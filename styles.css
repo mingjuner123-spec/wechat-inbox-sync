@@ -1,0 +1,6 @@
+.wechat-inbox-sync-status {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 8px;
+}
