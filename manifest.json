@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "minAppVersion": "1.5.0",
   "description": "Sync text, webpages, audio, and files from a WeChat mini program inbox into your vault.",
-  "author": "张张",
+  "author": "Zhang Zhang",
   "isDesktopOnly": true
 }

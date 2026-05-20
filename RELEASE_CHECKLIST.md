@@ -23,7 +23,7 @@ Submit a pull request to `obsidianmd/obsidian-releases` and add this entry to
 {
   "id": "wechat-inbox-sync",
   "name": "WeChat Inbox Sync",
-  "author": "张张",
+  "author": "Zhang Zhang",
   "description": "Sync text, webpages, audio, and files from a WeChat mini program inbox into your vault.",
   "repo": "YOUR_GITHUB_USERNAME/wechat-inbox-sync"
 }
