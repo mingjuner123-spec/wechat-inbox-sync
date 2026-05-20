@@ -7,6 +7,7 @@ const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-sha
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
   token: '',
+  clientId: '',
   inboxDir: '临时收集',
   autoSyncOnLoad: false,
   aiProvider: 'off',
@@ -48,6 +49,10 @@ const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmod
 const DOUBAO_ASR_RESOURCE_ID = 'volc.seedasr.auc';
 const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转写文本，不要摘要，不要解释，不要使用 Markdown。';
 
+function createClientId() {
+  return `obsidian-${crypto.randomBytes(16).toString('hex')}`;
+}
+
 function mergeSettings(savedSettings) {
   const merged = {
     ...DEFAULT_SETTINGS,
@@ -56,6 +61,7 @@ function mergeSettings(savedSettings) {
 
   merged.apiBase = String(merged.apiBase || '').trim() || DEFAULT_SETTINGS.apiBase;
   merged.token = String(merged.token || '').trim();
+  merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
@@ -1793,7 +1799,11 @@ function buildSyncNotice(count) {
 
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
-    this.settings = mergeSettings(await this.loadData());
+    const savedSettings = await this.loadData();
+    this.settings = mergeSettings(savedSettings);
+    if (!savedSettings || !savedSettings.clientId) {
+      await this.saveData(this.settings);
+    }
 
     this.addCommand({
       id: 'sync-wechat-inbox',
@@ -1813,16 +1823,17 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async requestJson(path, method = 'GET') {
+  async requestJson(path, method = 'GET', body = {}) {
     const response = await requestUrl({
       url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
       method,
       headers: {
         Authorization: `Bearer ${this.settings.token}`,
+        'X-Wechat-Inbox-Client-Id': this.settings.clientId,
         Accept: 'application/json',
         'Content-Type': 'application/json',
       },
-      body: method === 'POST' ? '{}' : undefined,
+      body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
     });
 
     const payload = response.json;
@@ -1830,6 +1841,32 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error((payload && payload.errMsg) || '同步 API 请求失败');
     }
     return payload;
+  }
+
+  async bindCurrentCode() {
+    const errors = validateSettings(this.settings);
+    if (errors.length) {
+      new Notice(errors[0]);
+      return;
+    }
+
+    try {
+      await this.requestJson('/bind', 'POST', {
+        clientId: this.settings.clientId,
+      });
+      new Notice('绑定成功');
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error || '');
+      if (message.includes('409') || message.includes('already bound') || message.includes('already-bound')) {
+        new Notice('该绑定码已被绑定，请更换绑定码');
+        return;
+      }
+      if (message.includes('403') || message.includes('Invalid bind code')) {
+        new Notice('绑定码无效');
+        return;
+      }
+      new Notice(`绑定失败：${message || '请稍后重试'}`);
+    }
   }
 
   async downloadArrayBuffer(url) {
@@ -2392,12 +2429,18 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('小程序绑定码')
-      .setDesc('在微信小程序绑定页生成并复制绑定码。')
+      .setDesc('在微信小程序绑定页生成并复制绑定码，粘贴后点击立即绑定。')
       .addText((text) => text
-        .setPlaceholder('IY7-WJL')
+        .setPlaceholder('请到小程序生成绑定码')
         .setValue(this.plugin.settings.token)
         .onChange(async (value) => {
           await this.plugin.saveSettings({ ...this.plugin.settings, token: value });
+        }))
+      .addButton((button) => button
+        .setButtonText('立即绑定')
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.bindCurrentCode();
         }));
 
     new Setting(containerEl)
