@@ -1229,6 +1229,38 @@ function isWechatArticleUrl(url) {
   return text.includes('mp.weixin.qq.com') || text.includes('weixin.qq.com');
 }
 
+function isWechatCaptchaUrl(url) {
+  return /\/mp\/wappoc_appmsgcaptcha\b/i.test(String(url || ''));
+}
+
+function decodeUrlComponentSafely(value) {
+  let text = decodeHtmlEntities(String(value || '')).trim();
+  for (let index = 0; index < 2; index += 1) {
+    try {
+      const decoded = decodeURIComponent(text);
+      if (decoded === text) break;
+      text = decoded;
+    } catch (error) {
+      break;
+    }
+  }
+  return text;
+}
+
+function extractWechatCaptchaTargetUrl(url) {
+  const source = String(url || '');
+  try {
+    const parsed = new URL(source);
+    const targetUrl = parsed.searchParams.get('target_url');
+    if (targetUrl) return decodeUrlComponentSafely(targetUrl);
+  } catch (error) {
+    // Fall back to regex for malformed links copied from apps.
+  }
+
+  const match = source.match(/[?&]target_url=([^&#]+)/i);
+  return match && match[1] ? decodeUrlComponentSafely(match[1]) : '';
+}
+
 function isXiaohongshuUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('xiaohongshu.com') || text.includes('xhslink.com');
@@ -1425,6 +1457,19 @@ function collectJsonStringValues(source, keys) {
   return values;
 }
 
+function collectLooseXiaohongshuImageUrls(source) {
+  const normalized = decodeHtmlEntities(String(source || ''))
+    .replace(/\\u002F/gi, '/')
+    .replace(/\\\//g, '/');
+  const urls = [];
+  const pattern = /https?:\/\/[^"'\\\s<>]*(?:sns-webpic|xhscdn|notes_pre_post)[^"'\\\s<>]*/gi;
+  let match;
+  while ((match = pattern.exec(normalized))) {
+    pushUniqueUrl(urls, match[0]);
+  }
+  return urls;
+}
+
 function collectImageUrlsFromHtml(html) {
   const source = String(html || '');
   const urls = [];
@@ -1467,6 +1512,8 @@ function collectImageUrlsFromHtml(html) {
       pushUniqueUrl(urls, url);
     }
   });
+
+  collectLooseXiaohongshuImageUrls(source).forEach((url) => pushUniqueUrl(urls, url));
 
   return dedupeImageVariants(urls);
 }
@@ -1694,6 +1741,39 @@ function selectReadableHtml(html) {
 
   const body = source.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   return body && body[1] ? body[1] : source;
+}
+
+function isWechatCaptchaHtml(html) {
+  const text = stripHtmlTags(String(html || ''));
+  return /环境异常/.test(text)
+    && /完成验证后即可继续访问|去验证/.test(text);
+}
+
+function buildWechatCaptchaMarkdown(url, html = '') {
+  const targetUrl = extractWechatCaptchaTargetUrl(url);
+  const lines = [
+    '公众号文章触发了微信安全验证。',
+    '',
+    '这不是插件解析失败，而是微信返回了验证页；插件不能自动绕过这个验证。',
+    '',
+    '建议处理方式：',
+    '',
+    '- 在微信内打开原文，完成验证后再复制正文保存。',
+    '- 或从公众号文章页使用“选择小程序工具”打开本小程序保存。',
+    '',
+  ];
+
+  if (targetUrl) {
+    lines.push(`原始文章链接：${targetUrl}`, '');
+  }
+  lines.push(`验证页链接：${url || ''}`, '');
+
+  const title = extractHtmlTitle(html);
+  if (title && !/wappoc_appmsgcaptcha/i.test(title)) {
+    lines.unshift(title, '');
+  }
+
+  return lines.join('\n').trim();
 }
 
 function imageTagToMarkdown(tag) {
@@ -2541,6 +2621,21 @@ class WechatObsidianInboxPlugin extends Plugin {
 
       const response = await requestUrl({ url, method: 'GET' });
       const html = response.text || '';
+      if (isWechatArticleUrl(url) && (isWechatCaptchaUrl(url) || isWechatCaptchaHtml(html))) {
+        const targetUrl = extractWechatCaptchaTargetUrl(url);
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            title: metadata.title || '公众号文章需要验证',
+            url: targetUrl || metadata.url || url,
+            originalUrl: metadata.originalUrl || url,
+            markdown: buildWechatCaptchaMarkdown(url, html),
+            conversionStatus: 'wechat_captcha',
+            conversionError: '微信返回公众号文章安全验证页',
+          },
+        };
+      }
       const markdown = htmlToMarkdown(html);
       const pageTitle = metadata.title || extractHtmlTitle(html);
       return {
