@@ -3,6 +3,7 @@ const zlib = require('zlib');
 const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
@@ -986,21 +987,110 @@ function isPdfMicroLine(line) {
   return Array.from(compact).length <= 2;
 }
 
+function shouldJoinPdfLines(previous, next) {
+  const left = String(previous || '').trim();
+  const right = String(next || '').trim();
+  if (!left || !right) return false;
+  if (/^#{1,6}\s+/.test(left) || /^#{1,6}\s+/.test(right)) return false;
+  if (/^[-*+]\s+/.test(left) || /^[-*+]\s+/.test(right)) return false;
+  if (/^\d{1,3}[.)、]\s*/.test(right)) return false;
+  if (/[。！？!?；;：:]$/.test(left)) return false;
+  if (/^[,，.。!?！？;；:：)]/.test(right)) return true;
+  return /[\p{L}\p{N}\u4e00-\u9fff]$/u.test(left) && /^[\p{L}\p{N}\u4e00-\u9fff]/u.test(right);
+}
+
+function getPdfLineJoiner(previous, next) {
+  const left = String(previous || '').trim();
+  const right = String(next || '').trim();
+  if (!left || !right) return '';
+  if (/^[,，.。!?！？;；:：)]/.test(right)) return '';
+  if (/[\u4e00-\u9fff]$/u.test(left) && /^[\u4e00-\u9fff]/u.test(right)) return '';
+  if (/\b[A-Z]{1,8}$/u.test(left) && /^[A-Z]\b/u.test(right)) return '';
+  return ' ';
+}
+
+function mergePdfWrappedLines(lines) {
+  const merged = [];
+  (lines || []).forEach((line) => {
+    const current = String(line || '').trim();
+    if (!current) {
+      if (merged.length && merged[merged.length - 1] !== '') merged.push('');
+      return;
+    }
+
+    const previous = merged[merged.length - 1];
+    if (previous && shouldJoinPdfLines(previous, current)) {
+      merged[merged.length - 1] = `${previous}${getPdfLineJoiner(previous, current)}${current}`;
+      return;
+    }
+
+    merged.push(current);
+  });
+  return merged;
+}
+
+function isLowQualityPdfExtraction(text) {
+  const source = String(text || '');
+  const compact = source.replace(/\s+/g, '');
+  if (!compact) return true;
+  const controlCount = (source.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
+  if (controlCount > 3) return true;
+  if (/[锟�]/.test(source)) return true;
+
+  const cjkCount = (compact.match(/[\u4e00-\u9fff]/g) || []).length;
+  if (cjkCount >= 2) return false;
+  const latinWordCount = (source.match(/[A-Za-z]{2,}/g) || []).length;
+  const readableCount = cjkCount + latinWordCount * 2;
+  return readableCount < 4;
+}
+
+function isSuspectPdfGlyphEncoding(text) {
+  const source = String(text || '');
+  const latinWords = source.match(/[A-Za-z]{12,}/g) || [];
+  const longLatinWords = latinWords.filter((word) => word.length >= 18);
+  const knownGlyphNoise = source.match(/\b(?:Rhe|Nlaybook|Buildine|Natite|Cncwfe|Copteptu|CHCRVER|Staee|chaneine|Aeentic|aeent|Nroeram|RESOWRCES)\b/gi) || [];
+  const compactCjk = source.replace(/[^\u4e00-\u9fff]/g, '');
+  const oddCjkTokens = source.match(/(?:学么|人未|改取|周朋|练么|可维)/g) || [];
+
+  if (knownGlyphNoise.length >= 4) return true;
+  if (longLatinWords.length >= 6 && latinWords.length >= 12) return true;
+  return compactCjk.length >= 1000 && oddCjkTokens.length >= 8 && longLatinWords.length >= 3;
+}
+
 function cleanPdfExtractedText(text) {
-  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  const lines = String(text || '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/\r\n/g, '\n')
+    .split('\n');
   const out = [];
   let microRun = [];
+  let pendingBlankAfterMicroRun = 0;
 
   const flushMicroRun = () => {
-    if (microRun.length && microRun.length < 4) {
+    if (!microRun.length) {
+      return;
+    }
+
+    const compact = microRun.join('').replace(/\s+/g, '');
+    const compactLength = Array.from(compact).length;
+    if (/^[A-Za-z]{2,8}$/.test(compact)) {
+      out.push(compact);
+    } else if (microRun.length < 4 && compactLength < 4) {
       out.push(...microRun);
+    } else if (compactLength >= 4 && /[\p{L}\p{N}\u4e00-\u9fff]/u.test(compact)) {
+      out.push(compact);
     }
     microRun = [];
+    pendingBlankAfterMicroRun = 0;
   };
 
   lines.forEach((line) => {
     const trimmed = String(line || '').trim();
     if (!trimmed) {
+      if (microRun.length && pendingBlankAfterMicroRun < 2) {
+        pendingBlankAfterMicroRun += 1;
+        return;
+      }
       flushMicroRun();
       if (out.length && out[out.length - 1] !== '') out.push('');
       return;
@@ -1013,6 +1103,7 @@ function cleanPdfExtractedText(text) {
 
     if (isPdfMicroLine(trimmed)) {
       microRun.push(trimmed);
+      pendingBlankAfterMicroRun = 0;
       return;
     }
 
@@ -1021,7 +1112,7 @@ function cleanPdfExtractedText(text) {
   });
 
   flushMicroRun();
-  return cleanMarkdownForStorage(out.join('\n'));
+  return cleanMarkdownForStorage(mergePdfWrappedLines(out).join('\n'));
 }
 
 function decodePdfStream(raw, dictionary) {
@@ -1102,11 +1193,21 @@ function extractPdfMarkdown(bufferLike) {
   }
 
   const cmap = buildPdfCMap(streams);
-  const text = cleanPdfExtractedText(streams
+  const rawText = streams
     .map((stream) => extractPdfTextFromContent(stream, cmap))
     .filter(Boolean)
     .join('\n\n')
-    .replace(/\n{3,}/g, '\n\n'));
+    .replace(/\n{3,}/g, '\n\n');
+
+  if (isLowQualityPdfExtraction(rawText)) {
+    throw new Error('PDF 文本提取质量过低。该文件可能使用特殊编码或扫描版，需要 OCR/高级解析。');
+  }
+
+  const text = cleanPdfExtractedText(rawText);
+
+  if (isSuspectPdfGlyphEncoding(text)) {
+    throw new Error('PDF 文本层编码异常，已保存原始附件，但暂不强制转 Markdown，避免生成乱码。建议使用 OCR 或导出为可复制文本的 PDF 后再同步。');
+  }
 
   if (!text) {
     throw new Error('PDF 未提取到文本。扫描版 PDF 或特殊编码 PDF 需要 OCR/高级解析。');
@@ -1257,11 +1358,71 @@ function normalizeExtractedUrl(url) {
     .trim();
 }
 
+function decodeJsonLikeString(text) {
+  const source = String(text || '');
+  if (!source) return '';
+  try {
+    return JSON.parse(`"${source.replace(/"/g, '\\"')}"`);
+  } catch (error) {
+    return source
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\n')
+      .replace(/\\t/g, ' ')
+      .replace(/\\"/g, '"')
+      .replace(/\\u002F/g, '/')
+      .replace(/\\\//g, '/');
+  }
+}
+
 function pushUniqueUrl(list, value) {
   const url = normalizeExtractedUrl(value);
   if (!url || /^data:/i.test(url) || /^blob:/i.test(url)) return;
   if (!/^https?:\/\//i.test(url)) return;
   if (!list.includes(url)) list.push(url);
+}
+
+function isLikelyImageUrl(value) {
+  const url = normalizeExtractedUrl(value);
+  if (!url) return false;
+  if (/\.(?:js|css|pdf|mp4|m4a|mp3|m3u8)(?:[?#]|$)/i.test(url)) return false;
+  return /\.(?:jpg|jpeg|png|webp)(?:[?!#]|$)/i.test(url)
+    || /\/notes_pre_post\//i.test(url)
+    || /sns-webpic/i.test(url)
+    || /(?:^|[!?#&])nd_(?:dft|prv)/i.test(url)
+    || /\/image\//i.test(url);
+}
+
+function getImageVariantKey(value) {
+  const url = normalizeExtractedUrl(value);
+  const noteImageMatch = url.match(/\/notes_pre_post\/([^!?#]+)/i);
+  if (noteImageMatch) return `notes_pre_post:${noteImageMatch[1]}`;
+  return url.replace(/([!?#&])nd_(?:dft|prv)[^?#&]*/i, '$1nd');
+}
+
+function dedupeImageVariants(urls) {
+  const map = new Map();
+  (urls || []).forEach((url) => {
+    if (!isLikelyImageUrl(url)) return;
+    const key = getImageVariantKey(url);
+    const existing = map.get(key);
+    if (!existing || /(?:^|[!?#&])nd_dft/i.test(url)) {
+      map.set(key, url);
+    }
+  });
+  return Array.from(map.values());
+}
+
+function collectJsonStringValues(source, keys) {
+  const wanted = new Set((keys || []).map((key) => String(key || '').toLowerCase()));
+  const values = [];
+  const pattern = /["']([A-Za-z0-9_$-]{2,40})["']\s*:\s*["']((?:\\.|[^"'\\])*)["']/g;
+  let match;
+  while ((match = pattern.exec(String(source || '')))) {
+    if (!wanted.has(String(match[1] || '').toLowerCase())) continue;
+    const value = decodeHtmlEntities(decodeJsonLikeString(match[2])).trim();
+    if (value && !values.includes(value)) values.push(value);
+  }
+  return values;
 }
 
 function collectImageUrlsFromHtml(html) {
@@ -1286,7 +1447,28 @@ function collectImageUrlsFromHtml(html) {
     pushUniqueUrl(urls, match[0]);
   }
 
-  return urls;
+  collectJsonStringValues(source, [
+    'url',
+    'urlDefault',
+    'urlPre',
+    'url_pre',
+    'urlSizeLarge',
+    'url_size_large',
+    'original',
+    'originalUrl',
+    'original_url',
+    'src',
+    'image',
+    'imageUrl',
+    'image_url',
+    'cover',
+  ]).forEach((url) => {
+    if (isLikelyImageUrl(url)) {
+      pushUniqueUrl(urls, url);
+    }
+  });
+
+  return dedupeImageVariants(urls);
 }
 
 function extractVideoUrlFromHtml(html) {
@@ -1319,20 +1501,80 @@ function extractTagsFromText(text, html = '') {
 function cleanSocialDescription(text) {
   return decodeHtmlEntities(String(text || ''))
     .replace(/\\n/g, '\n')
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/把文字复制好，?\s*然后去【小红书】查看详情。?/g, '')
     .replace(/\s+#/g, '\n#')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-function extractXiaohongshuMarkdownFromHtml(html, url) {
+function isDefaultXiaohongshuDescription(text) {
+  return /^3\s*亿人的生活经验/.test(String(text || '').trim());
+}
+
+function isNoisyXiaohongshuDescription(text) {
+  const source = String(text || '');
+  if (!source) return true;
+  if (isDefaultXiaohongshuDescription(source)) return true;
+  const compact = source.replace(/\s+/g, '');
+  if (compact.length > 6000) return true;
+
+  const noisyMarkers = [
+    'window.__INITIAL_STATE__',
+    'window.__SSR__',
+    'ICP备',
+    '营业执照',
+    '违法不良信息举报',
+    '增值电信业务经营许可证',
+    '创作中心',
+    'appSettings',
+    'serverTime',
+    'webpack',
+  ];
+  const markerCount = noisyMarkers.reduce((count, marker) => count + (source.includes(marker) ? 1 : 0), 0);
+  if (markerCount >= 2) return true;
+
+  const jsonNoiseCount = (source.match(/[{}[\]"'=]/g) || []).length;
+  return source.length > 1200 && jsonNoiseCount / Math.max(source.length, 1) > 0.08;
+}
+
+function scoreXiaohongshuDescriptionCandidate(candidate) {
+  const text = String(candidate.text || '').trim();
+  const length = Array.from(text).length;
+  let score = Math.min(length, 3000) + (candidate.weight || 0);
+  if (/#([\p{L}\p{N}_-]{1,32})/u.test(text)) score += 500;
+  if (/[\u4e00-\u9fff].*[\u4e00-\u9fff]/u.test(text)) score += 200;
+  if (length < 12) score -= 1000;
+  return score;
+}
+
+function extractXiaohongshuDescription(html, fallbackText = '') {
+  const source = String(html || '');
+  const jsonCandidates = collectJsonStringValues(source, [
+      'desc',
+      'description',
+      'content',
+      'noteContent',
+      'note_content',
+      'displayTitle',
+    ]);
+  const candidates = [
+    { text: cleanSocialDescription(fallbackText), weight: 100 },
+    { text: cleanSocialDescription(extractMetaContent(source, ['description', 'og:description', 'twitter:description'])), weight: 300 },
+    ...jsonCandidates.map((text) => ({ text: cleanSocialDescription(text), weight: 800 })),
+    { text: cleanSocialDescription(stripHtmlTags(selectReadableHtml(source))), weight: 0 },
+  ].filter((item) => item.text && !/^https?:\/\//i.test(item.text) && !isNoisyXiaohongshuDescription(item.text));
+
+  candidates.sort((a, b) => scoreXiaohongshuDescriptionCandidate(b) - scoreXiaohongshuDescriptionCandidate(a));
+  return candidates[0]?.text || '';
+}
+
+function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
   const source = String(html || '');
   const title = extractMetaContent(source, ['og:title', 'twitter:title'])
     || extractHtmlTitle(source)
     || '小红书笔记';
-  const description = cleanSocialDescription(
-    extractMetaContent(source, ['description', 'og:description', 'twitter:description'])
-    || stripHtmlTags(selectReadableHtml(source)),
-  );
+  const description = extractXiaohongshuDescription(source, fallbackText);
   const tags = extractTagsFromText(description, source);
   const images = collectImageUrlsFromHtml(source);
   const videoUrl = extractVideoUrlFromHtml(source);
@@ -1348,7 +1590,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url) {
   ];
 
   if (tags.length) {
-    lines.push('## 标签', '', ...tags.map((tag) => `- ${tag}`), '');
+    lines.push('## 标签', '', tags.join(' '), '');
   }
 
   if (images.length) {
@@ -1811,6 +2053,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       callback: () => this.syncInbox(),
     });
 
+    this.addRibbonIcon('inbox', '同步微信收集箱', () => {
+      this.syncInbox();
+    });
+
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
 
     if (this.settings.autoSyncOnLoad) {
@@ -1824,21 +2070,34 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async requestJson(path, method = 'GET', body = {}) {
-    const response = await requestUrl({
-      url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
-      method,
-      headers: {
-        Authorization: `Bearer ${this.settings.token}`,
-        'X-Wechat-Inbox-Client-Id': this.settings.clientId,
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
-      body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
-    });
+    let response;
+    try {
+      response = await requestUrl({
+        url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
+        method,
+        headers: {
+          Authorization: `Bearer ${this.settings.token}`,
+          'X-Wechat-Inbox-Client-Id': this.settings.clientId,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
+      });
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error || '');
+      if (message.includes('403')) {
+        throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
+      }
+      throw error;
+    }
 
     const payload = response.json;
     if (!payload || payload.success === false) {
-      throw new Error((payload && payload.errMsg) || '同步 API 请求失败');
+      const message = (payload && payload.errMsg) || '同步 API 请求失败';
+      if (message.includes('403') || message.includes('Invalid bind code')) {
+        throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
+      }
+      throw new Error(message);
     }
     return payload;
   }
@@ -2266,7 +2525,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const html = response.text || '';
         const extracted = isDouyinUrl(url)
           ? extractSocialVideoMarkdownFromHtml(html, url, '抖音')
-          : extractXiaohongshuMarkdownFromHtml(html, url);
+          : extractXiaohongshuMarkdownFromHtml(html, url, metadata.shareText || record.content || '');
         return {
           ...record,
           metadata: {
@@ -2418,8 +2677,21 @@ class WechatInboxSettingTab extends PluginSettingTab {
     containerEl.createEl('h2', { text: '微信 Obsidian 收集箱' });
 
     new Setting(containerEl)
+      .setName('微信小程序绑定教程')
+      .setDesc(`插件安装、绑定码填写和常见问题：${FEISHU_TUTORIAL_URL}`)
+      .addButton((button) => button
+        .setButtonText('打开教程')
+        .onClick(() => {
+          if (typeof window !== 'undefined' && window.open) {
+            window.open(FEISHU_TUTORIAL_URL);
+            return;
+          }
+          new Notice(FEISHU_TUTORIAL_URL);
+        }));
+
+    new Setting(containerEl)
       .setName('同步 API 地址')
-      .setDesc('填写云函数 syncApi 的 HTTP 访问地址，例如 https://.../sync。')
+      .setDesc('默认使用官方同步地址。这个地址只给插件请求使用，不需要在浏览器里打开；浏览器打开可能触发云开发安全验证。')
       .addText((text) => text
         .setPlaceholder(DEFAULT_SETTINGS.apiBase)
         .setValue(this.plugin.settings.apiBase)
@@ -2617,6 +2889,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  FEISHU_TUTORIAL_URL,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
   buildDoubaoAsrQueryRequest,
@@ -2631,6 +2904,8 @@ WechatObsidianInboxPlugin.__test = {
   buildRecordTitleBase,
   extractXiaohongshuMarkdownFromHtml,
   extractSocialVideoMarkdownFromHtml,
+  extractPdfMarkdown,
+  cleanPdfExtractedText,
   cleanMarkdownForStorage,
   validateSettings,
   mergeSettings,

@@ -50,7 +50,7 @@ the BRAT plugin by adding the GitHub repository URL after it is published.
 
 Open the plugin settings and fill in:
 
-- **Sync API URL**: the HTTP API endpoint of the CloudBase `sync` service.
+- **Sync API URL**: the plugin request endpoint of the CloudBase `sync` service. The default official endpoint is already filled in. It is not meant to be opened in a browser; opening it directly may trigger CloudBase security verification.
 - **Mini program bind code**: generate this in the mini program binding screen.
 - **Inbox directory**: the root folder for generated notes. The default is `临时收集`.
 - **Auto sync on load**: optionally pull new records after Obsidian starts.
