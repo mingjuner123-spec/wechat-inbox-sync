@@ -1426,9 +1426,16 @@ function isLikelyImageUrl(value) {
 
 function getImageVariantKey(value) {
   const url = normalizeExtractedUrl(value);
-  const noteImageMatch = url.match(/\/notes_pre_post\/([^!?#]+)/i);
-  if (noteImageMatch) return `notes_pre_post:${noteImageMatch[1]}`;
-  return url.replace(/([!?#&])nd_(?:dft|prv)[^?#&]*/i, '$1nd');
+  const noteImageMatch = url.match(/\/notes_pre_post\/([^"'\\\s<>?#]+)/i);
+  if (noteImageMatch) return `notes_pre_post:${noteImageMatch[1].replace(/!.+$/i, '')}`;
+
+  const spectrumImageMatch = url.match(/\/spectrum\/([^"'\\\s<>?#]+)/i);
+  if (spectrumImageMatch) return `spectrum:${spectrumImageMatch[1].replace(/!.+$/i, '')}`;
+
+  return url
+    .replace(/^http:\/\//i, 'https://')
+    .replace(/([!?#&])nd_(?:dft|prv)[^?#&]*/i, '$1nd')
+    .replace(/[?#].*$/g, '');
 }
 
 function dedupeImageVariants(urls) {
@@ -1585,6 +1592,13 @@ function isNoisyXiaohongshuDescription(text) {
   return source.length > 1200 && jsonNoiseCount / Math.max(source.length, 1) > 0.08;
 }
 
+function stripScriptAndStyleBlocks(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+}
+
 function scoreXiaohongshuDescriptionCandidate(candidate) {
   const text = String(candidate.text || '').trim();
   const length = Array.from(text).length;
@@ -1609,7 +1623,7 @@ function extractXiaohongshuDescription(html, fallbackText = '') {
     { text: cleanSocialDescription(fallbackText), weight: 100 },
     { text: cleanSocialDescription(extractMetaContent(source, ['description', 'og:description', 'twitter:description'])), weight: 300 },
     ...jsonCandidates.map((text) => ({ text: cleanSocialDescription(text), weight: 800 })),
-    { text: cleanSocialDescription(stripHtmlTags(selectReadableHtml(source))), weight: 0 },
+    { text: cleanSocialDescription(stripHtmlTags(stripScriptAndStyleBlocks(selectReadableHtml(source)))), weight: 0 },
   ].filter((item) => item.text && !/^https?:\/\//i.test(item.text) && !isNoisyXiaohongshuDescription(item.text));
 
   candidates.sort((a, b) => scoreXiaohongshuDescriptionCandidate(b) - scoreXiaohongshuDescriptionCandidate(a));
