@@ -489,8 +489,6 @@ function buildWebpageMarkdownBody(record, title) {
     : '网页转 Markdown 处理中，已先保存原始链接。';
 
   return [
-    pageTitle,
-    '',
     `原始链接：${url}`,
     '',
     '## Markdown 内容',
