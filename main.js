@@ -25,6 +25,7 @@ const DEFAULT_SETTINGS = {
   doubaoAsrApiKey: '',
   doubaoPollAttempts: 60,
   doubaoPollIntervalMs: 5000,
+  pendingDoubaoTasks: {},
   tencentSecretId: '',
   tencentSecretKey: '',
   tencentRegion: 'ap-shanghai',
@@ -74,6 +75,10 @@ function isRetryableTranscriptionError(error) {
   return Boolean(error && (error.retryable || error.code === 'TRANSCRIPTION_PENDING'));
 }
 
+function getDoubaoTaskKey(audioUrl) {
+  return crypto.createHash('sha256').update(String(audioUrl || '')).digest('hex');
+}
+
 function createClientId() {
   return `obsidian-${crypto.randomBytes(16).toString('hex')}`;
 }
@@ -99,6 +104,9 @@ function mergeSettings(savedSettings) {
   const doubaoPollIntervalMs = Number(merged.doubaoPollIntervalMs);
   merged.doubaoPollAttempts = Math.max(1, Number.isFinite(doubaoPollAttempts) ? doubaoPollAttempts : DEFAULT_SETTINGS.doubaoPollAttempts);
   merged.doubaoPollIntervalMs = Math.max(1000, Number.isFinite(doubaoPollIntervalMs) ? doubaoPollIntervalMs : DEFAULT_SETTINGS.doubaoPollIntervalMs);
+  merged.pendingDoubaoTasks = merged.pendingDoubaoTasks && typeof merged.pendingDoubaoTasks === 'object' && !Array.isArray(merged.pendingDoubaoTasks)
+    ? merged.pendingDoubaoTasks
+    : {};
   merged.tencentSecretId = String(merged.tencentSecretId || '').trim();
   merged.tencentSecretKey = String(merged.tencentSecretKey || '').trim();
   merged.tencentRegion = String(merged.tencentRegion || '').trim() || DEFAULT_SETTINGS.tencentRegion;
@@ -2776,6 +2784,18 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async runDoubaoTranscription(audioUrl) {
+    const taskKey = getDoubaoTaskKey(audioUrl);
+    const pendingTasks = this.settings.pendingDoubaoTasks || {};
+    const existingTask = pendingTasks[taskKey];
+    if (existingTask && existingTask.requestId) {
+      const existingState = await this.queryDoubaoTranscription(existingTask.requestId);
+      if (existingState.status === 'success') {
+        await this.clearPendingDoubaoTask(taskKey);
+        return existingState.transcription;
+      }
+      throw createRetryableTranscriptionError('豆包语音识别仍在处理中，请稍后再次同步');
+    }
+
     const requestId = createRequestId();
     const request = buildDoubaoAsrRequest({
       apiKey: this.settings.doubaoAsrApiKey,
@@ -2794,30 +2814,59 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (submitState.status === 'success') {
       return submitState.transcription;
     }
+    await this.savePendingDoubaoTask(taskKey, {
+      requestId,
+      audioUrl,
+      createdAt: new Date().toISOString(),
+    });
 
     for (let attempt = 0; attempt < this.settings.doubaoPollAttempts; attempt += 1) {
       if (attempt > 0) {
         await sleep(this.settings.doubaoPollIntervalMs);
       }
 
-      const query = buildDoubaoAsrQueryRequest({
-        apiKey: this.settings.doubaoAsrApiKey,
-        requestId,
-      });
-      const queryResponse = await requestUrl({
-        url: query.url,
-        method: 'POST',
-        headers: query.headers,
-        body: JSON.stringify(query.body),
-        throw: query.throw,
-      });
-      const state = parseDoubaoAsrTaskState(queryResponse);
+      const state = await this.queryDoubaoTranscription(requestId);
       if (state.status === 'success') {
+        await this.clearPendingDoubaoTask(taskKey);
         return state.transcription;
       }
     }
 
     throw createRetryableTranscriptionError('豆包语音识别仍在处理中，请稍后再次同步');
+  }
+
+  async queryDoubaoTranscription(requestId) {
+    const query = buildDoubaoAsrQueryRequest({
+      apiKey: this.settings.doubaoAsrApiKey,
+      requestId,
+    });
+    const queryResponse = await requestUrl({
+      url: query.url,
+      method: 'POST',
+      headers: query.headers,
+      body: JSON.stringify(query.body),
+      throw: query.throw,
+    });
+    return parseDoubaoAsrTaskState(queryResponse);
+  }
+
+  async savePendingDoubaoTask(taskKey, task) {
+    await this.saveSettings({
+      ...this.settings,
+      pendingDoubaoTasks: {
+        ...(this.settings.pendingDoubaoTasks || {}),
+        [taskKey]: task,
+      },
+    });
+  }
+
+  async clearPendingDoubaoTask(taskKey) {
+    const nextTasks = { ...(this.settings.pendingDoubaoTasks || {}) };
+    delete nextTasks[taskKey];
+    await this.saveSettings({
+      ...this.settings,
+      pendingDoubaoTasks: nextTasks,
+    });
   }
 
   async runTencentTranscription(audioUrl) {
@@ -3691,6 +3740,7 @@ WechatObsidianInboxPlugin.__test = {
   buildTranscriptOnlyMetadata,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
+  getDoubaoTaskKey,
   getDefaultLocalTranscriptionCommand,
   extractPdfMarkdown,
   cleanPdfExtractedText,
