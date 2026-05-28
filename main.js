@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 const childProcess = require('child_process');
 const fs = require('fs');
+const http = require('http');
+const https = require('https');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
@@ -59,6 +61,17 @@ const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 
 function getDefaultLocalTranscriptionCommand() {
   return `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
+}
+
+function createRetryableTranscriptionError(message) {
+  const error = new Error(message);
+  error.retryable = true;
+  error.code = 'TRANSCRIPTION_PENDING';
+  return error;
+}
+
+function isRetryableTranscriptionError(error) {
+  return Boolean(error && (error.retryable || error.code === 'TRANSCRIPTION_PENDING'));
 }
 
 function createClientId() {
@@ -1384,6 +1397,56 @@ function getSocialRequestHeaders(url) {
   return headers;
 }
 
+function resolveRedirectUrl(url, maxRedirects = 5) {
+  const source = String(url || '').trim();
+  if (!/^https?:\/\//i.test(source) || maxRedirects <= 0) {
+    return Promise.resolve(source);
+  }
+
+  return new Promise((resolve) => {
+    let parsed;
+    try {
+      parsed = new URL(source);
+    } catch (error) {
+      resolve(source);
+      return;
+    }
+
+    const client = parsed.protocol === 'http:' ? http : https;
+    const request = client.request(parsed, {
+      method: 'HEAD',
+      headers: getSocialRequestHeaders(source),
+    }, (response) => {
+      const location = response.headers && response.headers.location;
+      response.resume();
+      if (response.statusCode >= 300 && response.statusCode < 400 && location) {
+        try {
+          resolve(resolveRedirectUrl(new URL(location, source).toString(), maxRedirects - 1));
+          return;
+        } catch (error) {
+          resolve(source);
+          return;
+        }
+      }
+      resolve(source);
+    });
+
+    request.setTimeout(8000, () => {
+      request.destroy();
+      resolve(source);
+    });
+    request.on('error', () => resolve(source));
+    request.end();
+  });
+}
+
+function shouldResolvePlatformRedirect(url) {
+  const text = String(url || '').toLowerCase();
+  return text.includes('b23.tv')
+    || text.includes('v.douyin.com')
+    || text.includes('xhslink.com');
+}
+
 function getUrlHostname(url) {
   try {
     return new URL(String(url || '')).hostname.replace(/^www\./, '');
@@ -1774,6 +1837,29 @@ function extractBilibiliCidFromPayload(payload) {
     || (data && data.data && data.data.cid)
     || '';
   return cid ? String(cid) : '';
+}
+
+function extractBilibiliAudioUrlFromPlayurlPayload(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const playData = data && data.data ? data.data : {};
+  const audioList = playData.dash && Array.isArray(playData.dash.audio) ? playData.dash.audio : [];
+  for (const item of audioList) {
+    const url = normalizeExtractedUrl(item && (item.baseUrl || item.base_url || item.url));
+    if (url) return url;
+    const backups = (item && (item.backupUrl || item.backup_url)) || [];
+    if (Array.isArray(backups) && backups.length) {
+      const backupUrl = normalizeExtractedUrl(backups[0]);
+      if (backupUrl) return backupUrl;
+    }
+  }
+
+  const durlList = Array.isArray(playData.durl) ? playData.durl : [];
+  for (const item of durlList) {
+    const url = normalizeExtractedUrl(item && item.url);
+    if (url) return url;
+  }
+
+  return '';
 }
 
 function extractBilibiliAudioUrlFromHtml(html) {
@@ -2731,7 +2817,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    throw new Error('豆包语音识别仍在处理中，请稍后再次同步');
+    throw createRetryableTranscriptionError('豆包语音识别仍在处理中，请稍后再次同步');
   }
 
   async runTencentTranscription(audioUrl) {
@@ -2988,6 +3074,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         }),
       };
     } catch (error) {
+      if (isRetryableTranscriptionError(error)) {
+        throw error;
+      }
       return {
         ...record,
         metadata: buildTranscriptOnlyMetadata(metadata, {
@@ -3039,31 +3128,40 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async hydrateBilibiliTranscript(record, url) {
-    const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
+    const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+    const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
     const html = response.text || '';
     let subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(html);
+    let bvid = extractBilibiliBvid(resolvedUrl) || extractBilibiliBvid(url) || extractBilibiliBvid(html);
+    let cid = '';
+    let playurlAudioUrl = '';
 
-    if (!subtitleUrls.length) {
-      const bvid = extractBilibiliBvid(url) || extractBilibiliBvid(html);
-      if (bvid) {
-        try {
-          const viewResponse = await requestUrl({
-            url: `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+    if (bvid) {
+      try {
+        const viewResponse = await requestUrl({
+          url: `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+          method: 'GET',
+          headers: getSocialRequestHeaders(resolvedUrl),
+        });
+        cid = extractBilibiliCidFromPayload(viewResponse.json || viewResponse.text);
+        if (cid && !subtitleUrls.length) {
+          const playerResponse = await requestUrl({
+            url: `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
             method: 'GET',
-            headers: getSocialRequestHeaders(url),
+            headers: getSocialRequestHeaders(resolvedUrl),
           });
-          const cid = extractBilibiliCidFromPayload(viewResponse.json || viewResponse.text);
-          if (cid) {
-            const playerResponse = await requestUrl({
-              url: `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
-              method: 'GET',
-              headers: getSocialRequestHeaders(url),
-            });
-            subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(JSON.stringify(playerResponse.json || tryParseJson(playerResponse.text) || {}));
-          }
-        } catch (error) {
-          // Fall back to media transcription below.
+          subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(JSON.stringify(playerResponse.json || tryParseJson(playerResponse.text) || {}));
         }
+        if (cid) {
+          const playurlResponse = await requestUrl({
+            url: `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&fnval=16&fourk=1`,
+            method: 'GET',
+            headers: getSocialRequestHeaders(resolvedUrl),
+          });
+          playurlAudioUrl = extractBilibiliAudioUrlFromPlayurlPayload(playurlResponse.json || playurlResponse.text);
+        }
+      } catch (error) {
+        // Fall back to media transcription below.
       }
     }
 
@@ -3081,7 +3179,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.buildTranscriptRecordFromMedia(record, {
       url,
       platform: 'B站',
-      mediaUrl: extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
+      mediaUrl: playurlAudioUrl || extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
       source: 'audio',
     });
   }
@@ -3139,19 +3237,24 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
-        const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
+        const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+        const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
         const html = response.text || '';
         const mediaUrl = extractSocialMediaUrlFromHtml(html);
-        if (mediaUrl || isDouyinUrl(url)) {
+        const isVideoIntent = isDouyinUrl(url)
+          || isDouyinUrl(resolvedUrl)
+          || /[?&]type=video\b/i.test(resolvedUrl)
+          || /\/video\//i.test(resolvedUrl);
+        if (mediaUrl || isVideoIntent) {
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
-            platform: isDouyinUrl(url) ? '抖音' : '小红书',
+            platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
             mediaUrl,
             source: 'video',
           });
         }
 
-        const extracted = extractXiaohongshuMarkdownFromHtml(html, url, metadata.shareText || record.content || '');
+        const extracted = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '');
         return {
           ...record,
           metadata: {
@@ -3583,8 +3686,11 @@ WechatObsidianInboxPlugin.__test = {
   extractSocialMediaUrlFromHtml,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
+  extractBilibiliAudioUrlFromPlayurlPayload,
   buildAudioTranscriptMarkdown,
   buildTranscriptOnlyMetadata,
+  createRetryableTranscriptionError,
+  isRetryableTranscriptionError,
   getDefaultLocalTranscriptionCommand,
   extractPdfMarkdown,
   cleanPdfExtractedText,
