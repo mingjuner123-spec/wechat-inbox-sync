@@ -18,7 +18,54 @@ function Download-File {
     [Parameter(Mandatory = $true)][string]$OutFile
   )
   Write-Host "Downloading $Url"
-  Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers
+  try {
+    Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers
+  } catch {
+    Write-Host "PowerShell download failed, retrying with curl."
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curl) {
+      throw
+    }
+    & $curl.Source -L --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $OutFile $Url
+    if ($LASTEXITCODE -ne 0) {
+      throw "curl download failed with exit code $LASTEXITCODE"
+    }
+  }
+}
+
+function Get-LatestWhisperWindowsAsset {
+  try {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -Headers $Headers
+    $asset = $release.assets |
+      Where-Object {
+        $_.name -match "\.zip$" -and
+        $_.name -match "(win|windows|mingw|x64)" -and
+        $_.name -match "(bin|whisper)"
+      } |
+      Sort-Object @{ Expression = { if ($_.name -match "x64") { 0 } else { 1 } } }, name |
+      Select-Object -First 1
+    if ($asset) {
+      return $asset.browser_download_url
+    }
+  } catch {
+    Write-Host "GitHub API unavailable, falling back to release page parsing."
+  }
+
+  $latestResponse = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/latest" -Headers $Headers -MaximumRedirection 0 -ErrorAction SilentlyContinue
+  $location = $latestResponse.Headers.Location
+  if (-not $location) {
+    throw "Cannot locate latest whisper.cpp release."
+  }
+  $tag = Split-Path -Leaf ([uri]$location).AbsolutePath
+  $assetsPage = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/expanded_assets/$tag" -Headers $Headers
+  $match = [regex]::Match($assetsPage.Content, '/ggml-org/whisper\.cpp/releases/download/[^"]+whisper-bin-x64\.zip')
+  if (-not $match.Success) {
+    $match = [regex]::Match($assetsPage.Content, '/ggml-org/whisper\.cpp/releases/download/[^"]+whisper[^"]+x64[^"]+\.zip')
+  }
+  if (-not $match.Success) {
+    throw "Cannot find a Windows x64 whisper.cpp release asset. Open https://github.com/ggml-org/whisper.cpp/releases and download the Windows binary manually."
+  }
+  return "https://github.com$($match.Value)"
 }
 
 try {
@@ -32,21 +79,8 @@ try {
   New-CleanDirectory -Path $FfmpegDir
   New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null
 
-  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -Headers $Headers
-  $asset = $release.assets |
-    Where-Object {
-      $_.name -match "\.zip$" -and
-      $_.name -match "(win|windows|mingw|x64)" -and
-      $_.name -match "(bin|whisper)"
-    } |
-    Select-Object -First 1
-
-  if (-not $asset) {
-    throw "Cannot find a Windows x64 whisper.cpp release asset. Open https://github.com/ggml-org/whisper.cpp/releases and download the Windows binary manually."
-  }
-
   $whisperZip = Join-Path $TempRoot "whisper.zip"
-  Download-File -Url $asset.browser_download_url -OutFile $whisperZip
+  Download-File -Url (Get-LatestWhisperWindowsAsset) -OutFile $whisperZip
   Expand-Archive -LiteralPath $whisperZip -DestinationPath $WhisperDir -Force
 
   $ffmpegZip = Join-Path $TempRoot "ffmpeg.zip"
@@ -54,6 +88,9 @@ try {
   Expand-Archive -LiteralPath $ffmpegZip -DestinationPath $FfmpegDir -Force
 
   $modelPath = Join-Path $ModelDir "ggml-small.bin"
+  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {
+    Remove-Item -LiteralPath $modelPath -Force
+  }
   if (-not (Test-Path -LiteralPath $modelPath)) {
     Download-File -Url "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" -OutFile $modelPath
   }
@@ -70,6 +107,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $Whisper = Get-ChildItem -LiteralPath (Join-Path $Root "whisper") -Recurse -File |
   Where-Object { $_.Name -in @("whisper-cli.exe", "main.exe") } |
+  Sort-Object @{ Expression = { if ($_.Name -eq "whisper-cli.exe") { 0 } else { 1 } } }, FullName |
   Select-Object -First 1
 if (-not $Whisper) {
   throw "whisper-cli.exe not found. Please rerun install-local-asr.ps1."

@@ -75,6 +75,15 @@ function isRetryableTranscriptionError(error) {
   return Boolean(error && (error.retryable || error.code === 'TRANSCRIPTION_PENDING'));
 }
 
+function isRemoteAsrDownloadFailure(error) {
+  const message = String((error && error.message) || error || '');
+  return /Invalid audio URI|audio download failed|Audio download failed/i.test(message);
+}
+
+function getDefaultLocalTranscriptionScriptPath() {
+  return path.join(os.homedir(), LOCAL_ASR_HOME, 'transcribe.ps1');
+}
+
 function getDoubaoTaskKey(audioUrl) {
   return crypto.createHash('sha256').update(String(audioUrl || '')).digest('hex');
 }
@@ -1396,13 +1405,19 @@ function isXiaoyuzhouUrl(url) {
 function getSocialRequestHeaders(url) {
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
+    Accept: '*/*',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
   };
   if (isBilibiliUrl(url)) headers.Referer = 'https://www.bilibili.com/';
+  if (/bilivideo\.com/i.test(String(url || ''))) headers.Referer = 'https://www.bilibili.com/';
   if (isXiaohongshuUrl(url)) headers.Referer = 'https://www.xiaohongshu.com/';
   if (isDouyinUrl(url)) headers.Referer = 'https://www.douyin.com/';
   if (isXiaoyuzhouUrl(url)) headers.Referer = 'https://www.xiaoyuzhoufm.com/';
   return headers;
+}
+
+function isHeaderProtectedMediaUrl(url) {
+  return /bilivideo\.com|upos-[^/]+\.bilivideo\.com/i.test(String(url || ''));
 }
 
 function resolveRedirectUrl(url, maxRedirects = 5) {
@@ -2597,8 +2612,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async downloadArrayBuffer(url) {
-    const response = await requestUrl({ url, method: 'GET' });
+  async downloadArrayBuffer(url, headers = {}) {
+    const response = await requestUrl({ url, method: 'GET', headers });
     if (!response.arrayBuffer) {
       throw new Error('录音文件下载失败');
     }
@@ -2645,24 +2660,75 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload;
   }
 
+  getEffectiveLocalTranscriptionCommand() {
+    const configured = String(this.settings.localTranscriptionCommand || '').trim();
+    if (configured) return configured;
+    return fs.existsSync(getDefaultLocalTranscriptionScriptPath())
+      ? getDefaultLocalTranscriptionCommand()
+      : '';
+  }
+
+  canRunLocalTranscription() {
+    return Boolean(this.getEffectiveLocalTranscriptionCommand());
+  }
+
   async runConfiguredTranscription(audioUrl) {
-    if (this.settings.aiProvider === 'aliyun') {
+    const provider = this.settings.aiProvider;
+    const runLocalFallback = async (sourcePrefix) => {
+      if (provider === 'doubao') {
+        await this.clearPendingDoubaoTask(getDoubaoTaskKey(audioUrl));
+      }
       return {
-        transcription: await this.runAliyunTranscription(audioUrl),
-        source: 'aliyun',
+        transcription: await this.runLocalTranscription(audioUrl),
+        source: sourcePrefix ? `${sourcePrefix}-local` : 'local',
       };
+    };
+
+    if (['aliyun', 'doubao', 'tencent'].includes(provider) && isHeaderProtectedMediaUrl(audioUrl)) {
+      if (this.canRunLocalTranscription()) {
+        return runLocalFallback(provider);
+      }
+      throw new Error('该平台音频地址带防盗链，云端转写服务无法直接下载。请安装本地转写组件后重试。');
+    }
+
+    if (this.settings.aiProvider === 'aliyun') {
+      try {
+        return {
+          transcription: await this.runAliyunTranscription(audioUrl),
+          source: 'aliyun',
+        };
+      } catch (error) {
+        if (isRemoteAsrDownloadFailure(error) && this.canRunLocalTranscription()) {
+          return runLocalFallback('aliyun');
+        }
+        throw error;
+      }
     }
     if (this.settings.aiProvider === 'doubao') {
-      return {
-        transcription: await this.runDoubaoTranscription(audioUrl),
-        source: 'doubao',
-      };
+      try {
+        return {
+          transcription: await this.runDoubaoTranscription(audioUrl),
+          source: 'doubao',
+        };
+      } catch (error) {
+        if (isRemoteAsrDownloadFailure(error) && this.canRunLocalTranscription()) {
+          return runLocalFallback('doubao');
+        }
+        throw error;
+      }
     }
     if (this.settings.aiProvider === 'tencent') {
-      return {
-        transcription: await this.runTencentTranscription(audioUrl),
-        source: 'tencent',
-      };
+      try {
+        return {
+          transcription: await this.runTencentTranscription(audioUrl),
+          source: 'tencent',
+        };
+      } catch (error) {
+        if (isRemoteAsrDownloadFailure(error) && this.canRunLocalTranscription()) {
+          return runLocalFallback('tencent');
+        }
+        throw error;
+      }
     }
     if (this.settings.aiProvider === 'local') {
       return {
@@ -2674,7 +2740,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async runLocalTranscription(audioUrl) {
-    const commandTemplate = String(this.settings.localTranscriptionCommand || '').trim();
+    const commandTemplate = this.getEffectiveLocalTranscriptionCommand();
     if (!commandTemplate) {
       throw new Error('未配置本地转写命令');
     }
@@ -2723,7 +2789,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async downloadMediaToTempFile(audioUrl) {
-    const buffer = Buffer.from(await this.downloadArrayBuffer(audioUrl));
+    const buffer = Buffer.from(await this.downloadArrayBuffer(audioUrl, getSocialRequestHeaders(audioUrl)));
     const ext = getAudioFormatFromUrl(audioUrl);
     const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
     fs.writeFileSync(filePath, buffer);
@@ -2788,10 +2854,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     const pendingTasks = this.settings.pendingDoubaoTasks || {};
     const existingTask = pendingTasks[taskKey];
     if (existingTask && existingTask.requestId) {
-      const existingState = await this.queryDoubaoTranscription(existingTask.requestId);
-      if (existingState.status === 'success') {
+      try {
+        const existingState = await this.queryDoubaoTranscription(existingTask.requestId);
+        if (existingState.status === 'success') {
+          await this.clearPendingDoubaoTask(taskKey);
+          return existingState.transcription;
+        }
+      } catch (error) {
         await this.clearPendingDoubaoTask(taskKey);
-        return existingState.transcription;
+        throw error;
       }
       throw createRetryableTranscriptionError('豆包语音识别仍在处理中，请稍后再次同步');
     }
@@ -2825,7 +2896,13 @@ class WechatObsidianInboxPlugin extends Plugin {
         await sleep(this.settings.doubaoPollIntervalMs);
       }
 
-      const state = await this.queryDoubaoTranscription(requestId);
+      let state;
+      try {
+        state = await this.queryDoubaoTranscription(requestId);
+      } catch (error) {
+        await this.clearPendingDoubaoTask(taskKey);
+        throw error;
+      }
       if (state.status === 'success') {
         await this.clearPendingDoubaoTask(taskKey);
         return state.transcription;
@@ -3346,6 +3423,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       };
     } catch (error) {
+      if (isRetryableTranscriptionError(error)) {
+        throw error;
+      }
       if (isXiaoyuzhouUrl(url) || isBilibiliUrl(url) || isDouyinUrl(url)) {
         return {
           ...record,
@@ -3740,6 +3820,7 @@ WechatObsidianInboxPlugin.__test = {
   buildTranscriptOnlyMetadata,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
+  isRemoteAsrDownloadFailure,
   getDoubaoTaskKey,
   getDefaultLocalTranscriptionCommand,
   extractPdfMarkdown,
