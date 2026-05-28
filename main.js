@@ -1,4 +1,8 @@
 const crypto = require('crypto');
+const childProcess = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const zlib = require('zlib');
 const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
@@ -12,6 +16,7 @@ const DEFAULT_SETTINGS = {
   inboxDir: '临时收集',
   autoSyncOnLoad: false,
   aiProvider: 'off',
+  localTranscriptionCommand: '',
   aliyunApiKey: '',
   aliyunModel: 'qwen3.5-omni-plus',
   aliyunBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
@@ -28,6 +33,7 @@ const DEFAULT_SETTINGS = {
 
 const AI_PROVIDER_NAMES = {
   off: '关闭转写',
+  local: '本地转写命令',
   aliyun: '阿里云百炼 Qwen-Omni',
   doubao: '豆包语音识别',
   tencent: '腾讯云 ASR 录音文件识别',
@@ -49,6 +55,11 @@ const DOUBAO_ASR_SUBMIT_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmo
 const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/query';
 const DOUBAO_ASR_RESOURCE_ID = 'volc.seedasr.auc';
 const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转写文本，不要摘要，不要解释，不要使用 Markdown。';
+const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
+
+function getDefaultLocalTranscriptionCommand() {
+  return `powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
+}
 
 function createClientId() {
   return `obsidian-${crypto.randomBytes(16).toString('hex')}`;
@@ -66,6 +77,7 @@ function mergeSettings(savedSettings) {
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
+  merged.localTranscriptionCommand = String(merged.localTranscriptionCommand || '').trim();
   merged.aliyunApiKey = String(merged.aliyunApiKey || '').trim();
   merged.aliyunModel = String(merged.aliyunModel || '').trim() || DEFAULT_SETTINGS.aliyunModel;
   merged.aliyunBaseUrl = String(merged.aliyunBaseUrl || '').trim() || DEFAULT_SETTINGS.aliyunBaseUrl;
@@ -101,6 +113,9 @@ function validateSettings(settings) {
   }
   if (settings.aiProvider === 'doubao') {
     if (!settings.doubaoAsrApiKey) errors.push('请填写豆包语音识别 API Key');
+  }
+  if (settings.aiProvider === 'local') {
+    if (!settings.localTranscriptionCommand) errors.push('请填写本地转写命令');
   }
 
   return errors;
@@ -299,6 +314,14 @@ function parseAliyunTranscriptionResult(responseText) {
   return text;
 }
 
+function getAudioFormatFromUrl(audioUrl) {
+  const match = String(audioUrl || '').toLowerCase().match(/\.([a-z0-9]{2,5})(?:[?#]|$)/);
+  const ext = match ? match[1] : 'mp3';
+  if (['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg', 'mp4'].includes(ext)) return ext;
+  if (ext === 'm4s') return 'mp4';
+  return 'mp3';
+}
+
 function buildAliyunVoiceRequest({ settings, audioUrl }) {
   return {
     model: settings.aliyunModel || DEFAULT_SETTINGS.aliyunModel,
@@ -310,7 +333,7 @@ function buildAliyunVoiceRequest({ settings, audioUrl }) {
             type: 'input_audio',
             input_audio: {
               data: audioUrl,
-              format: 'mp3',
+              format: getAudioFormatFromUrl(audioUrl),
             },
           },
           {
@@ -352,7 +375,7 @@ function buildDoubaoAsrRequest({ apiKey, audioUrl, requestId = createRequestId()
       },
       audio: {
         url: audioUrl,
-        format: 'mp3',
+        format: getAudioFormatFromUrl(audioUrl),
         codec: 'raw',
         rate: 16000,
         bits: 16,
@@ -478,6 +501,16 @@ function sleep(ms) {
 function buildWebpageMarkdownBody(record, title) {
   const metadata = record.metadata || {};
   const url = metadata.url || record.content || '';
+  if (metadata.transcriptOnly) {
+    return buildAudioTranscriptMarkdown({
+      url,
+      transcription: metadata.transcription || '',
+      transcriptionStatus: metadata.transcriptionStatus || metadata.conversionStatus || 'pending',
+      transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
+      transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
+    });
+  }
+
   const pageTitle = metadata.title || title;
   const snapshot = cleanMarkdownForStorage(
     metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '',
@@ -496,6 +529,66 @@ function buildWebpageMarkdownBody(record, title) {
     snapshot || fallback,
     '',
   ].join('\n');
+}
+
+function buildAudioTranscriptMarkdown({
+  url,
+  transcription,
+  transcriptionStatus = 'pending',
+  transcriptionSource = '',
+  transcriptionError = '',
+}) {
+  const status = String(transcriptionStatus || '').toLowerCase();
+  const content = String(transcription || '').trim()
+    || (status === 'failed'
+      ? `转写失败。${transcriptionError || '未能提取到视频/音频文案。'}`
+      : '转写处理中，或未配置可用的转写方案。');
+  return [
+    `原始链接：${url || ''}`,
+    transcriptionSource ? `转写来源：${transcriptionSource}` : '',
+    '',
+    '## 口播/音频文案',
+    '',
+    content,
+    '',
+  ].filter((line) => line !== '').join('\n');
+}
+
+function buildTranscriptOnlyMetadata(metadata, {
+  url = '',
+  platform = '',
+  mediaUrl = '',
+  subtitleUrl = '',
+  transcription = '',
+  transcriptionStatus = 'failed',
+  transcriptionSource = '',
+  transcriptionError = '',
+  conversionStatus = '',
+} = {}) {
+  const {
+    markdown,
+    snapshot,
+    contentSnapshot,
+    imageUrls,
+    images,
+    ...rest
+  } = metadata || {};
+
+  const sourceName = platform || getWebpageSourcePrefix(url) || '网页';
+  return {
+    ...rest,
+    title: `${sourceName}口播文案`,
+    url: url || rest.url || '',
+    transcriptOnly: true,
+    mediaUrl,
+    audioUrl: mediaUrl,
+    subtitleUrl,
+    transcription,
+    transcriptionStatus,
+    transcriptionSource,
+    transcriptionError,
+    conversionStatus: conversionStatus || transcriptionStatus,
+  };
 }
 
 function buildFileMarkdownBody(record) {
@@ -1269,6 +1362,28 @@ function isDouyinUrl(url) {
   return text.includes('douyin.com') || text.includes('iesdouyin.com') || text.includes('amemv.com');
 }
 
+function isBilibiliUrl(url) {
+  const text = String(url || '').toLowerCase();
+  return text.includes('bilibili.com') || text.includes('b23.tv');
+}
+
+function isXiaoyuzhouUrl(url) {
+  const text = String(url || '').toLowerCase();
+  return text.includes('xiaoyuzhoufm.com') || text.includes('xiaoyuzhou.com');
+}
+
+function getSocialRequestHeaders(url) {
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
+    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  };
+  if (isBilibiliUrl(url)) headers.Referer = 'https://www.bilibili.com/';
+  if (isXiaohongshuUrl(url)) headers.Referer = 'https://www.xiaohongshu.com/';
+  if (isDouyinUrl(url)) headers.Referer = 'https://www.douyin.com/';
+  if (isXiaoyuzhouUrl(url)) headers.Referer = 'https://www.xiaoyuzhoufm.com/';
+  return headers;
+}
+
 function getUrlHostname(url) {
   try {
     return new URL(String(url || '')).hostname.replace(/^www\./, '');
@@ -1313,6 +1428,8 @@ function getWebpageSourcePrefix(url) {
   if (isWechatArticleUrl(url)) return '公众号';
   if (isXiaohongshuUrl(url)) return '小红书';
   if (isDouyinUrl(url)) return '抖音';
+  if (isBilibiliUrl(url)) return 'B站';
+  if (isXiaoyuzhouUrl(url)) return '小宇宙';
   return '网页';
 }
 
@@ -1382,10 +1499,11 @@ function extractMetaContent(html, names) {
 }
 
 function normalizeExtractedUrl(url) {
-  return decodeHtmlEntities(String(url || ''))
+  const normalized = decodeHtmlEntities(String(url || ''))
     .replace(/\\u002F/g, '/')
     .replace(/\\\//g, '/')
     .trim();
+  return normalized.startsWith('//') ? `https:${normalized}` : normalized;
 }
 
 function decodeJsonLikeString(text) {
@@ -1408,6 +1526,20 @@ function pushUniqueUrl(list, value) {
   const url = normalizeExtractedUrl(value);
   if (!url || /^data:/i.test(url) || /^blob:/i.test(url)) return;
   if (!/^https?:\/\//i.test(url)) return;
+  if (!list.includes(url)) list.push(url);
+}
+
+function isLikelyMediaUrl(value) {
+  const url = normalizeExtractedUrl(value);
+  if (!url) return false;
+  if (/\.(?:mp3|m4a|aac|wav|ogg|flac|mp4|m4s|m3u8)(?:[?#]|$)/i.test(url)) return true;
+  return /(?:media\.xyzcdn\.net|bilivideo\.com|bilibili\.com\/.*audio)/i.test(url);
+}
+
+function pushUniqueMediaUrl(list, value) {
+  const url = normalizeExtractedUrl(value);
+  if (!/^https?:\/\//i.test(url)) return;
+  if (!isLikelyMediaUrl(url)) return;
   if (!list.includes(url)) list.push(url);
 }
 
@@ -1529,6 +1661,137 @@ function extractVideoUrlFromHtml(html) {
   if (fromMeta) return normalizeExtractedUrl(fromMeta);
   const match = source.match(/https?:\\?\/\\?\/[^"'\\\s<>]+?\.(?:mp4|m4a|mp3|m3u8)(?:\?[^"'\\\s<>]*)?/i);
   return match ? normalizeExtractedUrl(match[0]) : '';
+}
+
+function extractPodcastAudioUrlFromHtml(html) {
+  const source = String(html || '');
+  const urls = [];
+  [
+    extractMetaContent(source, ['og:audio', 'og:audio:url', 'music:album', 'twitter:player:stream']),
+  ].forEach((url) => pushUniqueMediaUrl(urls, url));
+
+  const audioTags = source.match(/<audio\b[^>]*>/gi) || [];
+  audioTags.forEach((tag) => {
+    pushUniqueMediaUrl(urls, getHtmlAttribute(tag, 'src'));
+  });
+
+  collectJsonStringValues(source, [
+    'audioUrl',
+    'audio_url',
+    'mediaUrl',
+    'media_url',
+    'enclosureUrl',
+    'enclosure_url',
+    'src',
+    'url',
+  ]).forEach((url) => pushUniqueMediaUrl(urls, url));
+
+  const mediaPattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?\.(?:mp3|m4a|aac|wav|ogg|flac)(?:\?[^"'\\\s<>]*)?/gi;
+  let match;
+  while ((match = mediaPattern.exec(source))) {
+    pushUniqueMediaUrl(urls, match[0]);
+  }
+
+  return urls[0] || '';
+}
+
+function extractSocialMediaUrlFromHtml(html) {
+  const source = String(html || '');
+  const urls = [];
+
+  [
+    extractVideoUrlFromHtml(source),
+    extractPodcastAudioUrlFromHtml(source),
+  ].forEach((url) => pushUniqueMediaUrl(urls, url));
+
+  collectJsonStringValues(source, [
+    'audioUrl',
+    'audio_url',
+    'downloadAddr',
+    'download_addr',
+    'mediaUrl',
+    'media_url',
+    'musicUrl',
+    'music_url',
+    'playAddr',
+    'play_addr',
+    'src',
+    'streamUrl',
+    'stream_url',
+    'url',
+    'videoUrl',
+    'video_url',
+  ]).forEach((url) => pushUniqueMediaUrl(urls, url));
+
+  const mediaPattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?\.(?:mp3|m4a|aac|wav|ogg|flac|mp4|m4s|m3u8)(?:\?[^"'\\\s<>]*)?/gi;
+  let match;
+  while ((match = mediaPattern.exec(source))) {
+    pushUniqueMediaUrl(urls, match[0]);
+  }
+
+  return urls[0] || '';
+}
+
+function extractBilibiliSubtitleUrlsFromHtml(html) {
+  const source = String(html || '');
+  const urls = [];
+  collectJsonStringValues(source, [
+    'subtitle_url',
+    'subtitleUrl',
+  ]).forEach((value) => {
+    const url = normalizeExtractedUrl(value);
+    if (/^https?:\/\//i.test(url) && !urls.includes(url)) urls.push(url);
+  });
+
+  const pattern = /["']subtitle_url["']\s*:\s*["']((?:\\.|[^"'\\])+)["']/gi;
+  let match;
+  while ((match = pattern.exec(source))) {
+    const url = normalizeExtractedUrl(decodeJsonLikeString(match[1]));
+    if (url && !urls.includes(url)) urls.push(url);
+  }
+  return urls;
+}
+
+function parseBilibiliSubtitlePayload(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const body = Array.isArray(data && data.body) ? data.body : [];
+  return body
+    .map((item) => String((item && (item.content || item.text)) || '').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function extractBilibiliBvid(url) {
+  const match = String(url || '').match(/BV[0-9A-Za-z]+/);
+  return match ? match[0] : '';
+}
+
+function extractBilibiliCidFromPayload(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const pages = data && data.data && Array.isArray(data.data.pages) ? data.data.pages : [];
+  const cid = (pages[0] && pages[0].cid)
+    || (data && data.data && data.data.cid)
+    || '';
+  return cid ? String(cid) : '';
+}
+
+function extractBilibiliAudioUrlFromHtml(html) {
+  const source = String(html || '');
+  const urls = [];
+  collectJsonStringValues(source, [
+    'baseUrl',
+    'base_url',
+    'backupUrl',
+    'backup_url',
+  ]).forEach((url) => pushUniqueMediaUrl(urls, url));
+
+  const mediaPattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?(?:bilivideo\.com|bilibili\.com)[^"'\\\s<>]+?(?:audio|\.m4s|\.m4a|\.mp3)[^"'\\\s<>]*/gi;
+  let match;
+  while ((match = mediaPattern.exec(source))) {
+    pushUniqueMediaUrl(urls, match[0]);
+  }
+  return urls[0] || '';
 }
 
 function extractTagsFromText(text, html = '') {
@@ -1836,6 +2099,26 @@ function getElectronBrowserWindow() {
   } catch (error) {
     return null;
   }
+}
+
+async function openExternalUrl(url) {
+  try {
+    const electron = require('electron');
+    const shell = (electron.remote && electron.remote.shell) || electron.shell;
+    if (shell && shell.openExternal) {
+      await shell.openExternal(url);
+      return true;
+    }
+  } catch (error) {
+    // Fall back to the browser APIs below.
+  }
+
+  if (typeof window !== 'undefined' && window.open) {
+    const opened = window.open(url, '_blank', 'noopener');
+    return Boolean(opened);
+  }
+
+  return false;
 }
 
 function waitForWebContents(webContents, timeoutMs = 15000) {
@@ -2268,6 +2551,91 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload;
   }
 
+  async runConfiguredTranscription(audioUrl) {
+    if (this.settings.aiProvider === 'aliyun') {
+      return {
+        transcription: await this.runAliyunTranscription(audioUrl),
+        source: 'aliyun',
+      };
+    }
+    if (this.settings.aiProvider === 'doubao') {
+      return {
+        transcription: await this.runDoubaoTranscription(audioUrl),
+        source: 'doubao',
+      };
+    }
+    if (this.settings.aiProvider === 'tencent') {
+      return {
+        transcription: await this.runTencentTranscription(audioUrl),
+        source: 'tencent',
+      };
+    }
+    if (this.settings.aiProvider === 'local') {
+      return {
+        transcription: await this.runLocalTranscription(audioUrl),
+        source: 'local',
+      };
+    }
+    throw new Error('未配置可用的音频转写方案');
+  }
+
+  async runLocalTranscription(audioUrl) {
+    const commandTemplate = String(this.settings.localTranscriptionCommand || '').trim();
+    if (!commandTemplate) {
+      throw new Error('未配置本地转写命令');
+    }
+
+    const inputPath = await this.downloadMediaToTempFile(audioUrl);
+    const outputPath = `${inputPath}.txt`;
+    const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
+    const command = commandTemplate.includes('{input}')
+      ? commandTemplate
+        .replace(/\{input\}/g, quote(inputPath))
+        .replace(/\{output\}/g, quote(outputPath))
+      : `${commandTemplate} ${quote(inputPath)}`;
+
+    try {
+      const { stdout } = await new Promise((resolve, reject) => {
+        childProcess.exec(command, {
+          timeout: 2 * 60 * 60 * 1000,
+          maxBuffer: 50 * 1024 * 1024,
+          windowsHide: true,
+        }, (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(stderr || error.message || String(error)));
+            return;
+          }
+          resolve({ stdout, stderr });
+        });
+      });
+
+      const outputText = fs.existsSync(outputPath)
+        ? fs.readFileSync(outputPath, 'utf8')
+        : stdout;
+      const transcription = String(outputText || '').trim();
+      if (!transcription) {
+        throw new Error('本地转写命令没有返回文本');
+      }
+      return transcription;
+    } finally {
+      [inputPath, outputPath].forEach((filePath) => {
+        try {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        } catch (error) {
+          // Ignore temp cleanup failures.
+        }
+      });
+    }
+  }
+
+  async downloadMediaToTempFile(audioUrl) {
+    const buffer = Buffer.from(await this.downloadArrayBuffer(audioUrl));
+    const ext = getAudioFormatFromUrl(audioUrl);
+    const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
+    fs.writeFileSync(filePath, buffer);
+    return filePath;
+  }
+
   async runAliyunTranscription(audioUrl) {
     const response = await requestUrl({
       url: this.settings.aliyunBaseUrl,
@@ -2438,21 +2806,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       audioFileName: audioPath,
     };
 
-    if (this.settings.aiProvider === 'aliyun' || this.settings.aiProvider === 'doubao' || this.settings.aiProvider === 'tencent') {
+    if (this.settings.aiProvider !== 'off') {
       try {
-        let transcription;
-        if (this.settings.aiProvider === 'aliyun') {
-          transcription = await this.runAliyunTranscription(tempFileURL);
-        } else if (this.settings.aiProvider === 'doubao') {
-          transcription = await this.runDoubaoTranscription(tempFileURL);
-        } else {
-          transcription = await this.runTencentTranscription(tempFileURL);
-        }
+        const result = await this.runConfiguredTranscription(tempFileURL);
         nextMetadata = {
           ...nextMetadata,
-          transcription,
+          transcription: result.transcription,
           transcriptionStatus: 'success',
-          transcriptionProvider: this.settings.aiProvider,
+          transcriptionProvider: result.source,
         };
       } catch (error) {
         const message = error.message || String(error);
@@ -2568,6 +2929,163 @@ class WechatObsidianInboxPlugin extends Plugin {
     return nextMarkdown;
   }
 
+  async buildTranscriptRecordFromMedia(record, {
+    url,
+    platform,
+    mediaUrl = '',
+    subtitleText = '',
+    subtitleUrl = '',
+    source = '',
+  }) {
+    const metadata = record.metadata || {};
+
+    if (subtitleText) {
+      return {
+        ...record,
+        metadata: buildTranscriptOnlyMetadata(metadata, {
+          url,
+          platform,
+          mediaUrl,
+          subtitleUrl,
+          transcription: subtitleText,
+          transcriptionStatus: 'success',
+          transcriptionSource: source || 'subtitle',
+          conversionStatus: 'success',
+        }),
+      };
+    }
+
+    if (!mediaUrl) {
+      return {
+        ...record,
+        metadata: buildTranscriptOnlyMetadata(metadata, {
+          url,
+          platform,
+          mediaUrl,
+          subtitleUrl,
+          transcription: '',
+          transcriptionStatus: 'failed',
+          transcriptionError: '未能从链接中提取到可转写的音频或视频地址',
+          transcriptionSource: source || 'media-url',
+          conversionStatus: 'failed',
+        }),
+      };
+    }
+
+    try {
+      const result = await this.runConfiguredTranscription(mediaUrl);
+      return {
+        ...record,
+        metadata: buildTranscriptOnlyMetadata(metadata, {
+          url,
+          platform,
+          mediaUrl,
+          subtitleUrl,
+          transcription: result.transcription,
+          transcriptionStatus: 'success',
+          transcriptionSource: result.source,
+          conversionStatus: 'success',
+        }),
+      };
+    } catch (error) {
+      return {
+        ...record,
+        metadata: buildTranscriptOnlyMetadata(metadata, {
+          url,
+          platform,
+          mediaUrl,
+          subtitleUrl,
+          transcription: '',
+          transcriptionStatus: 'failed',
+          transcriptionError: error.message || String(error),
+          transcriptionSource: source || this.settings.aiProvider || 'unknown',
+          conversionStatus: 'failed',
+        }),
+      };
+    }
+  }
+
+  async hydrateXiaoyuzhouTranscript(record, url) {
+    const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
+    const html = response.text || '';
+    const mediaUrl = extractPodcastAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html);
+    return this.buildTranscriptRecordFromMedia(record, {
+      url,
+      platform: '小宇宙',
+      mediaUrl,
+      source: 'audio',
+    });
+  }
+
+  async fetchBilibiliSubtitleTextFromUrls(subtitleUrls) {
+    for (const subtitleUrl of subtitleUrls || []) {
+      try {
+        const response = await requestUrl({ url: subtitleUrl, method: 'GET', headers: getSocialRequestHeaders('https://www.bilibili.com/') });
+        const transcription = parseBilibiliSubtitlePayload(response.json || response.text);
+        if (transcription) {
+          return {
+            transcription,
+            subtitleUrl,
+          };
+        }
+      } catch (error) {
+        // Try the next subtitle candidate.
+      }
+    }
+    return {
+      transcription: '',
+      subtitleUrl: '',
+    };
+  }
+
+  async hydrateBilibiliTranscript(record, url) {
+    const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
+    const html = response.text || '';
+    let subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(html);
+
+    if (!subtitleUrls.length) {
+      const bvid = extractBilibiliBvid(url) || extractBilibiliBvid(html);
+      if (bvid) {
+        try {
+          const viewResponse = await requestUrl({
+            url: `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+            method: 'GET',
+            headers: getSocialRequestHeaders(url),
+          });
+          const cid = extractBilibiliCidFromPayload(viewResponse.json || viewResponse.text);
+          if (cid) {
+            const playerResponse = await requestUrl({
+              url: `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
+              method: 'GET',
+              headers: getSocialRequestHeaders(url),
+            });
+            subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(JSON.stringify(playerResponse.json || tryParseJson(playerResponse.text) || {}));
+          }
+        } catch (error) {
+          // Fall back to media transcription below.
+        }
+      }
+    }
+
+    const subtitle = await this.fetchBilibiliSubtitleTextFromUrls(subtitleUrls);
+    if (subtitle.transcription) {
+      return this.buildTranscriptRecordFromMedia(record, {
+        url,
+        platform: 'B站',
+        subtitleText: subtitle.transcription,
+        subtitleUrl: subtitle.subtitleUrl,
+        source: 'bilibili-subtitle',
+      });
+    }
+
+    return this.buildTranscriptRecordFromMedia(record, {
+      url,
+      platform: 'B站',
+      mediaUrl: extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
+      source: 'audio',
+    });
+  }
+
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
@@ -2612,12 +3130,28 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
 
+      if (isXiaoyuzhouUrl(url)) {
+        return await this.hydrateXiaoyuzhouTranscript(record, url);
+      }
+
+      if (isBilibiliUrl(url)) {
+        return await this.hydrateBilibiliTranscript(record, url);
+      }
+
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
-        const response = await requestUrl({ url, method: 'GET' });
+        const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
         const html = response.text || '';
-        const extracted = isDouyinUrl(url)
-          ? extractSocialVideoMarkdownFromHtml(html, url, '抖音')
-          : extractXiaohongshuMarkdownFromHtml(html, url, metadata.shareText || record.content || '');
+        const mediaUrl = extractSocialMediaUrlFromHtml(html);
+        if (mediaUrl || isDouyinUrl(url)) {
+          return await this.buildTranscriptRecordFromMedia(record, {
+            url,
+            platform: isDouyinUrl(url) ? '抖音' : '小红书',
+            mediaUrl,
+            source: 'video',
+          });
+        }
+
+        const extracted = extractXiaohongshuMarkdownFromHtml(html, url, metadata.shareText || record.content || '');
         return {
           ...record,
           metadata: {
@@ -2660,6 +3194,20 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       };
     } catch (error) {
+      if (isXiaoyuzhouUrl(url) || isBilibiliUrl(url) || isDouyinUrl(url)) {
+        return {
+          ...record,
+          metadata: buildTranscriptOnlyMetadata(metadata, {
+            url,
+            platform: getWebpageSourcePrefix(url),
+            transcription: '',
+            transcriptionStatus: 'failed',
+            transcriptionError: error.message || String(error),
+            transcriptionSource: 'platform-fetch',
+            conversionStatus: 'failed',
+          }),
+        };
+      }
       if (isFeishuUrl(url)) {
         return {
           ...record,
@@ -2781,19 +3329,18 @@ class WechatInboxSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl('h2', { text: '微信 Obsidian 收集箱' });
+    containerEl.createEl('h2', { text: 'Obsidian 内容同步助手' });
 
     new Setting(containerEl)
       .setName('微信小程序绑定教程')
       .setDesc(`插件安装、绑定码填写和常见问题：${FEISHU_TUTORIAL_URL}`)
       .addButton((button) => button
         .setButtonText('打开教程')
-        .onClick(() => {
-          if (typeof window !== 'undefined' && window.open) {
-            window.open(FEISHU_TUTORIAL_URL);
-            return;
+        .onClick(async () => {
+          const opened = await openExternalUrl(FEISHU_TUTORIAL_URL);
+          if (!opened) {
+            new Notice(`请复制链接到浏览器打开：${FEISHU_TUTORIAL_URL}`);
           }
-          new Notice(FEISHU_TUTORIAL_URL);
         }));
 
     new Setting(containerEl)
@@ -2808,7 +3355,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('小程序绑定码')
-      .setDesc('在微信小程序绑定页生成并复制绑定码，粘贴后点击立即绑定。')
+      .setDesc('打开微信小程序，Obsidian 内容同步助手绑定。')
       .addText((text) => text
         .setPlaceholder('请到小程序生成绑定码')
         .setValue(this.plugin.settings.token)
@@ -2855,6 +3402,27 @@ class WechatInboxSettingTab extends PluginSettingTab {
             this.display();
           });
       });
+
+    if (this.plugin.settings.aiProvider === 'local') {
+      new Setting(containerEl)
+        .setName('本地转写命令')
+        .setDesc('命令里可使用 {input} 作为音频文件路径，{output} 作为输出文本路径；可配合 local-asr/install-local-asr.ps1 一键准备本地 Whisper。')
+        .addText((text) => text
+          .setPlaceholder(getDefaultLocalTranscriptionCommand())
+          .setValue(this.plugin.settings.localTranscriptionCommand)
+          .onChange(async (value) => {
+            await this.plugin.saveSettings({ ...this.plugin.settings, localTranscriptionCommand: value });
+          }))
+        .addButton((button) => button
+          .setButtonText('填入默认命令')
+          .onClick(async () => {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              localTranscriptionCommand: getDefaultLocalTranscriptionCommand(),
+            });
+            this.display();
+          }));
+    }
 
     if (this.plugin.settings.aiProvider === 'tencent') {
       this.addPasswordSetting(containerEl, {
@@ -3011,6 +3579,13 @@ WechatObsidianInboxPlugin.__test = {
   buildRecordTitleBase,
   extractXiaohongshuMarkdownFromHtml,
   extractSocialVideoMarkdownFromHtml,
+  extractPodcastAudioUrlFromHtml,
+  extractSocialMediaUrlFromHtml,
+  extractBilibiliSubtitleUrlsFromHtml,
+  parseBilibiliSubtitlePayload,
+  buildAudioTranscriptMarkdown,
+  buildTranscriptOnlyMetadata,
+  getDefaultLocalTranscriptionCommand,
   extractPdfMarkdown,
   cleanPdfExtractedText,
   cleanMarkdownForStorage,
