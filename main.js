@@ -2210,21 +2210,55 @@ function getElectronBrowserWindow() {
   }
 }
 
+function getElectronShell() {
+  const candidates = [];
+  if (typeof require === 'function') candidates.push(require);
+  if (typeof window !== 'undefined' && typeof window.require === 'function') candidates.push(window.require.bind(window));
+  if (typeof globalThis !== 'undefined' && typeof globalThis.require === 'function') candidates.push(globalThis.require.bind(globalThis));
+
+  for (const load of candidates) {
+    try {
+      const electron = load('electron');
+      const shell = electron && ((electron.remote && electron.remote.shell) || electron.shell);
+      if (shell && typeof shell.openExternal === 'function') {
+        return shell;
+      }
+    } catch (error) {
+      // Try the next Electron entry point.
+    }
+  }
+  return null;
+}
+
 async function openExternalUrl(url) {
-  try {
-    const electron = require('electron');
-    const shell = (electron.remote && electron.remote.shell) || electron.shell;
-    if (shell && shell.openExternal) {
+  const shell = getElectronShell();
+  if (shell) {
+    try {
       await shell.openExternal(url);
+      return true;
+    } catch (error) {
+      // Fall back to browser APIs below.
+    }
+  }
+
+  try {
+    if (typeof window !== 'undefined' && window.open) {
+      const opened = window.open(url, '_blank', 'noopener');
+      if (opened) {
+        return true;
+      }
+    }
+  } catch (error) {
+    // Fall back to location navigation below.
+  }
+
+  try {
+    if (typeof window !== 'undefined' && window.location && typeof window.location.assign === 'function') {
+      window.location.assign(url);
       return true;
     }
   } catch (error) {
-    // Fall back to the browser APIs below.
-  }
-
-  if (typeof window !== 'undefined' && window.open) {
-    const opened = window.open(url, '_blank', 'noopener');
-    return Boolean(opened);
+    // Report failure to the caller.
   }
 
   return false;
@@ -3823,6 +3857,7 @@ WechatObsidianInboxPlugin.__test = {
   isRemoteAsrDownloadFailure,
   getDoubaoTaskKey,
   getDefaultLocalTranscriptionCommand,
+  openExternalUrl,
   extractPdfMarkdown,
   cleanPdfExtractedText,
   cleanMarkdownForStorage,
