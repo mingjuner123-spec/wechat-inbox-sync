@@ -1420,7 +1420,11 @@ function isHeaderProtectedMediaUrl(url) {
   return /bilivideo\.com|upos-[^/]+\.bilivideo\.com/i.test(String(url || ''));
 }
 
-function resolveRedirectUrl(url, maxRedirects = 5) {
+function shouldRetryRedirectWithGet(url, statusCode) {
+  return shouldResolvePlatformRedirect(url) && [400, 403, 404, 405, 501].includes(Number(statusCode));
+}
+
+function resolveRedirectUrl(url, maxRedirects = 5, method = 'HEAD') {
   const source = String(url || '').trim();
   if (!/^https?:\/\//i.test(source) || maxRedirects <= 0) {
     return Promise.resolve(source);
@@ -1437,7 +1441,7 @@ function resolveRedirectUrl(url, maxRedirects = 5) {
 
     const client = parsed.protocol === 'http:' ? http : https;
     const request = client.request(parsed, {
-      method: 'HEAD',
+      method,
       headers: getSocialRequestHeaders(source),
     }, (response) => {
       const location = response.headers && response.headers.location;
@@ -1450,6 +1454,10 @@ function resolveRedirectUrl(url, maxRedirects = 5) {
           resolve(source);
           return;
         }
+      }
+      if (method === 'HEAD' && shouldRetryRedirectWithGet(source, response.statusCode)) {
+        resolve(resolveRedirectUrl(source, maxRedirects, 'GET'));
+        return;
       }
       resolve(source);
     });
@@ -3861,6 +3869,7 @@ WechatObsidianInboxPlugin.__test = {
   extractPdfMarkdown,
   cleanPdfExtractedText,
   cleanMarkdownForStorage,
+  resolveRedirectUrl,
   validateSettings,
   mergeSettings,
 };
