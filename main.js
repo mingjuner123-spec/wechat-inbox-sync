@@ -155,6 +155,71 @@ function trimTrailingSlash(value) {
   return String(value || '').replace(/\/+$/, '');
 }
 
+function isRequestUrlTransportError(message) {
+  const text = String(message || '');
+  return text.includes('net::ERR_')
+    || text.includes('ERR_CONNECTION_')
+    || text.includes('ECONNRESET')
+    || text.includes('ETIMEDOUT')
+    || text.includes('socket hang up')
+    || text.includes('NetworkError');
+}
+
+function requestJsonViaNode(options) {
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(options.url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const transport = parsedUrl.protocol === 'http:' ? http : https;
+    const body = options.body || '';
+    const headers = {
+      ...(options.headers || {}),
+      'User-Agent': 'WeChat-Inbox-Sync-Obsidian/1.0',
+    };
+    if (body && !headers['Content-Length']) {
+      headers['Content-Length'] = Buffer.byteLength(body);
+    }
+
+    const request = transport.request(parsedUrl, {
+      method: options.method || 'GET',
+      headers,
+      timeout: options.timeout || 20000,
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        const text = buffer.toString('utf8');
+        let json = null;
+        try {
+          json = text ? JSON.parse(text) : null;
+        } catch (error) {
+          json = null;
+        }
+        resolve({
+          status: response.statusCode,
+          headers: response.headers,
+          text,
+          json,
+          arrayBuffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
+        });
+      });
+    });
+
+    request.on('timeout', () => {
+      request.destroy(new Error('Node HTTP request timeout'));
+    });
+    request.on('error', reject);
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
 function getRecordId(record) {
   return record._id || record.id || '';
 }
@@ -2596,30 +2661,58 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async requestJson(path, method = 'GET', body = {}) {
+    const requestOptions = {
+      url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
+      method,
+      headers: {
+        Authorization: `Bearer ${this.settings.token}`,
+        'X-Wechat-Inbox-Client-Id': this.settings.clientId,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
+    };
+
     let response;
     try {
-      response = await requestUrl({
-        url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
-        method,
-        headers: {
-          Authorization: `Bearer ${this.settings.token}`,
-          'X-Wechat-Inbox-Client-Id': this.settings.clientId,
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
-      });
+      response = await requestUrl(requestOptions);
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
       if (message.includes('403')) {
         throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
       }
-      throw error;
+      if (isRequestUrlTransportError(message)) {
+        try {
+          response = await requestJsonViaNode(requestOptions);
+        } catch (fallbackError) {
+          const fallbackMessage = fallbackError && fallbackError.message ? fallbackError.message : String(fallbackError || '');
+          throw new Error(`网络连接失败：${fallbackMessage || message}`);
+        }
+      } else {
+        throw error;
+      }
     }
 
-    const payload = response.json;
+    let payload = response.json || null;
+    if (!payload && response.text) {
+      try {
+        payload = JSON.parse(response.text || '{}');
+      } catch (error) {
+        payload = null;
+      }
+    }
+    if (response.status && (response.status < 200 || response.status >= 300)) {
+      const message = (payload && payload.errMsg) || `HTTP ${response.status}`;
+      if (response.status === 400 && message.includes('Missing client ID')) {
+        throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
+      }
+      throw new Error(message);
+    }
     if (!payload || payload.success === false) {
       const message = (payload && payload.errMsg) || '同步 API 请求失败';
+      if (message.includes('Missing client ID')) {
+        throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
+      }
       if (message.includes('403') || message.includes('Invalid bind code')) {
         throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
       }
@@ -2629,6 +2722,13 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async bindCurrentCode() {
+    if (!this.settings.clientId) {
+      await this.saveSettings({
+        ...this.settings,
+        clientId: createClientId(),
+      });
+    }
+
     const errors = validateSettings(this.settings);
     if (errors.length) {
       new Notice(errors[0]);
@@ -2643,7 +2743,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
       if (message.includes('409') || message.includes('already bound') || message.includes('already-bound')) {
-        new Notice('该绑定码已被绑定，请更换绑定码');
+        new Notice('绑定电脑名额已满，请在小程序绑定页新增电脑名额后再试');
         return;
       }
       if (message.includes('403') || message.includes('Invalid bind code')) {
@@ -3870,6 +3970,8 @@ WechatObsidianInboxPlugin.__test = {
   cleanPdfExtractedText,
   cleanMarkdownForStorage,
   resolveRedirectUrl,
+  isRequestUrlTransportError,
+  requestJsonViaNode,
   validateSettings,
   mergeSettings,
 };
