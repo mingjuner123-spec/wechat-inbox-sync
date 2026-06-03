@@ -18,7 +18,7 @@ const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
   token: '',
   pendingBindCode: '',
-  redeemCodeInput: '',
+  localTranscriptionEntitlementStatus: null,
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
@@ -117,6 +117,30 @@ function quoteCommandPath(filePath) {
 
 function buildLocalAsrInstallCommand(installerPath) {
   return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}`;
+}
+
+function formatEntitlementExpiresAt(expiresAt) {
+  if (!expiresAt) return '';
+  const date = new Date(expiresAt);
+  if (Number.isNaN(date.getTime())) return String(expiresAt);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function buildLocalTranscriptionEntitlementText(status) {
+  if (!status || typeof status !== 'object') {
+    return '权限状态：未刷新。请先在小程序里兑换，再回到插件点击「刷新权限」。';
+  }
+  if (status.hasAccess) {
+    return `权限状态：已开通${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}${status.bindingLabel ? `，绑定：${status.bindingLabel}` : ''}`;
+  }
+  if (status.status === 'expired') {
+    return `权限状态：已过期${status.expiresAt ? `，到期时间 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}。请在小程序里输入新的兑换码续期。`;
+  }
+  if (status.status === 'unbound') {
+    return '权限状态：未绑定小程序。请先完成小程序绑定。';
+  }
+  return '权限状态：未开通。请在小程序里输入兑换码开通后，再回到插件刷新权限。';
 }
 
 function downloadTextViaNode(url) {
@@ -270,7 +294,11 @@ function mergeSettings(savedSettings) {
   const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
   merged.token = tokenBinding ? normalizedToken : getPrimaryBindingToken(merged.bindings);
   merged.pendingBindCode = normalizeBindCodeInput(merged.pendingBindCode);
-  merged.redeemCodeInput = String(merged.redeemCodeInput || '').trim().toUpperCase().replace(/\s+/g, '');
+  merged.localTranscriptionEntitlementStatus = merged.localTranscriptionEntitlementStatus
+    && typeof merged.localTranscriptionEntitlementStatus === 'object'
+    && !Array.isArray(merged.localTranscriptionEntitlementStatus)
+    ? merged.localTranscriptionEntitlementStatus
+    : null;
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.autoSyncOnLoad = true;
@@ -2975,6 +3003,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  async cacheLocalTranscriptionEntitlementStatus(status) {
+    this.settings = mergeSettings({
+      ...this.settings,
+      localTranscriptionEntitlementStatus: status,
+    });
+    if (typeof this.saveData === 'function') {
+      await this.saveData(this.settings);
+    }
+  }
+
   getActiveBindings() {
     const bindings = normalizeBindings(this.settings)
       .filter((item) => item.enabled !== false && item.status !== 'unbound' && item.token);
@@ -3262,12 +3300,14 @@ class WechatObsidianInboxPlugin extends Plugin {
   async getLocalTranscriptionEntitlementStatus() {
     const bindings = this.getActiveBindings();
     if (!bindings.length) {
-      return {
+      const unboundStatus = {
         hasAccess: false,
         plan: LOCAL_TRANSCRIPTION_PLAN,
         status: 'unbound',
         expiresAt: '',
       };
+      await this.cacheLocalTranscriptionEntitlementStatus(unboundStatus);
+      return unboundStatus;
     }
 
     let lastError = null;
@@ -3276,7 +3316,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(LOCAL_TRANSCRIPTION_PLAN)}`, 'GET', {}, binding);
         const data = payload && payload.data ? payload.data : {};
         if (data.hasAccess) {
-          return {
+          const activeStatus = {
             hasAccess: true,
             plan: data.plan || LOCAL_TRANSCRIPTION_PLAN,
             status: data.status || 'active',
@@ -3284,6 +3324,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             bindingToken: binding.token,
             bindingLabel: binding.label || '',
           };
+          await this.cacheLocalTranscriptionEntitlementStatus(activeStatus);
+          return activeStatus;
         }
         lastError = data;
       } catch (error) {
@@ -3291,36 +3333,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return {
+    const inactiveStatus = {
       hasAccess: false,
       plan: LOCAL_TRANSCRIPTION_PLAN,
       status: (lastError && lastError.status) || 'inactive',
       expiresAt: (lastError && lastError.expiresAt) || '',
     };
-  }
-
-  async redeemLocalTranscriptionCode(code) {
-    const redeemCode = String(code || '').trim().toUpperCase().replace(/\s+/g, '');
-    if (!redeemCode) {
-      throw new Error('请输入兑换码');
-    }
-    const binding = this.getActiveBindings()[0];
-    if (!binding) {
-      throw new Error('请先绑定小程序码，再兑换本地转写权限。');
-    }
-    const payload = await this.requestJson('/entitlements/redeem', 'POST', {
-      code: redeemCode,
-      plan: LOCAL_TRANSCRIPTION_PLAN,
-    }, binding);
-    const data = payload && payload.data ? payload.data : {};
-    if (!data.hasAccess) {
-      throw new Error('兑换失败：兑换码无效或已过期。');
-    }
-    await this.saveSettings({
-      ...this.settings,
-      redeemCodeInput: '',
-    });
-    return data;
+    await this.cacheLocalTranscriptionEntitlementStatus(inactiveStatus);
+    return inactiveStatus;
   }
 
   async ensureLocalTranscriptionAccess() {
@@ -4408,35 +4428,20 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     if (this.plugin.settings.aiProvider === 'local') {
       const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
+      const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
       new Setting(containerEl)
         .setName('本地转写权限')
-        .setDesc('音视频文案提取功能为付费功能，开通联系张张wx：heyhmjx（备注ob会员），目前支持抖音、小红书、B站、小宇宙链接一键提取文案。')
-        .addText((text) => text
-          .setPlaceholder('例如 ZZAI030')
-          .setValue(this.plugin.settings.redeemCodeInput || '')
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, redeemCodeInput: value });
-          }))
-        .addButton((button) => button
-          .setButtonText('兑换并开通')
-          .setCta()
-          .onClick(async () => {
-            try {
-              const status = await this.plugin.redeemLocalTranscriptionCode(this.plugin.settings.redeemCodeInput);
-              new Notice(`本地转写已开通${status.expiresAt ? `，有效期至 ${status.expiresAt}` : ''}`);
-              this.display();
-            } catch (error) {
-              new Notice(`兑换失败：${error.message || error}`);
-            }
-          }))
+        .setDesc(`音视频文案提取功能为付费功能，请在微信小程序里输入兑换码开通。${entitlementText}`)
         .addButton((button) => button
           .setButtonText('刷新权限')
+          .setCta()
           .onClick(async () => {
             try {
               const status = await this.plugin.getLocalTranscriptionEntitlementStatus();
               new Notice(status.hasAccess
-                ? `本地转写权限有效${status.expiresAt ? `，有效期至 ${status.expiresAt}` : ''}`
+                ? `本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`
                 : '本地转写权限未开通或已过期');
+              this.display();
             } catch (error) {
               new Notice(`权限查询失败：${error.message || error}`);
             }
