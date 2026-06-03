@@ -12,6 +12,7 @@ const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-sha
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
+const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
@@ -116,6 +117,50 @@ function quoteCommandPath(filePath) {
 
 function buildLocalAsrInstallCommand(installerPath) {
   return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}`;
+}
+
+function downloadTextViaNode(url) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(String(url || ''));
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const client = parsed.protocol === 'http:' ? http : https;
+    const request = client.request(parsed, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'wechat-inbox-sync',
+        Accept: 'text/plain,*/*',
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          try {
+            downloadTextViaNode(new URL(response.headers.location, url).toString()).then(resolve, reject);
+          } catch (error) {
+            reject(error);
+          }
+          return;
+        }
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`HTTP ${response.statusCode}: ${text.slice(0, 120)}`));
+          return;
+        }
+        resolve(text);
+      });
+    });
+    request.setTimeout(30000, () => {
+      request.destroy(new Error('download timeout'));
+    });
+    request.on('error', reject);
+    request.end();
+  });
 }
 
 function createRetryableTranscriptionError(message) {
@@ -3191,6 +3236,25 @@ class WechatObsidianInboxPlugin extends Plugin {
     return path.join(this.getPluginBaseDir(), 'local-asr', 'install-local-asr.ps1');
   }
 
+  async getAvailableLocalAsrInstallerPath() {
+    const installerPath = this.getBundledLocalAsrInstallerPath();
+    if (fs.existsSync(installerPath)) return installerPath;
+
+    const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}.ps1`);
+    let scriptText = '';
+    try {
+      const response = await requestUrl({ url: LOCAL_ASR_INSTALLER_URL, method: 'GET' });
+      scriptText = response.text || '';
+    } catch (error) {
+      scriptText = await downloadTextViaNode(LOCAL_ASR_INSTALLER_URL);
+    }
+    if (!scriptText || !scriptText.includes('.wechat-inbox-local-asr')) {
+      throw new Error('Local ASR installer download returned invalid content');
+    }
+    fs.writeFileSync(downloadedPath, scriptText, 'utf8');
+    return downloadedPath;
+  }
+
   getLocalAsrInstallStatus() {
     return getLocalAsrInstallStatus();
   }
@@ -3273,10 +3337,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async installLocalAsr() {
     await this.ensureLocalTranscriptionAccess();
-    const installerPath = this.getBundledLocalAsrInstallerPath();
-    if (!fs.existsSync(installerPath)) {
-      throw new Error(`Local ASR installer not found: ${installerPath}`);
-    }
+    const installerPath = await this.getAvailableLocalAsrInstallerPath();
     const command = buildLocalAsrInstallCommand(installerPath);
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {
@@ -4556,6 +4617,7 @@ WechatObsidianInboxPlugin.__test = {
   FEISHU_TUTORIAL_URL,
   MAX_PLUGIN_BINDINGS,
   LOCAL_TRANSCRIPTION_PLAN,
+  LOCAL_ASR_INSTALLER_URL,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
   buildDoubaoAsrQueryRequest,
@@ -4586,6 +4648,7 @@ WechatObsidianInboxPlugin.__test = {
   getLocalAsrInstallRoot,
   getLocalAsrInstallStatus,
   buildLocalAsrInstallCommand,
+  downloadTextViaNode,
   getSocialRequestHeaders,
   shouldResolveMediaDownloadUrl,
   openExternalUrl,
