@@ -1946,6 +1946,32 @@ function pushUniqueMediaUrl(list, value) {
   if (!list.includes(url)) list.push(url);
 }
 
+function getTranscriptionMediaScore(value) {
+  const url = normalizeExtractedUrl(value).toLowerCase();
+  if (!url) return -1000;
+
+  let score = 0;
+  if (/\.(?:mp3|m4a|aac|wav|ogg|flac)(?:[?#]|$)/i.test(url)) score += 1000;
+  if (/audio|music|voice|mime_type=audio|audio_url|music_url|play_audio/i.test(url)) score += 800;
+  if (/aweme\/v1\/play/i.test(url)) score += 500;
+  if (/\.(?:mp4)(?:[?#]|$)|douyinvod\.com|zjcdn\.com\/tos-|mime_type=video/i.test(url)) score += 250;
+  if (/\.(?:m4s|m3u8)(?:[?#]|$)/i.test(url)) score -= 300;
+  if (/\.css(?:[?#]|$)|\.js(?:[?#]|$)|image|webp|jpg|png/i.test(url)) score -= 1000;
+  return score;
+}
+
+function sortMediaUrlsForTranscription(urls) {
+  return (urls || [])
+    .map((url, index) => ({ url: normalizeExtractedUrl(url), index }))
+    .filter((item) => /^https?:\/\//i.test(item.url) && isLikelyMediaUrl(item.url))
+    .filter((item, index, list) => list.findIndex((other) => other.url === item.url) === index)
+    .sort((a, b) => {
+      const scoreDiff = getTranscriptionMediaScore(b.url) - getTranscriptionMediaScore(a.url);
+      return scoreDiff || a.index - b.index;
+    })
+    .map((item) => item.url);
+}
+
 function isLikelyImageUrl(value) {
   const url = normalizeExtractedUrl(value);
   if (!url) return false;
@@ -2123,7 +2149,7 @@ function extractPodcastAudioUrlFromHtml(html) {
   return urls[0] || '';
 }
 
-function extractSocialMediaUrlFromHtml(html) {
+function extractSocialMediaUrlsFromHtml(html) {
   const source = String(html || '');
   const urls = [];
 
@@ -2168,7 +2194,11 @@ function extractSocialMediaUrlFromHtml(html) {
     pushUniqueMediaUrl(urls, match[0]);
   }
 
-  return urls[0] || '';
+  return sortMediaUrlsForTranscription(urls);
+}
+
+function extractSocialMediaUrlFromHtml(html) {
+  return extractSocialMediaUrlsFromHtml(html)[0] || '';
 }
 
 function extractBilibiliSubtitleUrlsFromHtml(html) {
@@ -2817,7 +2847,7 @@ async function renderUrlToMarkdownWithElectron(url) {
   }
 }
 
-async function renderSocialMediaUrlWithElectron(url) {
+async function renderSocialMediaUrlsWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
@@ -2848,6 +2878,12 @@ async function renderSocialMediaUrlWithElectron(url) {
         };
         const collect = () => {
           document.querySelectorAll('video, audio, source').forEach((node) => {
+            try {
+              if (node.tagName && node.tagName.toLowerCase() === 'video' && typeof node.play === 'function') {
+                node.muted = true;
+                node.play().catch(() => {});
+              }
+            } catch (error) {}
             add(node.currentSrc);
             add(node.src);
             add(node.getAttribute('src'));
@@ -2858,9 +2894,6 @@ async function renderSocialMediaUrlWithElectron(url) {
         };
         for (let index = 0; index < 24; index += 1) {
           collect();
-          if (urls.some((item) => /aweme\\/v1\\/play|douyinvod\\.com|zjcdn\\.com\\/tos-|mime_type=video|\\.mp4(?:[?#]|$)|\\.m3u8(?:[?#]|$)/i.test(item))) {
-            break;
-          }
           await sleep(500);
         }
         collect();
@@ -2870,12 +2903,17 @@ async function renderSocialMediaUrlWithElectron(url) {
 
     const urls = [];
     (Array.isArray(payload) ? payload : []).forEach((item) => pushUniqueMediaUrl(urls, item));
-    return urls[0] || '';
+    return sortMediaUrlsForTranscription(urls);
   } finally {
     if (win && typeof win.destroy === 'function') {
       win.destroy();
     }
   }
+}
+
+async function renderSocialMediaUrlWithElectron(url) {
+  const urls = await renderSocialMediaUrlsWithElectron(url);
+  return urls[0] || '';
 }
 
 function decodeJsonStringLiteral(value) {
@@ -3385,6 +3423,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderSocialMediaUrlWithElectron(url);
   }
 
+  async renderSocialMediaUrls(url) {
+    if (
+      Object.prototype.hasOwnProperty.call(this, 'renderSocialMediaUrl')
+      && !Object.prototype.hasOwnProperty.call(this, 'renderSocialMediaUrls')
+    ) {
+      return sortMediaUrlsForTranscription([await this.renderSocialMediaUrl(url)]);
+    }
+    return renderSocialMediaUrlsWithElectron(url);
+  }
+
   async runConfiguredTranscription(audioUrl) {
     const provider = this.settings.aiProvider;
     const runLocalFallback = async (sourcePrefix) => {
@@ -3507,6 +3555,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       ? await resolveRedirectUrl(audioUrl, 5, 'GET')
       : audioUrl;
     const buffer = Buffer.from(await this.downloadArrayBuffer(resolvedUrl, getSocialRequestHeaders(resolvedUrl)));
+    const head = buffer.subarray(0, Math.min(buffer.length, 256)).toString('utf8').trim().toLowerCase();
+    if (buffer.length < 512 || head.startsWith('<!doctype') || head.startsWith('<html') || head.includes('<body')) {
+      throw new Error('下载到的媒体不是有效音视频文件，可能是平台风控页或无效视频地址');
+    }
     const ext = getAudioFormatFromUrl(resolvedUrl || audioUrl);
     const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
     fs.writeFileSync(filePath, buffer);
@@ -3862,6 +3914,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     url,
     platform,
     mediaUrl = '',
+    mediaUrls = [],
     subtitleText = '',
     subtitleUrl = '',
     source = '',
@@ -3884,7 +3937,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
     }
 
-    if (!mediaUrl) {
+    const candidates = sortMediaUrlsForTranscription([mediaUrl, ...(Array.isArray(mediaUrls) ? mediaUrls : [])]);
+
+    if (!candidates.length) {
       return {
         ...record,
         metadata: buildTranscriptOnlyMetadata(metadata, {
@@ -3901,21 +3956,29 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
     }
 
+    let lastError = null;
     try {
-      const result = await this.runConfiguredTranscription(mediaUrl);
-      return {
-        ...record,
-        metadata: buildTranscriptOnlyMetadata(metadata, {
-          url,
-          platform,
-          mediaUrl,
-          subtitleUrl,
-          transcription: result.transcription,
-          transcriptionStatus: 'success',
-          transcriptionSource: result.source,
-          conversionStatus: 'success',
-        }),
-      };
+      for (const candidate of candidates) {
+        try {
+          const result = await this.runConfiguredTranscription(candidate);
+          return {
+            ...record,
+            metadata: buildTranscriptOnlyMetadata(metadata, {
+              url,
+              platform,
+              mediaUrl: candidate,
+              subtitleUrl,
+              transcription: result.transcription,
+              transcriptionStatus: 'success',
+              transcriptionSource: result.source,
+              conversionStatus: 'success',
+            }),
+          };
+        } catch (candidateError) {
+          lastError = candidateError;
+        }
+      }
+      throw lastError || new Error('未能完成音视频转写');
     } catch (error) {
       if (isRetryableTranscriptionError(error)) {
         throw error;
@@ -3945,6 +4008,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       url,
       platform: '小宇宙',
       mediaUrl,
+      mediaUrls: extractSocialMediaUrlsFromHtml(html),
       source: 'audio',
     });
   }
@@ -4083,14 +4147,23 @@ class WechatObsidianInboxPlugin extends Plugin {
         const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
         const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
         const html = response.text || '';
-        let mediaUrl = extractSocialMediaUrlFromHtml(html);
+        let mediaUrls = extractSocialMediaUrlsFromHtml(html);
+        let mediaUrl = mediaUrls[0] || '';
         const isVideoIntent = isDouyinUrl(url)
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
           || /\/video\//i.test(resolvedUrl);
-        if (!mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === 'function') {
+        if (isVideoIntent && typeof this.renderSocialMediaUrls === 'function') {
+          try {
+            mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, ...(await this.renderSocialMediaUrls(resolvedUrl))]);
+            mediaUrl = mediaUrls[0] || mediaUrl;
+          } catch (renderError) {
+            mediaUrl = mediaUrl || '';
+          }
+        } else if (!mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === 'function') {
           try {
             mediaUrl = await this.renderSocialMediaUrl(resolvedUrl);
+            mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
           } catch (renderError) {
             mediaUrl = '';
           }
@@ -4100,6 +4173,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
             mediaUrl,
+            mediaUrls,
             source: 'video',
           });
         }
@@ -4638,7 +4712,9 @@ WechatObsidianInboxPlugin.__test = {
   extractXiaohongshuMarkdownFromHtml,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
+  extractSocialMediaUrlsFromHtml,
   extractSocialMediaUrlFromHtml,
+  sortMediaUrlsForTranscription,
   cleanDisplayUrl,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
