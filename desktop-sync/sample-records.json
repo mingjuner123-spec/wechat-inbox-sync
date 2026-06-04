@@ -1,0 +1,43 @@
+{
+  "data": [
+    {
+      "_id": "sample-text-001",
+      "type": "text",
+      "content": "这是从微信小程序收集的一段临时想法。",
+      "source": "wechat-miniprogram",
+      "createdAt": "2026-05-08T12:34:00.000Z",
+      "status": "pending",
+      "metadata": {}
+    },
+    {
+      "_id": "sample-link-001",
+      "type": "link",
+      "content": "https://example.com/article",
+      "source": "wechat-miniprogram",
+      "createdAt": "2026-05-08T12:40:00.000Z",
+      "status": "pending",
+      "metadata": {
+        "url": "https://example.com/article",
+        "title": "示例文章标题",
+        "fetchStatus": "failed"
+      }
+    },
+    {
+      "_id": "sample-voice-001",
+      "type": "voice",
+      "content": "现场语音备忘录 - 00:15",
+      "source": "wechat-miniprogram",
+      "createdAt": "2026-05-08T12:45:00.000Z",
+      "status": "pending",
+      "metadata": {
+        "audioFileName": "语音-001.mp3",
+        "audioFileID": "cloud://voices/sample-voice-001.mp3",
+        "transcription": "这里是语音转写全文示例。",
+        "summary": "这里是语音摘要示例。",
+        "transcriptionStatus": "success",
+        "summaryStatus": "success"
+      }
+    }
+  ]
+}
+

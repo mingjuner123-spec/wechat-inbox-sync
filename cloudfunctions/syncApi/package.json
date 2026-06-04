@@ -1,0 +1,11 @@
+{
+  "name": "syncApi",
+  "version": "1.0.0",
+  "description": "HTTP sync API for Obsidian desktop sync",
+  "main": "index.js",
+  "license": "ISC",
+  "dependencies": {
+    "wx-server-sdk": "~2.4.0"
+  }
+}
+
