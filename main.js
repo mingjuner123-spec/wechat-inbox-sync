@@ -13,6 +13,7 @@ const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvn
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
+const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
@@ -66,12 +67,32 @@ const DOUBAO_ASR_RESOURCE_ID = 'volc.seedasr.auc';
 const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转写文本，不要摘要，不要解释，不要使用 Markdown。';
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 
-function getDefaultLocalTranscriptionCommand() {
+function getLocalAsrPlatform(platform = os.platform()) {
+  if (platform === 'win32') return 'win32';
+  if (platform === 'darwin') return 'darwin';
+  return platform || '';
+}
+
+function getDefaultLocalTranscriptionCommand(platform = os.platform()) {
+  if (getLocalAsrPlatform(platform) === 'darwin') {
+    return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
+  }
   return `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
 }
 
 function getLocalAsrInstallRoot(homeDir = os.homedir()) {
   return path.join(homeDir, LOCAL_ASR_HOME);
+}
+
+function joinLocalAsrPath(platform, ...segments) {
+  if (getLocalAsrPlatform(platform) === 'darwin') {
+    const [first, ...rest] = segments;
+    return [
+      String(first || '').replace(/\/+$/g, ''),
+      ...rest.map((segment) => String(segment || '').replace(/^\/+|\/+$/g, '')),
+    ].filter(Boolean).join('/');
+  }
+  return path.join(...segments);
 }
 
 function hasFileRecursive(rootDir, predicate) {
@@ -89,16 +110,23 @@ function hasFileRecursive(rootDir, predicate) {
   return false;
 }
 
-function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync) {
-  const transcribeScript = path.join(installRoot, 'transcribe.ps1');
-  const modelPath = path.join(installRoot, 'models', 'ggml-small.bin');
+function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
+  const isMac = getLocalAsrPlatform(platform) === 'darwin';
+  const transcribeScript = joinLocalAsrPath(platform, installRoot, isMac ? 'transcribe.sh' : 'transcribe.ps1');
+  const modelPath = joinLocalAsrPath(platform, installRoot, 'models', 'ggml-small.bin');
   const hasTranscribeScript = exists(transcribeScript);
   const hasModel = exists(modelPath);
-  const hasWhisper = exists(path.join(installRoot, 'whisper', 'whisper-cli.exe'))
-    || exists(path.join(installRoot, 'whisper', 'main.exe'))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'whisper'), (filePath, name) => ['whisper-cli.exe', 'main.exe'].includes(name)));
-  const hasFfmpeg = exists(path.join(installRoot, 'ffmpeg', 'ffmpeg.exe'))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'ffmpeg'), (filePath, name) => name === 'ffmpeg.exe'));
+  const whisperNames = isMac ? ['whisper-cli', 'main'] : ['whisper-cli.exe', 'main.exe'];
+  const ffmpegName = isMac ? 'ffmpeg' : 'ffmpeg.exe';
+  const hasWhisper = exists(joinLocalAsrPath(platform, installRoot, 'bin', 'whisper-cli'))
+    || exists(joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[0]))
+    || exists(joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[1]))
+    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'whisper'), (filePath, name) => whisperNames.includes(name)))
+    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => whisperNames.includes(name)));
+  const hasFfmpeg = exists(joinLocalAsrPath(platform, installRoot, 'bin', 'ffmpeg'))
+    || exists(joinLocalAsrPath(platform, installRoot, 'ffmpeg', ffmpegName))
+    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'ffmpeg'), (filePath, name) => name === ffmpegName))
+    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => name === ffmpegName));
 
   return {
     installRoot,
@@ -115,7 +143,10 @@ function quoteCommandPath(filePath) {
   return `"${String(filePath || '').replace(/"/g, '\\"')}"`;
 }
 
-function buildLocalAsrInstallCommand(installerPath) {
+function buildLocalAsrInstallCommand(installerPath, platform = os.platform()) {
+  if (getLocalAsrPlatform(platform) === 'darwin' || String(installerPath || '').endsWith('.sh')) {
+    return `/bin/bash ${quoteCommandPath(installerPath)}`;
+  }
   return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}`;
 }
 
@@ -204,7 +235,7 @@ function isRemoteAsrDownloadFailure(error) {
 }
 
 function getDefaultLocalTranscriptionScriptPath() {
-  return path.join(os.homedir(), LOCAL_ASR_HOME, 'transcribe.ps1');
+  return path.join(os.homedir(), LOCAL_ASR_HOME, getLocalAsrPlatform() === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1');
 }
 
 function getDoubaoTaskKey(audioUrl) {
@@ -3309,20 +3340,23 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getBundledLocalAsrInstallerPath() {
-    return path.join(this.getPluginBaseDir(), 'local-asr', 'install-local-asr.ps1');
+    const fileName = getLocalAsrPlatform() === 'darwin' ? 'install-local-asr-macos.sh' : 'install-local-asr.ps1';
+    return path.join(this.getPluginBaseDir(), 'local-asr', fileName);
   }
 
   async getAvailableLocalAsrInstallerPath() {
     const installerPath = this.getBundledLocalAsrInstallerPath();
     if (fs.existsSync(installerPath)) return installerPath;
 
-    const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}.ps1`);
+    const isMac = getLocalAsrPlatform() === 'darwin';
+    const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
+    const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
     let scriptText = '';
     try {
-      const response = await requestUrl({ url: LOCAL_ASR_INSTALLER_URL, method: 'GET' });
+      const response = await requestUrl({ url: installerUrl, method: 'GET' });
       scriptText = response.text || '';
     } catch (error) {
-      scriptText = await downloadTextViaNode(LOCAL_ASR_INSTALLER_URL);
+      scriptText = await downloadTextViaNode(installerUrl);
     }
     if (!scriptText || !scriptText.includes('.wechat-inbox-local-asr')) {
       throw new Error('Local ASR installer download returned invalid content');
@@ -4395,8 +4429,12 @@ class WechatInboxSettingTab extends PluginSettingTab {
     containerEl.createEl('h2', { text: 'Obsidian 内容同步助手' });
 
     new Setting(containerEl)
+      .setName('小程序名字：Obsidian 内容同步助手')
+      .setDesc('打开微信后搜索这个小程序，进入「绑定 Obsidian」页面复制绑定码。');
+
+    new Setting(containerEl)
       .setName('微信小程序绑定教程')
-      .setDesc(`插件安装、绑定码填写和常见问题：${FEISHU_TUTORIAL_URL}`)
+      .setDesc(`插件安装、绑定码填写和常见问题。小程序名字：Obsidian 内容同步助手。教程链接：${FEISHU_TUTORIAL_URL}`)
       .addButton((button) => button
         .setButtonText('打开教程')
         .onClick(async () => {
@@ -4455,7 +4493,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
       .setName('新增绑定码')
       .setDesc(bindings.length >= MAX_PLUGIN_BINDINGS
         ? `已达到上限：最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码。`
-        : `粘贴另一个微信设备的小程序绑定码，点击新增后会加入上方列表，不会覆盖已有绑定。当前 ${bindings.length}/${MAX_PLUGIN_BINDINGS}。`)
+        : `打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。点击新增后会加入上方列表，不会覆盖已有绑定。当前 ${bindings.length}/${MAX_PLUGIN_BINDINGS}。`)
       .addText((text) => text
         .setPlaceholder('例如 ABC-123')
         .setValue(this.plugin.settings.pendingBindCode || '')
@@ -4505,7 +4543,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
       const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
       new Setting(containerEl)
         .setName('本地转写权限')
-        .setDesc(`音视频文案提取功能为付费功能，请在微信小程序里输入兑换码开通。${entitlementText}`)
+        .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
         .addButton((button) => button
           .setButtonText('刷新权限')
           .setCta()
@@ -4697,6 +4735,8 @@ WechatObsidianInboxPlugin.__test = {
   MAX_PLUGIN_BINDINGS,
   LOCAL_TRANSCRIPTION_PLAN,
   LOCAL_ASR_INSTALLER_URL,
+  LOCAL_ASR_MACOS_INSTALLER_URL,
+  getLocalAsrPlatform,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
   buildDoubaoAsrQueryRequest,
