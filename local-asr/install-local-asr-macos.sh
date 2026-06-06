@@ -26,6 +26,27 @@ download_file() {
   exit 1
 }
 
+brew_install_formula() {
+  local formula="$1"
+  if brew list --versions "$formula" >/dev/null 2>&1; then
+    echo "Homebrew formula already installed: $formula"
+    return
+  fi
+
+  echo "Installing Homebrew formula: $formula"
+  if HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula"; then
+    return
+  fi
+
+  echo "" >&2
+  echo "WeChat Inbox Sync local ASR install failed while installing: $formula" >&2
+  echo "Please open Terminal and run this command manually, then retry in Obsidian:" >&2
+  echo "  brew install $formula" >&2
+  echo "If Homebrew says another process is running, wait a few minutes and retry." >&2
+  echo "If the network download is blocked, switch network or proxy and retry." >&2
+  exit 1
+}
+
 find_command() {
   local name="$1"
   if command -v "$name" >/dev/null 2>&1; then
@@ -56,20 +77,28 @@ fi
 
 mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/models"
 
-if ! brew list --versions ffmpeg >/dev/null 2>&1; then
-  brew install ffmpeg
-fi
-
-if ! brew list --versions whisper-cpp >/dev/null 2>&1; then
-  brew install whisper-cpp
-fi
+brew_install_formula ffmpeg
+brew_install_formula whisper-cpp
 
 WHISPER_BIN="$(find_command whisper-cli || true)"
 if [ -z "$WHISPER_BIN" ]; then
   WHISPER_BIN="$(find_command whisper-cpp || true)"
 fi
 if [ -z "$WHISPER_BIN" ]; then
-  echo "whisper-cli was not found after installing whisper-cpp." >&2
+  WHISPER_BIN="$(find_command whisper || true)"
+fi
+if [ -z "$WHISPER_BIN" ]; then
+  for prefix in /opt/homebrew /usr/local; do
+    candidate="$(find "$prefix" -path '*/whisper-cpp/*' -type f \( -name 'whisper-cli' -o -name 'whisper-cpp' -o -name 'whisper' -o -name 'main' \) -perm -111 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ]; then
+      WHISPER_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$WHISPER_BIN" ]; then
+  echo "whisper command was not found after installing whisper-cpp." >&2
+  echo "Please open Terminal and run: brew reinstall whisper-cpp" >&2
   exit 1
 fi
 

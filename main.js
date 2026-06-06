@@ -91,6 +91,18 @@ function resolveLocalAsrPlatform(value, runtimePlatform = os.platform()) {
   return normalized === 'auto' ? getLocalAsrPlatform(runtimePlatform) : normalized;
 }
 
+function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = os.platform()) {
+  const normalized = normalizeLocalAsrPlatform(selectedPlatform);
+  if (normalized === 'auto') return '';
+  const selected = getLocalAsrPlatform(normalized);
+  const runtime = getLocalAsrPlatform(runtimePlatform);
+  if (!['win32', 'darwin'].includes(selected) || !['win32', 'darwin'].includes(runtime)) return '';
+  if (selected === runtime) return '';
+  const selectedName = LOCAL_ASR_PLATFORM_NAMES[selected] || selected;
+  const runtimeName = LOCAL_ASR_PLATFORM_NAMES[runtime] || runtime;
+  return `Local ASR platform mismatch: this computer is ${runtimeName}, but the selected installer is ${selectedName}. Please choose Auto or ${runtimeName}, then install again.`;
+}
+
 function getDefaultLocalTranscriptionCommand(platform = os.platform()) {
   if (getLocalAsrPlatform(platform) === 'darwin') {
     return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
@@ -3561,6 +3573,10 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async installLocalAsr() {
     await this.ensureLocalTranscriptionAccess();
+    const mismatchMessage = getLocalAsrPlatformMismatchMessage(this.settings.localAsrPlatform);
+    if (mismatchMessage) {
+      throw new Error(mismatchMessage);
+    }
     const installerPath = await this.getAvailableLocalAsrInstallerPath();
     const platform = this.getConfiguredLocalAsrPlatform();
     const installRoot = getLocalAsrInstallRoot();
@@ -4924,6 +4940,7 @@ WechatObsidianInboxPlugin.__test = {
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
   resolveLocalAsrPlatform,
+  getLocalAsrPlatformMismatchMessage,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
   buildDoubaoAsrQueryRequest,
