@@ -157,6 +157,54 @@ function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists
   };
 }
 
+function getLocalAsrInstallLogPath(installRoot = getLocalAsrInstallRoot()) {
+  return path.join(installRoot, 'install.log');
+}
+
+function readLocalAsrInstallLog(installRoot = getLocalAsrInstallRoot()) {
+  const logPath = getLocalAsrInstallLogPath(installRoot);
+  try {
+    if (!fs.existsSync(logPath)) return '';
+    return fs.readFileSync(logPath, 'utf8').slice(-5000);
+  } catch (error) {
+    return `读取安装日志失败：${error.message || error}`;
+  }
+}
+
+function writeLocalAsrInstallLog({
+  installRoot = getLocalAsrInstallRoot(),
+  platform = os.platform(),
+  command = '',
+  installerPath = '',
+  stdout = '',
+  stderr = '',
+  error = '',
+  status = '',
+} = {}) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getLocalAsrInstallLogPath(installRoot);
+    const lines = [
+      `time=${new Date().toISOString()}`,
+      `status=${status}`,
+      `platform=${platform}`,
+      `installerPath=${installerPath}`,
+      `command=${command}`,
+      '--- stdout ---',
+      String(stdout || ''),
+      '--- stderr ---',
+      String(stderr || ''),
+      '--- error ---',
+      String(error || ''),
+      '',
+    ];
+    fs.writeFileSync(logPath, lines.join('\n'), 'utf8');
+    return logPath;
+  } catch (writeError) {
+    return '';
+  }
+}
+
 function quoteCommandPath(filePath) {
   return `"${String(filePath || '').replace(/"/g, '\\"')}"`;
 }
@@ -3406,6 +3454,53 @@ class WechatObsidianInboxPlugin extends Plugin {
     return getLocalAsrInstallStatus(getLocalAsrInstallRoot(), fs.existsSync, this.getConfiguredLocalAsrPlatform());
   }
 
+  getLocalAsrDiagnosticText() {
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const installRoot = getLocalAsrInstallRoot();
+    const status = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
+    const logText = readLocalAsrInstallLog(installRoot);
+    return [
+      'WeChat Inbox Sync 本地转写诊断',
+      `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
+      `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
+      `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
+      `实际使用系统：${platform}`,
+      `安装目录：${status.installRoot}`,
+      `转写脚本：${status.transcribeScript}`,
+      `脚本存在：${status.hasTranscribeScript ? '是' : '否'}`,
+      `whisper：${status.hasWhisper ? '是' : '否'}`,
+      `ffmpeg：${status.hasFfmpeg ? '是' : '否'}`,
+      `模型文件：${status.hasModel ? '是' : '否'}`,
+      `组件可用：${status.ready ? '是' : '否'}`,
+      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
+      `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      '最近安装日志：',
+      logText || '暂无 install.log',
+    ].join('\n');
+  }
+
+  async copyLocalAsrDiagnosticText() {
+    const text = this.getLocalAsrDiagnosticText();
+    if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    try {
+      const electron = require('electron');
+      if (electron && electron.clipboard && electron.clipboard.writeText) {
+        electron.clipboard.writeText(text);
+        return true;
+      }
+    } catch (error) {
+      // Obsidian mobile/electron variants may not expose electron here.
+    }
+    const diagnosticPath = path.join(getLocalAsrInstallRoot(), 'diagnostic.txt');
+    fs.mkdirSync(getLocalAsrInstallRoot(), { recursive: true });
+    fs.writeFileSync(diagnosticPath, text, 'utf8');
+    new Notice(`诊断信息已写入：${diagnosticPath}`);
+    return false;
+  }
+
   async getLocalTranscriptionEntitlementStatus() {
     const bindings = this.getActiveBindings();
     if (!bindings.length) {
@@ -3467,7 +3562,9 @@ class WechatObsidianInboxPlugin extends Plugin {
   async installLocalAsr() {
     await this.ensureLocalTranscriptionAccess();
     const installerPath = await this.getAvailableLocalAsrInstallerPath();
-    const command = buildLocalAsrInstallCommand(installerPath, this.getConfiguredLocalAsrPlatform());
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const installRoot = getLocalAsrInstallRoot();
+    const command = buildLocalAsrInstallCommand(installerPath, platform);
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {
       childProcess.exec(command, {
@@ -3476,9 +3573,29 @@ class WechatObsidianInboxPlugin extends Plugin {
         windowsHide: true,
       }, (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(stderr || stdout || error.message || String(error)));
+          const logPath = writeLocalAsrInstallLog({
+            installRoot,
+            platform,
+            installerPath,
+            command,
+            stdout,
+            stderr,
+            error: error.message || String(error),
+            status: 'failed',
+          });
+          const message = stderr || stdout || error.message || String(error);
+          reject(new Error(`${message}${logPath ? `\n安装日志：${logPath}` : ''}`));
           return;
         }
+        writeLocalAsrInstallLog({
+          installRoot,
+          platform,
+          installerPath,
+          command,
+          stdout,
+          stderr,
+          status: 'success',
+        });
         resolve({ stdout, stderr });
       });
     });
@@ -4644,6 +4761,16 @@ class WechatInboxSettingTab extends PluginSettingTab {
               this.display();
             } catch (error) {
               new Notice(`本地转写组件安装失败：${error.message || error}`);
+            }
+          }))
+        .addButton((button) => button
+          .setButtonText('复制诊断信息')
+          .onClick(async () => {
+            try {
+              await this.plugin.copyLocalAsrDiagnosticText();
+              new Notice('本地转写诊断信息已复制');
+            } catch (error) {
+              new Notice(`复制诊断信息失败：${error.message || error}`);
             }
           }));
     }
