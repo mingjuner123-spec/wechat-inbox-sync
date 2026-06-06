@@ -4,6 +4,7 @@ set -euo pipefail
 INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 
 cleanup() {
   rm -rf "$TEMP_ROOT"
@@ -15,15 +16,45 @@ download_file() {
   local out_file="$2"
   echo "Downloading $url"
   if command -v curl >/dev/null 2>&1; then
-    curl -L --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o "$out_file" "$url"
-    return
+    if curl -L --retry 2 --retry-delay 2 --connect-timeout 30 -C - -o "$out_file" "$url"; then
+      return 0
+    fi
   fi
   if command -v wget >/dev/null 2>&1; then
-    wget -O "$out_file" "$url"
-    return
+    if wget -O "$out_file" "$url"; then
+      return 0
+    fi
   fi
-  echo "curl or wget is required to download the Whisper model." >&2
-  exit 1
+  return 1
+}
+
+download_model() {
+  local out_file="$1"
+  local temp_file="$out_file.part"
+  local urls=("$MODEL_URL" "$MODEL_MIRROR_URL")
+  local url=""
+
+  rm -f "$temp_file"
+  for url in "${urls[@]}"; do
+    if download_file "$url" "$temp_file"; then
+      local model_size
+      model_size="$(wc -c < "$temp_file" | tr -d ' ')"
+      if [ "$model_size" -ge 400000000 ]; then
+        mv -f "$temp_file" "$out_file"
+        return 0
+      fi
+      echo "Downloaded model is too small from $url, trying next source." >&2
+      rm -f "$temp_file"
+    else
+      echo "Model download failed from $url, trying next source." >&2
+      rm -f "$temp_file"
+    fi
+  done
+
+  echo "Whisper model download failed from all sources." >&2
+  echo "The local ASR engine is installed, but the model file could not be downloaded." >&2
+  echo "Please retry installation later or switch network. No Terminal command is required." >&2
+  return 1
 }
 
 brew_install_formula() {
@@ -119,7 +150,7 @@ if [ -f "$MODEL_PATH" ]; then
   fi
 fi
 if [ ! -f "$MODEL_PATH" ]; then
-  download_file "$MODEL_URL" "$MODEL_PATH"
+  download_model "$MODEL_PATH"
 fi
 
 cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
