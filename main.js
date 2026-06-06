@@ -246,10 +246,20 @@ function createClientId() {
   return `obsidian-${crypto.randomBytes(16).toString('hex')}`;
 }
 
-function normalizeLocalTranscriptionCommand(command) {
-  return String(command || '')
+function isWindowsLocalAsrCommand(command) {
+  const normalized = String(command || '').toLowerCase();
+  return normalized.includes('powershell')
+    && (normalized.includes('transcribe.ps1') || normalized.includes(LOCAL_ASR_HOME));
+}
+
+function normalizeLocalTranscriptionCommand(command, platform = os.platform()) {
+  const normalized = String(command || '')
     .trim()
     .replace(/\$env:USERPROFILE/gi, '%USERPROFILE%');
+  if (getLocalAsrPlatform(platform) === 'darwin' && isWindowsLocalAsrCommand(normalized)) {
+    return getDefaultLocalTranscriptionCommand(platform);
+  }
+  return normalized;
 }
 
 function normalizeBindCodeInput(code) {
@@ -313,7 +323,7 @@ function getPrimaryBindingToken(bindings) {
   return active ? active.token : '';
 }
 
-function mergeSettings(savedSettings) {
+function mergeSettings(savedSettings, platform = os.platform()) {
   const merged = {
     ...DEFAULT_SETTINGS,
     ...(savedSettings || {}),
@@ -334,7 +344,7 @@ function mergeSettings(savedSettings) {
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
-  merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(merged.localTranscriptionCommand);
+  merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(merged.localTranscriptionCommand, platform);
   merged.aliyunApiKey = String(merged.aliyunApiKey || '').trim();
   merged.aliyunModel = String(merged.aliyunModel || '').trim() || DEFAULT_SETTINGS.aliyunModel;
   merged.aliyunBaseUrl = String(merged.aliyunBaseUrl || '').trim() || DEFAULT_SETTINGS.aliyunBaseUrl;
@@ -3430,7 +3440,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   async installLocalAsr() {
     await this.ensureLocalTranscriptionAccess();
     const installerPath = await this.getAvailableLocalAsrInstallerPath();
-    const command = buildLocalAsrInstallCommand(installerPath);
+    const command = buildLocalAsrInstallCommand(installerPath, getLocalAsrPlatform());
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {
       childProcess.exec(command, {
@@ -3448,7 +3458,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.saveSettings({
       ...this.settings,
       aiProvider: 'local',
-      localTranscriptionCommand: getDefaultLocalTranscriptionCommand(),
+      localTranscriptionCommand: getDefaultLocalTranscriptionCommand(getLocalAsrPlatform()),
     });
     new Notice('本地转写组件已安装，并已填入默认命令。');
   }
