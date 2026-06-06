@@ -25,6 +25,7 @@ const DEFAULT_SETTINGS = {
   inboxDir: '临时收集',
   autoSyncOnLoad: true,
   aiProvider: 'off',
+  localAsrPlatform: 'auto',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
   aliyunModel: 'qwen3.5-omni-plus',
@@ -49,6 +50,12 @@ const AI_PROVIDER_NAMES = {
   tencent: '腾讯云 ASR 录音文件识别',
 };
 
+const LOCAL_ASR_PLATFORM_NAMES = {
+  auto: '自动识别',
+  win32: 'Windows',
+  darwin: 'macOS',
+};
+
 const TYPE_DISPLAY_NAMES = {
   text: '文字',
   link: '链接',
@@ -71,6 +78,17 @@ function getLocalAsrPlatform(platform = os.platform()) {
   if (platform === 'win32') return 'win32';
   if (platform === 'darwin') return 'darwin';
   return platform || '';
+}
+
+function normalizeLocalAsrPlatform(value) {
+  return Object.prototype.hasOwnProperty.call(LOCAL_ASR_PLATFORM_NAMES, String(value || '').trim())
+    ? String(value || '').trim()
+    : 'auto';
+}
+
+function resolveLocalAsrPlatform(value, runtimePlatform = os.platform()) {
+  const normalized = normalizeLocalAsrPlatform(value);
+  return normalized === 'auto' ? getLocalAsrPlatform(runtimePlatform) : normalized;
 }
 
 function getDefaultLocalTranscriptionCommand(platform = os.platform()) {
@@ -234,8 +252,8 @@ function isRemoteAsrDownloadFailure(error) {
   return /Invalid audio URI|audio download failed|Audio download failed/i.test(message);
 }
 
-function getDefaultLocalTranscriptionScriptPath() {
-  return path.join(os.homedir(), LOCAL_ASR_HOME, getLocalAsrPlatform() === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1');
+function getDefaultLocalTranscriptionScriptPath(platform = os.platform()) {
+  return path.join(os.homedir(), LOCAL_ASR_HOME, getLocalAsrPlatform(platform) === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1');
 }
 
 function getDoubaoTaskKey(audioUrl) {
@@ -344,7 +362,11 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
-  merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(merged.localTranscriptionCommand, platform);
+  merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
+  merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
+    merged.localTranscriptionCommand,
+    resolveLocalAsrPlatform(merged.localAsrPlatform, platform),
+  );
   merged.aliyunApiKey = String(merged.aliyunApiKey || '').trim();
   merged.aliyunModel = String(merged.aliyunModel || '').trim() || DEFAULT_SETTINGS.aliyunModel;
   merged.aliyunBaseUrl = String(merged.aliyunBaseUrl || '').trim() || DEFAULT_SETTINGS.aliyunBaseUrl;
@@ -3331,8 +3353,9 @@ class WechatObsidianInboxPlugin extends Plugin {
   getEffectiveLocalTranscriptionCommand() {
     const configured = String(this.settings.localTranscriptionCommand || '').trim();
     if (configured) return configured;
-    return fs.existsSync(getDefaultLocalTranscriptionScriptPath())
-      ? getDefaultLocalTranscriptionCommand()
+    const platform = this.getConfiguredLocalAsrPlatform();
+    return fs.existsSync(getDefaultLocalTranscriptionScriptPath(platform))
+      ? getDefaultLocalTranscriptionCommand(platform)
       : '';
   }
 
@@ -3349,8 +3372,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     return __dirname;
   }
 
+  getConfiguredLocalAsrPlatform() {
+    return resolveLocalAsrPlatform(this.settings.localAsrPlatform);
+  }
+
   getBundledLocalAsrInstallerPath() {
-    const fileName = getLocalAsrPlatform() === 'darwin' ? 'install-local-asr-macos.sh' : 'install-local-asr.ps1';
+    const fileName = this.getConfiguredLocalAsrPlatform() === 'darwin' ? 'install-local-asr-macos.sh' : 'install-local-asr.ps1';
     return path.join(this.getPluginBaseDir(), 'local-asr', fileName);
   }
 
@@ -3358,7 +3385,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installerPath = this.getBundledLocalAsrInstallerPath();
     if (fs.existsSync(installerPath)) return installerPath;
 
-    const isMac = getLocalAsrPlatform() === 'darwin';
+    const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
     let scriptText = '';
@@ -3376,7 +3403,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getLocalAsrInstallStatus() {
-    return getLocalAsrInstallStatus();
+    return getLocalAsrInstallStatus(getLocalAsrInstallRoot(), fs.existsSync, this.getConfiguredLocalAsrPlatform());
   }
 
   async getLocalTranscriptionEntitlementStatus() {
@@ -3440,7 +3467,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   async installLocalAsr() {
     await this.ensureLocalTranscriptionAccess();
     const installerPath = await this.getAvailableLocalAsrInstallerPath();
-    const command = buildLocalAsrInstallCommand(installerPath, getLocalAsrPlatform());
+    const command = buildLocalAsrInstallCommand(installerPath, this.getConfiguredLocalAsrPlatform());
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {
       childProcess.exec(command, {
@@ -3458,7 +3485,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.saveSettings({
       ...this.settings,
       aiProvider: 'local',
-      localTranscriptionCommand: getDefaultLocalTranscriptionCommand(getLocalAsrPlatform()),
+      localTranscriptionCommand: getDefaultLocalTranscriptionCommand(this.getConfiguredLocalAsrPlatform()),
     });
     new Notice('本地转写组件已安装，并已填入默认命令。');
   }
@@ -4552,6 +4579,26 @@ class WechatInboxSettingTab extends PluginSettingTab {
       const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
       const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
       new Setting(containerEl)
+        .setName('本地转写系统')
+        .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。')
+        .addDropdown((dropdown) => {
+          Object.entries(LOCAL_ASR_PLATFORM_NAMES).forEach(([value, label]) => {
+            dropdown.addOption(value, label);
+          });
+          dropdown
+            .setValue(this.plugin.settings.localAsrPlatform || 'auto')
+            .onChange(async (value) => {
+              const localAsrPlatform = normalizeLocalAsrPlatform(value);
+              const platform = resolveLocalAsrPlatform(localAsrPlatform);
+              await this.plugin.saveSettings({
+                ...this.plugin.settings,
+                localAsrPlatform,
+                localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform),
+              });
+              this.display();
+            });
+        });
+      new Setting(containerEl)
         .setName('本地转写权限')
         .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
         .addButton((button) => button
@@ -4746,7 +4793,10 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_TRANSCRIPTION_PLAN,
   LOCAL_ASR_INSTALLER_URL,
   LOCAL_ASR_MACOS_INSTALLER_URL,
+  LOCAL_ASR_PLATFORM_NAMES,
   getLocalAsrPlatform,
+  normalizeLocalAsrPlatform,
+  resolveLocalAsrPlatform,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
   buildDoubaoAsrQueryRequest,
