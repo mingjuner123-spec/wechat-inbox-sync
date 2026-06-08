@@ -4474,7 +4474,12 @@ class WechatObsidianInboxPlugin extends Plugin {
           },
         };
       }
-      const markdown = htmlToMarkdown(html);
+      let markdown;
+      try {
+        markdown = htmlToMarkdown(html);
+      } catch (convertError) {
+        throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
+      }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       return {
         ...record,
