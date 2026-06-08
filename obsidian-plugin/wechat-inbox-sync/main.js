@@ -3147,15 +3147,15 @@ function getRecordConversionWarning(record) {
   if (!record) return '';
   const metadata = record.metadata || {};
   const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
+  const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
   if (status === 'failed') {
-    const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
-    const prefix = getRecordSourcePrefix(record);
-    const name = getRecordSourceName(record);
-    const label = `${prefix}-${name}`;
-    return `${label} 转写失败${errorMsg ? `：${errorMsg}` : ''}`;
+    return errorMsg || '网页转写失败（未知原因）';
   }
   if (status === 'wechat_captcha') {
-    return '公众号文章触发微信安全验证，正文未能提取';
+    return '微信安全验证拦截';
+  }
+  if (status === 'link_saved') {
+    return errorMsg || '网页抓取未成功';
   }
   return '';
 }
@@ -4614,16 +4614,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (showNotice || written.length) {
         let message = buildSyncNotice(written.length);
         if (conversionWarnings.length) {
-          message += `，${conversionWarnings.length} 条内容转写未完成（已保存原始链接）`;
+          const detail = conversionWarnings.map((w) => `\n• ${w}`).join('');
+          message += `，${conversionWarnings.length} 条转写失败（以下信息可直接复制反馈给开发者）：${detail}`;
         }
         if (failed.length) {
-          message += `，${failed.length} 条失败：${failed[0].message}`;
+          message += `，${failed.length} 条同步失败：${failed[0].message}`;
         }
-        new Notice(message);
-        // Log detailed warnings to console for debugging.
-        if (conversionWarnings.length) {
-          console.warn('[wechat-inbox-sync] Conversion warnings:', conversionWarnings);
-        }
+        new Notice(message, conversionWarnings.length ? 12000 : 5000);
       }
     } catch (error) {
       new Notice(`同步失败：${error.message || error}`);
