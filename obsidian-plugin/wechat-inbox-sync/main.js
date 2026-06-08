@@ -946,9 +946,18 @@ function buildWebpageMarkdownBody(record, title) {
     { dedupe: isFeishuUrl(url), feishuTitle: isFeishuUrl(url) ? pageTitle : '' },
   );
   const status = metadata.conversionStatus || 'pending';
-  const fallback = status === 'failed'
-    ? '网页转 Markdown 失败，已保存原始链接。'
-    : '网页转 Markdown 处理中，已先保存原始链接。';
+  const errorText = metadata.conversionError || '';
+  let fallback;
+  if (status === 'failed') {
+    const reason = errorText ? `\n\n失败原因：${errorText}` : '';
+    fallback = `网页转 Markdown 失败，已保存原始链接。${reason}`;
+  } else if (status === 'wechat_captcha') {
+    fallback = `微信返回公众号安全验证页，未能提取正文。已保存原始链接。${errorText ? `\n\n详细信息：${errorText}` : ''}`;
+  } else if (status === 'link_saved') {
+    fallback = `网页正文提取未成功，已保存原始链接。${errorText ? `\n\n说明：${errorText}` : ''}`;
+  } else {
+    fallback = '网页转 Markdown 处理中，已先保存原始链接。';
+  }
 
   return [
     `原始链接：${url}`,
@@ -3134,6 +3143,23 @@ function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
 }
 
+function getRecordConversionWarning(record) {
+  if (!record) return '';
+  const metadata = record.metadata || {};
+  const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
+  if (status === 'failed') {
+    const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
+    const prefix = getRecordSourcePrefix(record);
+    const name = getRecordSourceName(record);
+    const label = `${prefix}-${name}`;
+    return `${label} 转写失败${errorMsg ? `：${errorMsg}` : ''}`;
+  }
+  if (status === 'wechat_captcha') {
+    return '公众号文章触发微信安全验证，正文未能提取';
+  }
+  return '';
+}
+
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
@@ -4396,8 +4422,20 @@ class WechatObsidianInboxPlugin extends Plugin {
         };
       }
 
-      const response = await requestUrl({ url, method: 'GET' });
-      const html = response.text || '';
+      let html;
+      let usedFallback = false;
+      try {
+        const response = await requestUrl({ url, method: 'GET' });
+        html = response.text || '';
+      } catch (requestError) {
+        // Obsidian requestUrl can fail on some networks; fall back to Node.js HTTP.
+        try {
+          html = await downloadTextViaNode(url);
+          usedFallback = true;
+        } catch (fallbackError) {
+          throw new Error(`网页抓取失败（Obsidian 请求 + Node.js 降级均失败）：${requestError.message || requestError}；降级错误：${fallbackError.message || fallbackError}`);
+        }
+      }
       if (isWechatArticleUrl(url) && (isWechatCaptchaUrl(url) || isWechatCaptchaHtml(html))) {
         const targetUrl = extractWechatCaptchaTargetUrl(url);
         return {
@@ -4410,6 +4448,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             markdown: buildWechatCaptchaMarkdown(url, html),
             conversionStatus: 'wechat_captcha',
             conversionError: '微信返回公众号文章安全验证页',
+            conversionNote: usedFallback ? '已通过备用通道抓取' : '',
           },
         };
       }
@@ -4422,6 +4461,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           title: pageTitle || metadata.title || '',
           markdown,
           conversionStatus: 'success',
+          conversionNote: usedFallback ? '已通过备用通道抓取' : '',
         },
       };
     } catch (error) {
@@ -4506,6 +4546,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       recordId: getRecordId(record),
       filePath,
       title,
+      conversionWarning: getRecordConversionWarning(recordForMarkdown),
     };
   }
 
@@ -4514,12 +4555,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     const records = payload.data || [];
     const written = [];
     const failed = [];
+    const conversionWarnings = [];
     const syncedAt = new Date().toISOString();
 
     for (const record of records) {
       try {
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle);
         written.push(item);
+        if (item.conversionWarning) {
+          conversionWarnings.push(item.conversionWarning);
+        }
         await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
       } catch (error) {
         failed.push({
@@ -4529,7 +4574,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed };
+    return { written, failed, conversionWarnings };
   }
 
   async syncInbox(showNotice = true) {
@@ -4544,12 +4589,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       const shouldPrefixTitle = bindings.length > 1;
       const written = [];
       const failed = [];
+      const conversionWarnings = [];
 
       for (const binding of bindings) {
         try {
           const result = await this.syncBinding(binding, shouldPrefixTitle);
           written.push(...result.written);
           failed.push(...result.failed);
+          if (result.conversionWarnings && result.conversionWarnings.length) {
+            conversionWarnings.push(...result.conversionWarnings);
+          }
         } catch (error) {
           const message = error.message || String(error);
           if (isBindingInvalidMessage(message)) {
@@ -4563,10 +4612,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (showNotice || written.length) {
-        const message = failed.length
-          ? `${buildSyncNotice(written.length)}，${failed.length} 条失败：${failed[0].message}`
-          : buildSyncNotice(written.length);
+        let message = buildSyncNotice(written.length);
+        if (conversionWarnings.length) {
+          message += `，${conversionWarnings.length} 条内容转写未完成（已保存原始链接）`;
+        }
+        if (failed.length) {
+          message += `，${failed.length} 条失败：${failed[0].message}`;
+        }
         new Notice(message);
+        // Log detailed warnings to console for debugging.
+        if (conversionWarnings.length) {
+          console.warn('[wechat-inbox-sync] Conversion warnings:', conversionWarnings);
+        }
       }
     } catch (error) {
       new Notice(`同步失败：${error.message || error}`);
