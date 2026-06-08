@@ -1,4 +1,10 @@
 const DEFAULT_REDEEM_PLAN = 'local_transcription_beta';
+const LOCAL_TRANSCRIPTION_PLAN_ALIASES = [
+  DEFAULT_REDEEM_PLAN,
+  'local_transcription_pro',
+  'local_transcription_trial',
+  'pro',
+];
 const DEFAULT_REDEEM_DURATION_DAYS = 30;
 const DEFAULT_REDEEM_MAX_REDEMPTIONS = 1;
 
@@ -17,6 +23,10 @@ function normalizeRedeemCode(code) {
     .toUpperCase()
     .replace(/[‐-‒–—―]/g, '-')
     .replace(/\s+/g, '');
+}
+
+function isLocalTranscriptionPlan(plan) {
+  return LOCAL_TRANSCRIPTION_PLAN_ALIASES.includes(String(plan || '').trim());
 }
 
 function isRedeemCodeActive(codeDoc, now) {
@@ -68,6 +78,8 @@ function createRedeemCodeDocument({
       ? normalizedMaxRedemptions
       : DEFAULT_REDEEM_MAX_REDEMPTIONS,
     redeemedCount: 0,
+    deliveryStatus: 'unsent',
+    deliveredAt: '',
     note: String(note || ''),
     createdAt: now,
     updatedAt: now,
@@ -76,11 +88,67 @@ function createRedeemCodeDocument({
 
 function getBuiltInRedeemCodeDocument(code, now = new Date().toISOString()) {
   const normalizedCode = normalizeRedeemCode(code);
-  if (normalizedCode !== 'ZZAI0603') return null;
+  const builtInCodes = {
+    ZZAI0603: {
+      durationDays: DEFAULT_REDEEM_DURATION_DAYS,
+      note: 'built-in-test-code',
+    },
+    OBTSTVYE4U: {
+      durationDays: 3,
+      note: 'built-in-pro-test-3-days-20260605',
+    },
+    OBTSTGAN38: {
+      durationDays: 3,
+      note: 'built-in-pro-test-3-days-20260605',
+    },
+    OBPROVP57N: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROJVELA: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROESTH9: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROFZP5R: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPRO8RCSP: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROWECUS: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROK3Q9E: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROHVRLG: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROU8DZ4: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+    OBPROWVPNU: {
+      durationDays: 30,
+      note: 'built-in-pro-beta-30-days-20260605',
+    },
+  };
+  const builtInCode = builtInCodes[normalizedCode];
+  if (!builtInCode) return null;
   return createRedeemCodeDocument({
     code: normalizedCode,
+    durationDays: builtInCode.durationDays,
     now,
-    note: 'built-in-test-code',
+    note: builtInCode.note,
   });
 }
 
@@ -106,10 +174,12 @@ function buildEntitlementState(entitlement, now = new Date().toISOString()) {
 
 module.exports = {
   DEFAULT_REDEEM_PLAN,
+  LOCAL_TRANSCRIPTION_PLAN_ALIASES,
   DEFAULT_REDEEM_DURATION_DAYS,
   DEFAULT_REDEEM_MAX_REDEMPTIONS,
   addDaysIso,
   normalizeRedeemCode,
+  isLocalTranscriptionPlan,
   isRedeemCodeActive,
   createRedeemCodeDocument,
   getBuiltInRedeemCodeDocument,

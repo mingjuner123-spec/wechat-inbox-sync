@@ -1,44 +1,47 @@
 {
   "pages": [
     "pages/index/index",
+    "pages/pro/index",
+    "pages/admin/index",
+    "pages/help/index",
     "pages/example/index"
   ],
   "window": {
     "backgroundColor": "#F5F4EF",
     "backgroundTextStyle": "light",
     "navigationBarBackgroundColor": "#F5F4EF",
-    "navigationBarTitleText": "Obsidian 收集箱",
+    "navigationBarTitleText": "Obsidian 内容同步助手",
     "navigationBarTextStyle": "black"
   },
   "supportedMaterials": [
     {
       "materialType": "text/html",
       "name": "用${nickname}保存",
-      "desc": "保存公众号文章到 Obsidian 收集箱",
+      "desc": "保存公众号文章到 Obsidian 内容同步助手",
       "path": "pages/index/index"
     },
     {
       "materialType": "application/pdf",
       "name": "用${nickname}保存",
-      "desc": "保存 PDF 到 Obsidian 收集箱",
+      "desc": "保存 PDF 到 Obsidian 内容同步助手",
       "path": "pages/index/index"
     },
     {
       "materialType": "application/msword",
       "name": "用${nickname}保存",
-      "desc": "保存 Word 到 Obsidian 收集箱",
+      "desc": "保存 Word 到 Obsidian 内容同步助手",
       "path": "pages/index/index"
     },
     {
       "materialType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "name": "用${nickname}保存",
-      "desc": "保存 Word 到 Obsidian 收集箱",
+      "desc": "保存 Word 到 Obsidian 内容同步助手",
       "path": "pages/index/index"
     },
     {
       "materialType": "text/plain",
       "name": "用${nickname}保存",
-      "desc": "保存文本文件到 Obsidian 收集箱",
+      "desc": "保存文本文件到 Obsidian 内容同步助手",
       "path": "pages/index/index"
     }
   ],

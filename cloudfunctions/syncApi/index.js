@@ -70,6 +70,53 @@ function getBindCodeLookupCandidates(code) {
   return Array.from(new Set(variants));
 }
 
+function getChinaLocalDay(now = new Date().toISOString()) {
+  const date = new Date(now);
+  const time = Number.isNaN(date.getTime()) ? Date.now() : date.getTime();
+  return new Date(time + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function getAnalyticsEventDocumentId(openid, eventName, day) {
+  const safeOpenId = String(openid || '').replace(/[^A-Za-z0-9_-]/g, '_');
+  return `analytics_${eventName}_${day}_${safeOpenId}`;
+}
+
+async function recordAnalyticsEvent(openid, eventName, payload = {}) {
+  if (!openid || !eventName) return;
+  const now = new Date().toISOString();
+  const day = getChinaLocalDay(now);
+  const documentId = getAnalyticsEventDocumentId(openid, eventName, day);
+  if (typeof db.createCollection === 'function') {
+    try {
+      await db.createCollection('analytics_events');
+    } catch (error) {
+      // The collection already exists in normal use.
+    }
+  }
+  try {
+    await db.collection('analytics_events').add({
+      data: {
+        _id: documentId,
+        openid,
+        eventName,
+        day,
+        count: 1,
+        firstAt: now,
+        lastAt: now,
+        payload,
+      },
+    });
+  } catch (error) {
+    await db.collection('analytics_events').doc(documentId).update({
+      data: {
+        count: _.inc(1),
+        lastAt: now,
+        payload,
+      },
+    });
+  }
+}
+
 function normalizeBindClients(bindCode) {
   const seen = new Set();
   const clients = [];
@@ -268,6 +315,10 @@ function createRepository() {
           data: bindResult.data,
         });
       }
+      await recordAnalyticsEvent(bindResult.openid, 'bind_success', {
+        clientId,
+        status: bindResult.status,
+      });
 
       return {
         status: 'bound',

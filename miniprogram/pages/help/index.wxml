@@ -1,0 +1,51 @@
+<view class="page">
+  <view class="hero">
+    <view class="title">绑定 Obsidian 教程</view>
+    <view class="subtitle">不用先跳去飞书，先按下面 3 步完成绑定。</view>
+  </view>
+
+  <view class="steps-card">
+    <view class="step-item">
+      <view class="step-number">1</view>
+      <view class="step-content">
+        <view class="step-title">安装插件</view>
+        <view class="step-desc">在 Obsidian 插件市场搜索 <text class="inline-code">WeChat Inbox Sync</text> 并安装启用。</view>
+      </view>
+    </view>
+    <view class="step-item">
+      <view class="step-number">2</view>
+      <view class="step-content">
+        <view class="step-title">复制绑定码</view>
+        <view class="step-desc">回到小程序首页，点击「开始绑定」，复制你的专属绑定码。</view>
+      </view>
+    </view>
+    <view class="step-item">
+      <view class="step-number">3</view>
+      <view class="step-content">
+        <view class="step-title">插件里立即绑定</view>
+        <view class="step-desc">打开插件设置页，粘贴绑定码，点击「立即绑定」，再选择保存目录。</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="help-card">
+    <view class="card-title">如果插件市场安装不上</view>
+    <view class="help-text">可能是网络访问 GitHub 不稳定，也可能是 Obsidian 插件市场刷新慢。</view>
+    <view class="help-text">可以先使用插件压缩包手动安装，或者联系张张获取最新安装包。</view>
+  </view>
+
+  <view class="help-card">
+    <view class="card-title">详细图文教程</view>
+    <view class="help-text">遇到插件安装、绑定码填写、常见问题时，可以打开详细教程。</view>
+    <view class="tutorial-box">{{tutorialUrl}}</view>
+    <button class="secondary-button" bindtap="copyTutorialLink">复制教程链接</button>
+  </view>
+
+  <view class="help-card">
+    <view class="card-title">联系与用户群</view>
+    <view class="help-text">兑换 Pro、领取 7 天试用码、反馈同步问题、加入用户群，都可以联系张张。</view>
+    <view class="wechat-box">{{contactWechat}}</view>
+    <view class="help-tip">备注：ob会员 / ob试用</view>
+    <button class="primary-button" bindtap="copyWechat">复制微信号</button>
+  </view>
+</view>

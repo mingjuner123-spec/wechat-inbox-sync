@@ -94,6 +94,63 @@ function createInboxService(wxApi) {
     });
   }
 
+  function trackAnalyticsEvent(eventName, payload) {
+    return callInboxFunction({
+      type: 'trackAnalyticsEvent',
+      eventName,
+      payload,
+    });
+  }
+
+  function adminGenerateRedeemCodes(payload) {
+    return callInboxFunction({
+      type: 'adminGenerateRedeemCodes',
+      ...payload,
+    });
+  }
+
+  function adminListRedeemCodes(payload) {
+    return callInboxFunction({
+      type: 'adminListRedeemCodes',
+      ...payload,
+    });
+  }
+
+  function adminListEntitlements(payload) {
+    return callInboxFunction({
+      type: 'adminListEntitlements',
+      ...payload,
+    });
+  }
+
+  function adminListBindCodes(payload) {
+    return callInboxFunction({
+      type: 'adminListBindCodes',
+      ...payload,
+    });
+  }
+
+  function adminGetDashboard(payload) {
+    return callInboxFunction({
+      type: 'adminGetDashboard',
+      ...payload,
+    });
+  }
+
+  function adminUpdateEntitlement(payload) {
+    return callInboxFunction({
+      type: 'adminUpdateEntitlement',
+      ...payload,
+    });
+  }
+
+  function adminUpdateRedeemCode(payload) {
+    return callInboxFunction({
+      type: 'adminUpdateRedeemCode',
+      ...payload,
+    });
+  }
+
   function uploadVoiceFile(filePath) {
     const suffix = filePath && filePath.includes('.') ? filePath.slice(filePath.lastIndexOf('.')) : '.mp3';
     return cloud.uploadFile({
@@ -126,6 +183,14 @@ function createInboxService(wxApi) {
     getEntitlementStatus,
     redeemAccessCode,
     submitFeedback,
+    trackAnalyticsEvent,
+    adminGenerateRedeemCodes,
+    adminListRedeemCodes,
+    adminListEntitlements,
+    adminListBindCodes,
+    adminGetDashboard,
+    adminUpdateEntitlement,
+    adminUpdateRedeemCode,
     uploadInboxFile,
     uploadVoiceFile,
   };

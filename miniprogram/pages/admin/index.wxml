@@ -1,0 +1,195 @@
+<view class="admin-page">
+  <view class="admin-header">
+    <view class="admin-title">Pro 管理后台</view>
+    <view class="admin-subtitle">生成兑换码、查看 Pro 用户、续期和禁用。</view>
+  </view>
+
+  <view class="admin-card">
+    <view class="section-title">管理密钥</view>
+    <view class="form-row">
+      <input class="text-input" password value="{{adminSecret}}" placeholder="输入 REDEEM_ADMIN_SECRET" bindinput="onAdminSecretInput" />
+      <button class="small-button primary" bindtap="saveAdminSecret">保存</button>
+    </view>
+  </view>
+
+  <view class="admin-card dashboard-card">
+    <view class="section-header">
+      <view>
+        <view class="section-title">运营健康面板</view>
+        <view class="section-desc">最近更新：{{dashboard.generatedAtText || '-'}}</view>
+        <view class="scope-text">{{dashboard.scope.label}}</view>
+        <view class="scope-desc">{{dashboard.scope.desc}}</view>
+      </view>
+      <button class="tiny-button" bindtap="loadDashboard">刷新</button>
+    </view>
+    <view class="metric-grid">
+      <view wx:for="{{dashboard.cards}}" wx:key="key" class="metric-card {{item.value > 0 && (item.key === 'stalePendingRecords' || item.key === 'cleanupFailedRecords') ? 'warning' : ''}}">
+        <view class="metric-label">{{item.label}}</view>
+        <view class="metric-value">{{item.value}}</view>
+        <view class="metric-hint">{{item.hint}}</view>
+      </view>
+    </view>
+
+    <view class="dashboard-columns">
+      <view class="status-panel">
+        <view class="panel-title">云端暂存</view>
+        <view class="status-row"><text>待同步</text><text>{{dashboard.health.pendingRecords || 0}}</text></view>
+        <view class="status-row"><text>已同步</text><text>{{dashboard.health.syncedRecords || 0}}</text></view>
+        <view class="status-row warn"><text>超 24h 未同步</text><text>{{dashboard.health.stalePendingRecords || 0}}</text></view>
+        <view class="status-row warn"><text>清理失败</text><text>{{dashboard.health.cleanupFailedRecords || 0}}</text></view>
+        <view class="status-row"><text>暂存附件</text><text>{{dashboard.health.storageHoldingRecords || 0}} 个 / {{dashboard.health.storageHoldingText}}</text></view>
+      </view>
+
+      <view class="status-panel">
+        <view class="panel-title">Pro 会员</view>
+        <view class="status-row"><text>有效 Pro</text><text>{{dashboard.pro.activeEntitlements || 0}}</text></view>
+        <view class="status-row warn"><text>7 天内到期</text><text>{{dashboard.pro.expiringEntitlements || 0}}</text></view>
+        <view class="status-row"><text>未发放码</text><text>{{dashboard.pro.unsentCodes || 0}}</text></view>
+        <view class="status-row"><text>已发未激活</text><text>{{dashboard.pro.sentUnactivatedCodes || 0}}</text></view>
+        <view class="status-row"><text>已激活码</text><text>{{dashboard.pro.activatedCodes || 0}} / {{dashboard.pro.totalCodes || 0}}</text></view>
+      </view>
+    </view>
+
+    <view class="funnel-box">
+      <view class="panel-title">绑定转化漏斗</view>
+      <view class="funnel-subtitle">绑定码一般进入绑定页就会生成，所以重点看“拥有绑定码 → 插件绑定成功 → 首次同步成功”。</view>
+      <view class="funnel-list">
+        <view wx:for="{{dashboard.funnel.steps}}" wx:key="key" class="funnel-step">
+          <view class="funnel-main">
+            <view class="funnel-label">{{item.label}}</view>
+            <view class="funnel-hint">{{item.hint}}</view>
+          </view>
+          <view class="funnel-stat">
+            <view class="funnel-value">{{item.value}}</view>
+            <view class="funnel-rate">上一步 {{item.rateText}}</view>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <view class="dashboard-columns">
+      <view class="status-panel">
+        <view class="panel-title">内容类型</view>
+        <view wx:if="{{!dashboard.health.typeBreakdown.length}}" class="empty-text compact">暂无内容数据</view>
+        <view wx:for="{{dashboard.health.typeBreakdown}}" wx:key="key" class="status-row">
+          <text>{{item.label}}</text><text>{{item.value}}</text>
+        </view>
+      </view>
+
+      <view class="status-panel">
+        <view class="panel-title">初步判断</view>
+        <view wx:for="{{dashboard.diagnoses}}" wx:key="title" class="diagnosis-item {{item.type}}">
+          <view class="diagnosis-title">{{item.title}}</view>
+          <view class="diagnosis-desc">{{item.desc}}</view>
+        </view>
+      </view>
+    </view>
+
+    <view class="issue-box">
+      <view class="panel-title">需要关注的问题</view>
+      <view wx:if="{{!dashboard.issues.length}}" class="empty-text">暂无明显异常</view>
+      <view wx:for="{{dashboard.issues}}" wx:key="desc" class="issue-item {{item.type}}">
+        <view class="issue-title">{{item.title}}</view>
+        <view class="issue-desc">{{item.desc}}</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="admin-card">
+    <view class="section-title">批量生成兑换码</view>
+    <view class="form-grid">
+      <view class="field">
+        <text>数量</text>
+        <input class="text-input" type="number" data-field="count" value="{{count}}" bindinput="onFormInput" />
+      </view>
+      <view class="field">
+        <text>有效天数</text>
+        <input class="text-input" type="number" data-field="durationDays" value="{{durationDays}}" bindinput="onFormInput" />
+      </view>
+      <view class="field">
+        <text>使用次数</text>
+        <input class="text-input" type="number" data-field="maxRedemptions" value="{{maxRedemptions}}" bindinput="onFormInput" />
+      </view>
+      <view class="field">
+        <text>前缀</text>
+        <input class="text-input" data-field="prefix" value="{{prefix}}" bindinput="onFormInput" />
+      </view>
+    </view>
+    <view class="field full">
+      <text>备注</text>
+      <input class="text-input" data-field="note" value="{{note}}" bindinput="onFormInput" />
+    </view>
+    <view class="button-row">
+      <button class="main-button" loading="{{isLoading}}" bindtap="generateCodes">生成兑换码</button>
+      <button class="main-button secondary" bindtap="copyGeneratedCodes">复制本次生成</button>
+    </view>
+    <view wx:if="{{generatedCodes.length}}" class="code-grid">
+      <text wx:for="{{generatedCodes}}" wx:key="code" class="code-pill">{{item.code}}</text>
+    </view>
+  </view>
+
+  <view class="admin-card">
+    <view class="section-title">查询</view>
+    <view class="form-row">
+      <input class="text-input" value="{{keyword}}" placeholder="输入兑换码或 openid" bindinput="onKeywordInput" />
+      <button class="small-button primary" bindtap="refreshAll">查询</button>
+    </view>
+  </view>
+
+  <view class="admin-card">
+    <view class="section-title">兑换码列表</view>
+    <view wx:if="{{!redeemCodes.length}}" class="empty-text">暂无兑换码</view>
+    <view wx:for="{{redeemCodes}}" wx:key="_id" class="list-item">
+      <view class="item-main">
+        <view class="item-title">{{item.code}}</view>
+        <view class="item-meta">{{item.status}} · {{item.durationDays}}天 · {{item.redeemedCount}}/{{item.maxRedemptions}}</view>
+        <view class="item-meta">发放状态：{{item.deliveryStatusText}} · 发放时间：{{item.deliveredAtText}}</view>
+        <view class="item-meta">最后兑换：{{item.lastRedeemedAtText}} · {{item.lastRedeemedOpenId || '-'}}</view>
+      </view>
+      <view class="item-actions">
+        <button class="tiny-button" data-id="{{item._id}}" bindtap="markRedeemCodeSent">标记已发</button>
+        <button class="tiny-button" data-id="{{item._id}}" bindtap="markRedeemCodeUnsent">撤回发放</button>
+        <button class="tiny-button" data-id="{{item._id}}" bindtap="activateRedeemCode">启用</button>
+        <button class="tiny-button danger" data-id="{{item._id}}" bindtap="disableRedeemCode">禁用</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="admin-card">
+    <view class="section-title">Pro 用户列表</view>
+    <view class="form-row compact">
+      <text class="extend-label">续期天数</text>
+      <input class="text-input short" type="number" data-field="extendDays" value="{{extendDays}}" bindinput="onFormInput" />
+    </view>
+    <view wx:if="{{!entitlements.length}}" class="empty-text">暂无 Pro 用户</view>
+    <view wx:for="{{entitlements}}" wx:key="_id" class="list-item">
+      <view class="item-main">
+        <view class="item-title">{{item.code || item.openid}}</view>
+        <view class="item-meta">{{item.status}} · {{item.remainingDaysText}} · 到期：{{item.expiresAtText}}</view>
+        <view class="item-meta">openid：{{item.openid}}</view>
+      </view>
+      <view class="item-actions">
+        <button class="tiny-button" data-id="{{item._id}}" bindtap="extendEntitlement">续期</button>
+        <button class="tiny-button" data-id="{{item._id}}" bindtap="activateEntitlement">启用</button>
+        <button class="tiny-button danger" data-id="{{item._id}}" bindtap="disableEntitlement">禁用</button>
+      </view>
+    </view>
+  </view>
+
+  <view class="admin-card">
+    <view class="section-title">绑定码列表</view>
+    <view wx:if="{{!bindCodes.length}}" class="empty-text">暂无绑定码</view>
+    <view wx:for="{{bindCodes}}" wx:key="_id" class="list-item">
+      <view class="item-main">
+        <view class="item-title">{{item.code}}</view>
+        <view class="item-meta">{{item.status}} · 已绑定 {{item.clientCount}}/{{item.deviceLimit}} 台电脑 · 创建：{{item.createdAtText}}</view>
+        <view class="item-meta">openid：{{item.openid}}</view>
+        <view wx:if="{{item.clients.length}}" class="client-list">
+          <view wx:for="{{item.clients}}" wx:for-item="client" wx:key="clientId" class="client-item">
+            {{client.clientId}} · {{client.boundAt || '-'}}
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

@@ -7,188 +7,207 @@ const wxml = fs.readFileSync(path.join(root, 'miniprogram/pages/index/index.wxml
 const wxss = fs.readFileSync(path.join(root, 'miniprogram/pages/index/index.wxss'), 'utf8');
 const js = fs.readFileSync(path.join(root, 'miniprogram/pages/index/index.js'), 'utf8');
 const appJson = JSON.parse(fs.readFileSync(path.join(root, 'miniprogram/app.json'), 'utf8'));
+const projectConfig = JSON.parse(fs.readFileSync(path.join(root, 'project.config.json'), 'utf8'));
 const appJs = fs.readFileSync(path.join(root, 'miniprogram/app.js'), 'utf8');
+const proWxml = fs.readFileSync(path.join(root, 'miniprogram/pages/pro/index.wxml'), 'utf8');
+const proJs = fs.readFileSync(path.join(root, 'miniprogram/pages/pro/index.js'), 'utf8');
+const helpWxml = fs.readFileSync(path.join(root, 'miniprogram/pages/help/index.wxml'), 'utf8');
+const helpJs = fs.readFileSync(path.join(root, 'miniprogram/pages/help/index.js'), 'utf8');
 
-assert.match(wxml, /class="bind-guide-button"/);
-assert.match(wxml, /class="bind-home-button"/);
-assert.doesNotMatch(wxml, /class="bind-navbar"/);
-assert.doesNotMatch(wxml, /class="back-button"/);
-assert.doesNotMatch(wxml, /class="bind-nav-title"/);
-assert.doesNotMatch(wxss, /\.bind-navbar/);
-assert.doesNotMatch(wxss, /\.back-button/);
-assert.doesNotMatch(wxss, /\.bind-nav-title/);
-assert.match(wxml, /\{\{isBound \? '已完成绑定' : '未绑定本地 Vault'\}\}/);
-assert.match(wxml, /一个绑定码默认绑定 1 台电脑/);
-assert.doesNotMatch(wxml, /10 分钟内有效/);
-assert.match(wxml, /class="bind-rule-tip"/);
-assert.match(wxml, /\{\{displayBindCode\}\}/);
-assert.match(wxml, /bindtap="toggleBindCodeVisibility"/);
-assert.match(wxml, /bindtap="replaceCode"/);
-assert.match(wxml, /class="bind-device-panel"/);
-assert.match(wxml, /bindtap="increaseBindDeviceLimit"/);
-assert.match(wxml, /查看绑定码/);
-assert.match(wxml, /更换绑定码/);
+assert.deepStrictEqual(appJson.pages.slice(0, 3), [
+  'pages/index/index',
+  'pages/pro/index',
+  'pages/admin/index',
+]);
+assert.ok(appJson.pages.includes('pages/help/index'));
+assert.strictEqual(appJson.window.navigationBarTitleText, 'Obsidian 内容同步助手');
+assert.strictEqual(appJson.supportedMaterials[0].desc, '保存公众号文章到 Obsidian 内容同步助手');
+assert.ok(appJson.supportedMaterials.every((item) => String(item.name || '').includes('${nickname}')));
+assert.ok(projectConfig.packOptions.ignore.some((item) => item.value === 'images/create_cbr.png'));
+assert.ok(projectConfig.packOptions.ignore.some((item) => item.value === 'images/ai_example1.png'));
+
+assert.match(wxml, /Obsidian 内容同步助手/);
+assert.doesNotMatch(wxml, /把微信里的内容同步到 Obsidian/);
+assert.doesNotMatch(wxml, /权限、教程和联系入口都放在这里。/);
+assert.match(wxml, /currentView === 'collect'/);
+assert.match(wxml, /currentView === 'bind'/);
+assert.match(wxml, /currentView === 'mine'/);
+assert.match(wxml, /class="tabbar"/);
+assert.match(wxml, /data-view="collect"/);
+assert.match(wxml, /data-view="bind"/);
+assert.match(wxml, /data-view="mine"/);
+assert.match(wxml, /绑定 Obsidian/);
+assert.match(wxml, /开通 Pro/);
+assert.match(wxml, /插件更新公告/);
+assert.match(wxml, /最新插件版本：v\{\{pluginVersion\}\}/);
+assert.match(wxml, /更新时间：\{\{pluginUpdatedAt\}\}/);
+assert.match(wxml, /最近更新：\{\{announcementText\}\}/);
+assert.match(wxml, /bindtap="showAnnouncementDetail"/);
+assert.match(wxml, /class="usage-status/);
+assert.match(wxml, /\{\{usageStatusText\}\}/);
+assert.match(wxml, /现在支持以下网页/);
+assert.match(wxml, /免费版图文/);
+assert.match(wxml, /Pro版音视频文案提取/);
+assert.match(wxml, /图文免费，音视频 Pro/);
+assert.match(wxml, /Pro 和免费版的权益对比/);
+assert.match(wxml, /免费版/);
+assert.match(wxml, /pro版/);
+assert.match(wxml, /class="benefit-table"/);
+assert.match(wxml, /class="benefit-table-header"/);
+assert.match(wxml, /class="benefit-table-row"/);
+assert.match(wxml, /使用次数/);
+assert.match(wxml, /5次\/天/);
+assert.match(wxml, /不限/);
+assert.match(wxml, /文字、文件转写/);
+assert.match(wxml, /语音、MP3转写/);
+assert.match(wxml, /需用户充值配API/);
+assert.match(wxml, /无需配API/);
+assert.match(wxml, /图文链接转写/);
+assert.match(wxml, /音视频链接转写/);
+assert.match(wxml, /√/);
+assert.match(wxml, /×/);
+assert.doesNotMatch(wxml, /转写配置/);
+assert.doesNotMatch(wxml, /适合场景/);
+assert.match(wxml, /公众号/);
+assert.match(wxml, /飞书/);
+assert.match(wxml, /小红书/);
+assert.match(wxml, /抖音/);
+assert.match(wxml, /B站/);
+assert.match(wxml, /小宇宙/);
+assert.match(wxml, /class="platform-grid free-grid"/);
+assert.match(wxml, /class="platform-grid pro-grid"/);
+assert.match(wxml, /class="platform-node free"/);
+assert.match(wxml, /class="platform-node pro"/);
+assert.match(wxml, /class="platform-logo-image"/);
+assert.match(wxml, /images\/platforms\/wechat-article\.svg/);
+assert.match(wxml, /images\/platforms\/feishu-doc\.svg/);
+assert.match(wxml, /images\/platforms\/xhs-note\.svg/);
+assert.match(wxml, /images\/platforms\/douyin-video\.svg/);
+assert.match(wxml, /images\/platforms\/xhs-video\.svg/);
+assert.match(wxml, /images\/platforms\/bilibili-video\.svg/);
+assert.match(wxml, /images\/platforms\/xiaoyuzhou-audio\.svg/);
+assert.doesNotMatch(wxml, /最近收集/);
+assert.doesNotMatch(wxml, /bindtap="showMineView"/);
+assert.match(wxml, /领取 Pro 体验卡/);
+assert.match(wxml, /兑换码激活 Pro 会员/);
+assert.match(wxml, /data-note="ob会员" bindtap="copyWechatWithNote"/);
+assert.match(wxml, /加入用户群/);
+assert.match(wxml, /data-note="ob用户群" bindtap="copyWechatWithNote"/);
+assert.doesNotMatch(wxml, /联系张张 \/ 加入用户群/);
+assert.match(wxml, /bindtap="showRedeemModal"/);
 assert.match(wxml, /bindtap="readClipboard"/);
 assert.match(wxml, /bindtap="saveWebpageFromClipboardOrInput"/);
 assert.match(wxml, /bindtap="toggleRecording"/);
 assert.match(wxml, /bindtap="chooseInboxFile"/);
-assert.match(wxml, />读取网页链接</);
-assert.match(wxml, /'录音'/);
-assert.doesNotMatch(wxml, /录音\/音频/);
-assert.match(wxml, />文件\/音频</);
-assert.doesNotMatch(wxml, /bindtap="showUploadSheet"/);
-assert.doesNotMatch(js, /showUploadSheet\(\)/);
-assert.doesNotMatch(js, /showVoiceSheet\(\)/);
-assert.doesNotMatch(js, /itemList: \['开始录音', '上传音频'\]/);
-assert.doesNotMatch(js, /itemList: \['上传网页链接', '上传文件'\]/);
-assert.match(wxml, /class="notice-bar" bindtap="showAnnouncementDetail"/);
-assert.doesNotMatch(wxml, /class="notice-scroll"/);
-assert.doesNotMatch(wxml, /\{\{announcementText\}\}/);
-assert.doesNotMatch(wxml, /查看详情/);
-assert.match(wxml, /WeChat Inbox Sync/);
-assert.match(wxml, /插件名字：WeChat Inbox Sync/);
-assert.match(wxml, /安装位置：Obsidian 插件市场/);
-assert.match(wxml, /最新插件版本：v1\.1\.0（6月3日更新）/);
-assert.doesNotMatch(wxml, /插件更新公告 · WeChat Inbox Sync/);
-assert.match(wxss, /\.notice-plugin-meta/);
-assert.match(wxss, /\.notice-plugin-line/);
-assert.doesNotMatch(wxss, /\.notice-detail-link/);
-assert.doesNotMatch(wxss, /\.notice-scroll/);
-assert.doesNotMatch(wxss, /\.notice-text/);
-assert.doesNotMatch(wxml, /<button class="notice-bar" bindtap="copyTutorialLink">/);
-assert.doesNotMatch(wxml, /<button class="secondary-action-button" bindtap="copyTutorialLink">/);
-assert.doesNotMatch(wxml, /bindtap="showFeedbackModal"/);
-assert.doesNotMatch(wxml, /feedback-mask/);
-assert.doesNotMatch(wxml, /open-type="contact"/);
-assert.match(wxml, /<view class="notice-bar" bindtap="showAnnouncementDetail">/);
-assert.match(wxml, /class="bind-guide-button" bindtap="showTutorialModal"/);
-assert.match(wxml, /class="primary-actions"/);
-assert.match(wxml, /class="[^"]*share-button[^"]*" open-type="share"/);
-assert.match(wxml, /class="share-button-text"/);
-assert.match(wxml, /wx:if="\{\{tutorialVisible\}\}"/);
-assert.match(wxml, /class="tutorial-link-text"/);
-assert.match(wxml, /bindtap="copyTutorialLinkFromModal"/);
-assert.match(wxss, /\.bind-guide-button/);
-assert.match(wxss, /\.bind-home-button/);
-assert.match(wxss, /\.primary-actions/);
-assert.match(wxss, /\.share-button/);
-assert.match(wxss, /\.share-button\s*\{[\s\S]*flex: 0 0 176rpx/);
-assert.match(wxss, /\.share-button-text/);
+assert.match(wxml, /open-type="share"/);
+
+assert.match(wxml, /\{\{isBound \? '已绑定 Obsidian' : '1 分钟绑定 Obsidian'\}\}/);
+assert.match(wxml, /\{\{displayBindCode\}\}/);
+assert.match(wxml, /bindtap="toggleBindCodeVisibility"/);
+assert.match(wxml, /bindtap="replaceCode"/);
+assert.match(wxml, /class="bind-device-panel white"/);
+assert.match(wxml, /bindtap="increaseBindDeviceLimit"/);
+assert.match(wxml, /bindtap="confirmUnbindClient"/);
+assert.match(wxml, /bindtap="showTutorialModal">详细教程/);
+assert.match(wxml, /飞书链接/);
+assert.match(wxml, /obsidian绑定与pro开通详细教程/);
+assert.doesNotMatch(wxml, /contact-box/);
+assert.match(wxml, /wx:if="\{\{announcementVisible\}\}"/);
+assert.match(wxml, /class="announcement-sheet"/);
+assert.match(wxml, /bindtap="hideAnnouncementSheet"/);
+assert.doesNotMatch(wxml, /查看 Pro 与帮助/);
+assert.doesNotMatch(wxml, /bindtap="hideAnnouncementAndShowMine"/);
+
+assert.match(wxss, /\.tabbar/);
+assert.match(wxss, /\.tabbar-item/);
+assert.match(wxss, /\.platform-mini-card/);
+assert.match(wxss, /\.platform-grid/);
+assert.match(wxss, /\.platform-node/);
+assert.match(wxss, /\.platform-logo-image/);
+assert.match(wxss, /\.plugin-update-notice/);
+assert.match(wxss, /\.notice-action/);
+assert.match(wxss, /\.announcement-sheet/);
+assert.match(wxss, /\.view-mine/);
+assert.match(wxss, /\.benefit-table/);
+assert.match(wxss, /\.benefit-table-row/);
+assert.match(wxss, /text-align: center/);
 assert.match(wxss, /\.capture-actions/);
-assert.match(wxss, /\.capture-action-button/);
-assert.match(wxss, /\.action-bar\s*\{[\s\S]*flex-direction: column/);
-assert.match(wxss, /\.action-bar\s*\{[\s\S]*gap: 28rpx/);
-assert.match(wxss, /\.capture-actions\s*\{[\s\S]*width: 496rpx/);
-assert.match(wxss, /\.capture-actions\s*\{[\s\S]*margin: 0 auto/);
-assert.match(wxss, /\.capture-actions\s*\{[\s\S]*display: flex/);
-assert.match(wxss, /\.capture-actions\s*\{[\s\S]*flex-wrap: wrap/);
-assert.match(wxss, /\.capture-actions\s*\{[\s\S]*justify-content: space-between/);
-assert.match(wxss, /\.capture-action-button\s*\{[\s\S]*box-sizing: border-box/);
-assert.match(wxss, /\.capture-action-button\s*\{[\s\S]*flex: 0 0 208rpx/);
-assert.match(wxss, /\.capture-action-button\s*\{[\s\S]*width: 208rpx/);
-assert.match(wxss, /\.capture-actions \.capture-action-button\s*\{[\s\S]*border: 1rpx solid rgba\(111, 123, 89, 0\.14\)/);
-assert.match(wxss, /\.capture-actions \.capture-action-button\s*\{[\s\S]*box-shadow: 0 6rpx 16rpx rgba\(29, 29, 27, 0\.06\)/);
-assert.match(wxss, /\.capture-actions \.capture-action-button:nth-child\(-n \+ 2\)\s*\{[\s\S]*margin-bottom: 22rpx/);
-assert.match(wxss, /\.save-button\s*\{[\s\S]*align-self: flex-end/);
-assert.match(wxss, /\.save-button\s*\{[\s\S]*height: 72rpx/);
-assert.match(wxss, /\.bind-rule-tip/);
 assert.match(wxss, /\.bind-device-panel/);
-assert.match(wxss, /\.add-bind-device-button/);
-assert.match(wxss, /\.add-bind-device-button\s*\{[\s\S]*display: flex/);
-assert.match(wxss, /\.add-bind-device-button\s*\{[\s\S]*align-items: center/);
-assert.match(wxss, /\.add-bind-device-button\s*\{[\s\S]*justify-content: center/);
-assert.match(wxss, /\.tutorial-panel/);
+assert.match(wxss, /\.usage-status/);
+
+assert.match(js, /ANNOUNCEMENT_VERSION/);
+assert.match(js, /DEFAULT_UPDATE_ITEMS/);
+assert.match(js, /DEFAULT_PLUGIN_VERSION = '1\.1\.5'/);
+assert.match(js, /新增 macOS 本地转写组件安装支持/);
+assert.match(js, /DEFAULT_PLUGIN_UPDATED_AT = '2026-06-04'/);
+assert.match(js, /pluginVersion: DEFAULT_PLUGIN_VERSION/);
+assert.match(js, /pluginUpdatedAt: DEFAULT_PLUGIN_UPDATED_AT/);
+assert.match(js, /usageStatusText: buildUsageStatusText/);
+assert.match(js, /loadDailyUsageStatus/);
+assert.match(js, /Pro 使用中，今日不限次数/);
+assert.match(js, /showLaunchAnnouncementIfNeeded/);
+assert.match(js, /announcement_seen_/);
+assert.match(js, /currentView: 'bind'/);
+assert.match(js, /DEFAULT_INPUT_PLACEHOLDER = '复制编辑文字，网页链接请点击读取网页链接'/);
+assert.doesNotMatch(js, /粘贴文字、链接，或录一段语音/);
+assert.match(js, /alreadyRedeemed \? '该兑换码已激活过' : '兑换成功'/);
+assert.match(js, /switchMainTab/);
+assert.match(js, /showCollectView/);
+assert.match(js, /showMineView/);
+assert.match(js, /copyContactWechat/);
+assert.match(js, /copyWechatWithNote/);
+assert.match(js, /可免费领取 7 天 Pro 试用/);
+assert.match(js, /微信已复制，添加备注/);
+assert.match(js, /ob用户群/);
+assert.match(js, /announcementVisible: true/);
+assert.match(js, /hideAnnouncementSheet/);
+assert.match(js, /hideAnnouncementAndShowMine/);
+assert.match(js, /buildMembershipCard/);
+assert.match(js, /loadEntitlementStatus/);
+assert.match(js, /membershipCard: buildMembershipCard/);
 assert.match(js, /wx\.showShareMenu/);
 assert.match(js, /REWARDED_AD_UNIT_ID/);
 assert.match(js, /quotaUnlockPending: false/);
 assert.match(js, /quotaUnlockVisible: false/);
-assert.match(js, /showQuotaUnlockSheet/);
-assert.match(wxml, /分享解锁到10次/);
-assert.match(wxml, /看广告再加10次/);
 assert.match(js, /unlockDailyUsageByShare/);
 assert.match(js, /unlockDailyUsageByAd/);
-assert.match(wxml, /wx:if="\{\{quotaUnlockVisible\}\}"/);
-assert.match(wxml, /open-type="share"[\s\S]*分享解锁到10次/);
-assert.match(wxml, /bindtap="showRewardedAdForQuota"[\s\S]*看广告再加10次/);
-assert.doesNotMatch(js, /请点击右下角分享给朋友/);
-assert.doesNotMatch(js, /wx\.showActionSheet\(\{[\s\S]*分享解锁到10次/);
-assert.match(js, /MAX_RECORDER_DURATION_MS\s*=\s*600000/);
-assert.match(js, /duration:\s*MAX_RECORDER_DURATION_MS/);
-assert.match(js, /extractHttpUrl/);
-assert.doesNotMatch(js, /function isHttpUrl/);
 assert.match(js, /MAX_CHAT_UPLOAD_COUNT\s*=\s*10/);
-assert.match(js, /AUDIO_FILE_EXTENSIONS\s*=\s*\[[\s\S]*'amr'[\s\S]*\]/);
-assert.match(js, /DOCUMENT_FILE_EXTENSIONS\s*=\s*\[[\s\S]*'pdf'[\s\S]*'docx'[\s\S]*\]/);
-assert.match(js, /SUPPORTED_CHAT_UPLOAD_EXTENSIONS\s*=\s*\[\.\.\.DOCUMENT_FILE_EXTENSIONS,\s*\.\.\.AUDIO_FILE_EXTENSIONS\]/);
-assert.match(js, /count:\s*MAX_CHAT_UPLOAD_COUNT/);
-assert.match(js, /extension:\s*SUPPORTED_CHAT_UPLOAD_EXTENSIONS/);
+assert.match(js, /SUPPORTED_CHAT_UPLOAD_EXTENSIONS/);
 assert.match(js, /saveInboxFiles\(files\)/);
 assert.match(js, /saveOneInboxFile\(file\)/);
-assert.match(js, /isAudioInboxFile\(file\)/);
-assert.match(js, /buildVoicePayload\(upload\.fileID,\s*0,\s*file\.name\s*\|\|\s*''\)/);
-assert.match(js, /shareAppMessage/);
-assert.match(js, /shareTimeline/);
-assert.match(js, /onShareAppMessage\(\)/);
-assert.match(js, /onShareTimeline\(\)/);
-assert.match(js, /isBound: false/);
-assert.match(js, /bindCode: ''/);
-assert.match(js, /bindCodeVisible: false/);
-assert.match(js, /displayBindCode: '######'/);
-assert.match(js, /toggleBindCodeVisibility/);
-assert.match(js, /replaceCode/);
-assert.match(js, /replaceBindCode/);
-assert.match(js, /bindClients: \[\]/);
-assert.match(js, /increaseBindDeviceLimit/);
-assert.match(js, /requestIncreaseBindDeviceLimit/);
-assert.doesNotMatch(js, /bindCode: 'X9A-4KF'/);
-assert.doesNotMatch(js, /generateBindCode\(\)/);
-assert.match(js, /onShow\(\)/);
+assert.match(js, /handleForwardMaterials/);
+assert.match(js, /getForwardMaterialFile/);
+assert.match(js, /saveWebpageUrl\(url, sourceText\)/);
 assert.match(js, /requestBindStatus/);
 assert.match(js, /startBindStatusPolling/);
-assert.match(js, /showStatus\(text, options = \{\}\)/);
-assert.match(js, /options\.persist/);
-assert.match(js, /showStatus\('[^']+', \{ persist: true \}\)/);
-assert.match(js, /getErrorMessage/);
-assert.match(js, /showAnnouncementDetail\(\)/);
-assert.match(js, /wx\.showModal\(\{[\s\S]*title: '插件更新公告'[\s\S]*confirmText: '知道了'/);
-assert.match(js, /文件保存失败：/);
-assert.deepStrictEqual(appJson.supportedMaterials, [
-  {
-    materialType: 'text/html',
-    name: '用${nickname}保存',
-    desc: '保存公众号文章到 Obsidian 收集箱',
-    path: 'pages/index/index',
-  },
-  {
-    materialType: 'application/pdf',
-    name: '用${nickname}保存',
-    desc: '保存 PDF 到 Obsidian 收集箱',
-    path: 'pages/index/index',
-  },
-  {
-    materialType: 'application/msword',
-    name: '用${nickname}保存',
-    desc: '保存 Word 到 Obsidian 收集箱',
-    path: 'pages/index/index',
-  },
-  {
-    materialType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    name: '用${nickname}保存',
-    desc: '保存 Word 到 Obsidian 收集箱',
-    path: 'pages/index/index',
-  },
-  {
-    materialType: 'text/plain',
-    name: '用${nickname}保存',
-    desc: '保存文本文件到 Obsidian 收集箱',
-    path: 'pages/index/index',
-  },
-]);
+assert.match(js, /requestBindCode\(\{ switchToCollectIfBound: true \}\)/);
+assert.match(js, /trackAnalyticsOnce\('app_visit'\)/);
+assert.match(js, /trackAnalyticsOnce\('bind_page_view'\)/);
+assert.match(js, /trackAnalyticsEvent/);
+
+assert.match(proWxml, /7 天 Pro 试用/);
+assert.match(proWxml, /联系张张领取试用码/);
+assert.match(proWxml, /免费版/);
+assert.match(proWxml, /Pro版/);
+assert.match(proWxml, /抖音视频文案提取/);
+assert.match(proWxml, /B站视频文案提取/);
+assert.match(proWxml, /小宇宙播客文案提取/);
+assert.match(proWxml, /小红书视频文案提取/);
+assert.match(proWxml, /请输入兑换码/);
+assert.match(proWxml, /heyhmjx|\{\{contactWechat\}\}/);
+assert.match(proJs, /redeemAccessCode/);
+assert.match(proJs, /getEntitlementStatus/);
+assert.match(proJs, /CONTACT_WECHAT = 'heyhmjx'/);
+
+assert.match(helpWxml, /绑定 Obsidian 教程/);
+assert.match(helpWxml, /WeChat Inbox Sync/);
+assert.match(helpWxml, /复制教程链接/);
+assert.match(helpWxml, /复制微信号/);
+assert.match(helpWxml, /ob会员 \/ ob试用/);
+assert.match(helpJs, /CONTACT_WECHAT = 'heyhmjx'/);
+assert.match(helpJs, /copyTutorialLink/);
+assert.match(helpJs, /copyWechat/);
+
 assert.match(appJs, /forwardMaterials/);
 assert.match(appJs, /scene\s*===\s*1173/);
 assert.match(appJs, /consumeForwardMaterials/);
-assert.match(js, /handleForwardMaterials/);
-assert.match(js, /getForwardMaterialFile/);
-assert.match(js, /saveInboxFiles\(\[file\]\)/);
-assert.match(js, /consumeForwardMaterials/);
-assert.match(js, /saveWebpageUrl\(url, sourceText\)/);

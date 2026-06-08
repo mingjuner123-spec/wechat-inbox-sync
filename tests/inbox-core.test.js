@@ -11,6 +11,7 @@ const {
   normalizeBindCodeInput,
   buildDailyUsageDocument,
   buildUsageState,
+  buildProUsageState,
   generateUniqueBindCode,
   normalizeContentType,
   getUsageDay,
@@ -307,6 +308,15 @@ assert.deepStrictEqual(buildUsageState({
   remaining: 5,
   shareUnlocked: true,
   adUnlockCount: 1,
+});
+
+assert.deepStrictEqual(buildProUsageState(), {
+  used: 0,
+  limit: null,
+  remaining: null,
+  shareUnlocked: true,
+  adUnlockCount: 0,
+  proUnlimited: true,
 });
 
 (async () => {

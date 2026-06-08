@@ -14,6 +14,8 @@ assert.deepStrictEqual(buildPublicConfig(), {
   tutorialUrl: DEFAULT_TUTORIAL_URL,
   pluginVersion: '',
   updatedAt: '',
+  announcementVersion: '',
+  updateItems: [],
 });
 
 assert.deepStrictEqual(buildPublicConfig({
@@ -21,11 +23,15 @@ assert.deepStrictEqual(buildPublicConfig({
   tutorialUrl: ' https://example.com/tutorial ',
   pluginVersion: '0.1.1',
   updatedAt: '2026-05-13T16:00:00.000Z',
+  announcementVersion: ' 2026-05-13 ',
+  updateItems: [' 新增插件市场安装 ', '', '优化绑定提示'],
 }), {
   announcement: '2026年5月13日有插件更新，更新文件请在绑定教程下载',
   tutorialUrl: 'https://example.com/tutorial',
   pluginVersion: '0.1.1',
   updatedAt: '2026-05-13T16:00:00.000Z',
+  announcementVersion: '2026-05-13',
+  updateItems: ['新增插件市场安装', '优化绑定提示'],
 });
 
 assert.deepStrictEqual(buildPublicConfig({
@@ -36,4 +42,6 @@ assert.deepStrictEqual(buildPublicConfig({
   tutorialUrl: DEFAULT_TUTORIAL_URL,
   pluginVersion: '',
   updatedAt: '',
+  announcementVersion: '',
+  updateItems: [],
 });

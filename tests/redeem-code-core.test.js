@@ -2,9 +2,11 @@ const assert = require('assert');
 
 const {
   DEFAULT_REDEEM_PLAN,
+  LOCAL_TRANSCRIPTION_PLAN_ALIASES,
   DEFAULT_REDEEM_DURATION_DAYS,
   DEFAULT_REDEEM_MAX_REDEMPTIONS,
   normalizeRedeemCode,
+  isLocalTranscriptionPlan,
   isRedeemCodeActive,
   createRedeemCodeDocument,
   getBuiltInRedeemCodeDocument,
@@ -13,6 +15,17 @@ const {
 } = require('../cloudfunctions/quickstartFunctions/redeem-code-core');
 
 assert.strictEqual(DEFAULT_REDEEM_PLAN, 'local_transcription_beta');
+assert.deepStrictEqual(LOCAL_TRANSCRIPTION_PLAN_ALIASES, [
+  'local_transcription_beta',
+  'local_transcription_pro',
+  'local_transcription_trial',
+  'pro',
+]);
+assert.strictEqual(isLocalTranscriptionPlan('local_transcription_beta'), true);
+assert.strictEqual(isLocalTranscriptionPlan('local_transcription_pro'), true);
+assert.strictEqual(isLocalTranscriptionPlan('local_transcription_trial'), true);
+assert.strictEqual(isLocalTranscriptionPlan('pro'), true);
+assert.strictEqual(isLocalTranscriptionPlan('other_product'), false);
 assert.strictEqual(DEFAULT_REDEEM_DURATION_DAYS, 30);
 assert.strictEqual(DEFAULT_REDEEM_MAX_REDEMPTIONS, 1);
 assert.strictEqual(normalizeRedeemCode(' zz ai 001 '), 'ZZAI001');
@@ -29,6 +42,8 @@ assert.deepStrictEqual(createRedeemCodeDocument({
   durationDays: 30,
   maxRedemptions: 1,
   redeemedCount: 0,
+  deliveryStatus: 'unsent',
+  deliveredAt: '',
   note: '测试码',
   createdAt: '2026-06-03T08:00:00.000Z',
   updatedAt: '2026-06-03T08:00:00.000Z',
@@ -41,10 +56,26 @@ assert.deepStrictEqual(getBuiltInRedeemCodeDocument(' zzai0603 ', '2026-06-03T08
   durationDays: 30,
   maxRedemptions: 1,
   redeemedCount: 0,
+  deliveryStatus: 'unsent',
+  deliveredAt: '',
   note: 'built-in-test-code',
   createdAt: '2026-06-03T08:00:00.000Z',
   updatedAt: '2026-06-03T08:00:00.000Z',
 });
+assert.deepStrictEqual(getBuiltInRedeemCodeDocument('OBTSTVYE4U', '2026-06-05T08:00:00.000Z'), {
+  code: 'OBTSTVYE4U',
+  status: 'active',
+  plan: 'local_transcription_beta',
+  durationDays: 3,
+  maxRedemptions: 1,
+  redeemedCount: 0,
+  deliveryStatus: 'unsent',
+  deliveredAt: '',
+  note: 'built-in-pro-test-3-days-20260605',
+  createdAt: '2026-06-05T08:00:00.000Z',
+  updatedAt: '2026-06-05T08:00:00.000Z',
+});
+assert.strictEqual(getBuiltInRedeemCodeDocument('OBPROVP57N', '2026-06-05T08:00:00.000Z').durationDays, 30);
 assert.strictEqual(getBuiltInRedeemCodeDocument('ZZAI999', '2026-06-03T08:00:00.000Z'), null);
 
 assert.strictEqual(isRedeemCodeActive({

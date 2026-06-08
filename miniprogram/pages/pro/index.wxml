@@ -1,0 +1,72 @@
+<view class="page">
+  <view class="hero">
+    <view class="eyebrow">{{membership.badge}}</view>
+    <view class="title">{{membership.title}}</view>
+    <view class="subtitle">{{membership.desc}}</view>
+  </view>
+
+  <view class="trial-card">
+    <view class="trial-title">7 天 Pro 试用</view>
+    <view class="trial-desc">目前通过试用码开通。联系张张领取试用码后，在本页兑换即可使用。</view>
+    <button class="primary-button" bindtap="showContactModal">联系张张领取试用码</button>
+  </view>
+
+  <view class="compare-card">
+    <view class="card-title">版本能力</view>
+    <view class="plan-block">
+      <view class="plan-header">
+        <text class="plan-badge free">免费版</text>
+        <text class="plan-desc">图文同步</text>
+      </view>
+      <view class="feature-row">公众号文章同步到 Obsidian</view>
+      <view class="feature-row">飞书链接同步到 Obsidian</view>
+      <view class="feature-row">小红书图文笔记同步到 Obsidian</view>
+      <view class="feature-row">PDF、Word、文本文件保存</view>
+    </view>
+
+    <view class="divider"></view>
+
+    <view class="plan-block">
+      <view class="plan-header">
+        <text class="plan-badge pro">Pro版</text>
+        <text class="plan-desc">音视频文案提取</text>
+      </view>
+      <view class="feature-row">抖音视频文案提取</view>
+      <view class="feature-row">B站视频文案提取</view>
+      <view class="feature-row">小宇宙播客文案提取</view>
+      <view class="feature-row">小红书视频文案提取</view>
+    </view>
+  </view>
+
+  <view class="redeem-card">
+    <view class="card-title">已有兑换码</view>
+    <view class="redeem-desc">输入兑换码后，和当前微信绑定的电脑都可以使用 Pro 能力。</view>
+    <input
+      class="redeem-input"
+      value="{{redeemCodeInput}}"
+      placeholder="请输入兑换码"
+      placeholder-class="placeholder"
+      bindinput="onRedeemCodeInput"
+    />
+    <button class="secondary-button" disabled="{{isRedeeming}}" bindtap="submitRedeemCode">
+      {{isRedeeming ? '兑换中' : '确认兑换'}}
+    </button>
+  </view>
+
+  <view class="note-card">
+    <view class="note-title">使用提醒</view>
+    <view class="note-text">本地转写会占用电脑性能。长音视频转写时电脑发热、风扇转动属于正常现象。</view>
+    <view class="note-text">目前内测优先支持 Windows 10/11，Mac 版本后续单独适配。</view>
+  </view>
+
+  <view wx:if="{{contactVisible}}" class="modal-mask" bindtap="hideContactModal">
+    <view class="contact-panel" catchtap="noop">
+      <view class="contact-title">联系张张</view>
+      <view class="contact-desc">领取 7 天 Pro 试用码、兑换 Pro、反馈问题，都可以通过这个微信联系。</view>
+      <view class="wechat-box">{{contactWechat}}</view>
+      <view class="contact-tip">备注：ob试用 / ob会员</view>
+      <button class="primary-button" bindtap="copyWechat">复制微信号</button>
+      <button class="ghost-button" bindtap="hideContactModal">关闭</button>
+    </view>
+  </view>
+</view>

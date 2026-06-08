@@ -71,16 +71,38 @@ assert.strictEqual(
   helpers.LOCAL_ASR_INSTALLER_URL,
   'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1',
 );
+assert.strictEqual(
+  helpers.LOCAL_ASR_MACOS_INSTALLER_URL,
+  'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh',
+);
 assert.ok(pluginMainSource.includes('getAvailableLocalAsrInstallerPath'));
 assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1'));
+assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh'));
 const defaultLocalTranscriptionCommand = helpers.getDefaultLocalTranscriptionCommand();
 assert.ok(defaultLocalTranscriptionCommand.includes('%USERPROFILE%'));
 assert.strictEqual(defaultLocalTranscriptionCommand.includes('$env:USERPROFILE'), false);
+assert.strictEqual(
+  helpers.getDefaultLocalTranscriptionCommand('darwin'),
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
+);
 assert.strictEqual(
   helpers.mergeSettings({
     localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
   }).localTranscriptionCommand,
   'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+);
+assert.strictEqual(
+  helpers.mergeSettings({
+    localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+  }, 'darwin').localTranscriptionCommand,
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
+);
+assert.strictEqual(
+  helpers.mergeSettings({
+    localAsrPlatform: 'darwin',
+    localTranscriptionCommand: 'powershell -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+  }, 'win32').localTranscriptionCommand,
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
 );
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
 assert.strictEqual(pluginMainSource.includes(".setName('同步 API 地址')"), false);
@@ -89,6 +111,13 @@ assert.strictEqual(pluginMainSource.includes(".setName('本地转写命令')"), 
 assert.strictEqual(pluginMainSource.includes("local: '本地转写命令'"), false);
 assert.strictEqual(pluginMainSource.includes(".setButtonText('兑换并开通')"), false);
 assert.strictEqual(pluginMainSource.includes(".setPlaceholder('例如 ZZAI030')"), false);
+assert.ok(pluginMainSource.includes('小程序名字：Obsidian 内容同步助手'));
+assert.ok(pluginMainSource.includes('打开微信小程序【Obsidian 内容同步助手】'));
+assert.ok(pluginMainSource.includes('本地转写系统'));
+assert.ok(pluginMainSource.includes('如果苹果电脑安装失败，请手动选择 macOS'));
+assert.ok(pluginMainSource.includes('install.log'));
+assert.ok(pluginMainSource.includes('复制诊断信息'));
+assert.ok(pluginMainSource.includes('getLocalAsrDiagnosticText'));
 assert.strictEqual(helpers.getSocialRequestHeaders('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4').Referer, 'https://www.douyin.com/');
 assert.strictEqual(helpers.shouldResolveMediaDownloadUrl('https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000demo'), true);
 assert.strictEqual(helpers.shouldResolveMediaDownloadUrl('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4'), false);
@@ -116,8 +145,31 @@ assert.deepStrictEqual(
     ready: false,
   },
 );
+assert.deepStrictEqual(
+  helpers.getLocalAsrInstallStatus('/Users/demo/.wechat-inbox-local-asr', (filePath) => filePath.endsWith('transcribe.sh'), 'darwin'),
+  {
+    installRoot: '/Users/demo/.wechat-inbox-local-asr',
+    transcribeScript: '/Users/demo/.wechat-inbox-local-asr/transcribe.sh',
+    hasTranscribeScript: true,
+    hasWhisper: false,
+    hasFfmpeg: false,
+    hasModel: false,
+    ready: false,
+  },
+);
 assert.ok(helpers.buildLocalAsrInstallCommand('C:\\plugin\\local-asr\\install-local-asr.ps1').includes('-ExecutionPolicy Bypass'));
 assert.ok(helpers.buildLocalAsrInstallCommand('C:\\plugin\\local-asr\\install-local-asr.ps1').includes('"C:\\plugin\\local-asr\\install-local-asr.ps1"'));
+assert.strictEqual(
+  helpers.buildLocalAsrInstallCommand('/Users/demo/plugin/local-asr/install-local-asr-macos.sh', 'darwin'),
+  '/bin/bash "/Users/demo/plugin/local-asr/install-local-asr-macos.sh"',
+);
+assert.strictEqual(
+  helpers.getLocalAsrPlatformMismatchMessage('darwin', 'win32'),
+  'Local ASR platform mismatch: this computer is Windows, but the selected installer is macOS. Please choose Auto or Windows, then install again.',
+);
+assert.strictEqual(helpers.getLocalAsrPlatformMismatchMessage('auto', 'win32'), '');
+assert.strictEqual(helpers.getLocalAsrPlatformMismatchMessage('darwin', 'darwin'), '');
+assert.ok(pluginMainSource.includes('getLocalAsrPlatformMismatchMessage(this.settings.localAsrPlatform)'));
 assert.strictEqual(helpers.normalizeBindCodeInput(' ozt n1i '), 'OZT-N1I');
 assert.strictEqual(helpers.mergeSettings({ token: 'oztn1i' }).token, 'OZT-N1I');
 assert.strictEqual(typeof helpers.createRetryableTranscriptionError, 'function');

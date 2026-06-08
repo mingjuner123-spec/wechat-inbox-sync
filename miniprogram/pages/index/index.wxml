@@ -1,22 +1,30 @@
 <view class="app-container">
-  <view wx:if="{{currentView === 'home'}}" class="view-home">
-    <view class="header">
-      <view class="title">Obsidian 收集箱</view>
-      <view class="subtitle">把微信里的灵感、语音和链接收进 Obsidian</view>
+  <view wx:if="{{currentView === 'collect'}}" class="view-home page-with-tabbar">
+    <view class="header compact">
+      <view class="title">Obsidian 内容同步助手</view>
+    </view>
+
+    <view wx:if="{{!isBound}}" class="bind-reminder" bindtap="showBindView">
+      <view class="bind-reminder-text">
+        <view class="bind-reminder-title">还没绑定 Obsidian</view>
+        <view class="bind-reminder-desc">先用 1 分钟完成绑定，再开始同步。</view>
+      </view>
+      <view class="bind-reminder-action">去绑定</view>
     </view>
 
     <view class="notice-section">
-      <view class="notice-bar" bindtap="showAnnouncementDetail">
+      <view class="notice-bar plugin-update-notice" bindtap="showAnnouncementDetail">
         <view class="notice-dot"></view>
         <view class="notice-content">
           <view class="notice-header">
-            <text class="notice-title">插件更新公告</text>
+            <view class="notice-title">插件更新公告</view>
+            <view class="notice-action">查看详情</view>
           </view>
           <view class="notice-plugin-meta">
-            <text class="notice-plugin-line">插件名字：WeChat Inbox Sync</text>
-            <text class="notice-plugin-line">安装位置：Obsidian 插件市场</text>
-            <text class="notice-plugin-line">最新插件版本：v1.1.0（6月3日更新）</text>
+            <text class="notice-plugin-line">最新插件版本：v{{pluginVersion}}</text>
+            <text class="notice-plugin-line">更新时间：{{pluginUpdatedAt}}</text>
           </view>
+          <view class="notice-desc line-two">最近更新：{{announcementText}}</view>
         </view>
       </view>
     </view>
@@ -40,7 +48,7 @@
 
         <view class="action-bar">
           <view class="capture-actions">
-            <button class="capture-action-button" disabled="{{isSaving}}" bindtap="readClipboard">读取剪切板</button>
+            <button class="capture-action-button" disabled="{{isSaving}}" bindtap="readClipboard">读取剪贴板</button>
             <button class="capture-action-button" disabled="{{isSaving}}" bindtap="saveWebpageFromClipboardOrInput">读取网页链接</button>
             <button class="capture-action-button {{isRecording ? 'recording-active' : ''}}" disabled="{{isSaving && !isRecording}}" bindtap="toggleRecording">{{isRecording ? '结束录音' : '录音'}}</button>
             <button class="capture-action-button" disabled="{{isSaving}}" bindtap="chooseInboxFile">文件/音频</button>
@@ -49,91 +57,66 @@
             {{isSaving ? '保存中' : '保存'}}
           </button>
         </view>
+        <view class="usage-status {{entitlementStatus.hasAccess ? 'pro' : 'free'}}">{{usageStatusText}}</view>
       </view>
     </view>
 
-    <view class="recent-section">
-      <view class="recent-title">最近收集</view>
-      <view class="recent-list">
-        <block wx:for="{{recentList}}" wx:key="id">
-          <view class="recent-card {{item.isNew ? 'animate-fade-in-down' : ''}}">
-            <view class="recent-meta">
-              <view class="type-label {{item.labelClass}}">{{item.type}}</view>
-              <view class="recent-time">{{item.time}}</view>
-              <image
-                wx:if="{{item.pending}}"
-                class="meta-icon"
-                src="../../images/obsidian/cloud-cog-gray.svg"
-                mode="aspectFit"
-              />
-              <image
-                wx:else
-                class="meta-icon"
-                src="../../images/obsidian/check-green.svg"
-                mode="aspectFit"
-              />
+    <view class="platform-mini-section">
+      <view class="platform-mini-card">
+        <view class="platform-mini-header">
+          <view class="platform-mini-title">现在支持以下网页</view>
+          <view class="platform-mini-note">图文免费，音视频 Pro</view>
+        </view>
+        <view class="platform-group">
+          <view class="platform-group-title">免费版图文</view>
+          <view class="platform-grid free-grid">
+            <view class="platform-node free">
+              <image class="platform-logo-image" src="../../images/platforms/wechat-article.svg" mode="aspectFit" />
+              <text>公众号</text>
             </view>
-            <view class="recent-content {{item.type === 'TEXT' ? 'line-two' : 'line-one'}}">{{item.content}}</view>
-            <view wx:if="{{item.url}}" class="recent-url line-one">{{item.url}}</view>
+            <view class="platform-node free">
+              <image class="platform-logo-image" src="../../images/platforms/feishu-doc.svg" mode="aspectFit" />
+              <text>飞书</text>
+            </view>
+            <view class="platform-node free">
+              <image class="platform-logo-image" src="../../images/platforms/xhs-note.svg" mode="aspectFit" />
+              <text>小红书</text>
+            </view>
           </view>
-        </block>
-      </view>
-    </view>
-
-    <view class="bottom-action">
-      <view class="primary-actions">
-        <button class="home-action-button bind-button" bindtap="showBindView">
-          <image class="bind-icon" src="../../images/obsidian/plug-green.svg" mode="aspectFit" />
-          <text class="bind-button-text">绑定 Obsidian</text>
-        </button>
-        <button class="home-action-button share-button" open-type="share" aria-label="分享小程序">
-          <image class="share-icon" src="../../images/obsidian/share-green.svg" mode="aspectFit" />
-          <text class="share-button-text">分享</text>
-        </button>
-      </view>
-      <view class="secondary-actions">
-        <button class="secondary-action-button" bindtap="showRedeemModal">
-          {{entitlementStatus.hasAccess ? '内测权限已开通' : '兑换码'}}
-        </button>
+        </view>
+        <view class="platform-group pro-group">
+          <view class="platform-group-title">Pro版音视频文案提取</view>
+          <view class="platform-grid pro-grid">
+            <view class="platform-node pro">
+              <image class="platform-logo-image" src="../../images/platforms/douyin-video.svg" mode="aspectFit" />
+              <text>抖音</text>
+            </view>
+            <view class="platform-node pro">
+              <image class="platform-logo-image" src="../../images/platforms/xhs-video.svg" mode="aspectFit" />
+              <text>小红书</text>
+            </view>
+            <view class="platform-node pro">
+              <image class="platform-logo-image" src="../../images/platforms/bilibili-video.svg" mode="aspectFit" />
+              <text>B站</text>
+            </view>
+            <view class="platform-node pro">
+              <image class="platform-logo-image" src="../../images/platforms/xiaoyuzhou-audio.svg" mode="aspectFit" />
+              <text>小宇宙</text>
+            </view>
+          </view>
+        </view>
       </view>
     </view>
   </view>
 
-  <view wx:else class="view-bind">
+  <view wx:elif="{{currentView === 'bind'}}" class="view-bind page-with-tabbar">
     <view class="bind-content">
-      <view class="vault-icon-box">
-        <image class="vault-icon" src="../../images/obsidian/box-white.svg" mode="aspectFit" />
-      </view>
-
-      <view class="bind-heading">{{isBound ? '已完成绑定' : '未绑定本地 Vault'}}</view>
-      <view class="bind-desc">连接插件后，云端收集箱的内容将自动同步为本地 Markdown 文件。</view>
-      <view class="bind-rule-tip">一个绑定码默认绑定 1 台电脑，可主动增加到最多 3 台。</view>
+      <view class="bind-heading">{{isBound ? '已绑定 Obsidian' : '1 分钟绑定 Obsidian'}}</view>
+      <view class="bind-desc">{{isBound ? '当前微信里的收集内容，可以同步到已绑定电脑。' : '先完成绑定，再开始把内容同步到本地。'}}</view>
 
       <view class="code-card">
         <view class="code-label">您的专属绑定码</view>
         <view class="bind-code">{{displayBindCode}}</view>
-        <view class="bind-device-panel">
-          <view class="bind-device-header">
-            <view class="bind-device-title">已绑定电脑</view>
-            <view class="bind-device-count">{{bindClients.length}}/{{bindDeviceLimit}}</view>
-          </view>
-          <view wx:if="{{bindClients.length}}" class="bind-device-list">
-            <view wx:for="{{bindClients}}" wx:key="clientId" class="bind-device-item">
-              <view class="bind-device-dot"></view>
-              <view class="bind-device-info">
-                <view class="bind-device-name">{{item.name || 'Obsidian 插件'}}</view>
-                <view class="bind-device-meta">{{item.boundAt || '已绑定'}}</view>
-              </view>
-              <button class="unbind-device-button" data-client-id="{{item.clientId}}" bindtap="confirmUnbindClient">解除</button>
-            </view>
-          </view>
-          <view wx:else class="bind-device-empty">还没有电脑绑定这个绑定码</view>
-          <button wx:if="{{canAddBindDevice}}" class="add-bind-device-button" bindtap="increaseBindDeviceLimit">
-            新增一台电脑名额
-          </button>
-          <view wx:else class="bind-device-limit-tip">最多可绑定 {{bindMaxDeviceLimit}} 台电脑</view>
-        </view>
-
         <view class="code-actions">
           <button class="copy-code-button" bindtap="copyCode">
             <image class="copy-icon" src="../../images/obsidian/copy-dark.svg" mode="aspectFit" />
@@ -142,50 +125,144 @@
           <button class="toggle-code-button" bindtap="toggleBindCodeVisibility">
             <text>{{bindCodeVisible ? '关闭绑定码' : '查看绑定码'}}</text>
           </button>
-          <button class="replace-code-button" bindtap="replaceCode">
-            <image class="refresh-icon" src="../../images/obsidian/refresh-dark.svg" mode="aspectFit" />
-            <text>更换绑定码</text>
-          </button>
         </view>
       </view>
 
-      <view class="bind-extra-actions">
-        <button class="bind-guide-button" bindtap="showTutorialModal">
-          插件下载与绑定教程
-        </button>
-        <button class="bind-home-button" bindtap="showHomeView">
-          返回收集箱
-        </button>
-      </view>
-
-      <view class="instructions">
+      <view class="bind-steps-card">
         <view class="instruction-item">
           <view class="step-number">1</view>
-          <view class="step-text">在 Obsidian 中安装并启用同步助手插件</view>
+          <view class="step-text">在 Obsidian 插件市场搜索并安装 <text class="inline-code">WeChat Inbox Sync</text></view>
         </view>
         <view class="instruction-item">
           <view class="step-number">2</view>
-          <view class="step-text">打开插件设置页，输入上方绑定码并点击立即绑定</view>
+          <view class="step-text">复制上方绑定码</view>
         </view>
         <view class="instruction-item">
           <view class="step-number">3</view>
-          <view class="step-text">选择保存目录（默认：<text class="inline-code">临时收集</text>）</view>
-        </view>
-        <view class="instruction-item">
-          <view class="step-number">4</view>
-          <view class="step-text">回到微信，开始无缝收集</view>
+          <view class="step-text">打开插件设置页，粘贴绑定码，点击立即绑定</view>
         </view>
       </view>
+
+      <view class="bind-device-panel white">
+        <view class="bind-device-header">
+          <view class="bind-device-title">已绑定电脑</view>
+          <view class="bind-device-count">{{bindClients.length}}/{{bindDeviceLimit}}</view>
+        </view>
+        <view wx:if="{{bindClients.length}}" class="bind-device-list">
+          <view wx:for="{{bindClients}}" wx:key="clientId" class="bind-device-item">
+            <view class="bind-device-dot"></view>
+            <view class="bind-device-info">
+              <view class="bind-device-name">{{item.name || 'Obsidian 插件'}}</view>
+              <view class="bind-device-meta">{{item.boundAt || '已绑定'}}</view>
+            </view>
+            <button class="unbind-device-button" data-client-id="{{item.clientId}}" bindtap="confirmUnbindClient">解除</button>
+          </view>
+        </view>
+        <view wx:else class="bind-device-empty">还没有电脑绑定这个绑定码</view>
+        <button wx:if="{{canAddBindDevice}}" class="add-bind-device-button" bindtap="increaseBindDeviceLimit">
+          新增一台电脑名额
+        </button>
+        <view wx:else class="bind-device-limit-tip">最多可绑定 {{bindMaxDeviceLimit}} 台电脑</view>
+      </view>
+
+      <view class="bind-extra-actions">
+        <button class="bind-guide-button" bindtap="showTutorialModal">详细教程</button>
+        <button class="bind-home-button" bindtap="replaceCode">更换绑定码</button>
+      </view>
+    </view>
+  </view>
+
+  <view wx:elif="{{currentView === 'mine'}}" class="view-mine page-with-tabbar">
+    <view class="mine-header">
+      <view class="title">开通 Pro</view>
+    </view>
+
+    <view class="mine-card membership-card {{membershipCard.tone}}">
+      <view class="membership-top">
+        <view class="membership-badge">{{membershipCard.badge}}</view>
+        <view class="bind-mini-status">{{isBound ? '已绑定' : '未绑定'}}</view>
+      </view>
+      <view class="membership-title">{{membershipCard.title}}</view>
+      <view class="membership-desc">{{membershipCard.desc}}</view>
+      <view class="membership-actions">
+        <button class="membership-primary" bindtap="showRedeemModal">兑换码激活 Pro 会员</button>
+        <button class="membership-secondary" data-note="ob会员" bindtap="copyWechatWithNote">领取 Pro 体验卡</button>
+      </view>
+    </view>
+
+    <view class="mine-card">
+      <view class="mine-card-title">Pro 和免费版的权益对比</view>
+      <view class="benefit-table">
+        <view class="benefit-table-header">
+          <view class="benefit-cell benefit-name">权益</view>
+          <view class="benefit-cell">免费版</view>
+          <view class="benefit-cell pro-col">pro版</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">使用次数</view>
+          <view class="benefit-cell">5次/天</view>
+          <view class="benefit-cell pro-col">不限</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">文字、文件转写</view>
+          <view class="benefit-cell">√</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">语音、MP3转写</view>
+          <view class="benefit-cell">需用户充值配API</view>
+          <view class="benefit-cell pro-col">无需配API</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">图文链接转写</view>
+          <view class="benefit-cell">√</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">音视频链接转写</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+      </view>
+      <view class="mine-note">音视频文案提取为 Pro 内测功能，可联系张张领取 7 天试用码。</view>
+    </view>
+
+    <view class="mine-card">
+      <view class="mine-card-title">详细教程</view>
+      <view class="mine-note">obsidian绑定与pro开通详细教程</view>
+      <view class="mine-link" bindtap="copyTutorialLinkFromModal">复制飞书教程链接</view>
+      <view class="mine-link" bindtap="showAnnouncementDetail">查看功能更新公告</view>
+      <view class="mine-link" data-note="ob用户群" bindtap="copyWechatWithNote">加入用户群</view>
+    </view>
+  </view>
+
+  <view class="tabbar">
+    <button class="tabbar-item {{currentView === 'collect' ? 'active' : ''}}" data-view="collect" bindtap="switchMainTab">收集</button>
+    <button class="tabbar-item {{currentView === 'bind' ? 'active' : ''}}" data-view="bind" bindtap="switchMainTab">绑定 Obsidian</button>
+    <button class="tabbar-item {{currentView === 'mine' ? 'active' : ''}}" data-view="mine" bindtap="switchMainTab">开通 Pro</button>
+  </view>
+
+  <view wx:if="{{announcementVisible}}" class="announcement-mask" bindtap="hideAnnouncementSheet">
+    <view class="announcement-sheet" catchtap="noop">
+      <view class="announcement-handle"></view>
+      <view class="announcement-title">本次更新</view>
+      <view class="announcement-list">
+        <view wx:for="{{updateItems}}" wx:key="*this" class="announcement-item">
+          <view class="announcement-dot"></view>
+          <view class="announcement-text">{{item}}</view>
+        </view>
+      </view>
+      <button class="announcement-primary" bindtap="hideAnnouncementSheet">知道了</button>
     </view>
   </view>
 
   <view wx:if="{{tutorialVisible}}" class="tutorial-mask" bindtap="hideTutorialModal">
     <view class="tutorial-panel" catchtap="noop">
-      <view class="tutorial-title">绑定教程</view>
+      <view class="tutorial-title">详细教程</view>
       <view class="tutorial-desc">飞书链接</view>
       <view class="tutorial-link-row">
         <view class="tutorial-link-text">{{tutorialUrl}}</view>
-        <button class="tutorial-copy-button" bindtap="copyTutorialLinkFromModal">一键复制</button>
+        <button class="tutorial-copy-button" bindtap="copyTutorialLinkFromModal">复制</button>
       </view>
       <button class="tutorial-close-button" bindtap="hideTutorialModal">关闭</button>
     </view>
@@ -203,8 +280,8 @@
 
   <view wx:if="{{redeemVisible}}" class="redeem-mask" bindtap="hideRedeemModal">
     <view class="redeem-panel" catchtap="noop">
-      <view class="redeem-title">兑换内测权限</view>
-      <view class="redeem-desc">输入你收到的兑换码，开通本地转写/视频文案提取内测权限。</view>
+      <view class="redeem-title">兑换 Pro 权限</view>
+      <view class="redeem-desc">输入你收到的兑换码，开通音视频文案提取功能。</view>
       <input
         class="redeem-input"
         value="{{redeemCodeInput}}"

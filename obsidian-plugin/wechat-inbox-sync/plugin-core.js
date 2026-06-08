@@ -1,5 +1,6 @@
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const MAX_PLUGIN_BINDINGS = 3;
+const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
@@ -10,6 +11,7 @@ const DEFAULT_SETTINGS = {
   inboxDir: '临时收集',
   autoSyncOnLoad: false,
   aiProvider: 'off',
+  localAsrPlatform: 'auto',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
   aliyunModel: 'qwen3.5-omni-plus',
@@ -38,10 +40,44 @@ function createClientId() {
   return `obsidian-${require('crypto').randomBytes(16).toString('hex')}`;
 }
 
-function normalizeLocalTranscriptionCommand(command) {
-  return String(command || '')
+function getLocalAsrPlatform(platform = process.platform) {
+  if (platform === 'win32') return 'win32';
+  if (platform === 'darwin') return 'darwin';
+  return platform || '';
+}
+
+function normalizeLocalAsrPlatform(value) {
+  return ['auto', 'win32', 'darwin'].includes(String(value || '').trim())
+    ? String(value || '').trim()
+    : 'auto';
+}
+
+function resolveLocalAsrPlatform(value, runtimePlatform = process.platform) {
+  const normalized = normalizeLocalAsrPlatform(value);
+  return normalized === 'auto' ? getLocalAsrPlatform(runtimePlatform) : normalized;
+}
+
+function getDefaultLocalTranscriptionCommand(platform = process.platform) {
+  if (getLocalAsrPlatform(platform) === 'darwin') {
+    return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
+  }
+  return `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
+}
+
+function isWindowsLocalAsrCommand(command) {
+  const normalized = String(command || '').toLowerCase();
+  return normalized.includes('powershell')
+    && (normalized.includes('transcribe.ps1') || normalized.includes(LOCAL_ASR_HOME));
+}
+
+function normalizeLocalTranscriptionCommand(command, platform = process.platform) {
+  const normalized = String(command || '')
     .trim()
     .replace(/\$env:USERPROFILE/gi, '%USERPROFILE%');
+  if (getLocalAsrPlatform(platform) === 'darwin' && isWindowsLocalAsrCommand(normalized)) {
+    return getDefaultLocalTranscriptionCommand(platform);
+  }
+  return normalized;
 }
 
 function normalizeBindCodeInput(code) {
@@ -105,7 +141,7 @@ function getPrimaryBoundToken(bindings) {
   return active ? active.token : '';
 }
 
-function mergeSettings(savedSettings) {
+function mergeSettings(savedSettings, platform = process.platform) {
   const merged = {
     ...DEFAULT_SETTINGS,
     ...(savedSettings || {}),
@@ -121,7 +157,11 @@ function mergeSettings(savedSettings) {
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
-  merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(merged.localTranscriptionCommand);
+  merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
+  merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
+    merged.localTranscriptionCommand,
+    resolveLocalAsrPlatform(merged.localAsrPlatform, platform),
+  );
   merged.aliyunApiKey = String(merged.aliyunApiKey || '').trim();
   merged.aliyunModel = String(merged.aliyunModel || '').trim() || DEFAULT_SETTINGS.aliyunModel;
   merged.aliyunBaseUrl = String(merged.aliyunBaseUrl || '').trim() || DEFAULT_SETTINGS.aliyunBaseUrl;
@@ -180,9 +220,13 @@ module.exports = {
   OFFICIAL_SYNC_API_BASE,
   buildSyncNotice,
   createClientId,
+  getDefaultLocalTranscriptionCommand,
+  getLocalAsrPlatform,
   mergeSettings,
   normalizeBindCodeInput,
   normalizeBindings,
+  normalizeLocalAsrPlatform,
   normalizeLocalTranscriptionCommand,
+  resolveLocalAsrPlatform,
   validateSettings,
 };

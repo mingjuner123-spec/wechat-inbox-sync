@@ -172,4 +172,118 @@ const wxMock = {
       },
     },
   ]);
+
+  await service.adminGenerateRedeemCodes({
+    adminSecret: 'secret',
+    count: 10,
+    durationDays: 30,
+    maxRedemptions: 1,
+    prefix: 'OBPRO',
+    note: '内测码',
+  });
+  assert.deepStrictEqual(calls[13], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminGenerateRedeemCodes',
+        adminSecret: 'secret',
+        count: 10,
+        durationDays: 30,
+        maxRedemptions: 1,
+        prefix: 'OBPRO',
+        note: '内测码',
+      },
+    },
+  ]);
+
+  await service.adminListRedeemCodes({ adminSecret: 'secret', keyword: 'OBPRO' });
+  assert.deepStrictEqual(calls[14], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminListRedeemCodes',
+        adminSecret: 'secret',
+        keyword: 'OBPRO',
+      },
+    },
+  ]);
+
+  await service.adminListEntitlements({ adminSecret: 'secret', keyword: 'openid-1' });
+  assert.deepStrictEqual(calls[15], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminListEntitlements',
+        adminSecret: 'secret',
+        keyword: 'openid-1',
+      },
+    },
+  ]);
+
+  await service.adminListBindCodes({ adminSecret: 'secret', keyword: 'ABC' });
+  assert.deepStrictEqual(calls[16], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminListBindCodes',
+        adminSecret: 'secret',
+        keyword: 'ABC',
+      },
+    },
+  ]);
+
+  await service.adminUpdateEntitlement({
+    adminSecret: 'secret',
+    entitlementId: 'ent-1',
+    action: 'extend',
+    days: 30,
+  });
+  assert.deepStrictEqual(calls[17], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminUpdateEntitlement',
+        adminSecret: 'secret',
+        entitlementId: 'ent-1',
+        action: 'extend',
+        days: 30,
+      },
+    },
+  ]);
+
+  await service.adminUpdateRedeemCode({
+    adminSecret: 'secret',
+    codeId: 'code-1',
+    action: 'disable',
+  });
+  assert.deepStrictEqual(calls[18], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminUpdateRedeemCode',
+        adminSecret: 'secret',
+        codeId: 'code-1',
+        action: 'disable',
+      },
+    },
+  ]);
+
+  await service.trackAnalyticsEvent('app_visit', { view: 'bind' });
+  assert.deepStrictEqual(calls[19], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'trackAnalyticsEvent',
+        eventName: 'app_visit',
+        payload: { view: 'bind' },
+      },
+    },
+  ]);
 })();

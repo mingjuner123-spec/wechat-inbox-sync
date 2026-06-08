@@ -5,6 +5,11 @@ function normalizeText(value) {
   return String(value || '').trim();
 }
 
+function normalizeTextList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => normalizeText(item)).filter(Boolean);
+}
+
 function buildPublicConfig(config) {
   const source = config || {};
   return {
@@ -12,6 +17,8 @@ function buildPublicConfig(config) {
     tutorialUrl: normalizeText(source.tutorialUrl) || DEFAULT_TUTORIAL_URL,
     pluginVersion: normalizeText(source.pluginVersion),
     updatedAt: normalizeText(source.updatedAt),
+    announcementVersion: normalizeText(source.announcementVersion),
+    updateItems: normalizeTextList(source.updateItems),
   };
 }
 

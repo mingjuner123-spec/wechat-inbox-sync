@@ -355,6 +355,17 @@ function buildUsageState(usage) {
   };
 }
 
+function buildProUsageState() {
+  return {
+    used: 0,
+    limit: null,
+    remaining: null,
+    shareUnlocked: true,
+    adUnlockCount: 0,
+    proUnlimited: true,
+  };
+}
+
 module.exports = {
   DAILY_FREE_LIMIT,
   DAILY_SHARE_LIMIT,
@@ -377,4 +388,5 @@ module.exports = {
   getUsageDay,
   buildDailyUsageDocument,
   buildUsageState,
+  buildProUsageState,
 };

@@ -32,6 +32,7 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   inboxDir: '临时收集',
   autoSyncOnLoad: false,
   aiProvider: 'off',
+  localAsrPlatform: 'auto',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
   aliyunModel: 'qwen3.5-omni-plus',
@@ -94,6 +95,22 @@ assert.strictEqual(
   }).localTranscriptionCommand,
   'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
 );
+
+assert.strictEqual(
+  mergeSettings({
+    localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+  }, 'darwin').localTranscriptionCommand,
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
+);
+
+assert.strictEqual(
+  mergeSettings({
+    localAsrPlatform: 'darwin',
+    localTranscriptionCommand: 'powershell -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+  }, 'win32').localTranscriptionCommand,
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
+);
+assert.strictEqual(mergeSettings({ localAsrPlatform: 'bad-value' }).localAsrPlatform, 'auto');
 
 const whitespaceSettings = mergeSettings({
   apiBase: '   ',

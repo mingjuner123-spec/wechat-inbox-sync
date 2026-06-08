@@ -10,14 +10,26 @@ const {
 const { createInboxService } = require('../../services/inbox-service');
 
 const APP_VERSION = '0.1.0';
+const DEFAULT_PLUGIN_VERSION = '1.1.5';
+const DEFAULT_PLUGIN_UPDATED_AT = '2026-06-04';
 const TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const DEFAULT_ANNOUNCEMENT = '插件已可在 Obsidian 插件市场安装并自动更新，建议更换为插件市场版';
-const SHARE_TITLE = 'Obsidian 收集箱';
+const ANNOUNCEMENT_VERSION = '2026-06-04-pro-multi-device';
+const DEFAULT_UPDATE_ITEMS = [
+  '新增 Pro 音视频文案提取能力',
+  '新增 7 天 Pro 试用码领取入口',
+  '一个绑定码最多可绑定 3 台电脑',
+  '新增 macOS 本地转写组件安装支持',
+  '优化抖音、B站、小宇宙、小红书识别',
+];
+const CONTACT_WECHAT = 'heyhmjx';
+const SHARE_TITLE = 'Obsidian 内容同步助手';
 const SHARE_PATH = 'pages/index/index';
 const REWARDED_AD_UNIT_ID = 'adunit-d21c10ffc8e30f1d';
 const MAX_RECORDER_DURATION_MS = 600000;
 const MAX_CHAT_UPLOAD_COUNT = 10;
 const MAX_RECENT_ITEMS = 50;
+const DEFAULT_INPUT_PLACEHOLDER = '复制编辑文字，网页链接请点击读取网页链接';
 const AUDIO_FILE_EXTENSIONS = ['mp3', 'm4a', 'wav', 'aac', 'amr', 'silk', 'ogg', 'flac'];
 const DOCUMENT_FILE_EXTENSIONS = ['pdf', 'md', 'markdown', 'doc', 'docx', 'txt'];
 const SUPPORTED_CHAT_UPLOAD_EXTENSIONS = [...DOCUMENT_FILE_EXTENSIONS, ...AUDIO_FILE_EXTENSIONS];
@@ -108,21 +120,108 @@ function isDevtoolsPlatform() {
   }
 }
 
+function formatDateLabel(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getRemainingDays(value) {
+  if (!value) return 0;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 0;
+  return Math.max(0, Math.ceil((date.getTime() - Date.now()) / 86400000));
+}
+
+function buildMembershipCard(status = {}) {
+  const hasAccess = Boolean(status.hasAccess);
+  const expiresAt = status.expiresAt || '';
+  const daysLeft = getRemainingDays(expiresAt);
+  const isTrial = String(status.plan || '').includes('trial') || String(status.source || '').includes('trial');
+
+  if (hasAccess) {
+    return {
+      badge: isTrial ? 'Pro 试用中' : 'Pro 版',
+      title: isTrial ? `Pro 试用剩余 ${daysLeft || 1} 天` : 'Pro 功能已开通',
+      desc: expiresAt ? `有效期至 ${formatDateLabel(expiresAt)}` : '音视频文案提取功能可用',
+      cta: '查看 Pro 权益',
+      tone: 'pro',
+    };
+  }
+
+  if (status.status === 'expired') {
+    return {
+      badge: 'Pro 已到期',
+      title: '图文同步仍可继续使用',
+      desc: '音视频文案提取需要重新开通 Pro',
+      cta: '重新开通',
+      tone: 'expired',
+    };
+  }
+
+  return {
+    badge: '免费版',
+    title: '可免费领取 7 天 Pro 试用',
+    desc: '免费版可同步图文链接，想试音视频文案提取可联系张张领取试用码',
+    cta: '领取试用码',
+    tone: 'free',
+  };
+}
+
+function buildUsageStatusText(usage = {}, entitlementStatus = {}) {
+  if (entitlementStatus && entitlementStatus.hasAccess) {
+    return 'Pro 使用中，今日不限次数';
+  }
+
+  if (usage && usage.proUnlimited) {
+    return 'Pro 使用中，今日不限次数';
+  }
+
+  const used = Number(usage && usage.used) || 0;
+  const limit = Number(usage && usage.limit) || 5;
+  return `今日已用 ${used}/${limit} 次，分享可解锁更多次数`;
+}
+
+function buildAnnouncementContent(items = DEFAULT_UPDATE_ITEMS) {
+  return (items || DEFAULT_UPDATE_ITEMS)
+    .map((item, index) => `${index + 1}. ${item}`)
+    .join('\n');
+}
+
 Page({
   data: {
-    currentView: 'home',
+    currentView: 'bind',
     appVersion: APP_VERSION,
     tutorialUrl: TUTORIAL_URL,
     announcementText: DEFAULT_ANNOUNCEMENT,
+    announcementVersion: ANNOUNCEMENT_VERSION,
+    updateItems: DEFAULT_UPDATE_ITEMS,
+    pluginVersion: DEFAULT_PLUGIN_VERSION,
+    pluginUpdatedAt: DEFAULT_PLUGIN_UPDATED_AT,
+    contactWechat: CONTACT_WECHAT,
+    membershipCard: buildMembershipCard(),
     inputValue: '',
-    inputPlaceholder: '粘贴文字、链接，或录一段语音...',
+    inputPlaceholder: DEFAULT_INPUT_PLACEHOLDER,
     isRecording: false,
     isSaving: false,
     tutorialVisible: false,
+    announcementVisible: false,
     statusText: '已保存，等待 Obsidian 同步',
     statusVisible: false,
     quotaUnlockPending: false,
     quotaUnlockVisible: false,
+    dailyUsage: {
+      used: 0,
+      limit: 5,
+      remaining: 5,
+      shareUnlocked: false,
+      adUnlockCount: 0,
+    },
+    usageStatusText: buildUsageStatusText(),
     redeemVisible: false,
     redeemCodeInput: '',
     isRedeeming: false,
@@ -163,11 +262,18 @@ Page({
 
   onLoad() {
     this.inboxService = createInboxService(wx);
+    this.analyticsTracked = {};
+    this.trackAnalyticsOnce('app_visit');
+    if (this.data.currentView === 'bind') {
+      this.trackAnalyticsOnce('bind_page_view');
+    }
     this.enableShareMenu();
     this.setupRecorder();
     this.setupRewardedVideoAd();
     this.loadPublicConfig();
+    this.loadDailyUsageStatus();
     this.loadEntitlementStatus();
+    this.requestBindCode({ switchToCollectIfBound: true });
     this.consumeForwardMaterialsFromApp();
   },
 
@@ -266,7 +372,7 @@ Page({
     this.recorderManager.onError(() => {
       this.setData({
         isRecording: false,
-        inputPlaceholder: '粘贴文字、链接，或录一段语音...',
+        inputPlaceholder: DEFAULT_INPUT_PLACEHOLDER,
       });
       wx.showToast({
         title: '录音失败，请重试',
@@ -292,16 +398,46 @@ Page({
       const config = response.result && response.result.success ? response.result.data : null;
       if (!config) return;
 
+      const updateItems = Array.isArray(config.updateItems) && config.updateItems.length
+        ? config.updateItems
+        : DEFAULT_UPDATE_ITEMS;
+      const announcementVersion = config.announcementVersion || ANNOUNCEMENT_VERSION;
       this.setData({
         announcementText: config.announcement || DEFAULT_ANNOUNCEMENT,
+        announcementVersion,
+        updateItems,
+        pluginVersion: config.pluginVersion || DEFAULT_PLUGIN_VERSION,
+        pluginUpdatedAt: config.updatedAt || DEFAULT_PLUGIN_UPDATED_AT,
         tutorialUrl: config.tutorialUrl || TUTORIAL_URL,
       });
+      this.showLaunchAnnouncementIfNeeded({ announcementVersion, updateItems });
     } catch (error) {
       this.setData({
         announcementText: DEFAULT_ANNOUNCEMENT,
+        announcementVersion: ANNOUNCEMENT_VERSION,
+        updateItems: DEFAULT_UPDATE_ITEMS,
+        pluginVersion: DEFAULT_PLUGIN_VERSION,
+        pluginUpdatedAt: DEFAULT_PLUGIN_UPDATED_AT,
         tutorialUrl: TUTORIAL_URL,
       });
+      this.showLaunchAnnouncementIfNeeded();
     }
+  },
+
+  showLaunchAnnouncementIfNeeded(options = {}) {
+    const announcementVersion = options.announcementVersion || this.data.announcementVersion || ANNOUNCEMENT_VERSION;
+    const updateItems = options.updateItems || this.data.updateItems || DEFAULT_UPDATE_ITEMS;
+    const storageKey = `announcement_seen_${announcementVersion}`;
+    try {
+      if (wx.getStorageSync(storageKey)) return;
+      wx.setStorageSync(storageKey, true);
+    } catch (error) {
+      // 本地缓存失败不影响公告展示。
+    }
+
+    this.setData({
+      announcementVisible: true,
+    });
   },
 
   showTutorialModal() {
@@ -323,14 +459,21 @@ Page({
   },
 
   showAnnouncementDetail() {
-    const announcementText = String(this.data.announcementText || '').trim();
-    if (!announcementText) return;
+    this.setData({
+      announcementVisible: true,
+    });
+  },
 
-    wx.showModal({
-      title: '插件更新公告',
-      content: announcementText,
-      showCancel: false,
-      confirmText: '知道了',
+  hideAnnouncementSheet() {
+    this.setData({
+      announcementVisible: false,
+    });
+  },
+
+  hideAnnouncementAndShowMine() {
+    this.setData({
+      announcementVisible: false,
+      currentView: 'mine',
     });
   },
 
@@ -362,10 +505,38 @@ Page({
 
   noop() {},
 
+  trackAnalyticsOnce(eventName, payload = {}) {
+    if (!this.inboxService || !this.inboxService.trackAnalyticsEvent || !eventName) return;
+    this.analyticsTracked = this.analyticsTracked || {};
+    if (this.analyticsTracked[eventName]) return;
+    this.analyticsTracked[eventName] = true;
+    this.inboxService.trackAnalyticsEvent(eventName, {
+      view: this.data.currentView,
+      appVersion: this.data.appVersion,
+      ...payload,
+    }).catch(() => {});
+  },
+
   showHomeView() {
+    this.showCollectView();
+  },
+
+  showCollectView() {
     this.stopBindStatusPolling();
     this.setData({
-      currentView: 'home',
+      currentView: 'collect',
+    });
+  },
+
+  navigateToPro() {
+    wx.navigateTo({
+      url: '/pages/pro/index',
+    });
+  },
+
+  navigateToHelp() {
+    wx.navigateTo({
+      url: '/pages/help/index',
     });
   },
 
@@ -373,7 +544,57 @@ Page({
     this.setData({
       currentView: 'bind',
     });
+    this.trackAnalyticsOnce('bind_page_view', { source: 'showBindView' });
     this.requestBindCode();
+  },
+
+  showMineView() {
+    this.stopBindStatusPolling();
+    this.setData({
+      currentView: 'mine',
+    });
+  },
+
+  copyContactWechat() {
+    this.copyWechatWithNote({
+      currentTarget: {
+        dataset: {
+          note: 'ob用户群',
+        },
+      },
+    });
+  },
+
+  copyWechatWithNote(event = {}) {
+    const note = event.currentTarget && event.currentTarget.dataset
+      ? String(event.currentTarget.dataset.note || 'ob用户群')
+      : 'ob用户群';
+    wx.setClipboardData({
+      data: this.data.contactWechat || CONTACT_WECHAT,
+      success: () => {
+        wx.showToast({
+          title: `微信已复制，添加备注${note}`,
+          icon: 'none',
+        });
+      },
+    });
+  },
+
+  switchMainTab(event) {
+    const target = event.currentTarget && event.currentTarget.dataset
+      ? String(event.currentTarget.dataset.view || '')
+      : '';
+    if (target === 'collect') {
+      this.showCollectView();
+      return;
+    }
+    if (target === 'bind') {
+      this.showBindView();
+      return;
+    }
+    if (target === 'mine') {
+      this.showMineView();
+    }
   },
 
   toggleRecording() {
@@ -409,6 +630,7 @@ Page({
   getSaveErrorMessage(response, fallback) {
     const result = response && response.result ? response.result : null;
     if (result && result.errCode === 'DAILY_QUOTA_EXCEEDED') {
+      this.updateDailyUsageStatus(result.data || {});
       this.showQuotaUnlockSheet(result.data || {});
       return '今日免费次数已用完';
     }
@@ -433,6 +655,7 @@ Page({
     try {
       const response = await this.inboxService.unlockDailyUsageByShare();
       if (response.result && response.result.success) {
+        this.updateDailyUsageStatus(response.result.data);
         this.setData({
           quotaUnlockPending: false,
           quotaUnlockVisible: false,
@@ -490,6 +713,7 @@ Page({
     try {
       const response = await this.inboxService.unlockDailyUsageByAd();
       if (response.result && response.result.success) {
+        this.updateDailyUsageStatus(response.result.data);
         wx.showToast({
           title: '已增加10次同步次数',
           icon: 'none',
@@ -507,13 +731,39 @@ Page({
     try {
       const response = await this.inboxService.getEntitlementStatus('local_transcription_beta');
       if (response.result && response.result.success) {
+        const entitlementStatus = response.result.data || this.data.entitlementStatus;
         this.setData({
-          entitlementStatus: response.result.data || this.data.entitlementStatus,
+          entitlementStatus,
+          membershipCard: buildMembershipCard(entitlementStatus),
+          usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
         });
       }
     } catch (error) {
       // 权益状态失败不影响主流程。
     }
+  },
+
+  async loadDailyUsageStatus() {
+    try {
+      const response = await this.inboxService.getDailyUsage();
+      if (response.result && response.result.success) {
+        const dailyUsage = response.result.data || this.data.dailyUsage;
+        this.setData({
+          dailyUsage,
+          usageStatusText: buildUsageStatusText(dailyUsage, this.data.entitlementStatus),
+        });
+      }
+    } catch (error) {
+      // 次数状态失败不影响保存。
+    }
+  },
+
+  updateDailyUsageStatus(quota) {
+    if (!quota) return;
+    this.setData({
+      dailyUsage: quota,
+      usageStatusText: buildUsageStatusText(quota, this.data.entitlementStatus),
+    });
   },
 
   showRedeemModal() {
@@ -554,13 +804,16 @@ Page({
       if (!response.result || !response.result.success) {
         throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '兑换失败');
       }
+      const entitlementStatus = response.result.data || this.data.entitlementStatus;
       this.setData({
         redeemVisible: false,
         redeemCodeInput: '',
-        entitlementStatus: response.result.data || this.data.entitlementStatus,
+        entitlementStatus,
+        membershipCard: buildMembershipCard(entitlementStatus),
+        usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
       });
       wx.showToast({
-        title: '兑换成功',
+        title: entitlementStatus.alreadyRedeemed ? '该兑换码已激活过' : '兑换成功',
         icon: 'none',
       });
     } catch (error) {
@@ -683,6 +936,7 @@ Page({
       if (!response.result || !response.result.success) {
         throw new Error(this.getSaveErrorMessage(response, '保存失败'));
       }
+      this.updateDailyUsageStatus(response.result.data.quota);
 
       const item = createRecentItem('WEBPAGE', url);
       item.recordId = response.result.data.id;
@@ -762,6 +1016,7 @@ Page({
       if (!response.result || !response.result.success) {
         throw new Error(this.getSaveErrorMessage(response, '保存失败'));
       }
+      this.updateDailyUsageStatus(response.result.data.quota);
 
       const item = createRecentItem('VOICE', file.name || payload.content);
       item.recordId = response.result.data.id;
@@ -778,6 +1033,7 @@ Page({
     if (!response.result || !response.result.success) {
       throw new Error(this.getSaveErrorMessage(response, '保存失败'));
     }
+    this.updateDailyUsageStatus(response.result.data.quota);
 
     const item = createRecentItem('FILE', payload.fileName);
     item.recordId = response.result.data.id;
@@ -813,7 +1069,7 @@ Page({
     this.setData({
       isSaving: true,
       isRecording: false,
-      inputPlaceholder: '粘贴文字、链接，或录一段语音...',
+      inputPlaceholder: DEFAULT_INPUT_PLACEHOLDER,
     });
     this.showStatus('语音上传中，请勿重复操作', { persist: true });
 
@@ -824,6 +1080,7 @@ Page({
       if (!response.result || !response.result.success) {
         throw new Error(this.getSaveErrorMessage(response, '保存失败'));
       }
+      this.updateDailyUsageStatus(response.result.data.quota);
 
       const voiceItem = createRecentItem('VOICE', payload.content);
       voiceItem.recordId = response.result.data.id;
@@ -861,6 +1118,7 @@ Page({
       if (!response.result || !response.result.success) {
         throw new Error(this.getSaveErrorMessage(response, '保存失败'));
       }
+      this.updateDailyUsageStatus(response.result.data.quota);
 
       const type = classifyContent(content);
       const item = createRecentItem(type, content);
@@ -943,20 +1201,25 @@ Page({
     });
   },
 
-  async requestBindCode() {
+  async requestBindCode(options = {}) {
     try {
       const response = await this.inboxService.createBindCode();
       if (!response.result || !response.result.success) {
         throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '绑定码生成失败');
       }
+      const isBound = response.result.data.status === 'bound';
       this.setBindCodeState({
         code: response.result.data.code,
-        isBound: response.result.data.status === 'bound',
+        isBound,
         clients: response.result.data.clients || [],
         deviceLimit: response.result.data.deviceLimit,
         maxDeviceLimit: response.result.data.maxDeviceLimit,
         canAddDevice: response.result.data.canAddDevice,
       });
+      if (options.switchToCollectIfBound && isBound) {
+        this.setData({ currentView: 'collect' });
+        return;
+      }
       this.startBindStatusPolling();
     } catch (error) {
       this.stopBindStatusPolling();

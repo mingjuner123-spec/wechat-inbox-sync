@@ -74,7 +74,16 @@
   "compileType": "miniprogram",
   "srcMiniprogramRoot": "miniprogram/",
   "packOptions": {
-    "ignore": [],
+    "ignore": [
+      {
+        "type": "file",
+        "value": "images/create_cbr.png"
+      },
+      {
+        "type": "file",
+        "value": "images/ai_example1.png"
+      }
+    ],
     "include": []
   },
   "editorSetting": {

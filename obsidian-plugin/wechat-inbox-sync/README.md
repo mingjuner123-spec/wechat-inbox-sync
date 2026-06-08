@@ -59,9 +59,13 @@ Open the plugin settings and fill in:
 
 ### Local ASR helper
 
-If you do not want to use a cloud speech API, run the Windows helper in `local-asr/install-local-asr.ps1`.
-It installs whisper.cpp, ffmpeg, and a small Whisper model into `%USERPROFILE%\.wechat-inbox-local-asr`.
-Then choose **Local transcription command** in the plugin settings and click **Fill default command**.
+If you do not want to use a cloud speech API, use the local helper:
+
+- Windows: `local-asr/install-local-asr.ps1`
+- macOS: `local-asr/install-local-asr-macos.sh`
+
+It installs whisper.cpp, ffmpeg, and a small Whisper model into `.wechat-inbox-local-asr` under the current user home directory.
+Then choose **Local transcription** in the plugin settings and click **One-click install**.
 
 ## Data Flow
 
