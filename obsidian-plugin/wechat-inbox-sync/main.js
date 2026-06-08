@@ -947,24 +947,46 @@ function buildWebpageMarkdownBody(record, title) {
   );
   const status = metadata.conversionStatus || 'pending';
   const errorText = metadata.conversionError || '';
-  let fallback;
-  if (status === 'failed') {
-    const reason = errorText ? `\n\n失败原因：${errorText}` : '';
-    fallback = `网页转 Markdown 失败，已保存原始链接。${reason}`;
-  } else if (status === 'wechat_captcha') {
-    fallback = `微信返回公众号安全验证页，未能提取正文。已保存原始链接。${errorText ? `\n\n详细信息：${errorText}` : ''}`;
-  } else if (status === 'link_saved') {
-    fallback = `网页正文提取未成功，已保存原始链接。${errorText ? `\n\n说明：${errorText}` : ''}`;
-  } else {
-    fallback = '网页转 Markdown 处理中，已先保存原始链接。';
+
+  if (snapshot) {
+    return [
+      `原始链接：${url}`,
+      '',
+      '## Markdown 内容',
+      '',
+      snapshot,
+      '',
+    ].join('\n');
   }
 
+  if (status === 'failed' || status === 'wechat_captcha' || status === 'link_saved') {
+    const reasonLine = status === 'wechat_captcha'
+      ? '原因：微信返回了安全验证页，插件无法绕过'
+      : `原因：${errorText || '网页抓取失败'}`;
+    return [
+      `原始链接：${url}`,
+      '',
+      '> ⚠️ 这篇文章的正文未能自动提取，已为你保存原始链接。',
+      `> ${reasonLine}`,
+      '',
+      '---',
+      '',
+      '**如果这个问题持续出现，请复制以下信息发给张张（微信 heyhmjx），帮助产品改进：**',
+      '',
+      '```',
+      `链接：${url}`,
+      `错误：${errorText || '未知'}`,
+      `时间：${formatCreatedTime(record.createdAt)}`,
+      '```',
+      '',
+    ].join('\n');
+  }
+
+  // pending — 还没处理到
   return [
     `原始链接：${url}`,
     '',
-    '## Markdown 内容',
-    '',
-    snapshot || fallback,
+    '> 网页正文正在处理中，已先保存原始链接，下次同步时会自动更新。',
     '',
   ].join('\n');
 }
@@ -4614,13 +4636,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (showNotice || written.length) {
         let message = buildSyncNotice(written.length);
         if (conversionWarnings.length) {
-          const detail = conversionWarnings.map((w) => `\n• ${w}`).join('');
-          message += `，${conversionWarnings.length} 条转写失败（以下信息可直接复制反馈给开发者）：${detail}`;
+          message += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
         }
         if (failed.length) {
-          message += `，${failed.length} 条同步失败：${failed[0].message}`;
+          message += `，${failed.length} 条失败：${failed[0].message}`;
         }
-        new Notice(message, conversionWarnings.length ? 12000 : 5000);
+        new Notice(message);
       }
     } catch (error) {
       new Notice(`同步失败：${error.message || error}`);
