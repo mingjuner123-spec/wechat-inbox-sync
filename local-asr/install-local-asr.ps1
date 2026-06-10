@@ -287,11 +287,91 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 }
 $RunLog = Join-Path $Root "transcribe-last.log"
 
+function ConvertTo-NativeArgument {
+  param([AllowNull()][string]$Value)
+  $text = [string]$Value
+  if ($text -eq "") {
+    return '""'
+  }
+  if ($text -notmatch '[\s"]') {
+    return $text
+  }
+  return '"' + ($text -replace '"', '\"') + '"'
+}
+
+function Invoke-NativeProcess {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.CreateNoWindow = $true
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $psi
+  $stdout = New-Object System.Text.StringBuilder
+  $stderr = New-Object System.Text.StringBuilder
+  $outputHandler = [System.Diagnostics.DataReceivedEventHandler]{
+    param($sender, $event)
+    if ($null -ne $event.Data) {
+      [void]$stdout.AppendLine($event.Data)
+    }
+  }
+  $errorHandler = [System.Diagnostics.DataReceivedEventHandler]{
+    param($sender, $event)
+    if ($null -ne $event.Data) {
+      [void]$stderr.AppendLine($event.Data)
+    }
+  }
+
+  $process.add_OutputDataReceived($outputHandler)
+  $process.add_ErrorDataReceived($errorHandler)
+  $exitCode = 1
+  try {
+    [void]$process.Start()
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+  } finally {
+    $process.remove_OutputDataReceived($outputHandler)
+    $process.remove_ErrorDataReceived($errorHandler)
+    $process.Dispose()
+  }
+
+  $combined = @(
+    "--- stdout ---"
+    $stdout.ToString().TrimEnd()
+    "--- stderr ---"
+    $stderr.ToString().TrimEnd()
+  ) -join [Environment]::NewLine
+  return [PSCustomObject]@{
+    ExitCode = $exitCode
+    Output = $combined
+  }
+}
+
 try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
   $ChunkPattern = Join-Path $TempWorkDir "chunk-%03d.wav"
-  $ffmpegOutput = & $Ffmpeg.FullName -hide_banner -loglevel error -y -i $InputPath -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time $ChunkSeconds -reset_timestamps 1 $ChunkPattern 2>&1 | Out-String
-  $ffmpegExit = $LASTEXITCODE
+  $ffmpegResult = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-i", $InputPath,
+    "-ar", "16000",
+    "-ac", "1",
+    "-c:a", "pcm_s16le",
+    "-f", "segment",
+    "-segment_time", [string]$ChunkSeconds,
+    "-reset_timestamps", "1",
+    $ChunkPattern
+  )
+  $ffmpegOutput = $ffmpegResult.Output
+  $ffmpegExit = $ffmpegResult.ExitCode
   $chunkFiles = @(Get-ChildItem -LiteralPath $TempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
   $whisperLogs = New-Object System.Collections.Generic.List[string]
   $mergedText = New-Object System.Collections.Generic.List[string]
@@ -304,8 +384,15 @@ try {
   foreach ($chunk in $chunkFiles) {
     $chunkBase = [System.IO.Path]::Combine($TempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
     $chunkTxt = "$chunkBase.txt"
-    $chunkOutput = & $Whisper.FullName -m $Model -f $chunk.FullName -l zh -otxt -of $chunkBase 2>&1 | Out-String
-    $currentExit = $LASTEXITCODE
+    $chunkResult = Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments @(
+      "-m", $Model,
+      "-f", $chunk.FullName,
+      "-l", "zh",
+      "-otxt",
+      "-of", $chunkBase
+    )
+    $chunkOutput = $chunkResult.Output
+    $currentExit = $chunkResult.ExitCode
     $whisperLogs.Add("--- $($chunk.Name) exit=$currentExit ---")
     $whisperLogs.Add($chunkOutput)
     if ($currentExit -ne 0) {

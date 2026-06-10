@@ -166,10 +166,30 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
         scriptOutdated: true,
       };
     }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+    ) {
+      return {
+        scriptVersion: 'chunked-safe-native-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('CHUNK_SECONDS')
+      && source.includes('set -euo pipefail')
+    ) {
+      return {
+        scriptVersion: 'chunked-bash-run-log',
+        scriptOutdated: false,
+      };
+    }
     if (source.includes('transcribe-last.log') && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))) {
       return {
         scriptVersion: 'chunked-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     return {
