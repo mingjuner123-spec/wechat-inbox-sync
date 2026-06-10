@@ -187,6 +187,10 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
   return path.join(installRoot, 'transcribe-last.log');
 }
 
+function getSyncDiagnosticLogPath(installRoot = getLocalAsrInstallRoot()) {
+  return path.join(installRoot, 'sync-last.log');
+}
+
 function buildLocalAsrRunLogText({
   time = new Date().toISOString(),
   status = '',
@@ -238,6 +242,54 @@ function writeLocalAsrRunLog({
     return logPath;
   } catch (writeError) {
     return '';
+  }
+}
+
+function buildSyncDiagnosticLogText({
+  time = new Date().toISOString(),
+  status = '',
+  message = '',
+  bindingLabel = '',
+  stage = '',
+  current = 0,
+  total = 0,
+  title = '',
+  recordId = '',
+  error = '',
+} = {}) {
+  return [
+    `time=${time}`,
+    `status=${status}`,
+    `message=${message}`,
+    `bindingLabel=${bindingLabel}`,
+    `stage=${stage}`,
+    `current=${current}`,
+    `total=${total}`,
+    `title=${title}`,
+    `recordId=${recordId}`,
+    '--- error ---',
+    String(error || ''),
+  ].join('\n');
+}
+
+function writeSyncDiagnosticLog(payload = {}, installRoot = getLocalAsrInstallRoot()) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getSyncDiagnosticLogPath(installRoot);
+    fs.writeFileSync(logPath, buildSyncDiagnosticLogText(payload), 'utf8');
+    return logPath;
+  } catch (error) {
+    return '';
+  }
+}
+
+function readSyncDiagnosticLog(installRoot = getLocalAsrInstallRoot()) {
+  const logPath = getSyncDiagnosticLogPath(installRoot);
+  try {
+    if (!fs.existsSync(logPath)) return '';
+    return fs.readFileSync(logPath, 'utf8').slice(-5000);
+  } catch (error) {
+    return `读取同步日志失败：${error.message || error}`;
   }
 }
 
@@ -3277,6 +3329,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!savedSettings || !savedSettings.clientId) {
       await this.saveData(this.settings);
     }
+    this.lastSyncDiagnostic = null;
+    this.syncStatusBar = typeof this.addStatusBarItem === 'function' ? this.addStatusBarItem() : null;
+    if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
+      this.syncStatusBar.setText('');
+    }
 
     this.addCommand({
       id: 'sync-wechat-inbox',
@@ -3485,6 +3542,16 @@ class WechatObsidianInboxPlugin extends Plugin {
   showSyncProgress(progress = {}) {
     const message = buildSyncProgressMessage(progress);
     if (!message) return;
+    this.lastSyncDiagnostic = {
+      ...progress,
+      message,
+      status: progress.stage === 'empty' ? 'empty' : 'running',
+      time: new Date().toISOString(),
+    };
+    writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+    if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
+      this.syncStatusBar.setText(message);
+    }
     if (!this.syncProgressNotice) {
       this.syncProgressNotice = new Notice(message, 0);
       return;
@@ -3501,6 +3568,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.syncProgressNotice.hide();
     }
     this.syncProgressNotice = null;
+    if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
+      this.syncStatusBar.setText('');
+    }
   }
 
   async unbindBinding(token) {
@@ -3629,12 +3699,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     const status = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
     const logText = readLocalAsrInstallLog(installRoot);
     const runLogText = readLocalAsrRunLog(installRoot);
+    const syncLogText = readSyncDiagnosticLog(installRoot);
+    const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : '';
     return [
-      'WeChat Inbox Sync 本地转写诊断',
+      'WeChat Inbox Sync 同步失败诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
       `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
       `实际使用系统：${platform}`,
+      `API 地址：${this.settings.apiBase || '-'}`,
       `安装目录：${status.installRoot}`,
       `转写脚本：${status.transcribeScript}`,
       `脚本存在：${status.hasTranscribeScript ? '是' : '否'}`,
@@ -3644,6 +3717,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       `组件可用：${status.ready ? '是' : '否'}`,
       `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
       `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      '最近同步状态：',
+      lastSyncText || syncLogText || '暂无 sync-last.log',
       '最近转写日志：',
       runLogText || '暂无 transcribe-last.log',
       '最近安装日志：',
@@ -3651,8 +3726,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     ].join('\n');
   }
 
-  async copyLocalAsrDiagnosticText() {
-    const text = this.getLocalAsrDiagnosticText();
+  getSyncDiagnosticText() {
+    return this.getLocalAsrDiagnosticText();
+  }
+
+  async copyDiagnosticText(text, fileName = 'diagnostic.txt') {
     if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text);
       return true;
@@ -3666,11 +3744,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       // Obsidian mobile/electron variants may not expose electron here.
     }
-    const diagnosticPath = path.join(getLocalAsrInstallRoot(), 'diagnostic.txt');
+    const diagnosticPath = path.join(getLocalAsrInstallRoot(), fileName);
     fs.mkdirSync(getLocalAsrInstallRoot(), { recursive: true });
     fs.writeFileSync(diagnosticPath, text, 'utf8');
     new Notice(`诊断信息已写入：${diagnosticPath}`);
     return false;
+  }
+
+  async copyLocalAsrDiagnosticText() {
+    return this.copyDiagnosticText(this.getLocalAsrDiagnosticText(), 'local-asr-diagnostic.txt');
+  }
+
+  async copySyncDiagnosticText() {
+    return this.copyDiagnosticText(this.getSyncDiagnosticText(), 'sync-diagnostic.txt');
   }
 
   async getLocalTranscriptionEntitlementStatus() {
@@ -4748,9 +4834,27 @@ class WechatObsidianInboxPlugin extends Plugin {
         this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
         await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
       } catch (error) {
+        const message = error.message || String(error);
+        let failedTitle = '';
+        try {
+          failedTitle = buildRecordTitleBase(record);
+        } catch (titleError) {
+          failedTitle = getRecordId(record) || String(record && record.type ? record.type : 'unknown');
+        }
+        this.lastSyncDiagnostic = {
+          ...progress,
+          status: 'failed',
+          stage: progress.stage || 'processing',
+          title: failedTitle,
+          recordId: getRecordId(record),
+          message: '单条内容同步失败',
+          error: message,
+          time: new Date().toISOString(),
+        };
+        writeSyncDiagnosticLog(this.lastSyncDiagnostic);
         failed.push({
           recordId: getRecordId(record),
-          message: error.message || String(error),
+          message,
         });
       }
     }
@@ -4794,18 +4898,36 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
 
+      let finalMessage = buildSyncNotice(written.length);
       if (showNotice || written.length) {
-        let message = buildSyncNotice(written.length);
         if (conversionWarnings.length) {
-          message += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
+          finalMessage += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
         }
         if (failed.length) {
-          message += `，${failed.length} 条失败：${failed[0].message}`;
+          finalMessage += `，${failed.length} 条失败：${failed[0].message}`;
         }
-        new Notice(message);
+        new Notice(finalMessage);
       }
+      this.lastSyncDiagnostic = {
+        status: failed.length ? 'failed' : 'success',
+        stage: 'finished',
+        current: written.length,
+        total: written.length + failed.length,
+        message: finalMessage,
+        error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
+        time: new Date().toISOString(),
+      };
+      writeSyncDiagnosticLog(this.lastSyncDiagnostic);
       this.clearSyncProgressNotice();
     } catch (error) {
+      this.lastSyncDiagnostic = {
+        status: 'failed',
+        stage: 'syncInbox',
+        message: '同步失败',
+        error: error.message || String(error),
+        time: new Date().toISOString(),
+      };
+      writeSyncDiagnosticLog(this.lastSyncDiagnostic);
       this.clearSyncProgressNotice();
       new Notice(`同步失败：${error.message || error}`);
     }
@@ -5162,6 +5284,20 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .setButtonText('同步')
         .setCta()
         .onClick(() => this.plugin.syncInbox()));
+
+    new Setting(containerEl)
+      .setName('同步失败诊断')
+      .setDesc('同步失败、转写失败、下载卡住时，点这里复制诊断信息发给张张。里面包含最近同步阶段、转写日志和安装日志。')
+      .addButton((button) => button
+        .setButtonText('复制同步诊断')
+        .onClick(async () => {
+          try {
+            await this.plugin.copySyncDiagnosticText();
+            new Notice('同步失败诊断信息已复制');
+          } catch (error) {
+            new Notice(`复制同步诊断失败：${error.message || error}`);
+          }
+        }));
 
     const status = containerEl.createDiv({ cls: 'wechat-inbox-sync-status' });
     status.setText('同步后会生成：临时收集/YYYY-MM-DD/文字-143205.md、链接-143210.md、语音-143220.md。语音附件会放入临时收集/语音附件/。');

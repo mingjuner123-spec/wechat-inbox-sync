@@ -129,27 +129,56 @@ if ($OutputDir) {
   New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 }
 
-$TempWav = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N") + ".wav")
+$TempWorkDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N"))
+$ChunkSeconds = 600
 $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
   $OutputPath.Substring(0, $OutputPath.Length - 4)
 } else {
   $OutputPath
 }
-$GeneratedTxt = "$OutputBase.txt"
 $RunLog = Join-Path $Root "transcribe-last.log"
 
 try {
-  $ffmpegOutput = & $Ffmpeg.FullName -hide_banner -loglevel error -y -i $InputPath -ar 16000 -ac 1 -c:a pcm_s16le $TempWav 2>&1 | Out-String
+  New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
+  $ChunkPattern = Join-Path $TempWorkDir "chunk-%03d.wav"
+  $ffmpegOutput = & $Ffmpeg.FullName -hide_banner -loglevel error -y -i $InputPath -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time $ChunkSeconds -reset_timestamps 1 $ChunkPattern 2>&1 | Out-String
   $ffmpegExit = $LASTEXITCODE
-  $whisperOutput = & $Whisper.FullName -m $Model -f $TempWav -l zh -otxt -of $OutputBase 2>&1 | Out-String
-  $whisperExit = $LASTEXITCODE
+  $chunkFiles = @(Get-ChildItem -LiteralPath $TempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
+  $whisperLogs = New-Object System.Collections.Generic.List[string]
+  $mergedText = New-Object System.Collections.Generic.List[string]
+  $whisperExit = 0
+
+  if ($ffmpegExit -eq 0 -and $chunkFiles.Count -eq 0) {
+    throw "ffmpeg did not generate audio chunks."
+  }
+
+  foreach ($chunk in $chunkFiles) {
+    $chunkBase = [System.IO.Path]::Combine($TempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
+    $chunkTxt = "$chunkBase.txt"
+    $chunkOutput = & $Whisper.FullName -m $Model -f $chunk.FullName -l zh -otxt -of $chunkBase 2>&1 | Out-String
+    $currentExit = $LASTEXITCODE
+    $whisperLogs.Add("--- $($chunk.Name) exit=$currentExit ---")
+    $whisperLogs.Add($chunkOutput)
+    if ($currentExit -ne 0) {
+      $whisperExit = $currentExit
+      break
+    }
+    if (Test-Path -LiteralPath $chunkTxt) {
+      $text = (Get-Content -LiteralPath $chunkTxt -Raw).Trim()
+      if ($text) {
+        $mergedText.Add($text)
+      }
+    }
+  }
 
   @(
     "time=$(Get-Date -Format o)"
     "status=pending"
     "inputPath=$InputPath"
     "outputPath=$OutputPath"
-    "tempWav=$TempWav"
+    "tempWorkDir=$TempWorkDir"
+    "chunkSeconds=$ChunkSeconds"
+    "chunkCount=$($chunkFiles.Count)"
     "ffmpeg=$($Ffmpeg.FullName)"
     "ffmpegExit=$ffmpegExit"
     "--- ffmpeg output ---"
@@ -157,7 +186,7 @@ try {
     "whisper=$($Whisper.FullName)"
     "whisperExit=$whisperExit"
     "--- whisper output ---"
-    $whisperOutput
+    ($whisperLogs -join [Environment]::NewLine)
   ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
 
   if ($ffmpegExit -ne 0) {
@@ -167,11 +196,11 @@ try {
     throw "whisper failed with exit code $whisperExit. See $RunLog"
   }
 
-  if (-not (Test-Path -LiteralPath $GeneratedTxt)) {
-    throw "Whisper did not generate transcript: $GeneratedTxt"
+  if ($mergedText.Count -eq 0) {
+    throw "Whisper did not generate transcript text. See $RunLog"
   }
 
-  Move-Item -LiteralPath $GeneratedTxt -Destination $OutputPath -Force
+  ($mergedText -join "`n`n") | Set-Content -LiteralPath $OutputPath -Encoding UTF8
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   Get-Content -LiteralPath $OutputPath -Raw
 } catch {
@@ -182,8 +211,8 @@ try {
   )
   throw
 } finally {
-  if (Test-Path -LiteralPath $TempWav) {
-    Remove-Item -LiteralPath $TempWav -Force
+  if (Test-Path -LiteralPath $TempWorkDir) {
+    Remove-Item -LiteralPath $TempWorkDir -Recurse -Force
   }
 }
 '@ | Set-Content -LiteralPath $transcribeScript -Encoding UTF8

@@ -200,27 +200,65 @@ if [ ! -f "$MODEL" ]; then
 fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
-TEMP_WAV="${TMPDIR:-/tmp}/wechat-inbox-local-asr-$(uuidgen 2>/dev/null || date +%s%N).wav"
+TEMP_WORK_DIR="${TMPDIR:-/tmp}/wechat-inbox-local-asr-$(uuidgen 2>/dev/null || date +%s%N)"
+CHUNK_SECONDS=600
 OUTPUT_BASE="$OUTPUT_PATH"
 case "$OUTPUT_BASE" in
   *.txt) OUTPUT_BASE="${OUTPUT_BASE%.txt}" ;;
 esac
-GENERATED_TXT="$OUTPUT_BASE.txt"
+RUN_LOG="$ROOT/transcribe-last.log"
 
 cleanup() {
-  rm -f "$TEMP_WAV"
+  rm -rf "$TEMP_WORK_DIR"
 }
 trap cleanup EXIT
 
-"$FFMPEG" -hide_banner -loglevel error -y -i "$INPUT_PATH" -ar 16000 -ac 1 -c:a pcm_s16le "$TEMP_WAV"
-"$WHISPER" -m "$MODEL" -f "$TEMP_WAV" -l zh -otxt -of "$OUTPUT_BASE" >/dev/null
+mkdir -p "$TEMP_WORK_DIR"
+{
+  echo "time=$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "status=pending"
+  echo "inputPath=$INPUT_PATH"
+  echo "outputPath=$OUTPUT_PATH"
+  echo "tempWorkDir=$TEMP_WORK_DIR"
+  echo "chunkSeconds=$CHUNK_SECONDS"
+} > "$RUN_LOG"
 
-if [ ! -f "$GENERATED_TXT" ]; then
-  echo "Whisper did not generate transcript: $GENERATED_TXT" >&2
+"$FFMPEG" -hide_banner -loglevel error -y -i "$INPUT_PATH" -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time "$CHUNK_SECONDS" -reset_timestamps 1 "$TEMP_WORK_DIR/chunk-%03d.wav" 2>> "$RUN_LOG"
+
+chunk_count="$(find "$TEMP_WORK_DIR" -name 'chunk-*.wav' -type f | wc -l | tr -d ' ')"
+echo "chunkCount=$chunk_count" >> "$RUN_LOG"
+if [ "$chunk_count" -eq 0 ]; then
+  echo "ffmpeg did not generate audio chunks." >&2
+  echo "status=failed" >> "$RUN_LOG"
   exit 1
 fi
 
-mv -f "$GENERATED_TXT" "$OUTPUT_PATH"
+: > "$OUTPUT_PATH"
+for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
+  chunk_base="${chunk%.wav}"
+  chunk_txt="$chunk_base.txt"
+  {
+    echo "--- $(basename "$chunk") ---"
+  } >> "$RUN_LOG"
+  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
+  if [ ! -f "$chunk_txt" ]; then
+    echo "Whisper did not generate transcript: $chunk_txt" >&2
+    echo "status=failed" >> "$RUN_LOG"
+    exit 1
+  fi
+  if [ -s "$chunk_txt" ]; then
+    cat "$chunk_txt" >> "$OUTPUT_PATH"
+    printf '\n\n' >> "$OUTPUT_PATH"
+  fi
+done
+
+if [ ! -s "$OUTPUT_PATH" ]; then
+  echo "Whisper did not generate transcript text." >&2
+  echo "status=failed" >> "$RUN_LOG"
+  exit 1
+fi
+
+echo "status=success" >> "$RUN_LOG"
 cat "$OUTPUT_PATH"
 SCRIPT
 
