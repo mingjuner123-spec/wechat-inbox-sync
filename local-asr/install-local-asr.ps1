@@ -99,51 +99,29 @@ function Invoke-NativeProcess {
     [Parameter(Mandatory = $true)][string]$FilePath,
     [Parameter(Mandatory = $true)][string[]]$Arguments
   )
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $FilePath
-  $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.CreateNoWindow = $true
-
-  $process = New-Object System.Diagnostics.Process
-  $process.StartInfo = $psi
-  $stdout = New-Object System.Text.StringBuilder
-  $stderr = New-Object System.Text.StringBuilder
-  $outputHandler = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $event)
-    if ($null -ne $event.Data) {
-      [void]$stdout.AppendLine($event.Data)
-    }
-  }
-  $errorHandler = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $event)
-    if ($null -ne $event.Data) {
-      [void]$stderr.AppendLine($event.Data)
-    }
-  }
-
-  $process.add_OutputDataReceived($outputHandler)
-  $process.add_ErrorDataReceived($errorHandler)
-  $exitCode = 1
+  $stdoutPath = Join-Path $TempRoot ("native-stdout-" + [guid]::NewGuid().ToString("N") + ".log")
+  $stderrPath = Join-Path $TempRoot ("native-stderr-" + [guid]::NewGuid().ToString("N") + ".log")
   try {
-    [void]$process.Start()
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
-    $process.WaitForExit()
+    $process = Start-Process `
+      -FilePath $FilePath `
+      -ArgumentList $Arguments `
+      -NoNewWindow `
+      -Wait `
+      -PassThru `
+      -RedirectStandardOutput $stdoutPath `
+      -RedirectStandardError $stderrPath
     $exitCode = $process.ExitCode
+    $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
+    $stderrText = if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
   } finally {
-    $process.remove_OutputDataReceived($outputHandler)
-    $process.remove_ErrorDataReceived($errorHandler)
-    $process.Dispose()
+    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
   }
 
   $combined = @(
     "--- stdout ---"
-    $stdout.ToString().TrimEnd()
+    ([string]$stdoutText).TrimEnd()
     "--- stderr ---"
-    $stderr.ToString().TrimEnd()
+    ([string]$stderrText).TrimEnd()
   ) -join [Environment]::NewLine
   return [PSCustomObject]@{
     ExitCode = $exitCode
@@ -257,8 +235,38 @@ function Get-LatestWhisperWindowsAsset {
   return "https://github.com$($match.Value)"
 }
 
+function Write-TranscribeScript {
+  param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+  $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.ScriptName }
+  if (-not $scriptPath) {
+    throw "Cannot determine installer script path."
+  }
+  $installerSource = [System.IO.File]::ReadAllText($scriptPath)
+  $beginMarker = "# BEGIN_TRANSCRIBE_TEMPLATE"
+  $endMarker = "# END_TRANSCRIBE_TEMPLATE"
+  $beginIndex = $installerSource.LastIndexOf($beginMarker)
+  $endIndex = $installerSource.LastIndexOf($endMarker)
+  if ($beginIndex -lt 0 -or $endIndex -le $beginIndex) {
+    throw "Cannot find embedded transcribe script template."
+  }
+
+  $quoteIndex = $installerSource.IndexOf("@'", $beginIndex)
+  $contentStart = $installerSource.IndexOf("`n", $quoteIndex)
+  $quoteEnd = $installerSource.IndexOf("`n'@", $contentStart)
+  if ($quoteIndex -lt 0 -or $contentStart -lt 0 -or $quoteEnd -le $contentStart) {
+    throw "Cannot parse embedded transcribe script template."
+  }
+
+  $template = $installerSource.Substring($contentStart + 1, $quoteEnd - $contentStart - 1).TrimEnd("`r", "`n")
+  $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
+  Set-Content -LiteralPath $transcribeScript -Value $template -Encoding UTF8
+  Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null
+}
+
 try {
   New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+  Write-TranscribeScript -InstallRoot $InstallRoot
   New-CleanDirectory -Path $TempRoot
 
   $WhisperDir = Join-Path $InstallRoot "whisper"
@@ -268,26 +276,66 @@ try {
   $FfmpegStageDir = Join-Path $TempRoot "ffmpeg"
   New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null
 
-  $whisperZip = Join-Path $TempRoot "whisper.zip"
-  Install-ZipPackage `
-    -Urls @((Get-LatestWhisperWindowsAsset)) `
-    -ZipPath $whisperZip `
-    -StageDir $WhisperStageDir `
-    -MinBytes 1MB `
-    -ExpectedFiles @("whisper-cli.exe", "main.exe") `
-    -Label "whisper.cpp" | Out-Null
+  $installedWhisper = Find-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe")
+  if ($installedWhisper) {
+    try {
+      Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+      Write-Host "Existing whisper.cpp is usable; skipping download."
+    } catch {
+      Write-Host "Existing whisper.cpp is not usable; reinstalling."
+      Write-Host ($_.Exception.Message)
+      $installedWhisper = $null
+    }
+  }
+  if (-not $installedWhisper) {
+    $whisperZip = Join-Path $TempRoot "whisper.zip"
+    Install-ZipPackage `
+      -Urls @((Get-LatestWhisperWindowsAsset)) `
+      -ZipPath $whisperZip `
+      -StageDir $WhisperStageDir `
+      -MinBytes 1MB `
+      -ExpectedFiles @("whisper-cli.exe", "main.exe") `
+      -Label "whisper.cpp" | Out-Null
 
-  $ffmpegZip = Join-Path $TempRoot "ffmpeg.zip"
-  Install-ZipPackage `
-    -Urls @(
-      "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-      "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
-    ) `
-    -ZipPath $ffmpegZip `
-    -StageDir $FfmpegStageDir `
-    -MinBytes 10MB `
-    -ExpectedFiles @("ffmpeg.exe") `
-    -Label "ffmpeg" | Out-Null
+    if (Test-Path -LiteralPath $WhisperDir) {
+      Remove-Item -LiteralPath $WhisperDir -Recurse -Force
+    }
+    Move-Item -LiteralPath $WhisperStageDir -Destination $WhisperDir
+    $installedWhisper = Assert-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
+    Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+  }
+
+  $installedFfmpeg = Find-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe")
+  if ($installedFfmpeg) {
+    try {
+      Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
+      Write-Host "Existing ffmpeg is usable; skipping download."
+    } catch {
+      Write-Host "Existing ffmpeg is not usable; reinstalling."
+      Write-Host ($_.Exception.Message)
+      $installedFfmpeg = $null
+    }
+  }
+  if (-not $installedFfmpeg) {
+    $ffmpegZip = Join-Path $TempRoot "ffmpeg.zip"
+    Install-ZipPackage `
+      -Urls @(
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+      ) `
+      -ZipPath $ffmpegZip `
+      -StageDir $FfmpegStageDir `
+      -MinBytes 10MB `
+      -ExpectedFiles @("ffmpeg.exe") `
+      -Label "ffmpeg" | Out-Null
+
+    if (Test-Path -LiteralPath $FfmpegDir) {
+      Remove-Item -LiteralPath $FfmpegDir -Recurse -Force
+    }
+    Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir
+    $installedFfmpeg = Assert-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe") -Label "ffmpeg"
+    Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
+  }
 
   $modelPath = Join-Path $ModelDir "ggml-small.bin"
   if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {
@@ -300,21 +348,9 @@ try {
     Move-Item -LiteralPath $modelTempPath -Destination $modelPath -Force
   }
 
-  if (Test-Path -LiteralPath $WhisperDir) {
-    Remove-Item -LiteralPath $WhisperDir -Recurse -Force
-  }
-  Move-Item -LiteralPath $WhisperStageDir -Destination $WhisperDir
-  if (Test-Path -LiteralPath $FfmpegDir) {
-    Remove-Item -LiteralPath $FfmpegDir -Recurse -Force
-  }
-  Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir
-
-  $installedWhisper = Assert-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
-  $installedFfmpeg = Assert-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe") -Label "ffmpeg"
   Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
-  Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
-  Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
 
+# BEGIN_TRANSCRIBE_TEMPLATE
   $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
   @'
 param(
@@ -525,6 +561,7 @@ try {
   }
 }
 '@ | Set-Content -LiteralPath $transcribeScript -Encoding UTF8
+# END_TRANSCRIBE_TEMPLATE
 
   Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null
 
