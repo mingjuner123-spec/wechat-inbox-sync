@@ -183,6 +183,74 @@ function readLocalAsrInstallLog(installRoot = getLocalAsrInstallRoot()) {
   }
 }
 
+function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
+  return path.join(installRoot, 'transcribe-last.log');
+}
+
+function buildLocalAsrRunLogText({
+  time = new Date().toISOString(),
+  status = '',
+  command = '',
+  inputPath = '',
+  outputPath = '',
+  stdout = '',
+  stderr = '',
+  error = '',
+} = {}) {
+  return [
+    `time=${time}`,
+    `status=${status}`,
+    `inputPath=${inputPath}`,
+    `outputPath=${outputPath}`,
+    `command=${command}`,
+    '--- stdout ---',
+    String(stdout || ''),
+    '--- stderr ---',
+    String(stderr || ''),
+    '--- error ---',
+    String(error || ''),
+    '',
+  ].join('\n');
+}
+
+function writeLocalAsrRunLog({
+  installRoot = getLocalAsrInstallRoot(),
+  status = '',
+  command = '',
+  inputPath = '',
+  outputPath = '',
+  stdout = '',
+  stderr = '',
+  error = '',
+} = {}) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getLocalAsrRunLogPath(installRoot);
+    fs.writeFileSync(logPath, buildLocalAsrRunLogText({
+      status,
+      command,
+      inputPath,
+      outputPath,
+      stdout,
+      stderr,
+      error,
+    }), 'utf8');
+    return logPath;
+  } catch (writeError) {
+    return '';
+  }
+}
+
+function readLocalAsrRunLog(installRoot = getLocalAsrInstallRoot()) {
+  const logPath = getLocalAsrRunLogPath(installRoot);
+  try {
+    if (!fs.existsSync(logPath)) return '';
+    return fs.readFileSync(logPath, 'utf8').slice(-8000);
+  } catch (error) {
+    return `读取转写日志失败：${error.message || error}`;
+  }
+}
+
 function writeLocalAsrInstallLog({
   installRoot = getLocalAsrInstallRoot(),
   platform = os.platform(),
@@ -946,16 +1014,47 @@ function buildWebpageMarkdownBody(record, title) {
     { dedupe: isFeishuUrl(url), feishuTitle: isFeishuUrl(url) ? pageTitle : '' },
   );
   const status = metadata.conversionStatus || 'pending';
-  const fallback = status === 'failed'
-    ? '网页转 Markdown 失败，已保存原始链接。'
-    : '网页转 Markdown 处理中，已先保存原始链接。';
+  const errorText = metadata.conversionError || '';
 
+  if (snapshot) {
+    return [
+      `原始链接：${url}`,
+      '',
+      '## Markdown 内容',
+      '',
+      snapshot,
+      '',
+    ].join('\n');
+  }
+
+  if (status === 'failed' || status === 'wechat_captcha' || status === 'link_saved') {
+    const reasonLine = status === 'wechat_captcha'
+      ? '原因：微信返回了安全验证页，插件无法绕过'
+      : `原因：${errorText || '网页抓取失败'}`;
+    return [
+      `原始链接：${url}`,
+      '',
+      '> ⚠️ 这篇文章的正文未能自动提取，已为你保存原始链接。',
+      `> ${reasonLine}`,
+      '',
+      '---',
+      '',
+      '**如果这个问题持续出现，请复制以下信息发给张张（微信 heyhmjx），帮助产品改进：**',
+      '',
+      '```',
+      `链接：${url}`,
+      `错误：${errorText || '未知'}`,
+      `时间：${formatCreatedTime(record.createdAt)}`,
+      '```',
+      '',
+    ].join('\n');
+  }
+
+  // pending — 还没处理到
   return [
     `原始链接：${url}`,
     '',
-    '## Markdown 内容',
-    '',
-    snapshot || fallback,
+    '> 网页正文正在处理中，已先保存原始链接，下次同步时会自动更新。',
     '',
   ].join('\n');
 }
@@ -3134,6 +3233,43 @@ function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
 }
 
+function buildSyncProgressMessage({
+  bindingLabel = '',
+  stage = '',
+  current = 0,
+  total = 0,
+  title = '',
+} = {}) {
+  const label = bindingLabel ? `${bindingLabel}：` : '';
+  const countText = total ? `${current}/${total}` : '';
+  const suffix = title ? `：${title}` : '';
+  if (stage === 'fetching') return `${label}正在同步，正在获取待同步内容`;
+  if (stage === 'empty') return `${label}没有需要同步的新内容`;
+  if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
+  if (stage === 'downloading') return `${label}正在下载附件 ${countText}${suffix}`;
+  if (stage === 'transcribing') return `${label}正在转写音视频 ${countText}${suffix}`;
+  if (stage === 'writing') return `${label}正在写入 Obsidian ${countText}${suffix}`;
+  if (stage === 'marking') return `${label}正在更新同步状态 ${countText}${suffix}`;
+  return `${label}正在同步${countText ? ` ${countText}` : ''}${suffix}`;
+}
+
+function getRecordConversionWarning(record) {
+  if (!record) return '';
+  const metadata = record.metadata || {};
+  const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
+  const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
+  if (status === 'failed') {
+    return errorMsg || '网页转写失败（未知原因）';
+  }
+  if (status === 'wechat_captcha') {
+    return '微信安全验证拦截';
+  }
+  if (status === 'link_saved') {
+    return errorMsg || '网页抓取未成功';
+  }
+  return '';
+}
+
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
@@ -3346,6 +3482,27 @@ class WechatObsidianInboxPlugin extends Plugin {
     return response.arrayBuffer;
   }
 
+  showSyncProgress(progress = {}) {
+    const message = buildSyncProgressMessage(progress);
+    if (!message) return;
+    if (!this.syncProgressNotice) {
+      this.syncProgressNotice = new Notice(message, 0);
+      return;
+    }
+    if (typeof this.syncProgressNotice.setMessage === 'function') {
+      this.syncProgressNotice.setMessage(message);
+      return;
+    }
+    new Notice(message, 2500);
+  }
+
+  clearSyncProgressNotice() {
+    if (this.syncProgressNotice && typeof this.syncProgressNotice.hide === 'function') {
+      this.syncProgressNotice.hide();
+    }
+    this.syncProgressNotice = null;
+  }
+
   async unbindBinding(token) {
     const normalizedToken = normalizeBindCodeInput(token);
     if (!normalizedToken) {
@@ -3471,6 +3628,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installRoot = getLocalAsrInstallRoot();
     const status = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
     const logText = readLocalAsrInstallLog(installRoot);
+    const runLogText = readLocalAsrRunLog(installRoot);
     return [
       'WeChat Inbox Sync 本地转写诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
@@ -3486,6 +3644,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       `组件可用：${status.ready ? '是' : '否'}`,
       `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
       `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      '最近转写日志：',
+      runLogText || '暂无 transcribe-last.log',
       '最近安装日志：',
       logText || '暂无 install.log',
     ].join('\n');
@@ -3721,14 +3881,17 @@ class WechatObsidianInboxPlugin extends Plugin {
       : `${commandTemplate} ${quote(inputPath)}`;
 
     try {
-      const { stdout } = await new Promise((resolve, reject) => {
+      const { stdout, stderr } = await new Promise((resolve, reject) => {
         childProcess.exec(command, {
           timeout: 2 * 60 * 60 * 1000,
           maxBuffer: 50 * 1024 * 1024,
           windowsHide: true,
         }, (error, stdout, stderr) => {
           if (error) {
-            reject(new Error(stderr || error.message || String(error)));
+            const wrapped = new Error(stderr || error.message || String(error));
+            wrapped.stdout = stdout;
+            wrapped.stderr = stderr;
+            reject(wrapped);
             return;
           }
           resolve({ stdout, stderr });
@@ -3742,7 +3905,26 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!transcription) {
         throw new Error('本地转写命令没有返回文本');
       }
+      writeLocalAsrRunLog({
+        status: 'success',
+        command,
+        inputPath,
+        outputPath,
+        stdout,
+        stderr,
+      });
       return transcription;
+    } catch (error) {
+      writeLocalAsrRunLog({
+        status: 'failed',
+        command,
+        inputPath,
+        outputPath,
+        stdout: error && error.stdout ? error.stdout : '',
+        stderr: error && error.stderr ? error.stderr : '',
+        error: error && error.message ? error.message : String(error || ''),
+      });
+      throw error;
     } finally {
       [inputPath, outputPath].forEach((filePath) => {
         try {
@@ -3965,7 +4147,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return `${baseTitle}-${String(sequence).padStart(3, '0')}`;
   }
 
-  async writeVoiceAttachment(record, rootDir, dateFolder, title, binding = null) {
+  async writeVoiceAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
     const metadata = record.metadata || {};
     if (!metadata.audioFileID) {
       return record;
@@ -3976,6 +4158,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const audioDayDir = `${audioRootDir}/${dateFolder}`;
     const audioPath = `${audioDayDir}/${audioFileName}`;
     const tempFileURL = await this.requestFileDownloadUrl(metadata.audioFileID, binding);
+    this.showSyncProgress({ ...progress, stage: 'downloading', title });
     const audioBuffer = await this.downloadArrayBuffer(tempFileURL);
 
     if (typeof this.app.vault.adapter.writeBinary !== 'function') {
@@ -3993,6 +4176,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     if (this.settings.aiProvider !== 'off') {
       try {
+        this.showSyncProgress({ ...progress, stage: 'transcribing', title });
         const result = await this.runConfiguredTranscription(tempFileURL);
         nextMetadata = {
           ...nextMetadata,
@@ -4018,7 +4202,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async writeFileAttachment(record, rootDir, dateFolder, title, binding = null) {
+  async writeFileAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
     const metadata = record.metadata || {};
     if (!metadata.fileID) {
       return record;
@@ -4032,6 +4216,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const fileDayDir = `${fileRootDir}/${dateFolder}`;
       const filePath = `${fileDayDir}/${title}-${safeFileName}`;
       const tempFileURL = await this.requestFileDownloadUrl(metadata.fileID, binding);
+      this.showSyncProgress({ ...progress, stage: 'downloading', title: fileName });
       const fileBuffer = await this.downloadArrayBuffer(tempFileURL);
 
       if (typeof this.app.vault.adapter.writeBinary !== 'function') {
@@ -4058,6 +4243,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.convertedMarkdown = extractDocxMarkdown(nodeBuffer);
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'pdf') {
+          this.showSyncProgress({ ...progress, stage: 'processing', title: fileName });
           nextMetadata.convertedMarkdown = extractPdfMarkdown(nodeBuffer);
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'doc') {
@@ -4396,8 +4582,20 @@ class WechatObsidianInboxPlugin extends Plugin {
         };
       }
 
-      const response = await requestUrl({ url, method: 'GET' });
-      const html = response.text || '';
+      let html;
+      let usedFallback = false;
+      try {
+        const response = await requestUrl({ url, method: 'GET' });
+        html = response.text || '';
+      } catch (requestError) {
+        // Obsidian requestUrl can fail on some networks; fall back to Node.js HTTP.
+        try {
+          html = await downloadTextViaNode(url);
+          usedFallback = true;
+        } catch (fallbackError) {
+          throw new Error(`网页抓取失败（Obsidian 请求 + Node.js 降级均失败）：${requestError.message || requestError}；降级错误：${fallbackError.message || fallbackError}`);
+        }
+      }
       if (isWechatArticleUrl(url) && (isWechatCaptchaUrl(url) || isWechatCaptchaHtml(html))) {
         const targetUrl = extractWechatCaptchaTargetUrl(url);
         return {
@@ -4410,10 +4608,16 @@ class WechatObsidianInboxPlugin extends Plugin {
             markdown: buildWechatCaptchaMarkdown(url, html),
             conversionStatus: 'wechat_captcha',
             conversionError: '微信返回公众号文章安全验证页',
+            conversionNote: usedFallback ? '已通过备用通道抓取' : '',
           },
         };
       }
-      const markdown = htmlToMarkdown(html);
+      let markdown;
+      try {
+        markdown = htmlToMarkdown(html);
+      } catch (convertError) {
+        throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
+      }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       return {
         ...record,
@@ -4422,6 +4626,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           title: pageTitle || metadata.title || '',
           markdown,
           conversionStatus: 'success',
+          conversionNote: usedFallback ? '已通过备用通道抓取' : '',
         },
       };
     } catch (error) {
@@ -4478,11 +4683,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
 
-  async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false) {
+  async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const dateFolder = getDateFolderName(record.createdAt);
     const rootDir = this.settings.inboxDir;
     const dayDir = `${rootDir}/${dateFolder}`;
     const bindingLabel = shouldPrefixTitle && binding ? binding.label : '';
+    const progressTitle = buildRecordTitleBase(record);
+    this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
 
     await this.ensureFolder(rootDir);
     await this.ensureFolder(dayDir);
@@ -4491,35 +4698,54 @@ class WechatObsidianInboxPlugin extends Plugin {
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
     if (recordType === 'voice') {
-      recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding);
+      recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === 'file') {
-      recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding);
+      recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === 'webpage') {
+      this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
       recordForMarkdown = await this.hydrateWebpageMarkdown(record, rootDir, dateFolder, title);
       title = await this.nextRecordTitle(dayDir, recordForMarkdown, bindingLabel);
     }
     const markdown = buildMarkdownForRecord({ record: recordForMarkdown, title, syncedAt });
     const filePath = `${dayDir}/${title}.md`;
+    this.showSyncProgress({ ...progress, stage: 'writing', title });
     await this.app.vault.adapter.write(filePath, markdown);
 
     return {
       recordId: getRecordId(record),
       filePath,
       title,
+      conversionWarning: getRecordConversionWarning(recordForMarkdown),
     };
   }
 
   async syncBinding(binding, shouldPrefixTitle) {
+    const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
+    this.showSyncProgress({ bindingLabel, stage: 'fetching' });
     const payload = await this.requestJson('/records?status=pending', 'GET', {}, binding);
     const records = payload.data || [];
     const written = [];
     const failed = [];
+    const conversionWarnings = [];
     const syncedAt = new Date().toISOString();
+    if (!records.length) {
+      this.showSyncProgress({ bindingLabel, stage: 'empty' });
+    }
 
-    for (const record of records) {
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      const progress = {
+        bindingLabel,
+        current: index + 1,
+        total: records.length,
+      };
       try {
-        const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle);
+        const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, progress);
         written.push(item);
+        if (item.conversionWarning) {
+          conversionWarnings.push(item.conversionWarning);
+        }
+        this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
         await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
       } catch (error) {
         failed.push({
@@ -4529,7 +4755,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed };
+    return { written, failed, conversionWarnings };
   }
 
   async syncInbox(showNotice = true) {
@@ -4544,12 +4770,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       const shouldPrefixTitle = bindings.length > 1;
       const written = [];
       const failed = [];
+      const conversionWarnings = [];
+      this.syncProgressNotice = null;
+      this.showSyncProgress({ stage: 'fetching' });
 
       for (const binding of bindings) {
         try {
           const result = await this.syncBinding(binding, shouldPrefixTitle);
           written.push(...result.written);
           failed.push(...result.failed);
+          if (result.conversionWarnings && result.conversionWarnings.length) {
+            conversionWarnings.push(...result.conversionWarnings);
+          }
         } catch (error) {
           const message = error.message || String(error);
           if (isBindingInvalidMessage(message)) {
@@ -4563,12 +4795,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (showNotice || written.length) {
-        const message = failed.length
-          ? `${buildSyncNotice(written.length)}，${failed.length} 条失败：${failed[0].message}`
-          : buildSyncNotice(written.length);
+        let message = buildSyncNotice(written.length);
+        if (conversionWarnings.length) {
+          message += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
+        }
+        if (failed.length) {
+          message += `，${failed.length} 条失败：${failed[0].message}`;
+        }
         new Notice(message);
       }
+      this.clearSyncProgressNotice();
     } catch (error) {
+      this.clearSyncProgressNotice();
       new Notice(`同步失败：${error.message || error}`);
     }
   }
@@ -4965,6 +5203,7 @@ WechatObsidianInboxPlugin.__test = {
   extractBilibiliAudioUrlFromPlayurlPayload,
   buildAudioTranscriptMarkdown,
   buildTranscriptOnlyMetadata,
+  buildSyncProgressMessage,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
   isRemoteAsrDownloadFailure,
@@ -4972,6 +5211,9 @@ WechatObsidianInboxPlugin.__test = {
   getDefaultLocalTranscriptionCommand,
   getLocalAsrInstallRoot,
   getLocalAsrInstallStatus,
+  getLocalAsrRunLogPath,
+  buildLocalAsrRunLogText,
+  readLocalAsrRunLog,
   buildLocalAsrInstallCommand,
   downloadTextViaNode,
   getSocialRequestHeaders,

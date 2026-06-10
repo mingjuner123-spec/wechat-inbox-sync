@@ -136,17 +136,51 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
   $OutputPath
 }
 $GeneratedTxt = "$OutputBase.txt"
+$RunLog = Join-Path $Root "transcribe-last.log"
 
 try {
-  & $Ffmpeg.FullName -hide_banner -loglevel error -y -i $InputPath -ar 16000 -ac 1 -c:a pcm_s16le $TempWav
-  & $Whisper.FullName -m $Model -f $TempWav -l zh -otxt -of $OutputBase | Out-Null
+  $ffmpegOutput = & $Ffmpeg.FullName -hide_banner -loglevel error -y -i $InputPath -ar 16000 -ac 1 -c:a pcm_s16le $TempWav 2>&1 | Out-String
+  $ffmpegExit = $LASTEXITCODE
+  $whisperOutput = & $Whisper.FullName -m $Model -f $TempWav -l zh -otxt -of $OutputBase 2>&1 | Out-String
+  $whisperExit = $LASTEXITCODE
+
+  @(
+    "time=$(Get-Date -Format o)"
+    "status=pending"
+    "inputPath=$InputPath"
+    "outputPath=$OutputPath"
+    "tempWav=$TempWav"
+    "ffmpeg=$($Ffmpeg.FullName)"
+    "ffmpegExit=$ffmpegExit"
+    "--- ffmpeg output ---"
+    $ffmpegOutput
+    "whisper=$($Whisper.FullName)"
+    "whisperExit=$whisperExit"
+    "--- whisper output ---"
+    $whisperOutput
+  ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
+
+  if ($ffmpegExit -ne 0) {
+    throw "ffmpeg failed with exit code $ffmpegExit. See $RunLog"
+  }
+  if ($whisperExit -ne 0) {
+    throw "whisper failed with exit code $whisperExit. See $RunLog"
+  }
 
   if (-not (Test-Path -LiteralPath $GeneratedTxt)) {
     throw "Whisper did not generate transcript: $GeneratedTxt"
   }
 
   Move-Item -LiteralPath $GeneratedTxt -Destination $OutputPath -Force
+  Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   Get-Content -LiteralPath $OutputPath -Raw
+} catch {
+  Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value @(
+    "status=failed"
+    "--- error ---"
+    ($_ | Out-String)
+  )
+  throw
 } finally {
   if (Test-Path -LiteralPath $TempWav) {
     Remove-Item -LiteralPath $TempWav -Force
