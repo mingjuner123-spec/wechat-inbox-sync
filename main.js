@@ -3781,23 +3781,44 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async getAvailableLocalAsrInstallerPath() {
     const installerPath = this.getBundledLocalAsrInstallerPath();
-    if (fs.existsSync(installerPath)) return installerPath;
-
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
-    let scriptText = '';
+
+    const isInstallerCurrent = (scriptText) => {
+      const source = String(scriptText || '');
+      if (!source.includes('.wechat-inbox-local-asr')) return false;
+      if (isMac) {
+        return source.includes('CHUNK_SECONDS=600') && source.includes('transcribe-last.log');
+      }
+      return source.includes('Invoke-NativeProcess')
+        && source.includes('System.Text.UTF8Encoding')
+        && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
+        && source.includes('WriteAllText($OutputPath');
+    };
+
     try {
-      const response = await requestUrl({ url: installerUrl, method: 'GET' });
-      scriptText = response.text || '';
-    } catch (error) {
-      scriptText = await downloadTextViaNode(installerUrl);
+      let scriptText = '';
+      try {
+        const response = await requestUrl({ url: installerUrl, method: 'GET' });
+        scriptText = response.text || '';
+      } catch (error) {
+        scriptText = await downloadTextViaNode(installerUrl);
+      }
+      if (!isInstallerCurrent(scriptText)) {
+        throw new Error('Local ASR installer download returned outdated or invalid content');
+      }
+      fs.writeFileSync(downloadedPath, scriptText, 'utf8');
+      return downloadedPath;
+    } catch (downloadError) {
+      if (fs.existsSync(installerPath)) {
+        const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
+        if (isInstallerCurrent(bundledScriptText)) {
+          return installerPath;
+        }
+      }
+      throw new Error(`无法下载最新本地转写安装器：${downloadError.message || downloadError}`);
     }
-    if (!scriptText || !scriptText.includes('.wechat-inbox-local-asr')) {
-      throw new Error('Local ASR installer download returned invalid content');
-    }
-    fs.writeFileSync(downloadedPath, scriptText, 'utf8');
-    return downloadedPath;
   }
 
   getLocalAsrInstallStatus() {
