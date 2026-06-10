@@ -359,6 +359,18 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
+function ConvertTo-NativeArgument {
+  param([AllowNull()][string]$Value)
+  $text = [string]$Value
+  if ($text -eq "") {
+    return '""'
+  }
+  if ($text -notmatch '[\s"]') {
+    return $text
+  }
+  return '"' + ($text -replace '"', '\"') + '"'
+}
+
 function Invoke-NativeProcess {
   param(
     [Parameter(Mandatory = $true)][string]$FilePath,
