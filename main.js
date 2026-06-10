@@ -126,18 +126,62 @@ function joinLocalAsrPath(platform, ...segments) {
 }
 
 function hasFileRecursive(rootDir, predicate) {
+  return Boolean(findFileRecursive(rootDir, predicate));
+}
+
+function findFileRecursive(rootDir, predicate) {
   try {
-    if (!fs.existsSync(rootDir)) return false;
+    if (!fs.existsSync(rootDir)) return '';
     const entries = fs.readdirSync(rootDir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(rootDir, entry.name);
-      if (entry.isFile() && predicate(fullPath, entry.name)) return true;
-      if (entry.isDirectory() && hasFileRecursive(fullPath, predicate)) return true;
+      if (entry.isFile() && predicate(fullPath, entry.name)) return fullPath;
+      if (entry.isDirectory()) {
+        const found = findFileRecursive(fullPath, predicate);
+        if (found) return found;
+      }
     }
   } catch (error) {
-    return false;
+    return '';
   }
-  return false;
+  return '';
+}
+
+function findFirstExistingPath(candidates, exists) {
+  return candidates.find((candidate) => candidate && exists(candidate)) || '';
+}
+
+function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
+  try {
+    if (!scriptPath || !fileSystem.existsSync(scriptPath)) {
+      return {
+        scriptVersion: 'missing',
+        scriptOutdated: true,
+      };
+    }
+    const source = String(fileSystem.readFileSync(scriptPath, 'utf8') || '');
+    if (source.includes('GeneratedTxt')) {
+      return {
+        scriptVersion: 'legacy-generated-txt',
+        scriptOutdated: true,
+      };
+    }
+    if (source.includes('transcribe-last.log') && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))) {
+      return {
+        scriptVersion: 'chunked-run-log',
+        scriptOutdated: false,
+      };
+    }
+    return {
+      scriptVersion: 'unknown',
+      scriptOutdated: false,
+    };
+  } catch (error) {
+    return {
+      scriptVersion: 'unknown',
+      scriptOutdated: false,
+    };
+  }
 }
 
 function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
@@ -145,27 +189,51 @@ function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists
   const transcribeScript = joinLocalAsrPath(platform, installRoot, isMac ? 'transcribe.sh' : 'transcribe.ps1');
   const modelPath = joinLocalAsrPath(platform, installRoot, 'models', 'ggml-small.bin');
   const hasTranscribeScript = exists(transcribeScript);
+  const scriptVersionStatus = exists === fs.existsSync
+    ? getLocalAsrScriptVersionStatus(transcribeScript)
+    : { scriptVersion: 'unknown', scriptOutdated: false };
   const hasModel = exists(modelPath);
   const whisperNames = isMac ? ['whisper-cli', 'main'] : ['whisper-cli.exe', 'main.exe'];
   const ffmpegName = isMac ? 'ffmpeg' : 'ffmpeg.exe';
-  const hasWhisper = exists(joinLocalAsrPath(platform, installRoot, 'bin', 'whisper-cli'))
-    || exists(joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[0]))
-    || exists(joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[1]))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'whisper'), (filePath, name) => whisperNames.includes(name)))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => whisperNames.includes(name)));
-  const hasFfmpeg = exists(joinLocalAsrPath(platform, installRoot, 'bin', 'ffmpeg'))
-    || exists(joinLocalAsrPath(platform, installRoot, 'ffmpeg', ffmpegName))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'ffmpeg'), (filePath, name) => name === ffmpegName))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => name === ffmpegName));
+  const whisperCandidates = [
+    joinLocalAsrPath(platform, installRoot, 'bin', whisperNames[0]),
+    joinLocalAsrPath(platform, installRoot, 'bin', whisperNames[1]),
+    joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[0]),
+    joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[1]),
+  ];
+  const ffmpegCandidates = [
+    joinLocalAsrPath(platform, installRoot, 'bin', ffmpegName),
+    joinLocalAsrPath(platform, installRoot, 'ffmpeg', ffmpegName),
+  ];
+  const whisperPath = findFirstExistingPath(whisperCandidates, exists)
+    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'whisper'), (filePath, name) => whisperNames.includes(name)) : '')
+    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => whisperNames.includes(name)) : '');
+  const ffmpegPath = findFirstExistingPath(ffmpegCandidates, exists)
+    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'ffmpeg'), (filePath, name) => name === ffmpegName) : '')
+    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => name === ffmpegName) : '');
+  const hasWhisper = Boolean(whisperPath);
+  const hasFfmpeg = Boolean(ffmpegPath);
+  const missingReasons = [];
+  if (!hasTranscribeScript) missingReasons.push('转写脚本未找到，请重新安装/更新本地转写组件');
+  if (scriptVersionStatus.scriptOutdated) missingReasons.push('转写脚本过旧，请重新安装/更新本地转写组件');
+  if (!hasWhisper) missingReasons.push('whisper 未找到，请重新安装/更新本地转写组件');
+  if (!hasFfmpeg) missingReasons.push('ffmpeg 未找到，请重新安装/更新本地转写组件');
+  if (!hasModel) missingReasons.push('模型文件未找到，请重新安装/更新本地转写组件');
 
   return {
     installRoot,
     transcribeScript,
+    whisperPath,
+    ffmpegPath,
+    modelPath,
     hasTranscribeScript,
+    scriptVersion: scriptVersionStatus.scriptVersion,
+    scriptOutdated: scriptVersionStatus.scriptOutdated,
     hasWhisper,
     hasFfmpeg,
     hasModel,
-    ready: hasTranscribeScript && hasWhisper && hasFfmpeg && hasModel,
+    missingReasons,
+    ready: hasTranscribeScript && !scriptVersionStatus.scriptOutdated && hasWhisper && hasFfmpeg && hasModel,
   };
 }
 
@@ -187,6 +255,14 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
   return path.join(installRoot, 'transcribe-last.log');
 }
 
+function explainLocalAsrExitCode(value) {
+  const text = String(value || '');
+  if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
+    return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
+  }
+  return '';
+}
+
 function getSyncDiagnosticLogPath(installRoot = getLocalAsrInstallRoot()) {
   return path.join(installRoot, 'sync-last.log');
 }
@@ -201,6 +277,7 @@ function buildLocalAsrRunLogText({
   stderr = '',
   error = '',
 } = {}) {
+  const explanation = explainLocalAsrExitCode(error) || explainLocalAsrExitCode(stderr) || explainLocalAsrExitCode(stdout);
   return [
     `time=${time}`,
     `status=${status}`,
@@ -213,8 +290,9 @@ function buildLocalAsrRunLogText({
     String(stderr || ''),
     '--- error ---',
     String(error || ''),
+    explanation ? `--- 可能原因 ---\n${explanation}` : '',
     '',
-  ].join('\n');
+  ].filter((line) => line !== '').join('\n');
 }
 
 function writeLocalAsrRunLog({
@@ -3711,10 +3789,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       `安装目录：${status.installRoot}`,
       `转写脚本：${status.transcribeScript}`,
       `脚本存在：${status.hasTranscribeScript ? '是' : '否'}`,
+      `脚本版本：${status.scriptOutdated ? '过旧，请重新安装本地转写组件' : status.scriptVersion}`,
+      `脚本过旧：${status.scriptOutdated ? '是' : '否'}`,
       `whisper：${status.hasWhisper ? '是' : '否'}`,
+      `whisper 路径：${status.whisperPath || '未找到'}`,
       `ffmpeg：${status.hasFfmpeg ? '是' : '否'}`,
+      `ffmpeg 路径：${status.ffmpegPath || '未找到'}`,
       `模型文件：${status.hasModel ? '是' : '否'}`,
+      `模型路径：${status.modelPath}`,
       `组件可用：${status.ready ? '是' : '否'}`,
+      `缺失项：${status.missingReasons && status.missingReasons.length ? status.missingReasons.join('；') : '无'}`,
       `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
       `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
       '最近同步状态：',
@@ -3861,6 +3945,23 @@ class WechatObsidianInboxPlugin extends Plugin {
         resolve({ stdout, stderr });
       });
     });
+    const installStatus = this.getLocalAsrInstallStatus();
+    if (!installStatus.ready) {
+      const missingText = installStatus.missingReasons && installStatus.missingReasons.length
+        ? installStatus.missingReasons.join('；')
+        : '本地转写组件不完整';
+      const logPath = writeLocalAsrInstallLog({
+        installRoot,
+        platform,
+        installerPath,
+        command,
+        stdout: `whisper=${installStatus.whisperPath || 'missing'}\nffmpeg=${installStatus.ffmpegPath || 'missing'}\nmodel=${installStatus.hasModel ? installStatus.modelPath : 'missing'}`,
+        stderr: missingText,
+        error: missingText,
+        status: 'failed',
+      });
+      throw new Error(`本地转写组件安装不完整：${missingText}${logPath ? `\n安装日志：${logPath}` : ''}`);
+    }
     await this.saveSettings({
       ...this.settings,
       aiProvider: 'local',
@@ -3952,6 +4053,10 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async runLocalTranscription(audioUrl) {
     await this.ensureLocalTranscriptionAccess();
+    const installStatus = this.getLocalAsrInstallStatus();
+    if (installStatus.scriptOutdated) {
+      throw new Error('本地转写脚本过旧：请在插件设置里重新点击“安装/更新本地转写组件”，安装完成后再同步。');
+    }
     const commandTemplate = this.getEffectiveLocalTranscriptionCommand();
     if (!commandTemplate) {
       throw new Error('未配置本地转写命令');
@@ -5347,6 +5452,8 @@ WechatObsidianInboxPlugin.__test = {
   getDefaultLocalTranscriptionCommand,
   getLocalAsrInstallRoot,
   getLocalAsrInstallStatus,
+  getLocalAsrScriptVersionStatus,
+  explainLocalAsrExitCode,
   getLocalAsrRunLogPath,
   buildLocalAsrRunLogText,
   readLocalAsrRunLog,

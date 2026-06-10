@@ -1,4 +1,5 @@
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 $InstallRoot = Join-Path $env:USERPROFILE ".wechat-inbox-local-asr"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
@@ -26,11 +27,128 @@ function Download-File {
     if (-not $curl) {
       throw
     }
-    & $curl.Source -L --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $OutFile $Url
+    & $curl.Source -L --fail --silent --show-error --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $OutFile $Url
     if ($LASTEXITCODE -ne 0) {
       throw "curl download failed with exit code $LASTEXITCODE"
     }
   }
+}
+
+function Assert-DownloadedFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][Int64]$MinBytes,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  if (-not (Test-Path -LiteralPath $Path)) {
+    throw "$Label download failed: file not found at $Path"
+  }
+  $item = Get-Item -LiteralPath $Path
+  if ($item.Length -lt $MinBytes) {
+    throw "$Label download looks incomplete: $($item.Length) bytes at $Path. Please retry with a more stable network."
+  }
+  return $item
+}
+
+function Find-InstalledFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string[]]$Names
+  )
+  if (-not (Test-Path -LiteralPath $Root)) {
+    return $null
+  }
+  return Get-ChildItem -LiteralPath $Root -Recurse -File |
+    Where-Object { $Names -contains $_.Name } |
+    Sort-Object @{ Expression = { [array]::IndexOf($Names, $_.Name) } }, FullName |
+    Select-Object -First 1
+}
+
+function Assert-InstalledFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string[]]$Names,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $found = Find-InstalledFile -Root $Root -Names $Names
+  if (-not $found) {
+    throw "$Label install validation failed: cannot find $($Names -join ' or ') under $Root"
+  }
+  return $found
+}
+
+function Convert-ExitCodeToHex {
+  param([Parameter(Mandatory = $true)][int]$ExitCode)
+  return "0x{0:X8}" -f ([uint32]($ExitCode -band 0xffffffff))
+}
+
+function Install-VcRuntime {
+  $vcInstaller = Join-Path $TempRoot "vc_redist.x64.exe"
+  Write-Host "Installing Microsoft Visual C++ Runtime for whisper.cpp."
+  Download-File -Url "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcInstaller
+  Assert-DownloadedFile -Path $vcInstaller -MinBytes 1MB -Label "Microsoft Visual C++ Runtime" | Out-Null
+  & $vcInstaller /install /quiet /norestart
+  $exit = $LASTEXITCODE
+  if ($exit -notin @(0, 3010)) {
+    throw "Microsoft Visual C++ Runtime install failed with exit code $exit"
+  }
+}
+
+function Assert-ExecutableRuns {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string[]]$Arguments,
+    [Parameter(Mandatory = $true)][string]$Label,
+    [switch]$TryInstallVcRuntime
+  )
+  $output = & $Path @Arguments 2>&1 | Out-String
+  $exit = $LASTEXITCODE
+  if ($exit -eq 0) {
+    return $output
+  }
+
+  $hex = Convert-ExitCodeToHex -ExitCode $exit
+  if ($TryInstallVcRuntime -and ($exit -eq -1073741515 -or $hex -eq "0xC0000135")) {
+    Write-Host "$Label failed to start with $exit/$hex. This usually means the Windows VC++ Runtime is missing."
+    Install-VcRuntime
+    $output = & $Path @Arguments 2>&1 | Out-String
+    $exit = $LASTEXITCODE
+    if ($exit -eq 0) {
+      return $output
+    }
+    $hex = Convert-ExitCodeToHex -ExitCode $exit
+  }
+
+  throw "$Label runtime validation failed with exit code $exit/$hex. $output"
+}
+
+function Install-ZipPackage {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Urls,
+    [Parameter(Mandatory = $true)][string]$ZipPath,
+    [Parameter(Mandatory = $true)][string]$StageDir,
+    [Parameter(Mandatory = $true)][Int64]$MinBytes,
+    [Parameter(Mandatory = $true)][string[]]$ExpectedFiles,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $lastError = $null
+  foreach ($url in $Urls) {
+    try {
+      if (Test-Path -LiteralPath $ZipPath) {
+        Remove-Item -LiteralPath $ZipPath -Force
+      }
+      New-CleanDirectory -Path $StageDir
+      Download-File -Url $url -OutFile $ZipPath
+      Assert-DownloadedFile -Path $ZipPath -MinBytes $MinBytes -Label $Label | Out-Null
+      Expand-Archive -LiteralPath $ZipPath -DestinationPath $StageDir -Force
+      return Assert-InstalledFile -Root $StageDir -Names $ExpectedFiles -Label $Label
+    } catch {
+      $lastError = $_
+      Write-Host "$Label source failed: $url"
+      Write-Host ($_.Exception.Message)
+    }
+  }
+  throw $lastError
 }
 
 function Get-LatestWhisperWindowsAsset {
@@ -75,25 +193,56 @@ try {
   $WhisperDir = Join-Path $InstallRoot "whisper"
   $FfmpegDir = Join-Path $InstallRoot "ffmpeg"
   $ModelDir = Join-Path $InstallRoot "models"
-  New-CleanDirectory -Path $WhisperDir
-  New-CleanDirectory -Path $FfmpegDir
+  $WhisperStageDir = Join-Path $TempRoot "whisper"
+  $FfmpegStageDir = Join-Path $TempRoot "ffmpeg"
   New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null
 
   $whisperZip = Join-Path $TempRoot "whisper.zip"
-  Download-File -Url (Get-LatestWhisperWindowsAsset) -OutFile $whisperZip
-  Expand-Archive -LiteralPath $whisperZip -DestinationPath $WhisperDir -Force
+  Install-ZipPackage `
+    -Urls @((Get-LatestWhisperWindowsAsset)) `
+    -ZipPath $whisperZip `
+    -StageDir $WhisperStageDir `
+    -MinBytes 1MB `
+    -ExpectedFiles @("whisper-cli.exe", "main.exe") `
+    -Label "whisper.cpp" | Out-Null
 
   $ffmpegZip = Join-Path $TempRoot "ffmpeg.zip"
-  Download-File -Url "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $ffmpegZip
-  Expand-Archive -LiteralPath $ffmpegZip -DestinationPath $FfmpegDir -Force
+  Install-ZipPackage `
+    -Urls @(
+      "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+    ) `
+    -ZipPath $ffmpegZip `
+    -StageDir $FfmpegStageDir `
+    -MinBytes 10MB `
+    -ExpectedFiles @("ffmpeg.exe") `
+    -Label "ffmpeg" | Out-Null
 
   $modelPath = Join-Path $ModelDir "ggml-small.bin"
   if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {
     Remove-Item -LiteralPath $modelPath -Force
   }
   if (-not (Test-Path -LiteralPath $modelPath)) {
-    Download-File -Url "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" -OutFile $modelPath
+    $modelTempPath = Join-Path $TempRoot "ggml-small.bin"
+    Download-File -Url "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" -OutFile $modelTempPath
+    Assert-DownloadedFile -Path $modelTempPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Move-Item -LiteralPath $modelTempPath -Destination $modelPath -Force
   }
+
+  if (Test-Path -LiteralPath $WhisperDir) {
+    Remove-Item -LiteralPath $WhisperDir -Recurse -Force
+  }
+  Move-Item -LiteralPath $WhisperStageDir -Destination $WhisperDir
+  if (Test-Path -LiteralPath $FfmpegDir) {
+    Remove-Item -LiteralPath $FfmpegDir -Recurse -Force
+  }
+  Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir
+
+  $installedWhisper = Assert-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
+  $installedFfmpeg = Assert-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe") -Label "ffmpeg"
+  Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+  Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+  Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
 
   $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
   @'
@@ -217,7 +366,13 @@ try {
 }
 '@ | Set-Content -LiteralPath $transcribeScript -Encoding UTF8
 
+  Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null
+
   Write-Host ""
+  Write-Host "Local ASR install validation passed."
+  Write-Host "whisper: $($installedWhisper.FullName)"
+  Write-Host "ffmpeg: $($installedFfmpeg.FullName)"
+  Write-Host "model: $modelPath"
   Write-Host "Local ASR installed to: $InstallRoot"
   Write-Host "Use this Obsidian plugin command:"
   Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"`$env:USERPROFILE\.wechat-inbox-local-asr\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
