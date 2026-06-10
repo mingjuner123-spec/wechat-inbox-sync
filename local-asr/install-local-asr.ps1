@@ -286,6 +286,7 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
   $OutputPath
 }
 $RunLog = Join-Path $Root "transcribe-last.log"
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 function ConvertTo-NativeArgument {
   param([AllowNull()][string]$Value)
@@ -400,7 +401,7 @@ try {
       break
     }
     if (Test-Path -LiteralPath $chunkTxt) {
-      $text = (Get-Content -LiteralPath $chunkTxt -Raw).Trim()
+      $text = ([System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)).Trim()
       if ($text) {
         $mergedText.Add($text)
       }
@@ -436,9 +437,10 @@ try {
     throw "Whisper did not generate transcript text. See $RunLog"
   }
 
-  ($mergedText -join "`n`n") | Set-Content -LiteralPath $OutputPath -Encoding UTF8
+  $finalText = $mergedText -join "`n`n"
+  [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
-  Get-Content -LiteralPath $OutputPath -Raw
+  [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)
 } catch {
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value @(
     "status=failed"
