@@ -82,6 +82,75 @@ function Convert-ExitCodeToHex {
   return "0x{0:X8}" -f ([uint32]($ExitCode -band 0xffffffff))
 }
 
+function ConvertTo-NativeArgument {
+  param([AllowNull()][string]$Value)
+  $text = [string]$Value
+  if ($text -eq "") {
+    return '""'
+  }
+  if ($text -notmatch '[\s"]') {
+    return $text
+  }
+  return '"' + ($text -replace '"', '\"') + '"'
+}
+
+function Invoke-NativeProcess {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.CreateNoWindow = $true
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $psi
+  $stdout = New-Object System.Text.StringBuilder
+  $stderr = New-Object System.Text.StringBuilder
+  $outputHandler = [System.Diagnostics.DataReceivedEventHandler]{
+    param($sender, $event)
+    if ($null -ne $event.Data) {
+      [void]$stdout.AppendLine($event.Data)
+    }
+  }
+  $errorHandler = [System.Diagnostics.DataReceivedEventHandler]{
+    param($sender, $event)
+    if ($null -ne $event.Data) {
+      [void]$stderr.AppendLine($event.Data)
+    }
+  }
+
+  $process.add_OutputDataReceived($outputHandler)
+  $process.add_ErrorDataReceived($errorHandler)
+  $exitCode = 1
+  try {
+    [void]$process.Start()
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+  } finally {
+    $process.remove_OutputDataReceived($outputHandler)
+    $process.remove_ErrorDataReceived($errorHandler)
+    $process.Dispose()
+  }
+
+  $combined = @(
+    "--- stdout ---"
+    $stdout.ToString().TrimEnd()
+    "--- stderr ---"
+    $stderr.ToString().TrimEnd()
+  ) -join [Environment]::NewLine
+  return [PSCustomObject]@{
+    ExitCode = $exitCode
+    Output = $combined
+  }
+}
+
 function Install-VcRuntime {
   $vcInstaller = Join-Path $TempRoot "vc_redist.x64.exe"
   Write-Host "Installing Microsoft Visual C++ Runtime for whisper.cpp."
@@ -101,8 +170,9 @@ function Assert-ExecutableRuns {
     [Parameter(Mandatory = $true)][string]$Label,
     [switch]$TryInstallVcRuntime
   )
-  $output = & $Path @Arguments 2>&1 | Out-String
-  $exit = $LASTEXITCODE
+  $result = Invoke-NativeProcess -FilePath $Path -Arguments $Arguments
+  $output = $result.Output
+  $exit = $result.ExitCode
   if ($exit -eq 0) {
     return $output
   }
@@ -111,8 +181,9 @@ function Assert-ExecutableRuns {
   if ($TryInstallVcRuntime -and ($exit -eq -1073741515 -or $hex -eq "0xC0000135")) {
     Write-Host "$Label failed to start with $exit/$hex. This usually means the Windows VC++ Runtime is missing."
     Install-VcRuntime
-    $output = & $Path @Arguments 2>&1 | Out-String
-    $exit = $LASTEXITCODE
+    $result = Invoke-NativeProcess -FilePath $Path -Arguments $Arguments
+    $output = $result.Output
+    $exit = $result.ExitCode
     if ($exit -eq 0) {
       return $output
     }
@@ -287,18 +358,6 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 }
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-
-function ConvertTo-NativeArgument {
-  param([AllowNull()][string]$Value)
-  $text = [string]$Value
-  if ($text -eq "") {
-    return '""'
-  }
-  if ($text -notmatch '[\s"]') {
-    return $text
-  }
-  return '"' + ($text -replace '"', '\"') + '"'
-}
 
 function Invoke-NativeProcess {
   param(
