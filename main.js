@@ -138,6 +138,31 @@ function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env)
   return path.join(os.homedir(), LOCAL_ASR_HOME);
 }
 
+function hasLocalAsrNativeCrash(runLogText) {
+  const text = String(runLogText || '');
+  return text.includes('0xC0000409')
+    || text.includes('-1073740791')
+    || /whisper\.cpp[^\n]*崩溃/.test(text);
+}
+
+function getLocalAsrRepairAction({
+  platform = os.platform(),
+  installRoot = '',
+  status = {},
+  runLogText = '',
+} = {}) {
+  if (
+    getLocalAsrPlatform(platform) === 'win32'
+    && (!isAsciiPath(installRoot) || hasLocalAsrNativeCrash(runLogText))
+  ) {
+    return 'safe';
+  }
+  if (!status || !status.ready || status.scriptOutdated) {
+    return 'default';
+  }
+  return 'none';
+}
+
 function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = 'default', platform = os.platform(), env = process.env) {
   if (normalizeLocalAsrInstallMode(mode) === 'safe') {
     return getSafeLocalAsrInstallRoot(platform, env);
@@ -4287,6 +4312,33 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.installLocalAsr({ installMode: 'safe' });
   }
 
+  async checkAndRepairLocalAsr() {
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const installRoot = this.getConfiguredLocalAsrInstallRoot();
+    const status = this.getLocalAsrInstallStatus();
+    const action = getLocalAsrRepairAction({
+      platform,
+      installRoot,
+      status,
+      runLogText: readLocalAsrRunLog(installRoot),
+    });
+
+    if (action === 'none') {
+      new Notice('当前本地转写组件正常，不需要高级修复。');
+      return { action };
+    }
+
+    if (action === 'safe') {
+      await this.installLocalAsr({ installMode: 'safe' });
+      new Notice('已切换到安全安装目录，并重新安装本地转写组件。');
+      return { action };
+    }
+
+    await this.installLocalAsr({ installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode) });
+    new Notice('已更新本地转写组件。');
+    return { action };
+  }
+
   async renderSocialMediaUrl(url) {
     return renderSocialMediaUrlWithElectron(url);
   }
@@ -5658,14 +5710,13 @@ class WechatInboxSettingTab extends PluginSettingTab {
             }
           }))
         .addButton((button) => button
-          .setButtonText('高级修复')
+          .setButtonText('检测并修复')
           .onClick(async () => {
             try {
-              await this.plugin.switchLocalAsrToSafeInstallRoot();
-              new Notice('已切换到安全安装目录，并重新安装本地转写组件。');
+              await this.plugin.checkAndRepairLocalAsr();
               this.display();
             } catch (error) {
-              new Notice(`高级修复失败：${error.message || error}`);
+              new Notice(`检测并修复失败：${error.message || error}`);
             }
           }))
         .addButton((button) => button
@@ -5844,6 +5895,8 @@ WechatObsidianInboxPlugin.__test = {
   normalizeLocalAsrPlatform,
   normalizeLocalAsrInstallMode,
   isAsciiPath,
+  hasLocalAsrNativeCrash,
+  getLocalAsrRepairAction,
   resolveLocalAsrPlatform,
   getLocalAsrPlatformMismatchMessage,
   buildAliyunVoiceRequest,
