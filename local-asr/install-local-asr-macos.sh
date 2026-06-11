@@ -65,15 +65,36 @@ brew_install_formula() {
   fi
 
   echo "Installing Homebrew formula: $formula"
-  if HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula"; then
-    return
-  fi
+  local attempt
+  local output
+  local status
+  for attempt in 1 2 3; do
+    set +e
+    output="$(HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula" 2>&1)"
+    status=$?
+    set -e
+    printf '%s\n' "$output"
+    if [ "$status" -eq 0 ]; then
+      return
+    fi
+    if brew list --versions "$formula" >/dev/null 2>&1; then
+      echo "Homebrew formula is now installed despite a non-zero brew exit: $formula"
+      return
+    fi
+    if printf '%s\n' "$output" | grep -Eiq 'already locked|Please wait|another process'; then
+      echo "Homebrew is busy installing another package. Waiting before retry $attempt/3..." >&2
+      sleep 15
+      continue
+    fi
+    break
+  done
 
   echo "" >&2
   echo "WeChat Inbox Sync local ASR install failed while installing: $formula" >&2
-  echo "Please open Terminal and run this command manually, then retry in Obsidian:" >&2
+  echo "Homebrew did not finish installing $formula." >&2
+  echo "If Homebrew says another process is running, wait a few minutes and retry in Obsidian." >&2
+  echo "If it keeps failing, open Terminal and run this command manually, then retry in Obsidian:" >&2
   echo "  brew install $formula" >&2
-  echo "If Homebrew says another process is running, wait a few minutes and retry." >&2
   echo "If the network download is blocked, switch network or proxy and retry." >&2
   exit 1
 }
@@ -185,6 +206,7 @@ fi
 WHISPER="$ROOT/bin/whisper-cli"
 FFMPEG="$ROOT/bin/ffmpeg"
 MODEL="$ROOT/models/ggml-small.bin"
+SIMPLIFIED_PROMPT="$(printf '\350\257\267\350\276\223\345\207\272\347\256\200\344\275\223\344\270\255\346\226\207')"
 
 if [ ! -x "$WHISPER" ]; then
   echo "whisper-cli not found. Please rerun install-local-asr-macos.sh." >&2
@@ -240,7 +262,7 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   {
     echo "--- $(basename "$chunk") ---"
   } >> "$RUN_LOG"
-  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh --prompt "请输出简体中文" -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
+  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh --prompt "$SIMPLIFIED_PROMPT" -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
   if [ ! -f "$chunk_txt" ]; then
     echo "Whisper did not generate transcript: $chunk_txt" >&2
     echo "status=failed" >> "$RUN_LOG"

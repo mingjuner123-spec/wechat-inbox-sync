@@ -228,10 +228,22 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       source.includes('transcribe-last.log')
       && source.includes('CHUNK_SECONDS')
       && source.includes('set -euo pipefail')
+      && source.includes('SIMPLIFIED_PROMPT')
+      && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
+    ) {
+      return {
+        scriptVersion: 'chunked-bash-simplified-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('CHUNK_SECONDS')
+      && source.includes('set -euo pipefail')
     ) {
       return {
         scriptVersion: 'chunked-bash-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     if (source.includes('transcribe-last.log') && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))) {
