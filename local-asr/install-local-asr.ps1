@@ -1,7 +1,10 @@
+param(
+  [string]$InstallRoot = (Join-Path $env:USERPROFILE ".wechat-inbox-local-asr")
+)
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$InstallRoot = Join-Path $env:USERPROFILE ".wechat-inbox-local-asr"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
 
@@ -861,7 +864,7 @@ try {
   Write-Host "model: $modelPath"
   Write-Host "Local ASR installed to: $InstallRoot"
   Write-Host "Use this Obsidian plugin command:"
-  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"`$env:USERPROFILE\.wechat-inbox-local-asr\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
+  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
 } finally {
   if (Test-Path -LiteralPath $TempRoot) {
     Remove-Item -LiteralPath $TempRoot -Recurse -Force
