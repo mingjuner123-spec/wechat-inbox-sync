@@ -207,13 +207,35 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('ReadAllText')
       && source.includes('WriteAllText')
       && source.includes('Get-ShortPath')
-      && source.includes('$SafeTempRoot')
+      && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
       && !source.includes('DataReceivedEventHandler')
       && !source.includes('BeginOutputReadLine')
     ) {
       return {
-        scriptVersion: 'chunked-start-process-utf8-simplified-shortpath-run-log',
+        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-run-log',
         scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('$SafeTempRoot')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-simplified-shortpath-run-log',
+        scriptOutdated: true,
       };
     }
     if (
@@ -231,7 +253,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     ) {
       return {
         scriptVersion: 'chunked-start-process-utf8-simplified-run-log',
-        scriptOutdated: true,
+        scriptOutdated: false,
       };
     }
     if (

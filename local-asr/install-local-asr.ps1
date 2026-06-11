@@ -584,6 +584,12 @@ function New-SafeTempDirectory {
   throw "Cannot create a local ASR temp directory."
 }
 
+function Test-WhisperNativeCrashExitCode {
+  param([int]$ExitCode)
+  $hex = "0x{0:X8}" -f ([uint32]($ExitCode -band 0xffffffff))
+  return ($ExitCode -eq -1073740791 -or $hex -eq "0xC0000409")
+}
+
 function Invoke-NativeProcess {
   param(
     [Parameter(Mandatory = $true)][string]$FilePath,
@@ -635,25 +641,48 @@ function ConvertTo-SimplifiedChinese {
   }
 }
 
-try {
-  $SafeTempRoot = New-SafeTempDirectory
-  $TempWorkDir = Join-Path $SafeTempRoot "chunks"
+function Invoke-TranscribeAttempt {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("normal", "safe")][string]$Mode
+  )
+  $safeTempRoot = $null
+  $tempWorkDir = $null
+  $attemptInputPath = $InputPath
+  if ($Mode -eq "safe") {
+    $safeTempRoot = New-SafeTempDirectory
+    $tempWorkDir = Join-Path $safeTempRoot "chunks"
+    $attemptInputPath = Join-Path $safeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))
+    Copy-Item -LiteralPath $InputPath -Destination $attemptInputPath -Force
+  } else {
+    $tempWorkDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N"))
+  }
+  $pathForNative = {
+    param([string]$PathValue)
+    if ($Mode -eq "safe") {
+      return Get-ShortPath $PathValue
+    }
+    return $PathValue
+  }
+
+  $result = [PSCustomObject]@{
+    Mode = $Mode
+    TempWorkDir = $tempWorkDir
+    InputPath = $attemptInputPath
+    FfmpegOutput = ""
+    FfmpegExit = 0
+    ChunkCount = 0
+    WhisperLogs = ""
+    WhisperExit = 0
+    Text = ""
+    Error = ""
+  }
+
+  try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
-  $SafeInputPath = Join-Path $SafeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))
-  Copy-Item -LiteralPath $InputPath -Destination $SafeInputPath -Force
-  $ChunkPattern = Join-Path $TempWorkDir "chunk-%03d.wav"
-  @(
-    "time=$(Get-Date -Format o)"
-    "status=running"
-    "inputPath=$InputPath"
-    "outputPath=$OutputPath"
-    "safeInputPath=$SafeInputPath"
-    "tempWorkDir=$TempWorkDir"
-    "chunkSeconds=$ChunkSeconds"
-  ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
+  $ChunkPattern = Join-Path $tempWorkDir "chunk-%03d.wav"
   $ffmpegResult = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
     "-hide_banner", "-loglevel", "error", "-y",
-    "-i", (Get-ShortPath $SafeInputPath),
+    "-i", (& $pathForNative $attemptInputPath),
     "-ar", "16000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
@@ -664,7 +693,8 @@ try {
   )
   $ffmpegOutput = $ffmpegResult.Output
   $ffmpegExit = $ffmpegResult.ExitCode
-  $chunkFiles = @(Get-ChildItem -LiteralPath $TempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
+  $chunkFiles = @(Get-ChildItem -LiteralPath $tempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
+  $result.ChunkCount = $chunkFiles.Count
   $whisperLogs = New-Object System.Collections.Generic.List[string]
   $mergedText = New-Object System.Collections.Generic.List[string]
   $whisperExit = 0
@@ -674,15 +704,15 @@ try {
   }
 
   foreach ($chunk in $chunkFiles) {
-    $chunkBase = [System.IO.Path]::Combine($TempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
+    $chunkBase = [System.IO.Path]::Combine($tempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
     $chunkTxt = "$chunkBase.txt"
     $chunkResult = Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments @(
-      "-m", (Get-ShortPath $Model),
-      "-f", (Get-ShortPath $chunk.FullName),
+      "-m", (& $pathForNative $Model),
+      "-f", (& $pathForNative $chunk.FullName),
       "-l", "zh",
       "--prompt", $SimplifiedPrompt,
       "-otxt",
-      "-of", (Get-ShortPath $chunkBase)
+      "-of", (& $pathForNative $chunkBase)
     )
     $chunkOutput = $chunkResult.Output
     $currentExit = $chunkResult.ExitCode
@@ -700,37 +730,94 @@ try {
     }
   }
 
-  @(
+    $result.FfmpegOutput = $ffmpegOutput
+    $result.FfmpegExit = $ffmpegExit
+    $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
+    $result.WhisperExit = $whisperExit
+    $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
+    return $result
+  } catch {
+    $result.FfmpegOutput = $ffmpegOutput
+    $result.FfmpegExit = $ffmpegExit
+    $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
+    $result.WhisperExit = $whisperExit
+    $result.Error = ($_ | Out-String)
+    return $result
+  } finally {
+    if ($safeTempRoot -and (Test-Path -LiteralPath $safeTempRoot)) {
+      Remove-Item -LiteralPath $safeTempRoot -Recurse -Force
+    } elseif ($tempWorkDir -and (Test-Path -LiteralPath $tempWorkDir)) {
+      Remove-Item -LiteralPath $tempWorkDir -Recurse -Force
+    }
+  }
+}
+
+function Write-AttemptLog {
+  param(
+    [Parameter(Mandatory = $true)]$Attempt,
+    [AllowNull()]$FallbackAttempt
+  )
+  $lines = @(
     "time=$(Get-Date -Format o)"
     "status=running"
     "inputPath=$InputPath"
     "outputPath=$OutputPath"
-    "safeInputPath=$SafeInputPath"
-    "tempWorkDir=$TempWorkDir"
+    "mode=$($Attempt.Mode)"
+    "tempWorkDir=$($Attempt.TempWorkDir)"
     "chunkSeconds=$ChunkSeconds"
-    "chunkCount=$($chunkFiles.Count)"
+    "chunkCount=$($Attempt.ChunkCount)"
     "ffmpeg=$($Ffmpeg.FullName)"
-    "ffmpegExit=$ffmpegExit"
+    "ffmpegExit=$($Attempt.FfmpegExit)"
     "--- ffmpeg output ---"
-    $ffmpegOutput
+    $Attempt.FfmpegOutput
     "whisper=$($Whisper.FullName)"
-    "whisperExit=$whisperExit"
+    "whisperExit=$($Attempt.WhisperExit)"
     "--- whisper output ---"
-    ($whisperLogs -join [Environment]::NewLine)
-  ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
-
-  if ($ffmpegExit -ne 0) {
-    throw "ffmpeg failed with exit code $ffmpegExit. See $RunLog"
+    $Attempt.WhisperLogs
+  )
+  if ($FallbackAttempt) {
+    $lines += @(
+      "--- fallback attempt ---"
+      "mode=$($FallbackAttempt.Mode)"
+      "tempWorkDir=$($FallbackAttempt.TempWorkDir)"
+      "safeInputPath=$($FallbackAttempt.InputPath)"
+      "chunkCount=$($FallbackAttempt.ChunkCount)"
+      "ffmpegExit=$($FallbackAttempt.FfmpegExit)"
+      "--- fallback ffmpeg output ---"
+      $FallbackAttempt.FfmpegOutput
+      "whisperExit=$($FallbackAttempt.WhisperExit)"
+      "--- fallback whisper output ---"
+      $FallbackAttempt.WhisperLogs
+      "--- fallback error ---"
+      $FallbackAttempt.Error
+    )
   }
-  if ($whisperExit -ne 0) {
-    throw "whisper failed with exit code $whisperExit. See $RunLog"
-  }
+  $lines | Set-Content -LiteralPath $RunLog -Encoding UTF8
+}
 
-  if ($mergedText.Count -eq 0) {
+try {
+  $normalAttempt = Invoke-TranscribeAttempt -Mode "normal"
+  $finalAttempt = $normalAttempt
+  $fallbackAttempt = $null
+  if ($normalAttempt.FfmpegExit -eq 0 -and (Test-WhisperNativeCrashExitCode $normalAttempt.WhisperExit)) {
+    $fallbackAttempt = Invoke-TranscribeAttempt -Mode "safe"
+    if ($fallbackAttempt.FfmpegExit -eq 0 -and $fallbackAttempt.WhisperExit -eq 0 -and $fallbackAttempt.Text.Trim()) {
+      $finalAttempt = $fallbackAttempt
+    }
+  }
+  Write-AttemptLog -Attempt $normalAttempt -FallbackAttempt $fallbackAttempt
+
+  if ($finalAttempt.FfmpegExit -ne 0) {
+    throw "ffmpeg failed with exit code $($finalAttempt.FfmpegExit). See $RunLog"
+  }
+  if ($finalAttempt.WhisperExit -ne 0) {
+    throw "whisper failed with exit code $($finalAttempt.WhisperExit). See $RunLog"
+  }
+  if (-not $finalAttempt.Text.Trim()) {
     throw "Whisper did not generate transcript text. See $RunLog"
   }
 
-  $finalText = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
+  $finalText = ConvertTo-SimplifiedChinese $finalAttempt.Text
   [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)
@@ -741,10 +828,6 @@ try {
     ($_ | Out-String)
   )
   throw
-} finally {
-  if ($SafeTempRoot -and (Test-Path -LiteralPath $SafeTempRoot)) {
-    Remove-Item -LiteralPath $SafeTempRoot -Recurse -Force
-  }
 }
 '@ | Set-Content -LiteralPath $transcribeScript -Encoding UTF8
 # END_TRANSCRIBE_TEMPLATE
