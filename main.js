@@ -208,14 +208,38 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('WriteAllText')
       && source.includes('Get-ShortPath')
       && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Convert-ExitCodeToHex')
+      && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
       && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
       && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
       && !source.includes('DataReceivedEventHandler')
       && !source.includes('BeginOutputReadLine')
     ) {
       return {
-        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-run-log',
+        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-exitcode-run-log',
         scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-run-log',
+        scriptOutdated: true,
       };
     }
     if (
@@ -2162,6 +2186,17 @@ function isWechatArticleUrl(url) {
   return text.includes('mp.weixin.qq.com') || text.includes('weixin.qq.com');
 }
 
+function isWechatMpArticleUrl(url) {
+  const source = String(url || '').trim();
+  if (!source) return false;
+  try {
+    const parsed = new URL(source);
+    return /(^|\.)mp\.weixin\.qq\.com$/i.test(parsed.hostname);
+  } catch (error) {
+    return source.toLowerCase().includes('mp.weixin.qq.com');
+  }
+}
+
 function isWechatCaptchaUrl(url) {
   return /\/mp\/wappoc_appmsgcaptcha\b/i.test(String(url || ''));
 }
@@ -2244,6 +2279,15 @@ function isBilibiliUrl(url) {
 function isXiaoyuzhouUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('xiaoyuzhoufm.com') || text.includes('xiaoyuzhou.com');
+}
+
+function shouldHydrateLinkAsWebpage(url) {
+  return isWechatMpArticleUrl(url)
+    || isFeishuUrl(url)
+    || isXiaohongshuUrl(url)
+    || isDouyinUrl(url)
+    || isBilibiliUrl(url)
+    || isXiaoyuzhouUrl(url);
 }
 
 function getSocialRequestHeaders(url) {
@@ -2374,6 +2418,9 @@ function getWebpageSourcePrefix(url) {
 function getRecordSourcePrefix(record) {
   const type = String(record && record.type || '').toLowerCase();
   const metadata = (record && record.metadata) || {};
+  if (type === 'link' && shouldHydrateLinkAsWebpage(metadata.url || record.content || '')) {
+    return getWebpageSourcePrefix(metadata.url || record.content || '');
+  }
   if (type === 'text') return '文本';
   if (type === 'link') return '链接';
   if (type === 'voice') return '录音';
@@ -2405,6 +2452,9 @@ function getRecordSourceName(record) {
   }
   if (type === 'link') {
     const url = metadata.url || content;
+    if (shouldHydrateLinkAsWebpage(url)) {
+      return metadata.title || getUrlLastPathSegment(url) || getUrlHostname(url) || fallbackTime;
+    }
     return metadata.title || getUrlHostname(url) || getUrlLastPathSegment(url) || content || fallbackTime;
   }
   return content || fallbackTime;
@@ -2734,6 +2784,15 @@ function extractSocialMediaUrlsFromHtml(html) {
 
 function extractSocialMediaUrlFromHtml(html) {
   return extractSocialMediaUrlsFromHtml(html)[0] || '';
+}
+
+function isUnavailableXiaohongshuPage(html, url = '') {
+  const source = decodeHtmlEntities(String(html || ''));
+  const target = String(url || '');
+  return /xiaohongshu\.com\/404/i.test(target)
+    || /errorCode=-510001|error_code=300031/i.test(target)
+    || source.includes('你访问的页面不见了')
+    || source.includes('当前笔记暂时无法浏览');
 }
 
 function extractBilibiliSubtitleUrlsFromHtml(html) {
@@ -3942,6 +4001,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         return source.includes('CHUNK_SECONDS=600') && source.includes('transcribe-last.log');
       }
       return source.includes('Invoke-NativeProcess')
+        && source.includes('Convert-ExitCodeToHex')
+        && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
         && source.includes('System.Text.UTF8Encoding')
         && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
         && source.includes('WriteAllText($OutputPath');
@@ -4705,6 +4766,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     subtitleText = '',
     subtitleUrl = '',
     source = '',
+    noMediaError = '',
   }) {
     const metadata = record.metadata || {};
 
@@ -4736,7 +4798,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           subtitleUrl,
           transcription: '',
           transcriptionStatus: 'failed',
-          transcriptionError: '未能从链接中提取到可转写的音频或视频地址',
+          transcriptionError: noMediaError || '未能从链接中提取到可转写的音频或视频地址',
           transcriptionSource: source || 'media-url',
           conversionStatus: 'failed',
         }),
@@ -4936,6 +4998,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         const html = response.text || '';
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
+        const isUnavailableXhs = isXiaohongshuUrl(url)
+          && isUnavailableXiaohongshuPage(html, resolvedUrl);
         const isVideoIntent = isDouyinUrl(url)
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
@@ -4962,6 +5026,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl,
             mediaUrls,
             source: 'video',
+            noMediaError: isUnavailableXhs
+              ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
+              : '',
           });
         }
 
@@ -5094,13 +5161,29 @@ class WechatObsidianInboxPlugin extends Plugin {
     let title = await this.nextRecordTitle(dayDir, record, bindingLabel);
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
+    const linkAsWebpage = recordType === 'link' && shouldHydrateLinkAsWebpage((record.metadata && record.metadata.url) || record.content || '');
     if (recordType === 'voice') {
       recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === 'file') {
       recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding, progress);
-    } else if (recordType === 'webpage') {
+    } else if (recordType === 'webpage' || linkAsWebpage) {
       this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
-      recordForMarkdown = await this.hydrateWebpageMarkdown(record, rootDir, dateFolder, title);
+      recordForMarkdown = await this.hydrateWebpageMarkdown(
+        linkAsWebpage
+          ? {
+            ...record,
+            type: 'webpage',
+            metadata: {
+              ...(record.metadata || {}),
+              url: (record.metadata && record.metadata.url) || record.content || '',
+              conversionStatus: (record.metadata && record.metadata.conversionStatus) || 'pending',
+            },
+          }
+          : record,
+        rootDir,
+        dateFolder,
+        title,
+      );
       title = await this.nextRecordTitle(dayDir, recordForMarkdown, bindingLabel);
     }
     const markdown = buildMarkdownForRecord({ record: recordForMarkdown, title, syncedAt });
@@ -5643,8 +5726,11 @@ WechatObsidianInboxPlugin.__test = {
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,
   extractSocialMediaUrlFromHtml,
+  isUnavailableXiaohongshuPage,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,
+  isWechatMpArticleUrl,
+  shouldHydrateLinkAsWebpage,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,

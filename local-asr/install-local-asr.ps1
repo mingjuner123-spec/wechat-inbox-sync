@@ -79,7 +79,11 @@ function Assert-InstalledFile {
 
 function Convert-ExitCodeToHex {
   param([Parameter(Mandatory = $true)][int]$ExitCode)
-  return "0x{0:X8}" -f ([uint32]($ExitCode -band 0xffffffff))
+  $signed = [int64]$ExitCode
+  if ($signed -lt 0) {
+    $signed = 4294967296 + $signed
+  }
+  return "0x{0:X8}" -f $signed
 }
 
 function ConvertTo-NativeArgument {
@@ -527,6 +531,15 @@ function ConvertTo-NativeArgument {
   return '"' + ($text -replace '"', '\"') + '"'
 }
 
+function Convert-ExitCodeToHex {
+  param([Parameter(Mandatory = $true)][int]$ExitCode)
+  $signed = [int64]$ExitCode
+  if ($signed -lt 0) {
+    $signed = 4294967296 + $signed
+  }
+  return "0x{0:X8}" -f $signed
+}
+
 function Get-ShortPath {
   param([AllowNull()][string]$Path)
   $text = [string]$Path
@@ -586,7 +599,7 @@ function New-SafeTempDirectory {
 
 function Test-WhisperNativeCrashExitCode {
   param([int]$ExitCode)
-  $hex = "0x{0:X8}" -f ([uint32]($ExitCode -band 0xffffffff))
+  $hex = Convert-ExitCodeToHex -ExitCode $ExitCode
   return ($ExitCode -eq -1073740791 -or $hex -eq "0xC0000409")
 }
 
