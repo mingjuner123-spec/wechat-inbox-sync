@@ -119,11 +119,21 @@ function normalizeLocalAsrInstallMode(value) {
   return String(value || '').trim() === 'safe' ? 'safe' : 'default';
 }
 
+function isAsciiPath(value) {
+  return /^[\x00-\x7F]+$/.test(String(value || ''));
+}
+
 function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env) {
   if (getLocalAsrPlatform(platform) === 'win32') {
-    const publicDir = String((env && env.PUBLIC) || '').trim()
-      || path.join(String((env && env.SystemDrive) || 'C:'), 'Users', 'Public');
-    return path.join(publicDir, LOCAL_ASR_SAFE_HOME);
+    const systemDrive = String((env && env.SystemDrive) || 'C:').trim() || 'C:';
+    const candidates = [
+      String((env && env.PUBLIC) || '').trim(),
+      String((env && env.ProgramData) || '').trim(),
+      path.join(systemDrive, LOCAL_ASR_SAFE_HOME),
+      path.join('C:', LOCAL_ASR_SAFE_HOME),
+    ].filter(Boolean);
+    const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.join('C:', LOCAL_ASR_SAFE_HOME);
+    return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.join(safeBase, LOCAL_ASR_SAFE_HOME);
   }
   return path.join(os.homedir(), LOCAL_ASR_HOME);
 }
@@ -5833,6 +5843,7 @@ WechatObsidianInboxPlugin.__test = {
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
   normalizeLocalAsrInstallMode,
+  isAsciiPath,
   resolveLocalAsrPlatform,
   getLocalAsrPlatformMismatchMessage,
   buildAliyunVoiceRequest,
