@@ -240,7 +240,7 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   {
     echo "--- $(basename "$chunk") ---"
   } >> "$RUN_LOG"
-  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
+  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh --prompt "请输出简体中文" -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
   if [ ! -f "$chunk_txt" ]; then
     echo "Whisper did not generate transcript: $chunk_txt" >&2
     echo "status=failed" >> "$RUN_LOG"

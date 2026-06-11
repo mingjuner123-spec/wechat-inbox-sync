@@ -394,6 +394,7 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 }
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$SimplifiedPrompt = [string]::Concat([char]0x8bf7, [char]0x8f93, [char]0x51fa, [char]0x7b80, [char]0x4f53, [char]0x4e2d, [char]0x6587)
 
 function ConvertTo-NativeArgument {
   param([AllowNull()][string]$Value)
@@ -444,6 +445,20 @@ function Invoke-NativeProcess {
   }
 }
 
+function ConvertTo-SimplifiedChinese {
+  param([AllowNull()][string]$Text)
+  $source = [string]$Text
+  if ($source -eq "") {
+    return ""
+  }
+  try {
+    Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+    return [Microsoft.VisualBasic.Strings]::StrConv($source, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804)
+  } catch {
+    return $source
+  }
+}
+
 try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
   $ChunkPattern = Join-Path $TempWorkDir "chunk-%03d.wav"
@@ -484,6 +499,7 @@ try {
       "-m", $Model,
       "-f", $chunk.FullName,
       "-l", "zh",
+      "--prompt", $SimplifiedPrompt,
       "-otxt",
       "-of", $chunkBase
     )
@@ -498,7 +514,7 @@ try {
     if (Test-Path -LiteralPath $chunkTxt) {
       $text = ([System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)).Trim()
       if ($text) {
-        $mergedText.Add($text)
+        $mergedText.Add((ConvertTo-SimplifiedChinese $text))
       }
     }
   }
@@ -532,7 +548,7 @@ try {
     throw "Whisper did not generate transcript text. See $RunLog"
   }
 
-  $finalText = $mergedText -join "`n`n"
+  $finalText = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
   [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)

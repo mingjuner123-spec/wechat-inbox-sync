@@ -172,6 +172,9 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('Invoke-NativeProcess')
       && source.includes('Start-Process')
       && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
       && source.includes('System.Text.UTF8Encoding')
       && source.includes('ReadAllText')
       && source.includes('WriteAllText')
@@ -179,8 +182,23 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && !source.includes('BeginOutputReadLine')
     ) {
       return {
-        scriptVersion: 'chunked-start-process-utf8-run-log',
+        scriptVersion: 'chunked-start-process-utf8-simplified-run-log',
         scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-run-log',
+        scriptOutdated: true,
       };
     }
     if (
