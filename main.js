@@ -170,13 +170,30 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       source.includes('transcribe-last.log')
       && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
       && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && !source.includes('DataReceivedEventHandler')
+      && !source.includes('BeginOutputReadLine')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
       && source.includes('System.Text.UTF8Encoding')
       && source.includes('ReadAllText')
       && source.includes('WriteAllText')
     ) {
       return {
         scriptVersion: 'chunked-safe-native-utf8-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     if (
@@ -350,6 +367,36 @@ function writeLocalAsrRunLog({
       stderr,
       error,
     }), 'utf8');
+    return logPath;
+  } catch (writeError) {
+    return '';
+  }
+}
+
+function appendLocalAsrRunLog({
+  installRoot = getLocalAsrInstallRoot(),
+  status = '',
+  command = '',
+  inputPath = '',
+  outputPath = '',
+  stdout = '',
+  stderr = '',
+  error = '',
+} = {}) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getLocalAsrRunLogPath(installRoot);
+    const wrapperText = buildLocalAsrRunLogText({
+      status,
+      command,
+      inputPath,
+      outputPath,
+      stdout,
+      stderr,
+      error,
+    });
+    const prefix = fs.existsSync(logPath) ? '\n\n--- plugin wrapper ---\n' : '';
+    fs.appendFileSync(logPath, `${prefix}${wrapperText}`, 'utf8');
     return logPath;
   } catch (writeError) {
     return '';
@@ -4160,7 +4207,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       return transcription;
     } catch (error) {
-      writeLocalAsrRunLog({
+      appendLocalAsrRunLog({
         status: 'failed',
         command,
         inputPath,
@@ -5510,6 +5557,7 @@ WechatObsidianInboxPlugin.__test = {
   explainLocalAsrExitCode,
   getLocalAsrRunLogPath,
   buildLocalAsrRunLogText,
+  appendLocalAsrRunLog,
   readLocalAsrRunLog,
   buildLocalAsrInstallCommand,
   downloadTextViaNode,

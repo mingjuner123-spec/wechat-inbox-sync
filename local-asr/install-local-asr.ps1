@@ -412,51 +412,31 @@ function Invoke-NativeProcess {
     [Parameter(Mandatory = $true)][string]$FilePath,
     [Parameter(Mandatory = $true)][string[]]$Arguments
   )
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $FilePath
-  $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.CreateNoWindow = $true
-
-  $process = New-Object System.Diagnostics.Process
-  $process.StartInfo = $psi
-  $stdout = New-Object System.Text.StringBuilder
-  $stderr = New-Object System.Text.StringBuilder
-  $outputHandler = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $event)
-    if ($null -ne $event.Data) {
-      [void]$stdout.AppendLine($event.Data)
-    }
-  }
-  $errorHandler = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $event)
-    if ($null -ne $event.Data) {
-      [void]$stderr.AppendLine($event.Data)
-    }
-  }
-
-  $process.add_OutputDataReceived($outputHandler)
-  $process.add_ErrorDataReceived($errorHandler)
-  $exitCode = 1
+  $nativeTempDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-native-" + [guid]::NewGuid().ToString("N"))
+  $stdoutPath = Join-Path $nativeTempDir "stdout.log"
+  $stderrPath = Join-Path $nativeTempDir "stderr.log"
   try {
-    [void]$process.Start()
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
-    $process.WaitForExit()
+    New-Item -ItemType Directory -Force -Path $nativeTempDir | Out-Null
+    $process = Start-Process `
+      -FilePath $FilePath `
+      -ArgumentList $Arguments `
+      -NoNewWindow `
+      -Wait `
+      -PassThru `
+      -RedirectStandardOutput $stdoutPath `
+      -RedirectStandardError $stderrPath
     $exitCode = $process.ExitCode
+    $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
+    $stderrText = if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
   } finally {
-    $process.remove_OutputDataReceived($outputHandler)
-    $process.remove_ErrorDataReceived($errorHandler)
-    $process.Dispose()
+    Remove-Item -LiteralPath $nativeTempDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 
   $combined = @(
     "--- stdout ---"
-    $stdout.ToString().TrimEnd()
+    ([string]$stdoutText).TrimEnd()
     "--- stderr ---"
-    $stderr.ToString().TrimEnd()
+    ([string]$stderrText).TrimEnd()
   ) -join [Environment]::NewLine
   return [PSCustomObject]@{
     ExitCode = $exitCode
@@ -467,6 +447,14 @@ function Invoke-NativeProcess {
 try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
   $ChunkPattern = Join-Path $TempWorkDir "chunk-%03d.wav"
+  @(
+    "time=$(Get-Date -Format o)"
+    "status=running"
+    "inputPath=$InputPath"
+    "outputPath=$OutputPath"
+    "tempWorkDir=$TempWorkDir"
+    "chunkSeconds=$ChunkSeconds"
+  ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
   $ffmpegResult = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
     "-hide_banner", "-loglevel", "error", "-y",
     "-i", $InputPath,
@@ -517,7 +505,7 @@ try {
 
   @(
     "time=$(Get-Date -Format o)"
-    "status=pending"
+    "status=running"
     "inputPath=$InputPath"
     "outputPath=$OutputPath"
     "tempWorkDir=$TempWorkDir"
