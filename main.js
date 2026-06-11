@@ -4249,7 +4249,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderSocialMediaUrlsWithElectron(url);
   }
 
-  async runConfiguredTranscription(audioUrl) {
+  async runConfiguredTranscription(audioUrl, options = {}) {
     const provider = this.settings.aiProvider;
     const runLocalFallback = async (sourcePrefix) => {
       if (provider === 'doubao') {
@@ -4308,12 +4308,69 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
     if (this.settings.aiProvider === 'local') {
-      return {
-        transcription: await this.runLocalTranscription(audioUrl),
-        source: 'local',
-      };
+      try {
+        return {
+          transcription: await this.runLocalTranscription(audioUrl),
+          source: 'local',
+        };
+      } catch (error) {
+        if (!options.fileID && !options.allowCloudUrlFallback) {
+          throw error;
+        }
+        return await this.runCloudFallbackTranscription(audioUrl, {
+          ...options,
+          localError: error && error.message ? error.message : String(error || ''),
+          source: options.source || 'local',
+        });
+      }
     }
     throw new Error('未配置可用的音频转写方案');
+  }
+
+  async runCloudFallbackTranscription(audioUrl, options = {}) {
+    const binding = options.binding || this.getActiveBindings()[0] || null;
+    if (!binding) {
+      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：未绑定小程序`);
+    }
+    this.showSyncProgress({
+      stage: 'transcribing',
+      title: options.title || '',
+      message: '本地转写失败，正在尝试云端兜底',
+    });
+    const fileID = String(options.fileID || '').trim();
+    if (!fileID && !options.allowCloudUrlFallback) {
+      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：缺少云端文件 ID`);
+    }
+    try {
+      const requestBody = {
+        durationSeconds: options.durationSeconds || 60,
+        localError: options.localError || '',
+        source: options.source || 'local',
+        title: options.title || '',
+      };
+      if (fileID) {
+        requestBody.fileID = fileID;
+      } else {
+        requestBody.audioUrl = audioUrl;
+      }
+      const payload = await this.requestJson('/transcriptions/cloud', 'POST', requestBody, binding);
+      const data = payload && payload.data ? payload.data : {};
+      const transcription = String(data.transcription || '').trim();
+      if (!transcription) {
+        throw new Error('云端兜底返回空转写结果');
+      }
+      return {
+        transcription,
+        source: 'local-cloud-fallback',
+        cloudProvider: data.provider || 'cloud',
+        cloudRequestId: data.requestId || '',
+        cloudUsedSeconds: Number(data.usedSeconds) || 0,
+        cloudRemainingSeconds: Number(data.remainingSeconds) || 0,
+      };
+    } catch (cloudError) {
+      const cloudMessage = cloudError && cloudError.message ? cloudError.message : String(cloudError || '');
+      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：${cloudMessage}`);
+    }
   }
 
   async runLocalTranscription(audioUrl) {
@@ -4635,12 +4692,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.settings.aiProvider !== 'off') {
       try {
         this.showSyncProgress({ ...progress, stage: 'transcribing', title });
-        const result = await this.runConfiguredTranscription(tempFileURL);
+        const result = await this.runConfiguredTranscription(tempFileURL, {
+          binding,
+          fileID: metadata.audioFileID,
+          title,
+        });
         nextMetadata = {
           ...nextMetadata,
           transcription: result.transcription,
           transcriptionStatus: 'success',
           transcriptionProvider: result.source,
+          cloudTranscriptionProvider: result.cloudProvider || '',
+          cloudTranscriptionRequestId: result.cloudRequestId || '',
+          cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || 0,
+          cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || 0,
         };
       } catch (error) {
         const message = error.message || String(error);
@@ -4809,7 +4874,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       for (const candidate of candidates) {
         try {
-          const result = await this.runConfiguredTranscription(candidate);
+          const result = await this.runConfiguredTranscription(candidate, {
+            allowCloudUrlFallback: true,
+            title: metadata.title || '',
+            source: source || 'media-url',
+          });
           return {
             ...record,
             metadata: buildTranscriptOnlyMetadata(metadata, {
