@@ -212,11 +212,12 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
       && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
       && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+      && source.includes('safeModelPath')
       && !source.includes('DataReceivedEventHandler')
       && !source.includes('BeginOutputReadLine')
     ) {
       return {
-        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-exitcode-run-log',
+        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-safe-model-run-log',
         scriptOutdated: false,
       };
     }

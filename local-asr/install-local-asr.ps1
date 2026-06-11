@@ -242,6 +242,8 @@ function Assert-LocalAsrInference {
   try {
     $samplePath = Join-Path $validationDir "validation.wav"
     $outputBase = Join-Path $validationDir "validation"
+    $safeModelPath = Join-Path $validationDir "ggml-small.bin"
+    Copy-Item -LiteralPath $ModelPath -Destination $safeModelPath -Force
     Assert-ExecutableRuns `
       -Path $FfmpegPath `
       -Arguments @(
@@ -257,7 +259,7 @@ function Assert-LocalAsrInference {
     Assert-ExecutableRuns `
       -Path $WhisperPath `
       -Arguments @(
-        "-m", (Get-ShortPath $ModelPath),
+        "-m", (Get-ShortPath $safeModelPath),
         "-f", (Get-ShortPath $samplePath),
         "-l", "zh",
         "-otxt",
@@ -661,11 +663,14 @@ function Invoke-TranscribeAttempt {
   $safeTempRoot = $null
   $tempWorkDir = $null
   $attemptInputPath = $InputPath
+  $attemptModelPath = $Model
   if ($Mode -eq "safe") {
     $safeTempRoot = New-SafeTempDirectory
     $tempWorkDir = Join-Path $safeTempRoot "chunks"
     $attemptInputPath = Join-Path $safeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))
+    $attemptModelPath = Join-Path $safeTempRoot "ggml-small.bin"
     Copy-Item -LiteralPath $InputPath -Destination $attemptInputPath -Force
+    Copy-Item -LiteralPath $Model -Destination $attemptModelPath -Force
   } else {
     $tempWorkDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N"))
   }
@@ -681,6 +686,7 @@ function Invoke-TranscribeAttempt {
     Mode = $Mode
     TempWorkDir = $tempWorkDir
     InputPath = $attemptInputPath
+    ModelPath = $attemptModelPath
     FfmpegOutput = ""
     FfmpegExit = 0
     ChunkCount = 0
@@ -720,7 +726,7 @@ function Invoke-TranscribeAttempt {
     $chunkBase = [System.IO.Path]::Combine($tempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
     $chunkTxt = "$chunkBase.txt"
     $chunkResult = Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments @(
-      "-m", (& $pathForNative $Model),
+      "-m", (& $pathForNative $attemptModelPath),
       "-f", (& $pathForNative $chunk.FullName),
       "-l", "zh",
       "--prompt", $SimplifiedPrompt,
@@ -794,6 +800,7 @@ function Write-AttemptLog {
       "mode=$($FallbackAttempt.Mode)"
       "tempWorkDir=$($FallbackAttempt.TempWorkDir)"
       "safeInputPath=$($FallbackAttempt.InputPath)"
+      "safeModelPath=$($FallbackAttempt.ModelPath)"
       "chunkCount=$($FallbackAttempt.ChunkCount)"
       "ffmpegExit=$($FallbackAttempt.FfmpegExit)"
       "--- fallback ffmpeg output ---"
