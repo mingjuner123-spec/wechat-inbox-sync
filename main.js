@@ -147,6 +147,34 @@ function findFileRecursive(rootDir, predicate) {
   return '';
 }
 
+function findFileRecursiveByNames(rootDir, names) {
+  try {
+    if (!fs.existsSync(rootDir)) return '';
+    const matches = [];
+    const visit = (dir) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isFile() && names.includes(entry.name)) {
+          matches.push(fullPath);
+        } else if (entry.isDirectory()) {
+          visit(fullPath);
+        }
+      }
+    };
+    visit(rootDir);
+    matches.sort((left, right) => {
+      const leftRank = names.indexOf(path.basename(left));
+      const rightRank = names.indexOf(path.basename(right));
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return left.localeCompare(right);
+    });
+    return matches[0] || '';
+  } catch (error) {
+    return '';
+  }
+}
+
 function findFirstExistingPath(candidates, exists) {
   return candidates.find((candidate) => candidate && exists(candidate)) || '';
 }
@@ -178,12 +206,32 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('System.Text.UTF8Encoding')
       && source.includes('ReadAllText')
       && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('$SafeTempRoot')
       && !source.includes('DataReceivedEventHandler')
       && !source.includes('BeginOutputReadLine')
     ) {
       return {
-        scriptVersion: 'chunked-start-process-utf8-simplified-run-log',
+        scriptVersion: 'chunked-start-process-utf8-simplified-shortpath-run-log',
         scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-simplified-run-log',
+        scriptOutdated: true,
       };
     }
     if (
@@ -286,8 +334,8 @@ function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists
     joinLocalAsrPath(platform, installRoot, 'ffmpeg', ffmpegName),
   ];
   const whisperPath = findFirstExistingPath(whisperCandidates, exists)
-    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'whisper'), (filePath, name) => whisperNames.includes(name)) : '')
-    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => whisperNames.includes(name)) : '');
+    || (exists === fs.existsSync ? findFileRecursiveByNames(path.join(installRoot, 'whisper'), whisperNames) : '')
+    || (exists === fs.existsSync ? findFileRecursiveByNames(path.join(installRoot, 'bin'), whisperNames) : '');
   const ffmpegPath = findFirstExistingPath(ffmpegCandidates, exists)
     || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'ffmpeg'), (filePath, name) => name === ffmpegName) : '')
     || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => name === ffmpegName) : '');
@@ -339,6 +387,9 @@ function explainLocalAsrExitCode(value) {
   const text = String(value || '');
   if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
     return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
+  }
+  if (text.includes('-1073740791') || text.toUpperCase().includes('0XC0000409')) {
+    return 'whisper.cpp 原生程序崩溃（0xC0000409）。常见原因是 Windows 本机运行环境、CPU 指令集兼容性、中文路径或当前音视频片段触发了 whisper.cpp 崩溃。请先重新点击“安装/更新本地转写组件”，新版会用安全路径和真实推理校验修复；如果仍失败，需要复制同步失败诊断里的 transcribe-last.log 继续定位。';
   }
   return '';
 }
@@ -4475,7 +4526,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       return record;
     }
 
-    const audioFileName = `${title}.mp3`;
+    const sourceAudioName = metadata.audioFileName || record.content || '';
+    const sourceAudioExt = getAttachmentExt(sourceAudioName, metadata.audioFileExt || metadata.fileExt);
+    const audioFileName = `${title}.${sourceAudioExt || 'mp3'}`;
     const audioRootDir = `${rootDir}/语音附件`;
     const audioDayDir = `${audioRootDir}/${dateFolder}`;
     const audioPath = `${audioDayDir}/${audioFileName}`;

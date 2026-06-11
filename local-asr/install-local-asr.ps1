@@ -129,6 +129,63 @@ function Invoke-NativeProcess {
   }
 }
 
+function Get-ShortPath {
+  param([AllowNull()][string]$Path)
+  $text = [string]$Path
+  if ($text -eq "") {
+    return ""
+  }
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    if (Test-Path -LiteralPath $text -PathType Leaf) {
+      return $fso.GetFile($text).ShortPath
+    }
+    if (Test-Path -LiteralPath $text -PathType Container) {
+      return $fso.GetFolder($text).ShortPath
+    }
+    $parent = Split-Path -Parent $text
+    $name = Split-Path -Leaf $text
+    if ($parent -and (Test-Path -LiteralPath $parent)) {
+      $shortParent = Get-ShortPath $parent
+      if ($shortParent) {
+        return Join-Path $shortParent $name
+      }
+    }
+  } catch {
+    return $text
+  }
+  return $text
+}
+
+function New-SafeTempDirectory {
+  $baseCandidates = @()
+  if ($env:ProgramData) {
+    $baseCandidates += (Join-Path $env:ProgramData "wechat-inbox-local-asr")
+  }
+  if ($env:PUBLIC) {
+    $baseCandidates += (Join-Path $env:PUBLIC "wechat-inbox-local-asr")
+  }
+  if ($env:SystemDrive) {
+    $baseCandidates += (Join-Path $env:SystemDrive "wechat-inbox-local-asr-temp")
+  }
+  if ($env:TEMP) {
+    $baseCandidates += $env:TEMP
+  }
+
+  foreach ($base in $baseCandidates) {
+    try {
+      New-Item -ItemType Directory -Force -Path $base | Out-Null
+      $dir = Join-Path $base ("run-" + [guid]::NewGuid().ToString("N"))
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      return $dir
+    } catch {
+      continue
+    }
+  }
+
+  throw "Cannot create a local ASR temp directory."
+}
+
 function Install-VcRuntime {
   $vcInstaller = Join-Path $TempRoot "vc_redist.x64.exe"
   Write-Host "Installing Microsoft Visual C++ Runtime for whisper.cpp."
@@ -169,6 +226,47 @@ function Assert-ExecutableRuns {
   }
 
   throw "$Label runtime validation failed with exit code $exit/$hex. $output"
+}
+
+function Assert-LocalAsrInference {
+  param(
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  $validationDir = New-SafeTempDirectory
+  try {
+    $samplePath = Join-Path $validationDir "validation.wav"
+    $outputBase = Join-Path $validationDir "validation"
+    Assert-ExecutableRuns `
+      -Path $FfmpegPath `
+      -Arguments @(
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi",
+        "-i", "sine=frequency=440:duration=1",
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        $samplePath
+      ) `
+      -Label "ffmpeg inference validation" | Out-Null
+    Assert-ExecutableRuns `
+      -Path $WhisperPath `
+      -Arguments @(
+        "-m", (Get-ShortPath $ModelPath),
+        "-f", (Get-ShortPath $samplePath),
+        "-l", "zh",
+        "-otxt",
+        "-of", (Get-ShortPath $outputBase)
+      ) `
+      -Label "whisper.cpp inference validation" `
+      -TryInstallVcRuntime | Out-Null
+    Write-Host "Local ASR inference validation passed."
+  } finally {
+    if (Test-Path -LiteralPath $validationDir) {
+      Remove-Item -LiteralPath $validationDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
 }
 
 function Install-ZipPackage {
@@ -350,6 +448,28 @@ try {
 
   Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
 
+  try {
+    Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+  } catch {
+    Write-Host "Current whisper.cpp failed real inference validation; reinstalling once."
+    Write-Host ($_.Exception.Message)
+    $whisperZip = Join-Path $TempRoot "whisper-retry.zip"
+    Install-ZipPackage `
+      -Urls @((Get-LatestWhisperWindowsAsset)) `
+      -ZipPath $whisperZip `
+      -StageDir $WhisperStageDir `
+      -MinBytes 1MB `
+      -ExpectedFiles @("whisper-cli.exe", "main.exe") `
+      -Label "whisper.cpp" | Out-Null
+    if (Test-Path -LiteralPath $WhisperDir) {
+      Remove-Item -LiteralPath $WhisperDir -Recurse -Force
+    }
+    Move-Item -LiteralPath $WhisperStageDir -Destination $WhisperDir
+    $installedWhisper = Assert-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
+    Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+    Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+  }
+
 # BEGIN_TRANSCRIBE_TEMPLATE
   $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
   @'
@@ -385,7 +505,6 @@ if ($OutputDir) {
   New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 }
 
-$TempWorkDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N"))
 $ChunkSeconds = 600
 $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
   $OutputPath.Substring(0, $OutputPath.Length - 4)
@@ -406,6 +525,63 @@ function ConvertTo-NativeArgument {
     return $text
   }
   return '"' + ($text -replace '"', '\"') + '"'
+}
+
+function Get-ShortPath {
+  param([AllowNull()][string]$Path)
+  $text = [string]$Path
+  if ($text -eq "") {
+    return ""
+  }
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    if (Test-Path -LiteralPath $text -PathType Leaf) {
+      return $fso.GetFile($text).ShortPath
+    }
+    if (Test-Path -LiteralPath $text -PathType Container) {
+      return $fso.GetFolder($text).ShortPath
+    }
+    $parent = Split-Path -Parent $text
+    $name = Split-Path -Leaf $text
+    if ($parent -and (Test-Path -LiteralPath $parent)) {
+      $shortParent = Get-ShortPath $parent
+      if ($shortParent) {
+        return Join-Path $shortParent $name
+      }
+    }
+  } catch {
+    return $text
+  }
+  return $text
+}
+
+function New-SafeTempDirectory {
+  $baseCandidates = @()
+  if ($env:ProgramData) {
+    $baseCandidates += (Join-Path $env:ProgramData "wechat-inbox-local-asr")
+  }
+  if ($env:PUBLIC) {
+    $baseCandidates += (Join-Path $env:PUBLIC "wechat-inbox-local-asr")
+  }
+  if ($env:SystemDrive) {
+    $baseCandidates += (Join-Path $env:SystemDrive "wechat-inbox-local-asr-temp")
+  }
+  if ($env:TEMP) {
+    $baseCandidates += $env:TEMP
+  }
+
+  foreach ($base in $baseCandidates) {
+    try {
+      New-Item -ItemType Directory -Force -Path $base | Out-Null
+      $dir = Join-Path $base ("run-" + [guid]::NewGuid().ToString("N"))
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      return $dir
+    } catch {
+      continue
+    }
+  }
+
+  throw "Cannot create a local ASR temp directory."
 }
 
 function Invoke-NativeProcess {
@@ -460,19 +636,24 @@ function ConvertTo-SimplifiedChinese {
 }
 
 try {
+  $SafeTempRoot = New-SafeTempDirectory
+  $TempWorkDir = Join-Path $SafeTempRoot "chunks"
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
+  $SafeInputPath = Join-Path $SafeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))
+  Copy-Item -LiteralPath $InputPath -Destination $SafeInputPath -Force
   $ChunkPattern = Join-Path $TempWorkDir "chunk-%03d.wav"
   @(
     "time=$(Get-Date -Format o)"
     "status=running"
     "inputPath=$InputPath"
     "outputPath=$OutputPath"
+    "safeInputPath=$SafeInputPath"
     "tempWorkDir=$TempWorkDir"
     "chunkSeconds=$ChunkSeconds"
   ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
   $ffmpegResult = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
     "-hide_banner", "-loglevel", "error", "-y",
-    "-i", $InputPath,
+    "-i", (Get-ShortPath $SafeInputPath),
     "-ar", "16000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
@@ -496,12 +677,12 @@ try {
     $chunkBase = [System.IO.Path]::Combine($TempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
     $chunkTxt = "$chunkBase.txt"
     $chunkResult = Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments @(
-      "-m", $Model,
-      "-f", $chunk.FullName,
+      "-m", (Get-ShortPath $Model),
+      "-f", (Get-ShortPath $chunk.FullName),
       "-l", "zh",
       "--prompt", $SimplifiedPrompt,
       "-otxt",
-      "-of", $chunkBase
+      "-of", (Get-ShortPath $chunkBase)
     )
     $chunkOutput = $chunkResult.Output
     $currentExit = $chunkResult.ExitCode
@@ -524,6 +705,7 @@ try {
     "status=running"
     "inputPath=$InputPath"
     "outputPath=$OutputPath"
+    "safeInputPath=$SafeInputPath"
     "tempWorkDir=$TempWorkDir"
     "chunkSeconds=$ChunkSeconds"
     "chunkCount=$($chunkFiles.Count)"
@@ -560,8 +742,8 @@ try {
   )
   throw
 } finally {
-  if (Test-Path -LiteralPath $TempWorkDir) {
-    Remove-Item -LiteralPath $TempWorkDir -Recurse -Force
+  if ($SafeTempRoot -and (Test-Path -LiteralPath $SafeTempRoot)) {
+    Remove-Item -LiteralPath $SafeTempRoot -Recurse -Force
   }
 }
 '@ | Set-Content -LiteralPath $transcribeScript -Encoding UTF8
