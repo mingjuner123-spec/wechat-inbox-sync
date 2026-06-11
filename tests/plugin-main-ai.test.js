@@ -25,6 +25,13 @@ const fs = require('fs');
 const path = require('path');
 const pluginMainSource = fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8');
 
+const pluginMainLinesWithoutIntentionalPdfNoiseCheck = pluginMainSource
+  .split(/\r?\n/)
+  .filter((line) => !line.includes('/[锟�]/.test(source)'))
+  .join('\n');
+assert.strictEqual(/[�]/.test(pluginMainLinesWithoutIntentionalPdfNoiseCheck), false);
+assert.strictEqual(/(?:鏈|杞|寮|瀹|妯|鑴|缁|鏉|鐮|锛|銆|€|涓|鍛|浠|绔|鏄|鍚)/.test(pluginMainSource), false);
+
 assert.strictEqual(
   helpers.FEISHU_TUTORIAL_URL,
   'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink',
@@ -49,6 +56,7 @@ assert.strictEqual(typeof helpers.parseBilibiliSubtitlePayload, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliAudioUrlFromPlayurlPayload, 'function');
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');
+assert.strictEqual(typeof helpers.buildSyncProgressMessage, 'function');
 assert.strictEqual(typeof helpers.extractSocialMediaUrlFromHtml, 'function');
 assert.strictEqual(
   helpers.extractSocialMediaUrlFromHtml(`
@@ -64,6 +72,8 @@ assert.strictEqual(
 assert.strictEqual(typeof helpers.cleanDisplayUrl, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallRoot, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallStatus, 'function');
+assert.strictEqual(typeof helpers.getLocalAsrScriptVersionStatus, 'function');
+assert.strictEqual(typeof helpers.explainLocalAsrExitCode, 'function');
 assert.strictEqual(typeof helpers.buildLocalAsrInstallCommand, 'function');
 assert.strictEqual(typeof helpers.downloadTextViaNode, 'function');
 assert.strictEqual(helpers.LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_beta');
@@ -78,6 +88,13 @@ assert.strictEqual(
 assert.ok(pluginMainSource.includes('getAvailableLocalAsrInstallerPath'));
 assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1'));
 assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh'));
+assert.ok(pluginMainSource.includes('downloadedPath'));
+assert.ok(pluginMainSource.includes('return downloadedPath'));
+assert.ok(pluginMainSource.includes('return installerPath'));
+assert.ok(pluginMainSource.indexOf('return downloadedPath') < pluginMainSource.indexOf('return installerPath'));
+assert.strictEqual(pluginMainSource.includes('if (fs.existsSync(installerPath)) return installerPath'), false);
+assert.ok(pluginMainSource.includes('Local ASR installer download returned outdated or invalid content'));
+assert.ok(pluginMainSource.includes('无法下载最新本地转写安装器'));
 const defaultLocalTranscriptionCommand = helpers.getDefaultLocalTranscriptionCommand();
 assert.ok(defaultLocalTranscriptionCommand.includes('%USERPROFILE%'));
 assert.strictEqual(defaultLocalTranscriptionCommand.includes('$env:USERPROFILE'), false);
@@ -118,6 +135,14 @@ assert.ok(pluginMainSource.includes('如果苹果电脑安装失败，请手动�
 assert.ok(pluginMainSource.includes('install.log'));
 assert.ok(pluginMainSource.includes('复制诊断信息'));
 assert.ok(pluginMainSource.includes('getLocalAsrDiagnosticText'));
+assert.ok(pluginMainSource.includes('showSyncProgress'));
+assert.ok(pluginMainSource.includes('syncStatusBar'));
+assert.ok(pluginMainSource.includes('setText(message)'));
+assert.ok(pluginMainSource.includes('lastSyncDiagnostic'));
+assert.ok(pluginMainSource.includes('复制同步诊断'));
+assert.ok(pluginMainSource.includes('同步失败诊断'));
+assert.ok(pluginMainSource.includes('正在同步'));
+assert.ok(pluginMainSource.includes('正在处理'));
 assert.strictEqual(helpers.getSocialRequestHeaders('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4').Referer, 'https://www.douyin.com/');
 assert.strictEqual(helpers.shouldResolveMediaDownloadUrl('https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000demo'), true);
 assert.strictEqual(helpers.shouldResolveMediaDownloadUrl('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4'), false);
@@ -138,10 +163,20 @@ assert.deepStrictEqual(
   {
     installRoot: 'C:\\Users\\demo\\.wechat-inbox-local-asr',
     transcribeScript: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1',
+    whisperPath: '',
+    ffmpegPath: '',
+    modelPath: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-small.bin',
     hasTranscribeScript: true,
+    scriptVersion: 'unknown',
+    scriptOutdated: false,
     hasWhisper: false,
     hasFfmpeg: false,
     hasModel: false,
+    missingReasons: [
+      'whisper 未找到，请重新安装/更新本地转写组件',
+      'ffmpeg 未找到，请重新安装/更新本地转写组件',
+      '模型文件未找到，请重新安装/更新本地转写组件',
+    ],
     ready: false,
   },
 );
@@ -150,11 +185,82 @@ assert.deepStrictEqual(
   {
     installRoot: '/Users/demo/.wechat-inbox-local-asr',
     transcribeScript: '/Users/demo/.wechat-inbox-local-asr/transcribe.sh',
+    whisperPath: '',
+    ffmpegPath: '',
+    modelPath: '/Users/demo/.wechat-inbox-local-asr/models/ggml-small.bin',
     hasTranscribeScript: true,
+    scriptVersion: 'unknown',
+    scriptOutdated: false,
     hasWhisper: false,
     hasFfmpeg: false,
     hasModel: false,
+    missingReasons: [
+      'whisper 未找到，请重新安装/更新本地转写组件',
+      'ffmpeg 未找到，请重新安装/更新本地转写组件',
+      '模型文件未找到，请重新安装/更新本地转写组件',
+    ],
     ready: false,
+  },
+);
+const completeWindowsAsrStatus = helpers.getLocalAsrInstallStatus('C:\\Users\\demo\\.wechat-inbox-local-asr', (filePath) => [
+  'C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1',
+  'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe',
+  'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe',
+  'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-small.bin',
+].includes(filePath));
+assert.strictEqual(completeWindowsAsrStatus.whisperPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe');
+assert.strictEqual(completeWindowsAsrStatus.ffmpegPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe');
+assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
+assert.ok(pluginMainSource.includes('ffmpeg 路径：'));
+assert.ok(pluginMainSource.includes('缺失项：'));
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => '$GeneratedTxt = "$OutputBase.txt"\nthrow "Whisper did not generate transcript: $GeneratedTxt"',
+  }),
+  {
+    scriptVersion: 'legacy-generated-txt',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => '$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Invoke-NativeProcess {}\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-safe-native-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Invoke-NativeProcess {}\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-safe-native-utf8-run-log',
+    scriptOutdated: false,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('/Users/demo/.wechat-inbox-local-asr/transcribe.sh', {
+    existsSync: () => true,
+    readFileSync: () => 'set -euo pipefail\nCHUNK_SECONDS=600\nRUN_LOG="$ROOT/transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-bash-run-log',
+    scriptOutdated: false,
   },
 );
 assert.ok(helpers.buildLocalAsrInstallCommand('C:\\plugin\\local-asr\\install-local-asr.ps1').includes('-ExecutionPolicy Bypass'));
@@ -170,6 +276,33 @@ assert.strictEqual(
 assert.strictEqual(helpers.getLocalAsrPlatformMismatchMessage('auto', 'win32'), '');
 assert.strictEqual(helpers.getLocalAsrPlatformMismatchMessage('darwin', 'darwin'), '');
 assert.ok(pluginMainSource.includes('getLocalAsrPlatformMismatchMessage(this.settings.localAsrPlatform)'));
+assert.ok(pluginMainSource.includes('最近转写日志：'));
+assert.ok(pluginMainSource.includes('脚本版本：'));
+assert.ok(pluginMainSource.includes('脚本过旧'));
+assert.ok(pluginMainSource.includes('transcribe-last.log'));
+assert.strictEqual(typeof helpers.buildLocalAsrRunLogText, 'function');
+assert.ok(
+  helpers.buildLocalAsrRunLogText({
+    time: '2026-06-10T14:10:06.000Z',
+    status: 'failed',
+    command: 'powershell -File transcribe.ps1',
+    inputPath: 'C:\\Users\\win11\\AppData\\Local\\Temp\\wechat-inbox-sync-demo.mp3',
+    outputPath: 'C:\\Users\\win11\\AppData\\Local\\Temp\\wechat-inbox-sync-demo.mp3.txt',
+    stdout: 'stdout text',
+    stderr: 'stderr text',
+    error: 'Whisper did not generate transcript',
+  }).includes('Whisper did not generate transcript'),
+);
+assert.ok(
+  helpers.buildLocalAsrRunLogText({
+    status: 'failed',
+    error: 'whisper failed with exit code -1073741515',
+  }).includes('缺少 Windows VC++ 运行库或 whisper 依赖 DLL'),
+);
+assert.strictEqual(
+  helpers.explainLocalAsrExitCode(-1073741515),
+  '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。',
+);
 assert.strictEqual(helpers.normalizeBindCodeInput(' ozt n1i '), 'OZT-N1I');
 assert.strictEqual(helpers.mergeSettings({ token: 'oztn1i' }).token, 'OZT-N1I');
 assert.strictEqual(typeof helpers.createRetryableTranscriptionError, 'function');
