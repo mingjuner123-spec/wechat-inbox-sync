@@ -1,7 +1,7 @@
 {
   "id": "wechat-inbox-sync",
   "name": "WeChat Inbox Sync",
-  "version": "1.1.31",
+  "version": "1.1.32",
   "minAppVersion": "1.0.0",
   "description": "Sync text, webpages, audio, and files from a WeChat mini program inbox into your vault.",
   "author": "Zhang Zhang",

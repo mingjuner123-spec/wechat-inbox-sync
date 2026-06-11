@@ -4033,6 +4033,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       return source.includes('Invoke-NativeProcess')
         && source.includes('Convert-ExitCodeToHex')
         && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+        && source.includes('[string]$InstallRoot')
+        && source.includes('safeModelPath')
         && source.includes('System.Text.UTF8Encoding')
         && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
         && source.includes('WriteAllText($OutputPath');
@@ -4041,10 +4043,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       let scriptText = '';
       try {
-        const response = await requestUrl({ url: installerUrl, method: 'GET' });
+        const response = await requestUrl({ url: `${installerUrl}?t=${Date.now()}`, method: 'GET' });
         scriptText = response.text || '';
       } catch (error) {
-        scriptText = await downloadTextViaNode(installerUrl);
+        scriptText = await downloadTextViaNode(`${installerUrl}?t=${Date.now()}`);
       }
       if (!isInstallerCurrent(scriptText)) {
         throw new Error('Local ASR installer download returned outdated or invalid content');
