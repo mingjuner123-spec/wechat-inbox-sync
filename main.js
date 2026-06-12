@@ -1346,7 +1346,17 @@ function normalizeDoubaoSpeakerText(result) {
     .map((item) => {
       const text = String((item && (item.text || item.result_text || item.utterance_text)) || '').trim();
       if (!text) return '';
-      const speaker = item && (item.speaker || item.speaker_id || item.spk || item.speakerId);
+      const additions = item && item.additions && typeof item.additions === 'object' ? item.additions : {};
+      const speaker = item && (
+        item.speaker
+        || item.speaker_id
+        || item.spk
+        || item.speakerId
+        || additions.speaker
+        || additions.speaker_id
+        || additions.spk
+        || additions.speakerId
+      );
       return speaker === undefined || speaker === null || speaker === ''
         ? text
         : `说话人${speaker}：${text}`;
