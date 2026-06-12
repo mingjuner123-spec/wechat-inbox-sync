@@ -25,6 +25,8 @@ const DEFAULT_SETTINGS = {
   inboxDir: '临时收集',
   autoSyncOnLoad: true,
   aiProvider: 'off',
+  cloudPreTranscriptionEnabled: false,
+  cloudPreTranscriptionThresholdMinutes: 10,
   localAsrPlatform: 'auto',
   localAsrInstallMode: 'default',
   localTranscriptionCommand: '',
@@ -50,6 +52,11 @@ const AI_PROVIDER_NAMES = {
   doubao: '豆包语音识别',
   tencent: '腾讯云 ASR 录音文件识别',
 };
+
+function normalizeCloudPreTranscriptionThresholdMinutes(value) {
+  const number = Number(value);
+  return [10, 30, 60].includes(number) ? number : DEFAULT_SETTINGS.cloudPreTranscriptionThresholdMinutes;
+}
 
 const LOCAL_ASR_PLATFORM_NAMES = {
   auto: '自动识别',
@@ -886,6 +893,8 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
+  merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
+  merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
   merged.localAsrInstallMode = normalizeLocalAsrInstallMode(merged.localAsrInstallMode);
   merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
@@ -3714,6 +3723,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
       this.syncStatusBar.setText('');
     }
+    this.localAsrInstallPromise = null;
 
     this.addCommand({
       id: 'sync-wechat-inbox',
@@ -3760,6 +3770,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         lastSyncAt: '',
       }]
       : [];
+  }
+
+  async syncTranscriptionPreferences() {
+    const payload = {
+      cloudPreTranscriptionEnabled: Boolean(this.settings.cloudPreTranscriptionEnabled),
+      cloudPreTranscriptionThresholdMinutes: normalizeCloudPreTranscriptionThresholdMinutes(this.settings.cloudPreTranscriptionThresholdMinutes),
+    };
+    const bindings = this.getActiveBindings();
+    for (const binding of bindings) {
+      // eslint-disable-next-line no-await-in-loop
+      await this.requestJson('/transcription-preferences', 'POST', payload, binding);
+    }
+    return payload;
   }
 
   async requestJson(path, method = 'GET', body = {}, binding = null) {
@@ -4063,7 +4086,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       const source = String(scriptText || '');
       if (!source.includes('.wechat-inbox-local-asr')) return false;
       if (isMac) {
-        return source.includes('CHUNK_SECONDS=600') && source.includes('transcribe-last.log');
+        return source.includes('CHUNK_SECONDS=600')
+          && source.includes('transcribe-last.log')
+          && source.includes('python-venv')
+          && source.includes('validate_local_asr_inference')
+          && source.includes('exec "\\$WHISPER_CPP_BIN" "\\$@"');
       }
       return source.includes('Invoke-NativeProcess')
         && source.includes('Convert-ExitCodeToHex')
@@ -4235,6 +4262,19 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async installLocalAsr(options = {}) {
+    if (this.localAsrInstallPromise) {
+      new Notice('本地转写组件正在安装中，请等待当前安装完成后再重试。');
+      return await this.localAsrInstallPromise;
+    }
+    this.localAsrInstallPromise = this.doInstallLocalAsr(options);
+    try {
+      return await this.localAsrInstallPromise;
+    } finally {
+      this.localAsrInstallPromise = null;
+    }
+  }
+
+  async doInstallLocalAsr(options = {}) {
     await this.ensureLocalTranscriptionAccess();
     const mismatchMessage = getLocalAsrPlatformMismatchMessage(this.settings.localAsrPlatform);
     if (mismatchMessage) {
@@ -5638,6 +5678,47 @@ class WechatInboxSettingTab extends PluginSettingTab {
           });
       });
 
+    new Setting(containerEl)
+      .setName('长音视频云端预转写')
+      .setDesc('开启后，小程序提交超过阈值的音视频会优先在云端转写，插件同步时直接读取云端结果，并消耗云端转写额度。')
+      .addToggle((toggle) => toggle
+        .setValue(Boolean(this.plugin.settings.cloudPreTranscriptionEnabled))
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            cloudPreTranscriptionEnabled: Boolean(value),
+          });
+          try {
+            await this.plugin.syncTranscriptionPreferences();
+            new Notice(value ? '云端预转写已开启' : '云端预转写已关闭');
+          } catch (error) {
+            new Notice(`云端预转写设置同步失败：${error.message || error}`);
+          }
+        }));
+
+    new Setting(containerEl)
+      .setName('云端预转写阈值')
+      .setDesc('只有超过该时长的音视频才会在小程序提交后进入云端预转写。')
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption('10', '10 分钟以上')
+          .addOption('30', '30 分钟以上')
+          .addOption('60', '60 分钟以上')
+          .setValue(String(this.plugin.settings.cloudPreTranscriptionThresholdMinutes || 10))
+          .onChange(async (value) => {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              cloudPreTranscriptionThresholdMinutes: Number(value),
+            });
+            try {
+              await this.plugin.syncTranscriptionPreferences();
+              new Notice('云端预转写阈值已同步');
+            } catch (error) {
+              new Notice(`云端预转写设置同步失败：${error.message || error}`);
+            }
+          });
+      });
+
     if (this.plugin.settings.aiProvider === 'local') {
       const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
       const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
@@ -5894,6 +5975,7 @@ WechatObsidianInboxPlugin.__test = {
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
   normalizeLocalAsrInstallMode,
+  normalizeCloudPreTranscriptionThresholdMinutes,
   isAsciiPath,
   hasLocalAsrNativeCrash,
   getLocalAsrRepairAction,

@@ -64,7 +64,7 @@ If you do not want to use a cloud speech API, use the local helper:
 - Windows: `local-asr/install-local-asr.ps1`
 - macOS: `local-asr/install-local-asr-macos.sh`
 
-It installs whisper.cpp, ffmpeg, and a small Whisper model into `.wechat-inbox-local-asr` under the current user home directory.
+It installs whisper.cpp, ffmpeg, and a small Whisper model into `.wechat-inbox-local-asr` under the current user home directory. On macOS, the installer first uses an isolated local Python environment and bundled wheel binaries, so it does not depend on Homebrew for ffmpeg.
 Then choose **Local transcription** in the plugin settings and click **One-click install**.
 
 ## Data Flow
