@@ -523,6 +523,17 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $SimplifiedPrompt = [string]::Concat([char]0x8bf7, [char]0x8f93, [char]0x51fa, [char]0x7b80, [char]0x4f53, [char]0x4e2d, [char]0x6587)
+@(
+  "time=$(Get-Date -Format o)"
+  "status=pending"
+  "inputPath=$InputPath"
+  "outputPath=$OutputPath"
+  "chunkSeconds=$ChunkSeconds"
+  "progressStage=preparing"
+  "progressCurrent=0"
+  "progressTotal=0"
+  "progressPercent=0"
+) | Set-Content -LiteralPath $RunLog -Encoding UTF8
 
 function ConvertTo-NativeArgument {
   param([AllowNull()][string]$Value)
@@ -659,6 +670,24 @@ function ConvertTo-SimplifiedChinese {
   }
 }
 
+function Write-ProgressLog {
+  param(
+    [Parameter(Mandatory = $true)][string]$Stage,
+    [Parameter(Mandatory = $true)][int]$Current,
+    [Parameter(Mandatory = $true)][int]$Total
+  )
+  $percent = 0
+  if ($Total -gt 0) {
+    $percent = [Math]::Floor(($Current * 100) / $Total)
+  }
+  Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value @(
+    "progressStage=$Stage"
+    "progressCurrent=$Current"
+    "progressTotal=$Total"
+    "progressPercent=$percent"
+  )
+}
+
 function Invoke-TranscribeAttempt {
   param(
     [Parameter(Mandatory = $true)][ValidateSet("normal", "safe")][string]$Mode
@@ -717,9 +746,11 @@ function Invoke-TranscribeAttempt {
   $ffmpegExit = $ffmpegResult.ExitCode
   $chunkFiles = @(Get-ChildItem -LiteralPath $tempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
   $result.ChunkCount = $chunkFiles.Count
+  Write-ProgressLog -Stage "transcribing" -Current 0 -Total $chunkFiles.Count
   $whisperLogs = New-Object System.Collections.Generic.List[string]
   $mergedText = New-Object System.Collections.Generic.List[string]
   $whisperExit = 0
+  $chunkIndex = 0
 
   if ($ffmpegExit -eq 0 -and $chunkFiles.Count -eq 0) {
     throw "ffmpeg did not generate audio chunks."
@@ -750,6 +781,8 @@ function Invoke-TranscribeAttempt {
         $mergedText.Add((ConvertTo-SimplifiedChinese $text))
       }
     }
+    $chunkIndex += 1
+    Write-ProgressLog -Stage "transcribing" -Current $chunkIndex -Total $chunkFiles.Count
   }
 
     $result.FfmpegOutput = $ffmpegOutput
@@ -842,6 +875,7 @@ try {
 
   $finalText = ConvertTo-SimplifiedChinese $finalAttempt.Text
   [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
+  Write-ProgressLog -Stage "done" -Current $finalAttempt.ChunkCount -Total $finalAttempt.ChunkCount
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)
 } catch {

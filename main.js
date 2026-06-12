@@ -276,11 +276,12 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
       && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
       && source.includes('safeModelPath')
+      && source.includes('progressPercent')
       && !source.includes('DataReceivedEventHandler')
       && !source.includes('BeginOutputReadLine')
     ) {
       return {
-        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-safe-model-run-log',
+        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-safe-model-progress-run-log',
         scriptOutdated: false,
       };
     }
@@ -341,7 +342,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     ) {
       return {
         scriptVersion: 'chunked-start-process-utf8-simplified-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     if (
@@ -388,9 +389,10 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('set -euo pipefail')
       && source.includes('SIMPLIFIED_PROMPT')
       && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
+      && source.includes('progressPercent')
     ) {
       return {
-        scriptVersion: 'chunked-bash-simplified-run-log',
+        scriptVersion: 'chunked-bash-simplified-progress-run-log',
         scriptOutdated: false,
       };
     }
@@ -1289,9 +1291,9 @@ function buildDoubaoAsrRequest({ apiKey, audioUrl, requestId = createRequestId()
         enable_itn: true,
         enable_punc: true,
         enable_ddc: false,
-        enable_speaker_info: false,
+        enable_speaker_info: true,
         enable_channel_split: false,
-        show_utterances: false,
+        show_utterances: true,
         vad_segment: false,
         sensitive_words_filter: '',
       },
@@ -1336,16 +1338,36 @@ function formatHttpError(provider, response) {
   return parts.join('；');
 }
 
+function normalizeDoubaoSpeakerText(result) {
+  if (!result || typeof result !== 'object') return '';
+  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+  if (!utterances.length) return '';
+  return utterances
+    .map((item) => {
+      const text = String((item && (item.text || item.result_text || item.utterance_text)) || '').trim();
+      if (!text) return '';
+      const speaker = item && (item.speaker || item.speaker_id || item.spk || item.speakerId);
+      return speaker === undefined || speaker === null || speaker === ''
+        ? text
+        : `说话人${speaker}：${text}`;
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
 function parseDoubaoAsrResult(payload) {
   const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
   const result = data && data.result;
   if (Array.isArray(result)) {
     return result
-      .map((item) => item && (item.text || item.result_text || item.utterance_text || ''))
+      .map((item) => normalizeDoubaoSpeakerText(item) || String((item && (item.text || item.result_text || item.utterance_text)) || '').trim())
       .filter(Boolean)
       .join('\n')
       .trim();
   }
+  const speakerText = normalizeDoubaoSpeakerText(result);
+  if (speakerText) return speakerText;
   const text = (result && (result.text || result.result_text))
     || (data && (data.text || data.transcription))
     || '';
@@ -3674,21 +3696,60 @@ function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
 }
 
+function normalizeProgressPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(0, Math.min(100, Math.floor(number)));
+}
+
+function parseLocalAsrProgressLog(text) {
+  const source = String(text || '');
+  const values = {};
+  source.split(/\r?\n/).forEach((line) => {
+    const match = /^([A-Za-z][A-Za-z0-9_]*)=(.*)$/.exec(String(line || '').trim());
+    if (match) values[match[1]] = match[2];
+  });
+  if (
+    !Object.prototype.hasOwnProperty.call(values, 'progressStage')
+    && !Object.prototype.hasOwnProperty.call(values, 'progressCurrent')
+    && !Object.prototype.hasOwnProperty.call(values, 'progressTotal')
+    && !Object.prototype.hasOwnProperty.call(values, 'progressPercent')
+  ) {
+    return null;
+  }
+  const current = Number(values.progressCurrent);
+  const total = Number(values.progressTotal);
+  let percent = normalizeProgressPercent(values.progressPercent);
+  if (percent === null && Number.isFinite(current) && Number.isFinite(total) && total > 0) {
+    percent = normalizeProgressPercent((current * 100) / total);
+  }
+  if (percent === null) percent = 0;
+  return {
+    stage: values.progressStage || '',
+    current: Number.isFinite(current) ? current : 0,
+    total: Number.isFinite(total) ? total : 0,
+    percent,
+  };
+}
+
 function buildSyncProgressMessage({
   bindingLabel = '',
   stage = '',
   current = 0,
   total = 0,
   title = '',
+  percent = null,
 } = {}) {
   const label = bindingLabel ? `${bindingLabel}：` : '';
   const countText = total ? `${current}/${total}` : '';
+  const normalizedPercent = normalizeProgressPercent(percent);
+  const percentText = normalizedPercent === null ? '' : ` (${normalizedPercent}%)`;
   const suffix = title ? `：${title}` : '';
   if (stage === 'fetching') return `${label}正在同步，正在获取待同步内容`;
   if (stage === 'empty') return `${label}没有需要同步的新内容`;
   if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
   if (stage === 'downloading') return `${label}正在下载附件 ${countText}${suffix}`;
-  if (stage === 'transcribing') return `${label}正在转写音视频 ${countText}${suffix}`;
+  if (stage === 'transcribing') return `${label}正在转写音视频 ${countText}${percentText}${suffix}`;
   if (stage === 'writing') return `${label}正在写入 Obsidian ${countText}${suffix}`;
   if (stage === 'marking') return `${label}正在更新同步状态 ${countText}${suffix}`;
   return `${label}正在同步${countText ? ` ${countText}` : ''}${suffix}`;
@@ -4400,7 +4461,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         await this.clearPendingDoubaoTask(getDoubaoTaskKey(audioUrl));
       }
       return {
-        transcription: await this.runLocalTranscription(audioUrl),
+        transcription: await this.runLocalTranscription(audioUrl, options),
         source: sourcePrefix ? `${sourcePrefix}-local` : 'local',
       };
     };
@@ -4454,7 +4515,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.settings.aiProvider === 'local') {
       try {
         return {
-          transcription: await this.runLocalTranscription(audioUrl),
+          transcription: await this.runLocalTranscription(audioUrl, options),
           source: 'local',
         };
       } catch (error) {
@@ -4517,7 +4578,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async runLocalTranscription(audioUrl) {
+  async runLocalTranscription(audioUrl, options = {}) {
     await this.ensureLocalTranscriptionAccess();
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
@@ -4537,14 +4598,56 @@ class WechatObsidianInboxPlugin extends Plugin {
         .replace(/\{input\}/g, quote(inputPath))
         .replace(/\{output\}/g, quote(outputPath))
       : `${commandTemplate} ${quote(inputPath)}`;
+    const progressTitle = options.title || '';
+    let progressTimer = null;
+    let lastProgressKey = '';
+    const emitLocalProgress = (fallbackPercent = null) => {
+      if (typeof this.showSyncProgress !== 'function') return;
+      const parsedProgress = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot));
+      const progress = parsedProgress || (
+        fallbackPercent === null
+          ? null
+          : {
+            stage: '',
+            current: 0,
+            total: 0,
+            percent: fallbackPercent,
+          }
+      );
+      if (!progress) return;
+      const key = `${progress.stage}|${progress.current}|${progress.total}|${progress.percent}`;
+      if (key === lastProgressKey) return;
+      lastProgressKey = key;
+      this.showSyncProgress({
+        ...options,
+        stage: 'transcribing',
+        title: progressTitle,
+        percent: progress.percent,
+        localProgressStage: progress.stage,
+        localProgressCurrent: progress.current,
+        localProgressTotal: progress.total,
+      });
+    };
+    const stopProgressPolling = () => {
+      if (progressTimer) {
+        clearInterval(progressTimer);
+        progressTimer = null;
+      }
+    };
 
     try {
       const { stdout, stderr } = await new Promise((resolve, reject) => {
+        emitLocalProgress(0);
+        progressTimer = setInterval(() => emitLocalProgress(), 1000);
+        if (progressTimer && typeof progressTimer.unref === 'function') {
+          progressTimer.unref();
+        }
         childProcess.exec(command, {
           timeout: 2 * 60 * 60 * 1000,
           maxBuffer: 50 * 1024 * 1024,
           windowsHide: true,
         }, (error, stdout, stderr) => {
+          stopProgressPolling();
           if (error) {
             const wrapped = new Error(stderr || error.message || String(error));
             wrapped.stdout = stdout;
@@ -4552,6 +4655,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             reject(wrapped);
             return;
           }
+          emitLocalProgress(100);
           resolve({ stdout, stderr });
         });
       });
@@ -4586,6 +4690,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       throw error;
     } finally {
+      stopProgressPolling();
       [inputPath, outputPath].forEach((filePath) => {
         try {
           if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -6009,6 +6114,7 @@ WechatObsidianInboxPlugin.__test = {
   buildAudioTranscriptMarkdown,
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
+  parseLocalAsrProgressLog,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
   isRemoteAsrDownloadFailure,
