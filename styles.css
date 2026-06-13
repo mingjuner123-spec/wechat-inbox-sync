@@ -4,3 +4,14 @@
   line-height: 1.5;
   margin-top: 8px;
 }
+
+.wechat-inbox-sync-section-heading {
+  margin-top: 24px;
+  margin-bottom: 8px;
+}
+
+.wechat-inbox-sync-section-spacer {
+  height: 18px;
+  border-top: 1px solid var(--background-modifier-border);
+  margin-top: 24px;
+}

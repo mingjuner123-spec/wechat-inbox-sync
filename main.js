@@ -5765,6 +5765,11 @@ class WechatInboxSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl('h2', { text: 'Obsidian 内容同步助手' });
 
+    containerEl.createEl('h3', {
+      text: '使用教程',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
+
     new Setting(containerEl)
       .setName('小程序名字：Obsidian 内容同步助手')
       .setDesc('打开微信后搜索这个小程序，进入「绑定 Obsidian」页面复制绑定码。');
@@ -5780,6 +5785,11 @@ class WechatInboxSettingTab extends PluginSettingTab {
             new Notice(`请复制链接到浏览器打开：${FEISHU_TUTORIAL_URL}`);
           }
         }));
+
+    containerEl.createEl('h3', {
+      text: '绑定小程序',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
 
     const bindings = normalizeBindings(this.plugin.settings);
     if (bindings.length) {
@@ -5859,6 +5869,34 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .onChange(async (value) => {
           await this.plugin.saveSettings({ ...this.plugin.settings, inboxDir: value });
         }));
+
+    new Setting(containerEl)
+      .setName('立即同步')
+      .setDesc('手动拉取云端收集箱，并写入当前 vault。')
+      .addButton((button) => button
+        .setButtonText('同步')
+        .setCta()
+        .onClick(() => this.plugin.syncInbox()));
+
+    new Setting(containerEl)
+      .setName('同步失败诊断')
+      .setDesc('同步失败、转写失败、下载卡住时，点这里复制诊断信息发给张张。里面包含最近同步阶段、转写日志和安装日志。')
+      .addButton((button) => button
+        .setButtonText('复制同步诊断')
+        .onClick(async () => {
+          try {
+            await this.plugin.copySyncDiagnosticText();
+            new Notice('同步失败诊断信息已复制');
+          } catch (error) {
+            new Notice(`复制同步诊断失败：${error.message || error}`);
+          }
+        }));
+
+    containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
+    containerEl.createEl('h3', {
+      text: 'Pro 本地转写功能',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
 
     const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
     const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
@@ -5949,28 +5987,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
             new Notice('本地转写诊断信息已复制');
           } catch (error) {
             new Notice(`复制诊断信息失败：${error.message || error}`);
-          }
-        }));
-
-    new Setting(containerEl)
-      .setName('立即同步')
-      .setDesc('手动拉取云端收集箱，并写入当前 vault。')
-      .addButton((button) => button
-        .setButtonText('同步')
-        .setCta()
-        .onClick(() => this.plugin.syncInbox()));
-
-    new Setting(containerEl)
-      .setName('同步失败诊断')
-      .setDesc('同步失败、转写失败、下载卡住时，点这里复制诊断信息发给张张。里面包含最近同步阶段、转写日志和安装日志。')
-      .addButton((button) => button
-        .setButtonText('复制同步诊断')
-        .onClick(async () => {
-          try {
-            await this.plugin.copySyncDiagnosticText();
-            new Notice('同步失败诊断信息已复制');
-          } catch (error) {
-            new Notice(`复制同步诊断失败：${error.message || error}`);
           }
         }));
 
