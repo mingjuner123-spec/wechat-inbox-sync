@@ -5880,7 +5880,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('同步失败诊断')
-      .setDesc('同步失败、转写失败、下载卡住时，点这里复制诊断信息发给张张。里面包含最近同步阶段、转写日志和安装日志。')
+      .setDesc('同步失败、转写失败、下载卡住时，点这里复制诊断信息发给开发者张张（微信：heyhmjx）。里面包含最近同步阶段、转写日志和安装日志。')
       .addButton((button) => button
         .setButtonText('复制同步诊断')
         .onClick(async () => {
