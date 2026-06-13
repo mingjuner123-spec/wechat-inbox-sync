@@ -933,17 +933,6 @@ function validateSettings(settings) {
   const hasEnabledBinding = Array.isArray(settings.bindings)
     && settings.bindings.some((item) => item && item.enabled !== false && item.status !== 'unbound' && item.token);
   if (!settings.token && !hasEnabledBinding) errors.push('请填写小程序绑定码');
-
-  if (settings.aiProvider === 'tencent') {
-    if (!settings.tencentSecretId) errors.push('请填写腾讯云 SecretId');
-    if (!settings.tencentSecretKey) errors.push('请填写腾讯云 SecretKey');
-  }
-  if (settings.aiProvider === 'aliyun') {
-    if (!settings.aliyunApiKey) errors.push('请填写阿里云百炼 API Key');
-  }
-  if (settings.aiProvider === 'doubao') {
-    if (!settings.doubaoAsrApiKey) errors.push('请填写豆包语音识别 API Key');
-  }
   return errors;
 }
 
@@ -1506,10 +1495,14 @@ function buildAudioTranscriptMarkdown({
 }) {
   url = cleanDisplayUrl(url);
   const status = String(transcriptionStatus || '').toLowerCase();
+  const isCloudPending = ['queued', 'processing'].includes(status)
+    && String(transcriptionSource || '').includes('cloud');
   const content = String(transcription || '').trim()
     || (status === 'failed'
       ? `转写失败。${transcriptionError || '未能提取到视频/音频文案。'}`
-      : '转写处理中，或未配置可用的转写方案。');
+      : isCloudPending
+        ? '云端转写中，下次同步会自动更新。'
+        : '转写处理中，或未配置可用的转写方案。');
   return [
     `原始链接：${url || ''}`,
     transcriptionSource ? `转写来源：${transcriptionSource}` : '',
@@ -4476,6 +4469,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
     };
 
+    if (options.forceLocal) {
+      return runLocalFallback('');
+    }
+
     if (['aliyun', 'doubao', 'tencent'].includes(provider) && isHeaderProtectedMediaUrl(audioUrl)) {
       if (this.canRunLocalTranscription()) {
         return runLocalFallback(provider);
@@ -4951,13 +4948,68 @@ class WechatObsidianInboxPlugin extends Plugin {
       audioFileName: audioPath,
     };
 
-    if (this.settings.aiProvider !== 'off') {
+    const existingTranscriptionStatus = String(metadata.transcriptionStatus || '').toLowerCase();
+    const existingTranscription = String(metadata.transcription || '').trim();
+    const transcriptionSource = String(metadata.transcriptionSource || metadata.transcriptionProvider || '');
+    const isCloudTranscriptionRecord = metadata.transcriptionMode === 'cloud'
+      || transcriptionSource.includes('cloud-pretranscription')
+      || transcriptionSource.includes('cloud');
+    const shouldFallbackCloudFailureToLocal = isCloudTranscriptionRecord
+      && existingTranscriptionStatus === 'failed'
+      && !existingTranscription;
+
+    if (shouldFallbackCloudFailureToLocal) {
       try {
         this.showSyncProgress({ ...progress, stage: 'transcribing', title });
         const result = await this.runConfiguredTranscription(tempFileURL, {
           binding,
           fileID: metadata.audioFileID,
           title,
+          forceLocal: true,
+          cloudFallbackReason: 'cloud-pretranscription-failed',
+        });
+        nextMetadata = {
+          ...nextMetadata,
+          transcription: result.transcription,
+          transcriptionStatus: 'success',
+          transcriptionProvider: result.source,
+          transcriptionSource: 'local-fallback',
+          cloudTranscriptionError: metadata.transcriptionError || '',
+          cloudTranscriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || 'cloud-pretranscription',
+        };
+      } catch (error) {
+        const message = error.message || String(error);
+        nextMetadata = {
+          ...nextMetadata,
+          transcription: '',
+          transcriptionStatus: 'failed',
+          transcriptionError: message,
+          transcriptionProvider: 'local',
+          transcriptionSource: 'local-fallback',
+          cloudTranscriptionError: metadata.transcriptionError || '',
+        };
+      }
+    } else if (isCloudTranscriptionRecord) {
+      nextMetadata = {
+        ...nextMetadata,
+        transcription: existingTranscription,
+        transcriptionStatus: existingTranscriptionStatus || 'processing',
+        transcriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || 'cloud-pretranscription',
+        transcriptionSource: metadata.transcriptionSource || 'cloud-pretranscription',
+        transcriptionError: metadata.transcriptionError || (
+          ['queued', 'processing'].includes(existingTranscriptionStatus)
+            ? '云端转写中，下次同步会自动更新'
+            : ''
+        ),
+      };
+    } else if (this.settings.aiProvider !== 'off' || metadata.transcriptionMode === 'local') {
+      try {
+        this.showSyncProgress({ ...progress, stage: 'transcribing', title });
+        const result = await this.runConfiguredTranscription(tempFileURL, {
+          binding,
+          fileID: metadata.audioFileID,
+          title,
+          forceLocal: metadata.transcriptionMode === 'local',
         });
         nextMetadata = {
           ...nextMetadata,
@@ -5094,6 +5146,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     subtitleUrl = '',
     source = '',
     noMediaError = '',
+    binding = null,
+    title = '',
   }) {
     const metadata = record.metadata || {};
 
@@ -5136,23 +5190,41 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       for (const candidate of candidates) {
         try {
-          const result = await this.runConfiguredTranscription(candidate, {
-            allowCloudUrlFallback: true,
-            title: metadata.title || '',
-            source: source || 'media-url',
+          const useCloudForWebpage = metadata.transcriptionMode === 'cloud'
+            || metadata.cloudTranscriptionRequested === true;
+          const result = useCloudForWebpage
+            ? await this.runCloudFallbackTranscription(candidate, {
+              binding,
+              title: title || metadata.title || '',
+              source: source || 'media-url',
+              localError: 'user selected cloud transcription',
+              allowCloudUrlFallback: true,
+            })
+            : await this.runConfiguredTranscription(candidate, {
+              allowCloudUrlFallback: true,
+              title: metadata.title || '',
+              source: source || 'media-url',
+              forceLocal: metadata.transcriptionMode === 'local',
+            });
+          const nextMetadata = buildTranscriptOnlyMetadata(metadata, {
+            url,
+            platform,
+            mediaUrl: candidate,
+            subtitleUrl,
+            transcription: result.transcription,
+            transcriptionStatus: 'success',
+            transcriptionSource: result.source,
+            conversionStatus: 'success',
           });
           return {
             ...record,
-            metadata: buildTranscriptOnlyMetadata(metadata, {
-              url,
-              platform,
-              mediaUrl: candidate,
-              subtitleUrl,
-              transcription: result.transcription,
-              transcriptionStatus: 'success',
-              transcriptionSource: result.source,
-              conversionStatus: 'success',
-            }),
+            metadata: {
+              ...nextMetadata,
+              cloudTranscriptionProvider: result.cloudProvider || nextMetadata.cloudTranscriptionProvider || '',
+              cloudTranscriptionRequestId: result.cloudRequestId || nextMetadata.cloudTranscriptionRequestId || '',
+              cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || nextMetadata.cloudTranscriptionUsedSeconds || 0,
+              cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || nextMetadata.cloudTranscriptionRemainingSeconds || 0,
+            },
           };
         } catch (candidateError) {
           lastError = candidateError;
@@ -5180,7 +5252,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async hydrateXiaoyuzhouTranscript(record, url) {
+  async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = '') {
     const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
     const html = response.text || '';
     const mediaUrl = extractPodcastAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html);
@@ -5190,6 +5262,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       mediaUrl,
       mediaUrls: extractSocialMediaUrlsFromHtml(html),
       source: 'audio',
+      binding,
+      title,
     });
   }
 
@@ -5214,7 +5288,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async hydrateBilibiliTranscript(record, url) {
+  async hydrateBilibiliTranscript(record, url, binding = null, title = '') {
     const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
     const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
     const html = response.text || '';
@@ -5260,6 +5334,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         subtitleText: subtitle.transcription,
         subtitleUrl: subtitle.subtitleUrl,
         source: 'bilibili-subtitle',
+        binding,
+        title,
       });
     }
 
@@ -5268,10 +5344,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       platform: 'B站',
       mediaUrl: playurlAudioUrl || extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
       source: 'audio',
+      binding,
+      title,
     });
   }
 
-  async hydrateWebpageMarkdown(record, rootDir, dateFolder, title) {
+  async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
     if (!url || metadata.markdown || metadata.snapshot || metadata.contentSnapshot) {
@@ -5316,11 +5394,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isXiaoyuzhouUrl(url)) {
-        return await this.hydrateXiaoyuzhouTranscript(record, url);
+        return await this.hydrateXiaoyuzhouTranscript(record, url, binding, title);
       }
 
       if (isBilibiliUrl(url)) {
-        return await this.hydrateBilibiliTranscript(record, url);
+        return await this.hydrateBilibiliTranscript(record, url, binding, title);
       }
 
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
@@ -5331,7 +5409,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         let mediaUrl = mediaUrls[0] || '';
         const isUnavailableXhs = isXiaohongshuUrl(url)
           && isUnavailableXiaohongshuPage(html, resolvedUrl);
-        const isVideoIntent = isDouyinUrl(url)
+        const isVideoIntent = metadata.webpageMediaType === 'audio_video'
+          || isDouyinUrl(url)
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
           || /\/video\//i.test(resolvedUrl);
@@ -5357,6 +5436,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl,
             mediaUrls,
             source: 'video',
+            binding,
+            title,
             noMediaError: isUnavailableXhs
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
@@ -5514,6 +5595,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         rootDir,
         dateFolder,
         title,
+        binding,
       );
       title = await this.nextRecordTitle(dayDir, recordForMarkdown, bindingLabel);
     }
@@ -5778,280 +5860,97 @@ class WechatInboxSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings({ ...this.plugin.settings, inboxDir: value });
         }));
 
+    const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
+    const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
     new Setting(containerEl)
-      .setName('语音转写')
-      .setDesc('第一版只做转写，不做摘要。腾讯云密钥只保存在当前 Obsidian 本地。')
+      .setName('本地转写系统')
+      .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。云端转写请在微信小程序保存音视频时选择。')
       .addDropdown((dropdown) => {
-        Object.entries(AI_PROVIDER_NAMES).forEach(([value, label]) => {
+        Object.entries(LOCAL_ASR_PLATFORM_NAMES).forEach(([value, label]) => {
           dropdown.addOption(value, label);
         });
         dropdown
-          .setValue(this.plugin.settings.aiProvider)
+          .setValue(this.plugin.settings.localAsrPlatform || 'auto')
           .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, aiProvider: value });
+            const localAsrPlatform = normalizeLocalAsrPlatform(value);
+            const platform = resolveLocalAsrPlatform(localAsrPlatform);
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              aiProvider: 'local',
+              localAsrPlatform,
+              localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform),
+            });
             this.display();
           });
       });
-
     new Setting(containerEl)
-      .setName('长音视频云端预转写')
-      .setDesc('开启后，小程序提交超过阈值的音视频会优先在云端转写，插件同步时直接读取云端结果，并消耗云端转写额度。')
-      .addToggle((toggle) => toggle
-        .setValue(Boolean(this.plugin.settings.cloudPreTranscriptionEnabled))
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            cloudPreTranscriptionEnabled: Boolean(value),
-          });
+      .setName('本地转写权限')
+      .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
+      .addButton((button) => button
+        .setButtonText('刷新权限')
+        .setCta()
+        .onClick(async () => {
           try {
-            await this.plugin.syncTranscriptionPreferences();
-            new Notice(value ? '云端预转写已开启' : '云端预转写已关闭');
+            const status = await this.plugin.getLocalTranscriptionEntitlementStatus();
+            new Notice(status.hasAccess
+              ? `本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`
+              : '本地转写权限未开通或已过期');
+            this.display();
           } catch (error) {
-            new Notice(`云端预转写设置同步失败：${error.message || error}`);
+            new Notice(`权限查询失败：${error.message || error}`);
           }
         }));
-
     new Setting(containerEl)
-      .setName('云端预转写阈值')
-      .setDesc('只有超过该时长的音视频才会在小程序提交后进入云端预转写。')
-      .addDropdown((dropdown) => {
-        dropdown
-          .addOption('10', '10 分钟以上')
-          .addOption('30', '30 分钟以上')
-          .addOption('60', '60 分钟以上')
-          .setValue(String(this.plugin.settings.cloudPreTranscriptionThresholdMinutes || 10))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({
-              ...this.plugin.settings,
-              cloudPreTranscriptionThresholdMinutes: Number(value),
-            });
-            try {
-              await this.plugin.syncTranscriptionPreferences();
-              new Notice('云端预转写阈值已同步');
-            } catch (error) {
-              new Notice(`云端预转写设置同步失败：${error.message || error}`);
-            }
-          });
-      });
-
-    if (this.plugin.settings.aiProvider === 'local') {
-      const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
-      const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
-      new Setting(containerEl)
-        .setName('本地转写系统')
-        .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。')
-        .addDropdown((dropdown) => {
-          Object.entries(LOCAL_ASR_PLATFORM_NAMES).forEach(([value, label]) => {
-            dropdown.addOption(value, label);
-          });
-          dropdown
-            .setValue(this.plugin.settings.localAsrPlatform || 'auto')
-            .onChange(async (value) => {
-              const localAsrPlatform = normalizeLocalAsrPlatform(value);
-              const platform = resolveLocalAsrPlatform(localAsrPlatform);
-              await this.plugin.saveSettings({
-                ...this.plugin.settings,
-                localAsrPlatform,
-                localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform),
-              });
-              this.display();
-            });
-        });
-      new Setting(containerEl)
-        .setName('本地转写权限')
-        .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
-        .addButton((button) => button
-          .setButtonText('刷新权限')
-          .setCta()
-          .onClick(async () => {
-            try {
-              const status = await this.plugin.getLocalTranscriptionEntitlementStatus();
-              new Notice(status.hasAccess
-                ? `本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`
-                : '本地转写权限未开通或已过期');
-              this.display();
-            } catch (error) {
-              new Notice(`权限查询失败：${error.message || error}`);
-            }
-          }));
-      new Setting(containerEl)
-        .setName('本地转写组件')
-        .setDesc(localAsrStatus.ready
-          ? `已安装：${localAsrStatus.installRoot}`
-          : `未完整安装：${localAsrStatus.installRoot}`)
-        .addButton((button) => button
-          .setButtonText('检测状态')
-          .onClick(async () => {
-            const status = this.plugin.getLocalAsrInstallStatus();
-            let entitlementText = '';
-            try {
-              const entitlement = await this.plugin.getLocalTranscriptionEntitlementStatus();
-              entitlementText = entitlement.hasAccess
-                ? `权限有效${entitlement.expiresAt ? `，到期时间：${entitlement.expiresAt}` : ''}`
-                : '权限未开通或已过期';
-            } catch (error) {
-              entitlementText = '权限状态查询失败';
-            }
-            new Notice(`${status.ready ? '本地转写组件可用' : '本地转写组件未完整安装'}；${entitlementText}`);
-          }))
-        .addButton((button) => button
-          .setButtonText('一键安装')
-          .setCta()
-          .onClick(async () => {
-            try {
-              await this.plugin.installLocalAsr();
-              this.display();
-            } catch (error) {
-              new Notice(`本地转写组件安装失败：${error.message || error}`);
-            }
-          }))
-        .addButton((button) => button
-          .setButtonText('检测并修复')
-          .onClick(async () => {
-            try {
-              await this.plugin.checkAndRepairLocalAsr();
-              this.display();
-            } catch (error) {
-              new Notice(`检测并修复失败：${error.message || error}`);
-            }
-          }))
-        .addButton((button) => button
-          .setButtonText('复制诊断信息')
-          .onClick(async () => {
-            try {
-              await this.plugin.copyLocalAsrDiagnosticText();
-              new Notice('本地转写诊断信息已复制');
-            } catch (error) {
-              new Notice(`复制诊断信息失败：${error.message || error}`);
-            }
-          }));
-    }
-
-    if (this.plugin.settings.aiProvider === 'tencent') {
-      this.addPasswordSetting(containerEl, {
-        name: '腾讯云 SecretId',
-        desc: '用于调用腾讯云 ASR 录音文件识别。',
-        placeholder: 'AKID...',
-        value: this.plugin.settings.tencentSecretId,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, tencentSecretId: value });
-        },
-      });
-
-      this.addPasswordSetting(containerEl, {
-        name: '腾讯云 SecretKey',
-        desc: '只保存在当前 Obsidian 本地。',
-        placeholder: 'SecretKey',
-        value: this.plugin.settings.tencentSecretKey,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, tencentSecretKey: value });
-        },
-      });
-
-      new Setting(containerEl)
-        .setName('腾讯云地域')
-        .setDesc('默认 ap-shanghai。')
-        .addText((text) => text
-          .setPlaceholder('ap-shanghai')
-          .setValue(this.plugin.settings.tencentRegion)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentRegion: value });
-          }));
-
-      new Setting(containerEl)
-        .setName('识别模型')
-        .setDesc('普通话默认 16k_zh。')
-        .addText((text) => text
-          .setPlaceholder('16k_zh')
-          .setValue(this.plugin.settings.tencentEngineModelType)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentEngineModelType: value });
-          }));
-
-      new Setting(containerEl)
-        .setName('最大等待次数')
-        .setDesc('每次同步最多轮询多少次。默认 60 次。')
-        .addText((text) => text
-          .setPlaceholder('60')
-          .setValue(String(this.plugin.settings.tencentPollAttempts))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentPollAttempts: Number(value) });
-          }));
-
-      new Setting(containerEl)
-        .setName('每次等待毫秒')
-        .setDesc('默认 5000，60 次约等 5 分钟。')
-        .addText((text) => text
-          .setPlaceholder('5000')
-          .setValue(String(this.plugin.settings.tencentPollIntervalMs))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentPollIntervalMs: Number(value) });
-          }));
-    }
-
-    if (this.plugin.settings.aiProvider === 'aliyun') {
-      this.addPasswordSetting(containerEl, {
-        name: '阿里云百炼 API Key',
-        desc: '用于 Qwen-Omni 直接处理音频，Key 只保存在当前 Obsidian 本地。',
-        placeholder: 'sk-...',
-        value: this.plugin.settings.aliyunApiKey,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, aliyunApiKey: value });
-        },
-      });
-
-      new Setting(containerEl)
-        .setName('阿里模型')
-        .setDesc('默认 qwen3.5-omni-plus，适合先跑通长音频转写。')
-        .addText((text) => text
-          .setPlaceholder('qwen3.5-omni-plus')
-          .setValue(this.plugin.settings.aliyunModel)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, aliyunModel: value });
-          }));
-
-      new Setting(containerEl)
-        .setName('阿里接口地址')
-        .setDesc('一般保持默认即可。')
-        .addText((text) => text
-          .setPlaceholder(DEFAULT_SETTINGS.aliyunBaseUrl)
-          .setValue(this.plugin.settings.aliyunBaseUrl)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, aliyunBaseUrl: value });
-          }));
-    }
-
-    if (this.plugin.settings.aiProvider === 'doubao') {
-      this.addPasswordSetting(containerEl, {
-        name: '豆包语音识别 API Key',
-        desc: '用于豆包语音识别极速版，只做转写，不做摘要。Key 只保存在当前 Obsidian 本地。',
-        placeholder: 'volc-asr-key',
-        value: this.plugin.settings.doubaoAsrApiKey,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, doubaoAsrApiKey: value });
-        },
-      });
-
-      new Setting(containerEl)
-        .setName('豆包最大等待次数')
-        .setDesc('每次同步最多轮询多少次。默认 60 次。')
-        .addText((text) => text
-          .setPlaceholder('60')
-          .setValue(String(this.plugin.settings.doubaoPollAttempts))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, doubaoPollAttempts: Number(value) });
-          }));
-
-      new Setting(containerEl)
-        .setName('豆包每次等待毫秒')
-        .setDesc('默认 5000，60 次约等 5 分钟。')
-        .addText((text) => text
-          .setPlaceholder('5000')
-          .setValue(String(this.plugin.settings.doubaoPollIntervalMs))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, doubaoPollIntervalMs: Number(value) });
-          }));
-    }
+      .setName('本地转写组件')
+      .setDesc(localAsrStatus.ready
+        ? `已安装：${localAsrStatus.installRoot}`
+        : `未完整安装：${localAsrStatus.installRoot}`)
+      .addButton((button) => button
+        .setButtonText('检测状态')
+        .onClick(async () => {
+          const status = this.plugin.getLocalAsrInstallStatus();
+          let entitlementText = '';
+          try {
+            const entitlement = await this.plugin.getLocalTranscriptionEntitlementStatus();
+            entitlementText = entitlement.hasAccess
+              ? `权限有效${entitlement.expiresAt ? `，到期时间：${entitlement.expiresAt}` : ''}`
+              : '权限未开通或已过期';
+          } catch (error) {
+            entitlementText = '权限状态查询失败';
+          }
+          new Notice(`${status.ready ? '本地转写组件可用' : '本地转写组件未完整安装'}；${entitlementText}`);
+        }))
+      .addButton((button) => button
+        .setButtonText('一键安装')
+        .setCta()
+        .onClick(async () => {
+          try {
+            await this.plugin.installLocalAsr();
+            this.display();
+          } catch (error) {
+            new Notice(`本地转写组件安装失败：${error.message || error}`);
+          }
+        }))
+      .addButton((button) => button
+        .setButtonText('检测并修复')
+        .onClick(async () => {
+          try {
+            await this.plugin.checkAndRepairLocalAsr();
+            this.display();
+          } catch (error) {
+            new Notice(`检测并修复失败：${error.message || error}`);
+          }
+        }))
+      .addButton((button) => button
+        .setButtonText('复制诊断信息')
+        .onClick(async () => {
+          try {
+            await this.plugin.copyLocalAsrDiagnosticText();
+            new Notice('本地转写诊断信息已复制');
+          } catch (error) {
+            new Notice(`复制诊断信息失败：${error.message || error}`);
+          }
+        }));
 
     new Setting(containerEl)
       .setName('立即同步')
