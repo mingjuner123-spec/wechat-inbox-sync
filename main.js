@@ -2689,6 +2689,48 @@ function dedupeImageVariants(urls) {
   return Array.from(map.values());
 }
 
+function collectJsonArrayBlocks(source, keys) {
+  const wanted = (keys || []).map((key) => String(key || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!wanted.length) return [];
+  const pattern = new RegExp(`["'](?:${wanted.join('|')})["']\\s*:\\s*\\[`, 'gi');
+  const blocks = [];
+  const text = String(source || '');
+  let match;
+  while ((match = pattern.exec(text))) {
+    let depth = 1;
+    let inString = '';
+    let escaped = false;
+    const start = pattern.lastIndex - 1;
+    for (let index = pattern.lastIndex; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (inString) {
+        if (char === inString) inString = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        inString = char;
+        continue;
+      }
+      if (char === '[') depth += 1;
+      if (char === ']') depth -= 1;
+      if (depth === 0) {
+        blocks.push(text.slice(start, index + 1));
+        pattern.lastIndex = index + 1;
+        break;
+      }
+    }
+  }
+  return blocks;
+}
+
 function collectJsonStringValues(source, keys) {
   const wanted = new Set((keys || []).map((key) => String(key || '').toLowerCase()));
   const values = [];
@@ -2779,6 +2821,82 @@ function collectImageUrlsFromHtml(html) {
   collectLooseXiaohongshuImageUrls(source).forEach((url) => pushUniqueUrl(urls, url));
 
   return dedupeImageVariants(urls);
+}
+
+function isNoisyXiaohongshuImageUrl(value) {
+  const url = normalizeExtractedUrl(value).toLowerCase();
+  return /(?:avatar|sns-avatar|recommend|banner|logo|icon|emoji|sticker|qrcode|qr-code|comment|user|profile|ads?)[^/]*(?:\.jpg|\.jpeg|\.png|\.webp|!|$)/i.test(url)
+    || /ci\.xiaohongshu\.com\/(?:recommend|banner|logo|icon|avatar)/i.test(url);
+}
+
+function collectFilteredImageTagUrls(source) {
+  const urls = [];
+  const imageTags = String(source || '').match(/<img\b[^>]*>/gi) || [];
+  imageTags.forEach((tag) => {
+    const src = getHtmlAttribute(tag, 'data-src') || getHtmlAttribute(tag, 'src');
+    if (src && isLikelyImageUrl(src) && !isNoisyXiaohongshuImageUrl(src)) {
+      pushUniqueUrl(urls, src);
+    }
+    const srcset = getHtmlAttribute(tag, 'srcset');
+    if (srcset) {
+      const srcsetUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+      if (isLikelyImageUrl(srcsetUrl) && !isNoisyXiaohongshuImageUrl(srcsetUrl)) {
+        pushUniqueUrl(urls, srcsetUrl);
+      }
+    }
+  });
+  return urls;
+}
+
+function collectXiaohongshuNoteImageUrls(html) {
+  const source = String(html || '');
+  const urls = [];
+  [
+    extractMetaContent(source, ['og:image', 'og:image:url', 'twitter:image']),
+  ].forEach((url) => pushUniqueUrl(urls, url));
+
+  collectFilteredImageTagUrls(source).forEach((url) => pushUniqueUrl(urls, url));
+
+  const imageBlocks = collectJsonArrayBlocks(source, [
+    'imageList',
+    'image_list',
+    'images',
+    'imageUrls',
+    'image_urls',
+    'imageUrlList',
+    'image_url_list',
+  ]);
+
+  imageBlocks.forEach((block) => {
+    collectJsonStringValues(block, [
+      'url',
+      'urlDefault',
+      'urlPre',
+      'url_pre',
+      'urlSizeLarge',
+      'url_size_large',
+      'original',
+      'originalUrl',
+      'original_url',
+      'src',
+      'image',
+      'imageUrl',
+      'image_url',
+      'cover',
+    ]).forEach((url) => {
+      if (isLikelyImageUrl(url)) {
+        pushUniqueUrl(urls, url);
+      }
+    });
+    collectLooseXiaohongshuImageUrls(block).forEach((url) => pushUniqueUrl(urls, url));
+  });
+
+  const noteImages = dedupeImageVariants(urls);
+  if (imageBlocks.length || noteImages.length > 1) {
+    return noteImages;
+  }
+
+  return dedupeImageVariants(collectImageUrlsFromHtml(source)).slice(0, 6);
 }
 
 function extractVideoUrlFromHtml(html) {
@@ -3079,7 +3197,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     || '小红书笔记';
   const description = extractXiaohongshuDescription(source, fallbackText);
   const tags = extractTagsFromText(description, source);
-  const images = collectImageUrlsFromHtml(source);
+  const images = collectXiaohongshuNoteImageUrls(source);
   const videoUrl = extractVideoUrlFromHtml(source);
   const lines = [
     '## 标题',
@@ -3645,6 +3763,54 @@ function extractFeishuMarkdownFromHtml(html) {
   return markdown;
 }
 
+function yamlValue(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).replace(/\r?\n/g, ' ').trim();
+}
+
+function buildFrontmatter(lines) {
+  return ['---', ...lines, '---', ''].join('\n');
+}
+
+function buildRecordFrontmatter(record, title, syncedAt, audioFileName) {
+  const type = String(record.type || '').toLowerCase();
+  const metadata = record.metadata || {};
+  const lines = [
+    `id: ${yamlValue(getRecordId(record))}`,
+    `type: ${yamlValue(type)}`,
+    `title: ${yamlValue(title)}`,
+    `created_at: ${yamlValue(record.createdAt)}`,
+    `synced_at: ${yamlValue(syncedAt)}`,
+    `source: ${yamlValue(record.source || 'wechat-miniprogram')}`,
+    'status: synced',
+  ];
+
+  if (type === 'link') {
+    lines.push(`url: ${yamlValue(metadata.url || record.content)}`);
+    lines.push(`fetch_status: ${yamlValue(metadata.fetchStatus || 'pending')}`);
+  }
+
+  if (type === 'webpage') {
+    lines.push(`url: ${yamlValue(metadata.url || record.content)}`);
+    lines.push(`conversion_status: ${yamlValue(metadata.conversionStatus || 'pending')}`);
+  }
+
+  if (type === 'voice') {
+    lines.push(`audio_file: ${yamlValue(audioFileName)}`);
+    lines.push(`audio_file_id: ${yamlValue(metadata.audioFileID || '')}`);
+    lines.push(`transcription_status: ${yamlValue(metadata.transcriptionStatus || 'pending')}`);
+  }
+
+  if (type === 'file') {
+    lines.push(`file_name: ${yamlValue(metadata.fileName || record.content || '')}`);
+    lines.push(`file_id: ${yamlValue(metadata.fileID || '')}`);
+    lines.push(`file_ext: ${yamlValue(metadata.fileExt || '')}`);
+    lines.push(`conversion_status: ${yamlValue(metadata.conversionStatus || 'pending')}`);
+  }
+
+  return buildFrontmatter(lines);
+}
+
 function buildMarkdownForRecord({ record, title, syncedAt }) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
@@ -3692,7 +3858,8 @@ function buildMarkdownForRecord({ record, title, syncedAt }) {
     throw new Error(`Unsupported record type: ${record.type}`);
   }
 
-  return `收集时间：${formatCreatedTime(record.createdAt)}\n\n${body}`;
+  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName);
+  return `${frontmatter}\n收集时间：${formatCreatedTime(record.createdAt)}\n\n${body}`;
 }
 
 function buildSyncNotice(count) {
@@ -3773,6 +3940,30 @@ function getRecordConversionWarning(record) {
     return errorMsg || '网页抓取未成功';
   }
   return '';
+}
+
+function isCloudTranscriptionWaitingRecord(record) {
+  const metadata = (record && record.metadata) || {};
+  const status = String(metadata.transcriptionStatus || '').toLowerCase();
+  const source = String(metadata.transcriptionSource || metadata.transcriptionProvider || '').toLowerCase();
+  const isCloudRecord = metadata.transcriptionMode === 'cloud'
+    || metadata.cloudTranscriptionRequested === true
+    || source.includes('cloud-pretranscription')
+    || source.includes('cloud');
+  const hasTranscription = String(metadata.transcription || '').trim().length > 0;
+  return isCloudRecord && !hasTranscription && ['pending', 'queued', 'processing'].includes(status);
+}
+
+function isAudioVideoTranscriptionIncompleteRecord(record) {
+  const metadata = (record && record.metadata) || {};
+  const status = String(metadata.transcriptionStatus || '').toLowerCase();
+  const hasTranscription = String(metadata.transcription || '').trim().length > 0;
+  const isAudioVideoRecord = String(record && record.type || '').toLowerCase() === 'voice'
+    || metadata.webpageMediaType === 'audio_video'
+    || Boolean(metadata.audioFileID)
+    || metadata.transcriptOnly === true;
+  if (!isAudioVideoRecord || hasTranscription) return false;
+  return ['pending', 'queued', 'processing', 'failed'].includes(status);
 }
 
 class WechatObsidianInboxPlugin extends Plugin {
@@ -5599,6 +5790,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       );
       title = await this.nextRecordTitle(dayDir, recordForMarkdown, bindingLabel);
     }
+    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
+      const metadata = recordForMarkdown.metadata || {};
+      const status = metadata.transcriptionStatus || 'pending';
+      throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+    }
     const markdown = buildMarkdownForRecord({ record: recordForMarkdown, title, syncedAt });
     const filePath = `${dayDir}/${title}.md`;
     this.showSyncProgress({ ...progress, stage: 'writing', title });
@@ -5619,6 +5815,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const records = payload.data || [];
     const written = [];
     const failed = [];
+    const skipped = [];
     const conversionWarnings = [];
     const syncedAt = new Date().toISOString();
     if (!records.length) {
@@ -5632,6 +5829,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         current: index + 1,
         total: records.length,
       };
+      if (isCloudTranscriptionWaitingRecord(record)) {
+        skipped.push({
+          recordId: getRecordId(record),
+          reason: 'cloud-transcription-processing',
+        });
+        this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
+        continue;
+      }
       try {
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, progress);
         written.push(item);
@@ -5666,7 +5871,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed, conversionWarnings };
+    return { written, failed, skipped, conversionWarnings };
   }
 
   async syncInbox(showNotice = true) {
@@ -5681,6 +5886,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const shouldPrefixTitle = bindings.length > 1;
       const written = [];
       const failed = [];
+      const skipped = [];
       const conversionWarnings = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: 'fetching' });
@@ -5690,6 +5896,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           const result = await this.syncBinding(binding, shouldPrefixTitle);
           written.push(...result.written);
           failed.push(...result.failed);
+          if (result.skipped && result.skipped.length) {
+            skipped.push(...result.skipped);
+          }
           if (result.conversionWarnings && result.conversionWarnings.length) {
             conversionWarnings.push(...result.conversionWarnings);
           }
@@ -5706,6 +5915,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       let finalMessage = buildSyncNotice(written.length);
+      if (skipped.length) {
+        finalMessage += `，${skipped.length} 条云端转写中，完成后再同步`;
+      }
       if (showNotice || written.length) {
         if (conversionWarnings.length) {
           finalMessage += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
@@ -5719,7 +5931,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         status: failed.length ? 'failed' : 'success',
         stage: 'finished',
         current: written.length,
-        total: written.length + failed.length,
+        total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
         time: new Date().toISOString(),
@@ -5793,17 +6005,16 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     const bindings = normalizeBindings(this.plugin.settings);
     if (bindings.length) {
-      containerEl.createEl('h3', { text: '已绑定小程序码' });
       bindings.forEach((binding, index) => {
         const isUnbound = binding.status === 'unbound';
         const statusDesc = isUnbound
           ? `已解除/已失效${binding.lastError ? `：${binding.lastError}` : ''}`
           : (binding.enabled === false ? '已暂停同步' : '同步时会拉取这个微信里的收集内容');
         new Setting(containerEl)
-          .setName(`${binding.label || `微信 ${index + 1}`}：${binding.token}`)
+          .setName(`${binding.label || `已完成绑定的微信 ${index + 1}`}：${binding.token}`)
           .setDesc(statusDesc)
           .addText((text) => text
-            .setPlaceholder(`微信 ${index + 1}`)
+            .setPlaceholder(`已完成绑定的微信 ${index + 1}`)
             .setValue(binding.label || '')
             .onChange(async (value) => {
               const nextBindings = normalizeBindings(this.plugin.settings).map((item) => (
@@ -5837,10 +6048,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
     }
 
     new Setting(containerEl)
-      .setName('新增绑定码')
+      .setName('立即绑定')
       .setDesc(bindings.length >= MAX_PLUGIN_BINDINGS
         ? `已达到上限：最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码。`
-        : `打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。点击新增后会加入上方列表，不会覆盖已有绑定。当前 ${bindings.length}/${MAX_PLUGIN_BINDINGS}。`)
+        : `打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。点击立即绑定后会加入上方列表，不会覆盖已有绑定。当前 ${bindings.length}/${MAX_PLUGIN_BINDINGS}。`)
       .addText((text) => text
         .setPlaceholder('例如 ABC-123')
         .setValue(this.plugin.settings.pendingBindCode || '')
@@ -5849,7 +6060,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }))
       .addButton((button) => {
         button
-          .setButtonText('新增绑定码')
+          .setButtonText('立即绑定')
           .setCta()
           .onClick(async () => {
             await this.plugin.bindCurrentCode();
@@ -6024,6 +6235,7 @@ WechatObsidianInboxPlugin.__test = {
   parseTencentTaskStatusResponse,
   buildRecordTitleBase,
   extractXiaohongshuMarkdownFromHtml,
+  buildMarkdownForRecord,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,
