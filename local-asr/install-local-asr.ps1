@@ -7,6 +7,10 @@ $ProgressPreference = "SilentlyContinue"
 
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
+$ModelUrls = @(
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+)
 
 function New-CleanDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -307,6 +311,31 @@ function Install-ZipPackage {
   throw $lastError
 }
 
+function Install-ModelPackage {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Urls,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [Parameter(Mandatory = $true)][Int64]$MinBytes,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $lastError = $null
+  foreach ($url in $Urls) {
+    try {
+      if (Test-Path -LiteralPath $OutFile) {
+        Remove-Item -LiteralPath $OutFile -Force
+      }
+      Download-File -Url $url -OutFile $OutFile
+      Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null
+      return $OutFile
+    } catch {
+      $lastError = $_
+      Write-Host "$Label source failed: $url"
+      Write-Host ($_.Exception.Message)
+    }
+  }
+  throw $lastError
+}
+
 function Get-LatestWhisperWindowsAsset {
   try {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -Headers $Headers
@@ -450,8 +479,7 @@ try {
   }
   if (-not (Test-Path -LiteralPath $modelPath)) {
     $modelTempPath = Join-Path $TempRoot "ggml-small.bin"
-    Download-File -Url "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" -OutFile $modelTempPath
-    Assert-DownloadedFile -Path $modelTempPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls $ModelUrls -OutFile $modelTempPath -MinBytes 400MB -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $modelTempPath -Destination $modelPath -Force
   }
 
