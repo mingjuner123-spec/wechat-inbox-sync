@@ -1019,6 +1019,110 @@ function requestJsonViaNode(options) {
   });
 }
 
+function createAbortError(message = '当前转写已停止') {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function isAbortError(error) {
+  return error && (error.name === 'AbortError' || /aborted|abort|已停止|用户已停止/i.test(error.message || ''));
+}
+
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) {
+    throw createAbortError();
+  }
+}
+
+function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const signal = options.signal || null;
+    if (signal && signal.aborted) {
+      reject(createAbortError());
+      return;
+    }
+
+    const transport = parsedUrl.protocol === 'http:' ? http : https;
+    const request = transport.request(parsedUrl, {
+      method: 'GET',
+      headers,
+      timeout: options.timeout || 30000,
+    }, (response) => {
+      const location = response.headers && response.headers.location;
+      if (response.statusCode >= 300 && response.statusCode < 400 && location && redirectCount < 5) {
+        response.resume();
+        try {
+          const nextUrl = new URL(location, url).toString();
+          downloadArrayBufferViaNode(nextUrl, headers, options, redirectCount + 1).then(resolve, reject);
+        } catch (error) {
+          reject(error);
+        }
+        return;
+      }
+
+      if (response.statusCode && (response.statusCode < 200 || response.statusCode >= 300)) {
+        response.resume();
+        reject(new Error(`媒体下载失败：HTTP ${response.statusCode}`));
+        return;
+      }
+
+      const chunks = [];
+      let received = 0;
+      const total = Number(response.headers && response.headers['content-length']) || 0;
+      response.on('data', (chunk) => {
+        if (signal && signal.aborted) {
+          request.destroy(createAbortError());
+          return;
+        }
+        const buffer = Buffer.from(chunk);
+        chunks.push(buffer);
+        received += buffer.length;
+        if (typeof options.onProgress === 'function') {
+          options.onProgress({
+            received,
+            total,
+            percent: total > 0 ? Math.max(1, Math.min(99, Math.floor((received * 100) / total))) : null,
+          });
+        }
+      });
+      response.on('end', () => {
+        if (signal && signal.aborted) {
+          reject(createAbortError());
+          return;
+        }
+        const buffer = Buffer.concat(chunks);
+        if (typeof options.onProgress === 'function') {
+          options.onProgress({
+            received,
+            total: total || received,
+            percent: 100,
+          });
+        }
+        resolve(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+      });
+    });
+
+    const abort = () => request.destroy(createAbortError());
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', abort, { once: true });
+    }
+    request.on('timeout', () => {
+      request.destroy(new Error('媒体下载超时'));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 function getRecordId(record) {
   return record._id || record.id || '';
 }
@@ -3918,7 +4022,7 @@ function buildSyncProgressMessage({
   if (stage === 'fetching') return `${label}正在同步，正在获取待同步内容`;
   if (stage === 'empty') return `${label}没有需要同步的新内容`;
   if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
-  if (stage === 'downloading') return `${label}正在下载附件 ${countText}${suffix}`;
+  if (stage === 'downloading') return `${label}正在下载附件 ${countText}${percentText}${suffix}`;
   if (stage === 'transcribing') return `${label}正在转写音视频 ${countText}${percentText}${suffix}`;
   if (stage === 'writing') return `${label}正在写入 Obsidian ${countText}${suffix}`;
   if (stage === 'marking') return `${label}正在更新同步状态 ${countText}${suffix}`;
@@ -3979,11 +4083,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.syncStatusBar.setText('');
     }
     this.localAsrInstallPromise = null;
+    this.currentTranscriptionAbortController = null;
+    this.currentTranscriptionProcess = null;
 
     this.addCommand({
       id: 'sync-wechat-inbox',
       name: '同步微信收集箱',
       callback: () => this.syncInbox(),
+    });
+
+    this.addCommand({
+      id: 'stop-current-transcription',
+      name: '停止当前转写',
+      callback: () => this.stopCurrentTranscription(),
     });
 
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
@@ -4189,7 +4301,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
 
-  async downloadArrayBuffer(url, headers = {}) {
+  async downloadArrayBuffer(url, headers = {}, options = {}) {
+    if (options.signal || typeof options.onProgress === 'function') {
+      return downloadArrayBufferViaNode(url, headers, options);
+    }
     const response = await requestUrl({ url, method: 'GET', headers });
     if (!response.arrayBuffer) {
       throw new Error('录音文件下载失败');
@@ -4229,6 +4344,24 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
       this.syncStatusBar.setText('');
     }
+  }
+
+  stopCurrentTranscription() {
+    let stopped = false;
+    if (this.currentTranscriptionAbortController) {
+      this.currentTranscriptionAbortController.abort();
+      stopped = true;
+    }
+    if (this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
+      try {
+        this.currentTranscriptionProcess.kill();
+        stopped = true;
+      } catch (error) {
+        // Ignore process cleanup failures.
+      }
+    }
+    new Notice(stopped ? '已停止当前转写，会继续处理后面的同步内容。' : '当前没有正在转写的任务。');
+    return stopped;
   }
 
   async unbindBinding(token) {
@@ -4788,15 +4921,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error('未配置本地转写命令');
     }
 
-    const inputPath = await this.downloadMediaToTempFile(audioUrl);
-    const outputPath = `${inputPath}.txt`;
-    const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
-    const command = commandTemplate.includes('{input}')
-      ? commandTemplate
-        .replace(/\{input\}/g, quote(inputPath))
-        .replace(/\{output\}/g, quote(outputPath))
-      : `${commandTemplate} ${quote(inputPath)}`;
     const progressTitle = options.title || '';
+    const abortController = new AbortController();
+    this.currentTranscriptionAbortController = abortController;
     let progressTimer = null;
     let lastProgressKey = '';
     const emitLocalProgress = (fallbackPercent = null) => {
@@ -4833,19 +4960,55 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     };
 
+    let inputPath = '';
+    let outputPath = '';
+    let command = '';
     try {
+      this.showSyncProgress({
+        ...options,
+        stage: 'downloading',
+        title: progressTitle,
+        percent: 0,
+      });
+      inputPath = await this.downloadMediaToTempFile(audioUrl, {
+        sourceUrl: options.sourceUrl || options.url || '',
+        signal: abortController.signal,
+        onProgress: (progress = {}) => {
+          if (typeof progress.percent === 'number') {
+            this.showSyncProgress({
+              ...options,
+              stage: 'downloading',
+              title: progressTitle,
+              percent: progress.percent,
+            });
+          }
+        },
+      });
+      throwIfAborted(abortController.signal);
+      outputPath = `${inputPath}.txt`;
+      const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
+      command = commandTemplate.includes('{input}')
+        ? commandTemplate
+          .replace(/\{input\}/g, quote(inputPath))
+          .replace(/\{output\}/g, quote(outputPath))
+        : `${commandTemplate} ${quote(inputPath)}`;
       const { stdout, stderr } = await new Promise((resolve, reject) => {
         emitLocalProgress(0);
         progressTimer = setInterval(() => emitLocalProgress(), 1000);
         if (progressTimer && typeof progressTimer.unref === 'function') {
           progressTimer.unref();
         }
-        childProcess.exec(command, {
+        const child = childProcess.exec(command, {
           timeout: 2 * 60 * 60 * 1000,
           maxBuffer: 50 * 1024 * 1024,
           windowsHide: true,
         }, (error, stdout, stderr) => {
           stopProgressPolling();
+          this.currentTranscriptionProcess = null;
+          if (abortController.signal.aborted) {
+            reject(createAbortError());
+            return;
+          }
           if (error) {
             const wrapped = new Error(stderr || error.message || String(error));
             wrapped.stdout = stdout;
@@ -4856,6 +5019,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           emitLocalProgress(100);
           resolve({ stdout, stderr });
         });
+        this.currentTranscriptionProcess = child;
       });
 
       const outputText = fs.existsSync(outputPath)
@@ -4876,6 +5040,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       return transcription;
     } catch (error) {
+      if (isAbortError(error)) {
+        throw createRetryableTranscriptionError('用户已停止当前转写');
+      }
       appendLocalAsrRunLog({
         installRoot,
         status: 'failed',
@@ -4889,9 +5056,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw error;
     } finally {
       stopProgressPolling();
+      this.currentTranscriptionAbortController = null;
+      this.currentTranscriptionProcess = null;
       [inputPath, outputPath].forEach((filePath) => {
         try {
-          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
         } catch (error) {
           // Ignore temp cleanup failures.
         }
@@ -4899,11 +5068,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async downloadMediaToTempFile(audioUrl) {
+  async downloadMediaToTempFile(audioUrl, options = {}) {
     const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl)
       ? await resolveRedirectUrl(audioUrl, 5, 'GET')
       : audioUrl;
-    const buffer = Buffer.from(await this.downloadArrayBuffer(resolvedUrl, getSocialRequestHeaders(resolvedUrl)));
+    throwIfAborted(options.signal);
+    const buffer = Buffer.from(await this.downloadArrayBuffer(
+      resolvedUrl,
+      getSocialRequestHeaders(options.sourceUrl || resolvedUrl),
+      {
+        signal: options.signal,
+        onProgress: options.onProgress,
+      },
+    ));
+    throwIfAborted(options.signal);
     const head = buffer.subarray(0, Math.min(buffer.length, 256)).toString('utf8').trim().toLowerCase();
     if (buffer.length < 512 || head.startsWith('<!doctype') || head.startsWith('<html') || head.includes('<body')) {
       throw new Error('下载到的媒体不是有效音视频文件，可能是平台风控页或无效视频地址');
@@ -5395,6 +5573,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               allowCloudUrlFallback: true,
               title: metadata.title || '',
               source: source || 'media-url',
+              sourceUrl: url,
               forceLocal: metadata.transcriptionMode === 'local',
             });
           const nextMetadata = buildTranscriptOnlyMetadata(metadata, {
@@ -6189,6 +6368,11 @@ class WechatInboxSettingTab extends PluginSettingTab {
           } catch (error) {
             new Notice(`检测并修复失败：${error.message || error}`);
           }
+        }))
+      .addButton((button) => button
+        .setButtonText('停止当前转写')
+        .onClick(() => {
+          this.plugin.stopCurrentTranscription();
         }))
       .addButton((button) => button
         .setButtonText('复制诊断信息')

@@ -21,11 +21,14 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          ZIP_NAME="wechat-inbox-sync-$TAG_NAME.zip"
+          rm -f "$ZIP_NAME"
+          zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" main.js manifest.json styles.css --clobber
+            gh release upload "$TAG_NAME" main.js manifest.json styles.css "$ZIP_NAME" --clobber
           else
-            gh release create "$TAG_NAME" main.js manifest.json styles.css \
+            gh release create "$TAG_NAME" main.js manifest.json styles.css "$ZIP_NAME" \
               --title "$TAG_NAME" \
               --notes "WeChat Inbox Sync $TAG_NAME" \
               --latest
