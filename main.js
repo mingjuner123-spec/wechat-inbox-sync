@@ -14,6 +14,29 @@ const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
+const NOTE_SAVE_MODES = {
+  date: '按日期创建子目录',
+  root: '直接保存到根目录',
+};
+const DEFAULT_NOTE_PROPERTY_FIELDS = '';
+const NOTE_PROPERTY_FIELD_KEYS = [
+  'id',
+  'type',
+  'title',
+  'created_at',
+  'synced_at',
+  'source',
+  'status',
+  'url',
+  'fetch_status',
+  'conversion_status',
+  'audio_file',
+  'audio_file_id',
+  'transcription_status',
+  'file_name',
+  'file_id',
+  'file_ext',
+];
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
@@ -23,6 +46,8 @@ const DEFAULT_SETTINGS = {
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
+  noteSaveMode: 'date',
+  notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: true,
   aiProvider: 'off',
   cloudPreTranscriptionEnabled: false,
@@ -813,6 +838,26 @@ function normalizeLocalTranscriptionCommand(command, platform = os.platform()) {
   return normalized;
 }
 
+function normalizeNoteSaveMode(value) {
+  const normalized = String(value || '').trim();
+  return Object.prototype.hasOwnProperty.call(NOTE_SAVE_MODES, normalized)
+    ? normalized
+    : DEFAULT_SETTINGS.noteSaveMode;
+}
+
+function normalizeNotePropertyFields(value) {
+  const seen = new Set();
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => {
+      if (!NOTE_PROPERTY_FIELD_KEYS.includes(item) || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    })
+    .join(',');
+}
+
 function normalizeBindCodeInput(code) {
   const compact = String(code || '')
     .trim()
@@ -893,6 +938,8 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     : null;
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
+  merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
+  merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
@@ -3876,46 +3923,74 @@ function buildFrontmatter(lines) {
   return ['---', ...lines, '---', ''].join('\n');
 }
 
-function buildRecordFrontmatter(record, title, syncedAt, audioFileName) {
+function parseNotePropertyFields(propertyFields) {
+  return normalizeNotePropertyFields(propertyFields).split(',').filter(Boolean);
+}
+
+function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
-  const lines = [
-    `id: ${yamlValue(getRecordId(record))}`,
-    `type: ${yamlValue(type)}`,
-    `title: ${yamlValue(title)}`,
-    `created_at: ${yamlValue(record.createdAt)}`,
-    `synced_at: ${yamlValue(syncedAt)}`,
-    `source: ${yamlValue(record.source || 'wechat-miniprogram')}`,
-    'status: synced',
-  ];
+  const fields = {
+    id: getRecordId(record),
+    type,
+    title,
+    created_at: record.createdAt,
+    synced_at: syncedAt,
+    source: record.source || 'wechat-miniprogram',
+    status: 'synced',
+  };
 
   if (type === 'link') {
-    lines.push(`url: ${yamlValue(metadata.url || record.content)}`);
-    lines.push(`fetch_status: ${yamlValue(metadata.fetchStatus || 'pending')}`);
+    fields.url = metadata.url || record.content;
+    fields.fetch_status = metadata.fetchStatus || 'pending';
   }
 
   if (type === 'webpage') {
-    lines.push(`url: ${yamlValue(metadata.url || record.content)}`);
-    lines.push(`conversion_status: ${yamlValue(metadata.conversionStatus || 'pending')}`);
+    fields.url = metadata.url || record.content;
+    fields.conversion_status = metadata.conversionStatus || 'pending';
   }
 
   if (type === 'voice') {
-    lines.push(`audio_file: ${yamlValue(audioFileName)}`);
-    lines.push(`audio_file_id: ${yamlValue(metadata.audioFileID || '')}`);
-    lines.push(`transcription_status: ${yamlValue(metadata.transcriptionStatus || 'pending')}`);
+    fields.audio_file = audioFileName;
+    fields.audio_file_id = metadata.audioFileID || '';
+    fields.transcription_status = metadata.transcriptionStatus || 'pending';
   }
 
   if (type === 'file') {
-    lines.push(`file_name: ${yamlValue(metadata.fileName || record.content || '')}`);
-    lines.push(`file_id: ${yamlValue(metadata.fileID || '')}`);
-    lines.push(`file_ext: ${yamlValue(metadata.fileExt || '')}`);
-    lines.push(`conversion_status: ${yamlValue(metadata.conversionStatus || 'pending')}`);
+    fields.file_name = metadata.fileName || record.content || '';
+    fields.file_id = metadata.fileID || '';
+    fields.file_ext = metadata.fileExt || '';
+    fields.conversion_status = metadata.conversionStatus || 'pending';
   }
+
+  const defaultFieldOrder = [
+    'id',
+    'type',
+    'title',
+    'created_at',
+    'synced_at',
+    'source',
+    'status',
+    'url',
+    'fetch_status',
+    'conversion_status',
+    'audio_file',
+    'audio_file_id',
+    'transcription_status',
+    'file_name',
+    'file_id',
+    'file_ext',
+  ];
+  const selectedFields = parseNotePropertyFields(propertyFields);
+  const fieldOrder = selectedFields.length ? selectedFields : defaultFieldOrder;
+  const lines = fieldOrder
+    .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .map((key) => `${key}: ${yamlValue(fields[key])}`);
 
   return buildFrontmatter(lines);
 }
 
-function buildMarkdownForRecord({ record, title, syncedAt }) {
+function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS }) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
   const audioFileName = metadata.audioFileName || `${title}.mp3`;
@@ -3962,7 +4037,7 @@ function buildMarkdownForRecord({ record, title, syncedAt }) {
     throw new Error(`Unsupported record type: ${record.type}`);
   }
 
-  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName);
+  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
   return `${frontmatter}\n收集时间：${formatCreatedTime(record.createdAt)}\n\n${body}`;
 }
 
@@ -5932,15 +6007,15 @@ class WechatObsidianInboxPlugin extends Plugin {
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const dateFolder = getDateFolderName(record.createdAt);
     const rootDir = this.settings.inboxDir;
-    const dayDir = `${rootDir}/${dateFolder}`;
+    const noteDir = this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`;
     const bindingLabel = shouldPrefixTitle && binding ? binding.label : '';
     const progressTitle = buildRecordTitleBase(record);
     this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
 
     await this.ensureFolder(rootDir);
-    await this.ensureFolder(dayDir);
+    await this.ensureFolder(noteDir);
 
-    let title = await this.nextRecordTitle(dayDir, record, bindingLabel);
+    let title = await this.nextRecordTitle(noteDir, record, bindingLabel);
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
     const linkAsWebpage = recordType === 'link' && shouldHydrateLinkAsWebpage((record.metadata && record.metadata.url) || record.content || '');
@@ -5967,15 +6042,20 @@ class WechatObsidianInboxPlugin extends Plugin {
         title,
         binding,
       );
-      title = await this.nextRecordTitle(dayDir, recordForMarkdown, bindingLabel);
+      title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
     }
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
-    const markdown = buildMarkdownForRecord({ record: recordForMarkdown, title, syncedAt });
-    const filePath = `${dayDir}/${title}.md`;
+    const markdown = buildMarkdownForRecord({
+      record: recordForMarkdown,
+      title,
+      syncedAt,
+      propertyFields: this.settings.notePropertyFields,
+    });
+    const filePath = `${noteDir}/${title}.md`;
     this.showSyncProgress({ ...progress, stage: 'writing', title });
     await this.app.vault.adapter.write(filePath, markdown);
 
@@ -6252,12 +6332,43 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('保存根目录')
-      .setDesc('内容会写入该目录下的 YYYY-MM-DD 文件夹。')
+      .setDesc('同步笔记写入的位置；可选择是否按日期再创建子目录。')
       .addText((text) => text
         .setPlaceholder('临时收集')
         .setValue(this.plugin.settings.inboxDir)
         .onChange(async (value) => {
           await this.plugin.saveSettings({ ...this.plugin.settings, inboxDir: value });
+        }));
+
+    new Setting(containerEl)
+      .setName('笔记保存方式')
+      .setDesc('默认按日期分类；如果想所有文章都直接进入上面的目录，选择“直接保存到根目录”。')
+      .addDropdown((dropdown) => {
+        Object.entries(NOTE_SAVE_MODES).forEach(([value, label]) => {
+          dropdown.addOption(value, label);
+        });
+        dropdown
+          .setValue(this.plugin.settings.noteSaveMode || DEFAULT_SETTINGS.noteSaveMode)
+          .onChange(async (value) => {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              noteSaveMode: normalizeNoteSaveMode(value),
+            });
+            this.display();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('笔记属性字段')
+      .setDesc(`留空使用默认属性；也可以用英文逗号指定字段，例如：type,title,url,created_at。可用字段：${NOTE_PROPERTY_FIELD_KEYS.join(', ')}`)
+      .addTextArea((text) => text
+        .setPlaceholder('留空使用默认属性')
+        .setValue(this.plugin.settings.notePropertyFields || '')
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            notePropertyFields: normalizeNotePropertyFields(value),
+          });
         }));
 
     new Setting(containerEl)
@@ -6386,7 +6497,9 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
 
     const status = containerEl.createDiv({ cls: 'wechat-inbox-sync-status' });
-    status.setText('同步后会生成：临时收集/YYYY-MM-DD/文字-143205.md、链接-143210.md、语音-143220.md。语音附件会放入临时收集/语音附件/。');
+    status.setText(this.plugin.settings.noteSaveMode === 'root'
+      ? '同步后会生成：临时收集/文本-示例.md、临时收集/公众号-示例.md。语音附件仍会放入临时收集/语音附件/YYYY-MM-DD/。'
+      : '同步后会生成：临时收集/YYYY-MM-DD/文本-示例.md、公众号-示例.md。语音附件会放入临时收集/语音附件/YYYY-MM-DD/。');
   }
 }
 
@@ -6397,9 +6510,13 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_INSTALLER_URL,
   LOCAL_ASR_MACOS_INSTALLER_URL,
   LOCAL_ASR_PLATFORM_NAMES,
+  NOTE_PROPERTY_FIELD_KEYS,
+  NOTE_SAVE_MODES,
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
   normalizeLocalAsrInstallMode,
+  normalizeNotePropertyFields,
+  normalizeNoteSaveMode,
   normalizeCloudPreTranscriptionThresholdMinutes,
   isAsciiPath,
   hasLocalAsrNativeCrash,
