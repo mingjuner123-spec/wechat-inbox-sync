@@ -311,6 +311,26 @@ function Install-ZipPackage {
   throw $lastError
 }
 
+function Install-ExtractedPackage {
+  param(
+    [Parameter(Mandatory = $true)][string]$StageDir,
+    [Parameter(Mandatory = $true)][string]$DestinationDir,
+    [Parameter(Mandatory = $true)][string[]]$ExpectedFiles,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $found = Find-InstalledFile -Root $StageDir -Names $ExpectedFiles
+  if (-not $found) {
+    throw "$Label install validation failed: cannot find $($ExpectedFiles -join ' or ') under $StageDir"
+  }
+  if (Test-Path -LiteralPath $DestinationDir) {
+    Remove-Item -LiteralPath $DestinationDir -Recurse -Force
+  }
+  New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
+  Get-ChildItem -LiteralPath $StageDir -Force |
+    Copy-Item -Destination $DestinationDir -Recurse -Force
+  return Assert-InstalledFile -Root $DestinationDir -Names $ExpectedFiles -Label $Label
+}
+
 function Install-ModelPackage {
   param(
     [Parameter(Mandatory = $true)][string[]]$Urls,
@@ -436,8 +456,7 @@ try {
     if (Test-Path -LiteralPath $WhisperDir) {
       Remove-Item -LiteralPath $WhisperDir -Recurse -Force
     }
-    Move-Item -LiteralPath $WhisperStageDir -Destination $WhisperDir
-    $installedWhisper = Assert-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
+    $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
     Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
   }
 
@@ -468,8 +487,7 @@ try {
     if (Test-Path -LiteralPath $FfmpegDir) {
       Remove-Item -LiteralPath $FfmpegDir -Recurse -Force
     }
-    Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir
-    $installedFfmpeg = Assert-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe") -Label "ffmpeg"
+    $installedFfmpeg = Install-ExtractedPackage -StageDir $FfmpegStageDir -DestinationDir $FfmpegDir -ExpectedFiles @("ffmpeg.exe") -Label "ffmpeg"
     Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
   }
 
@@ -501,8 +519,7 @@ try {
     if (Test-Path -LiteralPath $WhisperDir) {
       Remove-Item -LiteralPath $WhisperDir -Recurse -Force
     }
-    Move-Item -LiteralPath $WhisperStageDir -Destination $WhisperDir
-    $installedWhisper = Assert-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
+    $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
     Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
     Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
   }
