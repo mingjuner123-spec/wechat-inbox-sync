@@ -4,6 +4,7 @@ const {
 } = require('./redeem-code-core');
 
 const ADMIN_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ADMIN_MAX_DURATION_DAYS = 9999;
 
 function normalizeAdminCodePrefix(prefix, fallback = 'OBPRO') {
   const normalized = String(prefix || '')
@@ -41,8 +42,7 @@ function createAdminRedeemCodeDocuments({
   randomInt,
 } = {}) {
   const normalizedCount = normalizeAdminPositiveInteger(count, 1, 100, 1);
-  const normalizedDurationDays = normalizeAdminPositiveInteger(durationDays, 1, 3650, 30);
-  const normalizedMaxRedemptions = normalizeAdminPositiveInteger(maxRedemptions, 1, 1000, 1);
+  const normalizedDurationDays = normalizeAdminPositiveInteger(durationDays, 1, ADMIN_MAX_DURATION_DAYS, 30);
   const normalizedPrefix = normalizeAdminCodePrefix(prefix);
   const codes = new Set();
   const documents = [];
@@ -55,7 +55,7 @@ function createAdminRedeemCodeDocuments({
       code,
       plan,
       durationDays: normalizedDurationDays,
-      maxRedemptions: normalizedMaxRedemptions,
+      maxRedemptions: 1,
       note,
       now,
     }));
@@ -149,8 +149,272 @@ function buildFunnelStep({ key, label, value, previousValue, hint }) {
   };
 }
 
+function getItemTime(item, fields = ['createdAt', 'updatedAt']) {
+  if (!item) return '';
+  for (const field of fields) {
+    if (item[field]) return item[field];
+  }
+  return '';
+}
+
+function getDateKey(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const chinaTime = date.getTime() + 8 * 60 * 60 * 1000;
+  return new Date(chinaTime).toISOString().slice(0, 10);
+}
+
+function getPreviousDateKey(now = new Date().toISOString()) {
+  const nowTime = new Date(now).getTime();
+  const safeNow = Number.isNaN(nowTime) ? Date.now() : nowTime;
+  return getDateKey(new Date(safeNow - 24 * 60 * 60 * 1000).toISOString());
+}
+
+function getWindowStart(rangeKey, now) {
+  const nowTime = new Date(now).getTime();
+  if (Number.isNaN(nowTime)) return '';
+  const spanMap = {
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+    '30d': 30 * 24 * 60 * 60 * 1000,
+  };
+  const span = spanMap[rangeKey];
+  return span ? new Date(nowTime - span).toISOString() : '';
+}
+
+function buildFunnelBreakpoints(steps = []) {
+  return steps.slice(1).map((step, index) => {
+    const previous = steps[index] || {};
+    const previousValue = Number(previous.value) || 0;
+    const currentValue = Number(step.value) || 0;
+    const dropValue = Math.max(0, previousValue - currentValue);
+    const conversion = previousValue > 0 ? currentValue / previousValue : null;
+    const dropRate = previousValue > 0 ? dropValue / previousValue : null;
+    let severity = 'ok';
+    if (previousValue >= 10 && dropRate !== null && dropRate >= 0.5) severity = 'danger';
+    else if (previousValue >= 10 && dropRate !== null && dropRate >= 0.3) severity = 'warn';
+    const actionMap = {
+      bindPageUsers: '检查首页是否 1 分钟内讲清楚“先绑定 Obsidian，再开始同步”。',
+      bindSuccessUsers: '优先排查插件安装、绑定码复制、插件设置页入口和绑定失败提示。',
+      syncedUsers: '检查插件是否自动同步、Obsidian 是否打开、首次成功反馈是否足够明显。',
+      repeatSyncUsers: '增加“同步成功后还能怎么用”的场景提示，让用户形成复用。',
+      activeProUsers: '在音视频链接失败或识别场景里自然提示 Pro，而不是只等用户主动点开通页。',
+    };
+    return {
+      key: `${previous.key}_to_${step.key}`,
+      from: previous.label || '',
+      to: step.label || '',
+      fromValue: previousValue,
+      toValue: currentValue,
+      dropValue,
+      conversionRate: conversion,
+      conversionText: conversion === null ? '-' : formatAdminRate(conversion),
+      dropText: dropRate === null ? '-' : formatAdminRate(dropRate),
+      severity,
+      action: actionMap[step.key] || '继续观察这个环节的用户行为。',
+    };
+  });
+}
+
+function getFirstSeenMap({ analyticsEvents = [], records = [], bindCodes = [], entitlements = [] } = {}) {
+  const firstSeen = new Map();
+  function touch(openid, time) {
+    if (!openid || !time) return;
+    const existed = firstSeen.get(openid);
+    if (!existed || time < existed) firstSeen.set(openid, time);
+  }
+  analyticsEvents.forEach((item) => touch(getOpenId(item), getItemTime(item, ['firstAt', 'createdAt', 'lastAt'])));
+  records.forEach((item) => touch(getOpenId(item), getItemTime(item, ['createdAt', 'updatedAt', 'syncedAt'])));
+  bindCodes.forEach((item) => touch(getOpenId(item), getItemTime(item, ['createdAt', 'boundAt', 'updatedAt'])));
+  entitlements.forEach((item) => touch(getOpenId(item), getItemTime(item, ['redeemedAt', 'createdAt', 'updatedAt'])));
+  return firstSeen;
+}
+
+function buildUserSegments({ currentOpenIds, firstSeen, windowStart, activeProOpenIds, repeatSyncOpenIds } = {}) {
+  const current = Array.from(currentOpenIds || []);
+  const newUsers = windowStart
+    ? current.filter((openid) => {
+      const firstTime = firstSeen && firstSeen.get(openid);
+      return firstTime && firstTime >= windowStart;
+    })
+    : [];
+  const returningUsers = windowStart ? current.filter((openid) => !newUsers.includes(openid)) : [];
+  return [
+    {
+      key: 'activeUsers',
+      label: '活跃用户',
+      value: current.length,
+      hint: '当前时间范围内有访问、绑定、收集、同步或 Pro 行为',
+    },
+    {
+      key: 'newUsers',
+      label: '新用户',
+      value: windowStart ? newUsers.length : '-',
+      hint: windowStart ? '首次出现就在当前时间范围内' : '总计视图不区分新老用户',
+    },
+    {
+      key: 'returningUsers',
+      label: '老用户',
+      value: windowStart ? returningUsers.length : '-',
+      hint: windowStart ? '当前范围内活跃，但更早就出现过' : '切到 30 天 / 7 天 / 24h 可看',
+    },
+    {
+      key: 'repeatSyncUsers',
+      label: '复用用户',
+      value: repeatSyncOpenIds ? repeatSyncOpenIds.size : 0,
+      hint: '至少同步过 2 条内容',
+    },
+    {
+      key: 'activeProUsers',
+      label: 'Pro 用户',
+      value: activeProOpenIds ? activeProOpenIds.size : 0,
+      hint: '当前仍在有效期内',
+    },
+  ];
+}
+
+function buildDailyTrend({ records = [], analyticsEvents = [], bindCodes = [], entitlements = [], now } = {}) {
+  const nowTime = new Date(now).getTime();
+  const safeNow = Number.isNaN(nowTime) ? Date.now() : nowTime;
+  const days = [];
+  for (let index = 13; index >= 0; index -= 1) {
+    const day = getDateKey(new Date(safeNow - index * 24 * 60 * 60 * 1000).toISOString());
+    days.push({
+      day,
+      visits: new Set(),
+      binds: new Set(),
+      syncs: new Set(),
+      pros: new Set(),
+      records: 0,
+    });
+  }
+  const map = new Map(days.map((item) => [item.day, item]));
+  analyticsEvents.forEach((item) => {
+    const day = item.day || getDateKey(item.lastAt || item.firstAt || item.createdAt);
+    const target = map.get(day);
+    const openid = getOpenId(item);
+    if (!target || !openid) return;
+    if (item.eventName === 'app_visit') target.visits.add(openid);
+    if (item.eventName === 'bind_success') target.binds.add(openid);
+  });
+  bindCodes.forEach((item) => {
+    const day = getDateKey(item.boundAt || item.updatedAt || item.createdAt);
+    const target = map.get(day);
+    const openid = getOpenId(item);
+    if (target && openid && (item.status === 'bound' || (Array.isArray(item.clients) && item.clients.length))) {
+      target.binds.add(openid);
+    }
+  });
+  records.forEach((item) => {
+    const createdDay = getDateKey(item.createdAt || item.updatedAt);
+    const createdTarget = map.get(createdDay);
+    if (createdTarget) createdTarget.records += 1;
+    const syncDay = getDateKey(getSyncedRecordTime(item));
+    const syncTarget = map.get(syncDay);
+    const openid = getOpenId(item);
+    if (syncTarget && openid && item.status === 'synced') syncTarget.syncs.add(openid);
+  });
+  entitlements.forEach((item) => {
+    const day = getDateKey(item.redeemedAt || item.updatedAt || item.createdAt);
+    const target = map.get(day);
+    const openid = getOpenId(item);
+    if (target && openid && (item.status || 'active') === 'active') target.pros.add(openid);
+  });
+  return days.map((item) => ({
+    day: item.day,
+    visits: item.visits.size,
+    binds: item.binds.size,
+    syncs: item.syncs.size,
+    pros: item.pros.size,
+    records: item.records,
+  }));
+}
+
 function getSyncedRecordTime(item) {
   return item && (item.syncedAt || (item.status === 'synced' ? item.updatedAt || item.createdAt : ''));
+}
+
+function getEventCount(item) {
+  return Number(item && item.count) || 1;
+}
+
+function hasBoundBefore(bindCode, day) {
+  if (!bindCode || !day) return false;
+  const clients = Array.isArray(bindCode.clients) ? bindCode.clients : [];
+  return clients.some((client) => getDateKey(client.boundAt || bindCode.boundAt || bindCode.updatedAt || bindCode.createdAt) < day)
+    || (bindCode.boundAt && getDateKey(bindCode.boundAt) < day);
+}
+
+function hasBoundOnDay(bindCode, day) {
+  if (!bindCode || !day) return false;
+  const clients = Array.isArray(bindCode.clients) ? bindCode.clients : [];
+  return clients.some((client) => getDateKey(client.boundAt || bindCode.boundAt || bindCode.updatedAt || bindCode.createdAt) === day)
+    || (bindCode.boundAt && getDateKey(bindCode.boundAt) === day);
+}
+
+function getEntitlementOpenDay(entitlement) {
+  return getDateKey(entitlement && (entitlement.redeemedAt || entitlement.createdAt || entitlement.updatedAt));
+}
+
+function isPaidEntitlement(entitlement) {
+  return (Number(entitlement && entitlement.durationDays) || 0) >= 30;
+}
+
+function buildYesterdayFunnel({
+  analyticsEvents = [],
+  entitlements = [],
+  bindCodes = [],
+  now = new Date().toISOString(),
+} = {}) {
+  const day = getPreviousDateKey(now);
+  const yesterdayVisits = analyticsEvents.filter((item) => item.eventName === 'app_visit' && (item.day || getDateKey(item.lastAt || item.firstAt || item.createdAt)) === day);
+  const visitOpenIds = getUniqueValues(yesterdayVisits);
+  const boundBeforeOpenIds = getUniqueValues(bindCodes.filter((item) => hasBoundBefore(item, day)));
+  const boundOnDayOpenIds = getUniqueValues(bindCodes.filter((item) => hasBoundOnDay(item, day)));
+  const newOpenIds = new Set();
+  const returningOpenIds = new Set();
+
+  visitOpenIds.forEach((openid) => {
+    if (boundBeforeOpenIds.has(openid)) returningOpenIds.add(openid);
+    else newOpenIds.add(openid);
+  });
+
+  const newBoundOpenIds = new Set(Array.from(newOpenIds).filter((openid) => boundOnDayOpenIds.has(openid)));
+  const proOpenedOpenIds = getUniqueValues(entitlements.filter((item) => getEntitlementOpenDay(item) === day));
+  const paidOpenedOpenIds = getUniqueValues(entitlements.filter((item) => getEntitlementOpenDay(item) === day && isPaidEntitlement(item)));
+  const totalProOpenIds = getUniqueValues(entitlements);
+  const totalBoundCount = bindCodes.reduce((sum, item) => sum + (Array.isArray(item.clients) ? item.clients.length : 0), 0);
+  const totalVisitEvents = analyticsEvents
+    .filter((item) => item.eventName === 'app_visit')
+    .reduce((sum, item) => sum + getEventCount(item), 0);
+
+  const data = {
+    day,
+    visitUserTotal: visitOpenIds.size,
+    newUserCount: newOpenIds.size,
+    returningUserCount: returningOpenIds.size,
+    newBoundUserCount: newBoundOpenIds.size,
+    proOpenedUsers: proOpenedOpenIds.size,
+    paidOpenedUsers: paidOpenedOpenIds.size,
+    totalProOpenedUsers: totalProOpenIds.size,
+    totalBoundCount,
+    totalVisitEvents,
+  };
+
+  data.cards = [
+    { key: 'visitUserTotal', label: '访问用户总数', value: data.visitUserTotal, hint: day },
+    { key: 'newUserCount', label: '新用户数', value: data.newUserCount, hint: '未完成绑定的用户，含第一次绑定用户' },
+    { key: 'returningUserCount', label: '老用户数', value: data.returningUserCount, hint: '此前已完成绑定的访问用户' },
+    { key: 'newBoundUserCount', label: '新用户中完成绑定的用户', value: data.newBoundUserCount, hint: '昨天第一次完成绑定' },
+    { key: 'proOpenedUsers', label: '开通 Pro 的用户数', value: data.proOpenedUsers, hint: '含 7 天体验数' },
+    { key: 'paidOpenedUsers', label: '开通付费数', value: data.paidOpenedUsers, hint: 'Pro 时长 30 天及以上' },
+    { key: 'totalProOpenedUsers', label: '总 Pro 开通数', value: data.totalProOpenedUsers, hint: '历史累计去重用户' },
+    { key: 'totalBoundCount', label: '总绑定数', value: data.totalBoundCount, hint: '历史绑定设备数' },
+    { key: 'totalVisitEvents', label: '总访问数', value: data.totalVisitEvents, hint: '历史访问总人次' },
+  ];
+
+  return data;
 }
 
 function summarizeRecordTypes(records = []) {
@@ -270,6 +534,12 @@ function summarizeAdminDashboard({
   entitlements = [],
   bindCodes = [],
   analyticsEvents = [],
+  allRecords = records,
+  allEntitlements = entitlements,
+  allBindCodes = bindCodes,
+  allAnalyticsEvents = analyticsEvents,
+  rangeKey = 'all',
+  windowStart = '',
   now = new Date().toISOString(),
   sampleLimit = 200,
   scope = null,
@@ -309,7 +579,22 @@ function summarizeAdminDashboard({
     map[openid] = (map[openid] || 0) + 1;
     return map;
   }, {});
-  const repeatSyncUsers = Object.keys(syncCountsByUser).filter((openid) => syncCountsByUser[openid] >= 2).length;
+  const repeatSyncOpenIds = new Set(Object.keys(syncCountsByUser).filter((openid) => syncCountsByUser[openid] >= 2));
+  const activeProOpenIds = getUniqueValues(activeEntitlements);
+  const currentOpenIds = new Set();
+  [
+    getUniqueValues(analyticsEvents),
+    getUniqueValues(records),
+    getUniqueValues(bindCodes),
+    getUniqueValues(entitlements),
+  ].forEach((set) => set.forEach((openid) => currentOpenIds.add(openid)));
+  const firstSeen = getFirstSeenMap({
+    analyticsEvents: allAnalyticsEvents,
+    records: allRecords,
+    bindCodes: allBindCodes,
+    entitlements: allEntitlements,
+  });
+  const repeatSyncUsers = repeatSyncOpenIds.size;
   const funnelSteps = [
     buildFunnelStep({
       key: 'visitUsers',
@@ -354,6 +639,7 @@ function summarizeAdminDashboard({
       hint: '当前仍在有效期内',
     }),
   ];
+  const funnelBreakpoints = buildFunnelBreakpoints(funnelSteps);
   const typeBreakdown = summarizeRecordTypes(records);
   const diagnoses = buildAdminDiagnoses({
     pendingRecords,
@@ -365,6 +651,58 @@ function summarizeAdminDashboard({
     syncedUsers,
     repeatSyncUsers,
     activeProUsers,
+  });
+  const segments = buildUserSegments({
+    currentOpenIds,
+    firstSeen,
+    windowStart: windowStart || getWindowStart(rangeKey, range.now),
+    activeProOpenIds,
+    repeatSyncOpenIds,
+  });
+  const dailyTrend = buildDailyTrend({
+    records,
+    analyticsEvents,
+    bindCodes,
+    entitlements,
+    now: range.now,
+  });
+  const conversionCards = [
+    {
+      key: 'visitToBindPage',
+      label: '访问到绑定页',
+      value: funnelSteps[1].rateText,
+      hint: `${visitUsers} → ${bindPageUsers}`,
+    },
+    {
+      key: 'bindPageToSuccess',
+      label: '绑定页到成功',
+      value: funnelSteps[2].rateText,
+      hint: `${bindPageUsers} → ${bindSuccessUsers}`,
+    },
+    {
+      key: 'bindToFirstSync',
+      label: '绑定到首同步',
+      value: funnelSteps[3].rateText,
+      hint: `${bindSuccessUsers} → ${syncedUsers}`,
+    },
+    {
+      key: 'syncToRepeat',
+      label: '首同步到复用',
+      value: funnelSteps[4].rateText,
+      hint: `${syncedUsers} → ${repeatSyncUsers}`,
+    },
+    {
+      key: 'syncToPro',
+      label: '同步到 Pro',
+      value: funnelSteps[5].rateText,
+      hint: `${syncedUsers} → ${activeProUsers}`,
+    },
+  ];
+  const yesterdayFunnel = buildYesterdayFunnel({
+    analyticsEvents: allAnalyticsEvents,
+    entitlements: allEntitlements,
+    bindCodes: allBindCodes,
+    now: range.now,
   });
 
   return {
@@ -414,6 +752,14 @@ function summarizeAdminDashboard({
       repeatSyncUsers,
       activeProUsers,
       steps: funnelSteps,
+      breakpoints: funnelBreakpoints,
+      conversionCards,
+    },
+    yesterdayFunnel,
+    segments,
+    trends: {
+      daily: dailyTrend,
+      latestDay: dailyTrend[dailyTrend.length - 1] || null,
     },
     diagnoses,
     pro: {
@@ -446,6 +792,7 @@ function summarizeAdminDashboard({
 
 module.exports = {
   ADMIN_CODE_CHARS,
+  ADMIN_MAX_DURATION_DAYS,
   normalizeAdminCodePrefix,
   normalizeAdminPositiveInteger,
   generateAdminRedeemCode,

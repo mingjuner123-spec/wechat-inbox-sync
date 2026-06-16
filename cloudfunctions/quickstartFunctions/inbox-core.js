@@ -5,6 +5,7 @@ const DAILY_AD_BONUS = 10;
 const DEFAULT_BIND_DEVICE_LIMIT = 1;
 const MAX_BIND_DEVICE_LIMIT = 3;
 const BIND_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED = true;
 
 function normalizeContentType(type) {
   const normalized = String(type || '').toLowerCase();
@@ -14,17 +15,67 @@ function normalizeContentType(type) {
   return normalized;
 }
 
+function isSupportedWebpageUrl(url) {
+  const text = String(url || '').toLowerCase();
+  return text.includes('mp.weixin.qq.com')
+    || text.includes('feishu.cn')
+    || text.includes('larksuite.com')
+    || text.includes('feishu.net')
+    || text.includes('xiaohongshu.com')
+    || text.includes('xhslink.com')
+    || text.includes('douyin.com')
+    || text.includes('iesdouyin.com')
+    || text.includes('amemv.com')
+    || text.includes('bilibili.com')
+    || text.includes('b23.tv')
+    || text.includes('xiaoyuzhoufm.com')
+    || text.includes('xiaoyuzhou.com');
+}
+
+function extractHttpUrl(content) {
+  const text = String(content || '');
+  const match = text.match(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/i);
+  if (!match) return '';
+  return match[0].replace(/[.,!?;:)\]}]+$/g, '');
+}
+
+function isAudioVideoWebpageUrl(url, sourceText = '') {
+  const text = `${String(url || '')}\n${String(sourceText || '')}`.toLowerCase();
+  if (
+    text.includes('douyin.com')
+    || text.includes('iesdouyin.com')
+    || text.includes('amemv.com')
+    || text.includes('bilibili.com/video')
+    || text.includes('b23.tv')
+    || text.includes('xiaoyuzhoufm.com')
+    || text.includes('xiaoyuzhou.com')
+  ) {
+    return true;
+  }
+  if (text.includes('xhslink.com')) {
+    return true;
+  }
+  if (text.includes('xiaohongshu.com')) {
+    return /([?&]type=video\b|\/video\/|视频|音频|播客|直播|vlog)/i.test(text);
+  }
+  return false;
+}
+
 function createBaseRecord({ event, openid, now }) {
-  const type = normalizeContentType(event.contentType);
+  const incomingType = normalizeContentType(event.contentType);
   const content = String(event.content || '').trim();
   if (!content) {
     throw new Error('Content is required');
   }
+  const extractedUrl = extractHttpUrl(event.url || content);
+  const url = String(event.url || extractedUrl || content).trim();
+  const type = (incomingType === 'link' || incomingType === 'text') && isSupportedWebpageUrl(url) ? 'webpage' : incomingType;
+  const recordContent = type === 'webpage' ? url : content;
 
   return {
     openid,
     type,
-    content,
+    content: recordContent,
     status: 'pending',
     source: 'wechat-miniprogram',
     createdAt: now,
@@ -33,7 +84,12 @@ function createBaseRecord({ event, openid, now }) {
   };
 }
 
-function createInboxRecordDocument({ event, openid, now }) {
+function createInboxRecordDocument({
+  event,
+  openid,
+  now,
+  cloudPreTranscription = {},
+}) {
   if (!openid) {
     throw new Error('OpenID is required');
   }
@@ -48,24 +104,74 @@ function createInboxRecordDocument({ event, openid, now }) {
   }
 
   if (record.type === 'webpage') {
+    const sourceText = String(event.shareText || event.content || '').trim();
+    const eventCloudPreTranscription = event.cloudPreTranscription || null;
+    const cloudPreTranscriptionConfig = eventCloudPreTranscription || cloudPreTranscription || {};
+    const transcriptionMode = String(cloudPreTranscriptionConfig && cloudPreTranscriptionConfig.mode || '').toLowerCase();
+    const isAudioVideoWebpage = event.webpageMediaType === 'audio_video' || isAudioVideoWebpageUrl(record.content, sourceText);
     record.metadata = {
       url: event.url || record.content,
-      shareText: String(event.shareText || '').trim(),
+      shareText: sourceText && sourceText !== record.content ? sourceText : '',
       conversionStatus: 'pending',
     };
+    if (isAudioVideoWebpage) {
+      const cloudRequestedByClient = transcriptionMode === 'cloud' && cloudPreTranscriptionConfig.enabled !== false;
+      const cloudRequested = !CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClient;
+      record.metadata.webpageMediaType = 'audio_video';
+      record.metadata.transcriptionStatus = cloudRequested ? 'queued' : 'pending';
+      record.metadata.transcriptionMode = cloudRequested ? 'cloud' : 'local';
+      record.metadata.cloudTranscriptionRequested = cloudRequested;
+      record.metadata.cloudTranscriptionReason = CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClient
+        ? 'cloud-disabled'
+        : Object.keys(cloudPreTranscriptionConfig).length
+        ? String(cloudPreTranscriptionConfig.reason || 'manual')
+        : 'missing-client-choice';
+      if (cloudRequested) {
+        record.metadata.transcriptionSource = 'cloud-pretranscription';
+        record.metadata.speakerDiarizationRequested = Boolean(cloudPreTranscriptionConfig && cloudPreTranscriptionConfig.speakerDiarization);
+      }
+    }
   }
 
   if (record.type === 'voice') {
     if (!event.audioFileID) {
       throw new Error('Audio file ID is required');
     }
+    const eventCloudPreTranscription = event.cloudPreTranscription || null;
+    const cloudPreTranscriptionConfig = eventCloudPreTranscription || cloudPreTranscription || {};
+    const transcriptionMode = String(cloudPreTranscriptionConfig.mode || '').toLowerCase();
+    const explicitCloudTranscription = transcriptionMode === 'cloud';
+    const explicitLocalTranscription = transcriptionMode === 'local' || (
+      eventCloudPreTranscription && cloudPreTranscriptionConfig.enabled === false
+    );
+    const durationMs = Number(event.duration) || 0;
+    const thresholdMinutes = Math.max(1, Number(cloudPreTranscriptionConfig.thresholdMinutes) || 10);
+    const cloudRequestedByClientOrThreshold = explicitCloudTranscription || (
+        !explicitLocalTranscription
+        && Boolean(cloudPreTranscriptionConfig.enabled)
+        && durationMs >= thresholdMinutes * 60 * 1000
+      );
+    const shouldQueueCloudTranscription = !CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClientOrThreshold;
     record.metadata = {
       audioFileID: event.audioFileID,
       audioFileName: event.audioFileName || '',
-      duration: event.duration || 0,
-      transcriptionStatus: 'pending',
+      duration: durationMs,
+      transcriptionStatus: shouldQueueCloudTranscription ? 'queued' : 'pending',
       summaryStatus: 'pending',
     };
+    record.metadata.transcriptionMode = shouldQueueCloudTranscription ? 'cloud' : 'local';
+    record.metadata.cloudTranscriptionRequested = Boolean(shouldQueueCloudTranscription);
+    record.metadata.cloudTranscriptionReason = String(
+      (CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClientOrThreshold ? 'cloud-disabled' : '')
+      || cloudPreTranscriptionConfig.reason
+      || (shouldQueueCloudTranscription ? (explicitCloudTranscription ? 'manual' : 'threshold') : '')
+      || (Object.keys(cloudPreTranscriptionConfig).length ? 'threshold-not-met' : 'missing-client-choice')
+    );
+    if (shouldQueueCloudTranscription) {
+      record.metadata.transcriptionSource = 'cloud-pretranscription';
+      record.metadata.cloudPreTranscriptionThresholdMinutes = thresholdMinutes;
+      record.metadata.speakerDiarizationRequested = Boolean(cloudPreTranscriptionConfig.speakerDiarization);
+    }
   }
 
   if (record.type === 'file') {
@@ -366,10 +472,18 @@ function buildProUsageState() {
   };
 }
 
+function requiresProTranscriptionAccess(record) {
+  const type = String(record && record.type || '').toLowerCase();
+  const metadata = (record && record.metadata) || {};
+  return type === 'voice'
+    || (type === 'webpage' && metadata.webpageMediaType === 'audio_video');
+}
+
 module.exports = {
   DAILY_FREE_LIMIT,
   DAILY_SHARE_LIMIT,
   DAILY_AD_BONUS,
+  CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED,
   DEFAULT_BIND_DEVICE_LIMIT,
   MAX_BIND_DEVICE_LIMIT,
   createInboxRecordDocument,
@@ -384,9 +498,13 @@ module.exports = {
   getBindCodeLookupCandidates,
   generateBindCode,
   generateUniqueBindCode,
+  extractHttpUrl,
   normalizeContentType,
+  isAudioVideoWebpageUrl,
+  isSupportedWebpageUrl,
   getUsageDay,
   buildDailyUsageDocument,
   buildUsageState,
   buildProUsageState,
+  requiresProTranscriptionAccess,
 };

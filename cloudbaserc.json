@@ -1,0 +1,45 @@
+{
+  "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
+  "envId": "he02-d8gebzv050ed6c4ef-d350b93bf",
+  "functionRoot": "./cloudfunctions",
+  "functions": [
+    {
+      "name": "syncApi",
+      "type": "Event",
+      "handler": "index.main",
+      "timeout": 300,
+      "runtime": "Nodejs18.15",
+      "memorySize": 256,
+      "installDependency": true,
+      "envVariables": {
+        "WECHAT_DATA_ENV": "he02-d8gebzv050ed6c4ef",
+        "DOUBAO_ASR_API_KEY": "c3834627-014b-4bb8-80d2-703d8afe2ec1",
+        "MEDIA_RESOLVER_URL": "https://gazette-tabs-theatre-albany.trycloudflare.com/resolve",
+        "MEDIA_RESOLVER_SECRET": "wechat-resolver-eab34d6760f34b5d",
+        "REDEEM_ADMIN_SECRET": "zz-admin-0603"
+      }
+    },
+    {
+      "name": "quickstartFunctions",
+      "type": "Event",
+      "handler": "index.main",
+      "timeout": 300,
+      "runtime": "Nodejs18.15",
+      "memorySize": 256,
+      "installDependency": true,
+      "triggers": [
+        {
+          "name": "cloud-transcription-queue-every-minute",
+          "type": "timer",
+          "config": "0 */1 * * * * *"
+        }
+      ],
+      "envVariables": {
+        "DOUBAO_ASR_API_KEY": "c3834627-014b-4bb8-80d2-703d8afe2ec1",
+        "MEDIA_RESOLVER_URL": "https://gazette-tabs-theatre-albany.trycloudflare.com/resolve",
+        "MEDIA_RESOLVER_SECRET": "wechat-resolver-eab34d6760f34b5d",
+        "REDEEM_ADMIN_SECRET": "zz-admin-0603"
+      }
+    }
+  ]
+}

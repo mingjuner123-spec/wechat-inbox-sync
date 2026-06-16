@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Obsidian 内容同步助手 · 运营后台</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-title">运营后台</div>
+        <div class="brand-subtitle">Obsidian 内容同步助手</div>
+      </div>
+      <nav class="nav">
+        <button class="nav-item active" data-view="overview">总览</button>
+        <button class="nav-item" data-view="funnel">运营漏斗</button>
+        <button class="nav-item" data-view="pro">Pro 管理</button>
+      </nav>
+    </aside>
+
+    <section class="content">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">总览</h1>
+          <p id="pageDesc">查看访问、绑定、同步和 Pro 转化。</p>
+        </div>
+        <div class="connection">
+          <input id="apiBase" placeholder="syncApi HTTP 地址" />
+          <input id="adminSecret" type="password" placeholder="管理密钥" />
+          <button id="saveConfig" class="button primary">保存</button>
+        </div>
+      </header>
+
+      <section id="notice" class="notice hidden"></section>
+
+      <section id="overviewView" class="view active">
+        <div class="toolbar">
+          <div class="segmented" id="rangeTabs">
+            <button class="active" data-range="all">总计</button>
+            <button data-range="30d">过去30天</button>
+            <button data-range="7d">过去7天</button>
+            <button data-range="24h">过去24h</button>
+          </div>
+          <button id="refreshOverview" class="button">刷新</button>
+        </div>
+        <div id="metricGrid" class="metric-grid"></div>
+        <section class="panel">
+          <div class="panel-header">
+            <h2>核心漏斗</h2>
+            <span id="scopeText"></span>
+          </div>
+          <div id="funnelList" class="funnel-list"></div>
+        </section>
+        <div class="columns">
+          <section class="panel">
+            <h2>初步判断</h2>
+            <div id="diagnosisList" class="stack-list"></div>
+          </section>
+          <section class="panel">
+            <h2>待处理异常</h2>
+            <div id="issueList" class="stack-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="funnelView" class="view">
+        <div class="toolbar">
+          <div>
+            <div class="section-kicker">上一天</div>
+            <h2>昨日关键漏斗</h2>
+          </div>
+          <button id="refreshFunnel" class="button">刷新漏斗</button>
+        </div>
+        <section class="panel">
+          <div class="panel-header">
+            <h2>上一天数据</h2>
+            <span id="funnelScopeText"></span>
+          </div>
+          <div id="yesterdayFunnelGrid" class="metric-grid compact">
+            <article class="metric-card"><div class="metric-label">访问用户总数</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">新用户数</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">老用户数</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">新用户中完成绑定的用户</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">开通 Pro 的用户数</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">开通付费数</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">总 Pro 开通数</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">总绑定数</div><div class="metric-value">-</div></article>
+            <article class="metric-card"><div class="metric-label">总访问数</div><div class="metric-value">-</div></article>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-header">
+            <h2>转化率</h2>
+            <span>辅助判断，不作为最终付费归因。</span>
+          </div>
+          <div id="conversionGrid" class="metric-grid compact"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-header">
+            <h2>掉点诊断</h2>
+            <span>看哪一步最该优先优化。</span>
+          </div>
+          <div id="breakpointList" class="breakpoint-list"></div>
+        </section>
+        <div class="columns">
+          <section class="panel">
+            <h2>用户分层</h2>
+            <div id="segmentGrid" class="segment-grid"></div>
+          </section>
+          <section class="panel">
+            <h2>最近 14 天趋势</h2>
+            <div id="trendList" class="trend-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="proView" class="view">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>生成兑换码</h2>
+            <span>一个兑换码只能被一个微信/小程序用户激活一次。</span>
+          </div>
+          <div class="form-grid">
+            <label class="field">
+              <span>生成数量</span>
+              <input id="codeCount" type="number" min="1" max="100" value="10" placeholder="数量" />
+            </label>
+            <label class="field">
+              <span>Pro 有效天数</span>
+              <input id="codeDays" type="number" min="1" max="9999" value="30" placeholder="兑换后开始计算" />
+            </label>
+            <label class="field">
+              <span>兑换码前缀</span>
+              <input id="codePrefix" value="OBPRO" placeholder="前缀" />
+            </label>
+            <label class="field wide">
+              <span>发放备注</span>
+              <input id="codeNote" value="Pro内测兑换码" placeholder="备注" />
+            </label>
+            <button id="generateCodes" class="button primary">生成</button>
+          </div>
+          <textarea id="generatedCodes" placeholder="本次生成的兑换码会显示在这里"></textarea>
+        </section>
+
+        <div class="toolbar pro-toolbar">
+          <input id="proKeyword" class="search-input" placeholder="搜索 openid / 兑换码" />
+          <input id="codeKeyword" class="search-input" placeholder="搜索兑换码 / 备注 / 发放对象" />
+          <select id="codeStatusFilter" class="select-input">
+            <option value="">兑换状态</option>
+            <option value="active">可兑换</option>
+            <option value="redeemed">已兑换</option>
+            <option value="disabled">已删除</option>
+          </select>
+          <select id="codeDeliveryFilter" class="select-input">
+            <option value="">发放状态</option>
+            <option value="unsent">未发放</option>
+            <option value="sent">已发放未激活</option>
+            <option value="activated">已激活</option>
+          </select>
+          <select id="paymentStatusFilter" class="select-input">
+            <option value="">订单状态</option>
+            <option value="pending">待确认</option>
+            <option value="paid">已支付</option>
+            <option value="cancelled">已取消</option>
+          </select>
+          <input id="deliveredTo" class="search-input" placeholder="标记发放对象，例如用户微信名" />
+          <label class="field compact-field">
+            <span>续期天数</span>
+            <input id="extendDays" class="short-input" type="number" min="1" max="9999" value="30" />
+          </label>
+          <label class="field compact-field">
+            <span>云端加量分钟</span>
+            <input id="cloudCreditMinutes" class="short-input" type="number" min="1" max="100000" value="60" />
+          </label>
+          <button id="refreshPro" class="button">刷新 Pro</button>
+        </div>
+
+        <details class="collapsible-panel" open>
+          <summary class="panel-summary">
+            <h2>Pro 用户</h2>
+            <span id="proCount"></span>
+          </summary>
+          <section class="panel collapsible-content">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>状态</th>
+                    <th>到期</th>
+                    <th>激活信息</th>
+                    <th>云端额度</th>
+                    <th>兑换码</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="proTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </details>
+
+        <details class="collapsible-panel" open>
+          <summary class="panel-summary">
+            <h2>已到期用户</h2>
+            <span id="expiredProCount"></span>
+          </summary>
+          <section class="panel collapsible-content">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>状态</th>
+                    <th>到期</th>
+                    <th>激活信息</th>
+                    <th>云端额度</th>
+                    <th>兑换码</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="expiredProTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </details>
+
+        <details class="collapsible-panel" open>
+          <summary class="panel-summary">
+            <h2>可用兑换码</h2>
+            <span id="availableCodeCountText"></span>
+          </summary>
+          <section class="panel collapsible-content">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>兑换码</th>
+                    <th>发放</th>
+                    <th>备注</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="availableCodeTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </details>
+
+        <details class="collapsible-panel" open>
+          <summary class="panel-summary">
+            <h2>付费订单</h2>
+            <span id="paymentOrderCountText"></span>
+          </summary>
+          <section class="panel collapsible-content">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>订单</th>
+                    <th>用户</th>
+                    <th>套餐</th>
+                    <th>金额</th>
+                    <th>状态</th>
+                    <th>时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="paymentOrderTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </details>
+      </section>
+    </section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

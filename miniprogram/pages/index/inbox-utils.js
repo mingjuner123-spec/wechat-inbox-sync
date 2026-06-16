@@ -1,5 +1,9 @@
 function classifyContent(content) {
   const text = (content || '').trim();
+  const url = extractHttpUrl(text);
+  if (isSupportedWebpageUrl(url)) {
+    return 'WEBPAGE';
+  }
   if (text.startsWith('http://') || text.startsWith('https://')) {
     return 'LINK';
   }
@@ -12,6 +16,45 @@ function extractHttpUrl(content) {
   if (!match) return '';
 
   return match[0].replace(/[.,!?;:)\]}]+$/g, '');
+}
+
+function isSupportedWebpageUrl(url) {
+  const text = String(url || '').toLowerCase();
+  return text.includes('mp.weixin.qq.com')
+    || text.includes('feishu.cn')
+    || text.includes('larksuite.com')
+    || text.includes('feishu.net')
+    || text.includes('xiaohongshu.com')
+    || text.includes('xhslink.com')
+    || text.includes('douyin.com')
+    || text.includes('iesdouyin.com')
+    || text.includes('amemv.com')
+    || text.includes('bilibili.com')
+    || text.includes('b23.tv')
+    || text.includes('xiaoyuzhoufm.com')
+    || text.includes('xiaoyuzhou.com');
+}
+
+function isAudioVideoWebpageUrl(url, sourceText = '') {
+  const text = `${String(url || '')}\n${String(sourceText || '')}`.toLowerCase();
+  if (
+    text.includes('douyin.com')
+    || text.includes('iesdouyin.com')
+    || text.includes('amemv.com')
+    || text.includes('bilibili.com/video')
+    || text.includes('b23.tv')
+    || text.includes('xiaoyuzhoufm.com')
+    || text.includes('xiaoyuzhou.com')
+  ) {
+    return true;
+  }
+  if (text.includes('xhslink.com')) {
+    return true;
+  }
+  if (text.includes('xiaohongshu.com')) {
+    return /([?&]type=video\b|\/video\/|视频|音频|播客|直播|vlog)/i.test(text);
+  }
+  return false;
 }
 
 function generateBindCode() {
@@ -56,6 +99,10 @@ function formatDuration(duration) {
 function buildTextOrLinkPayload(content) {
   const text = (content || '').trim();
   const type = classifyContent(text);
+  const url = extractHttpUrl(text);
+  if (type === 'WEBPAGE' && url) {
+    return buildWebpagePayload(url, text);
+  }
   if (type === 'LINK') {
     return {
       contentType: 'link',
@@ -69,7 +116,7 @@ function buildTextOrLinkPayload(content) {
   };
 }
 
-function buildWebpagePayload(url, sourceText) {
+function buildWebpagePayload(url, sourceText, options = {}) {
   const text = (url || '').trim();
   const payload = {
     contentType: 'webpage',
@@ -79,6 +126,12 @@ function buildWebpagePayload(url, sourceText) {
   const originalText = String(sourceText || '').trim();
   if (originalText && originalText !== text) {
     payload.shareText = originalText;
+  }
+  if (options.webpageMediaType) {
+    payload.webpageMediaType = options.webpageMediaType;
+  }
+  if (options.cloudPreTranscription) {
+    payload.cloudPreTranscription = options.cloudPreTranscription;
   }
   return payload;
 }
@@ -101,7 +154,7 @@ function buildFilePayload(file) {
   };
 }
 
-function buildVoicePayload(audioFileID, duration, audioFileName) {
+function buildVoicePayload(audioFileID, duration, audioFileName, options = {}) {
   const formattedDuration = formatDuration(duration);
   const payload = {
     contentType: 'voice',
@@ -112,6 +165,10 @@ function buildVoicePayload(audioFileID, duration, audioFileName) {
 
   if (audioFileName) {
     payload.audioFileName = audioFileName;
+  }
+
+  if (options.cloudPreTranscription) {
+    payload.cloudPreTranscription = options.cloudPreTranscription;
   }
 
   return payload;
@@ -128,4 +185,6 @@ module.exports = {
   buildVoicePayload,
   formatDuration,
   getFileExt,
+  isSupportedWebpageUrl,
+  isAudioVideoWebpageUrl,
 };

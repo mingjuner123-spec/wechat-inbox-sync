@@ -4,6 +4,7 @@ const {
   buildSyncedRecordCleanupData,
   collectRecordFileIds,
   handleSyncApiRequest,
+  shouldKeepRecordPendingForTranscription,
 } = require('../cloudfunctions/syncApi/sync-api-core');
 
 (async () => {
@@ -181,6 +182,12 @@ const {
     plan: 'local_transcription_beta',
     status: 'active',
     expiresAt: '2026-07-03T08:00:00.000Z',
+    code: '',
+    source: '',
+    durationDays: 0,
+    cloudQuotaSeconds: 0,
+    cloudUsedSeconds: 0,
+    cloudRemainingSeconds: 0,
   });
 
   const redeemResponse = await handleSyncApiRequest({
@@ -290,6 +297,183 @@ const {
     status: 'unbound',
   });
 
+  const cloudTranscriptionResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/transcriptions/cloud',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        fileID: 'cloud://voices/001.mp3',
+        durationSeconds: 120,
+        localError: 'local whisper failed',
+      }),
+    },
+    repository: {
+      ...repository,
+      async getEntitlement(openid, plan) {
+        calls.push(['cloudGetEntitlement', openid, plan]);
+        return {
+          plan,
+          status: 'active',
+          expiresAt: '2026-07-03T08:00:00.000Z',
+          cloudQuotaSeconds: 3600,
+          cloudUsedSeconds: 60,
+        };
+      },
+      async transcribeCloudAudio(openid, payload) {
+        calls.push(['transcribeCloudAudio', openid, payload.fileID, payload.durationSeconds, payload.localError]);
+        return {
+          transcription: '云端兜底转写结果',
+          provider: 'doubao',
+          requestId: 'request-1',
+          billedSeconds: 120,
+        };
+      },
+      async recordCloudTranscriptionUsage(openid, usage) {
+        calls.push(['recordCloudTranscriptionUsage', openid, usage.fileID, usage.usedSeconds, usage.remainingSeconds]);
+      },
+    },
+  });
+
+  assert.strictEqual(cloudTranscriptionResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(cloudTranscriptionResponse.body).data, {
+    transcription: '云端兜底转写结果',
+    provider: 'doubao',
+    requestId: 'request-1',
+    usedSeconds: 120,
+    remainingSeconds: 3420,
+  });
+
+  const noProCloudResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/transcriptions/cloud',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        fileID: 'cloud://voices/001.mp3',
+        durationSeconds: 60,
+      }),
+    },
+    repository: {
+      ...repository,
+      async getEntitlement() {
+        return null;
+      },
+    },
+  });
+
+  assert.strictEqual(noProCloudResponse.statusCode, 403);
+  assert.strictEqual(JSON.parse(noProCloudResponse.body).errCode, 'PRO_REQUIRED');
+
+  const quotaExceededCloudResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/transcriptions/cloud',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        fileID: 'cloud://voices/001.mp3',
+        durationSeconds: 600,
+      }),
+    },
+    repository: {
+      ...repository,
+      async getEntitlement(openid, plan) {
+        return {
+          plan,
+          status: 'active',
+          expiresAt: '2026-07-03T08:00:00.000Z',
+          cloudQuotaSeconds: 300,
+          cloudUsedSeconds: 0,
+        };
+      },
+    },
+  });
+
+  assert.strictEqual(quotaExceededCloudResponse.statusCode, 402);
+  assert.strictEqual(JSON.parse(quotaExceededCloudResponse.body).errCode, 'CLOUD_QUOTA_EXCEEDED');
+
+  const cloudTranscriptionByUrlResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/transcriptions/cloud',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        audioUrl: 'https://video.example.com/xhs.mp4',
+        durationSeconds: 60,
+        localError: 'local whisper crashed',
+      }),
+    },
+    repository: {
+      ...repository,
+      async getEntitlement(openid, plan) {
+        calls.push(['cloudGetEntitlementByUrl', openid, plan]);
+        return {
+          plan,
+          status: 'active',
+          expiresAt: '2026-07-03T08:00:00.000Z',
+          cloudQuotaSeconds: 3600,
+          cloudUsedSeconds: 0,
+        };
+      },
+      async transcribeCloudAudio(openid, payload) {
+        calls.push(['transcribeCloudAudioByUrl', openid, payload.audioUrl, payload.durationSeconds, payload.localError]);
+        return {
+          transcription: '小红书云端兜底转写结果',
+          provider: 'doubao',
+          requestId: 'request-url-1',
+          billedSeconds: 60,
+        };
+      },
+      async recordCloudTranscriptionUsage(openid, usage) {
+        calls.push(['recordCloudTranscriptionUsageByUrl', openid, usage.fileID, usage.usedSeconds, usage.remainingSeconds]);
+      },
+    },
+  });
+
+  assert.strictEqual(cloudTranscriptionByUrlResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(cloudTranscriptionByUrlResponse.body).data, {
+    transcription: '小红书云端兜底转写结果',
+    provider: 'doubao',
+    requestId: 'request-url-1',
+    usedSeconds: 60,
+    remainingSeconds: 3540,
+  });
+
+  const preferenceResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/transcription-preferences',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        cloudPreTranscriptionEnabled: true,
+        cloudPreTranscriptionThresholdMinutes: 30,
+      }),
+    },
+    repository: {
+      ...repository,
+      async saveTranscriptionPreferences(openid, preferences) {
+        calls.push([
+          'saveTranscriptionPreferences',
+          openid,
+          preferences.cloudPreTranscriptionEnabled,
+          preferences.cloudPreTranscriptionThresholdMinutes,
+        ]);
+        return preferences;
+      },
+    },
+  });
+
+  assert.strictEqual(preferenceResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(preferenceResponse.body).data, {
+    cloudPreTranscriptionEnabled: true,
+    cloudPreTranscriptionThresholdMinutes: 30,
+  });
+
   assert.deepStrictEqual(calls, [
     ['findOpenIdByToken', 'token-123', 'client-1'],
     ['listPendingRecords', 'openid-1'],
@@ -314,6 +498,21 @@ const {
     ['bindClientByToken', 'wrong-code', 'client-3'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
     ['unbindClientByToken', 'token-123', 'client-1'],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['isFileOwnedByOpenId', 'openid-1', 'cloud://voices/001.mp3'],
+    ['cloudGetEntitlement', 'openid-1', 'local_transcription_beta'],
+    ['transcribeCloudAudio', 'openid-1', 'cloud://voices/001.mp3', 120, 'local whisper failed'],
+    ['recordCloudTranscriptionUsage', 'openid-1', 'cloud://voices/001.mp3', 120, 3420],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['isFileOwnedByOpenId', 'openid-1', 'cloud://voices/001.mp3'],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['isFileOwnedByOpenId', 'openid-1', 'cloud://voices/001.mp3'],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['cloudGetEntitlementByUrl', 'openid-1', 'local_transcription_beta'],
+    ['transcribeCloudAudioByUrl', 'openid-1', 'https://video.example.com/xhs.mp4', 60, 'local whisper crashed'],
+    ['recordCloudTranscriptionUsageByUrl', 'openid-1', 'https://video.example.com/xhs.mp4', 60, 3540],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['saveTranscriptionPreferences', 'openid-1', true, 30],
   ]);
 
   assert.deepStrictEqual(collectRecordFileIds({
@@ -338,6 +537,61 @@ const {
       cleanedAt: '2026-05-14T08:00:00.000Z',
       deletedFileCount: 1,
       cleanupError: '',
+    },
+  });
+  assert.strictEqual(shouldKeepRecordPendingForTranscription({
+    type: 'voice',
+    metadata: {
+      audioFileID: 'cloud://voices/not-ready.mp3',
+      transcriptionMode: 'cloud',
+      transcriptionStatus: 'pending',
+    },
+  }), true);
+  assert.strictEqual(shouldKeepRecordPendingForTranscription({
+    type: 'webpage',
+    metadata: {
+      webpageMediaType: 'audio_video',
+      transcriptionMode: 'local',
+      transcriptionStatus: 'failed',
+      transcriptionError: 'local transcribe failed',
+    },
+  }), true);
+  assert.strictEqual(shouldKeepRecordPendingForTranscription({
+    type: 'voice',
+    metadata: {
+      audioFileID: 'cloud://voices/done.mp3',
+      transcriptionStatus: 'success',
+      transcription: 'done',
+    },
+  }), false);
+
+  let adminCalled = false;
+  const adminResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/admin/summary',
+      query: {},
+      headers: {
+        'x-admin-secret': 'secret',
+      },
+      body: JSON.stringify({ range: 'all' }),
+    },
+    repository: {
+      async handleAdminRequest(request) {
+        adminCalled = true;
+        assert.strictEqual(request.path, '/summary');
+        assert.strictEqual(request.adminSecret, 'secret');
+        return { ok: true };
+      },
+    },
+  });
+  assert.strictEqual(adminCalled, true);
+  assert.strictEqual(adminResponse.statusCode, 200);
+  assert.strictEqual(adminResponse.headers['Access-Control-Allow-Origin'], '*');
+  assert.deepStrictEqual(JSON.parse(adminResponse.body), {
+    success: true,
+    data: {
+      ok: true,
     },
   });
 

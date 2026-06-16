@@ -1,4 +1,6 @@
 const DEFAULT_REDEEM_PLAN = 'local_transcription_beta';
+const DEFAULT_CLOUD_TRANSCRIPTION_QUOTA_SECONDS = 0;
+const CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS = 60;
 
 function buildEntitlementState(entitlement, now = new Date().toISOString()) {
   if (!entitlement) {
@@ -7,6 +9,12 @@ function buildEntitlementState(entitlement, now = new Date().toISOString()) {
       plan: '',
       status: 'inactive',
       expiresAt: '',
+      code: '',
+      source: '',
+      durationDays: 0,
+      cloudQuotaSeconds: 0,
+      cloudUsedSeconds: 0,
+      cloudRemainingSeconds: 0,
     };
   }
   const expiresAt = entitlement.expiresAt || '';
@@ -17,6 +25,12 @@ function buildEntitlementState(entitlement, now = new Date().toISOString()) {
     plan: entitlement.plan || DEFAULT_REDEEM_PLAN,
     status,
     expiresAt,
+    code: normalizeRedeemCode(entitlement.code),
+    source: entitlement.source || '',
+    durationDays: Number(entitlement.durationDays) || 0,
+    cloudQuotaSeconds: Number(entitlement.cloudQuotaSeconds) || 0,
+    cloudUsedSeconds: Number(entitlement.cloudUsedSeconds) || 0,
+    cloudRemainingSeconds: Math.max(0, (Number(entitlement.cloudQuotaSeconds) || 0) - (Number(entitlement.cloudUsedSeconds) || 0)),
   };
 }
 
@@ -33,6 +47,9 @@ function jsonResponse(statusCode, payload) {
     statusCode,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Allow-Headers': 'content-type,x-admin-secret,authorization,x-wechat-inbox-client-id',
     },
     body: JSON.stringify(payload),
   };
@@ -113,6 +130,68 @@ function isEntitlementRedeemPath(path) {
   return normalized === '/entitlements/redeem' || normalized.endsWith('/entitlements/redeem');
 }
 
+function isCloudTranscriptionPath(path) {
+  const normalized = String(path || '');
+  return normalized === '/transcriptions/cloud' || normalized.endsWith('/transcriptions/cloud');
+}
+
+function isTranscriptionPreferencesPath(path) {
+  const normalized = String(path || '');
+  return normalized === '/transcription-preferences' || normalized.endsWith('/transcription-preferences');
+}
+
+function normalizeTranscriptionPreferences(body) {
+  const threshold = Number(body.cloudPreTranscriptionThresholdMinutes);
+  const allowedThresholds = [10, 30, 60];
+  return {
+    cloudPreTranscriptionEnabled: Boolean(body.cloudPreTranscriptionEnabled),
+    cloudPreTranscriptionThresholdMinutes: allowedThresholds.includes(threshold) ? threshold : 10,
+  };
+}
+
+function normalizePositiveSeconds(value, fallback = 0) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  return Math.ceil(number);
+}
+
+function getEntitlementCloudQuotaSeconds(entitlement) {
+  return normalizePositiveSeconds(
+    entitlement && (
+      entitlement.cloudQuotaSeconds
+      || entitlement.cloudQuota
+      || entitlement.cloudQuotaMinutes && Number(entitlement.cloudQuotaMinutes) * 60
+    ),
+    DEFAULT_CLOUD_TRANSCRIPTION_QUOTA_SECONDS,
+  );
+}
+
+function getEntitlementCloudUsedSeconds(entitlement) {
+  return normalizePositiveSeconds(
+    entitlement && (
+      entitlement.cloudUsedSeconds
+      || entitlement.cloudTranscriptionUsedSeconds
+      || entitlement.cloudUsedMinutes && Number(entitlement.cloudUsedMinutes) * 60
+    ),
+    0,
+  );
+}
+
+function buildCloudQuotaState(entitlement, requestedSeconds) {
+  const quotaSeconds = getEntitlementCloudQuotaSeconds(entitlement);
+  const usedSeconds = getEntitlementCloudUsedSeconds(entitlement);
+  const billableSeconds = Math.max(
+    CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS,
+    normalizePositiveSeconds(requestedSeconds, CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS),
+  );
+  return {
+    quotaSeconds,
+    usedSeconds,
+    billableSeconds,
+    remainingSeconds: Math.max(0, quotaSeconds - usedSeconds),
+  };
+}
+
 function collectRecordFileIds(record) {
   const metadata = (record && record.metadata) || {};
   const candidates = [metadata.audioFileID, metadata.fileID];
@@ -133,6 +212,18 @@ function buildSyncedRecordCleanupData({ syncedAt, fileIds = [], cleanupError = '
       cleanupError,
     },
   };
+}
+
+function shouldKeepRecordPendingForTranscription(record) {
+  const metadata = (record && record.metadata) || {};
+  const status = String(metadata.transcriptionStatus || '').toLowerCase();
+  const hasTranscription = String(metadata.transcription || '').trim().length > 0;
+  const isAudioVideoRecord = String(record && record.type || '').toLowerCase() === 'voice'
+    || metadata.webpageMediaType === 'audio_video'
+    || Boolean(metadata.audioFileID)
+    || metadata.transcriptOnly === true;
+  if (!isAudioVideoRecord || hasTranscription) return false;
+  return ['pending', 'queued', 'processing', 'failed'].includes(status);
 }
 
 async function requireOpenId(request, repository) {
@@ -276,10 +367,185 @@ async function handleEntitlementRedeemRequest({ request, repository, openid }) {
   });
 }
 
+async function handleCloudTranscriptionRequest({ request, repository, openid }) {
+  const body = parseJsonBody(request.body);
+  const fileID = String(body.fileID || body.audioFileID || '').trim();
+  const audioUrl = String(body.audioUrl || body.mediaUrl || '').trim();
+  const hasAudioUrl = /^https?:\/\//i.test(audioUrl);
+  if (!fileID && !hasAudioUrl) {
+    return jsonResponse(400, {
+      success: false,
+      errMsg: 'Missing fileID or audioUrl',
+    });
+  }
+  if (fileID && typeof repository.isFileOwnedByOpenId === 'function') {
+    const isOwned = await repository.isFileOwnedByOpenId(openid, fileID);
+    if (!isOwned) {
+      return jsonResponse(403, {
+        success: false,
+        errMsg: 'File does not belong to current user',
+      });
+    }
+  }
+  const entitlement = typeof repository.getEntitlement === 'function'
+    ? await repository.getEntitlement(openid, DEFAULT_REDEEM_PLAN)
+    : null;
+  const entitlementState = buildEntitlementState(entitlement);
+  if (!entitlementState.hasAccess) {
+    return jsonResponse(403, {
+      success: false,
+      errCode: 'PRO_REQUIRED',
+      errMsg: 'Pro membership is required for cloud transcription',
+    });
+  }
+  const durationSeconds = normalizePositiveSeconds(body.durationSeconds, CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS);
+  const quota = buildCloudQuotaState(entitlement, durationSeconds);
+  if (quota.remainingSeconds < quota.billableSeconds) {
+    return jsonResponse(402, {
+      success: false,
+      errCode: 'CLOUD_QUOTA_EXCEEDED',
+      errMsg: 'Cloud transcription quota exceeded',
+      data: {
+        quotaSeconds: quota.quotaSeconds,
+        usedSeconds: quota.usedSeconds,
+        remainingSeconds: quota.remainingSeconds,
+        requestedSeconds: quota.billableSeconds,
+      },
+    });
+  }
+  if (typeof repository.transcribeCloudAudio !== 'function') {
+    return jsonResponse(501, {
+      success: false,
+      errMsg: 'Cloud transcription is not available',
+    });
+  }
+  const result = await repository.transcribeCloudAudio(openid, {
+    fileID,
+    audioUrl,
+    durationSeconds: quota.billableSeconds,
+    localError: String(body.localError || '').slice(0, 1000),
+    source: String(body.source || '').slice(0, 100),
+    title: String(body.title || '').slice(0, 300),
+  });
+  const transcription = String(result && result.transcription || '').trim();
+  if (!transcription) {
+    return jsonResponse(502, {
+      success: false,
+      errMsg: 'Cloud transcription returned empty result',
+    });
+  }
+  const usedSeconds = normalizePositiveSeconds(result && result.billedSeconds, quota.billableSeconds);
+  const remainingSeconds = Math.max(0, quota.remainingSeconds - usedSeconds);
+  if (typeof repository.recordCloudTranscriptionUsage === 'function') {
+    await repository.recordCloudTranscriptionUsage(openid, {
+      fileID: fileID || audioUrl,
+      usedSeconds,
+      remainingSeconds,
+      quotaSeconds: quota.quotaSeconds,
+      previousUsedSeconds: quota.usedSeconds,
+      provider: result.provider || 'cloud',
+      requestId: result.requestId || '',
+      localError: String(body.localError || '').slice(0, 1000),
+      createdAt: new Date().toISOString(),
+    });
+  }
+  return jsonResponse(200, {
+    success: true,
+    data: {
+      transcription,
+      provider: result.provider || 'cloud',
+      requestId: result.requestId || '',
+      usedSeconds,
+      remainingSeconds,
+    },
+  });
+}
+
+async function handleTranscriptionPreferencesRequest({ request, repository, openid }) {
+  if (typeof repository.saveTranscriptionPreferences !== 'function') {
+    return jsonResponse(501, {
+      success: false,
+      errMsg: 'Transcription preferences API is not available',
+    });
+  }
+  const body = parseJsonBody(request.body);
+  const preferences = normalizeTranscriptionPreferences(body);
+  const saved = await repository.saveTranscriptionPreferences(openid, preferences);
+  return jsonResponse(200, {
+    success: true,
+    data: normalizeTranscriptionPreferences(saved || preferences),
+  });
+}
+
+function parseAdminBody(body) {
+  if (!body) return {};
+  if (typeof body === 'object') return body;
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    return {};
+  }
+}
+
+function getAdminPath(path) {
+  const normalized = String(path || '')
+    .replace(/^\/sync/, '')
+    .replace(/^\/admin/, '')
+    .replace(/\/+$/, '');
+  return normalized || '/summary';
+}
+
+function getHeader(headers, name) {
+  if (!headers || !name) return '';
+  const target = String(name).toLowerCase();
+  const key = Object.keys(headers).find((item) => String(item).toLowerCase() === target);
+  return key ? headers[key] : '';
+}
+
+function isAdminPath(path) {
+  const normalized = String(path || '').replace(/^\/sync/, '');
+  return normalized === '/admin' || normalized.startsWith('/admin/');
+}
+
+async function handleAdminApiRequest({ request, repository }) {
+  if (typeof repository.handleAdminRequest !== 'function') {
+    return jsonResponse(500, {
+      success: false,
+      errMsg: 'Admin handler is unavailable',
+    });
+  }
+  const body = parseAdminBody(request.body);
+  const query = request.query || {};
+  const data = await repository.handleAdminRequest({
+    method: request.method,
+    path: getAdminPath(request.path),
+    query,
+    body,
+    adminSecret: String(
+      getHeader(request.headers, 'x-admin-secret')
+      || body.adminSecret
+      || query.adminSecret
+      || ''
+    ).trim(),
+  });
+  return jsonResponse(200, {
+    success: true,
+    data,
+  });
+}
+
 async function handleSyncApiRequest({ request, repository }) {
   try {
     const method = String(request.method || '').toUpperCase();
     const path = request.path || '/';
+
+    if (method === 'OPTIONS' && isAdminPath(path)) {
+      return jsonResponse(204, { success: true });
+    }
+
+    if ((method === 'GET' || method === 'POST') && isAdminPath(path)) {
+      return await handleAdminApiRequest({ request, repository });
+    }
 
     if (method === 'POST' && isBindPath(path)) {
       return await handleBindRequest({ request, repository });
@@ -298,6 +564,14 @@ async function handleSyncApiRequest({ request, repository }) {
 
     if (method === 'POST' && isEntitlementRedeemPath(path)) {
       return await handleEntitlementRedeemRequest({ request, repository, openid: auth.openid });
+    }
+
+    if (method === 'POST' && isCloudTranscriptionPath(path)) {
+      return await handleCloudTranscriptionRequest({ request, repository, openid: auth.openid });
+    }
+
+    if (method === 'POST' && isTranscriptionPreferencesPath(path)) {
+      return await handleTranscriptionPreferencesRequest({ request, repository, openid: auth.openid });
     }
 
     if (method === 'GET' && isRecordsPath(path)) {
@@ -357,9 +631,12 @@ async function handleSyncApiRequest({ request, repository }) {
 
 module.exports = {
   buildSyncedRecordCleanupData,
+  buildCloudQuotaState,
   collectRecordFileIds,
   handleSyncApiRequest,
   isRedeemCodeBusinessError,
+  shouldKeepRecordPendingForTranscription,
+  normalizeTranscriptionPreferences,
   parseBearerToken,
   normalizeRedeemCode,
 };

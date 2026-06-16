@@ -11,7 +11,16 @@ const wxMock = {
     },
     uploadFile(options) {
       calls.push(['uploadFile', options]);
-      return Promise.resolve({ fileID: `cloud://${options.cloudPath}` });
+      const task = {
+        onProgressUpdate(callback) {
+          task.progressCallback = callback;
+          callback({ progress: 37, totalBytesSent: 370, totalBytesExpectedToSend: 1000 });
+        },
+      };
+      setTimeout(() => {
+        options.success({ fileID: `cloud://${options.cloudPath}` });
+      }, 0);
+      return task;
     },
   },
 };
@@ -72,20 +81,32 @@ const wxMock = {
     },
   ]);
 
-  const upload = await service.uploadVoiceFile('temp://voice.mp3');
+  const voiceProgressEvents = [];
+  const upload = await service.uploadVoiceFile('temp://voice.mp3', {
+    onProgress: (event) => voiceProgressEvents.push(event),
+  });
   assert.strictEqual(upload.fileID.startsWith('cloud://voices/'), true);
   assert.strictEqual(upload.fileID.endsWith('.mp3'), true);
   assert.strictEqual(calls[4][0], 'uploadFile');
   assert.strictEqual(calls[4][1].filePath, 'temp://voice.mp3');
+  assert.deepStrictEqual(voiceProgressEvents, [
+    { progress: 37, totalBytesSent: 370, totalBytesExpectedToSend: 1000 },
+  ]);
 
+  const fileProgressEvents = [];
   const uploadedFile = await service.uploadInboxFile({
     path: 'temp://example.pdf',
     name: 'example.pdf',
+  }, {
+    onProgress: (event) => fileProgressEvents.push(event),
   });
   assert.strictEqual(uploadedFile.fileID.startsWith('cloud://files/'), true);
   assert.strictEqual(uploadedFile.fileID.endsWith('.pdf'), true);
   assert.strictEqual(calls[5][0], 'uploadFile');
   assert.strictEqual(calls[5][1].filePath, 'temp://example.pdf');
+  assert.deepStrictEqual(fileProgressEvents, [
+    { progress: 37, totalBytesSent: 370, totalBytesExpectedToSend: 1000 },
+  ]);
 
   await service.submitFeedback({
     content: '绑定时看不懂云函数 HTTP 路由怎么配',
@@ -173,6 +194,53 @@ const wxMock = {
     },
   ]);
 
+  await service.startCloudPreTranscription('record-voice-1');
+  assert.deepStrictEqual(calls[13], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'processCloudPreTranscription',
+        recordId: 'record-voice-1',
+      },
+    },
+  ]);
+
+  await service.getTrialRedeemCode();
+  assert.deepStrictEqual(calls[14], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'getTrialRedeemCode',
+      },
+    },
+  ]);
+
+  await service.createPaymentOrder('pro_year');
+  assert.deepStrictEqual(calls[15], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'createPaymentOrder',
+        planId: 'pro_year',
+      },
+    },
+  ]);
+
+  await service.queryPaymentOrder('OBPAY001');
+  assert.deepStrictEqual(calls[16], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'queryPaymentOrder',
+        orderNo: 'OBPAY001',
+      },
+    },
+  ]);
+
   await service.adminGenerateRedeemCodes({
     adminSecret: 'secret',
     count: 10,
@@ -181,7 +249,7 @@ const wxMock = {
     prefix: 'OBPRO',
     note: '内测码',
   });
-  assert.deepStrictEqual(calls[13], [
+  assert.deepStrictEqual(calls[17], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -198,7 +266,7 @@ const wxMock = {
   ]);
 
   await service.adminListRedeemCodes({ adminSecret: 'secret', keyword: 'OBPRO' });
-  assert.deepStrictEqual(calls[14], [
+  assert.deepStrictEqual(calls[18], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -211,7 +279,7 @@ const wxMock = {
   ]);
 
   await service.adminListEntitlements({ adminSecret: 'secret', keyword: 'openid-1' });
-  assert.deepStrictEqual(calls[15], [
+  assert.deepStrictEqual(calls[19], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -224,7 +292,7 @@ const wxMock = {
   ]);
 
   await service.adminListBindCodes({ adminSecret: 'secret', keyword: 'ABC' });
-  assert.deepStrictEqual(calls[16], [
+  assert.deepStrictEqual(calls[20], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -242,7 +310,7 @@ const wxMock = {
     action: 'extend',
     days: 30,
   });
-  assert.deepStrictEqual(calls[17], [
+  assert.deepStrictEqual(calls[21], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -261,7 +329,7 @@ const wxMock = {
     codeId: 'code-1',
     action: 'disable',
   });
-  assert.deepStrictEqual(calls[18], [
+  assert.deepStrictEqual(calls[22], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -274,8 +342,39 @@ const wxMock = {
     },
   ]);
 
+  await service.adminListPaymentOrders({ adminSecret: 'secret', keyword: 'openid-1' });
+  assert.deepStrictEqual(calls[23], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminListPaymentOrders',
+        adminSecret: 'secret',
+        keyword: 'openid-1',
+      },
+    },
+  ]);
+
+  await service.adminUpdatePaymentOrder({
+    adminSecret: 'secret',
+    orderNo: 'OBPAY001',
+    action: 'markPaid',
+  });
+  assert.deepStrictEqual(calls[24], [
+    'callFunction',
+    {
+      name: 'quickstartFunctions',
+      data: {
+        type: 'adminUpdatePaymentOrder',
+        adminSecret: 'secret',
+        orderNo: 'OBPAY001',
+        action: 'markPaid',
+      },
+    },
+  ]);
+
   await service.trackAnalyticsEvent('app_visit', { view: 'bind' });
-  assert.deepStrictEqual(calls[19], [
+  assert.deepStrictEqual(calls[25], [
     'callFunction',
     {
       name: 'quickstartFunctions',

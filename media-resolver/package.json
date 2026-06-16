@@ -1,0 +1,13 @@
+{
+  "name": "wechat-inbox-media-resolver",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Webpage audio/video resolver relay for WeChat Inbox Sync cloud transcription.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

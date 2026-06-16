@@ -6,21 +6,19 @@ const {
   buildTextOrLinkPayload,
   buildWebpagePayload,
   buildVoicePayload,
+  isAudioVideoWebpageUrl,
 } = require('./inbox-utils');
 const { createInboxService } = require('../../services/inbox-service');
 
 const APP_VERSION = '0.1.0';
-const DEFAULT_PLUGIN_VERSION = '1.1.5';
-const DEFAULT_PLUGIN_UPDATED_AT = '2026-06-04';
-const TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
-const DEFAULT_ANNOUNCEMENT = '插件已可在 Obsidian 插件市场安装并自动更新，建议更换为插件市场版';
-const ANNOUNCEMENT_VERSION = '2026-06-04-pro-multi-device';
+const DEFAULT_PLUGIN_VERSION = '1.2.8';
+const DEFAULT_PLUGIN_UPDATED_AT = '2026-06-14';
+const TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
+const DEFAULT_ANNOUNCEMENT = 'Pro 版，已开启7天全面体验。前往开通 Pro 领取会员和查看教程。';
+const ANNOUNCEMENT_VERSION = '2026-06-14-local-transcription-first';
 const DEFAULT_UPDATE_ITEMS = [
-  '新增 Pro 音视频文案提取能力',
-  '新增 7 天 Pro 试用码领取入口',
-  '一个绑定码最多可绑定 3 台电脑',
-  '新增 macOS 本地转写组件安装支持',
-  '优化抖音、B站、小宇宙、小红书识别',
+  'Pro 版，已开启7天全面体验',
+  '前往开通 Pro 领取会员和查看教程',
 ];
 const CONTACT_WECHAT = 'heyhmjx';
 const SHARE_TITLE = 'Obsidian 内容同步助手';
@@ -28,11 +26,17 @@ const SHARE_PATH = 'pages/index/index';
 const REWARDED_AD_UNIT_ID = 'adunit-d21c10ffc8e30f1d';
 const MAX_RECORDER_DURATION_MS = 600000;
 const MAX_CHAT_UPLOAD_COUNT = 10;
+const MAX_ALBUM_UPLOAD_COUNT = 9;
 const MAX_RECENT_ITEMS = 50;
+const CLOUD_TRANSCRIPTION_STORAGE_KEY = 'wechat_inbox_cloud_transcription_preference';
+const CLOUD_TRANSCRIPTION_TEMP_DISABLED = true;
+const CLOUD_PRE_TRANSCRIPTION_RETRY_DELAYS_MS = [3000, 10000, 30000];
 const DEFAULT_INPUT_PLACEHOLDER = '复制编辑文字，网页链接请点击读取网页链接';
 const AUDIO_FILE_EXTENSIONS = ['mp3', 'm4a', 'wav', 'aac', 'amr', 'silk', 'ogg', 'flac'];
+const VIDEO_FILE_EXTENSIONS = ['mp4', 'mov', 'm4v'];
+const IMAGE_FILE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic'];
 const DOCUMENT_FILE_EXTENSIONS = ['pdf', 'md', 'markdown', 'doc', 'docx', 'txt'];
-const SUPPORTED_CHAT_UPLOAD_EXTENSIONS = [...DOCUMENT_FILE_EXTENSIONS, ...AUDIO_FILE_EXTENSIONS];
+const SUPPORTED_CHAT_UPLOAD_EXTENSIONS = [...DOCUMENT_FILE_EXTENSIONS, ...AUDIO_FILE_EXTENSIONS, ...VIDEO_FILE_EXTENSIONS, ...IMAGE_FILE_EXTENSIONS];
 
 function collectForwardMaterialText(value, depth = 0) {
   if (!value || depth > 3) return '';
@@ -86,11 +90,41 @@ function getFileExtension(file) {
 }
 
 function isAudioInboxFile(file) {
-  return AUDIO_FILE_EXTENSIONS.includes(getFileExtension(file));
+  const ext = getFileExtension(file);
+  return AUDIO_FILE_EXTENSIONS.includes(ext) || VIDEO_FILE_EXTENSIONS.includes(ext) || file.type === 'video';
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function normalizeAlbumMediaFile(media, index = 0) {
+  const tempFilePath = media && (media.tempFilePath || media.path);
+  const ext = getFileExtension({
+    name: media && media.name,
+    path: tempFilePath,
+  });
+  const isVideo = (media && media.fileType === 'video') || VIDEO_FILE_EXTENSIONS.includes(ext);
+  const fallbackExt = isVideo ? 'mp4' : 'jpg';
+  const name = (media && media.name) || `album-${isVideo ? 'video' : 'image'}-${index + 1}.${ext || fallbackExt}`;
+  return {
+    name,
+    path: tempFilePath,
+    tempFilePath,
+    size: (media && (media.size || media.fileSize)) || 0,
+    type: isVideo ? 'video' : 'image',
+    fileType: media && media.fileType,
+    duration: Number(media && media.duration) ? Number(media.duration) * 1000 : 0,
+  };
 }
 
 function getErrorMessage(error, fallback) {
   const message = (error && (error.errMsg || error.message)) || String(error || '');
+  if (/FUNCTIONS_TIME_LIMIT_EXCEEDED|timed out|timeout|cloud\.callFunction/i.test(message)) {
+    return '网络繁忙，稍后再试';
+  }
   return message && message !== '[object Object]' ? message : fallback;
 }
 
@@ -130,6 +164,13 @@ function formatDateLabel(value) {
   return `${year}-${month}-${day}`;
 }
 
+function isExpired(value) {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getTime() <= Date.now();
+}
+
 function getRemainingDays(value) {
   if (!value) return 0;
   const date = new Date(value);
@@ -147,7 +188,7 @@ function buildMembershipCard(status = {}) {
     return {
       badge: isTrial ? 'Pro 试用中' : 'Pro 版',
       title: isTrial ? `Pro 试用剩余 ${daysLeft || 1} 天` : 'Pro 功能已开通',
-      desc: expiresAt ? `有效期至 ${formatDateLabel(expiresAt)}` : '音视频文案提取功能可用',
+      desc: '音视频文案提取功能可用',
       cta: '查看 Pro 权益',
       tone: 'pro',
     };
@@ -157,7 +198,7 @@ function buildMembershipCard(status = {}) {
     return {
       badge: 'Pro 已到期',
       title: '图文同步仍可继续使用',
-      desc: '音视频文案提取需要重新开通 Pro',
+      desc: '该兑换码已到期，请联系张张续期。',
       cta: '重新开通',
       tone: 'expired',
     };
@@ -166,7 +207,7 @@ function buildMembershipCard(status = {}) {
   return {
     badge: '免费版',
     title: '可免费领取 7 天 Pro 试用',
-    desc: '免费版可同步图文链接，想试音视频文案提取可联系张张领取试用码',
+    desc: '免费版可同步图文链接，想试音视频文案提取可到 Pro 页领取体验卡',
     cta: '领取试用码',
     tone: 'free',
   };
@@ -186,10 +227,68 @@ function buildUsageStatusText(usage = {}, entitlementStatus = {}) {
   return `今日已用 ${used}/${limit} 次，分享可解锁更多次数`;
 }
 
+function formatCloudMinutes(seconds) {
+  const value = Number(seconds || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 分钟';
+  return `${Math.ceil(value / 60)} 分钟`;
+}
+
+function buildCloudQuotaSummary(status = {}) {
+  if (!status || !status.hasAccess) return '云端额度：开通 Pro 后可用';
+  const quota = Math.max(0, Number(status.cloudQuotaSeconds || 0));
+  const used = Math.max(0, Number(status.cloudUsedSeconds || 0));
+  const remainingValue = status.cloudRemainingSeconds !== undefined
+    ? Number(status.cloudRemainingSeconds || 0)
+    : Math.max(0, quota - used);
+  return `云端额度剩余 ${formatCloudMinutes(Math.max(0, remainingValue))}`;
+}
+
+function buildTrialState(status = {}) {
+  const code = String(status.code || '').trim();
+  const expiresAt = status.expiresAt || '';
+  return {
+    trialRedeemCode: code,
+    trialRedeemCodeExpiresAt: expiresAt,
+    trialRedeemCodeExpiresLabel: formatDateLabel(expiresAt),
+    trialRedeemCodeExpired: isExpired(expiresAt),
+  };
+}
+
+function normalizeCloudTranscriptionPreference(value = {}) {
+  const defaultMode = ['ask', 'local', 'cloud'].includes(value.defaultMode)
+    ? value.defaultMode
+    : 'local';
+  return {
+    defaultMode,
+  };
+}
+
+function buildCloudTranscriptionSummary(preference = {}) {
+  if (CLOUD_TRANSCRIPTION_TEMP_DISABLED) return '音视频转写：默认本地';
+  const normalized = normalizeCloudTranscriptionPreference(preference);
+  if (normalized.defaultMode === 'cloud') return '音视频转写：默认云端快速转写';
+  if (normalized.defaultMode === 'local') return '音视频转写：默认本地';
+  return '音视频转写：保存时选择本地或云端';
+}
+
+function buildCloudTranscriptionPayload(mode, reason = 'manual') {
+  const useCloud = mode === 'cloud';
+  return {
+    enabled: useCloud,
+    mode: useCloud ? 'cloud' : 'local',
+    reason,
+    speakerDiarization: useCloud,
+  };
+}
+
 function buildAnnouncementContent(items = DEFAULT_UPDATE_ITEMS) {
   return (items || DEFAULT_UPDATE_ITEMS)
     .map((item, index) => `${index + 1}. ${item}`)
     .join('\n');
+}
+
+function isLatestAnnouncementConfig(config = {}) {
+  return config.announcementVersion === ANNOUNCEMENT_VERSION;
 }
 
 Page({
@@ -212,6 +311,12 @@ Page({
     announcementVisible: false,
     statusText: '已保存，等待 Obsidian 同步',
     statusVisible: false,
+    uploadProgressVisible: false,
+    uploadProgressPercent: 0,
+    uploadProgressText: '',
+    cloudTranscriptionPreference: normalizeCloudTranscriptionPreference(),
+    cloudTranscriptionSummary: buildCloudTranscriptionSummary(),
+    cloudQuotaSummary: buildCloudQuotaSummary(),
     quotaUnlockPending: false,
     quotaUnlockVisible: false,
     dailyUsage: {
@@ -225,11 +330,24 @@ Page({
     redeemVisible: false,
     redeemCodeInput: '',
     isRedeeming: false,
+    trialCodeLoading: false,
+    trialRedeemCode: '',
+    trialRedeemCodeCreatedAt: '',
+    trialRedeemCodeExpiresAt: '',
+    trialRedeemCodeExpiresLabel: '',
+    trialRedeemCodeExpired: false,
+    entitlementStatusLoaded: false,
     entitlementStatus: {
       hasAccess: false,
       plan: '',
       status: 'inactive',
       expiresAt: '',
+      code: '',
+      source: '',
+      durationDays: 0,
+      cloudQuotaSeconds: 0,
+      cloudUsedSeconds: 0,
+      cloudRemainingSeconds: 0,
     },
     bindCode: '',
     bindCodeVisible: false,
@@ -270,6 +388,7 @@ Page({
     this.enableShareMenu();
     this.setupRecorder();
     this.setupRewardedVideoAd();
+    this.loadCloudTranscriptionPreference();
     this.loadPublicConfig();
     this.loadDailyUsageStatus();
     this.loadEntitlementStatus();
@@ -297,6 +416,139 @@ Page({
       withShareTicket: true,
       menus: ['shareAppMessage', 'shareTimeline'],
     });
+  },
+
+  loadCloudTranscriptionPreference() {
+    let stored = null;
+    try {
+      stored = wx.getStorageSync ? wx.getStorageSync(CLOUD_TRANSCRIPTION_STORAGE_KEY) : null;
+    } catch (error) {
+      stored = null;
+    }
+    const preference = normalizeCloudTranscriptionPreference(stored || {});
+    this.setData({
+      cloudTranscriptionPreference: preference,
+      cloudTranscriptionSummary: buildCloudTranscriptionSummary(preference),
+    });
+  },
+
+  rememberCloudTranscriptionChoice(defaultMode) {
+    const preference = normalizeCloudTranscriptionPreference({ defaultMode });
+    try {
+      if (wx.setStorageSync) {
+        wx.setStorageSync(CLOUD_TRANSCRIPTION_STORAGE_KEY, preference);
+      }
+    } catch (error) {
+      // Storage failure should not block saving the user's material.
+    }
+    this.setData({
+      cloudTranscriptionPreference: preference,
+      cloudTranscriptionSummary: buildCloudTranscriptionSummary(preference),
+    });
+  },
+
+  showCloudTranscriptionSettings() {
+    if (CLOUD_TRANSCRIPTION_TEMP_DISABLED) {
+      wx.showToast({
+        title: '云端转写暂未开放，当前默认本地转写',
+        icon: 'none',
+      });
+      return;
+    }
+    wx.showActionSheet({
+      itemList: ['默认本地转写', '默认云端快速转写', '每次保存时询问'],
+      success: (result) => {
+        const modes = ['local', 'cloud', 'ask'];
+        const defaultMode = modes[result.tapIndex] || 'local';
+        if (defaultMode === 'cloud' && !this.data.entitlementStatus.hasAccess) {
+          wx.showToast({
+            title: '开通 Pro 后可用云端转写',
+            icon: 'none',
+          });
+          return;
+        }
+        this.rememberCloudTranscriptionChoice(defaultMode);
+        wx.showToast({
+          title: '转写方式已更新',
+          icon: 'none',
+        });
+      },
+    });
+  },
+
+  async resolveCloudTranscriptionChoice(file = {}) {
+    if (CLOUD_TRANSCRIPTION_TEMP_DISABLED) {
+      return Promise.resolve(buildCloudTranscriptionPayload('local', 'cloud-disabled'));
+    }
+
+    if (!this.data.entitlementStatusLoaded && this.inboxService) {
+      await this.loadEntitlementStatus();
+    }
+
+    if (!this.data.entitlementStatus.hasAccess) {
+      return Promise.resolve(buildCloudTranscriptionPayload('local', 'free-user'));
+    }
+
+    const remainingSeconds = Number(this.data.entitlementStatus.cloudRemainingSeconds || 0);
+    if (!Number.isFinite(remainingSeconds) || remainingSeconds <= 0) {
+      return Promise.resolve(buildCloudTranscriptionPayload('local', 'quota-exhausted'));
+    }
+
+    const preference = normalizeCloudTranscriptionPreference(this.data.cloudTranscriptionPreference);
+    if (preference.defaultMode === 'cloud') {
+      return Promise.resolve(buildCloudTranscriptionPayload('cloud', 'remembered'));
+    }
+    if (preference.defaultMode === 'local') {
+      return Promise.resolve(buildCloudTranscriptionPayload('local', 'remembered'));
+    }
+
+    const durationMs = Number(file.duration || 0);
+    const durationHint = durationMs >= 10 * 60 * 1000 ? '（适合长音视频）' : '';
+    return new Promise((resolve) => {
+      wx.showActionSheet({
+        itemList: [
+          `保存并云端快速转写${durationHint}`,
+          '仅保存，本地转写',
+          '以后默认云端快速转写',
+          '以后默认本地转写',
+        ],
+        success: (result) => {
+          if (result.tapIndex === 0) {
+            resolve(buildCloudTranscriptionPayload('cloud', 'manual'));
+            return;
+          }
+          if (result.tapIndex === 2) {
+            this.rememberCloudTranscriptionChoice('cloud');
+            resolve(buildCloudTranscriptionPayload('cloud', 'remembered'));
+            return;
+          }
+          if (result.tapIndex === 3) {
+            this.rememberCloudTranscriptionChoice('local');
+            resolve(buildCloudTranscriptionPayload('local', 'remembered'));
+            return;
+          }
+          resolve(buildCloudTranscriptionPayload('local', 'manual'));
+        },
+        fail: () => {
+          resolve(buildCloudTranscriptionPayload('local', 'cancelled'));
+        },
+      });
+    });
+  },
+
+  async ensureProAccessForTranscription(message = '音视频转写需要 Pro') {
+    if (!this.data.entitlementStatusLoaded && this.inboxService) {
+      await this.loadEntitlementStatus();
+    }
+    if (this.data.entitlementStatus && this.data.entitlementStatus.hasAccess) {
+      return true;
+    }
+    wx.showToast({
+      title: message,
+      icon: 'none',
+    });
+    this.showMineView();
+    return false;
   },
 
   onShareAppMessage() {
@@ -398,17 +650,18 @@ Page({
       const config = response.result && response.result.success ? response.result.data : null;
       if (!config) return;
 
-      const updateItems = Array.isArray(config.updateItems) && config.updateItems.length
+      const useRemoteAnnouncement = isLatestAnnouncementConfig(config);
+      const updateItems = useRemoteAnnouncement && Array.isArray(config.updateItems) && config.updateItems.length
         ? config.updateItems
         : DEFAULT_UPDATE_ITEMS;
-      const announcementVersion = config.announcementVersion || ANNOUNCEMENT_VERSION;
+      const announcementVersion = useRemoteAnnouncement ? config.announcementVersion : ANNOUNCEMENT_VERSION;
       this.setData({
-        announcementText: config.announcement || DEFAULT_ANNOUNCEMENT,
+        announcementText: useRemoteAnnouncement ? (config.announcement || DEFAULT_ANNOUNCEMENT) : DEFAULT_ANNOUNCEMENT,
         announcementVersion,
         updateItems,
         pluginVersion: config.pluginVersion || DEFAULT_PLUGIN_VERSION,
         pluginUpdatedAt: config.updatedAt || DEFAULT_PLUGIN_UPDATED_AT,
-        tutorialUrl: config.tutorialUrl || TUTORIAL_URL,
+        tutorialUrl: TUTORIAL_URL,
       });
       this.showLaunchAnnouncementIfNeeded({ announcementVersion, updateItems });
     } catch (error) {
@@ -580,6 +833,18 @@ Page({
     });
   },
 
+  copyFormalMembershipWechat() {
+    wx.setClipboardData({
+      data: this.data.contactWechat || CONTACT_WECHAT,
+      success: () => {
+        wx.showToast({
+          title: '微信已复制，备注开通正式会员',
+          icon: 'none',
+        });
+      },
+    });
+  },
+
   switchMainTab(event) {
     const target = event.currentTarget && event.currentTarget.dataset
       ? String(event.currentTarget.dataset.view || '')
@@ -597,7 +862,7 @@ Page({
     }
   },
 
-  toggleRecording() {
+  async toggleRecording() {
     if (!this.recorderManager) {
       wx.showToast({
         title: '当前基础库不支持录音',
@@ -609,6 +874,8 @@ Page({
     const nextRecording = !this.data.isRecording;
 
     if (nextRecording) {
+      const hasProAccess = await this.ensureProAccessForTranscription('录音转写需要 Pro');
+      if (!hasProAccess) return;
       this.recorderManager.start({
         duration: MAX_RECORDER_DURATION_MS,
         sampleRate: 16000,
@@ -733,13 +1000,17 @@ Page({
       if (response.result && response.result.success) {
         const entitlementStatus = response.result.data || this.data.entitlementStatus;
         this.setData({
+          entitlementStatusLoaded: true,
           entitlementStatus,
           membershipCard: buildMembershipCard(entitlementStatus),
           usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
+          cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
+          ...buildTrialState(entitlementStatus),
         });
       }
     } catch (error) {
       // 权益状态失败不影响主流程。
+      this.setData({ entitlementStatusLoaded: true });
     }
   },
 
@@ -766,6 +1037,17 @@ Page({
     });
   },
 
+  handleMembershipPrimary() {
+    if (this.data.entitlementStatus && this.data.entitlementStatus.hasAccess) {
+      this.setData({
+        redeemVisible: true,
+        redeemCodeInput: '',
+      });
+      return;
+    }
+    this.showRedeemModal();
+  },
+
   showRedeemModal() {
     this.setData({
       redeemVisible: true,
@@ -784,6 +1066,91 @@ Page({
   onRedeemCodeInput(event) {
     this.setData({
       redeemCodeInput: event.detail.value,
+    });
+  },
+
+  copyCurrentRedeemCode() {
+    const code = String(this.data.entitlementStatus && this.data.entitlementStatus.code || '').trim();
+    if (!code) {
+      wx.showToast({
+        title: '暂未读取到兑换码记录',
+        icon: 'none',
+      });
+      return;
+    }
+
+    wx.setClipboardData({
+      data: code,
+      success: () => {
+        wx.showToast({
+          title: '兑换码已复制',
+          icon: 'none',
+        });
+      },
+    });
+  },
+
+  async claimTrialRedeemCode() {
+    if (this.data.trialCodeLoading) return;
+    if (this.data.trialRedeemCode && !this.data.trialRedeemCodeExpired) {
+      wx.showToast({
+        title: '7 天体验已开通',
+        icon: 'none',
+      });
+      return;
+    }
+
+    this.setData({ trialCodeLoading: true });
+    try {
+      const response = await this.inboxService.getTrialRedeemCode();
+      if (!response.result || !response.result.success) {
+        throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '体验开通失败');
+      }
+      const data = response.result.data || {};
+      const entitlementStatus = {
+        ...this.data.entitlementStatus,
+        ...data,
+      };
+      this.setData({
+        entitlementStatusLoaded: true,
+        entitlementStatus,
+        membershipCard: buildMembershipCard(entitlementStatus),
+        usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
+        cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
+        trialRedeemCodeCreatedAt: data.createdAt || '',
+        ...buildTrialState(entitlementStatus),
+      });
+      wx.showToast({
+        title: data.alreadyActivated ? '已读取体验资格' : '7 天体验已开通',
+        icon: 'none',
+      });
+    } catch (error) {
+      wx.showToast({
+        title: getErrorMessage(error, '体验开通失败，请稍后再试'),
+        icon: 'none',
+      });
+    } finally {
+      this.setData({ trialCodeLoading: false });
+    }
+  },
+
+  copyTrialRedeemCode() {
+    const code = String(this.data.trialRedeemCode || '').trim();
+    if (!code) {
+      wx.showToast({
+        title: '请先领取 7 天体验',
+        icon: 'none',
+      });
+      return;
+    }
+    wx.setClipboardData({
+      data: code,
+      success: () => {
+        wx.showToast({
+          title: '兑换码已复制',
+          icon: 'none',
+        });
+      },
     });
   },
 
@@ -811,6 +1178,8 @@ Page({
         entitlementStatus,
         membershipCard: buildMembershipCard(entitlementStatus),
         usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
+        cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
+        ...buildTrialState(entitlementStatus),
       });
       wx.showToast({
         title: entitlementStatus.alreadyRedeemed ? '该兑换码已激活过' : '兑换成功',
@@ -931,12 +1300,38 @@ Page({
     this.showStatus('网页链接保存中，请勿重复操作', { persist: true });
 
     try {
-      const payload = buildWebpagePayload(url, sourceText);
+      const isAudioVideoLink = isAudioVideoWebpageUrl(url, sourceText);
+      let payloadOptions = {};
+      if (isAudioVideoLink) {
+        if (!this.data.entitlementStatusLoaded && this.inboxService) {
+          await this.loadEntitlementStatus();
+        }
+        if (!this.data.entitlementStatus.hasAccess) {
+          this.setData({ isSaving: false });
+          wx.showToast({
+            title: '音视频链接需要 Pro',
+            icon: 'none',
+          });
+          this.showMineView();
+          return;
+        }
+        payloadOptions = {
+          webpageMediaType: 'audio_video',
+          cloudPreTranscription: await this.resolveCloudTranscriptionChoice({
+            url,
+            sourceText,
+            type: 'webpage',
+          }),
+        };
+      }
+
+      const payload = buildWebpagePayload(url, sourceText, payloadOptions);
       const response = await this.inboxService.saveRecord(payload);
       if (!response.result || !response.result.success) {
         throw new Error(this.getSaveErrorMessage(response, '保存失败'));
       }
       this.updateDailyUsageStatus(response.result.data.quota);
+      this.triggerCloudPreTranscriptionIfQueued(response.result.data);
 
       const item = createRecentItem('WEBPAGE', url);
       item.recordId = response.result.data.id;
@@ -946,7 +1341,7 @@ Page({
         isSaving: false,
         recentList: this.prependRecentItems(item),
       });
-      this.showStatus('网页链接已上传，等待转 Markdown');
+      this.showStatus(isAudioVideoLink ? '音视频链接已保存，等待转写' : '网页链接已上传，等待转 Markdown');
     } catch (error) {
       this.setData({ isSaving: false });
       this.showStatus('网页保存失败，请重试');
@@ -955,6 +1350,19 @@ Page({
         icon: 'none',
       });
     }
+  },
+
+  showImportMaterialSheet() {
+    wx.showActionSheet({
+      itemList: ['微信聊天文件', '手机相册图片/视频'],
+      success: (result) => {
+        if (result.tapIndex === 0) {
+          this.chooseInboxFile();
+        } else if (result.tapIndex === 1) {
+          this.chooseAlbumMedia();
+        }
+      },
+    });
   },
 
   chooseInboxFile() {
@@ -971,13 +1379,38 @@ Page({
     });
   },
 
-  async saveInboxFiles(files) {
+  chooseAlbumMedia() {
+    wx.chooseMedia({
+      count: MAX_ALBUM_UPLOAD_COUNT,
+      mediaType: ['image', 'video'],
+      sourceType: ['album'],
+      success: (result) => {
+        const files = (result.tempFiles || [])
+          .map((media, index) => normalizeAlbumMediaFile(media, index))
+          .filter((file) => file.tempFilePath);
+        if (files.length) {
+          this.saveInboxFiles(files, { maxCount: MAX_ALBUM_UPLOAD_COUNT });
+        }
+      },
+    });
+  },
+
+  async saveInboxFiles(files, options = {}) {
     if (this.data.isSaving) return;
-    const selectedFiles = (files || []).slice(0, MAX_CHAT_UPLOAD_COUNT);
+    const maxCount = Number(options.maxCount) || MAX_CHAT_UPLOAD_COUNT;
+    const selectedFiles = (files || []).slice(0, maxCount);
     if (!selectedFiles.length) return;
+    if (selectedFiles.some(isAudioInboxFile)) {
+      const hasProAccess = await this.ensureProAccessForTranscription('音频文件转写需要 Pro');
+      if (!hasProAccess) return;
+    }
 
     const recentItems = [];
     this.setData({ isSaving: true });
+    this.setUploadProgress({
+      percent: 0,
+      text: `准备上传 1/${selectedFiles.length}`,
+    });
 
     try {
       for (let index = 0; index < selectedFiles.length; index += 1) {
@@ -985,7 +1418,11 @@ Page({
         const fileName = file.name || `素材 ${index + 1}`;
         this.showStatus(`正在上传 ${index + 1}/${selectedFiles.length}：${fileName}`, { persist: true });
         // eslint-disable-next-line no-await-in-loop
-        const item = await this.saveOneInboxFile(file);
+        const item = await this.saveOneInboxFile(file, {
+          index,
+          total: selectedFiles.length,
+          fileName,
+        });
         recentItems.push(item);
       }
 
@@ -993,12 +1430,14 @@ Page({
         isSaving: false,
         recentList: this.prependRecentItems(recentItems),
       });
+      this.resetUploadProgress();
       this.showStatus(`已上传 ${recentItems.length} 个素材，等待 Obsidian 同步`);
     } catch (error) {
       this.setData({
         isSaving: false,
         recentList: recentItems.length ? this.prependRecentItems(recentItems) : this.data.recentList,
       });
+      this.resetUploadProgress();
       const message = getErrorMessage(error, '请重试');
       this.showStatus(`已上传 ${recentItems.length}/${selectedFiles.length}，失败：${message}`, { duration: 7000 });
       wx.showToast({
@@ -1008,15 +1447,32 @@ Page({
     }
   },
 
-  async saveOneInboxFile(file) {
+  async saveOneInboxFile(file, progressMeta = {}) {
+    const total = Number(progressMeta.total) || 1;
+    const index = Number(progressMeta.index) || 0;
+    const fileName = progressMeta.fileName || file.name || `素材 ${index + 1}`;
+    const basePercent = Math.round((index / total) * 100);
+    const span = Math.max(1, Math.round(100 / total));
+    const onProgress = (progress = {}) => {
+      const currentPercent = Math.max(0, Math.min(100, Number(progress.progress) || 0));
+      this.setUploadProgress({
+        percent: Math.min(99, basePercent + Math.round((currentPercent / 100) * span)),
+        text: total > 1
+          ? `正在上传 ${index + 1}/${total}：${fileName} ${Math.round(currentPercent)}%`
+          : `正在上传：${fileName} ${Math.round(currentPercent)}%`,
+      });
+    };
+
     if (isAudioInboxFile(file)) {
-      const upload = await this.inboxService.uploadVoiceFile(file.path || file.tempFilePath);
-      const payload = buildVoicePayload(upload.fileID, 0, file.name || '');
+      const cloudPreTranscription = await this.resolveCloudTranscriptionChoice(file);
+      const upload = await this.inboxService.uploadVoiceFile(file.path || file.tempFilePath, { onProgress });
+      const payload = buildVoicePayload(upload.fileID, file.duration || 0, file.name || '', { cloudPreTranscription });
       const response = await this.inboxService.saveRecord(payload);
       if (!response.result || !response.result.success) {
         throw new Error(this.getSaveErrorMessage(response, '保存失败'));
       }
       this.updateDailyUsageStatus(response.result.data.quota);
+      this.triggerCloudPreTranscriptionIfQueued(response.result.data);
 
       const item = createRecentItem('VOICE', file.name || payload.content);
       item.recordId = response.result.data.id;
@@ -1024,7 +1480,7 @@ Page({
       return item;
     }
 
-    const upload = await this.inboxService.uploadInboxFile(file);
+    const upload = await this.inboxService.uploadInboxFile(file, { onProgress });
     const payload = buildFilePayload({
       ...file,
       fileID: upload.fileID,
@@ -1045,6 +1501,10 @@ Page({
     if (this.data.isSaving) return;
     this.setData({ isSaving: true });
     this.showStatus('文件上传中，请勿重复操作', { persist: true });
+    this.setUploadProgress({
+      percent: 0,
+      text: `正在上传：${file.name || '文件'} 0%`,
+    });
 
     try {
       const item = await this.saveOneInboxFile(file);
@@ -1053,9 +1513,11 @@ Page({
         isSaving: false,
         recentList: this.prependRecentItems(item),
       });
+      this.resetUploadProgress();
       this.showStatus('文件已上传，等待 Obsidian 同步');
     } catch (error) {
       this.setData({ isSaving: false });
+      this.resetUploadProgress();
       const message = getErrorMessage(error, '请重试');
       this.showStatus(`文件保存失败：${message}`, { duration: 7000 });
       wx.showToast({
@@ -1066,21 +1528,48 @@ Page({
   },
 
   async handleRecorderStop(result) {
+    const hasProAccess = await this.ensureProAccessForTranscription('录音转写需要 Pro');
+    if (!hasProAccess) {
+      this.setData({
+        isSaving: false,
+        isRecording: false,
+        inputPlaceholder: DEFAULT_INPUT_PLACEHOLDER,
+      });
+      this.resetUploadProgress();
+      return;
+    }
+
     this.setData({
       isSaving: true,
       isRecording: false,
       inputPlaceholder: DEFAULT_INPUT_PLACEHOLDER,
     });
     this.showStatus('语音上传中，请勿重复操作', { persist: true });
+    this.setUploadProgress({
+      percent: 0,
+      text: '正在上传语音 0%',
+    });
 
     try {
-      const upload = await this.inboxService.uploadVoiceFile(result.tempFilePath);
-      const payload = buildVoicePayload(upload.fileID, result.duration);
+      const cloudPreTranscription = await this.resolveCloudTranscriptionChoice({
+        duration: result.duration || 0,
+      });
+      const upload = await this.inboxService.uploadVoiceFile(result.tempFilePath, {
+        onProgress: (progress = {}) => {
+          const percent = Math.max(0, Math.min(100, Number(progress.progress) || 0));
+          this.setUploadProgress({
+            percent,
+            text: `正在上传语音 ${Math.round(percent)}%`,
+          });
+        },
+      });
+      const payload = buildVoicePayload(upload.fileID, result.duration, '', { cloudPreTranscription });
       const response = await this.inboxService.saveRecord(payload);
       if (!response.result || !response.result.success) {
         throw new Error(this.getSaveErrorMessage(response, '保存失败'));
       }
       this.updateDailyUsageStatus(response.result.data.quota);
+      this.triggerCloudPreTranscriptionIfQueued(response.result.data);
 
       const voiceItem = createRecentItem('VOICE', payload.content);
       voiceItem.recordId = response.result.data.id;
@@ -1090,11 +1579,13 @@ Page({
         isSaving: false,
         recentList: this.prependRecentItems(voiceItem),
       });
+      this.resetUploadProgress();
       this.showStatus('语音已上传转写中');
     } catch (error) {
       this.setData({
         isSaving: false,
       });
+      this.resetUploadProgress();
       const message = getErrorMessage(error, '请重试');
       this.showStatus(`语音保存失败：${message}`, { duration: 7000 });
       wx.showToast({
@@ -1107,6 +1598,12 @@ Page({
   async handleSave() {
     const content = this.data.inputValue.trim();
     if (!content || this.data.isSaving) return;
+
+    const url = extractHttpUrl(content);
+    if (url && classifyContent(content) === 'WEBPAGE') {
+      await this.saveWebpageUrl(url, content);
+      return;
+    }
 
     this.setData({
       isSaving: true,
@@ -1144,6 +1641,43 @@ Page({
     }
   },
 
+  triggerCloudPreTranscriptionIfQueued(record) {
+    if (CLOUD_TRANSCRIPTION_TEMP_DISABLED) return;
+    const metadata = (record && record.metadata) || {};
+    const recordId = record && (record.id || record._id);
+    if (!recordId || metadata.transcriptionStatus !== 'queued') return;
+    this.startCloudPreTranscriptionWithRetry(recordId);
+    return;
+    this.inboxService.startCloudPreTranscription(recordId)
+      .catch((error) => {
+        const message = getErrorMessage(error, '云端预转写启动失败');
+        this.showStatus(`云端预转写启动失败：${message}`, { duration: 7000 });
+      });
+  },
+
+  async startCloudPreTranscriptionWithRetry(recordId) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= CLOUD_PRE_TRANSCRIPTION_RETRY_DELAYS_MS.length; attempt += 1) {
+      if (attempt > 0) {
+        // eslint-disable-next-line no-await-in-loop
+        await waitMs(CLOUD_PRE_TRANSCRIPTION_RETRY_DELAYS_MS[attempt - 1]);
+      }
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const response = await this.inboxService.startCloudPreTranscription(recordId);
+        const result = response && response.result;
+        if (result && result.success) {
+          return;
+        }
+        lastError = new Error((result && (result.errMsg || result.message)) || 'cloud pre-transcription failed');
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    const message = getErrorMessage(lastError, 'cloud pre-transcription failed');
+    this.showStatus(`云端转写启动失败：${message}`, { duration: 7000 });
+  },
+
   showStatus(text, options = {}) {
     if (this.statusTimer) {
       clearTimeout(this.statusTimer);
@@ -1166,6 +1700,23 @@ Page({
       });
       this.statusTimer = null;
     }, duration);
+  },
+
+  setUploadProgress({ percent = 0, text = '' } = {}) {
+    const normalizedPercent = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+    this.setData({
+      uploadProgressVisible: true,
+      uploadProgressPercent: normalizedPercent,
+      uploadProgressText: text || `上传中 ${normalizedPercent}%`,
+    });
+  },
+
+  resetUploadProgress() {
+    this.setData({
+      uploadProgressVisible: false,
+      uploadProgressPercent: 0,
+      uploadProgressText: '',
+    });
   },
 
   copyCode() {

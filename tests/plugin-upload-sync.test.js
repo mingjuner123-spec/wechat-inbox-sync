@@ -26,15 +26,16 @@ Module._load = function mockObsidian(request, parent, isMain) {
 const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
 Module._load = originalLoad;
 
-function createPlugin({ requestUrl, files = {} }) {
+function createPlugin({ requestUrl, files = {}, settings = {} }) {
   requestUrlMock = requestUrl;
   const plugin = new PluginClass();
-  plugin.settings = {
+  plugin.settings = PluginClass.__test.mergeSettings({
     apiBase: 'https://api.example.com/sync',
     token: 'ABC-123',
     inboxDir: '临时收集',
     aiProvider: 'off',
-  };
+    ...settings,
+  });
   plugin.app = {
     vault: {
       adapter: {
@@ -195,6 +196,27 @@ function createPdfBufferWithControlNoise() {
 }
 
 (async () => {
+  {
+    const { plugin, files } = createPlugin({
+      requestUrl: async () => ({}),
+      settings: {
+        noteSaveMode: 'root',
+      },
+    });
+
+    const item = await plugin.writeRecord({
+      _id: 'root-save-1',
+      type: 'text',
+      content: '直接保存到根目录',
+      createdAt: '2026-06-15T10:00:00.000Z',
+      metadata: {},
+    }, '2026-06-15T10:01:00.000Z');
+
+    assert.strictEqual(item.filePath, '临时收集/文本-直接保存到根目录.md');
+    assert.strictEqual(files['临时收集/2026-06-15'], undefined);
+    assert.ok(files['临时收集/文本-直接保存到根目录.md'].includes('直接保存到根目录'));
+  }
+
   {
     const { plugin, files } = createPlugin({
       requestUrl: async (options) => {
@@ -502,7 +524,9 @@ function createPdfBufferWithControlNoise() {
     }, '2026-05-13T12:07:00.000Z');
 
     const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
-    assert.strictEqual((note.match(new RegExp(repeatedTitle, 'g')) || []).length, 0);
+    assert.ok(note.startsWith('---\n'));
+    assert.ok(note.includes('\ntitle: '));
+    assert.strictEqual((note.replace(/^---[\s\S]*?---\n/, '').match(new RegExp(repeatedTitle, 'g')) || []).length, 0);
     assert.strictEqual((note.match(/飞书云文档/g) || []).length, 0);
     assert.strictEqual((note.match(/正文第一段/g) || []).length, 1);
   }
@@ -525,6 +549,45 @@ function createPdfBufferWithControlNoise() {
 
     assert.ok(markdown.includes('![[临时收集/网页图片/2026-05-14/网页-101632-image-01.png]]'));
     assert.ok(Buffer.isBuffer(files['临时收集/网页图片/2026-05-14/网页-101632-image-01.png']));
+  }
+
+  {
+    const { plugin, files } = createPlugin({
+      requestUrl: async (options) => {
+        if (String(options.url).includes('/files/download-url')) {
+          return {
+            json: {
+              success: true,
+              data: {
+                tempFileURL: 'https://temp.example.com/album-video.mp4',
+              },
+            },
+          };
+        }
+        if (options.url === 'https://temp.example.com/album-video.mp4') {
+          return { arrayBuffer: Buffer.from('video-bytes') };
+        }
+        return {};
+      },
+    });
+
+    await plugin.writeRecord({
+      _id: 'album-video-1',
+      type: 'voice',
+      content: 'album-video.mp4',
+      createdAt: '2026-06-11T10:00:00.000Z',
+      metadata: {
+        audioFileID: 'cloud://voices/album-video.mp4',
+        audioFileName: 'album-video.mp4',
+      },
+    }, '2026-06-11T10:01:00.000Z');
+
+    const savedPaths = Object.keys(files);
+    assert.ok(savedPaths.some((filePath) => filePath.endsWith('album-video.mp4')));
+    assert.strictEqual(savedPaths.some((filePath) => filePath.endsWith('album-video.mp3')), false);
+    const note = Object.entries(files).find(([filePath]) => filePath.endsWith('.md'))[1];
+    assert.ok(note.includes('album-video.mp4'));
+    assert.strictEqual(note.includes('album-video.mp3'), false);
   }
 
   {
@@ -552,6 +615,36 @@ function createPdfBufferWithControlNoise() {
     const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
     assert.ok(note.includes('Wechat article text content'));
     assert.ok(note.includes('![cover](https://img.example.com/a.jpg)'));
+  }
+
+  {
+    const { plugin, files } = createPlugin({
+      requestUrl: async () => ({
+        text: [
+          '<html><body><article>',
+          '<p>Legacy link record article text.</p>',
+          '<img data-src="https://img.example.com/legacy.jpg" alt="legacy-cover">',
+          '</article></body></html>',
+        ].join(''),
+      }),
+    });
+
+    await plugin.writeRecord({
+      _id: 'wechat-link-legacy',
+      type: 'link',
+      content: 'https://mp.weixin.qq.com/s/example',
+      createdAt: '2026-06-11T06:49:22.000Z',
+      metadata: {
+        url: 'https://mp.weixin.qq.com/s/example',
+      },
+    }, '2026-06-11T06:50:00.000Z');
+
+    const savedPath = Object.keys(files).find((filePath) => filePath.endsWith('.md'));
+    const note = files[savedPath];
+    assert.ok(savedPath.includes('公众号-'));
+    assert.ok(note.includes('Legacy link record article text'));
+    assert.ok(note.includes('![legacy-cover](https://img.example.com/legacy.jpg)'));
+    assert.strictEqual(note.includes('正文快照处理中'), false);
   }
 
   {

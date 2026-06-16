@@ -12,8 +12,32 @@ const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-sha
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
+const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
+const NOTE_SAVE_MODES = {
+  date: '按日期创建子目录',
+  root: '直接保存到根目录',
+};
+const DEFAULT_NOTE_PROPERTY_FIELDS = '';
+const NOTE_PROPERTY_FIELD_KEYS = [
+  'id',
+  'type',
+  'title',
+  'created_at',
+  'synced_at',
+  'source',
+  'status',
+  'url',
+  'fetch_status',
+  'conversion_status',
+  'audio_file',
+  'audio_file_id',
+  'transcription_status',
+  'file_name',
+  'file_id',
+  'file_ext',
+];
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
@@ -23,9 +47,14 @@ const DEFAULT_SETTINGS = {
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
+  noteSaveMode: 'date',
+  notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: true,
   aiProvider: 'off',
+  cloudPreTranscriptionEnabled: false,
+  cloudPreTranscriptionThresholdMinutes: 10,
   localAsrPlatform: 'auto',
+  localAsrInstallMode: 'default',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
   aliyunModel: 'qwen3.5-omni-plus',
@@ -50,6 +79,11 @@ const AI_PROVIDER_NAMES = {
   tencent: '腾讯云 ASR 录音文件识别',
 };
 
+function normalizeCloudPreTranscriptionThresholdMinutes(value) {
+  const number = Number(value);
+  return [10, 30, 60].includes(number) ? number : DEFAULT_SETTINGS.cloudPreTranscriptionThresholdMinutes;
+}
+
 const LOCAL_ASR_PLATFORM_NAMES = {
   auto: '自动识别',
   win32: 'Windows',
@@ -73,6 +107,7 @@ const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmod
 const DOUBAO_ASR_RESOURCE_ID = 'volc.seedasr.auc';
 const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转写文本，不要摘要，不要解释，不要使用 Markdown。';
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
+const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 
 function getLocalAsrPlatform(platform = os.platform()) {
   if (platform === 'win32') return 'win32';
@@ -103,14 +138,68 @@ function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = 
   return `Local ASR platform mismatch: this computer is ${runtimeName}, but the selected installer is ${selectedName}. Please choose Auto or ${runtimeName}, then install again.`;
 }
 
-function getDefaultLocalTranscriptionCommand(platform = os.platform()) {
+function getDefaultLocalTranscriptionCommand(platform = os.platform(), installRoot = '') {
   if (getLocalAsrPlatform(platform) === 'darwin') {
     return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
+  }
+  if (installRoot) {
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${path.join(installRoot, 'transcribe.ps1')}" -InputPath {input} -OutputPath {output}`;
   }
   return `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
 }
 
-function getLocalAsrInstallRoot(homeDir = os.homedir()) {
+function normalizeLocalAsrInstallMode(value) {
+  return String(value || '').trim() === 'safe' ? 'safe' : 'default';
+}
+
+function isAsciiPath(value) {
+  return /^[\x00-\x7F]+$/.test(String(value || ''));
+}
+
+function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env) {
+  if (getLocalAsrPlatform(platform) === 'win32') {
+    const systemDrive = String((env && env.SystemDrive) || 'C:').trim() || 'C:';
+    const candidates = [
+      String((env && env.PUBLIC) || '').trim(),
+      String((env && env.ProgramData) || '').trim(),
+      path.join(systemDrive, LOCAL_ASR_SAFE_HOME),
+      path.join('C:', LOCAL_ASR_SAFE_HOME),
+    ].filter(Boolean);
+    const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.join('C:', LOCAL_ASR_SAFE_HOME);
+    return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.join(safeBase, LOCAL_ASR_SAFE_HOME);
+  }
+  return path.join(os.homedir(), LOCAL_ASR_HOME);
+}
+
+function hasLocalAsrNativeCrash(runLogText) {
+  const text = String(runLogText || '');
+  return text.includes('0xC0000409')
+    || text.includes('-1073740791')
+    || /whisper\.cpp[^\n]*崩溃/.test(text);
+}
+
+function getLocalAsrRepairAction({
+  platform = os.platform(),
+  installRoot = '',
+  status = {},
+  runLogText = '',
+} = {}) {
+  if (
+    getLocalAsrPlatform(platform) === 'win32'
+    && (!isAsciiPath(installRoot) || hasLocalAsrNativeCrash(runLogText))
+  ) {
+    return 'safe';
+  }
+  if (!status || !status.ready || status.scriptOutdated) {
+    return 'default';
+  }
+  return 'none';
+}
+
+function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = 'default', platform = os.platform(), env = process.env) {
+  if (normalizeLocalAsrInstallMode(mode) === 'safe') {
+    return getSafeLocalAsrInstallRoot(platform, env);
+  }
   return path.join(homeDir, LOCAL_ASR_HOME);
 }
 
@@ -126,18 +215,239 @@ function joinLocalAsrPath(platform, ...segments) {
 }
 
 function hasFileRecursive(rootDir, predicate) {
+  return Boolean(findFileRecursive(rootDir, predicate));
+}
+
+function findFileRecursive(rootDir, predicate) {
   try {
-    if (!fs.existsSync(rootDir)) return false;
+    if (!fs.existsSync(rootDir)) return '';
     const entries = fs.readdirSync(rootDir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(rootDir, entry.name);
-      if (entry.isFile() && predicate(fullPath, entry.name)) return true;
-      if (entry.isDirectory() && hasFileRecursive(fullPath, predicate)) return true;
+      if (entry.isFile() && predicate(fullPath, entry.name)) return fullPath;
+      if (entry.isDirectory()) {
+        const found = findFileRecursive(fullPath, predicate);
+        if (found) return found;
+      }
     }
   } catch (error) {
-    return false;
+    return '';
   }
-  return false;
+  return '';
+}
+
+function findFileRecursiveByNames(rootDir, names) {
+  try {
+    if (!fs.existsSync(rootDir)) return '';
+    const matches = [];
+    const visit = (dir) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isFile() && names.includes(entry.name)) {
+          matches.push(fullPath);
+        } else if (entry.isDirectory()) {
+          visit(fullPath);
+        }
+      }
+    };
+    visit(rootDir);
+    matches.sort((left, right) => {
+      const leftRank = names.indexOf(path.basename(left));
+      const rightRank = names.indexOf(path.basename(right));
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return left.localeCompare(right);
+    });
+    return matches[0] || '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function findFirstExistingPath(candidates, exists) {
+  return candidates.find((candidate) => candidate && exists(candidate)) || '';
+}
+
+function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
+  try {
+    if (!scriptPath || !fileSystem.existsSync(scriptPath)) {
+      return {
+        scriptVersion: 'missing',
+        scriptOutdated: true,
+      };
+    }
+    const source = String(fileSystem.readFileSync(scriptPath, 'utf8') || '');
+    if (source.includes('GeneratedTxt')) {
+      return {
+        scriptVersion: 'legacy-generated-txt',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Convert-ExitCodeToHex')
+      && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+      && source.includes('safeModelPath')
+      && source.includes('progressPercent')
+      && !source.includes('DataReceivedEventHandler')
+      && !source.includes('BeginOutputReadLine')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-safe-model-progress-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-simplified-fallback-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('$SafeTempRoot')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-simplified-shortpath-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-simplified-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+    ) {
+      return {
+        scriptVersion: 'chunked-start-process-utf8-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+    ) {
+      return {
+        scriptVersion: 'chunked-safe-native-utf8-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))
+      && source.includes('Invoke-NativeProcess')
+    ) {
+      return {
+        scriptVersion: 'chunked-safe-native-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('CHUNK_SECONDS')
+      && source.includes('set -euo pipefail')
+      && source.includes('SIMPLIFIED_PROMPT')
+      && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
+      && source.includes('progressPercent')
+    ) {
+      return {
+        scriptVersion: 'chunked-bash-simplified-progress-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('CHUNK_SECONDS')
+      && source.includes('set -euo pipefail')
+    ) {
+      return {
+        scriptVersion: 'chunked-bash-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (source.includes('transcribe-last.log') && (source.includes('ChunkSeconds') || source.includes('CHUNK_SECONDS'))) {
+      return {
+        scriptVersion: 'chunked-run-log',
+        scriptOutdated: true,
+      };
+    }
+    return {
+      scriptVersion: 'unknown',
+      scriptOutdated: false,
+    };
+  } catch (error) {
+    return {
+      scriptVersion: 'unknown',
+      scriptOutdated: false,
+    };
+  }
 }
 
 function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
@@ -145,27 +455,51 @@ function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists
   const transcribeScript = joinLocalAsrPath(platform, installRoot, isMac ? 'transcribe.sh' : 'transcribe.ps1');
   const modelPath = joinLocalAsrPath(platform, installRoot, 'models', 'ggml-small.bin');
   const hasTranscribeScript = exists(transcribeScript);
+  const scriptVersionStatus = exists === fs.existsSync
+    ? getLocalAsrScriptVersionStatus(transcribeScript)
+    : { scriptVersion: 'unknown', scriptOutdated: false };
   const hasModel = exists(modelPath);
   const whisperNames = isMac ? ['whisper-cli', 'main'] : ['whisper-cli.exe', 'main.exe'];
   const ffmpegName = isMac ? 'ffmpeg' : 'ffmpeg.exe';
-  const hasWhisper = exists(joinLocalAsrPath(platform, installRoot, 'bin', 'whisper-cli'))
-    || exists(joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[0]))
-    || exists(joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[1]))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'whisper'), (filePath, name) => whisperNames.includes(name)))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => whisperNames.includes(name)));
-  const hasFfmpeg = exists(joinLocalAsrPath(platform, installRoot, 'bin', 'ffmpeg'))
-    || exists(joinLocalAsrPath(platform, installRoot, 'ffmpeg', ffmpegName))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'ffmpeg'), (filePath, name) => name === ffmpegName))
-    || (exists === fs.existsSync && hasFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => name === ffmpegName));
+  const whisperCandidates = [
+    joinLocalAsrPath(platform, installRoot, 'bin', whisperNames[0]),
+    joinLocalAsrPath(platform, installRoot, 'bin', whisperNames[1]),
+    joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[0]),
+    joinLocalAsrPath(platform, installRoot, 'whisper', whisperNames[1]),
+  ];
+  const ffmpegCandidates = [
+    joinLocalAsrPath(platform, installRoot, 'bin', ffmpegName),
+    joinLocalAsrPath(platform, installRoot, 'ffmpeg', ffmpegName),
+  ];
+  const whisperPath = findFirstExistingPath(whisperCandidates, exists)
+    || (exists === fs.existsSync ? findFileRecursiveByNames(path.join(installRoot, 'whisper'), whisperNames) : '')
+    || (exists === fs.existsSync ? findFileRecursiveByNames(path.join(installRoot, 'bin'), whisperNames) : '');
+  const ffmpegPath = findFirstExistingPath(ffmpegCandidates, exists)
+    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'ffmpeg'), (filePath, name) => name === ffmpegName) : '')
+    || (exists === fs.existsSync ? findFileRecursive(path.join(installRoot, 'bin'), (filePath, name) => name === ffmpegName) : '');
+  const hasWhisper = Boolean(whisperPath);
+  const hasFfmpeg = Boolean(ffmpegPath);
+  const missingReasons = [];
+  if (!hasTranscribeScript) missingReasons.push('转写脚本未找到，请重新安装/更新本地转写组件');
+  if (scriptVersionStatus.scriptOutdated) missingReasons.push('转写脚本过旧，请重新安装/更新本地转写组件');
+  if (!hasWhisper) missingReasons.push('whisper 未找到，请重新安装/更新本地转写组件');
+  if (!hasFfmpeg) missingReasons.push('ffmpeg 未找到，请重新安装/更新本地转写组件');
+  if (!hasModel) missingReasons.push('模型文件未找到，请重新安装/更新本地转写组件');
 
   return {
     installRoot,
     transcribeScript,
+    whisperPath,
+    ffmpegPath,
+    modelPath,
     hasTranscribeScript,
+    scriptVersion: scriptVersionStatus.scriptVersion,
+    scriptOutdated: scriptVersionStatus.scriptOutdated,
     hasWhisper,
     hasFfmpeg,
     hasModel,
-    ready: hasTranscribeScript && hasWhisper && hasFfmpeg && hasModel,
+    missingReasons,
+    ready: hasTranscribeScript && !scriptVersionStatus.scriptOutdated && hasWhisper && hasFfmpeg && hasModel,
   };
 }
 
@@ -180,6 +514,169 @@ function readLocalAsrInstallLog(installRoot = getLocalAsrInstallRoot()) {
     return fs.readFileSync(logPath, 'utf8').slice(-5000);
   } catch (error) {
     return `读取安装日志失败：${error.message || error}`;
+  }
+}
+
+function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
+  return path.join(installRoot, 'transcribe-last.log');
+}
+
+function explainLocalAsrExitCode(value) {
+  const text = String(value || '');
+  if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
+    return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
+  }
+  if (text.includes('-1073740791') || text.toUpperCase().includes('0XC0000409')) {
+    return 'whisper.cpp 原生程序崩溃（0xC0000409）。常见原因是 Windows 本机运行环境、CPU 指令集兼容性、中文路径或当前音视频片段触发了 whisper.cpp 崩溃。请先重新点击“安装/更新本地转写组件”，新版会用安全路径和真实推理校验修复；如果仍失败，需要复制同步失败诊断里的 transcribe-last.log 继续定位。';
+  }
+  return '';
+}
+
+function getSyncDiagnosticLogPath(installRoot = getLocalAsrInstallRoot()) {
+  return path.join(installRoot, 'sync-last.log');
+}
+
+function buildLocalAsrRunLogText({
+  time = new Date().toISOString(),
+  status = '',
+  command = '',
+  inputPath = '',
+  outputPath = '',
+  stdout = '',
+  stderr = '',
+  error = '',
+} = {}) {
+  const explanation = explainLocalAsrExitCode(error) || explainLocalAsrExitCode(stderr) || explainLocalAsrExitCode(stdout);
+  return [
+    `time=${time}`,
+    `status=${status}`,
+    `inputPath=${inputPath}`,
+    `outputPath=${outputPath}`,
+    `command=${command}`,
+    '--- stdout ---',
+    String(stdout || ''),
+    '--- stderr ---',
+    String(stderr || ''),
+    '--- error ---',
+    String(error || ''),
+    explanation ? `--- 可能原因 ---\n${explanation}` : '',
+    '',
+  ].filter((line) => line !== '').join('\n');
+}
+
+function writeLocalAsrRunLog({
+  installRoot = getLocalAsrInstallRoot(),
+  status = '',
+  command = '',
+  inputPath = '',
+  outputPath = '',
+  stdout = '',
+  stderr = '',
+  error = '',
+} = {}) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getLocalAsrRunLogPath(installRoot);
+    fs.writeFileSync(logPath, buildLocalAsrRunLogText({
+      status,
+      command,
+      inputPath,
+      outputPath,
+      stdout,
+      stderr,
+      error,
+    }), 'utf8');
+    return logPath;
+  } catch (writeError) {
+    return '';
+  }
+}
+
+function appendLocalAsrRunLog({
+  installRoot = getLocalAsrInstallRoot(),
+  status = '',
+  command = '',
+  inputPath = '',
+  outputPath = '',
+  stdout = '',
+  stderr = '',
+  error = '',
+} = {}) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getLocalAsrRunLogPath(installRoot);
+    const wrapperText = buildLocalAsrRunLogText({
+      status,
+      command,
+      inputPath,
+      outputPath,
+      stdout,
+      stderr,
+      error,
+    });
+    const prefix = fs.existsSync(logPath) ? '\n\n--- plugin wrapper ---\n' : '';
+    fs.appendFileSync(logPath, `${prefix}${wrapperText}`, 'utf8');
+    return logPath;
+  } catch (writeError) {
+    return '';
+  }
+}
+
+function buildSyncDiagnosticLogText({
+  time = new Date().toISOString(),
+  status = '',
+  message = '',
+  bindingLabel = '',
+  stage = '',
+  current = 0,
+  total = 0,
+  title = '',
+  recordId = '',
+  error = '',
+} = {}) {
+  return [
+    `time=${time}`,
+    `status=${status}`,
+    `message=${message}`,
+    `bindingLabel=${bindingLabel}`,
+    `stage=${stage}`,
+    `current=${current}`,
+    `total=${total}`,
+    `title=${title}`,
+    `recordId=${recordId}`,
+    '--- error ---',
+    String(error || ''),
+  ].join('\n');
+}
+
+function writeSyncDiagnosticLog(payload = {}, installRoot = getLocalAsrInstallRoot()) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getSyncDiagnosticLogPath(installRoot);
+    fs.writeFileSync(logPath, buildSyncDiagnosticLogText(payload), 'utf8');
+    return logPath;
+  } catch (error) {
+    return '';
+  }
+}
+
+function readSyncDiagnosticLog(installRoot = getLocalAsrInstallRoot()) {
+  const logPath = getSyncDiagnosticLogPath(installRoot);
+  try {
+    if (!fs.existsSync(logPath)) return '';
+    return fs.readFileSync(logPath, 'utf8').slice(-5000);
+  } catch (error) {
+    return `读取同步日志失败：${error.message || error}`;
+  }
+}
+
+function readLocalAsrRunLog(installRoot = getLocalAsrInstallRoot()) {
+  const logPath = getLocalAsrRunLogPath(installRoot);
+  try {
+    if (!fs.existsSync(logPath)) return '';
+    return fs.readFileSync(logPath, 'utf8').slice(-8000);
+  } catch (error) {
+    return `读取转写日志失败：${error.message || error}`;
   }
 }
 
@@ -221,11 +718,12 @@ function quoteCommandPath(filePath) {
   return `"${String(filePath || '').replace(/"/g, '\\"')}"`;
 }
 
-function buildLocalAsrInstallCommand(installerPath, platform = os.platform()) {
+function buildLocalAsrInstallCommand(installerPath, platform = os.platform(), installRoot = '') {
   if (getLocalAsrPlatform(platform) === 'darwin' || String(installerPath || '').endsWith('.sh')) {
     return `/bin/bash ${quoteCommandPath(installerPath)}`;
   }
-  return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}`;
+  const rootArg = installRoot ? ` -InstallRoot ${quoteCommandPath(installRoot)}` : '';
+  return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}${rootArg}`;
 }
 
 function formatEntitlementExpiresAt(expiresAt) {
@@ -312,8 +810,9 @@ function isRemoteAsrDownloadFailure(error) {
   return /Invalid audio URI|audio download failed|Audio download failed/i.test(message);
 }
 
-function getDefaultLocalTranscriptionScriptPath(platform = os.platform()) {
-  return path.join(os.homedir(), LOCAL_ASR_HOME, getLocalAsrPlatform(platform) === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1');
+function getDefaultLocalTranscriptionScriptPath(platform = os.platform(), installRoot = '') {
+  const root = installRoot || getLocalAsrInstallRoot(os.homedir(), 'default', platform);
+  return path.join(root, getLocalAsrPlatform(platform) === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1');
 }
 
 function getDoubaoTaskKey(audioUrl) {
@@ -338,6 +837,26 @@ function normalizeLocalTranscriptionCommand(command, platform = os.platform()) {
     return getDefaultLocalTranscriptionCommand(platform);
   }
   return normalized;
+}
+
+function normalizeNoteSaveMode(value) {
+  const normalized = String(value || '').trim();
+  return Object.prototype.hasOwnProperty.call(NOTE_SAVE_MODES, normalized)
+    ? normalized
+    : DEFAULT_SETTINGS.noteSaveMode;
+}
+
+function normalizeNotePropertyFields(value) {
+  const seen = new Set();
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => {
+      if (!NOTE_PROPERTY_FIELD_KEYS.includes(item) || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    })
+    .join(',');
 }
 
 function normalizeBindCodeInput(code) {
@@ -420,9 +939,14 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     : null;
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
+  merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
+  merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
+  merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
+  merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
+  merged.localAsrInstallMode = normalizeLocalAsrInstallMode(merged.localAsrInstallMode);
   merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
     merged.localTranscriptionCommand,
     resolveLocalAsrPlatform(merged.localAsrPlatform, platform),
@@ -457,17 +981,6 @@ function validateSettings(settings) {
   const hasEnabledBinding = Array.isArray(settings.bindings)
     && settings.bindings.some((item) => item && item.enabled !== false && item.status !== 'unbound' && item.token);
   if (!settings.token && !hasEnabledBinding) errors.push('请填写小程序绑定码');
-
-  if (settings.aiProvider === 'tencent') {
-    if (!settings.tencentSecretId) errors.push('请填写腾讯云 SecretId');
-    if (!settings.tencentSecretKey) errors.push('请填写腾讯云 SecretKey');
-  }
-  if (settings.aiProvider === 'aliyun') {
-    if (!settings.aliyunApiKey) errors.push('请填写阿里云百炼 API Key');
-  }
-  if (settings.aiProvider === 'doubao') {
-    if (!settings.doubaoAsrApiKey) errors.push('请填写豆包语音识别 API Key');
-  }
   return errors;
 }
 
@@ -550,6 +1063,110 @@ function requestJsonViaNode(options) {
     });
     request.on('error', reject);
     if (body) request.write(body);
+    request.end();
+  });
+}
+
+function createAbortError(message = '当前转写已停止') {
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function isAbortError(error) {
+  return error && (error.name === 'AbortError' || /aborted|abort|已停止|用户已停止/i.test(error.message || ''));
+}
+
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) {
+    throw createAbortError();
+  }
+}
+
+function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const signal = options.signal || null;
+    if (signal && signal.aborted) {
+      reject(createAbortError());
+      return;
+    }
+
+    const transport = parsedUrl.protocol === 'http:' ? http : https;
+    const request = transport.request(parsedUrl, {
+      method: 'GET',
+      headers,
+      timeout: options.timeout || 30000,
+    }, (response) => {
+      const location = response.headers && response.headers.location;
+      if (response.statusCode >= 300 && response.statusCode < 400 && location && redirectCount < 5) {
+        response.resume();
+        try {
+          const nextUrl = new URL(location, url).toString();
+          downloadArrayBufferViaNode(nextUrl, headers, options, redirectCount + 1).then(resolve, reject);
+        } catch (error) {
+          reject(error);
+        }
+        return;
+      }
+
+      if (response.statusCode && (response.statusCode < 200 || response.statusCode >= 300)) {
+        response.resume();
+        reject(new Error(`媒体下载失败：HTTP ${response.statusCode}`));
+        return;
+      }
+
+      const chunks = [];
+      let received = 0;
+      const total = Number(response.headers && response.headers['content-length']) || 0;
+      response.on('data', (chunk) => {
+        if (signal && signal.aborted) {
+          request.destroy(createAbortError());
+          return;
+        }
+        const buffer = Buffer.from(chunk);
+        chunks.push(buffer);
+        received += buffer.length;
+        if (typeof options.onProgress === 'function') {
+          options.onProgress({
+            received,
+            total,
+            percent: total > 0 ? Math.max(1, Math.min(99, Math.floor((received * 100) / total))) : null,
+          });
+        }
+      });
+      response.on('end', () => {
+        if (signal && signal.aborted) {
+          reject(createAbortError());
+          return;
+        }
+        const buffer = Buffer.concat(chunks);
+        if (typeof options.onProgress === 'function') {
+          options.onProgress({
+            received,
+            total: total || received,
+            percent: 100,
+          });
+        }
+        resolve(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+      });
+    });
+
+    const abort = () => request.destroy(createAbortError());
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', abort, { once: true });
+    }
+    request.on('timeout', () => {
+      request.destroy(new Error('媒体下载超时'));
+    });
+    request.on('error', reject);
     request.end();
   });
 }
@@ -815,9 +1432,9 @@ function buildDoubaoAsrRequest({ apiKey, audioUrl, requestId = createRequestId()
         enable_itn: true,
         enable_punc: true,
         enable_ddc: false,
-        enable_speaker_info: false,
+        enable_speaker_info: true,
         enable_channel_split: false,
-        show_utterances: false,
+        show_utterances: true,
         vad_segment: false,
         sensitive_words_filter: '',
       },
@@ -862,16 +1479,46 @@ function formatHttpError(provider, response) {
   return parts.join('；');
 }
 
+function normalizeDoubaoSpeakerText(result) {
+  if (!result || typeof result !== 'object') return '';
+  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+  if (!utterances.length) return '';
+  return utterances
+    .map((item) => {
+      const text = String((item && (item.text || item.result_text || item.utterance_text)) || '').trim();
+      if (!text) return '';
+      const additions = item && item.additions && typeof item.additions === 'object' ? item.additions : {};
+      const speaker = item && (
+        item.speaker
+        || item.speaker_id
+        || item.spk
+        || item.speakerId
+        || additions.speaker
+        || additions.speaker_id
+        || additions.spk
+        || additions.speakerId
+      );
+      return speaker === undefined || speaker === null || speaker === ''
+        ? text
+        : `说话人${speaker}：${text}`;
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
 function parseDoubaoAsrResult(payload) {
   const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
   const result = data && data.result;
   if (Array.isArray(result)) {
     return result
-      .map((item) => item && (item.text || item.result_text || item.utterance_text || ''))
+      .map((item) => normalizeDoubaoSpeakerText(item) || String((item && (item.text || item.result_text || item.utterance_text)) || '').trim())
       .filter(Boolean)
       .join('\n')
       .trim();
   }
+  const speakerText = normalizeDoubaoSpeakerText(result);
+  if (speakerText) return speakerText;
   const text = (result && (result.text || result.result_text))
     || (data && (data.text || data.transcription))
     || '';
@@ -1000,10 +1647,14 @@ function buildAudioTranscriptMarkdown({
 }) {
   url = cleanDisplayUrl(url);
   const status = String(transcriptionStatus || '').toLowerCase();
+  const isCloudPending = ['queued', 'processing'].includes(status)
+    && String(transcriptionSource || '').includes('cloud');
   const content = String(transcription || '').trim()
     || (status === 'failed'
       ? `转写失败。${transcriptionError || '未能提取到视频/音频文案。'}`
-      : '转写处理中，或未配置可用的转写方案。');
+      : isCloudPending
+        ? '云端转写中，下次同步会自动更新。'
+        : '转写处理中，或未配置可用的转写方案。');
   return [
     `原始链接：${url || ''}`,
     transcriptionSource ? `转写来源：${transcriptionSource}` : '',
@@ -1781,6 +2432,17 @@ function isWechatArticleUrl(url) {
   return text.includes('mp.weixin.qq.com') || text.includes('weixin.qq.com');
 }
 
+function isWechatMpArticleUrl(url) {
+  const source = String(url || '').trim();
+  if (!source) return false;
+  try {
+    const parsed = new URL(source);
+    return /(^|\.)mp\.weixin\.qq\.com$/i.test(parsed.hostname);
+  } catch (error) {
+    return source.toLowerCase().includes('mp.weixin.qq.com');
+  }
+}
+
 function isWechatCaptchaUrl(url) {
   return /\/mp\/wappoc_appmsgcaptcha\b/i.test(String(url || ''));
 }
@@ -1863,6 +2525,15 @@ function isBilibiliUrl(url) {
 function isXiaoyuzhouUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('xiaoyuzhoufm.com') || text.includes('xiaoyuzhou.com');
+}
+
+function shouldHydrateLinkAsWebpage(url) {
+  return isWechatMpArticleUrl(url)
+    || isFeishuUrl(url)
+    || isXiaohongshuUrl(url)
+    || isDouyinUrl(url)
+    || isBilibiliUrl(url)
+    || isXiaoyuzhouUrl(url);
 }
 
 function getSocialRequestHeaders(url) {
@@ -1993,6 +2664,9 @@ function getWebpageSourcePrefix(url) {
 function getRecordSourcePrefix(record) {
   const type = String(record && record.type || '').toLowerCase();
   const metadata = (record && record.metadata) || {};
+  if (type === 'link' && shouldHydrateLinkAsWebpage(metadata.url || record.content || '')) {
+    return getWebpageSourcePrefix(metadata.url || record.content || '');
+  }
   if (type === 'text') return '文本';
   if (type === 'link') return '链接';
   if (type === 'voice') return '录音';
@@ -2024,6 +2698,9 @@ function getRecordSourceName(record) {
   }
   if (type === 'link') {
     const url = metadata.url || content;
+    if (shouldHydrateLinkAsWebpage(url)) {
+      return metadata.title || getUrlLastPathSegment(url) || getUrlHostname(url) || fallbackTime;
+    }
     return metadata.title || getUrlHostname(url) || getUrlLastPathSegment(url) || content || fallbackTime;
   }
   return content || fallbackTime;
@@ -2164,6 +2841,48 @@ function dedupeImageVariants(urls) {
   return Array.from(map.values());
 }
 
+function collectJsonArrayBlocks(source, keys) {
+  const wanted = (keys || []).map((key) => String(key || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!wanted.length) return [];
+  const pattern = new RegExp(`["'](?:${wanted.join('|')})["']\\s*:\\s*\\[`, 'gi');
+  const blocks = [];
+  const text = String(source || '');
+  let match;
+  while ((match = pattern.exec(text))) {
+    let depth = 1;
+    let inString = '';
+    let escaped = false;
+    const start = pattern.lastIndex - 1;
+    for (let index = pattern.lastIndex; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (inString) {
+        if (char === inString) inString = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        inString = char;
+        continue;
+      }
+      if (char === '[') depth += 1;
+      if (char === ']') depth -= 1;
+      if (depth === 0) {
+        blocks.push(text.slice(start, index + 1));
+        pattern.lastIndex = index + 1;
+        break;
+      }
+    }
+  }
+  return blocks;
+}
+
 function collectJsonStringValues(source, keys) {
   const wanted = new Set((keys || []).map((key) => String(key || '').toLowerCase()));
   const values = [];
@@ -2254,6 +2973,82 @@ function collectImageUrlsFromHtml(html) {
   collectLooseXiaohongshuImageUrls(source).forEach((url) => pushUniqueUrl(urls, url));
 
   return dedupeImageVariants(urls);
+}
+
+function isNoisyXiaohongshuImageUrl(value) {
+  const url = normalizeExtractedUrl(value).toLowerCase();
+  return /(?:avatar|sns-avatar|recommend|banner|logo|icon|emoji|sticker|qrcode|qr-code|comment|user|profile|ads?)[^/]*(?:\.jpg|\.jpeg|\.png|\.webp|!|$)/i.test(url)
+    || /ci\.xiaohongshu\.com\/(?:recommend|banner|logo|icon|avatar)/i.test(url);
+}
+
+function collectFilteredImageTagUrls(source) {
+  const urls = [];
+  const imageTags = String(source || '').match(/<img\b[^>]*>/gi) || [];
+  imageTags.forEach((tag) => {
+    const src = getHtmlAttribute(tag, 'data-src') || getHtmlAttribute(tag, 'src');
+    if (src && isLikelyImageUrl(src) && !isNoisyXiaohongshuImageUrl(src)) {
+      pushUniqueUrl(urls, src);
+    }
+    const srcset = getHtmlAttribute(tag, 'srcset');
+    if (srcset) {
+      const srcsetUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+      if (isLikelyImageUrl(srcsetUrl) && !isNoisyXiaohongshuImageUrl(srcsetUrl)) {
+        pushUniqueUrl(urls, srcsetUrl);
+      }
+    }
+  });
+  return urls;
+}
+
+function collectXiaohongshuNoteImageUrls(html) {
+  const source = String(html || '');
+  const urls = [];
+  [
+    extractMetaContent(source, ['og:image', 'og:image:url', 'twitter:image']),
+  ].forEach((url) => pushUniqueUrl(urls, url));
+
+  collectFilteredImageTagUrls(source).forEach((url) => pushUniqueUrl(urls, url));
+
+  const imageBlocks = collectJsonArrayBlocks(source, [
+    'imageList',
+    'image_list',
+    'images',
+    'imageUrls',
+    'image_urls',
+    'imageUrlList',
+    'image_url_list',
+  ]);
+
+  imageBlocks.forEach((block) => {
+    collectJsonStringValues(block, [
+      'url',
+      'urlDefault',
+      'urlPre',
+      'url_pre',
+      'urlSizeLarge',
+      'url_size_large',
+      'original',
+      'originalUrl',
+      'original_url',
+      'src',
+      'image',
+      'imageUrl',
+      'image_url',
+      'cover',
+    ]).forEach((url) => {
+      if (isLikelyImageUrl(url)) {
+        pushUniqueUrl(urls, url);
+      }
+    });
+    collectLooseXiaohongshuImageUrls(block).forEach((url) => pushUniqueUrl(urls, url));
+  });
+
+  const noteImages = dedupeImageVariants(urls);
+  if (imageBlocks.length || noteImages.length > 1) {
+    return noteImages;
+  }
+
+  return dedupeImageVariants(collectImageUrlsFromHtml(source)).slice(0, 6);
 }
 
 function extractVideoUrlFromHtml(html) {
@@ -2353,6 +3148,15 @@ function extractSocialMediaUrlsFromHtml(html) {
 
 function extractSocialMediaUrlFromHtml(html) {
   return extractSocialMediaUrlsFromHtml(html)[0] || '';
+}
+
+function isUnavailableXiaohongshuPage(html, url = '') {
+  const source = decodeHtmlEntities(String(html || ''));
+  const target = String(url || '');
+  return /xiaohongshu\.com\/404/i.test(target)
+    || /errorCode=-510001|error_code=300031/i.test(target)
+    || source.includes('你访问的页面不见了')
+    || source.includes('当前笔记暂时无法浏览');
 }
 
 function extractBilibiliSubtitleUrlsFromHtml(html) {
@@ -2545,7 +3349,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     || '小红书笔记';
   const description = extractXiaohongshuDescription(source, fallbackText);
   const tags = extractTagsFromText(description, source);
-  const images = collectImageUrlsFromHtml(source);
+  const images = collectXiaohongshuNoteImageUrls(source);
   const videoUrl = extractVideoUrlFromHtml(source);
   const lines = [
     '## 标题',
@@ -3111,7 +3915,83 @@ function extractFeishuMarkdownFromHtml(html) {
   return markdown;
 }
 
-function buildMarkdownForRecord({ record, title, syncedAt }) {
+function yamlValue(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).replace(/\r?\n/g, ' ').trim();
+}
+
+function buildFrontmatter(lines) {
+  return ['---', ...lines, '---', ''].join('\n');
+}
+
+function parseNotePropertyFields(propertyFields) {
+  return normalizeNotePropertyFields(propertyFields).split(',').filter(Boolean);
+}
+
+function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
+  const type = String(record.type || '').toLowerCase();
+  const metadata = record.metadata || {};
+  const fields = {
+    id: getRecordId(record),
+    type,
+    title,
+    created_at: record.createdAt,
+    synced_at: syncedAt,
+    source: record.source || 'wechat-miniprogram',
+    status: 'synced',
+  };
+
+  if (type === 'link') {
+    fields.url = metadata.url || record.content;
+    fields.fetch_status = metadata.fetchStatus || 'pending';
+  }
+
+  if (type === 'webpage') {
+    fields.url = metadata.url || record.content;
+    fields.conversion_status = metadata.conversionStatus || 'pending';
+  }
+
+  if (type === 'voice') {
+    fields.audio_file = audioFileName;
+    fields.audio_file_id = metadata.audioFileID || '';
+    fields.transcription_status = metadata.transcriptionStatus || 'pending';
+  }
+
+  if (type === 'file') {
+    fields.file_name = metadata.fileName || record.content || '';
+    fields.file_id = metadata.fileID || '';
+    fields.file_ext = metadata.fileExt || '';
+    fields.conversion_status = metadata.conversionStatus || 'pending';
+  }
+
+  const defaultFieldOrder = [
+    'id',
+    'type',
+    'title',
+    'created_at',
+    'synced_at',
+    'source',
+    'status',
+    'url',
+    'fetch_status',
+    'conversion_status',
+    'audio_file',
+    'audio_file_id',
+    'transcription_status',
+    'file_name',
+    'file_id',
+    'file_ext',
+  ];
+  const selectedFields = parseNotePropertyFields(propertyFields);
+  const fieldOrder = selectedFields.length ? selectedFields : defaultFieldOrder;
+  const lines = fieldOrder
+    .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .map((key) => `${key}: ${yamlValue(fields[key])}`);
+
+  return buildFrontmatter(lines);
+}
+
+function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS }) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
   const audioFileName = metadata.audioFileName || `${title}.mp3`;
@@ -3158,11 +4038,71 @@ function buildMarkdownForRecord({ record, title, syncedAt }) {
     throw new Error(`Unsupported record type: ${record.type}`);
   }
 
-  return `收集时间：${formatCreatedTime(record.createdAt)}\n\n${body}`;
+  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
+  return `${frontmatter}\n收集时间：${formatCreatedTime(record.createdAt)}\n\n${body}`;
 }
 
 function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
+}
+
+function normalizeProgressPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return Math.max(0, Math.min(100, Math.floor(number)));
+}
+
+function parseLocalAsrProgressLog(text) {
+  const source = String(text || '');
+  const values = {};
+  source.split(/\r?\n/).forEach((line) => {
+    const match = /^([A-Za-z][A-Za-z0-9_]*)=(.*)$/.exec(String(line || '').trim());
+    if (match) values[match[1]] = match[2];
+  });
+  if (
+    !Object.prototype.hasOwnProperty.call(values, 'progressStage')
+    && !Object.prototype.hasOwnProperty.call(values, 'progressCurrent')
+    && !Object.prototype.hasOwnProperty.call(values, 'progressTotal')
+    && !Object.prototype.hasOwnProperty.call(values, 'progressPercent')
+  ) {
+    return null;
+  }
+  const current = Number(values.progressCurrent);
+  const total = Number(values.progressTotal);
+  let percent = normalizeProgressPercent(values.progressPercent);
+  if (percent === null && Number.isFinite(current) && Number.isFinite(total) && total > 0) {
+    percent = normalizeProgressPercent((current * 100) / total);
+  }
+  if (percent === null) percent = 0;
+  return {
+    stage: values.progressStage || '',
+    current: Number.isFinite(current) ? current : 0,
+    total: Number.isFinite(total) ? total : 0,
+    percent,
+  };
+}
+
+function buildSyncProgressMessage({
+  bindingLabel = '',
+  stage = '',
+  current = 0,
+  total = 0,
+  title = '',
+  percent = null,
+} = {}) {
+  const label = bindingLabel ? `${bindingLabel}：` : '';
+  const countText = total ? `${current}/${total}` : '';
+  const normalizedPercent = normalizeProgressPercent(percent);
+  const percentText = normalizedPercent === null ? '' : ` (${normalizedPercent}%)`;
+  const suffix = title ? `：${title}` : '';
+  if (stage === 'fetching') return `${label}正在同步，正在获取待同步内容`;
+  if (stage === 'empty') return `${label}没有需要同步的新内容`;
+  if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
+  if (stage === 'downloading') return `${label}正在下载附件 ${countText}${percentText}${suffix}`;
+  if (stage === 'transcribing') return `${label}正在转写音视频 ${countText}${percentText}${suffix}`;
+  if (stage === 'writing') return `${label}正在写入 Obsidian ${countText}${suffix}`;
+  if (stage === 'marking') return `${label}正在更新同步状态 ${countText}${suffix}`;
+  return `${label}正在同步${countText ? ` ${countText}` : ''}${suffix}`;
 }
 
 function getRecordConversionWarning(record) {
@@ -3182,6 +4122,30 @@ function getRecordConversionWarning(record) {
   return '';
 }
 
+function isCloudTranscriptionWaitingRecord(record) {
+  const metadata = (record && record.metadata) || {};
+  const status = String(metadata.transcriptionStatus || '').toLowerCase();
+  const source = String(metadata.transcriptionSource || metadata.transcriptionProvider || '').toLowerCase();
+  const isCloudRecord = metadata.transcriptionMode === 'cloud'
+    || metadata.cloudTranscriptionRequested === true
+    || source.includes('cloud-pretranscription')
+    || source.includes('cloud');
+  const hasTranscription = String(metadata.transcription || '').trim().length > 0;
+  return isCloudRecord && !hasTranscription && ['pending', 'queued', 'processing'].includes(status);
+}
+
+function isAudioVideoTranscriptionIncompleteRecord(record) {
+  const metadata = (record && record.metadata) || {};
+  const status = String(metadata.transcriptionStatus || '').toLowerCase();
+  const hasTranscription = String(metadata.transcription || '').trim().length > 0;
+  const isAudioVideoRecord = String(record && record.type || '').toLowerCase() === 'voice'
+    || metadata.webpageMediaType === 'audio_video'
+    || Boolean(metadata.audioFileID)
+    || metadata.transcriptOnly === true;
+  if (!isAudioVideoRecord || hasTranscription) return false;
+  return ['pending', 'queued', 'processing', 'failed'].includes(status);
+}
+
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
@@ -3189,11 +4153,25 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!savedSettings || !savedSettings.clientId) {
       await this.saveData(this.settings);
     }
+    this.lastSyncDiagnostic = null;
+    this.syncStatusBar = typeof this.addStatusBarItem === 'function' ? this.addStatusBarItem() : null;
+    if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
+      this.syncStatusBar.setText('');
+    }
+    this.localAsrInstallPromise = null;
+    this.currentTranscriptionAbortController = null;
+    this.currentTranscriptionProcess = null;
 
     this.addCommand({
       id: 'sync-wechat-inbox',
       name: '同步微信收集箱',
       callback: () => this.syncInbox(),
+    });
+
+    this.addCommand({
+      id: 'stop-current-transcription',
+      name: '停止当前转写',
+      callback: () => this.stopCurrentTranscription(),
     });
 
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
@@ -3235,6 +4213,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         lastSyncAt: '',
       }]
       : [];
+  }
+
+  async syncTranscriptionPreferences() {
+    const payload = {
+      cloudPreTranscriptionEnabled: Boolean(this.settings.cloudPreTranscriptionEnabled),
+      cloudPreTranscriptionThresholdMinutes: normalizeCloudPreTranscriptionThresholdMinutes(this.settings.cloudPreTranscriptionThresholdMinutes),
+    };
+    const bindings = this.getActiveBindings();
+    for (const binding of bindings) {
+      // eslint-disable-next-line no-await-in-loop
+      await this.requestJson('/transcription-preferences', 'POST', payload, binding);
+    }
+    return payload;
   }
 
   async requestJson(path, method = 'GET', body = {}, binding = null) {
@@ -3386,12 +4377,67 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
 
-  async downloadArrayBuffer(url, headers = {}) {
+  async downloadArrayBuffer(url, headers = {}, options = {}) {
+    if (options.signal || typeof options.onProgress === 'function') {
+      return downloadArrayBufferViaNode(url, headers, options);
+    }
     const response = await requestUrl({ url, method: 'GET', headers });
     if (!response.arrayBuffer) {
       throw new Error('录音文件下载失败');
     }
     return response.arrayBuffer;
+  }
+
+  showSyncProgress(progress = {}) {
+    const message = buildSyncProgressMessage(progress);
+    if (!message) return;
+    this.lastSyncDiagnostic = {
+      ...progress,
+      message,
+      status: progress.stage === 'empty' ? 'empty' : 'running',
+      time: new Date().toISOString(),
+    };
+    writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+    if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
+      this.syncStatusBar.setText(message);
+    }
+    if (!this.syncProgressNotice) {
+      this.syncProgressNotice = new Notice(message, 0);
+      return;
+    }
+    if (typeof this.syncProgressNotice.setMessage === 'function') {
+      this.syncProgressNotice.setMessage(message);
+      return;
+    }
+    new Notice(message, 2500);
+  }
+
+  clearSyncProgressNotice() {
+    if (this.syncProgressNotice && typeof this.syncProgressNotice.hide === 'function') {
+      this.syncProgressNotice.hide();
+    }
+    this.syncProgressNotice = null;
+    if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
+      this.syncStatusBar.setText('');
+    }
+  }
+
+  stopCurrentTranscription() {
+    let stopped = false;
+    if (this.currentTranscriptionAbortController) {
+      this.currentTranscriptionAbortController.abort();
+      stopped = true;
+    }
+    if (this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
+      try {
+        this.currentTranscriptionProcess.kill();
+        stopped = true;
+      } catch (error) {
+        // Ignore process cleanup failures.
+      }
+    }
+    new Notice(stopped ? '已停止当前转写，会继续处理后面的同步内容。' : '当前没有正在转写的任务。');
+    return stopped;
   }
 
   async unbindBinding(token) {
@@ -3462,8 +4508,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     const configured = String(this.settings.localTranscriptionCommand || '').trim();
     if (configured) return configured;
     const platform = this.getConfiguredLocalAsrPlatform();
-    return fs.existsSync(getDefaultLocalTranscriptionScriptPath(platform))
-      ? getDefaultLocalTranscriptionCommand(platform)
+    const installRoot = this.getConfiguredLocalAsrInstallRoot();
+    return fs.existsSync(getDefaultLocalTranscriptionScriptPath(platform, installRoot))
+      ? getDefaultLocalTranscriptionCommand(platform, installRoot)
       : '';
   }
 
@@ -3484,6 +4531,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     return resolveLocalAsrPlatform(this.settings.localAsrPlatform);
   }
 
+  getConfiguredLocalAsrInstallRoot(mode = this.settings.localAsrInstallMode) {
+    return getLocalAsrInstallRoot(os.homedir(), mode, this.getConfiguredLocalAsrPlatform());
+  }
+
   getBundledLocalAsrInstallerPath() {
     const fileName = this.getConfiguredLocalAsrPlatform() === 'darwin' ? 'install-local-asr-macos.sh' : 'install-local-asr.ps1';
     return path.join(this.getPluginBaseDir(), 'local-asr', fileName);
@@ -3491,56 +4542,104 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async getAvailableLocalAsrInstallerPath() {
     const installerPath = this.getBundledLocalAsrInstallerPath();
-    if (fs.existsSync(installerPath)) return installerPath;
-
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
-    let scriptText = '';
+
+    const isInstallerCurrent = (scriptText) => {
+      const source = String(scriptText || '');
+      if (!source.includes('.wechat-inbox-local-asr')) return false;
+      if (isMac) {
+        return source.includes('CHUNK_SECONDS=600')
+          && source.includes('transcribe-last.log')
+          && source.includes('python-venv')
+          && source.includes('validate_local_asr_inference')
+          && source.includes('exec "\\$WHISPER_CPP_BIN" "\\$@"');
+      }
+      return source.includes('Invoke-NativeProcess')
+        && source.includes('Convert-ExitCodeToHex')
+        && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+        && source.includes('[string]$InstallRoot')
+        && source.includes('Install-ExtractedPackage')
+        && !source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')
+        && source.includes('safeModelPath')
+        && source.includes('System.Text.UTF8Encoding')
+        && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
+        && source.includes('WriteAllText($OutputPath');
+    };
+
     try {
-      const response = await requestUrl({ url: installerUrl, method: 'GET' });
-      scriptText = response.text || '';
-    } catch (error) {
-      scriptText = await downloadTextViaNode(installerUrl);
+      let scriptText = '';
+      try {
+        const response = await requestUrl({ url: `${installerUrl}?t=${Date.now()}`, method: 'GET' });
+        scriptText = response.text || '';
+      } catch (error) {
+        scriptText = await downloadTextViaNode(`${installerUrl}?t=${Date.now()}`);
+      }
+      if (!isInstallerCurrent(scriptText)) {
+        throw new Error('Local ASR installer download returned outdated or invalid content');
+      }
+      fs.writeFileSync(downloadedPath, scriptText, 'utf8');
+      return downloadedPath;
+    } catch (downloadError) {
+      if (fs.existsSync(installerPath)) {
+        const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
+        if (isInstallerCurrent(bundledScriptText)) {
+          return installerPath;
+        }
+      }
+      throw new Error(`无法下载最新本地转写安装器：${downloadError.message || downloadError}`);
     }
-    if (!scriptText || !scriptText.includes('.wechat-inbox-local-asr')) {
-      throw new Error('Local ASR installer download returned invalid content');
-    }
-    fs.writeFileSync(downloadedPath, scriptText, 'utf8');
-    return downloadedPath;
   }
 
   getLocalAsrInstallStatus() {
-    return getLocalAsrInstallStatus(getLocalAsrInstallRoot(), fs.existsSync, this.getConfiguredLocalAsrPlatform());
+    return getLocalAsrInstallStatus(this.getConfiguredLocalAsrInstallRoot(), fs.existsSync, this.getConfiguredLocalAsrPlatform());
   }
 
   getLocalAsrDiagnosticText() {
     const platform = this.getConfiguredLocalAsrPlatform();
-    const installRoot = getLocalAsrInstallRoot();
+    const installRoot = this.getConfiguredLocalAsrInstallRoot();
     const status = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
     const logText = readLocalAsrInstallLog(installRoot);
+    const runLogText = readLocalAsrRunLog(installRoot);
+    const syncLogText = readSyncDiagnosticLog(installRoot);
+    const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : '';
     return [
-      'WeChat Inbox Sync 本地转写诊断',
+      'WeChat Inbox Sync 同步失败诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
       `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
       `实际使用系统：${platform}`,
+      `API 地址：${this.settings.apiBase || '-'}`,
       `安装目录：${status.installRoot}`,
       `转写脚本：${status.transcribeScript}`,
       `脚本存在：${status.hasTranscribeScript ? '是' : '否'}`,
+      `脚本版本：${status.scriptOutdated ? '过旧，请重新安装本地转写组件' : status.scriptVersion}`,
+      `脚本过旧：${status.scriptOutdated ? '是' : '否'}`,
       `whisper：${status.hasWhisper ? '是' : '否'}`,
+      `whisper 路径：${status.whisperPath || '未找到'}`,
       `ffmpeg：${status.hasFfmpeg ? '是' : '否'}`,
+      `ffmpeg 路径：${status.ffmpegPath || '未找到'}`,
       `模型文件：${status.hasModel ? '是' : '否'}`,
+      `模型路径：${status.modelPath}`,
       `组件可用：${status.ready ? '是' : '否'}`,
+      `缺失项：${status.missingReasons && status.missingReasons.length ? status.missingReasons.join('；') : '无'}`,
       `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
       `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      '最近同步状态：',
+      lastSyncText || syncLogText || '暂无 sync-last.log',
+      '最近转写日志：',
+      runLogText || '暂无 transcribe-last.log',
       '最近安装日志：',
       logText || '暂无 install.log',
     ].join('\n');
   }
 
-  async copyLocalAsrDiagnosticText() {
-    const text = this.getLocalAsrDiagnosticText();
+  getSyncDiagnosticText() {
+    return this.getLocalAsrDiagnosticText();
+  }
+
+  async copyDiagnosticText(text, fileName = 'diagnostic.txt') {
     if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text);
       return true;
@@ -3554,11 +4653,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       // Obsidian mobile/electron variants may not expose electron here.
     }
-    const diagnosticPath = path.join(getLocalAsrInstallRoot(), 'diagnostic.txt');
-    fs.mkdirSync(getLocalAsrInstallRoot(), { recursive: true });
+    const installRoot = this.getConfiguredLocalAsrInstallRoot();
+    const diagnosticPath = path.join(installRoot, fileName);
+    fs.mkdirSync(installRoot, { recursive: true });
     fs.writeFileSync(diagnosticPath, text, 'utf8');
     new Notice(`诊断信息已写入：${diagnosticPath}`);
     return false;
+  }
+
+  async copyLocalAsrDiagnosticText() {
+    return this.copyDiagnosticText(this.getLocalAsrDiagnosticText(), 'local-asr-diagnostic.txt');
+  }
+
+  async copySyncDiagnosticText() {
+    return this.copyDiagnosticText(this.getSyncDiagnosticText(), 'sync-diagnostic.txt');
   }
 
   async getLocalTranscriptionEntitlementStatus() {
@@ -3574,26 +4682,29 @@ class WechatObsidianInboxPlugin extends Plugin {
       return unboundStatus;
     }
 
+    const plans = [LOCAL_TRANSCRIPTION_PLAN, ...LOCAL_TRANSCRIPTION_FALLBACK_PLANS];
     let lastError = null;
     for (const binding of bindings) {
-      try {
-        const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(LOCAL_TRANSCRIPTION_PLAN)}`, 'GET', {}, binding);
-        const data = payload && payload.data ? payload.data : {};
-        if (data.hasAccess) {
-          const activeStatus = {
-            hasAccess: true,
-            plan: data.plan || LOCAL_TRANSCRIPTION_PLAN,
-            status: data.status || 'active',
-            expiresAt: data.expiresAt || '',
-            bindingToken: binding.token,
-            bindingLabel: binding.label || '',
-          };
-          await this.cacheLocalTranscriptionEntitlementStatus(activeStatus);
-          return activeStatus;
+      for (const plan of plans) {
+        try {
+          const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(plan)}`, 'GET', {}, binding);
+          const data = payload && payload.data ? payload.data : {};
+          if (data.hasAccess) {
+            const activeStatus = {
+              hasAccess: true,
+              plan: data.plan || plan,
+              status: data.status || 'active',
+              expiresAt: data.expiresAt || '',
+              bindingToken: binding.token,
+              bindingLabel: binding.label || '',
+            };
+            await this.cacheLocalTranscriptionEntitlementStatus(activeStatus);
+            return activeStatus;
+          }
+          lastError = data;
+        } catch (error) {
+          lastError = error;
         }
-        lastError = data;
-      } catch (error) {
-        lastError = error;
       }
     }
 
@@ -3619,7 +4730,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     throw new Error('本地转写权限未开通：请在小程序里输入兑换码开通后再使用。');
   }
 
-  async installLocalAsr() {
+  async installLocalAsr(options = {}) {
+    if (this.localAsrInstallPromise) {
+      new Notice('本地转写组件正在安装中，请等待当前安装完成后再重试。');
+      return await this.localAsrInstallPromise;
+    }
+    this.localAsrInstallPromise = this.doInstallLocalAsr(options);
+    try {
+      return await this.localAsrInstallPromise;
+    } finally {
+      this.localAsrInstallPromise = null;
+    }
+  }
+
+  async doInstallLocalAsr(options = {}) {
     await this.ensureLocalTranscriptionAccess();
     const mismatchMessage = getLocalAsrPlatformMismatchMessage(this.settings.localAsrPlatform);
     if (mismatchMessage) {
@@ -3627,8 +4751,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     const installerPath = await this.getAvailableLocalAsrInstallerPath();
     const platform = this.getConfiguredLocalAsrPlatform();
-    const installRoot = getLocalAsrInstallRoot();
-    const command = buildLocalAsrInstallCommand(installerPath, platform);
+    const installMode = normalizeLocalAsrInstallMode(options.installMode || this.settings.localAsrInstallMode);
+    const installRoot = this.getConfiguredLocalAsrInstallRoot(installMode);
+    const command = buildLocalAsrInstallCommand(installerPath, platform, platform === 'win32' ? installRoot : '');
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {
       childProcess.exec(command, {
@@ -3663,12 +4788,64 @@ class WechatObsidianInboxPlugin extends Plugin {
         resolve({ stdout, stderr });
       });
     });
+    const installStatus = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
+    if (!installStatus.ready) {
+      const missingText = installStatus.missingReasons && installStatus.missingReasons.length
+        ? installStatus.missingReasons.join('；')
+        : '本地转写组件不完整';
+      const logPath = writeLocalAsrInstallLog({
+        installRoot,
+        platform,
+        installerPath,
+        command,
+        stdout: `whisper=${installStatus.whisperPath || 'missing'}\nffmpeg=${installStatus.ffmpegPath || 'missing'}\nmodel=${installStatus.hasModel ? installStatus.modelPath : 'missing'}`,
+        stderr: missingText,
+        error: missingText,
+        status: 'failed',
+      });
+      throw new Error(`本地转写组件安装不完整：${missingText}${logPath ? `\n安装日志：${logPath}` : ''}`);
+    }
     await this.saveSettings({
       ...this.settings,
       aiProvider: 'local',
-      localTranscriptionCommand: getDefaultLocalTranscriptionCommand(this.getConfiguredLocalAsrPlatform()),
+      localAsrInstallMode: installMode,
+      localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform, installRoot),
     });
     new Notice('本地转写组件已安装，并已填入默认命令。');
+  }
+
+  async switchLocalAsrToSafeInstallRoot() {
+    if (this.getConfiguredLocalAsrPlatform() !== 'win32') {
+      throw new Error('安全安装目录目前只用于 Windows。');
+    }
+    await this.installLocalAsr({ installMode: 'safe' });
+  }
+
+  async checkAndRepairLocalAsr() {
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const installRoot = this.getConfiguredLocalAsrInstallRoot();
+    const status = this.getLocalAsrInstallStatus();
+    const action = getLocalAsrRepairAction({
+      platform,
+      installRoot,
+      status,
+      runLogText: readLocalAsrRunLog(installRoot),
+    });
+
+    if (action === 'none') {
+      new Notice('当前本地转写组件正常，不需要高级修复。');
+      return { action };
+    }
+
+    if (action === 'safe') {
+      await this.installLocalAsr({ installMode: 'safe' });
+      new Notice('已切换到安全安装目录，并重新安装本地转写组件。');
+      return { action };
+    }
+
+    await this.installLocalAsr({ installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode) });
+    new Notice('已更新本地转写组件。');
+    return { action };
   }
 
   async renderSocialMediaUrl(url) {
@@ -3685,17 +4862,21 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderSocialMediaUrlsWithElectron(url);
   }
 
-  async runConfiguredTranscription(audioUrl) {
+  async runConfiguredTranscription(audioUrl, options = {}) {
     const provider = this.settings.aiProvider;
     const runLocalFallback = async (sourcePrefix) => {
       if (provider === 'doubao') {
         await this.clearPendingDoubaoTask(getDoubaoTaskKey(audioUrl));
       }
       return {
-        transcription: await this.runLocalTranscription(audioUrl),
+        transcription: await this.runLocalTranscription(audioUrl, options),
         source: sourcePrefix ? `${sourcePrefix}-local` : 'local',
       };
     };
+
+    if (options.forceLocal) {
+      return runLocalFallback('');
+    }
 
     if (['aliyun', 'doubao', 'tencent'].includes(provider) && isHeaderProtectedMediaUrl(audioUrl)) {
       if (this.canRunLocalTranscription()) {
@@ -3744,43 +4925,182 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
     if (this.settings.aiProvider === 'local') {
-      return {
-        transcription: await this.runLocalTranscription(audioUrl),
-        source: 'local',
-      };
+      try {
+        return {
+          transcription: await this.runLocalTranscription(audioUrl, options),
+          source: 'local',
+        };
+      } catch (error) {
+        if (!options.fileID && !options.allowCloudUrlFallback) {
+          throw error;
+        }
+        return await this.runCloudFallbackTranscription(audioUrl, {
+          ...options,
+          localError: error && error.message ? error.message : String(error || ''),
+          source: options.source || 'local',
+        });
+      }
     }
     throw new Error('未配置可用的音频转写方案');
   }
 
-  async runLocalTranscription(audioUrl) {
+  async runCloudFallbackTranscription(audioUrl, options = {}) {
+    const binding = options.binding || this.getActiveBindings()[0] || null;
+    if (!binding) {
+      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：未绑定小程序`);
+    }
+    this.showSyncProgress({
+      stage: 'transcribing',
+      title: options.title || '',
+      message: '本地转写失败，正在尝试云端兜底',
+    });
+    const fileID = String(options.fileID || '').trim();
+    if (!fileID && !options.allowCloudUrlFallback) {
+      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：缺少云端文件 ID`);
+    }
+    try {
+      const requestBody = {
+        durationSeconds: options.durationSeconds || 60,
+        localError: options.localError || '',
+        source: options.source || 'local',
+        title: options.title || '',
+      };
+      if (fileID) {
+        requestBody.fileID = fileID;
+      } else {
+        requestBody.audioUrl = audioUrl;
+      }
+      const payload = await this.requestJson('/transcriptions/cloud', 'POST', requestBody, binding);
+      const data = payload && payload.data ? payload.data : {};
+      const transcription = String(data.transcription || '').trim();
+      if (!transcription) {
+        throw new Error('云端兜底返回空转写结果');
+      }
+      return {
+        transcription,
+        source: 'local-cloud-fallback',
+        cloudProvider: data.provider || 'cloud',
+        cloudRequestId: data.requestId || '',
+        cloudUsedSeconds: Number(data.usedSeconds) || 0,
+        cloudRemainingSeconds: Number(data.remainingSeconds) || 0,
+      };
+    } catch (cloudError) {
+      const cloudMessage = cloudError && cloudError.message ? cloudError.message : String(cloudError || '');
+      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：${cloudMessage}`);
+    }
+  }
+
+  async runLocalTranscription(audioUrl, options = {}) {
     await this.ensureLocalTranscriptionAccess();
+    const installStatus = this.getLocalAsrInstallStatus();
+    const installRoot = this.getConfiguredLocalAsrInstallRoot();
+    if (installStatus.scriptOutdated) {
+      throw new Error('本地转写脚本过旧：请在插件设置里重新点击“安装/更新本地转写组件”，安装完成后再同步。');
+    }
     const commandTemplate = this.getEffectiveLocalTranscriptionCommand();
     if (!commandTemplate) {
       throw new Error('未配置本地转写命令');
     }
 
-    const inputPath = await this.downloadMediaToTempFile(audioUrl);
-    const outputPath = `${inputPath}.txt`;
-    const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
-    const command = commandTemplate.includes('{input}')
-      ? commandTemplate
-        .replace(/\{input\}/g, quote(inputPath))
-        .replace(/\{output\}/g, quote(outputPath))
-      : `${commandTemplate} ${quote(inputPath)}`;
+    const progressTitle = options.title || '';
+    const abortController = new AbortController();
+    this.currentTranscriptionAbortController = abortController;
+    let progressTimer = null;
+    let lastProgressKey = '';
+    const emitLocalProgress = (fallbackPercent = null) => {
+      if (typeof this.showSyncProgress !== 'function') return;
+      const parsedProgress = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot));
+      const progress = parsedProgress || (
+        fallbackPercent === null
+          ? null
+          : {
+            stage: '',
+            current: 0,
+            total: 0,
+            percent: fallbackPercent,
+          }
+      );
+      if (!progress) return;
+      const key = `${progress.stage}|${progress.current}|${progress.total}|${progress.percent}`;
+      if (key === lastProgressKey) return;
+      lastProgressKey = key;
+      this.showSyncProgress({
+        ...options,
+        stage: 'transcribing',
+        title: progressTitle,
+        percent: progress.percent,
+        localProgressStage: progress.stage,
+        localProgressCurrent: progress.current,
+        localProgressTotal: progress.total,
+      });
+    };
+    const stopProgressPolling = () => {
+      if (progressTimer) {
+        clearInterval(progressTimer);
+        progressTimer = null;
+      }
+    };
 
+    let inputPath = '';
+    let outputPath = '';
+    let command = '';
     try {
-      const { stdout } = await new Promise((resolve, reject) => {
-        childProcess.exec(command, {
+      this.showSyncProgress({
+        ...options,
+        stage: 'downloading',
+        title: progressTitle,
+        percent: 0,
+      });
+      inputPath = await this.downloadMediaToTempFile(audioUrl, {
+        sourceUrl: options.sourceUrl || options.url || '',
+        signal: abortController.signal,
+        onProgress: (progress = {}) => {
+          if (typeof progress.percent === 'number') {
+            this.showSyncProgress({
+              ...options,
+              stage: 'downloading',
+              title: progressTitle,
+              percent: progress.percent,
+            });
+          }
+        },
+      });
+      throwIfAborted(abortController.signal);
+      outputPath = `${inputPath}.txt`;
+      const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
+      command = commandTemplate.includes('{input}')
+        ? commandTemplate
+          .replace(/\{input\}/g, quote(inputPath))
+          .replace(/\{output\}/g, quote(outputPath))
+        : `${commandTemplate} ${quote(inputPath)}`;
+      const { stdout, stderr } = await new Promise((resolve, reject) => {
+        emitLocalProgress(0);
+        progressTimer = setInterval(() => emitLocalProgress(), 1000);
+        if (progressTimer && typeof progressTimer.unref === 'function') {
+          progressTimer.unref();
+        }
+        const child = childProcess.exec(command, {
           timeout: 2 * 60 * 60 * 1000,
           maxBuffer: 50 * 1024 * 1024,
           windowsHide: true,
         }, (error, stdout, stderr) => {
-          if (error) {
-            reject(new Error(stderr || error.message || String(error)));
+          stopProgressPolling();
+          this.currentTranscriptionProcess = null;
+          if (abortController.signal.aborted) {
+            reject(createAbortError());
             return;
           }
+          if (error) {
+            const wrapped = new Error(stderr || error.message || String(error));
+            wrapped.stdout = stdout;
+            wrapped.stderr = stderr;
+            reject(wrapped);
+            return;
+          }
+          emitLocalProgress(100);
           resolve({ stdout, stderr });
         });
+        this.currentTranscriptionProcess = child;
       });
 
       const outputText = fs.existsSync(outputPath)
@@ -3790,11 +5110,38 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!transcription) {
         throw new Error('本地转写命令没有返回文本');
       }
+      writeLocalAsrRunLog({
+        installRoot,
+        status: 'success',
+        command,
+        inputPath,
+        outputPath,
+        stdout,
+        stderr,
+      });
       return transcription;
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw createRetryableTranscriptionError('用户已停止当前转写');
+      }
+      appendLocalAsrRunLog({
+        installRoot,
+        status: 'failed',
+        command,
+        inputPath,
+        outputPath,
+        stdout: error && error.stdout ? error.stdout : '',
+        stderr: error && error.stderr ? error.stderr : '',
+        error: error && error.message ? error.message : String(error || ''),
+      });
+      throw error;
     } finally {
+      stopProgressPolling();
+      this.currentTranscriptionAbortController = null;
+      this.currentTranscriptionProcess = null;
       [inputPath, outputPath].forEach((filePath) => {
         try {
-          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
         } catch (error) {
           // Ignore temp cleanup failures.
         }
@@ -3802,11 +5149,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async downloadMediaToTempFile(audioUrl) {
+  async downloadMediaToTempFile(audioUrl, options = {}) {
     const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl)
       ? await resolveRedirectUrl(audioUrl, 5, 'GET')
       : audioUrl;
-    const buffer = Buffer.from(await this.downloadArrayBuffer(resolvedUrl, getSocialRequestHeaders(resolvedUrl)));
+    throwIfAborted(options.signal);
+    const buffer = Buffer.from(await this.downloadArrayBuffer(
+      resolvedUrl,
+      getSocialRequestHeaders(options.sourceUrl || resolvedUrl),
+      {
+        signal: options.signal,
+        onProgress: options.onProgress,
+      },
+    ));
+    throwIfAborted(options.signal);
     const head = buffer.subarray(0, Math.min(buffer.length, 256)).toString('utf8').trim().toLowerCase();
     if (buffer.length < 512 || head.startsWith('<!doctype') || head.startsWith('<html') || head.includes('<body')) {
       throw new Error('下载到的媒体不是有效音视频文件，可能是平台风控页或无效视频地址');
@@ -4013,17 +5369,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     return `${baseTitle}-${String(sequence).padStart(3, '0')}`;
   }
 
-  async writeVoiceAttachment(record, rootDir, dateFolder, title, binding = null) {
+  async writeVoiceAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
     const metadata = record.metadata || {};
     if (!metadata.audioFileID) {
       return record;
     }
 
-    const audioFileName = `${title}.mp3`;
+    const sourceAudioName = metadata.audioFileName || record.content || '';
+    const sourceAudioExt = getAttachmentExt(sourceAudioName, metadata.audioFileExt || metadata.fileExt);
+    const audioFileName = `${title}.${sourceAudioExt || 'mp3'}`;
     const audioRootDir = `${rootDir}/语音附件`;
     const audioDayDir = `${audioRootDir}/${dateFolder}`;
     const audioPath = `${audioDayDir}/${audioFileName}`;
     const tempFileURL = await this.requestFileDownloadUrl(metadata.audioFileID, binding);
+    this.showSyncProgress({ ...progress, stage: 'downloading', title });
     const audioBuffer = await this.downloadArrayBuffer(tempFileURL);
 
     if (typeof this.app.vault.adapter.writeBinary !== 'function') {
@@ -4039,14 +5398,78 @@ class WechatObsidianInboxPlugin extends Plugin {
       audioFileName: audioPath,
     };
 
-    if (this.settings.aiProvider !== 'off') {
+    const existingTranscriptionStatus = String(metadata.transcriptionStatus || '').toLowerCase();
+    const existingTranscription = String(metadata.transcription || '').trim();
+    const transcriptionSource = String(metadata.transcriptionSource || metadata.transcriptionProvider || '');
+    const isCloudTranscriptionRecord = metadata.transcriptionMode === 'cloud'
+      || transcriptionSource.includes('cloud-pretranscription')
+      || transcriptionSource.includes('cloud');
+    const shouldFallbackCloudFailureToLocal = isCloudTranscriptionRecord
+      && existingTranscriptionStatus === 'failed'
+      && !existingTranscription;
+
+    if (shouldFallbackCloudFailureToLocal) {
       try {
-        const result = await this.runConfiguredTranscription(tempFileURL);
+        this.showSyncProgress({ ...progress, stage: 'transcribing', title });
+        const result = await this.runConfiguredTranscription(tempFileURL, {
+          binding,
+          fileID: metadata.audioFileID,
+          title,
+          forceLocal: true,
+          cloudFallbackReason: 'cloud-pretranscription-failed',
+        });
         nextMetadata = {
           ...nextMetadata,
           transcription: result.transcription,
           transcriptionStatus: 'success',
           transcriptionProvider: result.source,
+          transcriptionSource: 'local-fallback',
+          cloudTranscriptionError: metadata.transcriptionError || '',
+          cloudTranscriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || 'cloud-pretranscription',
+        };
+      } catch (error) {
+        const message = error.message || String(error);
+        nextMetadata = {
+          ...nextMetadata,
+          transcription: '',
+          transcriptionStatus: 'failed',
+          transcriptionError: message,
+          transcriptionProvider: 'local',
+          transcriptionSource: 'local-fallback',
+          cloudTranscriptionError: metadata.transcriptionError || '',
+        };
+      }
+    } else if (isCloudTranscriptionRecord) {
+      nextMetadata = {
+        ...nextMetadata,
+        transcription: existingTranscription,
+        transcriptionStatus: existingTranscriptionStatus || 'processing',
+        transcriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || 'cloud-pretranscription',
+        transcriptionSource: metadata.transcriptionSource || 'cloud-pretranscription',
+        transcriptionError: metadata.transcriptionError || (
+          ['queued', 'processing'].includes(existingTranscriptionStatus)
+            ? '云端转写中，下次同步会自动更新'
+            : ''
+        ),
+      };
+    } else if (this.settings.aiProvider !== 'off' || metadata.transcriptionMode === 'local') {
+      try {
+        this.showSyncProgress({ ...progress, stage: 'transcribing', title });
+        const result = await this.runConfiguredTranscription(tempFileURL, {
+          binding,
+          fileID: metadata.audioFileID,
+          title,
+          forceLocal: metadata.transcriptionMode === 'local',
+        });
+        nextMetadata = {
+          ...nextMetadata,
+          transcription: result.transcription,
+          transcriptionStatus: 'success',
+          transcriptionProvider: result.source,
+          cloudTranscriptionProvider: result.cloudProvider || '',
+          cloudTranscriptionRequestId: result.cloudRequestId || '',
+          cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || 0,
+          cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || 0,
         };
       } catch (error) {
         const message = error.message || String(error);
@@ -4066,7 +5489,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async writeFileAttachment(record, rootDir, dateFolder, title, binding = null) {
+  async writeFileAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
     const metadata = record.metadata || {};
     if (!metadata.fileID) {
       return record;
@@ -4080,6 +5503,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const fileDayDir = `${fileRootDir}/${dateFolder}`;
       const filePath = `${fileDayDir}/${title}-${safeFileName}`;
       const tempFileURL = await this.requestFileDownloadUrl(metadata.fileID, binding);
+      this.showSyncProgress({ ...progress, stage: 'downloading', title: fileName });
       const fileBuffer = await this.downloadArrayBuffer(tempFileURL);
 
       if (typeof this.app.vault.adapter.writeBinary !== 'function') {
@@ -4106,6 +5530,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.convertedMarkdown = extractDocxMarkdown(nodeBuffer);
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'pdf') {
+          this.showSyncProgress({ ...progress, stage: 'processing', title: fileName });
           nextMetadata.convertedMarkdown = extractPdfMarkdown(nodeBuffer);
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'doc') {
@@ -4170,6 +5595,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     subtitleText = '',
     subtitleUrl = '',
     source = '',
+    noMediaError = '',
+    binding = null,
+    title = '',
   }) {
     const metadata = record.metadata || {};
 
@@ -4201,7 +5629,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           subtitleUrl,
           transcription: '',
           transcriptionStatus: 'failed',
-          transcriptionError: '未能从链接中提取到可转写的音频或视频地址',
+          transcriptionError: noMediaError || '未能从链接中提取到可转写的音频或视频地址',
           transcriptionSource: source || 'media-url',
           conversionStatus: 'failed',
         }),
@@ -4212,19 +5640,42 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       for (const candidate of candidates) {
         try {
-          const result = await this.runConfiguredTranscription(candidate);
+          const useCloudForWebpage = metadata.transcriptionMode === 'cloud'
+            || metadata.cloudTranscriptionRequested === true;
+          const result = useCloudForWebpage
+            ? await this.runCloudFallbackTranscription(candidate, {
+              binding,
+              title: title || metadata.title || '',
+              source: source || 'media-url',
+              localError: 'user selected cloud transcription',
+              allowCloudUrlFallback: true,
+            })
+            : await this.runConfiguredTranscription(candidate, {
+              allowCloudUrlFallback: true,
+              title: metadata.title || '',
+              source: source || 'media-url',
+              sourceUrl: url,
+              forceLocal: metadata.transcriptionMode === 'local',
+            });
+          const nextMetadata = buildTranscriptOnlyMetadata(metadata, {
+            url,
+            platform,
+            mediaUrl: candidate,
+            subtitleUrl,
+            transcription: result.transcription,
+            transcriptionStatus: 'success',
+            transcriptionSource: result.source,
+            conversionStatus: 'success',
+          });
           return {
             ...record,
-            metadata: buildTranscriptOnlyMetadata(metadata, {
-              url,
-              platform,
-              mediaUrl: candidate,
-              subtitleUrl,
-              transcription: result.transcription,
-              transcriptionStatus: 'success',
-              transcriptionSource: result.source,
-              conversionStatus: 'success',
-            }),
+            metadata: {
+              ...nextMetadata,
+              cloudTranscriptionProvider: result.cloudProvider || nextMetadata.cloudTranscriptionProvider || '',
+              cloudTranscriptionRequestId: result.cloudRequestId || nextMetadata.cloudTranscriptionRequestId || '',
+              cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || nextMetadata.cloudTranscriptionUsedSeconds || 0,
+              cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || nextMetadata.cloudTranscriptionRemainingSeconds || 0,
+            },
           };
         } catch (candidateError) {
           lastError = candidateError;
@@ -4252,7 +5703,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async hydrateXiaoyuzhouTranscript(record, url) {
+  async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = '') {
     const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
     const html = response.text || '';
     const mediaUrl = extractPodcastAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html);
@@ -4262,6 +5713,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       mediaUrl,
       mediaUrls: extractSocialMediaUrlsFromHtml(html),
       source: 'audio',
+      binding,
+      title,
     });
   }
 
@@ -4286,7 +5739,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async hydrateBilibiliTranscript(record, url) {
+  async hydrateBilibiliTranscript(record, url, binding = null, title = '') {
     const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
     const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
     const html = response.text || '';
@@ -4332,6 +5785,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         subtitleText: subtitle.transcription,
         subtitleUrl: subtitle.subtitleUrl,
         source: 'bilibili-subtitle',
+        binding,
+        title,
       });
     }
 
@@ -4340,10 +5795,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       platform: 'B站',
       mediaUrl: playurlAudioUrl || extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
       source: 'audio',
+      binding,
+      title,
     });
   }
 
-  async hydrateWebpageMarkdown(record, rootDir, dateFolder, title) {
+  async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
     if (!url || metadata.markdown || metadata.snapshot || metadata.contentSnapshot) {
@@ -4388,11 +5845,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isXiaoyuzhouUrl(url)) {
-        return await this.hydrateXiaoyuzhouTranscript(record, url);
+        return await this.hydrateXiaoyuzhouTranscript(record, url, binding, title);
       }
 
       if (isBilibiliUrl(url)) {
-        return await this.hydrateBilibiliTranscript(record, url);
+        return await this.hydrateBilibiliTranscript(record, url, binding, title);
       }
 
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
@@ -4401,7 +5858,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         const html = response.text || '';
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
-        const isVideoIntent = isDouyinUrl(url)
+        const isUnavailableXhs = isXiaohongshuUrl(url)
+          && isUnavailableXiaohongshuPage(html, resolvedUrl);
+        const isVideoIntent = metadata.webpageMediaType === 'audio_video'
+          || isDouyinUrl(url)
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
           || /\/video\//i.test(resolvedUrl);
@@ -4427,6 +5887,11 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl,
             mediaUrls,
             source: 'video',
+            binding,
+            title,
+            noMediaError: isUnavailableXhs
+              ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
+              : '',
           });
         }
 
@@ -4545,28 +6010,59 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
 
-  async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false) {
+  async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const dateFolder = getDateFolderName(record.createdAt);
     const rootDir = this.settings.inboxDir;
-    const dayDir = `${rootDir}/${dateFolder}`;
+    const noteDir = this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`;
     const bindingLabel = shouldPrefixTitle && binding ? binding.label : '';
+    const progressTitle = buildRecordTitleBase(record);
+    this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
 
     await this.ensureFolder(rootDir);
-    await this.ensureFolder(dayDir);
+    await this.ensureFolder(noteDir);
 
-    let title = await this.nextRecordTitle(dayDir, record, bindingLabel);
+    let title = await this.nextRecordTitle(noteDir, record, bindingLabel);
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
+    const linkAsWebpage = recordType === 'link' && shouldHydrateLinkAsWebpage((record.metadata && record.metadata.url) || record.content || '');
     if (recordType === 'voice') {
-      recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding);
+      recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === 'file') {
-      recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding);
-    } else if (recordType === 'webpage') {
-      recordForMarkdown = await this.hydrateWebpageMarkdown(record, rootDir, dateFolder, title);
-      title = await this.nextRecordTitle(dayDir, recordForMarkdown, bindingLabel);
+      recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding, progress);
+    } else if (recordType === 'webpage' || linkAsWebpage) {
+      this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
+      recordForMarkdown = await this.hydrateWebpageMarkdown(
+        linkAsWebpage
+          ? {
+            ...record,
+            type: 'webpage',
+            metadata: {
+              ...(record.metadata || {}),
+              url: (record.metadata && record.metadata.url) || record.content || '',
+              conversionStatus: (record.metadata && record.metadata.conversionStatus) || 'pending',
+            },
+          }
+          : record,
+        rootDir,
+        dateFolder,
+        title,
+        binding,
+      );
+      title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
     }
-    const markdown = buildMarkdownForRecord({ record: recordForMarkdown, title, syncedAt });
-    const filePath = `${dayDir}/${title}.md`;
+    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
+      const metadata = recordForMarkdown.metadata || {};
+      const status = metadata.transcriptionStatus || 'pending';
+      throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+    }
+    const markdown = buildMarkdownForRecord({
+      record: recordForMarkdown,
+      title,
+      syncedAt,
+      propertyFields: this.settings.notePropertyFields,
+    });
+    const filePath = `${noteDir}/${title}.md`;
+    this.showSyncProgress({ ...progress, stage: 'writing', title });
     await this.app.vault.adapter.write(filePath, markdown);
 
     return {
@@ -4578,30 +6074,69 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async syncBinding(binding, shouldPrefixTitle) {
+    const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
+    this.showSyncProgress({ bindingLabel, stage: 'fetching' });
     const payload = await this.requestJson('/records?status=pending', 'GET', {}, binding);
     const records = payload.data || [];
     const written = [];
     const failed = [];
+    const skipped = [];
     const conversionWarnings = [];
     const syncedAt = new Date().toISOString();
+    if (!records.length) {
+      this.showSyncProgress({ bindingLabel, stage: 'empty' });
+    }
 
-    for (const record of records) {
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      const progress = {
+        bindingLabel,
+        current: index + 1,
+        total: records.length,
+      };
+      if (isCloudTranscriptionWaitingRecord(record)) {
+        skipped.push({
+          recordId: getRecordId(record),
+          reason: 'cloud-transcription-processing',
+        });
+        this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
+        continue;
+      }
       try {
-        const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle);
+        const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, progress);
         written.push(item);
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
+        this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
         await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
       } catch (error) {
+        const message = error.message || String(error);
+        let failedTitle = '';
+        try {
+          failedTitle = buildRecordTitleBase(record);
+        } catch (titleError) {
+          failedTitle = getRecordId(record) || String(record && record.type ? record.type : 'unknown');
+        }
+        this.lastSyncDiagnostic = {
+          ...progress,
+          status: 'failed',
+          stage: progress.stage || 'processing',
+          title: failedTitle,
+          recordId: getRecordId(record),
+          message: '单条内容同步失败',
+          error: message,
+          time: new Date().toISOString(),
+        };
+        writeSyncDiagnosticLog(this.lastSyncDiagnostic);
         failed.push({
           recordId: getRecordId(record),
-          message: error.message || String(error),
+          message,
         });
       }
     }
 
-    return { written, failed, conversionWarnings };
+    return { written, failed, skipped, conversionWarnings };
   }
 
   async syncInbox(showNotice = true) {
@@ -4616,13 +6151,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       const shouldPrefixTitle = bindings.length > 1;
       const written = [];
       const failed = [];
+      const skipped = [];
       const conversionWarnings = [];
+      this.syncProgressNotice = null;
+      this.showSyncProgress({ stage: 'fetching' });
 
       for (const binding of bindings) {
         try {
           const result = await this.syncBinding(binding, shouldPrefixTitle);
           written.push(...result.written);
           failed.push(...result.failed);
+          if (result.skipped && result.skipped.length) {
+            skipped.push(...result.skipped);
+          }
           if (result.conversionWarnings && result.conversionWarnings.length) {
             conversionWarnings.push(...result.conversionWarnings);
           }
@@ -4638,17 +6179,40 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
 
+      let finalMessage = buildSyncNotice(written.length);
+      if (skipped.length) {
+        finalMessage += `，${skipped.length} 条云端转写中，完成后再同步`;
+      }
       if (showNotice || written.length) {
-        let message = buildSyncNotice(written.length);
         if (conversionWarnings.length) {
-          message += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
+          finalMessage += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
         }
         if (failed.length) {
-          message += `，${failed.length} 条失败：${failed[0].message}`;
+          finalMessage += `，${failed.length} 条失败：${failed[0].message}`;
         }
-        new Notice(message);
+        new Notice(finalMessage);
       }
+      this.lastSyncDiagnostic = {
+        status: failed.length ? 'failed' : 'success',
+        stage: 'finished',
+        current: written.length,
+        total: written.length + failed.length + skipped.length,
+        message: finalMessage,
+        error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
+        time: new Date().toISOString(),
+      };
+      writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+      this.clearSyncProgressNotice();
     } catch (error) {
+      this.lastSyncDiagnostic = {
+        status: 'failed',
+        stage: 'syncInbox',
+        message: '同步失败',
+        error: error.message || String(error),
+        time: new Date().toISOString(),
+      };
+      writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+      this.clearSyncProgressNotice();
       new Notice(`同步失败：${error.message || error}`);
     }
   }
@@ -4678,6 +6242,11 @@ class WechatInboxSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.createEl('h2', { text: 'Obsidian 内容同步助手' });
 
+    containerEl.createEl('h3', {
+      text: '使用教程',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
+
     new Setting(containerEl)
       .setName('小程序名字：Obsidian 内容同步助手')
       .setDesc('打开微信后搜索这个小程序，进入「绑定 Obsidian」页面复制绑定码。');
@@ -4694,19 +6263,23 @@ class WechatInboxSettingTab extends PluginSettingTab {
           }
         }));
 
+    containerEl.createEl('h3', {
+      text: '绑定小程序',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
+
     const bindings = normalizeBindings(this.plugin.settings);
     if (bindings.length) {
-      containerEl.createEl('h3', { text: '已绑定小程序码' });
       bindings.forEach((binding, index) => {
         const isUnbound = binding.status === 'unbound';
         const statusDesc = isUnbound
           ? `已解除/已失效${binding.lastError ? `：${binding.lastError}` : ''}`
           : (binding.enabled === false ? '已暂停同步' : '同步时会拉取这个微信里的收集内容');
         new Setting(containerEl)
-          .setName(`${binding.label || `微信 ${index + 1}`}：${binding.token}`)
+          .setName(`${binding.label || `已完成绑定的微信 ${index + 1}`}：${binding.token}`)
           .setDesc(statusDesc)
           .addText((text) => text
-            .setPlaceholder(`微信 ${index + 1}`)
+            .setPlaceholder(`已完成绑定的微信 ${index + 1}`)
             .setValue(binding.label || '')
             .onChange(async (value) => {
               const nextBindings = normalizeBindings(this.plugin.settings).map((item) => (
@@ -4740,10 +6313,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
     }
 
     new Setting(containerEl)
-      .setName('新增绑定码')
+      .setName('立即绑定')
       .setDesc(bindings.length >= MAX_PLUGIN_BINDINGS
         ? `已达到上限：最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码。`
-        : `打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。点击新增后会加入上方列表，不会覆盖已有绑定。当前 ${bindings.length}/${MAX_PLUGIN_BINDINGS}。`)
+        : `打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。点击立即绑定后会加入上方列表，不会覆盖已有绑定。当前 ${bindings.length}/${MAX_PLUGIN_BINDINGS}。`)
       .addText((text) => text
         .setPlaceholder('例如 ABC-123')
         .setValue(this.plugin.settings.pendingBindCode || '')
@@ -4752,7 +6325,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }))
       .addButton((button) => {
         button
-          .setButtonText('新增绑定码')
+          .setButtonText('立即绑定')
           .setCta()
           .onClick(async () => {
             await this.plugin.bindCurrentCode();
@@ -4765,7 +6338,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('保存根目录')
-      .setDesc('内容会写入该目录下的 YYYY-MM-DD 文件夹。')
+      .setDesc('同步笔记写入的位置；可选择是否按日期再创建子目录。')
       .addText((text) => text
         .setPlaceholder('临时收集')
         .setValue(this.plugin.settings.inboxDir)
@@ -4774,228 +6347,35 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
-      .setName('语音转写')
-      .setDesc('第一版只做转写，不做摘要。腾讯云密钥只保存在当前 Obsidian 本地。')
+      .setName('笔记保存方式')
+      .setDesc('默认按日期分类；如果想所有文章都直接进入上面的目录，选择“直接保存到根目录”。')
       .addDropdown((dropdown) => {
-        Object.entries(AI_PROVIDER_NAMES).forEach(([value, label]) => {
+        Object.entries(NOTE_SAVE_MODES).forEach(([value, label]) => {
           dropdown.addOption(value, label);
         });
         dropdown
-          .setValue(this.plugin.settings.aiProvider)
+          .setValue(this.plugin.settings.noteSaveMode || DEFAULT_SETTINGS.noteSaveMode)
           .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, aiProvider: value });
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              noteSaveMode: normalizeNoteSaveMode(value),
+            });
             this.display();
           });
       });
 
-    if (this.plugin.settings.aiProvider === 'local') {
-      const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
-      const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
-      new Setting(containerEl)
-        .setName('本地转写系统')
-        .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。')
-        .addDropdown((dropdown) => {
-          Object.entries(LOCAL_ASR_PLATFORM_NAMES).forEach(([value, label]) => {
-            dropdown.addOption(value, label);
+    new Setting(containerEl)
+      .setName('笔记属性字段')
+      .setDesc(`留空使用默认属性；也可以用英文逗号指定字段，例如：type,title,url,created_at。可用字段：${NOTE_PROPERTY_FIELD_KEYS.join(', ')}`)
+      .addTextArea((text) => text
+        .setPlaceholder('留空使用默认属性')
+        .setValue(this.plugin.settings.notePropertyFields || '')
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            notePropertyFields: normalizeNotePropertyFields(value),
           });
-          dropdown
-            .setValue(this.plugin.settings.localAsrPlatform || 'auto')
-            .onChange(async (value) => {
-              const localAsrPlatform = normalizeLocalAsrPlatform(value);
-              const platform = resolveLocalAsrPlatform(localAsrPlatform);
-              await this.plugin.saveSettings({
-                ...this.plugin.settings,
-                localAsrPlatform,
-                localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform),
-              });
-              this.display();
-            });
-        });
-      new Setting(containerEl)
-        .setName('本地转写权限')
-        .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
-        .addButton((button) => button
-          .setButtonText('刷新权限')
-          .setCta()
-          .onClick(async () => {
-            try {
-              const status = await this.plugin.getLocalTranscriptionEntitlementStatus();
-              new Notice(status.hasAccess
-                ? `本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`
-                : '本地转写权限未开通或已过期');
-              this.display();
-            } catch (error) {
-              new Notice(`权限查询失败：${error.message || error}`);
-            }
-          }));
-      new Setting(containerEl)
-        .setName('本地转写组件')
-        .setDesc(localAsrStatus.ready
-          ? `已安装：${localAsrStatus.installRoot}`
-          : `未完整安装：${localAsrStatus.installRoot}`)
-        .addButton((button) => button
-          .setButtonText('检测状态')
-          .onClick(async () => {
-            const status = this.plugin.getLocalAsrInstallStatus();
-            let entitlementText = '';
-            try {
-              const entitlement = await this.plugin.getLocalTranscriptionEntitlementStatus();
-              entitlementText = entitlement.hasAccess
-                ? `权限有效${entitlement.expiresAt ? `，到期时间：${entitlement.expiresAt}` : ''}`
-                : '权限未开通或已过期';
-            } catch (error) {
-              entitlementText = '权限状态查询失败';
-            }
-            new Notice(`${status.ready ? '本地转写组件可用' : '本地转写组件未完整安装'}；${entitlementText}`);
-          }))
-        .addButton((button) => button
-          .setButtonText('一键安装')
-          .setCta()
-          .onClick(async () => {
-            try {
-              await this.plugin.installLocalAsr();
-              this.display();
-            } catch (error) {
-              new Notice(`本地转写组件安装失败：${error.message || error}`);
-            }
-          }))
-        .addButton((button) => button
-          .setButtonText('复制诊断信息')
-          .onClick(async () => {
-            try {
-              await this.plugin.copyLocalAsrDiagnosticText();
-              new Notice('本地转写诊断信息已复制');
-            } catch (error) {
-              new Notice(`复制诊断信息失败：${error.message || error}`);
-            }
-          }));
-    }
-
-    if (this.plugin.settings.aiProvider === 'tencent') {
-      this.addPasswordSetting(containerEl, {
-        name: '腾讯云 SecretId',
-        desc: '用于调用腾讯云 ASR 录音文件识别。',
-        placeholder: 'AKID...',
-        value: this.plugin.settings.tencentSecretId,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, tencentSecretId: value });
-        },
-      });
-
-      this.addPasswordSetting(containerEl, {
-        name: '腾讯云 SecretKey',
-        desc: '只保存在当前 Obsidian 本地。',
-        placeholder: 'SecretKey',
-        value: this.plugin.settings.tencentSecretKey,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, tencentSecretKey: value });
-        },
-      });
-
-      new Setting(containerEl)
-        .setName('腾讯云地域')
-        .setDesc('默认 ap-shanghai。')
-        .addText((text) => text
-          .setPlaceholder('ap-shanghai')
-          .setValue(this.plugin.settings.tencentRegion)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentRegion: value });
-          }));
-
-      new Setting(containerEl)
-        .setName('识别模型')
-        .setDesc('普通话默认 16k_zh。')
-        .addText((text) => text
-          .setPlaceholder('16k_zh')
-          .setValue(this.plugin.settings.tencentEngineModelType)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentEngineModelType: value });
-          }));
-
-      new Setting(containerEl)
-        .setName('最大等待次数')
-        .setDesc('每次同步最多轮询多少次。默认 60 次。')
-        .addText((text) => text
-          .setPlaceholder('60')
-          .setValue(String(this.plugin.settings.tencentPollAttempts))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentPollAttempts: Number(value) });
-          }));
-
-      new Setting(containerEl)
-        .setName('每次等待毫秒')
-        .setDesc('默认 5000，60 次约等 5 分钟。')
-        .addText((text) => text
-          .setPlaceholder('5000')
-          .setValue(String(this.plugin.settings.tencentPollIntervalMs))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, tencentPollIntervalMs: Number(value) });
-          }));
-    }
-
-    if (this.plugin.settings.aiProvider === 'aliyun') {
-      this.addPasswordSetting(containerEl, {
-        name: '阿里云百炼 API Key',
-        desc: '用于 Qwen-Omni 直接处理音频，Key 只保存在当前 Obsidian 本地。',
-        placeholder: 'sk-...',
-        value: this.plugin.settings.aliyunApiKey,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, aliyunApiKey: value });
-        },
-      });
-
-      new Setting(containerEl)
-        .setName('阿里模型')
-        .setDesc('默认 qwen3.5-omni-plus，适合先跑通长音频转写。')
-        .addText((text) => text
-          .setPlaceholder('qwen3.5-omni-plus')
-          .setValue(this.plugin.settings.aliyunModel)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, aliyunModel: value });
-          }));
-
-      new Setting(containerEl)
-        .setName('阿里接口地址')
-        .setDesc('一般保持默认即可。')
-        .addText((text) => text
-          .setPlaceholder(DEFAULT_SETTINGS.aliyunBaseUrl)
-          .setValue(this.plugin.settings.aliyunBaseUrl)
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, aliyunBaseUrl: value });
-          }));
-    }
-
-    if (this.plugin.settings.aiProvider === 'doubao') {
-      this.addPasswordSetting(containerEl, {
-        name: '豆包语音识别 API Key',
-        desc: '用于豆包语音识别极速版，只做转写，不做摘要。Key 只保存在当前 Obsidian 本地。',
-        placeholder: 'volc-asr-key',
-        value: this.plugin.settings.doubaoAsrApiKey,
-        onChange: async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, doubaoAsrApiKey: value });
-        },
-      });
-
-      new Setting(containerEl)
-        .setName('豆包最大等待次数')
-        .setDesc('每次同步最多轮询多少次。默认 60 次。')
-        .addText((text) => text
-          .setPlaceholder('60')
-          .setValue(String(this.plugin.settings.doubaoPollAttempts))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, doubaoPollAttempts: Number(value) });
-          }));
-
-      new Setting(containerEl)
-        .setName('豆包每次等待毫秒')
-        .setDesc('默认 5000，60 次约等 5 分钟。')
-        .addText((text) => text
-          .setPlaceholder('5000')
-          .setValue(String(this.plugin.settings.doubaoPollIntervalMs))
-          .onChange(async (value) => {
-            await this.plugin.saveSettings({ ...this.plugin.settings, doubaoPollIntervalMs: Number(value) });
-          }));
-    }
+        }));
 
     new Setting(containerEl)
       .setName('立即同步')
@@ -5005,8 +6385,127 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .setCta()
         .onClick(() => this.plugin.syncInbox()));
 
+    new Setting(containerEl)
+      .setName('同步失败诊断')
+      .setDesc('同步失败、转写失败、下载卡住时，点这里复制诊断信息发给开发者张张（微信：heyhmjx）。里面包含最近同步阶段、转写日志和安装日志。')
+      .addButton((button) => button
+        .setButtonText('复制同步诊断')
+        .onClick(async () => {
+          try {
+            await this.plugin.copySyncDiagnosticText();
+            new Notice('同步失败诊断信息已复制');
+          } catch (error) {
+            new Notice(`复制同步诊断失败：${error.message || error}`);
+          }
+        }));
+
+    containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
+    containerEl.createEl('h3', {
+      text: 'Pro 本地转写功能',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
+
+    const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
+    const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
+    new Setting(containerEl)
+      .setName('本地转写系统')
+      .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。云端转写请在微信小程序保存音视频时选择。')
+      .addDropdown((dropdown) => {
+        Object.entries(LOCAL_ASR_PLATFORM_NAMES).forEach(([value, label]) => {
+          dropdown.addOption(value, label);
+        });
+        dropdown
+          .setValue(this.plugin.settings.localAsrPlatform || 'auto')
+          .onChange(async (value) => {
+            const localAsrPlatform = normalizeLocalAsrPlatform(value);
+            const platform = resolveLocalAsrPlatform(localAsrPlatform);
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              aiProvider: 'local',
+              localAsrPlatform,
+              localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform),
+            });
+            this.display();
+          });
+      });
+    new Setting(containerEl)
+      .setName('本地转写权限')
+      .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
+      .addButton((button) => button
+        .setButtonText('刷新权限')
+        .setCta()
+        .onClick(async () => {
+          try {
+            const status = await this.plugin.getLocalTranscriptionEntitlementStatus();
+            new Notice(status.hasAccess
+              ? `本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`
+              : '本地转写权限未开通或已过期');
+            this.display();
+          } catch (error) {
+            new Notice(`权限查询失败：${error.message || error}`);
+          }
+        }));
+    new Setting(containerEl)
+      .setName('本地转写组件')
+      .setDesc(localAsrStatus.ready
+        ? `已安装：${localAsrStatus.installRoot}`
+        : `未完整安装：${localAsrStatus.installRoot}`)
+      .addButton((button) => button
+        .setButtonText('检测状态')
+        .onClick(async () => {
+          const status = this.plugin.getLocalAsrInstallStatus();
+          let entitlementText = '';
+          try {
+            const entitlement = await this.plugin.getLocalTranscriptionEntitlementStatus();
+            entitlementText = entitlement.hasAccess
+              ? `权限有效${entitlement.expiresAt ? `，到期时间：${entitlement.expiresAt}` : ''}`
+              : '权限未开通或已过期';
+          } catch (error) {
+            entitlementText = '权限状态查询失败';
+          }
+          new Notice(`${status.ready ? '本地转写组件可用' : '本地转写组件未完整安装'}；${entitlementText}`);
+        }))
+      .addButton((button) => button
+        .setButtonText('一键安装')
+        .setCta()
+        .onClick(async () => {
+          try {
+            await this.plugin.installLocalAsr();
+            this.display();
+          } catch (error) {
+            new Notice(`本地转写组件安装失败：${error.message || error}`);
+          }
+        }))
+      .addButton((button) => button
+        .setButtonText('检测并修复')
+        .onClick(async () => {
+          try {
+            await this.plugin.checkAndRepairLocalAsr();
+            this.display();
+          } catch (error) {
+            new Notice(`检测并修复失败：${error.message || error}`);
+          }
+        }))
+      .addButton((button) => button
+        .setButtonText('停止当前转写')
+        .onClick(() => {
+          this.plugin.stopCurrentTranscription();
+        }))
+      .addButton((button) => button
+        .setButtonText('复制诊断信息')
+        .onClick(async () => {
+          try {
+            await this.plugin.copyLocalAsrDiagnosticText();
+            new Notice('本地转写诊断信息已复制');
+          } catch (error) {
+            new Notice(`复制诊断信息失败：${error.message || error}`);
+          }
+        }));
+
     const status = containerEl.createDiv({ cls: 'wechat-inbox-sync-status' });
-    status.setText('同步后会生成：临时收集/YYYY-MM-DD/文字-143205.md、链接-143210.md、语音-143220.md。语音附件会放入临时收集/语音附件/。');
+    status.setText(this.plugin.settings.noteSaveMode === 'root'
+      ? '同步后会生成：临时收集/文本-示例.md、临时收集/公众号-示例.md。语音附件仍会放入临时收集/语音附件/YYYY-MM-DD/。'
+      : '同步后会生成：临时收集/YYYY-MM-DD/文本-示例.md、公众号-示例.md。语音附件会放入临时收集/语音附件/YYYY-MM-DD/。');
   }
 }
 
@@ -5017,8 +6516,17 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_INSTALLER_URL,
   LOCAL_ASR_MACOS_INSTALLER_URL,
   LOCAL_ASR_PLATFORM_NAMES,
+  NOTE_PROPERTY_FIELD_KEYS,
+  NOTE_SAVE_MODES,
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
+  normalizeLocalAsrInstallMode,
+  normalizeNotePropertyFields,
+  normalizeNoteSaveMode,
+  normalizeCloudPreTranscriptionThresholdMinutes,
+  isAsciiPath,
+  hasLocalAsrNativeCrash,
+  getLocalAsrRepairAction,
   resolveLocalAsrPlatform,
   getLocalAsrPlatformMismatchMessage,
   buildAliyunVoiceRequest,
@@ -5034,24 +6542,37 @@ WechatObsidianInboxPlugin.__test = {
   parseTencentTaskStatusResponse,
   buildRecordTitleBase,
   extractXiaohongshuMarkdownFromHtml,
+  buildMarkdownForRecord,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,
   extractSocialMediaUrlFromHtml,
+  isUnavailableXiaohongshuPage,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,
+  isWechatMpArticleUrl,
+  shouldHydrateLinkAsWebpage,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
   buildAudioTranscriptMarkdown,
   buildTranscriptOnlyMetadata,
+  buildSyncProgressMessage,
+  parseLocalAsrProgressLog,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
   isRemoteAsrDownloadFailure,
   getDoubaoTaskKey,
   getDefaultLocalTranscriptionCommand,
+  getSafeLocalAsrInstallRoot,
   getLocalAsrInstallRoot,
   getLocalAsrInstallStatus,
+  getLocalAsrScriptVersionStatus,
+  explainLocalAsrExitCode,
+  getLocalAsrRunLogPath,
+  buildLocalAsrRunLogText,
+  appendLocalAsrRunLog,
+  readLocalAsrRunLog,
   buildLocalAsrInstallCommand,
   downloadTextViaNode,
   getSocialRequestHeaders,

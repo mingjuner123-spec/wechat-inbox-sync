@@ -1,4 +1,5 @@
 const cloud = require('wx-server-sdk');
+const http = require('http');
 const https = require('https');
 const {
   createAdminRedeemCodeDocuments,
@@ -19,6 +20,7 @@ const {
   buildDailyUsageDocument,
   buildUsageState,
   buildProUsageState,
+  requiresProTranscriptionAccess,
 } = require('./inbox-core');
 const {
   buildFeishuFeedbackMessage,
@@ -36,7 +38,13 @@ const {
   getBuiltInRedeemCodeDocument,
   createEntitlementDocument,
   buildEntitlementState,
+  pickBestLocalTranscriptionEntitlement,
 } = require('./redeem-code-core');
+const {
+  createPaymentOrderDocument,
+  buildPaymentOrderState,
+  createPaidEntitlementFromOrder,
+} = require('./payment-core');
 
 cloud.init({
   env: cloud.DYNAMIC_CURRENT_ENV,
@@ -45,6 +53,17 @@ cloud.init({
 const db = cloud.database();
 const _ = db.command;
 const REQUEST_TIMEOUT_MS = 10000;
+const DOUBAO_ASR_SUBMIT_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit';
+const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/query';
+const DOUBAO_ASR_RESOURCE_ID = 'volc.bigasr.auc';
+const DEFAULT_CLOUD_ASR_POLL_ATTEMPTS = 60;
+const DEFAULT_CLOUD_ASR_POLL_INTERVAL_MS = 5000;
+const CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS = 60;
+const MEDIA_RESOLVER_TIMEOUT_MS = 30000;
+const CLOUD_TRANSCRIPTION_QUEUE_BATCH_SIZE = 3;
+const CLOUD_TRANSCRIPTION_QUEUE_MAX_READ = 5000;
+const CLOUD_TRANSCRIPTION_POLL_INTERVAL_MS = 60 * 1000;
+const CLOUD_TRANSCRIPTION_MAX_POLL_ATTEMPTS = 240;
 
 function collectRecordFileIds(record) {
   const metadata = (record && record.metadata) || {};
@@ -166,6 +185,26 @@ async function trackAnalyticsEvent(event) {
   };
 }
 
+async function getCloudRuntimeConfigStatus() {
+  return {
+    success: true,
+    data: getCloudRuntimeConfigStatusData(),
+  };
+}
+
+function getCloudRuntimeConfigStatusData() {
+  const doubaoKey = String(process.env.DOUBAO_ASR_API_KEY || '').trim();
+  const mediaResolverUrl = getMediaResolverUrl();
+  const mediaResolverSecret = getMediaResolverSecret();
+  return {
+    doubaoAsrApiKeyConfigured: Boolean(doubaoKey),
+    doubaoAsrApiKeyLength: doubaoKey.length,
+    mediaResolverUrlConfigured: Boolean(mediaResolverUrl),
+    mediaResolverSecretConfigured: Boolean(mediaResolverSecret),
+    checkedAt: new Date().toISOString(),
+  };
+}
+
 async function tryGetTodayUsage(openid, now) {
   try {
     return await getTodayUsage(openid, now);
@@ -203,9 +242,554 @@ async function getAudioTempURL(fileID) {
   return file && file.tempFileURL ? file.tempFileURL : '';
 }
 
+function isHttpUrl(url) {
+  return /^https?:\/\//i.test(String(url || ''));
+}
+
+function decodeHtmlAttribute(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function getHtmlAttribute(tag, name) {
+  const pattern = new RegExp(`${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, 'i');
+  const match = String(tag || '').match(pattern);
+  if (!match) return '';
+  return decodeHtmlAttribute(String(match[1] || '').replace(/^['"]|['"]$/g, '').trim());
+}
+
+function resolveMediaUrl(url, baseUrl) {
+  const value = decodeHtmlAttribute(url).trim();
+  if (!value) return '';
+  if (isHttpUrl(value)) return value;
+  try {
+    return new URL(value, baseUrl).toString();
+  } catch (error) {
+    return '';
+  }
+}
+
+function extractCloudPreTranscriptionMediaUrl(html, pageUrl) {
+  const source = String(html || '');
+  const metaPattern = /<meta\b[^>]*>/gi;
+  let match;
+  while ((match = metaPattern.exec(source))) {
+    const tag = match[0];
+    const key = `${getHtmlAttribute(tag, 'property')} ${getHtmlAttribute(tag, 'name')}`.toLowerCase();
+    if (
+      key.includes('og:video')
+      || key.includes('og:audio')
+      || key.includes('twitter:player:stream')
+      || key.includes('twitter:video')
+      || key.includes('twitter:audio')
+    ) {
+      const content = resolveMediaUrl(getHtmlAttribute(tag, 'content'), pageUrl);
+      if (content) return content;
+    }
+  }
+
+  const mediaPattern = /<(?:video|audio|source)\b[^>]*\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi;
+  while ((match = mediaPattern.exec(source))) {
+    const mediaUrl = resolveMediaUrl(String(match[1] || '').replace(/^['"]|['"]$/g, ''), pageUrl);
+    if (mediaUrl) return mediaUrl;
+  }
+
+  return '';
+}
+
+function fetchTextUrl(url, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (!isHttpUrl(url)) {
+      reject(new Error('Invalid webpage URL'));
+      return;
+    }
+    const parsed = new URL(url);
+    const req = https.get({
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: `${parsed.pathname}${parsed.search}`,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 WeChatInboxSync/1.0',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    }, (res) => {
+      const location = res.headers && res.headers.location;
+      if ([301, 302, 303, 307, 308].includes(Number(res.statusCode)) && location && redirectCount < 3) {
+        res.resume();
+        resolve(fetchTextUrl(new URL(location, url).toString(), redirectCount + 1));
+        return;
+      }
+      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+        res.resume();
+        reject(new Error(`Webpage fetch failed: HTTP ${res.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    });
+    req.on('error', reject);
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+      req.destroy(new Error('Webpage fetch timed out'));
+    });
+  });
+}
+
+function getMediaResolverUrl() {
+  return String(process.env.MEDIA_RESOLVER_URL || '').trim();
+}
+
+function getMediaResolverSecret() {
+  return String(process.env.MEDIA_RESOLVER_SECRET || '').trim();
+}
+
+function normalizeResolverMediaUrl(mediaUrl, resolverUrl, data = {}) {
+  const value = String(mediaUrl || '').trim();
+  if (!value || !isHttpUrl(value)) return value;
+  if (!data.proxied) return value;
+  try {
+    const media = new URL(value);
+    const resolver = new URL(resolverUrl);
+    if (media.pathname.startsWith('/media/') && resolver.protocol === 'https:') {
+      return `${resolver.origin}${media.pathname}${media.search}`;
+    }
+  } catch (error) {
+    return value;
+  }
+  return value;
+}
+
+async function requestMediaResolver(pageUrl, record = {}) {
+  const resolverUrl = getMediaResolverUrl();
+  if (!resolverUrl || !isHttpUrl(resolverUrl) || !isHttpUrl(pageUrl)) {
+    return null;
+  }
+  const secret = getMediaResolverSecret();
+  const headers = secret ? { 'x-resolver-secret': secret } : {};
+  const response = await postJson({
+    url: resolverUrl,
+    headers,
+    body: {
+      url: pageUrl,
+      recordId: record && record._id ? record._id : '',
+    },
+    timeoutMs: MEDIA_RESOLVER_TIMEOUT_MS,
+  });
+  if (response.status && response.status >= 200 && response.status < 300) {
+    const data = response.json && response.json.data;
+    const mediaUrl = normalizeResolverMediaUrl(data && data.mediaUrl, resolverUrl, data || {});
+    if (mediaUrl) {
+      return {
+        audioUrl: mediaUrl,
+        mediaUrl,
+        source: String(data.source || 'media-resolver'),
+        title: String(data.title || ''),
+        durationSeconds: Number(data.durationSeconds || 0) || 0,
+        originalMediaUrl: String(data.originalMediaUrl || ''),
+        proxied: Boolean(data.proxied),
+      };
+    }
+  }
+  const errorPayload = response.json || {};
+  const errMsg = errorPayload.errMsg || response.text || `HTTP ${response.status}`;
+  throw new Error(`网页音视频解析服务失败：${String(errMsg).slice(0, 200)}`);
+}
+
+async function resolveWebpageAudioUrl(pageUrl, record = {}) {
+  let resolverError = '';
+  try {
+    const resolved = await requestMediaResolver(pageUrl, record);
+    if (resolved && resolved.audioUrl) {
+      return resolved;
+    }
+  } catch (error) {
+    resolverError = error.message || String(error);
+  }
+
+  const html = await fetchTextUrl(pageUrl);
+  const audioUrl = extractCloudPreTranscriptionMediaUrl(html, pageUrl);
+  if (audioUrl) {
+    return {
+      audioUrl,
+      mediaUrl: audioUrl,
+      source: 'html',
+      title: '',
+      durationSeconds: 0,
+      resolverError,
+    };
+  }
+
+  if (resolverError) {
+    throw new Error(`${resolverError}；静态页面也未提取到可转写地址`);
+  }
+  throw new Error('未能从网页中提取到可转写的音视频地址');
+}
+
 function shouldPrepareAudioTempURL() {
   return Boolean(process.env.OPENAI_API_KEY)
     || String(process.env.VOICE_AI_PROVIDER || '').toLowerCase() === 'openai';
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function tryParseJson(text) {
+  try {
+    return JSON.parse(String(text || ''));
+  } catch (error) {
+    return null;
+  }
+}
+
+function getAudioFormatFromUrl(url) {
+  const clean = String(url || '').split('?')[0].split('#')[0].toLowerCase();
+  const match = clean.match(/\.([a-z0-9]+)$/);
+  const ext = match ? match[1] : '';
+  if (['mp3', 'wav', 'm4a', 'mp4', 'aac', 'ogg', 'flac', 'webm'].includes(ext)) return ext;
+  return 'mp3';
+}
+
+function getHttpHeader(headers, name) {
+  if (!headers || !name) return '';
+  const target = String(name).toLowerCase();
+  const key = Object.keys(headers).find((item) => String(item).toLowerCase() === target);
+  return key ? headers[key] : '';
+}
+
+function postJson({ url, headers = {}, body = {}, timeoutMs = 30000 }) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const rawBody = JSON.stringify(body || {});
+    const client = parsed.protocol === 'http:' ? http : https;
+    const req = client.request({
+      method: 'POST',
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: `${parsed.pathname}${parsed.search}`,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(rawBody),
+        ...headers,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({
+          status: res.statusCode,
+          headers: res.headers || {},
+          text,
+          json: tryParseJson(text),
+        });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('Cloud transcription request timed out'));
+    });
+    req.end(rawBody);
+  });
+}
+
+function createRequestId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function buildDoubaoSubmitRequest({ apiKey, audioUrl, requestId }) {
+  return {
+    url: DOUBAO_ASR_SUBMIT_URL,
+    headers: {
+      'X-Api-Key': apiKey,
+      'X-Api-Resource-Id': DOUBAO_ASR_RESOURCE_ID,
+      'X-Api-Request-Id': requestId,
+      'X-Api-Sequence': '-1',
+    },
+    body: {
+      user: {
+        uid: 'wechat-inbox-sync-cloud',
+      },
+      audio: {
+        url: audioUrl,
+        format: getAudioFormatFromUrl(audioUrl),
+        codec: 'raw',
+        rate: 16000,
+        bits: 16,
+        channel: 1,
+      },
+      request: {
+        model_name: 'bigmodel',
+        enable_itn: true,
+        enable_punc: true,
+        enable_ddc: false,
+        enable_speaker_info: true,
+        enable_channel_split: false,
+        show_utterances: true,
+        vad_segment: false,
+        sensitive_words_filter: '',
+      },
+    },
+  };
+}
+
+function buildDoubaoQueryRequest({ apiKey, requestId }) {
+  return {
+    url: DOUBAO_ASR_QUERY_URL,
+    headers: {
+      'X-Api-Key': apiKey,
+      'X-Api-Resource-Id': DOUBAO_ASR_RESOURCE_ID,
+      'X-Api-Request-Id': requestId,
+    },
+    body: {},
+  };
+}
+
+function formatDoubaoHttpError(response) {
+  const parts = [`Doubao ASR request failed: HTTP ${response && response.status}`];
+  ['x-api-status-code', 'x-api-message', 'x-api-request-id'].forEach((name) => {
+    const value = getHttpHeader(response && response.headers, name);
+    if (value) parts.push(`${name}=${value}`);
+  });
+  const body = String((response && (response.text || JSON.stringify(response.json || ''))) || '').trim();
+  if (body) parts.push(body.slice(0, 500));
+  return parts.join('; ');
+}
+
+function normalizeDoubaoSpeakerText(result) {
+  if (!result || typeof result !== 'object') return '';
+  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+  if (!utterances.length) return '';
+  return utterances
+    .map((item) => {
+      const text = String((item && (item.text || item.result_text || item.utterance_text)) || '').trim();
+      if (!text) return '';
+      const additions = item && item.additions && typeof item.additions === 'object' ? item.additions : {};
+      const speaker = item && (
+        item.speaker
+        || item.speaker_id
+        || item.spk
+        || item.speakerId
+        || additions.speaker
+        || additions.speaker_id
+        || additions.spk
+        || additions.speakerId
+      );
+      return speaker === undefined || speaker === null || speaker === ''
+        ? text
+        : `说话人${speaker}：${text}`;
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function normalizeDoubaoTimeToSeconds(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number > 1000 ? Math.ceil(number / 1000) : Math.ceil(number);
+}
+
+function getDoubaoUtteranceEndSeconds(item = {}) {
+  const additions = item && item.additions && typeof item.additions === 'object' ? item.additions : {};
+  return normalizeDoubaoTimeToSeconds(
+    item.end_time
+    || item.endTime
+    || item.end
+    || item.end_ms
+    || item.endMs
+    || additions.end_time
+    || additions.endTime
+    || additions.end
+    || additions.end_ms
+    || additions.endMs
+  );
+}
+
+function getDoubaoResultDurationSeconds(result) {
+  if (!result || typeof result !== 'object') return 0;
+  const directDuration = normalizeDoubaoTimeToSeconds(
+    result.duration
+    || result.duration_ms
+    || result.durationMs
+    || result.audio_duration
+    || result.audioDuration
+  );
+  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+  const utteranceDuration = utterances.reduce((maxValue, item) => Math.max(maxValue, getDoubaoUtteranceEndSeconds(item)), 0);
+  return Math.max(directDuration, utteranceDuration);
+}
+
+function getDoubaoPayloadDurationSeconds(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const result = data && data.result;
+  if (Array.isArray(result)) {
+    return result.reduce((maxValue, item) => Math.max(maxValue, getDoubaoResultDurationSeconds(item)), 0);
+  }
+  return getDoubaoResultDurationSeconds(result || data);
+}
+
+function parseDoubaoResult(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const result = data && data.result;
+  if (Array.isArray(result)) {
+    return result
+      .map((item) => normalizeDoubaoSpeakerText(item) || String((item && (item.text || item.result_text || item.utterance_text)) || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  const speakerText = normalizeDoubaoSpeakerText(result);
+  if (speakerText) return speakerText;
+  const text = (result && (result.text || result.result_text))
+    || (data && (data.text || data.transcription))
+    || '';
+  return String(text || '').trim();
+}
+
+function parseDoubaoTaskState(response) {
+  if (response.status && (response.status < 200 || response.status >= 300)) {
+    throw new Error(formatDoubaoHttpError(response));
+  }
+  const statusCode = getHttpHeader(response.headers, 'x-api-status-code');
+  if (statusCode && statusCode !== '20000000') {
+    if (statusCode === '20000001' || statusCode === '20000002') {
+      return {
+        status: 'processing',
+        transcription: '',
+      };
+    }
+    throw new Error(formatDoubaoHttpError(response));
+  }
+  const transcription = parseDoubaoResult(response.json || response.text);
+  return {
+    status: transcription ? 'success' : 'empty',
+    transcription,
+    durationSeconds: getDoubaoPayloadDurationSeconds(response.json || response.text),
+  };
+}
+
+async function runDoubaoCloudTranscription(audioUrl, options = {}) {
+  const apiKey = String((options.env || process.env || {}).DOUBAO_ASR_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error('DOUBAO_ASR_API_KEY is not configured');
+  }
+  const requestId = createRequestId();
+  const submit = buildDoubaoSubmitRequest({ apiKey, audioUrl, requestId });
+  const submitResponse = await postJson(submit);
+  const submitState = parseDoubaoTaskState(submitResponse);
+  if (submitState.status === 'success') {
+    return {
+      transcription: submitState.transcription,
+      durationSeconds: submitState.durationSeconds || 0,
+      requestId,
+      provider: 'doubao',
+    };
+  }
+
+  const attempts = Math.max(1, Number(process.env.CLOUD_ASR_POLL_ATTEMPTS) || DEFAULT_CLOUD_ASR_POLL_ATTEMPTS);
+  const intervalMs = Math.max(1000, Number(process.env.CLOUD_ASR_POLL_INTERVAL_MS) || DEFAULT_CLOUD_ASR_POLL_INTERVAL_MS);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await sleep(intervalMs);
+    const query = buildDoubaoQueryRequest({ apiKey, requestId });
+    const queryResponse = await postJson(query);
+    const state = parseDoubaoTaskState(queryResponse);
+    if (state.status === 'success') {
+      return {
+        transcription: state.transcription,
+        durationSeconds: state.durationSeconds || 0,
+        requestId,
+        provider: 'doubao',
+      };
+    }
+  }
+  throw new Error('Doubao ASR is still processing, please retry later');
+}
+
+async function submitDoubaoCloudTranscription(audioUrl, options = {}) {
+  const apiKey = String((options.env || process.env || {}).DOUBAO_ASR_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error('DOUBAO_ASR_API_KEY is not configured');
+  }
+  const requestId = createRequestId();
+  const submit = buildDoubaoSubmitRequest({ apiKey, audioUrl, requestId });
+  const submitResponse = await postJson(submit);
+  const submitState = parseDoubaoTaskState(submitResponse);
+  if (submitState.status === 'success') {
+    return {
+      complete: true,
+      transcription: submitState.transcription,
+      durationSeconds: submitState.durationSeconds || 0,
+      requestId,
+      provider: 'doubao',
+    };
+  }
+  return {
+    complete: false,
+    transcription: '',
+    durationSeconds: 0,
+    requestId,
+    provider: 'doubao',
+  };
+}
+
+async function queryDoubaoCloudTranscription(requestId, options = {}) {
+  const apiKey = String((options.env || process.env || {}).DOUBAO_ASR_API_KEY || '').trim();
+  const safeRequestId = String(requestId || '').trim();
+  if (!apiKey) {
+    throw new Error('DOUBAO_ASR_API_KEY is not configured');
+  }
+  if (!safeRequestId) {
+    throw new Error('Doubao ASR request id is missing');
+  }
+  const query = buildDoubaoQueryRequest({ apiKey, requestId: safeRequestId });
+  const queryResponse = await postJson(query);
+  const state = parseDoubaoTaskState(queryResponse);
+  if (state.status === 'success') {
+    return {
+      complete: true,
+      transcription: state.transcription,
+      durationSeconds: state.durationSeconds || 0,
+      requestId: safeRequestId,
+      provider: 'doubao',
+    };
+  }
+  if (state.status === 'processing') {
+    return {
+      complete: false,
+      transcription: '',
+      durationSeconds: 0,
+      requestId: safeRequestId,
+      provider: 'doubao',
+    };
+  }
+  throw new Error('Doubao ASR returned empty result');
+}
+
+function getBillableCloudSeconds(durationMs) {
+  const seconds = Math.ceil((Number(durationMs) || 0) / 1000);
+  return Math.max(CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS, seconds);
+}
+
+function getBillableCloudSecondsFromResult(metadata = {}, result = {}) {
+  const metadataSeconds = Math.ceil((Number(metadata.duration) || 0) / 1000);
+  const resultSeconds = Math.ceil(Number(result.durationSeconds) || 0);
+  return Math.max(CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS, metadataSeconds, resultSeconds);
+}
+
+function getCloudQuotaState(entitlement, billableSeconds) {
+  const state = buildEntitlementState(entitlement);
+  return {
+    ...state,
+    billableSeconds,
+    hasEnoughQuota: state.cloudRemainingSeconds >= billableSeconds,
+  };
 }
 
 async function getTodayUsage(openid, now) {
@@ -388,16 +972,120 @@ async function getUserEntitlement(openid, plan = DEFAULT_REDEEM_PLAN) {
     .orderBy('redeemedAt', 'desc')
     .limit(20)
     .get();
-  return (result.data || []).find((item) => isLocalTranscriptionPlan(item.plan)) || null;
+  return pickBestLocalTranscriptionEntitlement(result.data || []);
+}
+
+async function getUserTranscriptionSettings(openid) {
+  await ensureCollection('user_transcription_settings');
+  const result = await db.collection('user_transcription_settings')
+    .where({ openid })
+    .limit(1)
+    .get();
+  const settings = result.data && result.data[0] ? result.data[0] : null;
+  return {
+    enabled: Boolean(settings && settings.cloudPreTranscriptionEnabled),
+    thresholdMinutes: Number(settings && settings.cloudPreTranscriptionThresholdMinutes) || 10,
+  };
+}
+
+function getRedeemCodeSortTime(item = {}) {
+  return String(item.lastRedeemedAt || item.redeemedAt || item.activatedAt || item.updatedAt || item.createdAt || '');
+}
+
+function pickLatestRedeemCodeDocument(items = []) {
+  return (items || [])
+    .filter((item) => normalizeRedeemCode(item.code))
+    .sort((a, b) => getRedeemCodeSortTime(b).localeCompare(getRedeemCodeSortTime(a)))[0] || null;
+}
+
+async function findRedeemCodeForOpenid(openid) {
+  const safeOpenid = String(openid || '').trim();
+  if (!safeOpenid) return null;
+
+  await ensureCollection('redeem_codes');
+  const codeMatches = [];
+  const redeemCodeOpenidFields = [
+    'lastRedeemedOpenId',
+    'redeemedOpenId',
+    'openid',
+    'openId',
+    'userOpenId',
+  ];
+  for (const field of redeemCodeOpenidFields) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await db.collection('redeem_codes')
+        .where({ [field]: safeOpenid })
+        .limit(50)
+        .get();
+      codeMatches.push(...(result.data || []));
+    } catch (error) {
+      // 兼容历史字段，不让单个兜底查询影响权限状态读取。
+    }
+  }
+
+  const codeDoc = pickLatestRedeemCodeDocument(codeMatches);
+  if (codeDoc) return codeDoc;
+
+  await ensureCollection('user_entitlements');
+  try {
+    const entitlementResult = await db.collection('user_entitlements')
+      .where({ openid: safeOpenid })
+      .limit(50)
+      .get();
+    return pickLatestRedeemCodeDocument((entitlementResult.data || [])
+      .filter((item) => isLocalTranscriptionPlan(item.plan)));
+  } catch (error) {
+    return null;
+  }
+}
+
+async function hydrateEntitlementWithRedeemCode(openid, entitlement) {
+  if (!entitlement || normalizeRedeemCode(entitlement.code)) {
+    return entitlement;
+  }
+
+  const codeDoc = await findRedeemCodeForOpenid(openid);
+  const code = normalizeRedeemCode(codeDoc && codeDoc.code);
+  if (!code) {
+    return entitlement;
+  }
+
+  const now = new Date().toISOString();
+  const hydrated = {
+    ...entitlement,
+    code,
+    source: 'redeem_code',
+    durationDays: Number(codeDoc.durationDays) || Number(entitlement.durationDays) || 0,
+  };
+  if (entitlement._id) {
+    try {
+      await db.collection('user_entitlements').doc(entitlement._id).update({
+        data: {
+          code,
+          source: 'redeem_code',
+          durationDays: hydrated.durationDays,
+          updatedAt: now,
+        },
+      });
+    } catch (error) {
+      // 回填失败不影响用户查看当前权限状态。
+    }
+  }
+
+  return hydrated;
 }
 
 async function getEntitlementStatus(event) {
   const wxContext = cloud.getWXContext();
   const plan = String(event.plan || DEFAULT_REDEEM_PLAN).trim() || DEFAULT_REDEEM_PLAN;
   const entitlement = await getUserEntitlement(wxContext.OPENID, plan);
+  const hydratedEntitlement = event && event.includeRedeemCode
+    ? await hydrateEntitlementWithRedeemCode(wxContext.OPENID, entitlement)
+    : entitlement;
   return {
     success: true,
-    data: buildEntitlementState(entitlement),
+    data: buildEntitlementState(hydratedEntitlement),
   };
 }
 
@@ -461,6 +1149,11 @@ async function redeemAccessCode(event) {
     error.code = 'INVALID_REDEEM_CODE';
     throw error;
   }
+  if (codeDoc.trialOwnerOpenid && codeDoc.trialOwnerOpenid !== wxContext.OPENID) {
+    const error = new Error('兑换码无效、已过期或已被使用');
+    error.code = 'INVALID_REDEEM_CODE';
+    throw error;
+  }
 
   const plan = codeDoc.plan || DEFAULT_REDEEM_PLAN;
   const entitlement = createEntitlementDocument({
@@ -478,19 +1171,15 @@ async function redeemAccessCode(event) {
     await db.collection('user_entitlements').add({ data: entitlement });
   }
 
-  const maxRedemptions = Number(codeDoc.maxRedemptions) || 1;
-  const nextRedeemedCount = (Number(codeDoc.redeemedCount) || 0) + 1;
   const codeUpdateData = {
     redeemedCount: _.inc(1),
     deliveryStatus: 'activated',
     activatedAt: now,
     lastRedeemedAt: now,
     lastRedeemedOpenId: wxContext.OPENID,
+    status: 'redeemed',
     updatedAt: now,
   };
-  if (nextRedeemedCount >= maxRedemptions) {
-    codeUpdateData.status = 'redeemed';
-  }
   if (codeDoc._id) {
     await db.collection('redeem_codes').doc(codeDoc._id).update({
       data: codeUpdateData,
@@ -500,6 +1189,321 @@ async function redeemAccessCode(event) {
   return {
     success: true,
     data: buildEntitlementState(entitlement),
+  };
+}
+
+async function activateTrialRedeemCode({ openid, codeDoc, now }) {
+  const code = normalizeRedeemCode(codeDoc && codeDoc.code);
+  if (!openid) throw new Error('OpenID is required');
+  if (!code) throw new Error('Redeem code is required');
+
+  const existingEntitlementResult = await db.collection('user_entitlements')
+    .where({
+      openid,
+      code,
+      status: 'active',
+    })
+    .limit(1)
+    .get();
+  const existingEntitlement = existingEntitlementResult.data && existingEntitlementResult.data[0]
+    ? existingEntitlementResult.data[0]
+    : null;
+  if (existingEntitlement) {
+    return {
+      entitlement: existingEntitlement,
+      alreadyActivated: true,
+    };
+  }
+
+  const entitlement = createEntitlementDocument({
+    openid,
+    codeDoc,
+    now,
+  });
+  const currentLocalEntitlement = await getUserEntitlement(openid, DEFAULT_REDEEM_PLAN);
+  if (
+    currentLocalEntitlement
+    && buildEntitlementState(currentLocalEntitlement, now).hasAccess
+    && new Date(currentLocalEntitlement.expiresAt || 0).getTime() >= new Date(entitlement.expiresAt || 0).getTime()
+  ) {
+    return {
+      entitlement: currentLocalEntitlement,
+      alreadyActivated: true,
+      preservedExistingEntitlement: true,
+    };
+  }
+
+  const plan = codeDoc.plan || DEFAULT_REDEEM_PLAN;
+  const currentPlanEntitlement = await getUserEntitlement(openid, plan);
+  if (currentPlanEntitlement) {
+    await db.collection('user_entitlements').doc(currentPlanEntitlement._id).update({
+      data: entitlement,
+    });
+  } else {
+    await db.collection('user_entitlements').add({ data: entitlement });
+  }
+
+  if (codeDoc._id && codeDoc.status !== 'redeemed') {
+    await db.collection('redeem_codes').doc(codeDoc._id).update({
+      data: {
+        redeemedCount: _.inc(1),
+        deliveryStatus: 'activated',
+        activatedAt: now,
+        lastRedeemedAt: now,
+        lastRedeemedOpenId: openid,
+        status: 'redeemed',
+        updatedAt: now,
+      },
+    });
+  }
+
+  return {
+    entitlement,
+    alreadyActivated: false,
+  };
+}
+
+async function getTrialRedeemCode() {
+  const wxContext = cloud.getWXContext();
+  const openid = wxContext.OPENID;
+  const now = new Date().toISOString();
+  if (!openid) {
+    throw new Error('OpenID is required');
+  }
+
+  await ensureCollection('redeem_codes');
+  await ensureCollection('user_entitlements');
+
+  const currentLocalEntitlement = await getUserEntitlement(openid, DEFAULT_REDEEM_PLAN);
+  const currentLocalState = buildEntitlementState(currentLocalEntitlement, now);
+  const trialExpiresAt = createEntitlementDocument({
+    openid,
+    codeDoc: {
+      code: 'OBTRY-PRECHECK',
+      plan: 'local_transcription_trial',
+      durationDays: 7,
+    },
+    now,
+  }).expiresAt;
+  if (
+    currentLocalState.hasAccess
+    && new Date(currentLocalEntitlement.expiresAt || 0).getTime() >= new Date(trialExpiresAt || 0).getTime()
+  ) {
+    return {
+      success: true,
+      data: {
+        ...currentLocalState,
+        reused: true,
+        alreadyActivated: true,
+        preservedExistingEntitlement: true,
+      },
+    };
+  }
+
+  const existingResult = await db.collection('redeem_codes')
+    .where({
+      trialOwnerOpenid: openid,
+    })
+    .limit(1)
+    .get();
+  const existing = existingResult.data && existingResult.data[0] ? existingResult.data[0] : null;
+  if (existing) {
+    const activation = await activateTrialRedeemCode({ openid, codeDoc: existing, now });
+    const entitlementState = buildEntitlementState(activation.entitlement, now);
+    return {
+      success: true,
+      data: {
+        ...entitlementState,
+        code: normalizeRedeemCode(existing.code),
+        status: existing.status || 'active',
+        durationDays: Number(existing.durationDays) || 7,
+        cloudQuotaSeconds: Number(existing.cloudQuotaSeconds) || 0,
+        createdAt: existing.createdAt || '',
+        expiresAt: entitlementState.expiresAt,
+        reused: true,
+        alreadyActivated: activation.alreadyActivated,
+      },
+    };
+  }
+
+  let doc = null;
+  let attempts = 0;
+  while (!doc && attempts < 30) {
+    attempts += 1;
+    const [candidate] = createAdminRedeemCodeDocuments({
+      count: 1,
+      prefix: 'OBTRY',
+      durationDays: 7,
+      maxRedemptions: 1,
+      note: 'self-service-pro-trial',
+      plan: 'local_transcription_trial',
+      now,
+    });
+    const duplicateResult = await db.collection('redeem_codes')
+      .where({ code: candidate.code })
+      .limit(1)
+      .get();
+    if (duplicateResult.data && duplicateResult.data[0]) continue;
+    doc = {
+      ...candidate,
+      trialOwnerOpenid: openid,
+      trialIssuedAt: now,
+      deliveryStatus: 'sent',
+      deliveredAt: now,
+      deliveredTo: openid,
+    };
+  }
+
+  if (!doc) {
+    const error = new Error('体验卡生成失败，请稍后再试');
+    error.code = 'TRIAL_REDEEM_CODE_GENERATE_FAILED';
+    throw error;
+  }
+
+  const created = await db.collection('redeem_codes').add({ data: doc });
+  const createdDoc = {
+    ...doc,
+    _id: created._id,
+  };
+  const activation = await activateTrialRedeemCode({ openid, codeDoc: createdDoc, now });
+  const entitlementState = buildEntitlementState(activation.entitlement, now);
+  return {
+    success: true,
+    data: {
+      ...entitlementState,
+      code: doc.code,
+      status: 'redeemed',
+      durationDays: doc.durationDays,
+      cloudQuotaSeconds: doc.cloudQuotaSeconds,
+      createdAt: doc.createdAt,
+      expiresAt: entitlementState.expiresAt,
+      _id: created._id,
+      reused: false,
+      alreadyActivated: false,
+    },
+  };
+}
+
+async function createPaymentOrder(event = {}) {
+  const wxContext = cloud.getWXContext();
+  const openid = wxContext.OPENID;
+  if (!openid) throw new Error('OpenID is required');
+  await ensureCollection('payment_orders');
+  const now = new Date().toISOString();
+  const order = createPaymentOrderDocument({
+    openid,
+    planId: event.planId,
+    now,
+  });
+  const created = await db.collection('payment_orders').add({ data: order });
+  return {
+    success: true,
+    data: {
+      ...buildPaymentOrderState(order),
+      _id: created._id,
+    },
+  };
+}
+
+async function queryPaymentOrder(event = {}) {
+  const wxContext = cloud.getWXContext();
+  const openid = wxContext.OPENID;
+  const orderNo = String(event.orderNo || '').trim();
+  if (!openid) throw new Error('OpenID is required');
+  if (!orderNo) throw new Error('缺少订单号');
+  await ensureCollection('payment_orders');
+  const result = await db.collection('payment_orders')
+    .where({ orderNo, openid })
+    .limit(1)
+    .get();
+  const order = result.data && result.data[0] ? result.data[0] : null;
+  if (!order) throw new Error('订单不存在');
+  return {
+    success: true,
+    data: buildPaymentOrderState(order),
+  };
+}
+
+async function applyPaidPaymentOrder(order, now = new Date().toISOString()) {
+  const entitlement = createPaidEntitlementFromOrder({ order, now });
+  await ensureCollection('user_entitlements');
+  const currentResult = await db.collection('user_entitlements')
+    .where({
+      openid: order.openid,
+      plan: entitlement.plan,
+      status: 'active',
+    })
+    .orderBy('redeemedAt', 'desc')
+    .limit(1)
+    .get();
+  const current = currentResult.data && currentResult.data[0] ? currentResult.data[0] : null;
+  if (current && current._id) {
+    await db.collection('user_entitlements').doc(current._id).update({ data: entitlement });
+  } else {
+    await db.collection('user_entitlements').add({ data: entitlement });
+  }
+  return entitlement;
+}
+
+async function adminListPaymentOrders(event = {}) {
+  assertRedeemAdmin(event);
+  await ensureCollection('payment_orders');
+  const keyword = getKeyword(event.keyword);
+  const statusFilter = String(event.status || '').trim();
+  const limit = normalizeAdminPositiveInteger(event.limit, 1, 500, 100);
+  const result = await db.collection('payment_orders')
+    .orderBy('createdAt', 'desc')
+    .limit(500)
+    .get();
+  const filtered = (result.data || [])
+    .filter((item) => !statusFilter || item.status === statusFilter)
+    .filter((item) => includesAdminKeyword(item, keyword, ['orderNo', 'openid', 'planId', 'planName', 'status']));
+  return {
+    success: true,
+    data: {
+      items: filtered.slice(0, limit).map((item) => ({
+        _id: item._id,
+        openid: item.openid || '',
+        ...buildPaymentOrderState(item),
+        updatedAt: item.updatedAt || '',
+      })),
+      total: filtered.length,
+    },
+  };
+}
+
+async function adminUpdatePaymentOrder(event = {}) {
+  assertRedeemAdmin(event);
+  await ensureCollection('payment_orders');
+  const orderNo = String(event.orderNo || '').trim();
+  const action = String(event.action || '').trim();
+  if (!orderNo) throw new Error('缺少订单号');
+  const result = await db.collection('payment_orders')
+    .where({ orderNo })
+    .limit(1)
+    .get();
+  const order = result.data && result.data[0] ? result.data[0] : null;
+  if (!order || !order._id) throw new Error('订单不存在');
+  const now = new Date().toISOString();
+  const updateData = { updatedAt: now };
+  let entitlement = null;
+  if (action === 'markPaid') {
+    updateData.status = 'paid';
+    updateData.paidAt = order.paidAt || now;
+    updateData.payMode = order.payMode || 'manual_pending';
+    entitlement = await applyPaidPaymentOrder({ ...order, ...updateData }, updateData.paidAt);
+  } else if (action === 'cancel') {
+    updateData.status = 'cancelled';
+  } else {
+    throw new Error('不支持的订单操作');
+  }
+  await db.collection('payment_orders').doc(order._id).update({ data: updateData });
+  return {
+    success: true,
+    data: {
+      ...buildPaymentOrderState({ ...order, ...updateData }),
+      entitlement: entitlement ? buildEntitlementState(entitlement, now) : null,
+    },
   };
 }
 
@@ -526,7 +1530,7 @@ async function adminUpsertRedeemCode(event) {
     code: event.code,
     plan: event.plan || DEFAULT_REDEEM_PLAN,
     durationDays: event.durationDays,
-    maxRedemptions: event.maxRedemptions,
+    maxRedemptions: 1,
     now,
     note: event.note || '',
   });
@@ -623,7 +1627,7 @@ async function adminGenerateRedeemCodes(event) {
       count: 1,
       prefix: event.prefix || 'OBPRO',
       durationDays: event.durationDays,
-      maxRedemptions: event.maxRedemptions,
+      maxRedemptions: 1,
       note: event.note || '',
       plan: event.plan || DEFAULT_REDEEM_PLAN,
       now,
@@ -662,16 +1666,25 @@ async function adminListRedeemCodes(event) {
   await ensureCollection('redeem_codes');
   const now = new Date().toISOString();
   const keyword = getKeyword(event.keyword);
-  const limit = normalizeAdminPositiveInteger(event.limit, 1, 100, 50);
-  const result = await db.collection('redeem_codes')
-    .orderBy('updatedAt', 'desc')
-    .limit(100)
-    .get();
-  const items = (result.data || [])
-    .filter((item) => includesAdminKeyword({
-      ...item,
-      ...buildRedeemCodeDeliveryState(item),
-    }, keyword, ['code', 'status', 'plan', 'note', 'lastRedeemedOpenId', 'deliveryStatus', 'deliveryStatusText']))
+  const statusFilter = String(event.status || '').trim();
+  const deliveryStatusFilter = String(event.deliveryStatus || '').trim();
+  const limit = normalizeAdminPositiveInteger(event.limit, 1, 500, 100);
+  const maxRead = normalizeAdminPositiveInteger(event.maxRead, 100, 5000, 5000);
+  const result = await readAdminCollectionSnapshot('redeem_codes', {
+    orderField: 'updatedAt',
+    maxRead,
+  });
+  const filtered = (result.data || [])
+    .filter((item) => {
+      const deliveryState = buildRedeemCodeDeliveryState(item);
+      if (statusFilter && (item.status || 'active') !== statusFilter) return false;
+      if (deliveryStatusFilter && deliveryState.deliveryStatus !== deliveryStatusFilter) return false;
+      return includesAdminKeyword({
+        ...item,
+        ...deliveryState,
+      }, keyword, ['code', 'status', 'plan', 'note', 'deliveredTo', 'lastRedeemedOpenId', 'deliveryStatus', 'deliveryStatusText']);
+    });
+  const items = filtered
     .slice(0, limit)
     .map((item) => {
       const deliveryState = buildRedeemCodeDeliveryState(item);
@@ -686,6 +1699,7 @@ async function adminListRedeemCodes(event) {
         deliveryStatus: deliveryState.deliveryStatus,
         deliveryStatusText: deliveryState.deliveryStatusText,
         deliveredAt: item.deliveredAt || '',
+        deliveredTo: item.deliveredTo || '',
         note: item.note || '',
         lastRedeemedAt: item.lastRedeemedAt || '',
         lastRedeemedOpenId: item.lastRedeemedOpenId || '',
@@ -699,7 +1713,10 @@ async function adminListRedeemCodes(event) {
     success: true,
     data: {
       items,
-      total: items.length,
+      total: filtered.length,
+      scannedTotal: result.total,
+      isTruncated: result.isTruncated,
+      maxRead: result.maxRead,
     },
   };
 }
@@ -728,6 +1745,9 @@ async function adminListEntitlements(event) {
       redeemedAt: item.redeemedAt || '',
       expiresAt: item.expiresAt || '',
       updatedAt: item.updatedAt || '',
+      cloudQuotaSeconds: Number(item.cloudQuotaSeconds) || 0,
+      cloudUsedSeconds: Number(item.cloudUsedSeconds) || 0,
+      cloudRemainingSeconds: buildEntitlementState(item, now).cloudRemainingSeconds,
       remainingDays: getRemainingDays(item.expiresAt, now),
     }));
 
@@ -884,6 +1904,33 @@ async function adminUpdateEntitlement(event) {
   await ensureCollection('user_entitlements');
   const entitlementId = String(event.entitlementId || '').trim();
   const action = String(event.action || '').trim();
+  if (action === 'addCloudQuota') {
+    if (!entitlementId) throw new Error('缺少 Pro 用户记录 ID');
+    const result = await db.collection('user_entitlements').doc(entitlementId).get();
+    const entitlement = result.data;
+    if (!entitlement) throw new Error('Pro 用户记录不存在');
+    const now = new Date().toISOString();
+    const minutes = normalizeAdminPositiveInteger(event.minutes, 1, 100000, 60);
+    const addedSeconds = minutes * 60;
+    const cloudQuotaSeconds = (Number(entitlement.cloudQuotaSeconds) || 0) + addedSeconds;
+    const updateData = {
+      cloudQuotaSeconds: _.inc(addedSeconds),
+      cloudQuotaUpdatedAt: now,
+      updatedAt: now,
+    };
+    await db.collection('user_entitlements').doc(entitlementId).update({ data: updateData });
+    return {
+      success: true,
+      data: {
+        ...entitlement,
+        ...updateData,
+        _id: entitlementId,
+        cloudQuotaSeconds,
+        cloudRemainingSeconds: Math.max(0, cloudQuotaSeconds - (Number(entitlement.cloudUsedSeconds) || 0)),
+        remainingDays: getRemainingDays(entitlement.expiresAt, now),
+      },
+    };
+  }
   if (!entitlementId) throw new Error('缺少 Pro 用户记录 ID');
   if (!['extend', 'disable', 'activate'].includes(action)) throw new Error('不支持的 Pro 用户操作');
 
@@ -894,7 +1941,7 @@ async function adminUpdateEntitlement(event) {
   const now = new Date().toISOString();
   const updateData = { updatedAt: now };
   if (action === 'extend') {
-    const days = normalizeAdminPositiveInteger(event.days, 1, 3650, 30);
+    const days = normalizeAdminPositiveInteger(event.days, 1, 9999, 30);
     const baseTime = entitlement.expiresAt && new Date(entitlement.expiresAt).getTime() > new Date(now).getTime()
       ? entitlement.expiresAt
       : now;
@@ -949,10 +1996,12 @@ async function adminUpdateRedeemCode(event) {
   if (action === 'markSent') {
     updateData.deliveryStatus = 'sent';
     updateData.deliveredAt = now;
+    updateData.deliveredTo = String(event.deliveredTo || target.deliveredTo || '').trim();
   }
   if (action === 'markUnsent') {
     updateData.deliveryStatus = 'unsent';
     updateData.deliveredAt = '';
+    updateData.deliveredTo = '';
   }
   await db.collection('redeem_codes').doc(targetId).update({
     data: updateData,
@@ -975,14 +2024,24 @@ async function createInboxRecord(event) {
   const wxContext = cloud.getWXContext();
   const now = new Date().toISOString();
   const entitlement = await getUserEntitlement(wxContext.OPENID, DEFAULT_REDEEM_PLAN);
-  const quota = buildEntitlementState(entitlement, now).hasAccess
-    ? buildProUsageState()
-    : await consumeDailyQuota(wxContext.OPENID, now);
+  const transcriptionSettings = await getUserTranscriptionSettings(wxContext.OPENID);
   const data = createInboxRecordDocument({
     event,
     openid: wxContext.OPENID,
     now,
+    cloudPreTranscription: transcriptionSettings,
   });
+  const entitlementState = buildEntitlementState(entitlement, now);
+  if (requiresProTranscriptionAccess(data) && !entitlementState.hasAccess) {
+    return {
+      success: false,
+      errCode: 'PRO_REQUIRED',
+      errMsg: '录音、MP3 和音视频转写需要开通 Pro',
+    };
+  }
+  const quota = entitlementState.hasAccess
+    ? buildProUsageState()
+    : await consumeDailyQuota(wxContext.OPENID, now);
 
   if (data.type === 'voice' && shouldPrepareAudioTempURL()) {
     const voiceMetadata = {
@@ -1009,6 +2068,456 @@ async function createInboxRecord(event) {
       ...data,
     },
   };
+}
+
+async function getOwnedInboxRecord(openid, recordId) {
+  await ensureCollection('inbox_records');
+  const result = await db.collection('inbox_records')
+    .where({
+      _id: recordId,
+      openid,
+    })
+    .limit(1)
+    .get();
+  if (result.data && result.data[0]) return result.data[0];
+
+  const record = await findInboxRecordByIdFromSnapshot(recordId);
+  if (!record) return null;
+  return String(record.openid || '') === String(openid || '') ? record : null;
+}
+
+async function getInboxRecordById(recordId) {
+  await ensureCollection('inbox_records');
+  const result = await db.collection('inbox_records')
+    .where({
+      _id: recordId,
+    })
+    .limit(1)
+    .get();
+  if (result.data && result.data[0]) return result.data[0];
+  return await findInboxRecordByIdFromSnapshot(recordId);
+}
+
+async function findInboxRecordByIdFromSnapshot(recordId) {
+  const safeRecordId = String(recordId || '').trim();
+  if (!safeRecordId) return null;
+  const snapshot = await readAdminCollectionSnapshot('inbox_records', {
+    orderField: 'createdAt',
+    order: 'desc',
+    maxRead: 5000,
+  });
+  return (snapshot.data || []).find((item) => String(item._id || '') === safeRecordId) || null;
+}
+
+async function updateInboxRecordMetadata(record, metadataPatch, recordPatch = {}) {
+  const now = new Date().toISOString();
+  const metadata = {
+    ...(record.metadata || {}),
+    ...metadataPatch,
+    updatedAt: now,
+  };
+  const data = {
+    ...recordPatch,
+    metadata,
+    updatedAt: now,
+  };
+  await db.collection('inbox_records').doc(record._id).update({
+    data,
+  });
+  return {
+    ...record,
+    ...recordPatch,
+    metadata,
+    updatedAt: now,
+  };
+}
+
+async function failCloudPreTranscription(record, message) {
+  const runtimeConfig = getCloudRuntimeConfigStatusData();
+  const nextRecord = await updateInboxRecordMetadata(record, {
+    transcriptionStatus: 'failed',
+    transcriptionSource: 'cloud-pretranscription',
+    transcriptionError: String(message || '云端转写失败'),
+    cloudRuntimeDoubaoKeyConfigured: runtimeConfig.doubaoAsrApiKeyConfigured,
+    cloudRuntimeDoubaoKeyLength: runtimeConfig.doubaoAsrApiKeyLength,
+    cloudRuntimeMediaResolverUrlConfigured: runtimeConfig.mediaResolverUrlConfigured,
+    cloudRuntimeMediaResolverSecretConfigured: runtimeConfig.mediaResolverSecretConfigured,
+    cloudPreTranscriptionFinishedAt: new Date().toISOString(),
+  });
+  return {
+    success: false,
+    errMsg: nextRecord.metadata.transcriptionError,
+    data: {
+      recordId: record._id,
+      transcriptionStatus: 'failed',
+    },
+  };
+}
+
+async function consumeCloudTranscriptionQuota({ openid, entitlement, record, billableSeconds, provider, requestId }) {
+  const now = new Date().toISOString();
+  await ensureCollection('cloud_transcription_usages');
+  await db.collection('cloud_transcription_usages').add({
+    data: {
+      openid,
+      entitlementId: entitlement._id || '',
+      recordId: record._id,
+      fileID: record.metadata && (record.metadata.audioFileID || record.metadata.fileID || ''),
+      provider,
+      requestId,
+      usedSeconds: billableSeconds,
+      createdAt: now,
+    },
+  });
+  if (entitlement._id) {
+    await db.collection('user_entitlements').doc(entitlement._id).update({
+      data: {
+        cloudUsedSeconds: _.inc(billableSeconds),
+        cloudLastUsedAt: now,
+        updatedAt: now,
+      },
+    });
+  }
+}
+
+async function completeCloudPreTranscriptionRecord({
+  openid,
+  entitlement,
+  record,
+  result,
+  audioUrl = '',
+  isWebpageAudioVideo = false,
+  resolvedWebpageMedia = null,
+}) {
+  const metadata = record.metadata || {};
+  const transcription = String(result && result.transcription || '').trim();
+  if (!transcription) {
+    throw new Error('云端转写未返回正文');
+  }
+  const actualBillableSeconds = getBillableCloudSecondsFromResult(metadata, result);
+  const actualQuotaState = getCloudQuotaState(entitlement, actualBillableSeconds);
+  if (!actualQuotaState.hasEnoughQuota) {
+    return await failCloudPreTranscription(record, '云端转写额度不足');
+  }
+
+  await consumeCloudTranscriptionQuota({
+    openid,
+    entitlement,
+    record,
+    billableSeconds: actualBillableSeconds,
+    provider: result.provider || 'doubao',
+    requestId: result.requestId || '',
+  });
+
+  const remainingSeconds = Math.max(0, actualQuotaState.cloudRemainingSeconds - actualBillableSeconds);
+  const reactivateSyncedRecordPatch = record.status === 'synced'
+    ? {
+      status: 'pending',
+      syncedAt: '',
+    }
+    : {};
+  await updateInboxRecordMetadata(record, {
+    ...(isWebpageAudioVideo ? {
+      transcriptOnly: true,
+      audioUrl,
+      mediaUrl: audioUrl,
+      mediaResolverSource: resolvedWebpageMedia && resolvedWebpageMedia.source ? resolvedWebpageMedia.source : 'unknown',
+      mediaResolverTitle: resolvedWebpageMedia && resolvedWebpageMedia.title ? resolvedWebpageMedia.title : '',
+      mediaResolverDurationSeconds: resolvedWebpageMedia && resolvedWebpageMedia.durationSeconds ? resolvedWebpageMedia.durationSeconds : 0,
+      mediaResolverError: resolvedWebpageMedia && resolvedWebpageMedia.resolverError ? resolvedWebpageMedia.resolverError : '',
+      conversionStatus: 'success',
+    } : {}),
+    transcription,
+    transcriptionStatus: 'success',
+    transcriptionSource: 'cloud-pretranscription',
+    transcriptionProvider: result.provider || 'doubao',
+    transcriptionError: '',
+    doubaoRequestId: result.requestId || '',
+    cloudUsedSeconds: actualBillableSeconds,
+    cloudRemainingSeconds: remainingSeconds,
+    cloudDetectedDurationSeconds: Math.ceil(Number(result.durationSeconds) || 0),
+    cloudPreTranscriptionFinishedAt: new Date().toISOString(),
+  }, reactivateSyncedRecordPatch);
+
+  return {
+    success: true,
+    data: {
+      recordId: record._id,
+      transcriptionStatus: 'success',
+      usedSeconds: actualBillableSeconds,
+      remainingSeconds,
+    },
+  };
+}
+
+async function processCloudPreTranscription(event) {
+  const wxContext = cloud.getWXContext();
+  const openid = wxContext.OPENID;
+  const recordId = String(event.recordId || '').trim();
+  if (!recordId) {
+    throw new Error('缺少收集记录 ID');
+  }
+
+  const record = await getOwnedInboxRecord(openid, recordId);
+  if (!record) {
+    throw new Error('收集记录不存在');
+  }
+  return await processCloudPreTranscriptionRecord({
+    openid,
+    record,
+  });
+}
+
+function getNextCloudTranscriptionPollAt() {
+  return new Date(Date.now() + CLOUD_TRANSCRIPTION_POLL_INTERVAL_MS).toISOString();
+}
+
+async function startCloudPreTranscriptionRecord({ openid, record }) {
+  const metadata = record.metadata || {};
+  const fileID = String(metadata.audioFileID || metadata.fileID || '').trim();
+  const pageUrl = String(metadata.url || record.content || '').trim();
+  const isWebpageAudioVideo = record.type === 'webpage' && metadata.webpageMediaType === 'audio_video';
+  if (!fileID && !isWebpageAudioVideo) {
+    return await failCloudPreTranscription(record, 'Missing audio or video file for cloud transcription');
+  }
+
+  const now = new Date().toISOString();
+  const entitlement = await getUserEntitlement(openid, DEFAULT_REDEEM_PLAN);
+  const entitlementState = buildEntitlementState(entitlement, now);
+  if (!entitlementState.hasAccess) {
+    return await failCloudPreTranscription(record, 'Pro access is required for cloud transcription');
+  }
+
+  const minimumBillableSeconds = getBillableCloudSeconds(metadata.duration);
+  const minimumQuotaState = getCloudQuotaState(entitlement, minimumBillableSeconds);
+  if (!minimumQuotaState.hasEnoughQuota) {
+    return await failCloudPreTranscription(record, 'Cloud transcription quota is not enough');
+  }
+
+  try {
+    let audioUrl = '';
+    let resolvedWebpageMedia = null;
+    if (fileID) {
+      audioUrl = await getAudioTempURL(fileID);
+    } else if (isWebpageAudioVideo && isHttpUrl(pageUrl)) {
+      resolvedWebpageMedia = await resolveWebpageAudioUrl(pageUrl, record);
+      audioUrl = resolvedWebpageMedia.audioUrl;
+    }
+    if (!audioUrl) {
+      throw new Error(isWebpageAudioVideo ? 'No transcribable media URL was extracted from the webpage' : 'Failed to create audio temp URL');
+    }
+
+    const result = await submitDoubaoCloudTranscription(audioUrl);
+    if (result.complete) {
+      return await completeCloudPreTranscriptionRecord({
+        openid,
+        entitlement,
+        record,
+        result,
+        audioUrl,
+        isWebpageAudioVideo,
+        resolvedWebpageMedia,
+      });
+    }
+
+    await updateInboxRecordMetadata(record, {
+      ...(isWebpageAudioVideo ? {
+        transcriptOnly: true,
+        audioUrl,
+        mediaUrl: audioUrl,
+        mediaResolverSource: resolvedWebpageMedia && resolvedWebpageMedia.source ? resolvedWebpageMedia.source : 'unknown',
+        mediaResolverTitle: resolvedWebpageMedia && resolvedWebpageMedia.title ? resolvedWebpageMedia.title : '',
+        mediaResolverDurationSeconds: resolvedWebpageMedia && resolvedWebpageMedia.durationSeconds ? resolvedWebpageMedia.durationSeconds : 0,
+        mediaResolverError: resolvedWebpageMedia && resolvedWebpageMedia.resolverError ? resolvedWebpageMedia.resolverError : '',
+        conversionStatus: 'processing',
+      } : {}),
+      transcriptionStatus: 'processing',
+      transcriptionSource: 'cloud-pretranscription',
+      transcriptionProvider: result.provider || 'doubao',
+      transcriptionError: '',
+      doubaoRequestId: result.requestId || '',
+      cloudPollAttempts: 0,
+      cloudNextPollAt: getNextCloudTranscriptionPollAt(),
+      cloudPreTranscriptionStartedAt: metadata.cloudPreTranscriptionStartedAt || now,
+      cloudPreTranscriptionSubmittedAt: now,
+    });
+
+    return {
+      success: true,
+      data: {
+        recordId: record._id,
+        transcriptionStatus: 'processing',
+        requestId: result.requestId || '',
+      },
+    };
+  } catch (error) {
+    return await failCloudPreTranscription(record, error.message || String(error));
+  }
+}
+
+async function pollCloudPreTranscriptionRecord({ openid, record }) {
+  const metadata = record.metadata || {};
+  const requestId = String(metadata.doubaoRequestId || '').trim();
+  if (!requestId) {
+    return await failCloudPreTranscription(record, 'Cloud transcription request id is missing');
+  }
+
+  const pollAttempts = Number(metadata.cloudPollAttempts) || 0;
+  if (pollAttempts >= CLOUD_TRANSCRIPTION_MAX_POLL_ATTEMPTS) {
+    return await failCloudPreTranscription(record, 'Cloud transcription timed out');
+  }
+
+  const now = new Date().toISOString();
+  const entitlement = await getUserEntitlement(openid, DEFAULT_REDEEM_PLAN);
+  const entitlementState = buildEntitlementState(entitlement, now);
+  if (!entitlementState.hasAccess) {
+    return await failCloudPreTranscription(record, 'Pro access is required for cloud transcription');
+  }
+
+  try {
+    const result = await queryDoubaoCloudTranscription(requestId);
+    if (result.complete) {
+      const isWebpageAudioVideo = record.type === 'webpage' && metadata.webpageMediaType === 'audio_video';
+      return await completeCloudPreTranscriptionRecord({
+        openid,
+        entitlement,
+        record,
+        result,
+        audioUrl: metadata.audioUrl || metadata.mediaUrl || '',
+        isWebpageAudioVideo,
+        resolvedWebpageMedia: {
+          source: metadata.mediaResolverSource || '',
+          title: metadata.mediaResolverTitle || '',
+          durationSeconds: Number(metadata.mediaResolverDurationSeconds) || 0,
+          resolverError: metadata.mediaResolverError || '',
+        },
+      });
+    }
+
+    const nextAttempts = pollAttempts + 1;
+    await updateInboxRecordMetadata(record, {
+      transcriptionStatus: 'processing',
+      transcriptionSource: 'cloud-pretranscription',
+      transcriptionError: '',
+      cloudPollAttempts: nextAttempts,
+      cloudLastPolledAt: now,
+      cloudNextPollAt: getNextCloudTranscriptionPollAt(),
+    });
+
+    return {
+      success: true,
+      data: {
+        recordId: record._id,
+        transcriptionStatus: 'processing',
+        pollAttempts: nextAttempts,
+      },
+    };
+  } catch (error) {
+    return await failCloudPreTranscription(record, error.message || String(error));
+  }
+}
+
+function isCloudTranscriptionQueueRecord(record, nowTime) {
+  const metadata = (record && record.metadata) || {};
+  const status = String(metadata.transcriptionStatus || '').toLowerCase();
+  if (status !== 'queued' && status !== 'processing') return false;
+  const requested = metadata.cloudTranscriptionRequested === true
+    || metadata.transcriptionSource === 'cloud-pretranscription'
+    || metadata.doubaoRequestId
+    || status === 'queued';
+  if (!requested) return false;
+  const nextPollAt = metadata.cloudNextPollAt ? new Date(metadata.cloudNextPollAt).getTime() : 0;
+  return !nextPollAt || Number.isNaN(nextPollAt) || nextPollAt <= nowTime;
+}
+
+async function processCloudTranscriptionQueue(event = {}) {
+  const nowTime = Date.now();
+  const limit = normalizeAdminPositiveInteger(event.limit, 1, 10, CLOUD_TRANSCRIPTION_QUEUE_BATCH_SIZE);
+  const maxRead = normalizeAdminPositiveInteger(event.maxRead, 100, CLOUD_TRANSCRIPTION_QUEUE_MAX_READ, CLOUD_TRANSCRIPTION_QUEUE_MAX_READ);
+  const snapshot = await readAdminCollectionSnapshot('inbox_records', {
+    orderField: 'updatedAt',
+    order: 'asc',
+    maxRead,
+  });
+  const candidates = (snapshot.data || [])
+    .filter((record) => isCloudTranscriptionQueueRecord(record, nowTime))
+    .slice(0, limit);
+
+  const results = [];
+  for (const record of candidates) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await processCloudPreTranscriptionRecord({
+        openid: record.openid,
+        record,
+      });
+      results.push({
+        recordId: record._id,
+        success: Boolean(result && result.success),
+        data: result && result.data ? result.data : null,
+        errMsg: result && result.errMsg ? result.errMsg : '',
+      });
+    } catch (error) {
+      results.push({
+        recordId: record._id,
+        success: false,
+        data: null,
+        errMsg: error.message || String(error),
+      });
+    }
+  }
+
+  return {
+    success: true,
+    data: {
+      checked: snapshot.data ? snapshot.data.length : 0,
+      processed: results.length,
+      results,
+    },
+  };
+}
+
+async function processCloudPreTranscriptionRecord({ openid, record }) {
+  const recordId = record._id;
+  const metadata = record.metadata || {};
+  if (metadata.transcriptionStatus === 'success' && metadata.transcription) {
+    if (record.status === 'synced') {
+      await updateInboxRecordMetadata(record, {}, {
+        status: 'pending',
+        syncedAt: '',
+      });
+    }
+    return {
+      success: true,
+      data: {
+        recordId,
+        transcriptionStatus: 'success',
+        alreadyProcessed: true,
+      },
+    };
+  }
+
+  if (metadata.transcriptionStatus === 'processing' && metadata.doubaoRequestId) {
+    return await pollCloudPreTranscriptionRecord({ openid, record });
+  }
+
+  return await startCloudPreTranscriptionRecord({ openid, record });
+}
+
+async function adminRetryCloudPreTranscription(event) {
+  assertRedeemAdmin(event);
+  const recordId = String(event.recordId || '').trim();
+  if (!recordId) {
+    throw new Error('Record ID is required');
+  }
+  const record = await getInboxRecordById(recordId);
+  if (!record) {
+    throw new Error('Record not found');
+  }
+  return await processCloudPreTranscriptionRecord({
+    openid: record.openid,
+    record,
+  });
 }
 
 async function createBindCode() {
@@ -1214,7 +2723,7 @@ async function unbindBindClient(event) {
   };
 }
 
-function postJson(url, payload) {
+function postFeishuWebhookJson(url, payload) {
   return new Promise((resolve, reject) => {
     if (!url) {
       reject(new Error('FEISHU_FEEDBACK_WEBHOOK is not configured'));
@@ -1285,7 +2794,7 @@ async function submitFeedback(event) {
   }
 
   try {
-    await postJson(feishuWebhook, buildFeishuFeedbackMessage({
+    await postFeishuWebhookJson(feishuWebhook, buildFeishuFeedbackMessage({
       feedback: data,
       feedbackId,
     }));
@@ -1423,6 +2932,9 @@ async function markInboxRecordSynced(event) {
 
 exports.main = async (event) => {
   try {
+    if (event && (event.Type === 'Timer' || event.TriggerName || event.timer || event.type === 'timer')) {
+      return await processCloudTranscriptionQueue(event);
+    }
     switch (event.type) {
       case 'getOpenId':
         return await getOpenId();
@@ -1440,6 +2952,12 @@ exports.main = async (event) => {
         return await getEntitlementStatus(event);
       case 'redeemAccessCode':
         return await redeemAccessCode(event);
+      case 'getTrialRedeemCode':
+        return await getTrialRedeemCode(event);
+      case 'createPaymentOrder':
+        return await createPaymentOrder(event);
+      case 'queryPaymentOrder':
+        return await queryPaymentOrder(event);
       case 'adminUpsertRedeemCode':
         return await adminUpsertRedeemCode(event);
       case 'adminGenerateRedeemCodes':
@@ -1456,10 +2974,22 @@ exports.main = async (event) => {
         return await adminUpdateEntitlement(event);
       case 'adminUpdateRedeemCode':
         return await adminUpdateRedeemCode(event);
+      case 'adminListPaymentOrders':
+        return await adminListPaymentOrders(event);
+      case 'adminUpdatePaymentOrder':
+        return await adminUpdatePaymentOrder(event);
+      case 'adminRetryCloudPreTranscription':
+        return await adminRetryCloudPreTranscription(event);
       case 'trackAnalyticsEvent':
         return await trackAnalyticsEvent(event);
+      case 'getCloudRuntimeConfigStatus':
+        return await getCloudRuntimeConfigStatus(event);
       case 'createInboxRecord':
         return await createInboxRecord(event);
+      case 'processCloudPreTranscription':
+        return await processCloudPreTranscription(event);
+      case 'processCloudTranscriptionQueue':
+        return await processCloudTranscriptionQueue(event);
       case 'createBindCode':
         return await createBindCode(event);
       case 'replaceBindCode':

@@ -30,6 +30,8 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
+  noteSaveMode: 'date',
+  notePropertyFields: '',
   autoSyncOnLoad: false,
   aiProvider: 'off',
   localAsrPlatform: 'auto',
@@ -61,6 +63,8 @@ assert.deepStrictEqual(mergeSettings({
   apiBase: ' https://api.example.com/sync ',
   clientId: 'client-2',
   inboxDir: '',
+  noteSaveMode: 'root',
+  notePropertyFields: 'type, title, url',
   aiProvider: 'tencent',
   tencentSecretId: ' sid ',
   tencentSecretKey: ' sk ',
@@ -76,6 +80,8 @@ assert.deepStrictEqual(mergeSettings({
   ...DEFAULT_SETTINGS,
   apiBase: 'https://api.example.com/sync',
   clientId: 'client-2',
+  noteSaveMode: 'root',
+  notePropertyFields: 'type,title,url',
   aiProvider: 'tencent',
   localTranscriptionCommand: 'powershell -File transcribe.ps1 -InputPath {input} -OutputPath {output}',
   tencentSecretId: 'sid',
@@ -111,6 +117,8 @@ assert.strictEqual(
   '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
 );
 assert.strictEqual(mergeSettings({ localAsrPlatform: 'bad-value' }).localAsrPlatform, 'auto');
+assert.strictEqual(mergeSettings({ noteSaveMode: 'bad-value' }).noteSaveMode, 'date');
+assert.strictEqual(mergeSettings({ notePropertyFields: ' id, bad_key, url, id ' }).notePropertyFields, 'id,url');
 
 const whitespaceSettings = mergeSettings({
   apiBase: '   ',
@@ -227,9 +235,7 @@ assert.deepStrictEqual(validateSettings({
   apiBase: 'https://api.example.com/sync',
   token: 'ABC-123',
   aiProvider: 'aliyun',
-}), [
-  '请填写阿里云百炼 API Key',
-]);
+}), []);
 
 assert.deepStrictEqual(validateSettings({
   ...DEFAULT_SETTINGS,
@@ -245,9 +251,7 @@ assert.deepStrictEqual(validateSettings({
   apiBase: 'https://api.example.com/sync',
   token: 'ABC-123',
   aiProvider: 'doubao',
-}), [
-  '请填写豆包语音识别 API Key',
-]);
+}), []);
 
 assert.deepStrictEqual(validateSettings({
   ...DEFAULT_SETTINGS,
@@ -262,9 +266,7 @@ assert.deepStrictEqual(validateSettings({
   apiBase: 'https://api.example.com/sync',
   token: 'ABC-123',
   aiProvider: 'local',
-}), [
-  '请填写本地转写命令',
-]);
+}), []);
 
 assert.deepStrictEqual(validateSettings({
   ...DEFAULT_SETTINGS,
@@ -279,10 +281,7 @@ assert.deepStrictEqual(validateSettings({
   apiBase: 'https://api.example.com/sync',
   token: 'ABC-123',
   aiProvider: 'tencent',
-}), [
-  '请填写腾讯云 SecretId',
-  '请填写腾讯云 SecretKey',
-]);
+}), []);
 
 assert.deepStrictEqual(validateSettings({
   ...DEFAULT_SETTINGS,

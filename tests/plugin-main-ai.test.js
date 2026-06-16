@@ -23,6 +23,7 @@ Module._load = originalLoad;
 const helpers = PluginClass.__test;
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const pluginMainSource = fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8');
 
 const pluginMainLinesWithoutIntentionalPdfNoiseCheck = pluginMainSource
@@ -57,7 +58,10 @@ assert.strictEqual(typeof helpers.extractBilibiliAudioUrlFromPlayurlPayload, 'fu
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildSyncProgressMessage, 'function');
+assert.strictEqual(typeof helpers.parseLocalAsrProgressLog, 'function');
 assert.strictEqual(typeof helpers.extractSocialMediaUrlFromHtml, 'function');
+assert.strictEqual(typeof PluginClass.prototype.stopCurrentTranscription, 'function');
+assert.ok(pluginMainSource.includes("setButtonText('停止当前转写')"));
 assert.strictEqual(
   helpers.extractSocialMediaUrlFromHtml(`
     <script>
@@ -70,6 +74,8 @@ assert.strictEqual(
   'https://audio.example.com/demo-audio.m4a',
 );
 assert.strictEqual(typeof helpers.cleanDisplayUrl, 'function');
+assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
+assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallRoot, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallStatus, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrScriptVersionStatus, 'function');
@@ -88,12 +94,20 @@ assert.strictEqual(
 assert.ok(pluginMainSource.includes('getAvailableLocalAsrInstallerPath'));
 assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1'));
 assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh'));
+assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
+assert.ok(pluginMainSource.includes("source.includes('python-venv')"));
+assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
+assert.ok(pluginMainSource.includes("source.includes('exec \"\\\\$WHISPER_CPP_BIN\" \"\\\\$@\"')"));
+assert.ok(pluginMainSource.includes("source.includes('[string]$InstallRoot')"));
+assert.ok(pluginMainSource.includes("source.includes('safeModelPath')"));
 assert.ok(pluginMainSource.includes('downloadedPath'));
 assert.ok(pluginMainSource.includes('return downloadedPath'));
 assert.ok(pluginMainSource.includes('return installerPath'));
 assert.ok(pluginMainSource.indexOf('return downloadedPath') < pluginMainSource.indexOf('return installerPath'));
 assert.strictEqual(pluginMainSource.includes('if (fs.existsSync(installerPath)) return installerPath'), false);
 assert.ok(pluginMainSource.includes('Local ASR installer download returned outdated or invalid content'));
+assert.ok(pluginMainSource.includes("source.includes('Install-ExtractedPackage')"));
+assert.ok(pluginMainSource.includes("!source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')"));
 assert.ok(pluginMainSource.includes('无法下载最新本地转写安装器'));
 const defaultLocalTranscriptionCommand = helpers.getDefaultLocalTranscriptionCommand();
 assert.ok(defaultLocalTranscriptionCommand.includes('%USERPROFILE%'));
@@ -121,6 +135,10 @@ assert.strictEqual(
   }, 'win32').localTranscriptionCommand,
   '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
 );
+assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionEnabled, false);
+assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionThresholdMinutes, 10);
+assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 30 }).cloudPreTranscriptionThresholdMinutes, 30);
+assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 999 }).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
 assert.strictEqual(pluginMainSource.includes(".setName('同步 API 地址')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('启动时自动同步')"), false);
@@ -130,6 +148,18 @@ assert.strictEqual(pluginMainSource.includes(".setButtonText('兑换并开通')"
 assert.strictEqual(pluginMainSource.includes(".setPlaceholder('例如 ZZAI030')"), false);
 assert.ok(pluginMainSource.includes('小程序名字：Obsidian 内容同步助手'));
 assert.ok(pluginMainSource.includes('打开微信小程序【Obsidian 内容同步助手】'));
+assert.ok(pluginMainSource.includes(".setName('立即绑定')"));
+assert.ok(pluginMainSource.includes(".setButtonText('立即绑定')"));
+assert.ok(pluginMainSource.includes('已完成绑定的微信'));
+assert.strictEqual(pluginMainSource.includes("text: '已绑定小程序码'"), false);
+assert.strictEqual(pluginMainSource.includes(".setName('新增绑定码')"), false);
+assert.strictEqual(pluginMainSource.includes(".setButtonText('新增绑定码')"), false);
+assert.ok(pluginMainSource.includes("text: '使用教程'"));
+assert.ok(pluginMainSource.includes("text: '绑定小程序'"));
+assert.ok(pluginMainSource.includes("text: 'Pro 本地转写功能'"));
+assert.ok(pluginMainSource.includes('wechat-inbox-sync-section-spacer'));
+assert.ok(pluginMainSource.indexOf("text: '使用教程'") < pluginMainSource.indexOf("text: '绑定小程序'"));
+assert.ok(pluginMainSource.indexOf("text: '绑定小程序'") < pluginMainSource.indexOf("text: 'Pro 本地转写功能'"));
 assert.ok(pluginMainSource.includes('本地转写系统'));
 assert.ok(pluginMainSource.includes('如果苹果电脑安装失败，请手动选择 macOS'));
 assert.ok(pluginMainSource.includes('install.log'));
@@ -141,6 +171,17 @@ assert.ok(pluginMainSource.includes('setText(message)'));
 assert.ok(pluginMainSource.includes('lastSyncDiagnostic'));
 assert.ok(pluginMainSource.includes('复制同步诊断'));
 assert.ok(pluginMainSource.includes('同步失败诊断'));
+assert.ok(pluginMainSource.includes('发给开发者张张（微信：heyhmjx）'));
+assert.ok(pluginMainSource.includes('/transcriptions/cloud'));
+assert.ok(pluginMainSource.includes('runCloudFallbackTranscription'));
+assert.ok(pluginMainSource.includes('local-cloud-fallback'));
+assert.ok(pluginMainSource.includes('云端兜底'));
+assert.strictEqual(pluginMainSource.includes("setName('语音转写')"), false);
+assert.strictEqual(pluginMainSource.includes("setName('豆包语音识别 API Key')"), false);
+assert.strictEqual(pluginMainSource.includes("setName('阿里百炼 API Key')"), false);
+assert.strictEqual(pluginMainSource.includes("setName('腾讯云 SecretId')"), false);
+assert.strictEqual(pluginMainSource.includes("setName('长音视频云端预转写')"), false);
+assert.strictEqual(pluginMainSource.includes("setName('云端预转写阈值')"), false);
 assert.ok(pluginMainSource.includes('正在同步'));
 assert.ok(pluginMainSource.includes('正在处理'));
 assert.strictEqual(helpers.getSocialRequestHeaders('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4').Referer, 'https://www.douyin.com/');
@@ -154,6 +195,9 @@ assert.strictEqual(
   helpers.cleanDisplayUrl('https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?poc_token=abc&target_url=https%253A%252F%252Fmp.weixin.qq.com%252Fs%253F__biz%253DMzABC%2526mid%253D123%2526idx%253D1%2526sn%253Dabcdef%2526pass_ticket%253Dhidden'),
   'https://mp.weixin.qq.com/s?__biz=MzABC&mid=123&idx=1&sn=abcdef',
 );
+assert.strictEqual(helpers.isWechatMpArticleUrl('https://mp.weixin.qq.com/s/example'), true);
+assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://mp.weixin.qq.com/s/example'), true);
+assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://developers.weixin.qq.com/miniprogram'), false);
 assert.strictEqual(
   helpers.getLocalAsrInstallRoot('C:\\Users\\demo'),
   'C:\\Users\\demo\\.wechat-inbox-local-asr',
@@ -211,6 +255,26 @@ const completeWindowsAsrStatus = helpers.getLocalAsrInstallStatus('C:\\Users\\de
 assert.strictEqual(completeWindowsAsrStatus.whisperPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe');
 assert.strictEqual(completeWindowsAsrStatus.ffmpegPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe');
 assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
+{
+  const tempAsrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-status-'));
+  fs.mkdirSync(path.join(tempAsrRoot, 'whisper', 'Release'), { recursive: true });
+  fs.mkdirSync(path.join(tempAsrRoot, 'ffmpeg', 'bin'), { recursive: true });
+  fs.mkdirSync(path.join(tempAsrRoot, 'models'), { recursive: true });
+  fs.writeFileSync(path.join(tempAsrRoot, 'whisper', 'Release', 'main.exe'), '');
+  fs.writeFileSync(path.join(tempAsrRoot, 'whisper', 'Release', 'whisper-cli.exe'), '');
+  fs.writeFileSync(path.join(tempAsrRoot, 'ffmpeg', 'bin', 'ffmpeg.exe'), '');
+  fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
+  fs.writeFileSync(
+    path.join(tempAsrRoot, 'transcribe.ps1'),
+    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100',
+    'utf8',
+  );
+  const recursiveStatus = helpers.getLocalAsrInstallStatus(tempAsrRoot, fs.existsSync, 'win32');
+  assert.strictEqual(path.basename(recursiveStatus.whisperPath), 'whisper-cli.exe');
+  assert.strictEqual(path.basename(recursiveStatus.ffmpegPath), 'ffmpeg.exe');
+  assert.strictEqual(recursiveStatus.ready, true);
+  fs.rmSync(tempAsrRoot, { recursive: true, force: true });
+}
 assert.ok(pluginMainSource.includes('ffmpeg 路径：'));
 assert.ok(pluginMainSource.includes('缺失项：'));
 assert.deepStrictEqual(
@@ -250,6 +314,66 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'chunked-safe-native-utf8-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-start-process-utf8-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-start-process-utf8-simplified-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\n$SafeTempRoot = New-SafeTempDirectory\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-start-process-utf8-simplified-shortpath-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Test-WhisperNativeCrashExitCode {}\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-start-process-utf8-simplified-fallback-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"',
+  }),
+  {
+    scriptVersion: 'chunked-start-process-utf8-simplified-fallback-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100',
+  }),
+  {
+    scriptVersion: 'chunked-start-process-utf8-simplified-fallback-safe-model-progress-run-log',
     scriptOutdated: false,
   },
 );
@@ -260,6 +384,16 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'chunked-bash-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('/Users/demo/.wechat-inbox-local-asr/transcribe.sh', {
+    existsSync: () => true,
+    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nCHUNK_SECONDS=600\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
+  }),
+  {
+    scriptVersion: 'chunked-bash-simplified-progress-run-log',
     scriptOutdated: false,
   },
 );
@@ -268,6 +402,104 @@ assert.ok(helpers.buildLocalAsrInstallCommand('C:\\plugin\\local-asr\\install-lo
 assert.strictEqual(
   helpers.buildLocalAsrInstallCommand('/Users/demo/plugin/local-asr/install-local-asr-macos.sh', 'darwin'),
   '/bin/bash "/Users/demo/plugin/local-asr/install-local-asr-macos.sh"',
+);
+assert.deepStrictEqual(
+  helpers.parseLocalAsrProgressLog('progressStage=transcribing\nprogressCurrent=2\nprogressTotal=5\nprogressPercent=40\n'),
+  {
+    stage: 'transcribing',
+    current: 2,
+    total: 5,
+    percent: 40,
+  },
+);
+assert.deepStrictEqual(
+  helpers.parseLocalAsrProgressLog('progressStage=transcribing\nprogressCurrent=3\nprogressTotal=4\n'),
+  {
+    stage: 'transcribing',
+    current: 3,
+    total: 4,
+    percent: 75,
+  },
+);
+assert.strictEqual(
+  helpers.buildSyncProgressMessage({ stage: 'transcribing', title: 'demo.mp3', percent: 40 }).includes('40%'),
+  true,
+);
+assert.strictEqual(
+  helpers.buildSyncProgressMessage({ stage: 'downloading', title: 'podcast.mp3', percent: 25 }).includes('25%'),
+  true,
+);
+assert.strictEqual(helpers.isAsciiPath('C:\\Users\\Public'), true);
+assert.strictEqual(helpers.isAsciiPath('C:\\用户\\公用'), false);
+assert.strictEqual(
+  helpers.getSafeLocalAsrInstallRoot('win32', { PUBLIC: 'C:\\Users\\Public' }),
+  'C:\\Users\\Public\\wechat-inbox-local-asr',
+);
+assert.strictEqual(
+  helpers.getSafeLocalAsrInstallRoot('win32', {
+    PUBLIC: 'C:\\用户\\公用',
+    ProgramData: 'C:\\ProgramData',
+  }),
+  'C:\\ProgramData\\wechat-inbox-local-asr',
+);
+assert.strictEqual(
+  helpers.getSafeLocalAsrInstallRoot('win32', {
+    PUBLIC: 'C:\\用户\\公用',
+    ProgramData: 'C:\\程序数据',
+    SystemDrive: 'D:',
+  }),
+  'D:\\wechat-inbox-local-asr',
+);
+assert.strictEqual(
+  helpers.getLocalAsrInstallRoot('C:\\Users\\demo', 'safe', 'win32', { PUBLIC: 'C:\\Users\\Public' }),
+  'C:\\Users\\Public\\wechat-inbox-local-asr',
+);
+assert.strictEqual(
+  helpers.getLocalAsrRepairAction({
+    platform: 'win32',
+    installRoot: 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr',
+    status: { ready: true, scriptOutdated: false },
+    runLogText: '',
+  }),
+  'none',
+);
+assert.strictEqual(
+  helpers.getLocalAsrRepairAction({
+    platform: 'win32',
+    installRoot: 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr',
+    status: { ready: true, scriptOutdated: true },
+    runLogText: '',
+  }),
+  'default',
+);
+assert.strictEqual(
+  helpers.getLocalAsrRepairAction({
+    platform: 'win32',
+    installRoot: 'C:\\Users\\徐zx\\.wechat-inbox-local-asr',
+    status: { ready: true, scriptOutdated: false },
+    runLogText: '',
+  }),
+  'safe',
+);
+assert.strictEqual(
+  helpers.getLocalAsrRepairAction({
+    platform: 'win32',
+    installRoot: 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr',
+    status: { ready: true, scriptOutdated: false },
+    runLogText: 'whisper failed with exit code -1073740791 / 0xC0000409',
+  }),
+  'safe',
+);
+assert.strictEqual(
+  helpers.getDefaultLocalTranscriptionCommand('win32', 'C:\\Users\\Public\\wechat-inbox-local-asr'),
+  'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\Public\\wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+);
+assert.ok(
+  helpers.buildLocalAsrInstallCommand(
+    'C:\\plugin\\local-asr\\install-local-asr.ps1',
+    'win32',
+    'C:\\Users\\Public\\wechat-inbox-local-asr',
+  ).includes('-InstallRoot "C:\\Users\\Public\\wechat-inbox-local-asr"'),
 );
 assert.strictEqual(
   helpers.getLocalAsrPlatformMismatchMessage('darwin', 'win32'),
@@ -299,10 +531,35 @@ assert.ok(
     error: 'whisper failed with exit code -1073741515',
   }).includes('缺少 Windows VC++ 运行库或 whisper 依赖 DLL'),
 );
+assert.ok(
+  helpers.buildLocalAsrRunLogText({
+    status: 'failed',
+    error: 'whisper failed with exit code -1073740791',
+  }).includes('whisper.cpp 原生程序崩溃'),
+);
+assert.strictEqual(typeof helpers.appendLocalAsrRunLog, 'function');
+{
+  const tempRunLogDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-run-log-'));
+  const runLogPath = helpers.getLocalAsrRunLogPath(tempRunLogDir);
+  fs.writeFileSync(runLogPath, 'script detailed log\nffmpegExit=1', 'utf8');
+  helpers.appendLocalAsrRunLog({
+    installRoot: tempRunLogDir,
+    status: 'failed',
+    command: 'powershell -File transcribe.ps1',
+    error: 'wrapper command failed',
+  });
+  const mergedLog = fs.readFileSync(runLogPath, 'utf8');
+  assert.ok(mergedLog.includes('script detailed log'));
+  assert.ok(mergedLog.includes('ffmpegExit=1'));
+  assert.ok(mergedLog.includes('plugin wrapper'));
+  assert.ok(mergedLog.includes('wrapper command failed'));
+  fs.rmSync(tempRunLogDir, { recursive: true, force: true });
+}
 assert.strictEqual(
   helpers.explainLocalAsrExitCode(-1073741515),
   '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。',
 );
+assert.ok(helpers.explainLocalAsrExitCode(-1073740791).includes('0xC0000409'));
 assert.strictEqual(helpers.normalizeBindCodeInput(' ozt n1i '), 'OZT-N1I');
 assert.strictEqual(helpers.mergeSettings({ token: 'oztn1i' }).token, 'OZT-N1I');
 assert.strictEqual(typeof helpers.createRetryableTranscriptionError, 'function');
@@ -402,6 +659,24 @@ assert.strictEqual(xiaohongshuDuplicatedHostNote.imageUrls.length, 2);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('window.__INITIAL_STATE__'), false);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('imageList'), false);
 
+const xiaohongshuNoisyImagesNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<meta property="og:title" content="XHS Noisy Images Title">',
+  '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/spectrum/cover-noisy!nd_dft_wlteh_jpg_3">',
+  '</head><body>',
+  '<img src="https://sns-avatar-qc.xhscdn.com/avatar-user.jpg">',
+  '<img src="https://ci.xiaohongshu.com/recommend-banner.jpg">',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"正文。 #干净图片","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-inner-a!nd_dft_wlteh_jpg_3"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-inner-b!nd_dft_wlteh_jpg_3"}]},"feed":{"items":[{"image":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/recommend-noise!nd_dft_wlteh_jpg_3"}]}}</script>',
+  '</body></html>',
+].join(''), 'https://www.xiaohongshu.com/explore/noisy-images');
+assert.ok(xiaohongshuNoisyImagesNote.markdown.includes('cover-noisy'));
+assert.ok(xiaohongshuNoisyImagesNote.markdown.includes('real-inner-a'));
+assert.ok(xiaohongshuNoisyImagesNote.markdown.includes('real-inner-b'));
+assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('avatar-user'), false);
+assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('recommend-banner'), false);
+assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('recommend-noise'), false);
+assert.strictEqual(xiaohongshuNoisyImagesNote.imageUrls.length, 3);
+
 const xiaohongshuNoisyPageNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<meta property="og:title" content="给女朋友做的第一个vibe coding项目💕 - 小红书">',
@@ -426,6 +701,59 @@ const xiaohongshuFallbackNote = helpers.extractXiaohongshuMarkdownFromHtml([
 assert.ok(xiaohongshuFallbackNote.markdown.includes('刚开始听播客的'));
 assert.strictEqual(xiaohongshuFallbackNote.markdown.includes('3 亿人的生活经验'), false);
 assert.strictEqual(xiaohongshuFallbackNote.markdown.includes('把文字复制好'), false);
+
+assert.strictEqual(typeof helpers.buildMarkdownForRecord, 'function');
+const frontmatterMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'record-frontmatter-1',
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/frontmatter',
+    source: 'wechat-miniprogram',
+    createdAt: '2026-06-14T08:00:00.000Z',
+    metadata: {
+      title: 'Frontmatter Test',
+      url: 'https://www.xiaohongshu.com/explore/frontmatter',
+      conversionStatus: 'success',
+      markdown: '正文内容',
+    },
+  },
+  title: '小红书-Frontmatter Test',
+  syncedAt: '2026-06-14T08:05:00.000Z',
+});
+assert.ok(frontmatterMarkdown.startsWith('---\n'));
+assert.ok(frontmatterMarkdown.includes('\nid: record-frontmatter-1\n'));
+assert.ok(frontmatterMarkdown.includes('\ntype: webpage\n'));
+assert.ok(frontmatterMarkdown.includes('\nurl: https://www.xiaohongshu.com/explore/frontmatter\n'));
+assert.ok(frontmatterMarkdown.includes('\ncreated_at: 2026-06-14T08:00:00.000Z\n'));
+assert.ok(frontmatterMarkdown.includes('\nsynced_at: 2026-06-14T08:05:00.000Z\n'));
+assert.ok(frontmatterMarkdown.includes('\nstatus: synced\n'));
+assert.ok(frontmatterMarkdown.includes('收集时间：2026-06-14 16:00:00'));
+
+const customFrontmatterMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'record-frontmatter-custom-1',
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/custom-frontmatter',
+    source: 'wechat-miniprogram',
+    createdAt: '2026-06-14T08:00:00.000Z',
+    metadata: {
+      title: 'Custom Frontmatter Test',
+      url: 'https://www.xiaohongshu.com/explore/custom-frontmatter',
+      conversionStatus: 'success',
+      markdown: '正文内容',
+    },
+  },
+  title: '小红书-Custom Frontmatter Test',
+  syncedAt: '2026-06-14T08:05:00.000Z',
+  propertyFields: 'type,title,url',
+});
+assert.ok(customFrontmatterMarkdown.startsWith('---\n'));
+assert.ok(customFrontmatterMarkdown.includes('\ntype: webpage\n'));
+assert.ok(customFrontmatterMarkdown.includes('\ntitle: 小红书-Custom Frontmatter Test\n'));
+assert.ok(customFrontmatterMarkdown.includes('\nurl: https://www.xiaohongshu.com/explore/custom-frontmatter\n'));
+assert.strictEqual(customFrontmatterMarkdown.includes('\nid: record-frontmatter-custom-1\n'), false);
+assert.strictEqual(customFrontmatterMarkdown.includes('\ncreated_at: 2026-06-14T08:00:00.000Z\n'), false);
+assert.strictEqual(customFrontmatterMarkdown.includes('\nstatus: synced\n'), false);
 
 const cleanedPdfText = helpers.cleanPdfExtractedText([
   '创始人手册',
@@ -554,6 +882,13 @@ assert.strictEqual(failedTranscriptMarkdown.includes('## Markdown 内容'), fals
 assert.strictEqual(failedTranscriptMarkdown.includes('## 视频文案'), false);
 assert.strictEqual(failedTranscriptMarkdown.includes('window.__'), false);
 
+const cloudPendingTranscriptMarkdown = helpers.buildAudioTranscriptMarkdown({
+  url: 'cloud://voice/interview.mp3',
+  transcriptionStatus: 'processing',
+  transcriptionSource: 'cloud-pretranscription',
+});
+assert.ok(cloudPendingTranscriptMarkdown.includes('云端转写中，下次同步会自动更新。'));
+
 const socialMediaUrl = helpers.extractSocialMediaUrlFromHtml([
   '<html><head>',
   '<meta property="og:video" content="https://video.example.com/talk.mp4?token=1">',
@@ -618,6 +953,8 @@ assert.strictEqual(doubaoRequest.body.user.uid, 'wechat-inbox-sync');
 assert.strictEqual(doubaoRequest.body.audio.url, 'https://temp.example.com/voice.mp3');
 assert.strictEqual(doubaoRequest.body.audio.format, 'mp3');
 assert.strictEqual(doubaoRequest.body.request.model_name, 'bigmodel');
+assert.strictEqual(doubaoRequest.body.request.enable_speaker_info, true);
+assert.strictEqual(doubaoRequest.body.request.show_utterances, true);
 assert.strictEqual(doubaoRequest.throw, false);
 
 const doubaoQueryRequest = helpers.buildDoubaoAsrQueryRequest({
@@ -656,6 +993,39 @@ assert.strictEqual(helpers.parseDoubaoAsrResult({
     { text: '第二段' },
   ],
 }), '第一段\n第二段');
+
+assert.strictEqual(helpers.parseDoubaoAsrResult({
+  result: {
+    text: '完整文本',
+    utterances: [
+      { speaker: 1, text: '第一位说话。' },
+      { speaker_id: 2, utterance_text: '第二位回应。' },
+    ],
+  },
+}), '说话人1：第一位说话。\n说话人2：第二位回应。');
+
+assert.strictEqual(helpers.parseDoubaoAsrResult({
+  result: {
+    text: '完整文本',
+    utterances: [
+      { additions: { speaker: '1' }, text: '官方结构第一句。' },
+      { additions: { speaker: '2' }, text: '官方结构第二句。' },
+    ],
+  },
+}), '说话人1：官方结构第一句。\n说话人2：官方结构第二句。');
+
+assert.strictEqual(helpers.parseDoubaoAsrResult({
+  result: [
+    {
+      text: '完整文本',
+      utterances: [
+        { speaker: 1, text: '第一段' },
+        { speaker: 1, text: '继续第一段' },
+        { speaker: 2, result_text: '第二段' },
+      ],
+    },
+  ],
+}), '说话人1：第一段\n说话人1：继续第一段\n说话人2：第二段');
 
 assert.deepStrictEqual(helpers.parseDoubaoAsrTaskState({
   status: 200,
@@ -921,6 +1291,16 @@ async function runAsyncHydrationTests() {
         ].join(''),
       };
     }
+    if (url === 'https://www.xiaohongshu.com/explore/short-link-note') {
+      return {
+        text: '<html><head><title>XHS Short Link</title></head><body>短链落地页没有直接暴露视频</body></html>',
+      };
+    }
+    if (url === 'https://www.xiaohongshu.com/404?source=note&type=video') {
+      return {
+        text: '<html><head><title>小红书 - 你访问的页面不见了</title></head><body>你访问的页面不见了</body></html>',
+      };
+    }
     if (url === 'https://www.bilibili.com/video/BV123') {
       return {
         text: '<script>{"subtitle_url":"https://subtitle.example.com/subtitle.json"}</script>',
@@ -991,6 +1371,34 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(xhsVideoRecord.metadata.transcriptOnly, true);
   assert.strictEqual(xhsVideoRecord.metadata.markdown, undefined);
   assert.strictEqual(xhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs.mp4');
+
+  const forcedXhsVideoPlugin = new PluginClass();
+  forcedXhsVideoPlugin.settings = { aiProvider: 'off' };
+  forcedXhsVideoPlugin.renderSocialMediaUrls = async (url) => {
+    assert.strictEqual(url, 'https://www.xiaohongshu.com/explore/short-link-note');
+    return ['https://video.example.com/xhs-short-link.mp4'];
+  };
+  const forcedXhsVideoRecord = await forcedXhsVideoPlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/short-link-note',
+    metadata: {
+      url: 'https://www.xiaohongshu.com/explore/short-link-note',
+      webpageMediaType: 'audio_video',
+      transcriptionMode: 'local',
+    },
+  }, '', '', '小红书短链视频');
+  assert.strictEqual(forcedXhsVideoRecord.metadata.transcriptOnly, true);
+  assert.strictEqual(forcedXhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs-short-link.mp4');
+
+  const xhsUnavailableVideoRecord = await plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/404?source=note&type=video',
+    metadata: { url: 'https://www.xiaohongshu.com/404?source=note&type=video' },
+  }, '', '', '小红书失效视频');
+  assert.strictEqual(xhsUnavailableVideoRecord.metadata.transcriptOnly, true);
+  assert.strictEqual(xhsUnavailableVideoRecord.metadata.transcriptionStatus, 'failed');
+  assert.ok(xhsUnavailableVideoRecord.metadata.transcriptionError.includes('小红书网页端未返回可转写的视频资源'));
+  assert.ok(xhsUnavailableVideoRecord.metadata.transcriptionError.includes('从手机相册或文件导入视频'));
 
   const xhsImageRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
@@ -1074,6 +1482,141 @@ async function runAsyncHydrationTests() {
     transcription: '本地转写拿到的 B站口播',
     source: 'doubao-local',
   });
+
+  const forcedLocalPlugin = new PluginClass();
+  forcedLocalPlugin.settings = { aiProvider: 'off' };
+  forcedLocalPlugin.runLocalTranscription = async (audioUrl) => {
+    assert.strictEqual(audioUrl, 'https://media.example.com/local.m4a');
+    return '小程序选择本地后的转写结果';
+  };
+  const forcedLocalResult = await forcedLocalPlugin.runConfiguredTranscription('https://media.example.com/local.m4a', {
+    forceLocal: true,
+  });
+  assert.deepStrictEqual(forcedLocalResult, {
+    transcription: '小程序选择本地后的转写结果',
+    source: 'local',
+  });
+
+  const webMediaFallbackPlugin = new PluginClass();
+  webMediaFallbackPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'PRO-123',
+    clientId: 'test-client',
+    aiProvider: 'local',
+    localTranscriptionCommand: 'echo test',
+    bindings: [{
+      token: 'PRO-123',
+      label: 'Pro 微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  webMediaFallbackPlugin.runLocalTranscription = async () => {
+    throw new Error('whisper failed with exit code -1073740791');
+  };
+  webMediaFallbackPlugin.showSyncProgress = () => {};
+  const previousRequestUrlForWebMediaFallback = requestUrlMock;
+  const cloudFallbackRequests = [];
+  requestUrlMock = async ({ url, method, body, headers }) => {
+    cloudFallbackRequests.push({ url, method, body: JSON.parse(body), auth: headers.Authorization });
+    return {
+      status: 200,
+      text: JSON.stringify({
+        success: true,
+        data: {
+          transcription: '小红书云端兜底文案',
+          provider: 'doubao',
+          requestId: 'cloud-url-1',
+          usedSeconds: 60,
+          remainingSeconds: 3540,
+        },
+      }),
+    };
+  };
+  try {
+    const webMediaFallbackResult = await webMediaFallbackPlugin.runConfiguredTranscription('https://video.example.com/xhs.mp4', {
+      allowCloudUrlFallback: true,
+      title: '小红书口播',
+      source: 'video',
+    });
+    assert.deepStrictEqual(webMediaFallbackResult, {
+      transcription: '小红书云端兜底文案',
+      source: 'local-cloud-fallback',
+      cloudProvider: 'doubao',
+      cloudRequestId: 'cloud-url-1',
+      cloudUsedSeconds: 60,
+      cloudRemainingSeconds: 3540,
+    });
+    assert.deepStrictEqual(cloudFallbackRequests, [{
+      url: 'https://example.com/sync/transcriptions/cloud',
+      method: 'POST',
+      body: {
+        audioUrl: 'https://video.example.com/xhs.mp4',
+        durationSeconds: 60,
+        localError: 'whisper failed with exit code -1073740791',
+        source: 'video',
+        title: '小红书口播',
+      },
+      auth: 'Bearer PRO-123',
+    }]);
+  } finally {
+    requestUrlMock = previousRequestUrlForWebMediaFallback;
+  }
+
+  const cloudWebpagePlugin = new PluginClass();
+  cloudWebpagePlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'PRO-123',
+    clientId: 'test-client',
+    aiProvider: 'off',
+    bindings: [{
+      token: 'PRO-123',
+      label: 'Pro 微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  cloudWebpagePlugin.runConfiguredTranscription = async () => {
+    throw new Error('云端网页链接不应调用本地/插件转写');
+  };
+  const cloudWebpageCalls = [];
+  cloudWebpagePlugin.runCloudFallbackTranscription = async (audioUrl, options) => {
+    cloudWebpageCalls.push([audioUrl, options.source, options.title, options.binding && options.binding.token]);
+    return {
+      transcription: '云端网页音视频转写结果',
+      source: 'cloud-webpage',
+      cloudProvider: 'doubao',
+      cloudRequestId: 'cloud-web-1',
+      cloudUsedSeconds: 60,
+      cloudRemainingSeconds: 540,
+    };
+  };
+  const cloudWebpageResult = await cloudWebpagePlugin.buildTranscriptRecordFromMedia({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/123',
+    metadata: {
+      url: 'https://www.douyin.com/video/123',
+      webpageMediaType: 'audio_video',
+      transcriptionMode: 'cloud',
+      cloudTranscriptionRequested: true,
+    },
+  }, {
+    url: 'https://www.douyin.com/video/123',
+    platform: '抖音',
+    mediaUrl: 'https://video.example.com/douyin.mp4',
+    source: 'video',
+    binding: cloudWebpagePlugin.settings.bindings[0],
+    title: '抖音视频',
+  });
+  assert.strictEqual(cloudWebpageResult.metadata.transcription, '云端网页音视频转写结果');
+  assert.strictEqual(cloudWebpageResult.metadata.transcriptionSource, 'cloud-webpage');
+  assert.strictEqual(cloudWebpageResult.metadata.cloudTranscriptionProvider, 'doubao');
+  assert.deepStrictEqual(cloudWebpageCalls, [[
+    'https://video.example.com/douyin.mp4',
+    'video',
+    '抖音视频',
+    'PRO-123',
+  ]]);
 
   const doubaoPlugin = new PluginClass();
   doubaoPlugin.settings = {
@@ -1206,6 +1749,108 @@ async function runMissingClientIdRequestTest() {
   }
 }
 
+async function runTranscriptionPreferenceSyncTest() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    cloudPreTranscriptionEnabled: true,
+    cloudPreTranscriptionThresholdMinutes: 30,
+  });
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    return {
+      success: true,
+      data: body,
+    };
+  };
+
+  await plugin.syncTranscriptionPreferences();
+
+  assert.deepStrictEqual(calls, [[
+    '/transcription-preferences',
+    'POST',
+    {
+      cloudPreTranscriptionEnabled: true,
+      cloudPreTranscriptionThresholdMinutes: 30,
+    },
+    'ABC-123',
+  ]]);
+}
+
+async function runCloudProcessingRecordSkipSyncTest() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'cloud-processing-1',
+          type: 'voice',
+          content: '云端录音',
+          createdAt: '2026-06-13T08:38:46.735Z',
+          metadata: {
+            audioFileID: 'cloud://voices/cloud-processing.mp3',
+            transcriptionMode: 'cloud',
+            transcriptionStatus: 'processing',
+            transcriptionSource: 'cloud-pretranscription',
+          },
+        }, {
+          _id: 'cloud-pending-1',
+          type: 'webpage',
+          content: 'https://v.douyin.com/example/',
+          createdAt: '2026-06-13T08:39:46.735Z',
+          metadata: {
+            url: 'https://v.douyin.com/example/',
+            webpageMediaType: 'audio_video',
+            transcriptionMode: 'cloud',
+            transcriptionStatus: 'pending',
+            cloudTranscriptionRequested: true,
+          },
+        }],
+      };
+    }
+    return {
+      success: true,
+      data: {},
+    };
+  };
+  const writeCalls = [];
+  plugin.writeRecord = async (record) => {
+    writeCalls.push(record._id);
+    return {
+      recordId: record._id,
+      title: '云端录音',
+      filePath: '临时收集/云端录音.md',
+    };
+  };
+
+  const result = await plugin.syncBinding({
+    token: 'ABC-123',
+    label: '测试微信',
+  }, false);
+
+  assert.deepStrictEqual(result.written, []);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(writeCalls, []);
+  assert.deepStrictEqual(calls, [[
+    '/records?status=pending',
+    'GET',
+    {},
+    'ABC-123',
+  ]]);
+}
+
 async function runUnbindInvalidCodeMarksLocalUnboundTest() {
   const previousRequestUrlMock = requestUrlMock;
   requestUrlMock = async () => ({
@@ -1291,6 +1936,69 @@ async function runLocalTranscriptionEntitlementTests() {
     requestUrlMock = previousRequestUrlMock;
   }
 
+  const trialFallbackPlugin = new PluginClass();
+  trialFallbackPlugin.saveData = async () => {};
+  trialFallbackPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'TRIAL-123',
+    clientId: 'trial-client',
+    aiProvider: 'local',
+    localTranscriptionCommand: 'echo test',
+    bindings: [{
+      token: 'TRIAL-123',
+      label: '体验微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  const trialFallbackUrls = [];
+  requestUrlMock = async ({ url, method, headers }) => {
+    assert.strictEqual(method, 'GET');
+    assert.strictEqual(headers.Authorization, 'Bearer TRIAL-123');
+    trialFallbackUrls.push(url);
+    if (url.endsWith('plan=local_transcription_beta')) {
+      return {
+        status: 200,
+        text: JSON.stringify({
+          success: true,
+          data: {
+            hasAccess: false,
+            plan: '',
+            status: 'inactive',
+            expiresAt: '',
+          },
+        }),
+      };
+    }
+    assert.strictEqual(url, 'https://example.com/sync/entitlements/status?plan=local_transcription_trial');
+    return {
+      status: 200,
+      text: JSON.stringify({
+        success: true,
+        data: {
+          hasAccess: true,
+          plan: 'local_transcription_trial',
+          status: 'active',
+          expiresAt: '2026-06-23T02:10:14.993Z',
+        },
+      }),
+    };
+  };
+
+  try {
+    const status = await trialFallbackPlugin.getLocalTranscriptionEntitlementStatus();
+    assert.deepStrictEqual(trialFallbackUrls, [
+      'https://example.com/sync/entitlements/status?plan=local_transcription_beta',
+      'https://example.com/sync/entitlements/status?plan=local_transcription_trial',
+    ]);
+    assert.strictEqual(status.hasAccess, true);
+    assert.strictEqual(status.plan, 'local_transcription_trial');
+    assert.strictEqual(status.expiresAt, '2026-06-23T02:10:14.993Z');
+    assert.strictEqual(trialFallbackPlugin.settings.localTranscriptionEntitlementStatus.hasAccess, true);
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+
   const deniedPlugin = new PluginClass();
   deniedPlugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
@@ -1328,13 +2036,158 @@ async function runLocalTranscriptionEntitlementTests() {
   }
 }
 
+async function runCloudFailedVoiceLocalFallbackTests() {
+  const plugin = new PluginClass();
+  const writtenBinaries = [];
+  plugin.settings = helpers.mergeSettings({
+    aiProvider: 'off',
+    localTranscriptionCommand: 'echo local',
+  });
+  plugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => true,
+        writeBinary: async (filePath, buffer) => {
+          writtenBinaries.push([filePath, Buffer.from(buffer).toString('utf8')]);
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  plugin.requestFileDownloadUrl = async (fileID) => {
+    assert.strictEqual(fileID, 'cloud://voices/cloud-failed.mp3');
+    return 'https://temp.example.com/cloud-failed.mp3';
+  };
+  plugin.downloadArrayBuffer = async (url) => {
+    assert.strictEqual(url, 'https://temp.example.com/cloud-failed.mp3');
+    return Buffer.from('audio-bytes');
+  };
+  const transcriptionCalls = [];
+  plugin.runConfiguredTranscription = async (audioUrl, options) => {
+    transcriptionCalls.push([audioUrl, options.fileID, options.forceLocal, options.cloudFallbackReason]);
+    return {
+      transcription: '本地兜底转写成功',
+      source: 'local',
+    };
+  };
+  plugin.showSyncProgress = () => {};
+
+  const result = await plugin.writeVoiceAttachment({
+    _id: 'record-cloud-failed',
+    type: 'voice',
+    content: '会议录音',
+    metadata: {
+      audioFileID: 'cloud://voices/cloud-failed.mp3',
+      audioFileName: 'meeting.mp3',
+      transcriptionMode: 'cloud',
+      transcriptionStatus: 'failed',
+      transcriptionSource: 'cloud-pretranscription',
+      transcriptionError: '云端转写额度不足',
+    },
+  }, '临时收集', '2026-06-13', '录音-001', {
+    token: 'ABC-123',
+  });
+
+  assert.deepStrictEqual(transcriptionCalls, [[
+    'https://temp.example.com/cloud-failed.mp3',
+    'cloud://voices/cloud-failed.mp3',
+    true,
+    'cloud-pretranscription-failed',
+  ]]);
+  assert.deepStrictEqual(writtenBinaries, [[
+    '临时收集/语音附件/2026-06-13/录音-001.mp3',
+    'audio-bytes',
+  ]]);
+  assert.strictEqual(result.metadata.transcription, '本地兜底转写成功');
+  assert.strictEqual(result.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(result.metadata.transcriptionProvider, 'local');
+  assert.strictEqual(result.metadata.cloudTranscriptionError, '云端转写额度不足');
+}
+
+async function runPodcastDownloadHeaderTests() {
+  const plugin = new PluginClass();
+  let capturedHeaders = null;
+  plugin.downloadArrayBuffer = async (url, headers) => {
+    assert.strictEqual(url, 'https://cdn.example.com/podcast.mp3');
+    capturedHeaders = headers;
+    return Buffer.concat([
+      Buffer.from('ID3'),
+      Buffer.alloc(1024, 1),
+    ]);
+  };
+
+  const tempPath = await plugin.downloadMediaToTempFile('https://cdn.example.com/podcast.mp3', {
+    sourceUrl: 'https://www.xiaoyuzhoufm.com/episode/abc123',
+  });
+  try {
+    assert.strictEqual(capturedHeaders.Referer, 'https://www.xiaoyuzhoufm.com/');
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
+}
+
+async function runLocalAsrRepairDecisionTests() {
+  const healthyPlugin = new PluginClass();
+  healthyPlugin.settings = helpers.mergeSettings({
+    localAsrPlatform: 'win32',
+    localAsrInstallMode: 'default',
+  });
+  healthyPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+  healthyPlugin.getConfiguredLocalAsrInstallRoot = () => 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr';
+  healthyPlugin.getLocalAsrInstallStatus = () => ({ ready: true, scriptOutdated: false });
+  const healthyCalls = [];
+  healthyPlugin.installLocalAsr = async (options) => healthyCalls.push(options);
+  const healthyResult = await healthyPlugin.checkAndRepairLocalAsr();
+  assert.strictEqual(healthyResult.action, 'none');
+  assert.deepStrictEqual(healthyCalls, []);
+
+  const stalePlugin = new PluginClass();
+  stalePlugin.settings = helpers.mergeSettings({
+    localAsrPlatform: 'win32',
+    localAsrInstallMode: 'default',
+  });
+  stalePlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+  stalePlugin.getConfiguredLocalAsrInstallRoot = () => 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr';
+  stalePlugin.getLocalAsrInstallStatus = () => ({ ready: true, scriptOutdated: true });
+  const staleCalls = [];
+  stalePlugin.installLocalAsr = async (options) => staleCalls.push(options);
+  const staleResult = await stalePlugin.checkAndRepairLocalAsr();
+  assert.strictEqual(staleResult.action, 'default');
+  assert.deepStrictEqual(staleCalls, [{ installMode: 'default' }]);
+
+  const crashRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-crash-log-'));
+  try {
+    fs.writeFileSync(path.join(crashRoot, 'transcribe-last.log'), 'whisper failed with exit code -1073740791 / 0xC0000409', 'utf8');
+    const crashPlugin = new PluginClass();
+    crashPlugin.settings = helpers.mergeSettings({
+      localAsrPlatform: 'win32',
+      localAsrInstallMode: 'default',
+    });
+    crashPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+    crashPlugin.getConfiguredLocalAsrInstallRoot = () => crashRoot;
+    crashPlugin.getLocalAsrInstallStatus = () => ({ ready: true, scriptOutdated: false });
+    const crashCalls = [];
+    crashPlugin.installLocalAsr = async (options) => crashCalls.push(options);
+    const crashResult = await crashPlugin.checkAndRepairLocalAsr();
+    assert.strictEqual(crashResult.action, 'safe');
+    assert.deepStrictEqual(crashCalls, [{ installMode: 'safe' }]);
+  } finally {
+    fs.rmSync(crashRoot, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await runAsyncHydrationTests();
   await runOpenExternalUrlTests();
   await runCloudRequestFallbackTests();
   await runMissingClientIdRequestTest();
+  await runTranscriptionPreferenceSyncTest();
+  await runCloudProcessingRecordSkipSyncTest();
   await runUnbindInvalidCodeMarksLocalUnboundTest();
   await runLocalTranscriptionEntitlementTests();
+  await runCloudFailedVoiceLocalFallbackTests();
+  await runPodcastDownloadHeaderTests();
+  await runLocalAsrRepairDecisionTests();
 }
 
 main().catch((error) => {

@@ -46,18 +46,45 @@
           {{statusText}}
         </view>
 
+        <view wx:if="{{uploadProgressVisible}}" class="upload-progress-card">
+          <view class="upload-progress-meta">
+            <text>{{uploadProgressText}}</text>
+            <text>{{uploadProgressPercent}}%</text>
+          </view>
+          <view class="upload-progress-track">
+            <view class="upload-progress-fill" style="width:{{uploadProgressPercent}}%"></view>
+          </view>
+        </view>
+
         <view class="action-bar">
           <view class="capture-actions">
             <button class="capture-action-button" disabled="{{isSaving}}" bindtap="readClipboard">读取剪贴板</button>
             <button class="capture-action-button" disabled="{{isSaving}}" bindtap="saveWebpageFromClipboardOrInput">读取网页链接</button>
             <button class="capture-action-button {{isRecording ? 'recording-active' : ''}}" disabled="{{isSaving && !isRecording}}" bindtap="toggleRecording">{{isRecording ? '结束录音' : '录音'}}</button>
-            <button class="capture-action-button" disabled="{{isSaving}}" bindtap="chooseInboxFile">文件/音频</button>
+            <button class="capture-action-button" disabled="{{isSaving}}" bindtap="showImportMaterialSheet">导入素材</button>
           </view>
           <button class="save-button {{isSaving ? 'saving' : ''}}" disabled="{{isSaving || isRecording}}" bindtap="handleSave">
             {{isSaving ? '保存中' : '保存'}}
           </button>
         </view>
         <view class="usage-status {{entitlementStatus.hasAccess ? 'pro' : 'free'}}">{{usageStatusText}}</view>
+        <view class="home-capability-strip">
+          <view class="home-capability-row free">
+            <text class="home-capability-label">免费</text>
+            <text class="home-capability-text">文本、图文链接、本地图文文件</text>
+          </view>
+          <view class="home-capability-row pro">
+            <text class="home-capability-label">Pro</text>
+            <text class="home-capability-text">录音、音视频链接、本地MP3文件</text>
+          </view>
+        </view>
+        <view wx:if="{{false}}" class="transcription-mode-row {{entitlementStatus.hasAccess ? 'pro' : 'free'}}" bindtap="showCloudTranscriptionSettings">
+          <text class="transcription-mode-label">音视频转写</text>
+          <view class="transcription-mode-copy">
+            <text class="transcription-mode-value">{{cloudTranscriptionSummary}}</text>
+            <text class="transcription-quota-value">{{cloudQuotaSummary}}</text>
+          </view>
+        </view>
       </view>
     </view>
 
@@ -67,46 +94,54 @@
           <view class="platform-mini-title">现在支持以下网页</view>
           <view class="platform-mini-note">图文免费，音视频 Pro</view>
         </view>
-        <view class="platform-group">
-          <view class="platform-group-title">免费版图文</view>
-          <view class="platform-grid free-grid">
-            <view class="platform-node free">
-              <image class="platform-logo-image" src="../../images/platforms/wechat-article.svg" mode="aspectFit" />
-              <text>公众号</text>
-            </view>
-            <view class="platform-node free">
-              <image class="platform-logo-image" src="../../images/platforms/feishu-doc.svg" mode="aspectFit" />
-              <text>飞书</text>
-            </view>
-            <view class="platform-node free">
-              <image class="platform-logo-image" src="../../images/platforms/xhs-note.svg" mode="aspectFit" />
-              <text>小红书</text>
-            </view>
+        <view class="platform-compact-strip">
+          <view class="platform-compact-node free">
+            <image class="platform-logo-image" src="../../images/platforms/wechat-article.svg" mode="aspectFit" />
+            <text>公众号</text>
           </view>
-        </view>
-        <view class="platform-group pro-group">
-          <view class="platform-group-title">Pro版音视频文案提取</view>
-          <view class="platform-grid pro-grid">
-            <view class="platform-node pro">
-              <image class="platform-logo-image" src="../../images/platforms/douyin-video.svg" mode="aspectFit" />
-              <text>抖音</text>
-            </view>
-            <view class="platform-node pro">
-              <image class="platform-logo-image" src="../../images/platforms/xhs-video.svg" mode="aspectFit" />
-              <text>小红书</text>
-            </view>
-            <view class="platform-node pro">
-              <image class="platform-logo-image" src="../../images/platforms/bilibili-video.svg" mode="aspectFit" />
-              <text>B站</text>
-            </view>
-            <view class="platform-node pro">
-              <image class="platform-logo-image" src="../../images/platforms/xiaoyuzhou-audio.svg" mode="aspectFit" />
-              <text>小宇宙</text>
-            </view>
+          <view class="platform-compact-node free">
+            <image class="platform-logo-image" src="../../images/platforms/feishu-doc.svg" mode="aspectFit" />
+            <text>飞书</text>
+          </view>
+          <view class="platform-compact-node free">
+            <image class="platform-logo-image" src="../../images/platforms/xhs-note.svg" mode="aspectFit" />
+            <text>小红书</text>
+          </view>
+          <view class="platform-compact-node pro">
+            <image class="platform-logo-image" src="../../images/platforms/douyin-video.svg" mode="aspectFit" />
+            <text>抖音</text>
+          </view>
+          <view class="platform-compact-node pro">
+            <image class="platform-logo-image" src="../../images/platforms/xhs-video.svg" mode="aspectFit" />
+            <text>小红书</text>
+          </view>
+          <view class="platform-compact-node pro">
+            <image class="platform-logo-image" src="../../images/platforms/bilibili-video.svg" mode="aspectFit" />
+            <text>B站</text>
+          </view>
+          <view class="platform-compact-node pro">
+            <image class="platform-logo-image" src="../../images/platforms/xiaoyuzhou-audio.svg" mode="aspectFit" />
+            <text>小宇宙</text>
           </view>
         </view>
       </view>
     </view>
+
+    <view wx:if="{{recentList.length}}" class="recent-section compact">
+      <view class="recent-title">最近同步</view>
+      <view class="recent-list">
+        <view wx:for="{{recentList}}" wx:key="id" wx:for-index="index" wx:if="{{index < 2}}" class="recent-card compact">
+          <view class="recent-meta">
+            <text class="type-label {{item.labelClass}}">{{item.type}}</text>
+            <text class="recent-time">{{item.time}}</text>
+          </view>
+          <view class="recent-content line-two">{{item.content}}</view>
+          <view wx:if="{{item.url}}" class="recent-url line-one">{{item.url}}</view>
+        </view>
+      </view>
+    </view>
+
+    <view class="home-ad-slot"></view>
   </view>
 
   <view wx:elif="{{currentView === 'bind'}}" class="view-bind page-with-tabbar">
@@ -183,11 +218,30 @@
         <view class="bind-mini-status">{{isBound ? '已绑定' : '未绑定'}}</view>
       </view>
       <view class="membership-title">{{membershipCard.title}}</view>
-      <view class="membership-desc">{{membershipCard.desc}}</view>
-      <view class="membership-actions">
-        <button class="membership-primary" bindtap="showRedeemModal">兑换码激活 Pro 会员</button>
-        <button class="membership-secondary" data-note="ob会员" bindtap="copyWechatWithNote">领取 Pro 体验卡</button>
-      </view>
+      <view wx:if="{{membershipCard.desc}}" class="membership-desc">{{membershipCard.desc}}</view>
+      <view wx:if="{{!trialRedeemCode}}" class="membership-desc">点击后会直接开通 7 天体验，不需要再输入兑换码。</view>
+
+      <button
+        wx:if="{{!trialRedeemCode}}"
+        class="membership-primary full"
+        disabled="{{trialCodeLoading}}"
+        bindtap="claimTrialRedeemCode"
+      >
+        {{trialCodeLoading ? '开通中' : '领取 7 天 Pro 体验'}}
+      </button>
+
+      <block wx:if="{{trialRedeemCode}}">
+        <view class="trial-code-label dark">兑换码</view>
+        <view class="trial-code-box light">{{trialRedeemCode}}</view>
+        <view wx:if="{{trialRedeemCodeExpiresLabel && !trialRedeemCodeExpired}}" class="trial-expiry dark">
+          有效期至 {{trialRedeemCodeExpiresLabel}}
+        </view>
+        <view wx:if="{{trialRedeemCodeExpiresLabel && trialRedeemCodeExpired}}" class="trial-expiry dark expired">
+          该兑换码已到期，请联系张张续期。
+        </view>
+        <button class="membership-primary full" bindtap="copyFormalMembershipWechat">开通正式会员</button>
+        <button class="membership-secondary full" bindtap="copyTrialRedeemCode">一键复制兑换码</button>
+      </block>
     </view>
 
     <view class="mine-card">
@@ -210,8 +264,8 @@
         </view>
         <view class="benefit-table-row">
           <view class="benefit-cell benefit-name">语音、MP3转写</view>
-          <view class="benefit-cell">需用户充值配API</view>
-          <view class="benefit-cell pro-col">无需配API</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
         </view>
         <view class="benefit-table-row">
           <view class="benefit-cell benefit-name">图文链接转写</view>
@@ -224,15 +278,24 @@
           <view class="benefit-cell pro-col">√</view>
         </view>
       </view>
-      <view class="mine-note">音视频文案提取为 Pro 内测功能，可联系张张领取 7 天试用码。</view>
     </view>
 
     <view class="mine-card">
-      <view class="mine-card-title">详细教程</view>
-      <view class="mine-note">obsidian绑定与pro开通详细教程</view>
-      <view class="mine-link" bindtap="copyTutorialLinkFromModal">复制飞书教程链接</view>
-      <view class="mine-link" bindtap="showAnnouncementDetail">查看功能更新公告</view>
-      <view class="mine-link" data-note="ob用户群" bindtap="copyWechatWithNote">加入用户群</view>
+      <view class="mine-card-title">Pro 开通详细教程</view>
+      <view class="tutorial-step">
+        <view class="tutorial-step-title">1. 领取 7 天体验</view>
+        <view class="mine-note">点击上方按钮，成功后这里会显示兑换码和有效期。</view>
+      </view>
+      <view class="tutorial-step">
+        <view class="tutorial-step-title">2. 更新插件为最新版本</view>
+        <image class="tutorial-image" src="../../images/tutorials/pro-install-local-asr.png" mode="widthFix" />
+      </view>
+      <view class="tutorial-step">
+        <view class="tutorial-step-title">3. 安装本地转写组件即可开始转写音视频</view>
+        <image class="tutorial-image" src="../../images/tutorials/pro-update-plugin.png" mode="widthFix" />
+      </view>
+      <view class="mine-link" bindtap="copyTutorialLinkFromModal">详细教程，飞书链接</view>
+      <view class="mine-link" data-note="OB 群" bindtap="copyWechatWithNote">加入用户群（备注 OB 群）</view>
     </view>
   </view>
 
@@ -252,7 +315,8 @@
           <view class="announcement-text">{{item}}</view>
         </view>
       </view>
-      <button class="announcement-primary" bindtap="hideAnnouncementSheet">知道了</button>
+      <button class="announcement-primary" bindtap="hideAnnouncementAndShowMine">立即前往</button>
+      <button class="announcement-secondary" bindtap="hideAnnouncementSheet">知道了</button>
     </view>
   </view>
 
@@ -280,19 +344,28 @@
 
   <view wx:if="{{redeemVisible}}" class="redeem-mask" bindtap="hideRedeemModal">
     <view class="redeem-panel" catchtap="noop">
-      <view class="redeem-title">兑换 Pro 权限</view>
-      <view class="redeem-desc">输入你收到的兑换码，开通音视频文案提取功能。</view>
-      <input
-        class="redeem-input"
-        value="{{redeemCodeInput}}"
-        placeholder="请输入兑换码"
-        placeholder-class="input-placeholder"
-        bindinput="onRedeemCodeInput"
-      />
-      <button class="redeem-submit-button" disabled="{{isRedeeming}}" bindtap="submitRedeemCode">
-        {{isRedeeming ? '兑换中' : '确认兑换'}}
-      </button>
-      <button class="redeem-cancel-button" disabled="{{isRedeeming}}" bindtap="hideRedeemModal">取消</button>
+      <block wx:if="{{entitlementStatus.hasAccess}}">
+        <view class="redeem-title">当前 Pro 兑换码</view>
+        <view class="redeem-desc">{{entitlementStatus.code ? '这是当前微信开通 Pro 时使用的兑换码，可一键复制留存。' : '正在读取当前微信开通 Pro 时使用的兑换码，不影响 Pro 功能使用。'}}</view>
+        <view class="redeem-current-code {{entitlementStatus.code ? '' : 'is-empty'}}">{{entitlementStatus.code || '暂未读取到兑换码记录'}}</view>
+        <button wx:if="{{entitlementStatus.code}}" class="redeem-submit-button" bindtap="copyCurrentRedeemCode">复制兑换码</button>
+        <button class="redeem-cancel-button" bindtap="hideRedeemModal">关闭</button>
+      </block>
+      <block wx:else>
+        <view class="redeem-title">兑换 Pro 权限</view>
+        <view class="redeem-desc">输入你收到的兑换码，开通音视频文案提取功能。</view>
+        <input
+          class="redeem-input"
+          value="{{redeemCodeInput}}"
+          placeholder="请输入兑换码"
+          placeholder-class="input-placeholder"
+          bindinput="onRedeemCodeInput"
+        />
+        <button class="redeem-submit-button" disabled="{{isRedeeming}}" bindtap="submitRedeemCode">
+          {{isRedeeming ? '兑换中' : '确认兑换'}}
+        </button>
+        <button class="redeem-cancel-button" disabled="{{isRedeeming}}" bindtap="hideRedeemModal">取消</button>
+      </block>
     </view>
   </view>
 </view>

@@ -1,0 +1,9 @@
+{
+  "name": "admin-api",
+  "version": "1.0.0",
+  "description": "Admin API for Obsidian content sync helper",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

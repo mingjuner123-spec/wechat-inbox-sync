@@ -14,7 +14,8 @@ Markdown notes and local attachments.
 - Extract spoken/audio transcripts from supported Xiaoyuzhou, Bilibili, Douyin, and Xiaohongshu video links when subtitles or a transcribable media URL is available.
 - Save audio attachments and optionally transcribe them with a user-configured provider.
 - Save uploaded files as local attachments and extract Markdown from `txt`, `md`, `docx`, and text-based `pdf` files.
-- Keep generated files under a daily folder such as `临时收集/2026-05-20/`.
+- Keep generated files under a daily folder such as `临时收集/2026-05-20/`, or save notes directly into the configured inbox directory.
+- Customize which YAML note properties are written at the top of each generated note.
 - Use readable note names such as `公众号-文章标题.md`, `pdf-源文件名.md`, and `录音-会议录音.md`.
 
 ## Requirements
@@ -54,6 +55,8 @@ Open the plugin settings and fill in:
 - **Sync API URL**: the plugin request endpoint of the CloudBase `sync` service. The default official endpoint is already filled in. It is not meant to be opened in a browser; opening it directly may trigger CloudBase security verification.
 - **Mini program bind code**: generate this in the mini program binding screen.
 - **Inbox directory**: the root folder for generated notes. The default is `临时收集`.
+- **Note save mode**: choose whether notes are saved under a daily subfolder or directly into the inbox directory.
+- **Note property fields**: leave blank for the default YAML properties, or enter a comma-separated field list such as `type,title,url,created_at`.
 - **Auto sync on load**: optionally pull new records after Obsidian starts.
 - **Speech transcription provider**: optional. Supported providers currently include Tencent Cloud ASR, Alibaba Cloud Bailian/Qwen-Omni, Doubao ASR, and a local transcription command.
 
@@ -64,7 +67,7 @@ If you do not want to use a cloud speech API, use the local helper:
 - Windows: `local-asr/install-local-asr.ps1`
 - macOS: `local-asr/install-local-asr-macos.sh`
 
-It installs whisper.cpp, ffmpeg, and a small Whisper model into `.wechat-inbox-local-asr` under the current user home directory.
+It installs whisper.cpp, ffmpeg, and a small Whisper model into `.wechat-inbox-local-asr` under the current user home directory. On macOS, the installer first uses an isolated local Python environment and bundled wheel binaries, so it does not depend on Homebrew for ffmpeg.
 Then choose **Local transcription** in the plugin settings and click **One-click install**.
 
 ## Data Flow

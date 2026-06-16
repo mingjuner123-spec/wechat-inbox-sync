@@ -1,6 +1,7 @@
 const { createInboxService } = require('../../services/inbox-service');
 
 const CONTACT_WECHAT = 'heyhmjx';
+const PRO_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
 
 function formatDateLabel(value) {
   if (!value) return '';
@@ -12,6 +13,13 @@ function formatDateLabel(value) {
   return `${year}-${month}-${day}`;
 }
 
+function isExpired(value) {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getTime() <= Date.now();
+}
+
 function getRemainingDays(value) {
   if (!value) return 0;
   const date = new Date(value);
@@ -21,50 +29,103 @@ function getRemainingDays(value) {
 
 function getErrorMessage(error, fallback) {
   const message = (error && (error.errMsg || error.message)) || String(error || '');
+  if (/FUNCTIONS_TIME_LIMIT_EXCEEDED|timed out|timeout|cloud\.callFunction/i.test(message)) {
+    return '网络繁忙，请稍后再试';
+  }
   return message && message !== '[object Object]' ? message : fallback;
+}
+
+function formatCloudMinutes(seconds) {
+  const value = Number(seconds || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 分钟';
+  const minutes = Math.ceil(value / 60);
+  return `${minutes} 分钟`;
+}
+
+function buildCloudQuota(status = {}) {
+  const quota = Math.max(0, Number(status.cloudQuotaSeconds || 0));
+  const used = Math.max(0, Number(status.cloudUsedSeconds || 0));
+  const remainingValue = status.cloudRemainingSeconds !== undefined
+    ? Number(status.cloudRemainingSeconds || 0)
+    : Math.max(0, quota - used);
+  const remaining = Math.max(0, remainingValue);
+  return {
+    totalText: formatCloudMinutes(quota),
+    usedText: formatCloudMinutes(used),
+    remainingText: formatCloudMinutes(remaining),
+  };
 }
 
 function buildMembership(status = {}) {
   const hasAccess = Boolean(status.hasAccess);
-  const expiresAt = status.expiresAt || '';
-  const daysLeft = getRemainingDays(expiresAt);
+  const daysLeft = getRemainingDays(status.expiresAt || '');
   const isTrial = String(status.plan || '').includes('trial') || String(status.source || '').includes('trial');
 
   if (hasAccess) {
     return {
-      badge: isTrial ? 'Pro 试用中' : 'Pro 已开通',
-      title: isTrial ? `试用剩余 ${daysLeft || 1} 天` : '音视频文案提取已可用',
-      desc: expiresAt ? `有效期至 ${formatDateLabel(expiresAt)}` : '当前微信已开通 Pro 权限',
+      badge: isTrial ? 'Pro 体验中' : 'Pro 已开通',
+      title: isTrial ? `体验剩余 ${daysLeft || 1} 天` : 'Pro 已开通',
+      desc: '音视频文案提取功能已可用。',
     };
   }
 
   if (status.status === 'expired') {
     return {
       badge: 'Pro 已到期',
-      title: '需要重新开通 Pro',
-      desc: '图文同步仍可继续使用，音视频文案提取需重新兑换。',
+      title: '体验已到期',
+      desc: '该兑换码已到期，请联系张张续期。',
     };
   }
 
   return {
     badge: '免费版',
-    title: '可领取 7 天 Pro 试用码',
-    desc: '联系张张获取试用码，先试抖音、B站、小宇宙、小红书视频文案提取。',
+    title: '领取 7 天 Pro 体验',
+    desc: '',
+  };
+}
+
+function buildTrialState(status = {}) {
+  const code = String(status.code || '').trim();
+  const expiresAt = status.expiresAt || '';
+  return {
+    trialRedeemCode: code,
+    trialRedeemCodeExpiresAt: expiresAt,
+    trialRedeemCodeExpiresLabel: formatDateLabel(expiresAt),
+    trialRedeemCodeExpired: isExpired(expiresAt),
   };
 }
 
 Page({
   data: {
     contactWechat: CONTACT_WECHAT,
-    contactVisible: false,
-    redeemCodeInput: '',
-    isRedeeming: false,
+    proTutorialUrl: PRO_TUTORIAL_URL,
+    trialCodeLoading: false,
+    paymentOrderLoading: false,
+    selectedPaymentPlanId: 'pro_year',
+    latestPaymentOrder: null,
+    paymentPlans: [
+      { id: 'pro_month', name: 'Pro 月卡', price: '29 元', desc: '适合先正式体验 1 个月' },
+      { id: 'pro_year', name: 'Pro 年卡', price: '199 元', desc: '适合长期使用，本地转写更划算' },
+    ],
+    trialRedeemCode: '',
+    trialRedeemCodeCreatedAt: '',
+    trialRedeemCodeExpiresAt: '',
+    trialRedeemCodeExpiresLabel: '',
+    trialRedeemCodeExpired: false,
+    quotaRefreshing: false,
+    entitlementStatusLoading: false,
+    entitlementStatusLoaded: false,
     entitlementStatus: {
       hasAccess: false,
       plan: '',
       status: 'inactive',
       expiresAt: '',
+      code: '',
+      cloudQuotaSeconds: 0,
+      cloudUsedSeconds: 0,
+      cloudRemainingSeconds: 0,
     },
+    cloudQuota: buildCloudQuota(),
     membership: buildMembership(),
   },
 
@@ -73,83 +134,178 @@ Page({
     this.loadEntitlementStatus();
   },
 
-  async loadEntitlementStatus() {
+  onShow() {
+    if (this.inboxService && this.data.entitlementStatusLoaded) {
+      this.loadEntitlementStatus({ silent: true });
+    }
+  },
+
+  selectPaymentPlan(event) {
+    const planId = event.currentTarget.dataset.planId || 'pro_year';
+    this.setData({ selectedPaymentPlanId: planId });
+  },
+
+  async createFormalPaymentOrder() {
+    if (this.data.paymentOrderLoading) return;
+    this.setData({ paymentOrderLoading: true });
+    try {
+      const response = await this.inboxService.createPaymentOrder(this.data.selectedPaymentPlanId);
+      if (!response.result || !response.result.success) {
+        throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '订单创建失败');
+      }
+      const order = response.result.data || {};
+      this.setData({ latestPaymentOrder: order });
+      wx.showModal({
+        title: '订单已生成',
+        content: order.paymentEnabled
+          ? '微信支付已准备好，请继续完成付款。'
+          : `当前微信支付商户号还在配置中，订单号：${order.orderNo || ''}。你可以先联系客服人工确认。`,
+        showCancel: false,
+      });
+    } catch (error) {
+      wx.showToast({
+        title: getErrorMessage(error, '订单创建失败，请稍后再试'),
+        icon: 'none',
+      });
+    } finally {
+      this.setData({ paymentOrderLoading: false });
+    }
+  },
+
+  async loadEntitlementStatus(options = {}) {
+    if (this.data.entitlementStatusLoading) return;
+    this.setData({
+      entitlementStatusLoading: true,
+      quotaRefreshing: Boolean(options.refreshing),
+    });
     try {
       const response = await this.inboxService.getEntitlementStatus('local_transcription_beta');
       if (response.result && response.result.success) {
         const entitlementStatus = response.result.data || this.data.entitlementStatus;
         this.setData({
+          entitlementStatusLoaded: true,
           entitlementStatus,
+          cloudQuota: buildCloudQuota(entitlementStatus),
           membership: buildMembership(entitlementStatus),
+          ...buildTrialState(entitlementStatus),
         });
       }
     } catch (error) {
-      // 权限状态读取失败不影响页面展示。
+      this.setData({ entitlementStatusLoaded: true });
+      if (options.refreshing) {
+        wx.showToast({
+          title: getErrorMessage(error, '刷新失败，请稍后再试'),
+          icon: 'none',
+        });
+      }
+    } finally {
+      this.setData({
+        entitlementStatusLoading: false,
+        quotaRefreshing: false,
+      });
     }
   },
 
-  showContactModal() {
-    this.setData({ contactVisible: true });
+  refreshEntitlementStatus() {
+    this.loadEntitlementStatus({ refreshing: true });
   },
 
-  hideContactModal() {
-    this.setData({ contactVisible: false });
+  async claimTrialRedeemCode() {
+    if (this.data.trialCodeLoading) return;
+    if (this.data.trialRedeemCode && !this.data.trialRedeemCodeExpired) {
+      wx.showToast({
+        title: '7 天体验已开通',
+        icon: 'none',
+      });
+      return;
+    }
+
+    this.setData({ trialCodeLoading: true });
+    try {
+      const response = await this.inboxService.getTrialRedeemCode();
+      if (!response.result || !response.result.success) {
+        throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '体验开通失败');
+      }
+      const data = response.result.data || {};
+      const entitlementStatus = {
+        ...this.data.entitlementStatus,
+        ...data,
+      };
+      this.setData({
+        entitlementStatusLoaded: true,
+        entitlementStatus,
+        cloudQuota: buildCloudQuota(entitlementStatus),
+        membership: buildMembership(entitlementStatus),
+        trialRedeemCodeCreatedAt: data.createdAt || '',
+        ...buildTrialState(entitlementStatus),
+      });
+      wx.showToast({
+        title: data.alreadyActivated ? '已读取体验资格' : '7 天体验已开通',
+        icon: 'none',
+      });
+    } catch (error) {
+      wx.showToast({
+        title: getErrorMessage(error, '体验开通失败，请稍后再试'),
+        icon: 'none',
+      });
+    } finally {
+      this.setData({ trialCodeLoading: false });
+    }
   },
 
-  copyWechat() {
+  copyTrialRedeemCode() {
+    const code = String(this.data.trialRedeemCode || '').trim();
+    if (!code) {
+      wx.showToast({
+        title: '请先领取 7 天体验',
+        icon: 'none',
+      });
+      return;
+    }
     wx.setClipboardData({
-      data: CONTACT_WECHAT,
+      data: code,
       success: () => {
         wx.showToast({
-          title: '微信号已复制',
+          title: '兑换码已复制',
           icon: 'none',
         });
       },
     });
   },
 
-  onRedeemCodeInput(event) {
-    this.setData({
-      redeemCodeInput: event.detail.value,
+  copyProTutorialLink() {
+    wx.setClipboardData({
+      data: PRO_TUTORIAL_URL,
+      success: () => {
+        wx.showToast({
+          title: '教程链接已复制',
+          icon: 'none',
+        });
+      },
     });
   },
 
-  async submitRedeemCode() {
-    const code = String(this.data.redeemCodeInput || '').trim();
-    if (!code) {
-      wx.showToast({
-        title: '请输入兑换码',
-        icon: 'none',
-      });
-      return;
-    }
-    if (this.data.isRedeeming) return;
-
-    this.setData({ isRedeeming: true });
-    try {
-      const response = await this.inboxService.redeemAccessCode(code);
-      if (!response.result || !response.result.success) {
-        throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '兑换失败');
-      }
-      const entitlementStatus = response.result.data || this.data.entitlementStatus;
-      this.setData({
-        redeemCodeInput: '',
-        entitlementStatus,
-        membership: buildMembership(entitlementStatus),
-      });
-      wx.showToast({
-        title: '兑换成功',
-        icon: 'none',
-      });
-    } catch (error) {
-      wx.showToast({
-        title: getErrorMessage(error, '兑换失败，请检查兑换码'),
-        icon: 'none',
-      });
-    } finally {
-      this.setData({ isRedeeming: false });
-    }
+  copyUserGroupWechat() {
+    wx.setClipboardData({
+      data: this.data.contactWechat || CONTACT_WECHAT,
+      success: () => {
+        wx.showToast({
+          title: '微信已复制，备注 OB 群',
+          icon: 'none',
+        });
+      },
+    });
   },
 
-  noop() {},
+  copyFormalMembershipWechat() {
+    wx.setClipboardData({
+      data: this.data.contactWechat || CONTACT_WECHAT,
+      success: () => {
+        wx.showToast({
+          title: '微信已复制，备注开通正式会员',
+          icon: 'none',
+        });
+      },
+    });
+  },
 });

@@ -6,6 +6,7 @@ miniprogram_npm/
 dist/
 build/
 coverage/
+.worktrees/
 .env
 .env.*
 !.env.example

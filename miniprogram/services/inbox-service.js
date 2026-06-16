@@ -87,6 +87,33 @@ function createInboxService(wxApi) {
     });
   }
 
+  function getTrialRedeemCode() {
+    return callInboxFunction({
+      type: 'getTrialRedeemCode',
+    });
+  }
+
+  function createPaymentOrder(planId) {
+    return callInboxFunction({
+      type: 'createPaymentOrder',
+      planId,
+    });
+  }
+
+  function queryPaymentOrder(orderNo) {
+    return callInboxFunction({
+      type: 'queryPaymentOrder',
+      orderNo,
+    });
+  }
+
+  function startCloudPreTranscription(recordId) {
+    return callInboxFunction({
+      type: 'processCloudPreTranscription',
+      recordId,
+    });
+  }
+
   function submitFeedback(payload) {
     return callInboxFunction({
       type: 'submitFeedback',
@@ -151,22 +178,49 @@ function createInboxService(wxApi) {
     });
   }
 
-  function uploadVoiceFile(filePath) {
-    const suffix = filePath && filePath.includes('.') ? filePath.slice(filePath.lastIndexOf('.')) : '.mp3';
-    return cloud.uploadFile({
-      cloudPath: `voices/${Date.now()}-${Math.floor(Math.random() * 1000)}${suffix}`,
-      filePath,
+  function adminListPaymentOrders(payload) {
+    return callInboxFunction({
+      type: 'adminListPaymentOrders',
+      ...payload,
     });
   }
 
-  function uploadInboxFile(file) {
+  function adminUpdatePaymentOrder(payload) {
+    return callInboxFunction({
+      type: 'adminUpdatePaymentOrder',
+      ...payload,
+    });
+  }
+
+  function uploadWithProgress(uploadOptions, onProgress) {
+    return new Promise((resolve, reject) => {
+      const uploadTask = cloud.uploadFile({
+        ...uploadOptions,
+        success: resolve,
+        fail: reject,
+      });
+      if (uploadTask && typeof uploadTask.onProgressUpdate === 'function' && typeof onProgress === 'function') {
+        uploadTask.onProgressUpdate(onProgress);
+      }
+    });
+  }
+
+  function uploadVoiceFile(filePath, options = {}) {
+    const suffix = filePath && filePath.includes('.') ? filePath.slice(filePath.lastIndexOf('.')) : '.mp3';
+    return uploadWithProgress({
+      cloudPath: `voices/${Date.now()}-${Math.floor(Math.random() * 1000)}${suffix}`,
+      filePath,
+    }, options.onProgress);
+  }
+
+  function uploadInboxFile(file, options = {}) {
     const filePath = file.path || file.tempFilePath;
     const fileName = file.name || 'upload-file';
     const suffix = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '';
-    return cloud.uploadFile({
+    return uploadWithProgress({
       cloudPath: `files/${Date.now()}-${Math.floor(Math.random() * 1000)}${suffix}`,
       filePath,
-    });
+    }, options.onProgress);
   }
 
   return {
@@ -182,6 +236,10 @@ function createInboxService(wxApi) {
     unlockDailyUsageByAd,
     getEntitlementStatus,
     redeemAccessCode,
+    getTrialRedeemCode,
+    createPaymentOrder,
+    queryPaymentOrder,
+    startCloudPreTranscription,
     submitFeedback,
     trackAnalyticsEvent,
     adminGenerateRedeemCodes,
@@ -191,6 +249,8 @@ function createInboxService(wxApi) {
     adminGetDashboard,
     adminUpdateEntitlement,
     adminUpdateRedeemCode,
+    adminListPaymentOrders,
+    adminUpdatePaymentOrder,
     uploadInboxFile,
     uploadVoiceFile,
   };

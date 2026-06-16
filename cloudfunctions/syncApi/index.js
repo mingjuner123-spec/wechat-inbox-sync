@@ -1,23 +1,316 @@
 const cloud = require('wx-server-sdk');
+const https = require('https');
 const {
   buildSyncedRecordCleanupData,
   collectRecordFileIds,
   handleSyncApiRequest,
+  shouldKeepRecordPendingForTranscription,
 } = require('./sync-api-core');
+const {
+  DEFAULT_REDEEM_PLAN,
+  isLocalTranscriptionPlan,
+  pickBestLocalTranscriptionEntitlement,
+} = require('./redeem-code-core');
+
+function getCloudDataEnv() {
+  return String(process.env.WECHAT_DATA_ENV || '').trim() || cloud.DYNAMIC_CURRENT_ENV;
+}
 
 cloud.init({
-  env: cloud.DYNAMIC_CURRENT_ENV,
+  env: getCloudDataEnv(),
 });
 
 const db = cloud.database();
 const _ = db.command;
+const { handleAdminRequest: handleAdminConsoleRequest } = require('./admin-handler');
 const DEFAULT_BIND_DEVICE_LIMIT = 1;
 const MAX_BIND_DEVICE_LIMIT = 3;
 const BIND_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const DEFAULT_REDEEM_PLAN = 'local_transcription_beta';
+const DOUBAO_ASR_SUBMIT_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit';
+const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/query';
+const DOUBAO_ASR_RESOURCE_ID = 'volc.bigasr.auc';
+const DEFAULT_CLOUD_ASR_POLL_ATTEMPTS = 60;
+const DEFAULT_CLOUD_ASR_POLL_INTERVAL_MS = 5000;
 
 function formatCleanupError(error) {
   return error && error.message ? error.message : String(error || '');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function tryParseJson(text) {
+  try {
+    return JSON.parse(String(text || ''));
+  } catch (error) {
+    return null;
+  }
+}
+
+function getAudioFormatFromUrl(url) {
+  const clean = String(url || '').split('?')[0].split('#')[0].toLowerCase();
+  const match = clean.match(/\.([a-z0-9]+)$/);
+  const ext = match ? match[1] : '';
+  if (['mp3', 'wav', 'm4a', 'mp4', 'aac', 'ogg', 'flac', 'webm'].includes(ext)) return ext;
+  return 'mp3';
+}
+
+function getHttpHeader(headers, name) {
+  if (!headers || !name) return '';
+  const target = String(name).toLowerCase();
+  const key = Object.keys(headers).find((item) => String(item).toLowerCase() === target);
+  return key ? headers[key] : '';
+}
+
+function postJson({ url, headers = {}, body = {}, timeoutMs = 30000 }) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const rawBody = JSON.stringify(body || {});
+    const req = https.request({
+      method: 'POST',
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: `${parsed.pathname}${parsed.search}`,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(rawBody),
+        ...headers,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({
+          status: res.statusCode,
+          headers: res.headers || {},
+          text,
+          json: tryParseJson(text),
+        });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('Cloud transcription request timed out'));
+    });
+    req.end(rawBody);
+  });
+}
+
+function createRequestId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function buildDoubaoSubmitRequest({ apiKey, audioUrl, requestId }) {
+  return {
+    url: DOUBAO_ASR_SUBMIT_URL,
+    headers: {
+      'X-Api-Key': apiKey,
+      'X-Api-Resource-Id': DOUBAO_ASR_RESOURCE_ID,
+      'X-Api-Request-Id': requestId,
+      'X-Api-Sequence': '-1',
+    },
+    body: {
+      user: {
+        uid: 'wechat-inbox-sync-cloud',
+      },
+      audio: {
+        url: audioUrl,
+        format: getAudioFormatFromUrl(audioUrl),
+        codec: 'raw',
+        rate: 16000,
+        bits: 16,
+        channel: 1,
+      },
+      request: {
+        model_name: 'bigmodel',
+        enable_itn: true,
+        enable_punc: true,
+        enable_ddc: false,
+        enable_speaker_info: true,
+        enable_channel_split: false,
+        show_utterances: true,
+        vad_segment: false,
+        sensitive_words_filter: '',
+      },
+    },
+  };
+}
+
+function buildDoubaoQueryRequest({ apiKey, requestId }) {
+  return {
+    url: DOUBAO_ASR_QUERY_URL,
+    headers: {
+      'X-Api-Key': apiKey,
+      'X-Api-Resource-Id': DOUBAO_ASR_RESOURCE_ID,
+      'X-Api-Request-Id': requestId,
+    },
+    body: {},
+  };
+}
+
+function formatDoubaoHttpError(response) {
+  const parts = [`豆包语音识别请求失败：HTTP ${response && response.status}`];
+  ['x-api-status-code', 'x-api-message', 'x-api-request-id'].forEach((name) => {
+    const value = getHttpHeader(response && response.headers, name);
+    if (value) parts.push(`${name}=${value}`);
+  });
+  const body = String((response && (response.text || JSON.stringify(response.json || ''))) || '').trim();
+  if (body) parts.push(body.slice(0, 500));
+  return parts.join('；');
+}
+
+function normalizeDoubaoSpeakerText(result) {
+  if (!result || typeof result !== 'object') return '';
+  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+  if (utterances.length) {
+    return utterances
+      .map((item) => {
+        const text = String((item && (item.text || item.result_text || item.utterance_text)) || '').trim();
+        if (!text) return '';
+        const additions = item && item.additions && typeof item.additions === 'object' ? item.additions : {};
+        const speaker = item && (
+          item.speaker
+          || item.speaker_id
+          || item.spk
+          || item.speakerId
+          || additions.speaker
+          || additions.speaker_id
+          || additions.spk
+          || additions.speakerId
+        );
+        return speaker === undefined || speaker === null || speaker === ''
+          ? text
+          : `说话人${speaker}：${text}`;
+      })
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+function normalizeDoubaoTimeToSeconds(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number > 1000 ? Math.ceil(number / 1000) : Math.ceil(number);
+}
+
+function getDoubaoUtteranceEndSeconds(item = {}) {
+  const additions = item && item.additions && typeof item.additions === 'object' ? item.additions : {};
+  return normalizeDoubaoTimeToSeconds(
+    item.end_time
+    || item.endTime
+    || item.end
+    || item.end_ms
+    || item.endMs
+    || additions.end_time
+    || additions.endTime
+    || additions.end
+    || additions.end_ms
+    || additions.endMs
+  );
+}
+
+function getDoubaoResultDurationSeconds(result) {
+  if (!result || typeof result !== 'object') return 0;
+  const directDuration = normalizeDoubaoTimeToSeconds(
+    result.duration
+    || result.duration_ms
+    || result.durationMs
+    || result.audio_duration
+    || result.audioDuration
+  );
+  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+  const utteranceDuration = utterances.reduce((maxValue, item) => Math.max(maxValue, getDoubaoUtteranceEndSeconds(item)), 0);
+  return Math.max(directDuration, utteranceDuration);
+}
+
+function getDoubaoPayloadDurationSeconds(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const result = data && data.result;
+  if (Array.isArray(result)) {
+    return result.reduce((maxValue, item) => Math.max(maxValue, getDoubaoResultDurationSeconds(item)), 0);
+  }
+  return getDoubaoResultDurationSeconds(result || data);
+}
+
+function parseDoubaoResult(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const result = data && data.result;
+  if (Array.isArray(result)) {
+    return result
+      .map((item) => normalizeDoubaoSpeakerText(item) || String((item && (item.text || item.result_text || item.utterance_text)) || '').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  const speakerText = normalizeDoubaoSpeakerText(result);
+  if (speakerText) return speakerText;
+  const text = (result && (result.text || result.result_text))
+    || (data && (data.text || data.transcription))
+    || '';
+  return String(text || '').trim();
+}
+
+function parseDoubaoTaskState(response) {
+  if (response.status && (response.status < 200 || response.status >= 300)) {
+    throw new Error(formatDoubaoHttpError(response));
+  }
+  const statusCode = getHttpHeader(response.headers, 'x-api-status-code');
+  if (statusCode && statusCode !== '20000000') {
+    if (statusCode === '20000001' || statusCode === '20000002') {
+      return {
+        status: 'processing',
+        transcription: '',
+      };
+    }
+    throw new Error(formatDoubaoHttpError(response));
+  }
+  const transcription = parseDoubaoResult(response.json || response.text);
+  return {
+    status: transcription ? 'success' : 'empty',
+    transcription,
+    durationSeconds: getDoubaoPayloadDurationSeconds(response.json || response.text),
+  };
+}
+
+async function runDoubaoCloudTranscription(audioUrl, options = {}) {
+  const apiKey = String((options.env || process.env || {}).DOUBAO_ASR_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error('DOUBAO_ASR_API_KEY is not configured');
+  }
+  const requestId = createRequestId();
+  const submit = buildDoubaoSubmitRequest({ apiKey, audioUrl, requestId });
+  const submitResponse = await postJson(submit);
+  const submitState = parseDoubaoTaskState(submitResponse);
+  if (submitState.status === 'success') {
+    return {
+      transcription: submitState.transcription,
+      durationSeconds: submitState.durationSeconds || 0,
+      requestId,
+      provider: 'doubao',
+    };
+  }
+  const attempts = Math.max(1, Number(process.env.CLOUD_ASR_POLL_ATTEMPTS) || DEFAULT_CLOUD_ASR_POLL_ATTEMPTS);
+  const intervalMs = Math.max(1000, Number(process.env.CLOUD_ASR_POLL_INTERVAL_MS) || DEFAULT_CLOUD_ASR_POLL_INTERVAL_MS);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await sleep(intervalMs);
+    const query = buildDoubaoQueryRequest({ apiKey, requestId });
+    const queryResponse = await postJson(query);
+    const state = parseDoubaoTaskState(queryResponse);
+    if (state.status === 'success') {
+      return {
+        transcription: state.transcription,
+        durationSeconds: state.durationSeconds || 0,
+        requestId,
+        provider: 'doubao',
+      };
+    }
+  }
+  throw new Error('豆包语音识别仍在处理中，请稍后重试');
 }
 
 function normalizeEvent(event) {
@@ -239,6 +532,14 @@ function addDaysIso(now, days) {
   return date.toISOString();
 }
 
+function getDefaultCloudQuotaSeconds(durationDays) {
+  const days = Number(durationDays) || 30;
+  if (days <= 7) return 20 * 60;
+  if (days <= 31) return 60 * 60;
+  if (days <= 100) return 240 * 60;
+  return 1000 * 60;
+}
+
 function getBuiltInRedeemCodeDocument(code, now = new Date().toISOString()) {
   if (normalizeRedeemCode(code) !== 'ZZAI0603') return null;
   return {
@@ -246,6 +547,7 @@ function getBuiltInRedeemCodeDocument(code, now = new Date().toISOString()) {
     status: 'active',
     plan: DEFAULT_REDEEM_PLAN,
     durationDays: 30,
+    cloudQuotaSeconds: getDefaultCloudQuotaSeconds(30),
     maxRedemptions: 1,
     redeemedCount: 0,
     note: 'built-in-test-code',
@@ -259,9 +561,8 @@ function isRedeemCodeActive(codeDoc, now) {
   if (codeDoc.status && codeDoc.status !== 'active') return false;
   const expiresAt = codeDoc.expiresAt || '';
   if (expiresAt && new Date(expiresAt).getTime() <= new Date(now).getTime()) return false;
-  const maxRedemptions = Number(codeDoc.maxRedemptions) || 1;
   const redeemedCount = Number(codeDoc.redeemedCount) || 0;
-  return redeemedCount < maxRedemptions;
+  return redeemedCount < 1;
 }
 
 function buildEntitlementState(entitlement, now = new Date().toISOString()) {
@@ -271,6 +572,9 @@ function buildEntitlementState(entitlement, now = new Date().toISOString()) {
       plan: '',
       status: 'inactive',
       expiresAt: '',
+      code: '',
+      source: '',
+      durationDays: 0,
     };
   }
   const expiresAt = entitlement.expiresAt || '';
@@ -281,6 +585,9 @@ function buildEntitlementState(entitlement, now = new Date().toISOString()) {
     plan: entitlement.plan || DEFAULT_REDEEM_PLAN,
     status,
     expiresAt,
+    code: normalizeRedeemCode(entitlement.code),
+    source: entitlement.source || '',
+    durationDays: Number(entitlement.durationDays) || 0,
   };
 }
 
@@ -381,6 +688,18 @@ function createRepository() {
     },
 
     async getEntitlement(openid, plan) {
+      if (isLocalTranscriptionPlan(plan)) {
+        const result = await db
+          .collection('user_entitlements')
+          .where({
+            openid,
+          })
+          .limit(100)
+          .get();
+
+        return pickBestLocalTranscriptionEntitlement(result.data || []);
+      }
+
       const result = await db
         .collection('user_entitlements')
         .where({
@@ -417,6 +736,10 @@ function createRepository() {
         status: 'active',
         source: 'redeem_code',
         code,
+        durationDays: Number(effectiveCodeDoc.durationDays) || 30,
+        cloudQuotaSeconds: Number(effectiveCodeDoc.cloudQuotaSeconds)
+          || getDefaultCloudQuotaSeconds(Number(effectiveCodeDoc.durationDays) || 30),
+        cloudUsedSeconds: Number(effectiveCodeDoc.cloudUsedSeconds) || 0,
         redeemedAt: now,
         expiresAt: effectiveCodeDoc.entitlementExpiresAt || effectiveCodeDoc.accessExpiresAt || addDaysIso(now, effectiveCodeDoc.durationDays),
         updatedAt: now,
@@ -439,17 +762,13 @@ function createRepository() {
         await db.collection('user_entitlements').add({ data: entitlement });
       }
 
-      const maxRedemptions = Number(effectiveCodeDoc.maxRedemptions) || 1;
-      const nextRedeemedCount = (Number(effectiveCodeDoc.redeemedCount) || 0) + 1;
       const updateData = {
         redeemedCount: _.inc(1),
         lastRedeemedAt: now,
         lastRedeemedOpenId: openid,
+        status: 'redeemed',
         updatedAt: now,
       };
-      if (nextRedeemedCount >= maxRedemptions) {
-        updateData.status = 'redeemed';
-      }
       if (effectiveCodeDoc._id) {
         await db.collection('redeem_codes').doc(effectiveCodeDoc._id).update({ data: updateData });
       }
@@ -486,6 +805,18 @@ function createRepository() {
       const record = recordResult.data && recordResult.data[0] ? recordResult.data[0] : null;
       if (!record) {
         throw new Error('Record not found');
+      }
+
+      if (shouldKeepRecordPendingForTranscription(record)) {
+        return {
+          id: recordId,
+          status: 'pending',
+          syncedAt: record.syncedAt || '',
+          cleaned: false,
+          deletedFileCount: 0,
+          cleanupError: '',
+          reason: 'transcription-not-complete',
+        };
       }
 
       const fileIds = collectRecordFileIds(record);
@@ -562,6 +893,94 @@ function createRepository() {
         fileID,
         tempFileURL: file.tempFileURL,
       };
+    },
+
+    async transcribeCloudAudio(openid, payload) {
+      const audioUrl = payload.audioUrl
+        ? String(payload.audioUrl).trim()
+        : (await this.getTempFileURL(openid, payload.fileID)).tempFileURL;
+      if (!/^https?:\/\//i.test(audioUrl)) {
+        throw new Error('Cloud transcription audio URL is invalid');
+      }
+      const result = await runDoubaoCloudTranscription(audioUrl);
+      const billedSeconds = Math.max(
+        60,
+        Math.ceil(Number(payload.durationSeconds) || 0),
+        Math.ceil(Number(result.durationSeconds) || 0),
+      );
+      return {
+        ...result,
+        billedSeconds,
+      };
+    },
+
+    async recordCloudTranscriptionUsage(openid, usage) {
+      const now = usage.createdAt || new Date().toISOString();
+      if (typeof db.createCollection === 'function') {
+        try {
+          await db.createCollection('cloud_transcription_usages');
+        } catch (error) {
+          // Collection already exists.
+        }
+      }
+      await db.collection('cloud_transcription_usages').add({
+        data: {
+          openid,
+          fileID: usage.fileID,
+          usedSeconds: Number(usage.usedSeconds) || 0,
+          remainingSeconds: Number(usage.remainingSeconds) || 0,
+          quotaSeconds: Number(usage.quotaSeconds) || 0,
+          previousUsedSeconds: Number(usage.previousUsedSeconds) || 0,
+          provider: usage.provider || 'doubao',
+          requestId: usage.requestId || '',
+          localError: usage.localError || '',
+          createdAt: now,
+        },
+      });
+
+      const entitlement = await this.getEntitlement(openid, DEFAULT_REDEEM_PLAN);
+      if (entitlement && entitlement._id) {
+        await db.collection('user_entitlements').doc(entitlement._id).update({
+          data: {
+            cloudUsedSeconds: _.inc(Number(usage.usedSeconds) || 0),
+            cloudLastUsedAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+    },
+
+    async saveTranscriptionPreferences(openid, preferences) {
+      const now = new Date().toISOString();
+      if (typeof db.createCollection === 'function') {
+        try {
+          await db.createCollection('user_transcription_settings');
+        } catch (error) {
+          // Collection already exists.
+        }
+      }
+      const data = {
+        openid,
+        cloudPreTranscriptionEnabled: Boolean(preferences.cloudPreTranscriptionEnabled),
+        cloudPreTranscriptionThresholdMinutes: Number(preferences.cloudPreTranscriptionThresholdMinutes) || 10,
+        updatedAt: now,
+      };
+      const result = await db
+        .collection('user_transcription_settings')
+        .where({ openid })
+        .limit(1)
+        .get();
+      const current = result.data && result.data[0] ? result.data[0] : null;
+      if (current && current._id) {
+        await db.collection('user_transcription_settings').doc(current._id).update({ data });
+      } else {
+        await db.collection('user_transcription_settings').add({ data: { ...data, createdAt: now } });
+      }
+      return data;
+    },
+
+    async handleAdminRequest(request) {
+      return await handleAdminConsoleRequest(request);
     },
   };
 }

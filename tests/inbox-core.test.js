@@ -12,12 +12,14 @@ const {
   buildDailyUsageDocument,
   buildUsageState,
   buildProUsageState,
+  requiresProTranscriptionAccess,
   generateUniqueBindCode,
   normalizeContentType,
   getUsageDay,
   DAILY_FREE_LIMIT,
   DAILY_SHARE_LIMIT,
   DAILY_AD_BONUS,
+  CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED,
   DEFAULT_BIND_DEVICE_LIMIT,
   MAX_BIND_DEVICE_LIMIT,
 } = require('../cloudfunctions/quickstartFunctions/inbox-core');
@@ -25,8 +27,13 @@ const {
 assert.strictEqual(DAILY_FREE_LIMIT, 5);
 assert.strictEqual(DAILY_SHARE_LIMIT, 10);
 assert.strictEqual(DAILY_AD_BONUS, 10);
+assert.strictEqual(CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED, true);
 assert.strictEqual(DEFAULT_BIND_DEVICE_LIMIT, 1);
 assert.strictEqual(MAX_BIND_DEVICE_LIMIT, 3);
+assert.strictEqual(requiresProTranscriptionAccess({ type: 'voice', metadata: {} }), true);
+assert.strictEqual(requiresProTranscriptionAccess({ type: 'webpage', metadata: { webpageMediaType: 'audio_video' } }), true);
+assert.strictEqual(requiresProTranscriptionAccess({ type: 'webpage', metadata: { webpageMediaType: 'article' } }), false);
+assert.strictEqual(requiresProTranscriptionAccess({ type: 'file', metadata: {} }), false);
 assert.strictEqual(getUsageDay('2026-05-08T16:30:00.000Z'), '2026-05-09');
 assert.strictEqual(normalizeContentType('TEXT'), 'text');
 assert.strictEqual(normalizeContentType('link'), 'link');
@@ -76,6 +83,20 @@ const linkRecord = createInboxRecordDocument({
 assert.strictEqual(linkRecord.metadata.url, 'https://example.com/a');
 assert.strictEqual(linkRecord.metadata.fetchStatus, 'pending');
 
+const linkWechatRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'link',
+    content: 'https://mp.weixin.qq.com/s/example',
+    url: 'https://mp.weixin.qq.com/s/example',
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(linkWechatRecord.type, 'webpage');
+assert.strictEqual(linkWechatRecord.metadata.url, 'https://mp.weixin.qq.com/s/example');
+assert.strictEqual(linkWechatRecord.metadata.conversionStatus, 'pending');
+
 const webpageRecord = createInboxRecordDocument({
   event: {
     contentType: 'webpage',
@@ -91,6 +112,103 @@ assert.strictEqual(webpageRecord.type, 'webpage');
 assert.strictEqual(webpageRecord.metadata.url, 'https://mp.weixin.qq.com/s/example');
 assert.strictEqual(webpageRecord.metadata.shareText, '分享文案 https://mp.weixin.qq.com/s/example');
 assert.strictEqual(webpageRecord.metadata.conversionStatus, 'pending');
+
+const douyinShareTextRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'text',
+    content: '3.35 复制打开抖音，看看作品 https://v.douyin.com/3x-bYuN1C9k/ 10/16',
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(douyinShareTextRecord.type, 'webpage');
+assert.strictEqual(douyinShareTextRecord.content, 'https://v.douyin.com/3x-bYuN1C9k/');
+assert.strictEqual(douyinShareTextRecord.metadata.url, 'https://v.douyin.com/3x-bYuN1C9k/');
+assert.strictEqual(douyinShareTextRecord.metadata.webpageMediaType, 'audio_video');
+assert.strictEqual(douyinShareTextRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(douyinShareTextRecord.metadata.transcriptionStatus, 'pending');
+assert.strictEqual(douyinShareTextRecord.metadata.cloudTranscriptionRequested, false);
+assert.match(douyinShareTextRecord.metadata.shareText, /复制打开抖音/);
+
+const cloudDouyinShareTextRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'text',
+    content: '复制打开抖音 https://v.douyin.com/3x-bYuN1C9k/',
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+  cloudPreTranscription: {
+    enabled: true,
+    mode: 'cloud',
+    reason: 'server-default',
+    speakerDiarization: true,
+  },
+});
+
+assert.strictEqual(cloudDouyinShareTextRecord.type, 'webpage');
+assert.strictEqual(cloudDouyinShareTextRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(cloudDouyinShareTextRecord.metadata.transcriptionStatus, 'pending');
+assert.strictEqual(cloudDouyinShareTextRecord.metadata.cloudTranscriptionRequested, false);
+assert.strictEqual(cloudDouyinShareTextRecord.metadata.cloudTranscriptionReason, 'cloud-disabled');
+
+const cloudWebMediaRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'webpage',
+    content: 'https://www.douyin.com/video/123',
+    url: 'https://www.douyin.com/video/123',
+    webpageMediaType: 'audio_video',
+    cloudPreTranscription: {
+      enabled: true,
+      mode: 'cloud',
+      reason: 'remembered',
+    },
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(cloudWebMediaRecord.metadata.webpageMediaType, 'audio_video');
+assert.strictEqual(cloudWebMediaRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(cloudWebMediaRecord.metadata.cloudTranscriptionRequested, false);
+assert.strictEqual(cloudWebMediaRecord.metadata.transcriptionStatus, 'pending');
+assert.strictEqual(cloudWebMediaRecord.metadata.cloudTranscriptionReason, 'cloud-disabled');
+
+const localWebMediaRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'webpage',
+    content: 'https://www.bilibili.com/video/BV123',
+    url: 'https://www.bilibili.com/video/BV123',
+    webpageMediaType: 'audio_video',
+    cloudPreTranscription: {
+      enabled: false,
+      mode: 'local',
+      reason: 'remembered',
+    },
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(localWebMediaRecord.metadata.webpageMediaType, 'audio_video');
+assert.strictEqual(localWebMediaRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(localWebMediaRecord.metadata.cloudTranscriptionRequested, false);
+
+const legacyWebMediaRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'webpage',
+    content: 'https://xhslink.com/example',
+    url: 'https://xhslink.com/example',
+    webpageMediaType: 'audio_video',
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(legacyWebMediaRecord.metadata.webpageMediaType, 'audio_video');
+assert.strictEqual(legacyWebMediaRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(legacyWebMediaRecord.metadata.cloudTranscriptionRequested, false);
+assert.strictEqual(legacyWebMediaRecord.metadata.cloudTranscriptionReason, 'missing-client-choice');
 
 const fileRecord = createInboxRecordDocument({
   event: {
@@ -132,7 +250,98 @@ assert.deepStrictEqual(voiceRecord.metadata, {
   duration: 15200,
   transcriptionStatus: 'pending',
   summaryStatus: 'pending',
+  transcriptionMode: 'local',
+  cloudTranscriptionRequested: false,
+  cloudTranscriptionReason: 'missing-client-choice',
 });
+
+const cloudQueuedVoiceRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'voice',
+    content: '访谈录音 - 31:00',
+    audioFileID: 'cloud://voice/long.mp3',
+    audioFileName: 'interview.mp3',
+    duration: 31 * 60 * 1000,
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+  cloudPreTranscription: {
+    enabled: true,
+    thresholdMinutes: 30,
+  },
+});
+
+assert.strictEqual(cloudQueuedVoiceRecord.metadata.transcriptionStatus, 'pending');
+assert.strictEqual(cloudQueuedVoiceRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(cloudQueuedVoiceRecord.metadata.cloudTranscriptionRequested, false);
+assert.strictEqual(cloudQueuedVoiceRecord.metadata.cloudTranscriptionReason, 'cloud-disabled');
+
+const shortVoiceRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'voice',
+    content: '短语音 - 05:00',
+    audioFileID: 'cloud://voice/short.mp3',
+    duration: 5 * 60 * 1000,
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+  cloudPreTranscription: {
+    enabled: true,
+    thresholdMinutes: 10,
+  },
+});
+
+assert.strictEqual(shortVoiceRecord.metadata.transcriptionStatus, 'pending');
+
+const manuallyQueuedVoiceRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'voice',
+    content: 'manual cloud - 05:00',
+    audioFileID: 'cloud://voice/manual.mp3',
+    duration: 5 * 60 * 1000,
+    cloudPreTranscription: {
+      enabled: true,
+      mode: 'cloud',
+      reason: 'manual',
+      speakerDiarization: true,
+    },
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+  cloudPreTranscription: {
+    enabled: false,
+    thresholdMinutes: 30,
+  },
+});
+
+assert.strictEqual(manuallyQueuedVoiceRecord.metadata.transcriptionStatus, 'pending');
+assert.strictEqual(manuallyQueuedVoiceRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(manuallyQueuedVoiceRecord.metadata.cloudTranscriptionRequested, false);
+assert.strictEqual(manuallyQueuedVoiceRecord.metadata.cloudTranscriptionReason, 'cloud-disabled');
+
+const localOverrideVoiceRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'voice',
+    content: 'local override - 31:00',
+    audioFileID: 'cloud://voice/local.mp3',
+    duration: 31 * 60 * 1000,
+    cloudPreTranscription: {
+      enabled: false,
+      mode: 'local',
+      reason: 'manual',
+    },
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+  cloudPreTranscription: {
+    enabled: true,
+    thresholdMinutes: 10,
+  },
+});
+
+assert.strictEqual(localOverrideVoiceRecord.metadata.transcriptionStatus, 'pending');
+assert.strictEqual(localOverrideVoiceRecord.metadata.transcriptionMode, 'local');
+assert.strictEqual(localOverrideVoiceRecord.metadata.cloudTranscriptionRequested, false);
 
 const bindCode = createBindCodeDocument({
   openid: 'openid-1',

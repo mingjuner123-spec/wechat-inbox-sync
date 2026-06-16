@@ -1,9 +1,23 @@
+param(
+  [string]$InstallRoot = (Join-Path $env:USERPROFILE ".wechat-inbox-local-asr")
+)
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$InstallRoot = Join-Path $env:USERPROFILE ".wechat-inbox-local-asr"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
+$CacheRoot = Join-Path $InstallRoot "cache"
+$InstallStatePath = Join-Path $InstallRoot ".install-state.json"
+$InstallerScriptVersion = "1.2.17"
+$DownloadLowSpeedLimitBytesPerSecond = 10240
+$DownloadLowSpeedTimeoutSeconds = 180
+$InstallLockPath = Join-Path $InstallRoot ".install.lock"
+$InstallMutexName = "Global\WechatInboxLocalAsrInstall"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
+$ModelUrls = @(
+  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+)
 
 function New-CleanDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -13,21 +27,162 @@ function New-CleanDirectory {
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
 
+function Acquire-InstallLock {
+  New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+  $mutex = New-Object System.Threading.Mutex($false, $InstallMutexName)
+  $acquired = $false
+  try {
+    $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(10))
+  } catch [System.Threading.AbandonedMutexException] {
+    $acquired = $true
+  }
+  if (-not $acquired) {
+    throw "Another local ASR installation is already running. Please stop the previous installation or wait a few minutes, then retry."
+  }
+  Set-Content -LiteralPath $InstallLockPath -Encoding UTF8 -Value @(
+    "pid=$PID"
+    "time=$(Get-Date -Format o)"
+  )
+  return $mutex
+}
+
+function Release-InstallLock {
+  param([AllowNull()]$Mutex)
+  if ($Mutex) {
+    try {
+      $Mutex.ReleaseMutex()
+    } catch {
+      # The mutex may already be abandoned if the process is exiting.
+    }
+    $Mutex.Dispose()
+  }
+  Remove-Item -LiteralPath $InstallLockPath -Force -ErrorAction SilentlyContinue
+}
+
+function Copy-FileWithRetry {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourcePath,
+    [Parameter(Mandatory = $true)][string]$DestinationPath,
+    [int]$Attempts = 10,
+    [int]$DelayMilliseconds = 1000
+  )
+  $lastError = $null
+  $destinationDir = Split-Path -Parent $DestinationPath
+  if ($destinationDir) {
+    New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+  }
+  for ($i = 1; $i -le $Attempts; $i += 1) {
+    try {
+      Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+      return $DestinationPath
+    } catch {
+      $lastError = $_
+      Write-Host "File is busy, retrying copy $i/$Attempts`: $SourcePath"
+      Start-Sleep -Milliseconds $DelayMilliseconds
+    }
+  }
+  throw $lastError
+}
+
+function Prepare-ZipForExtraction {
+  param(
+    [Parameter(Mandatory = $true)][string]$ZipPath,
+    [Parameter(Mandatory = $true)][string]$TempRoot,
+    [Parameter(Mandatory = $true)][string]$Label,
+    [string]$FallbackUrl = ""
+  )
+  $extractZipPath = Join-Path $TempRoot ("extract-" + [guid]::NewGuid().ToString("N") + ".zip")
+  try {
+    Copy-FileWithRetry -SourcePath $ZipPath -DestinationPath $extractZipPath | Out-Null
+    return $extractZipPath
+  } catch {
+    if (-not $FallbackUrl) {
+      throw
+    }
+    Write-Host "$Label cache package is locked or unreadable; downloading a fresh temporary package."
+    Download-File -Url $FallbackUrl -OutFile $extractZipPath -Resume
+    return $extractZipPath
+  }
+}
+
+function Remove-ItemIfNotBusy {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  try {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return $true
+  } catch {
+    Write-Host "Cannot remove busy cache file; keeping it for a later retry: $Path"
+    return $false
+  }
+}
+
+function Download-ZipToCacheOrTemp {
+  param(
+    [Parameter(Mandatory = $true)][string]$Url,
+    [Parameter(Mandatory = $true)][string]$CachePath,
+    [Parameter(Mandatory = $true)][string]$TempPath
+  )
+  try {
+    Download-File -Url $Url -OutFile $CachePath -Resume
+    return $CachePath
+  } catch {
+    Write-Host "Cache download failed or cache is busy; downloading to a temporary package."
+    Download-File -Url $Url -OutFile $TempPath -Resume
+    return $TempPath
+  }
+}
+
 function Download-File {
   param(
     [Parameter(Mandatory = $true)][string]$Url,
-    [Parameter(Mandatory = $true)][string]$OutFile
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [switch]$Resume
   )
+  $outDir = Split-Path -Parent $OutFile
+  if ($outDir) {
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+  }
   Write-Host "Downloading $Url"
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($Resume -and $curl) {
+    & $curl.Source `
+      -L `
+      --fail `
+      --silent `
+      --show-error `
+      --retry 2 `
+      --retry-delay 2 `
+      --connect-timeout 30 `
+      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
+      --speed-time $DownloadLowSpeedTimeoutSeconds `
+      -C - `
+      -o $OutFile `
+      $Url
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+    Write-Host "curl resumable download failed with exit code $LASTEXITCODE; retrying with PowerShell."
+  }
   try {
     Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers
   } catch {
     Write-Host "PowerShell download failed, retrying with curl."
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if (-not $curl) {
       throw
     }
-    & $curl.Source -L --fail --silent --show-error --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $OutFile $Url
+    & $curl.Source `
+      -L `
+      --fail `
+      --silent `
+      --show-error `
+      --retry 2 `
+      --retry-delay 2 `
+      --connect-timeout 30 `
+      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
+      --speed-time $DownloadLowSpeedTimeoutSeconds `
+      -C - `
+      -o $OutFile `
+      $Url
     if ($LASTEXITCODE -ne 0) {
       throw "curl download failed with exit code $LASTEXITCODE"
     }
@@ -79,7 +234,11 @@ function Assert-InstalledFile {
 
 function Convert-ExitCodeToHex {
   param([Parameter(Mandatory = $true)][int]$ExitCode)
-  return "0x{0:X8}" -f ([uint32]($ExitCode -band 0xffffffff))
+  $signed = [int64]$ExitCode
+  if ($signed -lt 0) {
+    $signed = 4294967296 + $signed
+  }
+  return "0x{0:X8}" -f $signed
 }
 
 function ConvertTo-NativeArgument {
@@ -129,6 +288,63 @@ function Invoke-NativeProcess {
   }
 }
 
+function Get-ShortPath {
+  param([AllowNull()][string]$Path)
+  $text = [string]$Path
+  if ($text -eq "") {
+    return ""
+  }
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    if (Test-Path -LiteralPath $text -PathType Leaf) {
+      return $fso.GetFile($text).ShortPath
+    }
+    if (Test-Path -LiteralPath $text -PathType Container) {
+      return $fso.GetFolder($text).ShortPath
+    }
+    $parent = Split-Path -Parent $text
+    $name = Split-Path -Leaf $text
+    if ($parent -and (Test-Path -LiteralPath $parent)) {
+      $shortParent = Get-ShortPath $parent
+      if ($shortParent) {
+        return Join-Path $shortParent $name
+      }
+    }
+  } catch {
+    return $text
+  }
+  return $text
+}
+
+function New-SafeTempDirectory {
+  $baseCandidates = @()
+  if ($env:ProgramData) {
+    $baseCandidates += (Join-Path $env:ProgramData "wechat-inbox-local-asr")
+  }
+  if ($env:PUBLIC) {
+    $baseCandidates += (Join-Path $env:PUBLIC "wechat-inbox-local-asr")
+  }
+  if ($env:SystemDrive) {
+    $baseCandidates += (Join-Path $env:SystemDrive "wechat-inbox-local-asr-temp")
+  }
+  if ($env:TEMP) {
+    $baseCandidates += $env:TEMP
+  }
+
+  foreach ($base in $baseCandidates) {
+    try {
+      New-Item -ItemType Directory -Force -Path $base | Out-Null
+      $dir = Join-Path $base ("run-" + [guid]::NewGuid().ToString("N"))
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      return $dir
+    } catch {
+      continue
+    }
+  }
+
+  throw "Cannot create a local ASR temp directory."
+}
+
 function Install-VcRuntime {
   $vcInstaller = Join-Path $TempRoot "vc_redist.x64.exe"
   Write-Host "Installing Microsoft Visual C++ Runtime for whisper.cpp."
@@ -171,6 +387,148 @@ function Assert-ExecutableRuns {
   throw "$Label runtime validation failed with exit code $exit/$hex. $output"
 }
 
+function Assert-LocalAsrInference {
+  param(
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  $validationDir = New-SafeTempDirectory
+  try {
+    $samplePath = Join-Path $validationDir "validation.wav"
+    $outputBase = Join-Path $validationDir "validation"
+    $safeModelPath = Join-Path $validationDir "ggml-small.bin"
+    Copy-Item -LiteralPath $ModelPath -Destination $safeModelPath -Force
+    Assert-ExecutableRuns `
+      -Path $FfmpegPath `
+      -Arguments @(
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi",
+        "-i", "sine=frequency=440:duration=1",
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        $samplePath
+      ) `
+      -Label "ffmpeg inference validation" | Out-Null
+    Assert-ExecutableRuns `
+      -Path $WhisperPath `
+      -Arguments @(
+        "-m", (Get-ShortPath $safeModelPath),
+        "-f", (Get-ShortPath $samplePath),
+        "-l", "zh",
+        "-otxt",
+        "-of", (Get-ShortPath $outputBase)
+      ) `
+      -Label "whisper.cpp inference validation" `
+      -TryInstallVcRuntime | Out-Null
+    Write-Host "Local ASR inference validation passed."
+  } finally {
+    if (Test-Path -LiteralPath $validationDir) {
+      Remove-Item -LiteralPath $validationDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Read-InstallState {
+  if (-not (Test-Path -LiteralPath $InstallStatePath)) {
+    return $null
+  }
+  try {
+    return Get-Content -LiteralPath $InstallStatePath -Raw | ConvertFrom-Json
+  } catch {
+    Write-Host "Install state is unreadable; running full validation."
+    return $null
+  }
+}
+
+function Get-FileState {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return $null
+  }
+  $item = Get-Item -LiteralPath $Path
+  return [pscustomobject]@{
+    path = $item.FullName
+    length = [Int64]$item.Length
+    lastWriteUtcTicks = [Int64]$item.LastWriteTimeUtc.Ticks
+  }
+}
+
+function Test-FileStateMatches {
+  param(
+    [AllowNull()]$State,
+    [Parameter(Mandatory = $true)][string]$Path
+  )
+  if (-not $State) {
+    return $false
+  }
+  $actual = Get-FileState -Path $Path
+  if (-not $actual) {
+    return $false
+  }
+  return (
+    $State.path -eq $actual.path -and
+    [Int64]$State.length -eq $actual.length -and
+    [Int64]$State.lastWriteUtcTicks -eq $actual.lastWriteUtcTicks
+  )
+}
+
+function Test-InstallStateValid {
+  param(
+    [AllowNull()]$State,
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  if (-not $State) {
+    return $false
+  }
+  if ($State.installerScriptVersion -ne $InstallerScriptVersion) {
+    return $false
+  }
+  if ($State.validationStatus -ne "passed") {
+    return $false
+  }
+  return (
+    (Test-FileStateMatches -State $State.whisper -Path $WhisperPath) -and
+    (Test-FileStateMatches -State $State.ffmpeg -Path $FfmpegPath) -and
+    (Test-FileStateMatches -State $State.model -Path $ModelPath)
+  )
+}
+
+function Write-InstallState {
+  param(
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  $state = [pscustomobject]@{
+    installerScriptVersion = $InstallerScriptVersion
+    validationStatus = "passed"
+    validatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+    whisper = Get-FileState -Path $WhisperPath
+    ffmpeg = Get-FileState -Path $FfmpegPath
+    model = Get-FileState -Path $ModelPath
+  }
+  $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $InstallStatePath -Encoding UTF8
+}
+
+function Invoke-LocalAsrValidation {
+  param(
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  $state = Read-InstallState
+  if (Test-InstallStateValid -State $state -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath) {
+    Write-Host "Local ASR was already validated for the current files; skipping full inference validation."
+    return
+  }
+  Assert-LocalAsrInference -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath
+  Write-InstallState -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath
+}
+
 function Install-ZipPackage {
   param(
     [Parameter(Mandatory = $true)][string[]]$Urls,
@@ -183,18 +541,91 @@ function Install-ZipPackage {
   $lastError = $null
   foreach ($url in $Urls) {
     try {
-      if (Test-Path -LiteralPath $ZipPath) {
-        Remove-Item -LiteralPath $ZipPath -Force
-      }
       New-CleanDirectory -Path $StageDir
-      Download-File -Url $url -OutFile $ZipPath
-      Assert-DownloadedFile -Path $ZipPath -MinBytes $MinBytes -Label $Label | Out-Null
-      Expand-Archive -LiteralPath $ZipPath -DestinationPath $StageDir -Force
+      $cacheFile = $ZipPath
+      if ((Test-Path -LiteralPath $cacheFile) -and ((Get-Item -LiteralPath $cacheFile).Length -ge $MinBytes)) {
+        Write-Host "Using cached $Label package: $cacheFile"
+        $extractZipPath = Prepare-ZipForExtraction -ZipPath $cacheFile -TempRoot $TempRoot -Label $Label -FallbackUrl $url
+      } else {
+        if (Test-Path -LiteralPath $cacheFile) {
+          Write-Host "Resuming partial cached $Label package: $cacheFile"
+        }
+        $downloadTempPath = Join-Path $TempRoot ("download-" + [guid]::NewGuid().ToString("N") + ".zip")
+        $zipForExtraction = Download-ZipToCacheOrTemp -Url $url -CachePath $cacheFile -TempPath $downloadTempPath
+        $extractZipPath = Prepare-ZipForExtraction -ZipPath $zipForExtraction -TempRoot $TempRoot -Label $Label -FallbackUrl $url
+      }
+      Assert-DownloadedFile -Path $extractZipPath -MinBytes $MinBytes -Label $Label | Out-Null
+      Expand-Archive -LiteralPath $extractZipPath -DestinationPath $StageDir -Force
       return Assert-InstalledFile -Root $StageDir -Names $ExpectedFiles -Label $Label
     } catch {
       $lastError = $_
       Write-Host "$Label source failed: $url"
       Write-Host ($_.Exception.Message)
+      if (Test-Path -LiteralPath $ZipPath) {
+        $cachedZip = Get-Item -LiteralPath $ZipPath
+        if ($cachedZip.Length -ge $MinBytes) {
+          Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+        } else {
+          Write-Host "Keeping partial $Label package for retry: $ZipPath"
+        }
+      }
+    }
+  }
+  throw $lastError
+}
+
+function Install-ExtractedPackage {
+  param(
+    [Parameter(Mandatory = $true)][string]$StageDir,
+    [Parameter(Mandatory = $true)][string]$DestinationDir,
+    [Parameter(Mandatory = $true)][string[]]$ExpectedFiles,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $found = Find-InstalledFile -Root $StageDir -Names $ExpectedFiles
+  if (-not $found) {
+    throw "$Label install validation failed: cannot find $($ExpectedFiles -join ' or ') under $StageDir"
+  }
+  if (Test-Path -LiteralPath $DestinationDir) {
+    Remove-Item -LiteralPath $DestinationDir -Recurse -Force
+  }
+  New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
+  Get-ChildItem -LiteralPath $StageDir -Force |
+    Copy-Item -Destination $DestinationDir -Recurse -Force
+  return Assert-InstalledFile -Root $DestinationDir -Names $ExpectedFiles -Label $Label
+}
+
+function Install-ModelPackage {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Urls,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [Parameter(Mandatory = $true)][Int64]$MinBytes,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $lastError = $null
+  foreach ($url in $Urls) {
+    try {
+      if (Test-Path -LiteralPath $OutFile) {
+        if ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes) {
+          Write-Host "Using cached $Label package: $OutFile"
+          return $OutFile
+        }
+        Write-Host "Resuming partial cached $Label package: $OutFile"
+      }
+      Download-File -Url $url -OutFile $OutFile -Resume
+      Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null
+      return $OutFile
+    } catch {
+      $lastError = $_
+      Write-Host "$Label source failed: $url"
+      Write-Host ($_.Exception.Message)
+      if (Test-Path -LiteralPath $OutFile) {
+        $cachedFile = Get-Item -LiteralPath $OutFile
+        if ($cachedFile.Length -ge $MinBytes) {
+          Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        } else {
+          Write-Host "Keeping partial $Label package for retry: $OutFile"
+        }
+      }
     }
   }
   throw $lastError
@@ -264,8 +695,11 @@ function Write-TranscribeScript {
   Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null
 }
 
+$installMutex = $null
 try {
+  $installMutex = Acquire-InstallLock
   New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+  New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
   Write-TranscribeScript -InstallRoot $InstallRoot
   New-CleanDirectory -Path $TempRoot
 
@@ -288,7 +722,7 @@ try {
     }
   }
   if (-not $installedWhisper) {
-    $whisperZip = Join-Path $TempRoot "whisper.zip"
+    $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
       -Urls @((Get-LatestWhisperWindowsAsset)) `
       -ZipPath $whisperZip `
@@ -300,8 +734,7 @@ try {
     if (Test-Path -LiteralPath $WhisperDir) {
       Remove-Item -LiteralPath $WhisperDir -Recurse -Force
     }
-    Move-Item -LiteralPath $WhisperStageDir -Destination $WhisperDir
-    $installedWhisper = Assert-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
+    $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
     Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
   }
 
@@ -317,7 +750,7 @@ try {
     }
   }
   if (-not $installedFfmpeg) {
-    $ffmpegZip = Join-Path $TempRoot "ffmpeg.zip"
+    $ffmpegZip = Join-Path $CacheRoot "ffmpeg.zip"
     Install-ZipPackage `
       -Urls @(
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
@@ -332,23 +765,46 @@ try {
     if (Test-Path -LiteralPath $FfmpegDir) {
       Remove-Item -LiteralPath $FfmpegDir -Recurse -Force
     }
-    Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir
-    $installedFfmpeg = Assert-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe") -Label "ffmpeg"
+    $installedFfmpeg = Install-ExtractedPackage -StageDir $FfmpegStageDir -DestinationDir $FfmpegDir -ExpectedFiles @("ffmpeg.exe") -Label "ffmpeg"
     Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
   }
 
   $modelPath = Join-Path $ModelDir "ggml-small.bin"
+  $cachedModelPath = Join-Path $CacheRoot "ggml-small.bin"
   if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {
     Remove-Item -LiteralPath $modelPath -Force
   }
   if (-not (Test-Path -LiteralPath $modelPath)) {
-    $modelTempPath = Join-Path $TempRoot "ggml-small.bin"
-    Download-File -Url "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin" -OutFile $modelTempPath
-    Assert-DownloadedFile -Path $modelTempPath -MinBytes 400MB -Label "Whisper model" | Out-Null
-    Move-Item -LiteralPath $modelTempPath -Destination $modelPath -Force
+    if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
+      Remove-Item -LiteralPath $cachedModelPath -Force
+    }
+    Install-ModelPackage -Urls $ModelUrls -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
   Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+
+  try {
+    Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+  } catch {
+    Write-Host "Current whisper.cpp failed real inference validation; reinstalling once."
+    Write-Host ($_.Exception.Message)
+    $whisperZip = Join-Path $CacheRoot "whisper.zip"
+    Install-ZipPackage `
+      -Urls @((Get-LatestWhisperWindowsAsset)) `
+      -ZipPath $whisperZip `
+      -StageDir $WhisperStageDir `
+      -MinBytes 1MB `
+      -ExpectedFiles @("whisper-cli.exe", "main.exe") `
+      -Label "whisper.cpp" | Out-Null
+    if (Test-Path -LiteralPath $WhisperDir) {
+      Remove-Item -LiteralPath $WhisperDir -Recurse -Force
+    }
+    $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
+    Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+    Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+    Write-InstallState -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+  }
 
 # BEGIN_TRANSCRIBE_TEMPLATE
   $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
@@ -385,7 +841,6 @@ if ($OutputDir) {
   New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 }
 
-$TempWorkDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N"))
 $ChunkSeconds = 600
 $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
   $OutputPath.Substring(0, $OutputPath.Length - 4)
@@ -394,6 +849,18 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 }
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$SimplifiedPrompt = [string]::Concat([char]0x8bf7, [char]0x8f93, [char]0x51fa, [char]0x7b80, [char]0x4f53, [char]0x4e2d, [char]0x6587)
+@(
+  "time=$(Get-Date -Format o)"
+  "status=pending"
+  "inputPath=$InputPath"
+  "outputPath=$OutputPath"
+  "chunkSeconds=$ChunkSeconds"
+  "progressStage=preparing"
+  "progressCurrent=0"
+  "progressTotal=0"
+  "progressPercent=0"
+) | Set-Content -LiteralPath $RunLog -Encoding UTF8
 
 function ConvertTo-NativeArgument {
   param([AllowNull()][string]$Value)
@@ -407,56 +874,108 @@ function ConvertTo-NativeArgument {
   return '"' + ($text -replace '"', '\"') + '"'
 }
 
+function Convert-ExitCodeToHex {
+  param([Parameter(Mandatory = $true)][int]$ExitCode)
+  $signed = [int64]$ExitCode
+  if ($signed -lt 0) {
+    $signed = 4294967296 + $signed
+  }
+  return "0x{0:X8}" -f $signed
+}
+
+function Get-ShortPath {
+  param([AllowNull()][string]$Path)
+  $text = [string]$Path
+  if ($text -eq "") {
+    return ""
+  }
+  try {
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+    if (Test-Path -LiteralPath $text -PathType Leaf) {
+      return $fso.GetFile($text).ShortPath
+    }
+    if (Test-Path -LiteralPath $text -PathType Container) {
+      return $fso.GetFolder($text).ShortPath
+    }
+    $parent = Split-Path -Parent $text
+    $name = Split-Path -Leaf $text
+    if ($parent -and (Test-Path -LiteralPath $parent)) {
+      $shortParent = Get-ShortPath $parent
+      if ($shortParent) {
+        return Join-Path $shortParent $name
+      }
+    }
+  } catch {
+    return $text
+  }
+  return $text
+}
+
+function New-SafeTempDirectory {
+  $baseCandidates = @()
+  if ($env:ProgramData) {
+    $baseCandidates += (Join-Path $env:ProgramData "wechat-inbox-local-asr")
+  }
+  if ($env:PUBLIC) {
+    $baseCandidates += (Join-Path $env:PUBLIC "wechat-inbox-local-asr")
+  }
+  if ($env:SystemDrive) {
+    $baseCandidates += (Join-Path $env:SystemDrive "wechat-inbox-local-asr-temp")
+  }
+  if ($env:TEMP) {
+    $baseCandidates += $env:TEMP
+  }
+
+  foreach ($base in $baseCandidates) {
+    try {
+      New-Item -ItemType Directory -Force -Path $base | Out-Null
+      $dir = Join-Path $base ("run-" + [guid]::NewGuid().ToString("N"))
+      New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      return $dir
+    } catch {
+      continue
+    }
+  }
+
+  throw "Cannot create a local ASR temp directory."
+}
+
+function Test-WhisperNativeCrashExitCode {
+  param([int]$ExitCode)
+  $hex = Convert-ExitCodeToHex -ExitCode $ExitCode
+  return ($ExitCode -eq -1073740791 -or $hex -eq "0xC0000409")
+}
+
 function Invoke-NativeProcess {
   param(
     [Parameter(Mandatory = $true)][string]$FilePath,
     [Parameter(Mandatory = $true)][string[]]$Arguments
   )
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $FilePath
-  $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.CreateNoWindow = $true
-
-  $process = New-Object System.Diagnostics.Process
-  $process.StartInfo = $psi
-  $stdout = New-Object System.Text.StringBuilder
-  $stderr = New-Object System.Text.StringBuilder
-  $outputHandler = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $event)
-    if ($null -ne $event.Data) {
-      [void]$stdout.AppendLine($event.Data)
-    }
-  }
-  $errorHandler = [System.Diagnostics.DataReceivedEventHandler]{
-    param($sender, $event)
-    if ($null -ne $event.Data) {
-      [void]$stderr.AppendLine($event.Data)
-    }
-  }
-
-  $process.add_OutputDataReceived($outputHandler)
-  $process.add_ErrorDataReceived($errorHandler)
-  $exitCode = 1
+  $nativeTempDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-native-" + [guid]::NewGuid().ToString("N"))
+  $stdoutPath = Join-Path $nativeTempDir "stdout.log"
+  $stderrPath = Join-Path $nativeTempDir "stderr.log"
   try {
-    [void]$process.Start()
-    $process.BeginOutputReadLine()
-    $process.BeginErrorReadLine()
-    $process.WaitForExit()
+    New-Item -ItemType Directory -Force -Path $nativeTempDir | Out-Null
+    $process = Start-Process `
+      -FilePath $FilePath `
+      -ArgumentList $Arguments `
+      -NoNewWindow `
+      -Wait `
+      -PassThru `
+      -RedirectStandardOutput $stdoutPath `
+      -RedirectStandardError $stderrPath
     $exitCode = $process.ExitCode
+    $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
+    $stderrText = if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
   } finally {
-    $process.remove_OutputDataReceived($outputHandler)
-    $process.remove_ErrorDataReceived($errorHandler)
-    $process.Dispose()
+    Remove-Item -LiteralPath $nativeTempDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 
   $combined = @(
     "--- stdout ---"
-    $stdout.ToString().TrimEnd()
+    ([string]$stdoutText).TrimEnd()
     "--- stderr ---"
-    $stderr.ToString().TrimEnd()
+    ([string]$stderrText).TrimEnd()
   ) -join [Environment]::NewLine
   return [PSCustomObject]@{
     ExitCode = $exitCode
@@ -464,12 +983,84 @@ function Invoke-NativeProcess {
   }
 }
 
-try {
+function ConvertTo-SimplifiedChinese {
+  param([AllowNull()][string]$Text)
+  $source = [string]$Text
+  if ($source -eq "") {
+    return ""
+  }
+  try {
+    Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+    return [Microsoft.VisualBasic.Strings]::StrConv($source, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804)
+  } catch {
+    return $source
+  }
+}
+
+function Write-ProgressLog {
+  param(
+    [Parameter(Mandatory = $true)][string]$Stage,
+    [Parameter(Mandatory = $true)][int]$Current,
+    [Parameter(Mandatory = $true)][int]$Total
+  )
+  $percent = 0
+  if ($Total -gt 0) {
+    $percent = [Math]::Floor(($Current * 100) / $Total)
+  }
+  Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value @(
+    "progressStage=$Stage"
+    "progressCurrent=$Current"
+    "progressTotal=$Total"
+    "progressPercent=$percent"
+  )
+}
+
+function Invoke-TranscribeAttempt {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("normal", "safe")][string]$Mode
+  )
+  $safeTempRoot = $null
+  $tempWorkDir = $null
+  $attemptInputPath = $InputPath
+  $attemptModelPath = $Model
+  if ($Mode -eq "safe") {
+    $safeTempRoot = New-SafeTempDirectory
+    $tempWorkDir = Join-Path $safeTempRoot "chunks"
+    $attemptInputPath = Join-Path $safeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))
+    $attemptModelPath = Join-Path $safeTempRoot "ggml-small.bin"
+    Copy-Item -LiteralPath $InputPath -Destination $attemptInputPath -Force
+    Copy-Item -LiteralPath $Model -Destination $attemptModelPath -Force
+  } else {
+    $tempWorkDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N"))
+  }
+  $pathForNative = {
+    param([string]$PathValue)
+    if ($Mode -eq "safe") {
+      return Get-ShortPath $PathValue
+    }
+    return $PathValue
+  }
+
+  $result = [PSCustomObject]@{
+    Mode = $Mode
+    TempWorkDir = $tempWorkDir
+    InputPath = $attemptInputPath
+    ModelPath = $attemptModelPath
+    FfmpegOutput = ""
+    FfmpegExit = 0
+    ChunkCount = 0
+    WhisperLogs = ""
+    WhisperExit = 0
+    Text = ""
+    Error = ""
+  }
+
+  try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
-  $ChunkPattern = Join-Path $TempWorkDir "chunk-%03d.wav"
+  $ChunkPattern = Join-Path $tempWorkDir "chunk-%03d.wav"
   $ffmpegResult = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
     "-hide_banner", "-loglevel", "error", "-y",
-    "-i", $InputPath,
+    "-i", (& $pathForNative $attemptInputPath),
     "-ar", "16000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
@@ -480,24 +1071,28 @@ try {
   )
   $ffmpegOutput = $ffmpegResult.Output
   $ffmpegExit = $ffmpegResult.ExitCode
-  $chunkFiles = @(Get-ChildItem -LiteralPath $TempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
+  $chunkFiles = @(Get-ChildItem -LiteralPath $tempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
+  $result.ChunkCount = $chunkFiles.Count
+  Write-ProgressLog -Stage "transcribing" -Current 0 -Total $chunkFiles.Count
   $whisperLogs = New-Object System.Collections.Generic.List[string]
   $mergedText = New-Object System.Collections.Generic.List[string]
   $whisperExit = 0
+  $chunkIndex = 0
 
   if ($ffmpegExit -eq 0 -and $chunkFiles.Count -eq 0) {
     throw "ffmpeg did not generate audio chunks."
   }
 
   foreach ($chunk in $chunkFiles) {
-    $chunkBase = [System.IO.Path]::Combine($TempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
+    $chunkBase = [System.IO.Path]::Combine($tempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
     $chunkTxt = "$chunkBase.txt"
     $chunkResult = Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments @(
-      "-m", $Model,
-      "-f", $chunk.FullName,
+      "-m", (& $pathForNative $attemptModelPath),
+      "-f", (& $pathForNative $chunk.FullName),
       "-l", "zh",
+      "--prompt", $SimplifiedPrompt,
       "-otxt",
-      "-of", $chunkBase
+      "-of", (& $pathForNative $chunkBase)
     )
     $chunkOutput = $chunkResult.Output
     $currentExit = $chunkResult.ExitCode
@@ -510,42 +1105,104 @@ try {
     if (Test-Path -LiteralPath $chunkTxt) {
       $text = ([System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)).Trim()
       if ($text) {
-        $mergedText.Add($text)
+        $mergedText.Add((ConvertTo-SimplifiedChinese $text))
       }
     }
+    $chunkIndex += 1
+    Write-ProgressLog -Stage "transcribing" -Current $chunkIndex -Total $chunkFiles.Count
   }
 
-  @(
+    $result.FfmpegOutput = $ffmpegOutput
+    $result.FfmpegExit = $ffmpegExit
+    $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
+    $result.WhisperExit = $whisperExit
+    $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
+    return $result
+  } catch {
+    $result.FfmpegOutput = $ffmpegOutput
+    $result.FfmpegExit = $ffmpegExit
+    $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
+    $result.WhisperExit = $whisperExit
+    $result.Error = ($_ | Out-String)
+    return $result
+  } finally {
+    if ($safeTempRoot -and (Test-Path -LiteralPath $safeTempRoot)) {
+      Remove-Item -LiteralPath $safeTempRoot -Recurse -Force
+    } elseif ($tempWorkDir -and (Test-Path -LiteralPath $tempWorkDir)) {
+      Remove-Item -LiteralPath $tempWorkDir -Recurse -Force
+    }
+  }
+}
+
+function Write-AttemptLog {
+  param(
+    [Parameter(Mandatory = $true)]$Attempt,
+    [AllowNull()]$FallbackAttempt
+  )
+  $lines = @(
     "time=$(Get-Date -Format o)"
-    "status=pending"
+    "status=running"
     "inputPath=$InputPath"
     "outputPath=$OutputPath"
-    "tempWorkDir=$TempWorkDir"
+    "mode=$($Attempt.Mode)"
+    "tempWorkDir=$($Attempt.TempWorkDir)"
     "chunkSeconds=$ChunkSeconds"
-    "chunkCount=$($chunkFiles.Count)"
+    "chunkCount=$($Attempt.ChunkCount)"
     "ffmpeg=$($Ffmpeg.FullName)"
-    "ffmpegExit=$ffmpegExit"
+    "ffmpegExit=$($Attempt.FfmpegExit)"
     "--- ffmpeg output ---"
-    $ffmpegOutput
+    $Attempt.FfmpegOutput
     "whisper=$($Whisper.FullName)"
-    "whisperExit=$whisperExit"
+    "whisperExit=$($Attempt.WhisperExit)"
     "--- whisper output ---"
-    ($whisperLogs -join [Environment]::NewLine)
-  ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
-
-  if ($ffmpegExit -ne 0) {
-    throw "ffmpeg failed with exit code $ffmpegExit. See $RunLog"
+    $Attempt.WhisperLogs
+  )
+  if ($FallbackAttempt) {
+    $lines += @(
+      "--- fallback attempt ---"
+      "mode=$($FallbackAttempt.Mode)"
+      "tempWorkDir=$($FallbackAttempt.TempWorkDir)"
+      "safeInputPath=$($FallbackAttempt.InputPath)"
+      "safeModelPath=$($FallbackAttempt.ModelPath)"
+      "chunkCount=$($FallbackAttempt.ChunkCount)"
+      "ffmpegExit=$($FallbackAttempt.FfmpegExit)"
+      "--- fallback ffmpeg output ---"
+      $FallbackAttempt.FfmpegOutput
+      "whisperExit=$($FallbackAttempt.WhisperExit)"
+      "--- fallback whisper output ---"
+      $FallbackAttempt.WhisperLogs
+      "--- fallback error ---"
+      $FallbackAttempt.Error
+    )
   }
-  if ($whisperExit -ne 0) {
-    throw "whisper failed with exit code $whisperExit. See $RunLog"
-  }
+  $lines | Set-Content -LiteralPath $RunLog -Encoding UTF8
+}
 
-  if ($mergedText.Count -eq 0) {
+try {
+  $normalAttempt = Invoke-TranscribeAttempt -Mode "normal"
+  $finalAttempt = $normalAttempt
+  $fallbackAttempt = $null
+  if ($normalAttempt.FfmpegExit -eq 0 -and (Test-WhisperNativeCrashExitCode $normalAttempt.WhisperExit)) {
+    $fallbackAttempt = Invoke-TranscribeAttempt -Mode "safe"
+    if ($fallbackAttempt.FfmpegExit -eq 0 -and $fallbackAttempt.WhisperExit -eq 0 -and $fallbackAttempt.Text.Trim()) {
+      $finalAttempt = $fallbackAttempt
+    }
+  }
+  Write-AttemptLog -Attempt $normalAttempt -FallbackAttempt $fallbackAttempt
+
+  if ($finalAttempt.FfmpegExit -ne 0) {
+    throw "ffmpeg failed with exit code $($finalAttempt.FfmpegExit). See $RunLog"
+  }
+  if ($finalAttempt.WhisperExit -ne 0) {
+    throw "whisper failed with exit code $($finalAttempt.WhisperExit). See $RunLog"
+  }
+  if (-not $finalAttempt.Text.Trim()) {
     throw "Whisper did not generate transcript text. See $RunLog"
   }
 
-  $finalText = $mergedText -join "`n`n"
+  $finalText = ConvertTo-SimplifiedChinese $finalAttempt.Text
   [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
+  Write-ProgressLog -Stage "done" -Current $finalAttempt.ChunkCount -Total $finalAttempt.ChunkCount
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)
 } catch {
@@ -555,10 +1212,6 @@ try {
     ($_ | Out-String)
   )
   throw
-} finally {
-  if (Test-Path -LiteralPath $TempWorkDir) {
-    Remove-Item -LiteralPath $TempWorkDir -Recurse -Force
-  }
 }
 '@ | Set-Content -LiteralPath $transcribeScript -Encoding UTF8
 # END_TRANSCRIBE_TEMPLATE
@@ -572,9 +1225,10 @@ try {
   Write-Host "model: $modelPath"
   Write-Host "Local ASR installed to: $InstallRoot"
   Write-Host "Use this Obsidian plugin command:"
-  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"`$env:USERPROFILE\.wechat-inbox-local-asr\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
+  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
 } finally {
   if (Test-Path -LiteralPath $TempRoot) {
     Remove-Item -LiteralPath $TempRoot -Recurse -Force
   }
+  Release-InstallLock -Mutex $installMutex
 }

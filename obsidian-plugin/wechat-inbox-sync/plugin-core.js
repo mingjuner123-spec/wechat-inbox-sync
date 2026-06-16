@@ -1,6 +1,29 @@
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
+const NOTE_SAVE_MODES = {
+  date: '按日期创建子目录',
+  root: '直接保存到根目录',
+};
+const DEFAULT_NOTE_PROPERTY_FIELDS = '';
+const NOTE_PROPERTY_FIELD_KEYS = [
+  'id',
+  'type',
+  'title',
+  'created_at',
+  'synced_at',
+  'source',
+  'status',
+  'url',
+  'fetch_status',
+  'conversion_status',
+  'audio_file',
+  'audio_file_id',
+  'transcription_status',
+  'file_name',
+  'file_id',
+  'file_ext',
+];
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
@@ -9,6 +32,8 @@ const DEFAULT_SETTINGS = {
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
+  noteSaveMode: 'date',
+  notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: false,
   aiProvider: 'off',
   localAsrPlatform: 'auto',
@@ -78,6 +103,26 @@ function normalizeLocalTranscriptionCommand(command, platform = process.platform
     return getDefaultLocalTranscriptionCommand(platform);
   }
   return normalized;
+}
+
+function normalizeNoteSaveMode(value) {
+  const normalized = String(value || '').trim();
+  return Object.prototype.hasOwnProperty.call(NOTE_SAVE_MODES, normalized)
+    ? normalized
+    : DEFAULT_SETTINGS.noteSaveMode;
+}
+
+function normalizeNotePropertyFields(value) {
+  const seen = new Set();
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => {
+      if (!NOTE_PROPERTY_FIELD_KEYS.includes(item) || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    })
+    .join(',');
 }
 
 function normalizeBindCodeInput(code) {
@@ -155,6 +200,8 @@ function mergeSettings(savedSettings, platform = process.platform) {
   merged.pendingBindCode = normalizeBindCodeInput(merged.pendingBindCode);
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
+  merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
+  merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
@@ -191,21 +238,6 @@ function validateSettings(settings) {
   const hasEnabledBinding = Array.isArray(settings.bindings)
     && settings.bindings.some((item) => item && item.enabled !== false && item.status !== 'unbound' && item.token);
   if (!settings.token && !hasEnabledBinding) errors.push('请填写小程序绑定码');
-
-  if (settings.aiProvider === 'tencent') {
-    if (!settings.tencentSecretId) errors.push('请填写腾讯云 SecretId');
-    if (!settings.tencentSecretKey) errors.push('请填写腾讯云 SecretKey');
-  }
-  if (settings.aiProvider === 'aliyun') {
-    if (!settings.aliyunApiKey) errors.push('请填写阿里云百炼 API Key');
-  }
-  if (settings.aiProvider === 'doubao') {
-    if (!settings.doubaoAsrApiKey) errors.push('请填写豆包语音识别 API Key');
-  }
-  if (settings.aiProvider === 'local') {
-    if (!settings.localTranscriptionCommand) errors.push('请填写本地转写命令');
-  }
-
   return errors;
 }
 
@@ -217,6 +249,8 @@ module.exports = {
   AI_PROVIDER_NAMES,
   DEFAULT_SETTINGS,
   MAX_PLUGIN_BINDINGS,
+  NOTE_PROPERTY_FIELD_KEYS,
+  NOTE_SAVE_MODES,
   OFFICIAL_SYNC_API_BASE,
   buildSyncNotice,
   createClientId,
@@ -227,6 +261,8 @@ module.exports = {
   normalizeBindings,
   normalizeLocalAsrPlatform,
   normalizeLocalTranscriptionCommand,
+  normalizeNotePropertyFields,
+  normalizeNoteSaveMode,
   resolveLocalAsrPlatform,
   validateSettings,
 };

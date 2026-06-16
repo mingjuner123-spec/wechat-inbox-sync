@@ -5,6 +5,7 @@ const {
   LOCAL_TRANSCRIPTION_PLAN_ALIASES,
   DEFAULT_REDEEM_DURATION_DAYS,
   DEFAULT_REDEEM_MAX_REDEMPTIONS,
+  getDefaultCloudQuotaSeconds,
   normalizeRedeemCode,
   isLocalTranscriptionPlan,
   isRedeemCodeActive,
@@ -12,7 +13,9 @@ const {
   getBuiltInRedeemCodeDocument,
   createEntitlementDocument,
   buildEntitlementState,
+  pickBestLocalTranscriptionEntitlement,
 } = require('../cloudfunctions/quickstartFunctions/redeem-code-core');
+const syncRedeemCodeCore = require('../cloudfunctions/syncApi/redeem-code-core');
 
 assert.strictEqual(DEFAULT_REDEEM_PLAN, 'local_transcription_beta');
 assert.deepStrictEqual(LOCAL_TRANSCRIPTION_PLAN_ALIASES, [
@@ -28,6 +31,10 @@ assert.strictEqual(isLocalTranscriptionPlan('pro'), true);
 assert.strictEqual(isLocalTranscriptionPlan('other_product'), false);
 assert.strictEqual(DEFAULT_REDEEM_DURATION_DAYS, 30);
 assert.strictEqual(DEFAULT_REDEEM_MAX_REDEMPTIONS, 1);
+assert.strictEqual(getDefaultCloudQuotaSeconds(3), 1200);
+assert.strictEqual(getDefaultCloudQuotaSeconds(30), 3600);
+assert.strictEqual(getDefaultCloudQuotaSeconds(90), 14400);
+assert.strictEqual(getDefaultCloudQuotaSeconds(365), 60000);
 assert.strictEqual(normalizeRedeemCode(' zz ai 001 '), 'ZZAI001');
 assert.strictEqual(normalizeRedeemCode('zz–ai–001'), 'ZZ-AI-001');
 
@@ -41,6 +48,7 @@ assert.deepStrictEqual(createRedeemCodeDocument({
   plan: 'local_transcription_beta',
   durationDays: 30,
   maxRedemptions: 1,
+  cloudQuotaSeconds: 3600,
   redeemedCount: 0,
   deliveryStatus: 'unsent',
   deliveredAt: '',
@@ -55,6 +63,7 @@ assert.deepStrictEqual(getBuiltInRedeemCodeDocument(' zzai0603 ', '2026-06-03T08
   plan: 'local_transcription_beta',
   durationDays: 30,
   maxRedemptions: 1,
+  cloudQuotaSeconds: 3600,
   redeemedCount: 0,
   deliveryStatus: 'unsent',
   deliveredAt: '',
@@ -68,6 +77,7 @@ assert.deepStrictEqual(getBuiltInRedeemCodeDocument('OBTSTVYE4U', '2026-06-05T08
   plan: 'local_transcription_beta',
   durationDays: 3,
   maxRedemptions: 1,
+  cloudQuotaSeconds: 1200,
   redeemedCount: 0,
   deliveryStatus: 'unsent',
   deliveredAt: '',
@@ -89,6 +99,13 @@ assert.strictEqual(isRedeemCodeActive({
   code: 'ZZAI001',
   status: 'active',
   maxRedemptions: 1,
+  redeemedCount: 1,
+}, '2026-06-03T08:00:00.000Z'), false);
+
+assert.strictEqual(isRedeemCodeActive({
+  code: 'ZZAI001',
+  status: 'active',
+  maxRedemptions: 99,
   redeemedCount: 1,
 }, '2026-06-03T08:00:00.000Z'), false);
 
@@ -121,6 +138,9 @@ assert.deepStrictEqual(createEntitlementDocument({
   status: 'active',
   source: 'redeem_code',
   code: 'ZZAI001',
+  durationDays: 30,
+  cloudQuotaSeconds: 3600,
+  cloudUsedSeconds: 0,
   redeemedAt: '2026-06-03T08:00:00.000Z',
   expiresAt: '2026-07-03T08:00:00.000Z',
   updatedAt: '2026-06-03T08:00:00.000Z',
@@ -139,6 +159,9 @@ assert.deepStrictEqual(createEntitlementDocument({
   status: 'active',
   source: 'redeem_code',
   code: 'ZZAI030',
+  durationDays: 30,
+  cloudQuotaSeconds: 3600,
+  cloudUsedSeconds: 0,
   redeemedAt: '2026-06-03T08:00:00.000Z',
   expiresAt: '2026-07-03T08:00:00.000Z',
   updatedAt: '2026-06-03T08:00:00.000Z',
@@ -149,26 +172,119 @@ assert.deepStrictEqual(buildEntitlementState(null), {
   plan: '',
   status: 'inactive',
   expiresAt: '',
+  code: '',
+  source: '',
+  durationDays: 0,
+  cloudQuotaSeconds: 0,
+  cloudUsedSeconds: 0,
+  cloudRemainingSeconds: 0,
 });
 
 assert.deepStrictEqual(buildEntitlementState({
   plan: 'douyin_transcription_beta',
   status: 'active',
   expiresAt: '2026-07-03T08:00:00.000Z',
+  code: 'ZZAI030',
+  source: 'redeem_code',
+  durationDays: 30,
 }, '2026-06-03T08:00:00.000Z'), {
   hasAccess: true,
   plan: 'douyin_transcription_beta',
   status: 'active',
   expiresAt: '2026-07-03T08:00:00.000Z',
+  code: 'ZZAI030',
+  source: 'redeem_code',
+  durationDays: 30,
+  cloudQuotaSeconds: 0,
+  cloudUsedSeconds: 0,
+  cloudRemainingSeconds: 0,
 });
 
 assert.deepStrictEqual(buildEntitlementState({
   plan: 'local_transcription_beta',
   status: 'active',
   expiresAt: '2026-06-02T08:00:00.000Z',
+  code: 'OBPRO12345',
 }, '2026-06-03T08:00:00.000Z'), {
   hasAccess: false,
   plan: 'local_transcription_beta',
   status: 'expired',
   expiresAt: '2026-06-02T08:00:00.000Z',
+  code: 'OBPRO12345',
+  source: '',
+  durationDays: 0,
+  cloudQuotaSeconds: 0,
+  cloudUsedSeconds: 0,
+  cloudRemainingSeconds: 0,
 });
+
+assert.strictEqual(pickBestLocalTranscriptionEntitlement([
+  {
+    _id: 'trial',
+    plan: 'local_transcription_trial',
+    status: 'active',
+    expiresAt: '2026-06-10T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+  {
+    _id: 'beta',
+    plan: 'local_transcription_beta',
+    status: 'active',
+    expiresAt: '2026-07-03T08:00:00.000Z',
+    redeemedAt: '2026-06-01T08:00:00.000Z',
+  },
+], '2026-06-03T08:00:00.000Z')._id, 'beta');
+
+assert.strictEqual(pickBestLocalTranscriptionEntitlement([
+  {
+    _id: 'expired-pro',
+    plan: 'local_transcription_pro',
+    status: 'active',
+    expiresAt: '2026-06-02T08:00:00.000Z',
+    redeemedAt: '2026-06-01T08:00:00.000Z',
+  },
+  {
+    _id: 'trial',
+    plan: 'local_transcription_trial',
+    status: 'active',
+    expiresAt: '2026-06-10T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+], '2026-06-03T08:00:00.000Z')._id, 'trial');
+
+assert.strictEqual(pickBestLocalTranscriptionEntitlement([
+  {
+    _id: 'legacy-trial-without-status',
+    plan: 'local_transcription_trial',
+    expiresAt: '2026-06-10T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+], '2026-06-03T08:00:00.000Z')._id, 'legacy-trial-without-status');
+
+assert.strictEqual(pickBestLocalTranscriptionEntitlement([
+  {
+    _id: 'existing-trial-code',
+    plan: 'local_transcription_trial',
+    status: 'active',
+    code: 'OBTRY123',
+    expiresAt: '2026-06-10T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+  {
+    _id: 'paid-pro',
+    plan: 'local_transcription_pro',
+    status: 'active',
+    code: 'OBPRO123',
+    expiresAt: '2026-09-03T08:00:00.000Z',
+    redeemedAt: '2026-06-01T08:00:00.000Z',
+  },
+], '2026-06-03T08:00:00.000Z')._id, 'paid-pro');
+
+assert.strictEqual(syncRedeemCodeCore.pickBestLocalTranscriptionEntitlement([
+  {
+    _id: 'trial-entitlement',
+    plan: 'local_transcription_trial',
+    expiresAt: '2026-06-10T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+], '2026-06-03T08:00:00.000Z')._id, 'trial-entitlement');
