@@ -8,7 +8,10 @@ const path = require('path');
 const zlib = require('zlib');
 const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const LEGACY_OFFICIAL_SYNC_API_BASES = [
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+];
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
@@ -920,13 +923,20 @@ function getPrimaryBindingToken(bindings) {
   return active ? active.token : '';
 }
 
+function normalizeApiBase(apiBase) {
+  const normalized = String(apiBase || '').trim() || DEFAULT_SETTINGS.apiBase;
+  return LEGACY_OFFICIAL_SYNC_API_BASES.includes(normalized)
+    ? OFFICIAL_SYNC_API_BASE
+    : normalized;
+}
+
 function mergeSettings(savedSettings, platform = os.platform()) {
   const merged = {
     ...DEFAULT_SETTINGS,
     ...(savedSettings || {}),
   };
 
-  merged.apiBase = String(merged.apiBase || '').trim() || DEFAULT_SETTINGS.apiBase;
+  merged.apiBase = normalizeApiBase(merged.apiBase);
   merged.bindings = normalizeBindings(merged);
   const normalizedToken = normalizeBindCodeInput(merged.token);
   const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
@@ -6670,6 +6680,7 @@ WechatObsidianInboxPlugin.__test = {
   validateSettings,
   mergeSettings,
   normalizeBindings,
+  normalizeApiBase,
   normalizeBindCodeInput,
 };
 
