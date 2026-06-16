@@ -8,11 +8,13 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.15"
+$InstallerScriptVersion = "1.2.16"
+$DownloadLowSpeedLimitBytesPerSecond = 10240
+$DownloadLowSpeedTimeoutSeconds = 180
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
 $ModelUrls = @(
-  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 )
 
 function New-CleanDirectory {
@@ -36,7 +38,19 @@ function Download-File {
   Write-Host "Downloading $Url"
   $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
   if ($Resume -and $curl) {
-    & $curl.Source -L --fail --silent --show-error --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $OutFile $Url
+    & $curl.Source `
+      -L `
+      --fail `
+      --silent `
+      --show-error `
+      --retry 2 `
+      --retry-delay 2 `
+      --connect-timeout 30 `
+      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
+      --speed-time $DownloadLowSpeedTimeoutSeconds `
+      -C - `
+      -o $OutFile `
+      $Url
     if ($LASTEXITCODE -eq 0) {
       return
     }
@@ -49,7 +63,19 @@ function Download-File {
     if (-not $curl) {
       throw
     }
-    & $curl.Source -L --fail --silent --show-error --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $OutFile $Url
+    & $curl.Source `
+      -L `
+      --fail `
+      --silent `
+      --show-error `
+      --retry 2 `
+      --retry-delay 2 `
+      --connect-timeout 30 `
+      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
+      --speed-time $DownloadLowSpeedTimeoutSeconds `
+      -C - `
+      -o $OutFile `
+      $Url
     if ($LASTEXITCODE -ne 0) {
       throw "curl download failed with exit code $LASTEXITCODE"
     }

@@ -5,11 +5,13 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.2.15"
+INSTALLER_SCRIPT_VERSION="1.2.16"
+DOWNLOAD_LOW_SPEED_LIMIT=10240
+DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
-MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 
 cleanup() {
   if [ "$LOCK_HELD" -eq 1 ]; then
@@ -51,7 +53,15 @@ download_file() {
   local out_file="$2"
   echo "Downloading $url"
   if command -v curl >/dev/null 2>&1; then
-    if curl -L --retry 2 --retry-delay 2 --connect-timeout 30 -C - -o "$out_file" "$url"; then
+    if curl -L \
+      --retry 2 \
+      --retry-delay 2 \
+      --connect-timeout 30 \
+      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \
+      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+      -C - \
+      -o "$out_file" \
+      "$url"; then
       return 0
     fi
   fi
@@ -66,7 +76,7 @@ download_file() {
 download_model() {
   local out_file="$1"
   local temp_file="$out_file.part"
-  local urls=("$MODEL_URL" "$MODEL_MIRROR_URL")
+  local urls=("$MODEL_MIRROR_URL" "$MODEL_URL")
   local url=""
 
   for url in "${urls[@]}"; do
