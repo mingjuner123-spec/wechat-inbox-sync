@@ -4,7 +4,6 @@ const {
   buildSyncedRecordCleanupData,
   collectRecordFileIds,
   handleSyncApiRequest,
-  shouldKeepRecordPendingForTranscription,
 } = require('./sync-api-core');
 const {
   DEFAULT_REDEEM_PLAN,
@@ -925,18 +924,6 @@ function createRepository() {
       const record = recordResult.data && recordResult.data[0] ? recordResult.data[0] : null;
       if (!record) {
         throw new Error('Record not found');
-      }
-
-      if (shouldKeepRecordPendingForTranscription(record)) {
-        return {
-          id: recordId,
-          status: 'pending',
-          syncedAt: record.syncedAt || '',
-          cleaned: false,
-          deletedFileCount: 0,
-          cleanupError: '',
-          reason: 'transcription-not-complete',
-        };
       }
 
       const fileIds = collectRecordFileIds(record);
