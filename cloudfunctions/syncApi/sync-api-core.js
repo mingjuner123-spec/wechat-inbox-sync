@@ -223,11 +223,17 @@ function shouldKeepRecordPendingForTranscription(record) {
   const metadata = (record && record.metadata) || {};
   const status = String(metadata.transcriptionStatus || '').toLowerCase();
   const hasTranscription = String(metadata.transcription || '').trim().length > 0;
+  const mode = String(metadata.transcriptionMode || '').toLowerCase();
+  const cloudRequested = mode === 'cloud'
+    || metadata.cloudTranscriptionRequested === true
+    || metadata.transcriptionSource === 'cloud-pretranscription'
+    || Boolean(metadata.doubaoRequestId);
   const isAudioVideoRecord = String(record && record.type || '').toLowerCase() === 'voice'
     || metadata.webpageMediaType === 'audio_video'
     || Boolean(metadata.audioFileID)
     || metadata.transcriptOnly === true;
   if (!isAudioVideoRecord || hasTranscription) return false;
+  if (mode === 'local' || !cloudRequested) return false;
   return ['pending', 'queued', 'processing', 'failed'].includes(status);
 }
 

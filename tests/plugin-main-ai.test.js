@@ -1715,6 +1715,56 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(cloudPrepareThenLocalRecord.metadata.transcription, '同步时云端准备音频，本地转写结果');
   assert.strictEqual(cloudPrepareThenLocalRecord.metadata.mediaPreparedByCloud, true);
 
+  const inferredCloudPreparePlugin = new PluginClass();
+  inferredCloudPreparePlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'PRO-123',
+    clientId: 'test-client',
+    aiProvider: 'local',
+    localTranscriptionCommand: 'echo test',
+    bindings: [{
+      token: 'PRO-123',
+      label: 'Pro 微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  const inferredPrepareCalls = [];
+  inferredCloudPreparePlugin.prepareWebpageMedia = async (record, binding) => {
+    inferredPrepareCalls.push([record.metadata.url, binding && binding.token]);
+    return {
+      mediaUrl: 'https://media.example.com/cloud-prepared-douyin.m4a',
+      audioUrl: 'https://media.example.com/cloud-prepared-douyin.m4a',
+      source: 'media-resolver',
+    };
+  };
+  inferredCloudPreparePlugin.runLocalTranscription = async (audioUrl) => {
+    assert.strictEqual(audioUrl, 'https://media.example.com/cloud-prepared-douyin.m4a');
+    return '未标记音视频的抖音链接也先云端准备';
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://v.douyin.com/cloud-prepare-unmarked/') {
+      throw new Error('unmarked platform links should use cloud media prepare before local page parsing');
+    }
+    throw new Error(`unexpected inferred prepare request ${url}`);
+  };
+  const inferredCloudPrepareRecord = await inferredCloudPreparePlugin.hydrateWebpageMarkdown({
+    _id: 'record-cloud-prepare-inferred-1',
+    type: 'webpage',
+    content: 'https://v.douyin.com/cloud-prepare-unmarked/',
+    metadata: {
+      url: 'https://v.douyin.com/cloud-prepare-unmarked/',
+      conversionStatus: 'pending',
+    },
+  }, '', '', '抖音未标记云端准备');
+  assert.deepStrictEqual(inferredPrepareCalls, [[
+    'https://v.douyin.com/cloud-prepare-unmarked/',
+    'PRO-123',
+  ]]);
+  assert.strictEqual(inferredCloudPrepareRecord.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(inferredCloudPrepareRecord.metadata.transcription, '未标记音视频的抖音链接也先云端准备');
+  assert.strictEqual(inferredCloudPrepareRecord.metadata.mediaPreparedByCloud, true);
+
   const doubaoPlugin = new PluginClass();
   doubaoPlugin.settings = {
     aiProvider: 'doubao',

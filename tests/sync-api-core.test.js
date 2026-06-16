@@ -602,7 +602,15 @@ const {
       transcriptionStatus: 'failed',
       transcriptionError: 'local transcribe failed',
     },
-  }), true);
+  }), false);
+  assert.strictEqual(shouldKeepRecordPendingForTranscription({
+    type: 'voice',
+    metadata: {
+      audioFileID: 'cloud://voices/local-ready-to-mark.mp3',
+      transcriptionMode: 'local',
+      transcriptionStatus: 'pending',
+    },
+  }), false);
   assert.strictEqual(shouldKeepRecordPendingForTranscription({
     type: 'voice',
     metadata: {
