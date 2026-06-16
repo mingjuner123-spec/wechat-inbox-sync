@@ -1703,6 +1703,21 @@ function buildTranscriptOnlyMetadata(metadata, {
   };
 }
 
+function getPreparedMediaUrlFromMetadata(metadata = {}) {
+  const mediaUrl = String(metadata.mediaUrl || metadata.audioUrl || '').trim();
+  if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl)) return '';
+  if (
+    metadata.mediaPreparedByCloud === true
+    || metadata.cloudPreparedMedia === true
+    || metadata.mediaResolverSource
+    || metadata.mediaPreparedAt
+    || metadata.webpageMediaType === 'audio_video'
+  ) {
+    return mediaUrl;
+  }
+  return '';
+}
+
 function buildFileMarkdownBody(record) {
   const metadata = record.metadata || {};
   const fileName = metadata.fileName || record.content || 'upload-file';
@@ -4228,6 +4243,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload;
   }
 
+  async prepareWebpageMedia(record, binding = null) {
+    const metadata = (record && record.metadata) || {};
+    const url = String(metadata.url || (record && record.content) || '').trim();
+    if (!url) return null;
+    const payload = await this.requestJson('/media/prepare', 'POST', {
+      url,
+      recordId: record && (record._id || record.id) || '',
+      source: metadata.webpageMediaType === 'audio_video' ? 'audio_video' : 'webpage',
+      title: metadata.title || '',
+    }, binding);
+    return payload && payload.data ? payload.data : null;
+  }
+
   async requestJson(path, method = 'GET', body = {}, binding = null) {
     const token = normalizeBindCodeInput(
       typeof binding === 'string' ? binding : ((binding && binding.token) || this.settings.token),
@@ -5808,6 +5836,52 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
 
     try {
+      const effectiveBinding = binding || this.getActiveBindings()[0] || null;
+      const preparedMediaUrl = metadata.webpageMediaType === 'audio_video'
+        ? getPreparedMediaUrlFromMetadata(metadata)
+        : '';
+      if (preparedMediaUrl) {
+        return await this.buildTranscriptRecordFromMedia(record, {
+          url,
+          platform: getWebpageSourcePrefix(url),
+          mediaUrl: preparedMediaUrl,
+          source: metadata.mediaResolverSource || 'cloud-media-prepare',
+          binding: effectiveBinding,
+          title,
+        });
+      }
+
+      if (metadata.webpageMediaType === 'audio_video' && typeof this.prepareWebpageMedia === 'function') {
+        try {
+          const prepared = await this.prepareWebpageMedia(record, effectiveBinding);
+          const cloudPreparedMediaUrl = prepared && (prepared.mediaUrl || prepared.audioUrl);
+          if (cloudPreparedMediaUrl) {
+            return await this.buildTranscriptRecordFromMedia({
+              ...record,
+              metadata: {
+                ...metadata,
+                mediaUrl: cloudPreparedMediaUrl,
+                audioUrl: prepared.audioUrl || cloudPreparedMediaUrl,
+                mediaPreparedByCloud: true,
+                mediaResolverSource: prepared.source || 'media-prepare',
+                mediaResolverTitle: prepared.title || '',
+                mediaResolverDurationSeconds: Number(prepared.durationSeconds || 0) || 0,
+                mediaPreparedExpiresAt: prepared.expiresAt || '',
+              },
+            }, {
+              url,
+              platform: getWebpageSourcePrefix(url),
+              mediaUrl: cloudPreparedMediaUrl,
+              source: prepared.source || 'cloud-media-prepare',
+              binding: effectiveBinding,
+              title,
+            });
+          }
+        } catch (prepareError) {
+          // Fall back to the existing local page parsing path below.
+        }
+      }
+
       if (isFeishuUrl(url)) {
         try {
           const rendered = await renderUrlToMarkdownWithElectron(url);

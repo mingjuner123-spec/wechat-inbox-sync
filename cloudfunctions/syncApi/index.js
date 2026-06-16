@@ -31,6 +31,35 @@ const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmod
 const DOUBAO_ASR_RESOURCE_ID = 'volc.bigasr.auc';
 const DEFAULT_CLOUD_ASR_POLL_ATTEMPTS = 60;
 const DEFAULT_CLOUD_ASR_POLL_INTERVAL_MS = 5000;
+const MEDIA_RESOLVER_TIMEOUT_MS = 30000;
+
+function isHttpUrl(url) {
+  return /^https?:\/\//i.test(String(url || ''));
+}
+
+function getMediaResolverUrl() {
+  return String(process.env.MEDIA_RESOLVER_URL || '').trim();
+}
+
+function getMediaResolverSecret() {
+  return String(process.env.MEDIA_RESOLVER_SECRET || '').trim();
+}
+
+function normalizeResolverMediaUrl(mediaUrl, resolverUrl, data = {}) {
+  const value = String(mediaUrl || '').trim();
+  if (!value || !isHttpUrl(value)) return value;
+  if (!data.proxied) return value;
+  try {
+    const media = new URL(value);
+    const resolver = new URL(resolverUrl);
+    if (media.pathname.startsWith('/media/') && resolver.protocol === 'https:') {
+      return `${resolver.origin}${media.pathname}${media.search}`;
+    }
+  } catch (error) {
+    return value;
+  }
+  return value;
+}
 
 function formatCleanupError(error) {
   return error && error.message ? error.message : String(error || '');
@@ -911,6 +940,44 @@ function createRepository() {
       return {
         ...result,
         billedSeconds,
+      };
+    },
+
+    async prepareWebpageMedia(openid, payload) {
+      const pageUrl = String(payload && payload.url || '').trim();
+      const resolverUrl = getMediaResolverUrl();
+      if (!isHttpUrl(pageUrl)) {
+        throw new Error('Media prepare URL is invalid');
+      }
+      if (!resolverUrl || !isHttpUrl(resolverUrl)) {
+        throw new Error('MEDIA_RESOLVER_URL is not configured');
+      }
+      const secret = getMediaResolverSecret();
+      const response = await postJson({
+        url: resolverUrl,
+        headers: secret ? { 'x-resolver-secret': secret } : {},
+        body: {
+          url: pageUrl,
+          recordId: payload.recordId || '',
+        },
+        timeoutMs: MEDIA_RESOLVER_TIMEOUT_MS,
+      });
+      if (!response.status || response.status < 200 || response.status >= 300) {
+        const errorPayload = response.json || {};
+        throw new Error(errorPayload.errMsg || response.text || `Media resolver HTTP ${response.status}`);
+      }
+      const data = response.json && response.json.data ? response.json.data : {};
+      const mediaUrl = normalizeResolverMediaUrl(data.mediaUrl, resolverUrl, data);
+      if (!isHttpUrl(mediaUrl)) {
+        throw new Error('Media resolver returned empty media URL');
+      }
+      return {
+        mediaUrl,
+        audioUrl: mediaUrl,
+        source: String(data.source || 'media-resolver'),
+        title: String(data.title || ''),
+        durationSeconds: Number(data.durationSeconds || 0) || 0,
+        expiresAt: data.expiresAt || '',
       };
     },
 

@@ -443,6 +443,43 @@ const {
     remainingSeconds: 3540,
   });
 
+  const prepareMediaResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/media/prepare',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        url: 'https://www.douyin.com/video/123',
+        recordId: 'record-web-media-1',
+      }),
+    },
+    repository: {
+      ...repository,
+      async prepareWebpageMedia(openid, payload) {
+        calls.push(['prepareWebpageMedia', openid, payload.url, payload.recordId]);
+        return {
+          mediaUrl: 'https://media.example.com/prepared-douyin.m4a',
+          audioUrl: 'https://media.example.com/prepared-douyin.m4a',
+          source: 'media-resolver',
+          title: 'prepared title',
+          durationSeconds: 88,
+          expiresAt: '2026-06-16T12:00:00.000Z',
+        };
+      },
+    },
+  });
+
+  assert.strictEqual(prepareMediaResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(prepareMediaResponse.body).data, {
+    mediaUrl: 'https://media.example.com/prepared-douyin.m4a',
+    audioUrl: 'https://media.example.com/prepared-douyin.m4a',
+    source: 'media-resolver',
+    title: 'prepared title',
+    durationSeconds: 88,
+    expiresAt: '2026-06-16T12:00:00.000Z',
+  });
+
   const preferenceResponse = await handleSyncApiRequest({
     request: {
       method: 'POST',
@@ -511,6 +548,8 @@ const {
     ['cloudGetEntitlementByUrl', 'openid-1', 'local_transcription_beta'],
     ['transcribeCloudAudioByUrl', 'openid-1', 'https://video.example.com/xhs.mp4', 60, 'local whisper crashed'],
     ['recordCloudTranscriptionUsageByUrl', 'openid-1', 'https://video.example.com/xhs.mp4', 60, 3540],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['prepareWebpageMedia', 'openid-1', 'https://www.douyin.com/video/123', 'record-web-media-1'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
     ['saveTranscriptionPreferences', 'openid-1', true, 30],
   ]);

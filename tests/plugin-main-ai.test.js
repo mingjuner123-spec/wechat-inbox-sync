@@ -1618,6 +1618,103 @@ async function runAsyncHydrationTests() {
     'PRO-123',
   ]]);
 
+  const preparedMediaPlugin = new PluginClass();
+  preparedMediaPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'PRO-123',
+    clientId: 'test-client',
+    aiProvider: 'local',
+    localTranscriptionCommand: 'echo test',
+    bindings: [{
+      token: 'PRO-123',
+      label: 'Pro 微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  let preparedPageFetchCount = 0;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.douyin.com/video/prepared') {
+      preparedPageFetchCount += 1;
+      throw new Error('prepared media should not fetch platform page');
+    }
+    throw new Error(`unexpected prepared media request ${url}`);
+  };
+  preparedMediaPlugin.runLocalTranscription = async (audioUrl) => {
+    assert.strictEqual(audioUrl, 'https://media.example.com/prepared-douyin.m4a');
+    return '云端准备音频后的本地转写结果';
+  };
+  const preparedMediaRecord = await preparedMediaPlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/prepared',
+    metadata: {
+      url: 'https://www.douyin.com/video/prepared',
+      webpageMediaType: 'audio_video',
+      mediaUrl: 'https://media.example.com/prepared-douyin.m4a',
+      audioUrl: 'https://media.example.com/prepared-douyin.m4a',
+      mediaPreparedByCloud: true,
+      mediaResolverSource: 'media-resolver',
+    },
+  }, '', '', '抖音云端准备音频');
+  assert.strictEqual(preparedPageFetchCount, 0);
+  assert.strictEqual(preparedMediaRecord.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(preparedMediaRecord.metadata.transcription, '云端准备音频后的本地转写结果');
+  assert.strictEqual(preparedMediaRecord.metadata.mediaUrl, 'https://media.example.com/prepared-douyin.m4a');
+
+  const cloudPrepareThenLocalPlugin = new PluginClass();
+  cloudPrepareThenLocalPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'PRO-123',
+    clientId: 'test-client',
+    aiProvider: 'local',
+    localTranscriptionCommand: 'echo test',
+    bindings: [{
+      token: 'PRO-123',
+      label: 'Pro 微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  const prepareCalls = [];
+  cloudPrepareThenLocalPlugin.prepareWebpageMedia = async (record, binding) => {
+    prepareCalls.push([record.metadata.url, binding && binding.token]);
+    return {
+      mediaUrl: 'https://media.example.com/cloud-prepared-xhs.m4a',
+      audioUrl: 'https://media.example.com/cloud-prepared-xhs.m4a',
+      source: 'media-resolver',
+      title: 'cloud prepared xhs',
+      durationSeconds: 66,
+    };
+  };
+  cloudPrepareThenLocalPlugin.runLocalTranscription = async (audioUrl) => {
+    assert.strictEqual(audioUrl, 'https://media.example.com/cloud-prepared-xhs.m4a');
+    return '同步时云端准备音频，本地转写结果';
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/cloud-prepare') {
+      throw new Error('cloud media prepare should replace platform page fetch');
+    }
+    throw new Error(`unexpected cloud prepare request ${url}`);
+  };
+  const cloudPrepareThenLocalRecord = await cloudPrepareThenLocalPlugin.hydrateWebpageMarkdown({
+    _id: 'record-cloud-prepare-1',
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/cloud-prepare',
+    metadata: {
+      url: 'https://www.xiaohongshu.com/explore/cloud-prepare',
+      webpageMediaType: 'audio_video',
+      transcriptionMode: 'local',
+    },
+  }, '', '', '小红书云端准备');
+  assert.deepStrictEqual(prepareCalls, [[
+    'https://www.xiaohongshu.com/explore/cloud-prepare',
+    'PRO-123',
+  ]]);
+  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.mediaUrl, 'https://media.example.com/cloud-prepared-xhs.m4a');
+  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.transcription, '同步时云端准备音频，本地转写结果');
+  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.mediaPreparedByCloud, true);
+
   const doubaoPlugin = new PluginClass();
   doubaoPlugin.settings = {
     aiProvider: 'doubao',

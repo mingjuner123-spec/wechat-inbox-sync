@@ -135,6 +135,11 @@ function isCloudTranscriptionPath(path) {
   return normalized === '/transcriptions/cloud' || normalized.endsWith('/transcriptions/cloud');
 }
 
+function isMediaPreparePath(path) {
+  const normalized = String(path || '');
+  return normalized === '/media/prepare' || normalized.endsWith('/media/prepare');
+}
+
 function isTranscriptionPreferencesPath(path) {
   const normalized = String(path || '');
   return normalized === '/transcription-preferences' || normalized.endsWith('/transcription-preferences');
@@ -461,6 +466,48 @@ async function handleCloudTranscriptionRequest({ request, repository, openid }) 
   });
 }
 
+async function handleMediaPrepareRequest({ request, repository, openid }) {
+  const body = parseJsonBody(request.body);
+  const url = String(body.url || body.pageUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return jsonResponse(400, {
+      success: false,
+      errMsg: 'Missing or invalid url',
+    });
+  }
+  if (typeof repository.prepareWebpageMedia !== 'function') {
+    return jsonResponse(501, {
+      success: false,
+      errMsg: 'Media preparation is not available',
+    });
+  }
+  const data = await repository.prepareWebpageMedia(openid, {
+    url,
+    recordId: String(body.recordId || '').trim(),
+    source: String(body.source || '').slice(0, 100),
+    title: String(body.title || '').slice(0, 300),
+  });
+  const mediaUrl = String(data && (data.mediaUrl || data.audioUrl) || '').trim();
+  if (!/^https?:\/\//i.test(mediaUrl)) {
+    return jsonResponse(422, {
+      success: false,
+      errMsg: 'No transcribable media URL was prepared',
+      data: data || null,
+    });
+  }
+  return jsonResponse(200, {
+    success: true,
+    data: {
+      mediaUrl,
+      audioUrl: String(data.audioUrl || mediaUrl),
+      source: String(data.source || 'media-prepare'),
+      title: String(data.title || ''),
+      durationSeconds: Number(data.durationSeconds || 0) || 0,
+      expiresAt: String(data.expiresAt || ''),
+    },
+  });
+}
+
 async function handleTranscriptionPreferencesRequest({ request, repository, openid }) {
   if (typeof repository.saveTranscriptionPreferences !== 'function') {
     return jsonResponse(501, {
@@ -568,6 +615,10 @@ async function handleSyncApiRequest({ request, repository }) {
 
     if (method === 'POST' && isCloudTranscriptionPath(path)) {
       return await handleCloudTranscriptionRequest({ request, repository, openid: auth.openid });
+    }
+
+    if (method === 'POST' && isMediaPreparePath(path)) {
+      return await handleMediaPrepareRequest({ request, repository, openid: auth.openid });
     }
 
     if (method === 'POST' && isTranscriptionPreferencesPath(path)) {
