@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.14"
+$InstallerScriptVersion = "1.2.15"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
 $ModelUrls = @(
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
@@ -414,7 +414,7 @@ function Install-ZipPackage {
         Write-Host "Using cached $Label package: $cacheFile"
       } else {
         if (Test-Path -LiteralPath $cacheFile) {
-          Remove-Item -LiteralPath $cacheFile -Force
+          Write-Host "Resuming partial cached $Label package: $cacheFile"
         }
         Download-File -Url $url -OutFile $cacheFile -Resume
       }
@@ -426,7 +426,12 @@ function Install-ZipPackage {
       Write-Host "$Label source failed: $url"
       Write-Host ($_.Exception.Message)
       if (Test-Path -LiteralPath $ZipPath) {
-        Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+        $cachedZip = Get-Item -LiteralPath $ZipPath
+        if ($cachedZip.Length -ge $MinBytes) {
+          Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+        } else {
+          Write-Host "Keeping partial $Label package for retry: $ZipPath"
+        }
       }
     }
   }
@@ -468,7 +473,7 @@ function Install-ModelPackage {
           Write-Host "Using cached $Label package: $OutFile"
           return $OutFile
         }
-        Remove-Item -LiteralPath $OutFile -Force
+        Write-Host "Resuming partial cached $Label package: $OutFile"
       }
       Download-File -Url $url -OutFile $OutFile -Resume
       Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null
@@ -477,6 +482,14 @@ function Install-ModelPackage {
       $lastError = $_
       Write-Host "$Label source failed: $url"
       Write-Host ($_.Exception.Message)
+      if (Test-Path -LiteralPath $OutFile) {
+        $cachedFile = Get-Item -LiteralPath $OutFile
+        if ($cachedFile.Length -ge $MinBytes) {
+          Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        } else {
+          Write-Host "Keeping partial $Label package for retry: $OutFile"
+        }
+      }
     }
   }
   throw $lastError
