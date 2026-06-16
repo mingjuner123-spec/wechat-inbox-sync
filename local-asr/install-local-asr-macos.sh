@@ -3,6 +3,9 @@ set -euo pipefail
 
 INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
+CACHE_ROOT="$INSTALL_ROOT/cache"
+INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
+INSTALLER_SCRIPT_VERSION="1.2.14"
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
@@ -66,7 +69,6 @@ download_model() {
   local urls=("$MODEL_URL" "$MODEL_MIRROR_URL")
   local url=""
 
-  rm -f "$temp_file"
   for url in "${urls[@]}"; do
     if download_file "$url" "$temp_file"; then
       local model_size
@@ -111,6 +113,57 @@ validate_local_asr_inference() {
   echo "Local ASR inference validation passed."
 }
 
+file_state() {
+  local file_path="$1"
+  if [ ! -e "$file_path" ]; then
+    echo "::missing::"
+    return
+  fi
+  local size
+  local mtime
+  size="$(wc -c < "$file_path" | tr -d ' ')"
+  mtime="$(stat -f '%m' "$file_path" 2>/dev/null || stat -c '%Y' "$file_path" 2>/dev/null || echo 0)"
+  printf '%s|%s|%s' "$file_path" "$size" "$mtime"
+}
+
+install_state_is_valid() {
+  local whisper_bin="$1"
+  local ffmpeg_bin="$2"
+  local model_path="$3"
+  [ -f "$INSTALL_STATE_PATH" ] || return 1
+  grep -Fqx "installerScriptVersion=$INSTALLER_SCRIPT_VERSION" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "validationStatus=passed" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "whisper=$(file_state "$whisper_bin")" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "ffmpeg=$(file_state "$ffmpeg_bin")" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "model=$(file_state "$model_path")" "$INSTALL_STATE_PATH" || return 1
+}
+
+write_install_state() {
+  local whisper_bin="$1"
+  local ffmpeg_bin="$2"
+  local model_path="$3"
+  {
+    echo "installerScriptVersion=$INSTALLER_SCRIPT_VERSION"
+    echo "validationStatus=passed"
+    echo "validatedAtUtc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "whisper=$(file_state "$whisper_bin")"
+    echo "ffmpeg=$(file_state "$ffmpeg_bin")"
+    echo "model=$(file_state "$model_path")"
+  } > "$INSTALL_STATE_PATH"
+}
+
+run_or_skip_local_asr_validation() {
+  local whisper_bin="$1"
+  local ffmpeg_bin="$2"
+  local model_path="$3"
+  if install_state_is_valid "$whisper_bin" "$ffmpeg_bin" "$model_path"; then
+    echo "Local ASR was already validated for the current files; skipping full inference validation."
+    return
+  fi
+  validate_local_asr_inference "$whisper_bin" "$ffmpeg_bin" "$model_path"
+  write_install_state "$whisper_bin" "$ffmpeg_bin" "$model_path"
+}
+
 find_python3() {
   if command -v python3 >/dev/null 2>&1; then
     command -v python3
@@ -128,13 +181,53 @@ find_python3() {
 create_python_venv() {
   local python_bin="$1"
   local venv_dir="$INSTALL_ROOT/python-venv"
-  rm -rf "$venv_dir"
+  if [ -x "$venv_dir/bin/python" ]; then
+    echo "$venv_dir/bin/python"
+    return 0
+  fi
   if "$python_bin" -m venv "$venv_dir" >/dev/null 2>&1; then
     echo "$venv_dir/bin/python"
     return 0
   fi
   echo "Python venv creation failed for $python_bin." >&2
   return 1
+}
+
+reuse_python_venv() {
+  local venv_dir="$INSTALL_ROOT/python-venv"
+  local venv_python="$venv_dir/bin/python"
+  local whisper_cpp_bin=""
+  if [ ! -x "$venv_python" ]; then
+    return 1
+  fi
+  if [ -x "$venv_dir/bin/whisper-cpp" ]; then
+    whisper_cpp_bin="$venv_dir/bin/whisper-cpp"
+  else
+    whisper_cpp_bin="$(find "$venv_dir/bin" -maxdepth 1 -type f -name 'whisper-cpp*' -perm -111 2>/dev/null | head -n 1 || true)"
+  fi
+  if [ -z "$whisper_cpp_bin" ] || [ ! -x "$whisper_cpp_bin" ]; then
+    return 1
+  fi
+  if ! "$venv_python" -c 'import imageio_ffmpeg' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
+#!/usr/bin/env bash
+WHISPER_CPP_BIN="$whisper_cpp_bin"
+exec "\$WHISPER_CPP_BIN" "\$@"
+SCRIPT
+
+  cat > "$INSTALL_ROOT/bin/ffmpeg" <<SCRIPT
+#!/usr/bin/env bash
+exec "$venv_python" -c 'import os, sys, imageio_ffmpeg; exe = imageio_ffmpeg.get_ffmpeg_exe(); os.execv(exe, [exe] + sys.argv[1:])' "\$@"
+SCRIPT
+
+  chmod +x "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg"
+  assert_executable_runs "Portable whisper.cpp-cli" "$INSTALL_ROOT/bin/whisper-cli" -h || return 1
+  assert_executable_runs "Portable imageio-ffmpeg" "$INSTALL_ROOT/bin/ffmpeg" -version || return 1
+  echo "Reusing existing portable macOS ASR tools."
+  return 0
 }
 
 ensure_python_pip() {
@@ -286,9 +379,11 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 acquire_install_lock
-mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/models"
+mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/models" "$CACHE_ROOT"
 
-if ! install_python_local_asr_tools; then
+if reuse_python_venv; then
+  :
+elif ! install_python_local_asr_tools; then
   if ! command -v brew >/dev/null 2>&1; then
     echo "Portable macOS ASR installation failed and Homebrew is not available for fallback." >&2
     echo "Please retry later after switching network or updating macOS Python." >&2
@@ -344,10 +439,19 @@ if [ -f "$MODEL_PATH" ]; then
   fi
 fi
 if [ ! -f "$MODEL_PATH" ]; then
-  download_model "$MODEL_PATH"
+  if [ -f "$CACHE_ROOT/ggml-small.bin" ]; then
+    cached_model_size="$(wc -c < "$CACHE_ROOT/ggml-small.bin" | tr -d ' ')"
+    if [ "$cached_model_size" -lt 400000000 ]; then
+      rm -f "$CACHE_ROOT/ggml-small.bin"
+    fi
+  fi
+  if [ ! -f "$CACHE_ROOT/ggml-small.bin" ]; then
+    download_model "$CACHE_ROOT/ggml-small.bin"
+  fi
+  cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"
 fi
 
-validate_local_asr_inference "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg" "$MODEL_PATH"
+run_or_skip_local_asr_validation "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg" "$MODEL_PATH"
 
 cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
 #!/usr/bin/env bash

@@ -6,6 +6,9 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
+$CacheRoot = Join-Path $InstallRoot "cache"
+$InstallStatePath = Join-Path $InstallRoot ".install-state.json"
+$InstallerScriptVersion = "1.2.14"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
 $ModelUrls = @(
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
@@ -23,14 +26,26 @@ function New-CleanDirectory {
 function Download-File {
   param(
     [Parameter(Mandatory = $true)][string]$Url,
-    [Parameter(Mandatory = $true)][string]$OutFile
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [switch]$Resume
   )
+  $outDir = Split-Path -Parent $OutFile
+  if ($outDir) {
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+  }
   Write-Host "Downloading $Url"
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($Resume -and $curl) {
+    & $curl.Source -L --fail --silent --show-error --retry 5 --retry-delay 2 --connect-timeout 30 -C - -o $OutFile $Url
+    if ($LASTEXITCODE -eq 0) {
+      return
+    }
+    Write-Host "curl resumable download failed with exit code $LASTEXITCODE; retrying with PowerShell."
+  }
   try {
     Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers
   } catch {
     Write-Host "PowerShell download failed, retrying with curl."
-    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if (-not $curl) {
       throw
     }
@@ -282,6 +297,105 @@ function Assert-LocalAsrInference {
   }
 }
 
+function Read-InstallState {
+  if (-not (Test-Path -LiteralPath $InstallStatePath)) {
+    return $null
+  }
+  try {
+    return Get-Content -LiteralPath $InstallStatePath -Raw | ConvertFrom-Json
+  } catch {
+    Write-Host "Install state is unreadable; running full validation."
+    return $null
+  }
+}
+
+function Get-FileState {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return $null
+  }
+  $item = Get-Item -LiteralPath $Path
+  return [pscustomobject]@{
+    path = $item.FullName
+    length = [Int64]$item.Length
+    lastWriteUtcTicks = [Int64]$item.LastWriteTimeUtc.Ticks
+  }
+}
+
+function Test-FileStateMatches {
+  param(
+    [AllowNull()]$State,
+    [Parameter(Mandatory = $true)][string]$Path
+  )
+  if (-not $State) {
+    return $false
+  }
+  $actual = Get-FileState -Path $Path
+  if (-not $actual) {
+    return $false
+  }
+  return (
+    $State.path -eq $actual.path -and
+    [Int64]$State.length -eq $actual.length -and
+    [Int64]$State.lastWriteUtcTicks -eq $actual.lastWriteUtcTicks
+  )
+}
+
+function Test-InstallStateValid {
+  param(
+    [AllowNull()]$State,
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  if (-not $State) {
+    return $false
+  }
+  if ($State.installerScriptVersion -ne $InstallerScriptVersion) {
+    return $false
+  }
+  if ($State.validationStatus -ne "passed") {
+    return $false
+  }
+  return (
+    (Test-FileStateMatches -State $State.whisper -Path $WhisperPath) -and
+    (Test-FileStateMatches -State $State.ffmpeg -Path $FfmpegPath) -and
+    (Test-FileStateMatches -State $State.model -Path $ModelPath)
+  )
+}
+
+function Write-InstallState {
+  param(
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  $state = [pscustomobject]@{
+    installerScriptVersion = $InstallerScriptVersion
+    validationStatus = "passed"
+    validatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+    whisper = Get-FileState -Path $WhisperPath
+    ffmpeg = Get-FileState -Path $FfmpegPath
+    model = Get-FileState -Path $ModelPath
+  }
+  $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $InstallStatePath -Encoding UTF8
+}
+
+function Invoke-LocalAsrValidation {
+  param(
+    [Parameter(Mandatory = $true)][string]$WhisperPath,
+    [Parameter(Mandatory = $true)][string]$FfmpegPath,
+    [Parameter(Mandatory = $true)][string]$ModelPath
+  )
+  $state = Read-InstallState
+  if (Test-InstallStateValid -State $state -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath) {
+    Write-Host "Local ASR was already validated for the current files; skipping full inference validation."
+    return
+  }
+  Assert-LocalAsrInference -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath
+  Write-InstallState -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath
+}
+
 function Install-ZipPackage {
   param(
     [Parameter(Mandatory = $true)][string[]]$Urls,
@@ -294,11 +408,16 @@ function Install-ZipPackage {
   $lastError = $null
   foreach ($url in $Urls) {
     try {
-      if (Test-Path -LiteralPath $ZipPath) {
-        Remove-Item -LiteralPath $ZipPath -Force
-      }
       New-CleanDirectory -Path $StageDir
-      Download-File -Url $url -OutFile $ZipPath
+      $cacheFile = $ZipPath
+      if ((Test-Path -LiteralPath $cacheFile) -and ((Get-Item -LiteralPath $cacheFile).Length -ge $MinBytes)) {
+        Write-Host "Using cached $Label package: $cacheFile"
+      } else {
+        if (Test-Path -LiteralPath $cacheFile) {
+          Remove-Item -LiteralPath $cacheFile -Force
+        }
+        Download-File -Url $url -OutFile $cacheFile -Resume
+      }
       Assert-DownloadedFile -Path $ZipPath -MinBytes $MinBytes -Label $Label | Out-Null
       Expand-Archive -LiteralPath $ZipPath -DestinationPath $StageDir -Force
       return Assert-InstalledFile -Root $StageDir -Names $ExpectedFiles -Label $Label
@@ -306,6 +425,9 @@ function Install-ZipPackage {
       $lastError = $_
       Write-Host "$Label source failed: $url"
       Write-Host ($_.Exception.Message)
+      if (Test-Path -LiteralPath $ZipPath) {
+        Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+      }
     }
   }
   throw $lastError
@@ -342,9 +464,13 @@ function Install-ModelPackage {
   foreach ($url in $Urls) {
     try {
       if (Test-Path -LiteralPath $OutFile) {
+        if ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes) {
+          Write-Host "Using cached $Label package: $OutFile"
+          return $OutFile
+        }
         Remove-Item -LiteralPath $OutFile -Force
       }
-      Download-File -Url $url -OutFile $OutFile
+      Download-File -Url $url -OutFile $OutFile -Resume
       Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null
       return $OutFile
     } catch {
@@ -422,6 +548,7 @@ function Write-TranscribeScript {
 
 try {
   New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+  New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
   Write-TranscribeScript -InstallRoot $InstallRoot
   New-CleanDirectory -Path $TempRoot
 
@@ -444,7 +571,7 @@ try {
     }
   }
   if (-not $installedWhisper) {
-    $whisperZip = Join-Path $TempRoot "whisper.zip"
+    $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
       -Urls @((Get-LatestWhisperWindowsAsset)) `
       -ZipPath $whisperZip `
@@ -472,7 +599,7 @@ try {
     }
   }
   if (-not $installedFfmpeg) {
-    $ffmpegZip = Join-Path $TempRoot "ffmpeg.zip"
+    $ffmpegZip = Join-Path $CacheRoot "ffmpeg.zip"
     Install-ZipPackage `
       -Urls @(
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
@@ -492,23 +619,26 @@ try {
   }
 
   $modelPath = Join-Path $ModelDir "ggml-small.bin"
+  $cachedModelPath = Join-Path $CacheRoot "ggml-small.bin"
   if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {
     Remove-Item -LiteralPath $modelPath -Force
   }
   if (-not (Test-Path -LiteralPath $modelPath)) {
-    $modelTempPath = Join-Path $TempRoot "ggml-small.bin"
-    Install-ModelPackage -Urls $ModelUrls -OutFile $modelTempPath -MinBytes 400MB -Label "Whisper model" | Out-Null
-    Move-Item -LiteralPath $modelTempPath -Destination $modelPath -Force
+    if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
+      Remove-Item -LiteralPath $cachedModelPath -Force
+    }
+    Install-ModelPackage -Urls $ModelUrls -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
   Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
 
   try {
-    Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+    Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
   } catch {
     Write-Host "Current whisper.cpp failed real inference validation; reinstalling once."
     Write-Host ($_.Exception.Message)
-    $whisperZip = Join-Path $TempRoot "whisper-retry.zip"
+    $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
       -Urls @((Get-LatestWhisperWindowsAsset)) `
       -ZipPath $whisperZip `
@@ -522,6 +652,7 @@ try {
     $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
     Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
     Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+    Write-InstallState -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
   }
 
 # BEGIN_TRANSCRIBE_TEMPLATE
