@@ -4560,6 +4560,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         && source.includes('Convert-ExitCodeToHex')
         && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
         && source.includes('[string]$InstallRoot')
+        && source.includes('Install-ExtractedPackage')
+        && !source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')
         && source.includes('safeModelPath')
         && source.includes('System.Text.UTF8Encoding')
         && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
