@@ -12,7 +12,9 @@ const {
   normalizeBindCodeInput,
 } = require('../obsidian-plugin/wechat-inbox-sync/plugin-core');
 
-assert.strictEqual(OFFICIAL_SYNC_API_BASE, 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync');
+const LEGACY_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+
+assert.strictEqual(OFFICIAL_SYNC_API_BASE, 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync');
 assert.strictEqual(MAX_PLUGIN_BINDINGS, 3);
 
 assert.deepStrictEqual(AI_PROVIDER_NAMES, {
@@ -58,6 +60,11 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
 }
 
 assert.match(mergeSettings({ clientId: '' }).clientId, /^obsidian-[a-f0-9]{32}$/);
+
+assert.strictEqual(
+  mergeSettings({ apiBase: LEGACY_OFFICIAL_SYNC_API_BASE }).apiBase,
+  OFFICIAL_SYNC_API_BASE,
+);
 
 assert.deepStrictEqual(mergeSettings({
   apiBase: ' https://api.example.com/sync ',

@@ -79,6 +79,11 @@ assert.match(
 );
 assert.match(
   syncApiIndex,
+  /PRODUCTION_WECHAT_DATA_ENV\s*=\s*['"]he02-d8gebzv050ed6c4ef['"]/,
+  'syncApi should fall back to the production WeChat data env when HTTP service env variables are missing'
+);
+assert.match(
+  syncApiIndex,
   /pickBestLocalTranscriptionEntitlement/,
   'syncApi should treat trial, pro, and beta local transcription entitlements as one plugin permission'
 );
@@ -110,6 +115,11 @@ assert.match(
   syncAdminHandler,
   /WECHAT_DATA_ENV/,
   'syncApi admin handler should not reinitialize wx-server-sdk back to the empty deployment env'
+);
+assert.match(
+  syncAdminHandler,
+  /PRODUCTION_WECHAT_DATA_ENV\s*=\s*['"]he02-d8gebzv050ed6c4ef['"]/,
+  'syncApi admin handler should share the same production data env fallback'
 );
 assert.match(
   syncAdminHandler,

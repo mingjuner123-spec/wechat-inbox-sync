@@ -17,8 +17,10 @@ const {
   createPaidEntitlementFromOrder,
 } = require('./payment-core');
 
+const PRODUCTION_WECHAT_DATA_ENV = 'he02-d8gebzv050ed6c4ef';
+
 function getCloudDataEnv() {
-  return String(process.env.WECHAT_DATA_ENV || '').trim() || cloud.DYNAMIC_CURRENT_ENV;
+  return String(process.env.WECHAT_DATA_ENV || '').trim() || PRODUCTION_WECHAT_DATA_ENV || cloud.DYNAMIC_CURRENT_ENV;
 }
 
 cloud.init({

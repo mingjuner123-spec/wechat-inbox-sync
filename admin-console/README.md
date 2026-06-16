@@ -57,13 +57,13 @@
    当前环境已经有同步接口：
 
    ```text
-   https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync
+   https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync
    ```
 
    后台管理接口会走：
 
    ```text
-   https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync/admin/summary
+   https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync/admin/summary
    ```
 
 4. 打开 `admin-console/index.html`。

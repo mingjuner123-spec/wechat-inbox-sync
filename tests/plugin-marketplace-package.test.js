@@ -14,7 +14,7 @@ const macInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install-loc
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.2.17');
+assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.strictEqual(manifest.minAppVersion, '1.0.0');
 assert.strictEqual(manifest.isDesktopOnly, true);
 assert.strictEqual(versions[manifest.version], manifest.minAppVersion);

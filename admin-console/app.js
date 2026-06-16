@@ -1,5 +1,5 @@
 const STORAGE_KEY = 'ob_admin_console_config';
-const DEFAULT_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const DEFAULT_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 
 const state = {
   view: 'overview',
