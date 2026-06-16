@@ -8,9 +8,11 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.16"
+$InstallerScriptVersion = "1.2.17"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 180
+$InstallLockPath = Join-Path $InstallRoot ".install.lock"
+$InstallMutexName = "Global\WechatInboxLocalAsrInstall"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
 $ModelUrls = @(
   "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
@@ -23,6 +25,111 @@ function New-CleanDirectory {
     Remove-Item -LiteralPath $Path -Recurse -Force
   }
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
+}
+
+function Acquire-InstallLock {
+  New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+  $mutex = New-Object System.Threading.Mutex($false, $InstallMutexName)
+  $acquired = $false
+  try {
+    $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(10))
+  } catch [System.Threading.AbandonedMutexException] {
+    $acquired = $true
+  }
+  if (-not $acquired) {
+    throw "Another local ASR installation is already running. Please stop the previous installation or wait a few minutes, then retry."
+  }
+  Set-Content -LiteralPath $InstallLockPath -Encoding UTF8 -Value @(
+    "pid=$PID"
+    "time=$(Get-Date -Format o)"
+  )
+  return $mutex
+}
+
+function Release-InstallLock {
+  param([AllowNull()]$Mutex)
+  if ($Mutex) {
+    try {
+      $Mutex.ReleaseMutex()
+    } catch {
+      # The mutex may already be abandoned if the process is exiting.
+    }
+    $Mutex.Dispose()
+  }
+  Remove-Item -LiteralPath $InstallLockPath -Force -ErrorAction SilentlyContinue
+}
+
+function Copy-FileWithRetry {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourcePath,
+    [Parameter(Mandatory = $true)][string]$DestinationPath,
+    [int]$Attempts = 10,
+    [int]$DelayMilliseconds = 1000
+  )
+  $lastError = $null
+  $destinationDir = Split-Path -Parent $DestinationPath
+  if ($destinationDir) {
+    New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+  }
+  for ($i = 1; $i -le $Attempts; $i += 1) {
+    try {
+      Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+      return $DestinationPath
+    } catch {
+      $lastError = $_
+      Write-Host "File is busy, retrying copy $i/$Attempts`: $SourcePath"
+      Start-Sleep -Milliseconds $DelayMilliseconds
+    }
+  }
+  throw $lastError
+}
+
+function Prepare-ZipForExtraction {
+  param(
+    [Parameter(Mandatory = $true)][string]$ZipPath,
+    [Parameter(Mandatory = $true)][string]$TempRoot,
+    [Parameter(Mandatory = $true)][string]$Label,
+    [string]$FallbackUrl = ""
+  )
+  $extractZipPath = Join-Path $TempRoot ("extract-" + [guid]::NewGuid().ToString("N") + ".zip")
+  try {
+    Copy-FileWithRetry -SourcePath $ZipPath -DestinationPath $extractZipPath | Out-Null
+    return $extractZipPath
+  } catch {
+    if (-not $FallbackUrl) {
+      throw
+    }
+    Write-Host "$Label cache package is locked or unreadable; downloading a fresh temporary package."
+    Download-File -Url $FallbackUrl -OutFile $extractZipPath -Resume
+    return $extractZipPath
+  }
+}
+
+function Remove-ItemIfNotBusy {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  try {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    return $true
+  } catch {
+    Write-Host "Cannot remove busy cache file; keeping it for a later retry: $Path"
+    return $false
+  }
+}
+
+function Download-ZipToCacheOrTemp {
+  param(
+    [Parameter(Mandatory = $true)][string]$Url,
+    [Parameter(Mandatory = $true)][string]$CachePath,
+    [Parameter(Mandatory = $true)][string]$TempPath
+  )
+  try {
+    Download-File -Url $Url -OutFile $CachePath -Resume
+    return $CachePath
+  } catch {
+    Write-Host "Cache download failed or cache is busy; downloading to a temporary package."
+    Download-File -Url $Url -OutFile $TempPath -Resume
+    return $TempPath
+  }
 }
 
 function Download-File {
@@ -438,14 +545,17 @@ function Install-ZipPackage {
       $cacheFile = $ZipPath
       if ((Test-Path -LiteralPath $cacheFile) -and ((Get-Item -LiteralPath $cacheFile).Length -ge $MinBytes)) {
         Write-Host "Using cached $Label package: $cacheFile"
+        $extractZipPath = Prepare-ZipForExtraction -ZipPath $cacheFile -TempRoot $TempRoot -Label $Label -FallbackUrl $url
       } else {
         if (Test-Path -LiteralPath $cacheFile) {
           Write-Host "Resuming partial cached $Label package: $cacheFile"
         }
-        Download-File -Url $url -OutFile $cacheFile -Resume
+        $downloadTempPath = Join-Path $TempRoot ("download-" + [guid]::NewGuid().ToString("N") + ".zip")
+        $zipForExtraction = Download-ZipToCacheOrTemp -Url $url -CachePath $cacheFile -TempPath $downloadTempPath
+        $extractZipPath = Prepare-ZipForExtraction -ZipPath $zipForExtraction -TempRoot $TempRoot -Label $Label -FallbackUrl $url
       }
-      Assert-DownloadedFile -Path $ZipPath -MinBytes $MinBytes -Label $Label | Out-Null
-      Expand-Archive -LiteralPath $ZipPath -DestinationPath $StageDir -Force
+      Assert-DownloadedFile -Path $extractZipPath -MinBytes $MinBytes -Label $Label | Out-Null
+      Expand-Archive -LiteralPath $extractZipPath -DestinationPath $StageDir -Force
       return Assert-InstalledFile -Root $StageDir -Names $ExpectedFiles -Label $Label
     } catch {
       $lastError = $_
@@ -585,7 +695,9 @@ function Write-TranscribeScript {
   Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null
 }
 
+$installMutex = $null
 try {
+  $installMutex = Acquire-InstallLock
   New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
   New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
   Write-TranscribeScript -InstallRoot $InstallRoot
@@ -1118,4 +1230,5 @@ try {
   if (Test-Path -LiteralPath $TempRoot) {
     Remove-Item -LiteralPath $TempRoot -Recurse -Force
   }
+  Release-InstallLock -Mutex $installMutex
 }
