@@ -1618,8 +1618,8 @@ async function runAsyncHydrationTests() {
     'PRO-123',
   ]]);
 
-  const preparedMediaPlugin = new PluginClass();
-  preparedMediaPlugin.settings = helpers.mergeSettings({
+  const localPlatformParsePlugin = new PluginClass();
+  localPlatformParsePlugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'PRO-123',
     clientId: 'test-client',
@@ -1632,91 +1632,41 @@ async function runAsyncHydrationTests() {
       status: 'bound',
     }],
   });
-  let preparedPageFetchCount = 0;
-  requestUrlMock = async ({ url }) => {
-    if (url === 'https://www.douyin.com/video/prepared') {
-      preparedPageFetchCount += 1;
-      throw new Error('prepared media should not fetch platform page');
-    }
-    throw new Error(`unexpected prepared media request ${url}`);
+  let localPrepareCalled = false;
+  localPlatformParsePlugin.prepareWebpageMedia = async () => {
+    localPrepareCalled = true;
+    throw new Error('local software mode should not call cloud media prepare');
   };
-  preparedMediaPlugin.runLocalTranscription = async (audioUrl) => {
-    assert.strictEqual(audioUrl, 'https://media.example.com/prepared-douyin.m4a');
-    return '云端准备音频后的本地转写结果';
-  };
-  const preparedMediaRecord = await preparedMediaPlugin.hydrateWebpageMarkdown({
-    type: 'webpage',
-    content: 'https://www.douyin.com/video/prepared',
-    metadata: {
-      url: 'https://www.douyin.com/video/prepared',
-      webpageMediaType: 'audio_video',
-      mediaUrl: 'https://media.example.com/prepared-douyin.m4a',
-      audioUrl: 'https://media.example.com/prepared-douyin.m4a',
-      mediaPreparedByCloud: true,
-      mediaResolverSource: 'media-resolver',
-    },
-  }, '', '', '抖音云端准备音频');
-  assert.strictEqual(preparedPageFetchCount, 0);
-  assert.strictEqual(preparedMediaRecord.metadata.transcriptionStatus, 'success');
-  assert.strictEqual(preparedMediaRecord.metadata.transcription, '云端准备音频后的本地转写结果');
-  assert.strictEqual(preparedMediaRecord.metadata.mediaUrl, 'https://media.example.com/prepared-douyin.m4a');
-
-  const cloudPrepareThenLocalPlugin = new PluginClass();
-  cloudPrepareThenLocalPlugin.settings = helpers.mergeSettings({
-    apiBase: 'https://example.com/sync',
-    token: 'PRO-123',
-    clientId: 'test-client',
-    aiProvider: 'local',
-    localTranscriptionCommand: 'echo test',
-    bindings: [{
-      token: 'PRO-123',
-      label: 'Pro 微信',
-      enabled: true,
-      status: 'bound',
-    }],
-  });
-  const prepareCalls = [];
-  cloudPrepareThenLocalPlugin.prepareWebpageMedia = async (record, binding) => {
-    prepareCalls.push([record.metadata.url, binding && binding.token]);
-    return {
-      mediaUrl: 'https://media.example.com/cloud-prepared-xhs.m4a',
-      audioUrl: 'https://media.example.com/cloud-prepared-xhs.m4a',
-      source: 'media-resolver',
-      title: 'cloud prepared xhs',
-      durationSeconds: 66,
-    };
-  };
-  cloudPrepareThenLocalPlugin.runLocalTranscription = async (audioUrl) => {
-    assert.strictEqual(audioUrl, 'https://media.example.com/cloud-prepared-xhs.m4a');
-    return '同步时云端准备音频，本地转写结果';
+  localPlatformParsePlugin.runLocalTranscription = async (audioUrl) => {
+    assert.strictEqual(audioUrl, 'https://media.example.com/local-xhs.mp4');
+    return '本地解析音频后本地转写结果';
   };
   requestUrlMock = async ({ url }) => {
-    if (url === 'https://www.xiaohongshu.com/explore/cloud-prepare') {
-      throw new Error('cloud media prepare should replace platform page fetch');
+    if (url === 'https://www.xiaohongshu.com/explore/local-parse') {
+      return {
+        text: '<html><script>{"video":{"url":"https:\\/\\/media.example.com\\/local-xhs.mp4"}}</script></html>',
+      };
     }
-    throw new Error(`unexpected cloud prepare request ${url}`);
+    throw new Error(`unexpected local platform parse request ${url}`);
   };
-  const cloudPrepareThenLocalRecord = await cloudPrepareThenLocalPlugin.hydrateWebpageMarkdown({
-    _id: 'record-cloud-prepare-1',
+  const localPlatformParseRecord = await localPlatformParsePlugin.hydrateWebpageMarkdown({
+    _id: 'record-local-parse-1',
     type: 'webpage',
-    content: 'https://www.xiaohongshu.com/explore/cloud-prepare',
+    content: 'https://www.xiaohongshu.com/explore/local-parse',
     metadata: {
-      url: 'https://www.xiaohongshu.com/explore/cloud-prepare',
+      url: 'https://www.xiaohongshu.com/explore/local-parse',
       webpageMediaType: 'audio_video',
       transcriptionMode: 'local',
     },
-  }, '', '', '小红书云端准备');
-  assert.deepStrictEqual(prepareCalls, [[
-    'https://www.xiaohongshu.com/explore/cloud-prepare',
-    'PRO-123',
-  ]]);
-  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.transcriptionStatus, 'success');
-  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.mediaUrl, 'https://media.example.com/cloud-prepared-xhs.m4a');
-  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.transcription, '同步时云端准备音频，本地转写结果');
-  assert.strictEqual(cloudPrepareThenLocalRecord.metadata.mediaPreparedByCloud, true);
+  }, '', '', '小红书本地解析');
+  assert.strictEqual(localPrepareCalled, false);
+  assert.strictEqual(localPlatformParseRecord.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(localPlatformParseRecord.metadata.mediaUrl, 'https://media.example.com/local-xhs.mp4');
+  assert.strictEqual(localPlatformParseRecord.metadata.transcription, '本地解析音频后本地转写结果');
+  assert.strictEqual(localPlatformParseRecord.metadata.mediaPreparedByCloud, undefined);
 
-  const inferredCloudPreparePlugin = new PluginClass();
-  inferredCloudPreparePlugin.settings = helpers.mergeSettings({
+  const inferredLocalPlatformPlugin = new PluginClass();
+  inferredLocalPlatformPlugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'PRO-123',
     clientId: 'test-client',
@@ -1729,41 +1679,36 @@ async function runAsyncHydrationTests() {
       status: 'bound',
     }],
   });
-  const inferredPrepareCalls = [];
-  inferredCloudPreparePlugin.prepareWebpageMedia = async (record, binding) => {
-    inferredPrepareCalls.push([record.metadata.url, binding && binding.token]);
-    return {
-      mediaUrl: 'https://media.example.com/cloud-prepared-douyin.m4a',
-      audioUrl: 'https://media.example.com/cloud-prepared-douyin.m4a',
-      source: 'media-resolver',
-    };
+  let inferredPrepareCalled = false;
+  inferredLocalPlatformPlugin.prepareWebpageMedia = async () => {
+    inferredPrepareCalled = true;
+    throw new Error('unmarked platform links should stay on local platform parsing');
   };
-  inferredCloudPreparePlugin.runLocalTranscription = async (audioUrl) => {
-    assert.strictEqual(audioUrl, 'https://media.example.com/cloud-prepared-douyin.m4a');
-    return '未标记音视频的抖音链接也先云端准备';
+  inferredLocalPlatformPlugin.runLocalTranscription = async (audioUrl) => {
+    assert.strictEqual(audioUrl, 'https://v3-dy-o.zjcdn.com/tos-cn-ve/local-douyin.mp4');
+    return '未标记平台链接走本地解析';
   };
   requestUrlMock = async ({ url }) => {
-    if (url === 'https://v.douyin.com/cloud-prepare-unmarked/') {
-      throw new Error('unmarked platform links should use cloud media prepare before local page parsing');
+    if (url === 'https://www.douyin.com/video/local-parse-unmarked') {
+      return {
+        text: '<html><script>{"videoUrl":"https:\\/\\/v3-dy-o.zjcdn.com\\/tos-cn-ve\\/local-douyin.mp4"}</script></html>',
+      };
     }
-    throw new Error(`unexpected inferred prepare request ${url}`);
+    throw new Error(`unexpected inferred local parse request ${url}`);
   };
-  const inferredCloudPrepareRecord = await inferredCloudPreparePlugin.hydrateWebpageMarkdown({
-    _id: 'record-cloud-prepare-inferred-1',
+  const inferredLocalPlatformRecord = await inferredLocalPlatformPlugin.hydrateWebpageMarkdown({
+    _id: 'record-local-parse-inferred-1',
     type: 'webpage',
-    content: 'https://v.douyin.com/cloud-prepare-unmarked/',
+    content: 'https://www.douyin.com/video/local-parse-unmarked',
     metadata: {
-      url: 'https://v.douyin.com/cloud-prepare-unmarked/',
+      url: 'https://www.douyin.com/video/local-parse-unmarked',
       conversionStatus: 'pending',
     },
-  }, '', '', '抖音未标记云端准备');
-  assert.deepStrictEqual(inferredPrepareCalls, [[
-    'https://v.douyin.com/cloud-prepare-unmarked/',
-    'PRO-123',
-  ]]);
-  assert.strictEqual(inferredCloudPrepareRecord.metadata.transcriptionStatus, 'success');
-  assert.strictEqual(inferredCloudPrepareRecord.metadata.transcription, '未标记音视频的抖音链接也先云端准备');
-  assert.strictEqual(inferredCloudPrepareRecord.metadata.mediaPreparedByCloud, true);
+  }, '', '', '抖音未标记本地解析');
+  assert.strictEqual(inferredPrepareCalled, false);
+  assert.strictEqual(inferredLocalPlatformRecord.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(inferredLocalPlatformRecord.metadata.transcription, '未标记平台链接走本地解析');
+  assert.strictEqual(inferredLocalPlatformRecord.metadata.mediaPreparedByCloud, undefined);
 
   const doubaoPlugin = new PluginClass();
   doubaoPlugin.settings = {
