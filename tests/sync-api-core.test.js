@@ -461,6 +461,10 @@ const {
         return {
           mediaUrl: 'https://media.example.com/prepared-douyin.m4a',
           audioUrl: 'https://media.example.com/prepared-douyin.m4a',
+          originalMediaUrl: 'https://platform.example.com/raw-douyin.m4a',
+          preparedFileID: 'cloud://prepared-media/openid-1/demo.m4a',
+          cached: true,
+          mediaPreparedByCloud: true,
           source: 'media-resolver',
           title: 'prepared title',
           durationSeconds: 88,
@@ -474,6 +478,10 @@ const {
   assert.deepStrictEqual(JSON.parse(prepareMediaResponse.body).data, {
     mediaUrl: 'https://media.example.com/prepared-douyin.m4a',
     audioUrl: 'https://media.example.com/prepared-douyin.m4a',
+    originalMediaUrl: 'https://platform.example.com/raw-douyin.m4a',
+    preparedFileID: 'cloud://prepared-media/openid-1/demo.m4a',
+    cached: true,
+    mediaPreparedByCloud: true,
     source: 'media-resolver',
     title: 'prepared title',
     durationSeconds: 88,

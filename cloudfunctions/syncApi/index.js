@@ -32,6 +32,8 @@ const DOUBAO_ASR_RESOURCE_ID = 'volc.bigasr.auc';
 const DEFAULT_CLOUD_ASR_POLL_ATTEMPTS = 60;
 const DEFAULT_CLOUD_ASR_POLL_INTERVAL_MS = 5000;
 const MEDIA_RESOLVER_TIMEOUT_MS = 30000;
+const MEDIA_PREPARE_DOWNLOAD_TIMEOUT_MS = 120000;
+const MEDIA_PREPARE_MAX_BYTES = 512 * 1024 * 1024;
 
 function isHttpUrl(url) {
   return /^https?:\/\//i.test(String(url || ''));
@@ -43,6 +45,29 @@ function getMediaResolverUrl() {
 
 function getMediaResolverSecret() {
   return String(process.env.MEDIA_RESOLVER_SECRET || '').trim();
+}
+
+function isMediaPrepareCacheEnabled() {
+  return String(process.env.MEDIA_PREPARE_CACHE_ENABLED || '').toLowerCase() === 'true';
+}
+
+function getMediaPrepareCacheTtlMs() {
+  const hours = Number(process.env.MEDIA_PREPARE_CACHE_TTL_HOURS || 24);
+  return Math.max(1, Math.min(168, Number.isFinite(hours) ? hours : 24)) * 60 * 60 * 1000;
+}
+
+function sanitizeCloudPathPart(value) {
+  return String(value || '')
+    .replace(/[^A-Za-z0-9_-]/g, '_')
+    .slice(0, 80) || 'unknown';
+}
+
+function getPreparedMediaExt(url) {
+  const clean = String(url || '').split('?')[0].split('#')[0].toLowerCase();
+  const match = clean.match(/\.([a-z0-9]{2,5})$/);
+  const ext = match ? match[1] : '';
+  if (['mp3', 'wav', 'm4a', 'mp4', 'aac', 'ogg', 'flac', 'webm', 'm4s'].includes(ext)) return ext;
+  return 'm4a';
 }
 
 function normalizeResolverMediaUrl(mediaUrl, resolverUrl, data = {}) {
@@ -59,6 +84,72 @@ function normalizeResolverMediaUrl(mediaUrl, resolverUrl, data = {}) {
     return value;
   }
   return value;
+}
+
+function downloadPreparedMedia(url, headers = {}, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (!isHttpUrl(url)) {
+      reject(new Error('Prepared media URL is invalid'));
+      return;
+    }
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'http:' ? require('http') : https;
+    const req = client.get({
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: `${parsed.pathname}${parsed.search}`,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 WeChatInboxMediaPrepare/1.0',
+        Accept: '*/*',
+        ...headers,
+      },
+    }, (res) => {
+      const location = res.headers && res.headers.location;
+      if ([301, 302, 303, 307, 308].includes(Number(res.statusCode)) && location && redirectCount < 5) {
+        res.resume();
+        resolve(downloadPreparedMedia(new URL(location, url).toString(), headers, redirectCount + 1));
+        return;
+      }
+      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+        res.resume();
+        reject(new Error(`Prepared media download failed: HTTP ${res.statusCode}`));
+        return;
+      }
+      const contentLength = Number(res.headers && res.headers['content-length']) || 0;
+      if (contentLength > MEDIA_PREPARE_MAX_BYTES) {
+        res.resume();
+        reject(new Error('Prepared media is too large'));
+        return;
+      }
+      const chunks = [];
+      let size = 0;
+      res.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > MEDIA_PREPARE_MAX_BYTES) {
+          req.destroy(new Error('Prepared media is too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        const head = buffer.subarray(0, Math.min(buffer.length, 256)).toString('utf8').trim().toLowerCase();
+        if (buffer.length < 512 || head.startsWith('<!doctype') || head.startsWith('<html') || head.includes('<body')) {
+          reject(new Error('Prepared media download returned HTML instead of media'));
+          return;
+        }
+        resolve({
+          buffer,
+          contentType: String(res.headers && res.headers['content-type'] || 'application/octet-stream'),
+        });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(MEDIA_PREPARE_DOWNLOAD_TIMEOUT_MS, () => {
+      req.destroy(new Error('Prepared media download timed out'));
+    });
+  });
 }
 
 function formatCleanupError(error) {
@@ -971,9 +1062,46 @@ function createRepository() {
       if (!isHttpUrl(mediaUrl)) {
         throw new Error('Media resolver returned empty media URL');
       }
+      if (isMediaPrepareCacheEnabled()) {
+        const downloaded = await downloadPreparedMedia(mediaUrl, data.headers || {});
+        const now = Date.now();
+        const ext = getPreparedMediaExt(mediaUrl);
+        const openidPart = sanitizeCloudPathPart(openid);
+        const recordPart = sanitizeCloudPathPart(payload.recordId || createRequestId());
+        const cloudPath = `prepared-media/${openidPart}/${recordPart}-${now}.${ext}`;
+        const upload = await cloud.uploadFile({
+          cloudPath,
+          fileContent: downloaded.buffer,
+        });
+        const fileID = upload.fileID || '';
+        const tempUrlResult = await cloud.getTempFileURL({
+          fileList: [fileID],
+        });
+        const file = tempUrlResult.fileList && tempUrlResult.fileList[0] ? tempUrlResult.fileList[0] : {};
+        const tempFileURL = file.tempFileURL || '';
+        if (!isHttpUrl(tempFileURL)) {
+          throw new Error('Failed to create prepared media temp URL');
+        }
+        return {
+          mediaUrl: tempFileURL,
+          audioUrl: tempFileURL,
+          originalMediaUrl: mediaUrl,
+          preparedFileID: fileID,
+          cached: true,
+          mediaPreparedByCloud: true,
+          source: String(data.source || 'media-resolver'),
+          title: String(data.title || ''),
+          durationSeconds: Number(data.durationSeconds || 0) || 0,
+          expiresAt: new Date(Date.now() + getMediaPrepareCacheTtlMs()).toISOString(),
+        };
+      }
       return {
         mediaUrl,
         audioUrl: mediaUrl,
+        originalMediaUrl: String(data.originalMediaUrl || ''),
+        preparedFileID: '',
+        cached: false,
+        mediaPreparedByCloud: false,
         source: String(data.source || 'media-resolver'),
         title: String(data.title || ''),
         durationSeconds: Number(data.durationSeconds || 0) || 0,

@@ -500,6 +500,10 @@ async function handleMediaPrepareRequest({ request, repository, openid }) {
     data: {
       mediaUrl,
       audioUrl: String(data.audioUrl || mediaUrl),
+      originalMediaUrl: String(data.originalMediaUrl || ''),
+      preparedFileID: String(data.preparedFileID || ''),
+      cached: Boolean(data.cached),
+      mediaPreparedByCloud: Boolean(data.mediaPreparedByCloud || data.cached),
       source: String(data.source || 'media-prepare'),
       title: String(data.title || ''),
       durationSeconds: Number(data.durationSeconds || 0) || 0,
