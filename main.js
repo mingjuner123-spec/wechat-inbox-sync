@@ -12,6 +12,7 @@ const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-sha
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
+const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
 const NOTE_SAVE_MODES = {
@@ -4679,26 +4680,29 @@ class WechatObsidianInboxPlugin extends Plugin {
       return unboundStatus;
     }
 
+    const plans = [LOCAL_TRANSCRIPTION_PLAN, ...LOCAL_TRANSCRIPTION_FALLBACK_PLANS];
     let lastError = null;
     for (const binding of bindings) {
-      try {
-        const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(LOCAL_TRANSCRIPTION_PLAN)}`, 'GET', {}, binding);
-        const data = payload && payload.data ? payload.data : {};
-        if (data.hasAccess) {
-          const activeStatus = {
-            hasAccess: true,
-            plan: data.plan || LOCAL_TRANSCRIPTION_PLAN,
-            status: data.status || 'active',
-            expiresAt: data.expiresAt || '',
-            bindingToken: binding.token,
-            bindingLabel: binding.label || '',
-          };
-          await this.cacheLocalTranscriptionEntitlementStatus(activeStatus);
-          return activeStatus;
+      for (const plan of plans) {
+        try {
+          const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(plan)}`, 'GET', {}, binding);
+          const data = payload && payload.data ? payload.data : {};
+          if (data.hasAccess) {
+            const activeStatus = {
+              hasAccess: true,
+              plan: data.plan || plan,
+              status: data.status || 'active',
+              expiresAt: data.expiresAt || '',
+              bindingToken: binding.token,
+              bindingLabel: binding.label || '',
+            };
+            await this.cacheLocalTranscriptionEntitlementStatus(activeStatus);
+            return activeStatus;
+          }
+          lastError = data;
+        } catch (error) {
+          lastError = error;
         }
-        lastError = data;
-      } catch (error) {
-        lastError = error;
       }
     }
 
