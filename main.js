@@ -2551,6 +2551,14 @@ function shouldHydrateLinkAsWebpage(url) {
     || isXiaoyuzhouUrl(url);
 }
 
+function shouldPrepareWebpageMediaInCloud(url, metadata = {}) {
+  return metadata.webpageMediaType === 'audio_video'
+    || isXiaohongshuUrl(url)
+    || isDouyinUrl(url)
+    || isBilibiliUrl(url)
+    || isXiaoyuzhouUrl(url);
+}
+
 function getSocialRequestHeaders(url) {
   const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
@@ -5837,7 +5845,8 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     try {
       const effectiveBinding = binding || this.getActiveBindings()[0] || null;
-      const preparedMediaUrl = metadata.webpageMediaType === 'audio_video'
+      const shouldUseCloudMediaPrepare = shouldPrepareWebpageMediaInCloud(url, metadata);
+      const preparedMediaUrl = shouldUseCloudMediaPrepare
         ? getPreparedMediaUrlFromMetadata(metadata)
         : '';
       if (preparedMediaUrl) {
@@ -5851,7 +5860,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         });
       }
 
-      if (metadata.webpageMediaType === 'audio_video' && typeof this.prepareWebpageMedia === 'function') {
+      if (shouldUseCloudMediaPrepare && typeof this.prepareWebpageMedia === 'function') {
         try {
           const prepared = await this.prepareWebpageMedia(record, effectiveBinding);
           const cloudPreparedMediaUrl = prepared && (prepared.mediaUrl || prepared.audioUrl);
