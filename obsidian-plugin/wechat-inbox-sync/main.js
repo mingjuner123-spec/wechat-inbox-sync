@@ -2519,6 +2519,30 @@ function isDouyinMediaUrl(url) {
   return /douyinvod\.com|zjcdn\.com\/tos-|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ''));
 }
 
+function extractDouyinAwemeId(url) {
+  const text = String(url || '');
+  const patterns = [
+    /\/video\/(\d{8,})/i,
+    /\/share\/video\/(\d{8,})/i,
+    /[?&](?:aweme_id|item_id|item_ids)=(\d{8,})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) return match[1];
+  }
+  return '';
+}
+
+function getDouyinAwemeDetailUrls(awemeId) {
+  const id = String(awemeId || '').trim();
+  if (!id) return [];
+  const query = `aweme_id=${encodeURIComponent(id)}&aid=6383&device_platform=webapp`;
+  return [
+    `https://www.douyin.com/aweme/v1/web/aweme/detail/?${query}`,
+    `https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=${encodeURIComponent(id)}&aid=1128&device_platform=webapp`,
+  ];
+}
+
 function shouldResolveMediaDownloadUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('/aweme/v1/play')
@@ -3158,6 +3182,39 @@ function extractSocialMediaUrlsFromHtml(html) {
 
 function extractSocialMediaUrlFromHtml(html) {
   return extractSocialMediaUrlsFromHtml(html)[0] || '';
+}
+
+function collectDouyinUrlList(value, urls) {
+  if (!value) return;
+  if (typeof value === 'string') {
+    pushUniqueMediaUrl(urls, value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectDouyinUrlList(item, urls));
+    return;
+  }
+  if (typeof value === 'object') {
+    collectDouyinUrlList(value.url_list, urls);
+    collectDouyinUrlList(value.urlList, urls);
+    collectDouyinUrlList(value.url, urls);
+  }
+}
+
+function extractDouyinMediaUrlsFromDetailPayload(payload) {
+  const detail = payload && (payload.aweme_detail || payload.awemeDetail || payload.item_list && payload.item_list[0]);
+  if (!detail || typeof detail !== 'object') return [];
+  const video = detail.video || {};
+  const urls = [];
+  collectDouyinUrlList(video.play_addr, urls);
+  collectDouyinUrlList(video.download_addr, urls);
+  collectDouyinUrlList(video.playAddr, urls);
+  collectDouyinUrlList(video.downloadAddr, urls);
+  (Array.isArray(video.bit_rate) ? video.bit_rate : []).forEach((item) => {
+    collectDouyinUrlList(item && item.play_addr, urls);
+    collectDouyinUrlList(item && item.playAddr, urls);
+  });
+  return sortMediaUrlsForTranscription(urls);
 }
 
 function isUnavailableXiaohongshuPage(html, url = '') {
@@ -5868,6 +5925,25 @@ class WechatObsidianInboxPlugin extends Plugin {
         const html = response.text || '';
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
+        let hasPreciseDouyinMedia = false;
+        if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
+          const awemeId = extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
+          for (const detailUrl of getDouyinAwemeDetailUrls(awemeId)) {
+            try {
+              // Douyin's rendered page can load recommendation videos; the detail API is pinned to one aweme id.
+              const detailResponse = await requestUrl({ url: detailUrl, method: 'GET', headers: getSocialRequestHeaders(detailUrl) });
+              const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailResponse.json || JSON.parse(detailResponse.text || '{}'));
+              if (detailUrls.length) {
+                mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
+                mediaUrl = mediaUrls[0] || mediaUrl;
+                hasPreciseDouyinMedia = true;
+                break;
+              }
+            } catch (detailError) {
+              // Fall back to page extraction/rendering below.
+            }
+          }
+        }
         const isUnavailableXhs = isXiaohongshuUrl(url)
           && isUnavailableXiaohongshuPage(html, resolvedUrl);
         const isVideoIntent = metadata.webpageMediaType === 'audio_video'
@@ -5875,14 +5951,14 @@ class WechatObsidianInboxPlugin extends Plugin {
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
           || /\/video\//i.test(resolvedUrl);
-        if (isVideoIntent && typeof this.renderSocialMediaUrls === 'function') {
+        if (!hasPreciseDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === 'function') {
           try {
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, ...(await this.renderSocialMediaUrls(resolvedUrl))]);
             mediaUrl = mediaUrls[0] || mediaUrl;
           } catch (renderError) {
             mediaUrl = mediaUrl || '';
           }
-        } else if (!mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === 'function') {
+        } else if (!hasPreciseDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === 'function') {
           try {
             mediaUrl = await this.renderSocialMediaUrl(resolvedUrl);
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
@@ -6557,6 +6633,8 @@ WechatObsidianInboxPlugin.__test = {
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,
   extractSocialMediaUrlFromHtml,
+  extractDouyinAwemeId,
+  extractDouyinMediaUrlsFromDetailPayload,
   isUnavailableXiaohongshuPage,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,

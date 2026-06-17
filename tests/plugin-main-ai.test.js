@@ -817,6 +817,30 @@ const douyinPlayApiUrl = helpers.extractSocialMediaUrlFromHtml([
 ].join(''));
 assert.strictEqual(douyinPlayApiUrl, 'https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000demo&ratio=720p&line=0');
 
+assert.strictEqual(
+  helpers.extractDouyinAwemeId('https://www.douyin.com/video/7644238277092174409'),
+  '7644238277092174409',
+);
+assert.strictEqual(
+  helpers.extractDouyinAwemeId('https://www.iesdouyin.com/share/video/7644238277092174409/?region=CN'),
+  '7644238277092174409',
+);
+assert.deepStrictEqual(
+  helpers.extractDouyinMediaUrlsFromDetailPayload({
+    aweme_detail: {
+      aweme_id: '7644238277092174409',
+      video: {
+        play_addr: {
+          url_list: [
+            'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4',
+          ],
+        },
+      },
+    },
+  }),
+  ['https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4'],
+);
+
 const podcastAudioUrl = helpers.extractPodcastAudioUrlFromHtml([
   '<html><head>',
   '<meta property="og:audio" content="https://media.example.com/xiaoyuzhou-episode.mp3">',
@@ -1246,6 +1270,48 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(douyinRecord.metadata.markdown, undefined);
   assert.strictEqual(douyinRecord.metadata.transcriptionStatus, 'failed');
   assert.strictEqual(douyinRecord.metadata.mediaUrl, 'https://video.example.com/douyin.mp4');
+
+  const preciseDouyinPlugin = new PluginClass();
+  preciseDouyinPlugin.settings = { aiProvider: 'off' };
+  let preciseDouyinRenderCalled = false;
+  preciseDouyinPlugin.renderSocialMediaUrls = async () => {
+    preciseDouyinRenderCalled = true;
+    throw new Error('precise douyin detail should avoid rendered recommendation resources');
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.douyin.com/video/7644238277092174409') {
+      return {
+        text: '<html><head><meta charset="UTF-8"></head><body><script>var glb;</script></body></html>',
+      };
+    }
+    if (url.includes('/aweme/v1/web/aweme/detail/') && url.includes('aweme_id=7644238277092174409')) {
+      return {
+        json: {
+          aweme_detail: {
+            aweme_id: '7644238277092174409',
+            desc: '先生 我出不了神山 你带一支格桑花走吧 #萨普神山 #西藏',
+            video: {
+              play_addr: {
+                url_list: [
+                  'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4',
+                ],
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`unexpected precise douyin request ${url}`);
+  };
+  const preciseDouyinRecord = await preciseDouyinPlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/7644238277092174409',
+    metadata: { url: 'https://www.douyin.com/video/7644238277092174409' },
+  }, '', '', '抖音精确作品');
+  assert.strictEqual(preciseDouyinRecord.metadata.transcriptOnly, true);
+  assert.strictEqual(preciseDouyinRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4');
+  assert.strictEqual(preciseDouyinRecord.metadata.title, '抖音口播文案');
+  assert.strictEqual(preciseDouyinRenderCalled, false);
 
   const renderedDouyinPlugin = new PluginClass();
   renderedDouyinPlugin.settings = { aiProvider: 'off' };
