@@ -2210,12 +2210,6 @@ async function completeCloudPreTranscriptionRecord({
   });
 
   const remainingSeconds = Math.max(0, actualQuotaState.cloudRemainingSeconds - actualBillableSeconds);
-  const reactivateSyncedRecordPatch = record.status === 'synced'
-    ? {
-      status: 'pending',
-      syncedAt: '',
-    }
-    : {};
   await updateInboxRecordMetadata(record, {
     ...(isWebpageAudioVideo ? {
       transcriptOnly: true,
@@ -2237,7 +2231,7 @@ async function completeCloudPreTranscriptionRecord({
     cloudRemainingSeconds: remainingSeconds,
     cloudDetectedDurationSeconds: Math.ceil(Number(result.durationSeconds) || 0),
     cloudPreTranscriptionFinishedAt: new Date().toISOString(),
-  }, reactivateSyncedRecordPatch);
+  });
 
   return {
     success: true,
@@ -2481,12 +2475,6 @@ async function processCloudPreTranscriptionRecord({ openid, record }) {
   const recordId = record._id;
   const metadata = record.metadata || {};
   if (metadata.transcriptionStatus === 'success' && metadata.transcription) {
-    if (record.status === 'synced') {
-      await updateInboxRecordMetadata(record, {}, {
-        status: 'pending',
-        syncedAt: '',
-      });
-    }
     return {
       success: true,
       data: {

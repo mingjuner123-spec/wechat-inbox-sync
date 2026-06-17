@@ -237,6 +237,21 @@ function shouldKeepRecordPendingForTranscription(record) {
   return ['pending', 'queued', 'processing', 'failed'].includes(status);
 }
 
+function hasAlreadySyncedEvidence(record) {
+  if (!record) return false;
+  if (String(record.status || '').toLowerCase() === 'synced') return true;
+  if (String(record.syncedAt || '').trim()) return true;
+  const metadata = record.metadata || {};
+  const cleanupStatus = String(metadata.cleanupStatus || '').toLowerCase();
+  return cleanupStatus === 'cleaned'
+    || cleanupStatus === 'storage-delete-failed'
+    || Boolean(String(metadata.cleanedAt || '').trim());
+}
+
+function filterSyncableRecords(records = []) {
+  return (records || []).filter((record) => !hasAlreadySyncedEvidence(record));
+}
+
 async function requireOpenId(request, repository) {
   const token = parseBearerToken(request.headers);
   const clientId = parseClientId(request);
@@ -639,7 +654,7 @@ async function handleSyncApiRequest({ request, repository }) {
       const records = await repository.listPendingRecords(auth.openid);
       return jsonResponse(200, {
         success: true,
-        data: records,
+        data: filterSyncableRecords(records),
       });
     }
 
@@ -694,7 +709,9 @@ module.exports = {
   buildSyncedRecordCleanupData,
   buildCloudQuotaState,
   collectRecordFileIds,
+  filterSyncableRecords,
   handleSyncApiRequest,
+  hasAlreadySyncedEvidence,
   isRedeemCodeBusinessError,
   shouldKeepRecordPendingForTranscription,
   normalizeTranscriptionPreferences,

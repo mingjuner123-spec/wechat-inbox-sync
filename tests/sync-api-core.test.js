@@ -50,6 +50,29 @@ const {
           status: 'pending',
           metadata: {},
         },
+        {
+          _id: 'record-reactivated-synced-at',
+          type: 'text',
+          content: '',
+          createdAt: '2026-05-08T12:35:00.000Z',
+          source: 'wechat-miniprogram',
+          status: 'pending',
+          syncedAt: '2026-05-08T13:00:00.000Z',
+          metadata: {},
+        },
+        {
+          _id: 'record-reactivated-cleaned',
+          type: 'voice',
+          content: '',
+          createdAt: '2026-05-08T12:36:00.000Z',
+          source: 'wechat-miniprogram',
+          status: 'pending',
+          syncedAt: '',
+          metadata: {
+            cleanupStatus: 'cleaned',
+            cleanedAt: '2026-05-08T13:01:00.000Z',
+          },
+        },
       ];
     },
     async markRecordSynced(openid, recordId) {
@@ -116,6 +139,7 @@ const {
   });
 
   assert.strictEqual(listResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(listResponse.body).data.map((item) => item._id), ['record-text-1']);
   assert.strictEqual(JSON.parse(listResponse.body).data[0].content, 'API record');
 
   const markResponse = await handleSyncApiRequest({

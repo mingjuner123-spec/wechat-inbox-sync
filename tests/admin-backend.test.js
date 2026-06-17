@@ -88,9 +88,22 @@ assert.match(indexSource, /cloudDetectedDurationSeconds/);
 assert.match(indexSource, /doubaoRequestId/);
 assert.match(indexSource, /cloudNextPollAt/);
 assert.match(indexSource, /CLOUD_TRANSCRIPTION_MAX_POLL_ATTEMPTS/);
-assert.match(indexSource, /reactivateSyncedRecordPatch/);
-assert.match(indexSource, /status: 'pending'/);
-assert.match(indexSource, /syncedAt: ''/);
+
+const completeCloudPreTranscriptionBody = indexSource.slice(
+  indexSource.indexOf('async function completeCloudPreTranscriptionRecord'),
+  indexSource.indexOf('async function processCloudPreTranscription'),
+);
+assert.doesNotMatch(completeCloudPreTranscriptionBody, /reactivateSyncedRecordPatch/);
+assert.doesNotMatch(completeCloudPreTranscriptionBody, /status:\s*'pending'/);
+assert.doesNotMatch(completeCloudPreTranscriptionBody, /syncedAt:\s*''/);
+
+const processCloudPreTranscriptionRecordBody = indexSource.slice(
+  indexSource.indexOf('async function processCloudPreTranscriptionRecord'),
+  indexSource.indexOf('async function adminRetryCloudPreTranscription'),
+);
+assert.match(processCloudPreTranscriptionRecordBody, /alreadyProcessed: true/);
+assert.doesNotMatch(processCloudPreTranscriptionRecordBody, /status:\s*'pending'/);
+assert.doesNotMatch(processCloudPreTranscriptionRecordBody, /syncedAt:\s*''/);
 
 const quickstartFunctionConfig = cloudbaseConfig.functions.find((item) => item.name === 'quickstartFunctions');
 assert.ok(quickstartFunctionConfig);
