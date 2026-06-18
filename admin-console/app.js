@@ -1,5 +1,5 @@
 const STORAGE_KEY = 'ob_admin_console_config';
-const DEFAULT_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const DEFAULT_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 
 const state = {
   view: 'overview',
@@ -11,9 +11,21 @@ const state = {
 
 const viewMeta = {
   overview: ['总览', '查看访问、绑定、同步和 Pro 转化。'],
-  funnel: ['运营漏斗', '上一天关键漏斗和转化掉点。'],
+  funnel: ['运营漏斗', '当前绑定和近 1/7/30 天同步活跃。'],
   pro: ['Pro 管理', '生成、发放、筛选、删除兑换码，并管理 Pro 用户。'],
 };
+
+const SYNC_ACTIVITY_KEYS = [
+  'currentBoundUsers',
+  'activeSyncUsers1d',
+  'activeSyncUsers7d',
+  'activeSyncUsers30d',
+];
+
+const HIDDEN_OVERVIEW_CARD_KEYS = new Set([
+  'visitUsers',
+  'boundDevices',
+]);
 
 function $(id) {
   return document.getElementById(id);
@@ -183,13 +195,58 @@ function renderMetrics(cards = []) {
   `).join('');
 }
 
+function getOverviewCards(data = {}) {
+  const activityCards = getSyncActivityCards(data);
+  const activityKeys = new Set(activityCards.map((item) => item.key));
+  const safeCards = (data.cards || [])
+    .filter((item) => item && !HIDDEN_OVERVIEW_CARD_KEYS.has(item.key))
+    .filter((item) => item && !activityKeys.has(item.key));
+  return [
+    ...activityCards,
+    ...safeCards,
+  ];
+}
+
 function renderFunnel(steps = []) {
   $('funnelList').innerHTML = steps.map((item) => `
     <article class="funnel-step">
       <div class="funnel-label">${escapeHtml(item.label)}</div>
       <div class="funnel-value">${escapeHtml(item.value)}</div>
-      <div class="funnel-rate">上一步 ${escapeHtml(item.rateText || '-')}</div>
+      <div class="funnel-rate">占当前绑定 ${escapeHtml(item.rateText || '-')}</div>
       <div class="funnel-hint">${escapeHtml(item.hint || '')}</div>
+    </article>
+  `).join('');
+}
+
+function getSyncActivityCards(data = {}) {
+  const funnel = data.funnel || {};
+  const currentBoundUsers = funnel.currentBoundUsers ?? funnel.boundUsers ?? 0;
+  const fallbackCards = [
+    { key: 'currentBoundUsers', label: '当前已绑定微信用户', value: currentBoundUsers, rateText: '-', hint: '当前绑定码里仍处于已绑定状态的微信用户数' },
+    { key: 'activeSyncUsers1d', label: '近 1 天仍同步', value: funnel.activeSyncUsers1d ?? '-', rateText: '-', hint: '已绑定用户里，最近 1 天仍然有同步动作的人数' },
+    { key: 'activeSyncUsers7d', label: '近 7 天仍同步', value: funnel.activeSyncUsers7d ?? '-', rateText: '-', hint: '已绑定用户里，最近 7 天仍然有同步动作的人数' },
+    { key: 'activeSyncUsers30d', label: '近 30 天仍同步', value: funnel.activeSyncUsers30d ?? '-', rateText: '-', hint: '已绑定用户里，最近 30 天仍然有同步动作的人数' },
+  ];
+  const sourceCards = Array.isArray(funnel.activityCards) && funnel.activityCards.length
+    ? funnel.activityCards
+    : (Array.isArray(funnel.steps) ? funnel.steps : []);
+  const cardMap = new Map(sourceCards
+    .filter((item) => item && SYNC_ACTIVITY_KEYS.includes(item.key))
+    .map((item) => [item.key, item]));
+  return fallbackCards.map((item) => ({
+    ...item,
+    ...(cardMap.get(item.key) || {}),
+  }));
+}
+
+function renderSyncActivity(data = {}) {
+  const cards = getSyncActivityCards(data);
+  $('syncActivityGrid').innerHTML = cards.map((item) => `
+    <article class="sync-activity-card">
+      <div class="metric-label">${escapeHtml(item.label)}</div>
+      <div class="metric-value">${escapeHtml(item.value)}</div>
+      <div class="metric-hint">${escapeHtml(item.hint || '')}</div>
+      <div class="sync-activity-rate">${item.key === 'currentBoundUsers' ? '基准人数' : `占当前绑定 ${escapeHtml(item.rateText || '-')}`}</div>
     </article>
   `).join('');
 }
@@ -203,70 +260,10 @@ function renderStack(id, items = [], emptyText = '暂无数据') {
   `).join('') : `<div class="stack-item"><div class="stack-desc">${emptyText}</div></div>`;
 }
 
-function renderYesterdayFunnel(data = {}) {
-  const cards = data.cards || [
-    { label: '访问用户总数', value: data.visitUserTotal || 0, hint: data.day || '' },
-    { label: '新用户数', value: data.newUserCount || 0, hint: '昨天前未完成绑定' },
-    { label: '老用户数', value: data.returningUserCount || 0, hint: '昨天前已完成绑定' },
-    { label: '新用户中完成绑定的用户', value: data.newBoundUserCount || 0, hint: '昨天完成首次绑定' },
-    { label: '开通 Pro 的用户数', value: data.proOpenedUsers || 0, hint: '含 7 天体验' },
-    { label: '开通付费数', value: data.paidOpenedUsers || 0, hint: 'Pro 时长 30 天及以上' },
-    { label: '总 Pro 开通数', value: data.totalProOpenedUsers || 0, hint: '历史累计' },
-    { label: '总绑定数', value: data.totalBoundCount || 0, hint: '历史绑定设备数' },
-    { label: '总访问数', value: data.totalVisitEvents || 0, hint: '历史访问人次' },
-  ];
-  $('yesterdayFunnelGrid').innerHTML = cards.map((item) => `
-    <article class="metric-card">
-      <div class="metric-label">${escapeHtml(item.label)}</div>
-      <div class="metric-value">${escapeHtml(item.value)}</div>
-      <div class="metric-hint">${escapeHtml(item.hint || '')}</div>
-    </article>
-  `).join('');
-}
-
-function renderBreakpoints(items = []) {
-  $('breakpointList').innerHTML = items.length ? items.map((item) => `
-    <article class="breakpoint-item ${escapeHtml(item.severity || 'ok')}">
-      <div>
-        <div class="breakpoint-title">${escapeHtml(item.from)} → ${escapeHtml(item.to)}</div>
-        <div class="breakpoint-desc">流失 ${escapeHtml(item.dropValue)} 人，转化 ${escapeHtml(item.conversionText || '-')}，掉点 ${escapeHtml(item.dropText || '-')}</div>
-        <div class="breakpoint-action">${escapeHtml(item.action || '')}</div>
-      </div>
-      <div class="breakpoint-number">${escapeHtml(item.fromValue)} → ${escapeHtml(item.toValue)}</div>
-    </article>
-  `).join('') : '<div class="stack-item"><div class="stack-desc">暂无漏斗断点数据</div></div>';
-}
-
-function renderSegments(items = []) {
-  $('segmentGrid').innerHTML = items.map((item) => `
-    <article class="segment-item">
-      <div class="segment-label">${escapeHtml(item.label)}</div>
-      <div class="segment-value">${escapeHtml(item.value)}</div>
-      <div class="segment-hint">${escapeHtml(item.hint || '')}</div>
-    </article>
-  `).join('');
-}
-
-function renderTrends(items = []) {
-  const maxValue = Math.max(1, ...items.map((item) => Math.max(item.visits || 0, item.binds || 0, item.syncs || 0, item.pros || 0, item.records || 0)));
-  $('trendList').innerHTML = items.map((item) => {
-    const width = Math.max(4, Math.round(((item.visits || item.records || item.syncs || 0) / maxValue) * 100));
-    return `
-      <article class="trend-row">
-        <div class="trend-day">${escapeHtml(String(item.day || '').slice(5))}</div>
-        <div class="trend-bars">
-          <div class="trend-bar" style="width:${width}%"></div>
-        </div>
-        <div class="trend-meta">访 ${escapeHtml(item.visits)} / 绑 ${escapeHtml(item.binds)} / 同 ${escapeHtml(item.syncs)} / Pro ${escapeHtml(item.pros)}</div>
-      </article>
-    `;
-  }).join('');
-}
-
 async function loadOverview() {
   const data = await request('/summary', { range: state.range, maxRead: 5000 });
-  renderMetrics(data.cards || []);
-  renderFunnel((data.funnel && data.funnel.steps) || []);
+  renderMetrics(getOverviewCards(data));
+  renderFunnel(getSyncActivityCards(data));
   renderStack('diagnosisList', data.diagnoses || [], '暂无明显异常');
   renderStack('issueList', data.issues || [], '暂无待处理异常');
   $('scopeText').textContent = data.scope ? `${data.scope.label} · ${data.scope.desc}` : '';
@@ -274,20 +271,8 @@ async function loadOverview() {
 
 async function loadFunnel() {
   const data = await request('/summary', { range: 'all', maxRead: 5000 });
-  renderYesterdayFunnel(data.yesterdayFunnel || {});
-  $('conversionGrid').innerHTML = (data.funnel && data.funnel.conversionCards ? data.funnel.conversionCards : []).map((item) => `
-    <article class="metric-card">
-      <div class="metric-label">${escapeHtml(item.label)}</div>
-      <div class="metric-value">${escapeHtml(item.value)}</div>
-      <div class="metric-hint">${escapeHtml(item.hint || '')}</div>
-    </article>
-  `).join('');
-  renderBreakpoints((data.funnel && data.funnel.breakpoints) || []);
-  renderSegments(data.segments || []);
-  renderTrends((data.trends && data.trends.daily) || []);
-  $('funnelScopeText').textContent = data.yesterdayFunnel && data.yesterdayFunnel.day
-    ? `${data.yesterdayFunnel.day} · ${data.scope ? data.scope.label : ''}`
-    : (data.scope ? `${data.scope.label} · ${data.scope.desc}` : '');
+  renderSyncActivity(data);
+  $('funnelScopeText').textContent = data.scope ? `${data.scope.label} · ${data.scope.desc}` : '';
 }
 
 async function loadProManagement() {

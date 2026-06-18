@@ -15,6 +15,8 @@ const {
   requiresProTranscriptionAccess,
   generateUniqueBindCode,
   normalizeContentType,
+  buildInboxRecordDedupeKey,
+  isAudioVideoWebpageUrl,
   getUsageDay,
   DAILY_FREE_LIMIT,
   DAILY_SHARE_LIMIT,
@@ -68,6 +70,7 @@ assert.deepStrictEqual(textRecord, {
   createdAt: '2026-05-08T12:00:00.000Z',
   syncedAt: null,
   metadata: {},
+  dedupeKey: 'text:先收集，后整理',
 });
 
 const linkRecord = createInboxRecordDocument({
@@ -130,6 +133,54 @@ assert.strictEqual(douyinShareTextRecord.metadata.transcriptionMode, 'local');
 assert.strictEqual(douyinShareTextRecord.metadata.transcriptionStatus, 'pending');
 assert.strictEqual(douyinShareTextRecord.metadata.cloudTranscriptionRequested, false);
 assert.match(douyinShareTextRecord.metadata.shareText, /复制打开抖音/);
+assert.strictEqual(douyinShareTextRecord.dedupeKey, 'webpage:https://v.douyin.com/3x-bYuN1C9k');
+
+const repeatedXhsRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'text',
+    content: '3.35 复制此链接，打开小红书 https://xhslink.com/o/3LgfhGjkO9w 直接观看',
+  },
+  openid: 'openid-1',
+  now: '2026-06-18T12:00:00.000Z',
+});
+
+assert.strictEqual(repeatedXhsRecord.type, 'webpage');
+assert.strictEqual(repeatedXhsRecord.content, 'https://xhslink.com/o/3LgfhGjkO9w');
+assert.strictEqual(repeatedXhsRecord.dedupeKey, 'webpage:https://xhslink.com/o/3LgfhGjkO9w');
+assert.strictEqual(repeatedXhsRecord.metadata.webpageMediaType, undefined);
+assert.strictEqual(repeatedXhsRecord.metadata.transcriptionStatus, undefined);
+assert.strictEqual(isAudioVideoWebpageUrl(
+  'http://xhslink.com/o/2rths0HGbgt',
+  'AI时代，我为什么推荐每个人使用Obsidian？ 跳转【小红书】看看笔记详情~',
+), false);
+assert.strictEqual(isAudioVideoWebpageUrl(
+  'http://xhslink.com/video/demo',
+  '小红书 vlog 视频，打开看看',
+), true);
+assert.strictEqual(isAudioVideoWebpageUrl(
+  'http://xhslink.com/o/3LgfhGjkO9w',
+  '\u8ba9\u6211\u770b\u770b \u8fd8\u6709\u8c01\u4e0d\u4f1a\u7528\u64ad\u5ba2\u8f6c\u6587\u5b57\u7684 \u53bb\u3010\u5c0f\u7ea2\u4e66\u3011\u770b\u770b\u8fd9\u7bc7\u5b9d\u85cf\u7b14\u8bb0\u5427\uff01',
+), false);
+assert.strictEqual(buildInboxRecordDedupeKey({
+  type: 'webpage',
+  content: 'http://xhslink.com/o/3LgfhGjkO9w',
+  metadata: { url: 'http://xhslink.com/o/3LgfhGjkO9w' },
+}), repeatedXhsRecord.dedupeKey);
+assert.strictEqual(buildInboxRecordDedupeKey({
+  type: 'webpage',
+  content: 'http://xhslink.com/o/3LgfhGjkO9w/',
+  metadata: { url: 'https://xhslink.com/o/3LgfhGjkO9w/?utm_source=copy' },
+}), 'webpage:https://xhslink.com/o/3LgfhGjkO9w');
+assert.strictEqual(buildInboxRecordDedupeKey({
+  type: 'file',
+  content: 'same.pdf',
+  metadata: { fileID: ' cloud://files/same.pdf ' },
+}), 'file:cloud://files/same.pdf');
+assert.strictEqual(buildInboxRecordDedupeKey({
+  type: 'voice',
+  content: 'same.mp3',
+  metadata: { audioFileID: ' cloud://voices/same.mp3 ' },
+}), 'voice:cloud://voices/same.mp3');
 
 const cloudDouyinShareTextRecord = createInboxRecordDocument({
   event: {
@@ -174,6 +225,31 @@ assert.strictEqual(cloudWebMediaRecord.metadata.cloudTranscriptionRequested, fal
 assert.strictEqual(cloudWebMediaRecord.metadata.transcriptionStatus, 'pending');
 assert.strictEqual(cloudWebMediaRecord.metadata.cloudTranscriptionReason, 'cloud-disabled');
 
+const cloudTestWebMediaRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'webpage',
+    content: 'https://www.douyin.com/video/456',
+    url: 'https://www.douyin.com/video/456',
+    webpageMediaType: 'audio_video',
+    cloudPreTranscription: {
+      enabled: true,
+      mode: 'cloud',
+      reason: 'cloud-test',
+      speakerDiarization: true,
+    },
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(cloudTestWebMediaRecord.metadata.webpageMediaType, 'audio_video');
+assert.strictEqual(cloudTestWebMediaRecord.metadata.transcriptionMode, 'cloud');
+assert.strictEqual(cloudTestWebMediaRecord.metadata.cloudTranscriptionRequested, true);
+assert.strictEqual(cloudTestWebMediaRecord.metadata.transcriptionStatus, 'queued');
+assert.strictEqual(cloudTestWebMediaRecord.metadata.cloudTranscriptionReason, 'cloud-test');
+assert.strictEqual(cloudTestWebMediaRecord.metadata.transcriptionSource, 'cloud-pretranscription');
+assert.strictEqual(cloudTestWebMediaRecord.metadata.speakerDiarizationRequested, true);
+
 const localWebMediaRecord = createInboxRecordDocument({
   event: {
     contentType: 'webpage',
@@ -205,10 +281,10 @@ const legacyWebMediaRecord = createInboxRecordDocument({
   now: '2026-05-08T12:00:00.000Z',
 });
 
-assert.strictEqual(legacyWebMediaRecord.metadata.webpageMediaType, 'audio_video');
-assert.strictEqual(legacyWebMediaRecord.metadata.transcriptionMode, 'local');
-assert.strictEqual(legacyWebMediaRecord.metadata.cloudTranscriptionRequested, false);
-assert.strictEqual(legacyWebMediaRecord.metadata.cloudTranscriptionReason, 'missing-client-choice');
+assert.strictEqual(legacyWebMediaRecord.metadata.webpageMediaType, undefined);
+assert.strictEqual(legacyWebMediaRecord.metadata.transcriptionMode, undefined);
+assert.strictEqual(legacyWebMediaRecord.metadata.cloudTranscriptionRequested, undefined);
+assert.strictEqual(legacyWebMediaRecord.metadata.cloudTranscriptionReason, undefined);
 
 const fileRecord = createInboxRecordDocument({
   event: {
@@ -318,6 +394,30 @@ assert.strictEqual(manuallyQueuedVoiceRecord.metadata.transcriptionStatus, 'pend
 assert.strictEqual(manuallyQueuedVoiceRecord.metadata.transcriptionMode, 'local');
 assert.strictEqual(manuallyQueuedVoiceRecord.metadata.cloudTranscriptionRequested, false);
 assert.strictEqual(manuallyQueuedVoiceRecord.metadata.cloudTranscriptionReason, 'cloud-disabled');
+
+const cloudTestVoiceRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'voice',
+    content: 'cloud test - 02:00',
+    audioFileID: 'cloud://voice/cloud-test.mp3',
+    duration: 2 * 60 * 1000,
+    cloudPreTranscription: {
+      enabled: true,
+      mode: 'cloud',
+      reason: 'cloud-test',
+      speakerDiarization: true,
+    },
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(cloudTestVoiceRecord.metadata.transcriptionStatus, 'queued');
+assert.strictEqual(cloudTestVoiceRecord.metadata.transcriptionMode, 'cloud');
+assert.strictEqual(cloudTestVoiceRecord.metadata.cloudTranscriptionRequested, true);
+assert.strictEqual(cloudTestVoiceRecord.metadata.cloudTranscriptionReason, 'cloud-test');
+assert.strictEqual(cloudTestVoiceRecord.metadata.transcriptionSource, 'cloud-pretranscription');
+assert.strictEqual(cloudTestVoiceRecord.metadata.speakerDiarizationRequested, true);
 
 const localOverrideVoiceRecord = createInboxRecordDocument({
   event: {

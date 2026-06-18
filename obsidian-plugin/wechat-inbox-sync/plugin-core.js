@@ -1,7 +1,7 @@
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const NOTE_SAVE_MODES = {

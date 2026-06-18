@@ -3,7 +3,9 @@ const assert = require('assert');
 const {
   buildSyncedRecordCleanupData,
   collectRecordFileIds,
+  filterSyncableRecords,
   handleSyncApiRequest,
+  normalizeSyncableRecord,
   shouldKeepRecordPendingForTranscription,
 } = require('../cloudfunctions/syncApi/sync-api-core');
 
@@ -71,6 +73,32 @@ const {
           metadata: {
             cleanupStatus: 'cleaned',
             cleanedAt: '2026-05-08T13:01:00.000Z',
+          },
+        },
+        {
+          _id: 'record-xhs-duplicate-pending',
+          type: 'webpage',
+          content: 'https://xhslink.com/o/3LgfhGjkO9w',
+          dedupeKey: 'webpage:https://xhslink.com/o/3LgfhGjkO9w',
+          createdAt: '2026-06-18T12:00:00.000Z',
+          source: 'wechat-miniprogram',
+          status: 'pending',
+          metadata: {
+            url: 'https://xhslink.com/o/3LgfhGjkO9w',
+          },
+        },
+        {
+          _id: 'record-xhs-already-synced',
+          type: 'webpage',
+          content: '',
+          dedupeKey: 'webpage:https://xhslink.com/o/3LgfhGjkO9w',
+          createdAt: '2026-06-18T11:00:00.000Z',
+          source: 'wechat-miniprogram',
+          status: 'synced',
+          syncedAt: '2026-06-18T11:10:00.000Z',
+          metadata: {
+            url: '',
+            cleanupStatus: 'cleaned',
           },
         },
       ];
@@ -610,6 +638,26 @@ const {
       cleanupError: '',
     },
   });
+  assert.deepStrictEqual(normalizeSyncableRecord({
+    _id: 'xhs-podcast-text-note',
+    type: 'webpage',
+    content: 'http://xhslink.com/o/3LgfhGjkO9w',
+    status: 'pending',
+    metadata: {
+      url: 'http://xhslink.com/o/3LgfhGjkO9w',
+      shareText: '\u8ba9\u6211\u770b\u770b \u8fd8\u6709\u8c01\u4e0d\u4f1a\u7528\u64ad\u5ba2\u8f6c\u6587\u5b57\u7684 \u53bb\u3010\u5c0f\u7ea2\u4e66\u3011\u770b\u770b\u8fd9\u7bc7\u5b9d\u85cf\u7b14\u8bb0\u5427\uff01',
+      conversionStatus: 'pending',
+      webpageMediaType: 'audio_video',
+      transcriptionStatus: 'pending',
+      transcriptionMode: 'local',
+      cloudTranscriptionRequested: false,
+      cloudTranscriptionReason: 'cloud-disabled',
+    },
+  }).metadata, {
+    url: 'http://xhslink.com/o/3LgfhGjkO9w',
+    shareText: '\u8ba9\u6211\u770b\u770b \u8fd8\u6709\u8c01\u4e0d\u4f1a\u7528\u64ad\u5ba2\u8f6c\u6587\u5b57\u7684 \u53bb\u3010\u5c0f\u7ea2\u4e66\u3011\u770b\u770b\u8fd9\u7bc7\u5b9d\u85cf\u7b14\u8bb0\u5427\uff01',
+    conversionStatus: 'pending',
+  });
   assert.strictEqual(shouldKeepRecordPendingForTranscription({
     type: 'voice',
     metadata: {
@@ -641,6 +689,37 @@ const {
       audioFileID: 'cloud://voices/done.mp3',
       transcriptionStatus: 'success',
       transcription: 'done',
+    },
+  }), false);
+  assert.deepStrictEqual(normalizeSyncableRecord({
+    _id: 'xhs-text-note',
+    type: 'webpage',
+    content: 'http://xhslink.com/o/2rths0HGbgt',
+    status: 'pending',
+    metadata: {
+      url: 'http://xhslink.com/o/2rths0HGbgt',
+      shareText: 'AI时代，我为什么推荐每个人使用Obsidian？ 跳转【小红书】看看笔记详情~',
+      conversionStatus: 'pending',
+      webpageMediaType: 'audio_video',
+      transcriptionStatus: 'pending',
+      transcriptionMode: 'local',
+      cloudTranscriptionRequested: false,
+      cloudTranscriptionReason: 'cloud-disabled',
+    },
+  }).metadata, {
+    url: 'http://xhslink.com/o/2rths0HGbgt',
+    shareText: 'AI时代，我为什么推荐每个人使用Obsidian？ 跳转【小红书】看看笔记详情~',
+    conversionStatus: 'pending',
+  });
+  assert.strictEqual(shouldKeepRecordPendingForTranscription({
+    type: 'webpage',
+    content: 'http://xhslink.com/o/2rths0HGbgt',
+    metadata: {
+      url: 'http://xhslink.com/o/2rths0HGbgt',
+      shareText: 'AI时代，我为什么推荐每个人使用Obsidian？ 跳转【小红书】看看笔记详情~',
+      webpageMediaType: 'audio_video',
+      transcriptionStatus: 'pending',
+      transcriptionMode: 'local',
     },
   }), false);
 

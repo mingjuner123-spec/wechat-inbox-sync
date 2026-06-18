@@ -6,6 +6,7 @@ const DEFAULT_BIND_DEVICE_LIMIT = 1;
 const MAX_BIND_DEVICE_LIMIT = 3;
 const BIND_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED = true;
+const CLOUD_PRE_TRANSCRIPTION_TEST_REASON = 'cloud-test';
 
 function normalizeContentType(type) {
   const normalized = String(type || '').toLowerCase();
@@ -39,8 +40,88 @@ function extractHttpUrl(content) {
   return match[0].replace(/[.,!?;:)\]}]+$/g, '');
 }
 
+function normalizeDedupeText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function normalizeDedupeUrl(value) {
+  const raw = extractHttpUrl(value) || String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.protocol = 'https:';
+    parsed.hostname = parsed.hostname.toLowerCase();
+    parsed.hash = '';
+    parsed.pathname = parsed.pathname.replace(/\/+$/g, '') || '/';
+
+    const trackingPrefixes = ['utm_'];
+    const trackingKeys = new Set([
+      'spm',
+      'share_token',
+      'share_source',
+      'source',
+      'timestamp',
+      'tt_from',
+      'from',
+      'is_from_webapp',
+      'sender_device',
+      'sender_web_id',
+      'ug_btm',
+      'xsec_token',
+      'xsec_source',
+      'appuid',
+      'apptime',
+    ]);
+    const kept = [];
+    parsed.searchParams.forEach((paramValue, paramKey) => {
+      const key = String(paramKey || '').toLowerCase();
+      if (trackingPrefixes.some((prefix) => key.startsWith(prefix)) || trackingKeys.has(key)) {
+        return;
+      }
+      kept.push([paramKey, paramValue]);
+    });
+    kept.sort(([left], [right]) => String(left).localeCompare(String(right)));
+    parsed.search = '';
+    kept.forEach(([key, paramValue]) => parsed.searchParams.append(key, paramValue));
+
+    return parsed.toString().replace(/\/$/g, '').replace(/\?$/g, '');
+  } catch (error) {
+    return raw.replace(/\/+$/g, '');
+  }
+}
+
+function buildInboxRecordDedupeKey(record) {
+  const type = normalizeContentType(record && record.type);
+  const metadata = (record && record.metadata) || {};
+  if (type === 'voice') {
+    const audioFileID = normalizeDedupeText(metadata.audioFileID);
+    return audioFileID ? `voice:${audioFileID}` : '';
+  }
+  if (type === 'file') {
+    const fileID = normalizeDedupeText(metadata.fileID);
+    return fileID ? `file:${fileID}` : '';
+  }
+  if (type === 'webpage' || type === 'link') {
+    const url = normalizeDedupeUrl(metadata.url || (record && record.content));
+    return url ? `${type}:${url}` : '';
+  }
+  const content = normalizeDedupeText(record && record.content);
+  return content ? `${type}:${content}` : '';
+}
+
+function canQueueCloudPreTranscription(cloudPreTranscriptionConfig = {}) {
+  const reason = String(cloudPreTranscriptionConfig.reason || '').toLowerCase();
+  return !CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED || reason === CLOUD_PRE_TRANSCRIPTION_TEST_REASON;
+}
+
+function hasXiaohongshuAudioVideoIntent(url) {
+  const text = String(url || '').toLowerCase();
+  return /([?&]type=video\b|\/video\/|xhslink\.com\/a\/)/i.test(text);
+}
+
 function isAudioVideoWebpageUrl(url, sourceText = '') {
   const text = `${String(url || '')}\n${String(sourceText || '')}`.toLowerCase();
+  const urlText = String(url || '').toLowerCase();
   if (
     text.includes('douyin.com')
     || text.includes('iesdouyin.com')
@@ -52,11 +133,11 @@ function isAudioVideoWebpageUrl(url, sourceText = '') {
   ) {
     return true;
   }
-  if (text.includes('xhslink.com')) {
-    return true;
+  if (urlText.includes('xhslink.com')) {
+    return hasXiaohongshuAudioVideoIntent(urlText);
   }
-  if (text.includes('xiaohongshu.com')) {
-    return /([?&]type=video\b|\/video\/|视频|音频|播客|直播|vlog)/i.test(text);
+  if (urlText.includes('xiaohongshu.com')) {
+    return /([?&]type=video\b|\/video\/)/i.test(urlText);
   }
   return false;
 }
@@ -108,7 +189,7 @@ function createInboxRecordDocument({
     const eventCloudPreTranscription = event.cloudPreTranscription || null;
     const cloudPreTranscriptionConfig = eventCloudPreTranscription || cloudPreTranscription || {};
     const transcriptionMode = String(cloudPreTranscriptionConfig && cloudPreTranscriptionConfig.mode || '').toLowerCase();
-    const isAudioVideoWebpage = event.webpageMediaType === 'audio_video' || isAudioVideoWebpageUrl(record.content, sourceText);
+    const isAudioVideoWebpage = isAudioVideoWebpageUrl(record.content, sourceText);
     record.metadata = {
       url: event.url || record.content,
       shareText: sourceText && sourceText !== record.content ? sourceText : '',
@@ -116,12 +197,13 @@ function createInboxRecordDocument({
     };
     if (isAudioVideoWebpage) {
       const cloudRequestedByClient = transcriptionMode === 'cloud' && cloudPreTranscriptionConfig.enabled !== false;
-      const cloudRequested = !CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClient;
+      const cloudAllowed = canQueueCloudPreTranscription(cloudPreTranscriptionConfig);
+      const cloudRequested = cloudAllowed && cloudRequestedByClient;
       record.metadata.webpageMediaType = 'audio_video';
       record.metadata.transcriptionStatus = cloudRequested ? 'queued' : 'pending';
       record.metadata.transcriptionMode = cloudRequested ? 'cloud' : 'local';
       record.metadata.cloudTranscriptionRequested = cloudRequested;
-      record.metadata.cloudTranscriptionReason = CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClient
+      record.metadata.cloudTranscriptionReason = CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClient && !cloudAllowed
         ? 'cloud-disabled'
         : Object.keys(cloudPreTranscriptionConfig).length
         ? String(cloudPreTranscriptionConfig.reason || 'manual')
@@ -151,7 +233,8 @@ function createInboxRecordDocument({
         && Boolean(cloudPreTranscriptionConfig.enabled)
         && durationMs >= thresholdMinutes * 60 * 1000
       );
-    const shouldQueueCloudTranscription = !CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClientOrThreshold;
+    const cloudAllowed = canQueueCloudPreTranscription(cloudPreTranscriptionConfig);
+    const shouldQueueCloudTranscription = cloudAllowed && cloudRequestedByClientOrThreshold;
     record.metadata = {
       audioFileID: event.audioFileID,
       audioFileName: event.audioFileName || '',
@@ -162,7 +245,7 @@ function createInboxRecordDocument({
     record.metadata.transcriptionMode = shouldQueueCloudTranscription ? 'cloud' : 'local';
     record.metadata.cloudTranscriptionRequested = Boolean(shouldQueueCloudTranscription);
     record.metadata.cloudTranscriptionReason = String(
-      (CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClientOrThreshold ? 'cloud-disabled' : '')
+      (CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED && cloudRequestedByClientOrThreshold && !cloudAllowed ? 'cloud-disabled' : '')
       || cloudPreTranscriptionConfig.reason
       || (shouldQueueCloudTranscription ? (explicitCloudTranscription ? 'manual' : 'threshold') : '')
       || (Object.keys(cloudPreTranscriptionConfig).length ? 'threshold-not-met' : 'missing-client-choice')
@@ -187,6 +270,7 @@ function createInboxRecordDocument({
     };
   }
 
+  record.dedupeKey = buildInboxRecordDedupeKey(record);
   return record;
 }
 
@@ -499,6 +583,7 @@ module.exports = {
   generateBindCode,
   generateUniqueBindCode,
   extractHttpUrl,
+  buildInboxRecordDedupeKey,
   normalizeContentType,
   isAudioVideoWebpageUrl,
   isSupportedWebpageUrl,

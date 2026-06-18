@@ -1,6 +1,7 @@
 const DEFAULT_REDEEM_PLAN = 'local_transcription_beta';
 const DEFAULT_CLOUD_TRANSCRIPTION_QUOTA_SECONDS = 0;
 const CLOUD_TRANSCRIPTION_MIN_BILL_SECONDS = 60;
+const { buildInboxRecordDedupeKey, isAudioVideoWebpageUrl } = require('./inbox-core');
 
 function buildEntitlementState(entitlement, now = new Date().toISOString()) {
   if (!entitlement) {
@@ -220,7 +221,8 @@ function buildSyncedRecordCleanupData({ syncedAt, fileIds = [], cleanupError = '
 }
 
 function shouldKeepRecordPendingForTranscription(record) {
-  const metadata = (record && record.metadata) || {};
+  const normalizedRecord = normalizeSyncableRecord(record);
+  const metadata = (normalizedRecord && normalizedRecord.metadata) || {};
   const status = String(metadata.transcriptionStatus || '').toLowerCase();
   const hasTranscription = String(metadata.transcription || '').trim().length > 0;
   const mode = String(metadata.transcriptionMode || '').toLowerCase();
@@ -248,8 +250,58 @@ function hasAlreadySyncedEvidence(record) {
     || Boolean(String(metadata.cleanedAt || '').trim());
 }
 
+function getRecordDedupeKey(record) {
+  const storedKey = String(record && record.dedupeKey || '').trim();
+  if (storedKey) return storedKey;
+  try {
+    return buildInboxRecordDedupeKey(record);
+  } catch (error) {
+    return '';
+  }
+}
+
+function normalizeSyncableRecord(record) {
+  const metadata = (record && record.metadata) || {};
+  const url = metadata.url || (record && record.content) || '';
+  const shareText = metadata.shareText || (record && record.content) || '';
+  const isXhsUrl = /(?:xhslink\.com|xiaohongshu\.com)/i.test(String(url || ''));
+  if (
+    String(record && record.type || '').toLowerCase() === 'webpage'
+    && isXhsUrl
+    && metadata.webpageMediaType === 'audio_video'
+    && !isAudioVideoWebpageUrl(url, shareText)
+  ) {
+    const nextMetadata = { ...metadata };
+    delete nextMetadata.webpageMediaType;
+    delete nextMetadata.transcriptionStatus;
+    delete nextMetadata.transcriptionMode;
+    delete nextMetadata.cloudTranscriptionRequested;
+    delete nextMetadata.cloudTranscriptionReason;
+    delete nextMetadata.transcriptionSource;
+    return {
+      ...record,
+      metadata: nextMetadata,
+    };
+  }
+  return record;
+}
+
 function filterSyncableRecords(records = []) {
-  return (records || []).filter((record) => !hasAlreadySyncedEvidence(record));
+  const syncedKeys = new Set();
+  for (const record of records || []) {
+    if (!hasAlreadySyncedEvidence(record)) continue;
+    const key = getRecordDedupeKey(record);
+    if (key) syncedKeys.add(key);
+  }
+  const pendingKeys = new Set();
+  return (records || []).filter((record) => {
+    if (hasAlreadySyncedEvidence(record)) return false;
+    const key = getRecordDedupeKey(record);
+    if (!key) return true;
+    if (syncedKeys.has(key) || pendingKeys.has(key)) return false;
+    pendingKeys.add(key);
+    return true;
+  }).map(normalizeSyncableRecord);
 }
 
 async function requireOpenId(request, repository) {
@@ -710,6 +762,8 @@ module.exports = {
   buildCloudQuotaState,
   collectRecordFileIds,
   filterSyncableRecords,
+  getRecordDedupeKey,
+  normalizeSyncableRecord,
   handleSyncApiRequest,
   hasAlreadySyncedEvidence,
   isRedeemCodeBusinessError,

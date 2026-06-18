@@ -35,8 +35,14 @@ function isSupportedWebpageUrl(url) {
     || text.includes('xiaoyuzhou.com');
 }
 
+function hasXiaohongshuAudioVideoIntent(url) {
+  const text = String(url || '').toLowerCase();
+  return /([?&]type=video\b|\/video\/|xhslink\.com\/a\/)/i.test(text);
+}
+
 function isAudioVideoWebpageUrl(url, sourceText = '') {
   const text = `${String(url || '')}\n${String(sourceText || '')}`.toLowerCase();
+  const urlText = String(url || '').toLowerCase();
   if (
     text.includes('douyin.com')
     || text.includes('iesdouyin.com')
@@ -48,11 +54,11 @@ function isAudioVideoWebpageUrl(url, sourceText = '') {
   ) {
     return true;
   }
-  if (text.includes('xhslink.com')) {
-    return true;
+  if (urlText.includes('xhslink.com')) {
+    return hasXiaohongshuAudioVideoIntent(urlText);
   }
-  if (text.includes('xiaohongshu.com')) {
-    return /([?&]type=video\b|\/video\/|视频|音频|播客|直播|vlog)/i.test(text);
+  if (urlText.includes('xiaohongshu.com')) {
+    return /([?&]type=video\b|\/video\/)/i.test(urlText);
   }
   return false;
 }

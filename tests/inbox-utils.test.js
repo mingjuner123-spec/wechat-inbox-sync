@@ -35,7 +35,8 @@ assert.strictEqual(isAudioVideoWebpageUrl('https://www.bilibili.com/video/BV123'
 assert.strictEqual(isAudioVideoWebpageUrl('https://www.xiaoyuzhoufm.com/episode/1'), true);
 assert.strictEqual(isAudioVideoWebpageUrl('https://mp.weixin.qq.com/s/example'), false);
 assert.strictEqual(isAudioVideoWebpageUrl('https://www.xiaohongshu.com/explore/abc?type=video'), true);
-assert.strictEqual(isAudioVideoWebpageUrl('http://xhslink.com/o/5xRiTruK9EQ', '小红书视频分享'), true);
+assert.strictEqual(isAudioVideoWebpageUrl('http://xhslink.com/o/5xRiTruK9EQ', '小红书视频分享'), false);
+assert.strictEqual(isAudioVideoWebpageUrl('http://xhslink.com/video/demo'), true);
 assert.strictEqual(isAudioVideoWebpageUrl('http://xhslink.com/a/abc123'), true);
 assert.strictEqual(isAudioVideoWebpageUrl('https://www.xiaohongshu.com/explore/abc?xsec_token=note'), false);
 

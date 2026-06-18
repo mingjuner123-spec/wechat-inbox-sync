@@ -9,9 +9,9 @@ const zlib = require('zlib');
 const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
@@ -1185,6 +1185,38 @@ function getRecordId(record) {
   return record._id || record.id || '';
 }
 
+function normalizeVaultPath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+function normalizeYamlScalar(value) {
+  const text = String(value || '').trim();
+  if (
+    (text.startsWith('"') && text.endsWith('"'))
+    || (text.startsWith("'") && text.endsWith("'"))
+  ) {
+    return text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+function getRecordIdFromFrontmatter(markdown) {
+  const source = String(markdown || '').replace(/^\uFEFF/, '');
+  const match = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
+  if (!match) return '';
+  const lines = match[1].split(/\r?\n/);
+  for (const line of lines) {
+    const fieldMatch = /^\s*id\s*:\s*(.*?)\s*$/.exec(line);
+    if (fieldMatch) return normalizeYamlScalar(fieldMatch[1]);
+  }
+  return '';
+}
+
+function hasRecordIdInFrontmatter(markdown, recordId) {
+  const expected = String(recordId || '').trim();
+  return Boolean(expected && getRecordIdFromFrontmatter(markdown) === expected);
+}
+
 function pad2(value) {
   return String(value).padStart(2, '0');
 }
@@ -2262,11 +2294,14 @@ function isSuspectPdfGlyphEncoding(text) {
   const latinWords = source.match(/[A-Za-z]{12,}/g) || [];
   const longLatinWords = latinWords.filter((word) => word.length >= 18);
   const knownGlyphNoise = source.match(/\b(?:Rhe|Nlaybook|Buildine|Natite|Cncwfe|Copteptu|CHCRVER|Staee|chaneine|Aeentic|aeent|Nroeram|RESOWRCES)\b/gi) || [];
+  const compact = source.replace(/\s+/g, '');
   const compactCjk = source.replace(/[^\u4e00-\u9fff]/g, '');
   const oddCjkTokens = source.match(/(?:学么|人未|改取|周朋|练么|可维)/g) || [];
+  const cjkRatio = compact ? compactCjk.length / Array.from(compact).length : 0;
+  const hasReadableCjkText = compactCjk.length >= 80 && cjkRatio >= 0.25;
 
   if (knownGlyphNoise.length >= 4) return true;
-  if (longLatinWords.length >= 6 && latinWords.length >= 12) return true;
+  if (!hasReadableCjkText && longLatinWords.length >= 6 && latinWords.length >= 12) return true;
   return compactCjk.length >= 1000 && oddCjkTokens.length >= 8 && longLatinWords.length >= 3;
 }
 
@@ -4111,6 +4146,23 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
 
 function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
+}
+
+function buildSkippedSyncNotice(skipped = []) {
+  const localDuplicateCount = skipped.filter((item) => item && item.reason === 'already-synced-local').length;
+  const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
+  const otherSkippedCount = Math.max(0, skipped.length - localDuplicateCount - cloudProcessingCount);
+  const parts = [];
+  if (localDuplicateCount) {
+    parts.push(`${localDuplicateCount} 条本地已存在，已跳过重复写入`);
+  }
+  if (cloudProcessingCount) {
+    parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
+  }
+  if (otherSkippedCount) {
+    parts.push(`${otherSkippedCount} 条已跳过`);
+  }
+  return parts.length ? `，${parts.join('，')}` : '';
 }
 
 function normalizeProgressPercent(value) {
@@ -6096,6 +6148,36 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
 
+  async findExistingRecordNotePath(recordId) {
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!normalizedRecordId || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== 'function') {
+      return '';
+    }
+
+    const inboxDir = normalizeVaultPath(this.settings.inboxDir);
+    const files = this.app.vault.getMarkdownFiles();
+    for (const file of files) {
+      const filePath = normalizeVaultPath(file && file.path);
+      if (!filePath || (inboxDir && filePath !== inboxDir && !filePath.startsWith(`${inboxDir}/`))) {
+        continue;
+      }
+      try {
+        let markdown = '';
+        if (typeof this.app.vault.cachedRead === 'function') {
+          markdown = await this.app.vault.cachedRead(file);
+        } else if (this.app.vault.adapter && typeof this.app.vault.adapter.read === 'function') {
+          markdown = await this.app.vault.adapter.read(file.path);
+        }
+        if (hasRecordIdInFrontmatter(markdown, normalizedRecordId)) {
+          return file.path || filePath;
+        }
+      } catch (error) {
+        // Ignore unreadable notes; sync should continue and surface real write/mark errors.
+      }
+    }
+    return '';
+  }
+
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const dateFolder = getDateFolderName(record.createdAt);
     const rootDir = this.settings.inboxDir;
@@ -6189,6 +6271,18 @@ class WechatObsidianInboxPlugin extends Plugin {
         continue;
       }
       try {
+        const recordId = getRecordId(record);
+        const existingFilePath = await this.findExistingRecordNotePath(recordId);
+        if (existingFilePath) {
+          skipped.push({
+            recordId,
+            reason: 'already-synced-local',
+            filePath: existingFilePath,
+          });
+          this.showSyncProgress({ ...progress, stage: 'marking', title: buildRecordTitleBase(record) });
+          await this.requestJson(`/records/${encodeURIComponent(recordId)}/synced`, 'POST', {}, binding);
+          continue;
+        }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, progress);
         written.push(item);
         if (item.conversionWarning) {
@@ -6267,7 +6361,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
       let finalMessage = buildSyncNotice(written.length);
       if (skipped.length) {
-        finalMessage += `，${skipped.length} 条云端转写中，完成后再同步`;
+        finalMessage += buildSkippedSyncNotice(skipped);
       }
       if (showNotice || written.length) {
         if (conversionWarnings.length) {
@@ -6487,13 +6581,20 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
     containerEl.createEl('h3', {
-      text: 'Pro 本地转写功能',
+      text: '高级选项',
       cls: 'wechat-inbox-sync-section-heading',
+    });
+
+    const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    localAsrPanel.createEl('summary', { text: '本地转写组件（高级/备用）' });
+    localAsrPanel.createDiv({
+      text: '默认走本地转写；这里只在需要安装、更新或排查本地转写组件时使用。',
+      cls: 'wechat-inbox-sync-muted',
     });
 
     const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
     const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
-    new Setting(containerEl)
+    new Setting(localAsrPanel)
       .setName('本地转写系统')
       .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。云端转写请在微信小程序保存音视频时选择。')
       .addDropdown((dropdown) => {
@@ -6514,7 +6615,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
             this.display();
           });
       });
-    new Setting(containerEl)
+    new Setting(localAsrPanel)
       .setName('本地转写权限')
       .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
       .addButton((button) => button
@@ -6531,7 +6632,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
             new Notice(`权限查询失败：${error.message || error}`);
           }
         }));
-    new Setting(containerEl)
+    new Setting(localAsrPanel)
       .setName('本地转写组件')
       .setDesc(localAsrStatus.ready
         ? `已安装：${localAsrStatus.installRoot}`
@@ -6627,6 +6728,7 @@ WechatObsidianInboxPlugin.__test = {
   parseTencentCreateTaskResponse,
   parseTencentTaskStatusResponse,
   buildRecordTitleBase,
+  hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
   buildMarkdownForRecord,
   extractSocialVideoMarkdownFromHtml,
@@ -6646,6 +6748,7 @@ WechatObsidianInboxPlugin.__test = {
   buildAudioTranscriptMarkdown,
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
+  buildSkippedSyncNotice,
   parseLocalAsrProgressLog,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
