@@ -870,6 +870,12 @@ function getDoubaoTaskKey(audioUrl) {
 }
 
 function createClientId() {
+  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `obsidian-${hex}`;
+  }
   return `obsidian-${crypto.randomBytes(16).toString('hex')}`;
 }
 
