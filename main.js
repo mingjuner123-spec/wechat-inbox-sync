@@ -22,16 +22,19 @@ const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
 };
-const DEFAULT_NOTE_PROPERTY_FIELDS = '';
+const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source,description,keywords';
 const NOTE_PROPERTY_FIELD_KEYS = [
   'id',
   'type',
   'title',
+  'author',
+  'url',
   'created_at',
   'synced_at',
   'source',
+  'description',
+  'keywords',
   'status',
-  'url',
   'fetch_status',
   'conversion_status',
   'audio_file',
@@ -1185,6 +1188,38 @@ function getRecordId(record) {
   return record._id || record.id || '';
 }
 
+function normalizeVaultPath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+function normalizeYamlScalar(value) {
+  const text = String(value || '').trim();
+  if (
+    (text.startsWith('"') && text.endsWith('"'))
+    || (text.startsWith("'") && text.endsWith("'"))
+  ) {
+    return text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+function getRecordIdFromFrontmatter(markdown) {
+  const source = String(markdown || '').replace(/^\uFEFF/, '');
+  const match = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
+  if (!match) return '';
+  const lines = match[1].split(/\r?\n/);
+  for (const line of lines) {
+    const fieldMatch = /^\s*id\s*:\s*(.*?)\s*$/.exec(line);
+    if (fieldMatch) return normalizeYamlScalar(fieldMatch[1]);
+  }
+  return '';
+}
+
+function hasRecordIdInFrontmatter(markdown, recordId) {
+  const expected = String(recordId || '').trim();
+  return Boolean(expected && getRecordIdFromFrontmatter(markdown) === expected);
+}
+
 function pad2(value) {
   return String(value).padStart(2, '0');
 }
@@ -1607,8 +1642,6 @@ function buildWebpageMarkdownBody(record, title) {
 
   if (snapshot) {
     return [
-      `原始链接：${url}`,
-      '',
       '## Markdown 内容',
       '',
       snapshot,
@@ -1621,9 +1654,7 @@ function buildWebpageMarkdownBody(record, title) {
       ? '原因：微信返回了安全验证页，插件无法绕过'
       : `原因：${errorText || '网页抓取失败'}`;
     return [
-      `原始链接：${url}`,
-      '',
-      '> ⚠️ 这篇文章的正文未能自动提取，已为你保存原始链接。',
+      '> ⚠️ 这篇文章的正文未能自动提取，原始链接已写入笔记属性。',
       `> ${reasonLine}`,
       '',
       '---',
@@ -1641,9 +1672,7 @@ function buildWebpageMarkdownBody(record, title) {
 
   // pending — 还没处理到
   return [
-    `原始链接：${url}`,
-    '',
-    '> 网页正文正在处理中，已先保存原始链接，下次同步时会自动更新。',
+    '> 网页正文正在处理中，原始链接已写入笔记属性，下次同步时会自动更新。',
     '',
   ].join('\n');
 }
@@ -1745,8 +1774,23 @@ function cleanMarkdownForStorage(markdown, options = {}) {
   const seen = new Map();
   let lastWasBlank = true;
   let pendingListMarker = '';
+  let inFence = false;
 
   lines.forEach((line) => {
+    const rawLine = String(line || '').replace(/\u200b/g, '').replace(/\ufeff/g, '');
+    if (/^\s*```/.test(rawLine)) {
+      out.push(rawLine.trim());
+      inFence = !inFence;
+      lastWasBlank = false;
+      pendingListMarker = '';
+      return;
+    }
+    if (inFence) {
+      out.push(rawLine);
+      lastWasBlank = false;
+      return;
+    }
+
     let text = String(line || '')
       .replace(/\u200b/g, '')
       .replace(/\ufeff/g, '')
@@ -2262,11 +2306,14 @@ function isSuspectPdfGlyphEncoding(text) {
   const latinWords = source.match(/[A-Za-z]{12,}/g) || [];
   const longLatinWords = latinWords.filter((word) => word.length >= 18);
   const knownGlyphNoise = source.match(/\b(?:Rhe|Nlaybook|Buildine|Natite|Cncwfe|Copteptu|CHCRVER|Staee|chaneine|Aeentic|aeent|Nroeram|RESOWRCES)\b/gi) || [];
+  const compact = source.replace(/\s+/g, '');
   const compactCjk = source.replace(/[^\u4e00-\u9fff]/g, '');
   const oddCjkTokens = source.match(/(?:学么|人未|改取|周朋|练么|可维)/g) || [];
+  const cjkRatio = compact ? compactCjk.length / Array.from(compact).length : 0;
+  const hasReadableCjkText = compactCjk.length >= 80 && cjkRatio >= 0.25;
 
   if (knownGlyphNoise.length >= 4) return true;
-  if (longLatinWords.length >= 6 && latinWords.length >= 12) return true;
+  if (!hasReadableCjkText && longLatinWords.length >= 6 && latinWords.length >= 12) return true;
   return compactCjk.length >= 1000 && oddCjkTokens.length >= 8 && longLatinWords.length >= 3;
 }
 
@@ -2764,6 +2811,39 @@ function extractMetaContent(html, names) {
     }
   }
   return '';
+}
+
+function extractKeywordList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+  return String(value || '')
+    .split(/[,，、\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function extractWebpageMetadataFromHtml(html, url = '') {
+  const source = String(html || '');
+  const description = cleanSocialDescription(extractMetaContent(source, [
+    'description',
+    'og:description',
+    'twitter:description',
+  ]));
+  return {
+    title: extractMetaContent(source, ['og:title', 'twitter:title']) || extractHtmlTitle(source),
+    author: extractMetaContent(source, [
+      'author',
+      'article:author',
+      'og:site_name',
+      'weixin:author',
+      'twitter:creator',
+    ]),
+    description,
+    keywords: extractKeywordList(extractMetaContent(source, ['keywords', 'article:tag'])),
+    platform: getWebpageSourcePrefix(url),
+    contentCategory: isDouyinUrl(url) || isBilibiliUrl(url) || isXiaoyuzhouUrl(url) ? '音视频' : '图文',
+  };
 }
 
 function normalizeExtractedUrl(url) {
@@ -3408,6 +3488,19 @@ function extractXiaohongshuDescription(html, fallbackText = '') {
   return candidates[0]?.text || '';
 }
 
+function extractXiaohongshuAuthor(html) {
+  const source = String(html || '');
+  const candidates = collectJsonStringValues(source, [
+    'nickname',
+    'nickName',
+    'userNickname',
+    'user_nickname',
+    'userName',
+  ]).map((item) => cleanSocialDescription(item))
+    .filter((item) => item && item.length <= 40 && !/^https?:\/\//i.test(item));
+  return candidates[0] || '';
+}
+
 function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
   url = cleanDisplayUrl(url);
   const source = String(html || '');
@@ -3425,7 +3518,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     '',
     '## 正文',
     '',
-    description || '页面未直接暴露正文，已保存原始链接。',
+    description || '页面未直接暴露正文，原始链接已写入笔记属性。',
     '',
   ];
 
@@ -3447,9 +3540,11 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     lines.push('## 视频源', '', `[视频文件](${videoUrl})`, '');
   }
 
-  lines.push(`原始链接：${url || ''}`, '');
   return {
     title,
+    author: extractXiaohongshuAuthor(source),
+    description,
+    tags,
     markdown: lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
     imageUrls: images,
     videoUrl,
@@ -3475,7 +3570,7 @@ function extractSocialVideoMarkdownFromHtml(html, url, platform = '视频') {
     '',
     '## 视频文案',
     '',
-    description || '页面未直接暴露视频文案，已保存原始链接。',
+    description || '页面未直接暴露视频文案，原始链接已写入笔记属性。',
     '',
   ];
 
@@ -3487,9 +3582,11 @@ function extractSocialVideoMarkdownFromHtml(html, url, platform = '视频') {
     lines.push('## 视频源', '', `[视频文件](${videoUrl})`, '');
   }
 
-  lines.push(`原始链接：${url || ''}`, '');
   return {
     title,
+    description,
+    tags,
+    platform,
     markdown: lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
     videoUrl,
   };
@@ -3506,11 +3603,139 @@ function decodeHtmlEntities(text) {
     .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
 }
 
+function cleanHtmlCodeText(html) {
+  return decodeHtmlEntities(String(html || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|li|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, ''))
+    .replace(/\r\n/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/^\n+|\n+$/g, '');
+}
+
+function htmlCodeBlockToMarkdown(html) {
+  const code = cleanHtmlCodeText(html);
+  if (!code.trim()) return '';
+  return `\n\n\`\`\`\n${code}\n\`\`\`\n\n`;
+}
+
 function stripHtmlTags(html) {
   return decodeHtmlEntities(String(html || '').replace(/<[^>]+>/g, ''))
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function extractHtmlTextByClass(html, classPattern) {
+  const pattern = /<([a-z][\w:-]*)\b[^>]*class=["']([^"']*)["'][^>]*>([\s\S]*?)<\/\1>/gi;
+  const candidates = [];
+  let match;
+  while ((match = pattern.exec(String(html || '')))) {
+    if (classPattern.test(match[2] || '')) {
+      const text = stripHtmlTags(match[3]);
+      if (text) candidates.push({ className: match[2] || '', text });
+    }
+  }
+  candidates.sort((a, b) => {
+    const aExact = /(^|\s)(comment[_-]?content|js_comment_content|discuss_message_content)(\s|$)/i.test(a.className) ? 1 : 0;
+    const bExact = /(^|\s)(comment[_-]?content|js_comment_content|discuss_message_content)(\s|$)/i.test(b.className) ? 1 : 0;
+    return bExact - aExact || a.text.length - b.text.length;
+  });
+  return candidates[0]?.text || '';
+}
+
+function decodeJsonLikeText(value) {
+  return decodeHtmlEntities(decodeJsonStringLiteral(String(value || '')))
+    .replace(/\\n/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeWechatComment(comment) {
+  const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
+  const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
+  if (!content || content.length < 2) return null;
+  return {
+    author,
+    content,
+    time: String(comment.time || '').trim(),
+    likes: String(comment.likes || '').trim(),
+  };
+}
+
+function pushWechatComment(comments, seen, comment) {
+  const normalized = normalizeWechatComment(comment || {});
+  if (!normalized) return;
+  const key = `${normalized.author}|${normalized.content}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  comments.push(normalized);
+}
+
+function extractWechatCommentsFromJson(html, comments, seen) {
+  const source = String(html || '');
+  const patterns = [
+    /"nick_?name"\s*:\s*"((?:\\.|[^"\\])*)"\s*,[\s\S]{0,900}?"content"\s*:\s*"((?:\\.|[^"\\])*)"/gi,
+    /"content"\s*:\s*"((?:\\.|[^"\\])*)"\s*,[\s\S]{0,900}?"nick_?name"\s*:\s*"((?:\\.|[^"\\])*)"/gi,
+  ];
+
+  patterns.forEach((pattern, patternIndex) => {
+    let match;
+    while ((match = pattern.exec(source))) {
+      const author = patternIndex === 0 ? match[1] : match[2];
+      const content = patternIndex === 0 ? match[2] : match[1];
+      pushWechatComment(comments, seen, {
+        author: decodeJsonLikeText(author),
+        content: decodeJsonLikeText(content),
+      });
+    }
+  });
+}
+
+function extractWechatCommentsFromHtml(html, limit = 20) {
+  const source = String(html || '');
+  const comments = [];
+  const seen = new Set();
+  const areaMatch = source.match(/<[^>]+id=["']js_cmt_area["'][^>]*>([\s\S]*?)(?:<script\b|<\/body>|$)/i);
+  const area = areaMatch && areaMatch[1] ? areaMatch[1] : source;
+  const itemPattern = /<((?:li|div))\b[^>]*(?:class|id)=["'][^"']*(?:comment|cmt)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/gi;
+  let match;
+
+  while ((match = itemPattern.exec(area))) {
+    const item = match[2] || '';
+    const content = extractHtmlTextByClass(item, /(?:comment[_-]?content|js_comment_content|discuss_message_content|content|message)/i)
+      || stripHtmlTags(item);
+    const author = extractHtmlTextByClass(item, /(?:nickname|nick[_-]?name|comment[_-]?name|user[_-]?name|author)/i);
+    const time = extractHtmlTextByClass(item, /(?:time|date)/i);
+    const likes = extractHtmlTextByClass(item, /(?:like|praise|赞)/i);
+    pushWechatComment(comments, seen, { author, content, time, likes });
+    if (comments.length >= limit) return comments;
+  }
+
+  extractWechatCommentsFromJson(source, comments, seen);
+  return comments.slice(0, limit);
+}
+
+function buildWechatCommentsMarkdown(comments = []) {
+  const items = (comments || []).map(normalizeWechatComment).filter(Boolean);
+  if (!items.length) return '';
+  const lines = ['## 评论区', ''];
+  items.forEach((comment) => {
+    const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
+    const prefix = comment.author ? `**${comment.author}**：` : '';
+    lines.push(`- ${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
+  });
+  return lines.join('\n').trim();
+}
+
+function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
+  const source = String(markdown || '').trim();
+  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
+  const comments = Array.isArray(htmlOrComments)
+    ? htmlOrComments
+    : extractWechatCommentsFromHtml(htmlOrComments);
+  const commentMarkdown = buildWechatCommentsMarkdown(comments);
+  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
 }
 
 function extractHtmlTitle(html) {
@@ -3579,10 +3804,12 @@ function imageTagToMarkdown(tag) {
 }
 
 function htmlToMarkdown(html) {
-  let readable = selectReadableHtml(html)
+  const sourceHtml = String(html || '');
+  let readable = selectReadableHtml(sourceHtml)
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code))
     .replace(/<img\b[^>]*>/gi, imageTagToMarkdown)
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
     .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
@@ -3597,13 +3824,9 @@ function htmlToMarkdown(html) {
       return text ? `[${text}](${decodeHtmlEntities(href)})` : decodeHtmlEntities(href);
     });
 
-  readable = stripHtmlTags(readable)
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line, index, lines) => line || lines[index - 1])
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  readable = cleanMarkdownForStorage(stripHtmlTags(readable));
+
+  readable = appendWechatCommentsToMarkdown(readable, sourceHtml);
 
   if (readable.length < 20) {
     throw new Error('网页正文太短，无法转为 Markdown');
@@ -3763,12 +3986,39 @@ async function renderUrlToMarkdownWithElectron(url) {
           const tag = node.tagName.toLowerCase();
           if (tag === 'script' || tag === 'style' || tag === 'noscript') return '';
           if (tag === 'img') return imageToMarkdown(node);
+          if (tag === 'pre' || tag === 'code') {
+            const code = String(node.innerText || node.textContent || '').replace(/\\u00a0/g, ' ').replace(/^\\n+|\\n+$/g, '');
+            const fence = String.fromCharCode(96, 96, 96);
+            return code.trim() ? '\\n\\n' + fence + '\\n' + code + '\\n' + fence + '\\n\\n' : '';
+          }
           const childText = Array.from(node.childNodes).map(blockToMarkdown).join('');
           if (/^h[1-6]$/.test(tag)) return '\\n' + '#'.repeat(Number(tag[1])) + ' ' + clean(childText) + '\\n';
           if (tag === 'li') return '\\n- ' + clean(childText);
           if (['p', 'div', 'section', 'article', 'main', 'blockquote', 'tr'].includes(tag)) return '\\n' + childText + '\\n';
           if (tag === 'br') return '\\n';
           return childText;
+        };
+        const extractWechatComments = () => {
+          const comments = [];
+          const seen = new Set();
+          const area = document.querySelector('#js_cmt_area') || document;
+          const nodes = Array.from(area.querySelectorAll('[class*="comment"],[class*="cmt"],[id*="comment"],[id*="cmt"]'));
+          nodes.forEach((node) => {
+            const text = clean(node.innerText || node.textContent || '');
+            if (!text || text.length < 2 || text.length > 500) return;
+            const authorNode = node.querySelector('[class*="nickname"],[class*="nick"],[class*="author"],[class*="user"]');
+            const contentNode = node.querySelector('[class*="comment_content"],[class*="content"],[class*="message"]');
+            const author = clean(authorNode ? authorNode.innerText || authorNode.textContent || '' : '');
+            const content = clean(contentNode ? contentNode.innerText || contentNode.textContent || '' : text);
+            const key = author + '|' + content;
+            if (!content || seen.has(key)) return;
+            seen.add(key);
+            comments.push({ author, content });
+          });
+          if (!comments.length) return '';
+          return '\\n\\n## 评论区\\n\\n' + comments.slice(0, 20).map((item) => {
+            return '- ' + (item.author ? '**' + item.author + '**：' : '') + item.content;
+          }).join('\\n');
         };
         const seen = new Set();
         const collected = [];
@@ -3830,7 +4080,11 @@ async function renderUrlToMarkdownWithElectron(url) {
         const root = candidates.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length)[0] || document.body;
         const byBlocks = clean(collected.join('\\n\\n'));
         const byRoot = clean(blockToMarkdown(root));
-        const markdown = byBlocks.length > byRoot.length * 0.6 ? byBlocks : byRoot;
+        const baseMarkdown = byBlocks.length > byRoot.length * 0.6 ? byBlocks : byRoot;
+        const commentsMarkdown = extractWechatComments();
+        const markdown = commentsMarkdown && !/(^|\\n)##\\s+评论区\\b/.test(baseMarkdown)
+          ? clean(baseMarkdown + '\\n\\n' + commentsMarkdown)
+          : baseMarkdown;
         const toDataUrl = (blob) => new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => resolve(String(reader.result || ''));
@@ -3984,6 +4238,12 @@ function extractFeishuMarkdownFromHtml(html) {
 
 function yamlValue(value) {
   if (value === undefined || value === null) return '';
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .join(', ');
+  }
   return String(value).replace(/\r?\n/g, ' ').trim();
 }
 
@@ -3995,6 +4255,62 @@ function parseNotePropertyFields(propertyFields) {
   return normalizeNotePropertyFields(propertyFields).split(',').filter(Boolean);
 }
 
+function getRecordUrl(record, metadata = record && record.metadata || {}) {
+  return cleanDisplayUrl(metadata.url || metadata.originalUrl || record.content || '');
+}
+
+function getRecordAuthor(metadata = {}) {
+  return metadata.author
+    || metadata.accountName
+    || metadata.nickname
+    || metadata.nickName
+    || metadata.sourceName
+    || '';
+}
+
+function getRecordDescription(metadata = {}) {
+  return metadata.description
+    || metadata.summary
+    || metadata.excerpt
+    || metadata.abstract
+    || '';
+}
+
+function getRecordKeywords(metadata = {}) {
+  const value = metadata.keywords || metadata.tags || metadata.hashtags || [];
+  if (Array.isArray(value)) return value;
+  return String(value || '')
+    .split(/[,，、\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getRecordSourceLabel(record, metadata = {}) {
+  const type = String(record && record.type || '').toLowerCase();
+  const url = getRecordUrl(record, metadata);
+  let platform = metadata.platform || metadata.platformName || '';
+  if (!platform) platform = getWebpageSourcePrefix(url);
+  if (!platform && type === 'voice') platform = '录音';
+  if (!platform && type === 'file') platform = '文件';
+  if (!platform && type === 'text') platform = '文本';
+  if (!platform) platform = record.source || '微信小程序';
+
+  let category = metadata.contentCategory || metadata.category || metadata.noteType || '';
+  if (!category) {
+    if (type === 'voice') category = '录音';
+    else if (type === 'file') category = metadata.fileExt ? String(metadata.fileExt).toUpperCase() : '文件';
+    else if (metadata.transcriptOnly || metadata.webpageMediaType === 'audio_video') category = '音视频';
+    else if (type === 'webpage' || type === 'link') category = '图文';
+  }
+
+  const normalizedPlatform = String(platform || '').trim();
+  const normalizedCategory = String(category || '').trim();
+  if (normalizedPlatform && normalizedCategory && !normalizedPlatform.includes(normalizedCategory)) {
+    return `${normalizedPlatform}${normalizedCategory}`;
+  }
+  return normalizedPlatform || normalizedCategory || '';
+}
+
 function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
@@ -4002,19 +4318,21 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
     id: getRecordId(record),
     type,
     title,
+    author: getRecordAuthor(metadata),
+    url: getRecordUrl(record, metadata),
     created_at: record.createdAt,
     synced_at: syncedAt,
-    source: record.source || 'wechat-miniprogram',
+    source: getRecordSourceLabel(record, metadata),
+    description: getRecordDescription(metadata),
+    keywords: getRecordKeywords(metadata),
     status: 'synced',
   };
 
   if (type === 'link') {
-    fields.url = metadata.url || record.content;
     fields.fetch_status = metadata.fetchStatus || 'pending';
   }
 
   if (type === 'webpage') {
-    fields.url = metadata.url || record.content;
     fields.conversion_status = metadata.conversionStatus || 'pending';
   }
 
@@ -4031,15 +4349,19 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
     fields.conversion_status = metadata.conversionStatus || 'pending';
   }
 
-  const defaultFieldOrder = [
+  const defaultFieldOrder = parseNotePropertyFields(DEFAULT_NOTE_PROPERTY_FIELDS);
+  const legacyFieldOrder = [
     'id',
     'type',
     'title',
+    'author',
+    'url',
     'created_at',
     'synced_at',
     'source',
+    'description',
+    'keywords',
     'status',
-    'url',
     'fetch_status',
     'conversion_status',
     'audio_file',
@@ -4050,9 +4372,10 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
     'file_ext',
   ];
   const selectedFields = parseNotePropertyFields(propertyFields);
-  const fieldOrder = selectedFields.length ? selectedFields : defaultFieldOrder;
+  const fieldOrder = selectedFields.length ? selectedFields : (defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder);
   const lines = fieldOrder
     .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .filter((key) => yamlValue(fields[key]))
     .map((key) => `${key}: ${yamlValue(fields[key])}`);
 
   return buildFrontmatter(lines);
@@ -4075,8 +4398,6 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
       : '正文快照处理中，已先保存标题和原始链接。';
     body = [
       pageTitle,
-      '',
-      `原始链接：${url}`,
       '',
       '## 正文快照',
       '',
@@ -4106,11 +4427,28 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
   }
 
   const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
-  return `${frontmatter}\n收集时间：${formatCreatedTime(record.createdAt)}\n\n${body}`;
+  return `${frontmatter}\n${body}`;
 }
 
 function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
+}
+
+function buildSkippedSyncNotice(skipped = []) {
+  const localDuplicateCount = skipped.filter((item) => item && item.reason === 'already-synced-local').length;
+  const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
+  const otherSkippedCount = Math.max(0, skipped.length - localDuplicateCount - cloudProcessingCount);
+  const parts = [];
+  if (localDuplicateCount) {
+    parts.push(`${localDuplicateCount} 条本地已存在，已跳过重复写入`);
+  }
+  if (cloudProcessingCount) {
+    parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
+  }
+  if (otherSkippedCount) {
+    parts.push(`${otherSkippedCount} 条已跳过`);
+  }
+  return parts.length ? `，${parts.join('，')}` : '';
 }
 
 function normalizeProgressPercent(value) {
@@ -5987,6 +6325,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           metadata: {
             ...metadata,
             title: metadata.title || extracted.title || getWebpageSourcePrefix(url),
+            author: metadata.author || extracted.author || '',
+            description: metadata.description || extracted.description || '',
+            keywords: metadata.keywords || extracted.tags || [],
+            platform: metadata.platform || '小红书',
+            contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === 'audio_video' ? '视频' : '图文'),
             markdown: extracted.markdown,
             imageUrls: extracted.imageUrls || [],
             videoUrl: extracted.videoUrl || '',
@@ -6032,11 +6375,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
       }
       const pageTitle = metadata.title || extractHtmlTitle(html);
+      const pageMeta = extractWebpageMetadataFromHtml(html, url);
       return {
         ...record,
         metadata: {
           ...metadata,
           title: pageTitle || metadata.title || '',
+          author: metadata.author || pageMeta.author || '',
+          description: metadata.description || pageMeta.description || '',
+          keywords: metadata.keywords || pageMeta.keywords || [],
+          platform: metadata.platform || pageMeta.platform || '',
+          contentCategory: metadata.contentCategory || pageMeta.contentCategory || '',
           markdown,
           conversionStatus: 'success',
           conversionNote: usedFallback ? '已通过备用通道抓取' : '',
@@ -6094,6 +6443,36 @@ class WechatObsidianInboxPlugin extends Plugin {
     const label = sanitizeNoteTitlePart(bindingLabel, '');
     const baseTitle = buildRecordTitleBase(record);
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
+  }
+
+  async findExistingRecordNotePath(recordId) {
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!normalizedRecordId || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== 'function') {
+      return '';
+    }
+
+    const inboxDir = normalizeVaultPath(this.settings.inboxDir);
+    const files = this.app.vault.getMarkdownFiles();
+    for (const file of files) {
+      const filePath = normalizeVaultPath(file && file.path);
+      if (!filePath || (inboxDir && filePath !== inboxDir && !filePath.startsWith(`${inboxDir}/`))) {
+        continue;
+      }
+      try {
+        let markdown = '';
+        if (typeof this.app.vault.cachedRead === 'function') {
+          markdown = await this.app.vault.cachedRead(file);
+        } else if (this.app.vault.adapter && typeof this.app.vault.adapter.read === 'function') {
+          markdown = await this.app.vault.adapter.read(file.path);
+        }
+        if (hasRecordIdInFrontmatter(markdown, normalizedRecordId)) {
+          return file.path || filePath;
+        }
+      } catch (error) {
+        // Ignore unreadable notes; sync should continue and surface real write/mark errors.
+      }
+    }
+    return '';
   }
 
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
@@ -6189,6 +6568,18 @@ class WechatObsidianInboxPlugin extends Plugin {
         continue;
       }
       try {
+        const recordId = getRecordId(record);
+        const existingFilePath = await this.findExistingRecordNotePath(recordId);
+        if (existingFilePath) {
+          skipped.push({
+            recordId,
+            reason: 'already-synced-local',
+            filePath: existingFilePath,
+          });
+          this.showSyncProgress({ ...progress, stage: 'marking', title: buildRecordTitleBase(record) });
+          await this.requestJson(`/records/${encodeURIComponent(recordId)}/synced`, 'POST', {}, binding);
+          continue;
+        }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, progress);
         written.push(item);
         if (item.conversionWarning) {
@@ -6264,7 +6655,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
       let finalMessage = buildSyncNotice(written.length);
       if (skipped.length) {
-        finalMessage += `，${skipped.length} 条云端转写中，完成后再同步`;
+        finalMessage += buildSkippedSyncNotice(skipped);
       }
       if (showNotice || written.length) {
         if (conversionWarnings.length) {
@@ -6484,13 +6875,20 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
     containerEl.createEl('h3', {
-      text: 'Pro 本地转写功能',
+      text: '高级选项',
       cls: 'wechat-inbox-sync-section-heading',
+    });
+
+    const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    localAsrPanel.createEl('summary', { text: '本地转写组件（高级/备用）' });
+    localAsrPanel.createDiv({
+      text: '默认走本地转写；这里只在需要安装、更新或排查本地转写组件时使用。',
+      cls: 'wechat-inbox-sync-muted',
     });
 
     const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
     const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
-    new Setting(containerEl)
+    new Setting(localAsrPanel)
       .setName('本地转写系统')
       .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。云端转写请在微信小程序保存音视频时选择。')
       .addDropdown((dropdown) => {
@@ -6511,7 +6909,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
             this.display();
           });
       });
-    new Setting(containerEl)
+    new Setting(localAsrPanel)
       .setName('本地转写权限')
       .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
       .addButton((button) => button
@@ -6528,7 +6926,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
             new Notice(`权限查询失败：${error.message || error}`);
           }
         }));
-    new Setting(containerEl)
+    new Setting(localAsrPanel)
       .setName('本地转写组件')
       .setDesc(localAsrStatus.ready
         ? `已安装：${localAsrStatus.installRoot}`
@@ -6624,6 +7022,7 @@ WechatObsidianInboxPlugin.__test = {
   parseTencentCreateTaskResponse,
   parseTencentTaskStatusResponse,
   buildRecordTitleBase,
+  hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
   buildMarkdownForRecord,
   extractSocialVideoMarkdownFromHtml,
@@ -6643,6 +7042,7 @@ WechatObsidianInboxPlugin.__test = {
   buildAudioTranscriptMarkdown,
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
+  buildSkippedSyncNotice,
   parseLocalAsrProgressLog,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
@@ -6665,6 +7065,10 @@ WechatObsidianInboxPlugin.__test = {
   openExternalUrl,
   extractPdfMarkdown,
   cleanPdfExtractedText,
+  htmlToMarkdown,
+  extractWebpageMetadataFromHtml,
+  extractWechatCommentsFromHtml,
+  appendWechatCommentsToMarkdown,
   cleanMarkdownForStorage,
   resolveRedirectUrl,
   isRequestUrlTransportError,
