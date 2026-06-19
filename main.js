@@ -699,10 +699,12 @@ function buildSyncDiagnosticLogText({
   ].join('\n');
 }
 
-function writeSyncDiagnosticLog(payload = {}, installRoot = getLocalAsrInstallRoot()) {
+function writeSyncDiagnosticLog(payload = {}, installRoot = '') {
+  if (isMobileRuntime()) return '';
+  const root = installRoot || getLocalAsrInstallRoot();
   try {
-    fs.mkdirSync(installRoot, { recursive: true });
-    const logPath = getSyncDiagnosticLogPath(installRoot);
+    fs.mkdirSync(root, { recursive: true });
+    const logPath = getSyncDiagnosticLogPath(root);
     fs.writeFileSync(logPath, buildSyncDiagnosticLogText(payload), 'utf8');
     return logPath;
   } catch (error) {
@@ -710,8 +712,10 @@ function writeSyncDiagnosticLog(payload = {}, installRoot = getLocalAsrInstallRo
   }
 }
 
-function readSyncDiagnosticLog(installRoot = getLocalAsrInstallRoot()) {
-  const logPath = getSyncDiagnosticLogPath(installRoot);
+function readSyncDiagnosticLog(installRoot = '') {
+  if (isMobileRuntime()) return '';
+  const root = installRoot || getLocalAsrInstallRoot();
+  const logPath = getSyncDiagnosticLogPath(root);
   try {
     if (!fs.existsSync(logPath)) return '';
     return fs.readFileSync(logPath, 'utf8').slice(-5000);
