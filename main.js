@@ -1,12 +1,69 @@
-const crypto = require('crypto');
-const childProcess = require('child_process');
-const fs = require('fs');
-const http = require('http');
-const https = require('https');
-const os = require('os');
-const path = require('path');
-const zlib = require('zlib');
-const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
+const { Notice, Plugin, PluginSettingTab, Setting, requestUrl, Platform } = require('obsidian');
+
+function getOptionalDesktopModule(name) {
+  try {
+    return require(name);
+  } catch (error) {
+    return null;
+  }
+}
+
+function getDesktopModule(name) {
+  const module = getOptionalDesktopModule(name);
+  if (!module) {
+    throw new Error(`Desktop-only module unavailable: ${name}`);
+  }
+  return module;
+}
+
+function createLazyDesktopModule(name) {
+  return new Proxy({}, {
+    get(_target, property) {
+      const module = getDesktopModule(name);
+      const value = module[property];
+      return typeof value === 'function' ? value.bind(module) : value;
+    },
+  });
+}
+
+const crypto = createLazyDesktopModule('crypto');
+const childProcess = createLazyDesktopModule('child_process');
+const fs = createLazyDesktopModule('fs');
+const http = createLazyDesktopModule('http');
+const https = createLazyDesktopModule('https');
+const os = createLazyDesktopModule('os');
+const path = createLazyDesktopModule('path');
+const zlib = createLazyDesktopModule('zlib');
+
+function isMobileRuntime(platformInfo = Platform) {
+  return Boolean(platformInfo && (platformInfo.isMobile || platformInfo.isIosApp || platformInfo.isAndroidApp));
+}
+
+function isDesktopRuntime(platformInfo = Platform) {
+  return !isMobileRuntime(platformInfo);
+}
+
+function getRuntimePlatform() {
+  if (Platform && Platform.isWin) return 'win32';
+  if (Platform && Platform.isMacOS) return 'darwin';
+  if (Platform && Platform.isLinux) return 'linux';
+  const osModule = getOptionalDesktopModule('os');
+  return osModule && typeof osModule.platform === 'function' ? osModule.platform() : '';
+}
+
+function getRuntimeHomeDir() {
+  const osModule = getOptionalDesktopModule('os');
+  return osModule && typeof osModule.homedir === 'function' ? osModule.homedir() : '';
+}
+
+function getRuntimeTmpDir() {
+  const osModule = getOptionalDesktopModule('os');
+  return osModule && typeof osModule.tmpdir === 'function' ? osModule.tmpdir() : '.';
+}
+
+function getProcessEnv() {
+  return typeof process !== 'undefined' && process && process.env ? process.env : {};
+}
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
@@ -90,6 +147,7 @@ const TYPE_DISPLAY_NAMES = {
   file: '文件',
 };
 
+const MOBILE_UNSUPPORTED_RECORD_TYPES = new Set(['voice', 'file']);
 const CHINA_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
 const TENCENT_ASR_HOST = 'asr.tencentcloudapi.com';
 const TENCENT_ASR_VERSION = '2019-06-14';
@@ -101,7 +159,7 @@ const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转�
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 
-function getLocalAsrPlatform(platform = os.platform()) {
+function getLocalAsrPlatform(platform = getRuntimePlatform()) {
   if (platform === 'win32') return 'win32';
   if (platform === 'darwin') return 'darwin';
   return platform || '';
@@ -113,12 +171,12 @@ function normalizeLocalAsrPlatform(value) {
     : 'auto';
 }
 
-function resolveLocalAsrPlatform(value, runtimePlatform = os.platform()) {
+function resolveLocalAsrPlatform(value, runtimePlatform = getRuntimePlatform()) {
   const normalized = normalizeLocalAsrPlatform(value);
   return normalized === 'auto' ? getLocalAsrPlatform(runtimePlatform) : normalized;
 }
 
-function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = os.platform()) {
+function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = getRuntimePlatform()) {
   const normalized = normalizeLocalAsrPlatform(selectedPlatform);
   if (normalized === 'auto') return '';
   const selected = getLocalAsrPlatform(normalized);
@@ -130,7 +188,7 @@ function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = 
   return `Local ASR platform mismatch: this computer is ${runtimeName}, but the selected installer is ${selectedName}. Please choose Auto or ${runtimeName}, then install again.`;
 }
 
-function getDefaultLocalTranscriptionCommand(platform = os.platform(), installRoot = '') {
+function getDefaultLocalTranscriptionCommand(platform = getRuntimePlatform(), installRoot = '') {
   if (getLocalAsrPlatform(platform) === 'darwin') {
     return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
   }
@@ -148,7 +206,7 @@ function isAsciiPath(value) {
   return /^[\x00-\x7F]+$/.test(String(value || ''));
 }
 
-function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env) {
+function getSafeLocalAsrInstallRoot(platform = getRuntimePlatform(), env = getProcessEnv()) {
   if (getLocalAsrPlatform(platform) === 'win32') {
     const systemDrive = String((env && env.SystemDrive) || 'C:').trim() || 'C:';
     const candidates = [
@@ -160,7 +218,7 @@ function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env)
     const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.join('C:', LOCAL_ASR_SAFE_HOME);
     return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.join(safeBase, LOCAL_ASR_SAFE_HOME);
   }
-  return path.join(os.homedir(), LOCAL_ASR_HOME);
+  return path.join(getRuntimeHomeDir(), LOCAL_ASR_HOME);
 }
 
 function hasLocalAsrNativeCrash(runLogText) {
@@ -171,7 +229,7 @@ function hasLocalAsrNativeCrash(runLogText) {
 }
 
 function getLocalAsrRepairAction({
-  platform = os.platform(),
+  platform = getRuntimePlatform(),
   installRoot = '',
   status = {},
   runLogText = '',
@@ -188,7 +246,7 @@ function getLocalAsrRepairAction({
   return 'none';
 }
 
-function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = 'default', platform = os.platform(), env = process.env) {
+function getLocalAsrInstallRoot(homeDir = getRuntimeHomeDir(), mode = 'default', platform = getRuntimePlatform(), env = getProcessEnv()) {
   if (normalizeLocalAsrInstallMode(mode) === 'safe') {
     return getSafeLocalAsrInstallRoot(platform, env);
   }
@@ -442,7 +500,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
   }
 }
 
-function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
+function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = getRuntimePlatform()) {
   const isMac = getLocalAsrPlatform(platform) === 'darwin';
   const transcribeScript = joinLocalAsrPath(platform, installRoot, isMac ? 'transcribe.sh' : 'transcribe.ps1');
   const modelPath = joinLocalAsrPath(platform, installRoot, 'models', 'ggml-small.bin');
@@ -674,7 +732,7 @@ function readLocalAsrRunLog(installRoot = getLocalAsrInstallRoot()) {
 
 function writeLocalAsrInstallLog({
   installRoot = getLocalAsrInstallRoot(),
-  platform = os.platform(),
+  platform = getRuntimePlatform(),
   command = '',
   installerPath = '',
   stdout = '',
@@ -710,7 +768,7 @@ function quoteCommandPath(filePath) {
   return `"${String(filePath || '').replace(/"/g, '\\"')}"`;
 }
 
-function buildLocalAsrInstallCommand(installerPath, platform = os.platform(), installRoot = '') {
+function buildLocalAsrInstallCommand(installerPath, platform = getRuntimePlatform(), installRoot = '') {
   if (getLocalAsrPlatform(platform) === 'darwin' || String(installerPath || '').endsWith('.sh')) {
     return `/bin/bash ${quoteCommandPath(installerPath)}`;
   }
@@ -802,8 +860,8 @@ function isRemoteAsrDownloadFailure(error) {
   return /Invalid audio URI|audio download failed|Audio download failed/i.test(message);
 }
 
-function getDefaultLocalTranscriptionScriptPath(platform = os.platform(), installRoot = '') {
-  const root = installRoot || getLocalAsrInstallRoot(os.homedir(), 'default', platform);
+function getDefaultLocalTranscriptionScriptPath(platform = getRuntimePlatform(), installRoot = '') {
+  const root = installRoot || getLocalAsrInstallRoot(getRuntimeHomeDir(), 'default', platform);
   return path.join(root, getLocalAsrPlatform(platform) === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1');
 }
 
@@ -821,7 +879,7 @@ function isWindowsLocalAsrCommand(command) {
     && (normalized.includes('transcribe.ps1') || normalized.includes(LOCAL_ASR_HOME));
 }
 
-function normalizeLocalTranscriptionCommand(command, platform = os.platform()) {
+function normalizeLocalTranscriptionCommand(command, platform = getRuntimePlatform()) {
   const normalized = String(command || '')
     .trim()
     .replace(/\$env:USERPROFILE/gi, '%USERPROFILE%');
@@ -919,7 +977,7 @@ function normalizeApiBase(apiBase) {
     : normalized;
 }
 
-function mergeSettings(savedSettings, platform = os.platform()) {
+function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   const merged = {
     ...DEFAULT_SETTINGS,
     ...(savedSettings || {}),
@@ -4535,6 +4593,14 @@ function isAudioVideoTranscriptionIncompleteRecord(record) {
   return ['pending', 'queued', 'processing', 'failed'].includes(status);
 }
 
+function isMobileSafeRecord(record) {
+  const type = String(record && record.type || '').toLowerCase();
+  const metadata = (record && record.metadata) || {};
+  if (MOBILE_UNSUPPORTED_RECORD_TYPES.has(type)) return false;
+  if (metadata.webpageMediaType === 'audio_video' || metadata.audioFileID || metadata.transcriptOnly === true) return false;
+  return ['text', 'link', 'webpage'].includes(type);
+}
+
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
@@ -4921,7 +4987,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getConfiguredLocalAsrInstallRoot(mode = this.settings.localAsrInstallMode) {
-    return getLocalAsrInstallRoot(os.homedir(), mode, this.getConfiguredLocalAsrPlatform());
+    return getLocalAsrInstallRoot(getRuntimeHomeDir(), mode, this.getConfiguredLocalAsrPlatform());
   }
 
   getBundledLocalAsrInstallerPath() {
@@ -4933,7 +4999,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installerPath = this.getBundledLocalAsrInstallerPath();
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
-    const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
+    const downloadedPath = path.join(getRuntimeTmpDir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
 
     const isInstallerCurrent = (scriptText) => {
       const source = String(scriptText || '');
@@ -4996,7 +5062,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return [
       'WeChat Inbox Sync 同步失败诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
-      `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
+      `运行系统：${getRuntimePlatform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
       `实际使用系统：${platform}`,
       `API 地址：${this.settings.apiBase || '-'}`,
@@ -5557,7 +5623,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error('下载到的媒体不是有效音视频文件，可能是平台风控页或无效视频地址');
     }
     const ext = getAudioFormatFromUrl(resolvedUrl || audioUrl);
-    const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
+    const filePath = path.join(getRuntimeTmpDir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
     fs.writeFileSync(filePath, buffer);
     return filePath;
   }
@@ -6199,6 +6265,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       if (isFeishuUrl(url)) {
         try {
+          if (isMobileRuntime()) {
+            throw new Error('Electron renderer unavailable on mobile');
+          }
           const rendered = await renderUrlToMarkdownWithElectron(url);
           const markdown = await this.saveWebpageImageAssets(
             rendered.markdown,
@@ -6328,6 +6397,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         const response = await requestUrl({ url, method: 'GET' });
         html = response.text || '';
       } catch (requestError) {
+        if (isMobileRuntime()) {
+          throw requestError;
+        }
         // Obsidian requestUrl can fail on some networks; fall back to Node.js HTTP.
         try {
           html = await downloadTextViaNode(url);
@@ -6551,6 +6623,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         continue;
       }
       try {
+        if (isMobileRuntime() && !isMobileSafeRecord(record)) {
+          skipped.push({
+            recordId: getRecordId(record),
+            reason: 'mobile-unsupported',
+          });
+          this.showSyncProgress({ ...progress, stage: 'processing', title: buildRecordTitleBase(record) });
+          continue;
+        }
         const recordId = getRecordId(record);
         const existingFilePath = await this.findExistingRecordNotePath(recordId);
         if (existingFilePath) {
@@ -6843,6 +6923,14 @@ class WechatInboxSettingTab extends PluginSettingTab {
           }
         }));
 
+    if (isMobileRuntime()) {
+      containerEl.createDiv({
+        cls: 'wechat-inbox-sync-status',
+        text: '\u624b\u673a\u8f7b\u91cf\u6a21\u5f0f\uff1a\u4ec5\u540c\u6b65\u6587\u5b57\u3001\u516c\u4f17\u53f7\u56fe\u6587\u3001\u98de\u4e66\u56fe\u6587\u548c\u5c0f\u7ea2\u4e66\u56fe\u6587\u3002\u97f3\u89c6\u9891\u548c\u6587\u4ef6\u4f1a\u7559\u5728\u4e91\u7aef\uff0c\u8bf7\u7528\u7535\u8111\u7aef\u540c\u6b65\u3002',
+      });
+      return;
+    }
+
     containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
     containerEl.createEl('h3', {
       text: '高级选项',
@@ -6969,6 +7057,9 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_PLATFORM_NAMES,
   NOTE_PROPERTY_FIELD_KEYS,
   NOTE_SAVE_MODES,
+  isMobileRuntime,
+  isDesktopRuntime,
+  isMobileSafeRecord,
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
   normalizeLocalAsrInstallMode,
@@ -7048,6 +7139,7 @@ WechatObsidianInboxPlugin.__test = {
   normalizeBindings,
   normalizeApiBase,
   normalizeBindCodeInput,
+  WechatInboxSettingTab,
 };
 
 module.exports = WechatObsidianInboxPlugin;
