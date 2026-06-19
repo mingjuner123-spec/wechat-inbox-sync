@@ -6255,9 +6255,6 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
         } catch (error) {
           const message = error.message || String(error);
-          if (isBindingInvalidMessage(message)) {
-            await this.markBindingUnbound(binding.token, '绑定码已失效或已被更换');
-          }
           failed.push({
             recordId: binding.label || binding.token,
             message: `${binding.label || binding.token}：${message}`,
