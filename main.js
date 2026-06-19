@@ -22,27 +22,13 @@ const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
 };
-const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source,description,keywords';
+const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source';
 const NOTE_PROPERTY_FIELD_KEYS = [
-  'id',
-  'type',
   'title',
   'author',
   'url',
-  'created_at',
   'synced_at',
   'source',
-  'description',
-  'keywords',
-  'status',
-  'fetch_status',
-  'conversion_status',
-  'audio_file',
-  'audio_file_id',
-  'transcription_status',
-  'file_name',
-  'file_id',
-  'file_ext',
 ];
 
 const DEFAULT_SETTINGS = {
@@ -953,7 +939,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
-  merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
+  merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
@@ -4359,8 +4345,6 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
     'created_at',
     'synced_at',
     'source',
-    'description',
-    'keywords',
     'status',
     'fetch_status',
     'conversion_status',
@@ -6524,7 +6508,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       record: recordForMarkdown,
       title,
       syncedAt,
-      propertyFields: this.settings.notePropertyFields,
     });
     const filePath = `${noteDir}/${title}.md`;
     this.showSyncProgress({ ...progress, stage: 'writing', title });
@@ -6837,19 +6820,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
             this.display();
           });
       });
-
-    new Setting(containerEl)
-      .setName('笔记属性字段')
-      .setDesc(`留空使用默认属性；也可以用英文逗号指定字段，例如：type,title,url,created_at。可用字段：${NOTE_PROPERTY_FIELD_KEYS.join(', ')}`)
-      .addTextArea((text) => text
-        .setPlaceholder('留空使用默认属性')
-        .setValue(this.plugin.settings.notePropertyFields || '')
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            notePropertyFields: normalizeNotePropertyFields(value),
-          });
-        }));
 
     new Setting(containerEl)
       .setName('立即同步')
