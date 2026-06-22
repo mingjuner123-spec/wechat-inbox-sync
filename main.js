@@ -1049,11 +1049,11 @@ function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   merged.deepseekApiKey = '';
   merged.deepseekModel = DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = DEFAULT_SETTINGS.deepseekBaseUrl;
-  if (merged.aiMetadataEnabled) {
-    const fields = parseNotePropertyFields(merged.notePropertyFields);
-    const baseFields = parseNotePropertyFields(DEFAULT_NOTE_PROPERTY_FIELDS);
-    const hasOnlyGeneratedFields = fields.length > 0
-      && fields.every((field) => ['description', 'keywords'].includes(field));
+  const fields = parseNotePropertyFields(merged.notePropertyFields);
+  const baseFields = parseNotePropertyFields(DEFAULT_NOTE_PROPERTY_FIELDS);
+  const hasOnlyGeneratedFields = fields.length > 0
+    && fields.every((field) => ['description', 'keywords'].includes(field));
+  if (hasOnlyGeneratedFields || merged.aiMetadataEnabled) {
     const nextFields = hasOnlyGeneratedFields ? baseFields : fields;
     ['description', 'keywords'].forEach((field) => {
       if (!nextFields.includes(field)) nextFields.push(field);
@@ -1888,10 +1888,11 @@ function shouldGenerateAiMetadata(settings, record) {
     || shouldRefreshAiDescription(metadata, record);
 }
 
-function ensureRequiredMetadataFallbacks(record) {
+function ensureRequiredMetadataFallbacks(record, settings = null) {
   if (!record || !record.metadata) return record;
   const metadata = { ...(record.metadata || {}) };
-  if (isXiaohongshuRecord(record, metadata) && !getRecordKeywords(metadata).length) {
+  const allowAiMetadataFallbacks = !settings || Boolean(settings.aiMetadataEnabled);
+  if (allowAiMetadataFallbacks && isXiaohongshuRecord(record, metadata) && !getRecordKeywords(metadata).length) {
     const keywords = buildFallbackGeneratedKeywords({ ...record, metadata });
     if (keywords.length) metadata.keywords = keywords;
   }
@@ -6475,9 +6476,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       generated = await this.generateAiMetadataWithCloud(record);
     } catch (error) {
-      if (isBindingInvalidMessage(error && error.message ? error.message : error)) {
-        await this.disableProFeatureSettings();
-      }
+      await this.disableProFeatureSettings();
       return record;
     }
     const metadata = { ...((record && record.metadata) || {}) };
@@ -8460,7 +8459,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown);
-    recordForMarkdown = ensureRequiredMetadataFallbacks(recordForMarkdown);
+    recordForMarkdown = ensureRequiredMetadataFallbacks(recordForMarkdown, this.settings);
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,

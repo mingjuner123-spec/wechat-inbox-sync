@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.46');
-assert.strictEqual(versions['1.2.46'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.47');
+assert.strictEqual(versions['1.2.47'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -399,6 +399,11 @@ const aiSettingsWithOnlyGeneratedFields = helpers.mergeSettings({
   notePropertyFields: 'description,keywords',
 });
 assert.strictEqual(aiSettingsWithOnlyGeneratedFields.notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
+const aiDisabledSettingsWithOnlyGeneratedFields = helpers.mergeSettings({
+  aiMetadataEnabled: false,
+  notePropertyFields: 'description,keywords',
+});
+assert.strictEqual(aiDisabledSettingsWithOnlyGeneratedFields.notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
 
 assert.strictEqual(typeof helpers.shouldRefreshAiDescription, 'function');
 assert.strictEqual(typeof helpers.buildFallbackGeneratedKeywords, 'function');
@@ -572,6 +577,39 @@ async function runAsyncChecks() {
   assert.deepStrictEqual(invalidBindingAiResult.metadata.keywords || [], []);
   assert.strictEqual(invalidBindingAiPlugin.settings.aiMetadataEnabled, false);
 
+  const inactiveProAiPlugin = new Plugin();
+  inactiveProAiPlugin.settings = helpers.mergeSettings({
+    aiMetadataEnabled: true,
+    bindings: [{ token: 'free-token', label: 'free', status: 'bound', enabled: true }],
+    clientId: 'free-client',
+  });
+  inactiveProAiPlugin.requestJson = async (url) => {
+    if (String(url).includes('/entitlements/status')) {
+      return { data: { hasAccess: false, plan: 'pro', status: 'inactive' } };
+    }
+    if (url === '/metadata/generate') {
+      throw new Error('metadata/generate should not be called without Pro');
+    }
+    return { data: {} };
+  };
+  const inactiveProAiResult = await inactiveProAiPlugin.enrichRecordMetadataWithAi(aiMetadataCandidateRecord);
+  assert.strictEqual(inactiveProAiResult.metadata.description || '', '');
+  assert.deepStrictEqual(inactiveProAiResult.metadata.keywords || [], []);
+  assert.strictEqual(inactiveProAiPlugin.settings.aiMetadataEnabled, false);
+
+  const proClosedXhsRecord = helpers.ensureRequiredMetadataFallbacks({
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/no-pro-keywords',
+    metadata: {
+      url: 'https://www.xiaohongshu.com/explore/no-pro-keywords',
+      platform: '小红书',
+      title: '小红书关键词不该生成',
+      markdown: '## 正文\n\n这篇讲小红书内容选题和AI写作。\n\n#小红书 #内容选题 #AI写作',
+      keywords: [],
+    },
+  }, { aiMetadataEnabled: false });
+  assert.deepStrictEqual(proClosedXhsRecord.metadata.keywords || [], []);
+
   const multiBindingAiPlugin = new Plugin();
   multiBindingAiPlugin.settings = helpers.mergeSettings({
     aiMetadataEnabled: true,
@@ -598,6 +636,9 @@ async function runAsyncChecks() {
   assert.strictEqual(multiBindingAiResult.metadata.description, 'Pro 绑定生成的简介');
   assert.deepStrictEqual(multiBindingAiResult.metadata.keywords, ['Pro关键词']);
   assert.deepStrictEqual(multiBindingAiPlugin.settings.bindings.map((item) => item.token), ['PRO-TOKEN']);
+  const multiBindingConnectionResult = await multiBindingAiPlugin.testAiMetadataConnection();
+  assert.ok(multiBindingConnectionResult.description || multiBindingConnectionResult.keywords.length);
+  assert.deepStrictEqual(metadataGenerateTokens, ['PRO-TOKEN', 'PRO-TOKEN']);
 
   const xhsHydratePlugin = new Plugin();
   xhsHydratePlugin.settings = helpers.mergeSettings({ xiaohongshuCommentsEnabled: false });
