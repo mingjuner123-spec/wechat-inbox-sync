@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.42');
-assert.strictEqual(versions['1.2.42'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.43');
+assert.strictEqual(versions['1.2.43'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -307,22 +307,32 @@ assert.deepStrictEqual(
   },
 );
 
+const aiMetadataCandidateRecord = {
+  type: 'text',
+  content: 'Obsidian content workflow with Xiaohongshu comments and AI metadata.',
+  metadata: {
+    title: 'AI metadata test',
+    markdown: 'Obsidian content workflow with Xiaohongshu comments and AI metadata.',
+  },
+};
+
 const settings = helpers.mergeSettings({
   aiMetadataEnabled: true,
-  deepseekApiKey: 'sk-test',
-  deepseekModel: 'deepseek-chat',
   notePropertyFields: 'title,description,keywords',
 });
 assert.strictEqual(settings.aiMetadataEnabled, true);
-assert.strictEqual(settings.deepseekApiKey, 'sk-test');
-assert.strictEqual(settings.deepseekModel, 'deepseek-chat');
+assert.strictEqual(settings.deepseekApiKey, '');
 assert.strictEqual(settings.notePropertyFields, 'title,description,keywords');
+const defaultFeatureSettings = helpers.mergeSettings({});
+assert.strictEqual(defaultFeatureSettings.aiMetadataEnabled, false);
+assert.strictEqual(defaultFeatureSettings.xiaohongshuCommentsEnabled, false);
+assert.strictEqual(helpers.shouldGenerateAiMetadata(defaultFeatureSettings, aiMetadataCandidateRecord), false);
 const aiSettingsWithLegacyFields = helpers.mergeSettings({
   aiMetadataEnabled: true,
-  deepseekApiKey: 'sk-test',
   notePropertyFields: 'title,author,url,synced_at,source',
 });
 assert.strictEqual(aiSettingsWithLegacyFields.notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
+assert.strictEqual(helpers.shouldGenerateAiMetadata(aiSettingsWithLegacyFields, aiMetadataCandidateRecord), true);
 
 assert.strictEqual(typeof helpers.shouldRefreshAiDescription, 'function');
 assert.strictEqual(typeof helpers.buildFallbackGeneratedKeywords, 'function');
@@ -410,10 +420,10 @@ async function runAsyncChecks() {
   const plugin = new Plugin();
   plugin.settings = helpers.mergeSettings({
     aiMetadataEnabled: true,
-    deepseekApiKey: 'sk-test',
     notePropertyFields: 'title,description,keywords',
+    token: 'token-123',
   });
-  plugin.generateMetadataWithDeepSeek = async () => ({
+  plugin.generateAiMetadataWithCloud = async () => ({
     description: '把小红书标题方法沉淀成可复用的AI写作流程。',
     keywords: [],
   });
@@ -452,8 +462,54 @@ async function runAsyncChecks() {
   assert.ok(existingMarkdown.includes('  - 内容选题'));
   assert.ok(existingMarkdown.includes('  - AI写作'));
 
+  const trialOnlyProFeaturePlugin = new Plugin();
+  trialOnlyProFeaturePlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    bindings: [{ token: 'trial-token', label: 'trial', status: 'bound', enabled: true }],
+    clientId: 'trial-client',
+  });
+  trialOnlyProFeaturePlugin.requestJson = async (url) => ({
+    data: url.includes('local_transcription_trial')
+      ? { hasAccess: true, plan: 'local_transcription_trial', status: 'active' }
+      : { hasAccess: false, plan: '', status: 'inactive' },
+  });
+  const trialOnlyProFeatureStatus = await trialOnlyProFeaturePlugin.getProFeatureEntitlementStatus();
+  assert.strictEqual(trialOnlyProFeatureStatus.hasAccess, false);
+  assert.notStrictEqual(trialOnlyProFeatureStatus.plan, 'local_transcription_trial');
+
+  const activeProFeaturePlugin = new Plugin();
+  activeProFeaturePlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    bindings: [{ token: 'pro-token', label: 'pro', status: 'bound', enabled: true }],
+    clientId: 'pro-client',
+  });
+  activeProFeaturePlugin.requestJson = async (url) => ({
+    data: url.includes('local_transcription_beta')
+      ? { hasAccess: true, plan: 'local_transcription_beta', status: 'active' }
+      : { hasAccess: false, plan: '', status: 'inactive' },
+  });
+  const activeProFeatureStatus = await activeProFeaturePlugin.getProFeatureEntitlementStatus();
+  assert.strictEqual(activeProFeatureStatus.hasAccess, true);
+  assert.strictEqual(activeProFeatureStatus.plan, 'local_transcription_beta');
+
   const xhsHydratePlugin = new Plugin();
-  xhsHydratePlugin.settings = helpers.mergeSettings({});
+  xhsHydratePlugin.settings = helpers.mergeSettings({ xiaohongshuCommentsEnabled: false });
+  let xhsRenderCalledWhenDisabled = false;
+  xhsHydratePlugin.renderXiaohongshuComments = async () => {
+    xhsRenderCalledWhenDisabled = true;
+    return [{ author: '不该出现', content: '关闭开关时不能抓评论' }];
+  };
+  const xhsDisabled = await xhsHydratePlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/static-comments',
+    metadata: { url: 'https://www.xiaohongshu.com/explore/static-comments', platform: '小红书' },
+  }, '', '', '小红书测试');
+  assert.strictEqual(xhsRenderCalledWhenDisabled, false);
+  assert.ok(xhsDisabled.metadata.markdown.includes('一级评论'));
+  assert.ok(!xhsDisabled.metadata.markdown.includes('关闭开关时不能抓评论'));
+
+  xhsHydratePlugin.settings = helpers.mergeSettings({ xiaohongshuCommentsEnabled: true });
+  xhsHydratePlugin.ensureProFeatureAccess = async () => ({ hasAccess: true });
   let xhsRenderCalled = false;
   xhsHydratePlugin.renderXiaohongshuComments = async () => {
     xhsRenderCalled = true;
@@ -485,7 +541,9 @@ async function runAsyncChecks() {
 
   const source = fs.readFileSync(pluginPath, 'utf8');
   assert.ok(source.includes("text: 'AI 简介与关键词（DeepSeek）'"));
-  assert.ok(source.includes(".setName('DeepSeek API Key')"));
+  assert.ok(!source.includes(".setName('DeepSeek API Key')"));
+  assert.ok(!source.includes(".setName('DeepSeek 模型')"));
+  assert.ok(!source.includes('sk-test'));
 
   console.log('release social, feishu, and AI metadata checks passed');
 }

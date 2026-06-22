@@ -74,6 +74,7 @@ const MAX_PLUGIN_BINDINGS = 3;
 const SOCIAL_COMMENT_LIMIT = 100;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
+const PRO_FEATURE_PLANS = [LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_pro', 'pro'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
 const SOCIAL_LOGIN_TARGETS = {
@@ -128,6 +129,7 @@ const DEFAULT_SETTINGS = {
   autoSyncOnLoad: true,
   aiProvider: 'off',
   aiMetadataEnabled: false,
+  xiaohongshuCommentsEnabled: false,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -1042,9 +1044,11 @@ function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
-  merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
-  merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
-  merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
+  merged.xiaohongshuCommentsEnabled = Boolean(merged.xiaohongshuCommentsEnabled);
+  // DeepSeek credentials live on the official sync API, never in the public plugin bundle/settings.
+  merged.deepseekApiKey = '';
+  merged.deepseekModel = DEFAULT_SETTINGS.deepseekModel;
+  merged.deepseekBaseUrl = DEFAULT_SETTINGS.deepseekBaseUrl;
   if (merged.aiMetadataEnabled) {
     const fields = parseNotePropertyFields(merged.notePropertyFields);
     ['description', 'keywords'].forEach((field) => {
@@ -1872,7 +1876,7 @@ function buildFileMarkdownBody(record) {
 }
 
 function shouldGenerateAiMetadata(settings, record) {
-  if (!settings || !settings.aiMetadataEnabled || !settings.deepseekApiKey) return false;
+  if (!settings || !settings.aiMetadataEnabled) return false;
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
   return !getRecordDescription(metadata)
@@ -6253,7 +6257,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
     if (response.status && (response.status < 200 || response.status >= 300)) {
-      const message = (payload && payload.errMsg) || `HTTP ${response.status}`;
+      const message = (payload && (payload.errCode === 'PRO_REQUIRED' ? 'PRO_REQUIRED' : payload.errMsg)) || `HTTP ${response.status}`;
       if (response.status === 400 && message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
@@ -6294,40 +6298,36 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload || {};
   }
 
-  async generateMetadataWithDeepSeek(record) {
+  async generateAiMetadataWithCloud(record) {
     const inputText = extractAiMetadataInputText(record);
     if (!inputText) return { description: '', keywords: [] };
-    const payload = await this.requestExternalJson(this.settings.deepseekBaseUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.settings.deepseekApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel,
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: '你是内容整理助手。请基于用户提供的文案生成简介和关键词。只输出 JSON：{"description":"一句话简介","keywords":["关键词1","关键词2"]}。description 控制在 1 句话，keywords 返回 3 到 8 个简洁中文或英文关键词。',
-          },
-          {
-            role: 'user',
-            content: inputText,
-          },
-        ],
-      }),
-    });
-    return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
+    const binding = this.getActiveBindings()[0] || null;
+    if (!binding) {
+      throw new Error('AI 简介与关键词仅 Pro 用户可用：请先绑定小程序并开通 Pro。');
+    }
+    const payload = await this.requestJson('/metadata/generate', 'POST', {
+      title: (record && record.metadata && record.metadata.title) || '',
+      source: (record && record.metadata && (record.metadata.platform || record.metadata.source)) || '',
+      content: inputText,
+    }, binding);
+    const data = payload && payload.data ? payload.data : payload;
+    return {
+      description: cleanGeneratedDescription(data && data.description),
+      keywords: normalizeGeneratedKeywords(data && data.keywords),
+    };
+  }
+
+  async generateMetadataWithDeepSeek(record) {
+    return await this.generateAiMetadataWithCloud(record);
   }
 
   async enrichRecordMetadataWithAi(record) {
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     let generated = { description: '', keywords: [] };
     try {
-      generated = await this.generateMetadataWithDeepSeek(record);
+      generated = await this.generateAiMetadataWithCloud(record);
     } catch (error) {
+      if (String(error && error.message || error || '').includes('PRO_REQUIRED')) throw error;
       generated = { description: '', keywords: [] };
     }
     const metadata = { ...((record && record.metadata) || {}) };
@@ -6352,10 +6352,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async testDeepSeekConnection() {
-    if (!this.settings.deepseekApiKey) {
-      throw new Error('请先填写 DeepSeek API Key');
-    }
-    const result = await this.generateMetadataWithDeepSeek({
+    const result = await this.generateAiMetadataWithCloud({
       type: 'text',
       content: '这是一段关于 Obsidian 内容同步助手、飞书机器人和知识管理的测试文案。',
       metadata: {
@@ -6792,6 +6789,70 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
     await this.cacheLocalTranscriptionEntitlementStatus(inactiveStatus);
     return inactiveStatus;
+  }
+
+  async getProFeatureEntitlementStatus() {
+    const bindings = this.getActiveBindings();
+    if (!bindings.length) {
+      return {
+        hasAccess: false,
+        plan: LOCAL_TRANSCRIPTION_PLAN,
+        status: 'unbound',
+        expiresAt: '',
+      };
+    }
+
+    let lastError = null;
+    for (const binding of bindings) {
+      for (const plan of PRO_FEATURE_PLANS) {
+        try {
+          const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(plan)}`, 'GET', {}, binding);
+          const data = payload && payload.data ? payload.data : {};
+          if (data.hasAccess) {
+            return {
+              hasAccess: true,
+              plan: data.plan || plan,
+              status: data.status || 'active',
+              expiresAt: data.expiresAt || '',
+              bindingToken: binding.token,
+              bindingLabel: binding.label || '',
+            };
+          }
+          lastError = data;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+    }
+
+    return {
+      hasAccess: false,
+      plan: LOCAL_TRANSCRIPTION_PLAN,
+      status: (lastError && lastError.status) || 'inactive',
+      expiresAt: (lastError && lastError.expiresAt) || '',
+    };
+  }
+
+  async ensureProFeatureAccess(featureName = 'Pro 功能') {
+    const status = await this.getProFeatureEntitlementStatus();
+    if (status.hasAccess) return status;
+    if (status.status === 'unbound') {
+      throw new Error(`${featureName}仅 Pro 用户可用：请先绑定小程序并开通 Pro。`);
+    }
+    if (status.status === 'expired') {
+      throw new Error(`${featureName}仅 Pro 用户可用：你的 Pro 已过期，请续期开通。`);
+    }
+    throw new Error(`${featureName}仅 Pro 用户可用：请在小程序里开通 Pro 后再使用。`);
+  }
+
+  async toggleProFeatureSetting(settingKey, enabled, featureName) {
+    if (enabled) {
+      await this.ensureProFeatureAccess(featureName);
+    }
+    await this.saveSettings({
+      ...this.settings,
+      [settingKey]: Boolean(enabled),
+    });
   }
 
   async ensureLocalTranscriptionAccess() {
@@ -7993,8 +8054,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = '';
           }
         }
-        if (isXiaohongshuUrl(url) && !isMobileRuntime()) {
+        if (isXiaohongshuUrl(url) && this.settings.xiaohongshuCommentsEnabled && !isMobileRuntime()) {
           try {
+            await this.ensureProFeatureAccess('小红书评论区抓取');
             renderedSocialComments = typeof this.renderXiaohongshuComments === 'function'
               ? await this.renderXiaohongshuComments(resolvedUrl)
               : await renderXiaohongshuCommentsWithElectron(resolvedUrl);
@@ -8615,55 +8677,36 @@ class WechatInboxSettingTab extends PluginSettingTab {
     const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     aiPanel.createEl('summary', { text: 'AI 简介与关键词（DeepSeek）' });
     aiPanel.createDiv({
-      text: '给 Pro 用户生成 description 和 keywords。默认只在缺失时补齐，不覆盖已有网页元信息。',
+      text: 'Pro 功能。默认关闭；打开后同步写入前自动生成 description 和 keywords。DeepSeek 已内置在官方服务端，不需要填写 API Key。',
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(aiPanel)
       .setName('启用 AI 简介与关键词')
-      .setDesc('同步写入前自动生成内容简介与关键词。')
+      .setDesc('仅 Pro 用户可用；默认关闭。同步写入前自动生成内容简介与关键词。')
       .addToggle((toggle) => toggle
         .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
         .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            aiMetadataEnabled: value,
-          });
-        }));
-    new Setting(aiPanel)
-      .setName('DeepSeek API Key')
-      .setDesc('用于生成 description 和 keywords。')
-      .addText((text) => {
-        text.inputEl.type = 'password';
-        text
-          .setPlaceholder('sk-...')
-          .setValue(this.plugin.settings.deepseekApiKey || '')
-          .onChange(async (value) => {
+          try {
+            await this.plugin.toggleProFeatureSetting('aiMetadataEnabled', value, 'AI 简介与关键词');
+            this.display();
+          } catch (error) {
+            new Notice(error.message || String(error));
             await this.plugin.saveSettings({
               ...this.plugin.settings,
-              deepseekApiKey: value,
+              aiMetadataEnabled: false,
             });
-          });
-      });
-    new Setting(aiPanel)
-      .setName('DeepSeek 模型')
-      .setDesc('默认使用 deepseek-chat。')
-      .addText((text) => text
-        .setPlaceholder('deepseek-chat')
-        .setValue(this.plugin.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel)
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            deepseekModel: value,
-          });
+            this.display();
+          }
         }));
     new Setting(aiPanel)
       .setName('测试 AI 连接')
-      .setDesc('立即校验 API Key 和模型是否可用。')
+      .setDesc('校验 Pro 权限和服务端 DeepSeek 是否可用。')
       .addButton((button) => button
         .setButtonText('测试 AI 连接')
         .setCta()
         .onClick(async () => {
           try {
+            await this.plugin.ensureProFeatureAccess('AI 简介与关键词');
             const result = await this.plugin.testDeepSeekConnection();
             new Notice(`AI 连接成功：${result.description || result.keywords.join('、')}`);
           } catch (error) {
@@ -8678,8 +8721,26 @@ class WechatInboxSettingTab extends PluginSettingTab {
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(commentPanel)
-      .setName('小红书评论区')
-      .setDesc('扫码登录小红书网页后，同步小红书图文/视频时会复用本地会话抓评论区。')
+      .setName('启用小红书评论区抓取')
+      .setDesc('Pro 功能；默认关闭。打开后同步小红书图文/视频时会复用本地网页登录态抓评论区。')
+      .addToggle((toggle) => toggle
+        .setValue(Boolean(this.plugin.settings.xiaohongshuCommentsEnabled))
+        .onChange(async (value) => {
+          try {
+            await this.plugin.toggleProFeatureSetting('xiaohongshuCommentsEnabled', value, '小红书评论区抓取');
+            this.display();
+          } catch (error) {
+            new Notice(error.message || String(error));
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              xiaohongshuCommentsEnabled: false,
+            });
+            this.display();
+          }
+        }));
+    new Setting(commentPanel)
+      .setName('小红书登录状态')
+      .setDesc('打开小红书评论区抓取后，需要扫码登录小红书网页。')
       .addButton((button) => button
         .setButtonText('登录小红书')
         .setCta()
@@ -8915,6 +8976,7 @@ WechatObsidianInboxPlugin.__test = {
   buildWechatArticleMarkdownWithComments,
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
+  shouldGenerateAiMetadata,
   shouldRefreshAiDescription,
   ensureRequiredMetadataFallbacks,
   buildFallbackGeneratedKeywords,
