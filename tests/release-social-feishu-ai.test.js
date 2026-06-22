@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.38');
-assert.strictEqual(versions['1.2.38'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.39');
+assert.strictEqual(versions['1.2.39'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -381,7 +381,30 @@ async function runAsyncChecks() {
     propertyFields: plugin.settings.notePropertyFields,
   });
   assert.ok(enrichedMarkdown.includes('description: 把小红书标题方法沉淀成可复用的AI写作流程。'));
-  assert.ok(enrichedMarkdown.includes('keywords: 小红书, 标题方法, AI写作'));
+  assert.ok(enrichedMarkdown.includes('keywords:'));
+  assert.ok(enrichedMarkdown.includes('  - 小红书'));
+  assert.ok(enrichedMarkdown.includes('  - 标题方法'));
+  assert.ok(enrichedMarkdown.includes('  - AI写作'));
+  const existingMarkdownXhs = helpers.ensureRequiredMetadataFallbacks({
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/existing',
+    metadata: {
+      url: 'https://www.xiaohongshu.com/explore/existing',
+      title: '小红书关键词旧记录',
+      markdown: '## 正文\n\n这篇讲小红书内容选题和AI写作。\n\n#小红书 #内容选题 #AI写作',
+      keywords: [],
+    },
+  });
+  const existingMarkdown = helpers.buildMarkdownForRecord({
+    record: existingMarkdownXhs,
+    title: '小红书关键词旧记录',
+    syncedAt: '2026-06-22T00:00:00.000Z',
+    propertyFields: 'title,description,keywords',
+  });
+  assert.ok(existingMarkdown.includes('keywords:'));
+  assert.ok(existingMarkdown.includes('  - 小红书'));
+  assert.ok(existingMarkdown.includes('  - 内容选题'));
+  assert.ok(existingMarkdown.includes('  - AI写作'));
 
   const xhsHydratePlugin = new Plugin();
   xhsHydratePlugin.settings = helpers.mergeSettings({});

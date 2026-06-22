@@ -5499,6 +5499,27 @@ function yamlValue(value) {
   return String(value).replace(/\r?\n/g, ' ').trim();
 }
 
+function yamlScalar(value) {
+  const text = String(value || '').replace(/\r?\n/g, ' ').trim();
+  if (!text) return '';
+  if (/[:#\[\]{},&*!|>'"%@`]/.test(text) || /^\s|\s$|^(true|false|null|yes|no|on|off)$/i.test(text)) {
+    return JSON.stringify(text);
+  }
+  return text;
+}
+
+function buildFrontmatterLine(key, value) {
+  if (Array.isArray(value)) {
+    const items = value
+      .map((item) => yamlScalar(item))
+      .filter(Boolean);
+    if (!items.length) return '';
+    return `${key}:\n${items.map((item) => `  - ${item}`).join('\n')}`;
+  }
+  const scalar = yamlValue(value);
+  return scalar ? `${key}: ${scalar}` : '';
+}
+
 function buildFrontmatter(lines) {
   return ['---', ...lines, '---', ''].join('\n');
 }
@@ -5626,7 +5647,8 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
   const lines = fieldOrder
     .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
     .filter((key) => yamlValue(fields[key]))
-    .map((key) => `${key}: ${yamlValue(fields[key])}`);
+    .map((key) => buildFrontmatterLine(key, fields[key]))
+    .filter(Boolean);
 
   return buildFrontmatter(lines);
 }
