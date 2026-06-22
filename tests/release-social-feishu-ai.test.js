@@ -45,8 +45,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.34');
-assert.strictEqual(versions['1.2.34'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.35');
+assert.strictEqual(versions['1.2.35'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -76,6 +76,18 @@ assert.ok(feishuMarkdown.includes('## 二级标题'));
 assert.ok(feishuMarkdown.includes('### 三级标题'));
 assert.ok(feishuMarkdown.includes('![流程图](https://example.com/a.png)'));
 assert.ok(feishuMarkdown.includes('![图片](https://example.com/b.jpg)'));
+const feishuRichImagesMarkdown = helpers.extractFeishuMarkdownFromHtml(`
+  <html><body>
+    <h1>飞书图片测试</h1>
+    <picture><source srcset="https://example.com/source.webp 2x"><img data-src="https://example.com/picture.png"></picture>
+    <div style="background-image:url('https://example.com/bg.jpg')">背景图</div>
+    <script>window.__DATA__={"imageUrl":"https:\\/\\/example.com\\/script.png","preview_url":"https://example.com/preview.jpeg"}</script>
+  </body></html>
+`);
+assert.ok(feishuRichImagesMarkdown.includes('https://example.com/source.webp'));
+assert.ok(feishuRichImagesMarkdown.includes('https://example.com/bg.jpg'));
+assert.ok(feishuRichImagesMarkdown.includes('https://example.com/script.png'));
+assert.ok(feishuRichImagesMarkdown.includes('https://example.com/preview.jpeg'));
 
 const wechatScriptCommentHtml = `
   <html>
@@ -142,6 +154,9 @@ const wechatMarkdownWithApiComments = helpers.buildWechatArticleMarkdownWithComm
 );
 assert.ok(wechatMarkdownWithApiComments.includes('## 评论区'));
 assert.ok(wechatMarkdownWithApiComments.includes('**接口读者**：这条评论来自微信接口'));
+const wechatMarkdownWithoutComments = helpers.buildWechatArticleMarkdownWithComments('公众号正文', wechatArticleForCommentApi, []);
+assert.ok(wechatMarkdownWithoutComments.includes('## 评论区'));
+assert.ok(wechatMarkdownWithoutComments.includes('未抓取到公开评论'));
 
 const xhsNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
@@ -239,6 +254,25 @@ const hydratedXhsRecord = helpers.buildXiaohongshuRecordFromExtraction(noisyXhsR
   renderedComments: [{ author: '渲染用户', content: '渲染后才出现的评论' }],
 });
 assert.ok(hydratedXhsRecord.metadata.markdown.includes('**渲染用户**：渲染后才出现的评论'));
+const xhsRecordWithoutMetadataKeywords = helpers.buildXiaohongshuRecordFromExtraction({
+  type: 'webpage',
+  content: 'https://www.xiaohongshu.com/explore/999',
+  metadata: { platform: '小红书', title: 'AI内容选题' },
+}, {
+  metadata: { platform: '小红书', title: 'AI内容选题' },
+  url: 'https://www.xiaohongshu.com/explore/999',
+  extracted: {
+    title: 'AI内容选题',
+    description: '这篇讲小红书内容选题和AI写作。',
+    tags: [],
+    markdown: '## 正文\n\n这篇讲小红书内容选题和AI写作。',
+    imageUrls: [],
+    videoUrl: '',
+    comments: [],
+  },
+});
+assert.ok(Array.isArray(xhsRecordWithoutMetadataKeywords.metadata.keywords));
+assert.ok(xhsRecordWithoutMetadataKeywords.metadata.keywords.length > 0);
 
 async function runAsyncChecks() {
   const plugin = new Plugin();

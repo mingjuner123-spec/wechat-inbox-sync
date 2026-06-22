@@ -1853,6 +1853,19 @@ function shouldGenerateAiMetadata(settings, record) {
     || shouldRefreshAiDescription(metadata, record);
 }
 
+function ensureRequiredMetadataFallbacks(record) {
+  if (!record || !record.metadata) return record;
+  const metadata = { ...(record.metadata || {}) };
+  if (isXiaohongshuRecord(record, metadata) && !getRecordKeywords(metadata).length) {
+    const keywords = buildFallbackGeneratedKeywords({ ...record, metadata });
+    if (keywords.length) metadata.keywords = keywords;
+  }
+  return {
+    ...record,
+    metadata,
+  };
+}
+
 function cleanMarkdownForStorage(markdown, options = {}) {
   const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
   const out = [];
@@ -3318,12 +3331,34 @@ function collectImageUrlsFromHtml(html) {
 
   const imageTags = source.match(/<img\b[^>]*>/gi) || [];
   imageTags.forEach((tag) => {
-    pushUniqueUrl(urls, getHtmlAttribute(tag, 'data-src') || getHtmlAttribute(tag, 'src'));
-    const srcset = getHtmlAttribute(tag, 'srcset');
+    [
+      'data-src',
+      'data-original',
+      'data-url',
+      'data-origin-src',
+      'data-lazy-src',
+      'src',
+    ].forEach((attr) => pushUniqueUrl(urls, getHtmlAttribute(tag, attr)));
+    const srcset = getHtmlAttribute(tag, 'srcset') || getHtmlAttribute(tag, 'data-srcset');
     if (srcset) {
-      pushUniqueUrl(urls, srcset.split(',')[0].trim().split(/\s+/)[0]);
+      srcset.split(',').forEach((item) => pushUniqueUrl(urls, item.trim().split(/\s+/)[0]));
     }
   });
+
+  const sourceTags = source.match(/<source\b[^>]*>/gi) || [];
+  sourceTags.forEach((tag) => {
+    const srcset = getHtmlAttribute(tag, 'srcset') || getHtmlAttribute(tag, 'data-srcset');
+    if (srcset) {
+      srcset.split(',').forEach((item) => pushUniqueUrl(urls, item.trim().split(/\s+/)[0]));
+    }
+    pushUniqueUrl(urls, getHtmlAttribute(tag, 'src'));
+  });
+
+  const cssUrlPattern = /url\((?:'|")?([^'")]+?\.(?:jpg|jpeg|png|webp)(?:\?[^'")\s]*)?)(?:'|")?\)/gi;
+  let cssMatch;
+  while ((cssMatch = cssUrlPattern.exec(source))) {
+    pushUniqueUrl(urls, cssMatch[1]);
+  }
 
   const imagePattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"'\\\s<>]*)?/gi;
   let match;
@@ -3837,6 +3872,18 @@ function buildXiaohongshuRecordFromExtraction(record, {
     ...(renderedComments || []),
   ];
   const markdown = mergeSocialCommentsIntoMarkdown(extracted.markdown || '', allComments);
+  const recordForKeywords = {
+    ...record,
+    metadata: {
+      ...metadata,
+      title: metadata.title || extracted.title,
+      description: metadata.description || extracted.description,
+      markdown,
+      tags: extracted.tags || [],
+    },
+  };
+  const keywords = getRecordKeywords({ keywords: metadata.keywords || extracted.tags || [] });
+  const fallbackKeywords = keywords.length ? keywords : buildFallbackGeneratedKeywords(recordForKeywords);
   return {
     ...record,
     metadata: {
@@ -3844,7 +3891,7 @@ function buildXiaohongshuRecordFromExtraction(record, {
       title: metadata.title || extracted.title || getWebpageSourcePrefix(url),
       author: metadata.author || extracted.author || '',
       description: metadata.description || extracted.description || '',
-      keywords: metadata.keywords || extracted.tags || [],
+      keywords: fallbackKeywords,
       platform: metadata.platform || '小红书',
       contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === 'audio_video' ? '视频' : '图文'),
       markdown,
@@ -4275,11 +4322,18 @@ function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
 }
 
 function buildWechatArticleMarkdownWithComments(markdown, html, extraComments = []) {
+  const source = String(markdown || '').trim();
   const comments = [
     ...extractWechatCommentsFromHtml(html),
     ...(extraComments || []),
   ];
-  return appendWechatCommentsToMarkdown(markdown, comments);
+  if (!comments.length) {
+    if (/(^|\n)##\s+评论区\b/.test(source)) return source;
+    return `${source}\n\n## 评论区\n\n> 未抓取到公开评论。可能是文章未开放精选留言、微信网页端未暴露评论接口、评论需要微信登录态，或该链接返回的是安全验证/受限页面。`;
+  }
+  const withoutExistingStatus = source.replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '').trim();
+  const base = withoutExistingStatus.replace(/\n+##\s+评论区[\s\S]*$/m, '').trim();
+  return mergeSocialCommentsIntoMarkdown(base, comments);
 }
 
 async function fetchWechatCommentsFromApi(articleUrl, html) {
@@ -4536,12 +4590,19 @@ async function renderUrlToMarkdownWithElectron(url) {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
         const imageAssets = [];
+        const seenImageAssets = new Set();
+        const addImageAsset = (src, alt) => {
+          src = String(src || '').trim();
+          if (!src || seenImageAssets.has(src)) return '';
+          seenImageAssets.add(src);
+          imageAssets.push({ src, alt: alt || '图片' });
+          return '\\n\\n![' + (alt || '图片') + '](' + src + ')\\n\\n';
+        };
         const imageToMarkdown = (img) => {
-          const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+          const src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-url') || '';
           if (!src) return '';
           const alt = img.alt || '图片';
-          imageAssets.push({ src, alt });
-          return '\\n\\n![' + alt + '](' + src + ')\\n\\n';
+          return addImageAsset(src, alt);
         };
         const blockToMarkdown = (node) => {
           if (!node) return '';
@@ -4646,9 +4707,49 @@ async function renderUrlToMarkdownWithElectron(url) {
         const byRoot = clean(blockToMarkdown(root));
         const baseMarkdown = byBlocks.length > byRoot.length * 0.6 ? byBlocks : byRoot;
         const commentsMarkdown = extractWechatComments();
-        const markdown = commentsMarkdown && !/(^|\\n)##\\s+评论区\\b/.test(baseMarkdown)
+        document.querySelectorAll('img').forEach((img) => {
+          imageToMarkdown(img);
+          const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
+          srcset.split(',').forEach((item) => addImageAsset(item.trim().split(/\\s+/)[0], img.alt || '图片'));
+        });
+        document.querySelectorAll('source').forEach((node) => {
+          const srcset = node.getAttribute('srcset') || node.getAttribute('data-srcset') || '';
+          srcset.split(',').forEach((item) => addImageAsset(item.trim().split(/\\s+/)[0], '图片'));
+          addImageAsset(node.getAttribute('src'), '图片');
+        });
+        document.querySelectorAll('*').forEach((node) => {
+          try {
+            const bg = getComputedStyle(node).backgroundImage || '';
+            const matches = bg.match(/url\\(["']?([^"')]+)["']?\\)/g) || [];
+            matches.forEach((item) => {
+              const match = item.match(/url\\(["']?([^"')]+)["']?\\)/);
+              if (match) addImageAsset(match[1], '背景图');
+            });
+          } catch (error) {}
+        });
+        try {
+          performance.getEntriesByType('resource').forEach((entry) => {
+            if (/\\.(?:jpg|jpeg|png|webp)(?:[?#]|$)/i.test(entry.name || '')) {
+              addImageAsset(entry.name, '图片');
+            }
+          });
+        } catch (error) {}
+        const imageMarkdown = imageAssets
+          .map((asset, index) => '![' + (asset.alt || ('图片' + (index + 1))) + '](' + asset.src + ')')
+          .join('\\n\\n');
+        let markdown = commentsMarkdown && !/(^|\\n)##\\s+评论区\\b/.test(baseMarkdown)
           ? clean(baseMarkdown + '\\n\\n' + commentsMarkdown)
           : baseMarkdown;
+        if (imageMarkdown) {
+          const missingImageMarkdown = imageMarkdown
+            .split(/\\n\\n+/)
+            .filter((line) => {
+              const match = line.match(/\\(([^)]+)\\)/);
+              return match && !markdown.includes(match[1]);
+            })
+            .join('\\n\\n');
+          if (missingImageMarkdown) markdown = clean(markdown + '\\n\\n## 图片\\n\\n' + missingImageMarkdown);
+        }
         const toDataUrl = (blob) => new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => resolve(String(reader.result || ''));
@@ -4999,8 +5100,19 @@ function collectFeishuImageUrls(source) {
     'origin_url',
     'downloadUrl',
     'download_url',
+    'previewUrl',
+    'preview_url',
+    'thumbnail',
+    'thumbnailUrl',
+    'thumbnail_url',
+    'largeUrl',
+    'large_url',
+    'srcset',
   ]).forEach((url) => {
     if (isLikelyImageUrl(url)) pushUniqueUrl(urls, url);
+    if (String(url || '').includes(',')) {
+      String(url).split(',').forEach((item) => pushUniqueUrl(urls, item.trim().split(/\s+/)[0]));
+    }
   });
   return urls;
 }
@@ -7505,6 +7617,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown);
+    recordForMarkdown = ensureRequiredMetadataFallbacks(recordForMarkdown);
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,
@@ -8140,6 +8253,7 @@ WechatObsidianInboxPlugin.__test = {
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   shouldRefreshAiDescription,
+  ensureRequiredMetadataFallbacks,
   buildFallbackGeneratedKeywords,
   extractAiMetadataInputText,
   cleanMarkdownForStorage,
