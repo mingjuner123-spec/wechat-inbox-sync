@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.41');
-assert.strictEqual(versions['1.2.41'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.42');
+assert.strictEqual(versions['1.2.42'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -268,6 +268,18 @@ assert.ok(xhsExpandScript.includes('展开'));
 assert.ok(xhsExpandScript.includes('更多回复'));
 assert.ok(xhsExpandScript.includes('scrollTop'));
 assert.ok(xhsExpandScript.includes('comment'));
+assert.strictEqual(typeof helpers.getXiaohongshuDomCommentExtractScript, 'function');
+const xhsDomScript = helpers.getXiaohongshuDomCommentExtractScript();
+assert.ok(xhsDomScript.includes('note-text'));
+assert.ok(xhsDomScript.includes('comment-content'));
+assert.ok(xhsDomScript.includes('SOCIAL_COMMENT_LIMIT'));
+assert.strictEqual(typeof helpers.getXiaohongshuInPageCommentFetchScript, 'function');
+const xhsInPageCommentScript = helpers.getXiaohongshuInPageCommentFetchScript('https://www.xiaohongshu.com/explore/abc123?xsec_token=token-1');
+assert.ok(xhsInPageCommentScript.includes('/api/sns/web/v2/comment/page'));
+assert.ok(xhsInPageCommentScript.includes('/api/sns/web/v2/comment/sub/page'));
+assert.ok(xhsInPageCommentScript.includes("credentials: 'include'"));
+assert.ok(xhsInPageCommentScript.includes('root_comment_id'));
+assert.ok(xhsInPageCommentScript.includes('xsec_token'));
 
 assert.strictEqual(typeof helpers.getSocialElectronPartition, 'function');
 assert.strictEqual(helpers.getSocialElectronPartition('xiaohongshu'), 'persist:wechat-inbox-sync-xiaohongshu');
@@ -372,6 +384,27 @@ const xhsRecordWithoutMetadataKeywords = helpers.buildXiaohongshuRecordFromExtra
 });
 assert.ok(Array.isArray(xhsRecordWithoutMetadataKeywords.metadata.keywords));
 assert.ok(xhsRecordWithoutMetadataKeywords.metadata.keywords.length > 0);
+const xhsRecordWithFallbackKeywordsAndComments = helpers.buildXiaohongshuRecordFromExtraction({
+  type: 'webpage',
+  content: 'https://www.xiaohongshu.com/explore/keywords-comments',
+  metadata: { platform: '小红书', title: 'AI内容选题' },
+}, {
+  metadata: { platform: '小红书', title: 'AI内容选题' },
+  url: 'https://www.xiaohongshu.com/explore/keywords-comments',
+  extracted: {
+    title: 'AI内容选题',
+    description: '这篇讲小红书内容选题和AI写作。',
+    tags: [],
+    markdown: '## 正文\n\n这篇讲小红书内容选题和AI写作。',
+    imageUrls: [],
+    videoUrl: '',
+    comments: [],
+  },
+  renderedComments: [{ author: '评论用户', content: '关键词生成以后评论区也不能丢' }],
+});
+assert.ok(xhsRecordWithFallbackKeywordsAndComments.metadata.keywords.length > 0);
+assert.ok(xhsRecordWithFallbackKeywordsAndComments.metadata.markdown.includes('## 评论区'));
+assert.ok(xhsRecordWithFallbackKeywordsAndComments.metadata.markdown.includes('关键词生成以后评论区也不能丢'));
 
 async function runAsyncChecks() {
   const plugin = new Plugin();

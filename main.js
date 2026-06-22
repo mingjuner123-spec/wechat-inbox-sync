@@ -4598,8 +4598,8 @@ function createRenderedCommentCollector(webContents, platform) {
   };
   const addPayload = (payload) => {
     const extracted = target === 'wechat'
-      ? extractWechatCommentsFromPayload(payload, 30)
-      : extractXiaohongshuCommentsFromPayload(payload, 30);
+      ? extractWechatCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT)
+      : extractXiaohongshuCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT);
     extracted.forEach((comment) => pushSocialComment(comments, seen, comment));
   };
 
@@ -5176,7 +5176,7 @@ function getXiaohongshuCommentExpansionScript() {
         .filter((node) => {
           const text = String(node.innerText || node.textContent || '').replace(/\\s+/g, '');
           if (!text || text.length > 40 || !visible(node)) return false;
-          return /展开|更多回复|查看.*回复|全部回复|更多评论|展开.*评论|展开.*条|共\\d+条回复|\\d+条回复|more/i.test(text);
+          return /^(评论|查看评论|全部评论|更多评论)$|展开|更多回复|查看.*回复|全部回复|展开.*评论|展开.*条|共\\d+条回复|\\d+条回复|more/i.test(text);
         });
       const scrollables = () => Array.from(document.querySelectorAll('[class*="comment"], [class*="comments"], [class*="reply"], [class*="scroll"], [class*="list"], main, body, html'))
         .filter((node) => {
@@ -5206,6 +5206,192 @@ function getXiaohongshuCommentExpansionScript() {
         if (stableRounds >= 4) break;
       }
       return true;
+    })()
+  `;
+}
+
+function getXiaohongshuInPageCommentFetchScript(url = '') {
+  return `
+    (async () => {
+      const SOCIAL_COMMENT_LIMIT = ${SOCIAL_COMMENT_LIMIT};
+      const inputUrl = ${JSON.stringify(cleanDisplayUrl(url))};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+      const safeParseUrl = (value) => {
+        try { return new URL(value || location.href, location.href); } catch (error) { return null; }
+      };
+      const readSearch = (key) => {
+        const urls = [safeParseUrl(location.href), safeParseUrl(inputUrl)].filter(Boolean);
+        for (const parsed of urls) {
+          const value = parsed.searchParams.get(key);
+          if (value) return value;
+        }
+        return '';
+      };
+      const pageSource = () => {
+        try {
+          return [
+            document.documentElement ? document.documentElement.innerHTML || '' : '',
+            JSON.stringify(window.__INITIAL_STATE__ || {}),
+            JSON.stringify(window.__APOLLO_STATE__ || {}),
+          ].join('\\n');
+        } catch (error) {
+          return document.documentElement ? document.documentElement.innerHTML || '' : '';
+        }
+      };
+      const readNoteId = () => {
+        const urls = [safeParseUrl(location.href), safeParseUrl(inputUrl)].filter(Boolean);
+        for (const parsed of urls) {
+          const match = parsed.pathname.match(/\\/(?:explore|discovery\\/item|item)\\/([0-9a-zA-Z]+)/i);
+          if (match && match[1]) return match[1];
+        }
+        const source = pageSource();
+        const patterns = [
+          /["']note[_-]?id["']\\s*:\\s*["']([0-9a-zA-Z]+)["']/i,
+          /["']noteId["']\\s*:\\s*["']([0-9a-zA-Z]+)["']/i,
+          /noteDetailMap["']?\\s*:\\s*\\{\\s*["']([0-9a-zA-Z]+)["']/i
+        ];
+        for (const pattern of patterns) {
+          const match = source.match(pattern);
+          if (match && match[1]) return match[1];
+        }
+        return '';
+      };
+      const readXsecToken = () => {
+        const direct = readSearch('xsec_token');
+        if (direct) return direct;
+        const source = pageSource();
+        const match = source.match(/["']xsec_token["']\\s*:\\s*["']([^"']+)["']/i)
+          || source.match(/["']xsecToken["']\\s*:\\s*["']([^"']+)["']/i);
+        return match && match[1] ? clean(match[1]) : '';
+      };
+      const readField = (value, keys) => {
+        for (const key of keys) {
+          if (value && Object.prototype.hasOwnProperty.call(value, key) && value[key] !== undefined && value[key] !== null) {
+            return value[key];
+          }
+        }
+        return undefined;
+      };
+      const findCommentArrays = (value, arrays = [], depth = 0) => {
+        if (!value || depth > 6) return arrays;
+        if (Array.isArray(value)) {
+          if (value.some((item) => item && typeof item === 'object' && readField(item, ['id', 'comment_id', 'content', 'commentContent']) !== undefined)) {
+            arrays.push(value);
+          }
+          value.forEach((item) => findCommentArrays(item, arrays, depth + 1));
+          return arrays;
+        }
+        if (typeof value !== 'object') return arrays;
+        Object.keys(value).forEach((key) => {
+          if (/comment|cmt|reply|list|items|data/i.test(key)) findCommentArrays(value[key], arrays, depth + 1);
+        });
+        return arrays;
+      };
+      const collectRootComments = (payload) => {
+        const roots = [];
+        const seen = new Set();
+        findCommentArrays(payload).forEach((items) => {
+          items.forEach((item) => {
+            if (!item || typeof item !== 'object') return;
+            const content = readField(item, ['content', 'text', 'commentContent', 'comment_content']);
+            const id = readField(item, ['id', 'comment_id', 'commentId']);
+            if (!id || !content || seen.has(String(id))) return;
+            seen.add(String(id));
+            roots.push(item);
+          });
+        });
+        return roots;
+      };
+      const getCursor = (payload) => {
+        const data = payload && (payload.data || payload.result || payload);
+        return String(readField(data || {}, ['cursor', 'next_cursor', 'nextCursor']) || '');
+      };
+      const hasMore = (payload) => {
+        const data = payload && (payload.data || payload.result || payload);
+        const value = readField(data || {}, ['has_more', 'hasMore', 'has_next', 'hasNext']);
+        return value === true || value === 1 || value === 'true' || value === '1';
+      };
+      const requestJson = async (path, params) => {
+        const query = new URLSearchParams();
+        Object.entries(params || {}).forEach(([key, value]) => {
+          if (value !== undefined && value !== null && String(value) !== '') query.set(key, String(value));
+        });
+        const response = await fetch(path + '?' + query.toString(), {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            Accept: 'application/json, text/plain, */*',
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
+        const text = await response.text();
+        try { return JSON.parse(text); } catch (error) { return text; }
+      };
+
+      const noteId = readNoteId();
+      if (!noteId) return [];
+      const xsecToken = readXsecToken();
+      const baseParams = {
+        note_id: noteId,
+        xsec_token: xsecToken,
+        image_formats: 'jpg,webp,avif'
+      };
+      const payloads = [];
+      const rootComments = [];
+      let cursor = '';
+      for (let page = 0; page < 3 && rootComments.length < SOCIAL_COMMENT_LIMIT; page += 1) {
+        let payload = null;
+        try {
+          payload = await requestJson('/api/sns/web/v2/comment/page', {
+            ...baseParams,
+            cursor,
+            top_comment_id: '',
+          });
+        } catch (error) {
+          break;
+        }
+        if (!payload) break;
+        payloads.push(payload);
+        collectRootComments(payload).forEach((comment) => {
+          if (rootComments.length < SOCIAL_COMMENT_LIMIT) rootComments.push(comment);
+        });
+        const nextCursor = getCursor(payload);
+        if (!hasMore(payload) || !nextCursor || nextCursor === cursor) break;
+        cursor = nextCursor;
+        await sleep(350);
+      }
+
+      for (const comment of rootComments.slice(0, SOCIAL_COMMENT_LIMIT)) {
+        const rootCommentId = readField(comment, ['id', 'comment_id', 'commentId']);
+        const replyCount = Number(readField(comment, ['sub_comment_count', 'subCommentCount', 'sub_comment_num', 'reply_count', 'replyCount']) || 0);
+        const inlineReplies = readField(comment, ['sub_comments', 'subComments', 'reply_list', 'replyList']);
+        const inlineReplyCount = Array.isArray(inlineReplies) ? inlineReplies.length : 0;
+        const hasHiddenReplies = replyCount > inlineReplyCount
+          || readField(comment, ['sub_comment_cursor', 'subCommentCursor', 'sub_comment_has_more', 'subCommentHasMore']) !== undefined;
+        if (!rootCommentId || !hasHiddenReplies) continue;
+        let subCursor = '';
+        for (let page = 0; page < 3; page += 1) {
+          let payload = null;
+          try {
+            payload = await requestJson('/api/sns/web/v2/comment/sub/page', {
+              ...baseParams,
+              root_comment_id: rootCommentId,
+              cursor: subCursor,
+              num: 10,
+            });
+          } catch (error) {
+            break;
+          }
+          if (!payload) break;
+          payloads.push(payload);
+          const nextCursor = getCursor(payload);
+          if (!hasMore(payload) || !nextCursor || nextCursor === subCursor) break;
+          subCursor = nextCursor;
+          await sleep(250);
+        }
+      }
+      return payloads;
     })()
   `;
 }
@@ -5276,6 +5462,79 @@ function getWechatInPageCommentFetchScript() {
   `;
 }
 
+function getXiaohongshuDomCommentExtractScript() {
+  return `
+    (() => {
+      const SOCIAL_COMMENT_LIMIT = ${SOCIAL_COMMENT_LIMIT};
+      const clean = (text) => String(text || '')
+        .replace(/\\u00a0/g, ' ')
+        .replace(/\\s+/g, ' ')
+        .trim();
+      const pickText = (root, selectors) => {
+        for (const selector of selectors) {
+          const node = root.querySelector(selector);
+          const text = clean(node ? node.innerText || node.textContent || '' : '');
+          if (text) return text;
+        }
+        return '';
+      };
+      const nodes = Array.from(document.querySelectorAll([
+        '[class*="comment-item"]',
+        '[class*="commentItem"]',
+        '[class*="comment-card"]',
+        '[class*="commentCard"]',
+        '[class*="comment-container"]',
+        '[class*="commentContainer"]',
+        '[class*="reply-item"]',
+        '[class*="replyItem"]',
+        '[class*="note-text"]',
+        '[data-e2e*="comment"]'
+      ].join(',')));
+      const comments = [];
+      const seen = new Set();
+      nodes.forEach((node) => {
+        const fullText = clean(node.innerText || node.textContent || '');
+        if (!fullText || fullText.length < 2 || fullText.length > 1000) return;
+        const author = pickText(node, [
+          '[class*="user-name"]',
+          '[class*="userName"]',
+          '[class*="nickname"]',
+          '[class*="nick"]',
+          '[class*="author"]',
+          '[class*="name"]'
+        ]);
+        let content = pickText(node, [
+          '[class*="comment-content"]',
+          '[class*="commentContent"]',
+          '[class*="note-text"]',
+          '[class*="content"]',
+          '[class*="text"]',
+          '[class*="desc"]'
+        ]);
+        if (!content || content === author) {
+          content = fullText;
+          if (author && content.startsWith(author)) content = clean(content.slice(author.length));
+        }
+        content = content
+          .replace(/^(回复|赞|点赞|展开|收起|更多回复|查看回复)\\s*/g, '')
+          .replace(/\\s*(回复|赞|点赞|展开|收起|更多回复|查看回复)\\s*$/g, '')
+          .trim();
+        const likes = pickText(node, [
+          '[class*="like-count"]',
+          '[class*="likeCount"]',
+          '[class*="likes"]',
+          '[class*="praise"]'
+        ]).replace(/[^0-9万\\.]/g, '');
+        const key = author + '|' + content;
+        if (!content || content.length < 2 || seen.has(key)) return;
+        seen.add(key);
+        comments.push({ author, content, likes });
+      });
+      return comments.slice(0, SOCIAL_COMMENT_LIMIT);
+    })()
+  `;
+}
+
 async function renderXiaohongshuCommentsWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -5293,77 +5552,22 @@ async function renderXiaohongshuCommentsWithElectron(url) {
     const loaded = waitForWebContents(win.webContents, 18000);
     await win.loadURL(url);
     await loaded;
+    await settleRenderedPage(win.webContents);
+    let inPagePayloads = [];
+    try {
+      const payload = await win.webContents.executeJavaScript(getXiaohongshuInPageCommentFetchScript(url));
+      inPagePayloads = Array.isArray(payload) ? payload : (payload ? [payload] : []);
+    } catch (error) {
+      inPagePayloads = [];
+    }
     await win.webContents.executeJavaScript(getXiaohongshuCommentExpansionScript());
-    const comments = await win.webContents.executeJavaScript(`
-      (() => {
-        const clean = (text) => String(text || '')
-          .replace(/\\u00a0/g, ' ')
-          .replace(/\\s+/g, ' ')
-          .trim();
-        const pickText = (root, selectors) => {
-          for (const selector of selectors) {
-            const node = root.querySelector(selector);
-            const text = clean(node ? node.innerText || node.textContent || '' : '');
-            if (text) return text;
-          }
-          return '';
-        };
-        const nodes = Array.from(document.querySelectorAll([
-          '[class*="comment-item"]',
-          '[class*="commentItem"]',
-          '[class*="comment-card"]',
-          '[class*="commentCard"]',
-          '[class*="comment-container"]',
-          '[class*="commentContainer"]',
-          '[class*="reply-item"]',
-          '[class*="replyItem"]',
-          '[data-e2e*="comment"]'
-        ].join(',')));
-        const comments = [];
-        const seen = new Set();
-        nodes.forEach((node) => {
-          const fullText = clean(node.innerText || node.textContent || '');
-          if (!fullText || fullText.length < 2 || fullText.length > 800) return;
-          const author = pickText(node, [
-            '[class*="user-name"]',
-            '[class*="userName"]',
-            '[class*="nickname"]',
-            '[class*="nick"]',
-            '[class*="author"]',
-            '[class*="name"]'
-          ]);
-          let content = pickText(node, [
-            '[class*="comment-content"]',
-            '[class*="commentContent"]',
-            '[class*="content"]',
-            '[class*="text"]',
-            '[class*="desc"]'
-          ]);
-          if (!content || content === author) {
-            content = fullText;
-            if (author && content.startsWith(author)) content = clean(content.slice(author.length));
-          }
-          content = content
-            .replace(/^(回复|赞|点赞|展开|收起)\\s*/g, '')
-            .replace(/\\s*(回复|赞|点赞|展开|收起)\\s*$/g, '')
-            .trim();
-          const likes = pickText(node, [
-            '[class*="like-count"]',
-            '[class*="likeCount"]',
-            '[class*="likes"]',
-            '[class*="praise"]'
-          ]).replace(/[^0-9万\\.]/g, '');
-          const key = author + '|' + content;
-          if (!content || content.length < 2 || seen.has(key)) return;
-          seen.add(key);
-          comments.push({ author, content, likes });
-        });
-        return comments.slice(0, SOCIAL_COMMENT_LIMIT);
-      })()
-    `);
+    const comments = await win.webContents.executeJavaScript(getXiaohongshuDomCommentExtractScript());
     const merged = [];
     const seen = new Set();
     (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
+    inPagePayloads.forEach((payload) => {
+      extractXiaohongshuCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT).forEach((comment) => pushSocialComment(merged, seen, comment));
+    });
     (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
     return merged.slice(0, SOCIAL_COMMENT_LIMIT);
   } finally {
@@ -8665,6 +8869,8 @@ WechatObsidianInboxPlugin.__test = {
   shouldHydrateLinkAsWebpage,
   getSocialElectronPartition,
   getXiaohongshuCommentExpansionScript,
+  getXiaohongshuInPageCommentFetchScript,
+  getXiaohongshuDomCommentExtractScript,
   getWechatInPageCommentFetchScript,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
