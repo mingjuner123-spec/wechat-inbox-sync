@@ -57,6 +57,10 @@ const DEFAULT_SETTINGS = {
   notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: true,
   aiProvider: 'off',
+  aiMetadataEnabled: false,
+  deepseekApiKey: '',
+  deepseekModel: 'deepseek-chat',
+  deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
   cloudPreTranscriptionEnabled: false,
   cloudPreTranscriptionThresholdMinutes: 10,
   localAsrPlatform: 'auto',
@@ -989,6 +993,10 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
+  merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
+  merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
+  merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
+  merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
@@ -1795,6 +1803,13 @@ function buildTranscriptOnlyMetadata(metadata, {
   };
 }
 
+function shouldGenerateAiMetadata(settings, record) {
+  if (!settings || !settings.aiMetadataEnabled || !settings.deepseekApiKey) return false;
+  if (!record || !record.metadata) return false;
+  const metadata = record.metadata || {};
+  return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
+}
+
 function buildFileMarkdownBody(record) {
   const metadata = record.metadata || {};
   const fileName = metadata.fileName || record.content || 'upload-file';
@@ -1902,6 +1917,77 @@ function cleanMarkdownForStorage(markdown, options = {}) {
   });
 
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function stripMarkdownCodeBlocks(markdown) {
+  return String(markdown || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]+`/g, ' ');
+}
+
+function normalizeGeneratedKeywords(value) {
+  const source = Array.isArray(value) ? value.join(',') : String(value || '');
+  const seen = new Set();
+  return source
+    .replace(/[\r\n]+/g, ',')
+    .split(/[#,，,、；;\s]+/)
+    .map((item) => String(item || '').trim())
+    .filter((item) => item && item.length <= 24)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function parseGeneratedMetadataResponse(text) {
+  const source = String(text || '').trim();
+  if (!source) return { description: '', keywords: [] };
+
+  const fencedJsonMatch = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const jsonSource = fencedJsonMatch ? fencedJsonMatch[1].trim() : source;
+  const jsonPayload = tryParseJson(jsonSource);
+  if (jsonPayload && typeof jsonPayload === 'object') {
+    return {
+      description: String(jsonPayload.description || jsonPayload.summary || jsonPayload.excerpt || '').trim(),
+      keywords: normalizeGeneratedKeywords(jsonPayload.keywords || jsonPayload.tags || jsonPayload.hashtags || []),
+    };
+  }
+
+  const descriptionMatch = source.match(/description\s*[:：]\s*([^\n]+)/i)
+    || source.match(/简介\s*[:：]\s*([^\n]+)/i)
+    || source.match(/总结\s*[:：]\s*([^\n]+)/i);
+  const keywordsMatch = source.match(/keywords?\s*[:：]\s*([^\n]+)/i)
+    || source.match(/标签\s*[:：]\s*([^\n]+)/i)
+    || source.match(/关键词\s*[:：]\s*([^\n]+)/i);
+  return {
+    description: String(descriptionMatch ? descriptionMatch[1] : '').trim(),
+    keywords: normalizeGeneratedKeywords(keywordsMatch ? keywordsMatch[1] : ''),
+  };
+}
+
+function extractAiMetadataInputText(record) {
+  const metadata = (record && record.metadata) || {};
+  const parts = [
+    metadata.title,
+    record && record.content,
+    metadata.markdown,
+    metadata.snapshot,
+    metadata.contentSnapshot,
+    metadata.transcription,
+    metadata.description,
+    metadata.summary,
+    metadata.excerpt,
+  ].filter(Boolean);
+  return cleanMarkdownForStorage(
+    stripMarkdownCodeBlocks(parts.join('\n\n'))
+      .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
+      .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
+      .replace(/^#{1,6}\s*/gm, '')
+      .replace(/^\s*>\s*/gm, '')
+      .replace(/\n{3,}/g, '\n\n'),
+  ).slice(0, 6000);
 }
 
 function normalizeTitleForCompare(text) {
@@ -4750,6 +4836,89 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload;
   }
 
+  async requestExternalJson(url, { method = 'POST', headers = {}, body = null } = {}) {
+    const requestOptions = {
+      url,
+      method,
+      headers,
+      body,
+    };
+    let response;
+    try {
+      response = await requestUrl(requestOptions);
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error || '');
+      if (!isRequestUrlTransportError(message)) throw error;
+      response = await requestJsonViaNode(requestOptions);
+    }
+    const payload = response.json || (response.text ? tryParseJson(response.text) : null);
+    if (response.status && (response.status < 200 || response.status >= 300)) {
+      throw new Error((payload && (payload.error && payload.error.message || payload.errMsg)) || `HTTP ${response.status}`);
+    }
+    return payload || {};
+  }
+
+  async generateMetadataWithDeepSeek(record) {
+    const inputText = extractAiMetadataInputText(record);
+    if (!inputText) return { description: '', keywords: [] };
+    const payload = await this.requestExternalJson(this.settings.deepseekBaseUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.settings.deepseekApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: '你是内容整理助手。请基于用户提供的文案生成简介和关键词。只输出 JSON：{"description":"一句话简介","keywords":["关键词1","关键词2"]}。description 控制在 1 句话，keywords 返回 3 到 8 个简洁中文或英文关键词。',
+          },
+          {
+            role: 'user',
+            content: inputText,
+          },
+        ],
+      }),
+    });
+    return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
+  }
+
+  async enrichRecordMetadataWithAi(record) {
+    if (!shouldGenerateAiMetadata(this.settings, record)) return record;
+    const generated = await this.generateMetadataWithDeepSeek(record);
+    const metadata = { ...((record && record.metadata) || {}) };
+    if (!getRecordDescription(metadata) && generated.description) {
+      metadata.description = generated.description;
+    }
+    if (!getRecordKeywords(metadata).length && generated.keywords.length) {
+      metadata.keywords = generated.keywords;
+    }
+    return {
+      ...record,
+      metadata,
+    };
+  }
+
+  async testDeepSeekConnection() {
+    if (!this.settings.deepseekApiKey) {
+      throw new Error('请先填写 DeepSeek API Key');
+    }
+    const result = await this.generateMetadataWithDeepSeek({
+      type: 'text',
+      content: '这是一段关于 Obsidian 内容同步助手、飞书机器人和知识管理的测试文案。',
+      metadata: {
+        title: 'AI 连接测试',
+      },
+    });
+    if (!result.description && !result.keywords.length) {
+      throw new Error('DeepSeek 已响应，但没有返回可用的简介或关键词');
+    }
+    return result;
+  }
+
   async bindCurrentCode() {
     if (!this.settings.clientId) {
       await this.saveSettings({
@@ -6573,6 +6742,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
+    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown);
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,
@@ -6932,6 +7102,65 @@ class WechatInboxSettingTab extends PluginSettingTab {
       cls: 'wechat-inbox-sync-section-heading',
     });
 
+    const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    aiPanel.createEl('summary', { text: 'AI 简介与关键词（DeepSeek）' });
+    aiPanel.createDiv({
+      text: '给 Pro 用户生成 description 和 keywords。默认只在缺失时补齐，不覆盖已有网页元信息。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+    new Setting(aiPanel)
+      .setName('启用 AI 简介与关键词')
+      .setDesc('同步写入前自动生成内容简介与关键词。')
+      .addToggle((toggle) => toggle
+        .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            aiMetadataEnabled: value,
+          });
+        }));
+    new Setting(aiPanel)
+      .setName('DeepSeek API Key')
+      .setDesc('用于生成 description 和 keywords。')
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text
+          .setPlaceholder('sk-...')
+          .setValue(this.plugin.settings.deepseekApiKey || '')
+          .onChange(async (value) => {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              deepseekApiKey: value,
+            });
+          });
+      });
+    new Setting(aiPanel)
+      .setName('DeepSeek 模型')
+      .setDesc('默认使用 deepseek-chat。')
+      .addText((text) => text
+        .setPlaceholder('deepseek-chat')
+        .setValue(this.plugin.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            deepseekModel: value,
+          });
+        }));
+    new Setting(aiPanel)
+      .setName('测试 AI 连接')
+      .setDesc('立即校验 API Key 和模型是否可用。')
+      .addButton((button) => button
+        .setButtonText('测试 AI 连接')
+        .setCta()
+        .onClick(async () => {
+          try {
+            const result = await this.plugin.testDeepSeekConnection();
+            new Notice(`AI 连接成功：${result.description || result.keywords.join('、')}`);
+          } catch (error) {
+            new Notice(`AI 连接失败：${error.message || error}`);
+          }
+        }));
+
     const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     localAsrPanel.createEl('summary', { text: '本地转写组件（高级/备用）' });
     localAsrPanel.createDiv({
@@ -7122,6 +7351,9 @@ WechatObsidianInboxPlugin.__test = {
   extractWebpageMetadataFromHtml,
   extractWechatCommentsFromHtml,
   appendWechatCommentsToMarkdown,
+  normalizeGeneratedKeywords,
+  parseGeneratedMetadataResponse,
+  extractAiMetadataInputText,
   cleanMarkdownForStorage,
   resolveRedirectUrl,
   isRequestUrlTransportError,

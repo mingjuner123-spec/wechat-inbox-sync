@@ -1,7 +1,7 @@
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const NOTE_SAVE_MODES = {
@@ -39,6 +39,10 @@ const DEFAULT_SETTINGS = {
   notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: false,
   aiProvider: 'off',
+  aiMetadataEnabled: false,
+  deepseekApiKey: '',
+  deepseekModel: 'deepseek-chat',
+  deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
   localAsrPlatform: 'auto',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
@@ -214,6 +218,10 @@ function mergeSettings(savedSettings, platform = process.platform) {
   merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
+  merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
+  merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
+  merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
+  merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
   merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
     merged.localTranscriptionCommand,

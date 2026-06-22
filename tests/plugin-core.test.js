@@ -12,10 +12,10 @@ const {
   normalizeBindCodeInput,
 } = require('../obsidian-plugin/wechat-inbox-sync/plugin-core');
 
-const LEGACY_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
-const CURRENT_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const STABLE_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const EXPERIMENTAL_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 
-assert.strictEqual(OFFICIAL_SYNC_API_BASE, CURRENT_OFFICIAL_SYNC_API_BASE);
+assert.strictEqual(OFFICIAL_SYNC_API_BASE, STABLE_OFFICIAL_SYNC_API_BASE);
 assert.strictEqual(MAX_PLUGIN_BINDINGS, 3);
 
 assert.deepStrictEqual(AI_PROVIDER_NAMES, {
@@ -37,6 +37,10 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   notePropertyFields: '',
   autoSyncOnLoad: false,
   aiProvider: 'off',
+  aiMetadataEnabled: false,
+  deepseekApiKey: '',
+  deepseekModel: 'deepseek-chat',
+  deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
   localAsrPlatform: 'auto',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
@@ -63,7 +67,7 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
 assert.match(mergeSettings({ clientId: '' }).clientId, /^obsidian-[a-f0-9]{32}$/);
 
 assert.strictEqual(
-  mergeSettings({ apiBase: LEGACY_OFFICIAL_SYNC_API_BASE }).apiBase,
+  mergeSettings({ apiBase: EXPERIMENTAL_OFFICIAL_SYNC_API_BASE }).apiBase,
   OFFICIAL_SYNC_API_BASE,
 );
 
@@ -91,6 +95,10 @@ assert.deepStrictEqual(mergeSettings({
   noteSaveMode: 'root',
   notePropertyFields: 'type,title,url',
   aiProvider: 'tencent',
+  aiMetadataEnabled: false,
+  deepseekApiKey: '',
+  deepseekModel: 'deepseek-chat',
+  deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
   localTranscriptionCommand: 'powershell -File transcribe.ps1 -InputPath {input} -OutputPath {output}',
   tencentSecretId: 'sid',
   tencentSecretKey: 'sk',

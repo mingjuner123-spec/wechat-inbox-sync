@@ -98,6 +98,9 @@ assert.strictEqual(typeof helpers.cleanDisplayUrl, 'function');
 assert.strictEqual(typeof helpers.htmlToMarkdown, 'function');
 assert.strictEqual(typeof helpers.extractWechatCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.appendWechatCommentsToMarkdown, 'function');
+assert.strictEqual(typeof helpers.normalizeGeneratedKeywords, 'function');
+assert.strictEqual(typeof helpers.parseGeneratedMetadataResponse, 'function');
+assert.strictEqual(typeof helpers.extractAiMetadataInputText, 'function');
 assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
 assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallRoot, 'function');
@@ -161,6 +164,9 @@ assert.strictEqual(
 );
 assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionThresholdMinutes, 10);
+assert.strictEqual(helpers.mergeSettings({}).aiMetadataEnabled, false);
+assert.strictEqual(helpers.mergeSettings({}).deepseekApiKey, '');
+assert.strictEqual(helpers.mergeSettings({}).deepseekModel, 'deepseek-chat');
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 30 }).cloudPreTranscriptionThresholdMinutes, 30);
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 999 }).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
@@ -183,6 +189,9 @@ assert.ok(pluginMainSource.includes("text: '绑定小程序'"));
 assert.strictEqual(pluginMainSource.includes("text: 'Pro 本地转写功能'"), false);
 assert.ok(pluginMainSource.includes("text: '高级选项'"));
 assert.ok(pluginMainSource.includes("createEl('details'"));
+assert.ok(pluginMainSource.includes("text: 'AI 简介与关键词（DeepSeek）'"));
+assert.ok(pluginMainSource.includes(".setName('DeepSeek API Key')"));
+assert.ok(pluginMainSource.includes(".setName('测试 AI 连接')"));
 assert.ok(pluginMainSource.includes("text: '本地转写组件（高级/备用）'"));
 assert.ok(pluginMainSource.includes('默认走本地转写'));
 assert.ok(pluginMainSource.includes('wechat-inbox-sync-section-spacer'));
@@ -314,6 +323,36 @@ assert.strictEqual(
   helpers.buildSkippedSyncNotice([{ reason: 'already-synced-local' }, { reason: 'cloud-transcription-processing' }]),
   '，1 条本地已存在，已跳过重复写入，1 条云端转写中，完成后再同步',
 );
+assert.deepStrictEqual(
+  helpers.normalizeGeneratedKeywords('#飞书机器人, Obsidian，效率提升  AI'),
+  ['飞书机器人', 'Obsidian', '效率提升', 'AI'],
+);
+assert.deepStrictEqual(
+  helpers.parseGeneratedMetadataResponse('```json\n{"description":"一句话总结","keywords":["飞书机器人","Obsidian","效率"]}\n```'),
+  {
+    description: '一句话总结',
+    keywords: ['飞书机器人', 'Obsidian', '效率'],
+  },
+);
+assert.deepStrictEqual(
+  helpers.parseGeneratedMetadataResponse('description: 一句话总结\nkeywords: 飞书机器人, Obsidian, 效率'),
+  {
+    description: '一句话总结',
+    keywords: ['飞书机器人', 'Obsidian', '效率'],
+  },
+);
+const aiMetadataInput = helpers.extractAiMetadataInputText({
+  type: 'webpage',
+  content: 'https://example.com/post',
+  metadata: {
+    title: '飞书机器人直播回放',
+    markdown: '# 飞书机器人直播回放\n\n这是正文第一段。\n\n- 要点一\n- 要点二\n\n```js\nconst hidden = true;\n```',
+  },
+});
+assert.ok(aiMetadataInput.includes('飞书机器人直播回放'));
+assert.ok(aiMetadataInput.includes('这是正文第一段'));
+assert.ok(aiMetadataInput.includes('要点一'));
+assert.strictEqual(aiMetadataInput.includes('const hidden = true;'), false);
 assert.strictEqual(
   helpers.getLocalAsrInstallRoot('C:\\Users\\demo'),
   'C:\\Users\\demo\\.wechat-inbox-local-asr',
