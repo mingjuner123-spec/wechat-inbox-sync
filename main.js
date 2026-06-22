@@ -4491,6 +4491,24 @@ function htmlToMarkdown(html) {
   return readable;
 }
 
+function htmlToMarkdownOrFallback(html, url = '', fallbackTitle = '') {
+  try {
+    return htmlToMarkdown(html);
+  } catch (error) {
+    const sourceHtml = String(html || '');
+    const title = fallbackTitle || extractHtmlTitle(sourceHtml) || getUrlHostname(url) || '网页正文';
+    const readable = cleanMarkdownForStorage(stripHtmlTags(selectReadableHtml(sourceHtml)));
+    const lines = [
+      title,
+      '',
+      readable || '正文暂未提取到足够内容，已保留原始链接并继续尝试抓取评论区。',
+      '',
+      cleanDisplayUrl(url) ? `原始链接：${cleanDisplayUrl(url)}` : '',
+    ].filter(Boolean);
+    return lines.join('\n');
+  }
+}
+
 function getElectronBrowserWindow() {
   try {
     const electron = require('electron');
@@ -6636,6 +6654,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderSocialMediaUrlsWithElectron(url);
   }
 
+  async renderXiaohongshuComments(url) {
+    return renderXiaohongshuCommentsWithElectron(url);
+  }
+
+  async renderWechatComments(url) {
+    return renderWechatCommentsWithElectron(url);
+  }
+
   async runConfiguredTranscription(audioUrl, options = {}) {
     const provider = this.settings.aiProvider;
     const runLocalFallback = async (sourcePrefix) => {
@@ -7683,9 +7709,11 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = '';
           }
         }
-        if (isXiaohongshuUrl(url) && !staticSocialComments.length && !isMobileRuntime()) {
+        if (isXiaohongshuUrl(url) && !isMobileRuntime()) {
           try {
-            renderedSocialComments = await renderXiaohongshuCommentsWithElectron(resolvedUrl);
+            renderedSocialComments = typeof this.renderXiaohongshuComments === 'function'
+              ? await this.renderXiaohongshuComments(resolvedUrl)
+              : await renderXiaohongshuCommentsWithElectron(resolvedUrl);
           } catch (renderCommentError) {
             renderedSocialComments = [];
           }
@@ -7754,7 +7782,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       let markdown;
       try {
-        markdown = htmlToMarkdown(html);
+        markdown = isWechatArticleUrl(url)
+          ? htmlToMarkdownOrFallback(html, url, metadata.title || '')
+          : htmlToMarkdown(html);
       } catch (convertError) {
         throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
       }
@@ -7766,7 +7796,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         if (!wechatComments.length && !isMobileRuntime()) {
           try {
-            wechatComments = await renderWechatCommentsWithElectron(url);
+            wechatComments = typeof this.renderWechatComments === 'function'
+              ? await this.renderWechatComments(url)
+              : await renderWechatCommentsWithElectron(url);
           } catch (renderCommentError) {
             wechatComments = [];
           }
@@ -8584,6 +8616,7 @@ WechatObsidianInboxPlugin.__test = {
   extractPdfMarkdown,
   cleanPdfExtractedText,
   htmlToMarkdown,
+  htmlToMarkdownOrFallback,
   extractWebpageMetadataFromHtml,
   extractFeishuMarkdownFromHtml,
   extractWechatCommentsFromHtml,

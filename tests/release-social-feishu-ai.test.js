@@ -27,7 +27,27 @@ function loadPlugin() {
         Plugin,
         PluginSettingTab,
         Setting: class Setting {},
-        requestUrl: async () => ({ status: 200, json: { success: true }, text: '{"success":true}' }),
+        requestUrl: async (options) => {
+          const url = typeof options === 'string' ? options : (options && options.url) || '';
+          if (url.includes('xiaohongshu.com')) {
+            return {
+              status: 200,
+              text: [
+                '<html><head><meta property="og:title" content="小红书测试">',
+                '<meta name="description" content="小红书正文"></head><body>',
+                '<div class="comment-item"><span class="user-name">一级用户</span><span class="comment-content">一级评论</span></div>',
+                '</body></html>',
+              ].join(''),
+            };
+          }
+          if (url.includes('mp.weixin.qq.com')) {
+            return {
+              status: 200,
+              text: '<html><head><title>公众号测试</title></head><body><div id="js_content"><p>公众号正文</p></div></body></html>',
+            };
+          }
+          return { status: 200, json: { success: true }, text: '{"success":true}' };
+        },
         Platform: { isMobile: false, isDesktop: true, isWin: true },
       };
     }
@@ -45,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.37');
-assert.strictEqual(versions['1.2.37'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.38');
+assert.strictEqual(versions['1.2.38'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -110,6 +130,11 @@ assert.deepStrictEqual(helpers.extractWechatCommentsFromHtml(wechatScriptComment
   { author: '读者B', content: '评论来自脚本数据', time: '2026-06-22', likes: '12' },
 ]);
 assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
+assert.strictEqual(typeof helpers.htmlToMarkdownOrFallback, 'function');
+assert.ok(helpers.htmlToMarkdownOrFallback(
+  '<html><head><title>短公众号</title></head><body><div id="js_content"><p>短</p></div></body></html>',
+  'https://mp.weixin.qq.com/s?__biz=short',
+).includes('短公众号'));
 
 assert.strictEqual(typeof helpers.extractWechatCommentRequestParams, 'function');
 assert.strictEqual(typeof helpers.extractWechatCommentsFromPayload, 'function');
@@ -357,6 +382,37 @@ async function runAsyncChecks() {
   });
   assert.ok(enrichedMarkdown.includes('description: 把小红书标题方法沉淀成可复用的AI写作流程。'));
   assert.ok(enrichedMarkdown.includes('keywords: 小红书, 标题方法, AI写作'));
+
+  const xhsHydratePlugin = new Plugin();
+  xhsHydratePlugin.settings = helpers.mergeSettings({});
+  let xhsRenderCalled = false;
+  xhsHydratePlugin.renderXiaohongshuComments = async () => {
+    xhsRenderCalled = true;
+    return [{ author: '楼中楼用户', content: '展开后才出现的回复' }];
+  };
+  const xhsHydrated = await xhsHydratePlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/static-comments',
+    metadata: { url: 'https://www.xiaohongshu.com/explore/static-comments', platform: '小红书' },
+  }, '', '', '小红书测试');
+  assert.strictEqual(xhsRenderCalled, true);
+  assert.ok(xhsHydrated.metadata.markdown.includes('一级评论'));
+  assert.ok(xhsHydrated.metadata.markdown.includes('展开后才出现的回复'));
+
+  const wechatHydratePlugin = new Plugin();
+  wechatHydratePlugin.settings = helpers.mergeSettings({});
+  let wechatRenderCalled = false;
+  wechatHydratePlugin.renderWechatComments = async () => {
+    wechatRenderCalled = true;
+    return [{ author: '公众号读者', content: '文章页登录态抓到的留言' }];
+  };
+  const wechatHydrated = await wechatHydratePlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://mp.weixin.qq.com/s?__biz=MzA-test&mid=1&idx=1&sn=abc',
+    metadata: { url: 'https://mp.weixin.qq.com/s?__biz=MzA-test&mid=1&idx=1&sn=abc', platform: '公众号' },
+  }, '', '', '公众号测试');
+  assert.strictEqual(wechatRenderCalled, true);
+  assert.ok(wechatHydrated.metadata.markdown.includes('文章页登录态抓到的留言'));
 
   const source = fs.readFileSync(pluginPath, 'utf8');
   assert.ok(source.includes("text: 'AI 简介与关键词（DeepSeek）'"));
