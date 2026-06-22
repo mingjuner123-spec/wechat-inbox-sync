@@ -75,6 +75,18 @@ const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
+const SOCIAL_LOGIN_TARGETS = {
+  xiaohongshu: {
+    label: '小红书',
+    partition: 'persist:wechat-inbox-sync-xiaohongshu',
+    loginUrl: 'https://www.xiaohongshu.com/explore',
+  },
+  wechat: {
+    label: '公众号',
+    partition: 'persist:wechat-inbox-sync-wechat',
+    loginUrl: 'https://mp.weixin.qq.com/',
+  },
+};
 const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
@@ -1705,6 +1717,7 @@ function buildWebpageMarkdownBody(record, title) {
       transcriptionStatus: metadata.transcriptionStatus || metadata.conversionStatus || 'pending',
       transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
       transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
+      comments: metadata.comments || [],
     });
   }
 
@@ -1759,6 +1772,7 @@ function buildAudioTranscriptMarkdown({
   transcriptionStatus = 'pending',
   transcriptionSource = '',
   transcriptionError = '',
+  comments = [],
 }) {
   url = cleanDisplayUrl(url);
   const status = String(transcriptionStatus || '').toLowerCase();
@@ -1770,6 +1784,7 @@ function buildAudioTranscriptMarkdown({
       : isCloudPending
         ? '云端转写中，下次同步会自动更新。'
         : '转写处理中，或未配置可用的转写方案。');
+  const commentsMarkdown = buildSocialCommentsMarkdown(comments);
   return [
     `原始链接：${url || ''}`,
     transcriptionSource ? `转写来源：${transcriptionSource}` : '',
@@ -1778,6 +1793,8 @@ function buildAudioTranscriptMarkdown({
     '',
     content,
     '',
+    commentsMarkdown,
+    commentsMarkdown ? '' : '',
   ].filter((line) => line !== '').join('\n');
 }
 
@@ -1791,6 +1808,7 @@ function buildTranscriptOnlyMetadata(metadata, {
   transcriptionSource = '',
   transcriptionError = '',
   conversionStatus = '',
+  comments = [],
 } = {}) {
   const {
     markdown,
@@ -1815,6 +1833,7 @@ function buildTranscriptOnlyMetadata(metadata, {
     transcriptionSource,
     transcriptionError,
     conversionStatus: conversionStatus || transcriptionStatus,
+    comments: (comments || []).map(normalizeSocialComment).filter(Boolean),
   };
 }
 
@@ -2836,6 +2855,12 @@ function cleanDisplayUrl(url) {
 function isXiaohongshuUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('xiaohongshu.com') || text.includes('xhslink.com');
+}
+
+function getSocialElectronPartition(target) {
+  const key = String(target || '').toLowerCase();
+  if (key === 'xhs') return SOCIAL_LOGIN_TARGETS.xiaohongshu.partition;
+  return SOCIAL_LOGIN_TARGETS[key] ? SOCIAL_LOGIN_TARGETS[key].partition : '';
 }
 
 function isDouyinUrl(url) {
@@ -4177,6 +4202,14 @@ function extractWechatCommentsFromPayload(payload, limit = 20) {
   return comments.slice(0, limit);
 }
 
+function extractXiaohongshuCommentsFromPayload(payload, limit = 20) {
+  const comments = [];
+  const seen = new Set();
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  extractCommentsFromObject(data, comments, seen, limit);
+  return comments.slice(0, limit);
+}
+
 function extractWechatCommentRequestParams(html, url = '') {
   const source = String(html || '');
   const params = {};
@@ -4218,7 +4251,7 @@ function extractWechatCommentRequestParams(html, url = '') {
 }
 
 function buildWechatCommentApiUrl(articleUrl, params = {}) {
-  if (!params.comment_id || !params.appmsg_token) return '';
+  if (!params.comment_id) return '';
   const api = new URL('https://mp.weixin.qq.com/mp/appmsg_comment');
   api.searchParams.set('action', 'getcomment');
   api.searchParams.set('scene', '0');
@@ -4235,7 +4268,7 @@ function buildWechatCommentApiUrl(articleUrl, params = {}) {
   api.searchParams.set('fasttmpl_type', '0');
   api.searchParams.set('fasttmpl_fullversion', '0');
   api.searchParams.set('fasttmpl_flag', '0');
-  api.searchParams.set('appmsg_token', params.appmsg_token);
+  api.searchParams.set('appmsg_token', params.appmsg_token || '');
   api.searchParams.set('x5', '0');
   api.searchParams.set('f', 'json');
   api.searchParams.set('r', String(Math.random()));
@@ -4328,8 +4361,7 @@ function buildWechatArticleMarkdownWithComments(markdown, html, extraComments = 
     ...(extraComments || []),
   ];
   if (!comments.length) {
-    if (/(^|\n)##\s+评论区\b/.test(source)) return source;
-    return `${source}\n\n## 评论区\n\n> 未抓取到公开评论。可能是文章未开放精选留言、微信网页端未暴露评论接口、评论需要微信登录态，或该链接返回的是安全验证/受限页面。`;
+    return source.replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '').trim();
   }
   const withoutExistingStatus = source.replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '').trim();
   const base = withoutExistingStatus.replace(/\n+##\s+评论区[\s\S]*$/m, '').trim();
@@ -4456,6 +4488,118 @@ function getElectronBrowserWindow() {
   try {
     const electron = require('electron');
     return (electron.remote && electron.remote.BrowserWindow) || electron.BrowserWindow || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getElectronSessionModule() {
+  try {
+    const electron = require('electron');
+    return (electron.remote && electron.remote.session) || electron.session || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function createSocialBrowserWindow(BrowserWindow, target, options = {}) {
+  const profile = SOCIAL_LOGIN_TARGETS[target] || null;
+  return new BrowserWindow({
+    width: options.width || 1280,
+    height: options.height || 1200,
+    show: options.show === true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      ...(profile ? { partition: profile.partition } : {}),
+    },
+  });
+}
+
+async function getSocialSessionCookieSummary(target) {
+  const profile = SOCIAL_LOGIN_TARGETS[target];
+  const sessionModule = getElectronSessionModule();
+  if (!profile || !sessionModule || typeof sessionModule.fromPartition !== 'function') return '';
+  try {
+    const cookies = await sessionModule.fromPartition(profile.partition).cookies.get({});
+    const count = Array.isArray(cookies) ? cookies.length : 0;
+    return count ? `已保存 ${count} 个本地登录凭证` : '未检测到本地登录凭证';
+  } catch (error) {
+    return '登录状态读取失败';
+  }
+}
+
+async function openSocialLoginWindow(target) {
+  const profile = SOCIAL_LOGIN_TARGETS[target];
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!profile || !BrowserWindow) {
+    throw new Error('当前 Obsidian 桌面环境不支持网页登录态窗口');
+  }
+  const win = createSocialBrowserWindow(BrowserWindow, target, {
+    width: 1200,
+    height: 900,
+    show: true,
+  });
+  await win.loadURL(profile.loginUrl);
+  return true;
+}
+
+function createRenderedCommentCollector(webContents, platform) {
+  const comments = [];
+  const seen = new Set();
+  const pending = new Map();
+  const target = String(platform || '').toLowerCase();
+  const matchesCommentUrl = (url) => {
+    const text = String(url || '').toLowerCase();
+    if (target === 'wechat') return text.includes('/mp/appmsg_comment') || text.includes('appmsg_comment');
+    if (target === 'xiaohongshu') return text.includes('/comment') || text.includes('comment/page') || text.includes('comment/list');
+    return text.includes('comment');
+  };
+  const addPayload = (payload) => {
+    const extracted = target === 'wechat'
+      ? extractWechatCommentsFromPayload(payload, 30)
+      : extractXiaohongshuCommentsFromPayload(payload, 30);
+    extracted.forEach((comment) => pushSocialComment(comments, seen, comment));
+  };
+
+  try {
+    if (!webContents || !webContents.debugger) return null;
+    if (!webContents.debugger.isAttached()) {
+      webContents.debugger.attach('1.3');
+    }
+    webContents.debugger.sendCommand('Network.enable').catch(() => {});
+    const onMessage = async (_event, method, params = {}) => {
+      try {
+        if (method === 'Network.responseReceived') {
+          const requestId = params.requestId;
+          const url = params.response && params.response.url;
+          if (requestId && matchesCommentUrl(url)) pending.set(requestId, url);
+          return;
+        }
+        if (method !== 'Network.loadingFinished' || !pending.has(params.requestId)) return;
+        const requestId = params.requestId;
+        pending.delete(requestId);
+        const body = await webContents.debugger.sendCommand('Network.getResponseBody', { requestId });
+        let text = String(body && body.body ? body.body : '');
+        if (body && body.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
+        addPayload(text);
+      } catch (error) {
+        // Some protected responses disallow body access; DOM extraction still runs below.
+      }
+    };
+    webContents.debugger.on('message', onMessage);
+    return {
+      getComments: () => comments.slice(0, 30),
+      dispose: () => {
+        try {
+          webContents.debugger.off('message', onMessage);
+          if (webContents.debugger.isAttached()) webContents.debugger.detach();
+        } catch (error) {
+          // Window teardown can detach the debugger first.
+        }
+      },
+    };
   } catch (error) {
     return null;
   }
@@ -4797,16 +4941,12 @@ async function renderWechatCommentsWithElectron(url) {
     throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
   }
 
-  const win = new BrowserWindow({
+  const win = createSocialBrowserWindow(BrowserWindow, 'wechat', {
     width: 1280,
     height: 1400,
     show: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
   });
+  const collector = createRenderedCommentCollector(win.webContents, 'wechat');
 
   try {
     const loaded = waitForWebContents(win.webContents, 18000);
@@ -4849,8 +4989,13 @@ async function renderWechatCommentsWithElectron(url) {
         return comments.slice(0, 20);
       })()
     `);
-    return Array.isArray(comments) ? comments.map(normalizeSocialComment).filter(Boolean) : [];
+    const merged = [];
+    const seen = new Set();
+    (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
+    (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
+    return merged.slice(0, 20);
   } finally {
+    if (collector) collector.dispose();
     if (win && !win.isDestroyed()) {
       win.destroy();
     }
@@ -4932,16 +5077,12 @@ async function renderXiaohongshuCommentsWithElectron(url) {
     throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
   }
 
-  const win = new BrowserWindow({
+  const win = createSocialBrowserWindow(BrowserWindow, 'xiaohongshu', {
     width: 1280,
     height: 1200,
     show: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
   });
+  const collector = createRenderedCommentCollector(win.webContents, 'xiaohongshu');
 
   try {
     const loaded = waitForWebContents(win.webContents, 18000);
@@ -5031,8 +5172,13 @@ async function renderXiaohongshuCommentsWithElectron(url) {
         return comments.slice(0, 20);
       })()
     `);
-    return Array.isArray(comments) ? comments.map(normalizeSocialComment).filter(Boolean) : [];
+    const merged = [];
+    const seen = new Set();
+    (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
+    (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
+    return merged.slice(0, 20);
   } finally {
+    if (collector) collector.dispose();
     if (win && !win.isDestroyed()) {
       win.destroy();
     }
@@ -5383,11 +5529,14 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
     const errorText = metadata.transcriptionError || metadata.aiError || '';
     const transcription = metadata.transcription
       || (metadata.transcriptionStatus === 'failed' ? `语音转写失败。${errorText}` : '未开启语音转写。');
+    const commentsMarkdown = buildSocialCommentsMarkdown(metadata.comments || []);
     body = [
       '## 转写全文',
       '',
       transcription,
       '',
+      commentsMarkdown,
+      commentsMarkdown ? '' : '',
       '## 录音文件',
       '',
       `![[${audioFileName}]]`,
@@ -5560,6 +5709,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       callback: () => this.stopCurrentTranscription(),
     });
 
+    this.addCommand({
+      id: 'login-xiaohongshu-for-comments',
+      name: '登录小红书以抓取评论区',
+      callback: () => this.openSocialLogin('xiaohongshu'),
+    });
+
+    this.addCommand({
+      id: 'login-wechat-for-comments',
+      name: '登录公众号网页以抓取评论区',
+      callback: () => this.openSocialLogin('wechat'),
+    });
+
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
       this.syncInbox();
     });
@@ -5574,6 +5735,24 @@ class WechatObsidianInboxPlugin extends Plugin {
   async saveSettings(nextSettings) {
     this.settings = mergeSettings(nextSettings);
     await this.saveData(this.settings);
+  }
+
+  async openSocialLogin(target) {
+    const profile = SOCIAL_LOGIN_TARGETS[target];
+    if (!profile) {
+      new Notice('未知平台登录目标');
+      return;
+    }
+    try {
+      await openSocialLoginWindow(target);
+      new Notice(`已打开${profile.label}登录窗口。登录完成后直接关闭窗口即可，插件会本地保存网页登录态。`);
+    } catch (error) {
+      new Notice(`${profile.label}登录窗口打开失败：${error.message || error}`);
+    }
+  }
+
+  async getSocialLoginStatusText(target) {
+    return await getSocialSessionCookieSummary(target);
   }
 
   async cacheLocalTranscriptionEntitlementStatus(status) {
@@ -7080,6 +7259,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     noMediaError = '',
     binding = null,
     title = '',
+    comments = [],
   }) {
     const metadata = record.metadata || {};
 
@@ -7095,6 +7275,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionStatus: 'success',
           transcriptionSource: source || 'subtitle',
           conversionStatus: 'success',
+          comments,
         }),
       };
     }
@@ -7114,6 +7295,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionError: noMediaError || '未能从链接中提取到可转写的音频或视频地址',
           transcriptionSource: source || 'media-url',
           conversionStatus: 'failed',
+          comments,
         }),
       };
     }
@@ -7148,6 +7330,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             transcriptionStatus: 'success',
             transcriptionSource: result.source,
             conversionStatus: 'success',
+            comments,
           });
           return {
             ...record,
@@ -7180,6 +7363,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionError: error.message || String(error),
           transcriptionSource: source || this.settings.aiProvider || 'unknown',
           conversionStatus: 'failed',
+          comments,
         }),
       };
     }
@@ -7341,6 +7525,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
         const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
         const html = response.text || '';
+        const staticSocialComments = isXiaohongshuUrl(url) ? extractSocialCommentsFromHtml(html) : [];
+        let renderedSocialComments = [];
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
@@ -7384,6 +7570,17 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = '';
           }
         }
+        if (isXiaohongshuUrl(url) && !staticSocialComments.length && !isMobileRuntime()) {
+          try {
+            renderedSocialComments = await renderXiaohongshuCommentsWithElectron(resolvedUrl);
+          } catch (renderCommentError) {
+            renderedSocialComments = [];
+          }
+        }
+        const socialComments = [
+          ...staticSocialComments,
+          ...renderedSocialComments,
+        ];
         if (mediaUrl || isVideoIntent) {
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
@@ -7393,6 +7590,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             source: 'video',
             binding,
             title,
+            comments: socialComments,
             noMediaError: isUnavailableXhs
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
@@ -7400,19 +7598,11 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
 
         const extracted = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '');
-        let renderedComments = [];
-        if (isXiaohongshuUrl(url) && !extracted.comments.length && !isMobileRuntime()) {
-          try {
-            renderedComments = await renderXiaohongshuCommentsWithElectron(resolvedUrl);
-          } catch (renderCommentError) {
-            renderedComments = [];
-          }
-        }
         return buildXiaohongshuRecordFromExtraction(record, {
           metadata,
           url,
           extracted,
-          renderedComments,
+          renderedComments: renderedSocialComments,
         });
       }
 
@@ -8051,6 +8241,40 @@ class WechatInboxSettingTab extends PluginSettingTab {
           }
         }));
 
+    const commentPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    commentPanel.createEl('summary', { text: '评论区抓取登录态' });
+    commentPanel.createDiv({
+      text: '小红书和公众号评论区通常需要网页登录态。这里会打开平台自己的登录窗口，本地保存登录凭证，不需要手动复制任何参数。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+    new Setting(commentPanel)
+      .setName('小红书评论区')
+      .setDesc('扫码登录小红书网页后，同步小红书图文/视频时会复用本地会话抓评论区。')
+      .addButton((button) => button
+        .setButtonText('登录小红书')
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.openSocialLogin('xiaohongshu');
+        }))
+      .addButton((button) => button
+        .setButtonText('查看状态')
+        .onClick(async () => {
+          new Notice(await this.plugin.getSocialLoginStatusText('xiaohongshu'));
+        }));
+    new Setting(commentPanel)
+      .setName('公众号评论区')
+      .setDesc('公众号评论优先走公开接口；登录公众号网页后，可提升需要登录态的评论命中率。')
+      .addButton((button) => button
+        .setButtonText('登录公众号网页')
+        .onClick(async () => {
+          await this.plugin.openSocialLogin('wechat');
+        }))
+      .addButton((button) => button
+        .setButtonText('查看状态')
+        .onClick(async () => {
+          new Notice(await this.plugin.getSocialLoginStatusText('wechat'));
+        }));
+
     const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     localAsrPanel.createEl('summary', { text: '本地转写组件（高级/备用）' });
     localAsrPanel.createDiv({
@@ -8213,6 +8437,7 @@ WechatObsidianInboxPlugin.__test = {
   cleanDisplayUrl,
   isWechatMpArticleUrl,
   shouldHydrateLinkAsWebpage,
+  getSocialElectronPartition,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
@@ -8247,7 +8472,9 @@ WechatObsidianInboxPlugin.__test = {
   extractFeishuMarkdownFromHtml,
   extractWechatCommentsFromHtml,
   extractWechatCommentRequestParams,
+  buildWechatCommentApiUrl,
   extractWechatCommentsFromPayload,
+  extractXiaohongshuCommentsFromPayload,
   appendWechatCommentsToMarkdown,
   buildWechatArticleMarkdownWithComments,
   normalizeGeneratedKeywords,
