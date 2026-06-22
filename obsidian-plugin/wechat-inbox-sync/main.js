@@ -8,6 +8,8 @@ const path = require('path');
 const zlib = require('zlib');
 const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
+const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
+
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
 ];
@@ -4140,6 +4142,105 @@ function getElectronBrowserWindow() {
   }
 }
 
+function getElectronRemote() {
+  try {
+    const electron = require('electron');
+    return electron.remote || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getWechatSession() {
+  const remote = getElectronRemote();
+  if (!remote) return null;
+  try {
+    return remote.session.fromPartition(WECHAT_SESSION_PARTITION);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function checkWechatLoginStatus() {
+  const session = getWechatSession();
+  if (!session) return false;
+  try {
+    const cookies = await session.cookies.get({ domain: 'mp.weixin.qq.com' });
+    return cookies.some((cookie) => cookie.name === 'wap_sid2' || cookie.name === 'wxuin');
+  } catch (error) {
+    return false;
+  }
+}
+
+async function loginWechatWeb(articleUrl) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持浏览器窗口');
+  }
+
+  const session = getWechatSession();
+  if (!session) {
+    throw new Error('无法创建微信登录会话');
+  }
+
+  // Navigate to WeChat article page. If not logged in, the page will show a QR code
+  // in the comment area prompting the user to scan with WeChat.
+  const loginUrl = articleUrl || 'https://mp.weixin.qq.com/';
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const win = new BrowserWindow({
+      width: 820,
+      height: 900,
+      show: true,
+      title: '微信扫码登录 — 登录后关闭窗口即可',
+      webPreferences: {
+        session,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    const finish = async (error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (win && !win.isDestroyed()) {
+          win.destroy();
+        }
+      } catch (destroyError) {
+        // Window may already be gone.
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      const loggedIn = await checkWechatLoginStatus();
+      resolve(loggedIn);
+    };
+
+    win.on('closed', () => finish());
+
+    win.webContents.on('did-finish-load', async () => {
+      const loggedIn = await checkWechatLoginStatus();
+      if (loggedIn) {
+        finish();
+      }
+    });
+
+    win.loadURL(loginUrl).catch((error) => {
+      finish(new Error(`打开微信登录页面失败：${error.message || error}`));
+    });
+
+    // Timeout after 5 minutes.
+    setTimeout(() => {
+      finish(new Error('微信登录超时（5分钟），请重试'));
+    }, 5 * 60 * 1000);
+  });
+}
+
 function getElectronShell() {
   const candidates = [];
   if (typeof require === 'function') candidates.push(require);
@@ -4249,11 +4350,13 @@ async function renderUrlToMarkdownWithElectron(url) {
     throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
   }
 
+  const wechatSession = getWechatSession();
   const win = new BrowserWindow({
     width: 1280,
     height: 1600,
     show: false,
     webPreferences: {
+      session: wechatSession || undefined,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -4429,11 +4532,13 @@ async function renderSocialMediaUrlsWithElectron(url) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
   }
 
+  const wechatSession = getWechatSession();
   const win = new BrowserWindow({
     width: 1280,
     height: 900,
     show: false,
     webPreferences: {
+      session: wechatSession || undefined,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -5011,6 +5116,27 @@ class WechatObsidianInboxPlugin extends Plugin {
   async saveSettings(nextSettings) {
     this.settings = mergeSettings(nextSettings);
     await this.saveData(this.settings);
+  }
+
+  async checkWechatLogin() {
+    try {
+      return await checkWechatLoginStatus();
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async loginWechat() {
+    try {
+      const loggedIn = await loginWechatWeb(null);
+      if (loggedIn) {
+        new Notice('微信登录成功！后续同步公众号文章时会自动提取评论区内容。');
+      } else {
+        new Notice('微信登录未完成，请在浏览器窗口中扫码后重试。');
+      }
+    } catch (error) {
+      new Notice(`微信登录失败：${error.message || error}`);
+    }
   }
 
   async cacheLocalTranscriptionEntitlementStatus(status) {
@@ -6839,6 +6965,34 @@ class WechatObsidianInboxPlugin extends Plugin {
         };
       }
 
+      // For WeChat articles, try Electron rendering first if logged in (enables comment extraction).
+      if (isWechatArticleUrl(url)) {
+        const wechatLoggedIn = await checkWechatLoginStatus();
+        if (wechatLoggedIn) {
+          try {
+            const rendered = await renderUrlToMarkdownWithElectron(url);
+            const markdown = await this.saveWebpageImageAssets(
+              rendered.markdown,
+              rendered.assets,
+              rootDir,
+              dateFolder,
+              title,
+            );
+            return {
+              ...record,
+              metadata: {
+                ...metadata,
+                title: metadata.title || rendered.title || '',
+                markdown,
+                conversionStatus: 'success',
+              },
+            };
+          } catch (electronError) {
+            // Electron rendering failed; fall through to the standard request path.
+          }
+        }
+      }
+
       let html;
       let usedFallback = false;
       try {
@@ -7311,6 +7465,29 @@ class WechatInboxSettingTab extends PluginSettingTab {
           button.setDisabled(true);
         }
       });
+
+    containerEl.createEl('h3', {
+      text: '公众号评论区提取（实验性）',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
+
+    const wechatLoginBtn = new Setting(containerEl)
+      .setName('微信网页版登录')
+      .setDesc('登录后可提取公众号文章的评论区内容。只需登录一次，cookie 会持久保存。')
+      .addButton((button) => button
+        .setButtonText('微信扫码登录')
+        .onClick(async () => {
+          wechatLoginBtn.setDesc('正在打开登录窗口…');
+          await this.plugin.loginWechat();
+          this.display();
+        }));
+
+    // Check current login status async.
+    this.plugin.checkWechatLogin().then((loggedIn) => {
+      if (loggedIn) {
+        wechatLoginBtn.setDesc('✅ 已登录。同步公众号文章时会自动提取评论区。');
+      }
+    });
 
     new Setting(containerEl)
       .setName('保存根目录')
