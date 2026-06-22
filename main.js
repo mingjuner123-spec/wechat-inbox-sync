@@ -79,13 +79,27 @@ const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
 };
-const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source';
+const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source,description,keywords';
 const NOTE_PROPERTY_FIELD_KEYS = [
+  'id',
+  'type',
   'title',
   'author',
   'url',
+  'created_at',
   'synced_at',
   'source',
+  'description',
+  'keywords',
+  'status',
+  'fetch_status',
+  'conversion_status',
+  'audio_file',
+  'audio_file_id',
+  'transcription_status',
+  'file_name',
+  'file_id',
+  'file_ext',
 ];
 
 const DEFAULT_SETTINGS = {
@@ -100,6 +114,10 @@ const DEFAULT_SETTINGS = {
   notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: true,
   aiProvider: 'off',
+  aiMetadataEnabled: false,
+  deepseekApiKey: '',
+  deepseekModel: 'deepseek-chat',
+  deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
   cloudPreTranscriptionEnabled: false,
   cloudPreTranscriptionThresholdMinutes: 10,
   localAsrPlatform: 'auto',
@@ -1007,9 +1025,13 @@ function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
-  merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
+  merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
+  merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
+  merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
+  merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
+  merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
@@ -1822,6 +1844,13 @@ function buildFileMarkdownBody(record) {
   ].filter((line) => line !== '').join('\n');
 }
 
+function shouldGenerateAiMetadata(settings, record) {
+  if (!settings || !settings.aiMetadataEnabled || !settings.deepseekApiKey) return false;
+  if (!record || !record.metadata) return false;
+  const metadata = record.metadata || {};
+  return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
+}
+
 function cleanMarkdownForStorage(markdown, options = {}) {
   const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
   const out = [];
@@ -1903,6 +1932,77 @@ function cleanMarkdownForStorage(markdown, options = {}) {
   });
 
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function stripMarkdownCodeBlocks(markdown) {
+  return String(markdown || '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]+`/g, ' ');
+}
+
+function normalizeGeneratedKeywords(value) {
+  const source = Array.isArray(value) ? value.join(',') : String(value || '');
+  const seen = new Set();
+  return source
+    .replace(/[\r\n]+/g, ',')
+    .split(/[#,，,、；;\s]+/)
+    .map((item) => String(item || '').trim())
+    .filter((item) => item && item.length <= 24)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function parseGeneratedMetadataResponse(text) {
+  const source = String(text || '').trim();
+  if (!source) return { description: '', keywords: [] };
+
+  const fencedJsonMatch = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const jsonSource = fencedJsonMatch ? fencedJsonMatch[1].trim() : source;
+  const jsonPayload = tryParseJson(jsonSource);
+  if (jsonPayload && typeof jsonPayload === 'object') {
+    return {
+      description: String(jsonPayload.description || jsonPayload.summary || jsonPayload.excerpt || '').trim(),
+      keywords: normalizeGeneratedKeywords(jsonPayload.keywords || jsonPayload.tags || jsonPayload.hashtags || []),
+    };
+  }
+
+  const descriptionMatch = source.match(/description\s*[:：]\s*([^\n]+)/i)
+    || source.match(/简介\s*[:：]\s*([^\n]+)/i)
+    || source.match(/总结\s*[:：]\s*([^\n]+)/i);
+  const keywordsMatch = source.match(/keywords?\s*[:：]\s*([^\n]+)/i)
+    || source.match(/标签\s*[:：]\s*([^\n]+)/i)
+    || source.match(/关键词\s*[:：]\s*([^\n]+)/i);
+  return {
+    description: String(descriptionMatch ? descriptionMatch[1] : '').trim(),
+    keywords: normalizeGeneratedKeywords(keywordsMatch ? keywordsMatch[1] : ''),
+  };
+}
+
+function extractAiMetadataInputText(record) {
+  const metadata = (record && record.metadata) || {};
+  const parts = [
+    metadata.title,
+    record && record.content,
+    metadata.markdown,
+    metadata.snapshot,
+    metadata.contentSnapshot,
+    metadata.transcription,
+    metadata.description,
+    metadata.summary,
+    metadata.excerpt,
+  ].filter(Boolean);
+  return cleanMarkdownForStorage(
+    stripMarkdownCodeBlocks(parts.join('\n\n'))
+      .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
+      .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
+      .replace(/^#{1,6}\s*/gm, '')
+      .replace(/^\s*>\s*/gm, '')
+      .replace(/\n{3,}/g, '\n\n'),
+  ).slice(0, 6000);
 }
 
 function normalizeTitleForCompare(text) {
@@ -3565,6 +3665,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
   const tags = extractTagsFromText(description, source);
   const images = collectXiaohongshuNoteImageUrls(source);
   const videoUrl = extractVideoUrlFromHtml(source);
+  const comments = extractSocialCommentsFromHtml(source);
   const lines = [
     '## 标题',
     '',
@@ -3594,6 +3695,11 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     lines.push('## 视频源', '', `[视频文件](${videoUrl})`, '');
   }
 
+  const commentsMarkdown = buildSocialCommentsMarkdown(comments);
+  if (commentsMarkdown) {
+    lines.push(commentsMarkdown, '');
+  }
+
   return {
     title,
     author: extractXiaohongshuAuthor(source),
@@ -3602,6 +3708,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     markdown: lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
     imageUrls: images,
     videoUrl,
+    comments,
   };
 }
 
@@ -3705,7 +3812,7 @@ function decodeJsonLikeText(value) {
     .trim();
 }
 
-function normalizeWechatComment(comment) {
+function normalizeSocialComment(comment) {
   const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
@@ -3717,8 +3824,8 @@ function normalizeWechatComment(comment) {
   };
 }
 
-function pushWechatComment(comments, seen, comment) {
-  const normalized = normalizeWechatComment(comment || {});
+function pushSocialComment(comments, seen, comment) {
+  const normalized = normalizeSocialComment(comment || {});
   if (!normalized) return;
   const key = `${normalized.author}|${normalized.content}`;
   if (seen.has(key)) return;
@@ -3726,8 +3833,133 @@ function pushWechatComment(comments, seen, comment) {
   comments.push(normalized);
 }
 
+function normalizeWechatComment(comment) {
+  return normalizeSocialComment(comment);
+}
+
+function pushWechatComment(comments, seen, comment) {
+  pushSocialComment(comments, seen, comment);
+}
+
+function readCommentField(item, keys) {
+  for (const key of keys) {
+    if (item && Object.prototype.hasOwnProperty.call(item, key) && item[key] !== undefined && item[key] !== null) {
+      const value = item[key];
+      if (typeof value === 'object') {
+        const nested = readCommentField(value, ['text', 'content', 'value', 'nickname', 'nickName', 'name']);
+        if (nested) return nested;
+      } else {
+        const text = String(value).trim();
+        if (text) return text;
+      }
+    }
+  }
+  return '';
+}
+
+function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0) {
+  if (!value || depth > 8 || comments.length >= limit) return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => extractCommentsFromObject(item, comments, seen, limit, depth + 1));
+    return;
+  }
+  if (typeof value !== 'object') return;
+
+  const content = readCommentField(value, [
+    'content',
+    'text',
+    'commentContent',
+    'comment_content',
+    'noteText',
+    'message',
+  ]);
+  if (content) {
+    const author = readCommentField(value, [
+      'nick_name',
+      'nickname',
+      'nickName',
+      'userNickname',
+      'user_nickname',
+      'userName',
+      'name',
+      'author',
+    ]) || readCommentField(value.user || value.userInfo || value.authorInfo || {}, [
+      'nick_name',
+      'nickname',
+      'nickName',
+      'userName',
+      'name',
+    ]);
+    const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
+    const likes = readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'like_count', 'likes']);
+    pushSocialComment(comments, seen, { author, content, time, likes });
+  }
+
+  Object.keys(value).forEach((key) => {
+    if (comments.length >= limit) return;
+    if (/comment|cmt|reply|discuss/i.test(key)) {
+      extractCommentsFromObject(value[key], comments, seen, limit, depth + 1);
+    }
+  });
+}
+
+function collectJsonObjectCandidates(source) {
+  const candidates = [];
+  const text = String(source || '');
+  const starts = [];
+  const objectPattern = /(?:elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)\s*[:=]\s*([\[{])/gi;
+  let match;
+  while ((match = objectPattern.exec(text))) {
+    starts.push(objectPattern.lastIndex - 1);
+  }
+  starts.forEach((start) => {
+    const open = text[start];
+    const close = open === '[' ? ']' : '}';
+    let depth = 0;
+    let quote = '';
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (quote) {
+        if (char === quote) quote = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+      if (char === open) depth += 1;
+      if (char === close) depth -= 1;
+      if (depth === 0) {
+        candidates.push(text.slice(start, index + 1));
+        break;
+      }
+    }
+  });
+  return candidates;
+}
+
+function parseLooseJsonCandidate(text) {
+  const source = String(text || '').trim();
+  return tryParseJson(source)
+    || tryParseJson(source
+      .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')
+      .replace(/'/g, '"'));
+}
+
 function extractWechatCommentsFromJson(html, comments, seen) {
   const source = String(html || '');
+  collectJsonObjectCandidates(source).forEach((candidate) => {
+    extractCommentsFromObject(parseLooseJsonCandidate(candidate), comments, seen);
+  });
   const patterns = [
     /"nick_?name"\s*:\s*"((?:\\.|[^"\\])*)"\s*,[\s\S]{0,900}?"content"\s*:\s*"((?:\\.|[^"\\])*)"/gi,
     /"content"\s*:\s*"((?:\\.|[^"\\])*)"\s*,[\s\S]{0,900}?"nick_?name"\s*:\s*"((?:\\.|[^"\\])*)"/gi,
@@ -3770,8 +4002,30 @@ function extractWechatCommentsFromHtml(html, limit = 20) {
   return comments.slice(0, limit);
 }
 
-function buildWechatCommentsMarkdown(comments = []) {
-  const items = (comments || []).map(normalizeWechatComment).filter(Boolean);
+function extractSocialCommentsFromHtml(html, limit = 20) {
+  const source = String(html || '');
+  const comments = [];
+  const seen = new Set();
+  const itemPattern = /<((?:li|div|section|article))\b[^>]*(?:class|id)=["'][^"']*(?:comment|cmt|reply|discuss)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/gi;
+  let match;
+  while ((match = itemPattern.exec(source))) {
+    const item = match[2] || '';
+    const content = extractHtmlTextByClass(item, /(?:comment[_-]?content|content|message|text|desc)/i)
+      || stripHtmlTags(item);
+    const author = extractHtmlTextByClass(item, /(?:nickname|nick[_-]?name|user[_-]?name|user-name|author|name)/i);
+    const time = extractHtmlTextByClass(item, /(?:time|date)/i);
+    const likes = extractHtmlTextByClass(item, /(?:like|liked|praise|赞)/i);
+    pushSocialComment(comments, seen, { author, content, time, likes });
+    if (comments.length >= limit) return comments;
+  }
+  collectJsonObjectCandidates(source).forEach((candidate) => {
+    extractCommentsFromObject(parseLooseJsonCandidate(candidate), comments, seen, limit);
+  });
+  return comments.slice(0, limit);
+}
+
+function buildSocialCommentsMarkdown(comments = []) {
+  const items = (comments || []).map(normalizeSocialComment).filter(Boolean);
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
   items.forEach((comment) => {
@@ -3780,6 +4034,10 @@ function buildWechatCommentsMarkdown(comments = []) {
     lines.push(`- ${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
   });
   return lines.join('\n').trim();
+}
+
+function buildWechatCommentsMarkdown(comments = []) {
+  return buildSocialCommentsMarkdown(comments);
 }
 
 function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
@@ -4257,10 +4515,116 @@ function decodeJsonStringLiteral(value) {
   }
 }
 
+function slugifyMarkdownHeading(text) {
+  return String(text || '')
+    .replace(/\*\*/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, '')
+    .replace(/\s+/g, '-');
+}
+
+function buildMarkdownToc(markdown) {
+  const headings = String(markdown || '')
+    .split(/\r?\n/)
+    .map((line) => {
+      const match = /^(#{1,6})\s+(.+)$/.exec(line.trim());
+      if (!match) return null;
+      const text = match[2].replace(/\*\*/g, '').trim();
+      if (!text || text === '目录' || text === '评论区') return null;
+      return {
+        level: match[1].length,
+        text,
+        slug: slugifyMarkdownHeading(text),
+      };
+    })
+    .filter(Boolean);
+  if (headings.length < 2) return '';
+  const minLevel = Math.min(...headings.map((item) => item.level));
+  return [
+    '## 目录',
+    '',
+    ...headings.map((item) => `${'  '.repeat(Math.max(0, item.level - minLevel))}- [${item.text}](#${item.slug})`),
+  ].join('\n');
+}
+
+function appendMarkdownToc(markdown) {
+  const source = String(markdown || '').trim();
+  if (!source || /(^|\n)##\s+目录\b/.test(source)) return source;
+  const toc = buildMarkdownToc(source);
+  return toc ? `${toc}\n\n${source}` : source;
+}
+
+function collectFeishuImageUrls(source) {
+  const urls = [];
+  collectImageUrlsFromHtml(source).forEach((url) => pushUniqueUrl(urls, url));
+  collectJsonStringValues(source, [
+    'url',
+    'src',
+    'image',
+    'imageUrl',
+    'image_url',
+    'originUrl',
+    'origin_url',
+    'downloadUrl',
+    'download_url',
+  ]).forEach((url) => {
+    if (isLikelyImageUrl(url)) pushUniqueUrl(urls, url);
+  });
+  return urls;
+}
+
+function inferFeishuHeadingLevel(text, blockType = '') {
+  const normalizedType = String(blockType || '').toLowerCase();
+  const match = normalizedType.match(/heading[_-]?([1-6])|h([1-6])/i);
+  if (match) return Number(match[1] || match[2]);
+  const value = String(text || '').trim();
+  if (/^[一二三四五六七八九十]+、/.test(value)) return 1;
+  if (/^第[一二三四五六七八九十]+步[:：、]/.test(value)) return 2;
+  if (/^(系统页面截图|工作流程图|整套系统分三层|格式|示例|提示词)/.test(value)) return 3;
+  return 0;
+}
+
+function pushFeishuLine(lines, seen, text, level = 0) {
+  const value = String(text || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  if (!value || value.length < 2 || /^https?:\/\//i.test(value) || /[{}[\]<>]/.test(value)) return;
+  const markdown = level ? `${'#'.repeat(Math.max(1, Math.min(6, level)))} ${value}` : formatFeishuHeadingLine(value);
+  const key = markdown.replace(/\s+/g, ' ');
+  if (seen.has(key)) return;
+  seen.add(key);
+  lines.push(markdown);
+}
+
 function extractFeishuMarkdownFromHtml(html) {
   const source = decodeHtmlEntities(String(html || ''));
   const lines = [];
+  const seen = new Set();
+  const readable = stripScriptAndStyleBlocks(source)
+    .replace(/<img\b[^>]*>/gi, (tag) => imageTagToMarkdown(tag))
+    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text) => `\n# ${stripHtmlTags(text)}\n`)
+    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text) => `\n## ${stripHtmlTags(text)}\n`)
+    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_, text) => `\n### ${stripHtmlTags(text)}\n`)
+    .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, (_, text) => `\n#### ${stripHtmlTags(text)}\n`)
+    .replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, (_, text) => `\n##### ${stripHtmlTags(text)}\n`)
+    .replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, (_, text) => `\n###### ${stripHtmlTags(text)}\n`)
+    .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, (_, text) => `\n${stripHtmlTags(text)}\n`);
+  cleanMarkdownForStorage(stripHtmlTags(readable), { dedupe: true })
+    .split(/\r?\n/)
+    .forEach((line) => {
+      const text = line.trim();
+      if (shouldDropFeishuLine(text, '')) return;
+      if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text)) {
+        if (!seen.has(text)) {
+          seen.add(text);
+          lines.push(text);
+        }
+        return;
+      }
+      pushFeishuLine(lines, seen, text);
+    });
+
   const patterns = [
+    /"(?:block_type|type)"\s*:\s*"([^"]+)"[\s\S]{0,500}?"(?:text|content|title|name)"\s*:\s*"((?:\\.|[^"\\]){2,})"/g,
     /"(?:text|content|title|name)"\s*:\s*"((?:\\.|[^"\\]){8,})"/g,
     /'text'\s*:\s*'((?:\\.|[^'\\]){8,})'/g,
   ];
@@ -4268,22 +4632,36 @@ function extractFeishuMarkdownFromHtml(html) {
   patterns.forEach((pattern) => {
     let match;
     while ((match = pattern.exec(source))) {
-      const text = decodeJsonStringLiteral(match[1])
+      const hasBlockType = match.length > 2;
+      const blockType = hasBlockType ? match[1] : '';
+      const rawText = hasBlockType ? match[2] : match[1];
+      const text = decodeJsonStringLiteral(rawText)
         .replace(/<[^>]+>/g, '')
         .replace(/\s+/g, ' ')
         .trim();
-      if (
-        text.length >= 8
-        && !/^https?:\/\//i.test(text)
-        && !/[{}[\]<>]/.test(text)
-        && !lines.includes(text)
-      ) {
-        lines.push(text);
-      }
+      if (shouldDropFeishuLine(text, '')) return;
+      pushFeishuLine(lines, seen, text, inferFeishuHeadingLevel(text, blockType));
     }
   });
 
-  const markdown = lines.join('\n\n').trim();
+  const existingImageUrls = new Set();
+  lines.forEach((line) => {
+    const match = String(line || '').match(/!\[[^\]]*]\(([^)]+)\)/);
+    if (match && match[1]) existingImageUrls.add(match[1]);
+  });
+  let appendedImageIndex = 0;
+  collectFeishuImageUrls(source).forEach((url) => {
+    if (existingImageUrls.has(url)) return;
+    existingImageUrls.add(url);
+    const markdown = `![图片${appendedImageIndex ? ` ${appendedImageIndex + 1}` : ''}](${url})`;
+    appendedImageIndex += 1;
+    if (!seen.has(markdown)) {
+      seen.add(markdown);
+      lines.push(markdown);
+    }
+  });
+
+  const markdown = appendMarkdownToc(lines.join('\n\n').trim());
   if (markdown.length < 20) {
     throw new Error('飞书静态页面中未提取到正文');
   }
@@ -4755,6 +5133,89 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error(message);
     }
     return payload;
+  }
+
+  async requestExternalJson(url, { method = 'POST', headers = {}, body = null } = {}) {
+    const requestOptions = {
+      url,
+      method,
+      headers,
+      body,
+    };
+    let response;
+    try {
+      response = await requestUrl(requestOptions);
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error || '');
+      if (!isRequestUrlTransportError(message)) throw error;
+      response = await requestJsonViaNode(requestOptions);
+    }
+    const payload = response.json || (response.text ? tryParseJson(response.text) : null);
+    if (response.status && (response.status < 200 || response.status >= 300)) {
+      throw new Error((payload && (payload.error && payload.error.message || payload.errMsg)) || `HTTP ${response.status}`);
+    }
+    return payload || {};
+  }
+
+  async generateMetadataWithDeepSeek(record) {
+    const inputText = extractAiMetadataInputText(record);
+    if (!inputText) return { description: '', keywords: [] };
+    const payload = await this.requestExternalJson(this.settings.deepseekBaseUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.settings.deepseekApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: '你是内容整理助手。请基于用户提供的文案生成简介和关键词。只输出 JSON：{"description":"一句话简介","keywords":["关键词1","关键词2"]}。description 控制在 1 句话，keywords 返回 3 到 8 个简洁中文或英文关键词。',
+          },
+          {
+            role: 'user',
+            content: inputText,
+          },
+        ],
+      }),
+    });
+    return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
+  }
+
+  async enrichRecordMetadataWithAi(record) {
+    if (!shouldGenerateAiMetadata(this.settings, record)) return record;
+    const generated = await this.generateMetadataWithDeepSeek(record);
+    const metadata = { ...((record && record.metadata) || {}) };
+    if (!getRecordDescription(metadata) && generated.description) {
+      metadata.description = generated.description;
+    }
+    if (!getRecordKeywords(metadata).length && generated.keywords.length) {
+      metadata.keywords = generated.keywords;
+    }
+    return {
+      ...record,
+      metadata,
+    };
+  }
+
+  async testDeepSeekConnection() {
+    if (!this.settings.deepseekApiKey) {
+      throw new Error('请先填写 DeepSeek API Key');
+    }
+    const result = await this.generateMetadataWithDeepSeek({
+      type: 'text',
+      content: '这是一段关于 Obsidian 内容同步助手、飞书机器人和知识管理的测试文案。',
+      metadata: {
+        title: 'AI 连接测试',
+      },
+    });
+    if (!result.description && !result.keywords.length) {
+      throw new Error('DeepSeek 已响应，但没有返回可用的简介或关键词');
+    }
+    return result;
   }
 
   async bindCurrentCode() {
@@ -6586,6 +7047,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
+    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown);
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,
@@ -6912,6 +7374,19 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName('笔记属性字段')
+      .setDesc(`留空使用默认属性；也可以用英文逗号指定字段，例如：type,title,url,created_at。可用字段：${NOTE_PROPERTY_FIELD_KEYS.join(', ')}`)
+      .addText((text) => text
+        .setPlaceholder('留空使用默认属性')
+        .setValue(this.plugin.settings.notePropertyFields || '')
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            notePropertyFields: normalizeNotePropertyFields(value),
+          });
+        }));
+
+    new Setting(containerEl)
       .setName('立即同步')
       .setDesc('手动拉取云端收集箱，并写入当前 vault。')
       .addButton((button) => button
@@ -6946,6 +7421,65 @@ class WechatInboxSettingTab extends PluginSettingTab {
       text: '高级选项',
       cls: 'wechat-inbox-sync-section-heading',
     });
+
+    const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    aiPanel.createEl('summary', { text: 'AI 简介与关键词（DeepSeek）' });
+    aiPanel.createDiv({
+      text: '给 Pro 用户生成 description 和 keywords。默认只在缺失时补齐，不覆盖已有网页元信息。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+    new Setting(aiPanel)
+      .setName('启用 AI 简介与关键词')
+      .setDesc('同步写入前自动生成内容简介与关键词。')
+      .addToggle((toggle) => toggle
+        .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            aiMetadataEnabled: value,
+          });
+        }));
+    new Setting(aiPanel)
+      .setName('DeepSeek API Key')
+      .setDesc('用于生成 description 和 keywords。')
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text
+          .setPlaceholder('sk-...')
+          .setValue(this.plugin.settings.deepseekApiKey || '')
+          .onChange(async (value) => {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              deepseekApiKey: value,
+            });
+          });
+      });
+    new Setting(aiPanel)
+      .setName('DeepSeek 模型')
+      .setDesc('默认使用 deepseek-chat。')
+      .addText((text) => text
+        .setPlaceholder('deepseek-chat')
+        .setValue(this.plugin.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            deepseekModel: value,
+          });
+        }));
+    new Setting(aiPanel)
+      .setName('测试 AI 连接')
+      .setDesc('立即校验 API Key 和模型是否可用。')
+      .addButton((button) => button
+        .setButtonText('测试 AI 连接')
+        .setCta()
+        .onClick(async () => {
+          try {
+            const result = await this.plugin.testDeepSeekConnection();
+            new Notice(`AI 连接成功：${result.description || result.keywords.join('、')}`);
+          } catch (error) {
+            new Notice(`AI 连接失败：${error.message || error}`);
+          }
+        }));
 
     const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     localAsrPanel.createEl('summary', { text: '本地转写组件（高级/备用）' });
@@ -7138,8 +7672,12 @@ WechatObsidianInboxPlugin.__test = {
   cleanPdfExtractedText,
   htmlToMarkdown,
   extractWebpageMetadataFromHtml,
+  extractFeishuMarkdownFromHtml,
   extractWechatCommentsFromHtml,
   appendWechatCommentsToMarkdown,
+  normalizeGeneratedKeywords,
+  parseGeneratedMetadataResponse,
+  extractAiMetadataInputText,
   cleanMarkdownForStorage,
   resolveRedirectUrl,
   isRequestUrlTransportError,
