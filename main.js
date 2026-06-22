@@ -3826,6 +3826,36 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
   };
 }
 
+function buildXiaohongshuRecordFromExtraction(record, {
+  metadata = (record && record.metadata) || {},
+  url = '',
+  extracted = {},
+  renderedComments = [],
+} = {}) {
+  const allComments = [
+    ...((extracted && extracted.comments) || []),
+    ...(renderedComments || []),
+  ];
+  const markdown = mergeSocialCommentsIntoMarkdown(extracted.markdown || '', allComments);
+  return {
+    ...record,
+    metadata: {
+      ...metadata,
+      title: metadata.title || extracted.title || getWebpageSourcePrefix(url),
+      author: metadata.author || extracted.author || '',
+      description: metadata.description || extracted.description || '',
+      keywords: metadata.keywords || extracted.tags || [],
+      platform: metadata.platform || '小红书',
+      contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === 'audio_video' ? '视频' : '图文'),
+      markdown,
+      imageUrls: extracted.imageUrls || [],
+      videoUrl: extracted.videoUrl || '',
+      comments: allComments.map(normalizeSocialComment).filter(Boolean),
+      conversionStatus: 'success',
+    },
+  };
+}
+
 function extractSocialVideoMarkdownFromHtml(html, url, platform = '视频') {
   url = cleanDisplayUrl(url);
   const source = String(html || '');
@@ -4150,6 +4180,13 @@ function buildSocialCommentsMarkdown(comments = []) {
   return lines.join('\n').trim();
 }
 
+function mergeSocialCommentsIntoMarkdown(markdown, comments = []) {
+  const source = String(markdown || '').trim();
+  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
+  const commentMarkdown = buildSocialCommentsMarkdown(comments);
+  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
+}
+
 function buildWechatCommentsMarkdown(comments = []) {
   return buildSocialCommentsMarkdown(comments);
 }
@@ -4160,8 +4197,7 @@ function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
   const comments = Array.isArray(htmlOrComments)
     ? htmlOrComments
     : extractWechatCommentsFromHtml(htmlOrComments);
-  const commentMarkdown = buildWechatCommentsMarkdown(comments);
-  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
+  return mergeSocialCommentsIntoMarkdown(source, comments);
 }
 
 function extractHtmlTitle(html) {
@@ -4619,6 +4655,119 @@ async function renderSocialMediaUrlsWithElectron(url) {
 async function renderSocialMediaUrlWithElectron(url) {
   const urls = await renderSocialMediaUrlsWithElectron(url);
   return urls[0] || '';
+}
+
+async function renderXiaohongshuCommentsWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
+  }
+
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1200,
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  try {
+    const loaded = waitForWebContents(win.webContents, 18000);
+    await win.loadURL(url);
+    await loaded;
+    await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const scrollables = () => Array.from(document.querySelectorAll('[class*="comment"], [class*="comments"], [class*="scroll"], [class*="list"], main, body, html'))
+          .filter((node) => {
+            try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
+          });
+        for (let index = 0; index < 16; index += 1) {
+          window.scrollBy(0, Math.max(450, Math.floor(window.innerHeight * 0.75)));
+          scrollables().forEach((node) => {
+            try { node.scrollTop = Math.min(node.scrollTop + 500, node.scrollHeight); } catch (error) {}
+          });
+          await sleep(650);
+        }
+        return true;
+      })()
+    `);
+    const comments = await win.webContents.executeJavaScript(`
+      (() => {
+        const clean = (text) => String(text || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/\\s+/g, ' ')
+          .trim();
+        const pickText = (root, selectors) => {
+          for (const selector of selectors) {
+            const node = root.querySelector(selector);
+            const text = clean(node ? node.innerText || node.textContent || '' : '');
+            if (text) return text;
+          }
+          return '';
+        };
+        const nodes = Array.from(document.querySelectorAll([
+          '[class*="comment-item"]',
+          '[class*="commentItem"]',
+          '[class*="comment-card"]',
+          '[class*="commentCard"]',
+          '[class*="comment-container"]',
+          '[class*="commentContainer"]',
+          '[class*="reply-item"]',
+          '[class*="replyItem"]',
+          '[data-e2e*="comment"]'
+        ].join(',')));
+        const comments = [];
+        const seen = new Set();
+        nodes.forEach((node) => {
+          const fullText = clean(node.innerText || node.textContent || '');
+          if (!fullText || fullText.length < 2 || fullText.length > 800) return;
+          const author = pickText(node, [
+            '[class*="user-name"]',
+            '[class*="userName"]',
+            '[class*="nickname"]',
+            '[class*="nick"]',
+            '[class*="author"]',
+            '[class*="name"]'
+          ]);
+          let content = pickText(node, [
+            '[class*="comment-content"]',
+            '[class*="commentContent"]',
+            '[class*="content"]',
+            '[class*="text"]',
+            '[class*="desc"]'
+          ]);
+          if (!content || content === author) {
+            content = fullText;
+            if (author && content.startsWith(author)) content = clean(content.slice(author.length));
+          }
+          content = content
+            .replace(/^(回复|赞|点赞|展开|收起)\\s*/g, '')
+            .replace(/\\s*(回复|赞|点赞|展开|收起)\\s*$/g, '')
+            .trim();
+          const likes = pickText(node, [
+            '[class*="like-count"]',
+            '[class*="likeCount"]',
+            '[class*="likes"]',
+            '[class*="praise"]'
+          ]).replace(/[^0-9万\\.]/g, '');
+          const key = author + '|' + content;
+          if (!content || content.length < 2 || seen.has(key)) return;
+          seen.add(key);
+          comments.push({ author, content, likes });
+        });
+        return comments.slice(0, 20);
+      })()
+    `);
+    return Array.isArray(comments) ? comments.map(normalizeSocialComment).filter(Boolean) : [];
+  } finally {
+    if (win && !win.isDestroyed()) {
+      win.destroy();
+    }
+  }
 }
 
 function decodeJsonStringLiteral(value) {
@@ -6971,22 +7120,20 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
 
         const extracted = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '');
-        return {
-          ...record,
-          metadata: {
-            ...metadata,
-            title: metadata.title || extracted.title || getWebpageSourcePrefix(url),
-            author: metadata.author || extracted.author || '',
-            description: metadata.description || extracted.description || '',
-            keywords: metadata.keywords || extracted.tags || [],
-            platform: metadata.platform || '小红书',
-            contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === 'audio_video' ? '视频' : '图文'),
-            markdown: extracted.markdown,
-            imageUrls: extracted.imageUrls || [],
-            videoUrl: extracted.videoUrl || '',
-            conversionStatus: 'success',
-          },
-        };
+        let renderedComments = [];
+        if (isXiaohongshuUrl(url) && !extracted.comments.length && !isMobileRuntime()) {
+          try {
+            renderedComments = await renderXiaohongshuCommentsWithElectron(resolvedUrl);
+          } catch (renderCommentError) {
+            renderedComments = [];
+          }
+        }
+        return buildXiaohongshuRecordFromExtraction(record, {
+          metadata,
+          url,
+          extracted,
+          renderedComments,
+        });
       }
 
       let html;
@@ -7757,6 +7904,8 @@ WechatObsidianInboxPlugin.__test = {
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
   buildMarkdownForRecord,
+  mergeSocialCommentsIntoMarkdown,
+  buildXiaohongshuRecordFromExtraction,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,

@@ -45,8 +45,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.32');
-assert.strictEqual(versions['1.2.32'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.33');
+assert.strictEqual(versions['1.2.33'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -156,6 +156,8 @@ assert.strictEqual(settings.notePropertyFields, 'title,description,keywords');
 
 assert.strictEqual(typeof helpers.shouldRefreshAiDescription, 'function');
 assert.strictEqual(typeof helpers.buildFallbackGeneratedKeywords, 'function');
+assert.strictEqual(typeof helpers.mergeSocialCommentsIntoMarkdown, 'function');
+assert.strictEqual(typeof helpers.buildXiaohongshuRecordFromExtraction, 'function');
 const noisyXhsRecord = {
   type: 'webpage',
   content: 'https://www.xiaohongshu.com/explore/789',
@@ -171,6 +173,28 @@ assert.deepStrictEqual(
   helpers.buildFallbackGeneratedKeywords(noisyXhsRecord).slice(0, 4),
   ['小红书', '标题方法', 'AI写作', '小红书标题方法'],
 );
+const mergedXhsMarkdown = helpers.mergeSocialCommentsIntoMarkdown('## 正文\n\n内容', [
+  { author: '渲染用户', content: '渲染后才出现的评论', likes: '5' },
+]);
+assert.ok(mergedXhsMarkdown.includes('## 评论区'));
+assert.ok(mergedXhsMarkdown.includes('**渲染用户**：渲染后才出现的评论'));
+const extractedWithoutComments = {
+  title: '小红书标题方法',
+  author: '',
+  description: '正文',
+  tags: [],
+  markdown: '## 正文\n\n正文',
+  imageUrls: [],
+  videoUrl: '',
+  comments: [],
+};
+const hydratedXhsRecord = helpers.buildXiaohongshuRecordFromExtraction(noisyXhsRecord, {
+  metadata: noisyXhsRecord.metadata,
+  url: noisyXhsRecord.content,
+  extracted: extractedWithoutComments,
+  renderedComments: [{ author: '渲染用户', content: '渲染后才出现的评论' }],
+});
+assert.ok(hydratedXhsRecord.metadata.markdown.includes('**渲染用户**：渲染后才出现的评论'));
 
 async function runAsyncChecks() {
   const plugin = new Plugin();
