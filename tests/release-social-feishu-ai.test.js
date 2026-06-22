@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.44');
-assert.strictEqual(versions['1.2.44'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.45');
+assert.strictEqual(versions['1.2.45'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -390,6 +390,11 @@ const aiSettingsWithLegacyFields = helpers.mergeSettings({
 });
 assert.strictEqual(aiSettingsWithLegacyFields.notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
 assert.strictEqual(helpers.shouldGenerateAiMetadata(aiSettingsWithLegacyFields, aiMetadataCandidateRecord), true);
+const aiSettingsWithOnlyGeneratedFields = helpers.mergeSettings({
+  aiMetadataEnabled: true,
+  notePropertyFields: 'description,keywords',
+});
+assert.strictEqual(aiSettingsWithOnlyGeneratedFields.notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
 
 assert.strictEqual(typeof helpers.shouldRefreshAiDescription, 'function');
 assert.strictEqual(typeof helpers.buildFallbackGeneratedKeywords, 'function');
@@ -548,6 +553,47 @@ async function runAsyncChecks() {
   const activeProFeatureStatus = await activeProFeaturePlugin.getProFeatureEntitlementStatus();
   assert.strictEqual(activeProFeatureStatus.hasAccess, true);
   assert.strictEqual(activeProFeatureStatus.plan, 'local_transcription_beta');
+
+  const invalidBindingAiPlugin = new Plugin();
+  invalidBindingAiPlugin.settings = helpers.mergeSettings({
+    aiMetadataEnabled: true,
+    bindings: [{ token: 'invalid-token', label: 'invalid', status: 'bound', enabled: true }],
+    clientId: 'invalid-client',
+  });
+  invalidBindingAiPlugin.requestJson = async () => {
+    throw new Error('绑定码未绑定或已失效');
+  };
+  const invalidBindingAiResult = await invalidBindingAiPlugin.enrichRecordMetadataWithAi(aiMetadataCandidateRecord);
+  assert.strictEqual(invalidBindingAiResult.metadata.description || '', '');
+  assert.deepStrictEqual(invalidBindingAiResult.metadata.keywords || [], []);
+  assert.strictEqual(invalidBindingAiPlugin.settings.aiMetadataEnabled, false);
+
+  const multiBindingAiPlugin = new Plugin();
+  multiBindingAiPlugin.settings = helpers.mergeSettings({
+    aiMetadataEnabled: true,
+    bindings: [
+      { token: 'invalid-token', label: 'old', status: 'bound', enabled: true },
+      { token: 'pro-token', label: 'pro', status: 'bound', enabled: true },
+    ],
+    clientId: 'multi-client',
+  });
+  const metadataGenerateTokens = [];
+  multiBindingAiPlugin.requestJson = async (url, method, body, binding) => {
+    if (String(url).includes('/entitlements/status')) {
+      if (binding && binding.token === 'INVALID-TOKEN') throw new Error('绑定码未绑定或已失效');
+      return { data: { hasAccess: true, plan: 'local_transcription_beta', status: 'active' } };
+    }
+    if (url === '/metadata/generate') {
+      metadataGenerateTokens.push(binding && binding.token);
+      return { data: { description: 'Pro 绑定生成的简介', keywords: ['Pro关键词'] } };
+    }
+    return { data: {} };
+  };
+  const multiBindingAiResult = await multiBindingAiPlugin.enrichRecordMetadataWithAi(aiMetadataCandidateRecord);
+  assert.deepStrictEqual(metadataGenerateTokens, ['PRO-TOKEN']);
+  assert.strictEqual(multiBindingAiResult.metadata.description, 'Pro 绑定生成的简介');
+  assert.deepStrictEqual(multiBindingAiResult.metadata.keywords, ['Pro关键词']);
+  assert.deepStrictEqual(multiBindingAiPlugin.settings.bindings.map((item) => item.token), ['PRO-TOKEN']);
 
   const xhsHydratePlugin = new Plugin();
   xhsHydratePlugin.settings = helpers.mergeSettings({ xiaohongshuCommentsEnabled: false });

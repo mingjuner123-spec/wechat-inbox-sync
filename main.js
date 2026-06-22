@@ -1051,10 +1051,14 @@ function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   merged.deepseekBaseUrl = DEFAULT_SETTINGS.deepseekBaseUrl;
   if (merged.aiMetadataEnabled) {
     const fields = parseNotePropertyFields(merged.notePropertyFields);
+    const baseFields = parseNotePropertyFields(DEFAULT_NOTE_PROPERTY_FIELDS);
+    const hasOnlyGeneratedFields = fields.length > 0
+      && fields.every((field) => ['description', 'keywords'].includes(field));
+    const nextFields = hasOnlyGeneratedFields ? baseFields : fields;
     ['description', 'keywords'].forEach((field) => {
-      if (!fields.includes(field)) fields.push(field);
+      if (!nextFields.includes(field)) nextFields.push(field);
     });
-    merged.notePropertyFields = fields.join(',');
+    merged.notePropertyFields = nextFields.join(',');
   }
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
@@ -6454,10 +6458,12 @@ class WechatObsidianInboxPlugin extends Plugin {
   async generateAiMetadataWithCloud(record) {
     const inputText = extractAiMetadataInputText(record);
     if (!inputText) return { description: '', keywords: [] };
-    const binding = this.getActiveBindings()[0] || null;
-    if (!binding) {
-      throw new Error('AI 简介与关键词仅 Pro 用户可用：请先绑定小程序并开通 Pro。');
-    }
+    const entitlement = await this.ensureProFeatureAccess('AI 简介与关键词');
+    const entitlementToken = normalizeBindCodeInput(entitlement && entitlement.bindingToken);
+    const binding = entitlementToken
+      ? this.getActiveBindings().find((item) => normalizeBindCodeInput(item.token) === entitlementToken)
+      : null;
+    if (!binding) throw new Error('AI 简介与关键词仅 Pro 用户可用：请先绑定小程序并开通 Pro。');
     const payload = await this.requestJson('/metadata/generate', 'POST', {
       title: (record && record.metadata && record.metadata.title) || '',
       source: (record && record.metadata && (record.metadata.platform || record.metadata.source)) || '',
@@ -6480,8 +6486,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       generated = await this.generateAiMetadataWithCloud(record);
     } catch (error) {
-      if (String(error && error.message || error || '').includes('PRO_REQUIRED')) throw error;
-      generated = { description: '', keywords: [] };
+      if (isBindingInvalidMessage(error && error.message ? error.message : error)) {
+        await this.disableProFeatureSettings();
+      }
+      return record;
     }
     const metadata = { ...((record && record.metadata) || {}) };
     const refreshDescription = shouldRefreshAiDescription(metadata, record);
@@ -6956,12 +6964,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
 
     let lastError = null;
+    const invalidBindingTokens = [];
+    const markInvalidBindingsUnbound = async () => {
+      for (const token of invalidBindingTokens) {
+        // eslint-disable-next-line no-await-in-loop
+        await this.markBindingUnbound(token, '绑定码已失效或已被更换');
+      }
+    };
     for (const binding of bindings) {
       for (const plan of PRO_FEATURE_PLANS) {
         try {
           const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(plan)}`, 'GET', {}, binding);
           const data = payload && payload.data ? payload.data : {};
           if (data.hasAccess) {
+            await markInvalidBindingsUnbound();
             return {
               hasAccess: true,
               plan: data.plan || plan,
@@ -6974,21 +6990,39 @@ class WechatObsidianInboxPlugin extends Plugin {
           lastError = data;
         } catch (error) {
           lastError = error;
+          if (isBindingInvalidMessage(error && error.message ? error.message : error)) {
+            invalidBindingTokens.push(binding.token);
+            break;
+          }
         }
       }
     }
+    await markInvalidBindingsUnbound();
 
     return {
       hasAccess: false,
       plan: LOCAL_TRANSCRIPTION_PLAN,
-      status: (lastError && lastError.status) || 'inactive',
+      status: invalidBindingTokens.length ? 'unbound' : ((lastError && lastError.status) || 'inactive'),
       expiresAt: (lastError && lastError.expiresAt) || '',
+      errorMessage: lastError && lastError.message ? lastError.message : String(lastError || ''),
     };
+  }
+
+  async disableProFeatureSettings() {
+    if (!this.settings.aiMetadataEnabled && !this.settings.xiaohongshuCommentsEnabled) return;
+    await this.saveSettings({
+      ...this.settings,
+      aiMetadataEnabled: false,
+      xiaohongshuCommentsEnabled: false,
+    });
   }
 
   async ensureProFeatureAccess(featureName = 'Pro 功能') {
     const status = await this.getProFeatureEntitlementStatus();
     if (status.hasAccess) return status;
+    if (isBindingInvalidMessage(status.errorMessage || '')) {
+      await this.disableProFeatureSettings();
+    }
     if (status.status === 'unbound') {
       throw new Error(`${featureName}仅 Pro 用户可用：请先绑定小程序并开通 Pro。`);
     }
