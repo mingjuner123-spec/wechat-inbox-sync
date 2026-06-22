@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.45');
-assert.strictEqual(versions['1.2.45'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.46');
+assert.strictEqual(versions['1.2.46'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -112,7 +112,7 @@ assert.ok(feishuRichImagesMarkdown.includes('https://example.com/preview.jpeg'))
 const wechatScriptCommentHtml = `
   <html>
     <body>
-      <div id="js_content"><p>正文内容</p></div>
+      <div id="js_content"><p>这是一段足够长的公众号正文内容，用来确认正文可以正常转成 Markdown。</p></div>
       <script>
         window.cgiData = {
           elected_comment: [{
@@ -129,7 +129,8 @@ const wechatScriptCommentHtml = `
 assert.deepStrictEqual(helpers.extractWechatCommentsFromHtml(wechatScriptCommentHtml), [
   { author: '读者B', content: '评论来自脚本数据', time: '2026-06-22', likes: '12' },
 ]);
-assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
+assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('足够长的公众号正文内容'));
+assert.ok(!helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
 assert.strictEqual(typeof helpers.htmlToMarkdownOrFallback, 'function');
 assert.ok(helpers.htmlToMarkdownOrFallback(
   '<html><head><title>短公众号</title></head><body><div id="js_content"><p>短</p></div></body></html>',
@@ -213,6 +214,9 @@ assert.ok(wechatMarkdownWithApiComments.includes('  - **作者** 回复 **接口
 const wechatMarkdownWithoutComments = helpers.buildWechatArticleMarkdownWithComments('公众号正文', wechatArticleForCommentApi, []);
 assert.ok(!wechatMarkdownWithoutComments.includes('## 评论区'));
 assert.ok(!wechatMarkdownWithoutComments.includes('未抓取到公开评论'));
+const wechatMarkdownWithEmbeddedCommentsDisabled = helpers.buildWechatArticleMarkdownWithComments('公众号正文', wechatScriptCommentHtml, []);
+assert.ok(!wechatMarkdownWithEmbeddedCommentsDisabled.includes('## 评论区'));
+assert.ok(!wechatMarkdownWithEmbeddedCommentsDisabled.includes('评论来自脚本数据'));
 
 const xhsNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
@@ -639,11 +643,17 @@ async function runAsyncChecks() {
     content: 'https://mp.weixin.qq.com/s?__biz=MzA-test&mid=1&idx=1&sn=abc',
     metadata: { url: 'https://mp.weixin.qq.com/s?__biz=MzA-test&mid=1&idx=1&sn=abc', platform: '公众号' },
   }, '', '', '公众号测试');
-  assert.strictEqual(wechatRenderCalled, true);
-  assert.ok(wechatHydrated.metadata.markdown.includes('文章页登录态抓到的留言'));
+  assert.strictEqual(wechatRenderCalled, false);
+  assert.ok(wechatHydrated.metadata.markdown.includes('公众号正文'));
+  assert.ok(!wechatHydrated.metadata.markdown.includes('文章页登录态抓到的留言'));
 
   const source = fs.readFileSync(pluginPath, 'utf8');
-  assert.ok(source.includes("text: 'AI 简介与关键词（DeepSeek）'"));
+  assert.ok(source.includes("text: 'AI 简介与关键词'"));
+  assert.ok(source.includes("text: '小红书评论区抓取'"));
+  assert.ok(!source.includes('login-wechat-for-comments'));
+  assert.ok(!source.includes('公众号文章阅读态'));
+  assert.ok(!source.includes('AI 简介与关键词（DeepSeek）'));
+  assert.ok(!source.includes('服务端 DeepSeek'));
   assert.ok(!source.includes(".setName('DeepSeek API Key')"));
   assert.ok(!source.includes(".setName('DeepSeek 模型')"));
   assert.ok(!source.includes('sk-test'));

@@ -1045,7 +1045,7 @@ function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
   merged.xiaohongshuCommentsEnabled = Boolean(merged.xiaohongshuCommentsEnabled);
-  // DeepSeek credentials live on the official sync API, never in the public plugin bundle/settings.
+  // AI credentials live on the official sync API, never in the public plugin bundle/settings.
   merged.deepseekApiKey = '';
   merged.deepseekModel = DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = DEFAULT_SETTINGS.deepseekBaseUrl;
@@ -2113,7 +2113,7 @@ function buildFallbackGeneratedKeywords(record) {
     /公众号/g,
     /飞书机器人/g,
     /Obsidian/gi,
-    /DeepSeek/gi,
+    /Deep\s*Seek/gi,
     /AI写作/gi,
     /AI/g,
     /标题方法/g,
@@ -4510,10 +4510,7 @@ function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
 
 function buildWechatArticleMarkdownWithComments(markdown, html, extraComments = []) {
   const source = String(markdown || '').trim();
-  const comments = [
-    ...extractWechatCommentsFromHtml(html),
-    ...(extraComments || []),
-  ];
+  const comments = extraComments || [];
   if (!comments.length) {
     return source.replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '').trim();
   }
@@ -4630,8 +4627,6 @@ function htmlToMarkdown(html) {
 
   readable = cleanMarkdownForStorage(stripHtmlTags(readable));
 
-  readable = appendWechatCommentsToMarkdown(readable, sourceHtml);
-
   if (readable.length < 20) {
     throw new Error('网页正文太短，无法转为 Markdown');
   }
@@ -4648,7 +4643,7 @@ function htmlToMarkdownOrFallback(html, url = '', fallbackTitle = '') {
     const lines = [
       title,
       '',
-      readable || '正文暂未提取到足够内容，已保留原始链接并继续尝试抓取评论区。',
+      readable || '正文暂未提取到足够内容，已保留原始链接。',
       '',
       cleanDisplayUrl(url) ? `原始链接：${cleanDisplayUrl(url)}` : '',
     ].filter(Boolean);
@@ -6287,14 +6282,8 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     this.addCommand({
       id: 'login-xiaohongshu-for-comments',
-      name: '登录小红书以抓取评论区',
+      name: '登录小红书以抓取小红书评论区',
       callback: () => this.openSocialLogin('xiaohongshu'),
-    });
-
-    this.addCommand({
-      id: 'login-wechat-for-comments',
-      name: '打开公众号文章阅读态以抓取评论区',
-      callback: () => this.openSocialLogin('wechat'),
     });
 
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
@@ -6476,7 +6465,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async generateMetadataWithDeepSeek(record) {
+  async generateMetadataWithAi(record) {
     return await this.generateAiMetadataWithCloud(record);
   }
 
@@ -6512,7 +6501,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async testDeepSeekConnection() {
+  async testAiMetadataConnection() {
     const result = await this.generateAiMetadataWithCloud({
       type: 'text',
       content: '这是一段关于 Obsidian 内容同步助手、飞书机器人和知识管理的测试文案。',
@@ -6521,7 +6510,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       },
     });
     if (!result.description && !result.keywords.length) {
-      throw new Error('DeepSeek 已响应，但没有返回可用的简介或关键词');
+      throw new Error('AI 服务已响应，但没有返回可用的简介或关键词');
     }
     return result;
   }
@@ -8321,22 +8310,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (convertError) {
         throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
       }
-      let wechatComments = [];
       if (isWechatArticleUrl(url)) {
-        wechatComments = extractWechatCommentsFromHtml(html);
-        if (!wechatComments.length) {
-          wechatComments = await fetchWechatCommentsFromApi(url, html);
-        }
-        if (!wechatComments.length && !isMobileRuntime()) {
-          try {
-            wechatComments = typeof this.renderWechatComments === 'function'
-              ? await this.renderWechatComments(url)
-              : await renderWechatCommentsWithElectron(url);
-          } catch (renderCommentError) {
-            wechatComments = [];
-          }
-        }
-        markdown = buildWechatArticleMarkdownWithComments(markdown, html, wechatComments);
+        markdown = buildWechatArticleMarkdownWithComments(markdown, html, []);
       }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       const pageMeta = extractWebpageMetadataFromHtml(html, url);
@@ -8862,14 +8837,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
     });
 
     const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    aiPanel.createEl('summary', { text: 'AI 简介与关键词（DeepSeek）' });
-    aiPanel.createDiv({
-      text: 'Pro 功能。默认关闭；打开后同步写入前自动生成 description 和 keywords。DeepSeek 已内置在官方服务端，不需要填写 API Key。',
-      cls: 'wechat-inbox-sync-muted',
-    });
+    aiPanel.createEl('summary', { text: 'AI 简介与关键词' });
     new Setting(aiPanel)
       .setName('启用 AI 简介与关键词')
-      .setDesc('仅 Pro 用户可用；默认关闭。同步写入前自动生成内容简介与关键词。')
+      .setDesc('仅 Pro 用户可用；默认关闭。打开后同步时自动生成内容简介与关键词。')
       .addToggle((toggle) => toggle
         .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
         .onChange(async (value) => {
@@ -8887,14 +8858,13 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
     new Setting(aiPanel)
       .setName('测试 AI 连接')
-      .setDesc('校验 Pro 权限和服务端 DeepSeek 是否可用。')
       .addButton((button) => button
         .setButtonText('测试 AI 连接')
         .setCta()
         .onClick(async () => {
           try {
             await this.plugin.ensureProFeatureAccess('AI 简介与关键词');
-            const result = await this.plugin.testDeepSeekConnection();
+            const result = await this.plugin.testAiMetadataConnection();
             new Notice(`AI 连接成功：${result.description || result.keywords.join('、')}`);
           } catch (error) {
             new Notice(`AI 连接失败：${error.message || error}`);
@@ -8902,14 +8872,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
 
     const commentPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    commentPanel.createEl('summary', { text: '评论区抓取登录态' });
-    commentPanel.createDiv({
-      text: '小红书需要网页登录态；公众号需要文章阅读态。这里会打开平台自己的页面，本地保存会话，不需要手动复制任何参数。',
-      cls: 'wechat-inbox-sync-muted',
-    });
+    commentPanel.createEl('summary', { text: '小红书评论区抓取' });
     new Setting(commentPanel)
       .setName('启用小红书评论区抓取')
-      .setDesc('Pro 功能；默认关闭。打开后同步小红书图文/视频时会复用本地网页登录态抓评论区。')
+      .setDesc('仅 Pro 用户可用；默认关闭。打开后同步小红书内容时会尝试提取评论区。')
       .addToggle((toggle) => toggle
         .setValue(Boolean(this.plugin.settings.xiaohongshuCommentsEnabled))
         .onChange(async (value) => {
@@ -8927,7 +8893,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
     new Setting(commentPanel)
       .setName('小红书登录状态')
-      .setDesc('打开小红书评论区抓取后，需要扫码登录小红书网页。')
+      .setDesc('打开小红书评论区抓取后，需要先登录小红书网页。')
       .addButton((button) => button
         .setButtonText('登录小红书')
         .setCta()
@@ -8938,19 +8904,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .setButtonText('查看状态')
         .onClick(async () => {
           new Notice(await this.plugin.getSocialLoginStatusText('xiaohongshu'));
-        }));
-    new Setting(commentPanel)
-      .setName('公众号文章阅读态')
-      .setDesc('公众号评论需要 mp.weixin.qq.com 文章阅读会话；不是公众号后台登录。同步时必要情况下会自动打开文章页，等待评论接口加载。')
-      .addButton((button) => button
-        .setButtonText('打开阅读态')
-        .onClick(async () => {
-          await this.plugin.openSocialLogin('wechat');
-        }))
-      .addButton((button) => button
-        .setButtonText('查看状态')
-        .onClick(async () => {
-          new Notice(await this.plugin.getSocialLoginStatusText('wechat'));
         }));
 
     const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
