@@ -45,8 +45,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.33');
-assert.strictEqual(versions['1.2.33'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.34');
+assert.strictEqual(versions['1.2.34'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -98,6 +98,50 @@ assert.deepStrictEqual(helpers.extractWechatCommentsFromHtml(wechatScriptComment
   { author: '读者B', content: '评论来自脚本数据', time: '2026-06-22', likes: '12' },
 ]);
 assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
+
+assert.strictEqual(typeof helpers.extractWechatCommentRequestParams, 'function');
+assert.strictEqual(typeof helpers.extractWechatCommentsFromPayload, 'function');
+assert.strictEqual(typeof helpers.buildWechatArticleMarkdownWithComments, 'function');
+const wechatArticleForCommentApi = `
+  <html>
+    <body>
+      <div id="js_content"><p>公众号正文</p></div>
+      <script>
+        var appmsg_token = "token-from-page";
+        var comment_id = "123456789";
+        var biz = "MzA-test";
+        var mid = "2247489999";
+        var idx = "1";
+        var sn = "abcdef";
+      </script>
+    </body>
+  </html>
+`;
+assert.deepStrictEqual(helpers.extractWechatCommentRequestParams(wechatArticleForCommentApi, 'https://mp.weixin.qq.com/s?__biz=MzA-test&mid=2247489999&idx=1&sn=abcdef'), {
+  appmsg_token: 'token-from-page',
+  comment_id: '123456789',
+  __biz: 'MzA-test',
+  mid: '2247489999',
+  idx: '1',
+  sn: 'abcdef',
+});
+assert.deepStrictEqual(helpers.extractWechatCommentsFromPayload({
+  elected_comment: [{
+    nick_name: '接口读者',
+    content: '这条评论来自微信接口',
+    create_time: '2026-06-22',
+    like_num: 18,
+  }],
+}), [
+  { author: '接口读者', content: '这条评论来自微信接口', time: '2026-06-22', likes: '18' },
+]);
+const wechatMarkdownWithApiComments = helpers.buildWechatArticleMarkdownWithComments(
+  '公众号正文',
+  wechatArticleForCommentApi,
+  [{ author: '接口读者', content: '这条评论来自微信接口' }],
+);
+assert.ok(wechatMarkdownWithApiComments.includes('## 评论区'));
+assert.ok(wechatMarkdownWithApiComments.includes('**接口读者**：这条评论来自微信接口'));
 
 const xhsNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',

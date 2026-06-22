@@ -4122,6 +4122,80 @@ function extractWechatCommentsFromJson(html, comments, seen) {
   });
 }
 
+function extractWechatCommentsFromPayload(payload, limit = 20) {
+  const comments = [];
+  const seen = new Set();
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  extractCommentsFromObject(data, comments, seen, limit);
+  return comments.slice(0, limit);
+}
+
+function extractWechatCommentRequestParams(html, url = '') {
+  const source = String(html || '');
+  const params = {};
+  const readScriptString = (keys) => {
+    for (const key of keys) {
+      const pattern = new RegExp(`(?:var\\s+)?${key}\\s*=\\s*["']([^"']+)["']`, 'i');
+      const match = source.match(pattern);
+      if (match && match[1]) return decodeHtmlEntities(decodeJsonLikeText(match[1])).trim();
+    }
+    return '';
+  };
+  const readScriptNumber = (keys) => {
+    for (const key of keys) {
+      const pattern = new RegExp(`(?:var\\s+)?${key}\\s*=\\s*["']?([0-9]+)["']?`, 'i');
+      const match = source.match(pattern);
+      if (match && match[1]) return match[1].trim();
+    }
+    return '';
+  };
+
+  try {
+    const parsed = new URL(cleanDisplayUrl(url));
+    ['__biz', 'mid', 'idx', 'sn'].forEach((key) => {
+      const value = parsed.searchParams.get(key);
+      if (value) params[key] = value;
+    });
+  } catch (error) {
+    // Script values below are enough for many WeChat pages.
+  }
+
+  params.appmsg_token = readScriptString(['appmsg_token', 'window.appmsg_token']) || params.appmsg_token || '';
+  params.comment_id = readScriptNumber(['comment_id', 'commentId']) || readScriptString(['comment_id', 'commentId']) || '';
+  params.__biz = params.__biz || readScriptString(['biz', '__biz']) || '';
+  params.mid = params.mid || readScriptNumber(['mid', 'appmsgid']) || readScriptString(['mid', 'appmsgid']) || '';
+  params.idx = params.idx || readScriptNumber(['idx']) || readScriptString(['idx']) || '';
+  params.sn = params.sn || readScriptString(['sn']) || '';
+
+  return Object.fromEntries(Object.entries(params).filter(([, value]) => value));
+}
+
+function buildWechatCommentApiUrl(articleUrl, params = {}) {
+  if (!params.comment_id || !params.appmsg_token) return '';
+  const api = new URL('https://mp.weixin.qq.com/mp/appmsg_comment');
+  api.searchParams.set('action', 'getcomment');
+  api.searchParams.set('scene', '0');
+  api.searchParams.set('__biz', params.__biz || '');
+  api.searchParams.set('appmsgid', params.mid || '');
+  api.searchParams.set('idx', params.idx || '1');
+  api.searchParams.set('comment_id', params.comment_id);
+  api.searchParams.set('offset', '0');
+  api.searchParams.set('limit', '20');
+  api.searchParams.set('send_time', '');
+  api.searchParams.set('sessionid', '0');
+  api.searchParams.set('enterid', String(Date.now()));
+  api.searchParams.set('ascene', '0');
+  api.searchParams.set('fasttmpl_type', '0');
+  api.searchParams.set('fasttmpl_fullversion', '0');
+  api.searchParams.set('fasttmpl_flag', '0');
+  api.searchParams.set('appmsg_token', params.appmsg_token);
+  api.searchParams.set('x5', '0');
+  api.searchParams.set('f', 'json');
+  api.searchParams.set('r', String(Math.random()));
+  if (articleUrl) api.searchParams.set('ref', cleanDisplayUrl(articleUrl));
+  return api.toString();
+}
+
 function extractWechatCommentsFromHtml(html, limit = 20) {
   const source = String(html || '');
   const comments = [];
@@ -4198,6 +4272,34 @@ function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
     ? htmlOrComments
     : extractWechatCommentsFromHtml(htmlOrComments);
   return mergeSocialCommentsIntoMarkdown(source, comments);
+}
+
+function buildWechatArticleMarkdownWithComments(markdown, html, extraComments = []) {
+  const comments = [
+    ...extractWechatCommentsFromHtml(html),
+    ...(extraComments || []),
+  ];
+  return appendWechatCommentsToMarkdown(markdown, comments);
+}
+
+async function fetchWechatCommentsFromApi(articleUrl, html) {
+  const params = extractWechatCommentRequestParams(html, articleUrl);
+  const apiUrl = buildWechatCommentApiUrl(articleUrl, params);
+  if (!apiUrl) return [];
+  try {
+    const response = await requestUrl({
+      url: apiUrl,
+      method: 'GET',
+      headers: {
+        ...getSocialRequestHeaders(articleUrl),
+        Referer: cleanDisplayUrl(articleUrl),
+        Accept: 'application/json,text/plain,*/*',
+      },
+    });
+    return extractWechatCommentsFromPayload(response.json || response.text);
+  } catch (error) {
+    return [];
+  }
 }
 
 function extractHtmlTitle(html) {
@@ -4583,6 +4685,72 @@ async function renderUrlToMarkdownWithElectron(url) {
     return result;
   } finally {
     if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
+}
+
+async function renderWechatCommentsWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
+  }
+
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1400,
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  try {
+    const loaded = waitForWebContents(win.webContents, 18000);
+    await win.loadURL(url);
+    await loaded;
+    await settleRenderedPage(win.webContents);
+    const comments = await win.webContents.executeJavaScript(`
+      (() => {
+        const clean = (text) => String(text || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/\\s+/g, ' ')
+          .trim();
+        const area = document.querySelector('#js_cmt_area') || document;
+        const nodes = Array.from(area.querySelectorAll([
+          '[class*="comment"]',
+          '[class*="cmt"]',
+          '[id*="comment"]',
+          '[id*="cmt"]',
+          '.discuss_item',
+          '.reply_item'
+        ].join(',')));
+        const comments = [];
+        const seen = new Set();
+        nodes.forEach((node) => {
+          const fullText = clean(node.innerText || node.textContent || '');
+          if (!fullText || fullText.length < 2 || fullText.length > 800) return;
+          const authorNode = node.querySelector('[class*="nickname"],[class*="nick"],[class*="author"],[class*="user"],[class*="name"]');
+          const contentNode = node.querySelector('[class*="comment_content"],[class*="content"],[class*="message"],[class*="text"],.discuss_message_content');
+          const likeNode = node.querySelector('[class*="like"],[class*="praise"],[class*="agree"]');
+          const author = clean(authorNode ? authorNode.innerText || authorNode.textContent || '' : '');
+          let content = clean(contentNode ? contentNode.innerText || contentNode.textContent || '' : fullText);
+          if (author && content.startsWith(author)) content = clean(content.slice(author.length));
+          content = content.replace(/^(精选留言|留言|回复|赞)\\s*/g, '').trim();
+          const likes = clean(likeNode ? likeNode.innerText || likeNode.textContent || '' : '').replace(/[^0-9万\\.]/g, '');
+          const key = author + '|' + content;
+          if (!content || content.length < 2 || seen.has(key)) return;
+          seen.add(key);
+          comments.push({ author, content, likes });
+        });
+        return comments.slice(0, 20);
+      })()
+    `);
+    return Array.isArray(comments) ? comments.map(normalizeSocialComment).filter(Boolean) : [];
+  } finally {
+    if (win && !win.isDestroyed()) {
       win.destroy();
     }
   }
@@ -7175,6 +7343,21 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (convertError) {
         throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
       }
+      let wechatComments = [];
+      if (isWechatArticleUrl(url)) {
+        wechatComments = extractWechatCommentsFromHtml(html);
+        if (!wechatComments.length) {
+          wechatComments = await fetchWechatCommentsFromApi(url, html);
+        }
+        if (!wechatComments.length && !isMobileRuntime()) {
+          try {
+            wechatComments = await renderWechatCommentsWithElectron(url);
+          } catch (renderCommentError) {
+            wechatComments = [];
+          }
+        }
+        markdown = buildWechatArticleMarkdownWithComments(markdown, html, wechatComments);
+      }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       const pageMeta = extractWebpageMetadataFromHtml(html, url);
       return {
@@ -7950,7 +8133,10 @@ WechatObsidianInboxPlugin.__test = {
   extractWebpageMetadataFromHtml,
   extractFeishuMarkdownFromHtml,
   extractWechatCommentsFromHtml,
+  extractWechatCommentRequestParams,
+  extractWechatCommentsFromPayload,
   appendWechatCommentsToMarkdown,
+  buildWechatArticleMarkdownWithComments,
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   shouldRefreshAiDescription,
