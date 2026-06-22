@@ -4044,12 +4044,24 @@ function normalizeSocialComment(comment) {
   const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
-  return {
+  const normalized = {
     author,
     content,
     time: String(comment.time || '').trim(),
     likes: String(comment.likes || '').trim(),
+    replyTo: String(comment.replyTo || comment.reply_to || '').replace(/^[:：]+|[:：]+$/g, '').trim(),
   };
+  const replies = Array.isArray(comment.replies) ? comment.replies : [];
+  const normalizedReplies = replies
+    .map((reply) => normalizeSocialComment(reply))
+    .filter(Boolean)
+    .map((reply) => ({
+      ...reply,
+      replyTo: reply.replyTo || normalized.author,
+    }));
+  if (normalizedReplies.length) normalized.replies = normalizedReplies;
+  if (!normalized.replyTo) delete normalized.replyTo;
+  return normalized;
 }
 
 function pushSocialComment(comments, seen, comment) {
@@ -4085,6 +4097,123 @@ function readCommentField(item, keys) {
   return '';
 }
 
+function getCommentAuthor(value) {
+  return readCommentField(value, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userNickname',
+    'user_nickname',
+    'userName',
+    'name',
+    'author',
+  ]) || readCommentField(value && (value.user || value.userInfo || value.user_info || value.authorInfo || value.user_info_detail) || {}, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userName',
+    'name',
+  ]);
+}
+
+function getCommentContent(value) {
+  return readCommentField(value, [
+    'content',
+    'text',
+    'commentContent',
+    'comment_content',
+    'noteText',
+    'message',
+  ]);
+}
+
+function getCommentTime(value) {
+  return readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
+}
+
+function getCommentLikes(value) {
+  return readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'liked_count', 'like_count', 'likes']);
+}
+
+function getReplyTargetAuthor(value, parentAuthor = '') {
+  return readCommentField(value && (value.target_comment || value.targetComment || value.reply_to || value.replyTo || value.to_user || value.toUser) || {}, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userName',
+    'name',
+    'author',
+  ]) || readCommentField(value && (
+    (value.target_comment && (value.target_comment.user || value.target_comment.user_info || value.target_comment.userInfo))
+    || (value.targetComment && (value.targetComment.user || value.targetComment.user_info || value.targetComment.userInfo))
+    || value.to_user_info
+    || value.toUserInfo
+  ) || {}, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userName',
+    'name',
+  ]) || parentAuthor || '';
+}
+
+function readCommentReplyItems(value) {
+  const replyValues = [
+    value && value.reply,
+    value && value.reply_info,
+    value && value.replyInfo,
+    value && value.reply_list,
+    value && value.replyList,
+    value && value.replies,
+    value && value.sub_comments,
+    value && value.subComments,
+    value && value.sub_comment_list,
+    value && value.subCommentList,
+    value && value.sub_comment,
+    value && value.subComment,
+  ].filter(Boolean);
+  const items = [];
+  replyValues.forEach((entry) => {
+    if (Array.isArray(entry)) {
+      entry.forEach((item) => {
+        if (item && typeof item === 'object') items.push(item);
+      });
+    } else if (entry && typeof entry === 'object') {
+      const nestedList = entry.list || entry.items || entry.comments || entry.reply_list || entry.replyList;
+      if (Array.isArray(nestedList)) {
+        nestedList.forEach((item) => {
+          if (item && typeof item === 'object') items.push(item);
+        });
+      } else {
+        items.push(entry);
+      }
+    }
+  });
+  return items;
+}
+
+function extractRepliesFromComment(value, parentAuthor, limit, depth) {
+  const replies = [];
+  const replySeen = new Set();
+  readCommentReplyItems(value).forEach((reply) => {
+    if (replies.length >= limit) return;
+    const content = getCommentContent(reply);
+    if (!content) return;
+    const author = getCommentAuthor(reply);
+    const replyTo = getReplyTargetAuthor(reply, parentAuthor);
+    const nestedReplies = extractRepliesFromComment(reply, author || parentAuthor, Math.max(0, limit - replies.length - 1), depth + 1);
+    pushSocialComment(replies, replySeen, {
+      author,
+      content,
+      time: getCommentTime(reply),
+      likes: getCommentLikes(reply),
+      replyTo,
+      replies: nestedReplies,
+    });
+  });
+  return replies;
+}
+
 function extractCommentsFromObject(value, comments, seen, limit = SOCIAL_COMMENT_LIMIT, depth = 0) {
   if (!value || depth > 8 || comments.length >= limit) return;
   if (Array.isArray(value)) {
@@ -4093,38 +4222,24 @@ function extractCommentsFromObject(value, comments, seen, limit = SOCIAL_COMMENT
   }
   if (typeof value !== 'object') return;
 
-  const content = readCommentField(value, [
-    'content',
-    'text',
-    'commentContent',
-    'comment_content',
-    'noteText',
-    'message',
-  ]);
+  const content = getCommentContent(value);
   if (content) {
-    const author = readCommentField(value, [
-      'nick_name',
-      'nickname',
-      'nickName',
-      'userNickname',
-      'user_nickname',
-      'userName',
-      'name',
-      'author',
-    ]) || readCommentField(value.user || value.userInfo || value.user_info || value.authorInfo || {}, [
-      'nick_name',
-      'nickname',
-      'nickName',
-      'userName',
-      'name',
-    ]);
-    const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
-    const likes = readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'liked_count', 'like_count', 'likes']);
-    pushSocialComment(comments, seen, { author, content, time, likes });
+    const author = getCommentAuthor(value);
+    const replies = extractRepliesFromComment(value, author, Math.max(0, limit - comments.length - 1), depth + 1);
+    pushSocialComment(comments, seen, {
+      author,
+      content,
+      time: getCommentTime(value),
+      likes: getCommentLikes(value),
+      replies,
+    });
   }
 
   Object.keys(value).forEach((key) => {
     if (comments.length >= limit) return;
+    if (/^(reply|reply_info|replyInfo|reply_list|replyList|replies|sub_comments|subComments|sub_comment_list|subCommentList|sub_comment|subComment)$/i.test(key)) {
+      return;
+    }
     if (/comment|cmt|reply|discuss|list|items|data/i.test(key)) {
       extractCommentsFromObject(value[key], comments, seen, limit, depth + 1);
     }
@@ -4352,10 +4467,19 @@ function buildSocialCommentsMarkdown(comments = []) {
   const items = (comments || []).map(normalizeSocialComment).filter(Boolean);
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
-  items.forEach((comment) => {
+  const renderCommentLine = (comment, indent = '') => {
     const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
-    const prefix = comment.author ? `**${comment.author}**：` : '';
-    lines.push(`- ${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
+    const author = comment.author || '匿名用户';
+    const relation = comment.replyTo ? ` 回复 **${comment.replyTo}**` : '';
+    return `${indent}- **${author}**${relation}：${comment.content}${meta ? `（${meta}）` : ''}`;
+  };
+  const renderThread = (comment, depth = 0) => {
+    lines.push(renderCommentLine(comment, '  '.repeat(depth)));
+    (comment.replies || []).forEach((reply) => renderThread(reply, depth + 1));
+  };
+  items.forEach((comment) => {
+    renderThread(comment);
+    lines.push('');
   });
   return lines.join('\n').trim();
 }
@@ -5307,6 +5431,22 @@ function getXiaohongshuInPageCommentFetchScript(url = '') {
         });
         return roots;
       };
+      const collectPayloadComments = (payload) => {
+        const roots = [];
+        const seen = new Set();
+        findCommentArrays(payload).forEach((items) => {
+          items.forEach((item) => {
+            if (!item || typeof item !== 'object') return;
+            const content = readField(item, ['content', 'text', 'commentContent', 'comment_content']);
+            const id = readField(item, ['id', 'comment_id', 'commentId']);
+            const key = String(id || content || '');
+            if (!content || !key || seen.has(key)) return;
+            seen.add(key);
+            roots.push(item);
+          });
+        });
+        return roots;
+      };
       const getCursor = (payload) => {
         const data = payload && (payload.data || payload.result || payload);
         return String(readField(data || {}, ['cursor', 'next_cursor', 'nextCursor']) || '');
@@ -5356,8 +5496,9 @@ function getXiaohongshuInPageCommentFetchScript(url = '') {
           break;
         }
         if (!payload) break;
-        payloads.push(payload);
-        collectRootComments(payload).forEach((comment) => {
+        const roots = collectRootComments(payload);
+        payloads.push({ data: { comments: roots } });
+        roots.forEach((comment) => {
           if (rootComments.length < SOCIAL_COMMENT_LIMIT) rootComments.push(comment);
         });
         const nextCursor = getCursor(payload);
@@ -5388,7 +5529,19 @@ function getXiaohongshuInPageCommentFetchScript(url = '') {
             break;
           }
           if (!payload) break;
-          payloads.push(payload);
+          const replies = collectPayloadComments(payload)
+            .filter((reply) => String(readField(reply, ['id', 'comment_id', 'commentId'])) !== String(rootCommentId));
+          if (replies.length) {
+            const currentReplies = Array.isArray(comment.sub_comments) ? comment.sub_comments : [];
+            const seenReplyIds = new Set(currentReplies.map((reply) => String(readField(reply, ['id', 'comment_id', 'commentId']) || readField(reply, ['content', 'text', 'commentContent', 'comment_content']) || '')));
+            replies.forEach((reply) => {
+              const replyKey = String(readField(reply, ['id', 'comment_id', 'commentId']) || readField(reply, ['content', 'text', 'commentContent', 'comment_content']) || '');
+              if (!replyKey || seenReplyIds.has(replyKey)) return;
+              seenReplyIds.add(replyKey);
+              currentReplies.push(reply);
+            });
+            comment.sub_comments = currentReplies;
+          }
           const nextCursor = getCursor(payload);
           if (!hasMore(payload) || !nextCursor || nextCursor === subCursor) break;
           subCursor = nextCursor;
@@ -8915,6 +9068,7 @@ WechatObsidianInboxPlugin.__test = {
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
   buildMarkdownForRecord,
+  buildSocialCommentsMarkdown,
   mergeSocialCommentsIntoMarkdown,
   buildXiaohongshuRecordFromExtraction,
   extractSocialVideoMarkdownFromHtml,

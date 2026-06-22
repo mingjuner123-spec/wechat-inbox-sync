@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.43');
-assert.strictEqual(versions['1.2.43'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.44');
+assert.strictEqual(versions['1.2.44'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -187,17 +187,29 @@ assert.deepStrictEqual(helpers.extractWechatCommentsFromPayload({
     content: '这条评论来自微信接口',
     create_time: '2026-06-22',
     like_num: 18,
+    reply: {
+      nick_name: '作者',
+      content: '谢谢你的反馈',
+      create_time: '2026-06-22',
+    },
   }],
 }), [
-  { author: '接口读者', content: '这条评论来自微信接口', time: '2026-06-22', likes: '18' },
+  {
+    author: '接口读者',
+    content: '这条评论来自微信接口',
+    time: '2026-06-22',
+    likes: '18',
+    replies: [{ author: '作者', content: '谢谢你的反馈', time: '2026-06-22', likes: '', replyTo: '接口读者' }],
+  },
 ]);
 const wechatMarkdownWithApiComments = helpers.buildWechatArticleMarkdownWithComments(
   '公众号正文',
   wechatArticleForCommentApi,
-  [{ author: '接口读者', content: '这条评论来自微信接口' }],
+  [{ author: '接口读者', content: '这条评论来自微信接口', replies: [{ author: '作者', content: '谢谢你的反馈', replyTo: '接口读者' }] }],
 );
 assert.ok(wechatMarkdownWithApiComments.includes('## 评论区'));
 assert.ok(wechatMarkdownWithApiComments.includes('**接口读者**：这条评论来自微信接口'));
+assert.ok(wechatMarkdownWithApiComments.includes('  - **作者** 回复 **接口读者**：谢谢你的反馈'));
 const wechatMarkdownWithoutComments = helpers.buildWechatArticleMarkdownWithComments('公众号正文', wechatArticleForCommentApi, []);
 assert.ok(!wechatMarkdownWithoutComments.includes('## 评论区'));
 assert.ok(!wechatMarkdownWithoutComments.includes('未抓取到公开评论'));
@@ -237,22 +249,65 @@ assert.strictEqual(typeof helpers.extractXiaohongshuCommentsFromPayload, 'functi
 assert.deepStrictEqual(helpers.extractXiaohongshuCommentsFromPayload({
   data: {
     comments: [{
+      id: 'root-1',
       content: '接口返回的小红书评论',
       create_time: 1782115200,
       like_count: '27',
       user_info: { nickname: '接口用户' },
       sub_comments: [{
+        id: 'reply-1',
         content: '楼中楼回复',
         create_time: 1782115300,
         like_count: 3,
         user_info: { nickname: '回复用户' },
+        target_comment: { user_info: { nickname: '接口用户' } },
       }],
     }],
   },
 }), [
-  { author: '接口用户', content: '接口返回的小红书评论', time: '1782115200', likes: '27' },
-  { author: '回复用户', content: '楼中楼回复', time: '1782115300', likes: '3' },
+  {
+    author: '接口用户',
+    content: '接口返回的小红书评论',
+    time: '1782115200',
+    likes: '27',
+    replies: [{ author: '回复用户', content: '楼中楼回复', time: '1782115300', likes: '3', replyTo: '接口用户' }],
+  },
 ]);
+const xhsThreadMarkdown = helpers.buildSocialCommentsMarkdown(helpers.extractXiaohongshuCommentsFromPayload({
+  data: {
+    comments: [{
+      id: 'root-1',
+      content: '接口返回的小红书评论',
+      user_info: { nickname: '接口用户' },
+      sub_comments: [{
+        id: 'reply-1',
+        content: '楼中楼回复',
+        user_info: { nickname: '回复用户' },
+        target_comment: { user_info: { nickname: '接口用户' } },
+      }],
+    }],
+  },
+}));
+assert.ok(xhsThreadMarkdown.includes('- **接口用户**：接口返回的小红书评论'));
+assert.ok(xhsThreadMarkdown.includes('  - **回复用户** 回复 **接口用户**：楼中楼回复'));
+assert.ok(xhsThreadMarkdown.includes('\n\n- **'));
+const nestedThreadMarkdown = helpers.buildSocialCommentsMarkdown([{
+  author: 'Root',
+  content: 'root comment',
+  replies: [{
+    author: 'Reply A',
+    replyTo: 'Root',
+    content: 'first reply',
+    replies: [{
+      author: 'Reply B',
+      replyTo: 'Reply A',
+      content: 'second reply',
+    }],
+  }],
+}]);
+assert.ok(nestedThreadMarkdown.includes('- **Root**：root comment'));
+assert.ok(nestedThreadMarkdown.includes('  - **Reply A** 回复 **Root**：first reply'));
+assert.ok(nestedThreadMarkdown.includes('    - **Reply B** 回复 **Reply A**：second reply'));
 const manyXhsComments = helpers.extractXiaohongshuCommentsFromPayload({
   data: {
     comments: Array.from({ length: 35 }, (_, index) => ({
@@ -278,6 +333,8 @@ const xhsInPageCommentScript = helpers.getXiaohongshuInPageCommentFetchScript('h
 assert.ok(xhsInPageCommentScript.includes('/api/sns/web/v2/comment/page'));
 assert.ok(xhsInPageCommentScript.includes('/api/sns/web/v2/comment/sub/page'));
 assert.ok(xhsInPageCommentScript.includes("credentials: 'include'"));
+assert.ok(xhsInPageCommentScript.includes('comment.sub_comments = currentReplies'));
+assert.ok(xhsInPageCommentScript.includes('payloads.push({ data: { comments: roots } })'));
 assert.ok(xhsInPageCommentScript.includes('root_comment_id'));
 assert.ok(xhsInPageCommentScript.includes('xsec_token'));
 
