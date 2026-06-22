@@ -71,6 +71,7 @@ const LEGACY_OFFICIAL_SYNC_API_BASES = [
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
+const SOCIAL_COMMENT_LIMIT = 100;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
@@ -4080,7 +4081,7 @@ function readCommentField(item, keys) {
   return '';
 }
 
-function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0) {
+function extractCommentsFromObject(value, comments, seen, limit = SOCIAL_COMMENT_LIMIT, depth = 0) {
   if (!value || depth > 8 || comments.length >= limit) return;
   if (Array.isArray(value)) {
     value.forEach((item) => extractCommentsFromObject(item, comments, seen, limit, depth + 1));
@@ -4201,7 +4202,7 @@ function extractWechatCommentsFromJson(html, comments, seen) {
   });
 }
 
-function extractWechatCommentsFromPayload(payload, limit = 20) {
+function extractWechatCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
   const comments = [];
   const seen = new Set();
   const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
@@ -4209,7 +4210,7 @@ function extractWechatCommentsFromPayload(payload, limit = 20) {
   return comments.slice(0, limit);
 }
 
-function extractXiaohongshuCommentsFromPayload(payload, limit = 20) {
+function extractXiaohongshuCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
   const comments = [];
   const seen = new Set();
   const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
@@ -4283,7 +4284,7 @@ function buildWechatCommentApiUrl(articleUrl, params = {}) {
   return api.toString();
 }
 
-function extractWechatCommentsFromHtml(html, limit = 20) {
+function extractWechatCommentsFromHtml(html, limit = SOCIAL_COMMENT_LIMIT) {
   const source = String(html || '');
   const comments = [];
   const seen = new Set();
@@ -4307,7 +4308,7 @@ function extractWechatCommentsFromHtml(html, limit = 20) {
   return comments.slice(0, limit);
 }
 
-function extractSocialCommentsFromHtml(html, limit = 20) {
+function extractSocialCommentsFromHtml(html, limit = SOCIAL_COMMENT_LIMIT) {
   const source = String(html || '');
   const comments = [];
   const seen = new Set();
@@ -4615,7 +4616,7 @@ function createRenderedCommentCollector(webContents, platform) {
     };
     webContents.debugger.on('message', onMessage);
     return {
-      getComments: () => comments.slice(0, 30),
+      getComments: () => comments.slice(0, SOCIAL_COMMENT_LIMIT),
       dispose: () => {
         try {
           webContents.debugger.off('message', onMessage);
@@ -4810,7 +4811,7 @@ async function renderUrlToMarkdownWithElectron(url) {
             comments.push({ author, content });
           });
           if (!comments.length) return '';
-          return '\\n\\n## 评论区\\n\\n' + comments.slice(0, 20).map((item) => {
+          return '\\n\\n## 评论区\\n\\n' + comments.slice(0, SOCIAL_COMMENT_LIMIT).map((item) => {
             return '- ' + (item.author ? '**' + item.author + '**：' : '') + item.content;
           }).join('\\n');
         };
@@ -5018,7 +5019,7 @@ async function renderWechatCommentsWithElectron(url) {
           seen.add(key);
           comments.push({ author, content, likes });
         });
-        return comments.slice(0, 20);
+        return comments.slice(0, SOCIAL_COMMENT_LIMIT);
       })()
     `);
     const merged = [];
@@ -5300,14 +5301,14 @@ async function renderXiaohongshuCommentsWithElectron(url) {
           seen.add(key);
           comments.push({ author, content, likes });
         });
-        return comments.slice(0, 20);
+        return comments.slice(0, SOCIAL_COMMENT_LIMIT);
       })()
     `);
     const merged = [];
     const seen = new Set();
     (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
     (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-    return merged.slice(0, 20);
+    return merged.slice(0, SOCIAL_COMMENT_LIMIT);
   } finally {
     if (collector) collector.dispose();
     if (win && !win.isDestroyed()) {

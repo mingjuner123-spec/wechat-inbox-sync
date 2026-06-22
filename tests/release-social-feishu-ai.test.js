@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.39');
-assert.strictEqual(versions['1.2.39'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.40');
+assert.strictEqual(versions['1.2.40'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -249,6 +249,15 @@ assert.deepStrictEqual(helpers.extractXiaohongshuCommentsFromPayload({
   { author: '接口用户', content: '接口返回的小红书评论', time: '1782115200', likes: '27' },
   { author: '回复用户', content: '楼中楼回复', time: '1782115300', likes: '3' },
 ]);
+const manyXhsComments = helpers.extractXiaohongshuCommentsFromPayload({
+  data: {
+    comments: Array.from({ length: 35 }, (_, index) => ({
+      content: `第${index + 1}条评论`,
+      user_info: { nickname: `用户${index + 1}` },
+    })),
+  },
+});
+assert.strictEqual(manyXhsComments.length, 35);
 assert.strictEqual(typeof helpers.getXiaohongshuCommentExpansionScript, 'function');
 const xhsExpandScript = helpers.getXiaohongshuCommentExpansionScript();
 assert.ok(xhsExpandScript.includes('展开'));
