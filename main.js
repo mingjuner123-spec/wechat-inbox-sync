@@ -85,7 +85,7 @@ const SOCIAL_LOGIN_TARGETS = {
   wechat: {
     label: '公众号',
     partition: 'persist:wechat-inbox-sync-wechat',
-    loginUrl: 'https://mp.weixin.qq.com/',
+    loginUrl: 'https://mp.weixin.qq.com/s',
   },
 };
 const NOTE_SAVE_MODES = {
@@ -4210,6 +4210,20 @@ function extractWechatCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT)
   return comments.slice(0, limit);
 }
 
+function shouldRetryWechatCommentsWithVisibleReader(payload, comments = []) {
+  if ((comments || []).map(normalizeSocialComment).filter(Boolean).length) return false;
+  if (!payload) return true;
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  if (!data || typeof data !== 'object') return true;
+  const ret = Number(data.ret !== undefined ? data.ret : (data.base_resp && data.base_resp.ret));
+  const errmsg = String(data.errmsg || (data.base_resp && data.base_resp.errmsg) || '').toLowerCase();
+  return ret === -3
+    || errmsg.includes('no session')
+    || errmsg.includes('session')
+    || errmsg.includes('token')
+    || errmsg.includes('login');
+}
+
 function extractXiaohongshuCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
   const comments = [];
   const seen = new Set();
@@ -5027,7 +5041,50 @@ async function renderWechatCommentsWithElectron(url) {
     (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
     extractWechatCommentsFromPayload(inPagePayload, 50).forEach((comment) => pushSocialComment(merged, seen, comment));
     (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-    return merged.slice(0, 50);
+    if (shouldRetryWechatCommentsWithVisibleReader(inPagePayload, merged)) {
+      const visibleComments = await renderWechatCommentsWithVisibleReader(url);
+      visibleComments.forEach((comment) => pushSocialComment(merged, seen, comment));
+    }
+    return merged.slice(0, SOCIAL_COMMENT_LIMIT);
+  } finally {
+    if (collector) collector.dispose();
+    if (win && !win.isDestroyed()) {
+      win.destroy();
+    }
+  }
+}
+
+async function renderWechatCommentsWithVisibleReader(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) return [];
+
+  const win = createSocialBrowserWindow(BrowserWindow, 'wechat', {
+    width: 1180,
+    height: 920,
+    show: true,
+  });
+  const collector = createRenderedCommentCollector(win.webContents, 'wechat');
+  const merged = [];
+  const seen = new Set();
+
+  try {
+    const loaded = waitForWebContents(win.webContents, 30000);
+    await win.loadURL(url);
+    await loaded;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      let payload = null;
+      try {
+        await settleRenderedPage(win.webContents);
+        payload = await win.webContents.executeJavaScript(getWechatInPageCommentFetchScript());
+      } catch (error) {
+        payload = null;
+      }
+      (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
+      extractWechatCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT).forEach((comment) => pushSocialComment(merged, seen, comment));
+      if (merged.length) return merged.slice(0, SOCIAL_COMMENT_LIMIT);
+      await new Promise((resolve) => window.setTimeout(resolve, 5000));
+    }
+    return merged.slice(0, SOCIAL_COMMENT_LIMIT);
   } finally {
     if (collector) collector.dispose();
     if (win && !win.isDestroyed()) {
@@ -5871,7 +5928,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     this.addCommand({
       id: 'login-wechat-for-comments',
-      name: '登录公众号网页以抓取评论区',
+      name: '打开公众号文章阅读态以抓取评论区',
       callback: () => this.openSocialLogin('wechat'),
     });
 
@@ -8413,7 +8470,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
     const commentPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     commentPanel.createEl('summary', { text: '评论区抓取登录态' });
     commentPanel.createDiv({
-      text: '小红书和公众号评论区通常需要网页登录态。这里会打开平台自己的登录窗口，本地保存登录凭证，不需要手动复制任何参数。',
+      text: '小红书需要网页登录态；公众号需要文章阅读态。这里会打开平台自己的页面，本地保存会话，不需要手动复制任何参数。',
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(commentPanel)
@@ -8431,10 +8488,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
           new Notice(await this.plugin.getSocialLoginStatusText('xiaohongshu'));
         }));
     new Setting(commentPanel)
-      .setName('公众号评论区')
-      .setDesc('公众号评论优先走公开接口；登录公众号网页后，可提升需要登录态的评论命中率。')
+      .setName('公众号文章阅读态')
+      .setDesc('公众号评论需要 mp.weixin.qq.com 文章阅读会话；不是公众号后台登录。同步时必要情况下会自动打开文章页，等待评论接口加载。')
       .addButton((button) => button
-        .setButtonText('登录公众号网页')
+        .setButtonText('打开阅读态')
         .onClick(async () => {
           await this.plugin.openSocialLogin('wechat');
         }))
@@ -8646,6 +8703,7 @@ WechatObsidianInboxPlugin.__test = {
   extractWechatCommentRequestParams,
   buildWechatCommentApiUrl,
   extractWechatCommentsFromPayload,
+  shouldRetryWechatCommentsWithVisibleReader,
   extractXiaohongshuCommentsFromPayload,
   appendWechatCommentsToMarkdown,
   buildWechatArticleMarkdownWithComments,

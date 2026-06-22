@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.40');
-assert.strictEqual(versions['1.2.40'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.41');
+assert.strictEqual(versions['1.2.41'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -177,6 +177,10 @@ const wechatInPageCommentScript = helpers.getWechatInPageCommentFetchScript();
 assert.ok(wechatInPageCommentScript.includes('/mp/appmsg_comment'));
 assert.ok(wechatInPageCommentScript.includes("credentials: 'include'"));
 assert.ok(wechatInPageCommentScript.includes('comment_id'));
+assert.strictEqual(typeof helpers.shouldRetryWechatCommentsWithVisibleReader, 'function');
+assert.strictEqual(helpers.shouldRetryWechatCommentsWithVisibleReader({ ret: -3, errmsg: 'no session' }, []), true);
+assert.strictEqual(helpers.shouldRetryWechatCommentsWithVisibleReader(null, []), true);
+assert.strictEqual(helpers.shouldRetryWechatCommentsWithVisibleReader(null, [{ author: '读者', content: '已抓到' }]), false);
 assert.deepStrictEqual(helpers.extractWechatCommentsFromPayload({
   elected_comment: [{
     nick_name: '接口读者',
