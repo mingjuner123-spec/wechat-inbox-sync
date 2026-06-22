@@ -45,8 +45,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.31');
-assert.strictEqual(versions['1.2.31'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.32');
+assert.strictEqual(versions['1.2.32'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -114,6 +114,22 @@ assert.deepStrictEqual(xhsNote.comments, [
   { author: '用户甲', content: '这个角度太有用了', time: '', likes: '9' },
 ]);
 
+const xhsNestedCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<meta property="og:title" content="XHS Nested Comment">',
+  '<meta name="description" content="我每次起标题都会花巨量时间，于是我就把起标题的核心知识做成了一个skill。（其实做成skill的方式也很值得分享，我放到下一期）这样确实会节省不少时间，我看小红书也在推redskill，索性直接发出来了。">',
+  '</head><body>',
+  '<script>',
+  'window.__INITIAL_STATE__ = {"note":{"noteDetailMap":{"abc":{"note":{"desc":"正文"}}}},"comments":{"list":[{"id":"c1","content":"评论在小红书脚本状态里","create_time":"2026-06-22","liked_count":31,"user_info":{"nickname":"脚本用户"}}]}};',
+  '</script>',
+  '</body></html>',
+].join(''), 'https://www.xiaohongshu.com/explore/456');
+assert.ok(xhsNestedCommentNote.markdown.includes('## 评论区'));
+assert.ok(xhsNestedCommentNote.markdown.includes('**脚本用户**：评论在小红书脚本状态里'));
+assert.deepStrictEqual(xhsNestedCommentNote.comments, [
+  { author: '脚本用户', content: '评论在小红书脚本状态里', time: '2026-06-22', likes: '31' },
+]);
+
 assert.strictEqual(typeof helpers.normalizeGeneratedKeywords, 'function');
 assert.deepStrictEqual(
   helpers.normalizeGeneratedKeywords('#飞书机器人, Obsidian，效率提升  AI'),
@@ -138,8 +154,47 @@ assert.strictEqual(settings.deepseekApiKey, 'sk-test');
 assert.strictEqual(settings.deepseekModel, 'deepseek-chat');
 assert.strictEqual(settings.notePropertyFields, 'title,description,keywords');
 
-const source = fs.readFileSync(pluginPath, 'utf8');
-assert.ok(source.includes("text: 'AI 简介与关键词（DeepSeek）'"));
-assert.ok(source.includes(".setName('DeepSeek API Key')"));
+assert.strictEqual(typeof helpers.shouldRefreshAiDescription, 'function');
+assert.strictEqual(typeof helpers.buildFallbackGeneratedKeywords, 'function');
+const noisyXhsRecord = {
+  type: 'webpage',
+  content: 'https://www.xiaohongshu.com/explore/789',
+  metadata: {
+    platform: '小红书',
+    title: '小红书标题方法',
+    description: '我每次起标题都会花巨量时间，于是我就把起标题的核心知识做成了一个skill。（其实做成skill的方式也很值得分享，我放到下一期）这样确实会节省不少时间，我看小红书也在推redskill，索性直接发出来了。',
+    markdown: '# 小红书标题方法\n\n这篇讲小红书爆款标题、内容选题和AI写作流程。\n\n#小红书 #标题方法 #AI写作',
+  },
+};
+assert.strictEqual(helpers.shouldRefreshAiDescription(noisyXhsRecord.metadata, noisyXhsRecord), true);
+assert.deepStrictEqual(
+  helpers.buildFallbackGeneratedKeywords(noisyXhsRecord).slice(0, 4),
+  ['小红书', '标题方法', 'AI写作', '小红书标题方法'],
+);
 
-console.log('release social, feishu, and AI metadata checks passed');
+async function runAsyncChecks() {
+  const plugin = new Plugin();
+  plugin.settings = helpers.mergeSettings({
+    aiMetadataEnabled: true,
+    deepseekApiKey: 'sk-test',
+    notePropertyFields: 'title,description,keywords',
+  });
+  plugin.generateMetadataWithDeepSeek = async () => ({
+    description: '把小红书标题方法沉淀成可复用的AI写作流程。',
+    keywords: [],
+  });
+  const enriched = await plugin.enrichRecordMetadataWithAi(noisyXhsRecord);
+  assert.strictEqual(enriched.metadata.description, '把小红书标题方法沉淀成可复用的AI写作流程。');
+  assert.deepStrictEqual(enriched.metadata.keywords.slice(0, 3), ['小红书', '标题方法', 'AI写作']);
+
+  const source = fs.readFileSync(pluginPath, 'utf8');
+  assert.ok(source.includes("text: 'AI 简介与关键词（DeepSeek）'"));
+  assert.ok(source.includes(".setName('DeepSeek API Key')"));
+
+  console.log('release social, feishu, and AI metadata checks passed');
+}
+
+runAsyncChecks().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

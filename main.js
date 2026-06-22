@@ -1848,7 +1848,9 @@ function shouldGenerateAiMetadata(settings, record) {
   if (!settings || !settings.aiMetadataEnabled || !settings.deepseekApiKey) return false;
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
-  return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
+  return !getRecordDescription(metadata)
+    || !getRecordKeywords(metadata).length
+    || shouldRefreshAiDescription(metadata, record);
 }
 
 function cleanMarkdownForStorage(markdown, options = {}) {
@@ -1956,6 +1958,29 @@ function normalizeGeneratedKeywords(value) {
     });
 }
 
+function cleanGeneratedDescription(value) {
+  const source = stripMarkdownCodeBlocks(String(value || ''))
+    .replace(/^description\s*[:：]\s*/i, '')
+    .replace(/^简介\s*[:：]\s*/i, '')
+    .replace(/^总结\s*[:：]\s*/i, '')
+    .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
+    .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!source) return '';
+
+  const sentences = source.match(/[^。！？!?]+[。！？!?]?/g) || [source];
+  const usable = sentences
+    .map((item) => item.trim())
+    .find((item) => {
+      const length = Array.from(item).length;
+      return length >= 8 && length <= 140;
+    }) || sentences[0].trim();
+  const chars = Array.from(usable);
+  return chars.length > 140 ? `${chars.slice(0, 140).join('').trim()}...` : usable;
+}
+
 function parseGeneratedMetadataResponse(text) {
   const source = String(text || '').trim();
   if (!source) return { description: '', keywords: [] };
@@ -1965,7 +1990,7 @@ function parseGeneratedMetadataResponse(text) {
   const jsonPayload = tryParseJson(jsonSource);
   if (jsonPayload && typeof jsonPayload === 'object') {
     return {
-      description: String(jsonPayload.description || jsonPayload.summary || jsonPayload.excerpt || '').trim(),
+      description: cleanGeneratedDescription(jsonPayload.description || jsonPayload.summary || jsonPayload.excerpt || ''),
       keywords: normalizeGeneratedKeywords(jsonPayload.keywords || jsonPayload.tags || jsonPayload.hashtags || []),
     };
   }
@@ -1977,9 +2002,98 @@ function parseGeneratedMetadataResponse(text) {
     || source.match(/标签\s*[:：]\s*([^\n]+)/i)
     || source.match(/关键词\s*[:：]\s*([^\n]+)/i);
   return {
-    description: String(descriptionMatch ? descriptionMatch[1] : '').trim(),
+    description: cleanGeneratedDescription(descriptionMatch ? descriptionMatch[1] : ''),
     keywords: normalizeGeneratedKeywords(keywordsMatch ? keywordsMatch[1] : ''),
   };
+}
+
+function isXiaohongshuRecord(record, metadata = (record && record.metadata) || {}) {
+  const platform = String(metadata.platform || metadata.source || '').toLowerCase();
+  const url = getRecordUrl(record, metadata);
+  return platform.includes('小红书') || isXiaohongshuUrl(url);
+}
+
+function shouldRefreshAiDescription(metadata = {}, record = null) {
+  const description = String(getRecordDescription(metadata) || '').trim();
+  if (!description) return false;
+  const compact = description.replace(/\s+/g, '');
+  const length = Array.from(compact).length;
+  if (length > 140) return true;
+  if (/^#+\s/.test(description) || /\n{2,}/.test(description) || /https?:\/\//i.test(description)) return true;
+  if (isXiaohongshuRecord(record, metadata)) {
+    if (length > 90) return true;
+    if (/(我每次|于是我|其实|下一期|这样确实|我看小红书|索性|做成skill|起标题)/i.test(compact) && length > 50) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function pushFallbackKeyword(keywords, seen, value) {
+  const cleaned = String(value || '')
+    .replace(/^#+/, '')
+    .replace(/[《》"'“”‘’()[\]{}]/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+  if (!cleaned || Array.from(cleaned).length < 2 || Array.from(cleaned).length > 18) return;
+  if (/^(正文|标题|图片|评论区|目录|链接|内容|笔记|网页|分享|这个|一个|我们|你们|他们|自己|就是)$/.test(cleaned)) return;
+  const key = cleaned.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  keywords.push(cleaned);
+}
+
+function buildFallbackGeneratedKeywords(record) {
+  const metadata = (record && record.metadata) || {};
+  const text = extractAiMetadataInputText(record);
+  const source = [
+    metadata.title,
+    metadata.description,
+    metadata.markdown,
+    record && record.content,
+  ].filter(Boolean).join('\n\n');
+  const keywords = [];
+  const seen = new Set();
+
+  extractTagsFromText(source, '').forEach((tag) => pushFallbackKeyword(keywords, seen, tag));
+  normalizeGeneratedKeywords(metadata.keywords || metadata.tags || metadata.hashtags || [])
+    .forEach((tag) => pushFallbackKeyword(keywords, seen, tag));
+  pushFallbackKeyword(keywords, seen, metadata.title);
+
+  const preferredPatterns = [
+    /小红书/g,
+    /公众号/g,
+    /飞书机器人/g,
+    /Obsidian/gi,
+    /DeepSeek/gi,
+    /AI写作/gi,
+    /AI/g,
+    /标题方法/g,
+    /内容选题/g,
+    /爆款标题/g,
+  ];
+  preferredPatterns.forEach((pattern) => {
+    let match;
+    while ((match = pattern.exec(source))) {
+      pushFallbackKeyword(keywords, seen, match[0]);
+    }
+  });
+
+  const tokenPattern = /[A-Za-z][A-Za-z0-9_-]{1,23}|[\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9_-]{1,15}/g;
+  let match;
+  while (keywords.length < 8 && (match = tokenPattern.exec(text))) {
+    pushFallbackKeyword(keywords, seen, match[0]);
+  }
+  return keywords.slice(0, 8);
+}
+
+function buildFallbackGeneratedDescription(record) {
+  const metadata = (record && record.metadata) || {};
+  const title = cleanGeneratedDescription(metadata.title || '');
+  const keywords = buildFallbackGeneratedKeywords(record).slice(0, 3);
+  if (title && keywords.length) return `关于${title}的内容整理，重点涉及${keywords.join('、')}。`;
+  if (title) return `关于${title}的内容整理。`;
+  return '';
 }
 
 function extractAiMetadataInputText(record) {
@@ -3883,7 +3997,7 @@ function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0)
       'userName',
       'name',
       'author',
-    ]) || readCommentField(value.user || value.userInfo || value.authorInfo || {}, [
+    ]) || readCommentField(value.user || value.userInfo || value.user_info || value.authorInfo || {}, [
       'nick_name',
       'nickname',
       'nickName',
@@ -3891,13 +4005,13 @@ function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0)
       'name',
     ]);
     const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
-    const likes = readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'like_count', 'likes']);
+    const likes = readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'liked_count', 'like_count', 'likes']);
     pushSocialComment(comments, seen, { author, content, time, likes });
   }
 
   Object.keys(value).forEach((key) => {
     if (comments.length >= limit) return;
-    if (/comment|cmt|reply|discuss/i.test(key)) {
+    if (/comment|cmt|reply|discuss|list|items|data/i.test(key)) {
       extractCommentsFromObject(value[key], comments, seen, limit, depth + 1);
     }
   });
@@ -3907,7 +4021,7 @@ function collectJsonObjectCandidates(source) {
   const candidates = [];
   const text = String(source || '');
   const starts = [];
-  const objectPattern = /(?:elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)\s*[:=]\s*([\[{])/gi;
+  const objectPattern = /["']?(?:elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)["']?\s*[:=]\s*([\[{])/gi;
   let match;
   while ((match = objectPattern.exec(text))) {
     starts.push(objectPattern.lastIndex - 1);
@@ -5187,13 +5301,26 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async enrichRecordMetadataWithAi(record) {
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
-    const generated = await this.generateMetadataWithDeepSeek(record);
+    let generated = { description: '', keywords: [] };
+    try {
+      generated = await this.generateMetadataWithDeepSeek(record);
+    } catch (error) {
+      generated = { description: '', keywords: [] };
+    }
     const metadata = { ...((record && record.metadata) || {}) };
-    if (!getRecordDescription(metadata) && generated.description) {
+    const refreshDescription = shouldRefreshAiDescription(metadata, record);
+    if ((!getRecordDescription(metadata) || refreshDescription) && generated.description) {
       metadata.description = generated.description;
     }
-    if (!getRecordKeywords(metadata).length && generated.keywords.length) {
-      metadata.keywords = generated.keywords;
+    if ((!getRecordDescription(metadata) || refreshDescription) && !generated.description) {
+      const fallbackDescription = buildFallbackGeneratedDescription({ ...record, metadata });
+      if (fallbackDescription) metadata.description = fallbackDescription;
+    }
+    if (!getRecordKeywords(metadata).length) {
+      const keywords = generated.keywords.length
+        ? generated.keywords
+        : buildFallbackGeneratedKeywords({ ...record, metadata });
+      if (keywords.length) metadata.keywords = keywords;
     }
     return {
       ...record,
@@ -7677,6 +7804,8 @@ WechatObsidianInboxPlugin.__test = {
   appendWechatCommentsToMarkdown,
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
+  shouldRefreshAiDescription,
+  buildFallbackGeneratedKeywords,
   extractAiMetadataInputText,
   cleanMarkdownForStorage,
   resolveRedirectUrl,
