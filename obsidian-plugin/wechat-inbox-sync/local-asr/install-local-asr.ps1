@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.17"
+$InstallerScriptVersion = "1.2.18"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 180
 $InstallLockPath = Join-Path $InstallRoot ".install.lock"
@@ -841,7 +841,8 @@ if ($OutputDir) {
   New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 }
 
-$ChunkSeconds = 600
+$ChunkSeconds = 120
+$ChunkRetrySeconds = 30
 $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
   $OutputPath.Substring(0, $OutputPath.Length - 4)
 } else {
@@ -856,10 +857,12 @@ $SimplifiedPrompt = [string]::Concat([char]0x8bf7, [char]0x8f93, [char]0x51fa, [
   "inputPath=$InputPath"
   "outputPath=$OutputPath"
   "chunkSeconds=$ChunkSeconds"
+  "chunkRetrySeconds=$ChunkRetrySeconds"
   "progressStage=preparing"
   "progressCurrent=0"
   "progressTotal=0"
   "progressPercent=0"
+  "recoveryTriggered=0"
 ) | Set-Content -LiteralPath $RunLog -Encoding UTF8
 
 function ConvertTo-NativeArgument {
@@ -1015,6 +1018,151 @@ function Write-ProgressLog {
   )
 }
 
+function Get-TranscriptPreview {
+  param([AllowNull()][string]$Text)
+  $value = [string]$Text
+  if ($value.Length -le 160) {
+    return $value
+  }
+  return $value.Substring(0, 160)
+}
+
+function Test-TranscriptHasRepeatHallucination {
+  param([AllowNull()][string]$Text)
+  $source = [string]$Text
+  if (-not $source.Trim()) {
+    return $false
+  }
+  $lines = $source -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+  if ($lines.Count -lt 3) {
+    return $false
+  }
+  $current = $null
+  $repeatCount = 0
+  foreach ($line in $lines) {
+    if ($line -eq $current) {
+      $repeatCount += 1
+      if ($repeatCount -ge 2 -and $line.Length -ge 6) {
+        return $true
+      }
+      continue
+    }
+    $current = $line
+    $repeatCount = 0
+  }
+  $joined = ($lines -join "")
+  if (-not $joined) {
+    return $false
+  }
+  $unique = @{}
+  foreach ($line in $lines) {
+    if (-not $unique.ContainsKey($line)) {
+      $unique[$line] = 0
+    }
+    $unique[$line] += 1
+    if ($line.Length -ge 6 -and $unique[$line] -ge 6) {
+      return $true
+    }
+  }
+  return $false
+}
+
+function Invoke-WhisperChunk {
+  param(
+    [Parameter(Mandatory = $true)][string]$ChunkPath,
+    [Parameter(Mandatory = $true)][string]$ChunkBase,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative,
+    [string[]]$ExtraArguments = @()
+  )
+  $arguments = @(
+    "-m", (& $PathForNative $attemptModelPath),
+    "-f", (& $PathForNative $ChunkPath),
+    "-l", "zh",
+    "--prompt", $SimplifiedPrompt
+  ) + $ExtraArguments + @(
+    "-otxt",
+    "-of", (& $PathForNative $ChunkBase)
+  )
+  return Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments $arguments
+}
+
+function Split-AudioToChunks {
+  param(
+    [Parameter(Mandatory = $true)][string]$AudioPath,
+    [Parameter(Mandatory = $true)][string]$OutputDir,
+    [Parameter(Mandatory = $true)][int]$SegmentSeconds,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+  $pattern = Join-Path $OutputDir "chunk-%03d.wav"
+  $result = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-i", (& $PathForNative $AudioPath),
+    "-ar", "16000",
+    "-ac", "1",
+    "-c:a", "pcm_s16le",
+    "-f", "segment",
+    "-segment_time", [string]$SegmentSeconds,
+    "-reset_timestamps", "1",
+    $pattern
+  )
+  $chunks = @(Get-ChildItem -LiteralPath $OutputDir -Filter "chunk-*.wav" | Sort-Object Name)
+  return [PSCustomObject]@{
+    FfmpegResult = $result
+    ChunkFiles = $chunks
+    ChunkPattern = $pattern
+  }
+}
+
+function Invoke-RecoverRepeatedChunkText {
+  param(
+    [Parameter(Mandatory = $true)][string]$ChunkPath,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  $recoverDir = Join-Path (Split-Path -Parent $ChunkPath) ([System.IO.Path]::GetFileNameWithoutExtension($ChunkPath) + "-retry")
+  if (Test-Path -LiteralPath $recoverDir) {
+    Remove-Item -LiteralPath $recoverDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  $split = Split-AudioToChunks -AudioPath $ChunkPath -OutputDir $recoverDir -SegmentSeconds $ChunkRetrySeconds -PathForNative $PathForNative
+  $logs = New-Object System.Collections.Generic.List[string]
+  $texts = New-Object System.Collections.Generic.List[string]
+  $exitCode = $split.FfmpegResult.ExitCode
+  $logs.Add("--- recovery ffmpeg exit=$exitCode ---")
+  $logs.Add($split.FfmpegResult.Output)
+  if ($exitCode -ne 0) {
+    return [PSCustomObject]@{
+      ExitCode = $exitCode
+      Logs = ($logs -join [Environment]::NewLine)
+      Text = ""
+    }
+  }
+  foreach ($recoverChunk in $split.ChunkFiles) {
+    $recoverBase = [System.IO.Path]::Combine($recoverDir, [System.IO.Path]::GetFileNameWithoutExtension($recoverChunk.Name))
+    $recoverTxt = "$recoverBase.txt"
+    $recoverResult = Invoke-WhisperChunk -ChunkPath $recoverChunk.FullName -ChunkBase $recoverBase -PathForNative $PathForNative -ExtraArguments @("-mc", "0", "-ml", "80", "-sow", "-bo", "1", "-bs", "1", "-tp", "0", "-nf", "-sns")
+    $logs.Add("--- recovery $($recoverChunk.Name) exit=$($recoverResult.ExitCode) ---")
+    $logs.Add($recoverResult.Output)
+    if ($recoverResult.ExitCode -ne 0) {
+      return [PSCustomObject]@{
+        ExitCode = $recoverResult.ExitCode
+        Logs = ($logs -join [Environment]::NewLine)
+        Text = ""
+      }
+    }
+    if (Test-Path -LiteralPath $recoverTxt) {
+      $recoverText = ([System.IO.File]::ReadAllText($recoverTxt, $Utf8NoBom)).Trim()
+      if ($recoverText) {
+        $texts.Add((ConvertTo-SimplifiedChinese $recoverText))
+      }
+    }
+  }
+  return [PSCustomObject]@{
+    ExitCode = 0
+    Logs = ($logs -join [Environment]::NewLine)
+    Text = (ConvertTo-SimplifiedChinese ($texts -join "`n"))
+  }
+}
+
 function Invoke-TranscribeAttempt {
   param(
     [Parameter(Mandatory = $true)][ValidateSet("normal", "safe")][string]$Mode
@@ -1057,27 +1205,17 @@ function Invoke-TranscribeAttempt {
 
   try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
-  $ChunkPattern = Join-Path $tempWorkDir "chunk-%03d.wav"
-  $ffmpegResult = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
-    "-hide_banner", "-loglevel", "error", "-y",
-    "-i", (& $pathForNative $attemptInputPath),
-    "-ar", "16000",
-    "-ac", "1",
-    "-c:a", "pcm_s16le",
-    "-f", "segment",
-    "-segment_time", [string]$ChunkSeconds,
-    "-reset_timestamps", "1",
-    $ChunkPattern
-  )
-  $ffmpegOutput = $ffmpegResult.Output
-  $ffmpegExit = $ffmpegResult.ExitCode
-  $chunkFiles = @(Get-ChildItem -LiteralPath $tempWorkDir -Filter "chunk-*.wav" | Sort-Object Name)
+  $split = Split-AudioToChunks -AudioPath $attemptInputPath -OutputDir $tempWorkDir -SegmentSeconds $ChunkSeconds -PathForNative $pathForNative
+  $ffmpegOutput = $split.FfmpegResult.Output
+  $ffmpegExit = $split.FfmpegResult.ExitCode
+  $chunkFiles = @($split.ChunkFiles)
   $result.ChunkCount = $chunkFiles.Count
   Write-ProgressLog -Stage "transcribing" -Current 0 -Total $chunkFiles.Count
   $whisperLogs = New-Object System.Collections.Generic.List[string]
   $mergedText = New-Object System.Collections.Generic.List[string]
   $whisperExit = 0
   $chunkIndex = 0
+  $recoveryTriggered = 0
 
   if ($ffmpegExit -eq 0 -and $chunkFiles.Count -eq 0) {
     throw "ffmpeg did not generate audio chunks."
@@ -1086,14 +1224,7 @@ function Invoke-TranscribeAttempt {
   foreach ($chunk in $chunkFiles) {
     $chunkBase = [System.IO.Path]::Combine($tempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
     $chunkTxt = "$chunkBase.txt"
-    $chunkResult = Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments @(
-      "-m", (& $pathForNative $attemptModelPath),
-      "-f", (& $pathForNative $chunk.FullName),
-      "-l", "zh",
-      "--prompt", $SimplifiedPrompt,
-      "-otxt",
-      "-of", (& $pathForNative $chunkBase)
-    )
+    $chunkResult = Invoke-WhisperChunk -ChunkPath $chunk.FullName -ChunkBase $chunkBase -PathForNative $pathForNative
     $chunkOutput = $chunkResult.Output
     $currentExit = $chunkResult.ExitCode
     $whisperLogs.Add("--- $($chunk.Name) exit=$currentExit ---")
@@ -1105,7 +1236,18 @@ function Invoke-TranscribeAttempt {
     if (Test-Path -LiteralPath $chunkTxt) {
       $text = ([System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)).Trim()
       if ($text) {
-        $mergedText.Add((ConvertTo-SimplifiedChinese $text))
+        $normalizedText = ConvertTo-SimplifiedChinese $text
+        if (Test-TranscriptHasRepeatHallucination $normalizedText) {
+          $recoveryTriggered = 1
+          $whisperLogs.Add("--- $($chunk.Name) repeat-detected preview ---")
+          $whisperLogs.Add((Get-TranscriptPreview $normalizedText))
+          $recovered = Invoke-RecoverRepeatedChunkText -ChunkPath $chunk.FullName -PathForNative $pathForNative
+          $whisperLogs.Add($recovered.Logs)
+          if ($recovered.ExitCode -eq 0 -and $recovered.Text.Trim() -and -not (Test-TranscriptHasRepeatHallucination $recovered.Text)) {
+            $normalizedText = $recovered.Text
+          }
+        }
+        $mergedText.Add($normalizedText)
       }
     }
     $chunkIndex += 1
@@ -1117,6 +1259,7 @@ function Invoke-TranscribeAttempt {
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
     $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
+    $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
     return $result
   } catch {
     $result.FfmpegOutput = $ffmpegOutput
@@ -1124,6 +1267,7 @@ function Invoke-TranscribeAttempt {
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
     $result.Error = ($_ | Out-String)
+    $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue 0 -Force
     return $result
   } finally {
     if ($safeTempRoot -and (Test-Path -LiteralPath $safeTempRoot)) {
@@ -1147,7 +1291,9 @@ function Write-AttemptLog {
     "mode=$($Attempt.Mode)"
     "tempWorkDir=$($Attempt.TempWorkDir)"
     "chunkSeconds=$ChunkSeconds"
+    "chunkRetrySeconds=$ChunkRetrySeconds"
     "chunkCount=$($Attempt.ChunkCount)"
+    "recoveryTriggered=$($Attempt.RecoveryTriggered)"
     "ffmpeg=$($Ffmpeg.FullName)"
     "ffmpegExit=$($Attempt.FfmpegExit)"
     "--- ffmpeg output ---"

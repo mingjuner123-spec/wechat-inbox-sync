@@ -26,6 +26,25 @@ const path = require('path');
 const os = require('os');
 const pluginMainSource = fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8');
 
+function utf16BeHex(text) {
+  const bytes = [0xfe, 0xff];
+  Array.from(text).forEach((char) => {
+    const code = char.charCodeAt(0);
+    bytes.push((code >> 8) & 0xff, code & 0xff);
+  });
+  return Buffer.from(bytes).toString('hex').toUpperCase();
+}
+
+function createUtf16BePdfBuffer(text) {
+  const stream = `BT /F1 12 Tf 72 720 Td <${utf16BeHex(text)}> Tj ET`;
+  const streamBuffer = Buffer.from(stream, 'latin1');
+  return Buffer.concat([
+    Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Length ${streamBuffer.length} >>\nstream\n`, 'latin1'),
+    streamBuffer,
+    Buffer.from('\nendstream\nendobj\n%%EOF', 'latin1'),
+  ]);
+}
+
 const pluginMainLinesWithoutIntentionalPdfNoiseCheck = pluginMainSource
   .split(/\r?\n/)
   .filter((line) => !line.includes('/[锟�]/.test(source)'))
@@ -49,6 +68,8 @@ assert.strictEqual(typeof helpers.buildTencentRequest, 'function');
 assert.strictEqual(typeof helpers.parseTencentCreateTaskResponse, 'function');
 assert.strictEqual(typeof helpers.parseTencentTaskStatusResponse, 'function');
 assert.strictEqual(typeof helpers.buildRecordTitleBase, 'function');
+assert.strictEqual(typeof helpers.hasRecordIdInFrontmatter, 'function');
+assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractSocialVideoMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
@@ -74,6 +95,9 @@ assert.strictEqual(
   'https://audio.example.com/demo-audio.m4a',
 );
 assert.strictEqual(typeof helpers.cleanDisplayUrl, 'function');
+assert.strictEqual(typeof helpers.htmlToMarkdown, 'function');
+assert.strictEqual(typeof helpers.extractWechatCommentsFromHtml, 'function');
+assert.strictEqual(typeof helpers.appendWechatCommentsToMarkdown, 'function');
 assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
 assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallRoot, 'function');
@@ -156,10 +180,14 @@ assert.strictEqual(pluginMainSource.includes(".setName('新增绑定码')"), fal
 assert.strictEqual(pluginMainSource.includes(".setButtonText('新增绑定码')"), false);
 assert.ok(pluginMainSource.includes("text: '使用教程'"));
 assert.ok(pluginMainSource.includes("text: '绑定小程序'"));
-assert.ok(pluginMainSource.includes("text: 'Pro 本地转写功能'"));
+assert.strictEqual(pluginMainSource.includes("text: 'Pro 本地转写功能'"), false);
+assert.ok(pluginMainSource.includes("text: '高级选项'"));
+assert.ok(pluginMainSource.includes("createEl('details'"));
+assert.ok(pluginMainSource.includes("text: '本地转写组件（高级/备用）'"));
+assert.ok(pluginMainSource.includes('默认走本地转写'));
 assert.ok(pluginMainSource.includes('wechat-inbox-sync-section-spacer'));
 assert.ok(pluginMainSource.indexOf("text: '使用教程'") < pluginMainSource.indexOf("text: '绑定小程序'"));
-assert.ok(pluginMainSource.indexOf("text: '绑定小程序'") < pluginMainSource.indexOf("text: 'Pro 本地转写功能'"));
+assert.ok(pluginMainSource.indexOf("text: '绑定小程序'") < pluginMainSource.indexOf("text: '高级选项'"));
 assert.ok(pluginMainSource.includes('本地转写系统'));
 assert.ok(pluginMainSource.includes('如果苹果电脑安装失败，请手动选择 macOS'));
 assert.ok(pluginMainSource.includes('install.log'));
@@ -198,6 +226,94 @@ assert.strictEqual(
 assert.strictEqual(helpers.isWechatMpArticleUrl('https://mp.weixin.qq.com/s/example'), true);
 assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://mp.weixin.qq.com/s/example'), true);
 assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://developers.weixin.qq.com/miniprogram'), false);
+const wechatCodeMarkdown = helpers.htmlToMarkdown(`
+  <html>
+    <body>
+      <div id="js_content">
+        <h2>Part4 Python可视化JRA-3Q气温数据</h2>
+        <pre><code>import numpy as np
+import xarray as xr
+# 读取JRA-3Q气温数据
+ds=xr.open_dataset('./jra3q.anl_surf.0_0_0.tmp2m-hgt-an-gauss.2026050100_2026053118.nc')
+# 绘制中国区域降水分布图
+region=[70, 140, 15, 55]
+# 读取地形数据
+img=plt.imread('./ned.tif')
+for item in [1, 2]:
+    print(item)</code></pre>
+      </div>
+      <script></script>
+    </body>
+  </html>
+`);
+assert.ok(wechatCodeMarkdown.includes('```'));
+assert.ok(wechatCodeMarkdown.includes('\n# 读取JRA-3Q气温数据\n'));
+assert.strictEqual(
+  /^# 读取JRA-3Q气温数据/m.test(wechatCodeMarkdown.replace(/```[\s\S]*?```/g, '')),
+  false,
+);
+const cleanedCodeMarkdown = helpers.cleanMarkdownForStorage(wechatCodeMarkdown);
+assert.ok(cleanedCodeMarkdown.includes('```'));
+assert.ok(cleanedCodeMarkdown.includes('ds=xr.open_dataset'));
+assert.ok(cleanedCodeMarkdown.includes('    print(item)'));
+assert.strictEqual(
+  /^# 绘制中国区域降水分布图/m.test(cleanedCodeMarkdown.replace(/```[\s\S]*?```/g, '')),
+  false,
+);
+const wechatCommentHtml = `
+  <html>
+    <body>
+      <div id="js_content"><p>正文内容</p></div>
+      <div id="js_cmt_area">
+        <ul id="js_cmt_list">
+          <li class="comment_card">
+            <span class="nickname">读者A</span>
+            <div class="comment_content">这个资料很有用，感谢整理。</div>
+          </li>
+        </ul>
+      </div>
+      <script></script>
+    </body>
+  </html>
+`;
+const wechatComments = helpers.extractWechatCommentsFromHtml(wechatCommentHtml);
+assert.deepStrictEqual(wechatComments, [
+  { author: '读者A', content: '这个资料很有用，感谢整理。', time: '', likes: '' },
+]);
+const wechatCommentMarkdown = helpers.htmlToMarkdown(wechatCommentHtml);
+assert.ok(wechatCommentMarkdown.includes('## 评论区'));
+assert.ok(wechatCommentMarkdown.includes('**读者A**：这个资料很有用，感谢整理。'));
+assert.strictEqual(typeof helpers.extractWebpageMetadataFromHtml, 'function');
+const articleMeta = helpers.extractWebpageMetadataFromHtml(`
+  <html>
+    <head>
+      <meta property="og:title" content="公众号文章标题">
+      <meta name="author" content="保姆级教程">
+      <meta name="description" content="这是一篇介绍 Codex 的文章">
+      <meta name="keywords" content="Codex, DeepSeek, 教程">
+    </head>
+  </html>
+`, 'https://mp.weixin.qq.com/s/example');
+assert.deepStrictEqual(articleMeta, {
+  title: '公众号文章标题',
+  author: '保姆级教程',
+  description: '这是一篇介绍 Codex 的文章',
+  keywords: ['Codex', 'DeepSeek', '教程'],
+  platform: '公众号',
+  contentCategory: '图文',
+});
+assert.strictEqual(
+  helpers.buildSkippedSyncNotice([{ reason: 'already-synced-local' }, { reason: 'already-synced-local' }]),
+  '，2 条本地已存在，已跳过重复写入',
+);
+assert.strictEqual(
+  helpers.buildSkippedSyncNotice([{ reason: 'cloud-transcription-processing' }]),
+  '，1 条云端转写中，完成后再同步',
+);
+assert.strictEqual(
+  helpers.buildSkippedSyncNotice([{ reason: 'already-synced-local' }, { reason: 'cloud-transcription-processing' }]),
+  '，1 条本地已存在，已跳过重复写入，1 条云端转写中，完成后再同步',
+);
 assert.strictEqual(
   helpers.getLocalAsrInstallRoot('C:\\Users\\demo'),
   'C:\\Users\\demo\\.wechat-inbox-local-asr',
@@ -266,7 +382,7 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
   fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(
     path.join(tempAsrRoot, 'transcribe.ps1'),
-    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 600\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100',
+    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nrecoveryTriggered=1',
     'utf8',
   );
   const recursiveStatus = helpers.getLocalAsrInstallStatus(tempAsrRoot, fs.existsSync, 'win32');
@@ -365,6 +481,16 @@ assert.deepStrictEqual(
   {
     scriptVersion: 'chunked-start-process-utf8-simplified-fallback-run-log',
     scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nrecoveryTriggered=1',
+  }),
+  {
+    scriptVersion: 'adaptive-chunked-start-process-repeat-guard-progress-run-log',
+    scriptOutdated: false,
   },
 );
 assert.deepStrictEqual(
@@ -574,6 +700,19 @@ assert.strictEqual(typeof helpers.resolveRedirectUrl, 'function');
 assert.strictEqual(typeof helpers.isRequestUrlTransportError, 'function');
 assert.strictEqual(typeof helpers.requestJsonViaNode, 'function');
 
+const chineseBookPdfText = helpers.extractPdfMarkdown(createUtf16BePdfBuffer([
+  '如果目标是实现10倍增长，那么这个过程通常并不会比10%的增长难上100倍，回报却可能是10%增长的100倍。',
+  '这本书讨论破局者如何重新设计自己的目标、能力和协作方式，让复杂问题变得更清楚。',
+  '当一个团队从追求线性改善转向重新定义问题，很多原本看起来必要的步骤都会被过滤掉。',
+  '作者强调，真正重要的不是把所有事情都做得更多，而是找到那些能够放大结果的关键杠杆。',
+  '在这种思路下，目标会变成一个筛选器，帮助我们区分什么值得继续投入，什么应该果断放弃。',
+  '所以这类书籍里经常会引用英文标题、心理学术语和商业案例，但主体内容仍然是可读的中文正文。',
+  'TheAgonyandtheEcstasy FiniteandInfiniteGames FriendsLoversandtheBigTerribleThing EdwardNortonLorenz CatchingtheBigFish SocialandPersonalityPsychologyCompass',
+  'BreakthroughCompanyPlaybook StrategicCoachResources TransformationalGrowthMindset EntrepreneurialConfidence IncomprehensibleAmbiguity ExponentialCollaboration',
+].join('\n')));
+assert.ok(chineseBookPdfText.includes('如果目标是实现10倍增长'));
+assert.ok(chineseBookPdfText.includes('TheAgonyandtheEcstasy'));
+
 assert.strictEqual(helpers.buildRecordTitleBase({
   type: 'file',
   content: 'Demo Document.pdf',
@@ -691,6 +830,10 @@ assert.strictEqual(xiaohongshuNoisyPageNote.markdown.includes('沪ICP备13030189
 assert.strictEqual(xiaohongshuNoisyPageNote.markdown.includes('window.__INITIAL_STATE__'), false);
 assert.ok(xiaohongshuNoisyPageNote.markdown.includes('#恋爱笔记 #异地恋 #vibecoding'));
 assert.ok(xiaohongshuNoisyPageNote.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/notes_pre_post/inner!nd_dft_wlteh_jpg_3)'));
+assert.ok(Array.isArray(xiaohongshuNoisyPageNote.tags));
+assert.ok(xiaohongshuNoisyPageNote.tags.includes('#恋爱笔记'));
+assert.ok(xiaohongshuNoisyPageNote.description.includes('异国恋'));
+assert.strictEqual(xiaohongshuNoisyPageNote.markdown.includes('原始链接：'), false);
 
 const xiaohongshuFallbackNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
@@ -713,6 +856,11 @@ const frontmatterMarkdown = helpers.buildMarkdownForRecord({
     metadata: {
       title: 'Frontmatter Test',
       url: 'https://www.xiaohongshu.com/explore/frontmatter',
+      author: '小红书账号',
+      platform: '小红书',
+      contentCategory: '图文',
+      description: '这是一段内容简介',
+      keywords: ['Obsidian', '知识管理'],
       conversionStatus: 'success',
       markdown: '正文内容',
     },
@@ -721,13 +869,19 @@ const frontmatterMarkdown = helpers.buildMarkdownForRecord({
   syncedAt: '2026-06-14T08:05:00.000Z',
 });
 assert.ok(frontmatterMarkdown.startsWith('---\n'));
-assert.ok(frontmatterMarkdown.includes('\nid: record-frontmatter-1\n'));
-assert.ok(frontmatterMarkdown.includes('\ntype: webpage\n'));
+assert.strictEqual(frontmatterMarkdown.includes('\nid: record-frontmatter-1\n'), false);
+assert.strictEqual(frontmatterMarkdown.includes('\ntype: webpage\n'), false);
+assert.ok(frontmatterMarkdown.includes('\ntitle: 小红书-Frontmatter Test\n'));
+assert.ok(frontmatterMarkdown.includes('\nauthor: 小红书账号\n'));
 assert.ok(frontmatterMarkdown.includes('\nurl: https://www.xiaohongshu.com/explore/frontmatter\n'));
-assert.ok(frontmatterMarkdown.includes('\ncreated_at: 2026-06-14T08:00:00.000Z\n'));
+assert.strictEqual(frontmatterMarkdown.includes('\ncreated_at: 2026-06-14T08:00:00.000Z\n'), false);
 assert.ok(frontmatterMarkdown.includes('\nsynced_at: 2026-06-14T08:05:00.000Z\n'));
-assert.ok(frontmatterMarkdown.includes('\nstatus: synced\n'));
-assert.ok(frontmatterMarkdown.includes('收集时间：2026-06-14 16:00:00'));
+assert.ok(frontmatterMarkdown.includes('\nsource: 小红书图文\n'));
+assert.ok(frontmatterMarkdown.includes('\ndescription: 这是一段内容简介\n'));
+assert.ok(frontmatterMarkdown.includes('\nkeywords: Obsidian, 知识管理\n'));
+assert.strictEqual(frontmatterMarkdown.includes('\nstatus: synced\n'), false);
+assert.strictEqual(frontmatterMarkdown.includes('收集时间：2026-06-14 16:00:00'), false);
+assert.strictEqual(frontmatterMarkdown.includes('原始链接：https://www.xiaohongshu.com/explore/frontmatter'), false);
 
 const customFrontmatterMarkdown = helpers.buildMarkdownForRecord({
   record: {
@@ -1050,6 +1204,18 @@ assert.strictEqual(helpers.parseDoubaoAsrResult({
     },
   ],
 }), '说话人1：第一段\n说话人1：继续第一段\n说话人2：第二段');
+
+assert.strictEqual(helpers.parseDoubaoAsrResult({
+  result: {
+    text: [
+      '但是这个可能会再打开微信',
+      '但是这个可能会再打开微信',
+      '但是这个可能会再打开微信',
+      '但是这个可能会再打开微信',
+      '我们继续往下讲',
+    ].join('\n'),
+  },
+}), '但是这个可能会再打开微信\n我们继续往下讲');
 
 assert.deepStrictEqual(helpers.parseDoubaoAsrTaskState({
   status: 200,
@@ -2009,6 +2175,101 @@ async function runCloudProcessingRecordSkipSyncTest() {
   ]]);
 }
 
+async function runExistingLocalRecordDedupSyncTest() {
+  assert.strictEqual(helpers.hasRecordIdInFrontmatter([
+    '---',
+    'id: existing-record-1',
+    'type: text',
+    '---',
+    '',
+    '正文内容',
+  ].join('\n'), 'existing-record-1'), true);
+  assert.strictEqual(helpers.hasRecordIdInFrontmatter([
+    '正文里出现 id: existing-record-1 不算已经同步',
+  ].join('\n'), 'existing-record-1'), false);
+
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    inboxDir: '临时收集',
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => [
+        { path: '临时收集/2026-06-17/旧内容.md', extension: 'md' },
+        { path: '其他目录/旧内容.md', extension: 'md' },
+      ],
+      cachedRead: async (file) => {
+        if (file.path === '临时收集/2026-06-17/旧内容.md') {
+          return [
+            '---',
+            'id: existing-record-1',
+            'type: text',
+            '---',
+            '',
+            '之前已经同步过的内容',
+          ].join('\n');
+        }
+        return [
+          '---',
+          'id: existing-record-1',
+          '---',
+        ].join('\n');
+      },
+    },
+  };
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'existing-record-1',
+          type: 'text',
+          content: '云端误标成 pending 的旧内容',
+          createdAt: '2026-06-17T08:00:00.000Z',
+          metadata: {},
+        }],
+      };
+    }
+    return {
+      success: true,
+      data: {},
+    };
+  };
+  plugin.writeRecord = async () => {
+    throw new Error('本地已有同 id 笔记时不应重复写入');
+  };
+
+  const result = await plugin.syncBinding({
+    token: 'ABC-123',
+    label: '测试微信',
+  }, false);
+
+  assert.deepStrictEqual(result.written, []);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(result.skipped, [{
+    recordId: 'existing-record-1',
+    reason: 'already-synced-local',
+    filePath: '临时收集/2026-06-17/旧内容.md',
+  }]);
+  assert.deepStrictEqual(calls, [[
+    '/records?status=pending',
+    'GET',
+    {},
+    'ABC-123',
+  ], [
+    '/records/existing-record-1/synced',
+    'POST',
+    {},
+    'ABC-123',
+  ]]);
+}
+
 async function runUnbindInvalidCodeMarksLocalUnboundTest() {
   const previousRequestUrlMock = requestUrlMock;
   requestUrlMock = async () => ({
@@ -2045,6 +2306,35 @@ async function runUnbindInvalidCodeMarksLocalUnboundTest() {
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
+}
+
+async function runSyncInvalidCodePreservesLocalBindingTest() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'OLD-123',
+    clientId: 'stale-client',
+    bindings: [{
+      token: 'OLD-123',
+      label: '旧微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  plugin.showSyncProgress = () => {};
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+  plugin.requestJson = async () => {
+    throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击“立即绑定”。');
+  };
+
+  await plugin.syncInbox(false);
+
+  assert.strictEqual(plugin.settings.token, 'OLD-123');
+  assert.deepStrictEqual(plugin.settings.bindings.map((item) => item.token), ['OLD-123']);
+  assert.strictEqual(savedSettings, null);
 }
 
 async function runLocalTranscriptionEntitlementTests() {
@@ -2341,7 +2631,9 @@ async function main() {
   await runMissingClientIdRequestTest();
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
+  await runExistingLocalRecordDedupSyncTest();
   await runUnbindInvalidCodeMarksLocalUnboundTest();
+  await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
   await runPodcastDownloadHeaderTests();
