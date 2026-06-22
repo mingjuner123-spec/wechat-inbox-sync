@@ -45,8 +45,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.36');
-assert.strictEqual(versions['1.2.36'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.37');
+assert.strictEqual(versions['1.2.37'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -147,6 +147,11 @@ const wechatCommentApiWithoutToken = helpers.buildWechatCommentApiUrl('https://m
 assert.ok(wechatCommentApiWithoutToken.includes('/mp/appmsg_comment?'));
 assert.ok(wechatCommentApiWithoutToken.includes('comment_id=987654321'));
 assert.ok(wechatCommentApiWithoutToken.includes('appmsg_token='));
+assert.strictEqual(typeof helpers.getWechatInPageCommentFetchScript, 'function');
+const wechatInPageCommentScript = helpers.getWechatInPageCommentFetchScript();
+assert.ok(wechatInPageCommentScript.includes('/mp/appmsg_comment'));
+assert.ok(wechatInPageCommentScript.includes("credentials: 'include'"));
+assert.ok(wechatInPageCommentScript.includes('comment_id'));
 assert.deepStrictEqual(helpers.extractWechatCommentsFromPayload({
   elected_comment: [{
     nick_name: '接口读者',
@@ -219,6 +224,12 @@ assert.deepStrictEqual(helpers.extractXiaohongshuCommentsFromPayload({
   { author: '接口用户', content: '接口返回的小红书评论', time: '1782115200', likes: '27' },
   { author: '回复用户', content: '楼中楼回复', time: '1782115300', likes: '3' },
 ]);
+assert.strictEqual(typeof helpers.getXiaohongshuCommentExpansionScript, 'function');
+const xhsExpandScript = helpers.getXiaohongshuCommentExpansionScript();
+assert.ok(xhsExpandScript.includes('展开'));
+assert.ok(xhsExpandScript.includes('更多回复'));
+assert.ok(xhsExpandScript.includes('scrollTop'));
+assert.ok(xhsExpandScript.includes('comment'));
 
 assert.strictEqual(typeof helpers.getSocialElectronPartition, 'function');
 assert.strictEqual(helpers.getSocialElectronPartition('xiaohongshu'), 'persist:wechat-inbox-sync-xiaohongshu');
@@ -256,6 +267,12 @@ assert.strictEqual(settings.aiMetadataEnabled, true);
 assert.strictEqual(settings.deepseekApiKey, 'sk-test');
 assert.strictEqual(settings.deepseekModel, 'deepseek-chat');
 assert.strictEqual(settings.notePropertyFields, 'title,description,keywords');
+const aiSettingsWithLegacyFields = helpers.mergeSettings({
+  aiMetadataEnabled: true,
+  deepseekApiKey: 'sk-test',
+  notePropertyFields: 'title,author,url,synced_at,source',
+});
+assert.strictEqual(aiSettingsWithLegacyFields.notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
 
 assert.strictEqual(typeof helpers.shouldRefreshAiDescription, 'function');
 assert.strictEqual(typeof helpers.buildFallbackGeneratedKeywords, 'function');
@@ -332,6 +349,14 @@ async function runAsyncChecks() {
   const enriched = await plugin.enrichRecordMetadataWithAi(noisyXhsRecord);
   assert.strictEqual(enriched.metadata.description, '把小红书标题方法沉淀成可复用的AI写作流程。');
   assert.deepStrictEqual(enriched.metadata.keywords.slice(0, 3), ['小红书', '标题方法', 'AI写作']);
+  const enrichedMarkdown = helpers.buildMarkdownForRecord({
+    record: enriched,
+    title: '小红书标题方法',
+    syncedAt: '2026-06-22T00:00:00.000Z',
+    propertyFields: plugin.settings.notePropertyFields,
+  });
+  assert.ok(enrichedMarkdown.includes('description: 把小红书标题方法沉淀成可复用的AI写作流程。'));
+  assert.ok(enrichedMarkdown.includes('keywords: 小红书, 标题方法, AI写作'));
 
   const source = fs.readFileSync(pluginPath, 'utf8');
   assert.ok(source.includes("text: 'AI 简介与关键词（DeepSeek）'"));

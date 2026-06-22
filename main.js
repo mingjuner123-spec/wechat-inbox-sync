@@ -1044,6 +1044,13 @@ function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
+  if (merged.aiMetadataEnabled) {
+    const fields = parseNotePropertyFields(merged.notePropertyFields);
+    ['description', 'keywords'].forEach((field) => {
+      if (!fields.includes(field)) fields.push(field);
+    });
+    merged.notePropertyFields = fields.join(',');
+  }
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
@@ -4953,6 +4960,13 @@ async function renderWechatCommentsWithElectron(url) {
     await win.loadURL(url);
     await loaded;
     await settleRenderedPage(win.webContents);
+    let inPagePayload = null;
+    try {
+      inPagePayload = await win.webContents.executeJavaScript(getWechatInPageCommentFetchScript());
+    } catch (error) {
+      inPagePayload = null;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
     const comments = await win.webContents.executeJavaScript(`
       (() => {
         const clean = (text) => String(text || '')
@@ -4992,8 +5006,9 @@ async function renderWechatCommentsWithElectron(url) {
     const merged = [];
     const seen = new Set();
     (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
+    extractWechatCommentsFromPayload(inPagePayload, 50).forEach((comment) => pushSocialComment(merged, seen, comment));
     (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-    return merged.slice(0, 20);
+    return merged.slice(0, 50);
   } finally {
     if (collector) collector.dispose();
     if (win && !win.isDestroyed()) {
@@ -5071,6 +5086,120 @@ async function renderSocialMediaUrlWithElectron(url) {
   return urls[0] || '';
 }
 
+function getXiaohongshuCommentExpansionScript() {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clickables = () => Array.from(document.querySelectorAll('button, [role="button"], a, span, div'))
+        .filter((node) => {
+          const text = String(node.innerText || node.textContent || '').replace(/\\s+/g, '');
+          if (!text || text.length > 40 || !visible(node)) return false;
+          return /展开|更多回复|查看.*回复|全部回复|更多评论|展开.*评论|展开.*条|共\\d+条回复|\\d+条回复|more/i.test(text);
+        });
+      const scrollables = () => Array.from(document.querySelectorAll('[class*="comment"], [class*="comments"], [class*="reply"], [class*="scroll"], [class*="list"], main, body, html'))
+        .filter((node) => {
+          try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
+        });
+      let stableRounds = 0;
+      let lastTextLength = 0;
+      for (let round = 0; round < 24; round += 1) {
+        let clicked = 0;
+        for (const node of clickables().slice(0, 12)) {
+          try {
+            node.scrollIntoView({ block: 'center', inline: 'nearest' });
+            await sleep(120);
+            node.click();
+            clicked += 1;
+            await sleep(350);
+          } catch (error) {}
+        }
+        window.scrollBy(0, Math.max(450, Math.floor(window.innerHeight * 0.75)));
+        scrollables().forEach((node) => {
+          try { node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight); } catch (error) {}
+        });
+        await sleep(700);
+        const textLength = String(document.body ? document.body.innerText || '' : '').length;
+        stableRounds = clicked === 0 && Math.abs(textLength - lastTextLength) < 20 ? stableRounds + 1 : 0;
+        lastTextLength = textLength;
+        if (stableRounds >= 4) break;
+      }
+      return true;
+    })()
+  `;
+}
+
+function getWechatInPageCommentFetchScript() {
+  return `
+    (async () => {
+      const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+      const escapeRegExp = (text) => String(text || '').replace(/[.*+?^\\$()|[\\]\\\\]/g, '\\\\$&');
+      const readVar = (names) => {
+        for (const name of names) {
+          try {
+            const value = name.split('.').reduce((obj, key) => (obj ? obj[key] : undefined), window);
+            if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+          } catch (error) {}
+        }
+        const source = Array.from(document.scripts || []).map((script) => script.textContent || '').join('\\n');
+        for (const name of names) {
+          const key = name.replace(/^window\\./, '');
+          const escaped = escapeRegExp(key);
+          const patterns = [
+            new RegExp('(?:var\\\\s+)?' + escaped + '\\\\s*=\\\\s*"([^"]+)"', 'i'),
+            new RegExp("(?:var\\\\s+)?" + escaped + "\\\\s*=\\\\s*'([^']+)'", 'i'),
+            new RegExp('(?:var\\\\s+)?' + escaped + '\\\\s*=\\\\s*([^;,\\\\n]+)', 'i'),
+          ];
+          for (const pattern of patterns) {
+            const match = source.match(pattern);
+            if (match && match[1]) return clean(match[1].replace(/[\"']/g, ''));
+          }
+        }
+        return '';
+      };
+      const fromUrl = new URLSearchParams(location.search || '');
+      const params = {
+        action: 'getcomment',
+        scene: '0',
+        __biz: fromUrl.get('__biz') || readVar(['biz', '__biz']),
+        appmsgid: fromUrl.get('mid') || readVar(['mid', 'appmsgid']),
+        idx: fromUrl.get('idx') || readVar(['idx']) || '1',
+        comment_id: readVar(['comment_id', 'commentId']),
+        offset: '0',
+        limit: '50',
+        send_time: '',
+        sessionid: '0',
+        enterid: String(Date.now()),
+        ascene: '0',
+        fasttmpl_type: '0',
+        fasttmpl_fullversion: '0',
+        fasttmpl_flag: '0',
+        appmsg_token: readVar(['appmsg_token', 'window.appmsg_token']),
+        x5: '0',
+        f: 'json',
+        r: String(Math.random())
+      };
+      if (!params.comment_id) return null;
+      const query = new URLSearchParams(params);
+      const response = await fetch('/mp/appmsg_comment?' + query.toString(), {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          Accept: 'application/json, text/javascript, */*; q=0.01',
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      });
+      const text = await response.text();
+      try { return JSON.parse(text); } catch (error) { return text; }
+    })()
+  `;
+}
+
 async function renderXiaohongshuCommentsWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -5088,23 +5217,7 @@ async function renderXiaohongshuCommentsWithElectron(url) {
     const loaded = waitForWebContents(win.webContents, 18000);
     await win.loadURL(url);
     await loaded;
-    await win.webContents.executeJavaScript(`
-      (async () => {
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        const scrollables = () => Array.from(document.querySelectorAll('[class*="comment"], [class*="comments"], [class*="scroll"], [class*="list"], main, body, html'))
-          .filter((node) => {
-            try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
-          });
-        for (let index = 0; index < 16; index += 1) {
-          window.scrollBy(0, Math.max(450, Math.floor(window.innerHeight * 0.75)));
-          scrollables().forEach((node) => {
-            try { node.scrollTop = Math.min(node.scrollTop + 500, node.scrollHeight); } catch (error) {}
-          });
-          await sleep(650);
-        }
-        return true;
-      })()
-    `);
+    await win.webContents.executeJavaScript(getXiaohongshuCommentExpansionScript());
     const comments = await win.webContents.executeJavaScript(`
       (() => {
         const clean = (text) => String(text || '')
@@ -7812,6 +7925,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       record: recordForMarkdown,
       title,
       syncedAt,
+      propertyFields: this.settings.notePropertyFields,
     });
     const filePath = `${noteDir}/${title}.md`;
     this.showSyncProgress({ ...progress, stage: 'writing', title });
@@ -8438,6 +8552,8 @@ WechatObsidianInboxPlugin.__test = {
   isWechatMpArticleUrl,
   shouldHydrateLinkAsWebpage,
   getSocialElectronPartition,
+  getXiaohongshuCommentExpansionScript,
+  getWechatInPageCommentFetchScript,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
