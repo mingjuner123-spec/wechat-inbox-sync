@@ -3650,6 +3650,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
   const tags = extractTagsFromText(description, source);
   const images = collectXiaohongshuNoteImageUrls(source);
   const videoUrl = extractVideoUrlFromHtml(source);
+  const comments = extractSocialCommentsFromHtml(source);
   const lines = [
     '## 标题',
     '',
@@ -3679,6 +3680,11 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     lines.push('## 视频源', '', `[视频文件](${videoUrl})`, '');
   }
 
+  const commentsMarkdown = buildSocialCommentsMarkdown(comments);
+  if (commentsMarkdown) {
+    lines.push(commentsMarkdown, '');
+  }
+
   return {
     title,
     author: extractXiaohongshuAuthor(source),
@@ -3687,6 +3693,7 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     markdown: lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
     imageUrls: images,
     videoUrl,
+    comments,
   };
 }
 
@@ -3790,7 +3797,7 @@ function decodeJsonLikeText(value) {
     .trim();
 }
 
-function normalizeWechatComment(comment) {
+function normalizeSocialComment(comment) {
   const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
@@ -3802,8 +3809,8 @@ function normalizeWechatComment(comment) {
   };
 }
 
-function pushWechatComment(comments, seen, comment) {
-  const normalized = normalizeWechatComment(comment || {});
+function pushSocialComment(comments, seen, comment) {
+  const normalized = normalizeSocialComment(comment || {});
   if (!normalized) return;
   const key = `${normalized.author}|${normalized.content}`;
   if (seen.has(key)) return;
@@ -3811,8 +3818,133 @@ function pushWechatComment(comments, seen, comment) {
   comments.push(normalized);
 }
 
+function normalizeWechatComment(comment) {
+  return normalizeSocialComment(comment);
+}
+
+function pushWechatComment(comments, seen, comment) {
+  pushSocialComment(comments, seen, comment);
+}
+
+function readCommentField(item, keys) {
+  for (const key of keys) {
+    if (item && Object.prototype.hasOwnProperty.call(item, key) && item[key] !== undefined && item[key] !== null) {
+      const value = item[key];
+      if (typeof value === 'object') {
+        const nested = readCommentField(value, ['text', 'content', 'value', 'nickname', 'nickName', 'name']);
+        if (nested) return nested;
+      } else {
+        const text = String(value).trim();
+        if (text) return text;
+      }
+    }
+  }
+  return '';
+}
+
+function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0) {
+  if (!value || depth > 8 || comments.length >= limit) return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => extractCommentsFromObject(item, comments, seen, limit, depth + 1));
+    return;
+  }
+  if (typeof value !== 'object') return;
+
+  const content = readCommentField(value, [
+    'content',
+    'text',
+    'commentContent',
+    'comment_content',
+    'noteText',
+    'message',
+  ]);
+  if (content) {
+    const author = readCommentField(value, [
+      'nick_name',
+      'nickname',
+      'nickName',
+      'userNickname',
+      'user_nickname',
+      'userName',
+      'name',
+      'author',
+    ]) || readCommentField(value.user || value.userInfo || value.authorInfo || {}, [
+      'nick_name',
+      'nickname',
+      'nickName',
+      'userName',
+      'name',
+    ]);
+    const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
+    const likes = readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'like_count', 'likes']);
+    pushSocialComment(comments, seen, { author, content, time, likes });
+  }
+
+  Object.keys(value).forEach((key) => {
+    if (comments.length >= limit) return;
+    if (/comment|cmt|reply|discuss/i.test(key)) {
+      extractCommentsFromObject(value[key], comments, seen, limit, depth + 1);
+    }
+  });
+}
+
+function collectJsonObjectCandidates(source) {
+  const candidates = [];
+  const text = String(source || '');
+  const starts = [];
+  const objectPattern = /(?:elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)\s*[:=]\s*([\[{])/gi;
+  let match;
+  while ((match = objectPattern.exec(text))) {
+    starts.push(objectPattern.lastIndex - 1);
+  }
+  starts.forEach((start) => {
+    const open = text[start];
+    const close = open === '[' ? ']' : '}';
+    let depth = 0;
+    let quote = '';
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (quote) {
+        if (char === quote) quote = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+      if (char === open) depth += 1;
+      if (char === close) depth -= 1;
+      if (depth === 0) {
+        candidates.push(text.slice(start, index + 1));
+        break;
+      }
+    }
+  });
+  return candidates;
+}
+
+function parseLooseJsonCandidate(text) {
+  const source = String(text || '').trim();
+  return tryParseJson(source)
+    || tryParseJson(source
+      .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":')
+      .replace(/'/g, '"'));
+}
+
 function extractWechatCommentsFromJson(html, comments, seen) {
   const source = String(html || '');
+  collectJsonObjectCandidates(source).forEach((candidate) => {
+    extractCommentsFromObject(parseLooseJsonCandidate(candidate), comments, seen);
+  });
   const patterns = [
     /"nick_?name"\s*:\s*"((?:\\.|[^"\\])*)"\s*,[\s\S]{0,900}?"content"\s*:\s*"((?:\\.|[^"\\])*)"/gi,
     /"content"\s*:\s*"((?:\\.|[^"\\])*)"\s*,[\s\S]{0,900}?"nick_?name"\s*:\s*"((?:\\.|[^"\\])*)"/gi,
@@ -3855,8 +3987,30 @@ function extractWechatCommentsFromHtml(html, limit = 20) {
   return comments.slice(0, limit);
 }
 
-function buildWechatCommentsMarkdown(comments = []) {
-  const items = (comments || []).map(normalizeWechatComment).filter(Boolean);
+function extractSocialCommentsFromHtml(html, limit = 20) {
+  const source = String(html || '');
+  const comments = [];
+  const seen = new Set();
+  const itemPattern = /<((?:li|div|section|article))\b[^>]*(?:class|id)=["'][^"']*(?:comment|cmt|reply|discuss)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/gi;
+  let match;
+  while ((match = itemPattern.exec(source))) {
+    const item = match[2] || '';
+    const content = extractHtmlTextByClass(item, /(?:comment[_-]?content|content|message|text|desc)/i)
+      || stripHtmlTags(item);
+    const author = extractHtmlTextByClass(item, /(?:nickname|nick[_-]?name|user[_-]?name|user-name|author|name)/i);
+    const time = extractHtmlTextByClass(item, /(?:time|date)/i);
+    const likes = extractHtmlTextByClass(item, /(?:like|liked|praise|赞)/i);
+    pushSocialComment(comments, seen, { author, content, time, likes });
+    if (comments.length >= limit) return comments;
+  }
+  collectJsonObjectCandidates(source).forEach((candidate) => {
+    extractCommentsFromObject(parseLooseJsonCandidate(candidate), comments, seen, limit);
+  });
+  return comments.slice(0, limit);
+}
+
+function buildSocialCommentsMarkdown(comments = []) {
+  const items = (comments || []).map(normalizeSocialComment).filter(Boolean);
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
   items.forEach((comment) => {
@@ -3865,6 +4019,10 @@ function buildWechatCommentsMarkdown(comments = []) {
     lines.push(`- ${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
   });
   return lines.join('\n').trim();
+}
+
+function buildWechatCommentsMarkdown(comments = []) {
+  return buildSocialCommentsMarkdown(comments);
 }
 
 function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
@@ -4342,10 +4500,117 @@ function decodeJsonStringLiteral(value) {
   }
 }
 
+function slugifyMarkdownHeading(text) {
+  return String(text || '')
+    .replace(/^#{1,6}\s+/, '')
+    .replace(/\*\*/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, '')
+    .replace(/\s+/g, '-');
+}
+
+function buildMarkdownToc(markdown) {
+  const headings = String(markdown || '')
+    .split(/\r?\n/)
+    .map((line) => {
+      const match = /^(#{1,6})\s+(.+)$/.exec(line.trim());
+      if (!match) return null;
+      const text = match[2].replace(/\*\*/g, '').trim();
+      if (!text || text === '目录' || text === '评论区') return null;
+      return {
+        level: match[1].length,
+        text,
+        slug: slugifyMarkdownHeading(text),
+      };
+    })
+    .filter(Boolean);
+  if (headings.length < 2) return '';
+  const minLevel = Math.min(...headings.map((item) => item.level));
+  return [
+    '## 目录',
+    '',
+    ...headings.map((item) => `${'  '.repeat(Math.max(0, item.level - minLevel))}- [${item.text}](#${item.slug})`),
+  ].join('\n');
+}
+
+function appendMarkdownToc(markdown) {
+  const source = String(markdown || '').trim();
+  if (!source || /(^|\n)##\s+目录\b/.test(source)) return source;
+  const toc = buildMarkdownToc(source);
+  return toc ? `${toc}\n\n${source}` : source;
+}
+
+function collectFeishuImageUrls(source) {
+  const urls = [];
+  collectImageUrlsFromHtml(source).forEach((url) => pushUniqueUrl(urls, url));
+  collectJsonStringValues(source, [
+    'url',
+    'src',
+    'image',
+    'imageUrl',
+    'image_url',
+    'originUrl',
+    'origin_url',
+    'downloadUrl',
+    'download_url',
+  ]).forEach((url) => {
+    if (isLikelyImageUrl(url)) pushUniqueUrl(urls, url);
+  });
+  return urls;
+}
+
+function inferFeishuHeadingLevel(text, blockType = '') {
+  const normalizedType = String(blockType || '').toLowerCase();
+  const match = normalizedType.match(/heading[_-]?([1-6])|h([1-6])/i);
+  if (match) return Number(match[1] || match[2]);
+  const value = String(text || '').trim();
+  if (/^[一二三四五六七八九十]+、/.test(value)) return 1;
+  if (/^第[一二三四五六七八九十]+步[:：、]/.test(value)) return 2;
+  if (/^(系统页面截图|工作流程图|整套系统分三层|格式|示例|提示词)/.test(value)) return 3;
+  return 0;
+}
+
+function pushFeishuLine(lines, seen, text, level = 0) {
+  const value = String(text || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  if (!value || value.length < 2 || /^https?:\/\//i.test(value) || /[{}[\]<>]/.test(value)) return;
+  const markdown = level ? `${'#'.repeat(Math.max(1, Math.min(6, level)))} ${value}` : formatFeishuHeadingLine(value);
+  const key = markdown.replace(/\s+/g, ' ');
+  if (seen.has(key)) return;
+  seen.add(key);
+  lines.push(markdown);
+}
+
 function extractFeishuMarkdownFromHtml(html) {
   const source = decodeHtmlEntities(String(html || ''));
   const lines = [];
+  const seen = new Set();
+  const readable = stripScriptAndStyleBlocks(source)
+    .replace(/<img\b[^>]*>/gi, (tag) => imageTagToMarkdown(tag))
+    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text) => `\n# ${stripHtmlTags(text)}\n`)
+    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text) => `\n## ${stripHtmlTags(text)}\n`)
+    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_, text) => `\n### ${stripHtmlTags(text)}\n`)
+    .replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, (_, text) => `\n#### ${stripHtmlTags(text)}\n`)
+    .replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, (_, text) => `\n##### ${stripHtmlTags(text)}\n`)
+    .replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, (_, text) => `\n###### ${stripHtmlTags(text)}\n`)
+    .replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, (_, text) => `\n${stripHtmlTags(text)}\n`);
+  cleanMarkdownForStorage(stripHtmlTags(readable), { dedupe: true })
+    .split(/\r?\n/)
+    .forEach((line) => {
+      const text = line.trim();
+      if (shouldDropFeishuLine(text, '')) return;
+      if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text)) {
+        if (!seen.has(text)) {
+          seen.add(text);
+          lines.push(text);
+        }
+        return;
+      }
+      pushFeishuLine(lines, seen, text);
+    });
+
   const patterns = [
+    /"(?:block_type|type)"\s*:\s*"([^"]+)"[\s\S]{0,500}?"(?:text|content|title|name)"\s*:\s*"((?:\\.|[^"\\]){2,})"/g,
     /"(?:text|content|title|name)"\s*:\s*"((?:\\.|[^"\\]){8,})"/g,
     /'text'\s*:\s*'((?:\\.|[^'\\]){8,})'/g,
   ];
@@ -4353,22 +4618,36 @@ function extractFeishuMarkdownFromHtml(html) {
   patterns.forEach((pattern) => {
     let match;
     while ((match = pattern.exec(source))) {
-      const text = decodeJsonStringLiteral(match[1])
+      const hasBlockType = match.length > 2;
+      const blockType = hasBlockType ? match[1] : '';
+      const rawText = hasBlockType ? match[2] : match[1];
+      const text = decodeJsonStringLiteral(rawText)
         .replace(/<[^>]+>/g, '')
         .replace(/\s+/g, ' ')
         .trim();
-      if (
-        text.length >= 8
-        && !/^https?:\/\//i.test(text)
-        && !/[{}[\]<>]/.test(text)
-        && !lines.includes(text)
-      ) {
-        lines.push(text);
-      }
+      if (shouldDropFeishuLine(text, '')) return;
+      pushFeishuLine(lines, seen, text, inferFeishuHeadingLevel(text, blockType));
     }
   });
 
-  const markdown = lines.join('\n\n').trim();
+  const existingImageUrls = new Set();
+  lines.forEach((line) => {
+    const match = String(line || '').match(/!\[[^\]]*]\(([^)]+)\)/);
+    if (match && match[1]) existingImageUrls.add(match[1]);
+  });
+  let appendedImageIndex = 0;
+  collectFeishuImageUrls(source).forEach((url) => {
+    if (existingImageUrls.has(url)) return;
+    existingImageUrls.add(url);
+    const markdown = `![图片${appendedImageIndex ? ` ${appendedImageIndex + 1}` : ''}](${url})`;
+    appendedImageIndex += 1;
+    if (!seen.has(markdown)) {
+      seen.add(markdown);
+      lines.push(markdown);
+    }
+  });
+
+  const markdown = appendMarkdownToc(lines.join('\n\n').trim());
   if (markdown.length < 20) {
     throw new Error('飞书静态页面中未提取到正文');
   }
@@ -7349,6 +7628,7 @@ WechatObsidianInboxPlugin.__test = {
   cleanPdfExtractedText,
   htmlToMarkdown,
   extractWebpageMetadataFromHtml,
+  extractFeishuMarkdownFromHtml,
   extractWechatCommentsFromHtml,
   appendWechatCommentsToMarkdown,
   normalizeGeneratedKeywords,

@@ -292,6 +292,54 @@ assert.deepStrictEqual(wechatComments, [
 const wechatCommentMarkdown = helpers.htmlToMarkdown(wechatCommentHtml);
 assert.ok(wechatCommentMarkdown.includes('## 评论区'));
 assert.ok(wechatCommentMarkdown.includes('**读者A**：这个资料很有用，感谢整理。'));
+const wechatScriptCommentHtml = `
+  <html>
+    <body>
+      <div id="js_content"><p>正文内容</p></div>
+      <script>
+        window.cgiData = {
+          elected_comment: [{
+            nick_name: "读者B",
+            content: "评论来自脚本数据",
+            create_time: "2026-06-22",
+            like_num: 12
+          }]
+        };
+      </script>
+    </body>
+  </html>
+`;
+assert.deepStrictEqual(helpers.extractWechatCommentsFromHtml(wechatScriptCommentHtml), [
+  { author: '读者B', content: '评论来自脚本数据', time: '2026-06-22', likes: '12' },
+]);
+assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
+const feishuStaticMarkdown = helpers.extractFeishuMarkdownFromHtml(`
+  <html>
+    <body>
+      <h1>一级标题</h1>
+      <h2>二级标题</h2>
+      <p>正文第一段</p>
+      <h3>三级标题</h3>
+      <img src="https://example.com/a.png" alt="流程图">
+      <script>
+        window.__DATA__ = {
+          "block_type":"heading2",
+          "text":"脚本二级标题",
+          "url":"https://example.com/b.jpg"
+        };
+      </script>
+    </body>
+  </html>
+`);
+assert.ok(feishuStaticMarkdown.includes('## 目录'));
+assert.ok(feishuStaticMarkdown.includes('- [一级标题](#一级标题)'));
+assert.ok(feishuStaticMarkdown.includes('  - [二级标题](#二级标题)'));
+assert.ok(feishuStaticMarkdown.includes('    - [三级标题](#三级标题)'));
+assert.ok(feishuStaticMarkdown.includes('# 一级标题'));
+assert.ok(feishuStaticMarkdown.includes('## 二级标题'));
+assert.ok(feishuStaticMarkdown.includes('### 三级标题'));
+assert.ok(feishuStaticMarkdown.includes('![流程图](https://example.com/a.png)'));
+assert.ok(feishuStaticMarkdown.includes('![图片](https://example.com/b.jpg)'));
 assert.strictEqual(typeof helpers.extractWebpageMetadataFromHtml, 'function');
 const articleMeta = helpers.extractWebpageMetadataFromHtml(`
   <html>
@@ -788,6 +836,7 @@ const xiaohongshuNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<meta property="og:image" content="https://img.example.com/cover.jpg">',
   '</head><body>',
   '<img src="https://img.example.com/inner-a.jpg">',
+  '<div class="comment-item"><span class="user-name">用户甲</span><span class="comment-content">这个角度太有用了</span><span class="like-count">9</span></div>',
   '<script>{"note":{"desc":"正文第一段，正文第二段，正文第三段。 #tagOne #tagTwo","imageList":[{"urlDefault":"https:\\/\\/img.example.com\\/inner-b.jpg"},{"url":"https:\\/\\/sns-webpic.example.com\\/inner-c"}]}}</script>',
   '</body></html>',
 ].join(''), 'https://www.xiaohongshu.com/explore/123');
@@ -801,6 +850,8 @@ assert.ok(xiaohongshuNote.markdown.includes('![封面](https://img.example.com/c
 assert.ok(xiaohongshuNote.markdown.includes('![内页图 1](https://img.example.com/inner-a.jpg)'));
 assert.ok(xiaohongshuNote.markdown.includes('![内页图 2](https://img.example.com/inner-b.jpg)'));
 assert.ok(xiaohongshuNote.markdown.includes('![内页图 3](https://sns-webpic.example.com/inner-c)'));
+assert.ok(xiaohongshuNote.markdown.includes('## 评论区'));
+assert.ok(xiaohongshuNote.markdown.includes('**用户甲**：这个角度太有用了'));
 
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
