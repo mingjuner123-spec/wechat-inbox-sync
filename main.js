@@ -1126,7 +1126,8 @@ function isRequestUrlTransportError(message) {
     || text.includes('ECONNRESET')
     || text.includes('ETIMEDOUT')
     || text.includes('socket hang up')
-    || text.includes('NetworkError');
+    || text.includes('NetworkError')
+    || /Request failed,\s*status\s+5\d\d/i.test(text);
 }
 
 function requestJsonViaNode(options) {
