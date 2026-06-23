@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.47');
-assert.strictEqual(versions['1.2.47'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.48');
+assert.strictEqual(versions['1.2.48'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -512,6 +512,15 @@ async function runAsyncChecks() {
   assert.ok(enrichedMarkdown.includes('  - 小红书'));
   assert.ok(enrichedMarkdown.includes('  - 标题方法'));
   assert.ok(enrichedMarkdown.includes('  - AI写作'));
+  const aiDisabledMarkdown = helpers.buildMarkdownForRecord({
+    record: noisyXhsRecord,
+    title: '小红书标题方法',
+    syncedAt: '2026-06-22T00:00:00.000Z',
+    propertyFields: 'title,author,url,synced_at,source,description,keywords',
+    includeAiMetadataFields: false,
+  });
+  assert.ok(!aiDisabledMarkdown.includes('description:'));
+  assert.ok(!aiDisabledMarkdown.includes('keywords:'));
   const existingMarkdownXhs = helpers.ensureRequiredMetadataFallbacks({
     type: 'webpage',
     content: 'https://www.xiaohongshu.com/explore/existing',
@@ -596,6 +605,22 @@ async function runAsyncChecks() {
   assert.strictEqual(inactiveProAiResult.metadata.description || '', '');
   assert.deepStrictEqual(inactiveProAiResult.metadata.keywords || [], []);
   assert.strictEqual(inactiveProAiPlugin.settings.aiMetadataEnabled, false);
+  const inactiveProMarkdown = helpers.buildMarkdownForRecord({
+    record: {
+      ...noisyXhsRecord,
+      metadata: {
+        ...noisyXhsRecord.metadata,
+        description: '这条来自历史 Pro 或网页 meta 的简介不应该继续写入',
+        keywords: ['历史关键词'],
+      },
+    },
+    title: '小红书标题方法',
+    syncedAt: '2026-06-22T00:00:00.000Z',
+    propertyFields: inactiveProAiPlugin.settings.notePropertyFields,
+    includeAiMetadataFields: inactiveProAiPlugin.settings.aiMetadataEnabled,
+  });
+  assert.ok(!inactiveProMarkdown.includes('description:'));
+  assert.ok(!inactiveProMarkdown.includes('keywords:'));
 
   const proClosedXhsRecord = helpers.ensureRequiredMetadataFallbacks({
     type: 'webpage',

@@ -6003,7 +6003,7 @@ function getRecordSourceLabel(record, metadata = {}) {
   return normalizedPlatform || normalizedCategory || '';
 }
 
-function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
+function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS, options = {}) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
   const fields = {
@@ -6063,8 +6063,10 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
   ];
   const selectedFields = parseNotePropertyFields(propertyFields);
   const fieldOrder = selectedFields.length ? selectedFields : (defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder);
+  const blockedFields = options.includeAiMetadataFields === false ? new Set(['description', 'keywords']) : new Set();
   const lines = fieldOrder
     .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .filter((key) => !blockedFields.has(key))
     .filter((key) => yamlValue(fields[key]))
     .map((key) => buildFrontmatterLine(key, fields[key]))
     .filter(Boolean);
@@ -6072,7 +6074,13 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
   return buildFrontmatter(lines);
 }
 
-function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS }) {
+function buildMarkdownForRecord({
+  record,
+  title,
+  syncedAt,
+  propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS,
+  includeAiMetadataFields = true,
+}) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
   const audioFileName = metadata.audioFileName || `${title}.mp3`;
@@ -6120,7 +6128,7 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
     throw new Error(`Unsupported record type: ${record.type}`);
   }
 
-  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
+  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields, { includeAiMetadataFields });
   return `${frontmatter}\n${body}`;
 }
 
@@ -8465,6 +8473,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       title,
       syncedAt,
       propertyFields: this.settings.notePropertyFields,
+      includeAiMetadataFields: Boolean(this.settings.aiMetadataEnabled),
     });
     const filePath = `${noteDir}/${title}.md`;
     this.showSyncProgress({ ...progress, stage: 'writing', title });
