@@ -1982,7 +1982,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
     lastWasBlank = false;
   });
 
-  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return restoreFlattenedSarBandTables(out).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function stripMarkdownCodeBlocks(markdown) {
@@ -4605,6 +4605,124 @@ function imageTagToMarkdown(tag) {
   return `\n\n![${alt}](${decodeHtmlEntities(sourceMatch[1])})\n\n`;
 }
 
+function escapeMarkdownTableCell(value) {
+  return decodeHtmlEntities(stripHtmlTags(value))
+    .replace(/\s+/g, ' ')
+    .replace(/\|/g, '\\|')
+    .trim();
+}
+
+function htmlTableToMarkdown(tableHtml) {
+  const rows = [];
+  const rowPattern = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch;
+  while ((rowMatch = rowPattern.exec(String(tableHtml || '')))) {
+    const cells = [];
+    const cellPattern = /<(?:th|td)\b[^>]*>([\s\S]*?)<\/(?:th|td)>/gi;
+    let cellMatch;
+    while ((cellMatch = cellPattern.exec(rowMatch[1] || ''))) {
+      cells.push(escapeMarkdownTableCell(cellMatch[1] || ''));
+    }
+    if (cells.some(Boolean)) rows.push(cells);
+  }
+  if (!rows.length) return stripHtmlTags(tableHtml);
+
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  const normalizedRows = rows.map((row) => {
+    const next = row.slice(0, columnCount);
+    while (next.length < columnCount) next.push('');
+    return next;
+  });
+  const header = normalizedRows[0];
+  const lines = [
+    `| ${header.join(' | ')} |`,
+    `| ${header.map(() => '---').join(' | ')} |`,
+    ...normalizedRows.slice(1).map((row) => `| ${row.join(' | ')} |`),
+  ];
+  return `\n\n${lines.join('\n')}\n\n`;
+}
+
+function isBlankMarkdownLine(line) {
+  return !String(line || '').trim();
+}
+
+function findNextNonBlankLine(lines, startIndex) {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    if (!isBlankMarkdownLine(lines[index])) return index;
+  }
+  return -1;
+}
+
+function buildMarkdownTableFromRows(headers, rows) {
+  return [
+    `| ${headers.join(' | ')} |`,
+    `| ${headers.map(() => '---').join(' | ')} |`,
+    ...rows.map((row) => `| ${row.join(' | ')} |`),
+  ];
+}
+
+function restoreFlattenedSarBandTables(lines) {
+  const headers = ['频段', '频率', '波长', '应用方向'];
+  const firstColumnPattern = /^(?:Ka|K|Ku|X|C|S|L|P)$/i;
+  const out = [];
+
+  for (let index = 0; index < lines.length;) {
+    const firstHeaderIndex = findNextNonBlankLine(lines, index);
+    if (firstHeaderIndex !== index || lines[index] !== headers[0]) {
+      out.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    let cursor = index;
+    let matchedHeaders = true;
+    for (const header of headers) {
+      const nextIndex = findNextNonBlankLine(lines, cursor);
+      if (nextIndex < 0 || lines[nextIndex] !== header) {
+        matchedHeaders = false;
+        break;
+      }
+      cursor = nextIndex + 1;
+    }
+    if (!matchedHeaders) {
+      out.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    const rows = [];
+    let rowCursor = cursor;
+    while (rowCursor < lines.length) {
+      const row = [];
+      const indexes = [];
+      let cellCursor = rowCursor;
+      for (let cellIndex = 0; cellIndex < headers.length; cellIndex += 1) {
+        const nextIndex = findNextNonBlankLine(lines, cellCursor);
+        if (nextIndex < 0) break;
+        row.push(String(lines[nextIndex] || '').trim());
+        indexes.push(nextIndex);
+        cellCursor = nextIndex + 1;
+      }
+      if (row.length !== headers.length || !firstColumnPattern.test(row[0])) break;
+      rows.push(row);
+      rowCursor = indexes[indexes.length - 1] + 1;
+    }
+
+    if (rows.length < 2) {
+      out.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    if (out.length && !isBlankMarkdownLine(out[out.length - 1])) out.push('');
+    out.push(...buildMarkdownTableFromRows(headers, rows));
+    out.push('');
+    index = rowCursor;
+  }
+
+  return out;
+}
+
 function htmlToMarkdown(html) {
   const sourceHtml = String(html || '');
   let readable = selectReadableHtml(sourceHtml)
@@ -4612,6 +4730,7 @@ function htmlToMarkdown(html) {
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
     .replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code))
+    .replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => htmlTableToMarkdown(table))
     .replace(/<img\b[^>]*>/gi, imageTagToMarkdown)
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
     .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
@@ -4916,6 +5035,25 @@ async function renderUrlToMarkdownWithElectron(url) {
           const alt = img.alt || '图片';
           return addImageAsset(src, alt);
         };
+        const tableToMarkdown = (table) => {
+          const rows = Array.from(table.querySelectorAll('tr')).map((row) => {
+            return Array.from(row.children)
+              .filter((cell) => ['th', 'td'].includes(String(cell.tagName || '').toLowerCase()))
+              .map((cell) => clean(cell.innerText || cell.textContent || '').replace(/\\|/g, '\\\\|'));
+          }).filter((row) => row.some(Boolean));
+          if (!rows.length) return '';
+          const columnCount = Math.max(...rows.map((row) => row.length));
+          const normalizedRows = rows.map((row) => {
+            const next = row.slice(0, columnCount);
+            while (next.length < columnCount) next.push('');
+            return next;
+          });
+          const header = normalizedRows[0];
+          return '\\n\\n| ' + header.join(' | ') + ' |\\n'
+            + '| ' + header.map(() => '---').join(' | ') + ' |\\n'
+            + normalizedRows.slice(1).map((row) => '| ' + row.join(' | ') + ' |').join('\\n')
+            + '\\n\\n';
+        };
         const blockToMarkdown = (node) => {
           if (!node) return '';
           if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
@@ -4923,6 +5061,7 @@ async function renderUrlToMarkdownWithElectron(url) {
           const tag = node.tagName.toLowerCase();
           if (tag === 'script' || tag === 'style' || tag === 'noscript') return '';
           if (tag === 'img') return imageToMarkdown(node);
+          if (tag === 'table') return tableToMarkdown(node);
           if (tag === 'pre' || tag === 'code') {
             const code = String(node.innerText || node.textContent || '').replace(/\\u00a0/g, ' ').replace(/^\\n+|\\n+$/g, '');
             const fence = String.fromCharCode(96, 96, 96);

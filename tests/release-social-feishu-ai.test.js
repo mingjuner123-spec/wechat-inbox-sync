@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.48');
-assert.strictEqual(versions['1.2.48'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.49');
+assert.strictEqual(versions['1.2.49'], manifest.minAppVersion);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
 const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
@@ -131,6 +131,58 @@ assert.deepStrictEqual(helpers.extractWechatCommentsFromHtml(wechatScriptComment
 ]);
 assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('足够长的公众号正文内容'));
 assert.ok(!helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
+const wechatTableMarkdown = helpers.htmlToMarkdown(`
+  <html>
+    <body>
+      <div id="js_content">
+        <p>SAR后向散射特性与传感器频段相关。</p>
+        <table>
+          <tbody>
+            <tr><th>频段</th><th>频率</th><th>波长</th><th>应用方向</th></tr>
+            <tr><td>Ka</td><td>27-40°GHz</td><td>1.1-0.8°cm</td><td>SAR中应用较少</td></tr>
+            <tr><td>X</td><td>8-12°GHz</td><td>3.8-2.4°cm</td><td>适用于城市监测、冰雪环境</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </body>
+  </html>
+`);
+assert.ok(wechatTableMarkdown.includes('| 频段 | 频率 | 波长 | 应用方向 |'));
+assert.ok(wechatTableMarkdown.includes('| Ka | 27-40°GHz | 1.1-0.8°cm | SAR中应用较少 |'));
+assert.ok(wechatTableMarkdown.includes('| X | 8-12°GHz | 3.8-2.4°cm | 适用于城市监测、冰雪环境 |'));
+const flattenedWechatTableMarkdown = helpers.cleanMarkdownForStorage([
+  'SAR后向散射特性与传感器的工作频率、波长密切相关。',
+  '',
+  '频段',
+  '',
+  '频率',
+  '',
+  '波长',
+  '',
+  '应用方向',
+  '',
+  'Ka',
+  '',
+  '27-40°GHz',
+  '',
+  '1.1-0.8°cm',
+  '',
+  'SAR中应用较少',
+  '',
+  'K',
+  '',
+  '18-27°GHz',
+  '',
+  '1.7-1.1°cm',
+  '',
+  'SAR中应用较少',
+  '',
+  '与此同时，雷达波长与空间分辨率呈负相关。',
+].join('\n'));
+assert.ok(flattenedWechatTableMarkdown.includes('| 频段 | 频率 | 波长 | 应用方向 |'));
+assert.ok(flattenedWechatTableMarkdown.includes('| Ka | 27-40°GHz | 1.1-0.8°cm | SAR中应用较少 |'));
+assert.ok(flattenedWechatTableMarkdown.includes('| K | 18-27°GHz | 1.7-1.1°cm | SAR中应用较少 |'));
+assert.ok(flattenedWechatTableMarkdown.includes('\n与此同时，雷达波长与空间分辨率呈负相关。'));
 assert.strictEqual(typeof helpers.htmlToMarkdownOrFallback, 'function');
 assert.ok(helpers.htmlToMarkdownOrFallback(
   '<html><head><title>短公众号</title></head><body><div id="js_content"><p>短</p></div></body></html>',
