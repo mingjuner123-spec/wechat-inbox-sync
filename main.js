@@ -2035,6 +2035,7 @@ function shouldDropFeishuLine(line, title) {
     '最近修改',
     '分享',
     '回复...',
+    '附件不支持打印',
     '上传日志',
     '联系客服',
     '功能更新',
@@ -2046,7 +2047,9 @@ function shouldDropFeishuLine(line, title) {
     '复制',
   ]);
   if (noise.has(text)) return true;
+  if (/^-\s+.+\s-\s+.+/.test(text) && text.length > 40) return true;
   if (/^图\s*\d+$/i.test(text)) return true;
+  if (/^\d{1,2}$/.test(text)) return true;
   if (/^\+\d+$/.test(text)) return true;
   if (/^共有\s*\d+\s*个协作者$/.test(text)) return true;
   if (/^最近修改\s*[:：]?\s*/.test(text)) return true;
@@ -2056,6 +2059,8 @@ function shouldDropFeishuLine(line, title) {
   if (/^\d+\s*字$/.test(text)) return true;
   if (/^评论/.test(text)) return true;
   if (/^[春壹始]$/.test(text)) return true;
+  if (/^[\u4e00-\u9fa5]{1,4}$/.test(text) && /(?:斤|斧|淇|钖|作者|头像)/.test(text)) return true;
+  if (/成长笔记(?:昨天\s*\d{1,2}:\d{2})?$/.test(text)) return true;
   if (/^春树.*云文档$/.test(text)) return true;
   if (normalizedTitle && normalized === normalizedTitle) return true;
   return false;
@@ -2065,9 +2070,6 @@ function formatFeishuHeadingLine(line) {
   const text = String(line || '').trim();
   if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
     return text;
-  }
-  if (/^.{4,80}[，,：:；;、].*(?:\d+w\+|\d+万|\d+次风口|风口|复盘|拆解|方法|案例)/i.test(text)) {
-    return `# ${text}`;
   }
   if (/^[一二三四五六七八九十]+、/.test(text)) {
     return `## ${text}`;
@@ -4119,6 +4121,17 @@ function buildWechatCaptchaMarkdown(url, html = '') {
   return lines.join('\n').trim();
 }
 
+function buildXiaohongshuFallbackMarkdown(url, reason = '') {
+  return [
+    '小红书链接已保存。',
+    '',
+    `原始链接：${url || ''}`,
+    '',
+    reason ? `> 小红书视频转写失败：${reason}` : '',
+    '> 如果这是视频笔记且需要口播/音频文案，请从手机相册或文件导入视频；如果只是图文笔记，正文会在页面公开内容可访问时自动保存。',
+  ].filter((line) => line !== '').join('\n');
+}
+
 function imageTagToMarkdown(tag) {
   const sourceMatch = String(tag || '').match(/\s(?:data-src|src)=["']([^"']+)["']/i);
   if (!sourceMatch || !sourceMatch[1]) return '';
@@ -4927,7 +4940,6 @@ function inferFeishuHeadingLevel(text, blockType = '') {
   if (match) return Number(match[1] || match[2]);
   const value = String(text || '').trim();
   if (/^[一二三四五六七八九十]+、/.test(value)) return 1;
-  if (/^.{4,80}[，,：:；;、].*(?:\d+w\+|\d+万|\d+次风口|风口|复盘|拆解|方法|案例)/i.test(value)) return 1;
   if (/^(?:\d{4}年之前|20\d{2}年|当时|后来|最后|总结|结论)/.test(value) && value.length <= 36) return 2;
   if (/^(?:第[一二三四五六七八九十\d]+次风口|第[一二三四五六七八九十\d]+[、，,]|[一二三四五六七八九十\d]+[、，,])/.test(value)) return 3;
   if (/^第[一二三四五六七八九十]+步[:：、]/.test(value)) return 2;
@@ -5343,6 +5355,54 @@ function getRecordKeywords(metadata = {}) {
     .split(/[,，、\s]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function stripMarkdownForDescription(markdown) {
+  return String(markdown || '')
+    .replace(/!\[[^\]]*]\([^)]+\)/g, '')
+    .replace(/\[\[([^\]]+)]]/g, '')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/^\|.*\|$/gm, '')
+    .replace(/\*\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractKeywordsFromText(text, title = '') {
+  const source = `${title || ''} ${text || ''}`;
+  const keywords = [];
+  const candidates = [
+    '风口',
+    '小红书',
+    'AI',
+    '知识库',
+    '飞书',
+    '复盘',
+    '电商',
+    '公众号',
+    '流量',
+    '创新',
+    '创业',
+  ];
+  candidates.forEach((candidate) => {
+    if (source.includes(candidate) && !keywords.includes(candidate)) keywords.push(candidate);
+  });
+  if (keywords.length) return keywords.slice(0, 8);
+  return Array.from(new Set(String(source || '').match(/[\p{L}\p{N}]{2,12}/gu) || [])).slice(0, 6);
+}
+
+function enrichExtractedWebpageMetadata(metadata = {}) {
+  const next = { ...metadata };
+  const text = stripMarkdownForDescription(next.markdown || next.content || '');
+  if (!next.description && text) {
+    const sentences = text.split(/[。！？!?]\s*/).map((item) => item.trim()).filter((item) => item.length >= 8);
+    next.description = (sentences[0] || text).slice(0, 120);
+  }
+  if (!getRecordKeywords(next).length) {
+    next.keywords = extractKeywordsFromText(`${next.description || ''} ${text}`, next.title || '');
+  }
+  return next;
 }
 
 function getRecordSourceLabel(record, metadata = {}) {
@@ -7439,25 +7499,25 @@ class WechatObsidianInboxPlugin extends Plugin {
           );
           return {
             ...record,
-            metadata: {
+            metadata: enrichExtractedWebpageMetadata({
               ...metadata,
               title: metadata.title || rendered.title || '飞书链接',
               markdown,
               conversionStatus: 'success',
-            },
+            }),
           };
         } catch (renderError) {
           try {
             const markdown = await fetchFeishuClientVarsMarkdown(url);
             return {
               ...record,
-              metadata: {
+              metadata: enrichExtractedWebpageMetadata({
                 ...metadata,
                 title: metadata.title || '飞书链接',
                 markdown,
                 conversionStatus: 'success',
                 conversionNote: renderError.message || String(renderError),
-              },
+              }),
             };
           } catch (clientVarsError) {
             try {
@@ -7466,7 +7526,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               const markdown = extractFeishuMarkdownFromHtml(html);
               return {
                 ...record,
-                metadata: {
+                metadata: enrichExtractedWebpageMetadata({
                   ...metadata,
                   title: metadata.title || extractHtmlTitle(html) || '飞书链接',
                   markdown,
@@ -7475,7 +7535,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                     renderError.message || String(renderError),
                     clientVarsError.message || String(clientVarsError),
                   ].filter(Boolean).join('；'),
-                },
+                }),
               };
             } catch (staticError) {
               throw new Error([
@@ -7543,7 +7603,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = '';
           }
         }
-        if (mediaUrl || isVideoIntent) {
+        if (mediaUrl) {
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
@@ -7556,6 +7616,26 @@ class WechatObsidianInboxPlugin extends Plugin {
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
           });
+        }
+        if (isVideoIntent && isXiaohongshuUrl(url)) {
+          const noMediaError = isUnavailableXhs
+            ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
+            : '未能从链接中提取到可转写的音频或视频地址';
+          return {
+            ...record,
+            metadata: {
+              ...metadata,
+              title: metadata.title || extractHtmlTitle(html) || '小红书链接',
+              url,
+              markdown: buildXiaohongshuFallbackMarkdown(url, noMediaError),
+              platform: metadata.platform || '小红书',
+              contentCategory: metadata.contentCategory || '视频',
+              transcriptionStatus: 'failed',
+              transcriptionError: noMediaError,
+              transcriptionSource: 'video',
+              conversionStatus: 'link_saved',
+            },
+          };
         }
 
         const extracted = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
@@ -8340,6 +8420,7 @@ WechatObsidianInboxPlugin.__test = {
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
   buildMarkdownForRecord,
+  enrichExtractedWebpageMetadata,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,
