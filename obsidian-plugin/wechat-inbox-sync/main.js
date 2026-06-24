@@ -1753,6 +1753,9 @@ function buildWebpageMarkdownBody(record, title) {
   const errorText = metadata.conversionError || '';
 
   if (snapshot) {
+    if (isFeishuUrl(url)) {
+      return `${snapshot}\n`;
+    }
     return [
       '## Markdown 内容',
       '',
@@ -1898,6 +1901,9 @@ function cleanMarkdownForStorage(markdown, options = {}) {
   let lastWasBlank = true;
   let pendingListMarker = '';
   let inFence = false;
+  let skippedFeishuOpeningOutline = false;
+  let feishuOpeningOutlineCount = 0;
+  let feishuOpeningContentStarted = false;
 
   lines.forEach((line) => {
     const rawLine = String(line || '').replace(/\u200b/g, '').replace(/\ufeff/g, '');
@@ -1938,6 +1944,18 @@ function cleanMarkdownForStorage(markdown, options = {}) {
 
     if (options.feishuTitle && shouldDropFeishuLine(text, options.feishuTitle)) {
       return;
+    }
+
+    if (options.feishuTitle && !feishuOpeningContentStarted && /^-\s+/.test(text)) {
+      feishuOpeningOutlineCount += 1;
+      if (feishuOpeningOutlineCount >= 3 || skippedFeishuOpeningOutline) {
+        skippedFeishuOpeningOutline = true;
+        return;
+      }
+    } else if (text && !/^!\[/.test(text)) {
+      if (!/^#{1,6}\s+/.test(text) && !/^-\s+/.test(text) && text.length >= 12 && /[。！？.!?]/.test(text)) {
+        feishuOpeningContentStarted = true;
+      }
     }
 
     if (/^\d+\.$/.test(text) || /^[•·]$/.test(text)) {
@@ -2054,6 +2072,7 @@ function extractAiMetadataInputText(record) {
 
 function normalizeTitleForCompare(text) {
   return String(text || '')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
     .replace(/[-–—]\s*飞书云文档\s*$/i, '')
     .replace(/^#+\s*/, '')
     .replace(/\*\*/g, '')
@@ -2063,6 +2082,7 @@ function normalizeTitleForCompare(text) {
 
 function normalizeFeishuMarkdownLine(line) {
   return String(line || '')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
     .replace(/^-\s*$/, '')
     .replace(/^-\s+/, '- ')
     .replace(/^Plain Text复制$/i, '')
@@ -2097,6 +2117,15 @@ function shouldDropFeishuLine(line, title) {
     '复制',
   ]);
   if (noise.has(text)) return true;
+  if (/添加快捷方式\s*最近修改\s*[:：]?/.test(text)) return true;
+  if (/^最近修改\s*[:：]?/.test(text)) return true;
+  if (/^你可能还想问/.test(text)) return true;
+  if (/^查询.*更多相关内容$/.test(text)) return true;
+  if (/^推荐内容由\s*AI\s*生成$/i.test(text)) return true;
+  if (/^加载中/.test(text)) return true;
+  if (/^本文暂未(?:引用|被).*文档/.test(text)) return true;
+  if (/^取消发送$/.test(text)) return true;
+  if (/^\d+\s*人点赞$/.test(text)) return true;
   if (/^-\s+.+\s-\s+.+/.test(text) && text.length > 40) return true;
   if (/^图\s*\d+$/i.test(text)) return true;
   if (/^\d{1,2}$/.test(text)) return true;
@@ -2120,6 +2149,12 @@ function formatFeishuHeadingLine(line) {
   const text = String(line || '').trim();
   if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
     return text;
+  }
+  const length = Array.from(text).length;
+  if (length >= 4 && length <= 34) {
+    if (/^(第[一二三四五六七八九十\d]+[、.．]?\s*)?[^，。！？!?]{0,16}风口[：:]/.test(text)) return `## ${text}`;
+    if (/^(什么是.+原理|举个例子|最后|知识付费的下一个形态)$/.test(text)) return `## ${text}`;
+    if (/^第[一二三四五六七八九十\d]+[步层：:]/.test(text)) return `### ${text}`;
   }
   return text;
 }
@@ -2931,6 +2966,7 @@ function truncateByChars(text, maxLength) {
 
 function sanitizeNoteTitlePart(text, fallback = '未命名') {
   const cleaned = decodeHtmlEntities(String(text || ''))
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
     .replace(/[\\/:*?"<>|]/g, '-')
     .replace(/\s+/g, ' ')
     .replace(/^[.\s]+|[.\s]+$/g, '')
@@ -5022,6 +5058,16 @@ function extractFeishuOutlineHeadingMap(html) {
   return map;
 }
 
+function stripFeishuOutlineContainers(html) {
+  const source = String(html || '');
+  return source.replace(/<(?<tag>aside|nav|div|section)\b(?<attrs>[^>]*)>(?<body>[\s\S]*?)<\/\k<tag>>/gi, function stripOutline(full) {
+    const groups = arguments[arguments.length - 1] || {};
+    const attrs = groups && groups.attrs || '';
+    const body = groups && groups.body || '';
+    return /(?:outline|catalog|toc|目录|docx-outline)/i.test(`${attrs} ${body.slice(0, 300)}`) ? '' : full;
+  });
+}
+
 function inferFeishuHeadingLevel(text, blockType = '') {
   const normalizedType = String(blockType || '').toLowerCase();
   const match = normalizedType.match(/heading[_-]?([1-6])|h([1-6])/i);
@@ -5044,7 +5090,7 @@ function extractFeishuMarkdownFromHtml(html) {
   const outlineHeadingMap = extractFeishuOutlineHeadingMap(source);
   const lines = [];
   const seen = new Set();
-  const readable = stripScriptAndStyleBlocks(source)
+  const readable = stripScriptAndStyleBlocks(stripFeishuOutlineContainers(source))
     .replace(/<img\b[^>]*>/gi, (tag) => imageTagToMarkdown(tag))
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text) => `\n# ${stripHtmlTags(text)}\n`)
     .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text) => `\n## ${stripHtmlTags(text)}\n`)

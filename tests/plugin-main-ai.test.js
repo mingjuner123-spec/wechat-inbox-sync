@@ -411,6 +411,18 @@ const feishuCleanMarkdown = helpers.extractFeishuMarkdownFromHtml(`
       <p>共有 22 个协作者</p>
       <p>+17</p>
       <p>图2</p>
+      <p>添加快捷方式最近修改: 昨天 16:14</p>
+      <p>上传日志</p>
+      <p>联系客服</p>
+      <p>功能更新</p>
+      <p>帮助中心</p>
+      <p>效率指南</p>
+      <p>你可能还想问 (2)</p>
+      <p>推荐内容由 AI 生成</p>
+      <p>加载中...</p>
+      <p>本文暂未引用其它文档</p>
+      <p>取消发送</p>
+      <p>1 人点赞</p>
       <p>- 踩中5次风口，赚了100w+ - 2020年之前，我没有任何目标 - 第一次风口：小红书商单</p>
       <p>2020年之前，我没有任何目标</p>
       <p>第一次风口：小红书商单</p>
@@ -426,6 +438,19 @@ assert.strictEqual(feishuCleanMarkdown.includes('分享'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('共有 22 个协作者'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('+17'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('图2'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('添加快捷方式'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('最近修改'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('上传日志'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('联系客服'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('功能更新'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('帮助中心'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('效率指南'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('你可能还想问'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('推荐内容'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('加载中'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('本文暂未引用'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('取消发送'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('人点赞'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('- 踩中5次风口'), false);
 assert.ok(feishuCleanMarkdown.includes('# 踩中5次风口，赚了100w+'));
 assert.ok(feishuCleanMarkdown.includes('## 2020年之前，我没有任何目标'));
@@ -444,7 +469,17 @@ const enrichedFeishuMetadata = helpers.enrichExtractedWebpageMetadata({
 });
 assert.ok(enrichedFeishuMetadata.description.includes('普通正文') || enrichedFeishuMetadata.description.includes('复盘这几次经历我发现'));
 assert.strictEqual(enrichedFeishuMetadata.description.includes('我的真实经历'), false);
+assert.strictEqual(enrichedFeishuMetadata.description.includes('添加快捷方式'), false);
 assert.ok(enrichedFeishuMetadata.keywords.includes('风口'));
+const feishuDirtyTitleBase = helpers.buildRecordTitleBase({
+  type: 'webpage',
+  content: 'https://my.feishu.cn/docx/VpP7d1nwuomPF5xHSrIcxrtUn8f',
+  metadata: {
+    title: '\u2063\u200b\u2063 ‌‌​‬⁢⁤ ‬⁤ ‬‍⁢​​‍⁤⁡ ⁢‍​‌⁢⁢​​⁡⁢⁢‌‬⁢⁡‍​‌⁣⁤‬​​‍‍踩中5次风口，赚',
+    platform: '飞书',
+  },
+});
+assert.strictEqual(feishuDirtyTitleBase, '飞书-踩中5次风口，赚');
 const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
   id: 'root',
   block_sequence: ['root', 'heading-block', 'paragraph-block', 'table-block', 'image-block', 'bullet-block'],

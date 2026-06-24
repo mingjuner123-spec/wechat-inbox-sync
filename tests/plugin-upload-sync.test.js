@@ -711,6 +711,7 @@ function createPdfBufferWithControlNoise() {
     const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
     assert.ok(note.startsWith('---\n'));
     assert.ok(note.includes('\ntitle: '));
+    assert.strictEqual(note.includes('## Markdown 内容'), false);
     assert.strictEqual((note.replace(/^---[\s\S]*?---\n/, '').match(new RegExp(repeatedTitle, 'g')) || []).length, 0);
     assert.strictEqual((note.match(/飞书云文档/g) || []).length, 0);
     assert.strictEqual((note.match(/正文第一段/g) || []).length, 1);
