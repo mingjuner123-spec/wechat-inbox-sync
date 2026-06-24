@@ -50,6 +50,7 @@ const NOTE_PROPERTY_FIELD_KEYS = [
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
+  settingsVersion: 2,
   token: '',
   pendingBindCode: '',
   localTranscriptionEntitlementStatus: null,
@@ -60,7 +61,7 @@ const DEFAULT_SETTINGS = {
   notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: true,
   aiProvider: 'off',
-  aiMetadataEnabled: false,
+  aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
@@ -157,7 +158,7 @@ function getDefaultLocalTranscriptionCommand(platform = os.platform(), installRo
     return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
   }
   if (installRoot) {
-    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${path.join(installRoot, 'transcribe.ps1')}" -InputPath {input} -OutputPath {output}`;
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${joinLocalAsrPath(platform, installRoot, 'transcribe.ps1')}" -InputPath {input} -OutputPath {output}`;
   }
   return `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
 }
@@ -176,11 +177,11 @@ function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env)
     const candidates = [
       String((env && env.PUBLIC) || '').trim(),
       String((env && env.ProgramData) || '').trim(),
-      path.join(systemDrive, LOCAL_ASR_SAFE_HOME),
-      path.join('C:', LOCAL_ASR_SAFE_HOME),
+      path.win32.join(systemDrive, LOCAL_ASR_SAFE_HOME),
+      path.win32.join('C:', LOCAL_ASR_SAFE_HOME),
     ].filter(Boolean);
-    const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.join('C:', LOCAL_ASR_SAFE_HOME);
-    return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.join(safeBase, LOCAL_ASR_SAFE_HOME);
+    const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.win32.join('C:', LOCAL_ASR_SAFE_HOME);
+    return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.win32.join(safeBase, LOCAL_ASR_SAFE_HOME);
   }
   return path.join(os.homedir(), LOCAL_ASR_HOME);
 }
@@ -214,7 +215,7 @@ function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = 'default', platfo
   if (normalizeLocalAsrInstallMode(mode) === 'safe') {
     return getSafeLocalAsrInstallRoot(platform, env);
   }
-  return path.join(homeDir, LOCAL_ASR_HOME);
+  return joinLocalAsrPath(platform, homeDir, LOCAL_ASR_HOME);
 }
 
 function joinLocalAsrPath(platform, ...segments) {
@@ -224,6 +225,9 @@ function joinLocalAsrPath(platform, ...segments) {
       String(first || '').replace(/\/+$/g, ''),
       ...rest.map((segment) => String(segment || '').replace(/^\/+|\/+$/g, '')),
     ].filter(Boolean).join('/');
+  }
+  if (getLocalAsrPlatform(platform) === 'win32') {
+    return path.win32.join(...segments);
   }
   return path.join(...segments);
 }
@@ -975,9 +979,11 @@ function normalizeApiBase(apiBase) {
 }
 
 function mergeSettings(savedSettings, platform = os.platform()) {
+  const sourceSettings = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
+  const savedSettingsVersion = Number(sourceSettings.settingsVersion) || 0;
   const merged = {
     ...DEFAULT_SETTINGS,
-    ...(savedSettings || {}),
+    ...sourceSettings,
   };
 
   merged.apiBase = normalizeApiBase(merged.apiBase);
@@ -997,8 +1003,13 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
-  merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
-  merged.xiaohongshuCommentsEnabled = merged.xiaohongshuCommentsEnabled !== false;
+  merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
+  merged.aiMetadataEnabled = savedSettingsVersion < 2
+    ? true
+    : merged.aiMetadataEnabled !== false;
+  merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2
+    ? true
+    : merged.xiaohongshuCommentsEnabled !== false;
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
@@ -2127,6 +2138,8 @@ function shouldDropFeishuLine(line, title) {
   if (/^取消发送$/.test(text)) return true;
   if (/^\d+\s*人点赞$/.test(text)) return true;
   if (/^-\s+.+\s-\s+.+/.test(text) && text.length > 40) return true;
+  if (/^-\s*(?:上传日志|联系客服|功能更新|帮助中心|效率指南)$/.test(text)) return true;
+  if (/^-\s*(?:第[一二三四五六七八九十\d]+(?:次|个)?风口|规律：|什么是|举个例子|知识付费|最后|第[一二三四五六七八九十\d]+[步层：])/.test(text)) return true;
   if (/^图\s*\d+$/i.test(text)) return true;
   if (/^\d{1,2}$/.test(text)) return true;
   if (/^\+\d+$/.test(text)) return true;
@@ -2152,6 +2165,7 @@ function formatFeishuHeadingLine(line) {
   }
   const length = Array.from(text).length;
   if (length >= 4 && length <= 34) {
+    if (/^\d{4}年之前，我没有任何目标$/.test(text)) return `## ${text}`;
     if (/^(第[一二三四五六七八九十\d]+[、.．]?\s*)?[^，。！？!?]{0,16}风口[：:]/.test(text)) return `## ${text}`;
     if (/^(什么是.+原理|举个例子|最后|知识付费的下一个形态)$/.test(text)) return `## ${text}`;
     if (/^第[一二三四五六七八九十\d]+[步层：:]/.test(text)) return `### ${text}`;
@@ -4421,6 +4435,43 @@ async function checkFeishuLoginStatus() {
   }
 }
 
+async function getXiaohongshuCookies() {
+  const session = getWechatSession();
+  if (!session) return [];
+  try {
+    const groups = await Promise.all([
+      session.cookies.get({ domain: '.xiaohongshu.com' }),
+      session.cookies.get({ domain: 'www.xiaohongshu.com' }),
+    ]);
+    const seen = new Set();
+    return groups
+      .flat()
+      .filter((cookie) => cookie && cookie.name && !seen.has(cookie.name) && seen.add(cookie.name));
+  } catch (error) {
+    return [];
+  }
+}
+
+async function checkXiaohongshuLoginStatus() {
+  const cookies = await getXiaohongshuCookies();
+  return cookies.some((cookie) => ['web_session', 'webId', 'a1', 'gid', 'xsecappid'].includes(cookie.name));
+}
+
+async function getXiaohongshuCookieHeader() {
+  const cookies = await getXiaohongshuCookies();
+  return cookies
+    .filter((cookie) => cookie && cookie.name && typeof cookie.value !== 'undefined')
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join('; ');
+}
+
+async function getXiaohongshuRequestHeaders(url) {
+  const headers = getSocialRequestHeaders(url);
+  const cookieHeader = await getXiaohongshuCookieHeader();
+  if (cookieHeader) headers.Cookie = cookieHeader;
+  return headers;
+}
+
 async function loginWechatWeb(articleUrl) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -4537,6 +4588,70 @@ async function loginFeishuWeb(targetUrl) {
     const timer = setInterval(async () => {
       try {
         await checkFeishuLoginStatus();
+      } catch (error) {}
+    }, 1500);
+
+    win.on('closed', async () => {
+      clearInterval(timer);
+      finish();
+    });
+    win.loadURL(loginUrl).catch((error) => {
+      clearInterval(timer);
+      finish(error);
+    });
+  });
+}
+
+async function loginXiaohongshuWeb(targetUrl) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持浏览器窗口');
+  }
+
+  const session = getWechatSession();
+  if (!session) {
+    throw new Error('无法创建小红书登录会话');
+  }
+
+  const loginUrl = targetUrl || 'https://www.xiaohongshu.com/';
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const win = new BrowserWindow({
+      width: 1040,
+      height: 860,
+      show: true,
+      title: '小红书网页登录 - 登录后关闭窗口即可',
+      webPreferences: {
+        session,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    const finish = async (error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        const destroyed = typeof win.isDestroyed === 'function' ? win.isDestroyed() : false;
+        if (win && typeof win.destroy === 'function' && !destroyed) {
+          win.destroy();
+        }
+      } catch (destroyError) {}
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(await checkXiaohongshuLoginStatus());
+    };
+
+    const timer = setInterval(async () => {
+      try {
+        if (await checkXiaohongshuLoginStatus()) {
+          clearInterval(timer);
+          finish();
+        }
       } catch (error) {}
     }, 1500);
 
@@ -5884,6 +5999,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       callback: () => this.loginFeishu(),
     });
 
+    this.addCommand({
+      id: 'login-xiaohongshu-web',
+      name: '登录小红书（用于提取小红书评论区）',
+      callback: () => this.loginXiaohongshu(),
+    });
+
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
       this.syncInbox();
     });
@@ -5916,6 +6037,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async checkXiaohongshuLogin() {
+    try {
+      return await checkXiaohongshuLoginStatus();
+    } catch (error) {
+      return false;
+    }
+  }
+
   async loginWechat() {
     try {
       const loggedIn = await loginWechatWeb(null);
@@ -5939,6 +6068,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     } catch (error) {
       new Notice(`飞书登录失败：${error.message || error}`);
+    }
+  }
+
+  async loginXiaohongshu(targetUrl = '') {
+    try {
+      const loggedIn = await loginXiaohongshuWeb(targetUrl || null);
+      if (loggedIn) {
+        new Notice('小红书登录已保存，后续同步小红书图文会复用该登录状态提取评论区。');
+      } else {
+        new Notice('小红书登录未确认，请在打开的窗口中完成登录后再同步。');
+      }
+    } catch (error) {
+      new Notice(`小红书登录失败：${error.message || error}`);
     }
   }
 
@@ -7737,7 +7879,10 @@ class WechatObsidianInboxPlugin extends Plugin {
 
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
         const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
-        const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
+        const headers = isXiaohongshuUrl(resolvedUrl)
+          ? await getXiaohongshuRequestHeaders(resolvedUrl)
+          : getSocialRequestHeaders(resolvedUrl);
+        const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers });
         const html = response.text || '';
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
@@ -8449,12 +8594,12 @@ class WechatInboxSettingTab extends PluginSettingTab {
     const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     aiPanel.createEl('summary', { text: 'AI 简介与关键词' });
     aiPanel.createDiv({
-      text: '给 Pro 用户生成 description 和 keywords。使用云端内嵌配置，默认只在缺失时补齐，不覆盖已有网页元信息。',
+      text: '默认开启，使用云端内嵌配置给 Pro 用户生成 description 和 keywords；不需要在插件里填写 DeepSeek API Key。',
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(aiPanel)
       .setName('启用 AI 简介与关键词')
-      .setDesc('同步写入前自动生成内容简介与关键词。')
+      .setDesc('同步写入前自动生成内容简介与关键词；小红书会结合正文和评论区一起生成。')
       .addToggle((toggle) => toggle
         .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
         .onChange(async (value) => {
@@ -8467,9 +8612,26 @@ class WechatInboxSettingTab extends PluginSettingTab {
     const socialPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     socialPanel.createEl('summary', { text: '小红书评论区提取' });
     socialPanel.createDiv({
-      text: '同步小红书图文时保留可解析到的评论区内容。',
+      text: '同步小红书图文时保留可解析到的评论区内容；如果评论区提取失败，请先登录小红书。',
       cls: 'wechat-inbox-sync-muted',
     });
+    const xiaohongshuLoginBtn = new Setting(socialPanel)
+      .setName('登录小红书')
+      .setDesc('小红书评论区可能需要网页登录状态；登录后插件会复用该状态提取评论区。')
+      .addButton((button) => button
+        .setButtonText('打开小红书登录')
+        .onClick(async () => {
+          xiaohongshuLoginBtn.setDesc('正在打开小红书登录窗口...');
+          await this.plugin.loginXiaohongshu();
+          this.display();
+        }));
+
+    this.plugin.checkXiaohongshuLogin().then((loggedIn) => {
+      if (loggedIn) {
+        xiaohongshuLoginBtn.setDesc('已保存小红书登录状态；同步小红书图文时会复用该状态提取评论区。');
+      }
+    });
+
     new Setting(socialPanel)
       .setName('提取小红书评论区')
       .setDesc('关闭后只保存标题、正文、标签、图片和视频，不附加评论区。')
@@ -8665,6 +8827,9 @@ WechatObsidianInboxPlugin.__test = {
   buildLocalAsrInstallCommand,
   downloadTextViaNode,
   getSocialRequestHeaders,
+  getXiaohongshuCookieHeader,
+  getXiaohongshuRequestHeaders,
+  checkXiaohongshuLoginStatus,
   shouldResolveMediaDownloadUrl,
   openExternalUrl,
   extractPdfMarkdown,
