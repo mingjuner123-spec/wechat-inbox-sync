@@ -5440,15 +5440,25 @@ async function fetchFeishuClientVarsMarkdown(url) {
   return extractFeishuMarkdownFromClientVars(payload);
 }
 
-function yamlValue(value) {
+function yamlValue(value, options = {}) {
   if (value === undefined || value === null) return '';
+  const normalize = (input) => String(input || '')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (Array.isArray(value)) {
-    return value
-      .map((item) => String(item || '').trim())
+    value = value
+      .map((item) => normalize(item))
       .filter(Boolean)
       .join(', ');
   }
-  return String(value).replace(/\r?\n/g, ' ').trim();
+  const text = normalize(value);
+  if (!text) return '';
+  if (options.quote || /[\r\n]/.test(text) || /^(?:true|false|null|yes|no|on|off)$/i.test(text)) {
+    return `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+  return text;
 }
 
 function buildFrontmatter(lines) {
@@ -5478,6 +5488,36 @@ function getRecordDescription(metadata = {}) {
     || metadata.excerpt
     || metadata.abstract
     || '';
+}
+
+function cleanFeishuPropertyText(value) {
+  return String(value || '')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
+    .replace(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f\s*\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, ' ')
+    .replace(/\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, ' ')
+    .replace(/\bheader-v2\b/gi, ' ')
+    .replace(/\b\u5206\u4eab\b/g, ' ')
+    .replace(/-\s+/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cleanFeishuDescriptionForFrontmatter(value) {
+  const beforeShell = String(value || '').split(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f|\u6700\u8fd1\u4fee\u6539|header-v2/i)[0] || value;
+  const cleaned = cleanFeishuPropertyText(beforeShell);
+  const firstSentence = cleaned.split(/[\u3002\uff01\uff1f!?]\s*/).map((item) => item.trim()).filter(Boolean)[0] || cleaned;
+  return firstSentence.slice(0, 160).trim();
+}
+
+function cleanRecordFrontmatterField(record, key, value) {
+  const metadata = (record && record.metadata) || {};
+  const url = getRecordUrl(record || {}, metadata);
+  if (!isFeishuUrl(url)) return value;
+  if (key === 'title' || key === 'author' || key === 'source') return cleanFeishuPropertyText(value);
+  if (key === 'description') return cleanFeishuDescriptionForFrontmatter(value);
+  if (key === 'keywords' && Array.isArray(value)) return value.map((item) => cleanFeishuPropertyText(item)).filter(Boolean);
+  if (key === 'keywords') return cleanFeishuPropertyText(value);
+  return value;
 }
 
 function getRecordKeywords(metadata = {}) {
@@ -5627,10 +5667,12 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
   ];
   const selectedFields = parseNotePropertyFields(propertyFields);
   const fieldOrder = selectedFields.length ? selectedFields : (defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder);
+  const shouldQuoteFrontmatterValue = isFeishuUrl(getRecordUrl(record, metadata));
   const lines = fieldOrder
     .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
-    .filter((key) => yamlValue(fields[key]))
-    .map((key) => `${key}: ${yamlValue(fields[key])}`);
+    .map((key) => [key, cleanRecordFrontmatterField(record, key, fields[key])])
+    .filter(([, value]) => yamlValue(value, { quote: shouldQuoteFrontmatterValue }))
+    .map(([key, value]) => `${key}: ${yamlValue(value, { quote: shouldQuoteFrontmatterValue })}`);
 
   return buildFrontmatter(lines);
 }
