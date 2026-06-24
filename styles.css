@@ -15,3 +15,22 @@
   border-top: 1px solid var(--background-modifier-border);
   margin-top: 24px;
 }
+
+.wechat-inbox-sync-advanced-panel {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--background-secondary);
+}
+
+.wechat-inbox-sync-advanced-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.wechat-inbox-sync-muted {
+  margin: 8px 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}

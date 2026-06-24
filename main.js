@@ -1,69 +1,14 @@
-const { Notice, Plugin, PluginSettingTab, Setting, requestUrl, Platform } = require('obsidian');
+const crypto = require('crypto');
+const childProcess = require('child_process');
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const os = require('os');
+const path = require('path');
+const zlib = require('zlib');
+const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
-function getOptionalDesktopModule(name) {
-  try {
-    return require(name);
-  } catch (error) {
-    return null;
-  }
-}
-
-function getDesktopModule(name) {
-  const module = getOptionalDesktopModule(name);
-  if (!module) {
-    throw new Error(`Desktop-only module unavailable: ${name}`);
-  }
-  return module;
-}
-
-function createLazyDesktopModule(name) {
-  return new Proxy({}, {
-    get(_target, property) {
-      const module = getDesktopModule(name);
-      const value = module[property];
-      return typeof value === 'function' ? value.bind(module) : value;
-    },
-  });
-}
-
-const crypto = createLazyDesktopModule('crypto');
-const childProcess = createLazyDesktopModule('child_process');
-const fs = createLazyDesktopModule('fs');
-const http = createLazyDesktopModule('http');
-const https = createLazyDesktopModule('https');
-const os = createLazyDesktopModule('os');
-const path = createLazyDesktopModule('path');
-const zlib = createLazyDesktopModule('zlib');
-
-function isMobileRuntime(platformInfo = Platform) {
-  return Boolean(platformInfo && (platformInfo.isMobile || platformInfo.isIosApp || platformInfo.isAndroidApp));
-}
-
-function isDesktopRuntime(platformInfo = Platform) {
-  return !isMobileRuntime(platformInfo);
-}
-
-function getRuntimePlatform() {
-  if (Platform && Platform.isWin) return 'win32';
-  if (Platform && Platform.isMacOS) return 'darwin';
-  if (Platform && Platform.isLinux) return 'linux';
-  const osModule = getOptionalDesktopModule('os');
-  return osModule && typeof osModule.platform === 'function' ? osModule.platform() : '';
-}
-
-function getRuntimeHomeDir() {
-  const osModule = getOptionalDesktopModule('os');
-  return osModule && typeof osModule.homedir === 'function' ? osModule.homedir() : '';
-}
-
-function getRuntimeTmpDir() {
-  const osModule = getOptionalDesktopModule('os');
-  return osModule && typeof osModule.tmpdir === 'function' ? osModule.tmpdir() : '.';
-}
-
-function getProcessEnv() {
-  return typeof process !== 'undefined' && process && process.env ? process.env : {};
-}
+const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -71,24 +16,10 @@ const LEGACY_OFFICIAL_SYNC_API_BASES = [
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
-const SOCIAL_COMMENT_LIMIT = 100;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
-const PRO_FEATURE_PLANS = [LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_pro', 'pro'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
-const SOCIAL_LOGIN_TARGETS = {
-  xiaohongshu: {
-    label: '小红书',
-    partition: 'persist:wechat-inbox-sync-xiaohongshu',
-    loginUrl: 'https://www.xiaohongshu.com/explore',
-  },
-  wechat: {
-    label: '公众号',
-    partition: 'persist:wechat-inbox-sync-wechat',
-    loginUrl: 'https://mp.weixin.qq.com/s',
-  },
-};
 const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
@@ -129,7 +60,7 @@ const DEFAULT_SETTINGS = {
   autoSyncOnLoad: true,
   aiProvider: 'off',
   aiMetadataEnabled: false,
-  xiaohongshuCommentsEnabled: false,
+  xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -180,7 +111,6 @@ const TYPE_DISPLAY_NAMES = {
   file: '文件',
 };
 
-const MOBILE_UNSUPPORTED_RECORD_TYPES = new Set(['voice', 'file']);
 const CHINA_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
 const TENCENT_ASR_HOST = 'asr.tencentcloudapi.com';
 const TENCENT_ASR_VERSION = '2019-06-14';
@@ -192,7 +122,7 @@ const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转�
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 
-function getLocalAsrPlatform(platform = getRuntimePlatform()) {
+function getLocalAsrPlatform(platform = os.platform()) {
   if (platform === 'win32') return 'win32';
   if (platform === 'darwin') return 'darwin';
   return platform || '';
@@ -204,12 +134,12 @@ function normalizeLocalAsrPlatform(value) {
     : 'auto';
 }
 
-function resolveLocalAsrPlatform(value, runtimePlatform = getRuntimePlatform()) {
+function resolveLocalAsrPlatform(value, runtimePlatform = os.platform()) {
   const normalized = normalizeLocalAsrPlatform(value);
   return normalized === 'auto' ? getLocalAsrPlatform(runtimePlatform) : normalized;
 }
 
-function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = getRuntimePlatform()) {
+function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = os.platform()) {
   const normalized = normalizeLocalAsrPlatform(selectedPlatform);
   if (normalized === 'auto') return '';
   const selected = getLocalAsrPlatform(normalized);
@@ -221,7 +151,7 @@ function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = 
   return `Local ASR platform mismatch: this computer is ${runtimeName}, but the selected installer is ${selectedName}. Please choose Auto or ${runtimeName}, then install again.`;
 }
 
-function getDefaultLocalTranscriptionCommand(platform = getRuntimePlatform(), installRoot = '') {
+function getDefaultLocalTranscriptionCommand(platform = os.platform(), installRoot = '') {
   if (getLocalAsrPlatform(platform) === 'darwin') {
     return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
   }
@@ -239,7 +169,7 @@ function isAsciiPath(value) {
   return /^[\x00-\x7F]+$/.test(String(value || ''));
 }
 
-function getSafeLocalAsrInstallRoot(platform = getRuntimePlatform(), env = getProcessEnv()) {
+function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env) {
   if (getLocalAsrPlatform(platform) === 'win32') {
     const systemDrive = String((env && env.SystemDrive) || 'C:').trim() || 'C:';
     const candidates = [
@@ -251,7 +181,7 @@ function getSafeLocalAsrInstallRoot(platform = getRuntimePlatform(), env = getPr
     const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.join('C:', LOCAL_ASR_SAFE_HOME);
     return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.join(safeBase, LOCAL_ASR_SAFE_HOME);
   }
-  return path.join(getRuntimeHomeDir(), LOCAL_ASR_HOME);
+  return path.join(os.homedir(), LOCAL_ASR_HOME);
 }
 
 function hasLocalAsrNativeCrash(runLogText) {
@@ -262,7 +192,7 @@ function hasLocalAsrNativeCrash(runLogText) {
 }
 
 function getLocalAsrRepairAction({
-  platform = getRuntimePlatform(),
+  platform = os.platform(),
   installRoot = '',
   status = {},
   runLogText = '',
@@ -279,7 +209,7 @@ function getLocalAsrRepairAction({
   return 'none';
 }
 
-function getLocalAsrInstallRoot(homeDir = getRuntimeHomeDir(), mode = 'default', platform = getRuntimePlatform(), env = getProcessEnv()) {
+function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = 'default', platform = os.platform(), env = process.env) {
   if (normalizeLocalAsrInstallMode(mode) === 'safe') {
     return getSafeLocalAsrInstallRoot(platform, env);
   }
@@ -364,6 +294,39 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       return {
         scriptVersion: 'legacy-generated-txt',
         scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('recoveryTriggered=')
+      && source.includes('Split-AudioToChunks')
+      && source.includes('Test-TranscriptHasRepeatHallucination')
+      && source.includes('Invoke-RecoverRepeatedChunkText')
+      && source.includes('$ChunkRetrySeconds')
+      && source.includes('$ChunkSeconds = 120')
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('$SimplifiedPrompt')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Convert-ExitCodeToHex')
+      && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+      && source.includes('safeModelPath')
+      && source.includes('progressPercent')
+      && !source.includes('DataReceivedEventHandler')
+      && !source.includes('BeginOutputReadLine')
+    ) {
+      return {
+        scriptVersion: 'adaptive-chunked-start-process-repeat-guard-progress-run-log',
+        scriptOutdated: false,
       };
     }
     if (
@@ -533,7 +496,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
   }
 }
 
-function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = getRuntimePlatform()) {
+function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
   const isMac = getLocalAsrPlatform(platform) === 'darwin';
   const transcribeScript = joinLocalAsrPath(platform, installRoot, isMac ? 'transcribe.sh' : 'transcribe.ps1');
   const modelPath = joinLocalAsrPath(platform, installRoot, 'models', 'ggml-small.bin');
@@ -732,12 +695,10 @@ function buildSyncDiagnosticLogText({
   ].join('\n');
 }
 
-function writeSyncDiagnosticLog(payload = {}, installRoot = '') {
-  if (isMobileRuntime()) return '';
-  const root = installRoot || getLocalAsrInstallRoot();
+function writeSyncDiagnosticLog(payload = {}, installRoot = getLocalAsrInstallRoot()) {
   try {
-    fs.mkdirSync(root, { recursive: true });
-    const logPath = getSyncDiagnosticLogPath(root);
+    fs.mkdirSync(installRoot, { recursive: true });
+    const logPath = getSyncDiagnosticLogPath(installRoot);
     fs.writeFileSync(logPath, buildSyncDiagnosticLogText(payload), 'utf8');
     return logPath;
   } catch (error) {
@@ -745,10 +706,8 @@ function writeSyncDiagnosticLog(payload = {}, installRoot = '') {
   }
 }
 
-function readSyncDiagnosticLog(installRoot = '') {
-  if (isMobileRuntime()) return '';
-  const root = installRoot || getLocalAsrInstallRoot();
-  const logPath = getSyncDiagnosticLogPath(root);
+function readSyncDiagnosticLog(installRoot = getLocalAsrInstallRoot()) {
+  const logPath = getSyncDiagnosticLogPath(installRoot);
   try {
     if (!fs.existsSync(logPath)) return '';
     return fs.readFileSync(logPath, 'utf8').slice(-5000);
@@ -769,7 +728,7 @@ function readLocalAsrRunLog(installRoot = getLocalAsrInstallRoot()) {
 
 function writeLocalAsrInstallLog({
   installRoot = getLocalAsrInstallRoot(),
-  platform = getRuntimePlatform(),
+  platform = os.platform(),
   command = '',
   installerPath = '',
   stdout = '',
@@ -805,7 +764,7 @@ function quoteCommandPath(filePath) {
   return `"${String(filePath || '').replace(/"/g, '\\"')}"`;
 }
 
-function buildLocalAsrInstallCommand(installerPath, platform = getRuntimePlatform(), installRoot = '') {
+function buildLocalAsrInstallCommand(installerPath, platform = os.platform(), installRoot = '') {
   if (getLocalAsrPlatform(platform) === 'darwin' || String(installerPath || '').endsWith('.sh')) {
     return `/bin/bash ${quoteCommandPath(installerPath)}`;
   }
@@ -897,8 +856,8 @@ function isRemoteAsrDownloadFailure(error) {
   return /Invalid audio URI|audio download failed|Audio download failed/i.test(message);
 }
 
-function getDefaultLocalTranscriptionScriptPath(platform = getRuntimePlatform(), installRoot = '') {
-  const root = installRoot || getLocalAsrInstallRoot(getRuntimeHomeDir(), 'default', platform);
+function getDefaultLocalTranscriptionScriptPath(platform = os.platform(), installRoot = '') {
+  const root = installRoot || getLocalAsrInstallRoot(os.homedir(), 'default', platform);
   return path.join(root, getLocalAsrPlatform(platform) === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1');
 }
 
@@ -907,12 +866,6 @@ function getDoubaoTaskKey(audioUrl) {
 }
 
 function createClientId() {
-  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
-    const bytes = new Uint8Array(16);
-    globalThis.crypto.getRandomValues(bytes);
-    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
-    return `obsidian-${hex}`;
-  }
   return `obsidian-${crypto.randomBytes(16).toString('hex')}`;
 }
 
@@ -922,7 +875,7 @@ function isWindowsLocalAsrCommand(command) {
     && (normalized.includes('transcribe.ps1') || normalized.includes(LOCAL_ASR_HOME));
 }
 
-function normalizeLocalTranscriptionCommand(command, platform = getRuntimePlatform()) {
+function normalizeLocalTranscriptionCommand(command, platform = os.platform()) {
   const normalized = String(command || '')
     .trim()
     .replace(/\$env:USERPROFILE/gi, '%USERPROFILE%');
@@ -1020,7 +973,7 @@ function normalizeApiBase(apiBase) {
     : normalized;
 }
 
-function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
+function mergeSettings(savedSettings, platform = os.platform()) {
   const merged = {
     ...DEFAULT_SETTINGS,
     ...(savedSettings || {}),
@@ -1040,26 +993,14 @@ function mergeSettings(savedSettings, platform = getRuntimePlatform()) {
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
-  merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
+  merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
-  merged.xiaohongshuCommentsEnabled = Boolean(merged.xiaohongshuCommentsEnabled);
-  // AI credentials live on the official sync API, never in the public plugin bundle/settings.
-  merged.deepseekApiKey = '';
-  merged.deepseekModel = DEFAULT_SETTINGS.deepseekModel;
-  merged.deepseekBaseUrl = DEFAULT_SETTINGS.deepseekBaseUrl;
-  const fields = parseNotePropertyFields(merged.notePropertyFields);
-  const baseFields = parseNotePropertyFields(DEFAULT_NOTE_PROPERTY_FIELDS);
-  const hasOnlyGeneratedFields = fields.length > 0
-    && fields.every((field) => ['description', 'keywords'].includes(field));
-  if (hasOnlyGeneratedFields || merged.aiMetadataEnabled) {
-    const nextFields = hasOnlyGeneratedFields ? baseFields : fields;
-    ['description', 'keywords'].forEach((field) => {
-      if (!nextFields.includes(field)) nextFields.push(field);
-    });
-    merged.notePropertyFields = nextFields.join(',');
-  }
+  merged.xiaohongshuCommentsEnabled = merged.xiaohongshuCommentsEnabled !== false;
+  merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
+  merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
+  merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
@@ -1633,7 +1574,7 @@ function normalizeDoubaoSpeakerText(result) {
   if (!result || typeof result !== 'object') return '';
   const utterances = Array.isArray(result.utterances) ? result.utterances : [];
   if (!utterances.length) return '';
-  return utterances
+  return dedupeRepeatedTranscriptionLines(utterances
     .map((item) => {
       const text = String((item && (item.text || item.result_text || item.utterance_text)) || '').trim();
       if (!text) return '';
@@ -1654,25 +1595,45 @@ function normalizeDoubaoSpeakerText(result) {
     })
     .filter(Boolean)
     .join('\n')
-    .trim();
+    .trim());
+}
+
+function dedupeRepeatedTranscriptionLines(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return '';
+
+  const deduped = [];
+  let previousLine = '';
+  for (const line of lines) {
+    if (line === previousLine) {
+      continue;
+    } else {
+      previousLine = line;
+    }
+    deduped.push(line);
+  }
+  return deduped.join('\n').trim();
 }
 
 function parseDoubaoAsrResult(payload) {
   const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
   const result = data && data.result;
   if (Array.isArray(result)) {
-    return result
+    return dedupeRepeatedTranscriptionLines(result
       .map((item) => normalizeDoubaoSpeakerText(item) || String((item && (item.text || item.result_text || item.utterance_text)) || '').trim())
       .filter(Boolean)
       .join('\n')
-      .trim();
+      .trim());
   }
   const speakerText = normalizeDoubaoSpeakerText(result);
   if (speakerText) return speakerText;
   const text = (result && (result.text || result.result_text))
     || (data && (data.text || data.transcription))
     || '';
-  return String(text || '').trim();
+  return dedupeRepeatedTranscriptionLines(String(text || '').trim());
 }
 
 function parseDoubaoAsrTaskState(response) {
@@ -1734,7 +1695,6 @@ function buildWebpageMarkdownBody(record, title) {
       transcriptionStatus: metadata.transcriptionStatus || metadata.conversionStatus || 'pending',
       transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
       transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
-      comments: metadata.comments || [],
     });
   }
 
@@ -1789,7 +1749,6 @@ function buildAudioTranscriptMarkdown({
   transcriptionStatus = 'pending',
   transcriptionSource = '',
   transcriptionError = '',
-  comments = [],
 }) {
   url = cleanDisplayUrl(url);
   const status = String(transcriptionStatus || '').toLowerCase();
@@ -1801,7 +1760,6 @@ function buildAudioTranscriptMarkdown({
       : isCloudPending
         ? '云端转写中，下次同步会自动更新。'
         : '转写处理中，或未配置可用的转写方案。');
-  const commentsMarkdown = buildSocialCommentsMarkdown(comments);
   return [
     `原始链接：${url || ''}`,
     transcriptionSource ? `转写来源：${transcriptionSource}` : '',
@@ -1810,8 +1768,6 @@ function buildAudioTranscriptMarkdown({
     '',
     content,
     '',
-    commentsMarkdown,
-    commentsMarkdown ? '' : '',
   ].filter((line) => line !== '').join('\n');
 }
 
@@ -1825,7 +1781,6 @@ function buildTranscriptOnlyMetadata(metadata, {
   transcriptionSource = '',
   transcriptionError = '',
   conversionStatus = '',
-  comments = [],
 } = {}) {
   const {
     markdown,
@@ -1850,8 +1805,14 @@ function buildTranscriptOnlyMetadata(metadata, {
     transcriptionSource,
     transcriptionError,
     conversionStatus: conversionStatus || transcriptionStatus,
-    comments: (comments || []).map(normalizeSocialComment).filter(Boolean),
   };
+}
+
+function shouldGenerateAiMetadata(settings, record) {
+  if (!settings || !settings.aiMetadataEnabled) return false;
+  if (!record || !record.metadata) return false;
+  const metadata = record.metadata || {};
+  return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
 }
 
 function buildFileMarkdownBody(record) {
@@ -1878,29 +1839,6 @@ function buildFileMarkdownBody(record) {
     converted || fallback,
     '',
   ].filter((line) => line !== '').join('\n');
-}
-
-function shouldGenerateAiMetadata(settings, record) {
-  if (!settings || !settings.aiMetadataEnabled) return false;
-  if (!record || !record.metadata) return false;
-  const metadata = record.metadata || {};
-  return !getRecordDescription(metadata)
-    || !getRecordKeywords(metadata).length
-    || shouldRefreshAiDescription(metadata, record);
-}
-
-function ensureRequiredMetadataFallbacks(record, settings = null) {
-  if (!record || !record.metadata) return record;
-  const metadata = { ...(record.metadata || {}) };
-  const allowAiMetadataFallbacks = !settings || Boolean(settings.aiMetadataEnabled);
-  if (allowAiMetadataFallbacks && isXiaohongshuRecord(record, metadata) && !getRecordKeywords(metadata).length) {
-    const keywords = buildFallbackGeneratedKeywords({ ...record, metadata });
-    if (keywords.length) metadata.keywords = keywords;
-  }
-  return {
-    ...record,
-    metadata,
-  };
 }
 
 function cleanMarkdownForStorage(markdown, options = {}) {
@@ -2008,29 +1946,6 @@ function normalizeGeneratedKeywords(value) {
     });
 }
 
-function cleanGeneratedDescription(value) {
-  const source = stripMarkdownCodeBlocks(String(value || ''))
-    .replace(/^description\s*[:：]\s*/i, '')
-    .replace(/^简介\s*[:：]\s*/i, '')
-    .replace(/^总结\s*[:：]\s*/i, '')
-    .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
-    .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
-    .replace(/^#{1,6}\s*/gm, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!source) return '';
-
-  const sentences = source.match(/[^。！？!?]+[。！？!?]?/g) || [source];
-  const usable = sentences
-    .map((item) => item.trim())
-    .find((item) => {
-      const length = Array.from(item).length;
-      return length >= 8 && length <= 140;
-    }) || sentences[0].trim();
-  const chars = Array.from(usable);
-  return chars.length > 140 ? `${chars.slice(0, 140).join('').trim()}...` : usable;
-}
-
 function parseGeneratedMetadataResponse(text) {
   const source = String(text || '').trim();
   if (!source) return { description: '', keywords: [] };
@@ -2040,7 +1955,7 @@ function parseGeneratedMetadataResponse(text) {
   const jsonPayload = tryParseJson(jsonSource);
   if (jsonPayload && typeof jsonPayload === 'object') {
     return {
-      description: cleanGeneratedDescription(jsonPayload.description || jsonPayload.summary || jsonPayload.excerpt || ''),
+      description: String(jsonPayload.description || jsonPayload.summary || jsonPayload.excerpt || '').trim(),
       keywords: normalizeGeneratedKeywords(jsonPayload.keywords || jsonPayload.tags || jsonPayload.hashtags || []),
     };
   }
@@ -2052,98 +1967,16 @@ function parseGeneratedMetadataResponse(text) {
     || source.match(/标签\s*[:：]\s*([^\n]+)/i)
     || source.match(/关键词\s*[:：]\s*([^\n]+)/i);
   return {
-    description: cleanGeneratedDescription(descriptionMatch ? descriptionMatch[1] : ''),
+    description: String(descriptionMatch ? descriptionMatch[1] : '').trim(),
     keywords: normalizeGeneratedKeywords(keywordsMatch ? keywordsMatch[1] : ''),
   };
 }
 
-function isXiaohongshuRecord(record, metadata = (record && record.metadata) || {}) {
-  const platform = String(metadata.platform || metadata.source || '').toLowerCase();
-  const url = getRecordUrl(record, metadata);
-  return platform.includes('小红书') || isXiaohongshuUrl(url);
-}
-
-function shouldRefreshAiDescription(metadata = {}, record = null) {
-  const description = String(getRecordDescription(metadata) || '').trim();
-  if (!description) return false;
-  const compact = description.replace(/\s+/g, '');
-  const length = Array.from(compact).length;
-  if (length > 140) return true;
-  if (/^#+\s/.test(description) || /\n{2,}/.test(description) || /https?:\/\//i.test(description)) return true;
-  if (isXiaohongshuRecord(record, metadata)) {
-    if (length > 90) return true;
-    if (/(我每次|于是我|其实|下一期|这样确实|我看小红书|索性|做成skill|起标题)/i.test(compact) && length > 50) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function pushFallbackKeyword(keywords, seen, value) {
-  const cleaned = String(value || '')
-    .replace(/^#+/, '')
-    .replace(/[《》"'“”‘’()[\]{}]/g, '')
-    .replace(/\s+/g, '')
-    .trim();
-  if (!cleaned || Array.from(cleaned).length < 2 || Array.from(cleaned).length > 18) return;
-  if (/^(正文|标题|图片|评论区|目录|链接|内容|笔记|网页|分享|这个|一个|我们|你们|他们|自己|就是)$/.test(cleaned)) return;
-  const key = cleaned.toLowerCase();
-  if (seen.has(key)) return;
-  seen.add(key);
-  keywords.push(cleaned);
-}
-
-function buildFallbackGeneratedKeywords(record) {
-  const metadata = (record && record.metadata) || {};
-  const text = extractAiMetadataInputText(record);
-  const source = [
-    metadata.title,
-    metadata.description,
-    metadata.markdown,
-    record && record.content,
-  ].filter(Boolean).join('\n\n');
-  const keywords = [];
-  const seen = new Set();
-
-  extractTagsFromText(source, '').forEach((tag) => pushFallbackKeyword(keywords, seen, tag));
-  normalizeGeneratedKeywords(metadata.keywords || metadata.tags || metadata.hashtags || [])
-    .forEach((tag) => pushFallbackKeyword(keywords, seen, tag));
-  pushFallbackKeyword(keywords, seen, metadata.title);
-
-  const preferredPatterns = [
-    /小红书/g,
-    /公众号/g,
-    /飞书机器人/g,
-    /Obsidian/gi,
-    /Deep\s*Seek/gi,
-    /AI写作/gi,
-    /AI/g,
-    /标题方法/g,
-    /内容选题/g,
-    /爆款标题/g,
-  ];
-  preferredPatterns.forEach((pattern) => {
-    let match;
-    while ((match = pattern.exec(source))) {
-      pushFallbackKeyword(keywords, seen, match[0]);
-    }
-  });
-
-  const tokenPattern = /[A-Za-z][A-Za-z0-9_-]{1,23}|[\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9_-]{1,15}/g;
-  let match;
-  while (keywords.length < 8 && (match = tokenPattern.exec(text))) {
-    pushFallbackKeyword(keywords, seen, match[0]);
-  }
-  return keywords.slice(0, 8);
-}
-
-function buildFallbackGeneratedDescription(record) {
-  const metadata = (record && record.metadata) || {};
-  const title = cleanGeneratedDescription(metadata.title || '');
-  const keywords = buildFallbackGeneratedKeywords(record).slice(0, 3);
-  if (title && keywords.length) return `关于${title}的内容整理，重点涉及${keywords.join('、')}。`;
-  if (title) return `关于${title}的内容整理。`;
-  return '';
+function normalizeGeneratedMetadataResult(result) {
+  return {
+    description: String(result && result.description || '').trim().slice(0, 300),
+    keywords: normalizeGeneratedKeywords(result && result.keywords),
+  };
 }
 
 function extractAiMetadataInputText(record) {
@@ -2875,12 +2708,6 @@ function isXiaohongshuUrl(url) {
   return text.includes('xiaohongshu.com') || text.includes('xhslink.com');
 }
 
-function getSocialElectronPartition(target) {
-  const key = String(target || '').toLowerCase();
-  if (key === 'xhs') return SOCIAL_LOGIN_TARGETS.xiaohongshu.partition;
-  return SOCIAL_LOGIN_TARGETS[key] ? SOCIAL_LOGIN_TARGETS[key].partition : '';
-}
-
 function isDouyinUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('douyin.com') || text.includes('iesdouyin.com') || text.includes('amemv.com');
@@ -3374,34 +3201,12 @@ function collectImageUrlsFromHtml(html) {
 
   const imageTags = source.match(/<img\b[^>]*>/gi) || [];
   imageTags.forEach((tag) => {
-    [
-      'data-src',
-      'data-original',
-      'data-url',
-      'data-origin-src',
-      'data-lazy-src',
-      'src',
-    ].forEach((attr) => pushUniqueUrl(urls, getHtmlAttribute(tag, attr)));
-    const srcset = getHtmlAttribute(tag, 'srcset') || getHtmlAttribute(tag, 'data-srcset');
+    pushUniqueUrl(urls, getHtmlAttribute(tag, 'data-src') || getHtmlAttribute(tag, 'src'));
+    const srcset = getHtmlAttribute(tag, 'srcset');
     if (srcset) {
-      srcset.split(',').forEach((item) => pushUniqueUrl(urls, item.trim().split(/\s+/)[0]));
+      pushUniqueUrl(urls, srcset.split(',')[0].trim().split(/\s+/)[0]);
     }
   });
-
-  const sourceTags = source.match(/<source\b[^>]*>/gi) || [];
-  sourceTags.forEach((tag) => {
-    const srcset = getHtmlAttribute(tag, 'srcset') || getHtmlAttribute(tag, 'data-srcset');
-    if (srcset) {
-      srcset.split(',').forEach((item) => pushUniqueUrl(urls, item.trim().split(/\s+/)[0]));
-    }
-    pushUniqueUrl(urls, getHtmlAttribute(tag, 'src'));
-  });
-
-  const cssUrlPattern = /url\((?:'|")?([^'")]+?\.(?:jpg|jpeg|png|webp)(?:\?[^'")\s]*)?)(?:'|")?\)/gi;
-  let cssMatch;
-  while ((cssMatch = cssUrlPattern.exec(source))) {
-    pushUniqueUrl(urls, cssMatch[1]);
-  }
 
   const imagePattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?\.(?:jpg|jpeg|png|webp)(?:\?[^"'\\\s<>]*)?/gi;
   let match;
@@ -3847,7 +3652,7 @@ function extractXiaohongshuAuthor(html) {
   return candidates[0] || '';
 }
 
-function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
+function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '', options = {}) {
   url = cleanDisplayUrl(url);
   const source = String(html || '');
   const title = extractMetaContent(source, ['og:title', 'twitter:title'])
@@ -3857,7 +3662,8 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
   const tags = extractTagsFromText(description, source);
   const images = collectXiaohongshuNoteImageUrls(source);
   const videoUrl = extractVideoUrlFromHtml(source);
-  const comments = extractSocialCommentsFromHtml(source);
+  const includeComments = options.includeComments !== false;
+  const comments = includeComments ? extractSocialCommentsFromHtml(source) : [];
   const lines = [
     '## 标题',
     '',
@@ -3901,48 +3707,6 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '') {
     imageUrls: images,
     videoUrl,
     comments,
-  };
-}
-
-function buildXiaohongshuRecordFromExtraction(record, {
-  metadata = (record && record.metadata) || {},
-  url = '',
-  extracted = {},
-  renderedComments = [],
-} = {}) {
-  const allComments = [
-    ...((extracted && extracted.comments) || []),
-    ...(renderedComments || []),
-  ];
-  const markdown = mergeSocialCommentsIntoMarkdown(extracted.markdown || '', allComments);
-  const recordForKeywords = {
-    ...record,
-    metadata: {
-      ...metadata,
-      title: metadata.title || extracted.title,
-      description: metadata.description || extracted.description,
-      markdown,
-      tags: extracted.tags || [],
-    },
-  };
-  const keywords = getRecordKeywords({ keywords: metadata.keywords || extracted.tags || [] });
-  const fallbackKeywords = keywords.length ? keywords : buildFallbackGeneratedKeywords(recordForKeywords);
-  return {
-    ...record,
-    metadata: {
-      ...metadata,
-      title: metadata.title || extracted.title || getWebpageSourcePrefix(url),
-      author: metadata.author || extracted.author || '',
-      description: metadata.description || extracted.description || '',
-      keywords: fallbackKeywords,
-      platform: metadata.platform || '小红书',
-      contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === 'audio_video' ? '视频' : '图文'),
-      markdown,
-      imageUrls: extracted.imageUrls || [],
-      videoUrl: extracted.videoUrl || '',
-      comments: allComments.map(normalizeSocialComment).filter(Boolean),
-      conversionStatus: 'success',
-    },
   };
 }
 
@@ -4050,24 +3814,12 @@ function normalizeSocialComment(comment) {
   const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
-  const normalized = {
+  return {
     author,
     content,
     time: String(comment.time || '').trim(),
     likes: String(comment.likes || '').trim(),
-    replyTo: String(comment.replyTo || comment.reply_to || '').replace(/^[:：]+|[:：]+$/g, '').trim(),
   };
-  const replies = Array.isArray(comment.replies) ? comment.replies : [];
-  const normalizedReplies = replies
-    .map((reply) => normalizeSocialComment(reply))
-    .filter(Boolean)
-    .map((reply) => ({
-      ...reply,
-      replyTo: reply.replyTo || normalized.author,
-    }));
-  if (normalizedReplies.length) normalized.replies = normalizedReplies;
-  if (!normalized.replyTo) delete normalized.replyTo;
-  return normalized;
 }
 
 function pushSocialComment(comments, seen, comment) {
@@ -4077,10 +3829,6 @@ function pushSocialComment(comments, seen, comment) {
   if (seen.has(key)) return;
   seen.add(key);
   comments.push(normalized);
-}
-
-function normalizeWechatComment(comment) {
-  return normalizeSocialComment(comment);
 }
 
 function pushWechatComment(comments, seen, comment) {
@@ -4103,124 +3851,7 @@ function readCommentField(item, keys) {
   return '';
 }
 
-function getCommentAuthor(value) {
-  return readCommentField(value, [
-    'nick_name',
-    'nickname',
-    'nickName',
-    'userNickname',
-    'user_nickname',
-    'userName',
-    'name',
-    'author',
-  ]) || readCommentField(value && (value.user || value.userInfo || value.user_info || value.authorInfo || value.user_info_detail) || {}, [
-    'nick_name',
-    'nickname',
-    'nickName',
-    'userName',
-    'name',
-  ]);
-}
-
-function getCommentContent(value) {
-  return readCommentField(value, [
-    'content',
-    'text',
-    'commentContent',
-    'comment_content',
-    'noteText',
-    'message',
-  ]);
-}
-
-function getCommentTime(value) {
-  return readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
-}
-
-function getCommentLikes(value) {
-  return readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'liked_count', 'like_count', 'likes']);
-}
-
-function getReplyTargetAuthor(value, parentAuthor = '') {
-  return readCommentField(value && (value.target_comment || value.targetComment || value.reply_to || value.replyTo || value.to_user || value.toUser) || {}, [
-    'nick_name',
-    'nickname',
-    'nickName',
-    'userName',
-    'name',
-    'author',
-  ]) || readCommentField(value && (
-    (value.target_comment && (value.target_comment.user || value.target_comment.user_info || value.target_comment.userInfo))
-    || (value.targetComment && (value.targetComment.user || value.targetComment.user_info || value.targetComment.userInfo))
-    || value.to_user_info
-    || value.toUserInfo
-  ) || {}, [
-    'nick_name',
-    'nickname',
-    'nickName',
-    'userName',
-    'name',
-  ]) || parentAuthor || '';
-}
-
-function readCommentReplyItems(value) {
-  const replyValues = [
-    value && value.reply,
-    value && value.reply_info,
-    value && value.replyInfo,
-    value && value.reply_list,
-    value && value.replyList,
-    value && value.replies,
-    value && value.sub_comments,
-    value && value.subComments,
-    value && value.sub_comment_list,
-    value && value.subCommentList,
-    value && value.sub_comment,
-    value && value.subComment,
-  ].filter(Boolean);
-  const items = [];
-  replyValues.forEach((entry) => {
-    if (Array.isArray(entry)) {
-      entry.forEach((item) => {
-        if (item && typeof item === 'object') items.push(item);
-      });
-    } else if (entry && typeof entry === 'object') {
-      const nestedList = entry.list || entry.items || entry.comments || entry.reply_list || entry.replyList;
-      if (Array.isArray(nestedList)) {
-        nestedList.forEach((item) => {
-          if (item && typeof item === 'object') items.push(item);
-        });
-      } else {
-        items.push(entry);
-      }
-    }
-  });
-  return items;
-}
-
-function extractRepliesFromComment(value, parentAuthor, limit, depth) {
-  const replies = [];
-  const replySeen = new Set();
-  readCommentReplyItems(value).forEach((reply) => {
-    if (replies.length >= limit) return;
-    const content = getCommentContent(reply);
-    if (!content) return;
-    const author = getCommentAuthor(reply);
-    const replyTo = getReplyTargetAuthor(reply, parentAuthor);
-    const nestedReplies = extractRepliesFromComment(reply, author || parentAuthor, Math.max(0, limit - replies.length - 1), depth + 1);
-    pushSocialComment(replies, replySeen, {
-      author,
-      content,
-      time: getCommentTime(reply),
-      likes: getCommentLikes(reply),
-      replyTo,
-      replies: nestedReplies,
-    });
-  });
-  return replies;
-}
-
-function extractCommentsFromObject(value, comments, seen, limit = SOCIAL_COMMENT_LIMIT, depth = 0) {
+function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0) {
   if (!value || depth > 8 || comments.length >= limit) return;
   if (Array.isArray(value)) {
     value.forEach((item) => extractCommentsFromObject(item, comments, seen, limit, depth + 1));
@@ -4228,25 +3859,39 @@ function extractCommentsFromObject(value, comments, seen, limit = SOCIAL_COMMENT
   }
   if (typeof value !== 'object') return;
 
-  const content = getCommentContent(value);
+  const content = readCommentField(value, [
+    'content',
+    'text',
+    'commentContent',
+    'comment_content',
+    'noteText',
+    'message',
+  ]);
   if (content) {
-    const author = getCommentAuthor(value);
-    const replies = extractRepliesFromComment(value, author, Math.max(0, limit - comments.length - 1), depth + 1);
-    pushSocialComment(comments, seen, {
-      author,
-      content,
-      time: getCommentTime(value),
-      likes: getCommentLikes(value),
-      replies,
-    });
+    const author = readCommentField(value, [
+      'nick_name',
+      'nickname',
+      'nickName',
+      'userNickname',
+      'user_nickname',
+      'userName',
+      'name',
+      'author',
+    ]) || readCommentField(value.user || value.userInfo || value.authorInfo || {}, [
+      'nick_name',
+      'nickname',
+      'nickName',
+      'userName',
+      'name',
+    ]);
+    const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
+    const likes = readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'like_count', 'likes']);
+    pushSocialComment(comments, seen, { author, content, time, likes });
   }
 
   Object.keys(value).forEach((key) => {
     if (comments.length >= limit) return;
-    if (/^(reply|reply_info|replyInfo|reply_list|replyList|replies|sub_comments|subComments|sub_comment_list|subCommentList|sub_comment|subComment)$/i.test(key)) {
-      return;
-    }
-    if (/comment|cmt|reply|discuss|list|items|data/i.test(key)) {
+    if (/comment|cmt|reply|discuss/i.test(key)) {
       extractCommentsFromObject(value[key], comments, seen, limit, depth + 1);
     }
   });
@@ -4256,7 +3901,7 @@ function collectJsonObjectCandidates(source) {
   const candidates = [];
   const text = String(source || '');
   const starts = [];
-  const objectPattern = /["']?(?:elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)["']?\s*[:=]\s*([\[{])/gi;
+  const objectPattern = /(?:elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)\s*[:=]\s*([\[{])/gi;
   let match;
   while ((match = objectPattern.exec(text))) {
     starts.push(objectPattern.lastIndex - 1);
@@ -4327,103 +3972,7 @@ function extractWechatCommentsFromJson(html, comments, seen) {
   });
 }
 
-function extractWechatCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
-  const comments = [];
-  const seen = new Set();
-  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
-  extractCommentsFromObject(data, comments, seen, limit);
-  return comments.slice(0, limit);
-}
-
-function shouldRetryWechatCommentsWithVisibleReader(payload, comments = []) {
-  if ((comments || []).map(normalizeSocialComment).filter(Boolean).length) return false;
-  if (!payload) return true;
-  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
-  if (!data || typeof data !== 'object') return true;
-  const ret = Number(data.ret !== undefined ? data.ret : (data.base_resp && data.base_resp.ret));
-  const errmsg = String(data.errmsg || (data.base_resp && data.base_resp.errmsg) || '').toLowerCase();
-  return ret === -3
-    || errmsg.includes('no session')
-    || errmsg.includes('session')
-    || errmsg.includes('token')
-    || errmsg.includes('login');
-}
-
-function extractXiaohongshuCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
-  const comments = [];
-  const seen = new Set();
-  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
-  extractCommentsFromObject(data, comments, seen, limit);
-  return comments.slice(0, limit);
-}
-
-function extractWechatCommentRequestParams(html, url = '') {
-  const source = String(html || '');
-  const params = {};
-  const readScriptString = (keys) => {
-    for (const key of keys) {
-      const pattern = new RegExp(`(?:var\\s+)?${key}\\s*=\\s*["']([^"']+)["']`, 'i');
-      const match = source.match(pattern);
-      if (match && match[1]) return decodeHtmlEntities(decodeJsonLikeText(match[1])).trim();
-    }
-    return '';
-  };
-  const readScriptNumber = (keys) => {
-    for (const key of keys) {
-      const pattern = new RegExp(`(?:var\\s+)?${key}\\s*=\\s*["']?([0-9]+)["']?`, 'i');
-      const match = source.match(pattern);
-      if (match && match[1]) return match[1].trim();
-    }
-    return '';
-  };
-
-  try {
-    const parsed = new URL(cleanDisplayUrl(url));
-    ['__biz', 'mid', 'idx', 'sn'].forEach((key) => {
-      const value = parsed.searchParams.get(key);
-      if (value) params[key] = value;
-    });
-  } catch (error) {
-    // Script values below are enough for many WeChat pages.
-  }
-
-  params.appmsg_token = readScriptString(['appmsg_token', 'window.appmsg_token']) || params.appmsg_token || '';
-  params.comment_id = readScriptNumber(['comment_id', 'commentId']) || readScriptString(['comment_id', 'commentId']) || '';
-  params.__biz = params.__biz || readScriptString(['biz', '__biz']) || '';
-  params.mid = params.mid || readScriptNumber(['mid', 'appmsgid']) || readScriptString(['mid', 'appmsgid']) || '';
-  params.idx = params.idx || readScriptNumber(['idx']) || readScriptString(['idx']) || '';
-  params.sn = params.sn || readScriptString(['sn']) || '';
-
-  return Object.fromEntries(Object.entries(params).filter(([, value]) => value));
-}
-
-function buildWechatCommentApiUrl(articleUrl, params = {}) {
-  if (!params.comment_id) return '';
-  const api = new URL('https://mp.weixin.qq.com/mp/appmsg_comment');
-  api.searchParams.set('action', 'getcomment');
-  api.searchParams.set('scene', '0');
-  api.searchParams.set('__biz', params.__biz || '');
-  api.searchParams.set('appmsgid', params.mid || '');
-  api.searchParams.set('idx', params.idx || '1');
-  api.searchParams.set('comment_id', params.comment_id);
-  api.searchParams.set('offset', '0');
-  api.searchParams.set('limit', '20');
-  api.searchParams.set('send_time', '');
-  api.searchParams.set('sessionid', '0');
-  api.searchParams.set('enterid', String(Date.now()));
-  api.searchParams.set('ascene', '0');
-  api.searchParams.set('fasttmpl_type', '0');
-  api.searchParams.set('fasttmpl_fullversion', '0');
-  api.searchParams.set('fasttmpl_flag', '0');
-  api.searchParams.set('appmsg_token', params.appmsg_token || '');
-  api.searchParams.set('x5', '0');
-  api.searchParams.set('f', 'json');
-  api.searchParams.set('r', String(Math.random()));
-  if (articleUrl) api.searchParams.set('ref', cleanDisplayUrl(articleUrl));
-  return api.toString();
-}
-
-function extractWechatCommentsFromHtml(html, limit = SOCIAL_COMMENT_LIMIT) {
+function extractWechatCommentsFromHtml(html, limit = 20) {
   const source = String(html || '');
   const comments = [];
   const seen = new Set();
@@ -4447,7 +3996,7 @@ function extractWechatCommentsFromHtml(html, limit = SOCIAL_COMMENT_LIMIT) {
   return comments.slice(0, limit);
 }
 
-function extractSocialCommentsFromHtml(html, limit = SOCIAL_COMMENT_LIMIT) {
+function extractSocialCommentsFromHtml(html, limit = 20) {
   const source = String(html || '');
   const comments = [];
   const seen = new Set();
@@ -4473,28 +4022,12 @@ function buildSocialCommentsMarkdown(comments = []) {
   const items = (comments || []).map(normalizeSocialComment).filter(Boolean);
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
-  const renderCommentLine = (comment, indent = '') => {
-    const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
-    const author = comment.author || '匿名用户';
-    const relation = comment.replyTo ? ` 回复 **${comment.replyTo}**` : '';
-    return `${indent}- **${author}**${relation}：${comment.content}${meta ? `（${meta}）` : ''}`;
-  };
-  const renderThread = (comment, depth = 0) => {
-    lines.push(renderCommentLine(comment, '  '.repeat(depth)));
-    (comment.replies || []).forEach((reply) => renderThread(reply, depth + 1));
-  };
   items.forEach((comment) => {
-    renderThread(comment);
-    lines.push('');
+    const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
+    const prefix = comment.author ? `**${comment.author}**：` : '';
+    lines.push(`- ${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
   });
   return lines.join('\n').trim();
-}
-
-function mergeSocialCommentsIntoMarkdown(markdown, comments = []) {
-  const source = String(markdown || '').trim();
-  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
-  const commentMarkdown = buildSocialCommentsMarkdown(comments);
-  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
 }
 
 function buildWechatCommentsMarkdown(comments = []) {
@@ -4507,38 +4040,8 @@ function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
   const comments = Array.isArray(htmlOrComments)
     ? htmlOrComments
     : extractWechatCommentsFromHtml(htmlOrComments);
-  return mergeSocialCommentsIntoMarkdown(source, comments);
-}
-
-function buildWechatArticleMarkdownWithComments(markdown, html, extraComments = []) {
-  const source = String(markdown || '').trim();
-  const comments = extraComments || [];
-  if (!comments.length) {
-    return source.replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '').trim();
-  }
-  const withoutExistingStatus = source.replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '').trim();
-  const base = withoutExistingStatus.replace(/\n+##\s+评论区[\s\S]*$/m, '').trim();
-  return mergeSocialCommentsIntoMarkdown(base, comments);
-}
-
-async function fetchWechatCommentsFromApi(articleUrl, html) {
-  const params = extractWechatCommentRequestParams(html, articleUrl);
-  const apiUrl = buildWechatCommentApiUrl(articleUrl, params);
-  if (!apiUrl) return [];
-  try {
-    const response = await requestUrl({
-      url: apiUrl,
-      method: 'GET',
-      headers: {
-        ...getSocialRequestHeaders(articleUrl),
-        Referer: cleanDisplayUrl(articleUrl),
-        Accept: 'application/json,text/plain,*/*',
-      },
-    });
-    return extractWechatCommentsFromPayload(response.json || response.text);
-  } catch (error) {
-    return [];
-  }
+  const commentMarkdown = buildWechatCommentsMarkdown(comments);
+  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
 }
 
 function extractHtmlTitle(html) {
@@ -4727,6 +4230,7 @@ function restoreFlattenedSarBandTables(lines) {
 function htmlToMarkdown(html) {
   const sourceHtml = String(html || '');
   let readable = selectReadableHtml(sourceHtml)
+    .replace(/<[^>]+id=["']js_cmt_area["'][^>]*>[\s\S]*?(?=<script\b|<\/body>|$)/gi, '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
@@ -4754,24 +4258,6 @@ function htmlToMarkdown(html) {
   return readable;
 }
 
-function htmlToMarkdownOrFallback(html, url = '', fallbackTitle = '') {
-  try {
-    return htmlToMarkdown(html);
-  } catch (error) {
-    const sourceHtml = String(html || '');
-    const title = fallbackTitle || extractHtmlTitle(sourceHtml) || getUrlHostname(url) || '网页正文';
-    const readable = cleanMarkdownForStorage(stripHtmlTags(selectReadableHtml(sourceHtml)));
-    const lines = [
-      title,
-      '',
-      readable || '正文暂未提取到足够内容，已保留原始链接。',
-      '',
-      cleanDisplayUrl(url) ? `原始链接：${cleanDisplayUrl(url)}` : '',
-    ].filter(Boolean);
-    return lines.join('\n');
-  }
-}
-
 function getElectronBrowserWindow() {
   try {
     const electron = require('electron');
@@ -4781,116 +4267,175 @@ function getElectronBrowserWindow() {
   }
 }
 
-function getElectronSessionModule() {
+function getElectronRemote() {
   try {
     const electron = require('electron');
-    return (electron.remote && electron.remote.session) || electron.session || null;
+    return electron.remote || null;
   } catch (error) {
     return null;
   }
 }
 
-function createSocialBrowserWindow(BrowserWindow, target, options = {}) {
-  const profile = SOCIAL_LOGIN_TARGETS[target] || null;
-  return new BrowserWindow({
-    width: options.width || 1280,
-    height: options.height || 1200,
-    show: options.show === true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      ...(profile ? { partition: profile.partition } : {}),
-    },
-  });
-}
-
-async function getSocialSessionCookieSummary(target) {
-  const profile = SOCIAL_LOGIN_TARGETS[target];
-  const sessionModule = getElectronSessionModule();
-  if (!profile || !sessionModule || typeof sessionModule.fromPartition !== 'function') return '';
+function getWechatSession() {
+  const remote = getElectronRemote();
+  if (!remote) return null;
   try {
-    const cookies = await sessionModule.fromPartition(profile.partition).cookies.get({});
-    const count = Array.isArray(cookies) ? cookies.length : 0;
-    return count ? `已保存 ${count} 个本地登录凭证` : '未检测到本地登录凭证';
+    return remote.session.fromPartition(WECHAT_SESSION_PARTITION);
   } catch (error) {
-    return '登录状态读取失败';
+    return null;
   }
 }
 
-async function openSocialLoginWindow(target) {
-  const profile = SOCIAL_LOGIN_TARGETS[target];
+async function checkWechatLoginStatus() {
+  const session = getWechatSession();
+  if (!session) return false;
+  try {
+    const cookies = await session.cookies.get({ domain: 'mp.weixin.qq.com' });
+    return cookies.some((cookie) => cookie.name === 'wap_sid2' || cookie.name === 'wxuin');
+  } catch (error) {
+    return false;
+  }
+}
+
+async function checkFeishuLoginStatus() {
+  const session = getWechatSession();
+  if (!session) return false;
+  try {
+    const cookies = await session.cookies.get({ domain: '.feishu.cn' });
+    return cookies.some((cookie) => cookie.name === 'session' || cookie.name === 'passport_web_did');
+  } catch (error) {
+    return false;
+  }
+}
+
+async function loginWechatWeb(articleUrl) {
   const BrowserWindow = getElectronBrowserWindow();
-  if (!profile || !BrowserWindow) {
-    throw new Error('当前 Obsidian 桌面环境不支持网页登录态窗口');
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持浏览器窗口');
   }
-  const win = createSocialBrowserWindow(BrowserWindow, target, {
-    width: 1200,
-    height: 900,
-    show: true,
+
+  const session = getWechatSession();
+  if (!session) {
+    throw new Error('无法创建微信登录会话');
+  }
+
+  // Navigate to WeChat article page. If not logged in, the page will show a QR code
+  // in the comment area prompting the user to scan with WeChat.
+  const loginUrl = articleUrl || 'https://mp.weixin.qq.com/';
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const win = new BrowserWindow({
+      width: 820,
+      height: 900,
+      show: true,
+      title: '微信扫码登录 — 登录后关闭窗口即可',
+      webPreferences: {
+        session,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    const finish = async (error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (win && !win.isDestroyed()) {
+          win.destroy();
+        }
+      } catch (destroyError) {
+        // Window may already be gone.
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      const loggedIn = await checkWechatLoginStatus();
+      resolve(loggedIn);
+    };
+
+    win.on('closed', () => finish());
+
+    win.webContents.on('did-finish-load', async () => {
+      const loggedIn = await checkWechatLoginStatus();
+      if (loggedIn) {
+        finish();
+      }
+    });
+
+    win.loadURL(loginUrl).catch((error) => {
+      finish(new Error(`打开微信登录页面失败：${error.message || error}`));
+    });
+
+    // Timeout after 5 minutes.
+    setTimeout(() => {
+      finish(new Error('微信登录超时（5分钟），请重试'));
+    }, 5 * 60 * 1000);
   });
-  await win.loadURL(profile.loginUrl);
-  return true;
 }
 
-function createRenderedCommentCollector(webContents, platform) {
-  const comments = [];
-  const seen = new Set();
-  const pending = new Map();
-  const target = String(platform || '').toLowerCase();
-  const matchesCommentUrl = (url) => {
-    const text = String(url || '').toLowerCase();
-    if (target === 'wechat') return text.includes('/mp/appmsg_comment') || text.includes('appmsg_comment');
-    if (target === 'xiaohongshu') return text.includes('/comment') || text.includes('comment/page') || text.includes('comment/list');
-    return text.includes('comment');
-  };
-  const addPayload = (payload) => {
-    const extracted = target === 'wechat'
-      ? extractWechatCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT)
-      : extractXiaohongshuCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT);
-    extracted.forEach((comment) => pushSocialComment(comments, seen, comment));
-  };
-
-  try {
-    if (!webContents || !webContents.debugger) return null;
-    if (!webContents.debugger.isAttached()) {
-      webContents.debugger.attach('1.3');
-    }
-    webContents.debugger.sendCommand('Network.enable').catch(() => {});
-    const onMessage = async (_event, method, params = {}) => {
-      try {
-        if (method === 'Network.responseReceived') {
-          const requestId = params.requestId;
-          const url = params.response && params.response.url;
-          if (requestId && matchesCommentUrl(url)) pending.set(requestId, url);
-          return;
-        }
-        if (method !== 'Network.loadingFinished' || !pending.has(params.requestId)) return;
-        const requestId = params.requestId;
-        pending.delete(requestId);
-        const body = await webContents.debugger.sendCommand('Network.getResponseBody', { requestId });
-        let text = String(body && body.body ? body.body : '');
-        if (body && body.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
-        addPayload(text);
-      } catch (error) {
-        // Some protected responses disallow body access; DOM extraction still runs below.
-      }
-    };
-    webContents.debugger.on('message', onMessage);
-    return {
-      getComments: () => comments.slice(0, SOCIAL_COMMENT_LIMIT),
-      dispose: () => {
-        try {
-          webContents.debugger.off('message', onMessage);
-          if (webContents.debugger.isAttached()) webContents.debugger.detach();
-        } catch (error) {
-          // Window teardown can detach the debugger first.
-        }
-      },
-    };
-  } catch (error) {
-    return null;
+async function loginFeishuWeb(targetUrl) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持浏览器窗口');
   }
+
+  const session = getWechatSession();
+  if (!session) {
+    throw new Error('无法创建飞书登录会话');
+  }
+
+  const loginUrl = targetUrl || 'https://my.feishu.cn/';
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const win = new BrowserWindow({
+      width: 1040,
+      height: 860,
+      show: true,
+      title: '飞书网页登录 - 登录后关闭窗口即可',
+      webPreferences: {
+        session,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    const finish = async (error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        const destroyed = typeof win.isDestroyed === 'function' ? win.isDestroyed() : false;
+        if (win && typeof win.destroy === 'function' && !destroyed) {
+          win.destroy();
+        }
+      } catch (destroyError) {}
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(await checkFeishuLoginStatus());
+    };
+
+    const timer = setInterval(async () => {
+      try {
+        await checkFeishuLoginStatus();
+      } catch (error) {}
+    }, 1500);
+
+    win.on('closed', async () => {
+      clearInterval(timer);
+      finish();
+    });
+    win.loadURL(loginUrl).catch((error) => {
+      clearInterval(timer);
+      finish(error);
+    });
+  });
 }
 
 function getElectronShell() {
@@ -5002,11 +4547,13 @@ async function renderUrlToMarkdownWithElectron(url) {
     throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
   }
 
+  const wechatSession = getWechatSession();
   const win = new BrowserWindow({
     width: 1280,
     height: 1600,
     show: false,
     webPreferences: {
+      session: wechatSession || undefined,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -5021,20 +4568,46 @@ async function renderUrlToMarkdownWithElectron(url) {
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
-        const imageAssets = [];
-        const seenImageAssets = new Set();
-        const addImageAsset = (src, alt) => {
-          src = String(src || '').trim();
-          if (!src || seenImageAssets.has(src)) return '';
-          seenImageAssets.add(src);
-          imageAssets.push({ src, alt: alt || '图片' });
-          return '\\n\\n![' + (alt || '图片') + '](' + src + ')\\n\\n';
+        const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn/i.test(location.href)
+          || /扫码登录|登录飞书|Login Required/i.test(clean(document.body ? document.body.innerText || document.body.textContent || '' : ''));
+        const getPathToken = () => {
+          const match = String(location.pathname || '').match(/\\/(?:docx|wiki)\\/([^/?#]+)/i);
+          return match ? decodeURIComponent(match[1]) : '';
         };
+        const getFeishuClientVars = async () => {
+          const token = getPathToken();
+          const candidates = [
+            window.DATA && window.DATA.clientVars && window.DATA.clientVars.data,
+            window.DATA && token && window.DATA[token] && window.DATA[token].CLIENT_VARS && window.DATA[token].CLIENT_VARS.data,
+            window.SERVER_DATA && window.SERVER_DATA.clientVars && window.SERVER_DATA.clientVars.data,
+            window.SERVER_RUNTIME_DATA && window.SERVER_RUNTIME_DATA.clientVars && window.SERVER_RUNTIME_DATA.clientVars.data,
+          ].filter(Boolean);
+          const existing = candidates.find((item) => item && (item.block_map || item.blockMap));
+          if (existing) return existing;
+          if (!token || isLoginPage()) return null;
+          try {
+            const response = await fetch('/space/api/docx/pages/client_vars?id=' + encodeURIComponent(token), {
+              credentials: 'include',
+              headers: { accept: 'application/json, text/plain, */*' },
+            });
+            const json = await response.json();
+            if (json && json.code && json.code !== 0) return null;
+            return json && json.data ? json.data : json;
+          } catch (error) {
+            return null;
+          }
+        };
+        const imageAssets = [];
         const imageToMarkdown = (img) => {
-          const src = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-url') || '';
+          const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
           if (!src) return '';
+          const width = Number(img.naturalWidth || img.width || 0);
+          const height = Number(img.naturalHeight || img.height || 0);
+          const className = String(img.className || '');
+          if ((width && height && (width < 80 || height < 80)) || /avatar|portrait|icon|logo/i.test(className)) return '';
           const alt = img.alt || '图片';
-          return addImageAsset(src, alt);
+          imageAssets.push({ src, alt, width, height });
+          return '\\n\\n![' + alt + '](' + src + ')\\n\\n';
         };
         const tableToMarkdown = (table) => {
           const rows = Array.from(table.querySelectorAll('tr')).map((row) => {
@@ -5059,6 +4632,7 @@ async function renderUrlToMarkdownWithElectron(url) {
           if (!node) return '';
           if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
           if (node.nodeType !== Node.ELEMENT_NODE) return '';
+          if (node.closest && node.closest('#js_cmt_area')) return '';
           const tag = node.tagName.toLowerCase();
           if (tag === 'script' || tag === 'style' || tag === 'noscript') return '';
           if (tag === 'img') return imageToMarkdown(node);
@@ -5074,28 +4648,6 @@ async function renderUrlToMarkdownWithElectron(url) {
           if (['p', 'div', 'section', 'article', 'main', 'blockquote', 'tr'].includes(tag)) return '\\n' + childText + '\\n';
           if (tag === 'br') return '\\n';
           return childText;
-        };
-        const extractWechatComments = () => {
-          const comments = [];
-          const seen = new Set();
-          const area = document.querySelector('#js_cmt_area') || document;
-          const nodes = Array.from(area.querySelectorAll('[class*="comment"],[class*="cmt"],[id*="comment"],[id*="cmt"]'));
-          nodes.forEach((node) => {
-            const text = clean(node.innerText || node.textContent || '');
-            if (!text || text.length < 2 || text.length > 500) return;
-            const authorNode = node.querySelector('[class*="nickname"],[class*="nick"],[class*="author"],[class*="user"]');
-            const contentNode = node.querySelector('[class*="comment_content"],[class*="content"],[class*="message"]');
-            const author = clean(authorNode ? authorNode.innerText || authorNode.textContent || '' : '');
-            const content = clean(contentNode ? contentNode.innerText || contentNode.textContent || '' : text);
-            const key = author + '|' + content;
-            if (!content || seen.has(key)) return;
-            seen.add(key);
-            comments.push({ author, content });
-          });
-          if (!comments.length) return '';
-          return '\\n\\n## 评论区\\n\\n' + comments.slice(0, SOCIAL_COMMENT_LIMIT).map((item) => {
-            return '- ' + (item.author ? '**' + item.author + '**：' : '') + item.content;
-          }).join('\\n');
         };
         const seen = new Set();
         const collected = [];
@@ -5157,51 +4709,7 @@ async function renderUrlToMarkdownWithElectron(url) {
         const root = candidates.sort((a, b) => (b.innerText || '').length - (a.innerText || '').length)[0] || document.body;
         const byBlocks = clean(collected.join('\\n\\n'));
         const byRoot = clean(blockToMarkdown(root));
-        const baseMarkdown = byBlocks.length > byRoot.length * 0.6 ? byBlocks : byRoot;
-        const commentsMarkdown = extractWechatComments();
-        document.querySelectorAll('img').forEach((img) => {
-          imageToMarkdown(img);
-          const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset') || '';
-          srcset.split(',').forEach((item) => addImageAsset(item.trim().split(/\\s+/)[0], img.alt || '图片'));
-        });
-        document.querySelectorAll('source').forEach((node) => {
-          const srcset = node.getAttribute('srcset') || node.getAttribute('data-srcset') || '';
-          srcset.split(',').forEach((item) => addImageAsset(item.trim().split(/\\s+/)[0], '图片'));
-          addImageAsset(node.getAttribute('src'), '图片');
-        });
-        document.querySelectorAll('*').forEach((node) => {
-          try {
-            const bg = getComputedStyle(node).backgroundImage || '';
-            const matches = bg.match(/url\\(["']?([^"')]+)["']?\\)/g) || [];
-            matches.forEach((item) => {
-              const match = item.match(/url\\(["']?([^"')]+)["']?\\)/);
-              if (match) addImageAsset(match[1], '背景图');
-            });
-          } catch (error) {}
-        });
-        try {
-          performance.getEntriesByType('resource').forEach((entry) => {
-            if (/\\.(?:jpg|jpeg|png|webp)(?:[?#]|$)/i.test(entry.name || '')) {
-              addImageAsset(entry.name, '图片');
-            }
-          });
-        } catch (error) {}
-        const imageMarkdown = imageAssets
-          .map((asset, index) => '![' + (asset.alt || ('图片' + (index + 1))) + '](' + asset.src + ')')
-          .join('\\n\\n');
-        let markdown = commentsMarkdown && !/(^|\\n)##\\s+评论区\\b/.test(baseMarkdown)
-          ? clean(baseMarkdown + '\\n\\n' + commentsMarkdown)
-          : baseMarkdown;
-        if (imageMarkdown) {
-          const missingImageMarkdown = imageMarkdown
-            .split(/\\n\\n+/)
-            .filter((line) => {
-              const match = line.match(/\\(([^)]+)\\)/);
-              return match && !markdown.includes(match[1]);
-            })
-            .join('\\n\\n');
-          if (missingImageMarkdown) markdown = clean(markdown + '\\n\\n## 图片\\n\\n' + missingImageMarkdown);
-        }
+        const markdown = byBlocks.length > byRoot.length * 0.6 ? byBlocks : byRoot;
         const toDataUrl = (blob) => new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => resolve(String(reader.result || ''));
@@ -5227,11 +4735,24 @@ async function renderUrlToMarkdownWithElectron(url) {
         return {
           title: document.title || '',
           markdown,
+          needsLogin: isLoginPage(),
+          clientVars: await getFeishuClientVars(),
           assets: uniqueAssets,
         };
       })()
     `);
 
+    if (result && result.needsLogin) {
+      throw new Error('飞书页面需要先登录。请在插件设置中点击“登录飞书”，登录后再同步。');
+    }
+    if (result && result.clientVars) {
+      try {
+        const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(result.clientVars);
+        if (clientVarsMarkdown && clientVarsMarkdown.length > String(result.markdown || '').length * 0.6) {
+          result.markdown = appendMissingMarkdownImages(clientVarsMarkdown, result.markdown);
+        }
+      } catch (error) {}
+    }
     if (!result || !result.markdown || result.markdown.length < 20) {
       throw new Error('隐藏浏览器未读取到足够正文');
     }
@@ -5243,135 +4764,19 @@ async function renderUrlToMarkdownWithElectron(url) {
   }
 }
 
-async function renderWechatCommentsWithElectron(url) {
-  const BrowserWindow = getElectronBrowserWindow();
-  if (!BrowserWindow) {
-    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
-  }
-
-  const win = createSocialBrowserWindow(BrowserWindow, 'wechat', {
-    width: 1280,
-    height: 1400,
-    show: false,
-  });
-  const collector = createRenderedCommentCollector(win.webContents, 'wechat');
-
-  try {
-    const loaded = waitForWebContents(win.webContents, 18000);
-    await win.loadURL(url);
-    await loaded;
-    await settleRenderedPage(win.webContents);
-    let inPagePayload = null;
-    try {
-      inPagePayload = await win.webContents.executeJavaScript(getWechatInPageCommentFetchScript());
-    } catch (error) {
-      inPagePayload = null;
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 1200));
-    const comments = await win.webContents.executeJavaScript(`
-      (() => {
-        const clean = (text) => String(text || '')
-          .replace(/\\u00a0/g, ' ')
-          .replace(/\\s+/g, ' ')
-          .trim();
-        const area = document.querySelector('#js_cmt_area') || document;
-        const nodes = Array.from(area.querySelectorAll([
-          '[class*="comment"]',
-          '[class*="cmt"]',
-          '[id*="comment"]',
-          '[id*="cmt"]',
-          '.discuss_item',
-          '.reply_item'
-        ].join(',')));
-        const comments = [];
-        const seen = new Set();
-        nodes.forEach((node) => {
-          const fullText = clean(node.innerText || node.textContent || '');
-          if (!fullText || fullText.length < 2 || fullText.length > 800) return;
-          const authorNode = node.querySelector('[class*="nickname"],[class*="nick"],[class*="author"],[class*="user"],[class*="name"]');
-          const contentNode = node.querySelector('[class*="comment_content"],[class*="content"],[class*="message"],[class*="text"],.discuss_message_content');
-          const likeNode = node.querySelector('[class*="like"],[class*="praise"],[class*="agree"]');
-          const author = clean(authorNode ? authorNode.innerText || authorNode.textContent || '' : '');
-          let content = clean(contentNode ? contentNode.innerText || contentNode.textContent || '' : fullText);
-          if (author && content.startsWith(author)) content = clean(content.slice(author.length));
-          content = content.replace(/^(精选留言|留言|回复|赞)\\s*/g, '').trim();
-          const likes = clean(likeNode ? likeNode.innerText || likeNode.textContent || '' : '').replace(/[^0-9万\\.]/g, '');
-          const key = author + '|' + content;
-          if (!content || content.length < 2 || seen.has(key)) return;
-          seen.add(key);
-          comments.push({ author, content, likes });
-        });
-        return comments.slice(0, SOCIAL_COMMENT_LIMIT);
-      })()
-    `);
-    const merged = [];
-    const seen = new Set();
-    (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-    extractWechatCommentsFromPayload(inPagePayload, 50).forEach((comment) => pushSocialComment(merged, seen, comment));
-    (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-    if (shouldRetryWechatCommentsWithVisibleReader(inPagePayload, merged)) {
-      const visibleComments = await renderWechatCommentsWithVisibleReader(url);
-      visibleComments.forEach((comment) => pushSocialComment(merged, seen, comment));
-    }
-    return merged.slice(0, SOCIAL_COMMENT_LIMIT);
-  } finally {
-    if (collector) collector.dispose();
-    if (win && !win.isDestroyed()) {
-      win.destroy();
-    }
-  }
-}
-
-async function renderWechatCommentsWithVisibleReader(url) {
-  const BrowserWindow = getElectronBrowserWindow();
-  if (!BrowserWindow) return [];
-
-  const win = createSocialBrowserWindow(BrowserWindow, 'wechat', {
-    width: 1180,
-    height: 920,
-    show: true,
-  });
-  const collector = createRenderedCommentCollector(win.webContents, 'wechat');
-  const merged = [];
-  const seen = new Set();
-
-  try {
-    const loaded = waitForWebContents(win.webContents, 30000);
-    await win.loadURL(url);
-    await loaded;
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      let payload = null;
-      try {
-        await settleRenderedPage(win.webContents);
-        payload = await win.webContents.executeJavaScript(getWechatInPageCommentFetchScript());
-      } catch (error) {
-        payload = null;
-      }
-      (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-      extractWechatCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT).forEach((comment) => pushSocialComment(merged, seen, comment));
-      if (merged.length) return merged.slice(0, SOCIAL_COMMENT_LIMIT);
-      await new Promise((resolve) => window.setTimeout(resolve, 5000));
-    }
-    return merged.slice(0, SOCIAL_COMMENT_LIMIT);
-  } finally {
-    if (collector) collector.dispose();
-    if (win && !win.isDestroyed()) {
-      win.destroy();
-    }
-  }
-}
-
 async function renderSocialMediaUrlsWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
   }
 
+  const wechatSession = getWechatSession();
   const win = new BrowserWindow({
     width: 1280,
     height: 900,
     show: false,
     webPreferences: {
+      session: wechatSession || undefined,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -5430,451 +4835,6 @@ async function renderSocialMediaUrlWithElectron(url) {
   return urls[0] || '';
 }
 
-function getXiaohongshuCommentExpansionScript() {
-  return `
-    (async () => {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const visible = (node) => {
-        if (!node) return false;
-        const rect = node.getBoundingClientRect();
-        const style = window.getComputedStyle(node);
-        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      };
-      const clickables = () => Array.from(document.querySelectorAll('button, [role="button"], a, span, div'))
-        .filter((node) => {
-          const text = String(node.innerText || node.textContent || '').replace(/\\s+/g, '');
-          if (!text || text.length > 40 || !visible(node)) return false;
-          return /^(评论|查看评论|全部评论|更多评论)$|展开|更多回复|查看.*回复|全部回复|展开.*评论|展开.*条|共\\d+条回复|\\d+条回复|more/i.test(text);
-        });
-      const scrollables = () => Array.from(document.querySelectorAll('[class*="comment"], [class*="comments"], [class*="reply"], [class*="scroll"], [class*="list"], main, body, html'))
-        .filter((node) => {
-          try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
-        });
-      let stableRounds = 0;
-      let lastTextLength = 0;
-      for (let round = 0; round < 24; round += 1) {
-        let clicked = 0;
-        for (const node of clickables().slice(0, 12)) {
-          try {
-            node.scrollIntoView({ block: 'center', inline: 'nearest' });
-            await sleep(120);
-            node.click();
-            clicked += 1;
-            await sleep(350);
-          } catch (error) {}
-        }
-        window.scrollBy(0, Math.max(450, Math.floor(window.innerHeight * 0.75)));
-        scrollables().forEach((node) => {
-          try { node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight); } catch (error) {}
-        });
-        await sleep(700);
-        const textLength = String(document.body ? document.body.innerText || '' : '').length;
-        stableRounds = clicked === 0 && Math.abs(textLength - lastTextLength) < 20 ? stableRounds + 1 : 0;
-        lastTextLength = textLength;
-        if (stableRounds >= 4) break;
-      }
-      return true;
-    })()
-  `;
-}
-
-function getXiaohongshuInPageCommentFetchScript(url = '') {
-  return `
-    (async () => {
-      const SOCIAL_COMMENT_LIMIT = ${SOCIAL_COMMENT_LIMIT};
-      const inputUrl = ${JSON.stringify(cleanDisplayUrl(url))};
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-      const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
-      const safeParseUrl = (value) => {
-        try { return new URL(value || location.href, location.href); } catch (error) { return null; }
-      };
-      const readSearch = (key) => {
-        const urls = [safeParseUrl(location.href), safeParseUrl(inputUrl)].filter(Boolean);
-        for (const parsed of urls) {
-          const value = parsed.searchParams.get(key);
-          if (value) return value;
-        }
-        return '';
-      };
-      const pageSource = () => {
-        try {
-          return [
-            document.documentElement ? document.documentElement.innerHTML || '' : '',
-            JSON.stringify(window.__INITIAL_STATE__ || {}),
-            JSON.stringify(window.__APOLLO_STATE__ || {}),
-          ].join('\\n');
-        } catch (error) {
-          return document.documentElement ? document.documentElement.innerHTML || '' : '';
-        }
-      };
-      const readNoteId = () => {
-        const urls = [safeParseUrl(location.href), safeParseUrl(inputUrl)].filter(Boolean);
-        for (const parsed of urls) {
-          const match = parsed.pathname.match(/\\/(?:explore|discovery\\/item|item)\\/([0-9a-zA-Z]+)/i);
-          if (match && match[1]) return match[1];
-        }
-        const source = pageSource();
-        const patterns = [
-          /["']note[_-]?id["']\\s*:\\s*["']([0-9a-zA-Z]+)["']/i,
-          /["']noteId["']\\s*:\\s*["']([0-9a-zA-Z]+)["']/i,
-          /noteDetailMap["']?\\s*:\\s*\\{\\s*["']([0-9a-zA-Z]+)["']/i
-        ];
-        for (const pattern of patterns) {
-          const match = source.match(pattern);
-          if (match && match[1]) return match[1];
-        }
-        return '';
-      };
-      const readXsecToken = () => {
-        const direct = readSearch('xsec_token');
-        if (direct) return direct;
-        const source = pageSource();
-        const match = source.match(/["']xsec_token["']\\s*:\\s*["']([^"']+)["']/i)
-          || source.match(/["']xsecToken["']\\s*:\\s*["']([^"']+)["']/i);
-        return match && match[1] ? clean(match[1]) : '';
-      };
-      const readField = (value, keys) => {
-        for (const key of keys) {
-          if (value && Object.prototype.hasOwnProperty.call(value, key) && value[key] !== undefined && value[key] !== null) {
-            return value[key];
-          }
-        }
-        return undefined;
-      };
-      const findCommentArrays = (value, arrays = [], depth = 0) => {
-        if (!value || depth > 6) return arrays;
-        if (Array.isArray(value)) {
-          if (value.some((item) => item && typeof item === 'object' && readField(item, ['id', 'comment_id', 'content', 'commentContent']) !== undefined)) {
-            arrays.push(value);
-          }
-          value.forEach((item) => findCommentArrays(item, arrays, depth + 1));
-          return arrays;
-        }
-        if (typeof value !== 'object') return arrays;
-        Object.keys(value).forEach((key) => {
-          if (/comment|cmt|reply|list|items|data/i.test(key)) findCommentArrays(value[key], arrays, depth + 1);
-        });
-        return arrays;
-      };
-      const collectRootComments = (payload) => {
-        const roots = [];
-        const seen = new Set();
-        findCommentArrays(payload).forEach((items) => {
-          items.forEach((item) => {
-            if (!item || typeof item !== 'object') return;
-            const content = readField(item, ['content', 'text', 'commentContent', 'comment_content']);
-            const id = readField(item, ['id', 'comment_id', 'commentId']);
-            if (!id || !content || seen.has(String(id))) return;
-            seen.add(String(id));
-            roots.push(item);
-          });
-        });
-        return roots;
-      };
-      const collectPayloadComments = (payload) => {
-        const roots = [];
-        const seen = new Set();
-        findCommentArrays(payload).forEach((items) => {
-          items.forEach((item) => {
-            if (!item || typeof item !== 'object') return;
-            const content = readField(item, ['content', 'text', 'commentContent', 'comment_content']);
-            const id = readField(item, ['id', 'comment_id', 'commentId']);
-            const key = String(id || content || '');
-            if (!content || !key || seen.has(key)) return;
-            seen.add(key);
-            roots.push(item);
-          });
-        });
-        return roots;
-      };
-      const getCursor = (payload) => {
-        const data = payload && (payload.data || payload.result || payload);
-        return String(readField(data || {}, ['cursor', 'next_cursor', 'nextCursor']) || '');
-      };
-      const hasMore = (payload) => {
-        const data = payload && (payload.data || payload.result || payload);
-        const value = readField(data || {}, ['has_more', 'hasMore', 'has_next', 'hasNext']);
-        return value === true || value === 1 || value === 'true' || value === '1';
-      };
-      const requestJson = async (path, params) => {
-        const query = new URLSearchParams();
-        Object.entries(params || {}).forEach(([key, value]) => {
-          if (value !== undefined && value !== null && String(value) !== '') query.set(key, String(value));
-        });
-        const response = await fetch(path + '?' + query.toString(), {
-          method: 'GET',
-          credentials: 'include',
-          headers: {
-            Accept: 'application/json, text/plain, */*',
-            'X-Requested-With': 'XMLHttpRequest'
-          }
-        });
-        const text = await response.text();
-        try { return JSON.parse(text); } catch (error) { return text; }
-      };
-
-      const noteId = readNoteId();
-      if (!noteId) return [];
-      const xsecToken = readXsecToken();
-      const baseParams = {
-        note_id: noteId,
-        xsec_token: xsecToken,
-        image_formats: 'jpg,webp,avif'
-      };
-      const payloads = [];
-      const rootComments = [];
-      let cursor = '';
-      for (let page = 0; page < 3 && rootComments.length < SOCIAL_COMMENT_LIMIT; page += 1) {
-        let payload = null;
-        try {
-          payload = await requestJson('/api/sns/web/v2/comment/page', {
-            ...baseParams,
-            cursor,
-            top_comment_id: '',
-          });
-        } catch (error) {
-          break;
-        }
-        if (!payload) break;
-        const roots = collectRootComments(payload);
-        payloads.push({ data: { comments: roots } });
-        roots.forEach((comment) => {
-          if (rootComments.length < SOCIAL_COMMENT_LIMIT) rootComments.push(comment);
-        });
-        const nextCursor = getCursor(payload);
-        if (!hasMore(payload) || !nextCursor || nextCursor === cursor) break;
-        cursor = nextCursor;
-        await sleep(350);
-      }
-
-      for (const comment of rootComments.slice(0, SOCIAL_COMMENT_LIMIT)) {
-        const rootCommentId = readField(comment, ['id', 'comment_id', 'commentId']);
-        const replyCount = Number(readField(comment, ['sub_comment_count', 'subCommentCount', 'sub_comment_num', 'reply_count', 'replyCount']) || 0);
-        const inlineReplies = readField(comment, ['sub_comments', 'subComments', 'reply_list', 'replyList']);
-        const inlineReplyCount = Array.isArray(inlineReplies) ? inlineReplies.length : 0;
-        const hasHiddenReplies = replyCount > inlineReplyCount
-          || readField(comment, ['sub_comment_cursor', 'subCommentCursor', 'sub_comment_has_more', 'subCommentHasMore']) !== undefined;
-        if (!rootCommentId || !hasHiddenReplies) continue;
-        let subCursor = '';
-        for (let page = 0; page < 3; page += 1) {
-          let payload = null;
-          try {
-            payload = await requestJson('/api/sns/web/v2/comment/sub/page', {
-              ...baseParams,
-              root_comment_id: rootCommentId,
-              cursor: subCursor,
-              num: 10,
-            });
-          } catch (error) {
-            break;
-          }
-          if (!payload) break;
-          const replies = collectPayloadComments(payload)
-            .filter((reply) => String(readField(reply, ['id', 'comment_id', 'commentId'])) !== String(rootCommentId));
-          if (replies.length) {
-            const currentReplies = Array.isArray(comment.sub_comments) ? comment.sub_comments : [];
-            const seenReplyIds = new Set(currentReplies.map((reply) => String(readField(reply, ['id', 'comment_id', 'commentId']) || readField(reply, ['content', 'text', 'commentContent', 'comment_content']) || '')));
-            replies.forEach((reply) => {
-              const replyKey = String(readField(reply, ['id', 'comment_id', 'commentId']) || readField(reply, ['content', 'text', 'commentContent', 'comment_content']) || '');
-              if (!replyKey || seenReplyIds.has(replyKey)) return;
-              seenReplyIds.add(replyKey);
-              currentReplies.push(reply);
-            });
-            comment.sub_comments = currentReplies;
-          }
-          const nextCursor = getCursor(payload);
-          if (!hasMore(payload) || !nextCursor || nextCursor === subCursor) break;
-          subCursor = nextCursor;
-          await sleep(250);
-        }
-      }
-      return payloads;
-    })()
-  `;
-}
-
-function getWechatInPageCommentFetchScript() {
-  return `
-    (async () => {
-      const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
-      const escapeRegExp = (text) => String(text || '').replace(/[.*+?^\\$()|[\\]\\\\]/g, '\\\\$&');
-      const readVar = (names) => {
-        for (const name of names) {
-          try {
-            const value = name.split('.').reduce((obj, key) => (obj ? obj[key] : undefined), window);
-            if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
-          } catch (error) {}
-        }
-        const source = Array.from(document.scripts || []).map((script) => script.textContent || '').join('\\n');
-        for (const name of names) {
-          const key = name.replace(/^window\\./, '');
-          const escaped = escapeRegExp(key);
-          const patterns = [
-            new RegExp('(?:var\\\\s+)?' + escaped + '\\\\s*=\\\\s*"([^"]+)"', 'i'),
-            new RegExp("(?:var\\\\s+)?" + escaped + "\\\\s*=\\\\s*'([^']+)'", 'i'),
-            new RegExp('(?:var\\\\s+)?' + escaped + '\\\\s*=\\\\s*([^;,\\\\n]+)', 'i'),
-          ];
-          for (const pattern of patterns) {
-            const match = source.match(pattern);
-            if (match && match[1]) return clean(match[1].replace(/[\"']/g, ''));
-          }
-        }
-        return '';
-      };
-      const fromUrl = new URLSearchParams(location.search || '');
-      const params = {
-        action: 'getcomment',
-        scene: '0',
-        __biz: fromUrl.get('__biz') || readVar(['biz', '__biz']),
-        appmsgid: fromUrl.get('mid') || readVar(['mid', 'appmsgid']),
-        idx: fromUrl.get('idx') || readVar(['idx']) || '1',
-        comment_id: readVar(['comment_id', 'commentId']),
-        offset: '0',
-        limit: '50',
-        send_time: '',
-        sessionid: '0',
-        enterid: String(Date.now()),
-        ascene: '0',
-        fasttmpl_type: '0',
-        fasttmpl_fullversion: '0',
-        fasttmpl_flag: '0',
-        appmsg_token: readVar(['appmsg_token', 'window.appmsg_token']),
-        x5: '0',
-        f: 'json',
-        r: String(Math.random())
-      };
-      if (!params.comment_id) return null;
-      const query = new URLSearchParams(params);
-      const response = await fetch('/mp/appmsg_comment?' + query.toString(), {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          Accept: 'application/json, text/javascript, */*; q=0.01',
-          'X-Requested-With': 'XMLHttpRequest'
-        }
-      });
-      const text = await response.text();
-      try { return JSON.parse(text); } catch (error) { return text; }
-    })()
-  `;
-}
-
-function getXiaohongshuDomCommentExtractScript() {
-  return `
-    (() => {
-      const SOCIAL_COMMENT_LIMIT = ${SOCIAL_COMMENT_LIMIT};
-      const clean = (text) => String(text || '')
-        .replace(/\\u00a0/g, ' ')
-        .replace(/\\s+/g, ' ')
-        .trim();
-      const pickText = (root, selectors) => {
-        for (const selector of selectors) {
-          const node = root.querySelector(selector);
-          const text = clean(node ? node.innerText || node.textContent || '' : '');
-          if (text) return text;
-        }
-        return '';
-      };
-      const nodes = Array.from(document.querySelectorAll([
-        '[class*="comment-item"]',
-        '[class*="commentItem"]',
-        '[class*="comment-card"]',
-        '[class*="commentCard"]',
-        '[class*="comment-container"]',
-        '[class*="commentContainer"]',
-        '[class*="reply-item"]',
-        '[class*="replyItem"]',
-        '[class*="note-text"]',
-        '[data-e2e*="comment"]'
-      ].join(',')));
-      const comments = [];
-      const seen = new Set();
-      nodes.forEach((node) => {
-        const fullText = clean(node.innerText || node.textContent || '');
-        if (!fullText || fullText.length < 2 || fullText.length > 1000) return;
-        const author = pickText(node, [
-          '[class*="user-name"]',
-          '[class*="userName"]',
-          '[class*="nickname"]',
-          '[class*="nick"]',
-          '[class*="author"]',
-          '[class*="name"]'
-        ]);
-        let content = pickText(node, [
-          '[class*="comment-content"]',
-          '[class*="commentContent"]',
-          '[class*="note-text"]',
-          '[class*="content"]',
-          '[class*="text"]',
-          '[class*="desc"]'
-        ]);
-        if (!content || content === author) {
-          content = fullText;
-          if (author && content.startsWith(author)) content = clean(content.slice(author.length));
-        }
-        content = content
-          .replace(/^(回复|赞|点赞|展开|收起|更多回复|查看回复)\\s*/g, '')
-          .replace(/\\s*(回复|赞|点赞|展开|收起|更多回复|查看回复)\\s*$/g, '')
-          .trim();
-        const likes = pickText(node, [
-          '[class*="like-count"]',
-          '[class*="likeCount"]',
-          '[class*="likes"]',
-          '[class*="praise"]'
-        ]).replace(/[^0-9万\\.]/g, '');
-        const key = author + '|' + content;
-        if (!content || content.length < 2 || seen.has(key)) return;
-        seen.add(key);
-        comments.push({ author, content, likes });
-      });
-      return comments.slice(0, SOCIAL_COMMENT_LIMIT);
-    })()
-  `;
-}
-
-async function renderXiaohongshuCommentsWithElectron(url) {
-  const BrowserWindow = getElectronBrowserWindow();
-  if (!BrowserWindow) {
-    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
-  }
-
-  const win = createSocialBrowserWindow(BrowserWindow, 'xiaohongshu', {
-    width: 1280,
-    height: 1200,
-    show: false,
-  });
-  const collector = createRenderedCommentCollector(win.webContents, 'xiaohongshu');
-
-  try {
-    const loaded = waitForWebContents(win.webContents, 18000);
-    await win.loadURL(url);
-    await loaded;
-    await settleRenderedPage(win.webContents);
-    let inPagePayloads = [];
-    try {
-      const payload = await win.webContents.executeJavaScript(getXiaohongshuInPageCommentFetchScript(url));
-      inPagePayloads = Array.isArray(payload) ? payload : (payload ? [payload] : []);
-    } catch (error) {
-      inPagePayloads = [];
-    }
-    await win.webContents.executeJavaScript(getXiaohongshuCommentExpansionScript());
-    const comments = await win.webContents.executeJavaScript(getXiaohongshuDomCommentExtractScript());
-    const merged = [];
-    const seen = new Set();
-    (collector ? collector.getComments() : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-    inPagePayloads.forEach((payload) => {
-      extractXiaohongshuCommentsFromPayload(payload, SOCIAL_COMMENT_LIMIT).forEach((comment) => pushSocialComment(merged, seen, comment));
-    });
-    (Array.isArray(comments) ? comments : []).forEach((comment) => pushSocialComment(merged, seen, comment));
-    return merged.slice(0, SOCIAL_COMMENT_LIMIT);
-  } finally {
-    if (collector) collector.dispose();
-    if (win && !win.isDestroyed()) {
-      win.destroy();
-    }
-  }
-}
-
 function decodeJsonStringLiteral(value) {
   try {
     return JSON.parse(`"${String(value || '').replace(/"/g, '\\"')}"`);
@@ -5885,6 +4845,7 @@ function decodeJsonStringLiteral(value) {
 
 function slugifyMarkdownHeading(text) {
   return String(text || '')
+    .replace(/^#{1,6}\s+/, '')
     .replace(/\*\*/g, '')
     .trim()
     .toLowerCase()
@@ -5936,19 +4897,8 @@ function collectFeishuImageUrls(source) {
     'origin_url',
     'downloadUrl',
     'download_url',
-    'previewUrl',
-    'preview_url',
-    'thumbnail',
-    'thumbnailUrl',
-    'thumbnail_url',
-    'largeUrl',
-    'large_url',
-    'srcset',
   ]).forEach((url) => {
     if (isLikelyImageUrl(url)) pushUniqueUrl(urls, url);
-    if (String(url || '').includes(',')) {
-      String(url).split(',').forEach((item) => pushUniqueUrl(urls, item.trim().split(/\s+/)[0]));
-    }
   });
   return urls;
 }
@@ -6047,6 +4997,284 @@ function extractFeishuMarkdownFromHtml(html) {
   return markdown;
 }
 
+function unwrapFeishuClientVarsPayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.block_map || payload.blockMap) return payload;
+  if (payload.data && typeof payload.data === 'object') return unwrapFeishuClientVarsPayload(payload.data);
+  if (payload.CLIENT_VARS && typeof payload.CLIENT_VARS === 'object') return unwrapFeishuClientVarsPayload(payload.CLIENT_VARS);
+  if (payload.clientVars && typeof payload.clientVars === 'object') return unwrapFeishuClientVarsPayload(payload.clientVars);
+  return null;
+}
+
+function collectFeishuRichText(value, output = [], key = '') {
+  if (value === undefined || value === null) return output;
+  const normalizedKey = String(key || '').toLowerCase();
+  if (typeof value === 'string') {
+    if (['text', 'content', 'title', 'name', 'plain_text', 'plainText'].some((item) => normalizedKey === item.toLowerCase())) {
+      const text = value.replace(/\s+/g, ' ').trim();
+      if (text) output.push(text);
+    }
+    return output;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectFeishuRichText(item, output, key));
+    return output;
+  }
+  if (typeof value !== 'object') return output;
+
+  if (['text', 'content', 'title', 'name', 'plain_text', 'plaintext'].includes(normalizedKey)) {
+    Object.values(value).forEach((item) => {
+      if (typeof item === 'string') {
+        const text = item.replace(/\s+/g, ' ').trim();
+        if (text) output.push(text);
+      }
+    });
+  }
+
+  if (value.initialAttributedTexts && typeof value.initialAttributedTexts === 'object') {
+    collectFeishuRichText(value.initialAttributedTexts, output, 'text');
+  }
+  if (value.text && typeof value.text === 'object' && value.text.initialAttributedTexts) {
+    collectFeishuRichText(value.text, output, 'text');
+  }
+  if (value.nodes && Array.isArray(value.nodes)) {
+    value.nodes.forEach((node) => collectFeishuRichText(node, output, 'text'));
+  }
+
+  Object.entries(value).forEach(([childKey, childValue]) => {
+    if (['id', 'token', 'parent_id', 'parentId', 'children', 'type', 'block_type'].includes(childKey)) return;
+    collectFeishuRichText(childValue, output, childKey);
+  });
+  return output;
+}
+
+function getFeishuBlockType(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  return String(data.type || data.block_type || block.type || block.block_type || '').toLowerCase();
+}
+
+function getFeishuBlockText(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  return Array.from(new Set(collectFeishuRichText(data)))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function collectFeishuTableRowsFromValue(value, rows = []) {
+  if (!value) return rows;
+  if (Array.isArray(value)) {
+    if (value.length && value.every((item) => Array.isArray(item) || (item && typeof item === 'object' && Array.isArray(item.cells)))) {
+      value.forEach((row) => {
+        const cells = Array.isArray(row) ? row : row.cells;
+        const next = cells.map((cell) => getFeishuBlockText(cell) || collectFeishuRichText(cell).join(' ')).map((cell) => String(cell || '').trim());
+        if (next.some(Boolean)) rows.push(next);
+      });
+      return rows;
+    }
+    value.forEach((item) => collectFeishuTableRowsFromValue(item, rows));
+    return rows;
+  }
+  if (typeof value !== 'object') return rows;
+
+  const directRows = value.rows || value.row_list || value.rowList;
+  if (Array.isArray(directRows)) {
+    collectFeishuTableRowsFromValue(directRows, rows);
+  }
+
+  const cells = value.cells || value.cell_list || value.cellList;
+  if (Array.isArray(cells) && cells.length) {
+    const matrix = [];
+    cells.forEach((cell, index) => {
+      const rowIndex = Number(cell.row || cell.rowIndex || cell.row_index || cell.r || 0);
+      const colIndex = Number(cell.col || cell.colIndex || cell.col_index || cell.c || index);
+      if (!matrix[rowIndex]) matrix[rowIndex] = [];
+      matrix[rowIndex][colIndex] = getFeishuBlockText(cell) || collectFeishuRichText(cell).join(' ');
+    });
+    matrix.filter(Boolean).forEach((row) => {
+      const normalized = row.map((cell) => String(cell || '').trim());
+      if (normalized.some(Boolean)) rows.push(normalized);
+    });
+  }
+  return rows;
+}
+
+function formatMarkdownTableRows(rows) {
+  const normalizedSource = (rows || []).filter((row) => Array.isArray(row) && row.some(Boolean));
+  if (!normalizedSource.length) return '';
+  const columnCount = Math.max(...normalizedSource.map((row) => row.length));
+  const normalizedRows = normalizedSource.map((row) => {
+    const next = row.map((cell) => String(cell || '').replace(/\|/g, '\\|').trim()).slice(0, columnCount);
+    while (next.length < columnCount) next.push('');
+    return next;
+  });
+  const header = normalizedRows[0];
+  return [
+    `| ${header.join(' | ')} |`,
+    `| ${header.map(() => '---').join(' | ')} |`,
+    ...normalizedRows.slice(1).map((row) => `| ${row.join(' | ')} |`),
+  ].join('\n');
+}
+
+function formatFeishuClientVarTableBlock(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const rows = collectFeishuTableRowsFromValue(data, []);
+  if (rows.length < 2) return '';
+  return formatMarkdownTableRows(rows);
+}
+
+function collectFeishuBlockImageUrls(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const urls = [];
+  collectFeishuImageUrls(JSON.stringify(data || {})).forEach((url) => pushUniqueUrl(urls, url));
+  collectJsonStringValues(JSON.stringify(data || {}), [
+    'origin_url',
+    'originUrl',
+    'preview_url',
+    'previewUrl',
+    'download_url',
+    'downloadUrl',
+    'src',
+    'url',
+  ]).forEach((url) => {
+    if (isLikelyImageUrl(url)) pushUniqueUrl(urls, url);
+  });
+  return urls;
+}
+
+function getFeishuHeadingLevelFromBlock(block, type) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const headingMatch = String(type || '').match(/heading[_-]?([1-6])|h([1-6])/);
+  if (headingMatch) return Number(headingMatch[1] || headingMatch[2] || 1);
+  const numericLevel = Number(data.heading_level || data.headingLevel || data.level || data.text_level || data.textLevel || 0);
+  return numericLevel >= 1 && numericLevel <= 6 ? numericLevel : 0;
+}
+
+function formatFeishuClientVarBlock(block) {
+  const text = getFeishuBlockText(block);
+  const type = getFeishuBlockType(block);
+
+  if (/table|sheet|grid/i.test(type)) {
+    const table = formatFeishuClientVarTableBlock(block);
+    if (table) return table;
+  }
+
+  if (/image|picture|diagram/i.test(type)) {
+    const imageUrls = collectFeishuBlockImageUrls(block);
+    if (imageUrls.length) {
+      return imageUrls.map((url, index) => `![图片${index ? ` ${index + 1}` : ''}](${url})`).join('\n\n');
+    }
+  }
+
+  if (!text || shouldDropFeishuLine(text, '')) return '';
+  const headingLevel = getFeishuHeadingLevelFromBlock(block, type);
+  if (headingLevel) {
+    const level = headingLevel;
+    return `${'#'.repeat(Math.max(1, Math.min(6, level)))} ${text}`;
+  }
+  if (/bullet|unordered|todo|check/.test(type)) return `- ${text}`;
+  if (/ordered|number/.test(type)) return `1. ${text}`;
+  return formatFeishuHeadingLine(text);
+}
+
+function extractFeishuMarkdownFromClientVars(payload) {
+  const clientVars = unwrapFeishuClientVarsPayload(payload);
+  const blockMap = clientVars && (clientVars.block_map || clientVars.blockMap);
+  if (!blockMap || typeof blockMap !== 'object') {
+    throw new Error('飞书 client_vars 中未找到 block_map');
+  }
+
+  const sequence = Array.isArray(clientVars.block_sequence)
+    ? clientVars.block_sequence
+    : (Array.isArray(clientVars.blockSequence) ? clientVars.blockSequence : Object.keys(blockMap));
+  const seen = new Set();
+  const lines = [];
+  sequence.forEach((id) => {
+    const block = blockMap[id];
+    if (!block) return;
+    const type = getFeishuBlockType(block);
+    if (type === 'page' || type === 'root') return;
+    const line = formatFeishuClientVarBlock(block);
+    if (!line || seen.has(line)) return;
+    seen.add(line);
+    lines.push(line);
+  });
+
+  const markdown = appendMarkdownToc(lines.join('\n\n').trim());
+  if (markdown.length < 20) {
+    throw new Error('飞书 client_vars 中未提取到正文');
+  }
+  return markdown;
+}
+
+function appendMissingMarkdownImages(markdown, fallbackMarkdown = '') {
+  const source = String(markdown || '').trim();
+  const existing = new Set();
+  const collect = (text) => {
+    const pattern = /!\[[^\]]*]\(([^)]+)\)/g;
+    let match;
+    while ((match = pattern.exec(String(text || '')))) {
+      if (match[1]) existing.add(match[1]);
+    }
+  };
+  collect(source);
+  const additions = [];
+  const pattern = /!\[([^\]]*)]\(([^)]+)\)/g;
+  let match;
+  while ((match = pattern.exec(String(fallbackMarkdown || '')))) {
+    const alt = match[1] || '图片';
+    const url = match[2] || '';
+    if (!url || existing.has(url) || !isLikelyImageUrl(url)) continue;
+    existing.add(url);
+    additions.push(`![${alt || '图片'}](${url})`);
+  }
+  return additions.length ? `${source}\n\n${additions.join('\n\n')}`.trim() : source;
+}
+
+function extractFeishuDocumentTokenFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const match = parsed.pathname.match(/\/(?:docx|wiki)\/([^/?#]+)/i);
+    return match ? decodeURIComponent(match[1]) : '';
+  } catch (error) {
+    const match = String(url || '').match(/\/(?:docx|wiki)\/([^/?#]+)/i);
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+}
+
+function buildFeishuClientVarsApiUrl(url) {
+  const token = extractFeishuDocumentTokenFromUrl(url);
+  if (!token) return '';
+  const parsed = new URL(String(url || ''));
+  parsed.pathname = '/space/api/docx/pages/client_vars';
+  parsed.search = `?id=${encodeURIComponent(token)}`;
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function getFeishuRequestHeaders(url) {
+  return {
+    Accept: 'application/json, text/plain, */*',
+    Referer: String(url || ''),
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36',
+  };
+}
+
+async function fetchFeishuClientVarsMarkdown(url) {
+  const apiUrl = buildFeishuClientVarsApiUrl(url);
+  if (!apiUrl) throw new Error('飞书链接中未找到文档 token');
+  const response = await requestUrl({
+    url: apiUrl,
+    method: 'GET',
+    headers: getFeishuRequestHeaders(url),
+  });
+  const payload = response.json || JSON.parse(response.text || '{}');
+  if (payload && payload.code && payload.code !== 0) {
+    throw new Error(payload.msg || `飞书 client_vars 接口返回 code ${payload.code}`);
+  }
+  return extractFeishuMarkdownFromClientVars(payload);
+}
+
 function yamlValue(value) {
   if (value === undefined || value === null) return '';
   if (Array.isArray(value)) {
@@ -6056,27 +5284,6 @@ function yamlValue(value) {
       .join(', ');
   }
   return String(value).replace(/\r?\n/g, ' ').trim();
-}
-
-function yamlScalar(value) {
-  const text = String(value || '').replace(/\r?\n/g, ' ').trim();
-  if (!text) return '';
-  if (/[:#\[\]{},&*!|>'"%@`]/.test(text) || /^\s|\s$|^(true|false|null|yes|no|on|off)$/i.test(text)) {
-    return JSON.stringify(text);
-  }
-  return text;
-}
-
-function buildFrontmatterLine(key, value) {
-  if (Array.isArray(value)) {
-    const items = value
-      .map((item) => yamlScalar(item))
-      .filter(Boolean);
-    if (!items.length) return '';
-    return `${key}:\n${items.map((item) => `  - ${item}`).join('\n')}`;
-  }
-  const scalar = yamlValue(value);
-  return scalar ? `${key}: ${scalar}` : '';
 }
 
 function buildFrontmatter(lines) {
@@ -6143,7 +5350,7 @@ function getRecordSourceLabel(record, metadata = {}) {
   return normalizedPlatform || normalizedCategory || '';
 }
 
-function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS, options = {}) {
+function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
   const fields = {
@@ -6191,6 +5398,8 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
     'created_at',
     'synced_at',
     'source',
+    'description',
+    'keywords',
     'status',
     'fetch_status',
     'conversion_status',
@@ -6203,24 +5412,15 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
   ];
   const selectedFields = parseNotePropertyFields(propertyFields);
   const fieldOrder = selectedFields.length ? selectedFields : (defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder);
-  const blockedFields = options.includeAiMetadataFields === false ? new Set(['description', 'keywords']) : new Set();
   const lines = fieldOrder
     .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
-    .filter((key) => !blockedFields.has(key))
     .filter((key) => yamlValue(fields[key]))
-    .map((key) => buildFrontmatterLine(key, fields[key]))
-    .filter(Boolean);
+    .map((key) => `${key}: ${yamlValue(fields[key])}`);
 
   return buildFrontmatter(lines);
 }
 
-function buildMarkdownForRecord({
-  record,
-  title,
-  syncedAt,
-  propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS,
-  includeAiMetadataFields = true,
-}) {
+function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS }) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
   const audioFileName = metadata.audioFileName || `${title}.mp3`;
@@ -6249,14 +5449,11 @@ function buildMarkdownForRecord({
     const errorText = metadata.transcriptionError || metadata.aiError || '';
     const transcription = metadata.transcription
       || (metadata.transcriptionStatus === 'failed' ? `语音转写失败。${errorText}` : '未开启语音转写。');
-    const commentsMarkdown = buildSocialCommentsMarkdown(metadata.comments || []);
     body = [
       '## 转写全文',
       '',
       transcription,
       '',
-      commentsMarkdown,
-      commentsMarkdown ? '' : '',
       '## 录音文件',
       '',
       `![[${audioFileName}]]`,
@@ -6268,7 +5465,7 @@ function buildMarkdownForRecord({
     throw new Error(`Unsupported record type: ${record.type}`);
   }
 
-  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields, { includeAiMetadataFields });
+  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
   return `${frontmatter}\n${body}`;
 }
 
@@ -6393,14 +5590,6 @@ function isAudioVideoTranscriptionIncompleteRecord(record) {
   return ['pending', 'queued', 'processing', 'failed'].includes(status);
 }
 
-function isMobileSafeRecord(record) {
-  const type = String(record && record.type || '').toLowerCase();
-  const metadata = (record && record.metadata) || {};
-  if (MOBILE_UNSUPPORTED_RECORD_TYPES.has(type)) return false;
-  if (metadata.webpageMediaType === 'audio_video' || metadata.audioFileID || metadata.transcriptOnly === true) return false;
-  return ['text', 'link', 'webpage'].includes(type);
-}
-
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
@@ -6430,9 +5619,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: 'login-xiaohongshu-for-comments',
-      name: '登录小红书以抓取小红书评论区',
-      callback: () => this.openSocialLogin('xiaohongshu'),
+      id: 'login-feishu-web',
+      name: 'Feishu web login (for link extraction)',
+      callback: () => this.loginFeishu(),
     });
 
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
@@ -6451,22 +5640,46 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async openSocialLogin(target) {
-    const profile = SOCIAL_LOGIN_TARGETS[target];
-    if (!profile) {
-      new Notice('未知平台登录目标');
-      return;
-    }
+  async checkWechatLogin() {
     try {
-      await openSocialLoginWindow(target);
-      new Notice(`已打开${profile.label}登录窗口。登录完成后直接关闭窗口即可，插件会本地保存网页登录态。`);
+      return await checkWechatLoginStatus();
     } catch (error) {
-      new Notice(`${profile.label}登录窗口打开失败：${error.message || error}`);
+      return false;
     }
   }
 
-  async getSocialLoginStatusText(target) {
-    return await getSocialSessionCookieSummary(target);
+  async checkFeishuLogin() {
+    try {
+      return await checkFeishuLoginStatus();
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async loginWechat() {
+    try {
+      const loggedIn = await loginWechatWeb(null);
+      if (loggedIn) {
+        new Notice('微信登录成功！后续同步公众号文章时会自动提取评论区内容。');
+      } else {
+        new Notice('微信登录未完成，请在浏览器窗口中扫码后重试。');
+      }
+    } catch (error) {
+      new Notice(`微信登录失败：${error.message || error}`);
+    }
+  }
+
+  async loginFeishu(targetUrl = '') {
+    try {
+      const loggedIn = await loginFeishuWeb(targetUrl || null);
+      if (loggedIn) {
+        new Notice('Feishu login saved. Sync will reuse this session for Feishu links.');
+      } else {
+        new Notice('Feishu login not confirmed. Please finish login in the opened window, then sync again.');
+      }
+    } catch (error) {
+      new Notice(`Feishu login failed: ${error.message || error}`);
+    }
   }
 
   async cacheLocalTranscriptionEntitlementStatus(status) {
@@ -6552,7 +5765,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
     if (response.status && (response.status < 200 || response.status >= 300)) {
-      const message = (payload && (payload.errCode === 'PRO_REQUIRED' ? 'PRO_REQUIRED' : payload.errMsg)) || `HTTP ${response.status}`;
+      const message = (payload && payload.errMsg) || `HTTP ${response.status}`;
       if (response.status === 400 && message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
@@ -6593,54 +5806,58 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload || {};
   }
 
-  async generateAiMetadataWithCloud(record) {
+  async generateMetadataWithCloud(record, binding = null) {
     const inputText = extractAiMetadataInputText(record);
     if (!inputText) return { description: '', keywords: [] };
-    const entitlement = await this.ensureProFeatureAccess('AI 简介与关键词');
-    const entitlementToken = normalizeBindCodeInput(entitlement && entitlement.bindingToken);
-    const binding = entitlementToken
-      ? this.getActiveBindings().find((item) => normalizeBindCodeInput(item.token) === entitlementToken)
-      : null;
-    if (!binding) throw new Error('AI 简介与关键词仅 Pro 用户可用：请先绑定小程序并开通 Pro。');
+    const metadata = (record && record.metadata) || {};
     const payload = await this.requestJson('/metadata/generate', 'POST', {
-      title: (record && record.metadata && record.metadata.title) || '',
-      source: (record && record.metadata && (record.metadata.platform || record.metadata.source)) || '',
+      title: metadata.title || record.title || '',
+      source: getRecordSourceLabel(record, metadata),
       content: inputText,
-    }, binding);
-    const data = payload && payload.data ? payload.data : payload;
-    return {
-      description: cleanGeneratedDescription(data && data.description),
-      keywords: normalizeGeneratedKeywords(data && data.keywords),
-    };
+    }, binding || null);
+    return normalizeGeneratedMetadataResult(payload && payload.data ? payload.data : payload);
   }
 
-  async generateMetadataWithAi(record) {
-    return await this.generateAiMetadataWithCloud(record);
-  }
-
-  async enrichRecordMetadataWithAi(record) {
-    if (!shouldGenerateAiMetadata(this.settings, record)) return record;
-    let generated = { description: '', keywords: [] };
-    try {
-      generated = await this.generateAiMetadataWithCloud(record);
-    } catch (error) {
-      await this.disableProFeatureSettings();
-      return record;
+  async generateMetadataWithDeepSeek(record, binding = null) {
+    if (!this.settings.deepseekApiKey) {
+      return await this.generateMetadataWithCloud(record, binding);
     }
+    const inputText = extractAiMetadataInputText(record);
+    if (!inputText) return { description: '', keywords: [] };
+    const payload = await this.requestExternalJson(this.settings.deepseekBaseUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.settings.deepseekApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: '你是内容整理助手。请基于用户提供的文案生成简介和关键词。只输出 JSON：{"description":"一句话简介","keywords":["关键词1","关键词2"]}。description 控制在 1 句话，keywords 返回 3 到 8 个简洁中文或英文关键词。',
+          },
+          {
+            role: 'user',
+            content: inputText,
+          },
+        ],
+      }),
+    });
+    return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
+  }
+
+  async enrichRecordMetadataWithAi(record, binding = null) {
+    if (!shouldGenerateAiMetadata(this.settings, record)) return record;
+    const generated = await this.generateMetadataWithDeepSeek(record, binding);
     const metadata = { ...((record && record.metadata) || {}) };
-    const refreshDescription = shouldRefreshAiDescription(metadata, record);
-    if ((!getRecordDescription(metadata) || refreshDescription) && generated.description) {
+    if (!getRecordDescription(metadata) && generated.description) {
       metadata.description = generated.description;
     }
-    if ((!getRecordDescription(metadata) || refreshDescription) && !generated.description) {
-      const fallbackDescription = buildFallbackGeneratedDescription({ ...record, metadata });
-      if (fallbackDescription) metadata.description = fallbackDescription;
-    }
-    if (!getRecordKeywords(metadata).length) {
-      const keywords = generated.keywords.length
-        ? generated.keywords
-        : buildFallbackGeneratedKeywords({ ...record, metadata });
-      if (keywords.length) metadata.keywords = keywords;
+    if (!getRecordKeywords(metadata).length && generated.keywords.length) {
+      metadata.keywords = generated.keywords;
     }
     return {
       ...record,
@@ -6648,8 +5865,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async testAiMetadataConnection() {
-    const result = await this.generateAiMetadataWithCloud({
+  async testDeepSeekConnection() {
+    const result = await this.generateMetadataWithDeepSeek({
       type: 'text',
       content: '这是一段关于 Obsidian 内容同步助手、飞书机器人和知识管理的测试文案。',
       metadata: {
@@ -6657,7 +5874,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       },
     });
     if (!result.description && !result.keywords.length) {
-      throw new Error('AI 服务已响应，但没有返回可用的简介或关键词');
+      throw new Error('DeepSeek 已响应，但没有返回可用的简介或关键词');
     }
     return result;
   }
@@ -6902,7 +6119,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getConfiguredLocalAsrInstallRoot(mode = this.settings.localAsrInstallMode) {
-    return getLocalAsrInstallRoot(getRuntimeHomeDir(), mode, this.getConfiguredLocalAsrPlatform());
+    return getLocalAsrInstallRoot(os.homedir(), mode, this.getConfiguredLocalAsrPlatform());
   }
 
   getBundledLocalAsrInstallerPath() {
@@ -6914,7 +6131,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installerPath = this.getBundledLocalAsrInstallerPath();
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
-    const downloadedPath = path.join(getRuntimeTmpDir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
+    const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
 
     const isInstallerCurrent = (scriptText) => {
       const source = String(scriptText || '');
@@ -6977,7 +6194,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return [
       'WeChat Inbox Sync 同步失败诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
-      `运行系统：${getRuntimePlatform()} ${os.arch()} ${os.release()}`,
+      `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
       `实际使用系统：${platform}`,
       `API 地址：${this.settings.apiBase || '-'}`,
@@ -7086,96 +6303,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
     await this.cacheLocalTranscriptionEntitlementStatus(inactiveStatus);
     return inactiveStatus;
-  }
-
-  async getProFeatureEntitlementStatus() {
-    const bindings = this.getActiveBindings();
-    if (!bindings.length) {
-      return {
-        hasAccess: false,
-        plan: LOCAL_TRANSCRIPTION_PLAN,
-        status: 'unbound',
-        expiresAt: '',
-      };
-    }
-
-    let lastError = null;
-    const invalidBindingTokens = [];
-    const markInvalidBindingsUnbound = async () => {
-      for (const token of invalidBindingTokens) {
-        // eslint-disable-next-line no-await-in-loop
-        await this.markBindingUnbound(token, '绑定码已失效或已被更换');
-      }
-    };
-    for (const binding of bindings) {
-      for (const plan of PRO_FEATURE_PLANS) {
-        try {
-          const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(plan)}`, 'GET', {}, binding);
-          const data = payload && payload.data ? payload.data : {};
-          if (data.hasAccess) {
-            await markInvalidBindingsUnbound();
-            return {
-              hasAccess: true,
-              plan: data.plan || plan,
-              status: data.status || 'active',
-              expiresAt: data.expiresAt || '',
-              bindingToken: binding.token,
-              bindingLabel: binding.label || '',
-            };
-          }
-          lastError = data;
-        } catch (error) {
-          lastError = error;
-          if (isBindingInvalidMessage(error && error.message ? error.message : error)) {
-            invalidBindingTokens.push(binding.token);
-            break;
-          }
-        }
-      }
-    }
-    await markInvalidBindingsUnbound();
-
-    return {
-      hasAccess: false,
-      plan: LOCAL_TRANSCRIPTION_PLAN,
-      status: invalidBindingTokens.length ? 'unbound' : ((lastError && lastError.status) || 'inactive'),
-      expiresAt: (lastError && lastError.expiresAt) || '',
-      errorMessage: lastError && lastError.message ? lastError.message : String(lastError || ''),
-    };
-  }
-
-  async disableProFeatureSettings() {
-    if (!this.settings.aiMetadataEnabled && !this.settings.xiaohongshuCommentsEnabled) return;
-    await this.saveSettings({
-      ...this.settings,
-      aiMetadataEnabled: false,
-      xiaohongshuCommentsEnabled: false,
-    });
-  }
-
-  async ensureProFeatureAccess(featureName = 'Pro 功能') {
-    const status = await this.getProFeatureEntitlementStatus();
-    if (status.hasAccess) return status;
-    if (isBindingInvalidMessage(status.errorMessage || '')) {
-      await this.disableProFeatureSettings();
-    }
-    if (status.status === 'unbound') {
-      throw new Error(`${featureName}仅 Pro 用户可用：请先绑定小程序并开通 Pro。`);
-    }
-    if (status.status === 'expired') {
-      throw new Error(`${featureName}仅 Pro 用户可用：你的 Pro 已过期，请续期开通。`);
-    }
-    throw new Error(`${featureName}仅 Pro 用户可用：请在小程序里开通 Pro 后再使用。`);
-  }
-
-  async toggleProFeatureSetting(settingKey, enabled, featureName) {
-    if (enabled) {
-      await this.ensureProFeatureAccess(featureName);
-    }
-    await this.saveSettings({
-      ...this.settings,
-      [settingKey]: Boolean(enabled),
-    });
   }
 
   async ensureLocalTranscriptionAccess() {
@@ -7320,14 +6447,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       return sortMediaUrlsForTranscription([await this.renderSocialMediaUrl(url)]);
     }
     return renderSocialMediaUrlsWithElectron(url);
-  }
-
-  async renderXiaohongshuComments(url) {
-    return renderXiaohongshuCommentsWithElectron(url);
-  }
-
-  async renderWechatComments(url) {
-    return renderWechatCommentsWithElectron(url);
   }
 
   async runConfiguredTranscription(audioUrl, options = {}) {
@@ -7636,7 +6755,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error('下载到的媒体不是有效音视频文件，可能是平台风控页或无效视频地址');
     }
     const ext = getAudioFormatFromUrl(resolvedUrl || audioUrl);
-    const filePath = path.join(getRuntimeTmpDir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
+    const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
     fs.writeFileSync(filePath, buffer);
     return filePath;
   }
@@ -8066,7 +7185,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     noMediaError = '',
     binding = null,
     title = '',
-    comments = [],
   }) {
     const metadata = record.metadata || {};
 
@@ -8082,7 +7200,6 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionStatus: 'success',
           transcriptionSource: source || 'subtitle',
           conversionStatus: 'success',
-          comments,
         }),
       };
     }
@@ -8102,7 +7219,6 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionError: noMediaError || '未能从链接中提取到可转写的音频或视频地址',
           transcriptionSource: source || 'media-url',
           conversionStatus: 'failed',
-          comments,
         }),
       };
     }
@@ -8137,7 +7253,6 @@ class WechatObsidianInboxPlugin extends Plugin {
             transcriptionStatus: 'success',
             transcriptionSource: result.source,
             conversionStatus: 'success',
-            comments,
           });
           return {
             ...record,
@@ -8170,7 +7285,6 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionError: error.message || String(error),
           transcriptionSource: source || this.settings.aiProvider || 'unknown',
           conversionStatus: 'failed',
-          comments,
         }),
       };
     }
@@ -8283,9 +7397,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       if (isFeishuUrl(url)) {
         try {
-          if (isMobileRuntime()) {
-            throw new Error('Electron renderer unavailable on mobile');
-          }
           const rendered = await renderUrlToMarkdownWithElectron(url);
           const markdown = await this.saveWebpageImageAssets(
             rendered.markdown,
@@ -8304,19 +7415,44 @@ class WechatObsidianInboxPlugin extends Plugin {
             },
           };
         } catch (renderError) {
-          const response = await requestUrl({ url, method: 'GET' });
-          const html = response.text || '';
-          const markdown = extractFeishuMarkdownFromHtml(html);
-          return {
-            ...record,
-            metadata: {
-              ...metadata,
-              title: metadata.title || extractHtmlTitle(html) || '飞书链接',
-              markdown,
-              conversionStatus: 'success',
-              conversionNote: renderError.message || String(renderError),
-            },
-          };
+          try {
+            const markdown = await fetchFeishuClientVarsMarkdown(url);
+            return {
+              ...record,
+              metadata: {
+                ...metadata,
+                title: metadata.title || '飞书链接',
+                markdown,
+                conversionStatus: 'success',
+                conversionNote: renderError.message || String(renderError),
+              },
+            };
+          } catch (clientVarsError) {
+            try {
+              const response = await requestUrl({ url, method: 'GET' });
+              const html = response.text || '';
+              const markdown = extractFeishuMarkdownFromHtml(html);
+              return {
+                ...record,
+                metadata: {
+                  ...metadata,
+                  title: metadata.title || extractHtmlTitle(html) || '飞书链接',
+                  markdown,
+                  conversionStatus: 'success',
+                  conversionNote: [
+                    renderError.message || String(renderError),
+                    clientVarsError.message || String(clientVarsError),
+                  ].filter(Boolean).join('；'),
+                },
+              };
+            } catch (staticError) {
+              throw new Error([
+                renderError.message || String(renderError),
+                clientVarsError.message || String(clientVarsError),
+                staticError.message || String(staticError),
+              ].filter(Boolean).join('；'));
+            }
+          }
         }
       }
 
@@ -8332,8 +7468,6 @@ class WechatObsidianInboxPlugin extends Plugin {
         const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
         const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers: getSocialRequestHeaders(resolvedUrl) });
         const html = response.text || '';
-        const staticSocialComments = isXiaohongshuUrl(url) ? extractSocialCommentsFromHtml(html) : [];
-        let renderedSocialComments = [];
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
@@ -8377,20 +7511,6 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = '';
           }
         }
-        if (isXiaohongshuUrl(url) && this.settings.xiaohongshuCommentsEnabled && !isMobileRuntime()) {
-          try {
-            await this.ensureProFeatureAccess('小红书评论区抓取');
-            renderedSocialComments = typeof this.renderXiaohongshuComments === 'function'
-              ? await this.renderXiaohongshuComments(resolvedUrl)
-              : await renderXiaohongshuCommentsWithElectron(resolvedUrl);
-          } catch (renderCommentError) {
-            renderedSocialComments = [];
-          }
-        }
-        const socialComments = [
-          ...staticSocialComments,
-          ...renderedSocialComments,
-        ];
         if (mediaUrl || isVideoIntent) {
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
@@ -8400,20 +7520,59 @@ class WechatObsidianInboxPlugin extends Plugin {
             source: 'video',
             binding,
             title,
-            comments: socialComments,
             noMediaError: isUnavailableXhs
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
           });
         }
 
-        const extracted = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '');
-        return buildXiaohongshuRecordFromExtraction(record, {
-          metadata,
-          url,
-          extracted,
-          renderedComments: renderedSocialComments,
+        const extracted = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
+          includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
         });
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            title: metadata.title || extracted.title || getWebpageSourcePrefix(url),
+            author: metadata.author || extracted.author || '',
+            description: metadata.description || extracted.description || '',
+            keywords: metadata.keywords || extracted.tags || [],
+            platform: metadata.platform || '小红书',
+            contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === 'audio_video' ? '视频' : '图文'),
+            markdown: extracted.markdown,
+            imageUrls: extracted.imageUrls || [],
+            videoUrl: extracted.videoUrl || '',
+            conversionStatus: 'success',
+          },
+        };
+      }
+
+      // For WeChat articles, try Electron rendering first if logged in (enables comment extraction).
+      if (isWechatArticleUrl(url)) {
+        const wechatLoggedIn = await checkWechatLoginStatus();
+        if (wechatLoggedIn) {
+          try {
+            const rendered = await renderUrlToMarkdownWithElectron(url);
+            const markdown = await this.saveWebpageImageAssets(
+              rendered.markdown,
+              rendered.assets,
+              rootDir,
+              dateFolder,
+              title,
+            );
+            return {
+              ...record,
+              metadata: {
+                ...metadata,
+                title: metadata.title || rendered.title || '',
+                markdown,
+                conversionStatus: 'success',
+              },
+            };
+          } catch (electronError) {
+            // Electron rendering failed; fall through to the standard request path.
+          }
+        }
       }
 
       let html;
@@ -8422,9 +7581,6 @@ class WechatObsidianInboxPlugin extends Plugin {
         const response = await requestUrl({ url, method: 'GET' });
         html = response.text || '';
       } catch (requestError) {
-        if (isMobileRuntime()) {
-          throw requestError;
-        }
         // Obsidian requestUrl can fail on some networks; fall back to Node.js HTTP.
         try {
           html = await downloadTextViaNode(url);
@@ -8451,14 +7607,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       let markdown;
       try {
-        markdown = isWechatArticleUrl(url)
-          ? htmlToMarkdownOrFallback(html, url, metadata.title || '')
-          : htmlToMarkdown(html);
+        markdown = htmlToMarkdown(html);
       } catch (convertError) {
         throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
-      }
-      if (isWechatArticleUrl(url)) {
-        markdown = buildWechatArticleMarkdownWithComments(markdown, html, []);
       }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       const pageMeta = extractWebpageMetadataFromHtml(html, url);
@@ -8606,14 +7757,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
-    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown);
-    recordForMarkdown = ensureRequiredMetadataFallbacks(recordForMarkdown, this.settings);
+    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,
       syncedAt,
       propertyFields: this.settings.notePropertyFields,
-      includeAiMetadataFields: Boolean(this.settings.aiMetadataEnabled),
     });
     const filePath = `${noteDir}/${title}.md`;
     this.showSyncProgress({ ...progress, stage: 'writing', title });
@@ -8657,14 +7806,6 @@ class WechatObsidianInboxPlugin extends Plugin {
         continue;
       }
       try {
-        if (isMobileRuntime() && !isMobileSafeRecord(record)) {
-          skipped.push({
-            recordId: getRecordId(record),
-            reason: 'mobile-unsupported',
-          });
-          this.showSyncProgress({ ...progress, stage: 'processing', title: buildRecordTitleBase(record) });
-          continue;
-        }
         const recordId = getRecordId(record);
         const existingFilePath = await this.findExistingRecordNotePath(recordId);
         if (existingFilePath) {
@@ -8907,6 +8048,28 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }
       });
 
+    containerEl.createEl('h3', {
+      text: 'Feishu link extraction',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
+
+    const feishuLoginBtn = new Setting(containerEl)
+      .setName('Feishu web login')
+      .setDesc('Log in once when Feishu requires a web session for document extraction.')
+      .addButton((button) => button
+        .setButtonText('Login Feishu')
+        .onClick(async () => {
+          feishuLoginBtn.setDesc('Opening Feishu login window...');
+          await this.plugin.loginFeishu();
+          this.display();
+        }));
+
+    this.plugin.checkFeishuLogin().then((loggedIn) => {
+      if (loggedIn) {
+        feishuLoginBtn.setDesc('Feishu login session saved. Future Feishu syncs will reuse it.');
+      }
+    });
+
     new Setting(containerEl)
       .setName('保存根目录')
       .setDesc('同步笔记写入的位置；可选择是否按日期再创建子目录。')
@@ -8936,19 +8099,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('笔记属性字段')
-      .setDesc(`留空使用默认属性；也可以用英文逗号指定字段，例如：type,title,url,created_at。可用字段：${NOTE_PROPERTY_FIELD_KEYS.join(', ')}`)
-      .addText((text) => text
-        .setPlaceholder('留空使用默认属性')
-        .setValue(this.plugin.settings.notePropertyFields || '')
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            notePropertyFields: normalizeNotePropertyFields(value),
-          });
-        }));
-
-    new Setting(containerEl)
       .setName('立即同步')
       .setDesc('手动拉取云端收集箱，并写入当前 vault。')
       .addButton((button) => button
@@ -8970,14 +8120,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
           }
         }));
 
-    if (isMobileRuntime()) {
-      containerEl.createDiv({
-        cls: 'wechat-inbox-sync-status',
-        text: '\u624b\u673a\u8f7b\u91cf\u6a21\u5f0f\uff1a\u4ec5\u540c\u6b65\u6587\u5b57\u3001\u516c\u4f17\u53f7\u56fe\u6587\u3001\u98de\u4e66\u56fe\u6587\u548c\u5c0f\u7ea2\u4e66\u56fe\u6587\u3002\u97f3\u89c6\u9891\u548c\u6587\u4ef6\u4f1a\u7559\u5728\u4e91\u7aef\uff0c\u8bf7\u7528\u7535\u8111\u7aef\u540c\u6b65\u3002',
-      });
-      return;
-    }
-
     containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
     containerEl.createEl('h3', {
       text: '高级选项',
@@ -8986,72 +8128,38 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     aiPanel.createEl('summary', { text: 'AI 简介与关键词' });
+    aiPanel.createDiv({
+      text: '给 Pro 用户生成 description 和 keywords。使用云端内嵌配置，默认只在缺失时补齐，不覆盖已有网页元信息。',
+      cls: 'wechat-inbox-sync-muted',
+    });
     new Setting(aiPanel)
       .setName('启用 AI 简介与关键词')
-      .setDesc('仅 Pro 用户可用；默认关闭。打开后同步时自动生成内容简介与关键词。')
+      .setDesc('同步写入前自动生成内容简介与关键词。')
       .addToggle((toggle) => toggle
         .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
         .onChange(async (value) => {
-          try {
-            await this.plugin.toggleProFeatureSetting('aiMetadataEnabled', value, 'AI 简介与关键词');
-            this.display();
-          } catch (error) {
-            new Notice(error.message || String(error));
-            await this.plugin.saveSettings({
-              ...this.plugin.settings,
-              aiMetadataEnabled: false,
-            });
-            this.display();
-          }
-        }));
-    new Setting(aiPanel)
-      .setName('测试 AI 连接')
-      .addButton((button) => button
-        .setButtonText('测试 AI 连接')
-        .setCta()
-        .onClick(async () => {
-          try {
-            await this.plugin.ensureProFeatureAccess('AI 简介与关键词');
-            const result = await this.plugin.testAiMetadataConnection();
-            new Notice(`AI 连接成功：${result.description || result.keywords.join('、')}`);
-          } catch (error) {
-            new Notice(`AI 连接失败：${error.message || error}`);
-          }
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            aiMetadataEnabled: value,
+          });
         }));
 
-    const commentPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    commentPanel.createEl('summary', { text: '小红书评论区抓取' });
-    new Setting(commentPanel)
-      .setName('启用小红书评论区抓取')
-      .setDesc('仅 Pro 用户可用；默认关闭。打开后同步小红书内容时会尝试提取评论区。')
+    const socialPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    socialPanel.createEl('summary', { text: '小红书评论区提取' });
+    socialPanel.createDiv({
+      text: '同步小红书图文时保留可解析到的评论区内容。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+    new Setting(socialPanel)
+      .setName('提取小红书评论区')
+      .setDesc('关闭后只保存标题、正文、标签、图片和视频，不附加评论区。')
       .addToggle((toggle) => toggle
-        .setValue(Boolean(this.plugin.settings.xiaohongshuCommentsEnabled))
+        .setValue(this.plugin.settings.xiaohongshuCommentsEnabled !== false)
         .onChange(async (value) => {
-          try {
-            await this.plugin.toggleProFeatureSetting('xiaohongshuCommentsEnabled', value, '小红书评论区抓取');
-            this.display();
-          } catch (error) {
-            new Notice(error.message || String(error));
-            await this.plugin.saveSettings({
-              ...this.plugin.settings,
-              xiaohongshuCommentsEnabled: false,
-            });
-            this.display();
-          }
-        }));
-    new Setting(commentPanel)
-      .setName('小红书登录状态')
-      .setDesc('打开小红书评论区抓取后，需要先登录小红书网页。')
-      .addButton((button) => button
-        .setButtonText('登录小红书')
-        .setCta()
-        .onClick(async () => {
-          await this.plugin.openSocialLogin('xiaohongshu');
-        }))
-      .addButton((button) => button
-        .setButtonText('查看状态')
-        .onClick(async () => {
-          new Notice(await this.plugin.getSocialLoginStatusText('xiaohongshu'));
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            xiaohongshuCommentsEnabled: value,
+          });
         }));
 
     const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
@@ -9174,9 +8282,6 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_PLATFORM_NAMES,
   NOTE_PROPERTY_FIELD_KEYS,
   NOTE_SAVE_MODES,
-  isMobileRuntime,
-  isDesktopRuntime,
-  isMobileSafeRecord,
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
   normalizeLocalAsrInstallMode,
@@ -9203,9 +8308,6 @@ WechatObsidianInboxPlugin.__test = {
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
   buildMarkdownForRecord,
-  buildSocialCommentsMarkdown,
-  mergeSocialCommentsIntoMarkdown,
-  buildXiaohongshuRecordFromExtraction,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,
@@ -9217,11 +8319,6 @@ WechatObsidianInboxPlugin.__test = {
   cleanDisplayUrl,
   isWechatMpArticleUrl,
   shouldHydrateLinkAsWebpage,
-  getSocialElectronPartition,
-  getXiaohongshuCommentExpansionScript,
-  getXiaohongshuInPageCommentFetchScript,
-  getXiaohongshuDomCommentExtractScript,
-  getWechatInPageCommentFetchScript,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
@@ -9252,23 +8349,13 @@ WechatObsidianInboxPlugin.__test = {
   extractPdfMarkdown,
   cleanPdfExtractedText,
   htmlToMarkdown,
-  htmlToMarkdownOrFallback,
   extractWebpageMetadataFromHtml,
   extractFeishuMarkdownFromHtml,
-  extractWechatCommentsFromHtml,
-  extractWechatCommentRequestParams,
-  buildWechatCommentApiUrl,
-  extractWechatCommentsFromPayload,
-  shouldRetryWechatCommentsWithVisibleReader,
-  extractXiaohongshuCommentsFromPayload,
-  appendWechatCommentsToMarkdown,
-  buildWechatArticleMarkdownWithComments,
+  extractFeishuMarkdownFromClientVars,
+  extractFeishuDocumentTokenFromUrl,
+  buildFeishuClientVarsApiUrl,
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
-  shouldGenerateAiMetadata,
-  shouldRefreshAiDescription,
-  ensureRequiredMetadataFallbacks,
-  buildFallbackGeneratedKeywords,
   extractAiMetadataInputText,
   cleanMarkdownForStorage,
   resolveRedirectUrl,
@@ -9279,7 +8366,6 @@ WechatObsidianInboxPlugin.__test = {
   normalizeBindings,
   normalizeApiBase,
   normalizeBindCodeInput,
-  WechatInboxSettingTab,
 };
 
 module.exports = WechatObsidianInboxPlugin;
