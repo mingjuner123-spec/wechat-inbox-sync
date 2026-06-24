@@ -3463,6 +3463,16 @@ function isUnavailableXiaohongshuPage(html, url = '') {
     || source.includes('当前笔记暂时无法浏览');
 }
 
+function hasReadableXiaohongshuGraphicContent(extracted, html, url = '') {
+  if (!extracted || isUnavailableXiaohongshuPage(html, url)) return false;
+  const hasImages = Array.isArray(extracted.imageUrls) && extracted.imageUrls.length > 0;
+  if (hasImages) return true;
+  const description = String(extracted.description || '').trim();
+  if (!description || description.length < 20) return false;
+  if (/^(?:短链落地页|当前笔记暂时无法浏览|你访问的页面不见了|页面未直接暴露正文)/.test(description)) return false;
+  return true;
+}
+
 function extractBilibiliSubtitleUrlsFromHtml(html) {
   const source = String(html || '');
   const urls = [];
@@ -7618,6 +7628,30 @@ class WechatObsidianInboxPlugin extends Plugin {
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
           || /\/video\//i.test(resolvedUrl);
+        let extractedXiaohongshu = null;
+        if (isXiaohongshuUrl(url)) {
+          extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
+            includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
+          });
+          if (hasReadableXiaohongshuGraphicContent(extractedXiaohongshu, html, resolvedUrl) && !extractedXiaohongshu.videoUrl) {
+            return {
+              ...record,
+              metadata: {
+                ...metadata,
+                title: metadata.title || extractedXiaohongshu.title || getWebpageSourcePrefix(url),
+                author: metadata.author || extractedXiaohongshu.author || '',
+                description: metadata.description || extractedXiaohongshu.description || '',
+                keywords: metadata.keywords || extractedXiaohongshu.tags || [],
+                platform: metadata.platform || '小红书',
+                contentCategory: '图文',
+                markdown: extractedXiaohongshu.markdown,
+                imageUrls: extractedXiaohongshu.imageUrls || [],
+                videoUrl: '',
+                conversionStatus: 'success',
+              },
+            };
+          }
+        }
         if (!hasPreciseDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === 'function') {
           try {
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, ...(await this.renderSocialMediaUrls(resolvedUrl))]);
@@ -7668,7 +7702,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           };
         }
 
-        const extracted = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
+        const extracted = extractedXiaohongshu || extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
           includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
         });
         return {

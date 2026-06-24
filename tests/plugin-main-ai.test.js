@@ -1869,6 +1869,19 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(forcedXhsVideoRecord.metadata.transcriptOnly, true);
   assert.strictEqual(forcedXhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs-short-link.mp4');
 
+  const mislabeledXhsImageRecord = await plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/image',
+    metadata: {
+      url: 'https://www.xiaohongshu.com/explore/image',
+      webpageMediaType: 'audio_video',
+    },
+  }, '', '', '误标小红书图文');
+  assert.strictEqual(mislabeledXhsImageRecord.metadata.transcriptOnly, undefined);
+  assert.strictEqual(mislabeledXhsImageRecord.metadata.contentCategory, '图文');
+  assert.ok(mislabeledXhsImageRecord.metadata.markdown.includes('真正图文正文'));
+  assert.ok(mislabeledXhsImageRecord.metadata.markdown.includes('![封面](https://img.example.com/cover.jpg)'));
+
   const xhsUnavailableVideoRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
     content: 'https://www.xiaohongshu.com/404?source=note&type=video',
