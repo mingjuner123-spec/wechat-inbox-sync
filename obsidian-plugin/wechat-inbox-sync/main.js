@@ -158,7 +158,7 @@ function getDefaultLocalTranscriptionCommand(platform = os.platform(), installRo
     return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
   }
   if (installRoot) {
-    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${path.join(installRoot, 'transcribe.ps1')}" -InputPath {input} -OutputPath {output}`;
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${joinLocalAsrPath(platform, installRoot, 'transcribe.ps1')}" -InputPath {input} -OutputPath {output}`;
   }
   return `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
 }
