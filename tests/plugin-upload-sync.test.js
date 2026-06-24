@@ -554,6 +554,65 @@ function createPdfBufferWithControlNoise() {
   }
 
   {
+    let metadataRequestSeen = false;
+    const { plugin, files } = createPlugin({
+      settings: {
+        aiMetadataEnabled: true,
+      },
+      requestUrl: async (options) => {
+        if (String(options.url || '').endsWith('/metadata/generate')) {
+          metadataRequestSeen = true;
+          const body = JSON.parse(options.body || '{}');
+          assert.ok(body.content.includes('正文：小红书图文主体内容'));
+          assert.ok(body.content.includes('评论区：这个案例适合做私域引流'));
+          return {
+            json: {
+              success: true,
+              data: {
+                description: 'AI 总结：这篇小红书围绕私域引流案例展开，并结合评论反馈提炼行动建议。',
+                keywords: ['私域引流', '小红书评论', '案例复盘'],
+              },
+            },
+          };
+        }
+        return {};
+      },
+    });
+
+    await plugin.writeRecord({
+      _id: 'xhs-ai-metadata-overrides-raw-meta',
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/ai-meta',
+      createdAt: '2026-06-24T12:10:30.000Z',
+      metadata: {
+        title: '小红书评论区关键词',
+        url: 'https://www.xiaohongshu.com/explore/ai-meta',
+        platform: '小红书',
+        contentCategory: '图文',
+        description: '网页自带的原始描述，不是 AI 总结',
+        keywords: ['原始标签', '页面标签'],
+        markdown: [
+          '# 小红书评论区关键词',
+          '',
+          '正文：小红书图文主体内容。',
+          '',
+          '## 评论区',
+          '',
+          '评论区：这个案例适合做私域引流。',
+        ].join('\n'),
+        conversionStatus: 'success',
+      },
+    }, '2026-06-24T12:10:40.000Z');
+
+    const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
+    assert.strictEqual(metadataRequestSeen, true);
+    assert.ok(note.includes('description: AI 总结：这篇小红书围绕私域引流案例展开，并结合评论反馈提炼行动建议。'));
+    assert.ok(note.includes('keywords: 私域引流, 小红书评论, 案例复盘'));
+    assert.strictEqual(note.includes('description: 网页自带的原始描述，不是 AI 总结'), false);
+    assert.strictEqual(note.includes('keywords: 原始标签, 页面标签'), false);
+  }
+
+  {
     const { plugin, files } = createPlugin({
       settings: {
         aiMetadataEnabled: true,

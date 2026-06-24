@@ -1127,6 +1127,8 @@ assert.ok(frontmatterMarkdown.includes('\nsource: 小红书图文\n'));
 assert.ok(frontmatterMarkdown.includes('\ndescription: 这是一段内容简介\n'));
 assert.ok(frontmatterMarkdown.includes('\nkeywords: Obsidian, 知识管理\n'));
 assert.strictEqual(frontmatterMarkdown.includes('\nstatus: synced\n'), false);
+assert.ok(frontmatterMarkdown.includes('<!-- wechat-inbox-record-id: record-frontmatter-1 -->'));
+assert.strictEqual(helpers.hasRecordIdInFrontmatter(frontmatterMarkdown, 'record-frontmatter-1'), true);
 assert.strictEqual(frontmatterMarkdown.includes('收集时间：2026-06-14 16:00:00'), false);
 assert.strictEqual(frontmatterMarkdown.includes('原始链接：https://www.xiaohongshu.com/explore/frontmatter'), false);
 
@@ -2448,6 +2450,15 @@ async function runExistingLocalRecordDedupSyncTest() {
   assert.strictEqual(helpers.hasRecordIdInFrontmatter([
     '正文里出现 id: existing-record-1 不算已经同步',
   ].join('\n'), 'existing-record-1'), false);
+  assert.strictEqual(helpers.hasRecordIdInFrontmatter([
+    '---',
+    'title: 旧版默认属性笔记',
+    '---',
+    '',
+    '<!-- wechat-inbox-record-id: existing-record-1 -->',
+    '',
+    '之前已经同步过的内容',
+  ].join('\n'), 'existing-record-1'), true);
 
   const calls = [];
   const plugin = new PluginClass();
@@ -2525,6 +2536,83 @@ async function runExistingLocalRecordDedupSyncTest() {
     'ABC-123',
   ], [
     '/records/existing-record-1/synced',
+    'POST',
+    {},
+    'ABC-123',
+  ]]);
+}
+
+async function runExistingLocalRecordUrlDedupSyncTest() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    inboxDir: '临时收集',
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => [
+        { path: '临时收集/2026-06-24/小红书-旧图文.md', extension: 'md' },
+      ],
+      cachedRead: async () => [
+        '---',
+        'title: 小红书-旧图文',
+        'url: https://www.xiaohongshu.com/explore/url-dedup',
+        'synced_at: 2026-06-24T08:00:00.000Z',
+        'source: 小红书图文',
+        '---',
+        '',
+        '旧版默认属性没有 id，但同一个链接已经同步过。',
+      ].join('\n'),
+    },
+  };
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'new-cloud-id-for-same-url',
+          type: 'webpage',
+          content: 'https://www.xiaohongshu.com/explore/url-dedup',
+          createdAt: '2026-06-24T08:05:00.000Z',
+          metadata: {
+            url: 'https://www.xiaohongshu.com/explore/url-dedup',
+          },
+        }],
+      };
+    }
+    return {
+      success: true,
+      data: {},
+    };
+  };
+  plugin.writeRecord = async () => {
+    throw new Error('本地已有同 url 笔记时不应重复写入');
+  };
+
+  const result = await plugin.syncBinding({
+    token: 'ABC-123',
+    label: '测试微信',
+  }, false);
+
+  assert.deepStrictEqual(result.written, []);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(result.skipped, [{
+    recordId: 'new-cloud-id-for-same-url',
+    reason: 'already-synced-local',
+    filePath: '临时收集/2026-06-24/小红书-旧图文.md',
+  }]);
+  assert.deepStrictEqual(calls, [[
+    '/records?status=pending',
+    'GET',
+    {},
+    'ABC-123',
+  ], [
+    '/records/new-cloud-id-for-same-url/synced',
     'POST',
     {},
     'ABC-123',
@@ -2893,6 +2981,7 @@ async function main() {
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runExistingLocalRecordDedupSyncTest();
+  await runExistingLocalRecordUrlDedupSyncTest();
   await runUnbindInvalidCodeMarksLocalUnboundTest();
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
