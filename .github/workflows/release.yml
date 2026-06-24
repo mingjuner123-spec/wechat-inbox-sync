@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate plugin version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd obsidian-plugin/wechat-inbox-sync
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          if [ "$manifest_version" != "$TAG_NAME" ]; then
+            echo "Tag $TAG_NAME does not match manifest.json version $manifest_version" >&2
+            exit 1
+          fi
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd obsidian-plugin/wechat-inbox-sync
+          ZIP_NAME="wechat-inbox-sync-$TAG_NAME.zip"
+          rm -f "$ZIP_NAME"
+          zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" main.js manifest.json styles.css versions.json "$ZIP_NAME" --clobber
+          else
+            gh release create "$TAG_NAME" main.js manifest.json styles.css versions.json "$ZIP_NAME" \
+              --title "$TAG_NAME" \
+              --notes "WeChat Inbox Sync $TAG_NAME" \
+              --latest
+          fi
