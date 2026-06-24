@@ -638,7 +638,7 @@ assert.strictEqual(
   'C:\\Users\\demo\\.wechat-inbox-local-asr',
 );
 assert.deepStrictEqual(
-  helpers.getLocalAsrInstallStatus('C:\\Users\\demo\\.wechat-inbox-local-asr', (filePath) => filePath.endsWith('transcribe.ps1')),
+  helpers.getLocalAsrInstallStatus('C:\\Users\\demo\\.wechat-inbox-local-asr', (filePath) => filePath.endsWith('transcribe.ps1'), 'win32'),
   {
     installRoot: 'C:\\Users\\demo\\.wechat-inbox-local-asr',
     transcribeScript: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1',
@@ -686,7 +686,7 @@ const completeWindowsAsrStatus = helpers.getLocalAsrInstallStatus('C:\\Users\\de
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe',
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe',
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-small.bin',
-].includes(filePath));
+].includes(filePath), 'win32');
 assert.strictEqual(completeWindowsAsrStatus.whisperPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe');
 assert.strictEqual(completeWindowsAsrStatus.ffmpegPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe');
 assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
