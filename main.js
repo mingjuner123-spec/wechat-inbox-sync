@@ -3956,7 +3956,7 @@ function readCommentField(item, keys) {
     if (item && Object.prototype.hasOwnProperty.call(item, key) && item[key] !== undefined && item[key] !== null) {
       const value = item[key];
       if (typeof value === 'object') {
-        const nested = readCommentField(value, ['text', 'content', 'value', 'nickname', 'nickName', 'name']);
+        const nested = readCommentField(value, ['text', 'content', 'contentText', 'commentText', 'value', 'nickname', 'nickName', 'name']);
         if (nested) return nested;
       } else {
         const text = String(value).trim();
@@ -3977,10 +3977,16 @@ function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0)
 
   const content = readCommentField(value, [
     'content',
+    'contentText',
+    'content_text',
     'text',
+    'commentText',
+    'comment_text',
     'commentContent',
     'comment_content',
     'noteText',
+    'note_text',
+    'desc',
     'message',
   ]);
   if (content) {
@@ -3993,22 +3999,24 @@ function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0)
       'userName',
       'name',
       'author',
-    ]) || readCommentField(value.user || value.userInfo || value.authorInfo || {}, [
+    ]) || readCommentField(value.user || value.userInfo || value.user_info || value.authorInfo || value.author_info || {}, [
       'nick_name',
       'nickname',
       'nickName',
       'userName',
+      'user_name',
       'name',
     ]);
     const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
-    const likes = readCommentField(value, ['like_num', 'likeNum', 'likedCount', 'like_count', 'likes']);
+    const likes = readCommentField(value, ['like_num', 'likeNum', 'likeCount', 'likedCount', 'liked_count', 'like_count', 'likes']);
     pushSocialComment(comments, seen, { author, content, time, likes });
   }
 
   Object.keys(value).forEach((key) => {
     if (comments.length >= limit) return;
-    if (/comment|cmt|reply|discuss/i.test(key)) {
-      extractCommentsFromObject(value[key], comments, seen, limit, depth + 1);
+    const child = value[key];
+    if (/comment|cmt|reply|discuss/i.test(key) || (Array.isArray(child) && /^(?:list|items|entries|data)$/i.test(key))) {
+      extractCommentsFromObject(child, comments, seen, limit, depth + 1);
     }
   });
 }
@@ -4017,7 +4025,7 @@ function collectJsonObjectCandidates(source) {
   const candidates = [];
   const text = String(source || '');
   const starts = [];
-  const objectPattern = /(?:elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)\s*[:=]\s*([\[{])/gi;
+  const objectPattern = /(?:__INITIAL_STATE__|INITIAL_STATE|elected_comment|comment(?:List|_list|s)?|comments|cmt_list|reply_list|discussion)\s*[:=]\s*([\[{])/gi;
   let match;
   while ((match = objectPattern.exec(text))) {
     starts.push(objectPattern.lastIndex - 1);
@@ -5723,6 +5731,7 @@ function getRecordSourceLabel(record, metadata = {}) {
 function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
   const type = String(record.type || '').toLowerCase();
   const metadata = record.metadata || {};
+  const aiMetadataSource = String(metadata.aiMetadataSource || '').trim();
   const fields = {
     id: getRecordId(record),
     type,
@@ -5732,8 +5741,8 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
     created_at: record.createdAt,
     synced_at: syncedAt,
     source: getRecordSourceLabel(record, metadata),
-    description: getRecordDescription(metadata),
-    keywords: getRecordKeywords(metadata),
+    description: aiMetadataSource ? getRecordDescription(metadata) : '',
+    keywords: aiMetadataSource ? getRecordKeywords(metadata) : [],
     status: 'synced',
   };
 
@@ -5847,13 +5856,9 @@ function buildSyncNotice(count) {
 }
 
 function buildSkippedSyncNotice(skipped = []) {
-  const localDuplicateCount = skipped.filter((item) => item && item.reason === 'already-synced-local').length;
   const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
-  const otherSkippedCount = Math.max(0, skipped.length - localDuplicateCount - cloudProcessingCount);
+  const otherSkippedCount = skipped.filter((item) => item && item.reason !== 'already-synced-local' && item.reason !== 'cloud-transcription-processing').length;
   const parts = [];
-  if (localDuplicateCount) {
-    parts.push(`${localDuplicateCount} 条本地已存在，已跳过重复写入`);
-  }
   if (cloudProcessingCount) {
     parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
   }
@@ -6271,6 +6276,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (generated.keywords.length) {
       metadata.keywords = generated.keywords;
+    }
+    if (generated.description || generated.keywords.length) {
+      metadata.aiMetadataSource = this.settings.deepseekApiKey ? 'deepseek' : 'cloud';
     }
     return {
       ...record,
@@ -7924,8 +7932,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 ...metadata,
                 title: metadata.title || extractedXiaohongshu.title || getWebpageSourcePrefix(url),
                 author: metadata.author || extractedXiaohongshu.author || '',
-                description: metadata.description || extractedXiaohongshu.description || '',
-                keywords: metadata.keywords || extractedXiaohongshu.tags || [],
+                extractedDescription: metadata.extractedDescription || extractedXiaohongshu.description || '',
+                extractedKeywords: metadata.extractedKeywords || extractedXiaohongshu.tags || [],
                 platform: metadata.platform || '小红书',
                 contentCategory: '图文',
                 markdown: extractedXiaohongshu.markdown,
@@ -7995,8 +8003,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             ...metadata,
             title: metadata.title || extracted.title || getWebpageSourcePrefix(url),
             author: metadata.author || extracted.author || '',
-            description: metadata.description || extracted.description || '',
-            keywords: metadata.keywords || extracted.tags || [],
+            extractedDescription: metadata.extractedDescription || extracted.description || '',
+            extractedKeywords: metadata.extractedKeywords || extracted.tags || [],
             platform: metadata.platform || '小红书',
             contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === 'audio_video' ? '视频' : '图文'),
             markdown: extracted.markdown,
