@@ -75,6 +75,16 @@ function createPlugin({ requestUrl, files = {}, settings = {} }) {
   assert.ok(pluginSource.includes("text: 'AI 简介与关键词'"));
   assert.ok(pluginSource.includes("text: '小红书评论区提取'"));
   assert.ok(pluginSource.includes(".setName('提取小红书评论区')"));
+  assert.ok(pluginSource.includes("id: 'login-xiaohongshu-web'"));
+  assert.ok(pluginSource.includes("async function checkXiaohongshuLoginStatus"));
+  assert.ok(pluginSource.includes("async function getXiaohongshuCookieHeader"));
+  assert.ok(pluginSource.includes("async function getXiaohongshuRequestHeaders"));
+  assert.ok(pluginSource.includes('headers.Cookie = cookieHeader'));
+  assert.ok(pluginSource.includes('登录小红书'));
+  assert.ok(pluginSource.includes('async checkXiaohongshuLogin()'));
+  assert.ok(pluginSource.includes("async loginXiaohongshu(targetUrl = '')"));
+  assert.ok(pluginSource.includes(".setButtonText('打开小红书登录')"));
+  assert.ok(pluginSource.includes('this.plugin.checkXiaohongshuLogin()'));
   assert.strictEqual(pluginSource.includes(".setName('DeepSeek API Key')"), false);
   assert.strictEqual(pluginSource.includes(".setName('测试 AI 连接')"), false);
   assert.strictEqual(pluginSource.includes("text: '公众号评论区提取（实验性）'"), false);
