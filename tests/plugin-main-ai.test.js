@@ -71,6 +71,7 @@ assert.strictEqual(typeof helpers.buildRecordTitleBase, 'function');
 assert.strictEqual(typeof helpers.hasRecordIdInFrontmatter, 'function');
 assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
+assert.strictEqual(typeof helpers.enrichExtractedWebpageMetadata, 'function');
 assert.strictEqual(typeof helpers.extractSocialVideoMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliSubtitleUrlsFromHtml, 'function');
@@ -403,9 +404,11 @@ const feishuCleanMarkdown = helpers.extractFeishuMarkdownFromHtml(`
       <p>共有 22 个协作者</p>
       <p>+17</p>
       <p>图2</p>
+      <p>- 踩中5次风口，赚了100w+ - 2020年之前，我没有任何目标 - 第一次风口：小红书商单</p>
       <p>2020年之前，我没有任何目标</p>
       <p>第一次风口：小红书商单</p>
       <p>第一，旧元素重组，就是创新</p>
+      <p>复盘这几次经历我发现，其实我从来没有刻意去追过什么风口，也没有研究趋势报告。</p>
       <p>正文内容应该保留下来，作为普通正文继续显示。</p>
     </body>
   </html>
@@ -414,11 +417,21 @@ assert.strictEqual(feishuCleanMarkdown.includes('分享'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('共有 22 个协作者'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('+17'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('图2'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('- 踩中5次风口'), false);
 assert.ok(feishuCleanMarkdown.includes('# 踩中5次风口，赚了100w+'));
 assert.ok(feishuCleanMarkdown.includes('## 2020年之前，我没有任何目标'));
 assert.ok(feishuCleanMarkdown.includes('### 第一次风口：小红书商单'));
 assert.ok(feishuCleanMarkdown.includes('### 第一，旧元素重组，就是创新'));
+assert.strictEqual(feishuCleanMarkdown.includes('# 复盘这几次经历我发现'), false);
+assert.ok(feishuCleanMarkdown.includes('复盘这几次经历我发现，其实我从来没有刻意去追过什么风口，也没有研究趋势报告。'));
 assert.ok(feishuCleanMarkdown.includes('正文内容应该保留下来'));
+const enrichedFeishuMetadata = helpers.enrichExtractedWebpageMetadata({
+  title: '踩中5次风口，赚了100w+',
+  markdown: feishuCleanMarkdown,
+  platform: '飞书',
+});
+assert.ok(enrichedFeishuMetadata.description.includes('复盘这几次经历我发现'));
+assert.ok(enrichedFeishuMetadata.keywords.includes('风口'));
 const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
   id: 'root',
   block_sequence: ['root', 'heading-block', 'paragraph-block', 'table-block', 'image-block', 'bullet-block'],
@@ -1848,7 +1861,8 @@ async function runAsyncHydrationTests() {
     content: 'https://www.xiaohongshu.com/404?source=note&type=video',
     metadata: { url: 'https://www.xiaohongshu.com/404?source=note&type=video' },
   }, '', '', '小红书失效视频');
-  assert.strictEqual(xhsUnavailableVideoRecord.metadata.transcriptOnly, true);
+  assert.strictEqual(xhsUnavailableVideoRecord.metadata.transcriptOnly, undefined);
+  assert.ok(xhsUnavailableVideoRecord.metadata.markdown.includes('小红书链接已保存'));
   assert.strictEqual(xhsUnavailableVideoRecord.metadata.transcriptionStatus, 'failed');
   assert.ok(xhsUnavailableVideoRecord.metadata.transcriptionError.includes('小红书网页端未返回可转写的视频资源'));
   assert.ok(xhsUnavailableVideoRecord.metadata.transcriptionError.includes('从手机相册或文件导入视频'));
