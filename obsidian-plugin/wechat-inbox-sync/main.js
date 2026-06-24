@@ -177,11 +177,11 @@ function getSafeLocalAsrInstallRoot(platform = os.platform(), env = process.env)
     const candidates = [
       String((env && env.PUBLIC) || '').trim(),
       String((env && env.ProgramData) || '').trim(),
-      path.join(systemDrive, LOCAL_ASR_SAFE_HOME),
-      path.join('C:', LOCAL_ASR_SAFE_HOME),
+      path.win32.join(systemDrive, LOCAL_ASR_SAFE_HOME),
+      path.win32.join('C:', LOCAL_ASR_SAFE_HOME),
     ].filter(Boolean);
-    const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.join('C:', LOCAL_ASR_SAFE_HOME);
-    return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.join(safeBase, LOCAL_ASR_SAFE_HOME);
+    const safeBase = candidates.find((candidate) => isAsciiPath(candidate)) || path.win32.join('C:', LOCAL_ASR_SAFE_HOME);
+    return safeBase.endsWith(LOCAL_ASR_SAFE_HOME) ? safeBase : path.win32.join(safeBase, LOCAL_ASR_SAFE_HOME);
   }
   return path.join(os.homedir(), LOCAL_ASR_HOME);
 }
