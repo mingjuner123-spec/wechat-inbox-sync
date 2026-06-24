@@ -5691,6 +5691,8 @@ function isAudioVideoTranscriptionIncompleteRecord(record) {
   const metadata = (record && record.metadata) || {};
   const status = String(metadata.transcriptionStatus || '').toLowerCase();
   const hasTranscription = String(metadata.transcription || '').trim().length > 0;
+  const hasPersistableMarkdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '').trim().length > 0;
+  if (hasPersistableMarkdown) return false;
   const isAudioVideoRecord = String(record && record.type || '').toLowerCase() === 'voice'
     || metadata.webpageMediaType === 'audio_video'
     || Boolean(metadata.audioFileID)
