@@ -31,10 +31,17 @@ jobs:
       - name: Run regression contract tests
         run: node tests/regression-contracts.test.js
 
-      - name: Run plugin and sync guard tests
-        run: |
-          node tests/plugin-core.test.js
-          node tests/plugin-main-ai.test.js
-          node tests/plugin-upload-sync.test.js
-          node tests/plugin-marketplace-package.test.js
-          node tests/sync-api-core.test.js
+      - name: Run plugin core tests
+        run: node tests/plugin-core.test.js
+
+      - name: Run plugin main AI tests
+        run: node tests/plugin-main-ai.test.js
+
+      - name: Run plugin upload sync tests
+        run: node tests/plugin-upload-sync.test.js
+
+      - name: Run plugin marketplace package tests
+        run: node tests/plugin-marketplace-package.test.js
+
+      - name: Run sync API core tests
+        run: node tests/sync-api-core.test.js
