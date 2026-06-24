@@ -554,6 +554,44 @@ function createPdfBufferWithControlNoise() {
   }
 
   {
+    const { plugin, files } = createPlugin({
+      settings: {
+        aiMetadataEnabled: true,
+      },
+      requestUrl: async (options) => {
+        if (String(options.url || '').endsWith('/metadata/generate')) {
+          return {
+            status: 500,
+            json: {
+              error: {
+                message: 'metadata cloud failed',
+              },
+            },
+          };
+        }
+        return {};
+      },
+    });
+
+    await plugin.writeRecord({
+      _id: 'ai-metadata-cloud-fails-but-note-saves',
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/ai-fallback',
+      createdAt: '2026-05-13T12:09:30.000Z',
+      metadata: {
+        url: 'https://www.xiaohongshu.com/explore/ai-fallback',
+        markdown: 'Xiaohongshu parsed body should still be saved when AI metadata fails.',
+        conversionStatus: 'success',
+      },
+    }, '2026-05-13T12:09:40.000Z');
+
+    const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
+    assert.ok(note.includes('Xiaohongshu parsed body should still be saved when AI metadata fails.'));
+    assert.strictEqual(note.includes('description:'), false);
+    assert.strictEqual(note.includes('keywords:'), false);
+  }
+
+  {
     const repeatedTitle = '手把手教学 - 用Claude code 搭建属于你的自动化AI内容生产系统';
     const cleaned = PluginClass.__test.cleanMarkdownForStorage([
       '飞书云文档',
