@@ -3097,6 +3097,11 @@ async function main() {
 }
 
 main().catch((error) => {
+  if (process.env.GITHUB_ACTIONS) {
+    const message = String(error && (error.stack || error.message) || error)
+      .replace(/\r?\n/g, '%0A');
+    console.error(`::error file=tests/plugin-main-ai.test.js::${message}`);
+  }
   console.error(error);
   process.exit(1);
 });
