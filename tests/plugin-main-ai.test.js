@@ -634,7 +634,7 @@ assert.ok(aiMetadataInput.includes('这是正文第一段'));
 assert.ok(aiMetadataInput.includes('要点一'));
 assert.strictEqual(aiMetadataInput.includes('const hidden = true;'), false);
 assert.strictEqual(
-  helpers.getLocalAsrInstallRoot('C:\\Users\\demo'),
+  helpers.getLocalAsrInstallRoot('C:\\Users\\demo', 'default', 'win32'),
   'C:\\Users\\demo\\.wechat-inbox-local-asr',
 );
 assert.deepStrictEqual(

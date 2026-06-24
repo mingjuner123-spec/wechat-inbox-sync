@@ -215,7 +215,7 @@ function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = 'default', platfo
   if (normalizeLocalAsrInstallMode(mode) === 'safe') {
     return getSafeLocalAsrInstallRoot(platform, env);
   }
-  return path.join(homeDir, LOCAL_ASR_HOME);
+  return joinLocalAsrPath(platform, homeDir, LOCAL_ASR_HOME);
 }
 
 function joinLocalAsrPath(platform, ...segments) {
