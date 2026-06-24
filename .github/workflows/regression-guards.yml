@@ -1,0 +1,40 @@
+name: Regression Guards
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  regression-guards:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax check plugin files
+        run: |
+          node --check obsidian-plugin/wechat-inbox-sync/main.js
+          node --check obsidian-plugin/wechat-inbox-sync/plugin-core.js
+          node --check cloudfunctions/syncApi/index.js
+          node --check cloudfunctions/quickstartFunctions/index.js
+
+      - name: Run regression contract tests
+        run: node tests/regression-contracts.test.js
+
+      - name: Run plugin and sync guard tests
+        run: |
+          node tests/plugin-core.test.js
+          node tests/plugin-main-ai.test.js
+          node tests/plugin-upload-sync.test.js
+          node tests/plugin-marketplace-package.test.js
+          node tests/sync-api-core.test.js
