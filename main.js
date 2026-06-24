@@ -5851,8 +5851,19 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async enrichRecordMetadataWithAi(record, binding = null) {
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
-    const generated = await this.generateMetadataWithDeepSeek(record, binding);
     const metadata = { ...((record && record.metadata) || {}) };
+    let generated;
+    try {
+      generated = await this.generateMetadataWithDeepSeek(record, binding);
+    } catch (error) {
+      return {
+        ...record,
+        metadata: {
+          ...metadata,
+          aiMetadataError: error && error.message ? error.message : String(error || ''),
+        },
+      };
+    }
     if (!getRecordDescription(metadata) && generated.description) {
       metadata.description = generated.description;
     }
