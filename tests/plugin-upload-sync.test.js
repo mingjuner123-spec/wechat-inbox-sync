@@ -746,6 +746,29 @@ function createPdfBufferWithControlNoise() {
   {
     const { plugin, files } = createPlugin({
       requestUrl: async () => ({
+        text: '<html><head><title>小红书失效视频</title></head><body>当前笔记暂时无法浏览</body></html>',
+      }),
+    });
+
+    await plugin.writeRecord({
+      _id: 'xhs-video-no-media',
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/unavailable?type=video',
+      createdAt: '2026-06-24T12:07:00.000Z',
+      metadata: {
+        url: 'https://www.xiaohongshu.com/explore/unavailable?type=video',
+        webpageMediaType: 'audio_video',
+      },
+    }, '2026-06-24T12:08:00.000Z');
+
+    const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
+    assert.ok(note.includes('小红书链接已保存'));
+    assert.ok(note.includes('小红书网页端未返回可转写的视频资源'));
+  }
+
+  {
+    const { plugin, files } = createPlugin({
+      requestUrl: async () => ({
         text: [
           '<html><body><article>',
           '<p>Legacy link record article text.</p>',
