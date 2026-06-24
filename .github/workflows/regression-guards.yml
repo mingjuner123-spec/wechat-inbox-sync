@@ -35,7 +35,19 @@ jobs:
         run: node tests/plugin-core.test.js
 
       - name: Run plugin main AI tests
-        run: node tests/plugin-main-ai.test.js
+        run: |
+          set +e
+          node tests/plugin-main-ai.test.js 2> plugin-main-ai.err
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            while IFS= read -r line; do
+              safe_line="${line//'%'/'%25'}"
+              safe_line="${safe_line//$'\r'/'%0D'}"
+              safe_line="${safe_line//$'\n'/'%0A'}"
+              echo "::error file=tests/plugin-main-ai.test.js::${safe_line}"
+            done < plugin-main-ai.err
+            exit "$status"
+          fi
 
       - name: Run plugin upload sync tests
         run: node tests/plugin-upload-sync.test.js
