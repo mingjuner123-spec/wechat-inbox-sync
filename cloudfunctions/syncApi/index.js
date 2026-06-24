@@ -950,19 +950,14 @@ function createRepository() {
       await db
         .collection('inbox_records')
         .doc(record._id)
-        .update({
-          data: buildSyncedRecordCleanupData({
-            syncedAt,
-            fileIds,
-            cleanupError,
-          }),
-        });
+        .remove();
 
       return {
         id: recordId,
-        status: 'synced',
+        status: 'deleted',
         syncedAt,
         cleaned: true,
+        deleted: true,
         deletedFileCount: fileIds.length,
         cleanupError,
       };

@@ -2897,21 +2897,16 @@ async function markInboxRecordSynced(event) {
   await db
     .collection('inbox_records')
     .doc(record._id)
-    .update({
-      data: buildSyncedRecordCleanupData({
-        syncedAt: now,
-        fileIds,
-        cleanupError,
-      }),
-    });
+    .remove();
 
   return {
     success: true,
     data: {
       id: event.recordId,
-      status: 'synced',
+      status: 'deleted',
       syncedAt: now,
       cleaned: true,
+      deleted: true,
       deletedFileCount: fileIds.length,
       cleanupError,
     },
