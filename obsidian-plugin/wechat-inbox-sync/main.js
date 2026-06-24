@@ -2031,6 +2031,13 @@ function shouldDropFeishuLine(line, title) {
     '登录/注册',
     '帮助中心',
     '效率指南',
+    '添加快捷方式',
+    '最近修改',
+    '分享',
+    '回复...',
+    '上传日志',
+    '联系客服',
+    '功能更新',
     'header-v2',
     '评论（0）',
     '跳转至首条评论',
@@ -2039,6 +2046,12 @@ function shouldDropFeishuLine(line, title) {
     '复制',
   ]);
   if (noise.has(text)) return true;
+  if (/^图\s*\d+$/i.test(text)) return true;
+  if (/^\+\d+$/.test(text)) return true;
+  if (/^共有\s*\d+\s*个协作者$/.test(text)) return true;
+  if (/^最近修改\s*[:：]?\s*/.test(text)) return true;
+  if (/^昨天\s*\d{1,2}:\d{2}$/.test(text)) return true;
+  if (/^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(text)) return true;
   if (/^最新修改时间为/.test(text)) return true;
   if (/^\d+\s*字$/.test(text)) return true;
   if (/^评论/.test(text)) return true;
@@ -2053,17 +2066,22 @@ function formatFeishuHeadingLine(line) {
   if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
     return text;
   }
-  if (/^[一二三四五六七八九十]+、/.test(text)) {
-    return `# **${text}**`;
+  if (/^.{4,80}[，,：:；;、].*(?:\d+w\+|\d+万|\d+次风口|风口|复盘|拆解|方法|案例)/i.test(text)) {
+    return `# ${text}`;
   }
+  if (/^[一二三四五六七八九十]+、/.test(text)) {
+    return `## ${text}`;
+  }
+  if (/^(?:第[一二三四五六七八九十\d]+次风口|第[一二三四五六七八九十\d]+[、，,]|[一二三四五六七八九十\d]+[、，,])/.test(text)) return `### ${text}`;
+  if (/^(?:\d{4}年之前|20\d{2}年|当时|后来|最后|总结|结论)/.test(text) && text.length <= 36) return `## ${text}`;
   if (/^第[一二三四五六七八九十]+步[:：、]/.test(text) || text === '先认识工具') {
-    return `## **${text}**`;
+    return `## ${text}`;
   }
   if (/^(系统页面截图|工作流程图|整套系统分三层|格式|示例|提示词|示例（.*）|人群画像格式.*)$/.test(text)) {
-    return `### **${text}**`;
+    return `### ${text}`;
   }
   if (/^(先自我介绍下|这套系统适合什么人？|这套系统适合什么人\?)$/.test(text)) {
-    return `# **${text}**`;
+    return `# ${text}`;
   }
   return text;
 }
@@ -4909,6 +4927,9 @@ function inferFeishuHeadingLevel(text, blockType = '') {
   if (match) return Number(match[1] || match[2]);
   const value = String(text || '').trim();
   if (/^[一二三四五六七八九十]+、/.test(value)) return 1;
+  if (/^.{4,80}[，,：:；;、].*(?:\d+w\+|\d+万|\d+次风口|风口|复盘|拆解|方法|案例)/i.test(value)) return 1;
+  if (/^(?:\d{4}年之前|20\d{2}年|当时|后来|最后|总结|结论)/.test(value) && value.length <= 36) return 2;
+  if (/^(?:第[一二三四五六七八九十\d]+次风口|第[一二三四五六七八九十\d]+[、，,]|[一二三四五六七八九十\d]+[、，,])/.test(value)) return 3;
   if (/^第[一二三四五六七八九十]+步[:：、]/.test(value)) return 2;
   if (/^(系统页面截图|工作流程图|整套系统分三层|格式|示例|提示词)/.test(value)) return 3;
   return 0;
@@ -4990,7 +5011,7 @@ function extractFeishuMarkdownFromHtml(html) {
     }
   });
 
-  const markdown = appendMarkdownToc(lines.join('\n\n').trim());
+  const markdown = lines.join('\n\n').trim();
   if (markdown.length < 20) {
     throw new Error('飞书静态页面中未提取到正文');
   }
@@ -5200,7 +5221,7 @@ function extractFeishuMarkdownFromClientVars(payload) {
     lines.push(line);
   });
 
-  const markdown = appendMarkdownToc(lines.join('\n\n').trim());
+  const markdown = lines.join('\n\n').trim();
   if (markdown.length < 20) {
     throw new Error('飞书 client_vars 中未提取到正文');
   }
@@ -5620,7 +5641,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     this.addCommand({
       id: 'login-feishu-web',
-      name: 'Feishu web login (for link extraction)',
+      name: '登录飞书（用于提取飞书文档）',
       callback: () => this.loginFeishu(),
     });
 
@@ -5673,12 +5694,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       const loggedIn = await loginFeishuWeb(targetUrl || null);
       if (loggedIn) {
-        new Notice('Feishu login saved. Sync will reuse this session for Feishu links.');
+        new Notice('飞书登录已保存，后续同步会复用该登录状态。');
       } else {
-        new Notice('Feishu login not confirmed. Please finish login in the opened window, then sync again.');
+        new Notice('飞书登录未确认，请在打开的窗口中完成登录后再同步。');
       }
     } catch (error) {
-      new Notice(`Feishu login failed: ${error.message || error}`);
+      new Notice(`飞书登录失败：${error.message || error}`);
     }
   }
 
@@ -8060,24 +8081,24 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     containerEl.createEl('h3', {
-      text: 'Feishu link extraction',
+      text: '飞书文档提取',
       cls: 'wechat-inbox-sync-section-heading',
     });
 
     const feishuLoginBtn = new Setting(containerEl)
-      .setName('Feishu web login')
-      .setDesc('Log in once when Feishu requires a web session for document extraction.')
+      .setName('登录飞书')
+      .setDesc('插件会优先尝试无登录提取；如果飞书要求登录，请先点这里登录，之后同步会复用登录状态。')
       .addButton((button) => button
-        .setButtonText('Login Feishu')
+        .setButtonText('打开飞书登录')
         .onClick(async () => {
-          feishuLoginBtn.setDesc('Opening Feishu login window...');
+          feishuLoginBtn.setDesc('正在打开飞书登录窗口...');
           await this.plugin.loginFeishu();
           this.display();
         }));
 
     this.plugin.checkFeishuLogin().then((loggedIn) => {
       if (loggedIn) {
-        feishuLoginBtn.setDesc('Feishu login session saved. Future Feishu syncs will reuse it.');
+        feishuLoginBtn.setDesc('已保存飞书登录状态；飞书文档同步会优先无登录提取，必要时复用该状态。');
       }
     });
 

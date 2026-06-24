@@ -195,6 +195,13 @@ assert.strictEqual(pluginMainSource.includes(".setName('DeepSeek API Key')"), fa
 assert.strictEqual(pluginMainSource.includes(".setName('测试 AI 连接')"), false);
 assert.strictEqual(pluginMainSource.includes("text: '公众号评论区提取（实验性）'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('笔记属性字段')"), false);
+assert.ok(pluginMainSource.includes("text: '飞书文档提取'"));
+assert.ok(pluginMainSource.includes(".setName('登录飞书')"));
+assert.ok(pluginMainSource.includes(".setButtonText('打开飞书登录')"));
+assert.ok(pluginMainSource.includes('插件会优先尝试无登录提取'));
+assert.strictEqual(pluginMainSource.includes("text: 'Feishu link extraction'"), false);
+assert.strictEqual(pluginMainSource.includes(".setName('Feishu web login')"), false);
+assert.strictEqual(pluginMainSource.includes(".setButtonText('Login Feishu')"), false);
 assert.ok(pluginMainSource.includes("text: '小红书评论区提取'"));
 assert.ok(pluginMainSource.includes(".setName('提取小红书评论区')"));
 assert.ok(pluginMainSource.includes("text: '本地转写组件（高级/备用）'"));
@@ -382,15 +389,36 @@ const feishuStaticMarkdown = helpers.extractFeishuMarkdownFromHtml(`
     </body>
   </html>
 `);
-assert.ok(feishuStaticMarkdown.includes('## 目录'));
-assert.ok(feishuStaticMarkdown.includes('- [一级标题](#一级标题)'));
-assert.ok(feishuStaticMarkdown.includes('  - [二级标题](#二级标题)'));
-assert.ok(feishuStaticMarkdown.includes('    - [三级标题](#三级标题)'));
+assert.strictEqual(feishuStaticMarkdown.includes('## 目录'), false);
 assert.ok(feishuStaticMarkdown.includes('# 一级标题'));
 assert.ok(feishuStaticMarkdown.includes('## 二级标题'));
 assert.ok(feishuStaticMarkdown.includes('### 三级标题'));
 assert.ok(feishuStaticMarkdown.includes('![流程图](https://example.com/a.png)'));
 assert.ok(feishuStaticMarkdown.includes('![图片](https://example.com/b.jpg)'));
+const feishuCleanMarkdown = helpers.extractFeishuMarkdownFromHtml(`
+  <html>
+    <body>
+      <h1>踩中5次风口，赚了100w+</h1>
+      <p>分享</p>
+      <p>共有 22 个协作者</p>
+      <p>+17</p>
+      <p>图2</p>
+      <p>2020年之前，我没有任何目标</p>
+      <p>第一次风口：小红书商单</p>
+      <p>第一，旧元素重组，就是创新</p>
+      <p>正文内容应该保留下来，作为普通正文继续显示。</p>
+    </body>
+  </html>
+`);
+assert.strictEqual(feishuCleanMarkdown.includes('分享'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('共有 22 个协作者'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('+17'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('图2'), false);
+assert.ok(feishuCleanMarkdown.includes('# 踩中5次风口，赚了100w+'));
+assert.ok(feishuCleanMarkdown.includes('## 2020年之前，我没有任何目标'));
+assert.ok(feishuCleanMarkdown.includes('### 第一次风口：小红书商单'));
+assert.ok(feishuCleanMarkdown.includes('### 第一，旧元素重组，就是创新'));
+assert.ok(feishuCleanMarkdown.includes('正文内容应该保留下来'));
 const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
   id: 'root',
   block_sequence: ['root', 'heading-block', 'paragraph-block', 'table-block', 'image-block', 'bullet-block'],
@@ -438,6 +466,7 @@ const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
 });
 assert.ok(feishuClientVarsMarkdown.includes('# 飞书新版标题'));
 assert.ok(feishuClientVarsMarkdown.includes('新版 client vars 正文内容'));
+assert.strictEqual(feishuClientVarsMarkdown.includes('## 目录'), false);
 assert.ok(feishuClientVarsMarkdown.includes('| 频段 | 频率 |'));
 assert.ok(feishuClientVarsMarkdown.includes('| Ka | 27-40GHz |'));
 assert.ok(feishuClientVarsMarkdown.includes('![图片](https://example.com/feishu-image.png)'));
