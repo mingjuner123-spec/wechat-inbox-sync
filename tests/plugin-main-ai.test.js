@@ -1167,6 +1167,37 @@ assert.strictEqual(helpers.hasRecordIdInFrontmatter(frontmatterMarkdown, 'record
 assert.strictEqual(frontmatterMarkdown.includes('收集时间：2026-06-14 16:00:00'), false);
 assert.strictEqual(frontmatterMarkdown.includes('原始链接：https://www.xiaohongshu.com/explore/frontmatter'), false);
 
+const feishuFrontmatterMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'record-feishu-frontmatter-1',
+    type: 'webpage',
+    content: 'https://my.feishu.cn/docx/VpP7d1nwuomPF5xHSrIcxrtUn8f?from=from_copylink',
+    source: 'wechat-miniprogram',
+    createdAt: '2026-06-24T13:03:39.000Z',
+    metadata: {
+      title: '\u2063\u200b\u2063 踩中5次风口，赚',
+      url: 'https://my.feishu.cn/docx/VpP7d1nwuomPF5xHSrIcxrtUn8f?from=from_copylink',
+      platform: '飞书',
+      contentCategory: '图文',
+      description: '踩中5次风口，赚了100w+ 添加快捷方式最近修改: 昨天 16:14 分享 header-v2',
+      keywords: ['风口', '小红书:AI', '知识库'],
+      conversionStatus: 'success',
+      markdown: '正文内容',
+    },
+  },
+  title: '飞书-\u2063\u200b\u2063 踩中5次风口，赚',
+  syncedAt: '2026-06-24T13:04:00.000Z',
+});
+const feishuFrontmatterBlock = feishuFrontmatterMarkdown.match(/^---\n([\s\S]*?)\n---/)[1];
+assert.strictEqual(feishuFrontmatterBlock.includes('\u2063'), false);
+assert.strictEqual(feishuFrontmatterBlock.includes('\u200b'), false);
+assert.strictEqual(feishuFrontmatterBlock.includes('添加快捷方式'), false);
+assert.strictEqual(feishuFrontmatterBlock.includes('最近修改'), false);
+assert.ok(feishuFrontmatterBlock.split('\n').includes('title: "飞书-踩中5次风口，赚"'));
+assert.ok(feishuFrontmatterBlock.split('\n').some((line) => /^description: ".+"$/.test(line)));
+assert.ok(feishuFrontmatterBlock.split('\n').some((line) => /^keywords: ".+"$/.test(line) && line.includes('小红书:AI')));
+assert.ok(feishuFrontmatterBlock.split('\n').every((line) => !/title: .*url: /.test(line) && !/description: .*keywords: /.test(line)));
+
 const customFrontmatterMarkdown = helpers.buildMarkdownForRecord({
   record: {
     _id: 'record-frontmatter-custom-1',
