@@ -25,6 +25,7 @@ const NOTE_SAVE_MODES = {
   root: '直接保存到根目录',
 };
 const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source,description,keywords';
+const RECORD_ID_MARKER_NAME = 'wechat-inbox-record-id';
 const NOTE_PROPERTY_FIELD_KEYS = [
   'id',
   'type',
@@ -1249,21 +1250,66 @@ function normalizeYamlScalar(value) {
   return text;
 }
 
-function getRecordIdFromFrontmatter(markdown) {
+function getFrontmatterBlock(markdown) {
   const source = String(markdown || '').replace(/^\uFEFF/, '');
   const match = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
-  if (!match) return '';
-  const lines = match[1].split(/\r?\n/);
+  return match ? match[1] : '';
+}
+
+function getFrontmatterScalar(markdown, fieldName) {
+  const block = getFrontmatterBlock(markdown);
+  if (!block || !fieldName) return '';
+  const escapedField = String(fieldName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lines = block.split(/\r?\n/);
   for (const line of lines) {
-    const fieldMatch = /^\s*id\s*:\s*(.*?)\s*$/.exec(line);
+    const fieldMatch = new RegExp(`^\\s*${escapedField}\\s*:\\s*(.*?)\\s*$`, 'i').exec(line);
     if (fieldMatch) return normalizeYamlScalar(fieldMatch[1]);
   }
   return '';
 }
 
+function getRecordIdFromFrontmatter(markdown) {
+  return getFrontmatterScalar(markdown, 'id');
+}
+
+function getRecordIdFromHiddenMarker(markdown) {
+  const match = new RegExp(`<!--\\s*${RECORD_ID_MARKER_NAME}\\s*:\\s*([\\s\\S]*?)\\s*-->`, 'i').exec(String(markdown || ''));
+  return match ? normalizeYamlScalar(match[1]).replace(/-->/g, '').trim() : '';
+}
+
+function getRecordIdFromMarkdown(markdown) {
+  return getRecordIdFromFrontmatter(markdown) || getRecordIdFromHiddenMarker(markdown);
+}
+
 function hasRecordIdInFrontmatter(markdown, recordId) {
   const expected = String(recordId || '').trim();
-  return Boolean(expected && getRecordIdFromFrontmatter(markdown) === expected);
+  return Boolean(expected && getRecordIdFromMarkdown(markdown) === expected);
+}
+
+function buildRecordIdMarker(recordId) {
+  const id = String(recordId || '').replace(/-->/g, '').trim();
+  return id ? `<!-- ${RECORD_ID_MARKER_NAME}: ${id} -->` : '';
+}
+
+function normalizeRecordUrlForCompare(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    parsed.protocol = parsed.protocol.toLowerCase();
+    parsed.hostname = parsed.hostname.toLowerCase();
+    return parsed.toString().replace(/\/$/, '');
+  } catch (error) {
+    return raw.replace(/#.*$/, '').replace(/\/$/, '');
+  }
+}
+
+function hasRecordUrlInFrontmatter(markdown, recordUrl) {
+  const expected = normalizeRecordUrlForCompare(recordUrl);
+  if (!expected) return false;
+  const actual = normalizeRecordUrlForCompare(getFrontmatterScalar(markdown, 'url'));
+  return Boolean(actual && actual === expected);
 }
 
 function pad2(value) {
@@ -1812,6 +1858,10 @@ function shouldGenerateAiMetadata(settings, record) {
   if (!settings || !settings.aiMetadataEnabled) return false;
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
+  if (!extractAiMetadataInputText(record)) return false;
+  if (String(record.type || '').toLowerCase() === 'webpage' || String(record.type || '').toLowerCase() === 'link') {
+    return true;
+  }
   return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
 }
 
@@ -5585,7 +5635,8 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
   }
 
   const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
-  return `${frontmatter}\n${body}`;
+  const recordIdMarker = buildRecordIdMarker(getRecordId(record));
+  return `${frontmatter}\n${recordIdMarker ? `${recordIdMarker}\n\n` : ''}${body}`;
 }
 
 function buildSyncNotice(count) {
@@ -5985,10 +6036,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       };
     }
-    if (!getRecordDescription(metadata) && generated.description) {
+    if (generated.description) {
       metadata.description = generated.description;
     }
-    if (!getRecordKeywords(metadata).length && generated.keywords.length) {
+    if (generated.keywords.length) {
       metadata.keywords = generated.keywords;
     }
     return {
@@ -7858,9 +7909,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
 
-  async findExistingRecordNotePath(recordId) {
-    const normalizedRecordId = String(recordId || '').trim();
-    if (!normalizedRecordId || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== 'function') {
+  async findExistingRecordNotePath(record) {
+    const normalizedRecordId = String(getRecordId(record) || '').trim();
+    const metadata = (record && record.metadata) || {};
+    const normalizedRecordUrl = normalizeRecordUrlForCompare(getRecordUrl(record || {}, metadata));
+    if ((!normalizedRecordId && !normalizedRecordUrl) || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== 'function') {
       return '';
     }
 
@@ -7878,7 +7931,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         } else if (this.app.vault.adapter && typeof this.app.vault.adapter.read === 'function') {
           markdown = await this.app.vault.adapter.read(file.path);
         }
-        if (hasRecordIdInFrontmatter(markdown, normalizedRecordId)) {
+        if (
+          (normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId))
+          || (normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl))
+        ) {
           return file.path || filePath;
         }
       } catch (error) {
@@ -7983,7 +8039,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       try {
         const recordId = getRecordId(record);
-        const existingFilePath = await this.findExistingRecordNotePath(recordId);
+        const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
             recordId,
