@@ -4460,9 +4460,18 @@ async function getXiaohongshuCookies() {
   }
 }
 
+function hasXiaohongshuAccountCookie(cookies = []) {
+  return (cookies || []).some((cookie) => {
+    const name = String(cookie && cookie.name || '');
+    const value = String(cookie && cookie.value || '').trim();
+    if (!value) return false;
+    return ['web_session', 'web_session_id', 'web_sessionid', 'sessionid', 'access-token', 'accessToken'].includes(name);
+  });
+}
+
 async function checkXiaohongshuLoginStatus() {
   const cookies = await getXiaohongshuCookies();
-  return cookies.some((cookie) => ['web_session', 'webId', 'a1', 'gid', 'xsecappid'].includes(cookie.name));
+  return hasXiaohongshuAccountCookie(cookies);
 }
 
 async function getXiaohongshuCookieHeader() {
@@ -5069,6 +5078,71 @@ async function renderSocialMediaUrlsWithElectron(url) {
 async function renderSocialMediaUrlWithElectron(url) {
   const urls = await renderSocialMediaUrlsWithElectron(url);
   return urls[0] || '';
+}
+
+async function renderXiaohongshuMarkdownWithElectron(url, fallbackText = '', options = {}) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染小红书');
+  }
+
+  const session = getWechatSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1400,
+    show: false,
+    webPreferences: {
+      session: session || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  try {
+    const loaded = waitForWebContents(win.webContents, 18000);
+    await win.loadURL(url);
+    await loaded;
+    const payload = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+        const isLoginWall = () => /登录后查看更多|验证码|请登录|小红书网页登录|手机号登录/.test(clean(document.body ? document.body.innerText || document.body.textContent || '' : ''));
+        for (let index = 0; index < 18; index += 1) {
+          window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
+          document.querySelectorAll('[class*="scroll"], [class*="comment"], [class*="content"], main, body, html').forEach((node) => {
+            try {
+              if (node && node.scrollHeight > node.clientHeight) {
+                node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight);
+              }
+            } catch (error) {}
+          });
+          await sleep(650);
+        }
+        window.scrollTo(0, 0);
+        await sleep(500);
+        return {
+          html: document.documentElement ? document.documentElement.outerHTML : '',
+          title: document.title || '',
+          text: clean(document.body ? document.body.innerText || document.body.textContent || '' : ''),
+          needsLogin: isLoginWall(),
+        };
+      })()
+    `);
+
+    if (payload && payload.needsLogin && !(payload.html || '').includes('comment')) {
+      throw new Error('小红书页面需要先登录。请在插件设置中点击“登录小红书”，登录后再同步。');
+    }
+    const extracted = extractXiaohongshuMarkdownFromHtml(payload && payload.html || '', url, fallbackText, options);
+    if (!hasReadableXiaohongshuGraphicContent(extracted, payload && payload.html || '', url)) {
+      throw new Error('隐藏浏览器未读取到足够的小红书正文');
+    }
+    return extracted;
+  } finally {
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
 }
 
 function decodeJsonStringLiteral(value) {
@@ -5930,6 +6004,12 @@ function buildSyncProgressMessage({
 function getRecordConversionWarning(record) {
   if (!record) return '';
   const metadata = record.metadata || {};
+  if (metadata.aiMetadataError) {
+    return `AI 简介关键词生成失败：${metadata.aiMetadataError}`;
+  }
+  if (metadata.commentExtractionError) {
+    return `小红书评论区提取失败：${metadata.commentExtractionError}`;
+  }
   const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
   const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
   if (status === 'failed') {
@@ -6868,6 +6948,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       return sortMediaUrlsForTranscription([await this.renderSocialMediaUrl(url)]);
     }
     return renderSocialMediaUrlsWithElectron(url);
+  }
+
+  async renderXiaohongshuMarkdown(url, fallbackText = '', options = {}) {
+    return renderXiaohongshuMarkdownWithElectron(url, fallbackText, options);
   }
 
   async runConfiguredTranscription(audioUrl, options = {}) {
@@ -7925,6 +8009,36 @@ class WechatObsidianInboxPlugin extends Plugin {
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
             includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
           });
+          if (
+            this.settings.xiaohongshuCommentsEnabled !== false
+            && (!extractedXiaohongshu.comments || !extractedXiaohongshu.comments.length)
+            && typeof this.renderXiaohongshuMarkdown === 'function'
+          ) {
+            try {
+              if (await checkXiaohongshuLoginStatus()) {
+                const renderedXiaohongshu = await this.renderXiaohongshuMarkdown(
+                  resolvedUrl,
+                  metadata.shareText || record.content || '',
+                  { includeComments: true },
+                );
+                if (
+                  renderedXiaohongshu
+                  && (
+                    (renderedXiaohongshu.comments || []).length
+                    || String(renderedXiaohongshu.markdown || '').length > String(extractedXiaohongshu.markdown || '').length
+                  )
+                ) {
+                  extractedXiaohongshu = renderedXiaohongshu;
+                }
+              } else {
+                extractedXiaohongshu.commentExtractionStatus = 'login_required';
+                extractedXiaohongshu.commentExtractionError = '小红书评论区需要先登录。请在插件设置中点击“登录小红书”或“检测小红书登录状态”。';
+              }
+            } catch (renderError) {
+              extractedXiaohongshu.commentExtractionStatus = 'failed';
+              extractedXiaohongshu.commentExtractionError = renderError.message || String(renderError);
+            }
+          }
           if (hasReadableXiaohongshuGraphicContent(extractedXiaohongshu, html, resolvedUrl) && !extractedXiaohongshu.videoUrl) {
             return {
               ...record,
@@ -7939,6 +8053,9 @@ class WechatObsidianInboxPlugin extends Plugin {
                 markdown: extractedXiaohongshu.markdown,
                 imageUrls: extractedXiaohongshu.imageUrls || [],
                 videoUrl: '',
+                comments: extractedXiaohongshu.comments || [],
+                commentExtractionStatus: extractedXiaohongshu.commentExtractionStatus || ((extractedXiaohongshu.comments || []).length ? 'success' : 'empty'),
+                commentExtractionError: extractedXiaohongshu.commentExtractionError || '',
                 conversionStatus: 'success',
               },
             };
@@ -8010,6 +8127,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             markdown: extracted.markdown,
             imageUrls: extracted.imageUrls || [],
             videoUrl: extracted.videoUrl || '',
+            comments: extracted.comments || [],
+            commentExtractionStatus: extracted.commentExtractionStatus || ((extracted.comments || []).length ? 'success' : 'empty'),
+            commentExtractionError: extracted.commentExtractionError || '',
             conversionStatus: 'success',
           },
         };
@@ -8370,7 +8490,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       if (showNotice || written.length) {
         if (conversionWarnings.length) {
-          finalMessage += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
+          finalMessage += `，${conversionWarnings.length} 条有处理提示：${conversionWarnings[0]}`;
         }
         if (failed.length) {
           finalMessage += `，${failed.length} 条失败：${failed[0].message}`;
@@ -8634,9 +8754,23 @@ class WechatInboxSettingTab extends PluginSettingTab {
           this.display();
         }));
 
+    const xiaohongshuCheckBtn = new Setting(socialPanel)
+      .setName('检测小红书登录状态')
+      .setDesc('用于确认当前电脑是否真的保存了小红书账号登录态；只有账号登录态才能提取评论区。')
+      .addButton((button) => button
+        .setButtonText('检测小红书登录状态')
+        .onClick(async () => {
+          const loggedIn = await this.plugin.checkXiaohongshuLogin();
+          xiaohongshuCheckBtn.setDesc(loggedIn
+            ? '已检测到小红书账号登录态，可以尝试提取评论区。'
+            : '未检测到小红书账号登录态。请点击“打开小红书登录”，完成登录后再同步小红书图文。');
+          new Notice(loggedIn ? '已检测到小红书登录状态' : '未检测到小红书登录状态，请先登录');
+        }));
+
     this.plugin.checkXiaohongshuLogin().then((loggedIn) => {
       if (loggedIn) {
         xiaohongshuLoginBtn.setDesc('已保存小红书登录状态；同步小红书图文时会复用该状态提取评论区。');
+        xiaohongshuCheckBtn.setDesc('已检测到小红书账号登录态，可以尝试提取评论区。');
       }
     });
 
@@ -8837,7 +8971,9 @@ WechatObsidianInboxPlugin.__test = {
   getSocialRequestHeaders,
   getXiaohongshuCookieHeader,
   getXiaohongshuRequestHeaders,
+  hasXiaohongshuAccountCookie,
   checkXiaohongshuLoginStatus,
+  renderXiaohongshuMarkdownWithElectron,
   shouldResolveMediaDownloadUrl,
   openExternalUrl,
   extractPdfMarkdown,
