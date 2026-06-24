@@ -226,6 +226,9 @@ function joinLocalAsrPath(platform, ...segments) {
       ...rest.map((segment) => String(segment || '').replace(/^\/+|\/+$/g, '')),
     ].filter(Boolean).join('/');
   }
+  if (getLocalAsrPlatform(platform) === 'win32') {
+    return path.win32.join(...segments);
+  }
   return path.join(...segments);
 }
 
