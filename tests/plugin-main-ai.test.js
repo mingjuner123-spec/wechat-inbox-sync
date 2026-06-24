@@ -400,6 +400,13 @@ const feishuCleanMarkdown = helpers.extractFeishuMarkdownFromHtml(`
   <html>
     <body>
       <h1>踩中5次风口，赚了100w+</h1>
+      <aside class="docx-outline">
+        <div class="outline-item" data-level="1">踩中5次风口，赚了100w+</div>
+        <div class="outline-item" data-level="2">2020年之前，我没有任何目标</div>
+        <div class="outline-item" data-level="3">第一次风口：小红书商单</div>
+        <div class="outline-item" data-level="3">第一，旧元素重组，就是创新</div>
+        <div class="outline-item" data-level="2">我的真实经历</div>
+      </aside>
       <p>分享</p>
       <p>共有 22 个协作者</p>
       <p>+17</p>
@@ -408,6 +415,8 @@ const feishuCleanMarkdown = helpers.extractFeishuMarkdownFromHtml(`
       <p>2020年之前，我没有任何目标</p>
       <p>第一次风口：小红书商单</p>
       <p>第一，旧元素重组，就是创新</p>
+      <p>我的真实经历</p>
+      <p>第一，普通正文没有在飞书目录里，就不能被猜成标题。</p>
       <p>复盘这几次经历我发现，其实我从来没有刻意去追过什么风口，也没有研究趋势报告。</p>
       <p>正文内容应该保留下来，作为普通正文继续显示。</p>
     </body>
@@ -422,6 +431,9 @@ assert.ok(feishuCleanMarkdown.includes('# 踩中5次风口，赚了100w+'));
 assert.ok(feishuCleanMarkdown.includes('## 2020年之前，我没有任何目标'));
 assert.ok(feishuCleanMarkdown.includes('### 第一次风口：小红书商单'));
 assert.ok(feishuCleanMarkdown.includes('### 第一，旧元素重组，就是创新'));
+assert.ok(feishuCleanMarkdown.includes('## 我的真实经历'));
+assert.strictEqual(feishuCleanMarkdown.includes('### 第一，普通正文没有在飞书目录里'), false);
+assert.ok(feishuCleanMarkdown.includes('第一，普通正文没有在飞书目录里，就不能被猜成标题。'));
 assert.strictEqual(feishuCleanMarkdown.includes('# 复盘这几次经历我发现'), false);
 assert.ok(feishuCleanMarkdown.includes('复盘这几次经历我发现，其实我从来没有刻意去追过什么风口，也没有研究趋势报告。'));
 assert.ok(feishuCleanMarkdown.includes('正文内容应该保留下来'));
@@ -430,7 +442,8 @@ const enrichedFeishuMetadata = helpers.enrichExtractedWebpageMetadata({
   markdown: feishuCleanMarkdown,
   platform: '飞书',
 });
-assert.ok(enrichedFeishuMetadata.description.includes('复盘这几次经历我发现'));
+assert.ok(enrichedFeishuMetadata.description.includes('普通正文') || enrichedFeishuMetadata.description.includes('复盘这几次经历我发现'));
+assert.strictEqual(enrichedFeishuMetadata.description.includes('我的真实经历'), false);
 assert.ok(enrichedFeishuMetadata.keywords.includes('风口'));
 const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
   id: 'root',

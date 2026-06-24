@@ -2071,20 +2071,6 @@ function formatFeishuHeadingLine(line) {
   if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
     return text;
   }
-  if (/^[一二三四五六七八九十]+、/.test(text)) {
-    return `## ${text}`;
-  }
-  if (/^(?:第[一二三四五六七八九十\d]+次风口|第[一二三四五六七八九十\d]+[、，,]|[一二三四五六七八九十\d]+[、，,])/.test(text)) return `### ${text}`;
-  if (/^(?:\d{4}年之前|20\d{2}年|当时|后来|最后|总结|结论)/.test(text) && text.length <= 36) return `## ${text}`;
-  if (/^第[一二三四五六七八九十]+步[:：、]/.test(text) || text === '先认识工具') {
-    return `## ${text}`;
-  }
-  if (/^(系统页面截图|工作流程图|整套系统分三层|格式|示例|提示词|示例（.*）|人群画像格式.*)$/.test(text)) {
-    return `### ${text}`;
-  }
-  if (/^(先自我介绍下|这套系统适合什么人？|这套系统适合什么人\?)$/.test(text)) {
-    return `# ${text}`;
-  }
   return text;
 }
 
@@ -4934,16 +4920,52 @@ function collectFeishuImageUrls(source) {
   return urls;
 }
 
+function getFeishuOutlineLevelFromTag(tag) {
+  const source = String(tag || '');
+  const attrPatterns = [
+    /\bdata-(?:level|heading-level|outline-level)\s*=\s*["']?([1-6])["']?/i,
+    /\b(?:aria-level|level)\s*=\s*["']?([1-6])["']?/i,
+  ];
+  for (const pattern of attrPatterns) {
+    const match = source.match(pattern);
+    if (match && match[1]) return Number(match[1]);
+  }
+  const classMatch = source.match(/\b(?:level|heading|h)-?([1-6])\b/i);
+  return classMatch && classMatch[1] ? Number(classMatch[1]) : 0;
+}
+
+function extractFeishuOutlineHeadingMap(html) {
+  const source = String(html || '');
+  const map = new Map();
+  const containerPattern = /<(?<tag>aside|nav|div|section)\b(?<attrs>[^>]*)>(?<body>[\s\S]*?)<\/\k<tag>>/gi;
+  let containerMatch;
+  while ((containerMatch = containerPattern.exec(source))) {
+    const attrs = containerMatch.groups && containerMatch.groups.attrs || '';
+    const body = containerMatch.groups && containerMatch.groups.body || '';
+    if (!/(?:outline|catalog|toc|目录|docx-outline)/i.test(`${attrs} ${body.slice(0, 300)}`)) continue;
+    const itemPattern = /<(?<tag>h[1-6]|li|a|div|span)\b(?<attrs>[^>]*)>(?<text>[\s\S]*?)<\/\k<tag>>/gi;
+    let itemMatch;
+    while ((itemMatch = itemPattern.exec(body))) {
+      const tag = String(itemMatch.groups && itemMatch.groups.tag || '').toLowerCase();
+      const attrsText = itemMatch.groups && itemMatch.groups.attrs || '';
+      const text = stripHtmlTags(itemMatch.groups && itemMatch.groups.text || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length < 2 || shouldDropFeishuLine(text, '')) continue;
+      let level = /^h[1-6]$/.test(tag) ? Number(tag[1]) : getFeishuOutlineLevelFromTag(attrsText);
+      if (!level) {
+        const indentMatch = attrsText.match(/padding-left\s*:\s*(\d+)px/i);
+        level = indentMatch ? Math.max(1, Math.min(6, Math.floor(Number(indentMatch[1]) / 16) + 1)) : 1;
+      }
+      const key = normalizeTitleForCompare(text);
+      if (key && !map.has(key)) map.set(key, Math.max(1, Math.min(6, level)));
+    }
+  }
+  return map;
+}
+
 function inferFeishuHeadingLevel(text, blockType = '') {
   const normalizedType = String(blockType || '').toLowerCase();
   const match = normalizedType.match(/heading[_-]?([1-6])|h([1-6])/i);
   if (match) return Number(match[1] || match[2]);
-  const value = String(text || '').trim();
-  if (/^[一二三四五六七八九十]+、/.test(value)) return 1;
-  if (/^(?:\d{4}年之前|20\d{2}年|当时|后来|最后|总结|结论)/.test(value) && value.length <= 36) return 2;
-  if (/^(?:第[一二三四五六七八九十\d]+次风口|第[一二三四五六七八九十\d]+[、，,]|[一二三四五六七八九十\d]+[、，,])/.test(value)) return 3;
-  if (/^第[一二三四五六七八九十]+步[:：、]/.test(value)) return 2;
-  if (/^(系统页面截图|工作流程图|整套系统分三层|格式|示例|提示词)/.test(value)) return 3;
   return 0;
 }
 
@@ -4959,6 +4981,7 @@ function pushFeishuLine(lines, seen, text, level = 0) {
 
 function extractFeishuMarkdownFromHtml(html) {
   const source = decodeHtmlEntities(String(html || ''));
+  const outlineHeadingMap = extractFeishuOutlineHeadingMap(source);
   const lines = [];
   const seen = new Set();
   const readable = stripScriptAndStyleBlocks(source)
@@ -4982,7 +5005,8 @@ function extractFeishuMarkdownFromHtml(html) {
         }
         return;
       }
-      pushFeishuLine(lines, seen, text);
+      const outlineLevel = outlineHeadingMap.get(normalizeTitleForCompare(text)) || 0;
+      pushFeishuLine(lines, seen, text, outlineLevel);
     });
 
   const patterns = [
@@ -5002,7 +5026,9 @@ function extractFeishuMarkdownFromHtml(html) {
         .replace(/\s+/g, ' ')
         .trim();
       if (shouldDropFeishuLine(text, '')) return;
-      pushFeishuLine(lines, seen, text, inferFeishuHeadingLevel(text, blockType));
+      const blockLevel = inferFeishuHeadingLevel(text, blockType);
+      const outlineLevel = outlineHeadingMap.get(normalizeTitleForCompare(text)) || 0;
+      pushFeishuLine(lines, seen, text, blockLevel || outlineLevel);
     }
   });
 
@@ -5359,9 +5385,11 @@ function getRecordKeywords(metadata = {}) {
 
 function stripMarkdownForDescription(markdown) {
   return String(markdown || '')
+    .split(/\r?\n/)
+    .filter((line) => !/^#{1,6}\s+/.test(String(line || '').trim()))
+    .join('\n')
     .replace(/!\[[^\]]*]\([^)]+\)/g, '')
     .replace(/\[\[([^\]]+)]]/g, '')
-    .replace(/^#{1,6}\s+/gm, '')
     .replace(/^[-*]\s+/gm, '')
     .replace(/^\|.*\|$/gm, '')
     .replace(/\*\*/g, '')

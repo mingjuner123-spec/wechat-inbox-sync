@@ -616,8 +616,10 @@ function createPdfBufferWithControlNoise() {
     assert.strictEqual(cleaned.includes('登录/注册'), false);
     assert.strictEqual(cleaned.includes('评论'), false);
     assert.strictEqual(cleaned.includes('0 字'), false);
-    assert.ok(cleaned.includes('## 一、先看成品'));
-    assert.ok(cleaned.includes('### 系统页面截图'));
+    assert.ok(cleaned.includes('一、先看成品'));
+    assert.ok(cleaned.includes('系统页面截图'));
+    assert.strictEqual(cleaned.includes('## 一、先看成品'), false);
+    assert.strictEqual(cleaned.includes('### 系统页面截图'), false);
     assert.ok(cleaned.includes('1. 采集爆款。每天系统自动采集同行业的爆款笔记。'));
     assert.ok(cleaned.includes('- 选题不用自己想——AI 基于行业爆款和你的定位。'));
     assert.strictEqual((cleaned.match(/正文内容/g) || []).length, 1);
