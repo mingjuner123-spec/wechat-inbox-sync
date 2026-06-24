@@ -33,6 +33,7 @@ const NOTE_PROPERTY_FIELD_KEYS = [
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
+  settingsVersion: 2,
   token: '',
   pendingBindCode: '',
   bindings: [],
@@ -42,7 +43,7 @@ const DEFAULT_SETTINGS = {
   notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: false,
   aiProvider: 'off',
-  aiMetadataEnabled: false,
+  aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
@@ -205,9 +206,11 @@ function normalizeApiBase(apiBase) {
 }
 
 function mergeSettings(savedSettings, platform = process.platform) {
+  const sourceSettings = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
+  const savedSettingsVersion = Number(sourceSettings.settingsVersion) || 0;
   const merged = {
     ...DEFAULT_SETTINGS,
-    ...(savedSettings || {}),
+    ...sourceSettings,
   };
 
   merged.apiBase = normalizeApiBase(merged.apiBase);
@@ -222,8 +225,13 @@ function mergeSettings(savedSettings, platform = process.platform) {
   merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
-  merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
-  merged.xiaohongshuCommentsEnabled = merged.xiaohongshuCommentsEnabled !== false;
+  merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
+  merged.aiMetadataEnabled = savedSettingsVersion < 2
+    ? true
+    : merged.aiMetadataEnabled !== false;
+  merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2
+    ? true
+    : merged.xiaohongshuCommentsEnabled !== false;
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;

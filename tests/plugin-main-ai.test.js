@@ -163,9 +163,12 @@ assert.strictEqual(
 );
 assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionThresholdMinutes, 10);
-assert.strictEqual(helpers.mergeSettings({}).aiMetadataEnabled, false);
+assert.strictEqual(helpers.mergeSettings({}).aiMetadataEnabled, true);
+assert.strictEqual(helpers.mergeSettings({ aiMetadataEnabled: false }).aiMetadataEnabled, true);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).xiaohongshuCommentsEnabled, true);
-assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
+assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, true);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).deepseekApiKey, '');
 assert.strictEqual(helpers.mergeSettings({}).deepseekModel, 'deepseek-chat');
 assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');

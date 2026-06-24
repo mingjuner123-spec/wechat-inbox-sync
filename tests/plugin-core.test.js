@@ -28,6 +28,7 @@ assert.deepStrictEqual(AI_PROVIDER_NAMES, {
 
 assert.deepStrictEqual(DEFAULT_SETTINGS, {
   apiBase: OFFICIAL_SYNC_API_BASE,
+  settingsVersion: 2,
   token: '',
   pendingBindCode: '',
   bindings: [],
@@ -37,7 +38,7 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   notePropertyFields: 'title,author,url,synced_at,source,description,keywords',
   autoSyncOnLoad: false,
   aiProvider: 'off',
-  aiMetadataEnabled: false,
+  aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
@@ -96,7 +97,7 @@ assert.deepStrictEqual(mergeSettings({
   noteSaveMode: 'root',
   notePropertyFields: 'title,author,url,synced_at,source,description,keywords',
   aiProvider: 'tencent',
-  aiMetadataEnabled: false,
+  aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
@@ -137,7 +138,10 @@ assert.strictEqual(
 assert.strictEqual(mergeSettings({ localAsrPlatform: 'bad-value' }).localAsrPlatform, 'auto');
 assert.strictEqual(mergeSettings({ noteSaveMode: 'bad-value' }).noteSaveMode, 'date');
 assert.strictEqual(mergeSettings({ notePropertyFields: ' id, bad_key, url, id ' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
-assert.strictEqual(mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
+assert.strictEqual(mergeSettings({ aiMetadataEnabled: false }).aiMetadataEnabled, true);
+assert.strictEqual(mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, false);
+assert.strictEqual(mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, true);
+assert.strictEqual(mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 
 const whitespaceSettings = mergeSettings({
   apiBase: '   ',

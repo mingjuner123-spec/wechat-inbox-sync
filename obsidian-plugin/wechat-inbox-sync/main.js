@@ -50,6 +50,7 @@ const NOTE_PROPERTY_FIELD_KEYS = [
 
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
+  settingsVersion: 2,
   token: '',
   pendingBindCode: '',
   localTranscriptionEntitlementStatus: null,
@@ -60,7 +61,7 @@ const DEFAULT_SETTINGS = {
   notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: true,
   aiProvider: 'off',
-  aiMetadataEnabled: false,
+  aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
@@ -975,9 +976,11 @@ function normalizeApiBase(apiBase) {
 }
 
 function mergeSettings(savedSettings, platform = os.platform()) {
+  const sourceSettings = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
+  const savedSettingsVersion = Number(sourceSettings.settingsVersion) || 0;
   const merged = {
     ...DEFAULT_SETTINGS,
-    ...(savedSettings || {}),
+    ...sourceSettings,
   };
 
   merged.apiBase = normalizeApiBase(merged.apiBase);
@@ -997,8 +1000,13 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
-  merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
-  merged.xiaohongshuCommentsEnabled = merged.xiaohongshuCommentsEnabled !== false;
+  merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
+  merged.aiMetadataEnabled = savedSettingsVersion < 2
+    ? true
+    : merged.aiMetadataEnabled !== false;
+  merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2
+    ? true
+    : merged.xiaohongshuCommentsEnabled !== false;
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
@@ -8449,12 +8457,12 @@ class WechatInboxSettingTab extends PluginSettingTab {
     const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     aiPanel.createEl('summary', { text: 'AI 简介与关键词' });
     aiPanel.createDiv({
-      text: '给 Pro 用户生成 description 和 keywords。使用云端内嵌配置，默认只在缺失时补齐，不覆盖已有网页元信息。',
+      text: '默认开启，使用云端内嵌配置给 Pro 用户生成 description 和 keywords；不需要在插件里填写 DeepSeek API Key。',
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(aiPanel)
       .setName('启用 AI 简介与关键词')
-      .setDesc('同步写入前自动生成内容简介与关键词。')
+      .setDesc('同步写入前自动生成内容简介与关键词；小红书会结合正文和评论区一起生成。')
       .addToggle((toggle) => toggle
         .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
         .onChange(async (value) => {

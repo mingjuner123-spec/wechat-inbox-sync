@@ -517,6 +517,61 @@ function createPdfBufferWithControlNoise() {
   {
     let metadataRequestSeen = false;
     const { plugin, files } = createPlugin({
+      requestUrl: async (options) => {
+        const url = String(options.url || '');
+        if (url === 'https://www.xiaohongshu.com/explore/live-xhs-comment-ai') {
+          return {
+            text: [
+              '<html><head>',
+              '<meta property="og:title" content="Live XHS Comment AI">',
+              '<meta name="description" content="Live Xiaohongshu body for metadata. #workflow">',
+              '<meta property="og:image" content="https://img.example.com/live-cover.jpg">',
+              '</head><body>',
+              '<div class="comment-item"><span class="user-name">Reader A</span><span class="comment-content">private-domain comment signal</span></div>',
+              '</body></html>',
+            ].join(''),
+          };
+        }
+        if (url.endsWith('/metadata/generate')) {
+          metadataRequestSeen = true;
+          const body = JSON.parse(options.body || '{}');
+          assert.ok(body.content.includes('Live Xiaohongshu body for metadata'));
+          assert.ok(body.content.includes('private-domain comment signal'));
+          return {
+            json: {
+              success: true,
+              data: {
+                description: 'AI generated from live Xiaohongshu page and comments',
+                keywords: ['小红书评论', 'AI简介', '私域引流'],
+              },
+            },
+          };
+        }
+        return {};
+      },
+    });
+
+    await plugin.writeRecord({
+      _id: 'live-xhs-comment-ai',
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/live-xhs-comment-ai',
+      createdAt: '2026-06-24T12:11:30.000Z',
+      metadata: {
+        url: 'https://www.xiaohongshu.com/explore/live-xhs-comment-ai',
+      },
+    }, '2026-06-24T12:11:40.000Z');
+
+    const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
+    assert.strictEqual(metadataRequestSeen, true);
+    assert.ok(note.includes('## 评论区'));
+    assert.ok(note.includes('private-domain comment signal'));
+    assert.ok(note.includes('description: AI generated from live Xiaohongshu page and comments'));
+    assert.ok(note.includes('keywords: 小红书评论, AI简介, 私域引流'));
+  }
+
+  {
+    let metadataRequestSeen = false;
+    const { plugin, files } = createPlugin({
       settings: {
         aiMetadataEnabled: true,
       },
