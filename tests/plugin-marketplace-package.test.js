@@ -3,8 +3,11 @@ const fs = require('fs');
 const path = require('path');
 
 const pluginDir = path.resolve(__dirname, '../obsidian-plugin/wechat-inbox-sync');
+const repoRoot = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(pluginDir, 'manifest.json'), 'utf8'));
 const versions = JSON.parse(fs.readFileSync(path.join(pluginDir, 'versions.json'), 'utf8'));
+const rootManifestPath = path.join(repoRoot, 'manifest.json');
+const rootVersionsPath = path.join(repoRoot, 'versions.json');
 const readme = fs.readFileSync(path.join(pluginDir, 'README.md'), 'utf8');
 const license = fs.readFileSync(path.join(pluginDir, 'LICENSE'), 'utf8');
 const checklist = fs.readFileSync(path.join(pluginDir, 'RELEASE_CHECKLIST.md'), 'utf8');
@@ -20,6 +23,10 @@ assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.strictEqual(manifest.minAppVersion, '1.0.0');
 assert.strictEqual(manifest.isDesktopOnly, true);
 assert.strictEqual(versions[manifest.version], manifest.minAppVersion);
+assert.strictEqual(fs.existsSync(rootManifestPath), true, 'root manifest.json should exist for Obsidian marketplace version indexing');
+assert.strictEqual(fs.existsSync(rootVersionsPath), true, 'root versions.json should exist for Obsidian marketplace version indexing');
+assert.deepStrictEqual(JSON.parse(fs.readFileSync(rootManifestPath, 'utf8')), manifest);
+assert.deepStrictEqual(JSON.parse(fs.readFileSync(rootVersionsPath, 'utf8')), versions);
 
 ['main.js', 'manifest.json', 'styles.css', 'versions.json', 'README.md', 'LICENSE', 'local-asr/install-local-asr.ps1', 'local-asr/install-local-asr-macos.sh', 'local-asr/README.md'].forEach((fileName) => {
   assert.strictEqual(fs.existsSync(path.join(pluginDir, fileName)), true, `${fileName} should exist`);
