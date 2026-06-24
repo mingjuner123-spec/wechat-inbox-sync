@@ -20,10 +20,14 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          cd obsidian-plugin/wechat-inbox-sync
-          manifest_version="$(node -p "require('./manifest.json').version")"
+          manifest_version="$(node -p "require('./obsidian-plugin/wechat-inbox-sync/manifest.json').version")"
+          root_manifest_version="$(node -p "require('./manifest.json').version")"
           if [ "$manifest_version" != "$TAG_NAME" ]; then
-            echo "Tag $TAG_NAME does not match manifest.json version $manifest_version" >&2
+            echo "Tag $TAG_NAME does not match subdir manifest.json version $manifest_version" >&2
+            exit 1
+          fi
+          if [ "$root_manifest_version" != "$TAG_NAME" ]; then
+            echo "Tag $TAG_NAME does not match root manifest.json version $root_manifest_version" >&2
             exit 1
           fi
 
