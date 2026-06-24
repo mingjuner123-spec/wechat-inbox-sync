@@ -2135,6 +2135,8 @@ function shouldDropFeishuLine(line, title) {
   if (/^取消发送$/.test(text)) return true;
   if (/^\d+\s*人点赞$/.test(text)) return true;
   if (/^-\s+.+\s-\s+.+/.test(text) && text.length > 40) return true;
+  if (/^-\s*(?:上传日志|联系客服|功能更新|帮助中心|效率指南)$/.test(text)) return true;
+  if (/^-\s*(?:第[一二三四五六七八九十\d]+(?:次|个)?风口|规律：|什么是|举个例子|知识付费|最后|第[一二三四五六七八九十\d]+[步层：])/.test(text)) return true;
   if (/^图\s*\d+$/i.test(text)) return true;
   if (/^\d{1,2}$/.test(text)) return true;
   if (/^\+\d+$/.test(text)) return true;
@@ -2160,6 +2162,7 @@ function formatFeishuHeadingLine(line) {
   }
   const length = Array.from(text).length;
   if (length >= 4 && length <= 34) {
+    if (/^\d{4}年之前，我没有任何目标$/.test(text)) return `## ${text}`;
     if (/^(第[一二三四五六七八九十\d]+[、.．]?\s*)?[^，。！？!?]{0,16}风口[：:]/.test(text)) return `## ${text}`;
     if (/^(什么是.+原理|举个例子|最后|知识付费的下一个形态)$/.test(text)) return `## ${text}`;
     if (/^第[一二三四五六七八九十\d]+[步层：:]/.test(text)) return `### ${text}`;

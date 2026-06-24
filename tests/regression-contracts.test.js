@@ -166,6 +166,39 @@ function createPlugin({ requestUrl, files = {}, settings = {} }) {
     assert.ok(frontmatter.split('\n').some((line) => /^keywords: ".+"$/.test(line) && line.includes('小红书:AI')));
     assert.strictEqual(frontmatter.includes('description: 飞书描述: 包含冒号也必须是安全属性\n'), false);
   }
+
+  {
+    const cleaned = PluginClass.__test.cleanMarkdownForStorage([
+      '内容有点长，我想把如何找到自己的新业务讲清楚。',
+      '',
+      '2020年之前，我没有任何目标',
+      '',
+      '踩中第一个风口之前，我一直在跑地推销售。',
+      '',
+      '- 上传日志',
+      '- 联系客服',
+      '- 功能更新',
+      '- 帮助中心',
+      '- 效率指南',
+      '- 第一次风口：小红书商单',
+      '- 第二次风口：小红书电商',
+      '',
+      '第一次风口：小红书商单',
+      '',
+      '2020年，疫情原因没法继续跑地推。',
+    ].join('\n'), {
+      dedupe: true,
+      feishuTitle: '踩中5次风口，赚了100w+',
+    });
+    assert.ok(cleaned.includes('## 2020年之前，我没有任何目标'));
+    assert.ok(cleaned.includes('## 第一次风口：小红书商单'));
+    assert.strictEqual(cleaned.includes('上传日志'), false);
+    assert.strictEqual(cleaned.includes('联系客服'), false);
+    assert.strictEqual(cleaned.includes('功能更新'), false);
+    assert.strictEqual(cleaned.includes('帮助中心'), false);
+    assert.strictEqual(cleaned.includes('效率指南'), false);
+    assert.strictEqual(cleaned.includes('- 第二次风口：小红书电商'), false);
+  }
 })().catch((error) => {
   console.error(error);
   process.exit(1);

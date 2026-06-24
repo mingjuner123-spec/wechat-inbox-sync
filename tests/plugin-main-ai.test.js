@@ -474,6 +474,43 @@ assert.ok(enrichedFeishuMetadata.description.includes('普通正文') || enriche
 assert.strictEqual(enrichedFeishuMetadata.description.includes('我的真实经历'), false);
 assert.strictEqual(enrichedFeishuMetadata.description.includes('添加快捷方式'), false);
 assert.ok(enrichedFeishuMetadata.keywords.includes('风口'));
+const feishuRenderedBodyCleanup = helpers.cleanMarkdownForStorage([
+  '内容有点长，我想把如何找到自己的新业务讲清楚。',
+  '',
+  '2020年之前，我没有任何目标',
+  '',
+  '踩中第一个风口之前，我一直在跑地推销售。',
+  '',
+  '- 上传日志',
+  '',
+  '- 联系客服',
+  '',
+  '- 功能更新',
+  '',
+  '- 帮助中心',
+  '',
+  '- 效率指南',
+  '',
+  '- 第一次风口：小红书商单',
+  '- 第二次风口：小红书电商',
+  '- 第三次风口：小红书虚拟电商',
+  '- 第四、五次风口：AI知识库 + 企业培训',
+  '',
+  '第一次风口：小红书商单',
+  '',
+  '2020年，疫情原因没法继续跑地推。',
+].join('\n'), {
+  dedupe: true,
+  feishuTitle: '踩中5次风口，赚了100w+',
+});
+assert.ok(feishuRenderedBodyCleanup.includes('## 2020年之前，我没有任何目标'));
+assert.ok(feishuRenderedBodyCleanup.includes('## 第一次风口：小红书商单'));
+assert.strictEqual(feishuRenderedBodyCleanup.includes('上传日志'), false);
+assert.strictEqual(feishuRenderedBodyCleanup.includes('联系客服'), false);
+assert.strictEqual(feishuRenderedBodyCleanup.includes('功能更新'), false);
+assert.strictEqual(feishuRenderedBodyCleanup.includes('帮助中心'), false);
+assert.strictEqual(feishuRenderedBodyCleanup.includes('效率指南'), false);
+assert.strictEqual(feishuRenderedBodyCleanup.includes('- 第二次风口：小红书电商'), false);
 const feishuDirtyTitleBase = helpers.buildRecordTitleBase({
   type: 'webpage',
   content: 'https://my.feishu.cn/docx/VpP7d1nwuomPF5xHSrIcxrtUn8f',
