@@ -196,6 +196,11 @@ function createPdfBufferWithControlNoise() {
 }
 
 (async () => {
+  assert.strictEqual(
+    PluginClass.__test.isRequestUrlTransportError('Request failed, status 500'),
+    true
+  );
+
   {
     const { plugin, files } = createPlugin({
       requestUrl: async () => ({}),
@@ -465,6 +470,87 @@ function createPdfBufferWithControlNoise() {
 
     const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
     assert.ok(note.includes('Feishu static paragraph content'));
+  }
+
+  {
+    const { plugin, files } = createPlugin({
+      requestUrl: async (options) => {
+        if (String(options.url || '').includes('/space/api/docx/pages/client_vars')) {
+          return {
+            json: {
+              code: 0,
+              data: {
+                id: 'doc-token',
+                block_sequence: ['doc-token', 'paragraph-block'],
+                block_map: {
+                  'doc-token': { id: 'doc-token', data: { type: 'page' } },
+                  'paragraph-block': {
+                    id: 'paragraph-block',
+                    data: {
+                      type: 'text',
+                      text: { initialAttributedTexts: { text: { 0: 'Feishu client vars paragraph content' } } },
+                    },
+                  },
+                },
+              },
+            },
+          };
+        }
+        throw new Error('Static Feishu page should not be needed');
+      },
+    });
+
+    await plugin.writeRecord({
+      _id: 'feishu-client-vars',
+      type: 'webpage',
+      content: 'https://my.feishu.cn/docx/doc-token',
+      createdAt: '2026-05-13T12:07:30.000Z',
+      metadata: {
+        url: 'https://my.feishu.cn/docx/doc-token',
+      },
+    }, '2026-05-13T12:07:40.000Z');
+
+    const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
+    assert.ok(note.includes('Feishu client vars paragraph content'));
+  }
+
+  {
+    let metadataRequestSeen = false;
+    const { plugin, files } = createPlugin({
+      settings: {
+        aiMetadataEnabled: true,
+      },
+      requestUrl: async (options) => {
+        if (String(options.url || '').endsWith('/metadata/generate')) {
+          metadataRequestSeen = true;
+          const body = JSON.parse(options.body || '{}');
+          assert.ok(body.content.includes('Cloud metadata source text'));
+          return {
+            json: {
+              success: true,
+              data: {
+                description: 'Cloud generated description',
+                keywords: ['Cloud', 'Metadata'],
+              },
+            },
+          };
+        }
+        return {};
+      },
+    });
+
+    await plugin.writeRecord({
+      _id: 'ai-metadata-cloud',
+      type: 'text',
+      content: 'Cloud metadata source text',
+      createdAt: '2026-05-13T12:08:30.000Z',
+      metadata: {},
+    }, '2026-05-13T12:08:40.000Z');
+
+    const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
+    assert.strictEqual(metadataRequestSeen, true);
+    assert.ok(note.includes('description: Cloud generated description'));
+    assert.ok(note.includes('keywords: Cloud, Metadata'));
   }
 
   {

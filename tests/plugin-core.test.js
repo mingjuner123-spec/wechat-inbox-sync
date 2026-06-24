@@ -34,10 +34,11 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   clientId: '',
   inboxDir: '临时收集',
   noteSaveMode: 'date',
-  notePropertyFields: '',
+  notePropertyFields: 'title,author,url,synced_at,source,description,keywords',
   autoSyncOnLoad: false,
   aiProvider: 'off',
   aiMetadataEnabled: false,
+  xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -93,9 +94,10 @@ assert.deepStrictEqual(mergeSettings({
   apiBase: 'https://api.example.com/sync',
   clientId: 'client-2',
   noteSaveMode: 'root',
-  notePropertyFields: 'type,title,url',
+  notePropertyFields: 'title,author,url,synced_at,source,description,keywords',
   aiProvider: 'tencent',
   aiMetadataEnabled: false,
+  xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -134,7 +136,8 @@ assert.strictEqual(
 );
 assert.strictEqual(mergeSettings({ localAsrPlatform: 'bad-value' }).localAsrPlatform, 'auto');
 assert.strictEqual(mergeSettings({ noteSaveMode: 'bad-value' }).noteSaveMode, 'date');
-assert.strictEqual(mergeSettings({ notePropertyFields: ' id, bad_key, url, id ' }).notePropertyFields, 'id,url');
+assert.strictEqual(mergeSettings({ notePropertyFields: ' id, bad_key, url, id ' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
+assert.strictEqual(mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 
 const whitespaceSettings = mergeSettings({
   apiBase: '   ',

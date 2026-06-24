@@ -96,8 +96,6 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.cleanDisplayUrl, 'function');
 assert.strictEqual(typeof helpers.htmlToMarkdown, 'function');
-assert.strictEqual(typeof helpers.extractWechatCommentsFromHtml, 'function');
-assert.strictEqual(typeof helpers.appendWechatCommentsToMarkdown, 'function');
 assert.strictEqual(typeof helpers.normalizeGeneratedKeywords, 'function');
 assert.strictEqual(typeof helpers.parseGeneratedMetadataResponse, 'function');
 assert.strictEqual(typeof helpers.extractAiMetadataInputText, 'function');
@@ -165,8 +163,11 @@ assert.strictEqual(
 assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({}).aiMetadataEnabled, false);
+assert.strictEqual(helpers.mergeSettings({}).xiaohongshuCommentsEnabled, true);
+assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).deepseekApiKey, '');
 assert.strictEqual(helpers.mergeSettings({}).deepseekModel, 'deepseek-chat');
+assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 30 }).cloudPreTranscriptionThresholdMinutes, 30);
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 999 }).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
@@ -189,9 +190,13 @@ assert.ok(pluginMainSource.includes("text: '绑定小程序'"));
 assert.strictEqual(pluginMainSource.includes("text: 'Pro 本地转写功能'"), false);
 assert.ok(pluginMainSource.includes("text: '高级选项'"));
 assert.ok(pluginMainSource.includes("createEl('details'"));
-assert.ok(pluginMainSource.includes("text: 'AI 简介与关键词（DeepSeek）'"));
-assert.ok(pluginMainSource.includes(".setName('DeepSeek API Key')"));
-assert.ok(pluginMainSource.includes(".setName('测试 AI 连接')"));
+assert.ok(pluginMainSource.includes("text: 'AI 简介与关键词'"));
+assert.strictEqual(pluginMainSource.includes(".setName('DeepSeek API Key')"), false);
+assert.strictEqual(pluginMainSource.includes(".setName('测试 AI 连接')"), false);
+assert.strictEqual(pluginMainSource.includes("text: '公众号评论区提取（实验性）'"), false);
+assert.strictEqual(pluginMainSource.includes(".setName('笔记属性字段')"), false);
+assert.ok(pluginMainSource.includes("text: '小红书评论区提取'"));
+assert.ok(pluginMainSource.includes(".setName('提取小红书评论区')"));
 assert.ok(pluginMainSource.includes("text: '本地转写组件（高级/备用）'"));
 assert.ok(pluginMainSource.includes('默认走本地转写'));
 assert.ok(pluginMainSource.includes('wechat-inbox-sync-section-spacer'));
@@ -272,7 +277,7 @@ assert.strictEqual(
 const wechatCommentHtml = `
   <html>
     <body>
-      <div id="js_content"><p>正文内容</p></div>
+      <div id="js_content"><p>这是一段足够长的公众号正文内容，用来确认评论区不会被保存到 Markdown 文件。</p></div>
       <div id="js_cmt_area">
         <ul id="js_cmt_list">
           <li class="comment_card">
@@ -285,17 +290,66 @@ const wechatCommentHtml = `
     </body>
   </html>
 `;
-const wechatComments = helpers.extractWechatCommentsFromHtml(wechatCommentHtml);
-assert.deepStrictEqual(wechatComments, [
-  { author: '读者A', content: '这个资料很有用，感谢整理。', time: '', likes: '' },
-]);
 const wechatCommentMarkdown = helpers.htmlToMarkdown(wechatCommentHtml);
-assert.ok(wechatCommentMarkdown.includes('## 评论区'));
-assert.ok(wechatCommentMarkdown.includes('**读者A**：这个资料很有用，感谢整理。'));
+assert.strictEqual(wechatCommentMarkdown.includes('## 评论区'), false);
+assert.strictEqual(wechatCommentMarkdown.includes('这个资料很有用，感谢整理。'), false);
+const wechatTableMarkdown = helpers.htmlToMarkdown(`
+  <html>
+    <body>
+      <div id="js_content">
+        <p>SAR后向散射特性与传感器频段相关。</p>
+        <table>
+          <tbody>
+            <tr><th>频段</th><th>频率</th><th>波长</th><th>应用方向</th></tr>
+            <tr><td>Ka</td><td>27-40°GHz</td><td>1.1-0.8°cm</td><td>SAR中应用较少</td></tr>
+            <tr><td>X</td><td>8-12°GHz</td><td>3.8-2.4°cm</td><td>适用于城市监测、冰雪环境</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </body>
+  </html>
+`);
+assert.ok(wechatTableMarkdown.includes('| 频段 | 频率 | 波长 | 应用方向 |'));
+assert.ok(wechatTableMarkdown.includes('| --- | --- | --- | --- |'));
+assert.ok(wechatTableMarkdown.includes('| Ka | 27-40°GHz | 1.1-0.8°cm | SAR中应用较少 |'));
+assert.ok(wechatTableMarkdown.includes('| X | 8-12°GHz | 3.8-2.4°cm | 适用于城市监测、冰雪环境 |'));
+const flattenedWechatTableMarkdown = helpers.cleanMarkdownForStorage([
+  'SAR后向散射特性与传感器的工作频率、波长密切相关。',
+  '',
+  '频段',
+  '',
+  '频率',
+  '',
+  '波长',
+  '',
+  '应用方向',
+  '',
+  'Ka',
+  '',
+  '27-40°GHz',
+  '',
+  '1.1-0.8°cm',
+  '',
+  'SAR中应用较少',
+  '',
+  'K',
+  '',
+  '18-27°GHz',
+  '',
+  '1.7-1.1°cm',
+  '',
+  'SAR中应用较少',
+  '',
+  '与此同时，雷达波长与空间分辨率呈负相关。',
+].join('\n'));
+assert.ok(flattenedWechatTableMarkdown.includes('| 频段 | 频率 | 波长 | 应用方向 |'));
+assert.ok(flattenedWechatTableMarkdown.includes('| Ka | 27-40°GHz | 1.1-0.8°cm | SAR中应用较少 |'));
+assert.ok(flattenedWechatTableMarkdown.includes('| K | 18-27°GHz | 1.7-1.1°cm | SAR中应用较少 |'));
+assert.ok(flattenedWechatTableMarkdown.includes('\n与此同时，雷达波长与空间分辨率呈负相关。'));
 const wechatScriptCommentHtml = `
   <html>
     <body>
-      <div id="js_content"><p>正文内容</p></div>
+      <div id="js_content"><p>这是一段足够长的公众号正文内容，用来确认脚本里的评论数据不会被保存。</p></div>
       <script>
         window.cgiData = {
           elected_comment: [{
@@ -309,10 +363,7 @@ const wechatScriptCommentHtml = `
     </body>
   </html>
 `;
-assert.deepStrictEqual(helpers.extractWechatCommentsFromHtml(wechatScriptCommentHtml), [
-  { author: '读者B', content: '评论来自脚本数据', time: '2026-06-22', likes: '12' },
-]);
-assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
+assert.strictEqual(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('评论来自脚本数据'), false);
 const feishuStaticMarkdown = helpers.extractFeishuMarkdownFromHtml(`
   <html>
     <body>
@@ -340,6 +391,57 @@ assert.ok(feishuStaticMarkdown.includes('## 二级标题'));
 assert.ok(feishuStaticMarkdown.includes('### 三级标题'));
 assert.ok(feishuStaticMarkdown.includes('![流程图](https://example.com/a.png)'));
 assert.ok(feishuStaticMarkdown.includes('![图片](https://example.com/b.jpg)'));
+const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
+  id: 'root',
+  block_sequence: ['root', 'heading-block', 'paragraph-block', 'table-block', 'image-block', 'bullet-block'],
+  block_map: {
+    root: { id: 'root', data: { type: 'page' } },
+    'heading-block': {
+      id: 'heading-block',
+      data: {
+        type: 'heading1',
+        text: { initialAttributedTexts: { text: { 0: '飞书新版标题' } } },
+      },
+    },
+    'paragraph-block': {
+      id: 'paragraph-block',
+      data: {
+        type: 'text',
+        text: { initialAttributedTexts: { text: { 0: '新版 client vars 正文内容' } } },
+      },
+    },
+    'table-block': {
+      id: 'table-block',
+      data: {
+        type: 'table',
+        rows: [
+          [{ text: { initialAttributedTexts: { text: { 0: '频段' } } } }, { text: { initialAttributedTexts: { text: { 0: '频率' } } } }],
+          [{ text: { initialAttributedTexts: { text: { 0: 'Ka' } } } }, { text: { initialAttributedTexts: { text: { 0: '27-40GHz' } } } }],
+        ],
+      },
+    },
+    'image-block': {
+      id: 'image-block',
+      data: {
+        type: 'image',
+        image: { origin_url: 'https://example.com/feishu-image.png' },
+      },
+    },
+    'bullet-block': {
+      id: 'bullet-block',
+      data: {
+        type: 'bullet',
+        text: { initialAttributedTexts: { text: { 0: '列表项目' } } },
+      },
+    },
+  },
+});
+assert.ok(feishuClientVarsMarkdown.includes('# 飞书新版标题'));
+assert.ok(feishuClientVarsMarkdown.includes('新版 client vars 正文内容'));
+assert.ok(feishuClientVarsMarkdown.includes('| 频段 | 频率 |'));
+assert.ok(feishuClientVarsMarkdown.includes('| Ka | 27-40GHz |'));
+assert.ok(feishuClientVarsMarkdown.includes('![图片](https://example.com/feishu-image.png)'));
+assert.ok(feishuClientVarsMarkdown.includes('- 列表项目'));
 assert.strictEqual(typeof helpers.extractWebpageMetadataFromHtml, 'function');
 const articleMeta = helpers.extractWebpageMetadataFromHtml(`
   <html>

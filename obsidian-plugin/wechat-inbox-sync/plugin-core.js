@@ -8,14 +8,17 @@ const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
 };
-const DEFAULT_NOTE_PROPERTY_FIELDS = '';
+const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source,description,keywords';
 const NOTE_PROPERTY_FIELD_KEYS = [
   'id',
   'type',
   'title',
+  'author',
   'created_at',
   'synced_at',
   'source',
+  'description',
+  'keywords',
   'status',
   'url',
   'fetch_status',
@@ -40,6 +43,7 @@ const DEFAULT_SETTINGS = {
   autoSyncOnLoad: false,
   aiProvider: 'off',
   aiMetadataEnabled: false,
+  xiaohongshuCommentsEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -215,10 +219,11 @@ function mergeSettings(savedSettings, platform = process.platform) {
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
-  merged.notePropertyFields = normalizeNotePropertyFields(merged.notePropertyFields);
+  merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.aiMetadataEnabled = Boolean(merged.aiMetadataEnabled);
+  merged.xiaohongshuCommentsEnabled = merged.xiaohongshuCommentsEnabled !== false;
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
