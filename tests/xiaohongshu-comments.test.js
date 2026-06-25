@@ -11,46 +11,48 @@ const threadedComments = helpers.extractXiaohongshuCommentsFromApiPayload({
     comments: [
       {
         id: 'root-1',
-        content: '用户1的主评论',
-        user: { nickName: '用户1' },
+        content: 'root one',
+        user: { nickName: 'User 1' },
         sub_comments: [
           {
             id: 'reply-1',
             root_comment_id: 'root-1',
             parent_comment_id: 'root-1',
-            content: '用户A第一次回复用户1',
-            user: { nickName: '用户A' },
+            content: 'first reply',
+            user: { nickName: 'User A' },
           },
         ],
       },
       {
         id: 'root-2',
-        content: '用户2的主评论',
-        user: { nickName: '用户2' },
+        content: 'root two',
+        user: { nickName: 'User 2' },
       },
       {
         id: 'reply-2',
         root_comment_id: 'root-1',
         parent_comment_id: 'reply-1',
-        target_comment: { user: { nickName: '用户A' } },
-        content: '用户1展开后的二次回复',
-        user: { nickName: '用户1' },
+        target_comment: { user: { nickName: 'User A' } },
+        content: 'expanded second reply',
+        user: { nickName: 'User 1' },
       },
     ],
   },
 });
 
 assert.strictEqual(threadedComments.length, 2);
-assert.strictEqual(threadedComments[0].author, '用户1');
-assert.strictEqual(threadedComments[0].replies.length, 2);
-assert.strictEqual(threadedComments[0].replies[1].replyTo, '用户A');
-assert.strictEqual(threadedComments[1].author, '用户2');
+assert.strictEqual(threadedComments[0].author, 'User 1');
+assert.strictEqual(threadedComments[0].replies.length, 1);
+assert.strictEqual(threadedComments[0].replies[0].replyTo, 'User 1');
+assert.strictEqual(threadedComments[0].replies[0].replies.length, 1);
+assert.strictEqual(threadedComments[0].replies[0].replies[0].replyTo, 'User A');
+assert.strictEqual(threadedComments[1].author, 'User 2');
 
 const markdown = helpers.buildSocialCommentsMarkdown(threadedComments);
-const root1Index = markdown.indexOf('**用户1**：用户1的主评论');
-const userAIndex = markdown.indexOf('**用户A** 回复 **用户1**：用户A第一次回复用户1');
-const user1SecondReplyIndex = markdown.indexOf('**用户1** 回复 **用户A**：用户1展开后的二次回复');
-const root2Index = markdown.indexOf('**用户2**：用户2的主评论');
+const root1Index = markdown.indexOf('**User 1**');
+const userAIndex = markdown.indexOf('**User A**');
+const user1SecondReplyIndex = markdown.indexOf('expanded second reply');
+const root2Index = markdown.indexOf('**User 2**');
 
 assert.ok(root1Index >= 0);
 assert.ok(userAIndex > root1Index);

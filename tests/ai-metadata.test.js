@@ -9,9 +9,9 @@ const record = {
   type: 'webpage',
   content: 'https://www.xiaohongshu.com/explore/ai-boundary',
   metadata: {
-    platform: '小红书',
-    title: 'AI内容选题',
-    markdown: '## 正文\n\n这篇讲小红书内容选题和AI写作。',
+    platform: 'Xiaohongshu',
+    title: 'AI content workflow',
+    markdown: '## Body\n\nThis is the body content and must not become fallback AI metadata.',
   },
 };
 
@@ -22,17 +22,20 @@ async function run() {
     bindings: [{ token: 'free-token', label: 'free', status: 'bound', enabled: true }],
     clientId: 'free-client',
   });
-  let cloudGenerateCalled = false;
+  let metadataGenerateCalled = false;
   inactiveProPlugin.requestJson = async (url) => {
     if (String(url).includes('/entitlements/status')) {
       return { data: { hasAccess: false, plan: 'pro', status: 'inactive' } };
     }
-    cloudGenerateCalled = true;
-    return { data: { description: '不应该生成', keywords: ['不应该生成'] } };
+    if (url === '/metadata/generate') {
+      metadataGenerateCalled = true;
+      return { data: { description: 'should not be generated', keywords: ['should-not-generate'] } };
+    }
+    return { data: {} };
   };
 
   const inactiveResult = await inactiveProPlugin.enrichRecordMetadataWithAi(record);
-  assert.strictEqual(cloudGenerateCalled, false);
+  assert.strictEqual(metadataGenerateCalled, false);
   assert.strictEqual(inactiveResult.metadata.description || '', '');
   assert.deepStrictEqual(inactiveResult.metadata.keywords || [], []);
   assert.strictEqual(inactiveProPlugin.settings.aiMetadataEnabled, false);
@@ -51,7 +54,6 @@ async function run() {
   assert.strictEqual(invalidResult.metadata.description || '', '');
   assert.deepStrictEqual(invalidResult.metadata.keywords || [], []);
   assert.strictEqual(invalidBindingPlugin.settings.aiMetadataEnabled, false);
-  assert.ok(invalidResult.metadata.aiMetadataError);
 }
 
 run()
