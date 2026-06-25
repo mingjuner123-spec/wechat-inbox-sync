@@ -2673,7 +2673,10 @@ function buildFileMarkdownBody(record) {
 }
 
 function cleanMarkdownForStorage(markdown, options = {}) {
-  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const sourceMarkdown = options.feishuTitle
+    ? normalizeFeishuMarkdownDocument(markdown, options.feishuTitle)
+    : String(markdown || '');
+  const lines = sourceMarkdown.replace(/\r\n/g, '\n').split('\n');
   const out = [];
   const seen = new Map();
   let lastWasBlank = true;
@@ -2792,9 +2795,94 @@ function normalizeFeishuMarkdownLine(line) {
     .trim();
 }
 
+function normalizeFeishuDocumentTitle(title) {
+  return String(title || '')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
+    .replace(/\s*[-–—]\s*\u98de\u4e66\u4e91\u6587\u6863\s*$/i, '')
+    .trim();
+}
+
+function stripFeishuTitleSuffix(text) {
+  return String(text || '')
+    .replace(/\s*[-–—]\s*(?:\u4ea4\u6d41\u53cd\u9988\u7fa4|\u98de\u4e66\u4e91\u6587\u6863|\u5f20\u5f20\u7684\u4e91\u6587\u6863)\s*$/i, '')
+    .trim();
+}
+
+function normalizeFeishuMarkdownDocument(markdown, title) {
+  const cleanTitle = normalizeFeishuDocumentTitle(title);
+  const titleKey = normalizeTitleForCompare(cleanTitle);
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let insertedTitle = false;
+  let sawFeishuChrome = false;
+  let skippingOpeningOutline = false;
+  let openingOutlineSkipped = false;
+
+  const promoteTitle = (line) => {
+    const source = String(line || '').trim();
+    if (!/^-\s+/.test(source) && !/^#{1,6}\s+/.test(source)) return '';
+    const value = stripFeishuTitleSuffix(source
+      .replace(/^-\s+/, '')
+      .replace(/^#{1,6}\s+/, '')
+      .trim());
+    if (!value || value.length < 4 || !titleKey) return '';
+    const key = normalizeTitleForCompare(value);
+    if (titleKey === key || titleKey.startsWith(key) || key.startsWith(titleKey)) {
+      return value;
+    }
+    return '';
+  };
+
+  for (const line of lines) {
+    const text = String(line || '')
+      .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
+      .trim();
+
+    if (!text) {
+      if (!skippingOpeningOutline) out.push(line);
+      continue;
+    }
+
+    if (insertedTitle && !openingOutlineSkipped && text === '\u5f00') {
+      skippingOpeningOutline = true;
+      openingOutlineSkipped = true;
+      continue;
+    }
+
+    if (/^#\s*\u98de\u4e66\u4e91\u6587\u6863$/i.test(text)
+      || /^\u98de\u4e66\u4e91\u6587\u6863$/i.test(text)
+      || text === '\u5f00'
+      || text === '\u5f20\u5f20\u7684\u4e91\u6587\u6863') {
+      sawFeishuChrome = true;
+      continue;
+    }
+
+    if (!insertedTitle) {
+      const headingTitle = promoteTitle(text);
+      if (headingTitle) {
+        out.push(`# ${headingTitle}`);
+        insertedTitle = true;
+        continue;
+      }
+    }
+
+    if (skippingOpeningOutline) {
+      if (/^-\s+/.test(text)) continue;
+      skippingOpeningOutline = false;
+    }
+
+    out.push(line);
+  }
+
+  return out.join('\n');
+}
+
 function shouldDropFeishuLine(line, title) {
   const text = String(line || '').trim();
   if (!text) return true;
+  if (/^\d{1,2}\u6708\d{1,2}\u65e5\u4fee\u6539$/.test(text)) return true;
+  if (/^\u4ea4\u6d41\u53cd\u9988\u7fa4$/.test(text)) return true;
+  if (/^-\s+.+\s[-–—]\s+\u4ea4\u6d41\u53cd\u9988\u7fa4$/.test(text)) return true;
   const normalized = normalizeTitleForCompare(text);
   const normalizedTitle = normalizeTitleForCompare(title);
   const noise = new Set([
@@ -2845,17 +2933,27 @@ function shouldDropFeishuLine(line, title) {
   if (/^[\u4e00-\u9fa5]{1,4}$/.test(text) && /(?:斤|斧|淇|钖|作者|头像)/.test(text)) return true;
   if (/成长笔记(?:昨天\s*\d{1,2}:\d{2})?$/.test(text)) return true;
   if (/^春树.*云文档$/.test(text)) return true;
-  if (normalizedTitle && normalized === normalizedTitle) return true;
+  if (normalizedTitle && normalized === normalizedTitle && !/^#{1,6}\s+/.test(text)) return true;
   return false;
 }
 
-function formatFeishuHeadingLine(line) {
+function formatFeishuHeadingLine(line, title = '') {
   const text = String(line || '').trim();
-  if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
+  if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text)) {
     return text;
+  }
+  const titleKey = normalizeTitleForCompare(title);
+  const textKey = normalizeTitleForCompare(text);
+  if (titleKey && textKey && (titleKey === textKey || titleKey.startsWith(textKey) || textKey.startsWith(titleKey))) {
+    return `# ${stripFeishuTitleSuffix(text)}`;
   }
   const length = Array.from(text).length;
   if (length >= 4 && length <= 34) {
+    if (/^(?:当前支持哪些内容)$/.test(text)) return `## ${text}`;
+    if (/^[一二三四五六七八九十]+、(?:插件绑定教程|产品使用教程|Pro\s*版激活与使用教程)$/.test(text)) return `## ${text}`;
+    if (/^\d+\.\s+(?:安装 Obsidian 插件|插件市场安装失败|绑定微信小程序|开始同步|读取剪切板|读取网页链接|录音和上传\s*MP3|其他本地文件|同步失败时怎么处理|领取会员试用|安装本地转写组件|版本优势与局限|正式会员开通|反馈-交流)$/.test(text)) {
+      return `### ${text}`;
+    }
     if (/^\d{4}年之前，我没有任何目标$/.test(text)) return `## ${text}`;
     if (/^(第[一二三四五六七八九十\d]+[、.．]?\s*)?[^，。！？!?]{0,16}风口[：:]/.test(text)) return `## ${text}`;
     if (/^(什么是.+原理|举个例子|最后|知识付费的下一个形态)$/.test(text)) return `## ${text}`;
@@ -8319,7 +8417,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       index += 1;
     }
 
-    return nextMarkdown;
+    return nextMarkdown
+      .replace(/!\[[^\]]*]\(blob:[^)]+\)/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
 
   async buildTranscriptRecordFromMedia(record, {
