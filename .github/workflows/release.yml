@@ -31,6 +31,20 @@ jobs:
             exit 1
           fi
 
+      - name: Run regression checks
+        run: |
+          set -euo pipefail
+          node --check main.js
+          node --check tests/plugin-main-ai.test.js
+          node tests/boundary-guard.test.js
+          node tests/xiaohongshu-comments.test.js
+          node tests/feishu-extract.test.js
+          node tests/ai-metadata.test.js
+          node tests/frontmatter.test.js
+          node tests/comments-model.test.js
+          node tests/plugin-main-ai.test.js
+          node tests/release-social-feishu-ai.test.js
+
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

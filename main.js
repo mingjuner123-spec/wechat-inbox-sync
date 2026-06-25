@@ -6390,6 +6390,20 @@ function collectFeishuImageUrls(source) {
   return urls;
 }
 
+function isNoisyFeishuImageUrl(value) {
+  const url = normalizeExtractedUrl(value).toLowerCase();
+  return /(?:avatar|portrait|profile|user|logo|icon|emoji|sticker|qrcode|qr-code)[^/]*(?:\.jpg|\.jpeg|\.png|\.webp|!|$)/i.test(url);
+}
+
+function feishuImageTagToMarkdown(tag) {
+  const sourceMatch = String(tag || '').match(/\s(?:data-src|src)=["']([^"']+)["']/i);
+  if (!sourceMatch || !sourceMatch[1] || isNoisyFeishuImageUrl(sourceMatch[1])) return '';
+  const className = getHtmlAttribute(tag, 'class');
+  const altText = getHtmlAttribute(tag, 'alt');
+  if (/(?:avatar|portrait|profile|user|logo|icon|emoji|sticker|qrcode|qr-code)/i.test(`${className} ${altText}`)) return '';
+  return imageTagToMarkdown(tag);
+}
+
 function getFeishuOutlineLevelFromTag(tag) {
   const source = String(tag || '');
   const attrPatterns = [
@@ -6436,8 +6450,10 @@ function stripFeishuOutlineContainers(html) {
   const source = String(html || '');
   return source.replace(/<(?<tag>aside|nav|div|section)\b(?<attrs>[^>]*)>(?<body>[\s\S]*?)<\/\k<tag>>/gi, function stripOutline(full) {
     const groups = arguments[arguments.length - 1] || {};
+    const tag = groups && groups.tag || '';
     const attrs = groups && groups.attrs || '';
     const body = groups && groups.body || '';
+    if (/^(?:aside|nav)$/i.test(tag)) return '';
     return /(?:outline|catalog|toc|目录|docx-outline)/i.test(`${attrs} ${body.slice(0, 300)}`) ? '' : full;
   });
 }
@@ -6465,7 +6481,8 @@ function extractFeishuMarkdownFromHtml(html) {
   const lines = [];
   const seen = new Set();
   const readable = stripScriptAndStyleBlocks(stripFeishuOutlineContainers(source))
-    .replace(/<img\b[^>]*>/gi, (tag) => imageTagToMarkdown(tag))
+    .replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => `\n${htmlTableToMarkdown(table)}\n`)
+    .replace(/<img\b[^>]*>/gi, (tag) => feishuImageTagToMarkdown(tag))
     .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text) => `\n# ${stripHtmlTags(text)}\n`)
     .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text) => `\n## ${stripHtmlTags(text)}\n`)
     .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, (_, text) => `\n### ${stripHtmlTags(text)}\n`)
@@ -6519,6 +6536,7 @@ function extractFeishuMarkdownFromHtml(html) {
   });
   let appendedImageIndex = 0;
   collectFeishuImageUrls(source).forEach((url) => {
+    if (isNoisyFeishuImageUrl(url)) return;
     if (existingImageUrls.has(url)) return;
     existingImageUrls.add(url);
     const markdown = `![图片${appendedImageIndex ? ` ${appendedImageIndex + 1}` : ''}](${url})`;
