@@ -4686,7 +4686,7 @@ async function loginXiaohongshuWeb(targetUrl) {
     throw new Error('当前 Obsidian 环境不支持浏览器窗口');
   }
 
-  const session = getWechatSession();
+  const session = getXiaohongshuSession();
   if (!session) {
     throw new Error('无法创建小红书登录会话');
   }
@@ -4711,12 +4711,6 @@ async function loginXiaohongshuWeb(targetUrl) {
     const finish = async (error) => {
       if (settled) return;
       settled = true;
-      try {
-        const destroyed = typeof win.isDestroyed === 'function' ? win.isDestroyed() : false;
-        if (win && typeof win.destroy === 'function' && !destroyed) {
-          win.destroy();
-        }
-      } catch (destroyError) {}
       if (error) {
         reject(error);
         return;
@@ -4724,21 +4718,10 @@ async function loginXiaohongshuWeb(targetUrl) {
       resolve(await probeXiaohongshuLoginStatus(loginUrl));
     };
 
-    const timer = setInterval(async () => {
-      try {
-        if (await checkXiaohongshuLoginStatus()) {
-          clearInterval(timer);
-          finish();
-        }
-      } catch (error) {}
-    }, 1500);
-
     win.on('closed', async () => {
-      clearInterval(timer);
       finish();
     });
     win.loadURL(loginUrl).catch((error) => {
-      clearInterval(timer);
       finish(error);
     });
   });
