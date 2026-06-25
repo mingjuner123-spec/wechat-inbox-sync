@@ -75,11 +75,11 @@ function createPlugin({ requestUrl, files = {}, settings = {} }) {
   assert.strictEqual(pluginCore.DEFAULT_SETTINGS.xiaohongshuCommentsEnabled, true);
   assert.strictEqual(
     pluginCore.OFFICIAL_SYNC_API_BASE,
-    'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
+    'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
   );
   assert.strictEqual(
     pluginCore.mergeSettings({
-      apiBase: 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+      apiBase: 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
     }).apiBase,
     pluginCore.OFFICIAL_SYNC_API_BASE,
   );
