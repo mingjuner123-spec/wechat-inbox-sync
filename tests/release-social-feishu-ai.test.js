@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.80');
-assert.strictEqual(versions['1.2.80'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.81');
+assert.strictEqual(versions['1.2.81'], manifest.minAppVersion);
 assert.strictEqual(helpers.isRequestUrlTransportError('Request failed, status 500'), true);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
