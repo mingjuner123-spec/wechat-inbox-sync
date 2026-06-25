@@ -1,16 +1,23 @@
 const assert = require('assert');
 
-const { createInboxService } = require('../miniprogram/services/inbox-service');
+const { WECHAT_CLOUD_ENV, createInboxService } = require('../miniprogram/services/inbox-service');
 
+const rawCloudCalls = [];
 const calls = [];
+function recordCloudCall(type, options) {
+  rawCloudCalls.push([type, options]);
+  const { config, ...legacyOptions } = options;
+  calls.push([type, legacyOptions]);
+}
+
 const wxMock = {
   cloud: {
     callFunction(options) {
-      calls.push(['callFunction', options]);
+      recordCloudCall('callFunction', options);
       return Promise.resolve({ result: { success: true, data: options.data } });
     },
     uploadFile(options) {
-      calls.push(['uploadFile', options]);
+      recordCloudCall('uploadFile', options);
       const task = {
         onProgressUpdate(callback) {
           task.progressCallback = callback;
@@ -45,13 +52,14 @@ const wxMock = {
     },
   ]);
 
-  await service.createBindCode();
+  await service.createBindCode({ inviterOpenid: 'inviter-openid' });
   assert.deepStrictEqual(calls[1], [
     'callFunction',
     {
       name: 'quickstartFunctions',
       data: {
         type: 'createBindCode',
+        inviterOpenid: 'inviter-openid',
       },
     },
   ]);
@@ -93,6 +101,16 @@ const wxMock = {
     { progress: 37, totalBytesSent: 370, totalBytesExpectedToSend: 1000 },
   ]);
 
+  const localAudioUpload = await service.uploadVoiceFile({
+    filePath: 'wxfile://tmp/2026.06.22/audio-cache/local-audio',
+    fileName: 'interview.m4a',
+  });
+  assert.strictEqual(localAudioUpload.fileID.startsWith('cloud://voices/'), true);
+  assert.strictEqual(localAudioUpload.fileID.endsWith('.m4a'), true);
+  assert.strictEqual(calls[5][0], 'uploadFile');
+  assert.strictEqual(calls[5][1].filePath, 'wxfile://tmp/2026.06.22/audio-cache/local-audio');
+  assert.match(calls[5][1].cloudPath, /^voices\/\d+-\d+\.m4a$/);
+
   const fileProgressEvents = [];
   const uploadedFile = await service.uploadInboxFile({
     path: 'temp://example.pdf',
@@ -102,8 +120,8 @@ const wxMock = {
   });
   assert.strictEqual(uploadedFile.fileID.startsWith('cloud://files/'), true);
   assert.strictEqual(uploadedFile.fileID.endsWith('.pdf'), true);
-  assert.strictEqual(calls[5][0], 'uploadFile');
-  assert.strictEqual(calls[5][1].filePath, 'temp://example.pdf');
+  assert.strictEqual(calls[6][0], 'uploadFile');
+  assert.strictEqual(calls[6][1].filePath, 'temp://example.pdf');
   assert.deepStrictEqual(fileProgressEvents, [
     { progress: 37, totalBytesSent: 370, totalBytesExpectedToSend: 1000 },
   ]);
@@ -113,7 +131,7 @@ const wxMock = {
     contact: 'feishu-user',
     appVersion: '0.1.0',
   });
-  assert.deepStrictEqual(calls[6], [
+  assert.deepStrictEqual(calls[7], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -127,7 +145,7 @@ const wxMock = {
   ]);
 
   await service.getPublicConfig();
-  assert.deepStrictEqual(calls[7], [
+  assert.deepStrictEqual(calls[8], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -138,7 +156,7 @@ const wxMock = {
   ]);
 
   await service.getDailyUsage();
-  assert.deepStrictEqual(calls[8], [
+  assert.deepStrictEqual(calls[9], [
     'callFunction',
     {
       name: 'quickstartFunctions',
@@ -148,16 +166,7 @@ const wxMock = {
     },
   ]);
 
-  await service.unlockDailyUsageByShare();
-  assert.deepStrictEqual(calls[9], [
-    'callFunction',
-    {
-      name: 'quickstartFunctions',
-      data: {
-        type: 'unlockDailyUsageByShare',
-      },
-    },
-  ]);
+  assert.strictEqual(service.unlockDailyUsageByShare, undefined);
 
   await service.unlockDailyUsageByAd();
   assert.deepStrictEqual(calls[10], [
@@ -385,4 +394,12 @@ const wxMock = {
       },
     },
   ]);
+
+  for (const [type, options] of rawCloudCalls) {
+    assert.deepStrictEqual(
+      options.config,
+      { env: WECHAT_CLOUD_ENV },
+      `${type} must explicitly use the production WeChat cloud env`,
+    );
+  }
 })();

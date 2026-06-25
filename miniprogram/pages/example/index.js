@@ -1,4 +1,6 @@
 // pages/exampleDetail/index.js
+const { callCloudFunction } = require('../../services/cloud-env');
+
 Page({
   data: {
     type: "",
@@ -214,7 +216,7 @@ Page({
     }
     wx.showLoading({ title: "插入中..." });
     try {
-      await wx.cloud.callFunction({
+      await callCloudFunction(wx.cloud, {
         name: "quickstartFunctions",
         data: {
           type: "insertRecord",

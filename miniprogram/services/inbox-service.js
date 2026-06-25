@@ -1,8 +1,10 @@
+const { WECHAT_CLOUD_ENV, callCloudFunction, uploadCloudFile } = require('./cloud-env');
+
 function createInboxService(wxApi) {
   const cloud = wxApi.cloud;
 
   function callInboxFunction(data) {
-    return cloud.callFunction({
+    return callCloudFunction(cloud, {
       name: 'quickstartFunctions',
       data,
     });
@@ -15,9 +17,10 @@ function createInboxService(wxApi) {
     });
   }
 
-  function createBindCode() {
+  function createBindCode(options = {}) {
     return callInboxFunction({
       type: 'createBindCode',
+      inviterOpenid: options.inviterOpenid || '',
     });
   }
 
@@ -61,9 +64,9 @@ function createInboxService(wxApi) {
     });
   }
 
-  function unlockDailyUsageByShare() {
+  function getOpenId() {
     return callInboxFunction({
-      type: 'unlockDailyUsageByShare',
+      type: 'getOpenId',
     });
   }
 
@@ -194,7 +197,7 @@ function createInboxService(wxApi) {
 
   function uploadWithProgress(uploadOptions, onProgress) {
     return new Promise((resolve, reject) => {
-      const uploadTask = cloud.uploadFile({
+      const uploadTask = uploadCloudFile(cloud, {
         ...uploadOptions,
         success: resolve,
         fail: reject,
@@ -205,8 +208,36 @@ function createInboxService(wxApi) {
     });
   }
 
-  function uploadVoiceFile(filePath, options = {}) {
-    const suffix = filePath && filePath.includes('.') ? filePath.slice(filePath.lastIndexOf('.')) : '.mp3';
+  function getUploadVoiceFilePath(file) {
+    if (typeof file === 'string') return file;
+    if (!file || typeof file !== 'object') return '';
+    return file.filePath || file.path || file.tempFilePath || '';
+  }
+
+  function getUploadVoiceFileName(file) {
+    if (!file || typeof file !== 'object') return '';
+    return file.fileName || file.name || '';
+  }
+
+  function extractUploadSuffix(filePath, fileName) {
+    const candidates = [fileName, filePath];
+    for (const candidate of candidates) {
+      const text = String(candidate || '');
+      if (!text) continue;
+      const normalized = text.replace(/\\/g, '/');
+      const baseName = normalized.slice(normalized.lastIndexOf('/') + 1);
+      const dotIndex = baseName.lastIndexOf('.');
+      if (dotIndex > 0 && dotIndex < baseName.length - 1) {
+        return baseName.slice(dotIndex);
+      }
+    }
+    return '.mp3';
+  }
+
+  function uploadVoiceFile(file, options = {}) {
+    const filePath = getUploadVoiceFilePath(file);
+    const fileName = getUploadVoiceFileName(file);
+    const suffix = extractUploadSuffix(filePath, fileName);
     return uploadWithProgress({
       cloudPath: `voices/${Date.now()}-${Math.floor(Math.random() * 1000)}${suffix}`,
       filePath,
@@ -232,7 +263,7 @@ function createInboxService(wxApi) {
     unbindBindClient,
     getPublicConfig,
     getDailyUsage,
-    unlockDailyUsageByShare,
+    getOpenId,
     unlockDailyUsageByAd,
     getEntitlementStatus,
     redeemAccessCode,
@@ -257,5 +288,6 @@ function createInboxService(wxApi) {
 }
 
 module.exports = {
+  WECHAT_CLOUD_ENV,
   createInboxService,
 };

@@ -1,21 +1,18 @@
 // app.js
-const WECHAT_CLOUD_ENV = 'he02-d8gebzv050ed6c4ef';
+const { WECHAT_CLOUD_ENV, initCloud } = require('./services/cloud-env');
 
 App({
-  onLaunch: function (options) {
+  onLaunch(options) {
     this.globalData = {
-      // 固定生产数据环境，避免开发者工具当前环境切换导致 INVALID_ENV。
+      // Pin the production data env so DevTools' selected env cannot break sync.
       env: WECHAT_CLOUD_ENV,
       pendingForwardMaterials: [],
     };
     this.captureForwardMaterials(options);
     if (!wx.cloud) {
-      console.error("请使用 2.2.3 或以上的基础库以使用云能力");
+      console.error('Please use base library 2.2.3 or later to use cloud capability.');
     } else {
-      wx.cloud.init({
-        env: WECHAT_CLOUD_ENV,
-        traceUser: true,
-      });
+      initCloud(wx);
     }
   },
 

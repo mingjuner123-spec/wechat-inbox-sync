@@ -28,6 +28,10 @@ const miniprogramApp = fs.readFileSync(
   path.join(root, 'miniprogram/app.js'),
   'utf8'
 );
+const miniprogramCloudEnv = fs.readFileSync(
+  path.join(root, 'miniprogram/services/cloud-env.js'),
+  'utf8'
+);
 
 assert.match(
   quickstartIndex,
@@ -63,14 +67,14 @@ assert.match(
 );
 
 assert.match(
-  miniprogramApp,
+  miniprogramCloudEnv,
   /WECHAT_CLOUD_ENV\s*=\s*['"]he02-d8gebzv050ed6c4ef['"]/,
   'mini program should use the WeChat cloud env id that owns production data'
 );
 assert.match(
   miniprogramApp,
-  /wx\.cloud\.init\(\{\s*env:\s*WECHAT_CLOUD_ENV/,
-  'mini program cloud init should use the fixed production env directly'
+  /initCloud\(wx\)/,
+  'mini program cloud init should go through the centralized fixed env helper'
 );
 assert.doesNotMatch(
   miniprogramApp,
