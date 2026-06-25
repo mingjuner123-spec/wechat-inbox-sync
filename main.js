@@ -3255,6 +3255,48 @@ function collectJsonArrayBlocks(source, keys) {
   return blocks;
 }
 
+function collectJsonObjectBlocks(source, keys) {
+  const wanted = (keys || []).map((key) => String(key || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!wanted.length) return [];
+  const pattern = new RegExp(`["']?(?:${wanted.join('|')})["']?\\s*:\\s*\\{`, 'gi');
+  const blocks = [];
+  const text = String(source || '');
+  let match;
+  while ((match = pattern.exec(text))) {
+    let depth = 1;
+    let inString = '';
+    let escaped = false;
+    const start = pattern.lastIndex - 1;
+    for (let index = pattern.lastIndex; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (inString) {
+        if (char === inString) inString = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        inString = char;
+        continue;
+      }
+      if (char === '{') depth += 1;
+      if (char === '}') depth -= 1;
+      if (depth === 0) {
+        blocks.push(text.slice(start, index + 1));
+        pattern.lastIndex = index + 1;
+        break;
+      }
+    }
+  }
+  return blocks;
+}
+
 function collectJsonStringValues(source, keys) {
   const wanted = new Set((keys || []).map((key) => String(key || '').toLowerCase()));
   const values = [];
@@ -3353,6 +3395,24 @@ function isNoisyXiaohongshuImageUrl(value) {
     || /ci\.xiaohongshu\.com\/(?:recommend|banner|logo|icon|avatar)/i.test(url);
 }
 
+function isLikelyXiaohongshuNoteImageUrl(value) {
+  const url = normalizeExtractedUrl(value);
+  if (!isLikelyImageUrl(url) || isNoisyXiaohongshuImageUrl(url)) return false;
+  return /(?:sns-webpic|xhscdn|notes_pre_post|\/spectrum\/)/i.test(url);
+}
+
+function pushXiaohongshuNoteImageUrl(urls, value) {
+  if (isLikelyImageUrl(value) && !isNoisyXiaohongshuImageUrl(value)) {
+    pushUniqueUrl(urls, value);
+  }
+}
+
+function pushXiaohongshuFallbackImageUrl(urls, value) {
+  if (isLikelyXiaohongshuNoteImageUrl(value)) {
+    pushUniqueUrl(urls, value);
+  }
+}
+
 function collectFilteredImageTagUrls(source) {
   const urls = [];
   const imageTags = String(source || '').match(/<img\b[^>]*>/gi) || [];
@@ -3375,13 +3435,14 @@ function collectFilteredImageTagUrls(source) {
 function collectXiaohongshuNoteImageUrls(html) {
   const source = String(html || '');
   const urls = [];
+  const metaImages = [];
   [
     extractMetaContent(source, ['og:image', 'og:image:url', 'twitter:image']),
-  ].forEach((url) => pushUniqueUrl(urls, url));
+  ].forEach((url) => pushXiaohongshuNoteImageUrl(metaImages, url));
+  collectFilteredImageTagUrls(source).forEach((url) => pushXiaohongshuNoteImageUrl(urls, url));
 
-  collectFilteredImageTagUrls(source).forEach((url) => pushUniqueUrl(urls, url));
-
-  const imageBlocks = collectJsonArrayBlocks(source, [
+  const noteBlocks = collectJsonObjectBlocks(source, ['note', 'noteData', 'noteDetail', 'noteInfo', 'currentNote']);
+  const imageBlocks = noteBlocks.flatMap((block) => collectJsonArrayBlocks(block, [
     'imageList',
     'image_list',
     'images',
@@ -3389,7 +3450,7 @@ function collectXiaohongshuNoteImageUrls(html) {
     'image_urls',
     'imageUrlList',
     'image_url_list',
-  ]);
+  ]));
 
   imageBlocks.forEach((block) => {
     collectJsonStringValues(block, [
@@ -3408,19 +3469,20 @@ function collectXiaohongshuNoteImageUrls(html) {
       'image_url',
       'cover',
     ]).forEach((url) => {
-      if (isLikelyImageUrl(url)) {
-        pushUniqueUrl(urls, url);
-      }
+      pushXiaohongshuNoteImageUrl(urls, url);
     });
-    collectLooseXiaohongshuImageUrls(block).forEach((url) => pushUniqueUrl(urls, url));
+    collectLooseXiaohongshuImageUrls(block).forEach((url) => pushXiaohongshuNoteImageUrl(urls, url));
   });
 
   const noteImages = dedupeImageVariants(urls);
-  if (imageBlocks.length || noteImages.length > 1) {
-    return noteImages;
+  if (noteImages.length) {
+    return dedupeImageVariants([...metaImages, ...noteImages]);
   }
 
-  return dedupeImageVariants(collectImageUrlsFromHtml(source)).slice(0, 6);
+  const fallbackUrls = [];
+  collectFilteredImageTagUrls(source).forEach((url) => pushXiaohongshuNoteImageUrl(fallbackUrls, url));
+  collectLooseXiaohongshuImageUrls(source).forEach((url) => pushXiaohongshuFallbackImageUrl(fallbackUrls, url));
+  return dedupeImageVariants([...metaImages, ...fallbackUrls]).slice(0, 6);
 }
 
 function extractVideoUrlFromHtml(html) {
@@ -4247,6 +4309,39 @@ function buildXiaohongshuCommentApiUrl(url, cursor = '') {
   return apiUrl.toString();
 }
 
+async function fetchXiaohongshuCommentApiPayload(apiUrl, refererUrl) {
+  const headers = await getXiaohongshuRequestHeaders(refererUrl);
+  headers.Referer = refererUrl;
+  headers.Accept = 'application/json, text/plain, */*';
+
+  try {
+    const response = await requestUrl({ url: apiUrl, method: 'GET', headers });
+    return response.json || tryParseJson(response.text || '');
+  } catch (requestError) {
+    const session = getXiaohongshuSession();
+    if (!session || typeof session.fetch !== 'function') {
+      throw requestError;
+    }
+    try {
+      const sessionHeaders = { ...headers };
+      delete sessionHeaders.Cookie;
+      delete sessionHeaders.cookie;
+      const response = await session.fetch(apiUrl, {
+        method: 'GET',
+        headers: sessionHeaders,
+        credentials: 'include',
+      });
+      const text = response && typeof response.text === 'function' ? await response.text() : '';
+      const payload = tryParseJson(text || '');
+      if (!payload) throw new Error(`Xiaohongshu comment API returned invalid JSON: ${response && response.status || 'unknown'}`);
+      return payload;
+    } catch (sessionError) {
+      sessionError.cause = requestError;
+      throw sessionError;
+    }
+  }
+}
+
 async function fetchXiaohongshuCommentsFromApi(url, limit = 20) {
   const comments = [];
   const seen = new Set();
@@ -4257,11 +4352,7 @@ async function fetchXiaohongshuCommentsFromApi(url, limit = 20) {
     const apiUrl = buildXiaohongshuCommentApiUrl(url, cursor);
     if (!apiUrl) return { comments, status: 'unavailable', error: '无法从链接中识别小红书笔记 ID' };
     try {
-      const headers = await getXiaohongshuRequestHeaders(url);
-      headers.Referer = url;
-      headers.Accept = 'application/json, text/plain, */*';
-      const response = await requestUrl({ url: apiUrl, method: 'GET', headers });
-      const payload = response.json || tryParseJson(response.text || '');
+      const payload = await fetchXiaohongshuCommentApiPayload(apiUrl, url);
       const pageComments = extractXiaohongshuCommentsFromApiPayload(payload, limit - comments.length);
       pageComments.forEach((comment) => pushSocialComment(comments, seen, comment));
       const data = payload && payload.data ? payload.data : {};
