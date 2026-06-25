@@ -37,7 +37,8 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          cd obsidian-plugin/wechat-inbox-sync
+          node scripts/build-obsidian-plugin-release.js
+          cd build/obsidian-plugin-release
           ZIP_NAME="wechat-inbox-sync-$TAG_NAME.zip"
           rm -f "$ZIP_NAME"
           zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr

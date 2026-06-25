@@ -15,6 +15,12 @@ const windowsInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install
 const macInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install-local-asr-macos.sh'), 'utf8');
 const releaseWorkflowPath = path.resolve(__dirname, '../.github/workflows/release.yml');
 const releaseWorkflow = fs.readFileSync(releaseWorkflowPath, 'utf8');
+const builtReleaseMainPath = path.join(repoRoot, 'build/obsidian-plugin-release/main.js');
+const localRuntimeModules = Array.from(fs.readFileSync(path.join(pluginDir, 'main.js'), 'utf8').matchAll(/require\(['"]\.\/([^'"]+)['"]\)/g))
+  .map((match) => `${match[1]}.js`)
+  .filter((fileName, index, list) => list.indexOf(fileName) === index);
+const releaseAssetNames = ['main.js', 'manifest.json', 'styles.css'];
+const buildScriptPath = path.join(repoRoot, 'scripts/build-obsidian-plugin-release.js');
 
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
@@ -28,9 +34,21 @@ assert.strictEqual(fs.existsSync(rootVersionsPath), true, 'root versions.json sh
 assert.deepStrictEqual(JSON.parse(fs.readFileSync(rootManifestPath, 'utf8')), manifest);
 assert.deepStrictEqual(JSON.parse(fs.readFileSync(rootVersionsPath, 'utf8')), versions);
 
-['main.js', 'manifest.json', 'styles.css', 'versions.json', 'README.md', 'LICENSE', 'local-asr/install-local-asr.ps1', 'local-asr/install-local-asr-macos.sh', 'local-asr/README.md'].forEach((fileName) => {
+['main.js', 'manifest.json', 'styles.css', 'versions.json', 'README.md', 'LICENSE', 'ai-metadata.js', 'xiaohongshu-comments.js', 'feishu-client-vars.js', 'local-asr/install-local-asr.ps1', 'local-asr/install-local-asr-macos.sh', 'local-asr/README.md'].forEach((fileName) => {
   assert.strictEqual(fs.existsSync(path.join(pluginDir, fileName)), true, `${fileName} should exist`);
 });
+localRuntimeModules.forEach((fileName) => {
+  assert.strictEqual(fs.existsSync(path.join(pluginDir, fileName)), true, `${fileName} required by source main.js should exist`);
+});
+assert.strictEqual(fs.existsSync(buildScriptPath), true, 'release build script should exist');
+if (fs.existsSync(builtReleaseMainPath)) {
+  const builtReleaseMain = fs.readFileSync(builtReleaseMainPath, 'utf8');
+  assert.strictEqual(
+    /require\(['"]\.\//.test(builtReleaseMain),
+    false,
+    'built release main.js should be standalone for Obsidian marketplace installs',
+  );
+}
 
 assert.ok(readme.includes('## Privacy'));
 assert.ok(readme.includes('## Installation'));
@@ -46,9 +64,21 @@ assert.ok(releaseWorkflow.includes('root_manifest_version="$(node -p'));
 assert.ok(releaseWorkflow.includes('subdir manifest.json version'));
 assert.ok(releaseWorkflow.includes('root manifest.json version'));
 assert.ok(releaseWorkflow.includes('if [ "$manifest_version" != "$TAG_NAME" ]; then'));
+assert.ok(releaseWorkflow.includes('node scripts/build-obsidian-plugin-release.js'));
+assert.ok(releaseWorkflow.includes('cd build/obsidian-plugin-release'));
 assert.ok(releaseWorkflow.includes('zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr'));
 assert.ok(releaseWorkflow.includes('gh release create "$TAG_NAME"'));
 assert.ok(releaseWorkflow.includes('gh release upload "$TAG_NAME"'));
+releaseAssetNames.forEach((fileName) => {
+  assert.ok(releaseWorkflow.includes(fileName), `release workflow should upload ${fileName}`);
+});
+localRuntimeModules.forEach((fileName) => {
+  assert.strictEqual(
+    releaseWorkflow.includes(` ${fileName}`),
+    false,
+    `${fileName} must not be a standalone marketplace asset because Obsidian installs only main.js, manifest.json, and styles.css`,
+  );
+});
 assert.ok(windowsInstaller.includes('$ChunkSeconds = 120'));
 assert.ok(windowsInstaller.includes('$ChunkRetrySeconds = 30'));
 assert.ok(windowsInstaller.includes('"-f", "segment"'));

@@ -78,13 +78,6 @@
             <text class="home-capability-text">录音、音视频链接、本地MP3文件</text>
           </view>
         </view>
-        <view wx:if="{{false}}" class="transcription-mode-row {{entitlementStatus.hasAccess ? 'pro' : 'free'}}" bindtap="showCloudTranscriptionSettings">
-          <text class="transcription-mode-label">音视频转写</text>
-          <view class="transcription-mode-copy">
-            <text class="transcription-mode-value">{{cloudTranscriptionSummary}}</text>
-            <text class="transcription-quota-value">{{cloudQuotaSummary}}</text>
-          </view>
-        </view>
       </view>
     </view>
 
@@ -197,7 +190,8 @@
         <button wx:if="{{canAddBindDevice}}" class="add-bind-device-button" bindtap="increaseBindDeviceLimit">
           新增一台电脑名额
         </button>
-        <view wx:else class="bind-device-limit-tip">最多可绑定 {{bindMaxDeviceLimit}} 台电脑</view>
+        <view wx:elif="{{bindHasProAccess}}" class="bind-device-limit-tip">Pro 最多可绑定 3 台电脑</view>
+        <view wx:else class="bind-device-limit-tip">免费版支持 1 台电脑，开通 Pro 后最多 3 台</view>
       </view>
 
       <view class="bind-extra-actions">
@@ -253,18 +247,8 @@
           <view class="benefit-cell pro-col">pro版</view>
         </view>
         <view class="benefit-table-row">
-          <view class="benefit-cell benefit-name">使用次数</view>
-          <view class="benefit-cell">5次/天</view>
-          <view class="benefit-cell pro-col">不限</view>
-        </view>
-        <view class="benefit-table-row">
           <view class="benefit-cell benefit-name">文字、文件转写</view>
           <view class="benefit-cell">√</view>
-          <view class="benefit-cell pro-col">√</view>
-        </view>
-        <view class="benefit-table-row">
-          <view class="benefit-cell benefit-name">语音、MP3转写</view>
-          <view class="benefit-cell">×</view>
           <view class="benefit-cell pro-col">√</view>
         </view>
         <view class="benefit-table-row">
@@ -273,7 +257,32 @@
           <view class="benefit-cell pro-col">√</view>
         </view>
         <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">使用次数</view>
+          <view class="benefit-cell">5次/天</view>
+          <view class="benefit-cell pro-col">不限</view>
+        </view>
+        <view class="benefit-table-row">
           <view class="benefit-cell benefit-name">音视频链接转写</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">语音、MP3转写</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">一个插件支持绑定设备数</view>
+          <view class="benefit-cell">1</view>
+          <view class="benefit-cell pro-col">3</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">提取小红书评论区</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">生成内容简介与关键词</view>
           <view class="benefit-cell">×</view>
           <view class="benefit-cell pro-col">√</view>
         </view>
@@ -332,12 +341,11 @@
     </view>
   </view>
 
-  <view wx:if="{{quotaUnlockVisible}}" class="quota-mask" bindtap="hideQuotaUnlockSheet">
+  <view wx:if="{{quotaUnlockVisible && !entitlementStatus.hasAccess}}" class="quota-mask" bindtap="hideQuotaUnlockSheet">
     <view class="quota-panel" catchtap="noop">
       <view class="quota-title">今日免费次数已用完</view>
-      <view class="quota-desc">可以分享解锁到 10 次，或看广告再加 10 次。</view>
-      <button class="quota-share-button" open-type="share">分享解锁到10次</button>
-      <button class="quota-ad-button" bindtap="showRewardedAdForQuota">看广告再加10次</button>
+      <view class="quota-desc">每天免费 5 次；看 15 秒广告额外获得 5 次，每天最多 10 次。</view>
+      <button class="quota-ad-button" bindtap="showRewardedAdForQuota">看广告加5次</button>
       <button class="quota-cancel-button" bindtap="hideQuotaUnlockSheet">稍后再说</button>
     </view>
   </view>

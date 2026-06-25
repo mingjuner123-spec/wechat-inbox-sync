@@ -236,6 +236,10 @@ function createPdfBufferWithControlNoise() {
         return {};
       },
     });
+    plugin.runConfiguredTranscription = async () => ({
+      transcription: 'local transcript for album video',
+      source: 'local',
+    });
 
     await plugin.writeRecord({
       _id: 'file-1',
@@ -328,6 +332,10 @@ function createPdfBufferWithControlNoise() {
         }
         return {};
       },
+    });
+    plugin.runConfiguredTranscription = async () => ({
+      transcription: 'local transcript for album video',
+      source: 'local',
     });
 
     await plugin.writeRecord({
@@ -532,6 +540,18 @@ function createPdfBufferWithControlNoise() {
             ].join(''),
           };
         }
+        if (url.includes('/entitlements/status')) {
+          return {
+            json: {
+              success: true,
+              data: {
+                hasAccess: true,
+                plan: 'local_transcription_beta',
+                status: 'active',
+              },
+            },
+          };
+        }
         if (url.endsWith('/metadata/generate')) {
           metadataRequestSeen = true;
           const body = JSON.parse(options.body || '{}');
@@ -576,6 +596,18 @@ function createPdfBufferWithControlNoise() {
         aiMetadataEnabled: true,
       },
       requestUrl: async (options) => {
+        if (String(options.url || '').includes('/entitlements/status')) {
+          return {
+            json: {
+              success: true,
+              data: {
+                hasAccess: true,
+                plan: 'local_transcription_beta',
+                status: 'active',
+              },
+            },
+          };
+        }
         if (String(options.url || '').endsWith('/metadata/generate')) {
           metadataRequestSeen = true;
           const body = JSON.parse(options.body || '{}');
@@ -615,6 +647,18 @@ function createPdfBufferWithControlNoise() {
         aiMetadataEnabled: true,
       },
       requestUrl: async (options) => {
+        if (String(options.url || '').includes('/entitlements/status')) {
+          return {
+            json: {
+              success: true,
+              data: {
+                hasAccess: true,
+                plan: 'local_transcription_beta',
+                status: 'active',
+              },
+            },
+          };
+        }
         if (String(options.url || '').endsWith('/metadata/generate')) {
           metadataRequestSeen = true;
           const body = JSON.parse(options.body || '{}');
@@ -703,6 +747,71 @@ function createPdfBufferWithControlNoise() {
     assert.ok(note.includes('Xiaohongshu parsed body should still be saved when AI metadata fails.'));
     assert.strictEqual(note.includes('description:'), false);
     assert.strictEqual(note.includes('keywords:'), false);
+  }
+
+  {
+    notices.length = 0;
+    const synced = [];
+    const { plugin, files } = createPlugin({
+      settings: {
+        aiMetadataEnabled: true,
+      },
+      requestUrl: async (options) => {
+        const url = String(options.url || '');
+        if (url.endsWith('/records?status=pending')) {
+          return {
+            json: {
+              success: true,
+              data: [{
+                _id: 'xhs-ai-failure-sync',
+                type: 'webpage',
+                content: 'https://www.xiaohongshu.com/explore/ai-failure-sync',
+                createdAt: '2026-06-24T12:09:30.000Z',
+                metadata: {
+                  url: 'https://www.xiaohongshu.com/explore/ai-failure-sync',
+                  markdown: '小红书正文已经提取，但 AI 简介关键词接口失败。',
+                  conversionStatus: 'success',
+                },
+              }],
+            },
+          };
+        }
+        if (url.includes('/entitlements/status')) {
+          return {
+            json: {
+              success: true,
+              data: {
+                hasAccess: true,
+                plan: 'local_transcription_beta',
+                status: 'active',
+              },
+            },
+          };
+        }
+        if (url.endsWith('/metadata/generate')) {
+          return {
+            status: 500,
+            json: {
+              success: false,
+              errMsg: 'metadata cloud failed',
+            },
+          };
+        }
+        if (url.includes('/records/xhs-ai-failure-sync/synced')) {
+          synced.push('xhs-ai-failure-sync');
+          return { json: { success: true, data: { id: 'xhs-ai-failure-sync', deleted: true } } };
+        }
+        return { json: { success: true } };
+      },
+    });
+
+    await plugin.syncInbox(true);
+
+    const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
+    assert.ok(note.includes('小红书正文已经提取'));
+    assert.deepStrictEqual(synced, ['xhs-ai-failure-sync']);
+    assert.ok(String(notices[notices.length - 1]).includes('AI 简介关键词生成失败'));
+    assert.ok(String(plugin.lastSyncDiagnostic.error || plugin.lastSyncDiagnostic.message || '').includes('metadata cloud failed'));
   }
 
   {
@@ -810,6 +919,10 @@ function createPdfBufferWithControlNoise() {
         }
         return {};
       },
+    });
+    plugin.runConfiguredTranscription = async () => ({
+      transcription: 'local transcript for album video',
+      source: 'local',
     });
 
     await plugin.writeRecord({
