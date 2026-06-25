@@ -9,6 +9,7 @@ const zlib = require('zlib');
 const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
+const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-xiaohongshu';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
@@ -4421,8 +4422,18 @@ function getWechatSession() {
   }
 }
 
+function getXiaohongshuSession() {
+  const remote = getElectronRemote();
+  if (!remote) return null;
+  try {
+    return remote.session.fromPartition(XIAOHONGSHU_SESSION_PARTITION);
+  } catch (error) {
+    return null;
+  }
+}
+
 async function checkWechatLoginStatus() {
-  const session = getWechatSession();
+  const session = getXiaohongshuSession();
   if (!session) return false;
   try {
     const cookies = await session.cookies.get({ domain: 'mp.weixin.qq.com' });
@@ -4433,7 +4444,7 @@ async function checkWechatLoginStatus() {
 }
 
 async function checkFeishuLoginStatus() {
-  const session = getWechatSession();
+  const session = getXiaohongshuSession();
   if (!session) return false;
   try {
     const cookies = await session.cookies.get({ domain: '.feishu.cn' });
@@ -4444,7 +4455,7 @@ async function checkFeishuLoginStatus() {
 }
 
 async function getXiaohongshuCookies() {
-  const session = getWechatSession();
+  const session = getXiaohongshuSession();
   if (!session) return [];
   try {
     const groups = await Promise.all([
@@ -4465,13 +4476,63 @@ function hasXiaohongshuAccountCookie(cookies = []) {
     const name = String(cookie && cookie.name || '');
     const value = String(cookie && cookie.value || '').trim();
     if (!value) return false;
-    return ['web_session', 'web_session_id', 'web_sessionid', 'sessionid', 'access-token', 'accessToken'].includes(name);
+    return [
+      'web_session',
+      'web_session_id',
+      'web_sessionid',
+      'sessionid',
+      'access-token',
+      'accessToken',
+    ].includes(name);
   });
 }
 
 async function checkXiaohongshuLoginStatus() {
   const cookies = await getXiaohongshuCookies();
   return hasXiaohongshuAccountCookie(cookies);
+}
+
+async function probeXiaohongshuLoginStatus(targetUrl = '') {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    return await checkXiaohongshuLoginStatus();
+  }
+  const session = getXiaohongshuSession();
+  if (!session) return false;
+  const win = new BrowserWindow({
+    width: 980,
+    height: 820,
+    show: false,
+    webPreferences: {
+      session,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  try {
+    const url = targetUrl || 'https://www.xiaohongshu.com/';
+    const loaded = waitForWebContents(win.webContents, 15000);
+    await win.loadURL(url);
+    await loaded;
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const state = await win.webContents.executeJavaScript(`
+      (() => {
+        const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\\s+/g, ' ').trim();
+        const hasLoginWall = /登录后查看更多|验证码|请登录|小红书网页登录|手机号登录|登录后查看/.test(text);
+        const hasUserSignal = Boolean(document.querySelector('[class*="avatar"], [class*="user"], [href*="/user/profile"]'));
+        return { hasLoginWall, hasUserSignal, text: text.slice(0, 500) };
+      })()
+    `);
+    if (state && state.hasLoginWall) return false;
+    return await checkXiaohongshuLoginStatus() || Boolean(state && state.hasUserSignal);
+  } catch (error) {
+    return await checkXiaohongshuLoginStatus();
+  } finally {
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
 }
 
 async function getXiaohongshuCookieHeader() {
@@ -4660,7 +4721,7 @@ async function loginXiaohongshuWeb(targetUrl) {
         reject(error);
         return;
       }
-      resolve(await checkXiaohongshuLoginStatus());
+      resolve(await probeXiaohongshuLoginStatus(loginUrl));
     };
 
     const timer = setInterval(async () => {
@@ -6124,7 +6185,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async checkXiaohongshuLogin() {
     try {
-      return await checkXiaohongshuLoginStatus();
+      return await probeXiaohongshuLoginStatus();
     } catch (error) {
       return false;
     }
@@ -8015,24 +8076,19 @@ class WechatObsidianInboxPlugin extends Plugin {
             && typeof this.renderXiaohongshuMarkdown === 'function'
           ) {
             try {
-              if (await checkXiaohongshuLoginStatus()) {
-                const renderedXiaohongshu = await this.renderXiaohongshuMarkdown(
-                  resolvedUrl,
-                  metadata.shareText || record.content || '',
-                  { includeComments: true },
-                );
-                if (
-                  renderedXiaohongshu
-                  && (
-                    (renderedXiaohongshu.comments || []).length
-                    || String(renderedXiaohongshu.markdown || '').length > String(extractedXiaohongshu.markdown || '').length
-                  )
-                ) {
-                  extractedXiaohongshu = renderedXiaohongshu;
-                }
-              } else {
-                extractedXiaohongshu.commentExtractionStatus = 'login_required';
-                extractedXiaohongshu.commentExtractionError = '小红书评论区需要先登录。请在插件设置中点击“登录小红书”或“检测小红书登录状态”。';
+              const renderedXiaohongshu = await this.renderXiaohongshuMarkdown(
+                resolvedUrl,
+                metadata.shareText || record.content || '',
+                { includeComments: true },
+              );
+              if (
+                renderedXiaohongshu
+                && (
+                  (renderedXiaohongshu.comments || []).length
+                  || String(renderedXiaohongshu.markdown || '').length > String(extractedXiaohongshu.markdown || '').length
+                )
+              ) {
+                extractedXiaohongshu = renderedXiaohongshu;
               }
             } catch (renderError) {
               extractedXiaohongshu.commentExtractionStatus = 'failed';
@@ -8969,10 +9025,13 @@ WechatObsidianInboxPlugin.__test = {
   buildLocalAsrInstallCommand,
   downloadTextViaNode,
   getSocialRequestHeaders,
+  XIAOHONGSHU_SESSION_PARTITION,
+  getXiaohongshuSession,
   getXiaohongshuCookieHeader,
   getXiaohongshuRequestHeaders,
   hasXiaohongshuAccountCookie,
   checkXiaohongshuLoginStatus,
+  probeXiaohongshuLoginStatus,
   renderXiaohongshuMarkdownWithElectron,
   shouldResolveMediaDownloadUrl,
   openExternalUrl,
