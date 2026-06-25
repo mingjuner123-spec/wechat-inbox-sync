@@ -4433,7 +4433,7 @@ function getXiaohongshuSession() {
 }
 
 async function checkWechatLoginStatus() {
-  const session = getXiaohongshuSession();
+  const session = getWechatSession();
   if (!session) return false;
   try {
     const cookies = await session.cookies.get({ domain: 'mp.weixin.qq.com' });
@@ -4444,7 +4444,7 @@ async function checkWechatLoginStatus() {
 }
 
 async function checkFeishuLoginStatus() {
-  const session = getXiaohongshuSession();
+  const session = getWechatSession();
   if (!session) return false;
   try {
     const cookies = await session.cookies.get({ domain: '.feishu.cn' });
