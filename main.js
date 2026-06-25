@@ -3927,10 +3927,26 @@ function decodeJsonLikeText(value) {
     .trim();
 }
 
+function isNoiseSocialCommentText(text) {
+  const source = decodeHtmlEntities(String(text || ''))
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!source) return true;
+  const compact = source.replace(/\s+/g, '');
+  if (!compact) return true;
+  if (/^共\d+条评论(?:-|·|，|,)?(?:回复)?$/i.test(compact)) return true;
+  if (/^(?:回复|展开|收起|查看更多|查看更多回复|全部回复|更多回复|写评论|说点什么|抢首评)$/i.test(compact)) return true;
+  if (/登录(?:后|查看|即可|查看更多|查看更多评论|查看全部评论内容|后查看全部评论内容)/.test(compact)) return true;
+  if (/请先登录|手机号登录|扫码登录|验证码|小红书网页登录/.test(compact)) return true;
+  return false;
+}
+
 function normalizeSocialComment(comment) {
   const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
+  if (isNoiseSocialCommentText(content)) return null;
+  if (author && isNoiseSocialCommentText(author)) return null;
   return {
     author,
     content,
@@ -4141,6 +4157,139 @@ function extractSocialCommentsFromHtml(html, limit = 20) {
     extractCommentsFromObject(parseLooseJsonCandidate(candidate), comments, seen, limit);
   });
   return comments.slice(0, limit);
+}
+
+function extractXiaohongshuNoteIdFromUrl(url) {
+  const source = String(url || '').trim();
+  if (!source) return '';
+  try {
+    const parsed = new URL(source);
+    const pathMatch = parsed.pathname.match(/\/(?:explore|discovery\/item|item)\/([0-9a-zA-Z]+)/i);
+    if (pathMatch && pathMatch[1]) return pathMatch[1];
+    const noteId = parsed.searchParams.get('note_id') || parsed.searchParams.get('noteId');
+    if (noteId) return noteId;
+  } catch (error) {
+    // Fall back to regex for copied or partially encoded share links.
+  }
+  const match = source.match(/\/(?:explore|discovery\/item|item)\/([0-9a-zA-Z]+)/i)
+    || source.match(/[?&]note_?id=([0-9a-zA-Z]+)/i);
+  return match && match[1] ? match[1] : '';
+}
+
+function extractXiaohongshuXsecTokenFromUrl(url) {
+  const source = String(url || '').trim();
+  if (!source) return '';
+  try {
+    const parsed = new URL(source);
+    return parsed.searchParams.get('xsec_token') || parsed.searchParams.get('xsecToken') || '';
+  } catch (error) {
+    const match = source.match(/[?&]xsec_?token=([^&#]+)/i);
+    return match && match[1] ? decodeUrlComponentSafely(match[1]) : '';
+  }
+}
+
+function extractXiaohongshuCommentsFromApiPayload(payload, limit = 20) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const comments = [];
+  const seen = new Set();
+  const roots = [
+    data && data.data && data.data.comments,
+    data && data.data && data.data.comment_list,
+    data && data.data && data.data.list,
+    data && data.comments,
+    data && data.comment_list,
+  ].filter(Boolean);
+
+  const visit = (items) => {
+    if (!items || comments.length >= limit) return;
+    const list = Array.isArray(items) ? items : [items];
+    list.forEach((item) => {
+      if (!item || typeof item !== 'object' || comments.length >= limit) return;
+      const content = readCommentField(item, [
+        'content',
+        'contentText',
+        'content_text',
+        'text',
+        'commentText',
+        'comment_text',
+        'commentContent',
+        'comment_content',
+      ]);
+      const author = readCommentField(item.user || item.userInfo || item.user_info || item.authorInfo || item.author_info || {}, [
+        'nickname',
+        'nickName',
+        'nick_name',
+        'userName',
+        'user_name',
+        'name',
+      ]) || readCommentField(item, ['nickname', 'nickName', 'nick_name', 'userName', 'name', 'author']);
+      const time = readCommentField(item, ['create_time', 'createTime', 'time', 'date']);
+      const likes = readCommentField(item, ['like_count', 'liked_count', 'likeCount', 'likedCount', 'like_num', 'likeNum', 'likes']);
+      pushSocialComment(comments, seen, { author, content, time, likes });
+      visit(item.sub_comments || item.subComments || item.sub_comment_list || item.subCommentList || item.replies || item.reply_list);
+    });
+  };
+
+  roots.forEach(visit);
+  return comments.slice(0, limit);
+}
+
+function buildXiaohongshuCommentApiUrl(url, cursor = '') {
+  const noteId = extractXiaohongshuNoteIdFromUrl(url);
+  if (!noteId) return '';
+  const apiUrl = new URL('https://edith.xiaohongshu.com/api/sns/web/v2/comment/page');
+  apiUrl.searchParams.set('note_id', noteId);
+  apiUrl.searchParams.set('cursor', cursor || '');
+  apiUrl.searchParams.set('top_comment_id', '');
+  apiUrl.searchParams.set('image_scenes', 'FD_WM_WEBP,CRD_WM_WEBP');
+  const xsecToken = extractXiaohongshuXsecTokenFromUrl(url);
+  if (xsecToken) apiUrl.searchParams.set('xsec_token', xsecToken);
+  return apiUrl.toString();
+}
+
+async function fetchXiaohongshuCommentsFromApi(url, limit = 20) {
+  const comments = [];
+  const seen = new Set();
+  let cursor = '';
+  let lastError = null;
+
+  for (let page = 0; page < 3 && comments.length < limit; page += 1) {
+    const apiUrl = buildXiaohongshuCommentApiUrl(url, cursor);
+    if (!apiUrl) return { comments, status: 'unavailable', error: '无法从链接中识别小红书笔记 ID' };
+    try {
+      const headers = await getXiaohongshuRequestHeaders(url);
+      headers.Referer = url;
+      headers.Accept = 'application/json, text/plain, */*';
+      const response = await requestUrl({ url: apiUrl, method: 'GET', headers });
+      const payload = response.json || tryParseJson(response.text || '');
+      const pageComments = extractXiaohongshuCommentsFromApiPayload(payload, limit - comments.length);
+      pageComments.forEach((comment) => pushSocialComment(comments, seen, comment));
+      const data = payload && payload.data ? payload.data : {};
+      cursor = String(data.cursor || data.next_cursor || data.nextCursor || '').trim();
+      const hasMore = Boolean(data.has_more || data.hasMore);
+      if (!cursor || !hasMore) break;
+    } catch (error) {
+      lastError = error;
+      break;
+    }
+  }
+
+  return {
+    comments: comments.slice(0, limit),
+    status: comments.length ? 'success' : (lastError ? 'failed' : 'empty'),
+    error: lastError ? (lastError.message || String(lastError)) : '',
+  };
+}
+
+function replaceXiaohongshuCommentsInExtraction(extracted, comments, status = '', error = '') {
+  const next = { ...(extracted || {}) };
+  next.comments = (comments || []).map(normalizeSocialComment).filter(Boolean);
+  next.commentExtractionStatus = status || (next.comments.length ? 'success' : 'empty');
+  next.commentExtractionError = error || '';
+  const markdown = String(next.markdown || '').replace(/\n{0,2}##\s+评论区[\s\S]*$/u, '').trim();
+  const commentMarkdown = buildSocialCommentsMarkdown(next.comments);
+  next.markdown = commentMarkdown ? `${markdown}\n\n${commentMarkdown}`.trim() : markdown;
+  return next;
 }
 
 function buildSocialCommentsMarkdown(comments = []) {
@@ -5130,7 +5279,7 @@ async function renderXiaohongshuMarkdownWithElectron(url, fallbackText = '', opt
     throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染小红书');
   }
 
-  const session = getWechatSession();
+  const session = getXiaohongshuSession();
   const win = new BrowserWindow({
     width: 1280,
     height: 1400,
@@ -8053,6 +8202,20 @@ class WechatObsidianInboxPlugin extends Plugin {
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
             includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
           });
+          if (this.settings.xiaohongshuCommentsEnabled !== false) {
+            const apiCommentResult = await fetchXiaohongshuCommentsFromApi(resolvedUrl);
+            if (apiCommentResult.comments && apiCommentResult.comments.length) {
+              extractedXiaohongshu = replaceXiaohongshuCommentsInExtraction(
+                extractedXiaohongshu,
+                apiCommentResult.comments,
+                'success',
+                '',
+              );
+            } else if (!extractedXiaohongshu.comments || !extractedXiaohongshu.comments.length) {
+              extractedXiaohongshu.commentExtractionStatus = apiCommentResult.status || 'empty';
+              extractedXiaohongshu.commentExtractionError = apiCommentResult.error || '';
+            }
+          }
           if (
             this.settings.xiaohongshuCommentsEnabled !== false
             && (!extractedXiaohongshu.comments || !extractedXiaohongshu.comments.length)
@@ -8071,7 +8234,12 @@ class WechatObsidianInboxPlugin extends Plugin {
                   || String(renderedXiaohongshu.markdown || '').length > String(extractedXiaohongshu.markdown || '').length
                 )
               ) {
-                extractedXiaohongshu = renderedXiaohongshu;
+                extractedXiaohongshu = replaceXiaohongshuCommentsInExtraction(
+                  renderedXiaohongshu,
+                  renderedXiaohongshu.comments || [],
+                  (renderedXiaohongshu.comments || []).length ? 'success' : (extractedXiaohongshu.commentExtractionStatus || 'empty'),
+                  extractedXiaohongshu.commentExtractionError || '',
+                );
               }
             } catch (renderError) {
               extractedXiaohongshu.commentExtractionStatus = 'failed';
@@ -8983,6 +9151,15 @@ WechatObsidianInboxPlugin.__test = {
   cleanDisplayUrl,
   isWechatMpArticleUrl,
   shouldHydrateLinkAsWebpage,
+  isNoiseSocialCommentText,
+  extractSocialCommentsFromHtml,
+  buildSocialCommentsMarkdown,
+  extractXiaohongshuNoteIdFromUrl,
+  extractXiaohongshuXsecTokenFromUrl,
+  extractXiaohongshuCommentsFromApiPayload,
+  buildXiaohongshuCommentApiUrl,
+  fetchXiaohongshuCommentsFromApi,
+  replaceXiaohongshuCommentsInExtraction,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
