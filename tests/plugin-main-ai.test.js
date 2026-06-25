@@ -3061,6 +3061,80 @@ async function runSyncInvalidCodePreservesLocalBindingTest() {
   assert.strictEqual(savedSettings, null);
 }
 
+async function runOnloadPersistsLegacyApiBaseMigrationTest() {
+  const plugin = new PluginClass();
+  const legacyApiBase = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+  plugin.loadData = async () => ({
+    settingsVersion: 2,
+    apiBase: legacyApiBase,
+    token: 'ABC-123',
+    clientId: 'stable-client-id',
+    bindings: [{
+      token: 'ABC-123',
+      label: '测试微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+  plugin.addCommand = () => {};
+  plugin.addRibbonIcon = () => {};
+  plugin.addSettingTab = () => {};
+  plugin.addStatusBarItem = () => ({ setText: () => {} });
+  const previousWindow = global.window;
+  global.window = { setTimeout: () => 0 };
+
+  try {
+    await plugin.onload();
+  } finally {
+    global.window = previousWindow;
+  }
+
+  assert.ok(savedSettings);
+  assert.strictEqual(savedSettings.apiBase, 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync');
+  assert.strictEqual(savedSettings.apiBase.includes('d350b93bf'), false);
+  assert.strictEqual(plugin.settings.apiBase, savedSettings.apiBase);
+}
+
+async function runEmptySyncKeepsBindingDiagnosticTest() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client-id',
+    bindings: [{
+      token: 'ABC-123',
+      label: '台式微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.requestJson = async (path, method, body, binding) => {
+    assert.strictEqual(path, '/records?status=pending');
+    assert.strictEqual(method, 'GET');
+    assert.strictEqual(binding.token, 'ABC-123');
+    return {
+      success: true,
+      data: [],
+    };
+  };
+
+  await plugin.syncInbox(false);
+
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'empty');
+  assert.deepStrictEqual(plugin.lastSyncDiagnostic.emptyBindings, [{
+    token: 'ABC-123',
+    label: '台式微信',
+    apiBase: 'https://example.com/sync',
+    clientId: 'test-client-id',
+  }]);
+  assert.ok(plugin.lastSyncDiagnostic.message.includes('ABC-123'));
+}
+
 async function runLocalTranscriptionEntitlementTests() {
   const previousRequestUrlMock = requestUrlMock;
   const plugin = new PluginClass();
@@ -3462,6 +3536,8 @@ async function main() {
   await runExistingLocalRecordUrlDedupSyncTest();
   await runUnbindInvalidCodeMarksLocalUnboundTest();
   await runSyncInvalidCodePreservesLocalBindingTest();
+  await runOnloadPersistsLegacyApiBaseMigrationTest();
+  await runEmptySyncKeepsBindingDiagnosticTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
   await runPodcastDownloadHeaderTests();

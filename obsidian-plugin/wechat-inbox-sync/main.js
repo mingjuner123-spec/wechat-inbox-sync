@@ -1062,6 +1062,17 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   return merged;
 }
 
+function shouldPersistMergedSettings(savedSettings, mergedSettings) {
+  if (!savedSettings || typeof savedSettings !== 'object') return true;
+  if (!savedSettings.clientId) return true;
+  if (String(savedSettings.apiBase || '').trim() !== mergedSettings.apiBase) return true;
+  if (normalizeBindCodeInput(savedSettings.token) !== mergedSettings.token) return true;
+  if (normalizeBindCodeInput(savedSettings.pendingBindCode) !== mergedSettings.pendingBindCode) return true;
+  const savedBindings = normalizeBindings(savedSettings);
+  if (JSON.stringify(savedBindings) !== JSON.stringify(mergedSettings.bindings || [])) return true;
+  return false;
+}
+
 function validateSettings(settings) {
   const errors = [];
   if (!settings.apiBase) errors.push('请填写同步 API 地址');
@@ -6122,6 +6133,30 @@ function buildSkippedSyncNotice(skipped = []) {
   return parts.length ? `，${parts.join('，')}` : '';
 }
 
+function buildEmptySyncDiagnostic(binding, settings) {
+  return {
+    token: normalizeBindCodeInput(binding && binding.token),
+    label: String((binding && binding.label) || (binding && binding.token) || '').trim(),
+    apiBase: normalizeApiBase(settings && settings.apiBase),
+    clientId: String((settings && settings.clientId) || '').trim(),
+  };
+}
+
+function buildEmptySyncNotice(emptyBindings = []) {
+  if (!emptyBindings.length) return buildSyncNotice(0);
+  const labels = emptyBindings
+    .map((item) => {
+      if (!item) return '';
+      if (item.label && item.token && item.label !== item.token) return `${item.label}:${item.token}`;
+      return item.label || item.token;
+    })
+    .filter(Boolean)
+    .join(', ');
+  return labels
+    ? `${buildSyncNotice(0)} (${labels})`
+    : buildSyncNotice(0);
+}
+
 function normalizeProgressPercent(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return null;
@@ -6222,7 +6257,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
     this.settings = mergeSettings(savedSettings);
-    if (!savedSettings || !savedSettings.clientId) {
+    if (shouldPersistMergedSettings(savedSettings, this.settings)) {
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
@@ -8376,9 +8411,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     const failed = [];
     const skipped = [];
     const conversionWarnings = [];
+    const emptyBindings = [];
     const syncedAt = new Date().toISOString();
     if (!records.length) {
       this.showSyncProgress({ bindingLabel, stage: 'empty' });
+      emptyBindings.push(buildEmptySyncDiagnostic(binding, this.settings));
     }
 
     for (let index = 0; index < records.length; index += 1) {
@@ -8434,7 +8471,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed, skipped, conversionWarnings };
+    return { written, failed, skipped, conversionWarnings, emptyBindings };
   }
 
   async syncInbox(showNotice = true) {
@@ -8451,6 +8488,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const failed = [];
       const skipped = [];
       const conversionWarnings = [];
+      const emptyBindings = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: 'fetching' });
 
@@ -8465,6 +8503,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (result.conversionWarnings && result.conversionWarnings.length) {
             conversionWarnings.push(...result.conversionWarnings);
           }
+          if (result.emptyBindings && result.emptyBindings.length) {
+            emptyBindings.push(...result.emptyBindings);
+          }
         } catch (error) {
           const message = error.message || String(error);
           failed.push({
@@ -8474,7 +8515,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
 
-      let finalMessage = buildSyncNotice(written.length);
+      let finalMessage = written.length ? buildSyncNotice(written.length) : buildEmptySyncNotice(emptyBindings);
       if (skipped.length) {
         finalMessage += buildSkippedSyncNotice(skipped);
       }
@@ -8488,12 +8529,15 @@ class WechatObsidianInboxPlugin extends Plugin {
         new Notice(finalMessage);
       }
       this.lastSyncDiagnostic = {
-        status: failed.length ? 'failed' : 'success',
+        status: failed.length ? 'failed' : (written.length || skipped.length ? 'success' : 'empty'),
         stage: 'finished',
         current: written.length,
         total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
+        emptyBindings,
+        apiBase: this.settings.apiBase,
+        clientId: this.settings.clientId,
         time: new Date().toISOString(),
       };
       writeSyncDiagnosticLog(this.lastSyncDiagnostic);
@@ -8996,9 +9040,12 @@ WechatObsidianInboxPlugin.__test = {
   requestJsonViaNode,
   validateSettings,
   mergeSettings,
+  shouldPersistMergedSettings,
   normalizeBindings,
   normalizeApiBase,
   normalizeBindCodeInput,
+  buildEmptySyncDiagnostic,
+  buildEmptySyncNotice,
 };
 
 module.exports = WechatObsidianInboxPlugin;
