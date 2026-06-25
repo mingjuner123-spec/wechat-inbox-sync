@@ -64,8 +64,18 @@ assert.match(
 
 assert.match(
   miniprogramApp,
-  /env:\s*["']he02-d8gebzv050ed6c4ef["']/,
+  /WECHAT_CLOUD_ENV\s*=\s*['"]he02-d8gebzv050ed6c4ef['"]/,
   'mini program should use the WeChat cloud env id that owns production data'
+);
+assert.match(
+  miniprogramApp,
+  /wx\.cloud\.init\(\{\s*env:\s*WECHAT_CLOUD_ENV/,
+  'mini program cloud init should use the fixed production env directly'
+);
+assert.doesNotMatch(
+  miniprogramApp,
+  /env:\s*this\.globalData\.env\s*\|\|\s*undefined/,
+  'mini program must not fall back to the developer-tools selected env because invalid local envs break sync'
 );
 assert.match(
   quickstartIndex,
@@ -84,8 +94,18 @@ assert.match(
 );
 assert.match(
   syncApiIndex,
+  /ALLOWED_WECHAT_DATA_ENVS[\s\S]*PRODUCTION_WECHAT_DATA_ENV[\s\S]*has\(configured\)[\s\S]*PRODUCTION_WECHAT_DATA_ENV/,
+  'syncApi should ignore invalid HTTP deployment env ids and always read the production WeChat data env'
+);
+assert.match(
+  syncApiIndex,
   /pickBestLocalTranscriptionEntitlement/,
   'syncApi should treat trial, pro, and beta local transcription entitlements as one plugin permission'
+);
+assert.match(
+  syncApiIndex,
+  /const\s*\{[\s\S]*normalizeRedeemCode[\s\S]*\}\s*=\s*require\('\.\/redeem-code-core'\)/,
+  'syncApi should import normalizeRedeemCode before using it in entitlement state'
 );
 assert.match(
   syncApiIndex,
@@ -94,8 +114,18 @@ assert.match(
 );
 assert.match(
   syncApiIndex,
-  /env:\s*getCloudDataEnv\(\)/,
+  /const\s+CLOUD_DATA_ENV\s*=\s*getCloudDataEnv\(\)[\s\S]*env:\s*CLOUD_DATA_ENV/,
   'syncApi should initialize wx-server-sdk with the resolved data environment'
+);
+assert.match(
+  syncApiIndex,
+  /function\s+getDataCloud\(\)[\s\S]*resourceEnv:\s*CLOUD_DATA_ENV[\s\S]*cloud\.Cloud\(options\)[\s\S]*dataCloud\.init\(\)/,
+  'syncApi should use a resource-bound cloud instance for the resolved data environment'
+);
+assert.match(
+  syncApiIndex,
+  /function\s+getDatabase\(\)[\s\S]*cloud\.database\(\{\s*env:\s*CLOUD_DATA_ENV\s*\}\)/,
+  'syncApi repository and admin diagnostics should use the same explicit production database env'
 );
 assert.ok(
   syncApiIndex.indexOf("cloud.init({") < syncApiIndex.indexOf("require('./admin-handler')"),
@@ -108,7 +138,7 @@ assert.match(
 );
 assert.match(
   adminApiIndex,
-  /env:\s*getCloudDataEnv\(\)/,
+  /env:\s*getCloudDataEnv\(\)|env:\s*CLOUD_DATA_ENV/,
   'adminApi should initialize wx-server-sdk with the resolved data environment'
 );
 assert.match(
@@ -123,6 +153,16 @@ assert.match(
 );
 assert.match(
   syncAdminHandler,
-  /env:\s*getCloudDataEnv\(\)/,
+  /ALLOWED_WECHAT_DATA_ENVS[\s\S]*PRODUCTION_WECHAT_DATA_ENV[\s\S]*has\(configured\)[\s\S]*PRODUCTION_WECHAT_DATA_ENV/,
+  'syncApi admin handler should resolve the same data env as syncApi'
+);
+assert.match(
+  syncAdminHandler,
+  /const\s+CLOUD_DATA_ENV\s*=\s*getCloudDataEnv\(\)[\s\S]*env:\s*CLOUD_DATA_ENV/,
   'syncApi admin handler should use the same resolved data environment as syncApi'
+);
+assert.match(
+  syncAdminHandler,
+  /const\s+CLOUD_DATA_ENV\s*=\s*getCloudDataEnv\(\)[\s\S]*cloud\.database\(\{\s*env:\s*CLOUD_DATA_ENV\s*\}\)/,
+  'syncApi admin handler should create database handles with the resolved data environment'
 );
