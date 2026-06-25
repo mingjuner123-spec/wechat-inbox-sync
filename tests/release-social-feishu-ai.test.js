@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.77');
-assert.strictEqual(versions['1.2.77'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.78');
+assert.strictEqual(versions['1.2.78'], manifest.minAppVersion);
 assert.strictEqual(helpers.isRequestUrlTransportError('Request failed, status 500'), true);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
@@ -88,10 +88,7 @@ const feishuMarkdown = helpers.extractFeishuMarkdownFromHtml(`
     </body>
   </html>
 `);
-assert.ok(feishuMarkdown.includes('## 目录'));
-assert.ok(feishuMarkdown.includes('- [一级标题](#一级标题)'));
-assert.ok(feishuMarkdown.includes('  - [二级标题](#二级标题)'));
-assert.ok(feishuMarkdown.includes('    - [三级标题](#三级标题)'));
+assert.strictEqual(feishuMarkdown.includes('## 目录'), false);
 assert.ok(feishuMarkdown.includes('# 一级标题'));
 assert.ok(feishuMarkdown.includes('## 二级标题'));
 assert.ok(feishuMarkdown.includes('### 三级标题'));
@@ -127,9 +124,12 @@ const wechatScriptCommentHtml = `
     </body>
   </html>
 `;
-assert.deepStrictEqual(helpers.extractWechatCommentsFromHtml(wechatScriptCommentHtml), [
-  { author: '读者B', content: '评论来自脚本数据', time: '2026-06-22', likes: '12' },
-]);
+const extractedWechatComments = helpers.extractWechatCommentsFromHtml(wechatScriptCommentHtml);
+assert.strictEqual(extractedWechatComments.length, 1);
+assert.strictEqual(extractedWechatComments[0].author, '读者B');
+assert.strictEqual(extractedWechatComments[0].content, '评论来自脚本数据');
+assert.strictEqual(extractedWechatComments[0].time, '2026-06-22');
+assert.strictEqual(extractedWechatComments[0].likes, '12');
 assert.ok(helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('足够长的公众号正文内容'));
 assert.ok(!helpers.htmlToMarkdown(wechatScriptCommentHtml).includes('**读者B**：评论来自脚本数据'));
 const wechatTableMarkdown = helpers.htmlToMarkdown(`
@@ -235,7 +235,7 @@ assert.strictEqual(typeof helpers.shouldRetryWechatCommentsWithVisibleReader, 'f
 assert.strictEqual(helpers.shouldRetryWechatCommentsWithVisibleReader({ ret: -3, errmsg: 'no session' }, []), true);
 assert.strictEqual(helpers.shouldRetryWechatCommentsWithVisibleReader(null, []), true);
 assert.strictEqual(helpers.shouldRetryWechatCommentsWithVisibleReader(null, [{ author: '读者', content: '已抓到' }]), false);
-assert.deepStrictEqual(helpers.extractWechatCommentsFromPayload({
+const wechatPayloadComments = helpers.extractWechatCommentsFromPayload({
   elected_comment: [{
     nick_name: '接口读者',
     content: '这条评论来自微信接口',
@@ -247,15 +247,16 @@ assert.deepStrictEqual(helpers.extractWechatCommentsFromPayload({
       create_time: '2026-06-22',
     },
   }],
-}), [
-  {
-    author: '接口读者',
-    content: '这条评论来自微信接口',
-    time: '2026-06-22',
-    likes: '18',
-    replies: [{ author: '作者', content: '谢谢你的反馈', time: '2026-06-22', likes: '', replyTo: '接口读者' }],
-  },
-]);
+});
+assert.strictEqual(wechatPayloadComments.length, 1);
+assert.strictEqual(wechatPayloadComments[0].author, '接口读者');
+assert.strictEqual(wechatPayloadComments[0].content, '这条评论来自微信接口');
+assert.strictEqual(wechatPayloadComments[0].time, '2026-06-22');
+assert.strictEqual(wechatPayloadComments[0].likes, '18');
+assert.strictEqual(wechatPayloadComments[0].replies.length, 1);
+assert.strictEqual(wechatPayloadComments[0].replies[0].author, '作者');
+assert.strictEqual(wechatPayloadComments[0].replies[0].content, '谢谢你的反馈');
+assert.strictEqual(wechatPayloadComments[0].replies[0].replyTo, '接口读者');
 const wechatMarkdownWithApiComments = helpers.buildWechatArticleMarkdownWithComments(
   '公众号正文',
   wechatArticleForCommentApi,
@@ -282,9 +283,10 @@ const xhsNote = helpers.extractXiaohongshuMarkdownFromHtml([
 ].join(''), 'https://www.xiaohongshu.com/explore/123');
 assert.ok(xhsNote.markdown.includes('## 评论区'));
 assert.ok(xhsNote.markdown.includes('**用户甲**：这个角度太有用了'));
-assert.deepStrictEqual(xhsNote.comments, [
-  { author: '用户甲', content: '这个角度太有用了', time: '', likes: '9' },
-]);
+assert.strictEqual(xhsNote.comments.length, 1);
+assert.strictEqual(xhsNote.comments[0].author, '用户甲');
+assert.strictEqual(xhsNote.comments[0].content, '这个角度太有用了');
+assert.strictEqual(xhsNote.comments[0].likes, '9');
 
 const xhsNestedCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
@@ -298,12 +300,14 @@ const xhsNestedCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
 ].join(''), 'https://www.xiaohongshu.com/explore/456');
 assert.ok(xhsNestedCommentNote.markdown.includes('## 评论区'));
 assert.ok(xhsNestedCommentNote.markdown.includes('**脚本用户**：评论在小红书脚本状态里'));
-assert.deepStrictEqual(xhsNestedCommentNote.comments, [
-  { author: '脚本用户', content: '评论在小红书脚本状态里', time: '2026-06-22', likes: '31' },
-]);
+assert.strictEqual(xhsNestedCommentNote.comments.length, 1);
+assert.strictEqual(xhsNestedCommentNote.comments[0].author, '脚本用户');
+assert.strictEqual(xhsNestedCommentNote.comments[0].content, '评论在小红书脚本状态里');
+assert.strictEqual(xhsNestedCommentNote.comments[0].time, '2026-06-22');
+assert.strictEqual(xhsNestedCommentNote.comments[0].likes, '31');
 
 assert.strictEqual(typeof helpers.extractXiaohongshuCommentsFromPayload, 'function');
-assert.deepStrictEqual(helpers.extractXiaohongshuCommentsFromPayload({
+const xhsPayloadComments = helpers.extractXiaohongshuCommentsFromPayload({
   data: {
     comments: [{
       id: 'root-1',
@@ -321,15 +325,16 @@ assert.deepStrictEqual(helpers.extractXiaohongshuCommentsFromPayload({
       }],
     }],
   },
-}), [
-  {
-    author: '接口用户',
-    content: '接口返回的小红书评论',
-    time: '1782115200',
-    likes: '27',
-    replies: [{ author: '回复用户', content: '楼中楼回复', time: '1782115300', likes: '3', replyTo: '接口用户' }],
-  },
-]);
+});
+assert.strictEqual(xhsPayloadComments.length, 1);
+assert.strictEqual(xhsPayloadComments[0].author, '接口用户');
+assert.strictEqual(xhsPayloadComments[0].content, '接口返回的小红书评论');
+assert.strictEqual(xhsPayloadComments[0].time, '1782115200');
+assert.strictEqual(xhsPayloadComments[0].likes, '27');
+assert.strictEqual(xhsPayloadComments[0].replies.length, 1);
+assert.strictEqual(xhsPayloadComments[0].replies[0].author, '回复用户');
+assert.strictEqual(xhsPayloadComments[0].replies[0].content, '楼中楼回复');
+assert.strictEqual(xhsPayloadComments[0].replies[0].replyTo, '接口用户');
 const xhsThreadMarkdown = helpers.buildSocialCommentsMarkdown(helpers.extractXiaohongshuCommentsFromPayload({
   data: {
     comments: [{
@@ -436,11 +441,11 @@ const settings = helpers.mergeSettings({
 });
 assert.strictEqual(settings.aiMetadataEnabled, true);
 assert.strictEqual(settings.deepseekApiKey, '');
-assert.strictEqual(settings.notePropertyFields, 'title,description,keywords');
+assert.strictEqual(settings.notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
 const defaultFeatureSettings = helpers.mergeSettings({});
-assert.strictEqual(defaultFeatureSettings.aiMetadataEnabled, false);
-assert.strictEqual(defaultFeatureSettings.xiaohongshuCommentsEnabled, false);
-assert.strictEqual(helpers.shouldGenerateAiMetadata(defaultFeatureSettings, aiMetadataCandidateRecord), false);
+assert.strictEqual(defaultFeatureSettings.aiMetadataEnabled, true);
+assert.strictEqual(defaultFeatureSettings.xiaohongshuCommentsEnabled, true);
+assert.strictEqual(helpers.shouldGenerateAiMetadata(defaultFeatureSettings, aiMetadataCandidateRecord), true);
 const aiSettingsWithLegacyFields = helpers.mergeSettings({
   aiMetadataEnabled: true,
   notePropertyFields: 'title,author,url,synced_at,source',

@@ -8,8 +8,8 @@ const path = require('path');
 const zlib = require('zlib');
 const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
 
-const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
-const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-xiaohongshu';
+const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-sync-wechat';
+const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
@@ -17,6 +17,7 @@ const LEGACY_OFFICIAL_SYNC_API_BASES = [
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
+const SOCIAL_COMMENT_LIMIT = 100;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
@@ -1005,10 +1006,10 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
-  merged.aiMetadataEnabled = savedSettingsVersion < 2
+  merged.aiMetadataEnabled = savedSettingsVersion < 2 && !Object.prototype.hasOwnProperty.call(sourceSettings, 'aiMetadataEnabled')
     ? true
     : merged.aiMetadataEnabled !== false;
-  merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2
+  merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2 && !Object.prototype.hasOwnProperty.call(sourceSettings, 'xiaohongshuCommentsEnabled')
     ? true
     : merged.xiaohongshuCommentsEnabled !== false;
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
@@ -1810,6 +1811,7 @@ function buildAudioTranscriptMarkdown({
   transcriptionStatus = 'pending',
   transcriptionSource = '',
   transcriptionError = '',
+  comments = [],
 }) {
   url = cleanDisplayUrl(url);
   const status = String(transcriptionStatus || '').toLowerCase();
@@ -1821,7 +1823,7 @@ function buildAudioTranscriptMarkdown({
       : isCloudPending
         ? '云端转写中，下次同步会自动更新。'
         : '转写处理中，或未配置可用的转写方案。');
-  return [
+  const lines = [
     `原始链接：${url || ''}`,
     transcriptionSource ? `转写来源：${transcriptionSource}` : '',
     '',
@@ -1829,7 +1831,12 @@ function buildAudioTranscriptMarkdown({
     '',
     content,
     '',
-  ].filter((line) => line !== '').join('\n');
+  ].filter((line) => line !== '');
+  const commentsMarkdown = buildSocialCommentsMarkdown(comments);
+  if (commentsMarkdown) {
+    lines.push('', commentsMarkdown);
+  }
+  return lines.join('\n');
 }
 
 function buildTranscriptOnlyMetadata(metadata, {
@@ -4036,12 +4043,26 @@ function normalizeSocialComment(comment) {
   if (!content || content.length < 2) return null;
   if (isNoiseSocialCommentText(content)) return null;
   if (author && isNoiseSocialCommentText(author)) return null;
-  return {
+  const normalized = {
+    id: String(comment.id || comment.commentId || comment.comment_id || '').trim(),
+    rootId: String(comment.rootId || comment.root_id || comment.rootCommentId || comment.root_comment_id || '').trim(),
+    parentId: String(comment.parentId || comment.parent_id || comment.parentCommentId || comment.parent_comment_id || comment.targetCommentId || comment.target_comment_id || '').trim(),
     author,
     content,
     time: String(comment.time || '').trim(),
     likes: String(comment.likes || '').trim(),
+    replyTo: String(comment.replyTo || comment.reply_to || '').replace(/^[:：]+|[:：]+$/g, '').trim(),
   };
+  const normalizedReplies = (Array.isArray(comment.replies) ? comment.replies : [])
+    .map((reply) => normalizeSocialComment(reply))
+    .filter(Boolean)
+    .map((reply) => ({
+      ...reply,
+      replyTo: reply.replyTo || normalized.author,
+    }));
+  if (normalizedReplies.length) normalized.replies = normalizedReplies;
+  else normalized.replies = [];
+  return normalized;
 }
 
 function pushSocialComment(comments, seen, comment) {
@@ -4073,15 +4094,50 @@ function readCommentField(item, keys) {
   return '';
 }
 
-function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0) {
-  if (!value || depth > 8 || comments.length >= limit) return;
-  if (Array.isArray(value)) {
-    value.forEach((item) => extractCommentsFromObject(item, comments, seen, limit, depth + 1));
-    return;
-  }
-  if (typeof value !== 'object') return;
+function getCommentId(value) {
+  return readCommentField(value, ['id', 'comment_id', 'commentId', 'commentID', 'commentid']);
+}
 
-  const content = readCommentField(value, [
+function getRootCommentId(value) {
+  return readCommentField(value, ['root_comment_id', 'rootCommentId', 'root_id', 'rootId', 'top_comment_id', 'topCommentId']);
+}
+
+function getParentCommentId(value) {
+  return readCommentField(value, [
+    'parent_comment_id',
+    'parentCommentId',
+    'parent_id',
+    'parentId',
+    'target_comment_id',
+    'targetCommentId',
+    'reply_comment_id',
+    'replyCommentId',
+  ]);
+}
+
+function getCommentAuthor(value) {
+  return readCommentField(value, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userNickname',
+    'user_nickname',
+    'userName',
+    'user_name',
+    'name',
+    'author',
+  ]) || readCommentField(value && (value.user || value.userInfo || value.user_info || value.authorInfo || value.author_info || value.user_info_detail) || {}, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userName',
+    'user_name',
+    'name',
+  ]);
+}
+
+function getCommentContent(value) {
+  return readCommentField(value, [
     'content',
     'contentText',
     'content_text',
@@ -4095,32 +4151,130 @@ function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0)
     'desc',
     'message',
   ]);
+}
+
+function getCommentTime(value) {
+  return readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
+}
+
+function getCommentLikes(value) {
+  return readCommentField(value, ['like_num', 'likeNum', 'likeCount', 'likedCount', 'liked_count', 'like_count', 'likes']);
+}
+
+function getReplyTargetAuthor(value, parentAuthor = '') {
+  return readCommentField(value && (value.target_comment || value.targetComment || value.reply_to || value.replyTo || value.to_user || value.toUser) || {}, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userName',
+    'user_name',
+    'name',
+    'author',
+  ]) || readCommentField(value && (
+    (value.target_comment && (value.target_comment.user || value.target_comment.user_info || value.target_comment.userInfo))
+    || (value.targetComment && (value.targetComment.user || value.targetComment.user_info || value.targetComment.userInfo))
+    || value.to_user_info
+    || value.toUserInfo
+  ) || {}, [
+    'nick_name',
+    'nickname',
+    'nickName',
+    'userName',
+    'user_name',
+    'name',
+  ]) || parentAuthor || '';
+}
+
+function readCommentReplyItems(value) {
+  const replyValues = [
+    value && value.reply,
+    value && value.reply_info,
+    value && value.replyInfo,
+    value && value.reply_list,
+    value && value.replyList,
+    value && value.replies,
+    value && value.sub_comments,
+    value && value.subComments,
+    value && value.sub_comment_list,
+    value && value.subCommentList,
+    value && value.sub_comment,
+    value && value.subComment,
+  ].filter(Boolean);
+  const items = [];
+  replyValues.forEach((entry) => {
+    if (Array.isArray(entry)) {
+      entry.forEach((item) => {
+        if (item && typeof item === 'object') items.push(item);
+      });
+    } else if (entry && typeof entry === 'object') {
+      const nestedList = entry.list || entry.items || entry.comments || entry.comment_list || entry.reply_list || entry.replyList;
+      if (Array.isArray(nestedList)) {
+        nestedList.forEach((item) => {
+          if (item && typeof item === 'object') items.push(item);
+        });
+      } else {
+        items.push(entry);
+      }
+    }
+  });
+  return items;
+}
+
+function extractRepliesFromComment(value, parentAuthor, limit, depth) {
+  const replies = [];
+  const replySeen = new Set();
+  readCommentReplyItems(value).forEach((reply) => {
+    if (replies.length >= limit) return;
+    const content = getCommentContent(reply);
+    if (!content) return;
+    const author = getCommentAuthor(reply);
+    const nestedReplies = extractRepliesFromComment(reply, author || parentAuthor, Math.max(0, limit - replies.length - 1), depth + 1);
+    pushSocialComment(replies, replySeen, {
+      id: getCommentId(reply),
+      rootId: getRootCommentId(reply),
+      parentId: getParentCommentId(reply),
+      author,
+      content,
+      time: getCommentTime(reply),
+      likes: getCommentLikes(reply),
+      replyTo: getReplyTargetAuthor(reply, parentAuthor),
+      replies: nestedReplies,
+    });
+  });
+  return replies;
+}
+
+function extractCommentsFromObject(value, comments, seen, limit = SOCIAL_COMMENT_LIMIT, depth = 0) {
+  if (!value || depth > 8 || comments.length >= limit) return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => extractCommentsFromObject(item, comments, seen, limit, depth + 1));
+    return;
+  }
+  if (typeof value !== 'object') return;
+
+  const content = getCommentContent(value);
   if (content) {
-    const author = readCommentField(value, [
-      'nick_name',
-      'nickname',
-      'nickName',
-      'userNickname',
-      'user_nickname',
-      'userName',
-      'name',
-      'author',
-    ]) || readCommentField(value.user || value.userInfo || value.user_info || value.authorInfo || value.author_info || {}, [
-      'nick_name',
-      'nickname',
-      'nickName',
-      'userName',
-      'user_name',
-      'name',
-    ]);
-    const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
-    const likes = readCommentField(value, ['like_num', 'likeNum', 'likeCount', 'likedCount', 'liked_count', 'like_count', 'likes']);
-    pushSocialComment(comments, seen, { author, content, time, likes });
+    const author = getCommentAuthor(value);
+    const replies = extractRepliesFromComment(value, author, Math.max(0, limit - comments.length - 1), depth + 1);
+    pushSocialComment(comments, seen, {
+      id: getCommentId(value),
+      rootId: getRootCommentId(value),
+      parentId: getParentCommentId(value),
+      author,
+      content,
+      time: getCommentTime(value),
+      likes: getCommentLikes(value),
+      replyTo: getReplyTargetAuthor(value, ''),
+      replies,
+    });
   }
 
   Object.keys(value).forEach((key) => {
     if (comments.length >= limit) return;
     const child = value[key];
+    if (/^(reply|reply_info|replyInfo|reply_list|replyList|replies|sub_comments|subComments|sub_comment_list|subCommentList|sub_comment|subComment)$/i.test(key)) {
+      return;
+    }
     if (/comment|cmt|reply|discuss/i.test(key) || (Array.isArray(child) && /^(?:list|items|entries|data)$/i.test(key))) {
       extractCommentsFromObject(child, comments, seen, limit, depth + 1);
     }
@@ -4226,6 +4380,126 @@ function extractWechatCommentsFromHtml(html, limit = 20) {
   return comments.slice(0, limit);
 }
 
+function extractWechatCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
+  const comments = [];
+  const seen = new Set();
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  extractCommentsFromObject(data, comments, seen, limit);
+  return threadSocialComments(comments, limit);
+}
+
+function shouldRetryWechatCommentsWithVisibleReader(payload, comments = []) {
+  if ((comments || []).map(normalizeSocialComment).filter(Boolean).length) return false;
+  if (!payload) return true;
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  if (!data || typeof data !== 'object') return true;
+  const ret = Number(data.ret !== undefined ? data.ret : (data.base_resp && data.base_resp.ret));
+  const errmsg = String(data.errmsg || (data.base_resp && data.base_resp.errmsg) || '').toLowerCase();
+  return ret === -3
+    || errmsg.includes('no session')
+    || errmsg.includes('session')
+    || errmsg.includes('token')
+    || errmsg.includes('login');
+}
+
+function extractWechatCommentRequestParams(html, url = '') {
+  const source = String(html || '');
+  const params = {};
+  const readScriptString = (keys) => {
+    for (const key of keys) {
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`(?:var\\s+)?${escaped}\\s*=\\s*["']([^"']+)["']`, 'i');
+      const match = source.match(pattern);
+      if (match && match[1]) return decodeHtmlEntities(decodeJsonLikeText(match[1])).trim();
+    }
+    return '';
+  };
+  const readScriptNumber = (keys) => {
+    for (const key of keys) {
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`(?:var\\s+)?${escaped}\\s*=\\s*["']?([0-9]+)["']?`, 'i');
+      const match = source.match(pattern);
+      if (match && match[1]) return match[1].trim();
+    }
+    return '';
+  };
+
+  try {
+    const parsed = new URL(cleanDisplayUrl(url));
+    ['__biz', 'mid', 'idx', 'sn'].forEach((key) => {
+      const value = parsed.searchParams.get(key);
+      if (value) params[key] = value;
+    });
+  } catch (error) {}
+
+  params.appmsg_token = readScriptString(['appmsg_token', 'window.appmsg_token']) || params.appmsg_token || '';
+  params.comment_id = readScriptNumber(['comment_id', 'commentId']) || readScriptString(['comment_id', 'commentId']) || '';
+  params.__biz = params.__biz || readScriptString(['biz', '__biz']) || '';
+  params.mid = params.mid || readScriptNumber(['mid', 'appmsgid']) || readScriptString(['mid', 'appmsgid']) || '';
+  params.idx = params.idx || readScriptNumber(['idx']) || readScriptString(['idx']) || '';
+  params.sn = params.sn || readScriptString(['sn']) || '';
+
+  return Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ''));
+}
+
+function buildWechatCommentApiUrl(articleUrl, params = {}) {
+  if (!params.comment_id) return '';
+  const api = new URL('https://mp.weixin.qq.com/mp/appmsg_comment');
+  api.searchParams.set('action', 'getcomment');
+  api.searchParams.set('scene', '0');
+  api.searchParams.set('__biz', params.__biz || '');
+  api.searchParams.set('appmsgid', params.mid || '');
+  api.searchParams.set('idx', params.idx || '1');
+  api.searchParams.set('comment_id', params.comment_id);
+  api.searchParams.set('offset', '0');
+  api.searchParams.set('limit', '50');
+  api.searchParams.set('send_time', '');
+  api.searchParams.set('sessionid', '0');
+  api.searchParams.set('enterid', String(Date.now()));
+  api.searchParams.set('ascene', '0');
+  api.searchParams.set('fasttmpl_type', '0');
+  api.searchParams.set('fasttmpl_fullversion', '0');
+  api.searchParams.set('fasttmpl_flag', '0');
+  api.searchParams.set('appmsg_token', params.appmsg_token || '');
+  api.searchParams.set('x5', '0');
+  api.searchParams.set('f', 'json');
+  api.searchParams.set('r', String(Math.random()));
+  if (articleUrl) api.searchParams.set('ref', cleanDisplayUrl(articleUrl));
+  return api.toString();
+}
+
+function getWechatInPageCommentFetchScript() {
+  return `
+    (async () => {
+      const readVar = (name) => {
+        try {
+          const value = name.split('.').reduce((obj, key) => (obj ? obj[key] : undefined), window);
+          if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+        } catch (error) {}
+        return '';
+      };
+      const params = new URLSearchParams({
+        action: 'getcomment',
+        scene: '0',
+        __biz: new URLSearchParams(location.search).get('__biz') || readVar('__biz') || readVar('biz'),
+        appmsgid: new URLSearchParams(location.search).get('mid') || readVar('mid') || readVar('appmsgid'),
+        idx: new URLSearchParams(location.search).get('idx') || readVar('idx') || '1',
+        comment_id: readVar('comment_id') || readVar('commentId'),
+        offset: '0',
+        limit: '50',
+        appmsg_token: readVar('appmsg_token') || readVar('window.appmsg_token'),
+        f: 'json'
+      });
+      const response = await fetch('/mp/appmsg_comment?' + params.toString(), {
+        method: 'GET',
+        credentials: 'include',
+        headers: { Accept: 'application/json,text/plain,*/*' }
+      });
+      return await response.text();
+    })()
+  `;
+}
+
 function collectHtmlBlocksByClassOrId(source, classOrIdPattern, tagNames = ['li', 'div', 'section', 'article'], limit = 80) {
   const text = String(source || '');
   const blocks = [];
@@ -4314,10 +4588,133 @@ function extractXiaohongshuXsecTokenFromUrl(url) {
   }
 }
 
-function extractXiaohongshuCommentsFromApiPayload(payload, limit = 20) {
+function threadSocialComments(comments = [], limit = SOCIAL_COMMENT_LIMIT) {
+  const flattened = [];
+  let syntheticIndex = 0;
+  const flatten = (comment, parent = null) => {
+    const normalized = normalizeSocialComment(comment);
+    if (!normalized) return;
+    const replies = normalized.replies || [];
+    const selfKey = normalized.id || `__comment_${syntheticIndex += 1}`;
+    flattened.push({
+      ...normalized,
+      _threadKey: selfKey,
+      rootId: normalized.rootId || (parent ? parent.rootId || parent._threadKey || parent.id || '' : ''),
+      parentId: normalized.parentId || (parent ? parent._threadKey || parent.id || '' : ''),
+      replyTo: normalized.replyTo || (parent ? parent.author || '' : ''),
+      replies: [],
+    });
+    replies.forEach((reply) => flatten(reply, { ...normalized, _threadKey: selfKey }));
+  };
+  (comments || []).forEach((comment) => flatten(comment));
+  const normalized = flattened;
+  const byId = new Map();
+  const roots = [];
+  const seenKeys = new Set();
+  const rootOrder = [];
+
+  const keyFor = (comment) => comment.id || comment._threadKey || `${comment.author}|${comment.content}`;
+  const register = (comment) => {
+    const key = keyFor(comment);
+    if (!key || seenKeys.has(key)) return null;
+    seenKeys.add(key);
+    const next = {
+      ...comment,
+      replies: [],
+    };
+    if (next.id) byId.set(next.id, next);
+    if (next._threadKey) byId.set(next._threadKey, next);
+    return next;
+  };
+
+  normalized.forEach((comment) => {
+    const next = register(comment);
+    if (!next) return;
+    const isReply = Boolean(next.rootId || next.parentId || next.replyTo);
+    const rootId = next.rootId && next.rootId !== next.id ? next.rootId : '';
+    const parentId = next.parentId && next.parentId !== next.id ? next.parentId : '';
+    if (isReply && !rootId && next.replyTo) {
+      const rootByReplyTo = [...roots].reverse().find((item) => item.author && item.author === next.replyTo);
+      if (rootByReplyTo) {
+        rootByReplyTo.replies.push(next);
+        return;
+      }
+    }
+    if (!isReply || !rootId) {
+      roots.push(next);
+      rootOrder.push(next.id || keyFor(next));
+      return;
+    }
+    const root = byId.get(rootId);
+    const parent = parentId ? byId.get(parentId) : null;
+    if (parent && parent !== root) {
+      next.replyTo = next.replyTo || parent.author || '';
+      const rootForParent = root || roots.find((item) => item.id === rootId);
+      if (rootForParent) {
+        rootForParent.replies.push(next);
+      } else {
+        parent.replies.push(next);
+      }
+      return;
+    }
+    if (root) {
+      next.replyTo = next.replyTo || root.author || '';
+      root.replies.push(next);
+      return;
+    }
+    roots.push(next);
+    rootOrder.push(next.id || keyFor(next));
+  });
+
+  const countThread = (items) => {
+    let count = 0;
+    const visit = (item) => {
+      if (!item || count >= limit) return;
+      count += 1;
+      (item.replies || []).forEach(visit);
+    };
+    (items || []).forEach(visit);
+    return count;
+  };
+  while (countThread(roots) > limit && roots.length) {
+    const last = roots[roots.length - 1];
+    if (last.replies && last.replies.length) last.replies.pop();
+    else roots.pop();
+  }
+  return roots;
+}
+
+function collectXiaohongshuApiCommentItems(value, items = [], depth = 0, context = {}) {
+  if (!value || depth > 8) return items;
+  if (Array.isArray(value)) {
+    value.forEach((item) => {
+      if (!item || typeof item !== 'object') return;
+      const content = getCommentContent(item);
+      const id = getCommentId(item);
+      const author = getCommentAuthor(item);
+      const rootId = getRootCommentId(item) || context.rootId || '';
+      const parentId = getParentCommentId(item) || (context.rootId ? context.parentId : '');
+      if (content) items.push({ item, context });
+      collectXiaohongshuApiCommentItems(item, items, depth + 1, content ? {
+        rootId: rootId || id || context.rootId || '',
+        parentId: id || parentId || '',
+        parentAuthor: author || context.parentAuthor || '',
+      } : context);
+    });
+    return items;
+  }
+  if (typeof value !== 'object') return items;
+  Object.keys(value).forEach((key) => {
+    const child = value[key];
+    if (/comment|cmt|reply|list|items|data/i.test(key)) {
+      collectXiaohongshuApiCommentItems(child, items, depth + 1, context);
+    }
+  });
+  return items;
+}
+
+function extractXiaohongshuCommentsFromApiPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
   const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
-  const comments = [];
-  const seen = new Set();
   const roots = [
     data && data.data && data.data.comments,
     data && data.data && data.data.comment_list,
@@ -4325,39 +4722,30 @@ function extractXiaohongshuCommentsFromApiPayload(payload, limit = 20) {
     data && data.comments,
     data && data.comment_list,
   ].filter(Boolean);
-
-  const visit = (items) => {
-    if (!items || comments.length >= limit) return;
-    const list = Array.isArray(items) ? items : [items];
-    list.forEach((item) => {
-      if (!item || typeof item !== 'object' || comments.length >= limit) return;
-      const content = readCommentField(item, [
-        'content',
-        'contentText',
-        'content_text',
-        'text',
-        'commentText',
-        'comment_text',
-        'commentContent',
-        'comment_content',
-      ]);
-      const author = readCommentField(item.user || item.userInfo || item.user_info || item.authorInfo || item.author_info || {}, [
-        'nickname',
-        'nickName',
-        'nick_name',
-        'userName',
-        'user_name',
-        'name',
-      ]) || readCommentField(item, ['nickname', 'nickName', 'nick_name', 'userName', 'name', 'author']);
-      const time = readCommentField(item, ['create_time', 'createTime', 'time', 'date']);
-      const likes = readCommentField(item, ['like_count', 'liked_count', 'likeCount', 'likedCount', 'like_num', 'likeNum', 'likes']);
-      pushSocialComment(comments, seen, { author, content, time, likes });
-      visit(item.sub_comments || item.subComments || item.sub_comment_list || item.subCommentList || item.replies || item.reply_list);
+  const sourceItems = roots.length ? roots.flatMap((root) => collectXiaohongshuApiCommentItems(root, [], 0)) : collectXiaohongshuApiCommentItems(data, [], 0);
+  const comments = [];
+  const seen = new Set();
+  sourceItems.forEach((entry) => {
+    const item = entry && entry.item ? entry.item : entry;
+    const context = entry && entry.context ? entry.context : {};
+    const author = getCommentAuthor(item);
+    const content = getCommentContent(item);
+    const id = getCommentId(item);
+    const rootId = getRootCommentId(item) || context.rootId || '';
+    const parentId = getParentCommentId(item) || (context.rootId ? context.parentId : '');
+    const replyTo = getReplyTargetAuthor(item, context.parentAuthor || '');
+    pushSocialComment(comments, seen, {
+      id,
+      rootId,
+      parentId,
+      author,
+      content,
+      time: getCommentTime(item),
+      likes: getCommentLikes(item),
+      replyTo,
     });
-  };
-
-  roots.forEach(visit);
-  return comments.slice(0, limit);
+  });
+  return threadSocialComments(comments, limit);
 }
 
 function buildXiaohongshuCommentApiUrl(url, cursor = '') {
@@ -4448,13 +4836,22 @@ function replaceXiaohongshuCommentsInExtraction(extracted, comments, status = ''
 }
 
 function buildSocialCommentsMarkdown(comments = []) {
-  const items = (comments || []).map(normalizeSocialComment).filter(Boolean);
+  const items = threadSocialComments((comments || []).map(normalizeSocialComment).filter(Boolean));
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
-  items.forEach((comment) => {
+  const renderCommentLine = (comment, indent = '') => {
     const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
-    const prefix = comment.author ? `**${comment.author}**：` : '';
-    lines.push(`- ${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
+    const author = comment.author || '匿名用户';
+    const relation = comment.replyTo ? ` 回复 **${comment.replyTo}**` : '';
+    return `${indent}- **${author}**${relation}：${comment.content}${meta ? `（${meta}）` : ''}`;
+  };
+  const renderThread = (comment, depth = 0) => {
+    lines.push(renderCommentLine(comment, '  '.repeat(depth)));
+    (comment.replies || []).forEach((reply) => renderThread(reply, depth + 1));
+  };
+  items.forEach((comment) => {
+    renderThread(comment);
+    lines.push('');
   });
   return lines.join('\n').trim();
 }
@@ -4471,6 +4868,36 @@ function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
     : extractWechatCommentsFromHtml(htmlOrComments);
   const commentMarkdown = buildWechatCommentsMarkdown(comments);
   return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
+}
+
+function buildWechatArticleMarkdownWithComments(markdown, html, extraComments = []) {
+  const source = String(markdown || '').trim();
+  const comments = extraComments || [];
+  if (!comments.length) {
+    return source
+      .replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '')
+      .replace(/\n+##\s+评论区[\s\S]*$/m, '')
+      .trim();
+  }
+  const withoutExistingComments = source
+    .replace(/\n+##\s+评论区\s*\n+\s*> 未抓取到公开评论[\s\S]*$/m, '')
+    .replace(/\n+##\s+评论区[\s\S]*$/m, '')
+    .trim();
+  return appendWechatCommentsToMarkdown(withoutExistingComments, comments);
+}
+
+function htmlToMarkdownOrFallback(html, url = '') {
+  try {
+    return htmlToMarkdown(html);
+  } catch (error) {
+    const title = extractHtmlTitle(html) || getWebpageSourcePrefix(url) || '网页内容';
+    const text = stripHtmlTags(selectReadableHtml(String(html || '')));
+    return cleanMarkdownForStorage([`# ${title}`, text].filter(Boolean).join('\n\n'));
+  }
+}
+
+function extractXiaohongshuCommentsFromPayload(payload, limit = SOCIAL_COMMENT_LIMIT) {
+  return extractXiaohongshuCommentsFromApiPayload(payload, limit);
 }
 
 function extractHtmlTitle(html) {
@@ -5428,6 +5855,408 @@ async function renderSocialMediaUrlWithElectron(url) {
   return urls[0] || '';
 }
 
+function createSocialBrowserWindow(BrowserWindow, platform, options = {}) {
+  const session = platform === 'xiaohongshu'
+    ? getXiaohongshuSession()
+    : platform === 'wechat'
+      ? getWechatSession()
+      : null;
+  return new BrowserWindow({
+    width: options.width || 1280,
+    height: options.height || 1200,
+    show: options.show === true,
+    title: options.title || '',
+    webPreferences: {
+      session: session || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+}
+
+function mergeSocialCommentTrees(commentGroups = [], limit = SOCIAL_COMMENT_LIMIT) {
+  const merged = [];
+  const seen = new Set();
+  (commentGroups || []).flat().forEach((comment) => pushSocialComment(merged, seen, comment));
+  return threadSocialComments(merged, limit);
+}
+
+function createRenderedCommentCollector(webContents, platform) {
+  const payloads = [];
+  const pending = new Map();
+  const target = String(platform || '').toLowerCase();
+  const matchesCommentUrl = (url) => {
+    const text = String(url || '').toLowerCase();
+    if (target === 'xiaohongshu') {
+      return text.includes('/api/sns/web') && (text.includes('/comment/') || text.includes('comment/page') || text.includes('comment/sub'));
+    }
+    if (target === 'wechat') return text.includes('/mp/appmsg_comment') || text.includes('appmsg_comment');
+    return text.includes('comment');
+  };
+
+  try {
+    if (!webContents || !webContents.debugger) return null;
+    if (!webContents.debugger.isAttached()) {
+      webContents.debugger.attach('1.3');
+    }
+    webContents.debugger.sendCommand('Network.enable').catch(() => {});
+    const onMessage = async (_event, method, params = {}) => {
+      try {
+        if (method === 'Network.responseReceived') {
+          const requestId = params.requestId;
+          const requestUrl = params.response && params.response.url;
+          if (requestId && matchesCommentUrl(requestUrl)) pending.set(requestId, requestUrl);
+          return;
+        }
+        if (method !== 'Network.loadingFinished' || !pending.has(params.requestId)) return;
+        const requestId = params.requestId;
+        pending.delete(requestId);
+        const body = await webContents.debugger.sendCommand('Network.getResponseBody', { requestId });
+        let text = String(body && body.body ? body.body : '');
+        if (body && body.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
+        if (text) payloads.push(text);
+      } catch (error) {
+        // Protected responses can block body access; page-side fetch and DOM fallback still run.
+      }
+    };
+    webContents.debugger.on('message', onMessage);
+    return {
+      getComments: () => mergeSocialCommentTrees(payloads.map((payload) => (
+        target === 'xiaohongshu'
+          ? extractXiaohongshuCommentsFromApiPayload(payload, SOCIAL_COMMENT_LIMIT)
+          : (() => {
+            const comments = [];
+            extractCommentsFromObject(payload, comments, new Set(), SOCIAL_COMMENT_LIMIT);
+            return comments;
+          })()
+      ))),
+      dispose: () => {
+        try {
+          webContents.debugger.off('message', onMessage);
+          if (webContents.debugger.isAttached()) webContents.debugger.detach();
+        } catch (error) {
+          // Window teardown may already have detached the debugger.
+        }
+      },
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function getSocialElectronPartition(platform) {
+  const target = String(platform || '').toLowerCase();
+  if (target === 'xiaohongshu' || target === 'xhs') return XIAOHONGSHU_SESSION_PARTITION;
+  if (target === 'wechat' || target === 'weixin') return WECHAT_SESSION_PARTITION;
+  return '';
+}
+
+function getXiaohongshuCommentExpansionScript() {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clickables = () => Array.from(document.querySelectorAll('button, [role="button"], a, span, div'))
+        .filter((node) => {
+          const text = String(node.innerText || node.textContent || '').replace(/\\s+/g, '');
+          if (!text || text.length > 48 || !visible(node)) return false;
+          return /^(评论|查看评论|全部评论|更多评论)$|展开|更多回复|查看.*回复|全部回复|共\\d+条回复|\\d+条回复|more/i.test(text);
+        });
+      const scrollables = () => Array.from(document.querySelectorAll('[class*="comment"], [class*="reply"], [class*="scroll"], [class*="list"], main, body, html'))
+        .filter((node) => {
+          try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
+        });
+      let stableRounds = 0;
+      let lastTextLength = 0;
+      for (let round = 0; round < 24; round += 1) {
+        let clicked = 0;
+        for (const node of clickables().slice(0, 14)) {
+          try {
+            node.scrollIntoView({ block: 'center', inline: 'nearest' });
+            await sleep(120);
+            node.click();
+            clicked += 1;
+            await sleep(320);
+          } catch (error) {}
+        }
+        window.scrollBy(0, Math.max(450, Math.floor(window.innerHeight * 0.75)));
+        scrollables().forEach((node) => {
+          try { node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight); } catch (error) {}
+        });
+        await sleep(700);
+        const textLength = String(document.body ? document.body.innerText || '' : '').length;
+        stableRounds = clicked === 0 && Math.abs(textLength - lastTextLength) < 20 ? stableRounds + 1 : 0;
+        lastTextLength = textLength;
+        if (stableRounds >= 4) break;
+      }
+      return true;
+    })()
+  `;
+}
+
+function getXiaohongshuInPageCommentFetchScript(url = '') {
+  return `
+    (async () => {
+      const SOCIAL_COMMENT_LIMIT = ${SOCIAL_COMMENT_LIMIT};
+      const inputUrl = ${JSON.stringify(cleanDisplayUrl(url))};
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const safeUrl = (value) => { try { return new URL(value || location.href, location.href); } catch (error) { return null; } };
+      const readField = (value, keys) => {
+        for (const key of keys) {
+          if (value && Object.prototype.hasOwnProperty.call(value, key) && value[key] !== undefined && value[key] !== null) return value[key];
+        }
+        return undefined;
+      };
+      const pageSource = () => {
+        try {
+          return [
+            document.documentElement ? document.documentElement.innerHTML || '' : '',
+            JSON.stringify(window.__INITIAL_STATE__ || {}),
+            JSON.stringify(window.__APOLLO_STATE__ || {}),
+          ].join('\\n');
+        } catch (error) {
+          return document.documentElement ? document.documentElement.innerHTML || '' : '';
+        }
+      };
+      const readNoteId = () => {
+        for (const parsed of [safeUrl(location.href), safeUrl(inputUrl)].filter(Boolean)) {
+          const match = parsed.pathname.match(/\\/(?:explore|discovery\\/item|item)\\/([0-9a-zA-Z]+)/i);
+          if (match && match[1]) return match[1];
+          const noteId = parsed.searchParams.get('note_id') || parsed.searchParams.get('noteId');
+          if (noteId) return noteId;
+        }
+        const source = pageSource();
+        const match = source.match(/["']note[_-]?id["']\\s*:\\s*["']([0-9a-zA-Z]+)["']/i)
+          || source.match(/["']noteId["']\\s*:\\s*["']([0-9a-zA-Z]+)["']/i);
+        return match && match[1] ? match[1] : '';
+      };
+      const readXsecToken = () => {
+        for (const parsed of [safeUrl(location.href), safeUrl(inputUrl)].filter(Boolean)) {
+          const token = parsed.searchParams.get('xsec_token') || parsed.searchParams.get('xsecToken');
+          if (token) return token;
+        }
+        const match = pageSource().match(/["']xsec_token["']\\s*:\\s*["']([^"']+)["']/i)
+          || pageSource().match(/["']xsecToken["']\\s*:\\s*["']([^"']+)["']/i);
+        return match && match[1] ? String(match[1]).trim() : '';
+      };
+      const requestJson = async (path, params) => {
+        const query = new URLSearchParams();
+        Object.entries(params || {}).forEach(([key, value]) => {
+          if (value !== undefined && value !== null && String(value) !== '') query.set(key, String(value));
+        });
+        const response = await fetch(path + '?' + query.toString(), {
+          method: 'GET',
+          credentials: 'include',
+          headers: { Accept: 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        const text = await response.text();
+        try { return JSON.parse(text); } catch (error) { return text; }
+      };
+      const getData = (payload) => payload && (payload.data || payload.result || payload) || {};
+      const getCursor = (payload) => String(readField(getData(payload), ['cursor', 'next_cursor', 'nextCursor']) || '');
+      const hasMore = (payload) => {
+        const value = readField(getData(payload), ['has_more', 'hasMore', 'has_next', 'hasNext']);
+        return value === true || value === 1 || value === 'true' || value === '1';
+      };
+      const getRootComments = (payload) => {
+        const data = getData(payload);
+        return readField(data, ['comments', 'comment_list', 'list', 'items']) || [];
+      };
+      const noteId = readNoteId();
+      if (!noteId) return [];
+      const baseParams = {
+        note_id: noteId,
+        xsec_token: readXsecToken(),
+        image_scenes: 'FD_WM_WEBP,CRD_WM_WEBP',
+        image_formats: 'jpg,webp,avif',
+      };
+      const payloads = [];
+      const rootComments = [];
+      let cursor = '';
+      for (let page = 0; page < 4 && rootComments.length < SOCIAL_COMMENT_LIMIT; page += 1) {
+        let payload = null;
+          try {
+            payload = await requestJson('/api/sns/web/v2/comment/page', { ...baseParams, cursor, top_comment_id: '' });
+          } catch (error) {
+            break;
+          }
+          const roots = Array.isArray(getRootComments(payload)) ? getRootComments(payload) : [];
+          if (roots.length) {
+          payloads.push({ data: { comments: roots } });
+          roots.forEach((comment) => {
+            if (rootComments.length < SOCIAL_COMMENT_LIMIT) rootComments.push(comment);
+          });
+        }
+        const nextCursor = getCursor(payload);
+        if (!hasMore(payload) || !nextCursor || nextCursor === cursor) break;
+        cursor = nextCursor;
+        await sleep(300);
+      }
+      for (const comment of rootComments.slice(0, SOCIAL_COMMENT_LIMIT)) {
+        const rootCommentId = readField(comment, ['id', 'comment_id', 'commentId']);
+        if (!rootCommentId) continue;
+        const inlineReplies = readField(comment, ['sub_comments', 'subComments', 'reply_list', 'replyList']);
+        const inlineReplyCount = Array.isArray(inlineReplies) ? inlineReplies.length : 0;
+        const replyCount = Number(readField(comment, ['sub_comment_count', 'subCommentCount', 'sub_comment_num', 'reply_count', 'replyCount']) || 0);
+        const hasHiddenReplies = replyCount > inlineReplyCount || readField(comment, ['sub_comment_cursor', 'subCommentCursor', 'sub_comment_has_more', 'subCommentHasMore']) !== undefined;
+        if (!hasHiddenReplies) continue;
+        let subCursor = '';
+        for (let page = 0; page < 4; page += 1) {
+          let payload = null;
+          try {
+            payload = await requestJson('/api/sns/web/v2/comment/sub/page', { ...baseParams, root_comment_id: rootCommentId, cursor: subCursor, num: 10 });
+          } catch (error) {
+            break;
+          }
+          const replies = Array.isArray(getRootComments(payload)) ? getRootComments(payload) : [];
+          if (replies.length) {
+            const currentReplies = Array.isArray(comment.sub_comments) ? comment.sub_comments : [];
+            const seenReplyIds = new Set(currentReplies.map((reply) => String(readField(reply, ['id', 'comment_id', 'commentId']) || readField(reply, ['content', 'text', 'commentContent', 'comment_content']) || '')));
+            replies.forEach((reply) => {
+              const replyKey = String(readField(reply, ['id', 'comment_id', 'commentId']) || readField(reply, ['content', 'text', 'commentContent', 'comment_content']) || '');
+              if (!replyKey || String(readField(reply, ['id', 'comment_id', 'commentId'])) === String(rootCommentId) || seenReplyIds.has(replyKey)) return;
+              seenReplyIds.add(replyKey);
+              currentReplies.push(reply);
+            });
+            comment.sub_comments = currentReplies;
+            payloads.push({ data: { comments: [comment] } });
+          } else if (payload) {
+            payloads.push(payload);
+          }
+          const nextCursor = getCursor(payload);
+          if (!hasMore(payload) || !nextCursor || nextCursor === subCursor) break;
+          subCursor = nextCursor;
+          await sleep(250);
+        }
+      }
+      return payloads;
+    })()
+  `;
+}
+
+function getXiaohongshuDomCommentExtractScript() {
+  return `
+    (() => {
+      const SOCIAL_COMMENT_LIMIT = ${SOCIAL_COMMENT_LIMIT};
+      const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+      const pickText = (root, selectors) => {
+        for (const selector of selectors) {
+          const node = root.querySelector(selector);
+          const text = clean(node ? node.innerText || node.textContent || '' : '');
+          if (text) return text;
+        }
+        return '';
+      };
+      const nodes = Array.from(document.querySelectorAll([
+        '[class*="comment-item"]',
+        '[class*="commentItem"]',
+        '[class*="comment-card"]',
+        '[class*="commentCard"]',
+        '[class*="reply-item"]',
+        '[class*="replyItem"]',
+        '[class*="note-text"]',
+        '[data-e2e*="comment"]'
+      ].join(',')));
+      const comments = [];
+      const seen = new Set();
+      nodes.forEach((node) => {
+        const fullText = clean(node.innerText || node.textContent || '');
+        if (!fullText || fullText.length < 2 || fullText.length > 1000) return;
+        const author = pickText(node, [
+          '[class*="user-name"]',
+          '[class*="userName"]',
+          '[class*="nickname"]',
+          '[class*="nick"]',
+          '[class*="author"]',
+          '[class*="name"]'
+        ]);
+        let content = pickText(node, [
+          '[class*="comment-content"]',
+          '[class*="commentContent"]',
+          '[class*="note-text"]',
+          '[class*="content"]',
+          '[class*="text"]',
+          '[class*="desc"]'
+        ]);
+        if (!content || content === author) {
+          content = fullText;
+          if (author && content.startsWith(author)) content = clean(content.slice(author.length));
+        }
+        content = content
+          .replace(/^(回复|赞|点赞|展开|收起|更多回复|查看回复)\\s*/g, '')
+          .replace(/\\s*(回复|赞|点赞|展开|收起|更多回复|查看回复)\\s*$/g, '')
+          .trim();
+        const likes = pickText(node, [
+          '[class*="like-count"]',
+          '[class*="likeCount"]',
+          '[class*="likes"]',
+          '[class*="praise"]'
+        ]).replace(/[^0-9万\\.]/g, '');
+        const key = author + '|' + content;
+        if (!content || content.length < 2 || seen.has(key)) return;
+        seen.add(key);
+        comments.push({ author, content, likes });
+      });
+      return comments.slice(0, SOCIAL_COMMENT_LIMIT);
+    })()
+  `;
+}
+
+async function renderXiaohongshuCommentsWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染小红书评论');
+  }
+
+  const win = createSocialBrowserWindow(BrowserWindow, 'xiaohongshu', {
+    width: 1280,
+    height: 1200,
+    show: false,
+  });
+  const collector = createRenderedCommentCollector(win.webContents, 'xiaohongshu');
+
+  try {
+    const loaded = waitForWebContents(win.webContents, 18000);
+    await win.loadURL(url);
+    await loaded;
+    await settleRenderedPage(win.webContents);
+    let inPagePayloads = [];
+    try {
+      const payload = await win.webContents.executeJavaScript(getXiaohongshuInPageCommentFetchScript(url));
+      inPagePayloads = Array.isArray(payload) ? payload : (payload ? [payload] : []);
+    } catch (error) {
+      inPagePayloads = [];
+    }
+    try {
+      await win.webContents.executeJavaScript(getXiaohongshuCommentExpansionScript());
+    } catch (error) {}
+    let domComments = [];
+    try {
+      const comments = await win.webContents.executeJavaScript(getXiaohongshuDomCommentExtractScript());
+      domComments = Array.isArray(comments) ? comments : [];
+    } catch (error) {
+      domComments = [];
+    }
+    const apiCommentGroups = inPagePayloads.map((payload) => extractXiaohongshuCommentsFromApiPayload(payload, SOCIAL_COMMENT_LIMIT));
+    return mergeSocialCommentTrees([
+      collector ? collector.getComments() : [],
+      ...apiCommentGroups,
+      domComments,
+    ], SOCIAL_COMMENT_LIMIT);
+  } finally {
+    if (collector) collector.dispose();
+    if (win && (typeof win.isDestroyed !== 'function' || !win.isDestroyed())) {
+      win.destroy();
+    }
+  }
+}
+
 async function renderXiaohongshuMarkdownWithElectron(url, fallbackText = '', options = {}) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -6111,6 +6940,87 @@ function extractKeywordsFromText(text, title = '') {
   return Array.from(new Set(String(source || '').match(/[\p{L}\p{N}]{2,12}/gu) || [])).slice(0, 6);
 }
 
+function buildFallbackGeneratedKeywords(record) {
+  const metadata = (record && record.metadata) || {};
+  const source = [
+    metadata.platform,
+    metadata.title,
+    metadata.description,
+    metadata.markdown,
+    record && record.content,
+  ].filter(Boolean).join('\n');
+  const keywords = [];
+  const add = (value) => {
+    const text = String(value || '').replace(/^#/, '').trim();
+    if (text && text.length <= 24 && !keywords.includes(text)) keywords.push(text);
+  };
+  ['小红书', '标题方法', 'AI写作'].forEach((candidate) => {
+    if (source.includes(candidate)) add(candidate);
+  });
+  add(metadata.title);
+  ['内容选题', '飞书', '公众号', 'Obsidian'].forEach((candidate) => {
+    if (source.includes(candidate)) add(candidate);
+  });
+  extractKeywordsFromText(source, metadata.title).forEach(add);
+  return keywords.slice(0, 8);
+}
+
+function shouldRefreshAiDescription(metadata = {}, record = {}) {
+  const description = getRecordDescription(metadata);
+  const keywords = getRecordKeywords(metadata);
+  if (!description || !keywords.length) return true;
+  const input = extractAiMetadataInputText(record);
+  if (!input) return false;
+  if (description.length > 180 || /页面未直接暴露正文|正文处理中|转写处理中/.test(description)) return true;
+  return false;
+}
+
+function mergeSocialCommentsIntoMarkdown(markdown, comments = []) {
+  const source = String(markdown || '').trim();
+  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
+  const commentMarkdown = buildSocialCommentsMarkdown(comments);
+  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
+}
+
+function buildXiaohongshuRecordFromExtraction(record, {
+  metadata = (record && record.metadata) || {},
+  url = '',
+  extracted = {},
+  renderedComments = [],
+} = {}) {
+  const allComments = mergeSocialCommentTrees([
+    extracted.comments || [],
+    renderedComments || [],
+  ]);
+  const markdown = mergeSocialCommentsIntoMarkdown(extracted.markdown || metadata.markdown || '', allComments);
+  const keywords = getRecordKeywords({ keywords: metadata.keywords || extracted.tags || [] });
+  return {
+    ...record,
+    metadata: {
+      ...metadata,
+      title: metadata.title || extracted.title || getWebpageSourcePrefix(url) || '小红书',
+      author: metadata.author || extracted.author || '',
+      description: metadata.description || extracted.description || '',
+      keywords: keywords.length ? keywords : buildFallbackGeneratedKeywords({
+        ...record,
+        metadata: {
+          ...metadata,
+          title: metadata.title || extracted.title,
+          description: metadata.description || extracted.description,
+          markdown,
+        },
+      }),
+      platform: metadata.platform || '小红书',
+      contentCategory: metadata.contentCategory || (extracted.videoUrl ? '视频' : '图文'),
+      markdown,
+      imageUrls: extracted.imageUrls || [],
+      videoUrl: extracted.videoUrl || '',
+      comments: allComments,
+      conversionStatus: 'success',
+    },
+  };
+}
+
 function enrichExtractedWebpageMetadata(metadata = {}) {
   const next = { ...metadata };
   const text = stripMarkdownForDescription(next.markdown || next.content || '');
@@ -6122,6 +7032,40 @@ function enrichExtractedWebpageMetadata(metadata = {}) {
     next.keywords = extractKeywordsFromText(`${next.description || ''} ${text}`, next.title || '');
   }
   return next;
+}
+
+function ensureRequiredMetadataFallbacks(record, options = {}) {
+  const metadata = { ...((record && record.metadata) || {}) };
+  if (options && options.aiMetadataEnabled === false) {
+    return {
+      ...record,
+      metadata: {
+        ...metadata,
+        keywords: getRecordKeywords(metadata),
+      },
+    };
+  }
+  const text = stripMarkdownForDescription(metadata.markdown || metadata.content || record && record.content || '');
+  if (!metadata.description && text) {
+    const sentences = text.split(/[。！？!?]\s*/).map((item) => item.trim()).filter((item) => item.length >= 8);
+    metadata.description = (sentences[0] || text).slice(0, 120);
+  }
+  if (!getRecordKeywords(metadata).length) {
+    metadata.keywords = buildFallbackGeneratedKeywords({
+      ...record,
+      metadata: {
+        ...metadata,
+        markdown: metadata.markdown || text,
+      },
+    });
+  }
+  if ((metadata.description || getRecordKeywords(metadata).length) && !metadata.aiMetadataSource) {
+    metadata.aiMetadataSource = 'fallback';
+  }
+  return {
+    ...record,
+    metadata,
+  };
 }
 
 function getRecordSourceLabel(record, metadata = {}) {
@@ -6218,7 +7162,13 @@ function buildRecordFrontmatter(record, title, syncedAt, audioFileName, property
     .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
     .map((key) => [key, cleanRecordFrontmatterField(record, key, fields[key])])
     .filter(([, value]) => yamlValue(value, { quote: shouldQuoteFrontmatterValue }))
-    .map(([key, value]) => `${key}: ${yamlValue(value, { quote: shouldQuoteFrontmatterValue })}`);
+    .flatMap(([key, value]) => {
+      if (key === 'keywords' && Array.isArray(value) && !shouldQuoteFrontmatterValue) {
+        const items = value.map((item) => yamlValue(item, { quote: shouldQuoteFrontmatterValue })).filter(Boolean);
+        return items.length ? [`${key}:`, ...items.map((item) => `  - ${item}`)] : [];
+      }
+      return [`${key}: ${yamlValue(value, { quote: shouldQuoteFrontmatterValue })}`];
+    });
 
   return buildFrontmatter(lines);
 }
@@ -6687,15 +7637,62 @@ class WechatObsidianInboxPlugin extends Plugin {
   async enrichRecordMetadataWithAi(record, binding = null) {
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
+    let entitlementBinding = binding;
+    if (!this.settings.deepseekApiKey && typeof this.generateAiMetadataWithCloud !== 'function' && typeof this.getProFeatureEntitlementStatus === 'function') {
+      const entitlement = await this.getProFeatureEntitlementStatus();
+      if (!entitlement.hasAccess) {
+        const nextSettings = { ...this.settings, aiMetadataEnabled: false };
+        if (typeof this.saveSettings === 'function') {
+          try {
+            await this.saveSettings(nextSettings);
+          } catch (error) {
+            this.settings = nextSettings;
+          }
+        } else {
+          this.settings = nextSettings;
+        }
+        return {
+          ...record,
+          metadata,
+        };
+      }
+      entitlementBinding = entitlement.binding || entitlementBinding;
+      if (entitlement.bindingToken && Array.isArray(this.settings.bindings)) {
+        const nextBindings = normalizeBindings(this.settings).filter((item) => item.token === entitlement.bindingToken);
+        if (nextBindings.length && nextBindings.length !== this.settings.bindings.length) {
+          this.settings = mergeSettings({ ...this.settings, token: entitlement.bindingToken, bindings: nextBindings });
+          if (typeof this.saveData === 'function') {
+            try {
+              await this.saveData(this.settings);
+            } catch (error) {}
+          }
+        }
+      }
+    }
     let generated;
     try {
-      generated = await this.generateMetadataWithDeepSeek(record, binding);
+      generated = typeof this.generateAiMetadataWithCloud === 'function'
+        ? normalizeGeneratedMetadataResult(await this.generateAiMetadataWithCloud(record, entitlementBinding))
+        : await this.generateMetadataWithDeepSeek(record, entitlementBinding);
     } catch (error) {
+      const message = error && error.message ? error.message : String(error || '');
+      if (/绑定码未绑定|已失效|Invalid bind code|403/i.test(message)) {
+        const nextSettings = { ...this.settings, aiMetadataEnabled: false };
+        if (typeof this.saveSettings === 'function') {
+          try {
+            await this.saveSettings(nextSettings);
+          } catch (saveError) {
+            this.settings = nextSettings;
+          }
+        } else {
+          this.settings = nextSettings;
+        }
+      }
       return {
         ...record,
         metadata: {
           ...metadata,
-          aiMetadataError: error && error.message ? error.message : String(error || ''),
+          aiMetadataError: message,
         },
       };
     }
@@ -6704,6 +7701,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (generated.keywords.length) {
       metadata.keywords = generated.keywords;
+    } else if (!getRecordKeywords(metadata).length) {
+      metadata.keywords = buildFallbackGeneratedKeywords({
+        ...record,
+        metadata: {
+          ...metadata,
+          description: generated.description || metadata.description,
+        },
+      });
     }
     if (generated.description || generated.keywords.length) {
       metadata.aiMetadataSource = this.settings.deepseekApiKey ? 'deepseek' : 'cloud';
@@ -6724,6 +7729,21 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
     if (!result.description && !result.keywords.length) {
       throw new Error('DeepSeek 已响应，但没有返回可用的简介或关键词');
+    }
+    return result;
+  }
+
+  async testAiMetadataConnection() {
+    const binding = this.getActiveBindings()[0] || null;
+    const result = await this.generateMetadataWithCloud({
+      type: 'text',
+      content: '这是一段关于 Obsidian 内容同步助手、飞书机器人和知识管理的测试文案。',
+      metadata: {
+        title: 'AI 连接测试',
+      },
+    }, binding);
+    if (!result.description && !result.keywords.length) {
+      throw new Error('AI 简介与关键词服务已响应，但没有返回可用结果');
     }
     return result;
   }
@@ -7154,6 +8174,49 @@ class WechatObsidianInboxPlugin extends Plugin {
     return inactiveStatus;
   }
 
+  async getProFeatureEntitlementStatus() {
+    const bindings = this.getActiveBindings();
+    if (!bindings.length) {
+      return {
+        hasAccess: false,
+        plan: LOCAL_TRANSCRIPTION_PLAN,
+        status: 'unbound',
+        expiresAt: '',
+      };
+    }
+    let lastData = null;
+    for (const binding of bindings) {
+      const normalizedBinding = {
+        ...binding,
+        token: normalizeBindCodeInput(binding.token),
+      };
+      try {
+        const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(LOCAL_TRANSCRIPTION_PLAN)}`, 'GET', {}, normalizedBinding);
+        const data = payload && payload.data ? payload.data : {};
+        lastData = data;
+        if (data.hasAccess) {
+          return {
+            hasAccess: true,
+            plan: data.plan || LOCAL_TRANSCRIPTION_PLAN,
+            status: data.status || 'active',
+            expiresAt: data.expiresAt || '',
+            bindingToken: normalizedBinding.token,
+            bindingLabel: normalizedBinding.label || '',
+            binding: normalizedBinding,
+          };
+        }
+      } catch (error) {
+        lastData = { status: 'inactive', error: error && error.message ? error.message : String(error || '') };
+      }
+    }
+    return {
+      hasAccess: false,
+      plan: (lastData && lastData.plan) || '',
+      status: (lastData && lastData.status) || 'inactive',
+      expiresAt: (lastData && lastData.expiresAt) || '',
+    };
+  }
+
   async ensureLocalTranscriptionAccess() {
     const status = await this.getLocalTranscriptionEntitlementStatus();
     if (status.hasAccess) return status;
@@ -7300,6 +8363,10 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async renderXiaohongshuMarkdown(url, fallbackText = '', options = {}) {
     return renderXiaohongshuMarkdownWithElectron(url, fallbackText, options);
+  }
+
+  async renderXiaohongshuComments(url) {
+    return renderXiaohongshuCommentsWithElectron(url);
   }
 
   async runConfiguredTranscription(audioUrl, options = {}) {
@@ -7993,6 +9060,13 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...record,
         metadata: {
           ...metadata,
+          markdown: metadata.markdown || [
+            metadata.title || title || getWebpageSourcePrefix(url) || '网页链接',
+            '',
+            `原始链接：${url}`,
+            '',
+            `> 网页正文提取失败：${error.message || String(error)}`,
+          ].join('\n'),
           conversionStatus: 'failed',
           conversionError: error.message || String(error),
         },
@@ -8355,14 +9429,36 @@ class WechatObsidianInboxPlugin extends Plugin {
         let extractedXiaohongshu = null;
         if (isXiaohongshuUrl(url)) {
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
-            includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
+            includeComments: true,
           });
+          if (this.settings.xiaohongshuCommentsEnabled !== false && typeof this.renderXiaohongshuComments === 'function') {
+            try {
+              const renderedComments = await this.renderXiaohongshuComments(resolvedUrl);
+              if (renderedComments && renderedComments.length) {
+                extractedXiaohongshu = replaceXiaohongshuCommentsInExtraction(
+                  extractedXiaohongshu,
+                  mergeSocialCommentTrees([
+                    extractedXiaohongshu.comments || [],
+                    renderedComments,
+                  ]),
+                  'success',
+                  '',
+                );
+              }
+            } catch (renderCommentsError) {
+              extractedXiaohongshu.commentExtractionStatus = extractedXiaohongshu.commentExtractionStatus || 'failed';
+              extractedXiaohongshu.commentExtractionError = extractedXiaohongshu.commentExtractionError || (renderCommentsError.message || String(renderCommentsError));
+            }
+          }
           if (this.settings.xiaohongshuCommentsEnabled !== false) {
             const apiCommentResult = await fetchXiaohongshuCommentsFromApi(resolvedUrl);
             if (apiCommentResult.comments && apiCommentResult.comments.length) {
               extractedXiaohongshu = replaceXiaohongshuCommentsInExtraction(
                 extractedXiaohongshu,
-                apiCommentResult.comments,
+                mergeSocialCommentTrees([
+                  extractedXiaohongshu.comments || [],
+                  apiCommentResult.comments,
+                ]),
                 'success',
                 '',
               );
@@ -8559,7 +9655,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       try {
         markdown = htmlToMarkdown(html);
       } catch (convertError) {
-        throw new Error(`HTML 转 Markdown 失败：${convertError.message || convertError}`);
+        markdown = htmlToMarkdownOrFallback(html, url);
       }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       const pageMeta = extractWebpageMetadataFromHtml(html, url);
@@ -9100,7 +10196,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
 
     const socialPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    socialPanel.createEl('summary', { text: '小红书评论区提取' });
+    socialPanel.createEl('summary', { text: '小红书评论区抓取' });
     socialPanel.createDiv({
       text: '同步小红书图文时保留可解析到的评论区内容；如果评论区提取失败，请先登录小红书。',
       cls: 'wechat-inbox-sync-muted',
@@ -9308,13 +10404,29 @@ WechatObsidianInboxPlugin.__test = {
   shouldHydrateLinkAsWebpage,
   isNoiseSocialCommentText,
   extractSocialCommentsFromHtml,
+  extractWechatCommentsFromHtml,
+  extractWechatCommentsFromPayload,
+  extractWechatCommentRequestParams,
+  buildWechatCommentApiUrl,
+  getWechatInPageCommentFetchScript,
+  shouldRetryWechatCommentsWithVisibleReader,
+  buildWechatArticleMarkdownWithComments,
   buildSocialCommentsMarkdown,
+  mergeSocialCommentTrees,
+  mergeSocialCommentsIntoMarkdown,
+  buildXiaohongshuRecordFromExtraction,
   extractXiaohongshuNoteIdFromUrl,
   extractXiaohongshuXsecTokenFromUrl,
+  extractXiaohongshuCommentsFromPayload,
   extractXiaohongshuCommentsFromApiPayload,
   buildXiaohongshuCommentApiUrl,
   fetchXiaohongshuCommentsFromApi,
   replaceXiaohongshuCommentsInExtraction,
+  createRenderedCommentCollector,
+  getXiaohongshuCommentExpansionScript,
+  getXiaohongshuInPageCommentFetchScript,
+  getXiaohongshuDomCommentExtractScript,
+  renderXiaohongshuCommentsWithElectron,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
@@ -9340,6 +10452,7 @@ WechatObsidianInboxPlugin.__test = {
   buildLocalAsrInstallCommand,
   downloadTextViaNode,
   getSocialRequestHeaders,
+  getSocialElectronPartition,
   XIAOHONGSHU_SESSION_PARTITION,
   getXiaohongshuSession,
   getXiaohongshuCookieHeader,
@@ -9353,12 +10466,17 @@ WechatObsidianInboxPlugin.__test = {
   extractPdfMarkdown,
   cleanPdfExtractedText,
   htmlToMarkdown,
+  htmlToMarkdownOrFallback,
   extractWebpageMetadataFromHtml,
   extractFeishuMarkdownFromHtml,
   extractFeishuMarkdownFromClientVars,
   extractFeishuDocumentTokenFromUrl,
   buildFeishuClientVarsApiUrl,
   normalizeGeneratedKeywords,
+  shouldGenerateAiMetadata,
+  shouldRefreshAiDescription,
+  buildFallbackGeneratedKeywords,
+  ensureRequiredMetadataFallbacks,
   parseGeneratedMetadataResponse,
   extractAiMetadataInputText,
   cleanMarkdownForStorage,
