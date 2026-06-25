@@ -1136,6 +1136,24 @@ assert.ok(xiaohongshuJsonCommentNote.markdown.includes('## 评论区'));
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('**JSON用户**：JSON里的评论正文'));
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('**嵌套用户**：第二条评论'));
 
+const xiaohongshuNestedDomCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<meta property="og:title" content="XHS Nested DOM Comments">',
+  '<meta name="description" content="正文。 #评论区">',
+  '</head><body>',
+  '<div class="comment-item">',
+  '  <div class="user-info"><span class="user-name">嵌套用户甲</span></div>',
+  '  <div class="comment-main">',
+  '    <div class="comment-content"><span>这是嵌套 DOM 里的评论正文</span></div>',
+  '    <span class="like-count">17</span>',
+  '  </div>',
+  '</div>',
+  '</body></html>',
+].join(''), 'https://www.xiaohongshu.com/explore/nested-dom-comments');
+assert.ok(xiaohongshuNestedDomCommentNote.markdown.includes('## 评论区'));
+assert.ok(xiaohongshuNestedDomCommentNote.markdown.includes('**嵌套用户甲**：这是嵌套 DOM 里的评论正文'));
+assert.strictEqual(xiaohongshuNestedDomCommentNote.comments.length, 1);
+
 const xiaohongshuLoginWallCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<meta property="og:title" content="XHS Login Wall Comment">',
@@ -1235,6 +1253,26 @@ assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('avatar-user'), 
 assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('recommend-banner'), false);
 assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('recommend-noise'), false);
 assert.strictEqual(xiaohongshuNoisyImagesNote.imageUrls.length, 3);
+
+const xiaohongshuRealWorldNoisyImagesNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<meta property="og:title" content="Obsidian 录音插件更新，一大波功能。 - 小红书">',
+  '<meta property="og:image" content="http://sns-webpic-qc.xhscdn.com/202606251730/cover/notes_pre_post/1040g3k83203evdfhl4905o2tvghgbjurjbrclmo!nd_dft_wlteh_webp_3">',
+  '</head><body>',
+  '<img src="https://fe-platform.xhscdn.com/platform/104101l0321829dg07k06jn2ge0jp60000000007dp7iga.png?imageView2/2/format/webp">',
+  '<img src="https://picasso-static.xiaohongshu.com/fe-platform/09c136c01bac91a3eb7284b6e107e4714d7c06da.png">',
+  '<img src="http://sns-webpic-qc.xhscdn.com/202606251730/48436f0cf18c194333586836cbb14a68/comment/1040g2u031ulate8m340040nace2uo6u5mbptf30!nc_n_webp_mw_1">',
+  '<img src="https://sns-avatar-qc.xhscdn.com/avatar/5e4ce12000000000010005f8.jpg?imageView2/2/w/120/format/jpg|imageMogr2/strip">',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"Resojot 0.9.2 更新了转写后的整理功能。 #obsidian插件","imageList":[{"urlDefault":"http:\\/\\/sns-webpic-qc.xhscdn.com\\/202606251730\\/899a2c43a72a840bad71401011e29afc\\/notes_pre_post\\/1040g3k83203evdfhl4c05o2tvghgbjur5qaev50!nd_dft_wlteh_webp_3"},{"urlDefault":"http:\\/\\/sns-webpic-qc.xhscdn.com\\/202606251730\\/ffbefd942a6d62afc2aed247adb46a59\\/notes_pre_post\\/1040g3k83203evdfhl49g5o2tvghgbjurcmq1u8g!nd_dft_wlteh_webp_3"}]}}</script>',
+  '</body></html>',
+].join(''), 'http://xhslink.com/o/9uBQ3b4KWbw');
+assert.ok(xiaohongshuRealWorldNoisyImagesNote.markdown.includes('notes_pre_post/1040g3k83203evdfhl4c05o2tvghgbjur5qaev50'));
+assert.ok(xiaohongshuRealWorldNoisyImagesNote.markdown.includes('notes_pre_post/1040g3k83203evdfhl49g5o2tvghgbjurcmq1u8g'));
+assert.strictEqual(xiaohongshuRealWorldNoisyImagesNote.markdown.includes('fe-platform.xhscdn.com/platform'), false);
+assert.strictEqual(xiaohongshuRealWorldNoisyImagesNote.markdown.includes('picasso-static.xiaohongshu.com'), false);
+assert.strictEqual(xiaohongshuRealWorldNoisyImagesNote.markdown.includes('/comment/1040g2u031ulate8m340040nace2uo6u5mbptf30'), false);
+assert.strictEqual(xiaohongshuRealWorldNoisyImagesNote.markdown.includes('sns-avatar-qc.xhscdn.com'), false);
+assert.strictEqual(xiaohongshuRealWorldNoisyImagesNote.imageUrls.length, 3);
 
 const xiaohongshuInlinePageNoiseNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',

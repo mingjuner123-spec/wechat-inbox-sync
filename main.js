@@ -3391,7 +3391,8 @@ function collectImageUrlsFromHtml(html) {
 
 function isNoisyXiaohongshuImageUrl(value) {
   const url = normalizeExtractedUrl(value).toLowerCase();
-  return /(?:avatar|sns-avatar|recommend|banner|logo|icon|emoji|sticker|qrcode|qr-code|comment|user|profile|ads?)[^/]*(?:\.jpg|\.jpeg|\.png|\.webp|!|$)/i.test(url)
+  return /(?:^https?:\/\/(?:fe-platform|picasso-static)\.|\/(?:fe-platform|platform|comment|avatar)\b)/i.test(url)
+    || /(?:avatar|sns-avatar|recommend|banner|logo|icon|emoji|sticker|qrcode|qr-code|comment|user|profile|ads?)[^/]*(?:\.jpg|\.jpeg|\.png|\.webp|!|$)/i.test(url)
     || /ci\.xiaohongshu\.com\/(?:recommend|banner|logo|icon|avatar)/i.test(url);
 }
 
@@ -3964,16 +3965,42 @@ function stripHtmlTags(html) {
     .trim();
 }
 
-function extractHtmlTextByClass(html, classPattern) {
-  const pattern = /<([a-z][\w:-]*)\b[^>]*class=["']([^"']*)["'][^>]*>([\s\S]*?)<\/\1>/gi;
-  const candidates = [];
+function collectHtmlBlocksByClassPattern(source, classPattern, tagNames = ['li', 'div', 'section', 'article', 'span', 'p']) {
+  const text = String(source || '');
+  const blocks = [];
+  const tagPattern = new RegExp(`<(${tagNames.join('|')})\\b[^>]*class=["']([^"']*)["'][^>]*>`, 'gi');
   let match;
-  while ((match = pattern.exec(String(html || '')))) {
-    if (classPattern.test(match[2] || '')) {
-      const text = stripHtmlTags(match[3]);
-      if (text) candidates.push({ className: match[2] || '', text });
+  while ((match = tagPattern.exec(text)) && blocks.length < 120) {
+    if (!classPattern.test(match[2] || '')) continue;
+    const tag = String(match[1] || '').toLowerCase();
+    const start = match.index;
+    const tagRe = new RegExp(`</?${tag}\\b[^>]*>`, 'gi');
+    tagRe.lastIndex = tagPattern.lastIndex;
+    let depth = 1;
+    let tagMatch;
+    while ((tagMatch = tagRe.exec(text))) {
+      const token = tagMatch[0] || '';
+      if (/^<\//.test(token)) {
+        depth -= 1;
+      } else if (!/\/>$/.test(token)) {
+        depth += 1;
+      }
+      if (depth === 0) {
+        blocks.push({ className: match[2] || '', html: text.slice(start, tagRe.lastIndex) });
+        tagPattern.lastIndex = tagRe.lastIndex;
+        break;
+      }
     }
   }
+  return blocks;
+}
+
+function extractHtmlTextByClass(html, classPattern) {
+  const candidates = [];
+  collectHtmlBlocksByClassPattern(html, classPattern).forEach((block) => {
+    const text = stripHtmlTags(getHtmlBlockInnerHtml(block.html));
+    if (text) candidates.push({ className: block.className || '', text });
+  });
   candidates.sort((a, b) => {
     const aExact = /(^|\s)(comment[_-]?content|js_comment_content|discuss_message_content)(\s|$)/i.test(a.className) ? 1 : 0;
     const bExact = /(^|\s)(comment[_-]?content|js_comment_content|discuss_message_content)(\s|$)/i.test(b.className) ? 1 : 0;
@@ -4199,14 +4226,51 @@ function extractWechatCommentsFromHtml(html, limit = 20) {
   return comments.slice(0, limit);
 }
 
+function collectHtmlBlocksByClassOrId(source, classOrIdPattern, tagNames = ['li', 'div', 'section', 'article'], limit = 80) {
+  const text = String(source || '');
+  const blocks = [];
+  const tagPattern = new RegExp(`<(${tagNames.join('|')})\\b[^>]*(?:class|id)=["'][^"']*(?:${classOrIdPattern})[^"']*["'][^>]*>`, 'gi');
+  let match;
+  while ((match = tagPattern.exec(text)) && blocks.length < limit) {
+    const tag = String(match[1] || '').toLowerCase();
+    const start = match.index;
+    const tagRe = new RegExp(`</?${tag}\\b[^>]*>`, 'gi');
+    tagRe.lastIndex = tagPattern.lastIndex;
+    let depth = 1;
+    let tagMatch;
+    while ((tagMatch = tagRe.exec(text))) {
+      const token = tagMatch[0] || '';
+      if (/^<\//.test(token)) {
+        depth -= 1;
+      } else if (!/\/>$/.test(token)) {
+        depth += 1;
+      }
+      if (depth === 0) {
+        blocks.push(text.slice(start, tagRe.lastIndex));
+        tagPattern.lastIndex = tagRe.lastIndex;
+        break;
+      }
+    }
+  }
+  return blocks;
+}
+
+function getHtmlBlockInnerHtml(block) {
+  const source = String(block || '');
+  const open = source.match(/^<([a-z][\w:-]*)\b[^>]*>/i);
+  if (!open) return source;
+  return source
+    .slice(open[0].length)
+    .replace(new RegExp(`</${open[1]}>\\s*$`, 'i'), '');
+}
+
 function extractSocialCommentsFromHtml(html, limit = 20) {
   const source = String(html || '');
   const comments = [];
   const seen = new Set();
-  const itemPattern = /<((?:li|div|section|article))\b[^>]*(?:class|id)=["'][^"']*(?:comment|cmt|reply|discuss)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/gi;
-  let match;
-  while ((match = itemPattern.exec(source))) {
-    const item = match[2] || '';
+  const blocks = collectHtmlBlocksByClassOrId(source, 'comment|cmt|reply|discuss');
+  for (const block of blocks) {
+    const item = getHtmlBlockInnerHtml(block);
     const content = extractHtmlTextByClass(item, /(?:comment[_-]?content|content|message|text|desc)/i)
       || stripHtmlTags(item);
     const author = extractHtmlTextByClass(item, /(?:nickname|nick[_-]?name|user[_-]?name|user-name|author|name)/i);
