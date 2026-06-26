@@ -175,6 +175,14 @@ assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).noteP
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 30 }).cloudPreTranscriptionThresholdMinutes, 30);
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 999 }).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
+assert.strictEqual(
+  helpers.mergeSettings({}).apiBase,
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+);
+assert.strictEqual(
+  helpers.normalizeApiBase('https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync'),
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+);
 assert.strictEqual(pluginMainSource.includes(".setName('同步 API 地址')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('启动时自动同步')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('本地转写命令')"), false);
