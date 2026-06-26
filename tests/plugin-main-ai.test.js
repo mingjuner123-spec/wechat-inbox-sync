@@ -2005,8 +2005,16 @@ async function runAsyncHydrationTests() {
         text: [
           '<html><head>',
           '<meta property="og:title" content="XHS Video">',
+          '<meta name="description" content="视频正文第一段 #视频笔记">',
           '<meta property="og:video" content="https://video.example.com/xhs.mp4">',
-          '</head><body>#tag 页面正文</body></html>',
+          '</head><body>',
+          '<script>window.__INITIAL_STATE__={',
+          '  note:{comments:{list:[',
+          '    {content:"视频评论正文",user:{nickname:"视频用户"},liked_count:6}',
+          '  ]}}',
+          '}</script>',
+          '#tag 页面正文',
+          '</body></html>',
         ].join(''),
       };
     }
@@ -2163,8 +2171,16 @@ async function runAsyncHydrationTests() {
         text: [
           '<html><head>',
           '<meta property="og:title" content="XHS Video">',
+          '<meta name="description" content="视频正文第一段 #视频笔记">',
           '<meta property="og:video" content="https://video.example.com/xhs.mp4">',
-          '</head><body>#tag 页面正文</body></html>',
+          '</head><body>',
+          '<script>window.__INITIAL_STATE__={',
+          '  note:{comments:{list:[',
+          '    {content:"视频评论正文",user:{nickname:"视频用户"},liked_count:6}',
+          '  ]}}',
+          '}</script>',
+          '#tag 页面正文',
+          '</body></html>',
         ].join(''),
       };
     }
@@ -2259,6 +2275,19 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(xhsVideoRecord.metadata.transcriptOnly, true);
   assert.strictEqual(xhsVideoRecord.metadata.markdown, undefined);
   assert.strictEqual(xhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs.mp4');
+  assert.strictEqual(xhsVideoRecord.metadata.commentExtractionStatus, 'success');
+  assert.strictEqual(xhsVideoRecord.metadata.comments.length, 1);
+  assert.strictEqual(xhsVideoRecord.metadata.comments[0].author, '视频用户');
+  assert.ok(helpers.buildMarkdownForRecord({
+    record: xhsVideoRecord,
+    title: '小红书视频',
+    syncedAt: '2026-06-26T00:00:00.000Z',
+  }).includes('## 评论区'));
+  assert.ok(helpers.buildMarkdownForRecord({
+    record: xhsVideoRecord,
+    title: '小红书视频',
+    syncedAt: '2026-06-26T00:00:00.000Z',
+  }).includes('**视频用户**：视频评论正文'));
 
   const forcedXhsVideoPlugin = new PluginClass();
   forcedXhsVideoPlugin.settings = { aiProvider: 'off' };
