@@ -2166,11 +2166,19 @@ function shouldDropFeishuLine(line, title) {
   return false;
 }
 
+function isFeishuNumberedSectionHeading(line) {
+  const text = String(line || '').trim();
+  const length = Array.from(text).length;
+  if (length < 4 || length > 80) return false;
+  return /^[0-9０-９]{1,2}\s*[|｜]\s*\S/.test(text);
+}
+
 function formatFeishuHeadingLine(line) {
   const text = String(line || '').trim();
   if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
     return text;
   }
+  if (isFeishuNumberedSectionHeading(text)) return `## ${text}`;
   const length = Array.from(text).length;
   if (length >= 4 && length <= 34) {
     if (/^\d{4}年之前，我没有任何目标$/.test(text)) return `## ${text}`;
@@ -2199,6 +2207,13 @@ function decodeDataUrl(dataUrl) {
     ? Buffer.from(body, 'base64')
     : Buffer.from(decodeURIComponent(body), 'utf8');
   return { mimeType, buffer };
+}
+
+function removeUnresolvedBlobMarkdownImages(markdown) {
+  return String(markdown || '')
+    .replace(/^\s*!\[[^\]]*]\(blob:[^)]+\)\s*$/gmi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function getImageExtFromMime(mimeType) {
@@ -9076,7 +9091,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async saveWebpageImageAssets(markdown, assets, rootDir, dateFolder, title) {
     if (!Array.isArray(assets) || !assets.length || typeof this.app.vault.adapter.writeBinary !== 'function') {
-      return markdown;
+      return removeUnresolvedBlobMarkdownImages(markdown);
     }
 
     const imageRootDir = `${rootDir}/网页图片`;
@@ -9098,7 +9113,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       index += 1;
     }
 
-    return nextMarkdown;
+    return removeUnresolvedBlobMarkdownImages(nextMarkdown);
   }
 
   async buildTranscriptRecordFromMedia(record, {

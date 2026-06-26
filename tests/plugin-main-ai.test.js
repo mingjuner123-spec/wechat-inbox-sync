@@ -553,6 +553,25 @@ assert.strictEqual(feishuRenderedBodyCleanup.includes('功能更新'), false);
 assert.strictEqual(feishuRenderedBodyCleanup.includes('帮助中心'), false);
 assert.strictEqual(feishuRenderedBodyCleanup.includes('效率指南'), false);
 assert.strictEqual(feishuRenderedBodyCleanup.includes('- 第二次风口：小红书电商'), false);
+const feishuNumberedSectionCleanup = helpers.cleanMarkdownForStorage([
+  '05｜你的第一个项目是做什么？',
+  '',
+  '七天：你第一个真正启动的项目是什么？',
+  '',
+  '一只仙：最开始其实是做 AI 代写。',
+  '',
+  '19 | 第一个小红书品爆单，一半是运气，一半是坚持',
+  '',
+  '这是一段普通正文，不能被当成标题。',
+].join('\n'), {
+  dedupe: true,
+  feishuTitle: '访谈生财传术师一只仙',
+});
+assert.ok(feishuNumberedSectionCleanup.includes('## 05｜你的第一个项目是做什么？'));
+assert.ok(feishuNumberedSectionCleanup.includes('## 19 | 第一个小红书品爆单，一半是运气，一半是坚持'));
+assert.strictEqual(feishuNumberedSectionCleanup.includes('## 七天：你第一个真正启动的项目是什么？'), false);
+assert.strictEqual(feishuNumberedSectionCleanup.includes('## 一只仙：最开始其实是做 AI 代写。'), false);
+assert.ok(feishuNumberedSectionCleanup.includes('这是一段普通正文，不能被当成标题。'));
 const feishuDirtyTitleBase = helpers.buildRecordTitleBase({
   type: 'webpage',
   content: 'https://my.feishu.cn/docx/VpP7d1nwuomPF5xHSrIcxrtUn8f',
@@ -3289,6 +3308,54 @@ async function runCloudFailedVoiceLocalFallbackTests() {
   assert.strictEqual(result.metadata.cloudTranscriptionError, '云端转写额度不足');
 }
 
+async function runFeishuImageAssetCleanupTests() {
+  const plugin = new PluginClass();
+  const writtenBinaries = [];
+  plugin.ensureFolder = async () => {};
+  plugin.app = {
+    vault: {
+      adapter: {
+        writeBinary: async (filePath, buffer) => {
+          writtenBinaries.push([filePath, Buffer.from(buffer).toString('utf8')]);
+        },
+      },
+    },
+  };
+
+  const markdown = [
+    '正文第一段',
+    '',
+    '![已捕获图片](blob:https://shengcaiyoushu01.feishu.cn/captured)',
+    '',
+    '![未捕获图片](blob:https://shengcaiyoushu01.feishu.cn/missing)',
+    '',
+    '![稳定图片](https://example.com/stable.png)',
+  ].join('\n');
+  const result = await plugin.saveWebpageImageAssets(markdown, [{
+    src: 'blob:https://shengcaiyoushu01.feishu.cn/captured',
+    dataUrl: 'data:image/png;base64,aW1hZ2UtYnl0ZXM=',
+  }], '临时收集', '2026-06-26', '飞书测试');
+
+  assert.deepStrictEqual(writtenBinaries, [[
+    '临时收集/网页图片/2026-06-26/飞书测试-image-01.png',
+    'image-bytes',
+  ]]);
+  assert.ok(result.includes('![[临时收集/网页图片/2026-06-26/飞书测试-image-01.png]]'));
+  assert.ok(result.includes('![稳定图片](https://example.com/stable.png)'));
+  assert.strictEqual(result.includes('blob:https://shengcaiyoushu01.feishu.cn/captured'), false);
+  assert.strictEqual(result.includes('blob:https://shengcaiyoushu01.feishu.cn/missing'), false);
+  assert.strictEqual(result.includes('未捕获图片'), false);
+
+  const noAssetResult = await plugin.saveWebpageImageAssets([
+    '正文第二段',
+    '',
+    '![未捕获图片](blob:https://shengcaiyoushu01.feishu.cn/no-assets)',
+  ].join('\n'), [], '临时收集', '2026-06-26', '飞书测试');
+  assert.strictEqual(noAssetResult.includes('blob:https://shengcaiyoushu01.feishu.cn/no-assets'), false);
+  assert.strictEqual(noAssetResult.includes('未捕获图片'), false);
+  assert.ok(noAssetResult.includes('正文第二段'));
+}
+
 async function runPodcastDownloadHeaderTests() {
   const plugin = new PluginClass();
   let capturedHeaders = null;
@@ -3437,6 +3504,7 @@ async function main() {
   await runCloudFailedVoiceLocalFallbackTests();
   await runPodcastDownloadHeaderTests();
   await runXiaohongshuCommentApiFallbackTests();
+  await runFeishuImageAssetCleanupTests();
   await runLocalAsrRepairDecisionTests();
 }
 
