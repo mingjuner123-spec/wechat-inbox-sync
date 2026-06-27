@@ -65,8 +65,8 @@ const helpers = Plugin.__test;
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
-assert.strictEqual(manifest.version, '1.2.90');
-assert.strictEqual(versions['1.2.90'], manifest.minAppVersion);
+assert.strictEqual(manifest.version, '1.2.91');
+assert.strictEqual(versions['1.2.91'], manifest.minAppVersion);
 assert.strictEqual(helpers.isRequestUrlTransportError('Request failed, status 500'), true);
 
 assert.strictEqual(typeof helpers.extractFeishuMarkdownFromHtml, 'function');
@@ -387,7 +387,7 @@ assert.ok(xhsExpandScript.includes('scrollTop'));
 assert.ok(xhsExpandScript.includes('comment'));
 assert.strictEqual(typeof helpers.getXiaohongshuDomCommentExtractScript, 'function');
 const xhsDomScript = helpers.getXiaohongshuDomCommentExtractScript();
-assert.ok(xhsDomScript.includes('note-text'));
+assert.strictEqual(xhsDomScript.includes('note-text'), false);
 assert.ok(xhsDomScript.includes('comment-content'));
 assert.ok(xhsDomScript.includes('SOCIAL_COMMENT_LIMIT'));
 assert.strictEqual(typeof helpers.getXiaohongshuInPageCommentFetchScript, 'function');

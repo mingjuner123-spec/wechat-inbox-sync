@@ -4052,15 +4052,47 @@ function isNoiseSocialCommentText(text) {
   if (!source) return true;
   const compact = source.replace(/\s+/g, '');
   if (!compact) return true;
+  if (/^加载中/.test(compact)) return true;
   if (/^共\d+条评论(?:-|·|，|,)?(?:回复)?$/i.test(compact)) return true;
   if (/^(?:回复|展开|收起|查看更多|查看更多回复|全部回复|更多回复|写评论|说点什么|抢首评)$/i.test(compact)) return true;
   if (/登录(?:后|查看|即可|查看更多|查看更多评论|查看全部评论内容|后查看全部评论内容)/.test(compact)) return true;
   if (/请先登录|手机号登录|扫码登录|验证码|小红书网页登录/.test(compact)) return true;
+  if (source.length > 500) return true;
+  const topicCount = (source.match(/#[\p{L}\p{N}_-]+/gu) || []).length;
+  if (source.length > 90 && topicCount >= 2) return true;
   return false;
 }
 
+function isAnonymousSocialAuthor(author) {
+  const source = String(author || '').trim();
+  return !source || source === '匿名用户';
+}
+
+function normalizeSocialCommentContentKey(content) {
+  return decodeHtmlEntities(String(content || ''))
+    .replace(/\[[^\]]*R\]/g, '')
+    .replace(/\s+/g, '')
+    .replace(/[，。！？、,.!?…~～"'“”‘’（）()【】[\]{}<>《》：:；;]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function formatSocialCommentTime(value) {
+  const source = String(value || '').trim();
+  if (!source) return '';
+  if (/^\d{13}$/.test(source) || /^\d{10}$/.test(source)) {
+    const millis = source.length === 13 ? Number(source) : Number(source) * 1000;
+    const date = new Date(millis);
+    if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+  }
+  const dateMatch = source.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (dateMatch) return dateMatch[1];
+  return source;
+}
+
 function normalizeSocialComment(comment) {
-  const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
+  let author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
+  if (isAnonymousSocialAuthor(author)) author = '';
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
   if (isNoiseSocialCommentText(content)) return null;
@@ -4090,9 +4122,30 @@ function normalizeSocialComment(comment) {
 function pushSocialComment(comments, seen, comment) {
   const normalized = normalizeSocialComment(comment || {});
   if (!normalized) return;
-  const key = `${normalized.author}|${normalized.content}`;
+  const contentKey = normalizeSocialCommentContentKey(normalized.content);
+  if (!contentKey || contentKey.length < 2) return;
+  if (!seen._contentIndex) seen._contentIndex = new Map();
+  const duplicateIndex = seen._contentIndex.get(contentKey);
+  if (duplicateIndex !== undefined) {
+    const existing = comments[duplicateIndex];
+    if (existing) {
+      if (isAnonymousSocialAuthor(existing.author) && !isAnonymousSocialAuthor(normalized.author)) {
+        existing.author = normalized.author;
+      }
+      if (!existing.id && normalized.id) existing.id = normalized.id;
+      if (!existing.rootId && normalized.rootId) existing.rootId = normalized.rootId;
+      if (!existing.parentId && normalized.parentId) existing.parentId = normalized.parentId;
+      if (!existing.time && normalized.time) existing.time = normalized.time;
+      if (!existing.likes && normalized.likes) existing.likes = normalized.likes;
+      if (!existing.replyTo && normalized.replyTo) existing.replyTo = normalized.replyTo;
+      (normalized.replies || []).forEach((reply) => pushSocialComment(existing.replies, new Set(), reply));
+    }
+    return;
+  }
+  const key = normalized.id ? `id:${normalized.id}` : `content:${contentKey}`;
   if (seen.has(key)) return;
   seen.add(key);
+  seen._contentIndex.set(contentKey, comments.length);
   comments.push(normalized);
 }
 
@@ -4862,7 +4915,7 @@ function buildSocialCommentsMarkdown(comments = []) {
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
   const renderCommentLine = (comment, indent = '') => {
-    const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
+    const meta = [formatSocialCommentTime(comment.time), comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
     const author = comment.author || '匿名用户';
     const relation = comment.replyTo ? ` 回复 **${comment.replyTo}**` : '';
     return `${indent}- **${author}**${relation}：${comment.content}${meta ? `（${meta}）` : ''}`;
@@ -6182,7 +6235,6 @@ function getXiaohongshuDomCommentExtractScript() {
         '[class*="commentCard"]',
         '[class*="reply-item"]',
         '[class*="replyItem"]',
-        '[class*="note-text"]',
         '[data-e2e*="comment"]'
       ].join(',')));
       const comments = [];
@@ -6201,7 +6253,6 @@ function getXiaohongshuDomCommentExtractScript() {
         let content = pickText(node, [
           '[class*="comment-content"]',
           '[class*="commentContent"]',
-          '[class*="note-text"]',
           '[class*="content"]',
           '[class*="text"]',
           '[class*="desc"]'
