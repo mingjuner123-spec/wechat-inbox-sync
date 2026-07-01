@@ -22,6 +22,7 @@ const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
+const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
 const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
@@ -8083,6 +8084,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           && source.includes('transcribe-last.log')
           && source.includes('python-venv')
           && source.includes('validate_local_asr_inference')
+          && source.includes('TENCENT_MODEL_URL=')
+          && source.includes('MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")')
           && source.includes('exec "\\$WHISPER_CPP_BIN" "\\$@"');
       }
       return source.includes('Invoke-NativeProcess')
@@ -8092,6 +8095,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         && source.includes('Install-ExtractedPackage')
         && !source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')
         && source.includes('safeModelPath')
+        && source.includes('$TencentCosAssetBaseUrl')
+        && source.includes('$WhisperWindowsTencentUrls')
+        && source.includes('$FfmpegTencentUrls')
+        && source.includes('$ModelTencentUrls')
+        && source.includes('Get-EnabledAssetUrls')
+        && source.includes('$WhisperWindowsFallbackUrls')
+        && source.includes('GitHub release page parsing failed')
+        && source.includes('INSTALLER FAILED')
+        && source.includes('$DownloadTimeoutSeconds = 1200')
+        && source.includes('--max-time $DownloadTimeoutSeconds')
         && source.includes('System.Text.UTF8Encoding')
         && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
         && source.includes('WriteAllText($OutputPath');
@@ -8329,11 +8342,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {
       childProcess.exec(command, {
-        timeout: 30 * 60 * 1000,
+        timeout: LOCAL_ASR_INSTALL_TIMEOUT_MS,
         maxBuffer: 20 * 1024 * 1024,
         windowsHide: true,
       }, (error, stdout, stderr) => {
         if (error) {
+          const timedOut = /timed out/i.test(error.message || '') || error.killed || error.signal === 'SIGTERM';
+          const timeoutMessage = '本地转写组件安装超时：安装超过 20 分钟仍未完成。通常是 GitHub、ffmpeg 或模型下载源无法访问/速度过慢。安装已中止，请复制诊断信息联系开发者。';
           const logPath = writeLocalAsrInstallLog({
             installRoot,
             platform,
@@ -8341,10 +8356,10 @@ class WechatObsidianInboxPlugin extends Plugin {
             command,
             stdout,
             stderr,
-            error: error.message || String(error),
+            error: timedOut ? timeoutMessage : (error.message || String(error)),
             status: 'failed',
           });
-          const message = stderr || stdout || error.message || String(error);
+          const message = timedOut ? timeoutMessage : (stderr || stdout || error.message || String(error));
           reject(new Error(`${message}${logPath ? `\n安装日志：${logPath}` : ''}`));
           return;
         }

@@ -5,13 +5,15 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.2.16"
+INSTALLER_SCRIPT_VERSION="1.2.17"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
+TENCENT_MODEL_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")
 
 cleanup() {
   if [ "$LOCK_HELD" -eq 1 ]; then
@@ -76,7 +78,7 @@ download_file() {
 download_model() {
   local out_file="$1"
   local temp_file="$out_file.part"
-  local urls=("$MODEL_MIRROR_URL" "$MODEL_URL")
+  local urls=("${MODEL_URLS[@]}")
   local url=""
 
   for url in "${urls[@]}"; do
@@ -462,6 +464,7 @@ if [ ! -f "$MODEL_PATH" ]; then
 fi
 
 run_or_skip_local_asr_validation "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg" "$MODEL_PATH"
+rm -f "$CACHE_ROOT/ggml-small.bin"
 
 cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
 #!/usr/bin/env bash

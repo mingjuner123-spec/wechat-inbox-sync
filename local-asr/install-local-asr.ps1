@@ -8,15 +8,29 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.18"
+$InstallerScriptVersion = "1.2.21"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
-$DownloadLowSpeedTimeoutSeconds = 180
+$DownloadLowSpeedTimeoutSeconds = 90
+$DownloadTimeoutSeconds = 1200
 $InstallLockPath = Join-Path $InstallRoot ".install.lock"
 $InstallMutexName = "Global\WechatInboxLocalAsrInstall"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
-$ModelUrls = @(
+$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"
+$WhisperWindowsTencentUrls = @()
+$FfmpegTencentUrls = @()
+$ModelTencentUrls = @()
+if (-not [string]::IsNullOrWhiteSpace($TencentCosAssetBaseUrl)) {
+  $tencentCosAssetBase = $TencentCosAssetBaseUrl.TrimEnd("/")
+  $WhisperWindowsTencentUrls += "$tencentCosAssetBase/whisper-bin-x64.zip"
+  $FfmpegTencentUrls += "$tencentCosAssetBase/ffmpeg-release-essentials.zip"
+  $ModelTencentUrls += "$tencentCosAssetBase/ggml-small.bin"
+}
+$ModelFallbackUrls = @(
   "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+)
+$WhisperWindowsFallbackUrls = @(
+  "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"
 )
 
 function New-CleanDirectory {
@@ -155,6 +169,7 @@ function Download-File {
       --connect-timeout 30 `
       --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
       --speed-time $DownloadLowSpeedTimeoutSeconds `
+      --max-time $DownloadTimeoutSeconds `
       -C - `
       -o $OutFile `
       $Url
@@ -164,7 +179,7 @@ function Download-File {
     Write-Host "curl resumable download failed with exit code $LASTEXITCODE; retrying with PowerShell."
   }
   try {
-    Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers
+    Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers -TimeoutSec $DownloadTimeoutSeconds
   } catch {
     Write-Host "PowerShell download failed, retrying with curl."
     if (-not $curl) {
@@ -180,6 +195,7 @@ function Download-File {
       --connect-timeout 30 `
       --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
       --speed-time $DownloadLowSpeedTimeoutSeconds `
+      --max-time $DownloadTimeoutSeconds `
       -C - `
       -o $OutFile `
       $Url
@@ -529,6 +545,27 @@ function Invoke-LocalAsrValidation {
   Write-InstallState -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath
 }
 
+function Get-EnabledAssetUrls {
+  param(
+    [string[]]$PrimaryUrls = @(),
+    [string[]]$FallbackUrls = @()
+  )
+  $enabledPrimaryUrls = @()
+  foreach ($url in $PrimaryUrls) {
+    $value = [string]$url
+    if ([string]::IsNullOrWhiteSpace($value)) {
+      continue
+    }
+    $trimmed = $value.Trim()
+    if ($trimmed -match "example\.com|your-cos-url|<|>") {
+      Write-Host "Skipping invalid primary asset URL: $trimmed"
+      continue
+    }
+    $enabledPrimaryUrls += $trimmed
+  }
+  return @($enabledPrimaryUrls + $FallbackUrls)
+}
+
 function Install-ZipPackage {
   param(
     [Parameter(Mandatory = $true)][string[]]$Urls,
@@ -649,21 +686,27 @@ function Get-LatestWhisperWindowsAsset {
     Write-Host "GitHub API unavailable, falling back to release page parsing."
   }
 
-  $latestResponse = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/latest" -Headers $Headers -MaximumRedirection 0 -ErrorAction SilentlyContinue
-  $location = $latestResponse.Headers.Location
-  if (-not $location) {
-    throw "Cannot locate latest whisper.cpp release."
+  try {
+    $latestResponse = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/latest" -Headers $Headers -MaximumRedirection 0 -ErrorAction Stop
+    $location = $latestResponse.Headers.Location
+    if (-not $location) {
+      throw "Cannot locate latest whisper.cpp release."
+    }
+    $tag = Split-Path -Leaf ([uri]$location).AbsolutePath
+    $assetsPage = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/expanded_assets/$tag" -Headers $Headers -ErrorAction Stop
+    $match = [regex]::Match($assetsPage.Content, '/ggml-org/whisper\.cpp/releases/download/[^"]+whisper-bin-x64\.zip')
+    if (-not $match.Success) {
+      $match = [regex]::Match($assetsPage.Content, '/ggml-org/whisper\.cpp/releases/download/[^"]+whisper[^"]+x64[^"]+\.zip')
+    }
+    if ($match.Success) {
+      return "https://github.com$($match.Value)"
+    }
+    throw "Cannot find a Windows x64 whisper.cpp release asset on the expanded assets page."
+  } catch {
+    Write-Host "GitHub release page parsing failed; falling back to bundled whisper.cpp release URL."
+    Write-Host ($_.Exception.Message)
   }
-  $tag = Split-Path -Leaf ([uri]$location).AbsolutePath
-  $assetsPage = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/expanded_assets/$tag" -Headers $Headers
-  $match = [regex]::Match($assetsPage.Content, '/ggml-org/whisper\.cpp/releases/download/[^"]+whisper-bin-x64\.zip')
-  if (-not $match.Success) {
-    $match = [regex]::Match($assetsPage.Content, '/ggml-org/whisper\.cpp/releases/download/[^"]+whisper[^"]+x64[^"]+\.zip')
-  }
-  if (-not $match.Success) {
-    throw "Cannot find a Windows x64 whisper.cpp release asset. Open https://github.com/ggml-org/whisper.cpp/releases and download the Windows binary manually."
-  }
-  return "https://github.com$($match.Value)"
+  return $WhisperWindowsFallbackUrls[0]
 }
 
 function Write-TranscribeScript {
@@ -724,7 +767,7 @@ try {
   if (-not $installedWhisper) {
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls @((Get-LatestWhisperWindowsAsset)) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `
@@ -752,10 +795,10 @@ try {
   if (-not $installedFfmpeg) {
     $ffmpegZip = Join-Path $CacheRoot "ffmpeg.zip"
     Install-ZipPackage `
-      -Urls @(
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $FfmpegTencentUrls -FallbackUrls @(
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
-      ) `
+      )) `
       -ZipPath $ffmpegZip `
       -StageDir $FfmpegStageDir `
       -MinBytes 10MB `
@@ -778,7 +821,7 @@ try {
     if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
       Remove-Item -LiteralPath $cachedModelPath -Force
     }
-    Install-ModelPackage -Urls $ModelUrls -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelTencentUrls -FallbackUrls $ModelFallbackUrls) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
     Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
@@ -791,7 +834,7 @@ try {
     Write-Host ($_.Exception.Message)
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls @((Get-LatestWhisperWindowsAsset)) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `
@@ -805,6 +848,7 @@ try {
     Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
     Write-InstallState -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
   }
+  Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue
 
 # BEGIN_TRANSCRIBE_TEMPLATE
   $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
@@ -1372,6 +1416,11 @@ try {
   Write-Host "Local ASR installed to: $InstallRoot"
   Write-Host "Use this Obsidian plugin command:"
   Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
+} catch {
+  Write-Host ""
+  Write-Host "INSTALLER FAILED"
+  Write-Host ($_ | Out-String)
+  throw
 } finally {
   if (Test-Path -LiteralPath $TempRoot) {
     Remove-Item -LiteralPath $TempRoot -Recurse -Force
