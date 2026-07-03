@@ -2841,10 +2841,28 @@ function trimFeishuTrailingRecommendations(lines) {
   return source;
 }
 
+function hasFeishuDanglingTableTail(lines) {
+  const source = (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+  if (source.length < 10) return false;
+  const joined = source.join('\n');
+  if (!/(?:安装清单总览|逐步安装指南|配置要求|以下是所有需要安装的软件和工具)/.test(joined)) return false;
+  const tail = source.slice(-18);
+  const shortFragmentCount = tail.filter((line) => {
+    if (/^#{1,6}\s+/.test(line) || /^[-*]\s+/.test(line) || /^!\[/.test(line)) return false;
+    if (/[。！？；：]$/.test(line)) return false;
+    return line.length <= 28;
+  }).length;
+  const toolFragmentCount = tail.filter((line) => /^(?:Node\.js|npm|FFmpeg|Python|Conda|CUDA Toolkit|Remotion|v?\d|必须|推荐|用途|版本|序号|是否必须)/i.test(line)).length;
+  return shortFragmentCount >= 8 && toolFragmentCount >= 4;
+}
+
 function isFeishuMarkdownLikelyTruncated(markdown) {
   const lines = String(markdown || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const trimmed = trimFeishuTrailingRecommendations(lines);
   if (trimmed.length <= lines.length - 3) return true;
+  if (hasFeishuDanglingTableTail(lines)) return true;
   if (lines.length < 20) return false;
   const lastHeadingIndex = lines.map((line, index) => (/^#{1,6}\s+/.test(line) ? index : -1)).filter((index) => index >= 0).pop() ?? -1;
   const tail = lines.slice(Math.max(0, lines.length - 12));
@@ -7013,6 +7031,65 @@ function formatFeishuClientVarBlock(block) {
   return formatFeishuHeadingLine(text);
 }
 
+function collectFeishuBlockChildIds(value, ids = []) {
+  if (!value) return ids;
+  if (typeof value === 'string') {
+    if (value.trim()) ids.push(value.trim());
+    return ids;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectFeishuBlockChildIds(item, ids));
+    return ids;
+  }
+  if (typeof value !== 'object') return ids;
+
+  const directKeys = [
+    'children',
+    'child_ids',
+    'childIds',
+    'children_ids',
+    'childrenIds',
+    'block_ids',
+    'blockIds',
+  ];
+  directKeys.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      collectFeishuBlockChildIds(value[key], ids);
+    }
+  });
+  ['id', 'block_id', 'blockId', 'token'].forEach((key) => {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) ids.push(candidate.trim());
+  });
+  return ids;
+}
+
+function buildFeishuClientVarBlockSequence(clientVars, blockMap) {
+  const initial = Array.isArray(clientVars.block_sequence)
+    ? clientVars.block_sequence
+    : (Array.isArray(clientVars.blockSequence) ? clientVars.blockSequence : []);
+  const ordered = [];
+  const seen = new Set();
+  const push = (id) => {
+    const key = String(id || '').trim();
+    if (!key || seen.has(key) || !blockMap[key]) return;
+    seen.add(key);
+    ordered.push(key);
+    const block = blockMap[key];
+    const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+    collectFeishuBlockChildIds(data).forEach(push);
+  };
+  initial.forEach(push);
+  if (!ordered.length) {
+    Object.entries(blockMap).forEach(([id, block]) => {
+      const type = getFeishuBlockType(block);
+      if (type === 'page' || type === 'root') push(id);
+    });
+  }
+  Object.keys(blockMap).forEach(push);
+  return ordered;
+}
+
 function extractFeishuMarkdownFromClientVars(payload) {
   const clientVars = unwrapFeishuClientVarsPayload(payload);
   const blockMap = clientVars && (clientVars.block_map || clientVars.blockMap);
@@ -7020,9 +7097,7 @@ function extractFeishuMarkdownFromClientVars(payload) {
     throw new Error('飞书 client_vars 中未找到 block_map');
   }
 
-  const sequence = Array.isArray(clientVars.block_sequence)
-    ? clientVars.block_sequence
-    : (Array.isArray(clientVars.blockSequence) ? clientVars.blockSequence : Object.keys(blockMap));
+  const sequence = buildFeishuClientVarBlockSequence(clientVars, blockMap);
   const seen = new Set();
   const lines = [];
   sequence.forEach((id) => {

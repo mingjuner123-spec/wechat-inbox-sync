@@ -784,6 +784,38 @@ assert.ok(feishuClientVarsMarkdown.includes('| Ka | 27-40GHz |'));
 assert.ok(feishuClientVarsMarkdown.includes('![图片](https://example.com/feishu-image.png)'));
 assert.ok(feishuClientVarsMarkdown.includes('[演示视频.mp4](https://example.com/feishu-demo.mp4)'));
 assert.ok(feishuClientVarsMarkdown.includes('- 列表项目'));
+const feishuClientVarsTreeMarkdown = helpers.extractFeishuMarkdownFromClientVars({
+  id: 'root',
+  block_sequence: ['root', 'heading-block', 'visible-paragraph'],
+  block_map: {
+    root: { id: 'root', data: { type: 'page', children: ['heading-block'] } },
+    'heading-block': {
+      id: 'heading-block',
+      data: {
+        type: 'heading1',
+        children: ['visible-paragraph', 'late-paragraph'],
+        text: { initialAttributedTexts: { text: { 0: '飞书树形标题' } } },
+      },
+    },
+    'visible-paragraph': {
+      id: 'visible-paragraph',
+      data: {
+        type: 'text',
+        text: { initialAttributedTexts: { text: { 0: 'block_sequence 里的正文' } } },
+      },
+    },
+    'late-paragraph': {
+      id: 'late-paragraph',
+      data: {
+        type: 'text',
+        text: { initialAttributedTexts: { text: { 0: '只存在于 children 的后续正文' } } },
+      },
+    },
+  },
+});
+assert.ok(feishuClientVarsTreeMarkdown.includes('# 飞书树形标题'));
+assert.ok(feishuClientVarsTreeMarkdown.includes('block_sequence 里的正文'));
+assert.ok(feishuClientVarsTreeMarkdown.includes('只存在于 children 的后续正文'));
 const feishuMergedMarkdown = helpers.mergeFeishuRenderedAndClientVarsMarkdown([
   '# 飞书云文档',
   '',
@@ -1003,6 +1035,30 @@ const truncatedFeishuMarkdown = [
 assert.strictEqual(helpers.shouldRefreshFeishuMarkdownFromSource(
   'https://fv2fbshiww0.feishu.cn/wiki/KTQtw8R56igHE7kkKwHcoTBun9e',
   { markdown: truncatedFeishuMarkdown },
+), true);
+assert.strictEqual(helpers.shouldRefreshFeishuMarkdownFromSource(
+  'https://fv2fbshiww0.feishu.cn/wiki/KTQtw8R56igHE7kkKwHcoTBun9e',
+  {
+    markdown: [
+      '# 读完这篇，你能做到什么',
+      '',
+      '# 三、实战教学：从0到出片',
+      '',
+      '### (2) 安装清单总览',
+      '',
+      '以下是所有需要安装的软件和工具：',
+      '',
+      '序号',
+      '版本',
+      '用途',
+      '是否必须',
+      'Node.js',
+      'v20+（推荐 v22）',
+      'Remotion 运行环境',
+      '必须',
+      'CUDA Toolkit',
+    ].join('\n'),
+  },
 ), true);
 assert.strictEqual(typeof helpers.extractWebpageMetadataFromHtml, 'function');
 const articleMeta = helpers.extractWebpageMetadataFromHtml(`
