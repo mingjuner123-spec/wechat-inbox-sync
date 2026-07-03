@@ -2170,9 +2170,6 @@ function buildAudioTranscriptMarkdown({
         ? '云端转写中，下次同步会自动更新。'
         : '转写处理中，或未配置可用的转写方案。');
   return [
-    `原始链接：${url || ''}`,
-    transcriptionSource ? `转写来源：${transcriptionSource}` : '',
-    '',
     '## 口播/音频文案',
     '',
     content,
@@ -2467,21 +2464,31 @@ function normalizeGeneratedMetadataResult(result) {
 
 function extractAiMetadataInputText(record) {
   const metadata = (record && record.metadata) || {};
-  const parts = [
-    metadata.title,
-    record && record.content,
-    metadata.markdown,
-    metadata.snapshot,
-    metadata.contentSnapshot,
-    metadata.transcription,
-    metadata.description,
-    metadata.summary,
-    metadata.excerpt,
-  ].filter(Boolean);
+  const isTranscriptRecord = metadata.transcriptOnly
+    || metadata.webpageMediaType === 'audio_video'
+    || (
+      metadata.transcriptionStatus === 'success'
+      && String(metadata.transcription || '').trim()
+    );
+  const parts = isTranscriptRecord
+    ? [
+      metadata.title,
+      metadata.transcription,
+    ].filter(Boolean)
+    : [
+      metadata.title,
+      metadata.markdown,
+      metadata.snapshot,
+      metadata.contentSnapshot,
+      metadata.description,
+      metadata.summary,
+      metadata.excerpt,
+    ].filter(Boolean);
   return cleanMarkdownForStorage(
     stripMarkdownCodeBlocks(parts.join('\n\n'))
       .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
       .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
+      .replace(/https?:\/\/[^\s<>()\]]+/gi, ' ')
       .replace(/^#{1,6}\s*/gm, '')
       .replace(/^\s*>\s*/gm, '')
       .replace(/\n{3,}/g, '\n\n'),

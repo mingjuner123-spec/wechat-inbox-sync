@@ -856,6 +856,23 @@ assert.ok(aiMetadataInput.includes('飞书机器人直播回放'));
 assert.ok(aiMetadataInput.includes('这是正文第一段'));
 assert.ok(aiMetadataInput.includes('要点一'));
 assert.strictEqual(aiMetadataInput.includes('const hidden = true;'), false);
+assert.strictEqual(aiMetadataInput.includes('https://example.com/post'), false);
+const transcriptAiMetadataInput = helpers.extractAiMetadataInputText({
+  type: 'webpage',
+  content: 'https://v.douyin.com/uTXolAGel5w/',
+  metadata: {
+    title: '抖音口播文案',
+    transcriptOnly: true,
+    transcriptionStatus: 'success',
+    transcription: '所有平台都在阻止你把他们的内容变成你的私有财产。今天我们从零开始讲如何把内容保存到 Obsidian。',
+    description: '旧的非 AI 摘要 https://v.douyin.com/uTXolAGel5w/',
+    keywords: ['Obsidian', 'AI'],
+  },
+});
+assert.ok(transcriptAiMetadataInput.includes('抖音口播文案'));
+assert.ok(transcriptAiMetadataInput.includes('所有平台都在阻止你'));
+assert.strictEqual(transcriptAiMetadataInput.includes('https://v.douyin.com'), false);
+assert.strictEqual(transcriptAiMetadataInput.includes('旧的非 AI 摘要'), false);
 assert.strictEqual(
   helpers.getLocalAsrInstallRoot('C:\\Users\\demo', 'default', 'win32'),
   'C:\\Users\\demo\\.wechat-inbox-local-asr',
@@ -1763,6 +1780,8 @@ assert.ok(transcriptMarkdown.includes('## 口播/音频文案'));
 assert.ok(transcriptMarkdown.includes('这是视频里真正说出来的内容。'));
 assert.strictEqual(transcriptMarkdown.includes('## 标题'), false);
 assert.strictEqual(transcriptMarkdown.includes('## 标签'), false);
+assert.strictEqual(transcriptMarkdown.includes('原始链接：'), false);
+assert.strictEqual(transcriptMarkdown.includes('转写来源：'), false);
 
 const failedTranscriptMarkdown = helpers.buildAudioTranscriptMarkdown({
   url: 'https://www.douyin.com/video/123',
