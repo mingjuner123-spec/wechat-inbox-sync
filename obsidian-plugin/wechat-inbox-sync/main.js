@@ -18,8 +18,8 @@ const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvn
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
-const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
-const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
+const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
+const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
 const LOCAL_OCR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1';
 const LOCAL_OCR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh';
 const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -2404,7 +2404,11 @@ function cleanMarkdownForStorage(markdown, options = {}) {
     lastWasBlank = false;
   });
 
-  return restoreFlattenedSarBandTables(out).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  let cleaned = restoreFlattenedSarBandTables(out).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (options.feishuTitle) {
+    cleaned = postProcessFeishuMarkdown(cleaned, options.feishuTitle);
+  }
+  return cleaned;
 }
 
 function stripMarkdownCodeBlocks(markdown) {
@@ -2518,6 +2522,7 @@ function normalizeFeishuMarkdownLine(line) {
 function shouldDropFeishuLine(line, title) {
   const text = String(line || '').trim();
   if (!text) return true;
+  const plainText = text.replace(/^#{1,6}\s+/, '').replace(/^[-*]\s+/, '').trim();
   const normalized = normalizeTitleForCompare(text);
   const normalizedTitle = normalizeTitleForCompare(title);
   const noise = new Set([
@@ -2543,8 +2548,35 @@ function shouldDropFeishuLine(line, title) {
     'Plain Text',
     'Plain Text复制',
     '复制',
+    'Bash',
+    '重播',
+    '播放',
+    '直播',
+    '进入全屏',
+    '画中画',
+    '原画',
+    '点击按住可拖动视频',
+    '星辰大海',
+    '蟹',
+    '蟹老板-老王1',
+    '正在以画中画形式播放',
+    '语句划分',
+    '音频时长核定',
+    '画面规划',
+    '画面代码审查',
+    '多AIAGENT优化',
+    '人点赞',
   ]);
-  if (noise.has(text)) return true;
+  if (noise.has(text) || noise.has(plainText)) return true;
+  if (/^\d{1,3}%$/.test(plainText)) return true;
+  if (/^\d+(?:\.\d+)?\s*(?:KB|MB|GB)$/i.test(plainText)) return true;
+  if (/^(?:-\s*)?\d{3,4}p$/i.test(plainText)) return true;
+  if (/^(?:-\s*)?\d+(?:\.\d+)?x$/i.test(plainText)) return true;
+  if (/^\d{1,2}月\d{1,2}日修改$/.test(plainText)) return true;
+  if (/^(?:\d{1,2}:\d{2}|\/|[0-9]+(?:\.[0-9]+)?x)$/.test(plainText)) return true;
+  if (/^\S{1,30}的云文档$/.test(plainText)) return true;
+  if (/^[\u{1F300}-\u{1FAFF}\u2600-\u27BF]+$/u.test(plainText)) return true;
+  if (normalizedTitle && normalized.includes(normalizedTitle) && normalized !== normalizedTitle && normalized.length <= normalizedTitle.length + 24) return true;
   if (/添加快捷方式\s*最近修改\s*[:：]?/.test(text)) return true;
   if (/^最近修改\s*[:：]?/.test(text)) return true;
   if (/^你可能还想问/.test(text)) return true;
@@ -2577,17 +2609,168 @@ function shouldDropFeishuLine(line, title) {
 
 function formatFeishuHeadingLine(line) {
   const text = String(line || '').trim();
+  if (/^#\s+(?:创建项目|或者克隆|应输出)/.test(text)) return `\\${text}`;
   if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
     return text;
   }
+  const numericSection = text.match(/^(\d+)\.(\d{1,3})(.+)$/);
+  if (numericSection && Number(numericSection[1]) <= 6 && !/^(?:[+]|MB|GB|KB|（推荐|推荐)/i.test(numericSection[3].trim())) {
+    return numericSection[2].length >= 2 ? `### ${text}` : `## ${text}`;
+  }
   const length = Array.from(text).length;
   if (length >= 4 && length <= 34) {
+    if (/^[一二三四五六七八九十]+[、.．]\s*.+/.test(text)) return `# ${text}`;
+    if (/^[（(]\d+[）)]\s*.+/.test(text)) return `### ${text}`;
     if (/^\d{4}年之前，我没有任何目标$/.test(text)) return `## ${text}`;
     if (/^(第[一二三四五六七八九十\d]+[、.．]?\s*)?[^，。！？!?]{0,16}风口[：:]/.test(text)) return `## ${text}`;
     if (/^(什么是.+原理|举个例子|最后|知识付费的下一个形态)$/.test(text)) return `## ${text}`;
     if (/^第[一二三四五六七八九十\d]+[步层：:]/.test(text)) return `### ${text}`;
   }
   return text;
+}
+
+function isFeishuTocBulletLine(line) {
+  const text = String(line || '').trim().replace(/^[-*]\s+/, '');
+  return /^[一二三四五六七八九十]+[、.．]/.test(text)
+    || /^\d+\.\d/.test(text)
+    || /^[（(]\d+[）)]/.test(text)
+    || /^第[一二三四五六七八九十\d]+[步层：:]/.test(text)
+    || /^.+(?:成果|经验|收获|流程|配置|安装|教学|优化|什么|想法|视频|画面|审查|制作|下一步).*$/.test(text);
+}
+
+function removeFeishuTocBlocks(lines) {
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = String(lines[index] || '');
+    if (!/^[-*]\s+/.test(line.trim())) {
+      output.push(line);
+      continue;
+    }
+    const block = [];
+    let cursor = index;
+    while (cursor < lines.length && /^[-*]\s+/.test(String(lines[cursor] || '').trim())) {
+      block.push(String(lines[cursor] || ''));
+      cursor += 1;
+    }
+    const tocCount = block.filter(isFeishuTocBulletLine).length;
+    if (block.length >= 4 && tocCount >= Math.ceil(block.length * 0.65)) {
+      index = cursor - 1;
+      continue;
+    }
+    output.push(...block);
+    index = cursor - 1;
+  }
+  return output;
+}
+
+function repairFeishuMarkdownTables(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = String(lines[index] || '').trim();
+    if (current === '|') continue;
+    const nextNonBlank = [];
+    let scan = index;
+    while (scan < lines.length && nextNonBlank.length < 8) {
+      const value = String(lines[scan] || '').trim();
+      if (value && value !== '|') nextNonBlank.push({ value, index: scan });
+      scan += 1;
+    }
+    let headers = null;
+    let separatorPattern = null;
+    if (
+      current === '组件'
+      && nextNonBlank.some((item) => item.value === '要求')
+      && nextNonBlank.some((item) => item.value === '说明')
+    ) {
+      headers = ['组件', '要求', '说明'];
+      separatorPattern = /^\|\s*---\s*\|\s*---\s*\|\s*---\s*\|$/;
+    } else if (
+      current === '序号'
+      && nextNonBlank.some((item) => item.value === '版本')
+      && nextNonBlank.some((item) => item.value === '用途')
+      && nextNonBlank.some((item) => item.value === '是否必须')
+    ) {
+      headers = ['序号', '版本', '用途', '是否必须'];
+      separatorPattern = /^\|\s*---\s*\|\s*---\s*\|\s*---\s*\|\s*---\s*(?:\|\s*---\s*)?\|$/;
+    }
+    if (!headers || !nextNonBlank.some((item) => separatorPattern.test(item.value))) {
+      output.push(lines[index]);
+      continue;
+    }
+
+    const separator = nextNonBlank.find((item) => separatorPattern.test(item.value));
+    const cells = [];
+    let cursor = separator.index + 1;
+    while (cursor < lines.length) {
+      const value = String(lines[cursor] || '').trim();
+      if (!value) {
+        cursor += 1;
+        continue;
+      }
+      if (value === '|' || /^#{1,6}\s+/.test(value) || /^!\[/.test(value) || /^\[[^\]]+]\(/.test(value)) break;
+      if (headers.includes(value) && cells.length) break;
+      if (shouldDropFeishuLine(value, '')) {
+        cursor += 1;
+        continue;
+      }
+      cells.push(value.replace(/\|/g, '\\|'));
+      cursor += 1;
+      if (cells.length >= 30) break;
+    }
+    const rows = [];
+    for (let cellIndex = 0; cellIndex + headers.length - 1 < cells.length; cellIndex += headers.length) {
+      rows.push(cells.slice(cellIndex, cellIndex + headers.length));
+    }
+    if (rows.length) {
+      output.push(`| ${headers.join(' | ')} |`);
+      output.push(`| ${headers.map(() => '---').join(' | ')} |`);
+      rows.forEach((row) => output.push(`| ${row.join(' | ')} |`));
+      index = Math.max(index, cursor - 1);
+      continue;
+    }
+    output.push(lines[index]);
+  }
+  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function removeFeishuResidualTableLines(markdown) {
+  const residue = new Set(['组件', '要求', '说明', 'CPU', '内存', '硬盘', '序号', '版本', '用途', '是否必须']);
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  let recentlySawTable = 0;
+  lines.forEach((line) => {
+    const text = String(line || '').trim();
+    if (/^\|.+\|$/.test(text)) {
+      recentlySawTable = 8;
+      output.push(line);
+      return;
+    }
+    if (recentlySawTable > 0 && residue.has(text)) {
+      recentlySawTable -= 1;
+      return;
+    }
+    if (recentlySawTable > 0) recentlySawTable -= 1;
+    output.push(line);
+  });
+  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function postProcessFeishuMarkdown(markdown, title = '') {
+  let lines = String(markdown || '').split(/\r?\n/)
+    .map((line) => String(line || '').trim())
+    .filter((line) => line && !shouldDropFeishuLine(line, title));
+  const commentsIndex = lines.findIndex((line) => /^(?:真诚点赞，手留余香|全文评论)$/.test(line));
+  if (commentsIndex >= 0) {
+    lines = lines.slice(0, commentsIndex);
+  }
+  lines = removeFeishuTocBlocks(lines);
+  lines = lines.map((line) => {
+    if (/^[-*]\s+读完这篇/.test(line)) return line.replace(/^[-*]\s+/, '# ');
+    if (/^[-*]\s+/.test(line) && isFeishuTocBulletLine(line)) return '';
+    return formatFeishuHeadingLine(line);
+  }).filter(Boolean);
+  return removeFeishuResidualTableLines(repairFeishuMarkdownTables(lines.join('\n'))).replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function sanitizeAttachmentName(fileName, fallbackName) {
@@ -5807,6 +5990,21 @@ async function renderUrlToMarkdownWithElectron(url) {
           imageAssets.push({ src, alt, width, height });
           return '\\n\\n![' + alt + '](' + src + ')\\n\\n';
         };
+        const mediaToMarkdown = (node) => {
+          const tag = String(node && node.tagName || '').toLowerCase();
+          const label = tag === 'audio' ? '音频文件' : '视频文件';
+          const urls = [];
+          const push = (value) => {
+            const src = String(value || '').trim();
+            if (!src || /^blob:/i.test(src) || urls.includes(src)) return;
+            urls.push(src);
+          };
+          push(node.currentSrc || node.src || node.getAttribute('src') || node.getAttribute('data-src') || '');
+          if (node.querySelectorAll) {
+            node.querySelectorAll('source').forEach((source) => push(source.src || source.getAttribute('src') || ''));
+          }
+          return urls.map((src, index) => '\\n\\n[' + label + (urls.length > 1 ? ' ' + (index + 1) : '') + '](' + src + ')\\n\\n').join('');
+        };
         const tableToMarkdown = (table) => {
           const rows = Array.from(table.querySelectorAll('tr')).map((row) => {
             return Array.from(row.children)
@@ -5834,6 +6032,7 @@ async function renderUrlToMarkdownWithElectron(url) {
           const tag = node.tagName.toLowerCase();
           if (tag === 'script' || tag === 'style' || tag === 'noscript') return '';
           if (tag === 'img') return imageToMarkdown(node);
+          if (tag === 'video' || tag === 'audio' || tag === 'source') return mediaToMarkdown(node);
           if (tag === 'table') return tableToMarkdown(node);
           if (tag === 'pre' || tag === 'code') {
             const code = String(node.innerText || node.textContent || '').replace(/\\u00a0/g, ' ').replace(/^\\n+|\\n+$/g, '');
@@ -5851,7 +6050,7 @@ async function renderUrlToMarkdownWithElectron(url) {
         const collected = [];
         const collectVisibleBlocks = () => {
           const blocks = [];
-          const candidates = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,table,[data-block-id],[data-block-type],[class*="block"],[class*="paragraph"],[class*="docx"],[class*="text"]'));
+          const candidates = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,table,video,audio,source,[data-block-id],[data-block-type],[class*="block"],[class*="paragraph"],[class*="docx"],[class*="text"]'));
           candidates.forEach((node) => {
             const text = clean(node.innerText || node.textContent || '');
             if (!text || text.length < 2 || seen.has(text)) return;
@@ -5927,6 +6126,13 @@ async function renderUrlToMarkdownWithElectron(url) {
             } catch (error) {}
           } else if (asset.src.startsWith('data:')) {
             next.dataUrl = asset.src;
+          } else if (/feishu\.cn|feishu\.net|internal-api-drive-stream/i.test(asset.src)) {
+            try {
+              const blob = await fetch(asset.src, { credentials: 'include' }).then((response) => response.blob());
+              if (blob && blob.size && /^image\//i.test(blob.type || '')) {
+                next.dataUrl = await toDataUrl(blob);
+              }
+            } catch (error) {}
           }
           uniqueAssets.push(next);
         }
@@ -6423,6 +6629,44 @@ function collectFeishuBlockImageUrls(block) {
   return urls;
 }
 
+function collectFeishuBlockMediaUrls(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const urls = [];
+  collectJsonStringValues(JSON.stringify(data || {}), [
+    'origin_url',
+    'originUrl',
+    'preview_url',
+    'previewUrl',
+    'download_url',
+    'downloadUrl',
+    'src',
+    'url',
+    'file_url',
+    'fileUrl',
+    'media_url',
+    'mediaUrl',
+    'video_url',
+    'videoUrl',
+    'play_url',
+    'playUrl',
+  ]).forEach((url) => {
+    if (isLikelyMediaUrl(url)) pushUniqueUrl(urls, url);
+  });
+  return urls;
+}
+
+function getFeishuBlockMediaLabel(block, text = '') {
+  if (isFeishuAssetPlaceholderLine(text)) return text;
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const labels = collectJsonStringValues(JSON.stringify(data || {}), [
+    'name',
+    'file_name',
+    'fileName',
+    'title',
+  ]).filter((item) => /\.(?:mp4|mov|m4v|webm|avi|mkv|mp3|m4a|wav|aac|flac)$/i.test(String(item || '').trim()));
+  return labels[0] || text || '媒体文件';
+}
+
 function getFeishuHeadingLevelFromBlock(block, type) {
   const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
   const headingMatch = String(type || '').match(/heading[_-]?([1-6])|h([1-6])/);
@@ -6444,6 +6688,17 @@ function formatFeishuClientVarBlock(block) {
     const imageUrls = collectFeishuBlockImageUrls(block);
     if (imageUrls.length) {
       return imageUrls.map((url, index) => `![图片${index ? ` ${index + 1}` : ''}](${url})`).join('\n\n');
+    }
+  }
+
+  if (/video|audio|media|file|attachment/i.test(type) || isFeishuAssetPlaceholderLine(text)) {
+    const mediaUrls = collectFeishuBlockMediaUrls(block);
+    if (mediaUrls.length) {
+      const label = getFeishuBlockMediaLabel(block, text);
+      return mediaUrls.map((url, index) => {
+        const suffix = mediaUrls.length > 1 ? ` ${index + 1}` : '';
+        return `[${label}${suffix}](${url})`;
+      }).join('\n\n');
     }
   }
 
@@ -6505,19 +6760,109 @@ function appendMissingMarkdownImages(markdown, fallbackMarkdown = '') {
   while ((match = pattern.exec(String(fallbackMarkdown || '')))) {
     const alt = match[1] || '图片';
     const url = match[2] || '';
-    if (!url || existing.has(url) || !isLikelyImageUrl(url)) continue;
+    if (!url || existing.has(url) || !isLikelyImageUrl(url) || isLikelyFeishuShellImage(alt, url)) continue;
     existing.add(url);
     additions.push(`![${alt || '图片'}](${url})`);
   }
   return additions.length ? `${source}\n\n${additions.join('\n\n')}`.trim() : source;
 }
 
-function mergeFeishuRenderedAndClientVarsMarkdown(renderedMarkdown = '', clientVarsMarkdown = '') {
-  const structured = String(clientVarsMarkdown || '').trim();
-  if (structured.length >= 20) {
-    return appendMissingMarkdownImages(structured, renderedMarkdown);
+function isFeishuAssetPlaceholderLine(line) {
+  const text = String(line || '').trim();
+  if (!text || /^!\[/.test(text) || /^\[.+]\(.+\)$/.test(text)) return false;
+  return /^[^\s\\/<>|?*:"]{2,180}\.(?:jpe?g|png|webp|gif|mp4|mov|m4v|webm|avi|mkv)$/i.test(text);
+}
+
+function isLikelyFeishuShellImage(alt = '', url = '') {
+  const source = `${alt || ''} ${url || ''}`.toLowerCase();
+  if (!source) return false;
+  if (/^blob:/.test(String(url || '').trim())) return true;
+  return /avatar|portrait|profile|user[-_]?avatar|icon|logo|emoji|sticker|reaction|comment|header|toolbar/.test(source)
+    || /头像|图标|表情|评论/.test(`${alt || ''} ${url || ''}`);
+}
+
+function getFirstMarkdownHeading(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  for (const line of lines) {
+    const match = String(line || '').trim().match(/^#{1,6}\s+(.+)$/);
+    if (match && match[1]) return match[1].trim();
   }
-  return String(renderedMarkdown || '').trim();
+  return '';
+}
+
+function cleanFeishuRenderedMarkdown(markdown, structuredMarkdown = '') {
+  const title = getFirstMarkdownHeading(structuredMarkdown);
+  const cleaned = cleanMarkdownForStorage(markdown, {
+    dedupe: true,
+    feishuTitle: title,
+  });
+  return cleaned
+    .split(/\r?\n/)
+    .filter((line) => {
+      const imageMatch = String(line || '').trim().match(/^!\[([^\]]*)]\(([^)]+)\)$/);
+      if (!imageMatch) return true;
+      return !isLikelyFeishuShellImage(imageMatch[1], imageMatch[2]);
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function getFeishuMarkdownBodyScore(markdown) {
+  return String(markdown || '')
+    .split(/\r?\n/)
+    .map((line) => String(line || '').trim())
+    .filter((line) => line && !/^!\[/.test(line) && !isFeishuAssetPlaceholderLine(line) && !shouldDropFeishuLine(line, ''))
+    .join('\n')
+    .replace(/\[[^\]]+]\([^)]+\)/g, ' ')
+    .replace(/https?:\/\/[^\s<>()\]]+/gi, ' ')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/\s+/g, '')
+    .length;
+}
+
+function countFeishuAssetPlaceholders(markdown) {
+  return String(markdown || '')
+    .split(/\r?\n/)
+    .filter((line) => isFeishuAssetPlaceholderLine(line))
+    .length;
+}
+
+function countMarkdownImages(markdown) {
+  return (String(markdown || '').match(/!\[[^\]]*]\([^)]+\)/g) || []).length;
+}
+
+function shouldRefreshFeishuMarkdownFromSource(url, metadata = {}) {
+  if (!isFeishuUrl(url)) return false;
+  const markdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '').trim();
+  if (!markdown) return false;
+  const placeholderCount = countFeishuAssetPlaceholders(markdown);
+  if (!placeholderCount) return false;
+  const bodyScore = getFeishuMarkdownBodyScore(markdown);
+  const imageCount = countMarkdownImages(markdown);
+  const hasLinkedMedia = /\[[^\]]+\]\(https?:\/\/[^)]+\.(?:mp4|mov|m4v|webm|mp3|m4a|wav|aac|flac)(?:[?#][^)]*)?\)/i.test(markdown);
+  return placeholderCount >= 2
+    || (placeholderCount >= 1 && !imageCount && !hasLinkedMedia)
+    || (placeholderCount >= 1 && bodyScore < 1500);
+}
+
+function mergeFeishuRenderedAndClientVarsMarkdown(renderedMarkdown = '', clientVarsMarkdown = '') {
+  const structured = cleanMarkdownForStorage(String(clientVarsMarkdown || '').trim(), { dedupe: true });
+  const rendered = cleanFeishuRenderedMarkdown(renderedMarkdown, structured);
+  if (structured.length >= 20) {
+    const structuredScore = getFeishuMarkdownBodyScore(structured);
+    const renderedScore = getFeishuMarkdownBodyScore(rendered);
+    const structuredPlaceholders = countFeishuAssetPlaceholders(structured);
+    const renderedHasBodyMedia = countMarkdownImages(rendered) > 0;
+    const renderedIsSubstantiallyRicher = renderedScore >= 160
+      && renderedScore >= Math.max(structuredScore * 1.45, structuredScore + 80);
+    if (rendered && (renderedIsSubstantiallyRicher || (structuredPlaceholders >= 2 && renderedHasBodyMedia && renderedScore > structuredScore))) {
+      return rendered;
+    }
+    return appendMissingMarkdownImages(structured, rendered);
+  }
+  return rendered || String(renderedMarkdown || '').trim();
 }
 
 function extractFeishuDocumentTokenFromUrl(url) {
@@ -7961,7 +8306,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isMac) {
         return source.includes('TENCENT_OCR_ASSET_BASE_URL')
           && source.includes('TENCENT_PIP_INDEX_URL')
-          && source.includes('download_text_file');
+          && source.includes('download_text_file')
+          && source.includes('detect_uv_arch');
       }
       return source.includes('$TencentOcrAssetBaseUrl')
         && source.includes('$TencentPipIndexUrl')
@@ -8043,11 +8389,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isMac) {
         return source.includes('CHUNK_SECONDS=600')
           && source.includes('transcribe-last.log')
-          && source.includes('python-venv')
           && source.includes('validate_local_asr_inference')
           && source.includes('TENCENT_MODEL_URL=')
-          && source.includes('MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")')
-          && source.includes('exec "\\$WHISPER_CPP_BIN" "\\$@"');
+          && source.includes('bootstrap_uv')
+          && source.includes('detect_uv_arch')
+          && source.includes('setup_python_and_packages');
       }
       return source.includes('Invoke-NativeProcess')
         && source.includes('Convert-ExitCodeToHex')
@@ -9680,7 +10026,10 @@ class WechatObsidianInboxPlugin extends Plugin {
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
-    if (!url || metadata.markdown || metadata.snapshot || metadata.contentSnapshot) {
+    if (!url) {
+      return record;
+    }
+    if ((metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       return record;
     }
 
@@ -10056,6 +10405,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           (normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId))
           || (normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl))
         ) {
+          if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
+            continue;
+          }
           return file.path || filePath;
         }
       } catch (error) {
@@ -10887,6 +11239,7 @@ WechatObsidianInboxPlugin.__test = {
   extractFeishuMarkdownFromHtml,
   extractFeishuMarkdownFromClientVars,
   mergeFeishuRenderedAndClientVarsMarkdown,
+  shouldRefreshFeishuMarkdownFromSource,
   extractFeishuDocumentTokenFromUrl,
   buildFeishuClientVarsApiUrl,
   normalizeGeneratedKeywords,

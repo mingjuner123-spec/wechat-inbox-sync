@@ -5,12 +5,14 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.2.17"
+INSTALLER_SCRIPT_VERSION="1.3.0"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
-TENCENT_MODEL_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows/ggml-small.bin"
+
+TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
+TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")
@@ -50,6 +52,239 @@ acquire_install_lock() {
   exit 1
 }
 
+# ── uv bootstrap ────────────────────────────────────────────────────────────
+# uv is a single Rust binary (~50 MB) that can install Python and manage venvs.
+# Primary download from Tencent CDN, fallback to GitHub releases.
+
+UV_VERSION="0.9.14"
+UV_BIN="$INSTALL_ROOT/bin/uv"
+
+detect_uv_arch() {
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64)  echo "aarch64-apple-darwin" ;;
+    x86_64) echo "x86_64-apple-darwin"   ;;
+    *)
+      echo "Unsupported macOS architecture: $arch" >&2
+      return 1
+      ;;
+  esac
+}
+
+download_uv() {
+  local uv_arch="$1"
+  local uv_temp="$2"
+  local urls=(
+    "${TENCENT_BASE_URL}/local-asr/common/uv-${uv_arch}"
+    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz"
+  )
+
+  for url in "${urls[@]}"; do
+    echo "Downloading uv from $url"
+    if command -v curl >/dev/null 2>&1; then
+      if curl -L --retry 2 --retry-delay 2 --connect-timeout 30 \
+        --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \
+        --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+        -o "$uv_temp" "$url" 2>&1; then
+        # Check if it's a tar.gz (GitHub) or raw binary (CDN)
+        if file "$uv_temp" 2>/dev/null | grep -q 'gzip'; then
+          tar xzf "$uv_temp" -C "$INSTALL_ROOT/bin" --strip-components=1 2>/dev/null || true
+          rm -f "$uv_temp"
+          if [ -x "$UV_BIN" ]; then
+            return 0
+          fi
+        else
+          mv "$uv_temp" "$UV_BIN"
+          chmod +x "$UV_BIN"
+          if [ -x "$UV_BIN" ]; then
+            return 0
+          fi
+        fi
+      fi
+    fi
+    rm -f "$uv_temp"
+    echo "uv download failed from $url, trying next source." >&2
+  done
+  return 1
+}
+
+bootstrap_uv() {
+  if [ -x "$UV_BIN" ] && "$UV_BIN" --version >/dev/null 2>&1; then
+    echo "uv is already available: $UV_BIN"
+    return 0
+  fi
+
+  mkdir -p "$INSTALL_ROOT/bin"
+  local uv_arch
+  uv_arch="$(detect_uv_arch)" || return 1
+  local uv_temp="$TEMP_ROOT/uv-download"
+
+  if download_uv "$uv_arch" "$uv_temp"; then
+    echo "uv installed to $UV_BIN"
+    return 0
+  fi
+
+  echo "" >&2
+  echo "无法下载 uv（Python 安装工具）。" >&2
+  echo "请检查网络连接后重试。No Terminal command is required." >&2
+  return 1
+}
+
+# ── Python + packages via uv ────────────────────────────────────────────────
+
+VENV_DIR="$INSTALL_ROOT/python-venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
+
+setup_python_and_packages() {
+  # If everything is already set up and working, skip.
+  if [ -x "$VENV_PYTHON" ] && [ -x "$INSTALL_ROOT/bin/whisper-cli" ] && [ -x "$INSTALL_ROOT/bin/ffmpeg" ]; then
+    if "$VENV_PYTHON" -c 'import imageio_ffmpeg' >/dev/null 2>&1; then
+      echo "Python venv and ASR tools are already ready."
+      return 0
+    fi
+  fi
+
+  bootstrap_uv || return 1
+
+  # Create venv.  uv will use system Python 3 if a working one exists;
+  # otherwise it auto-downloads a standalone Python build.
+  echo "Setting up Python environment (this may take a few minutes on first run)..."
+  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
+    # If 3.12 is unavailable, let uv pick the best available Python.
+    if ! "$UV_BIN" venv "$VENV_DIR" --python 3 2>&1; then
+      echo "" >&2
+      echo "无法创建 Python 虚拟环境。" >&2
+      echo "请尝试在终端运行: xcode-select --install" >&2
+      echo "安装 Xcode Command Line Tools 后重试。" >&2
+      echo "No Terminal command is required for the retry." >&2
+      return 1
+    fi
+  fi
+
+  if [ ! -x "$VENV_PYTHON" ]; then
+    echo "Python venv was not created at $VENV_PYTHON" >&2
+    return 1
+  fi
+
+  # Export VIRTUAL_ENV so uv pip targets this venv.
+  export VIRTUAL_ENV="$VENV_DIR"
+
+  echo "Installing whisper.cpp-cli and imageio-ffmpeg..."
+  if ! "$UV_BIN" pip install --upgrade whisper.cpp-cli imageio-ffmpeg 2>&1; then
+    echo "" >&2
+    echo "whisper.cpp-cli / imageio-ffmpeg 安装失败。" >&2
+    echo "请检查网络连接后重试。No Terminal command is required." >&2
+
+    # Fallback: try Homebrew
+    if command -v brew >/dev/null 2>&1; then
+      echo "尝试通过 Homebrew 安装..." >&2
+      return 2  # signal caller to try Homebrew
+    fi
+    return 1
+  fi
+
+  # Locate whisper-cpp binary in the venv.
+  local whisper_cpp_bin
+  whisper_cpp_bin="$VENV_DIR/bin/whisper-cpp"
+  if [ ! -x "$whisper_cpp_bin" ]; then
+    whisper_cpp_bin="$(find "$VENV_DIR/bin" -maxdepth 1 -type f -name 'whisper-cpp*' -perm -111 2>/dev/null | head -n 1 || true)"
+  fi
+  if [ -z "$whisper_cpp_bin" ] || [ ! -x "$whisper_cpp_bin" ]; then
+    echo "whisper.cpp-cli did not install the whisper-cpp command." >&2
+    return 1
+  fi
+
+  # Create wrapper scripts.
+  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
+#!/usr/bin/env bash
+WHISPER_CPP_BIN="$whisper_cpp_bin"
+exec "\$WHISPER_CPP_BIN" "\$@"
+SCRIPT
+
+  cat > "$INSTALL_ROOT/bin/ffmpeg" <<SCRIPT
+#!/usr/bin/env bash
+exec "$VENV_PYTHON" -c 'import os, sys, imageio_ffmpeg; exe = imageio_ffmpeg.get_ffmpeg_exe(); os.execv(exe, [exe] + sys.argv[1:])' "\$@"
+SCRIPT
+
+  chmod +x "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg"
+
+  if ! "$INSTALL_ROOT/bin/whisper-cli" -h >/dev/null 2>&1; then
+    echo "whisper-cli validation failed." >&2
+    return 1
+  fi
+  if ! "$INSTALL_ROOT/bin/ffmpeg" -version >/dev/null 2>&1; then
+    echo "ffmpeg validation failed." >&2
+    return 1
+  fi
+
+  echo "Python ASR tools installed successfully via uv."
+  return 0
+}
+
+# ── Homebrew fallback (only if uv pip install fails) ────────────────────────
+
+brew_install_formula() {
+  local formula="$1"
+  local max_attempts=3
+  local retry_delay_seconds=10
+
+  if brew list --versions "$formula" >/dev/null 2>&1; then
+    echo "Homebrew formula already installed: $formula"
+    return
+  fi
+
+  echo "Installing Homebrew formula: $formula"
+  local attempt output status
+  for attempt in $(seq 1 "$max_attempts"); do
+    set +e
+    output="$(HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula" 2>&1)"
+    status=$?
+    set -e
+    printf '%s\n' "$output"
+    if [ "$status" -eq 0 ]; then
+      return
+    fi
+    if brew list --versions "$formula" >/dev/null 2>&1; then
+      echo "Homebrew formula is now installed despite a non-zero brew exit: $formula"
+      return
+    fi
+    if printf '%s\n' "$output" | grep -Eiq 'already locked|Please wait|another process'; then
+      echo "Homebrew is busy. Waiting before retry $attempt/$max_attempts..." >&2
+      sleep "$retry_delay_seconds"
+      continue
+    fi
+    break
+  done
+
+  echo "" >&2
+  echo "Homebrew did not finish installing $formula." >&2
+  echo "Please retry in Obsidian after closing other installers." >&2
+  echo "No Terminal command is required." >&2
+  exit 1
+}
+
+find_command() {
+  local name="$1"
+  if [ -x "$INSTALL_ROOT/bin/$name" ]; then
+    echo "$INSTALL_ROOT/bin/$name"
+    return
+  fi
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return
+  fi
+  for prefix in /opt/homebrew /usr/local; do
+    if [ -x "$prefix/bin/$name" ]; then
+      echo "$prefix/bin/$name"
+      return
+    fi
+  done
+  return 1
+}
+
+# ── Model download ──────────────────────────────────────────────────────────
+
 download_file() {
   local url="$1"
   local out_file="$2"
@@ -79,7 +314,6 @@ download_model() {
   local out_file="$1"
   local temp_file="$out_file.part"
   local urls=("${MODEL_URLS[@]}")
-  local url=""
 
   for url in "${urls[@]}"; do
     if download_file "$url" "$temp_file"; then
@@ -102,6 +336,8 @@ download_model() {
   echo "Please retry installation later or switch network. No Terminal command is required." >&2
   return 1
 }
+
+# ── Validation ──────────────────────────────────────────────────────────────
 
 validate_local_asr_inference() {
   local whisper_bin="$1"
@@ -131,8 +367,7 @@ file_state() {
     echo "::missing::"
     return
   fi
-  local size
-  local mtime
+  local size mtime
   size="$(wc -c < "$file_path" | tr -d ' ')"
   mtime="$(stat -f '%m' "$file_path" 2>/dev/null || stat -c '%Y' "$file_path" 2>/dev/null || echo 0)"
   printf '%s|%s|%s' "$file_path" "$size" "$mtime"
@@ -176,212 +411,9 @@ run_or_skip_local_asr_validation() {
   write_install_state "$whisper_bin" "$ffmpeg_bin" "$model_path"
 }
 
-find_python3() {
-  if command -v python3 >/dev/null 2>&1; then
-    command -v python3
-    return
-  fi
-  for candidate in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
-    if [ -x "$candidate" ]; then
-      echo "$candidate"
-      return
-    fi
-  done
-  return 1
-}
+# ── Main ────────────────────────────────────────────────────────────────────
 
-create_python_venv() {
-  local python_bin="$1"
-  local venv_dir="$INSTALL_ROOT/python-venv"
-  if [ -x "$venv_dir/bin/python" ]; then
-    echo "$venv_dir/bin/python"
-    return 0
-  fi
-  if "$python_bin" -m venv "$venv_dir" >/dev/null 2>&1; then
-    echo "$venv_dir/bin/python"
-    return 0
-  fi
-  echo "Python venv creation failed for $python_bin." >&2
-  return 1
-}
-
-reuse_python_venv() {
-  local venv_dir="$INSTALL_ROOT/python-venv"
-  local venv_python="$venv_dir/bin/python"
-  local whisper_cpp_bin=""
-  if [ ! -x "$venv_python" ]; then
-    return 1
-  fi
-  if [ -x "$venv_dir/bin/whisper-cpp" ]; then
-    whisper_cpp_bin="$venv_dir/bin/whisper-cpp"
-  else
-    whisper_cpp_bin="$(find "$venv_dir/bin" -maxdepth 1 -type f -name 'whisper-cpp*' -perm -111 2>/dev/null | head -n 1 || true)"
-  fi
-  if [ -z "$whisper_cpp_bin" ] || [ ! -x "$whisper_cpp_bin" ]; then
-    return 1
-  fi
-  if ! "$venv_python" -c 'import imageio_ffmpeg' >/dev/null 2>&1; then
-    return 1
-  fi
-
-  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
-#!/usr/bin/env bash
-WHISPER_CPP_BIN="$whisper_cpp_bin"
-exec "\$WHISPER_CPP_BIN" "\$@"
-SCRIPT
-
-  cat > "$INSTALL_ROOT/bin/ffmpeg" <<SCRIPT
-#!/usr/bin/env bash
-exec "$venv_python" -c 'import os, sys, imageio_ffmpeg; exe = imageio_ffmpeg.get_ffmpeg_exe(); os.execv(exe, [exe] + sys.argv[1:])' "\$@"
-SCRIPT
-
-  chmod +x "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg"
-  assert_executable_runs "Portable whisper.cpp-cli" "$INSTALL_ROOT/bin/whisper-cli" -h || return 1
-  assert_executable_runs "Portable imageio-ffmpeg" "$INSTALL_ROOT/bin/ffmpeg" -version || return 1
-  echo "Reusing existing portable macOS ASR tools."
-  return 0
-}
-
-ensure_python_pip() {
-  local python_bin="$1"
-  if "$python_bin" -m pip --version >/dev/null 2>&1; then
-    return 0
-  fi
-  if "$python_bin" -m ensurepip --user >/dev/null 2>&1; then
-    return 0
-  fi
-  return 1
-}
-
-assert_executable_runs() {
-  local label="$1"
-  shift
-  if "$@" >/dev/null 2>&1; then
-    return 0
-  fi
-  echo "$label validation failed." >&2
-  return 1
-}
-
-install_python_local_asr_tools() {
-  local python_bin
-  python_bin="$(find_python3 || true)"
-  if [ -z "$python_bin" ]; then
-    echo "python3 was not found. Portable macOS ASR tools cannot be installed without Python 3." >&2
-    return 1
-  fi
-  local venv_python
-  venv_python="$(create_python_venv "$python_bin" || true)"
-  if [ -z "$venv_python" ]; then
-    echo "Portable macOS ASR tools need a working Python venv." >&2
-    return 1
-  fi
-
-  if ! ensure_python_pip "$venv_python"; then
-    echo "pip is not available in the local Python venv. Portable macOS ASR tools cannot be installed." >&2
-    return 1
-  fi
-
-  echo "Installing portable macOS ASR tools into local Python venv: whisper.cpp-cli imageio-ffmpeg"
-  "$venv_python" -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
-  if ! "$venv_python" -m pip install --upgrade --only-binary=:all: whisper.cpp-cli imageio-ffmpeg; then
-    echo "Python wheel installation failed. Will try Homebrew fallback for whisper-cpp if available." >&2
-    return 1
-  fi
-
-  local venv_bin
-  local whisper_cpp_bin
-  venv_bin="$(dirname "$venv_python")"
-  whisper_cpp_bin="$venv_bin/whisper-cpp"
-  if [ ! -x "$whisper_cpp_bin" ]; then
-    whisper_cpp_bin="$(find "$venv_bin" -maxdepth 1 -type f -name 'whisper-cpp*' -perm -111 2>/dev/null | head -n 1 || true)"
-  fi
-  if [ -z "$whisper_cpp_bin" ] || [ ! -x "$whisper_cpp_bin" ]; then
-    echo "whisper.cpp-cli did not install the whisper-cpp command in the local Python venv." >&2
-    return 1
-  fi
-
-  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
-#!/usr/bin/env bash
-WHISPER_CPP_BIN="$whisper_cpp_bin"
-exec "\$WHISPER_CPP_BIN" "\$@"
-SCRIPT
-
-  cat > "$INSTALL_ROOT/bin/ffmpeg" <<SCRIPT
-#!/usr/bin/env bash
-exec "$venv_python" -c 'import os, sys, imageio_ffmpeg; exe = imageio_ffmpeg.get_ffmpeg_exe(); os.execv(exe, [exe] + sys.argv[1:])' "\$@"
-SCRIPT
-
-  chmod +x "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg"
-  assert_executable_runs "Portable whisper.cpp-cli" "$INSTALL_ROOT/bin/whisper-cli" -h || return 1
-  assert_executable_runs "Portable imageio-ffmpeg" "$INSTALL_ROOT/bin/ffmpeg" -version || return 1
-
-  echo "Portable macOS ASR tools installed without Homebrew."
-  return 0
-}
-
-brew_install_formula() {
-  local formula="$1"
-  local max_attempts=3
-  local retry_delay_seconds=10
-  if brew list --versions "$formula" >/dev/null 2>&1; then
-    echo "Homebrew formula already installed: $formula"
-    return
-  fi
-
-  echo "Installing Homebrew formula: $formula"
-  local attempt
-  local output
-  local status
-  for attempt in $(seq 1 "$max_attempts"); do
-    set +e
-    output="$(HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula" 2>&1)"
-    status=$?
-    set -e
-    printf '%s\n' "$output"
-    if [ "$status" -eq 0 ]; then
-      return
-    fi
-    if brew list --versions "$formula" >/dev/null 2>&1; then
-      echo "Homebrew formula is now installed despite a non-zero brew exit: $formula"
-      return
-    fi
-    if printf '%s\n' "$output" | grep -Eiq 'already locked|Please wait|another process'; then
-      echo "Homebrew is busy installing another package. Waiting before retry $attempt/$max_attempts..." >&2
-      sleep "$retry_delay_seconds"
-      continue
-    fi
-    break
-  done
-
-  echo "" >&2
-  echo "WeChat Inbox Sync local ASR install failed while installing: $formula" >&2
-  echo "Homebrew did not finish installing $formula." >&2
-  echo "If Homebrew says another process is running, close other installers, wait 5-10 minutes, then retry in Obsidian." >&2
-  echo "No Terminal command is required for this retry." >&2
-  echo "If the network download is blocked, switch network or proxy and retry." >&2
-  exit 1
-}
-
-find_command() {
-  local name="$1"
-  if [ -x "$INSTALL_ROOT/bin/$name" ]; then
-    echo "$INSTALL_ROOT/bin/$name"
-    return
-  fi
-  if command -v "$name" >/dev/null 2>&1; then
-    command -v "$name"
-    return
-  fi
-  for prefix in /opt/homebrew /usr/local; do
-    if [ -x "$prefix/bin/$name" ]; then
-      echo "$prefix/bin/$name"
-      return
-    fi
-  done
-  return 1
-}
-
+# Ensure Homebrew is on PATH for Apple Silicon Macs (used only as fallback).
 if ! command -v brew >/dev/null 2>&1; then
   if [ -x /opt/homebrew/bin/brew ]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -393,19 +425,26 @@ fi
 acquire_install_lock
 mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/models" "$CACHE_ROOT"
 
-if reuse_python_venv; then
-  :
-elif ! install_python_local_asr_tools; then
-  if ! command -v brew >/dev/null 2>&1; then
-    echo "Portable macOS ASR installation failed and Homebrew is not available for fallback." >&2
-    echo "Please retry later after switching network or updating macOS Python." >&2
-    echo "No Terminal command is required." >&2
-    exit 1
-  fi
+# Primary path: uv → Python → pip packages.
+# Returns 2 if uv pip install failed but Homebrew is available as fallback.
+setup_python_and_packages
+setup_rc=$?
+
+if [ $setup_rc -eq 2 ]; then
+  # uv pip install failed, but Homebrew is available.
   brew_install_formula ffmpeg
   brew_install_formula whisper-cpp
+elif [ $setup_rc -ne 0 ]; then
+  # uv pipeline failed and no Homebrew available.
+  echo "" >&2
+  echo "本地转写组件安装失败。" >&2
+  echo "常见原因：网络不通、macOS 版本过旧、缺少 Xcode Command Line Tools。" >&2
+  echo "请在终端运行: xcode-select --install" >&2
+  echo "然后重新在 Obsidian 里安装。No Terminal command is required." >&2
+  exit 1
 fi
 
+# Locate whisper binary.
 WHISPER_BIN="$(find_command whisper-cli || true)"
 if [ -z "$WHISPER_BIN" ]; then
   WHISPER_BIN="$(find_command whisper-cpp || true)"
@@ -423,19 +462,18 @@ if [ -z "$WHISPER_BIN" ]; then
   done
 fi
 if [ -z "$WHISPER_BIN" ]; then
-  echo "whisper command was not found after installing whisper-cpp." >&2
-  echo "Please retry in Obsidian after switching network or updating macOS Python." >&2
-  echo "No Terminal command is required." >&2
+  echo "whisper command was not found after installation." >&2
+  echo "Please retry in Obsidian. No Terminal command is required." >&2
   exit 1
 fi
 
 FFMPEG_BIN="$(find_command ffmpeg || true)"
 if [ -z "$FFMPEG_BIN" ]; then
   echo "ffmpeg was not found after installation." >&2
-  echo "Portable imageio-ffmpeg did not provide ffmpeg, and the installer no longer uses Homebrew for ffmpeg." >&2
   exit 1
 fi
 
+# Symlink into our bin directory.
 if [ "$WHISPER_BIN" != "$INSTALL_ROOT/bin/whisper-cli" ]; then
   ln -sf "$WHISPER_BIN" "$INSTALL_ROOT/bin/whisper-cli"
 fi
@@ -443,6 +481,7 @@ if [ "$FFMPEG_BIN" != "$INSTALL_ROOT/bin/ffmpeg" ]; then
   ln -sf "$FFMPEG_BIN" "$INSTALL_ROOT/bin/ffmpeg"
 fi
 
+# Download model.
 MODEL_PATH="$INSTALL_ROOT/models/ggml-small.bin"
 if [ -f "$MODEL_PATH" ]; then
   model_size="$(wc -c < "$MODEL_PATH" | tr -d ' ')"
@@ -463,8 +502,11 @@ if [ ! -f "$MODEL_PATH" ]; then
   cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"
 fi
 
+# Run inference validation (cached if state is still valid).
 run_or_skip_local_asr_validation "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg" "$MODEL_PATH"
 rm -f "$CACHE_ROOT/ggml-small.bin"
+
+# ── Transcribe script ───────────────────────────────────────────────────────
 
 cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
 #!/usr/bin/env bash
