@@ -2357,7 +2357,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
       return;
     }
 
-    if (options.feishuTitle && shouldDropFeishuLine(text, options.feishuTitle)) {
+    if (options.feishuTitle && shouldDropFeishuLine(text, options.feishuTitle) && !isFeishuCodeLanguageLine(text)) {
       return;
     }
 
@@ -2756,10 +2756,107 @@ function removeFeishuResidualTableLines(markdown) {
   return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+function isFeishuCodeLanguageLine(line) {
+  return /^(?:Bash|Shell|PowerShell|JavaScript|TypeScript|Python|JSON|YAML|HTML|CSS)$/i.test(String(line || '').trim());
+}
+
+function isFeishuCommandLikeLine(line) {
+  const text = String(line || '').trim();
+  if (!text) return false;
+  if (/^#\s+/.test(text)) return true;
+  if (/^\\#\s+/.test(text)) return true;
+  if (/^(?:npx|npm|pnpm|yarn|node|python|pip|conda|ffmpeg|git|cd|mkdir|curl|brew|uv|powershell|pwsh|setx|export)\b/i.test(text)) return true;
+  if (/^(?:[A-Za-z]:\\|\.\/|\.\.\/|~\/)/.test(text)) return true;
+  if (/^[A-Z_][A-Z0-9_]*=/.test(text)) return true;
+  return false;
+}
+
+function isFeishuNarrativeAfterCode(line) {
+  const text = String(line || '').trim();
+  if (!text) return true;
+  if (/^#{1,6}\s+/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text) || /^\|.+\|$/.test(text)) return true;
+  return /[。！？；：]$/.test(text) || /^[\u4e00-\u9fa5].{4,}$/.test(text);
+}
+
+function formatFeishuCodeBlocks(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = String(lines[index] || '').trim();
+    if (!isFeishuCodeLanguageLine(current)) {
+      output.push(lines[index]);
+      continue;
+    }
+    const language = current.toLowerCase() === 'bash' || current.toLowerCase() === 'shell' ? 'bash' : current.toLowerCase();
+    const codeLines = [];
+    let cursor = index + 1;
+    while (cursor < lines.length) {
+      const value = String(lines[cursor] || '').trim();
+      if (!value) {
+        cursor += 1;
+        continue;
+      }
+      if (isFeishuCodeLanguageLine(value) || /^```/.test(value) || /^#{1,6}\s+/.test(value) || /^\|.+\|$/.test(value)) break;
+      if (isFeishuCommandLikeLine(value)) {
+        codeLines.push(value.replace(/^\\#/, '#'));
+        cursor += 1;
+        continue;
+      }
+      if (codeLines.length && isFeishuNarrativeAfterCode(value)) break;
+      if (!codeLines.length) break;
+      codeLines.push(value.replace(/^\\#/, '#'));
+      cursor += 1;
+    }
+    if (!codeLines.length) {
+      output.push(lines[index]);
+      continue;
+    }
+    if (output.length && String(output[output.length - 1] || '').trim()) output.push('');
+    output.push(`\`\`\`${language}`);
+    output.push(...codeLines);
+    output.push('```');
+    output.push('');
+    index = cursor - 1;
+  }
+  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function isFeishuRecommendationTitleLine(line) {
+  const text = String(line || '').trim();
+  if (!text || /^#{1,6}\s+/.test(text) || /^[-*]\s+/.test(text) || /^\|.+\|$/.test(text) || /^!\[/.test(text) || /^\[[^\]]+]\(/.test(text)) return false;
+  if (text.length < 8 || text.length > 80) return false;
+  if (/[。！？；：]$/.test(text)) return false;
+  return /(?:REMOTION|Remotion|AI|Agent|Hermes|Qwen|TTS|部署|教程|经验|分享|方法|踩坑|实操|策略|指南)/i.test(text);
+}
+
+function trimFeishuTrailingRecommendations(lines) {
+  const source = Array.isArray(lines) ? lines.slice() : [];
+  let lastContentIndex = source.length - 1;
+  while (lastContentIndex >= 0 && !String(source[lastContentIndex] || '').trim()) lastContentIndex -= 1;
+  if (lastContentIndex < 0) return source;
+  let start = lastContentIndex;
+  while (start >= 0 && isFeishuRecommendationTitleLine(source[start])) start -= 1;
+  const count = lastContentIndex - start;
+  if (count >= 3) return source.slice(0, start + 1);
+  return source;
+}
+
+function isFeishuMarkdownLikelyTruncated(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const trimmed = trimFeishuTrailingRecommendations(lines);
+  if (trimmed.length <= lines.length - 3) return true;
+  if (lines.length < 20) return false;
+  const lastHeadingIndex = lines.map((line, index) => (/^#{1,6}\s+/.test(line) ? index : -1)).filter((index) => index >= 0).pop() ?? -1;
+  const tail = lines.slice(Math.max(0, lines.length - 12));
+  return lastHeadingIndex >= 0
+    && lines.length - lastHeadingIndex < 12
+    && tail.filter(isFeishuRecommendationTitleLine).length >= 3;
+}
+
 function postProcessFeishuMarkdown(markdown, title = '') {
   let lines = String(markdown || '').split(/\r?\n/)
     .map((line) => String(line || '').trim())
-    .filter((line) => line && !shouldDropFeishuLine(line, title));
+    .filter((line) => line && (!shouldDropFeishuLine(line, title) || isFeishuCodeLanguageLine(line)));
   const commentsIndex = lines.findIndex((line) => /^(?:真诚点赞，手留余香|全文评论)$/.test(line));
   if (commentsIndex >= 0) {
     lines = lines.slice(0, commentsIndex);
@@ -2770,7 +2867,8 @@ function postProcessFeishuMarkdown(markdown, title = '') {
     if (/^[-*]\s+/.test(line) && isFeishuTocBulletLine(line)) return '';
     return formatFeishuHeadingLine(line);
   }).filter(Boolean);
-  return removeFeishuResidualTableLines(repairFeishuMarkdownTables(lines.join('\n'))).replace(/\n{3,}/g, '\n\n').trim();
+  lines = trimFeishuTrailingRecommendations(lines);
+  return formatFeishuCodeBlocks(removeFeishuResidualTableLines(repairFeishuMarkdownTables(lines.join('\n')))).replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function sanitizeAttachmentName(fileName, fallbackName) {
@@ -6063,12 +6161,44 @@ async function renderUrlToMarkdownWithElectron(url) {
           });
           return clean(blocks.join('\\n\\n'));
         };
-        const scrollables = () => Array.from(document.querySelectorAll('[class*="scroll"], [class*="container"], [class*="content"], [class*="doc"], main, body, html'))
+        const scrollables = () => {
+          const nodes = [document.scrollingElement, document.documentElement, document.body]
+            .concat(Array.from(document.querySelectorAll('*')));
+          const unique = Array.from(new Set(nodes.filter(Boolean)));
+          return unique
           .filter((node) => {
-            try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
-          });
+            try {
+              if (!node || !node.scrollHeight || !node.clientHeight) return false;
+              if (node.scrollHeight <= node.clientHeight + 20) return false;
+              const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+              const overflow = style ? String(style.overflowY || style.overflow || '') : '';
+              return /auto|scroll|overlay|hidden/i.test(overflow)
+                || node === document.scrollingElement
+                || node === document.documentElement
+                || node === document.body;
+            } catch (error) { return false; }
+          })
+          .sort((a, b) => {
+            try { return (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight); } catch (error) { return 0; }
+          })
+          .slice(0, 12);
+        };
+        const dispatchScrollEvents = () => {
+          const target = document.elementFromPoint(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight * 0.78)) || document.body;
+          try {
+            target.dispatchEvent(new WheelEvent('wheel', { deltaY: Math.max(900, window.innerHeight || 900), bubbles: true, cancelable: true }));
+          } catch (error) {}
+          try {
+            window.dispatchEvent(new WheelEvent('wheel', { deltaY: Math.max(900, window.innerHeight || 900), bubbles: true, cancelable: true }));
+          } catch (error) {}
+          try {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', code: 'PageDown', bubbles: true, cancelable: true }));
+          } catch (error) {}
+        };
         collectVisibleBlocks();
-        for (let index = 0; index < 36; index += 1) {
+        let stableRounds = 0;
+        for (let index = 0; index < 90; index += 1) {
+          const beforeCollectedLength = collected.join('\n').length;
           const before = Math.max(
             document.documentElement ? document.documentElement.scrollHeight : 0,
             document.body ? document.body.scrollHeight : 0
@@ -6077,8 +6207,10 @@ async function renderUrlToMarkdownWithElectron(url) {
           scrollables().forEach((node) => {
             try { node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight); } catch (error) {}
           });
-          await sleep(500);
+          dispatchScrollEvents();
+          await sleep(index < 8 ? 750 : 450);
           collectVisibleBlocks();
+          const afterCollectedLength = collected.join('\n').length;
           const after = Math.max(
             document.documentElement ? document.documentElement.scrollHeight : 0,
             document.body ? document.body.scrollHeight : 0
@@ -6087,8 +6219,12 @@ async function renderUrlToMarkdownWithElectron(url) {
           const atScrollableBottom = scrollables().every((node) => {
             try { return node.scrollTop + node.clientHeight >= node.scrollHeight - 8; } catch (error) { return true; }
           });
-          if (atDocumentBottom && atScrollableBottom && Math.abs(after - before) < 20) break;
+          const hasNewContent = afterCollectedLength > beforeCollectedLength + 20;
+          if (!hasNewContent && Math.abs(after - before) < 20 && atDocumentBottom && atScrollableBottom) stableRounds += 1;
+          else stableRounds = 0;
+          if (stableRounds >= 6) break;
         }
+        window.scrollTo(0, 0);
         const selectors = [
           '[data-testid*="doc"]',
           '[data-docx-has-block-data]',
@@ -6837,6 +6973,7 @@ function shouldRefreshFeishuMarkdownFromSource(url, metadata = {}) {
   if (!isFeishuUrl(url)) return false;
   const markdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '').trim();
   if (!markdown) return false;
+  if (isFeishuMarkdownLikelyTruncated(markdown)) return true;
   const placeholderCount = countFeishuAssetPlaceholders(markdown);
   if (!placeholderCount) return false;
   const bodyScore = getFeishuMarkdownBodyScore(markdown);

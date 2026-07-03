@@ -956,6 +956,44 @@ assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('- 一、成果'), fal
 assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('重播'), false);
 assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('点击按住可拖动视频'), false);
 assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('61%'), false);
+const cleanedFeishuCodeBlockMarkdown = helpers.cleanMarkdownForStorage([
+  '### 3.11remotion安装',
+  '',
+  'Bash',
+  '',
+  '# 创建项目（如果还没有的话）',
+  '',
+  'npx create-video@latest',
+  '',
+  '# 或者克隆已有项目后安装依赖',
+  '',
+  'cd remotion-studio',
+  'npm install',
+  '',
+  '安装完成后启动开发环境：',
+  '',
+  'npm start',
+].join('\n'), {
+  dedupe: true,
+  feishuTitle: 'REMOTION制作AI视频，深度经验分享',
+});
+assert.ok(cleanedFeishuCodeBlockMarkdown.includes('```bash\n# 创建项目（如果还没有的话）\nnpx create-video@latest'));
+assert.ok(cleanedFeishuCodeBlockMarkdown.includes('cd remotion-studio\nnpm install'));
+assert.ok(cleanedFeishuCodeBlockMarkdown.includes('```\n\n安装完成后启动开发环境：'));
+const truncatedFeishuMarkdown = [
+  '# 飞书标题',
+  '',
+  '### 第三步：安装 Conda + Python 3.12',
+  'python --version',
+  'REMOTION搭配Qwen3-TTS的声音克隆方法',
+  'AI企业服务赛道实战经验分享 - 从选品到获客策略',
+  'Hermes Agent从0到1部署教程 | 服务器选购及连接指南',
+  '用REMOTION做AI视频要避开的3个踩坑点',
+].join('\n');
+assert.strictEqual(helpers.shouldRefreshFeishuMarkdownFromSource(
+  'https://fv2fbshiww0.feishu.cn/wiki/KTQtw8R56igHE7kkKwHcoTBun9e',
+  { markdown: truncatedFeishuMarkdown },
+), true);
 assert.strictEqual(typeof helpers.extractWebpageMetadataFromHtml, 'function');
 const articleMeta = helpers.extractWebpageMetadataFromHtml(`
   <html>
