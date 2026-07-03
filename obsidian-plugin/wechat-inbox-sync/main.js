@@ -9278,20 +9278,35 @@ class WechatObsidianInboxPlugin extends Plugin {
     title = '',
   }) {
     const metadata = record.metadata || {};
+    const withTranscriptProperties = (nextMetadata) => {
+      if (!nextMetadata || nextMetadata.transcriptionStatus !== 'success') return nextMetadata;
+      const transcriptProperties = buildTranscriptPropertyMetadata({
+        transcription: nextMetadata.transcription,
+        title: title || metadata.title || nextMetadata.title || '',
+      });
+      const existingKeywords = getRecordKeywords(nextMetadata);
+      return {
+        ...nextMetadata,
+        description: nextMetadata.description || transcriptProperties.description,
+        keywords: existingKeywords.length ? existingKeywords : transcriptProperties.keywords,
+        aiMetadataSource: nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource,
+      };
+    };
 
     if (subtitleText) {
+      const nextMetadata = buildTranscriptOnlyMetadata(metadata, {
+        url,
+        platform,
+        mediaUrl,
+        subtitleUrl,
+        transcription: subtitleText,
+        transcriptionStatus: 'success',
+        transcriptionSource: source || 'subtitle',
+        conversionStatus: 'success',
+      });
       return {
         ...record,
-        metadata: buildTranscriptOnlyMetadata(metadata, {
-          url,
-          platform,
-          mediaUrl,
-          subtitleUrl,
-          transcription: subtitleText,
-          transcriptionStatus: 'success',
-          transcriptionSource: source || 'subtitle',
-          conversionStatus: 'success',
-        }),
+        metadata: withTranscriptProperties(nextMetadata),
       };
     }
 
@@ -9389,7 +9404,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           return {
             ...record,
             metadata: {
-              ...nextMetadata,
+              ...withTranscriptProperties(nextMetadata),
               cloudTranscriptionProvider: result.cloudProvider || nextMetadata.cloudTranscriptionProvider || '',
               cloudTranscriptionRequestId: result.cloudRequestId || nextMetadata.cloudTranscriptionRequestId || '',
               cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || nextMetadata.cloudTranscriptionUsedSeconds || 0,

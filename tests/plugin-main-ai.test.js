@@ -2574,6 +2574,9 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(cloudWebpageResult.metadata.transcription, '云端网页音视频转写结果');
   assert.strictEqual(cloudWebpageResult.metadata.transcriptionSource, 'cloud-webpage');
   assert.strictEqual(cloudWebpageResult.metadata.cloudTranscriptionProvider, 'doubao');
+  assert.strictEqual(cloudWebpageResult.metadata.aiMetadataSource, 'transcription');
+  assert.ok(cloudWebpageResult.metadata.description.includes('云端网页音视频转写结果'));
+  assert.ok(cloudWebpageResult.metadata.keywords.length > 0);
   assert.deepStrictEqual(cloudWebpageCalls, [[
     'https://video.example.com/douyin.mp4',
     'video',
