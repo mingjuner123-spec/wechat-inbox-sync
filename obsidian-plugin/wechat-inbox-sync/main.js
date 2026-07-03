@@ -6161,64 +6161,12 @@ async function renderUrlToMarkdownWithElectron(url) {
           });
           return clean(blocks.join('\\n\\n'));
         };
-        const scrollables = () => {
-          const selectors = [
-            '[class*="scroll"]',
-            '[class*="Scroll"]',
-            '[class*="container"]',
-            '[class*="Container"]',
-            '[class*="content"]',
-            '[class*="Content"]',
-            '[class*="doc"]',
-            '[class*="Doc"]',
-            '[class*="editor"]',
-            '[data-testid*="scroll"]',
-            '[data-testid*="doc"]',
-            '[data-docx-has-block-data]',
-            '[data-page-id]',
-            '[data-block-id]',
-            'main',
-            'article',
-          ];
-          const nodes = [document.scrollingElement, document.documentElement, document.body]
-            .concat(selectors.flatMap((selector) => {
-              try { return Array.from(document.querySelectorAll(selector)); } catch (error) { return []; }
-            }));
-          const unique = Array.from(new Set(nodes.filter(Boolean)));
-          return unique
+        const scrollables = () => Array.from(document.querySelectorAll('[class*="scroll"], [class*="container"], [class*="content"], [class*="doc"], main, body, html'))
           .filter((node) => {
-            try {
-              if (!node || !node.scrollHeight || !node.clientHeight) return false;
-              if (node.scrollHeight <= node.clientHeight + 20) return false;
-              const style = window.getComputedStyle ? window.getComputedStyle(node) : null;
-              const overflow = style ? String(style.overflowY || style.overflow || '') : '';
-              return /auto|scroll|overlay|hidden/i.test(overflow)
-                || node === document.scrollingElement
-                || node === document.documentElement
-                || node === document.body;
-            } catch (error) { return false; }
-          })
-          .sort((a, b) => {
-            try { return (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight); } catch (error) { return 0; }
-          })
-          .slice(0, 12);
-        };
-        const dispatchScrollEvents = () => {
-          const target = document.elementFromPoint(Math.floor(window.innerWidth / 2), Math.floor(window.innerHeight * 0.78)) || document.body;
-          try {
-            target.dispatchEvent(new WheelEvent('wheel', { deltaY: Math.max(900, window.innerHeight || 900), bubbles: true, cancelable: true }));
-          } catch (error) {}
-          try {
-            window.dispatchEvent(new WheelEvent('wheel', { deltaY: Math.max(900, window.innerHeight || 900), bubbles: true, cancelable: true }));
-          } catch (error) {}
-          try {
-            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', code: 'PageDown', bubbles: true, cancelable: true }));
-          } catch (error) {}
-        };
+            try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
+          });
         collectVisibleBlocks();
-        let stableRounds = 0;
-        for (let index = 0; index < 90; index += 1) {
-          const beforeCollectedLength = collected.join('\n').length;
+        for (let index = 0; index < 36; index += 1) {
           const before = Math.max(
             document.documentElement ? document.documentElement.scrollHeight : 0,
             document.body ? document.body.scrollHeight : 0
@@ -6227,10 +6175,8 @@ async function renderUrlToMarkdownWithElectron(url) {
           scrollables().forEach((node) => {
             try { node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight); } catch (error) {}
           });
-          dispatchScrollEvents();
-          await sleep(index < 8 ? 750 : 450);
+          await sleep(500);
           collectVisibleBlocks();
-          const afterCollectedLength = collected.join('\n').length;
           const after = Math.max(
             document.documentElement ? document.documentElement.scrollHeight : 0,
             document.body ? document.body.scrollHeight : 0
@@ -6239,12 +6185,8 @@ async function renderUrlToMarkdownWithElectron(url) {
           const atScrollableBottom = scrollables().every((node) => {
             try { return node.scrollTop + node.clientHeight >= node.scrollHeight - 8; } catch (error) { return true; }
           });
-          const hasNewContent = afterCollectedLength > beforeCollectedLength + 20;
-          if (!hasNewContent && Math.abs(after - before) < 20 && atDocumentBottom && atScrollableBottom) stableRounds += 1;
-          else stableRounds = 0;
-          if (stableRounds >= 6) break;
+          if (atDocumentBottom && atScrollableBottom && Math.abs(after - before) < 20) break;
         }
-        window.scrollTo(0, 0);
         const selectors = [
           '[data-testid*="doc"]',
           '[data-docx-has-block-data]',

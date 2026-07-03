@@ -25,6 +25,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const pluginMainSource = fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8');
+assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
+assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
