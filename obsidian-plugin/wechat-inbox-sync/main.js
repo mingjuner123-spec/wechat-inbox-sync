@@ -6264,6 +6264,137 @@ async function renderUrlToMarkdownWithElectron(url) {
   }
 }
 
+async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
+  }
+
+  const wechatSession = getWechatSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1600,
+    show: false,
+    webPreferences: {
+      session: wechatSession || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  try {
+    const loaded = waitForWebContents(win.webContents);
+    await win.loadURL(url);
+    await loaded;
+    const result = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const clean = (text) => String(text || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/[ \\t]+/g, ' ')
+          .trim();
+        const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn/i.test(location.href)
+          || /扫码登录|登录飞书|Login Required/i.test(document.body ? String(document.body.innerText || document.body.textContent || '') : '');
+        const lines = [];
+        const seenLines = new Set();
+        const imageAssets = [];
+        const seenImages = new Set();
+        const pushLine = (value) => {
+          const text = clean(value);
+          if (!text || text.length < 2 || seenLines.has(text)) return;
+          seenLines.add(text);
+          lines.push(text);
+        };
+        const pushImage = (img) => {
+          try {
+            const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+            if (!src || seenImages.has(src)) return;
+            const width = Number(img.naturalWidth || img.width || 0);
+            const height = Number(img.naturalHeight || img.height || 0);
+            const className = String(img.className || '');
+            if ((width && height && (width < 80 || height < 80)) || /avatar|portrait|icon|logo/i.test(className)) return;
+            seenImages.add(src);
+            const alt = clean(img.alt || '图片') || '图片';
+            imageAssets.push({ src, alt, width, height });
+            lines.push('![' + alt + '](' + src + ')');
+          } catch (error) {}
+        };
+        const collect = () => {
+          const bodyText = document.body ? String(document.body.innerText || document.body.textContent || '') : '';
+          bodyText.split(/\\n+/).forEach(pushLine);
+          document.querySelectorAll('img').forEach(pushImage);
+        };
+        const scrollables = () => Array.from(document.querySelectorAll('[class*="scroll"], [class*="container"], [class*="content"], [class*="doc"], main, body, html'))
+          .filter((node) => {
+            try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
+          });
+        collect();
+        for (let index = 0; index < 56; index += 1) {
+          const beforeCount = lines.length;
+          const before = Math.max(
+            document.documentElement ? document.documentElement.scrollHeight : 0,
+            document.body ? document.body.scrollHeight : 0
+          );
+          window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
+          scrollables().forEach((node) => {
+            try { node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight); } catch (error) {}
+          });
+          await sleep(520);
+          collect();
+          const after = Math.max(
+            document.documentElement ? document.documentElement.scrollHeight : 0,
+            document.body ? document.body.scrollHeight : 0
+          );
+          const atDocumentBottom = window.innerHeight + window.scrollY >= after - 8;
+          const atScrollableBottom = scrollables().every((node) => {
+            try { return node.scrollTop + node.clientHeight >= node.scrollHeight - 8; } catch (error) { return true; }
+          });
+          if (atDocumentBottom && atScrollableBottom && Math.abs(after - before) < 20 && lines.length === beforeCount) break;
+        }
+        const toDataUrl = (blob) => new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(reader.error || new Error('image read failed'));
+          reader.readAsDataURL(blob);
+        });
+        const uniqueAssets = [];
+        for (const asset of imageAssets) {
+          const next = { src: asset.src, alt: asset.alt || '图片' };
+          if (asset.src.startsWith('data:')) {
+            next.dataUrl = asset.src;
+          } else if (/feishu\\.cn|feishu\\.net|internal-api-drive-stream/i.test(asset.src)) {
+            try {
+              const blob = await fetch(asset.src, { credentials: 'include' }).then((response) => response.blob());
+              if (blob && blob.size && /^image\\//i.test(blob.type || '')) {
+                next.dataUrl = await toDataUrl(blob);
+              }
+            } catch (error) {}
+          }
+          uniqueAssets.push(next);
+        }
+        return {
+          title: document.title || '',
+          markdown: lines.join('\\n'),
+          needsLogin: isLoginPage(),
+          assets: uniqueAssets,
+        };
+      })()
+    `);
+    if (result && result.needsLogin) {
+      throw new Error('飞书页面需要先登录。请在插件设置中点击“登录飞书”，登录后再同步。');
+    }
+    if (!result || !result.markdown || result.markdown.length < 20) {
+      throw new Error('隐藏浏览器未读取到足够正文');
+    }
+    return result;
+  } finally {
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
+}
+
 async function renderSocialMediaUrlsWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -10135,9 +10266,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       if (isFeishuUrl(url)) {
         try {
-          const rendered = await renderUrlToMarkdownWithElectron(url);
+          const rendered = await renderFeishuUrlToSimpleMarkdownWithElectron(url);
+          const feishuTitle = metadata.title || rendered.title || '飞书链接';
+          const cleanedRenderedMarkdown = cleanMarkdownForStorage(rendered.markdown, {
+            dedupe: true,
+            feishuTitle,
+          });
           const markdown = await this.saveWebpageImageAssets(
-            rendered.markdown,
+            cleanedRenderedMarkdown,
             rendered.assets,
             rootDir,
             dateFolder,
@@ -10146,11 +10282,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           return {
             ...record,
             metadata: enrichExtractedWebpageMetadata({
-              ...metadata,
-              title: metadata.title || rendered.title || '飞书链接',
-              markdown,
-              conversionStatus: 'success',
-            }),
+                ...metadata,
+                title: feishuTitle,
+                markdown,
+                conversionStatus: 'success',
+              }),
           };
         } catch (renderError) {
           try {
