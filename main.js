@@ -69,11 +69,7 @@ const DEFAULT_SETTINGS = {
   xiaohongshuCommentsEnabled: true,
   xiaohongshuImageOcrEnabled: true,
   wechatChannelsExperimentUrl: '',
-  feishuCloudOAuthEnabled: true,
   feishuOAuthStatus: null,
-  feishuOpenApiEnabled: false,
-  feishuAppId: '',
-  feishuAppSecret: '',
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -1156,15 +1152,15 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     : merged.xiaohongshuCommentsEnabled !== false;
   merged.xiaohongshuImageOcrEnabled = true;
   merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || '').trim();
-  merged.feishuCloudOAuthEnabled = merged.feishuCloudOAuthEnabled !== false;
   merged.feishuOAuthStatus = merged.feishuOAuthStatus
     && typeof merged.feishuOAuthStatus === 'object'
     && !Array.isArray(merged.feishuOAuthStatus)
     ? merged.feishuOAuthStatus
     : null;
-  merged.feishuOpenApiEnabled = Boolean(merged.feishuOpenApiEnabled);
-  merged.feishuAppId = String(merged.feishuAppId || '').trim();
-  merged.feishuAppSecret = String(merged.feishuAppSecret || '').trim();
+  delete merged.feishuCloudOAuthEnabled;
+  delete merged.feishuOpenApiEnabled;
+  delete merged.feishuAppId;
+  delete merged.feishuAppSecret;
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
@@ -6279,7 +6275,7 @@ async function renderUrlToMarkdownWithElectron(url) {
     `);
 
     if (result && result.needsLogin) {
-      throw new Error('飞书页面需要先登录。请在插件设置中点击“登录飞书”，登录后再同步。');
+      throw new Error('飞书页面需要授权后才能完整提取。请在插件设置中点击“连接飞书官方 API”，授权后再同步。');
     }
     let __feishuDiag = 'no-clientVars';
     if (result && result.clientVars) {
@@ -6529,7 +6525,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
     `);
 
     if (result && result.needsLogin) {
-      throw new Error('飞书页面需要先登录。请在插件设置中点击“登录飞书”，登录后再同步。');
+      throw new Error('飞书页面需要授权后才能完整提取。请在插件设置中点击“连接飞书官方 API”，授权后再同步。');
     }
     let __feishuDiag = 'no-clientVars';
     if (result && result.clientVars) {
@@ -7604,7 +7600,7 @@ async function fetchFeishuTenantAccessToken({ apiBase, appId, appSecret, request
   const normalizedAppId = String(appId || '').trim();
   const normalizedSecret = String(appSecret || '').trim();
   if (!normalizedAppId || !normalizedSecret) {
-    throw new Error('未配置飞书 App ID / App Secret');
+    throw new Error('未配置飞书自建应用凭据');
   }
   const payload = await requestFeishuOpenApiJson({
     apiBase,
@@ -8242,12 +8238,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       id: 'stop-current-transcription',
       name: '停止当前转写',
       callback: () => this.stopCurrentTranscription(),
-    });
-
-    this.addCommand({
-      id: 'login-feishu-web',
-      name: '登录飞书（用于提取飞书文档）',
-      callback: () => this.loginFeishu(),
     });
 
     this.addCommand({
@@ -10973,8 +10963,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       if (isFeishuUrl(url)) {
         let openApiError = null;
-        const shouldUseFeishuCloudOAuth = this.settings.feishuCloudOAuthEnabled !== false
-          && this.settings.feishuOAuthStatus
+        const shouldUseFeishuCloudOAuth = this.settings.feishuOAuthStatus
           && this.settings.feishuOAuthStatus.connected;
         if (shouldUseFeishuCloudOAuth) {
           try {
@@ -10997,36 +10986,6 @@ class WechatObsidianInboxPlugin extends Plugin {
                 conversionStatus: 'success',
                 conversionSource: 'feishu-cloud-oauth',
                 conversionNote: `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
-              }),
-            };
-          } catch (error) {
-            openApiError = error;
-          }
-        }
-        if (this.settings.feishuOpenApiEnabled && this.settings.feishuAppId && this.settings.feishuAppSecret) {
-          try {
-            const openApiResult = await fetchFeishuOpenApiMarkdownFromUrl(url, {
-              appId: this.settings.feishuAppId,
-              appSecret: this.settings.feishuAppSecret,
-            });
-            const feishuTitle = metadata.title || openApiResult.title || '飞书链接';
-            const cleanedOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-              cleanMarkdownForStorage(openApiResult.markdown, {
-                dedupe: true,
-                feishuTitle,
-              }),
-              [],
-              url,
-            );
-            return {
-              ...record,
-              metadata: enrichExtractedWebpageMetadata({
-                ...metadata,
-                title: feishuTitle,
-                markdown: cleanedOpenApiMarkdown,
-                conversionStatus: 'success',
-                conversionSource: 'feishu-open-api',
-                conversionNote: `feishu-open-api blocks=${openApiResult.blockCount || 0}`,
               }),
             };
           } catch (error) {
@@ -11825,73 +11784,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
             new Notice(`刷新飞书授权状态失败：${error.message || error}`);
           }
         }));
-
-    new Setting(containerEl)
-      .setName('优先使用云端飞书授权')
-      .setDesc('开启后，飞书链接会先走用户授权的官方 OpenAPI；未连接或权限不足时，仍会自动回退到网页解析。')
-      .addToggle((toggle) => toggle
-        .setValue(this.plugin.settings.feishuCloudOAuthEnabled !== false)
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            feishuCloudOAuthEnabled: value,
-          });
-        }));
-
-    const feishuLoginBtn = new Setting(containerEl)
-      .setName('登录飞书')
-      .setDesc('插件会优先尝试无登录提取；如果飞书要求登录，请先点这里登录，之后同步会复用登录状态。')
-      .addButton((button) => button
-        .setButtonText('打开飞书登录')
-        .onClick(async () => {
-          feishuLoginBtn.setDesc('正在打开飞书登录窗口...');
-          await this.plugin.loginFeishu();
-          this.display();
-        }));
-
-    this.plugin.checkFeishuLogin().then((loggedIn) => {
-      if (loggedIn) {
-        feishuLoginBtn.setDesc('已保存飞书登录状态；飞书文档同步会优先无登录提取，必要时复用该状态。');
-      }
-    });
-
-    new Setting(containerEl)
-      .setName('飞书官方 API 实验通道')
-      .setDesc('用于测试长文档完整提取。需要在飞书开放平台创建自建应用，并给应用开通云文档读取权限；失败时会自动回退到网页解析。')
-      .addToggle((toggle) => toggle
-        .setValue(Boolean(this.plugin.settings.feishuOpenApiEnabled))
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            feishuOpenApiEnabled: value,
-          });
-        }));
-
-    new Setting(containerEl)
-      .setName('飞书 App ID')
-      .setDesc('自建应用的 App ID，只保存在当前 Obsidian 插件本地。')
-      .addText((text) => text
-        .setPlaceholder('cli_xxxxxxxxxxxxx')
-        .setValue(this.plugin.settings.feishuAppId || '')
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            feishuAppId: value,
-          });
-        }));
-
-    this.addPasswordSetting(containerEl, {
-      name: '飞书 App Secret',
-      desc: '自建应用的 App Secret，只保存在当前 Obsidian 插件本地。',
-      placeholder: 'App Secret',
-      value: this.plugin.settings.feishuAppSecret || '',
-      onChange: async (value) => {
-        await this.plugin.saveSettings({
-          ...this.plugin.settings,
-          feishuAppSecret: value,
-        });
-      },
-    });
 
     new Setting(containerEl)
       .setName('保存根目录')

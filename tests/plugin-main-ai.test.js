@@ -115,6 +115,9 @@ assert.strictEqual(typeof helpers.htmlToMarkdown, 'function');
 assert.strictEqual(typeof helpers.normalizeGeneratedKeywords, 'function');
 assert.strictEqual(typeof helpers.parseGeneratedMetadataResponse, 'function');
 assert.strictEqual(typeof helpers.extractAiMetadataInputText, 'function');
+assert.strictEqual(typeof helpers.extractFeishuOpenApiUrlInfo, 'function');
+assert.strictEqual(typeof helpers.extractFeishuMarkdownFromOpenApiBlocks, 'function');
+assert.strictEqual(typeof helpers.fetchFeishuOpenApiMarkdownFromUrl, 'function');
 assert.strictEqual(
   helpers.formatRedeemAccessError(new Error('Request failed, status 404'), 'auto'),
   '没有识别到可用兑换码，请手动输入兑换码。',
@@ -389,9 +392,17 @@ assert.strictEqual(pluginMainSource.includes(".setName('测试 AI 连接')"), fa
 assert.strictEqual(pluginMainSource.includes("text: '公众号评论区提取（实验性）'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('笔记属性字段')"), false);
 assert.ok(pluginMainSource.includes("text: '飞书文档提取'"));
-assert.ok(pluginMainSource.includes(".setName('登录飞书')"));
-assert.ok(pluginMainSource.includes(".setButtonText('打开飞书登录')"));
-assert.ok(pluginMainSource.includes('插件会优先尝试无登录提取'));
+assert.ok(pluginMainSource.includes(".setName('连接飞书官方 API')"));
+assert.ok(pluginMainSource.includes(".setButtonText('连接飞书')"));
+assert.strictEqual(pluginMainSource.includes(".setName('登录飞书')"), false);
+assert.strictEqual(pluginMainSource.includes(".setButtonText('打开飞书登录')"), false);
+assert.strictEqual(pluginMainSource.includes('插件会优先尝试无登录提取'), false);
+assert.strictEqual(pluginMainSource.includes('飞书官方 API 实验通道'), false);
+assert.strictEqual(pluginMainSource.includes('飞书 App ID'), false);
+assert.strictEqual(pluginMainSource.includes('飞书 App Secret'), false);
+assert.strictEqual(pluginMainSource.includes('this.settings.feishuOpenApiEnabled && this.settings.feishuAppId'), false);
+assert.strictEqual(pluginMainSource.includes('appId: this.settings.feishuAppId'), false);
+assert.strictEqual(pluginMainSource.includes('appSecret: this.settings.feishuAppSecret'), false);
 assert.strictEqual(pluginMainSource.includes("text: 'Feishu link extraction'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('Feishu web login')"), false);
 assert.strictEqual(pluginMainSource.includes(".setButtonText('Login Feishu')"), false);
@@ -816,6 +827,61 @@ const feishuClientVarsTreeMarkdown = helpers.extractFeishuMarkdownFromClientVars
 assert.ok(feishuClientVarsTreeMarkdown.includes('# 飞书树形标题'));
 assert.ok(feishuClientVarsTreeMarkdown.includes('block_sequence 里的正文'));
 assert.ok(feishuClientVarsTreeMarkdown.includes('只存在于 children 的后续正文'));
+assert.deepStrictEqual(
+  helpers.extractFeishuOpenApiUrlInfo('https://fv2fbshiww0.feishu.cn/wiki/KTQtw8R56igHE7kkKwHcoTBun9e?from=from_copylink'),
+  {
+    apiBase: 'https://open.feishu.cn/open-apis',
+    kind: 'wiki',
+    token: 'KTQtw8R56igHE7kkKwHcoTBun9e',
+  },
+);
+assert.deepStrictEqual(
+  helpers.extractFeishuOpenApiUrlInfo('https://example.larksuite.com/docx/DOCXtoken123'),
+  {
+    apiBase: 'https://open.larksuite.com/open-apis',
+    kind: 'docx',
+    token: 'DOCXtoken123',
+  },
+);
+const feishuOpenApiBlocksMarkdown = helpers.extractFeishuMarkdownFromOpenApiBlocks([
+  { block_id: 'page', block_type: 1, children: ['h1', 'p1', 'table1', 'img1', 'code1'] },
+  {
+    block_id: 'h1',
+    block_type: 3,
+    heading1: { elements: [{ text_run: { content: '官方 API 一级标题' } }] },
+  },
+  {
+    block_id: 'p1',
+    block_type: 2,
+    text: { elements: [{ text_run: { content: '官方 API 分页正文第一段' } }] },
+  },
+  {
+    block_id: 'table1',
+    block_type: 31,
+    table: { property: { row_size: 2, column_size: 2 }, cells: ['cell1', 'cell2', 'cell3', 'cell4'] },
+  },
+  { block_id: 'cell1', block_type: 32, children: ['cell1-text'] },
+  { block_id: 'cell1-text', block_type: 2, text: { elements: [{ text_run: { content: '组件' } }] } },
+  { block_id: 'cell2', block_type: 32, children: ['cell2-text'] },
+  { block_id: 'cell2-text', block_type: 2, text: { elements: [{ text_run: { content: '说明' } }] } },
+  { block_id: 'cell3', block_type: 32, children: ['cell3-text'] },
+  { block_id: 'cell3-text', block_type: 2, text: { elements: [{ text_run: { content: 'Remotion' } }] } },
+  { block_id: 'cell4', block_type: 32, children: ['cell4-text'] },
+  { block_id: 'cell4-text', block_type: 2, text: { elements: [{ text_run: { content: '视频生成' } }] } },
+  { block_id: 'img1', block_type: 27, image: { token: 'boxcnImageToken' } },
+  {
+    block_id: 'code1',
+    block_type: 14,
+    code: { elements: [{ text_run: { content: 'npm install\nnpm run dev' } }] },
+  },
+]);
+assert.ok(feishuOpenApiBlocksMarkdown.includes('# 官方 API 一级标题'));
+assert.ok(feishuOpenApiBlocksMarkdown.includes('官方 API 分页正文第一段'));
+assert.ok(feishuOpenApiBlocksMarkdown.includes('| 组件 | 说明 |'));
+assert.ok(feishuOpenApiBlocksMarkdown.includes('| Remotion | 视频生成 |'));
+assert.ok(feishuOpenApiBlocksMarkdown.includes('![图片](feishu-image:boxcnImageToken)'));
+assert.ok(feishuOpenApiBlocksMarkdown.includes('```'));
+assert.ok(feishuOpenApiBlocksMarkdown.includes('npm install\nnpm run dev'));
 const feishuMergedMarkdown = helpers.mergeFeishuRenderedAndClientVarsMarkdown([
   '# 飞书云文档',
   '',
@@ -2331,6 +2397,155 @@ async function runAsyncHydrationTests() {
   }
 
   assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);
+
+  const feishuOpenApiRequests = [];
+  const feishuOpenApiResult = await helpers.fetchFeishuOpenApiMarkdownFromUrl(
+    'https://fv2fbshiww0.feishu.cn/wiki/wikiToken123',
+    {
+      appId: 'cli_test',
+      appSecret: 'secret_test',
+      requestJson: async ({ url, method, headers, body }) => {
+        feishuOpenApiRequests.push({ url, method, headers, body });
+        if (url === 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal') {
+          assert.strictEqual(method, 'POST');
+          assert.deepStrictEqual(JSON.parse(body), { app_id: 'cli_test', app_secret: 'secret_test' });
+          return { status: 200, json: { code: 0, tenant_access_token: 'tenant-token', expire: 7200 } };
+        }
+        assert.strictEqual(headers.Authorization, 'Bearer tenant-token');
+        if (url === 'https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=wikiToken123') {
+          return {
+            status: 200,
+            json: {
+              code: 0,
+              data: { node: { obj_token: 'docxToken456', obj_type: 'docx', title: 'Wiki 文档标题' } },
+            },
+          };
+        }
+        if (url === 'https://open.feishu.cn/open-apis/docx/v1/documents/docxToken456') {
+          return { status: 200, json: { code: 0, data: { document: { title: '官方文档标题' } } } };
+        }
+        if (url === 'https://open.feishu.cn/open-apis/docx/v1/documents/docxToken456/blocks?page_size=500') {
+          return {
+            status: 200,
+            json: {
+              code: 0,
+              data: {
+                has_more: true,
+                page_token: 'next-page',
+                items: [
+                  { block_id: 'page', block_type: 1, children: ['h1', 'p1'] },
+                  { block_id: 'h1', block_type: 3, heading1: { elements: [{ text_run: { content: '官方分页标题' } }] } },
+                  { block_id: 'p1', block_type: 2, text: { elements: [{ text_run: { content: '第一页正文' } }] } },
+                ],
+              },
+            },
+          };
+        }
+        if (url === 'https://open.feishu.cn/open-apis/docx/v1/documents/docxToken456/blocks?page_size=500&page_token=next-page') {
+          return {
+            status: 200,
+            json: {
+              code: 0,
+              data: {
+                has_more: false,
+                items: [
+                  { block_id: 'h2', block_type: 4, heading2: { elements: [{ text_run: { content: '第二页标题' } }] } },
+                  { block_id: 'p2', block_type: 2, text: { elements: [{ text_run: { content: '第二页正文，不能因为 239 个 block 截断。' } }] } },
+                ],
+              },
+            },
+          };
+        }
+        throw new Error(`Unexpected Feishu OpenAPI URL: ${url}`);
+      },
+    },
+  );
+  assert.strictEqual(feishuOpenApiResult.documentId, 'docxToken456');
+  assert.strictEqual(feishuOpenApiResult.title, '官方文档标题');
+  assert.strictEqual(feishuOpenApiResult.blockCount, 5);
+  assert.ok(feishuOpenApiResult.markdown.includes('# 官方分页标题'));
+  assert.ok(feishuOpenApiResult.markdown.includes('第一页正文'));
+  assert.ok(feishuOpenApiResult.markdown.includes('## 第二页标题'));
+  assert.ok(feishuOpenApiResult.markdown.includes('第二页正文，不能因为 239 个 block 截断。'));
+  assert.deepStrictEqual(
+    feishuOpenApiRequests.map((item) => item.url),
+    [
+      'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+      'https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=wikiToken123',
+      'https://open.feishu.cn/open-apis/docx/v1/documents/docxToken456',
+      'https://open.feishu.cn/open-apis/docx/v1/documents/docxToken456/blocks?page_size=500',
+      'https://open.feishu.cn/open-apis/docx/v1/documents/docxToken456/blocks?page_size=500&page_token=next-page',
+    ],
+  );
+
+  await assert.rejects(
+    () => helpers.fetchFeishuOpenApiMarkdownFromUrl(
+      'https://my.feishu.cn/wiki/noWikiScope',
+      {
+        appId: 'cli_missing_scope',
+        appSecret: 'secret_missing_scope',
+        requestJson: async ({ url }) => {
+          if (url === 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal') {
+            return { status: 200, json: { code: 0, tenant_access_token: 'tenant-token', expire: 7200 } };
+          }
+          if (url === 'https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=noWikiScope') {
+            return {
+              status: 400,
+              json: {
+                code: 99991672,
+                msg: 'Access denied. One of the following scopes is required: [wiki:wiki, wiki:wiki:readonly, wiki:node:read].',
+              },
+            };
+          }
+          throw new Error(`Unexpected missing scope URL: ${url}`);
+        },
+      },
+    ),
+    /99991672.*wiki:wiki:readonly.*wiki:node:read/,
+  );
+
+  const cloudFeishuPlugin = new PluginClass();
+  const cloudFeishuCalls = [];
+  cloudFeishuPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: { connected: true },
+  });
+  cloudFeishuPlugin.requestJson = async (path, method, body, binding) => {
+    cloudFeishuCalls.push([path, method, body.url, binding && binding.token]);
+    if (path === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: '云端授权标题',
+          documentId: 'cloudDocxToken',
+          blockCount: 2,
+          blocks: [
+            { block_id: 'h1', block_type: 3, heading1: { elements: [{ text_run: { content: '云端授权一级标题' } }] } },
+            { block_id: 'p1', block_type: 2, text: { elements: [{ text_run: { content: '云端授权正文内容。' } }] } },
+          ],
+        },
+      };
+    }
+    throw new Error(`Unexpected cloud Feishu path ${path}`);
+  };
+  const cloudHydrated = await cloudFeishuPlugin.hydrateWebpageMarkdown({
+    _id: 'feishu-cloud-oauth-hydrate',
+    type: 'webpage',
+    content: 'https://my.feishu.cn/docx/cloudDocxToken',
+    metadata: { url: 'https://my.feishu.cn/docx/cloudDocxToken' },
+  }, '临时收集', '2026-07-04', '飞书云端授权测试');
+  assert.strictEqual(cloudHydrated.metadata.conversionSource, 'feishu-cloud-oauth');
+  assert.strictEqual(cloudHydrated.metadata.title, '云端授权标题');
+  assert.ok(cloudHydrated.metadata.markdown.includes('# 云端授权一级标题'));
+  assert.ok(cloudHydrated.metadata.markdown.includes('云端授权正文内容。'));
+  assert.deepStrictEqual(cloudFeishuCalls, [[
+    '/feishu/extract',
+    'POST',
+    'https://my.feishu.cn/docx/cloudDocxToken',
+    undefined,
+  ]]);
 
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.douyin.com/video/123') {

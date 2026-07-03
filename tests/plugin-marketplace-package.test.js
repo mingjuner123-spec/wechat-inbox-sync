@@ -58,7 +58,8 @@ assert.ok(windowsOcrInstaller.includes('$TencentPipIndexUrl = "https://mirrors.c
 assert.ok(windowsOcrInstaller.includes('$PypiFallbackIndexUrl = "https://pypi.org/simple"'));
 assert.ok(windowsOcrInstaller.includes('Download-TextFile'));
 assert.ok(macOcrInstaller.includes('rapidocr-onnxruntime'));
-assert.ok(macOcrInstaller.includes('TENCENT_OCR_ASSET_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"'));
+assert.ok(macOcrInstaller.includes('TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"'));
+assert.ok(macOcrInstaller.includes('TENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"'));
 assert.ok(macOcrInstaller.includes('TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"'));
 assert.ok(macOcrInstaller.includes('PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"'));
 assert.ok(macOcrInstaller.includes('download_text_file'));
@@ -213,38 +214,41 @@ assert.ok(windowsInstaller.includes('Assert-LocalAsrInference'));
 assert.ok(windowsInstaller.includes('"-f", "lavfi"'));
 assert.ok(windowsInstaller.includes('validation.wav'));
 assert.ok(windowsInstaller.includes('Local ASR inference validation passed'));
-assert.ok(macInstaller.includes('install_python_local_asr_tools'));
+assert.ok(macInstaller.includes('bootstrap_uv'));
+assert.ok(macInstaller.includes('setup_python_and_packages'));
 assert.ok(macInstaller.includes('whisper.cpp-cli'));
 assert.ok(macInstaller.includes('imageio-ffmpeg'));
-assert.ok(macInstaller.includes('python-venv'));
-assert.ok(macInstaller.includes('create_python_venv'));
+assert.ok(macInstaller.includes('UV_BIN="$INSTALL_ROOT/bin/uv"'));
+assert.ok(macInstaller.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12'));
+assert.ok(macInstaller.includes('"$UV_BIN" pip install --upgrade whisper.cpp-cli imageio-ffmpeg'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.2.17"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.0"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=180'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));
 assert.ok(macInstaller.includes('--speed-time "$DOWNLOAD_LOW_SPEED_TIME"'));
 assert.ok(macInstaller.includes('CACHE_ROOT="$INSTALL_ROOT/cache"'));
-assert.ok(macInstaller.includes('TENCENT_MODEL_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows/ggml-small.bin"'));
+assert.ok(macInstaller.includes('TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"'));
+assert.ok(macInstaller.includes('TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"'));
 assert.ok(macInstaller.includes('MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")'));
 assert.ok(macInstaller.includes('local urls=("${MODEL_URLS[@]}")'));
-assert.ok(macInstaller.includes('reuse_python_venv'));
-assert.ok(macInstaller.includes('Reusing existing portable macOS ASR tools.'));
+assert.ok(macInstaller.includes('Python venv and ASR tools are already ready.'));
 assert.strictEqual(macInstaller.includes('rm -rf "$venv_dir"'), false);
 assert.ok(macInstaller.includes('Local ASR was already validated for the current files; skipping full inference validation.'));
 assert.ok(macInstaller.includes('download_model "$CACHE_ROOT/ggml-small.bin"'));
 assert.ok(macInstaller.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"'));
 assert.ok(macInstaller.includes('rm -f "$CACHE_ROOT/ggml-small.bin"'));
-assert.ok(macInstaller.includes('assert_executable_runs'));
+assert.ok(macInstaller.includes('whisper-cli validation failed.'));
+assert.ok(macInstaller.includes('ffmpeg validation failed.'));
 assert.ok(macInstaller.includes('validate_local_asr_inference'));
 assert.ok(macInstaller.includes('Local ASR inference validation passed'));
 assert.ok(macInstaller.includes('exec "\\$WHISPER_CPP_BIN" "\\$@"'));
 assert.strictEqual(macInstaller.includes('-m whisper_cpp'), false);
 assert.ok(macInstaller.includes('brew_install_formula ffmpeg'));
 assert.ok(
-  macInstaller.indexOf('if ! install_python_local_asr_tools; then') <
+  macInstaller.indexOf('setup_python_and_packages') <
     macInstaller.indexOf('brew_install_formula ffmpeg'),
-  'macOS installer should only use Homebrew ffmpeg after the portable Python path fails',
+  'macOS installer should only use Homebrew ffmpeg after the uv Python path fails',
 );
 assert.ok(macInstaller.includes('brew_install_formula whisper-cpp'));
 assert.strictEqual(macInstaller.includes('brew reinstall whisper-cpp'), false);
@@ -270,7 +274,7 @@ assert.ok(macInstaller.includes('-f segment -segment_time "$CHUNK_SECONDS"'));
 assert.ok(macInstaller.includes('SIMPLIFIED_PROMPT="$(printf'));
 assert.ok(macInstaller.includes('--prompt "$SIMPLIFIED_PROMPT"'));
 assert.strictEqual(macInstaller.includes('--prompt "请输出简体中文"'), false);
-assert.ok(macInstaller.includes('Homebrew is busy installing another package'));
+assert.ok(macInstaller.includes('Homebrew is busy. Waiting before retry'));
 assert.ok(macInstaller.includes('chunkCount='));
 assert.ok(macInstaller.includes('transcribe-last.log'));
 assert.ok(macInstaller.includes('progressStage='));
