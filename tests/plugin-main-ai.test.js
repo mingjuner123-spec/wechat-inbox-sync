@@ -2574,9 +2574,6 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(cloudWebpageResult.metadata.transcription, '云端网页音视频转写结果');
   assert.strictEqual(cloudWebpageResult.metadata.transcriptionSource, 'cloud-webpage');
   assert.strictEqual(cloudWebpageResult.metadata.cloudTranscriptionProvider, 'doubao');
-  assert.strictEqual(cloudWebpageResult.metadata.aiMetadataSource, 'transcription');
-  assert.ok(cloudWebpageResult.metadata.description.includes('云端网页音视频转写结果'));
-  assert.ok(cloudWebpageResult.metadata.keywords.length > 0);
   assert.deepStrictEqual(cloudWebpageCalls, [[
     'https://video.example.com/douyin.mp4',
     'video',
@@ -3368,6 +3365,87 @@ async function runLocalTranscriptionEntitlementTests() {
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
+
+  const requiredAiRecord = {
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/7644238277092174409',
+    metadata: {
+      url: 'https://www.douyin.com/video/7644238277092174409',
+      platform: '抖音',
+      transcriptOnly: true,
+      webpageMediaType: 'audio_video',
+      transcriptionStatus: 'success',
+      transcription: '抖音视频转写全文，讲了评论区选题和内容创作。',
+      description: '旧的非 AI 转写摘要',
+      keywords: ['旧关键词'],
+      aiMetadataSource: 'transcription',
+    },
+  };
+  const requiredAiPlugin = new PluginClass();
+  requiredAiPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'PRO-123',
+    pendingRedeemCode: 'OBPROT93C6',
+    localTranscriptionEntitlementStatus: {
+      hasAccess: true,
+      plan: 'local_transcription_beta',
+      status: 'active',
+      expiresAt: '2026-07-30T08:00:00.000Z',
+      code: 'OBPROT93C6',
+    },
+    bindings: [{
+      token: 'PRO-123',
+      label: 'Pro 微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  const requiredMetadataCalls = [];
+  requiredAiPlugin.requestJson = async (url, method, body, binding) => {
+    requiredMetadataCalls.push([url, method, body.content, binding && binding.token]);
+    assert.strictEqual(url, '/metadata/generate');
+    return {
+      data: {
+        description: 'AI 生成的抖音简介',
+        keywords: ['抖音口播', '内容创作'],
+      },
+    };
+  };
+  const requiredAiResult = await requiredAiPlugin.enrichRecordMetadataWithAi(requiredAiRecord, {
+    token: 'PRO-123',
+  }, { requireMetadata: true });
+  assert.strictEqual(requiredAiResult.metadata.description, 'AI 生成的抖音简介');
+  assert.deepStrictEqual(requiredAiResult.metadata.keywords, ['抖音口播', '内容创作']);
+  assert.strictEqual(requiredAiResult.metadata.aiMetadataSource, 'cloud');
+  assert.deepStrictEqual(requiredMetadataCalls.map(([url, method, , token]) => [url, method, token]), [[
+    '/metadata/generate',
+    'POST',
+    'PRO-123',
+  ]]);
+  assert.ok(requiredMetadataCalls[0][2].includes('抖音视频转写全文'));
+
+  const missingRedeemAiPlugin = new PluginClass();
+  missingRedeemAiPlugin.saveData = async () => {};
+  missingRedeemAiPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'NO-CODE-123',
+    pendingRedeemCode: '',
+    bindings: [{
+      token: 'NO-CODE-123',
+      label: '未识别兑换码微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  missingRedeemAiPlugin.requestJson = async () => {
+    throw new Error('metadata/generate should not be called without a valid redeem code');
+  };
+  await assert.rejects(
+    () => missingRedeemAiPlugin.enrichRecordMetadataWithAi(requiredAiRecord, {
+      token: 'NO-CODE-123',
+    }, { requireMetadata: true }),
+    /AI 简介与关键词生成失败.*兑换码/,
+  );
 
   const deniedPlugin = new PluginClass();
   deniedPlugin.settings = helpers.mergeSettings({

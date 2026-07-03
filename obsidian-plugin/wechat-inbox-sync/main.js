@@ -2251,6 +2251,22 @@ function shouldGenerateAiMetadata(settings, record) {
   return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
 }
 
+function shouldRequireAiMetadataForTranscript(record) {
+  const metadata = (record && record.metadata) || {};
+  const type = String(record && record.type || '').toLowerCase();
+  return Boolean(
+    metadata.transcriptionStatus === 'success'
+    && String(metadata.transcription || '').trim()
+    && extractAiMetadataInputText(record)
+    && (
+      metadata.transcriptOnly
+      || metadata.webpageMediaType === 'audio_video'
+      || type === 'voice'
+      || (type === 'file' && metadata.transcriptionSource)
+    ),
+  );
+}
+
 function buildFileMarkdownBody(record) {
   const metadata = record.metadata || {};
   const fileName = metadata.fileName || record.content || 'upload-file';
@@ -7451,30 +7467,32 @@ class WechatObsidianInboxPlugin extends Plugin {
     return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
   }
 
-  async enrichRecordMetadataWithAi(record, binding = null) {
-    if (!shouldGenerateAiMetadata(this.settings, record)) return record;
+  async enrichRecordMetadataWithAi(record, binding = null, options = {}) {
+    const requireMetadata = Boolean(options.requireMetadata);
+    if (!requireMetadata && !shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
-    const hasAccess = await this.hasProFeatureAccess();
-    if (!hasAccess) {
+    const fail = (message) => {
+      const finalMessage = message || 'AI 简介与关键词生成失败';
+      if (requireMetadata) {
+        throw new Error(`AI 简介与关键词生成失败：${finalMessage}`);
+      }
       return {
         ...record,
         metadata: {
           ...metadata,
-          aiMetadataError: 'Pro 权限未开通，已跳过简介与关键词生成。',
+          aiMetadataError: finalMessage,
         },
       };
+    };
+    const hasAccess = await this.hasProFeatureAccess();
+    if (!hasAccess) {
+      return fail('Pro 权限未开通，或插件未识别到有效兑换码。请在 Pro 高级选项里自动识别/手动输入兑换码后刷新权限。');
     }
     let generated;
     try {
       generated = await this.generateMetadataWithDeepSeek(record, binding);
     } catch (error) {
-      return {
-        ...record,
-        metadata: {
-          ...metadata,
-          aiMetadataError: error && error.message ? error.message : String(error || ''),
-        },
-      };
+      return fail(error && error.message ? error.message : String(error || ''));
     }
     if (generated.description) {
       metadata.description = generated.description;
@@ -7484,6 +7502,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (generated.description || generated.keywords.length) {
       metadata.aiMetadataSource = this.settings.deepseekApiKey ? 'deepseek' : 'cloud';
+    }
+    if (requireMetadata && (!metadata.description || !getRecordKeywords(metadata).length)) {
+      return fail('AI 接口没有返回可用的简介和关键词。');
     }
     return {
       ...record,
@@ -9278,35 +9299,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     title = '',
   }) {
     const metadata = record.metadata || {};
-    const withTranscriptProperties = (nextMetadata) => {
-      if (!nextMetadata || nextMetadata.transcriptionStatus !== 'success') return nextMetadata;
-      const transcriptProperties = buildTranscriptPropertyMetadata({
-        transcription: nextMetadata.transcription,
-        title: title || metadata.title || nextMetadata.title || '',
-      });
-      const existingKeywords = getRecordKeywords(nextMetadata);
-      return {
-        ...nextMetadata,
-        description: nextMetadata.description || transcriptProperties.description,
-        keywords: existingKeywords.length ? existingKeywords : transcriptProperties.keywords,
-        aiMetadataSource: nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource,
-      };
-    };
 
     if (subtitleText) {
-      const nextMetadata = buildTranscriptOnlyMetadata(metadata, {
-        url,
-        platform,
-        mediaUrl,
-        subtitleUrl,
-        transcription: subtitleText,
-        transcriptionStatus: 'success',
-        transcriptionSource: source || 'subtitle',
-        conversionStatus: 'success',
-      });
       return {
         ...record,
-        metadata: withTranscriptProperties(nextMetadata),
+        metadata: buildTranscriptOnlyMetadata(metadata, {
+          url,
+          platform,
+          mediaUrl,
+          subtitleUrl,
+          transcription: subtitleText,
+          transcriptionStatus: 'success',
+          transcriptionSource: source || 'subtitle',
+          conversionStatus: 'success',
+        }),
       };
     }
 
@@ -9404,7 +9410,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           return {
             ...record,
             metadata: {
-              ...withTranscriptProperties(nextMetadata),
+              ...nextMetadata,
               cloudTranscriptionProvider: result.cloudProvider || nextMetadata.cloudTranscriptionProvider || '',
               cloudTranscriptionRequestId: result.cloudRequestId || nextMetadata.cloudTranscriptionRequestId || '',
               cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || nextMetadata.cloudTranscriptionUsedSeconds || 0,
@@ -10097,7 +10103,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
-    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
+    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding, {
+      requireMetadata: shouldRequireAiMetadataForTranscript(recordForMarkdown),
+    });
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,
