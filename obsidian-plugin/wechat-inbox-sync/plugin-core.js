@@ -1,7 +1,7 @@
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const NOTE_SAVE_MODES = {
@@ -36,6 +36,8 @@ const DEFAULT_SETTINGS = {
   settingsVersion: 2,
   token: '',
   pendingBindCode: '',
+  pendingRedeemCode: '',
+  localTranscriptionEntitlementStatus: null,
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
@@ -45,10 +47,14 @@ const DEFAULT_SETTINGS = {
   aiProvider: 'off',
   aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
+  xiaohongshuImageOcrEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
+  cloudPreTranscriptionEnabled: false,
+  cloudPreTranscriptionThresholdMinutes: 10,
   localAsrPlatform: 'auto',
+  localAsrInstallMode: 'default',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
   aliyunModel: 'qwen3.5-omni-plus',
@@ -192,6 +198,14 @@ function normalizeBindings(settings) {
   return bindings.slice(0, MAX_PLUGIN_BINDINGS);
 }
 
+function canAddPluginBinding(settings, candidateToken) {
+  const token = normalizeBindCodeInput(candidateToken);
+  if (!token) return false;
+  const bindings = normalizeBindings(settings);
+  if (bindings.some((item) => item && item.token === token)) return true;
+  return bindings.length < MAX_PLUGIN_BINDINGS;
+}
+
 function getPrimaryBoundToken(bindings) {
   const active = (Array.isArray(bindings) ? bindings : [])
     .find((item) => item && item.enabled !== false && item.status !== 'unbound' && item.token);
@@ -219,6 +233,12 @@ function mergeSettings(savedSettings, platform = process.platform) {
   const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
   merged.token = tokenBinding ? normalizedToken : getPrimaryBoundToken(merged.bindings);
   merged.pendingBindCode = normalizeBindCodeInput(merged.pendingBindCode);
+  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
+  merged.localTranscriptionEntitlementStatus = merged.localTranscriptionEntitlementStatus
+    && typeof merged.localTranscriptionEntitlementStatus === 'object'
+    && !Array.isArray(merged.localTranscriptionEntitlementStatus)
+    ? merged.localTranscriptionEntitlementStatus
+    : null;
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
@@ -226,16 +246,23 @@ function mergeSettings(savedSettings, platform = process.platform) {
   merged.autoSyncOnLoad = Boolean(merged.autoSyncOnLoad);
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
-  merged.aiMetadataEnabled = savedSettingsVersion < 2
-    ? true
-    : merged.aiMetadataEnabled !== false;
+  merged.aiMetadataEnabled = true;
   merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2
     ? true
     : merged.xiaohongshuCommentsEnabled !== false;
+  merged.xiaohongshuImageOcrEnabled = true;
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
+  merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
+  const cloudPreTranscriptionThresholdMinutes = Number(merged.cloudPreTranscriptionThresholdMinutes);
+  merged.cloudPreTranscriptionThresholdMinutes = [10, 30, 60].includes(cloudPreTranscriptionThresholdMinutes)
+    ? cloudPreTranscriptionThresholdMinutes
+    : DEFAULT_SETTINGS.cloudPreTranscriptionThresholdMinutes;
   merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
+  merged.localAsrInstallMode = ['default', 'safe'].includes(String(merged.localAsrInstallMode || '').trim())
+    ? String(merged.localAsrInstallMode || '').trim()
+    : DEFAULT_SETTINGS.localAsrInstallMode;
   merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
     merged.localTranscriptionCommand,
     resolveLocalAsrPlatform(merged.localAsrPlatform, platform),
@@ -284,6 +311,7 @@ module.exports = {
   NOTE_SAVE_MODES,
   OFFICIAL_SYNC_API_BASE,
   buildSyncNotice,
+  canAddPluginBinding,
   createClientId,
   getDefaultLocalTranscriptionCommand,
   getLocalAsrPlatform,

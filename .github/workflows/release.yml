@@ -40,7 +40,7 @@ jobs:
           cd obsidian-plugin/wechat-inbox-sync
           ZIP_NAME="wechat-inbox-sync-$TAG_NAME.zip"
           rm -f "$ZIP_NAME"
-          zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr
+          zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr local-ocr
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" main.js manifest.json styles.css versions.json "$ZIP_NAME" --clobber

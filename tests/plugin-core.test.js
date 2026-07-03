@@ -4,6 +4,7 @@ const {
   AI_PROVIDER_NAMES,
   DEFAULT_SETTINGS,
   MAX_PLUGIN_BINDINGS,
+  canAddPluginBinding,
   OFFICIAL_SYNC_API_BASE,
   mergeSettings,
   normalizeBindings,
@@ -12,11 +13,31 @@ const {
   normalizeBindCodeInput,
 } = require('../obsidian-plugin/wechat-inbox-sync/plugin-core');
 
-const STABLE_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
-const EXPERIMENTAL_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const STABLE_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const LEGACY_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 
 assert.strictEqual(OFFICIAL_SYNC_API_BASE, STABLE_OFFICIAL_SYNC_API_BASE);
 assert.strictEqual(MAX_PLUGIN_BINDINGS, 3);
+assert.strictEqual(canAddPluginBinding({
+  bindings: [
+    { token: 'abc123', enabled: true },
+    { token: 'def456', enabled: true },
+    { token: 'ghi789', enabled: true },
+  ],
+}, 'jkl234'), false);
+assert.strictEqual(canAddPluginBinding({
+  bindings: [
+    { token: 'abc123', enabled: true },
+    { token: 'def456', enabled: true },
+    { token: 'ghi789', enabled: true },
+  ],
+}, 'def456'), true);
+assert.strictEqual(canAddPluginBinding({
+  bindings: [
+    { token: 'abc123', enabled: true },
+    { token: 'def456', enabled: true },
+  ],
+}, 'ghi789'), true);
 
 assert.deepStrictEqual(AI_PROVIDER_NAMES, {
   off: '关闭转写',
@@ -31,6 +52,8 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   settingsVersion: 2,
   token: '',
   pendingBindCode: '',
+  pendingRedeemCode: '',
+  localTranscriptionEntitlementStatus: null,
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
@@ -40,10 +63,14 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   aiProvider: 'off',
   aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
+  xiaohongshuImageOcrEnabled: true,
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
+  cloudPreTranscriptionEnabled: false,
+  cloudPreTranscriptionThresholdMinutes: 10,
   localAsrPlatform: 'auto',
+  localAsrInstallMode: 'default',
   localTranscriptionCommand: '',
   aliyunApiKey: '',
   aliyunModel: 'qwen3.5-omni-plus',
@@ -60,6 +87,13 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
   tencentPollIntervalMs: 5000,
 });
 
+assert.strictEqual(
+  mergeSettings({ pendingRedeemCode: ' ob-pro 123 ', xiaohongshuImageOcrEnabled: true }).pendingRedeemCode,
+  'OB-PRO123',
+);
+assert.strictEqual(mergeSettings({ xiaohongshuImageOcrEnabled: true }).xiaohongshuImageOcrEnabled, true);
+assert.strictEqual(mergeSettings({ xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
+
 {
   const merged = mergeSettings({ token: 'ABC-123' });
   assert.strictEqual(merged.token, 'ABC-123');
@@ -69,7 +103,7 @@ assert.deepStrictEqual(DEFAULT_SETTINGS, {
 assert.match(mergeSettings({ clientId: '' }).clientId, /^obsidian-[a-f0-9]{32}$/);
 
 assert.strictEqual(
-  mergeSettings({ apiBase: EXPERIMENTAL_OFFICIAL_SYNC_API_BASE }).apiBase,
+  mergeSettings({ apiBase: LEGACY_OFFICIAL_SYNC_API_BASE }).apiBase,
   OFFICIAL_SYNC_API_BASE,
 );
 
@@ -139,7 +173,7 @@ assert.strictEqual(mergeSettings({ localAsrPlatform: 'bad-value' }).localAsrPlat
 assert.strictEqual(mergeSettings({ noteSaveMode: 'bad-value' }).noteSaveMode, 'date');
 assert.strictEqual(mergeSettings({ notePropertyFields: ' id, bad_key, url, id ' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
 assert.strictEqual(mergeSettings({ aiMetadataEnabled: false }).aiMetadataEnabled, true);
-assert.strictEqual(mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, false);
+assert.strictEqual(mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, true);
 assert.strictEqual(mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, true);
 assert.strictEqual(mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 

@@ -77,7 +77,12 @@ assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliSubtitleUrlsFromHtml, 'function');
 assert.strictEqual(typeof helpers.parseBilibiliSubtitlePayload, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliAudioUrlFromPlayurlPayload, 'function');
+assert.strictEqual(typeof helpers.isWechatChannelsUrl, 'function');
+assert.strictEqual(typeof helpers.extractWechatChannelsRequestPayload, 'function');
+assert.strictEqual(typeof helpers.normalizeWechatChannelsFeedPayload, 'function');
+assert.strictEqual(typeof helpers.normalizeBrowserCapturedMediaUrls, 'function');
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
+assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildSyncProgressMessage, 'function');
 assert.strictEqual(typeof helpers.parseLocalAsrProgressLog, 'function');
@@ -100,8 +105,130 @@ assert.strictEqual(typeof helpers.htmlToMarkdown, 'function');
 assert.strictEqual(typeof helpers.normalizeGeneratedKeywords, 'function');
 assert.strictEqual(typeof helpers.parseGeneratedMetadataResponse, 'function');
 assert.strictEqual(typeof helpers.extractAiMetadataInputText, 'function');
+assert.strictEqual(
+  helpers.formatRedeemAccessError(new Error('Request failed, status 404'), 'auto'),
+  '没有识别到可用兑换码，请手动输入兑换码。',
+);
+assert.strictEqual(
+  helpers.formatRedeemAccessError(new Error('Request failed, status 400'), 'redeem'),
+  '兑换码无效、已过期，或不属于当前绑定微信。',
+);
 assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
 assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
+assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/sph/A7ULN6a876'), true);
+assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=A7ULN6a876'), true);
+assert.deepStrictEqual(
+  helpers.extractWechatChannelsRequestPayload('https://weixin.qq.com/sph/A7ULN6a876'),
+  { shortUri: 'A7ULN6a876' },
+);
+assert.deepStrictEqual(
+  helpers.extractWechatChannelsRequestPayload('https://channels.weixin.qq.com/web/pages/feed?eid=export%2Fdemo'),
+  { exportId: 'export/demo' },
+);
+const normalizedChannelsObjectDesc = helpers.normalizeWechatChannelsFeedPayload({
+  data: {
+    authorInfo: { nickname: '视频号作者' },
+    object_desc: {
+      description: '发布简介不能作为转写',
+      media: [
+        {
+          url: 'https://finder.video.qq.com/encrypted.mp4',
+          decode_key: '210003037022918',
+        },
+      ],
+    },
+  },
+});
+assert.strictEqual(normalizedChannelsObjectDesc.videoUrl, 'https://finder.video.qq.com/encrypted.mp4');
+assert.deepStrictEqual(normalizedChannelsObjectDesc.mediaUrls, ['https://finder.video.qq.com/encrypted.mp4']);
+assert.strictEqual(normalizedChannelsObjectDesc.decodeKey, '210003037022918');
+assert.strictEqual(normalizedChannelsObjectDesc.author, '视频号作者');
+const normalizedChannelsNestedObject = helpers.normalizeWechatChannelsFeedPayload({
+  data: {
+    object: {
+      id: 'page-export-id',
+      contact: { nickname: '页面作者' },
+      objectDesc: {
+        description: '页面分享视频',
+        media: [
+          {
+            url: 'https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc123',
+            urlToken: '&token=tok456',
+            decodeKey: '987654321',
+            thumbUrl: 'https://cdn.example.com/page-cover.jpg',
+            videoPlayLen: 12,
+            fileSize: 1048576,
+            videoResolution: '1080p',
+          },
+        ],
+      },
+    },
+    sceneInfo: { dynamicExportId: 'page-export-id' },
+  },
+});
+assert.strictEqual(
+  normalizedChannelsNestedObject.videoUrl,
+  'https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc123&token=tok456',
+);
+assert.deepStrictEqual(normalizedChannelsNestedObject.mediaUrls, [
+  'https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc123&token=tok456',
+]);
+assert.strictEqual(normalizedChannelsNestedObject.decodeKey, '987654321');
+assert.strictEqual(normalizedChannelsNestedObject.author, '页面作者');
+assert.strictEqual(normalizedChannelsNestedObject.coverUrl, 'https://cdn.example.com/page-cover.jpg');
+assert.strictEqual(normalizedChannelsNestedObject.mediaItems[0].decryptKey, '987654321');
+assert.strictEqual(normalizedChannelsNestedObject.mediaItems[0].durationSeconds, 12);
+assert.strictEqual(typeof helpers.extractWechatChannelsProfilesFromText, 'function');
+const extractedWechatChannelsProfiles = helpers.extractWechatChannelsProfilesFromText(JSON.stringify({
+  ret: 0,
+  data: {
+    object: {
+      id: 'captured-export-id',
+      contact: { nickname: '捕获作者' },
+      objectDesc: {
+        description: '从登录窗口捕获的视频号对象',
+        media: [
+          {
+            url: 'https://finder.video.qq.com/251/20302/stodownload?encfilekey=captured',
+            urlToken: '&token=captured-token',
+            decodeKey: '123456789',
+          },
+        ],
+      },
+    },
+  },
+}), 'https://channels.weixin.qq.com/web/pages/feed?eid=captured-export-id');
+assert.strictEqual(extractedWechatChannelsProfiles.length, 1);
+assert.strictEqual(
+  extractedWechatChannelsProfiles[0].mediaItems[0].url,
+  'https://finder.video.qq.com/251/20302/stodownload?encfilekey=captured&token=captured-token',
+);
+assert.strictEqual(extractedWechatChannelsProfiles[0].mediaItems[0].decryptKey, '123456789');
+assert.deepStrictEqual(
+  helpers.normalizeBrowserCapturedMediaUrls([
+    { url: 'https://res.wx.qq.com/open/js/finder-preview.js' },
+    { url: 'https://mpvideo.qpic.cn/cover-only/0?dis_k=demo', resourceType: 'image' },
+    { url: 'https://finder.video.qq.com/251/20304/stodownload?m=demo&filekey=video.mp4' },
+    'https://mpvideo.qpic.cn/0b2eiaaaakiaaaaabcdef/0?dis_k=demo',
+    { request: { url: 'https://example.com/cover.jpg' } },
+    'https://finder.video.qq.com/251/20304/stodownload?m=demo&filekey=video.mp4',
+  ]),
+  [
+    'https://finder.video.qq.com/251/20304/stodownload?m=demo&filekey=video.mp4',
+    'https://mpvideo.qpic.cn/0b2eiaaaakiaaaaabcdef/0?dis_k=demo',
+  ],
+);
+assert.deepStrictEqual(
+  helpers.extractSocialMediaUrlsFromHtml(`
+    <script>
+      window.__finderData = {
+        raw: "https:\\/\\/mpvideo.qpic.cn\\/0b2eiaaaakiaaaaabcdef\\/0?dis_k=demo"
+      };
+    </script>
+  `),
+  ['https://mpvideo.qpic.cn/0b2eiaaaakiaaaaabcdef/0?dis_k=demo'],
+);
+assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);
 assert.strictEqual(typeof helpers.getLocalAsrInstallRoot, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallStatus, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrScriptVersionStatus, 'function');
@@ -124,8 +251,21 @@ assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
 assert.ok(pluginMainSource.includes("source.includes('python-venv')"));
 assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
 assert.ok(pluginMainSource.includes("source.includes('exec \"\\\\$WHISPER_CPP_BIN\" \"\\\\$@\"')"));
+assert.ok(pluginMainSource.includes("source.includes('TENCENT_MODEL_URL=')"));
+assert.ok(pluginMainSource.includes("source.includes('MODEL_URLS=(\"$TENCENT_MODEL_URL\" \"$MODEL_MIRROR_URL\" \"$MODEL_URL\")')"));
 assert.ok(pluginMainSource.includes("source.includes('[string]$InstallRoot')"));
 assert.ok(pluginMainSource.includes("source.includes('safeModelPath')"));
+assert.ok(pluginMainSource.includes("source.includes('$TencentCosAssetBaseUrl')"));
+assert.ok(pluginMainSource.includes("source.includes('$WhisperWindowsTencentUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('$FfmpegTencentUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('$ModelTencentUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('Get-EnabledAssetUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('$WhisperWindowsFallbackUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('GitHub release page parsing failed')"));
+assert.ok(pluginMainSource.includes("source.includes('INSTALLER FAILED')"));
+assert.ok(pluginMainSource.includes('LOCAL_ASR_INSTALL_TIMEOUT_MS'));
+assert.ok(pluginMainSource.includes('本地转写组件安装超时'));
+assert.ok(pluginMainSource.includes('安装超过 20 分钟'));
 assert.ok(pluginMainSource.includes('downloadedPath'));
 assert.ok(pluginMainSource.includes('return downloadedPath'));
 assert.ok(pluginMainSource.includes('return installerPath'));
@@ -165,10 +305,12 @@ assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionEnabled, false
 assert.strictEqual(helpers.mergeSettings({}).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({}).aiMetadataEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ aiMetadataEnabled: false }).aiMetadataEnabled, true);
-assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, false);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, true);
 assert.strictEqual(helpers.mergeSettings({}).xiaohongshuCommentsEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
+assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, true);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
 assert.strictEqual(helpers.mergeSettings({}).deepseekApiKey, '');
 assert.strictEqual(helpers.mergeSettings({}).deepseekModel, 'deepseek-chat');
 assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
@@ -183,18 +325,43 @@ assert.strictEqual(pluginMainSource.includes(".setButtonText('兑换并开通')"
 assert.strictEqual(pluginMainSource.includes(".setPlaceholder('例如 ZZAI030')"), false);
 assert.ok(pluginMainSource.includes('小程序名字：Obsidian 内容同步助手'));
 assert.ok(pluginMainSource.includes('打开微信小程序【Obsidian 内容同步助手】'));
-assert.ok(pluginMainSource.includes(".setName('立即绑定')"));
-assert.ok(pluginMainSource.includes(".setButtonText('立即绑定')"));
-assert.ok(pluginMainSource.includes('已完成绑定的微信'));
+assert.ok(pluginMainSource.includes(".setName('输入绑定码')"));
+assert.strictEqual(pluginMainSource.includes(".setName('立即绑定')"), false);
+assert.ok(pluginMainSource.includes(".setButtonText(primaryBinding ? '绑定成功' : '立即绑定')"));
+assert.strictEqual(pluginMainSource.includes('基础绑定微信'), false);
+assert.strictEqual(pluginMainSource.includes('renderBindingSetting(containerEl, primaryBinding'), false);
+assert.ok(pluginMainSource.includes('基础绑定区只保留 1 个小程序绑定码'));
+assert.ok(pluginMainSource.includes("text: '额外绑定设备'"));
+assert.ok(pluginMainSource.includes(".setName('绑定额外设备')"));
+assert.ok(pluginMainSource.includes("ensureProFeatureAccess('额外绑定设备')"));
 assert.strictEqual(pluginMainSource.includes("text: '已绑定小程序码'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('新增绑定码')"), false);
 assert.strictEqual(pluginMainSource.includes(".setButtonText('新增绑定码')"), false);
 assert.ok(pluginMainSource.includes("text: '使用教程'"));
 assert.ok(pluginMainSource.includes("text: '绑定小程序'"));
 assert.strictEqual(pluginMainSource.includes("text: 'Pro 本地转写功能'"), false);
-assert.ok(pluginMainSource.includes("text: '高级选项'"));
+assert.ok(pluginMainSource.includes("text: 'Pro 高级选项'"));
+assert.ok(pluginMainSource.includes("text: '兑换码与权限状态'"));
+assert.ok(pluginMainSource.includes("autoRedeemProCode"));
+assert.ok(pluginMainSource.includes("/entitlements/auto-redeem"));
+assert.ok(pluginMainSource.includes('pendingRedeemCode'));
+assert.ok(pluginMainSource.includes('formatRedeemAccessError'));
+assert.ok(pluginMainSource.includes(".setButtonText('自动识别')"));
+assert.ok(pluginMainSource.includes('兑换码：'));
 assert.ok(pluginMainSource.includes("createEl('details'"));
-assert.ok(pluginMainSource.includes("text: 'AI 简介与关键词'"));
+assert.strictEqual(pluginMainSource.includes("text: 'AI 简介与关键词'"), false);
+assert.strictEqual(pluginMainSource.includes(".setName('启用 AI 简介与关键词')"), false);
+assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默认开启'));
+assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), false);
+assert.ok(pluginMainSource.includes('小红书图文 OCR：已默认开启'));
+assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
+assert.ok(pluginMainSource.includes('图片文字识别 OCR 模块'));
+assert.ok(pluginMainSource.includes('getLocalOcrInstallStatus'));
+assert.ok(pluginMainSource.includes('runLocalImageOcr'));
+assert.ok(pluginMainSource.includes('install-local-ocr.ps1'));
+assert.ok(pluginMainSource.includes('install-local-ocr-macos.sh'));
+assert.strictEqual(pluginMainSource.includes("requestJson('/ocr/images'"), false);
+assert.strictEqual(pluginMainSource.includes('!settings.aiMetadataEnabled'), false);
 assert.strictEqual(pluginMainSource.includes(".setName('DeepSeek API Key')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('测试 AI 连接')"), false);
 assert.strictEqual(pluginMainSource.includes("text: '公众号评论区提取（实验性）'"), false);
@@ -208,11 +375,18 @@ assert.strictEqual(pluginMainSource.includes(".setName('Feishu web login')"), fa
 assert.strictEqual(pluginMainSource.includes(".setButtonText('Login Feishu')"), false);
 assert.ok(pluginMainSource.includes("text: '小红书评论区提取'"));
 assert.ok(pluginMainSource.includes(".setName('提取小红书评论区')"));
-assert.ok(pluginMainSource.includes("text: '本地转写组件（高级/备用）'"));
+assert.strictEqual(pluginMainSource.includes("text: '视频号转写实验'"), false);
+assert.strictEqual(pluginMainSource.includes("id: 'open-wechat-channels-listener'"), false);
+assert.strictEqual(pluginMainSource.includes("text: '音视频转写组件安装'"), false);
+assert.ok(pluginMainSource.includes("text: '本地转写组件安装'"));
+assert.ok(pluginMainSource.includes(".setName('本地转写组件安装')"));
+assert.ok(pluginMainSource.includes('runLocalAsrButtonTask(button'));
+assert.ok(pluginMainSource.includes('button.setButtonText(runningText)'));
+assert.ok(pluginMainSource.includes('button.setButtonText(originalText)'));
 assert.ok(pluginMainSource.includes('默认走本地转写'));
 assert.ok(pluginMainSource.includes('wechat-inbox-sync-section-spacer'));
 assert.ok(pluginMainSource.indexOf("text: '使用教程'") < pluginMainSource.indexOf("text: '绑定小程序'"));
-assert.ok(pluginMainSource.indexOf("text: '绑定小程序'") < pluginMainSource.indexOf("text: '高级选项'"));
+assert.ok(pluginMainSource.indexOf("text: '绑定小程序'") < pluginMainSource.indexOf("text: 'Pro 高级选项'"));
 assert.ok(pluginMainSource.includes('本地转写系统'));
 assert.ok(pluginMainSource.includes('如果苹果电脑安装失败，请手动选择 macOS'));
 assert.ok(pluginMainSource.includes('install.log'));
@@ -238,6 +412,7 @@ assert.strictEqual(pluginMainSource.includes("setName('云端预转写阈值')")
 assert.ok(pluginMainSource.includes('正在同步'));
 assert.ok(pluginMainSource.includes('正在处理'));
 assert.strictEqual(helpers.getSocialRequestHeaders('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4').Referer, 'https://www.douyin.com/');
+assert.strictEqual(helpers.getSocialRequestHeaders('https://mpvideo.qpic.cn/0b2eiaaaakiaaaaabcdef/0?dis_k=demo').Referer, 'https://channels.weixin.qq.com/');
 assert.strictEqual(helpers.shouldResolveMediaDownloadUrl('https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000demo'), true);
 assert.strictEqual(helpers.shouldResolveMediaDownloadUrl('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4'), false);
 assert.strictEqual(
@@ -417,6 +592,9 @@ const feishuCleanMarkdown = helpers.extractFeishuMarkdownFromHtml(`
       <p>添加快捷方式最近修改: 昨天 16:14</p>
       <p>上传日志</p>
       <p>联系客服</p>
+      <p>搜索</p>
+      <p>墨度</p>
+      <p>莞尔</p>
       <p>功能更新</p>
       <p>帮助中心</p>
       <p>效率指南</p>
@@ -445,6 +623,9 @@ assert.strictEqual(feishuCleanMarkdown.includes('添加快捷方式'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('最近修改'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('上传日志'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('联系客服'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('搜索'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('墨度'), false);
+assert.strictEqual(feishuCleanMarkdown.includes('莞尔'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('功能更新'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('帮助中心'), false);
 assert.strictEqual(feishuCleanMarkdown.includes('效率指南'), false);
@@ -572,6 +753,37 @@ assert.ok(feishuClientVarsMarkdown.includes('| 频段 | 频率 |'));
 assert.ok(feishuClientVarsMarkdown.includes('| Ka | 27-40GHz |'));
 assert.ok(feishuClientVarsMarkdown.includes('![图片](https://example.com/feishu-image.png)'));
 assert.ok(feishuClientVarsMarkdown.includes('- 列表项目'));
+const feishuMergedMarkdown = helpers.mergeFeishuRenderedAndClientVarsMarkdown([
+  '# 飞书云文档',
+  '',
+  '搜索',
+  '',
+  '墨度',
+  '',
+  '![头像](blob:https://feishu.example/avatar)',
+  '',
+  '- 飞书新版标题 - 一级目录 - 二级目录 - 三级目录',
+  '',
+  '上传日志',
+  '',
+  '联系客服',
+  '',
+  '这是一大段渲染出来的网页壳内容，长度比结构化正文更长，但不应该被优先使用。',
+].join('\n'), [
+  '# 飞书新版标题',
+  '',
+  '正文第一段',
+  '',
+  '## 一级目录',
+  '',
+  '### 二级目录',
+].join('\n'));
+assert.ok(feishuMergedMarkdown.startsWith('# 飞书新版标题'));
+assert.ok(feishuMergedMarkdown.includes('## 一级目录'));
+assert.ok(feishuMergedMarkdown.includes('### 二级目录'));
+assert.strictEqual(feishuMergedMarkdown.includes('上传日志'), false);
+assert.strictEqual(feishuMergedMarkdown.includes('联系客服'), false);
+assert.strictEqual(feishuMergedMarkdown.includes('墨度'), false);
 assert.strictEqual(typeof helpers.extractWebpageMetadataFromHtml, 'function');
 const articleMeta = helpers.extractWebpageMetadataFromHtml(`
   <html>
@@ -899,6 +1111,14 @@ assert.strictEqual(
   helpers.getLocalAsrInstallRoot('C:\\Users\\demo', 'safe', 'win32', { PUBLIC: 'C:\\Users\\Public' }),
   'C:\\Users\\Public\\wechat-inbox-local-asr',
 );
+assert.strictEqual(typeof helpers.extractLocalAsrInstallRootFromCommand, 'function');
+assert.strictEqual(
+  helpers.extractLocalAsrInstallRootFromCommand(
+    'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\ADMIN\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+    'win32',
+  ),
+  'C:\\Users\\ADMIN\\.wechat-inbox-local-asr',
+);
 assert.strictEqual(
   helpers.getLocalAsrRepairAction({
     platform: 'win32',
@@ -1154,6 +1374,65 @@ assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('avatar-user'), 
 assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('recommend-banner'), false);
 assert.strictEqual(xiaohongshuNoisyImagesNote.markdown.includes('recommend-noise'), false);
 assert.strictEqual(xiaohongshuNoisyImagesNote.imageUrls.length, 3);
+
+const xiaohongshuDefaultShareImageNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<meta property="og:title" content="XHS Default Share Image Title">',
+  '<meta property="og:image" content="https://picasso-static.xiaohongshu.com/fe-platform/default-logo.png">',
+  '</head><body>',
+  '<img src="https://fe-platform.xhscdn.com/platform/blank-placeholder.png?imageView2/2/2/format/png">',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"正文。 #真实图集","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-cover!nd_dft_wlteh_jpg_3"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-inner!nd_dft_wlteh_jpg_3"}]}}</script>',
+  '</body></html>',
+].join(''), 'https://www.xiaohongshu.com/explore/default-share-image');
+assert.strictEqual(xiaohongshuDefaultShareImageNote.markdown.includes('picasso-static'), false);
+assert.strictEqual(xiaohongshuDefaultShareImageNote.markdown.includes('fe-platform.xhscdn.com/platform'), false);
+assert.ok(xiaohongshuDefaultShareImageNote.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/spectrum/real-cover!nd_dft_wlteh_jpg_3)'));
+assert.ok(xiaohongshuDefaultShareImageNote.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/spectrum/real-inner!nd_dft_wlteh_jpg_3)'));
+assert.strictEqual(xiaohongshuDefaultShareImageNote.imageUrls.length, 2);
+
+const xiaohongshuPrebuiltMarkdownNote = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'xhs-prebuilt-bad-cover',
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/prebuilt-bad-cover',
+    metadata: {
+      title: 'XHS Prebuilt Bad Cover',
+      url: 'https://www.xiaohongshu.com/explore/prebuilt-bad-cover',
+      markdown: [
+        '## 标题',
+        '',
+        'XHS Prebuilt Bad Cover',
+        '',
+        '## 正文',
+        '',
+        '正文。',
+        '',
+        '## 图片',
+        '',
+        '### 封面',
+        '',
+        '![封面](https://picasso-static.xiaohongshu.com/fe-platform/default-logo.png)',
+        '',
+        '### 内页图',
+        '',
+        '![内页图 1](https://fe-platform.xhscdn.com/platform/blank-placeholder.png?imageView2/2/2/format/png)',
+        '',
+        '![内页图 2](https://sns-webpic-qc.xhscdn.com/spectrum/real-cover!nd_dft_wlteh_jpg_3)',
+        '',
+        '![内页图 3](https://sns-webpic-qc.xhscdn.com/spectrum/real-inner!nd_dft_wlteh_jpg_3)',
+        '',
+      ].join('\n'),
+    },
+    createdAt: '2026-07-03T00:00:00.000Z',
+  },
+  title: 'XHS Prebuilt Bad Cover',
+  syncedAt: '2026-07-03T00:01:00.000Z',
+});
+assert.strictEqual(xiaohongshuPrebuiltMarkdownNote.includes('picasso-static'), false);
+assert.strictEqual(xiaohongshuPrebuiltMarkdownNote.includes('fe-platform.xhscdn.com/platform'), false);
+assert.ok(xiaohongshuPrebuiltMarkdownNote.includes('![封面](https://sns-webpic-qc.xhscdn.com/spectrum/real-cover!nd_dft_wlteh_jpg_3)'));
+assert.ok(xiaohongshuPrebuiltMarkdownNote.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/spectrum/real-inner!nd_dft_wlteh_jpg_3)'));
+assert.strictEqual(xiaohongshuPrebuiltMarkdownNote.includes('![内页图 2](https://sns-webpic-qc.xhscdn.com/spectrum/real-cover!nd_dft_wlteh_jpg_3)'), false);
 
 const xiaohongshuNoisyPageNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
@@ -1756,6 +2035,8 @@ async function runAsyncHydrationTests() {
     http.request = originalHttpRequest;
   }
 
+  assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);
+
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.douyin.com/video/123') {
       return {
@@ -2172,6 +2453,7 @@ async function runAsyncHydrationTests() {
     apiBase: 'https://example.com/sync',
     token: 'PRO-123',
     clientId: 'test-client',
+    pendingRedeemCode: 'OBPROT93C6',
     aiProvider: 'local',
     localTranscriptionCommand: 'echo test',
     bindings: [{
@@ -2869,6 +3151,7 @@ async function runLocalTranscriptionEntitlementTests() {
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
     clientId: 'test-client',
+    pendingRedeemCode: 'OBPROT93C6',
     aiProvider: 'local',
     localTranscriptionCommand: 'echo test',
     bindings: [{
@@ -2879,10 +3162,11 @@ async function runLocalTranscriptionEntitlementTests() {
     }],
   });
 
-  requestUrlMock = async ({ url, method, headers }) => {
-    assert.strictEqual(method, 'GET');
-    assert.strictEqual(url, 'https://example.com/sync/entitlements/status?plan=local_transcription_beta');
+  requestUrlMock = async ({ url, method, headers, body }) => {
+    assert.strictEqual(method, 'POST');
+    assert.strictEqual(url, 'https://example.com/sync/entitlements/redeem');
     assert.strictEqual(headers.Authorization, 'Bearer ABC-123');
+    assert.deepStrictEqual(JSON.parse(body), { code: 'OBPROT93C6' });
     return {
       status: 200,
       text: JSON.stringify({
@@ -2892,18 +3176,54 @@ async function runLocalTranscriptionEntitlementTests() {
           plan: 'local_transcription_beta',
           status: 'active',
           expiresAt: '2026-07-03T08:00:00.000Z',
+          code: 'OBPROT93C6',
         },
       }),
     };
   };
 
   try {
-    const status = await plugin.getLocalTranscriptionEntitlementStatus();
-    assert.strictEqual(status.hasAccess, true);
+    const status = await plugin.getProFeatureAccessStatus({ forceRefresh: true });
+    assert.strictEqual(status.hasAccess, true, JSON.stringify(status));
+    assert.strictEqual(status.code, 'OBPROT93C6');
     assert.strictEqual(status.expiresAt, '2026-07-03T08:00:00.000Z');
     assert.strictEqual(plugin.settings.localTranscriptionEntitlementStatus.hasAccess, true);
+    assert.strictEqual(plugin.settings.localTranscriptionEntitlementStatus.code, 'OBPROT93C6');
+    assert.strictEqual(plugin.settings.pendingRedeemCode, 'OBPROT93C6');
     assert.strictEqual(plugin.settings.localTranscriptionEntitlementStatus.expiresAt, '2026-07-03T08:00:00.000Z');
     assert.strictEqual(typeof plugin.redeemLocalTranscriptionCode, 'undefined');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+
+  const cachedCodePlugin = new PluginClass();
+  cachedCodePlugin.saveData = async () => {};
+  cachedCodePlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    pendingRedeemCode: 'OBPROT93C6',
+    localTranscriptionEntitlementStatus: {
+      hasAccess: true,
+      plan: 'local_transcription_beta',
+      status: 'active',
+      expiresAt: '2026-07-03T08:00:00.000Z',
+      code: 'OBPROT93C6',
+    },
+    bindings: [{
+      token: 'ABC-123',
+      label: '付费微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  requestUrlMock = async () => {
+    throw new Error('cached code access should not request the cloud');
+  };
+  try {
+    const status = await cachedCodePlugin.getProFeatureAccessStatus();
+    assert.strictEqual(status.hasAccess, true);
+    assert.strictEqual(status.code, 'OBPROT93C6');
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
@@ -2923,50 +3243,114 @@ async function runLocalTranscriptionEntitlementTests() {
       status: 'bound',
     }],
   });
-  const trialFallbackUrls = [];
-  requestUrlMock = async ({ url, method, headers }) => {
-    assert.strictEqual(method, 'GET');
-    assert.strictEqual(headers.Authorization, 'Bearer TRIAL-123');
-    trialFallbackUrls.push(url);
-    if (url.endsWith('plan=local_transcription_beta')) {
-      return {
-        status: 200,
-        text: JSON.stringify({
-          success: true,
-          data: {
-            hasAccess: false,
-            plan: '',
-            status: 'inactive',
-            expiresAt: '',
-          },
-        }),
-      };
-    }
-    assert.strictEqual(url, 'https://example.com/sync/entitlements/status?plan=local_transcription_trial');
+  requestUrlMock = async () => {
+    throw new Error('should not query entitlement by bind code when no redeem code is entered');
+  };
+
+  try {
+    const status = await trialFallbackPlugin.getProFeatureAccessStatus({ forceRefresh: true });
+    assert.strictEqual(status.hasAccess, false);
+    assert.strictEqual(status.status, 'missing_redeem_code');
+    assert.strictEqual(trialFallbackPlugin.settings.localTranscriptionEntitlementStatus.hasAccess, false);
+    await assert.rejects(
+      () => trialFallbackPlugin.ensureProFeatureAccess('测试功能'),
+      /兑换码/,
+    );
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+
+  const emptyInputWithCachedProPlugin = new PluginClass();
+  emptyInputWithCachedProPlugin.saveData = async () => {};
+  emptyInputWithCachedProPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'CACHED-123',
+    clientId: 'cached-client',
+    pendingRedeemCode: '',
+    localTranscriptionEntitlementStatus: {
+      hasAccess: true,
+      plan: 'local_transcription_beta',
+      status: 'active',
+      expiresAt: '2026-07-30T08:00:00.000Z',
+      code: 'OBPROT93C6',
+    },
+    bindings: [{
+      token: 'CACHED-123',
+      label: '已购微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  requestUrlMock = async () => {
+    throw new Error('should not use cached Pro when the redeem code input is empty');
+  };
+  try {
+    const status = await emptyInputWithCachedProPlugin.getProFeatureAccessStatus();
+    assert.strictEqual(status.hasAccess, false);
+    assert.strictEqual(status.status, 'missing_redeem_code');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+
+  const autoRedeemPlugin = new PluginClass();
+  autoRedeemPlugin.saveData = async () => {};
+  autoRedeemPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'AUTO-123',
+    clientId: 'auto-client',
+    aiProvider: 'local',
+    localTranscriptionCommand: 'echo test',
+    bindings: [{
+      token: 'AUTO-123',
+      label: '自动识别微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  const autoRedeemRequests = [];
+  requestUrlMock = async ({ url, method, headers, body }) => {
+    assert.strictEqual(headers.Authorization, 'Bearer AUTO-123');
+    autoRedeemRequests.push([method, url, body || '']);
+    assert.strictEqual(method, 'POST');
+    assert.strictEqual(url, 'https://example.com/sync/entitlements/auto-redeem');
     return {
       status: 200,
       text: JSON.stringify({
         success: true,
         data: {
           hasAccess: true,
-          plan: 'local_transcription_trial',
+          plan: 'local_transcription_beta',
           status: 'active',
-          expiresAt: '2026-06-23T02:10:14.993Z',
+          expiresAt: '2026-07-30T08:00:00.000Z',
+          code: 'OBPROT93C6',
+          source: 'redeem_code',
+          autoRedeemed: true,
         },
       }),
     };
   };
 
   try {
-    const status = await trialFallbackPlugin.getLocalTranscriptionEntitlementStatus();
-    assert.deepStrictEqual(trialFallbackUrls, [
-      'https://example.com/sync/entitlements/status?plan=local_transcription_beta',
-      'https://example.com/sync/entitlements/status?plan=local_transcription_trial',
+    const status = await autoRedeemPlugin.autoRedeemProCode({ silent: true });
+    assert.deepStrictEqual(autoRedeemRequests.map(([method, url]) => [method, url]), [
+      ['POST', 'https://example.com/sync/entitlements/auto-redeem'],
     ]);
     assert.strictEqual(status.hasAccess, true);
-    assert.strictEqual(status.plan, 'local_transcription_trial');
-    assert.strictEqual(status.expiresAt, '2026-06-23T02:10:14.993Z');
-    assert.strictEqual(trialFallbackPlugin.settings.localTranscriptionEntitlementStatus.hasAccess, true);
+    assert.strictEqual(status.code, 'OBPROT93C6');
+    assert.strictEqual(status.expiresAt, '2026-07-30T08:00:00.000Z');
+    assert.strictEqual(status.bindingLabel, '自动识别微信');
+    assert.strictEqual(autoRedeemPlugin.settings.pendingRedeemCode, 'OBPROT93C6');
+    assert.strictEqual(autoRedeemPlugin.settings.localTranscriptionEntitlementStatus.code, 'OBPROT93C6');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+
+  requestUrlMock = async () => {
+    throw new Error('Request failed, status 404');
+  };
+  try {
+    const status = await autoRedeemPlugin.autoRedeemProCode({ silent: true });
+    assert.strictEqual(status, null);
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
@@ -2985,23 +3369,14 @@ async function runLocalTranscriptionEntitlementTests() {
       status: 'bound',
     }],
   });
-  requestUrlMock = async () => ({
-    status: 200,
-    text: JSON.stringify({
-      success: true,
-      data: {
-        hasAccess: false,
-        plan: 'local_transcription_beta',
-        status: 'expired',
-        expiresAt: '2026-06-02T08:00:00.000Z',
-      },
-    }),
-  });
+  requestUrlMock = async () => {
+    throw new Error('should not query entitlement by bind code for Pro feature access');
+  };
 
   try {
     await assert.rejects(
       () => deniedPlugin.runConfiguredTranscription('https://media.example.com/demo.mp4'),
-      /本地转写权限/,
+      /兑换码/,
     );
   } finally {
     requestUrlMock = previousRequestUrlMock;
@@ -3076,6 +3451,90 @@ async function runCloudFailedVoiceLocalFallbackTests() {
   assert.strictEqual(result.metadata.cloudTranscriptionError, '云端转写额度不足');
 }
 
+async function runAudioVideoFileAttachmentTranscriptionTests() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    aiProvider: 'local',
+    localTranscriptionCommand: 'echo test',
+    aiMetadataEnabled: true,
+  });
+  const writtenBinaries = [];
+  plugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => true,
+        writeBinary: async (filePath, buffer) => {
+          writtenBinaries.push([filePath, Buffer.from(buffer).toString('utf8')]);
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  plugin.requestFileDownloadUrl = async (fileID) => {
+    assert.strictEqual(fileID, 'cloud://files/wechat-channels.mp4');
+    return 'https://temp.example.com/wechat-channels.mp4';
+  };
+  plugin.downloadArrayBuffer = async (url) => {
+    assert.strictEqual(url, 'https://temp.example.com/wechat-channels.mp4');
+    return Buffer.from('video-bytes');
+  };
+  const transcriptionCalls = [];
+  plugin.runConfiguredTranscription = async (audioUrl, options = {}) => {
+    transcriptionCalls.push([audioUrl, options.fileID, options.source, options.title]);
+    return {
+      transcription: '评论区才是最好的选题库，因为用户会把真实问题直接写出来。',
+      source: 'local',
+    };
+  };
+  plugin.showSyncProgress = () => {};
+
+  const result = await plugin.writeFileAttachment({
+    _id: 'record-video-file',
+    type: 'file',
+    content: 'wechat-channels.mp4',
+    createdAt: '2026-06-30T10:00:00.000Z',
+    metadata: {
+      fileID: 'cloud://files/wechat-channels.mp4',
+      fileName: 'wechat-channels.mp4',
+      fileExt: 'mp4',
+      fileSize: 1024,
+    },
+  }, '临时收集', '2026-06-30', '视频号-本地视频', {
+    token: 'PRO-123',
+  });
+
+  assert.deepStrictEqual(transcriptionCalls, [[
+    'https://temp.example.com/wechat-channels.mp4',
+    'cloud://files/wechat-channels.mp4',
+    'file-attachment',
+    '视频号-本地视频',
+  ]]);
+  assert.deepStrictEqual(writtenBinaries, [[
+    '临时收集/文件附件/2026-06-30/视频号-本地视频-wechat-channels.mp4',
+    'video-bytes',
+  ]]);
+  assert.strictEqual(result.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(result.metadata.transcription, '评论区才是最好的选题库，因为用户会把真实问题直接写出来。');
+  assert.strictEqual(result.metadata.transcriptionSource, 'file-attachment');
+  assert.strictEqual(result.metadata.aiMetadataSource, 'transcription');
+  assert.ok(result.metadata.description.includes('评论区才是最好的选题库'));
+  assert.ok(result.metadata.keywords.length > 0);
+
+  const markdown = helpers.buildMarkdownForRecord({
+    record: {
+      ...result,
+      _id: 'record-video-file',
+      createdAt: '2026-06-30T10:00:00.000Z',
+    },
+    title: '视频号-本地视频',
+    syncedAt: '2026-06-30T10:05:00.000Z',
+  });
+  assert.ok(markdown.includes('## 口播/音频文案'));
+  assert.ok(markdown.includes('评论区才是最好的选题库'));
+  assert.match(markdown, /^description: .*评论区才是最好的选题库/m);
+  assert.match(markdown, /^keywords: .+/m);
+}
+
 async function runPodcastDownloadHeaderTests() {
   const plugin = new PluginClass();
   let capturedHeaders = null;
@@ -3096,9 +3555,80 @@ async function runPodcastDownloadHeaderTests() {
   } finally {
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
   }
+
+  const imagePlugin = new PluginClass();
+  imagePlugin.downloadArrayBuffer = async () => Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(1024, 0),
+  ]);
+  await assert.rejects(
+    () => imagePlugin.downloadMediaToTempFile('https://mpvideo.qpic.cn/cover-only/0?dis_k=demo', {
+      sourceUrl: 'https://weixin.qq.com/sph/AmHcK1JE0j',
+    }),
+    /不是有效音视频|不是有效/,
+  );
+
+  assert.strictEqual(typeof helpers.decryptWechatChannelsMediaBuffer, 'function');
+  assert.strictEqual(typeof helpers.generateWechatChannelsDecryptorBytes, 'function');
+  const originalMp4Header = Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftypisom'),
+    Buffer.alloc(512, 2),
+  ]);
+  const seed = '987654321';
+  const encryptedMp4Header = Buffer.from(originalMp4Header);
+  const keyBytes = helpers.generateWechatChannelsDecryptorBytes(seed, encryptedMp4Header.length);
+  for (let index = 0; index < encryptedMp4Header.length; index += 1) {
+    encryptedMp4Header[index] ^= keyBytes[index];
+  }
+  assert.deepStrictEqual(
+    helpers.decryptWechatChannelsMediaBuffer(encryptedMp4Header, seed),
+    originalMp4Header,
+  );
+
+  const encryptedDownloadPlugin = new PluginClass();
+  encryptedDownloadPlugin.downloadArrayBuffer = async () => encryptedMp4Header;
+  const decryptedTempPath = await encryptedDownloadPlugin.downloadMediaToTempFile(
+    'https://finder.video.qq.com/251/20302/stodownload?encfilekey=abc123',
+    {
+      sourceUrl: 'https://weixin.qq.com/sph/AmHcK1JE0j',
+      decryptKey: seed,
+    },
+  );
+  try {
+    assert.strictEqual(path.extname(decryptedTempPath), '.mp4');
+    assert.deepStrictEqual(fs.readFileSync(decryptedTempPath).subarray(0, originalMp4Header.length), originalMp4Header);
+  } finally {
+    if (fs.existsSync(decryptedTempPath)) fs.unlinkSync(decryptedTempPath);
+  }
 }
 
 async function runLocalAsrRepairDecisionTests() {
+  const commandRootPlugin = new PluginClass();
+  commandRootPlugin.settings = helpers.mergeSettings({
+    localAsrPlatform: 'win32',
+    localAsrInstallMode: 'default',
+    localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\ADMIN\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+  });
+  const originalFsExistsSync = fs.existsSync;
+  fs.existsSync = (filePath) => {
+    const value = String(filePath || '');
+    if (value.startsWith('C:\\Users\\ADMIN\\.wechat-inbox-local-asr')) return true;
+    if (value.startsWith('C:\\Users\\11266\\.wechat-inbox-local-asr')) return false;
+    return originalFsExistsSync(filePath);
+  };
+  try {
+    assert.strictEqual(
+      commandRootPlugin.getConfiguredLocalAsrInstallRoot(),
+      'C:\\Users\\ADMIN\\.wechat-inbox-local-asr',
+    );
+    const status = commandRootPlugin.getLocalAsrInstallStatus();
+    assert.strictEqual(status.installRoot, 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr');
+    assert.strictEqual(status.ready, true);
+  } finally {
+    fs.existsSync = originalFsExistsSync;
+  }
+
   const healthyPlugin = new PluginClass();
   healthyPlugin.settings = helpers.mergeSettings({
     localAsrPlatform: 'win32',
@@ -3161,6 +3691,7 @@ async function main() {
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
+  await runAudioVideoFileAttachmentTranscriptionTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
 }

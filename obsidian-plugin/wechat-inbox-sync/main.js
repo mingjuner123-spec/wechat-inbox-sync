@@ -11,15 +11,16 @@ const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsid
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
+const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
 const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
@@ -53,6 +54,7 @@ const DEFAULT_SETTINGS = {
   settingsVersion: 2,
   token: '',
   pendingBindCode: '',
+  pendingRedeemCode: '',
   localTranscriptionEntitlementStatus: null,
   bindings: [],
   clientId: '',
@@ -63,6 +65,8 @@ const DEFAULT_SETTINGS = {
   aiProvider: 'off',
   aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
+  xiaohongshuImageOcrEnabled: true,
+  wechatChannelsExperimentUrl: '',
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -85,6 +89,15 @@ const DEFAULT_SETTINGS = {
   tencentPollAttempts: 60,
   tencentPollIntervalMs: 5000,
 };
+
+const XIAOHONGSHU_OCR_MAX_IMAGES = 18;
+const XIAOHONGSHU_OCR_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+function getImageFileExtension(url = '') {
+  const match = String(url || '').split('?')[0].match(/\.([a-z0-9]{2,5})$/i);
+  const ext = match ? match[1].toLowerCase() : 'jpg';
+  return ['jpg', 'jpeg', 'png', 'webp', 'bmp'].includes(ext) ? ext : 'jpg';
+}
 
 const AI_PROVIDER_NAMES = {
   off: '关闭转写',
@@ -123,6 +136,9 @@ const DOUBAO_ASR_RESOURCE_ID = 'volc.seedasr.auc';
 const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转写文本，不要摘要，不要解释，不要使用 Markdown。';
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
+const LOCAL_OCR_HOME = '.wechat-inbox-local-ocr';
+const LOCAL_OCR_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const LOCAL_OCR_RUN_TIMEOUT_MS = 90 * 1000;
 
 function getLocalAsrPlatform(platform = os.platform()) {
   if (platform === 'win32') return 'win32';
@@ -216,6 +232,39 @@ function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = 'default', platfo
     return getSafeLocalAsrInstallRoot(platform, env);
   }
   return joinLocalAsrPath(platform, homeDir, LOCAL_ASR_HOME);
+}
+
+function getLocalOcrInstallRoot(homeDir = os.homedir(), platform = os.platform()) {
+  return joinLocalAsrPath(platform, homeDir, LOCAL_OCR_HOME);
+}
+
+function getLocalOcrPythonPath(platform = os.platform(), installRoot = getLocalOcrInstallRoot(os.homedir(), platform)) {
+  return getLocalAsrPlatform(platform) === 'darwin'
+    ? joinLocalAsrPath(platform, installRoot, 'venv', 'bin', 'python')
+    : joinLocalAsrPath(platform, installRoot, 'venv', 'Scripts', 'python.exe');
+}
+
+function getLocalOcrScriptPath(platform = os.platform(), installRoot = getLocalOcrInstallRoot(os.homedir(), platform)) {
+  return joinLocalAsrPath(platform, installRoot, 'ocr_image.py');
+}
+
+function getLocalOcrInstallStatus(installRoot = getLocalOcrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
+  const pythonPath = getLocalOcrPythonPath(platform, installRoot);
+  const scriptPath = getLocalOcrScriptPath(platform, installRoot);
+  const hasPython = Boolean(pythonPath && exists(pythonPath));
+  const hasScript = Boolean(scriptPath && exists(scriptPath));
+  const missingReasons = [];
+  if (!hasPython) missingReasons.push('Python OCR 运行环境未找到，请安装/更新本地转写组件');
+  if (!hasScript) missingReasons.push('OCR 脚本未找到，请安装/更新本地转写组件');
+  return {
+    installRoot,
+    pythonPath,
+    scriptPath,
+    hasPython,
+    hasScript,
+    missingReasons,
+    ready: hasPython && hasScript,
+  };
 }
 
 function joinLocalAsrPath(platform, ...segments) {
@@ -777,6 +826,14 @@ function buildLocalAsrInstallCommand(installerPath, platform = os.platform(), in
   return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}${rootArg}`;
 }
 
+function buildLocalOcrInstallCommand(installerPath, platform = os.platform(), installRoot = '') {
+  if (getLocalAsrPlatform(platform) === 'darwin' || String(installerPath || '').endsWith('.sh')) {
+    return `/bin/bash ${quoteCommandPath(installerPath)}`;
+  }
+  const rootArg = installRoot ? ` -InstallRoot ${quoteCommandPath(installRoot)}` : '';
+  return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}${rootArg}`;
+}
+
 function formatEntitlementExpiresAt(expiresAt) {
   if (!expiresAt) return '';
   const date = new Date(expiresAt);
@@ -790,7 +847,13 @@ function buildLocalTranscriptionEntitlementText(status) {
     return '权限状态：未刷新。请先在小程序里兑换，再回到插件点击「刷新权限」。';
   }
   if (status.hasAccess) {
-    return `权限状态：已开通${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}${status.bindingLabel ? `，绑定：${status.bindingLabel}` : ''}`;
+    return `权限状态：已开通${status.code ? `，兑换码：${status.code}` : ''}${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}${status.bindingLabel ? `，绑定：${status.bindingLabel}` : ''}`;
+  }
+  if (status.status === 'missing_redeem_code') {
+    return '权限状态：无可用兑换码。请输入或自动识别兑换码后刷新。';
+  }
+  if (status.status === 'invalid_redeem_code') {
+    return `权限状态：兑换码无效${status.code ? `（${status.code}）` : ''}。`;
   }
   if (status.status === 'expired') {
     return `权限状态：已过期${status.expiresAt ? `，到期时间 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}。请在小程序里输入新的兑换码续期。`;
@@ -799,6 +862,52 @@ function buildLocalTranscriptionEntitlementText(status) {
     return '权限状态：未绑定小程序。请先完成小程序绑定。';
   }
   return '权限状态：未开通。请在小程序里输入兑换码开通后，再回到插件刷新权限。';
+}
+
+function isCachedProStatusActive(status, now = Date.now()) {
+  if (!status || typeof status !== 'object') return false;
+  if (!status.hasAccess || status.status === 'expired') return false;
+  if (!status.expiresAt) return true;
+  const expiresAt = new Date(status.expiresAt).getTime();
+  return Number.isNaN(expiresAt) || expiresAt > now;
+}
+
+function isCachedProStatusActiveForCode(status, code, now = Date.now()) {
+  const normalizedCode = normalizeBindCodeInput(code);
+  return Boolean(
+    normalizedCode
+    && isCachedProStatusActive(status, now)
+    && normalizeBindCodeInput(status && status.code) === normalizedCode,
+  );
+}
+
+function buildMissingRedeemCodeStatus() {
+  return {
+    hasAccess: false,
+    plan: LOCAL_TRANSCRIPTION_PLAN,
+    status: 'missing_redeem_code',
+    expiresAt: '',
+    code: '',
+  };
+}
+
+function formatRedeemAccessError(error, mode = 'redeem') {
+  const message = error && error.message ? error.message : String(error || '');
+  if (/status\s*404|NO_AVAILABLE_REDEEM_CODE|没有找到|No available redeem code/i.test(message)) {
+    return mode === 'auto'
+      ? '没有识别到可用兑换码，请手动输入兑换码。'
+      : '无可用兑换码，请先输入或自动识别兑换码。';
+  }
+  if (/status\s*400|INVALID_REDEEM_CODE|Invalid redeem code|兑换码无效|Missing redeem code/i.test(message)) {
+    return '兑换码无效、已过期，或不属于当前绑定微信。';
+  }
+  if (/Invalid bind code|绑定码未绑定|403/i.test(message)) {
+    return '绑定码未绑定或已失效，请先重新绑定小程序。';
+  }
+  if (/Request failed, status/i.test(message)) {
+    return '兑换码验证失败，请稍后重试。';
+  }
+  return message || '兑换码验证失败，请稍后重试。';
 }
 
 function downloadTextViaNode(url) {
@@ -890,6 +999,25 @@ function normalizeLocalTranscriptionCommand(command, platform = os.platform()) {
   return normalized;
 }
 
+function extractLocalAsrInstallRootFromCommand(command, platform = os.platform()) {
+  const source = String(command || '').trim();
+  if (!source) return '';
+  const localPlatform = getLocalAsrPlatform(platform);
+  const scriptName = localPlatform === 'darwin' ? 'transcribe.sh' : 'transcribe.ps1';
+  const scriptPattern = escapeRegExp(scriptName);
+  const quotedMatch = source.match(new RegExp(`["']([^"']*${scriptPattern})["']`, 'i'));
+  const unquotedMatch = quotedMatch ? null : source.match(new RegExp(`(?:^|\\s)([^\\s"']*${scriptPattern})(?:\\s|$)`, 'i'));
+  const scriptPath = String((quotedMatch && quotedMatch[1]) || (unquotedMatch && unquotedMatch[1]) || '').trim();
+  if (!scriptPath || /[%$]|\{|\}/.test(scriptPath)) return '';
+  const normalizedScriptPath = localPlatform === 'win32'
+    ? path.win32.normalize(scriptPath)
+    : path.posix.normalize(scriptPath.replace(/\\/g, '/'));
+  if (path.basename(normalizedScriptPath).toLowerCase() !== scriptName.toLowerCase()) return '';
+  return localPlatform === 'win32'
+    ? path.win32.dirname(normalizedScriptPath)
+    : path.posix.dirname(normalizedScriptPath);
+}
+
 function normalizeNoteSaveMode(value) {
   const normalized = String(value || '').trim();
   return Object.prototype.hasOwnProperty.call(NOTE_SAVE_MODES, normalized)
@@ -965,6 +1093,14 @@ function normalizeBindings(settings) {
   return bindings.slice(0, MAX_PLUGIN_BINDINGS);
 }
 
+function canAddPluginBinding(settings, candidateToken) {
+  const token = normalizeBindCodeInput(candidateToken);
+  if (!token) return false;
+  const bindings = normalizeBindings(settings);
+  if (bindings.some((item) => item && item.token === token)) return true;
+  return bindings.length < MAX_PLUGIN_BINDINGS;
+}
+
 function getPrimaryBindingToken(bindings) {
   const active = (Array.isArray(bindings) ? bindings : [])
     .find((item) => item && item.enabled !== false && item.status !== 'unbound' && item.token);
@@ -992,6 +1128,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
   merged.token = tokenBinding ? normalizedToken : getPrimaryBindingToken(merged.bindings);
   merged.pendingBindCode = normalizeBindCodeInput(merged.pendingBindCode);
+  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
   merged.localTranscriptionEntitlementStatus = merged.localTranscriptionEntitlementStatus
     && typeof merged.localTranscriptionEntitlementStatus === 'object'
     && !Array.isArray(merged.localTranscriptionEntitlementStatus)
@@ -1004,12 +1141,12 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.autoSyncOnLoad = true;
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
-  merged.aiMetadataEnabled = savedSettingsVersion < 2
-    ? true
-    : merged.aiMetadataEnabled !== false;
+  merged.aiMetadataEnabled = true;
   merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2
     ? true
     : merged.xiaohongshuCommentsEnabled !== false;
+  merged.xiaohongshuImageOcrEnabled = true;
+  merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || '').trim();
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
@@ -1510,10 +1647,214 @@ function parseAliyunTranscriptionResult(responseText) {
 
 function getAudioFormatFromUrl(audioUrl) {
   const match = String(audioUrl || '').toLowerCase().match(/\.([a-z0-9]{2,5})(?:[?#]|$)/);
+  if (!match && /finder\.video\.qq\.com|mpvideo/i.test(String(audioUrl || ''))) return 'mp4';
   const ext = match ? match[1] : 'mp3';
   if (['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg', 'mp4'].includes(ext)) return ext;
   if (ext === 'm4s') return 'mp4';
   return 'mp3';
+}
+
+function bufferStartsWith(buffer, bytes) {
+  if (!buffer || buffer.length < bytes.length) return false;
+  return bytes.every((byte, index) => buffer[index] === byte);
+}
+
+function getInvalidDownloadedMediaReason(buffer) {
+  if (!buffer || buffer.length < 512) {
+    return '下载到的媒体文件过小，可能不是有效音视频文件';
+  }
+  const headBuffer = buffer.subarray(0, Math.min(buffer.length, 256));
+  const headText = headBuffer.toString('utf8').trim().toLowerCase();
+  if (headText.startsWith('<!doctype') || headText.startsWith('<html') || headText.includes('<body')) {
+    return '下载到的是网页内容，不是有效音视频文件';
+  }
+  if (headText.startsWith('{') || headText.startsWith('[')) {
+    return '下载到的是接口返回数据，不是有效音视频文件';
+  }
+  if (
+    bufferStartsWith(buffer, [0xff, 0xd8, 0xff])
+    || bufferStartsWith(buffer, [0x89, 0x50, 0x4e, 0x47])
+    || bufferStartsWith(buffer, [0x47, 0x49, 0x46, 0x38])
+    || (bufferStartsWith(buffer, [0x52, 0x49, 0x46, 0x46]) && buffer.subarray(8, 12).toString('ascii') === 'WEBP')
+  ) {
+    return '下载到的是封面图片，不是有效音视频文件';
+  }
+  return '';
+}
+
+const WECHAT_CHANNELS_ENCRYPTED_HEAD_BYTES = 131072;
+
+function u64(value) {
+  return BigInt.asUintN(64, value);
+}
+
+class Isaac64 {
+  constructor(seed) {
+    this.randrsl = new Array(256).fill(0n);
+    this.mm = new Array(256).fill(0n);
+    this.randcnt = 0;
+    this.aa = 0n;
+    this.bb = 0n;
+    this.cc = 0n;
+    this.randrsl[0] = u64(seed);
+    this.randinit(true);
+  }
+
+  mix(a, b, c, d, e, f, g, h) {
+    a = u64(a - e); f = u64(f ^ (h >> 9n)); h = u64(h + a);
+    b = u64(b - f); g = u64(g ^ u64(a << 9n)); a = u64(a + b);
+    c = u64(c - g); h = u64(h ^ (b >> 23n)); b = u64(b + c);
+    d = u64(d - h); a = u64(a ^ u64(c << 15n)); c = u64(c + d);
+    e = u64(e - a); b = u64(b ^ (d >> 14n)); d = u64(d + e);
+    f = u64(f - b); c = u64(c ^ u64(e << 20n)); e = u64(e + f);
+    g = u64(g - c); d = u64(d ^ (f >> 17n)); f = u64(f + g);
+    h = u64(h - d); e = u64(e ^ u64(g << 14n)); g = u64(g + h);
+    return [a, b, c, d, e, f, g, h];
+  }
+
+  randinit(flag) {
+    let a = 0x9e3779b97f4a7c13n;
+    let b = a;
+    let c = a;
+    let d = a;
+    let e = a;
+    let f = a;
+    let g = a;
+    let h = a;
+
+    for (let index = 0; index < 4; index += 1) {
+      [a, b, c, d, e, f, g, h] = this.mix(a, b, c, d, e, f, g, h);
+    }
+
+    for (let index = 0; index < 256; index += 8) {
+      if (flag) {
+        a = u64(a + this.randrsl[index]);
+        b = u64(b + this.randrsl[index + 1]);
+        c = u64(c + this.randrsl[index + 2]);
+        d = u64(d + this.randrsl[index + 3]);
+        e = u64(e + this.randrsl[index + 4]);
+        f = u64(f + this.randrsl[index + 5]);
+        g = u64(g + this.randrsl[index + 6]);
+        h = u64(h + this.randrsl[index + 7]);
+      }
+      [a, b, c, d, e, f, g, h] = this.mix(a, b, c, d, e, f, g, h);
+      this.mm[index] = a;
+      this.mm[index + 1] = b;
+      this.mm[index + 2] = c;
+      this.mm[index + 3] = d;
+      this.mm[index + 4] = e;
+      this.mm[index + 5] = f;
+      this.mm[index + 6] = g;
+      this.mm[index + 7] = h;
+    }
+
+    if (flag) {
+      for (let index = 0; index < 256; index += 8) {
+        a = u64(a + this.mm[index]);
+        b = u64(b + this.mm[index + 1]);
+        c = u64(c + this.mm[index + 2]);
+        d = u64(d + this.mm[index + 3]);
+        e = u64(e + this.mm[index + 4]);
+        f = u64(f + this.mm[index + 5]);
+        g = u64(g + this.mm[index + 6]);
+        h = u64(h + this.mm[index + 7]);
+        [a, b, c, d, e, f, g, h] = this.mix(a, b, c, d, e, f, g, h);
+        this.mm[index] = a;
+        this.mm[index + 1] = b;
+        this.mm[index + 2] = c;
+        this.mm[index + 3] = d;
+        this.mm[index + 4] = e;
+        this.mm[index + 5] = f;
+        this.mm[index + 6] = g;
+        this.mm[index + 7] = h;
+      }
+    }
+
+    this.isaac64();
+    this.randcnt = 256;
+  }
+
+  isaac64() {
+    this.cc = u64(this.cc + 1n);
+    this.bb = u64(this.bb + this.cc);
+
+    for (let index = 0; index < 256; index += 1) {
+      const x = this.mm[index];
+      switch (index % 4) {
+        case 0:
+          this.aa = u64(~u64(this.aa ^ u64(this.aa << 21n)));
+          break;
+        case 1:
+          this.aa = u64(this.aa ^ (this.aa >> 5n));
+          break;
+        case 2:
+          this.aa = u64(this.aa ^ u64(this.aa << 12n));
+          break;
+        default:
+          this.aa = u64(this.aa ^ (this.aa >> 33n));
+          break;
+      }
+      this.aa = u64(this.aa + this.mm[(index + 128) % 256]);
+      const y = u64(this.mm[Number((x >> 3n) & 255n)] + this.aa + this.bb);
+      this.mm[index] = y;
+      this.bb = u64(this.mm[Number((y >> 11n) & 255n)] + x);
+      this.randrsl[index] = this.bb;
+    }
+  }
+
+  next() {
+    if (this.randcnt === 0) {
+      this.isaac64();
+      this.randcnt = 256;
+    }
+    this.randcnt -= 1;
+    return this.randrsl[this.randcnt];
+  }
+
+  generate(length) {
+    const result = Buffer.alloc(Math.max(0, Number(length) || 0));
+    let position = 0;
+    while (position < result.length) {
+      const value = this.next();
+      for (let shift = 56; shift >= 0 && position < result.length; shift -= 8) {
+        result[position] = Number((value >> BigInt(shift)) & 0xffn);
+        position += 1;
+      }
+    }
+    return result;
+  }
+}
+
+function parseWechatChannelsDecryptKey(decryptKey) {
+  const value = String(decryptKey || '').trim();
+  if (!value) return null;
+  try {
+    if (/^0x[0-9a-f]+$/i.test(value) || /^\d+$/.test(value)) {
+      return u64(BigInt(value));
+    }
+  } catch (error) {
+    return null;
+  }
+  return null;
+}
+
+function generateWechatChannelsDecryptorBytes(decryptKey, length) {
+  const seed = parseWechatChannelsDecryptKey(decryptKey);
+  if (seed === null) return Buffer.alloc(0);
+  return new Isaac64(seed).generate(length);
+}
+
+function decryptWechatChannelsMediaBuffer(buffer, decryptKey, limit = WECHAT_CHANNELS_ENCRYPTED_HEAD_BYTES) {
+  const input = Buffer.from(buffer || []);
+  const seed = parseWechatChannelsDecryptKey(decryptKey);
+  if (seed === null || !input.length) return input;
+  const result = Buffer.from(input);
+  const decryptLength = Math.min(result.length, Math.max(0, Number(limit) || 0));
+  const keyBytes = new Isaac64(seed).generate(decryptLength);
+  for (let index = 0; index < decryptLength; index += 1) {
+    result[index] ^= keyBytes[index];
+  }
+  return result;
 }
 
 function buildAliyunVoiceRequest({ settings, audioUrl }) {
@@ -1745,6 +2086,17 @@ function sleep(ms) {
 function buildWebpageMarkdownBody(record, title) {
   const metadata = record.metadata || {};
   const url = cleanDisplayUrl(metadata.url || record.content || '');
+  const pageTitle = metadata.title || title;
+  let snapshot = cleanMarkdownForStorage(
+    metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '',
+    { dedupe: isFeishuUrl(url), feishuTitle: isFeishuUrl(url) ? pageTitle : '' },
+  );
+  if (snapshot && isXiaohongshuUrl(url)) {
+    snapshot = sanitizeXiaohongshuMarkdownImages(snapshot);
+  }
+  if (metadata.transcriptOnly && snapshot && isWechatChannelsUrl(url) && metadata.conversionStatus === 'link_saved') {
+    return `${snapshot}\n`;
+  }
   if (metadata.transcriptOnly) {
     return buildAudioTranscriptMarkdown({
       url,
@@ -1755,11 +2107,6 @@ function buildWebpageMarkdownBody(record, title) {
     });
   }
 
-  const pageTitle = metadata.title || title;
-  const snapshot = cleanMarkdownForStorage(
-    metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '',
-    { dedupe: isFeishuUrl(url), feishuTitle: isFeishuUrl(url) ? pageTitle : '' },
-  );
   const status = metadata.conversionStatus || 'pending';
   const errorText = metadata.conversionError || '';
 
@@ -1831,6 +2178,30 @@ function buildAudioTranscriptMarkdown({
   ].filter((line) => line !== '').join('\n');
 }
 
+function buildTranscriptPropertyMetadata({
+  transcription = '',
+  title = '',
+} = {}) {
+  const text = cleanMarkdownForStorage(stripMarkdownCodeBlocks(String(transcription || '')))
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) {
+    return {
+      description: '',
+      keywords: [],
+      aiMetadataSource: '',
+    };
+  }
+  const sentences = text.split(/[。！？!?]\s*/).map((item) => item.trim()).filter((item) => item.length >= 8);
+  const description = (sentences[0] || text).slice(0, 160).trim();
+  const keywords = extractKeywordsFromText(text, title).slice(0, 8);
+  return {
+    description,
+    keywords,
+    aiMetadataSource: 'transcription',
+  };
+}
+
 function buildTranscriptOnlyMetadata(metadata, {
   url = '',
   platform = '',
@@ -1869,7 +2240,6 @@ function buildTranscriptOnlyMetadata(metadata, {
 }
 
 function shouldGenerateAiMetadata(settings, record) {
-  if (!settings || !settings.aiMetadataEnabled) return false;
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
   if (!extractAiMetadataInputText(record)) return false;
@@ -1887,6 +2257,25 @@ function buildFileMarkdownBody(record) {
   const converted = cleanMarkdownForStorage(metadata.markdown || metadata.convertedMarkdown || '');
   const status = metadata.conversionStatus || 'pending';
   const errorText = metadata.conversionError || '';
+  const transcriptionStatus = String(metadata.transcriptionStatus || '').toLowerCase();
+  const transcription = String(metadata.transcription || '').trim();
+  if (transcriptionStatus || transcription) {
+    const transcriptionError = metadata.transcriptionError || '';
+    const content = transcription || (transcriptionStatus === 'failed'
+      ? `转写失败。${transcriptionError || '未能提取到音视频文案。'}`
+      : '转写处理中，或未配置可用的转写方案。');
+    return [
+      `文件名：${fileName}`,
+      filePath ? `本地附件：[[${filePath}]]` : '',
+      fileID ? `云端文件：${fileID}` : '',
+      metadata.transcriptionSource ? `转写来源：${metadata.transcriptionSource}` : '',
+      '',
+      '## 口播/音频文案',
+      '',
+      content,
+      '',
+    ].filter((line) => line !== '').join('\n');
+  }
   const fallback = status === 'failed'
     ? `文件转 Markdown 失败，已保存文件信息。${errorText ? `\n\n失败原因：${errorText}` : ''}`
     : status === 'attachment_saved'
@@ -2114,6 +2503,9 @@ function shouldDropFeishuLine(line, title) {
     '效率指南',
     '添加快捷方式',
     '最近修改',
+    '搜索',
+    '墨度',
+    '莞尔',
     '分享',
     '回复...',
     '附件不支持打印',
@@ -2210,6 +2602,10 @@ function getAttachmentExt(fileName, fallbackExt) {
 
 function isMarkdownConvertibleExt(ext) {
   return ['md', 'markdown', 'txt'].includes(String(ext || '').toLowerCase());
+}
+
+function isAudioVideoAttachmentExt(ext) {
+  return ['mp3', 'm4a', 'wav', 'aac', 'amr', 'silk', 'ogg', 'flac', 'mp4', 'mov', 'm4v'].includes(String(ext || '').toLowerCase());
 }
 
 function decodeUtf8ArrayBuffer(buffer) {
@@ -2864,6 +3260,50 @@ function isXiaoyuzhouUrl(url) {
   return text.includes('xiaoyuzhoufm.com') || text.includes('xiaoyuzhou.com');
 }
 
+const WECHAT_CHANNELS_FEED_INFO_URL = 'https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info';
+
+function isWechatChannelsUrl(url) {
+  const text = String(url || '').toLowerCase();
+  return text.includes('channels.weixin.qq.com')
+    || /(^|\/\/)weixin\.qq\.com\/sph\//i.test(text);
+}
+
+function isWechatChannelsMediaUrl(url) {
+  return /finder\.video\.qq\.com|mpvideo\.qpic\.cn|(^|[./-])mpvideo/i.test(String(url || ''));
+}
+
+function extractWechatChannelsRequestPayload(url) {
+  const source = String(url || '').trim();
+  try {
+    const parsed = new URL(source);
+    const hostname = parsed.hostname.toLowerCase();
+    const path = parsed.pathname || '';
+    if (hostname === 'weixin.qq.com') {
+      const match = path.match(/\/sph\/([^/?#]+)/i);
+      if (match && match[1]) return { shortUri: decodeURIComponent(match[1]) };
+    }
+    if (hostname === 'channels.weixin.qq.com') {
+      const id = parsed.searchParams.get('id');
+      if (id) return { shortUri: id };
+      const eid = parsed.searchParams.get('eid');
+      if (eid) return { exportId: eid };
+    }
+  } catch (error) {
+    // Fall through to regex extraction for malformed copied links.
+  }
+
+  const shortMatch = source.match(/weixin\.qq\.com\/sph\/([^/?#\s]+)/i)
+    || source.match(/[?&]id=([^&#\s]+)/i);
+  if (shortMatch && shortMatch[1]) {
+    return { shortUri: decodeUrlComponentSafely(shortMatch[1]) };
+  }
+  const exportMatch = source.match(/[?&]eid=([^&#\s]+)/i);
+  if (exportMatch && exportMatch[1]) {
+    return { exportId: decodeUrlComponentSafely(exportMatch[1]) };
+  }
+  return {};
+}
+
 function shouldHydrateLinkAsWebpage(url) {
   return isWechatMpArticleUrl(url)
     || isFeishuUrl(url)
@@ -2884,6 +3324,7 @@ function getSocialRequestHeaders(url) {
   if (isXiaohongshuUrl(url)) headers.Referer = 'https://www.xiaohongshu.com/';
   if (isDouyinUrl(url) || isDouyinMediaUrl(url)) headers.Referer = 'https://www.douyin.com/';
   if (isXiaoyuzhouUrl(url)) headers.Referer = 'https://www.xiaoyuzhoufm.com/';
+  if (isWechatChannelsUrl(url) || isWechatChannelsMediaUrl(url)) headers.Referer = 'https://channels.weixin.qq.com/';
   return headers;
 }
 
@@ -2946,7 +3387,8 @@ function shouldResolvePlatformRedirect(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('b23.tv')
     || text.includes('v.douyin.com')
-    || text.includes('xhslink.com');
+    || text.includes('xhslink.com')
+    || /weixin\.qq\.com\/sph\//i.test(text);
 }
 
 function getUrlHostname(url) {
@@ -2991,6 +3433,7 @@ function sanitizeNoteTitlePart(text, fallback = '未命名') {
 
 function getWebpageSourcePrefix(url) {
   if (isFeishuUrl(url)) return '飞书';
+  if (isWechatChannelsUrl(url)) return '视频号';
   if (isWechatArticleUrl(url)) return '公众号';
   if (isXiaohongshuUrl(url)) return '小红书';
   if (isDouyinUrl(url)) return '抖音';
@@ -3138,7 +3581,7 @@ function isLikelyMediaUrl(value) {
   const url = normalizeExtractedUrl(value);
   if (!url) return false;
   if (/\.(?:mp3|m4a|aac|wav|ogg|flac|mp4|m4s|m3u8)(?:[?#]|$)/i.test(url)) return true;
-  return /(?:media\.xyzcdn\.net|bilivideo\.com|bilibili\.com\/.*audio|douyin\.com\/aweme\/v1\/play|douyinvod\.com|zjcdn\.com\/tos-|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video)/i.test(url);
+  return /(?:media\.xyzcdn\.net|finder\.video\.qq\.com|mpvideo|bilivideo\.com|bilibili\.com\/.*audio|douyin\.com\/aweme\/v1\/play|douyinvod\.com|zjcdn\.com\/tos-|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video)/i.test(url);
 }
 
 function pushUniqueMediaUrl(list, value) {
@@ -3146,6 +3589,25 @@ function pushUniqueMediaUrl(list, value) {
   if (!/^https?:\/\//i.test(url)) return;
   if (!isLikelyMediaUrl(url)) return;
   if (!list.includes(url)) list.push(url);
+}
+
+function extractLooseMediaUrlsFromText(text) {
+  const source = String(text || '');
+  const urls = [];
+  const patterns = [
+    /https?:\\?\/\\?\/[^"'\s<>]*?(?:finder\.video\.qq\.com|mpvideo\.qpic\.cn|mpvideo)[^"'\s<>]*/gi,
+    /https?:\\?\/\\?\/[^"'\s<>]+?\.(?:mp3|m4a|aac|wav|ogg|flac|mp4|m4s|m3u8)(?:[?#][^"'\s<>]*)?/gi,
+  ];
+
+  patterns.forEach((pattern) => {
+    let match;
+    while ((match = pattern.exec(source))) {
+      const rawUrl = String(match[0] || '').replace(/[),.;]+$/g, '');
+      pushUniqueMediaUrl(urls, rawUrl);
+    }
+  });
+
+  return urls;
 }
 
 function getTranscriptionMediaScore(value) {
@@ -3156,7 +3618,7 @@ function getTranscriptionMediaScore(value) {
   if (/\.(?:mp3|m4a|aac|wav|ogg|flac)(?:[?#]|$)/i.test(url)) score += 1000;
   if (/audio|music|voice|mime_type=audio|audio_url|music_url|play_audio/i.test(url)) score += 800;
   if (/aweme\/v1\/play/i.test(url)) score += 500;
-  if (/\.(?:mp4)(?:[?#]|$)|douyinvod\.com|zjcdn\.com\/tos-|mime_type=video/i.test(url)) score += 250;
+  if (/\.(?:mp4)(?:[?#]|$)|finder\.video\.qq\.com|mpvideo|douyinvod\.com|zjcdn\.com\/tos-|mime_type=video/i.test(url)) score += 250;
   if (/\.(?:m4s|m3u8)(?:[?#]|$)/i.test(url)) score -= 300;
   if (/\.css(?:[?#]|$)|\.js(?:[?#]|$)|image|webp|jpg|png/i.test(url)) score -= 1000;
   return score;
@@ -3172,6 +3634,54 @@ function sortMediaUrlsForTranscription(urls) {
       return scoreDiff || a.index - b.index;
     })
     .map((item) => item.url);
+}
+
+function collectBrowserCapturedMediaUrls(value, urls = [], seen = new Set(), depth = 0) {
+  if (value === undefined || value === null || depth > 5) return urls;
+  if (typeof value === 'string') {
+    pushUniqueMediaUrl(urls, value);
+    extractLooseMediaUrlsFromText(value).forEach((url) => pushUniqueMediaUrl(urls, url));
+    return urls;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectBrowserCapturedMediaUrls(item, urls, seen, depth + 1));
+    return urls;
+  }
+  if (typeof value !== 'object' || seen.has(value)) return urls;
+  seen.add(value);
+
+  const resourceType = String(value.resourceType || value.initiatorType || value.type || '').toLowerCase();
+  if (['image', 'img', 'script', 'stylesheet', 'font', 'css'].includes(resourceType)) {
+    return urls;
+  }
+
+  [
+    'url',
+    'requestUrl',
+    'redirectURL',
+    'redirectUrl',
+    'name',
+    'src',
+    'currentSrc',
+  ].forEach((key) => collectBrowserCapturedMediaUrls(value[key], urls, seen, depth + 1));
+
+  ['request', 'response', 'resource', 'details'].forEach((key) => {
+    if (value[key]) collectBrowserCapturedMediaUrls(value[key], urls, seen, depth + 1);
+  });
+
+  Object.keys(value).forEach((key) => {
+    if (/url|src|media|video|audio|stream|download|play|name/i.test(key)) {
+      collectBrowserCapturedMediaUrls(value[key], urls, seen, depth + 1);
+    }
+  });
+
+  return urls;
+}
+
+function normalizeBrowserCapturedMediaUrls(items) {
+  const urls = [];
+  collectBrowserCapturedMediaUrls(items, urls);
+  return sortMediaUrlsForTranscription(urls);
 }
 
 function isLikelyImageUrl(value) {
@@ -3348,7 +3858,10 @@ function collectImageUrlsFromHtml(html) {
 
 function isNoisyXiaohongshuImageUrl(value) {
   const url = normalizeExtractedUrl(value).toLowerCase();
-  return /(?:avatar|sns-avatar|recommend|banner|logo|icon|emoji|sticker|qrcode|qr-code|comment|user|profile|ads?)[^/]*(?:\.jpg|\.jpeg|\.png|\.webp|!|$)/i.test(url)
+  return /picasso-static\.xiaohongshu\.com\/fe-platform\//i.test(url)
+    || /fe-platform\.xhscdn\.com\/platform\//i.test(url)
+    || /(?:^|\/\/)[^/]*xhscdn\.com\/platform\//i.test(url)
+    || /(?:avatar|sns-avatar|recommend|banner|logo|icon|emoji|sticker|qrcode|qr-code|comment|user|profile|ads?)[^/]*(?:\.jpg|\.jpeg|\.png|\.webp|!|$)/i.test(url)
     || /ci\.xiaohongshu\.com\/(?:recommend|banner|logo|icon|avatar)/i.test(url);
 }
 
@@ -3376,7 +3889,9 @@ function collectXiaohongshuNoteImageUrls(html) {
   const urls = [];
   [
     extractMetaContent(source, ['og:image', 'og:image:url', 'twitter:image']),
-  ].forEach((url) => pushUniqueUrl(urls, url));
+  ].forEach((url) => {
+    if (url && !isNoisyXiaohongshuImageUrl(url)) pushUniqueUrl(urls, url);
+  });
 
   collectFilteredImageTagUrls(source).forEach((url) => pushUniqueUrl(urls, url));
 
@@ -3407,11 +3922,13 @@ function collectXiaohongshuNoteImageUrls(html) {
       'image_url',
       'cover',
     ]).forEach((url) => {
-      if (isLikelyImageUrl(url)) {
+      if (isLikelyImageUrl(url) && !isNoisyXiaohongshuImageUrl(url)) {
         pushUniqueUrl(urls, url);
       }
     });
-    collectLooseXiaohongshuImageUrls(block).forEach((url) => pushUniqueUrl(urls, url));
+    collectLooseXiaohongshuImageUrls(block).forEach((url) => {
+      if (!isNoisyXiaohongshuImageUrl(url)) pushUniqueUrl(urls, url);
+    });
   });
 
   const noteImages = dedupeImageVariants(urls);
@@ -3419,7 +3936,51 @@ function collectXiaohongshuNoteImageUrls(html) {
     return noteImages;
   }
 
-  return dedupeImageVariants(collectImageUrlsFromHtml(source)).slice(0, 6);
+  return dedupeImageVariants(collectImageUrlsFromHtml(source)
+    .filter((imageUrl) => !isNoisyXiaohongshuImageUrl(imageUrl))).slice(0, 6);
+}
+
+function sanitizeXiaohongshuMarkdownImages(markdown) {
+  const source = String(markdown || '');
+  if (!source.includes('## 图片')) return source;
+  const lines = source.split('\n');
+  const start = lines.findIndex((line) => /^##\s+图片\s*$/u.test(String(line || '').trim()));
+  if (start < 0) return source;
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^##\s+/u.test(String(lines[index] || '').trim())) {
+      end = index;
+      break;
+    }
+  }
+  const imageSection = lines.slice(start, end).join('\n');
+  const imageUrls = [];
+  const imagePattern = /!\[[^\]]*]\(([^)]+)\)/g;
+  let match;
+  while ((match = imagePattern.exec(imageSection))) {
+    const imageUrl = normalizeExtractedUrl(match[1]);
+    if (imageUrl && isLikelyImageUrl(imageUrl) && !isNoisyXiaohongshuImageUrl(imageUrl)) {
+      pushUniqueUrl(imageUrls, imageUrl);
+    }
+  }
+  const cleanImages = dedupeImageVariants(imageUrls);
+  if (!cleanImages.length || cleanImages.length === (imageSection.match(/!\[[^\]]*]\(/g) || []).length) {
+    return source;
+  }
+
+  const replacement = ['## 图片', '', '### 封面', '', `![封面](${cleanImages[0]})`, ''];
+  if (cleanImages.length > 1) {
+    replacement.push('### 内页图', '');
+    cleanImages.slice(1).forEach((imageUrl, index) => {
+      replacement.push(`![内页图 ${index + 1}](${imageUrl})`, '');
+    });
+  }
+
+  return [
+    ...lines.slice(0, start),
+    ...replacement,
+    ...lines.slice(end),
+  ].join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function extractVideoUrlFromHtml(html) {
@@ -3507,6 +4068,8 @@ function extractSocialMediaUrlsFromHtml(html) {
     'playUrlList',
     'play_url_list',
   ]).forEach((url) => pushUniqueMediaUrl(urls, url));
+
+  extractLooseMediaUrlsFromText(source).forEach((url) => pushUniqueMediaUrl(urls, url));
 
   const mediaPattern = /https?:\\?\/\\?\/[^"'\\\s<>]+?\.(?:mp3|m4a|aac|wav|ogg|flac|mp4|m4s|m3u8)(?:\?[^"'\\\s<>]*)?/gi;
   let match;
@@ -3826,6 +4389,78 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '', option
   };
 }
 
+function normalizeOcrText(text) {
+  const lines = String(text || '')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const seen = new Set();
+  return lines
+    .filter((line) => {
+      const key = line.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join('\n')
+    .trim();
+}
+
+function countReadableOcrChars(text) {
+  return (String(text || '').replace(/\s+/g, '').match(/[\u3400-\u9fffA-Za-z0-9]/g) || []).length;
+}
+
+function normalizeXiaohongshuOcrItems(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => {
+      const text = normalizeOcrText(item && (item.text || item.ocrText || item.value));
+      const readableChars = countReadableOcrChars(text);
+      return {
+        imageUrl: String(item && (item.imageUrl || item.url) || '').trim(),
+        text,
+        index: Number(item && item.index) || index + 1,
+        readableChars,
+        substantial: readableChars >= 80,
+      };
+    })
+    .filter((item) => item.text && item.readableChars >= 15);
+}
+
+function isLikelyImageTextNote(items = []) {
+  const normalized = normalizeXiaohongshuOcrItems(items);
+  const total = normalized.reduce((sum, item) => sum + item.readableChars, 0);
+  const imageTextCount = normalized.filter((item) => item.readableChars >= 40).length;
+  return normalized.some((item) => item.readableChars >= 80)
+    || imageTextCount >= 2
+    || total >= 120;
+}
+
+function buildXiaohongshuOcrMarkdown(items = []) {
+  const normalized = normalizeXiaohongshuOcrItems(items);
+  if (!normalized.length) return '';
+  const lines = [
+    '## 图片文字 OCR（测试版）',
+    '',
+    isLikelyImageTextNote(normalized)
+      ? '> 检测到图片里有较多文字，下面是 OCR 识别结果；原图片仍保留在上方。'
+      : '> 下面是图片中的少量可识别文字；原图片仍保留在上方。',
+    '',
+  ];
+  normalized.forEach((item, index) => {
+    const displayIndex = Number.isFinite(item.index) && item.index > 0 ? item.index : index + 1;
+    lines.push(`### 图片 ${displayIndex}`, '', item.text, '');
+  });
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function appendXiaohongshuOcrMarkdown(markdown, items = []) {
+  const ocrMarkdown = buildXiaohongshuOcrMarkdown(items);
+  if (!ocrMarkdown) return String(markdown || '').trim();
+  const source = String(markdown || '').trim();
+  return `${source}\n\n${ocrMarkdown}`.trim();
+}
+
 function extractSocialVideoMarkdownFromHtml(html, url, platform = '视频') {
   url = cleanDisplayUrl(url);
   const source = String(html || '');
@@ -3865,6 +4500,308 @@ function extractSocialVideoMarkdownFromHtml(html, url, platform = '视频') {
     markdown: lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
     videoUrl,
   };
+}
+
+const WECHAT_CHANNELS_MEDIA_URL_KEYS = [
+  'videoUrl',
+  'video_url',
+  'mediaUrl',
+  'media_url',
+  'downloadUrl',
+  'download_url',
+  'fileUrl',
+  'file_url',
+  'url',
+];
+
+const WECHAT_CHANNELS_MEDIA_URL_TOKEN_KEYS = [
+  'urlToken',
+  'url_token',
+  'token',
+];
+
+const WECHAT_CHANNELS_DECODE_KEY_KEYS = [
+  'decodeKey',
+  'decode_key',
+  'decodekey',
+  'decryptKey',
+  'decrypt_key',
+  'decryptkey',
+];
+
+const WECHAT_CHANNELS_COVER_URL_KEYS = [
+  'coverUrl',
+  'cover_url',
+  'thumbUrl',
+  'thumb_url',
+  'fullThumbUrl',
+  'full_thumb_url',
+  'poster',
+  'posterUrl',
+];
+
+const WECHAT_CHANNELS_MEDIA_CONTAINER_KEYS = [
+  'object',
+  'object_desc',
+  'objectDesc',
+  'objectList',
+  'object_list',
+  'media',
+  'mediaList',
+  'media_list',
+  'h264VideoInfo',
+  'h264_video_info',
+  'h265VideoInfo',
+  'h265_video_info',
+  'videoInfo',
+  'video_info',
+  'objectDesc',
+  'object_desc',
+  'feedInfo',
+  'feed_info',
+  'data',
+];
+
+function isWechatChannelsPlainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readWechatChannelsString(object, keys) {
+  if (!isWechatChannelsPlainObject(object)) return '';
+  for (const key of keys) {
+    const value = object[key];
+    if (value !== undefined && value !== null && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+  return '';
+}
+
+function isWechatChannelsImageUrl(url) {
+  return /\.(?:jpg|jpeg|png|webp|gif|svg)(?:[?#]|$)/i.test(String(url || ''));
+}
+
+function isLikelyWechatChannelsMediaUrl(url) {
+  const value = normalizeExtractedUrl(url);
+  if (!/^https?:\/\//i.test(value) || isWechatChannelsImageUrl(value)) return false;
+  return /finder\.video\.qq\.com|mpvideo|video|media|\.mp4|\.m4s|\.m3u8|mime_type=video/i.test(value);
+}
+
+function appendWechatChannelsUrlToken(url, token) {
+  const baseUrl = normalizeExtractedUrl(url);
+  const normalizedToken = decodeHtmlEntities(String(token || '').trim());
+  if (!baseUrl || !normalizedToken) return baseUrl;
+  if (/^https?:\/\//i.test(normalizedToken)) return normalizeExtractedUrl(normalizedToken);
+  if (baseUrl.includes(normalizedToken)) return baseUrl;
+  if (/^[?&]/.test(normalizedToken)) return `${baseUrl}${normalizedToken}`;
+  return `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}${normalizedToken.replace(/^[?&]/, '')}`;
+}
+
+function pushWechatChannelsMediaCandidate(candidates, object, forceMediaObject = false) {
+  if (!isWechatChannelsPlainObject(object)) return;
+  const url = appendWechatChannelsUrlToken(
+    readWechatChannelsString(object, WECHAT_CHANNELS_MEDIA_URL_KEYS),
+    readWechatChannelsString(object, WECHAT_CHANNELS_MEDIA_URL_TOKEN_KEYS),
+  );
+  if (!/^https?:\/\//i.test(url) || isWechatChannelsImageUrl(url)) return;
+  if (!forceMediaObject && !isLikelyWechatChannelsMediaUrl(url)) return;
+  const decodeKey = readWechatChannelsString(object, WECHAT_CHANNELS_DECODE_KEY_KEYS);
+  const coverUrl = normalizeExtractedUrl(readWechatChannelsString(object, WECHAT_CHANNELS_COVER_URL_KEYS));
+  const durationValue = Number(object.videoPlayLen || object.duration || object.durationSeconds || object.duration_seconds || 0);
+  const fileSizeValue = Number(object.fileSize || object.file_size || object.size || 0);
+  const resolution = readWechatChannelsString(object, ['videoResolution', 'video_resolution', 'resolution']);
+  if (!candidates.some((candidate) => candidate.url === url)) {
+    candidates.push({
+      url,
+      decodeKey,
+      decryptKey: decodeKey,
+      coverUrl,
+      durationSeconds: Number.isFinite(durationValue) && durationValue > 0 ? durationValue : 0,
+      fileSize: Number.isFinite(fileSizeValue) && fileSizeValue > 0 ? fileSizeValue : 0,
+      resolution,
+    });
+  }
+}
+
+function collectWechatChannelsMediaCandidates(value, candidates = [], seen = new Set(), forceMediaObject = false) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectWechatChannelsMediaCandidates(item, candidates, seen, forceMediaObject));
+    return candidates;
+  }
+  if (!isWechatChannelsPlainObject(value) || seen.has(value)) return candidates;
+  seen.add(value);
+
+  pushWechatChannelsMediaCandidate(candidates, value, forceMediaObject);
+
+  for (const key of WECHAT_CHANNELS_MEDIA_CONTAINER_KEYS) {
+    if (value[key] !== undefined && value[key] !== null) {
+      const childIsMediaObject = forceMediaObject
+        || key.toLowerCase().includes('media')
+        || key.toLowerCase().includes('video');
+      collectWechatChannelsMediaCandidates(value[key], candidates, seen, childIsMediaObject);
+    }
+  }
+
+  return candidates;
+}
+
+function getWechatChannelsMediaCandidates(feedInfo) {
+  return collectWechatChannelsMediaCandidates(feedInfo);
+}
+
+function getWechatChannelsVideoUrl(feedInfo) {
+  const firstMedia = getWechatChannelsMediaCandidates(feedInfo)[0] || {};
+  return firstMedia.url || '';
+}
+
+function buildWechatChannelsTitle(description, fallback = '视频号文案') {
+  const firstLine = String(description || '')
+    .replace(/#[\p{L}\p{N}_-]{1,32}/gu, '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+  return sanitizeNoteTitlePart(truncateByChars(firstLine, 32), fallback);
+}
+
+function normalizeWechatChannelsFeedPayload(payload) {
+  const root = payload && typeof payload === 'object' ? payload : {};
+  const data = root.data && typeof root.data === 'object' ? root.data : {};
+  const objectInfo = data.object && typeof data.object === 'object' ? data.object
+    : data.object_info && typeof data.object_info === 'object' ? data.object_info
+      : {};
+  const feedInfo = data.feedInfo && typeof data.feedInfo === 'object' ? data.feedInfo
+    : data.feed_info && typeof data.feed_info === 'object' ? data.feed_info
+      : {};
+  const objectDesc = data.object_desc && typeof data.object_desc === 'object' ? data.object_desc
+    : data.objectDesc && typeof data.objectDesc === 'object' ? data.objectDesc
+      : objectInfo.object_desc && typeof objectInfo.object_desc === 'object' ? objectInfo.object_desc
+        : objectInfo.objectDesc && typeof objectInfo.objectDesc === 'object' ? objectInfo.objectDesc
+      : feedInfo.object_desc && typeof feedInfo.object_desc === 'object' ? feedInfo.object_desc
+        : feedInfo.objectDesc && typeof feedInfo.objectDesc === 'object' ? feedInfo.objectDesc
+          : {};
+  const authorInfo = data.authorInfo && typeof data.authorInfo === 'object' ? data.authorInfo
+    : data.author_info && typeof data.author_info === 'object' ? data.author_info
+      : objectInfo.contact && typeof objectInfo.contact === 'object' ? objectInfo.contact
+        : objectInfo.authorInfo && typeof objectInfo.authorInfo === 'object' ? objectInfo.authorInfo
+      : {};
+  const sceneInfo = data.sceneInfo && typeof data.sceneInfo === 'object' ? data.sceneInfo
+    : data.scene_info && typeof data.scene_info === 'object' ? data.scene_info
+      : {};
+  const errMsg = data.errMsg && typeof data.errMsg === 'object' ? data.errMsg : {};
+  const description = cleanSocialDescription(
+    feedInfo.description || feedInfo.desc
+    || objectDesc.description || objectDesc.desc
+    || data.description || data.desc
+    || '',
+  );
+  const mediaCandidates = getWechatChannelsMediaCandidates(root);
+  const mediaUrls = mediaCandidates.map((candidate) => candidate.url);
+  const firstMedia = mediaCandidates[0] || {};
+  const decodeKey = firstMedia.decodeKey || (mediaCandidates.find((candidate) => candidate.decodeKey) || {}).decodeKey || '';
+  const videoUrl = firstMedia.url || getWechatChannelsVideoUrl(feedInfo);
+  const coverUrl = normalizeExtractedUrl(
+    firstMedia.coverUrl
+    || feedInfo.coverUrl || feedInfo.cover_url
+    || objectDesc.coverUrl || objectDesc.cover_url || objectDesc.thumbUrl || objectDesc.thumb_url
+    || data.coverUrl || data.cover_url
+    || '',
+  );
+  return {
+    title: buildWechatChannelsTitle(description),
+    author: cleanSocialDescription(authorInfo.nickname || authorInfo.nickName || ''),
+    description,
+    tags: extractTagsFromText(description),
+    coverUrl,
+    videoUrl,
+    mediaUrls,
+    mediaItems: mediaCandidates,
+    decodeKey,
+    dynamicExportId: String(sceneInfo.dynamicExportId || sceneInfo.dynamic_export_id || objectInfo.id || objectInfo.exportId || ''),
+    errMsg: String(errMsg.title || errMsg.content || root.errMsg || '').trim(),
+  };
+}
+
+function pushWechatChannelsProfile(profiles, profile, sourceUrl = '') {
+  if (!profile || typeof profile !== 'object') return;
+  const mediaItems = Array.isArray(profile.mediaItems) ? profile.mediaItems : [];
+  if (!mediaItems.length && !profile.videoUrl) return;
+  const normalizedProfile = {
+    ...profile,
+    sourceUrl: sourceUrl || profile.sourceUrl || '',
+    mediaItems,
+    mediaUrls: Array.isArray(profile.mediaUrls) ? profile.mediaUrls : mediaItems.map((item) => item.url).filter(Boolean),
+    videoUrl: profile.videoUrl || (mediaItems[0] && mediaItems[0].url) || '',
+  };
+  const key = [
+    normalizedProfile.videoUrl,
+    ...normalizedProfile.mediaItems.map((item) => item && item.url).filter(Boolean),
+  ].join('|');
+  if (!key || profiles.some((item) => [
+    item.videoUrl,
+    ...((item.mediaItems || []).map((media) => media && media.url).filter(Boolean)),
+  ].join('|') === key)) return;
+  profiles.push(normalizedProfile);
+}
+
+function collectWechatChannelsProfiles(value, profiles = [], seen = new Set(), sourceUrl = '') {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectWechatChannelsProfiles(item, profiles, seen, sourceUrl));
+    return profiles;
+  }
+  if (!value || typeof value !== 'object' || seen.has(value)) return profiles;
+  seen.add(value);
+
+  [
+    normalizeWechatChannelsFeedPayload(value),
+    normalizeWechatChannelsFeedPayload({ data: value }),
+    normalizeWechatChannelsFeedPayload({ data: { object: value } }),
+  ].forEach((profile) => pushWechatChannelsProfile(profiles, profile, sourceUrl));
+
+  Object.keys(value).forEach((key) => {
+    if (/data|object|feed|media|video|desc|list|item|response/i.test(key)) {
+      collectWechatChannelsProfiles(value[key], profiles, seen, sourceUrl);
+    }
+  });
+  return profiles;
+}
+
+function extractWechatChannelsProfilesFromText(text, sourceUrl = '') {
+  const source = typeof text === 'string' ? text : JSON.stringify(text || {});
+  const parsed = typeof text === 'string' ? tryParseJson(source) : text;
+  const profiles = [];
+  if (parsed && typeof parsed === 'object') {
+    collectWechatChannelsProfiles(parsed, profiles, new Set(), sourceUrl);
+  }
+  return profiles;
+}
+
+function buildWechatChannelsPreviewUrl(url) {
+  const payload = extractWechatChannelsRequestPayload(url);
+  if (payload.shortUri) {
+    return `https://channels.weixin.qq.com/finder-preview/pages/sph?id=${encodeURIComponent(payload.shortUri)}`;
+  }
+  if (payload.exportId) {
+    return `https://channels.weixin.qq.com/web/pages/feed?eid=${encodeURIComponent(payload.exportId)}`;
+  }
+  return String(url || '');
+}
+
+function buildWechatChannelsUnavailableMarkdown(url, feed = {}, reason = '') {
+  const lines = [
+    '原始链接：' + cleanDisplayUrl(url),
+    '',
+    '## 视频号口播文案',
+    '',
+    '未能提取视频号口播文案。',
+    '',
+    reason || '视频号网页端未返回可转写的视频资源。',
+    '',
+    '这通常表示当前分享链接在网页端只公开了发布简介、封面等信息，未公开真实视频播放地址。可以尝试重新从微信内分享链接；如果仍失败，请把视频保存到相册或导出为 MP4/音频后，通过小程序上传素材，插件会按原视频文件自动转写。',
+  ];
+  if (feed.description) {
+    lines.push('', '## 发布简介（仅供定位，不作为口播转写）', '', feed.description);
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function decodeHtmlEntities(text) {
@@ -4984,9 +5921,7 @@ async function renderUrlToMarkdownWithElectron(url) {
     if (result && result.clientVars) {
       try {
         const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(result.clientVars);
-        if (clientVarsMarkdown && clientVarsMarkdown.length > String(result.markdown || '').length * 0.6) {
-          result.markdown = appendMissingMarkdownImages(clientVarsMarkdown, result.markdown);
-        }
+        result.markdown = mergeFeishuRenderedAndClientVarsMarkdown(result.markdown, clientVarsMarkdown);
       } catch (error) {}
     }
     if (!result || !result.markdown || result.markdown.length < 20) {
@@ -5019,6 +5954,31 @@ async function renderSocialMediaUrlsWithElectron(url) {
     },
   });
 
+  const capturedRequests = [];
+  const browserSession = (win.webContents && win.webContents.session) || wechatSession;
+  const installedWebRequestHandlers = [];
+  const captureWebRequestDetails = (details) => {
+    capturedRequests.push({
+      url: details && details.url,
+      redirectURL: details && (details.redirectURL || details.redirectUrl),
+      resourceType: details && details.resourceType,
+    });
+  };
+  const installWebRequestHandler = (method, listener) => {
+    try {
+      if (!browserSession || !browserSession.webRequest || typeof browserSession.webRequest[method] !== 'function') return;
+      browserSession.webRequest[method]({ urls: ['<all_urls>'] }, listener);
+      installedWebRequestHandlers.push(method);
+    } catch (error) {}
+  };
+
+  installWebRequestHandler('onBeforeRequest', (details, callback) => {
+    captureWebRequestDetails(details);
+    if (typeof callback === 'function') callback({});
+  });
+  installWebRequestHandler('onBeforeRedirect', captureWebRequestDetails);
+  installWebRequestHandler('onCompleted', captureWebRequestDetails);
+
   try {
     const loaded = waitForWebContents(win.webContents, 18000);
     await win.loadURL(url);
@@ -5027,9 +5987,12 @@ async function renderSocialMediaUrlsWithElectron(url) {
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const urls = [];
-        const add = (value) => {
+        const add = (value, resourceType = '') => {
           const url = String(value || '').trim();
-          if (url && !urls.includes(url)) urls.push(url);
+          if (!url) return;
+          if (!urls.some((item) => item && item.url === url)) {
+            urls.push({ url, resourceType });
+          }
         };
         const collect = () => {
           document.querySelectorAll('video, audio, source').forEach((node) => {
@@ -5039,12 +6002,12 @@ async function renderSocialMediaUrlsWithElectron(url) {
                 node.play().catch(() => {});
               }
             } catch (error) {}
-            add(node.currentSrc);
-            add(node.src);
-            add(node.getAttribute('src'));
+            add(node.currentSrc, 'media');
+            add(node.src, 'media');
+            add(node.getAttribute('src'), 'media');
           });
           try {
-            performance.getEntriesByType('resource').forEach((entry) => add(entry.name));
+            performance.getEntriesByType('resource').forEach((entry) => add(entry.name, entry.initiatorType || ''));
           } catch (error) {}
         };
         for (let index = 0; index < 24; index += 1) {
@@ -5056,10 +6019,15 @@ async function renderSocialMediaUrlsWithElectron(url) {
       })()
     `);
 
-    const urls = [];
-    (Array.isArray(payload) ? payload : []).forEach((item) => pushUniqueMediaUrl(urls, item));
-    return sortMediaUrlsForTranscription(urls);
+    return normalizeBrowserCapturedMediaUrls([capturedRequests, payload]);
   } finally {
+    installedWebRequestHandlers.forEach((method) => {
+      try {
+        if (browserSession && browserSession.webRequest && typeof browserSession.webRequest[method] === 'function') {
+          browserSession.webRequest[method]({ urls: ['<all_urls>'] }, null);
+        }
+      } catch (error) {}
+    });
     if (win && typeof win.destroy === 'function') {
       win.destroy();
     }
@@ -5517,6 +6485,14 @@ function appendMissingMarkdownImages(markdown, fallbackMarkdown = '') {
     additions.push(`![${alt || '图片'}](${url})`);
   }
   return additions.length ? `${source}\n\n${additions.join('\n\n')}`.trim() : source;
+}
+
+function mergeFeishuRenderedAndClientVarsMarkdown(renderedMarkdown = '', clientVarsMarkdown = '') {
+  const structured = String(clientVarsMarkdown || '').trim();
+  if (structured.length >= 20) {
+    return appendMissingMarkdownImages(structured, renderedMarkdown);
+  }
+  return String(renderedMarkdown || '').trim();
 }
 
 function extractFeishuDocumentTokenFromUrl(url) {
@@ -6089,6 +7065,223 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async resolveWechatChannelsListenerUrl(targetUrl = '') {
+    const source = String(targetUrl || this.settings.wechatChannelsExperimentUrl || '').trim();
+    if (!source) return 'https://channels.weixin.qq.com/';
+    if (!isWechatChannelsUrl(source)) return source;
+    const payload = extractWechatChannelsRequestPayload(source);
+    if (payload.exportId) return buildWechatChannelsPreviewUrl(source);
+    try {
+      const feed = await this.fetchWechatChannelsFeedInfo(source);
+      if (feed.dynamicExportId) {
+        return `https://channels.weixin.qq.com/web/pages/feed?eid=${encodeURIComponent(feed.dynamicExportId)}&context_id=wechat-inbox-${Date.now()}&entrance_id=1019`;
+      }
+    } catch (error) {
+      // Fall back to the public preview page; logged-in pages can still trigger useful requests.
+    }
+    return buildWechatChannelsPreviewUrl(source);
+  }
+
+  async openWechatChannelsListener(targetUrl = '') {
+    const BrowserWindow = getElectronBrowserWindow();
+    if (!BrowserWindow) {
+      new Notice('当前版本已暂停视频号监听功能。');
+      return null;
+    }
+    const session = getWechatSession();
+    if (!session) {
+      new Notice('无法创建微信网页会话。');
+      return null;
+    }
+
+    const listenerUrl = await this.resolveWechatChannelsListenerUrl(targetUrl);
+    await this.saveSettings({
+      ...this.settings,
+      wechatChannelsExperimentUrl: String(targetUrl || this.settings.wechatChannelsExperimentUrl || '').trim(),
+    });
+
+    const win = new BrowserWindow({
+      width: 1100,
+      height: 860,
+      show: true,
+      title: '视频号转写监听（实验）',
+      webPreferences: {
+        session,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+
+    const requestMeta = new Map();
+    const debuggerApi = win.webContents && win.webContents.debugger;
+    const inspectCapturedBody = async (requestId) => {
+      const meta = requestMeta.get(requestId) || {};
+      const inspectKey = `${meta.url || ''} ${meta.mimeType || ''} ${meta.type || ''}`.toLowerCase();
+      if (!/(channels\.weixin\.qq\.com|finder|wechat|json|cgi|feed|object|comment|profile|media|video)/i.test(inspectKey)) return;
+      try {
+        const bodyResult = await debuggerApi.sendCommand('Network.getResponseBody', { requestId });
+        const rawBody = bodyResult && bodyResult.body ? bodyResult.body : '';
+        if (!rawBody || rawBody.length > 8 * 1024 * 1024) return;
+        const text = bodyResult.base64Encoded
+          ? Buffer.from(rawBody, 'base64').toString('utf8')
+          : rawBody;
+        const profiles = extractWechatChannelsProfilesFromText(text, targetUrl || this.settings.wechatChannelsExperimentUrl || meta.url || listenerUrl);
+        for (const profile of profiles) {
+          await this.handleWechatChannelsCapturedProfile(profile, targetUrl || this.settings.wechatChannelsExperimentUrl || meta.url || listenerUrl);
+        }
+      } catch (error) {
+        // Some responses cannot be read after completion; keep listening.
+      } finally {
+        requestMeta.delete(requestId);
+      }
+    };
+
+    if (debuggerApi) {
+      try {
+        debuggerApi.attach('1.3');
+        await debuggerApi.sendCommand('Network.enable');
+        debuggerApi.on('message', (_event, method, params = {}) => {
+          if (method === 'Network.responseReceived' && params.requestId) {
+            requestMeta.set(params.requestId, {
+              url: params.response && params.response.url,
+              mimeType: params.response && params.response.mimeType,
+              type: params.type,
+            });
+          }
+          if (method === 'Network.loadingFinished' && params.requestId) {
+            inspectCapturedBody(params.requestId);
+          }
+        });
+        win.on('closed', () => {
+          try {
+            if (debuggerApi.isAttached && debuggerApi.isAttached()) {
+              debuggerApi.detach();
+            }
+          } catch (error) {}
+        });
+        new Notice('视频号监听窗口已打开。扫码登录后，打开或刷新视频号内容，捕获到媒体后会自动转写保存。');
+      } catch (error) {
+        new Notice(`视频号监听未能启用网络捕获：${error.message || error}`);
+      }
+    }
+
+    try {
+      await win.loadURL(listenerUrl);
+    } catch (error) {
+      new Notice(`打开视频号页面失败：${error.message || error}`);
+    }
+    return win;
+  }
+
+  async handleWechatChannelsCapturedProfile(profile, sourceUrl = '') {
+    const mediaItems = Array.isArray(profile && profile.mediaItems) ? profile.mediaItems : [];
+    const mediaUrl = profile.videoUrl || (mediaItems[0] && mediaItems[0].url) || '';
+    if (!mediaUrl) return null;
+    const decryptKey = String((mediaItems[0] && (mediaItems[0].decryptKey || mediaItems[0].decodeKey)) || profile.decodeKey || '').trim();
+    const captureKey = `${mediaUrl}|${decryptKey}`;
+    this.wechatChannelsCapturedMediaKeys = this.wechatChannelsCapturedMediaKeys || new Set();
+    this.wechatChannelsCaptureInFlight = this.wechatChannelsCaptureInFlight || new Set();
+    if (this.wechatChannelsCapturedMediaKeys.has(captureKey) || this.wechatChannelsCaptureInFlight.has(captureKey)) {
+      return null;
+    }
+    this.wechatChannelsCaptureInFlight.add(captureKey);
+    try {
+      new Notice('已捕获视频号媒体，开始转写...');
+      const now = new Date().toISOString();
+      const title = profile.title || buildWechatChannelsTitle(profile.description || '', '视频号口播文案');
+      const record = {
+        _id: `wechat-channels-local-${crypto.createHash('sha256').update(captureKey).digest('hex').slice(0, 24)}`,
+        type: 'webpage',
+        content: cleanDisplayUrl(sourceUrl || profile.sourceUrl || mediaUrl),
+        createdAt: now,
+        metadata: {
+          url: cleanDisplayUrl(sourceUrl || profile.sourceUrl || ''),
+          title,
+          author: profile.author || '',
+          platform: '视频号',
+          contentCategory: '视频',
+          webpageMediaType: 'audio_video',
+          transcriptOnly: true,
+          coverUrl: profile.coverUrl || (mediaItems[0] && mediaItems[0].coverUrl) || '',
+          dynamicExportId: profile.dynamicExportId || '',
+          wechatChannelsDecodeKey: decryptKey,
+          wechatChannelsEncryptedMedia: Boolean(decryptKey),
+        },
+      };
+      const activeBinding = this.getActiveBindings()[0] || null;
+      const transcribedRecord = await this.buildTranscriptRecordFromMedia(record, {
+        url: sourceUrl || profile.sourceUrl || mediaUrl,
+        platform: '视频号',
+        mediaUrl,
+        mediaUrls: Array.isArray(profile.mediaUrls) ? profile.mediaUrls : mediaItems.map((item) => item.url).filter(Boolean),
+        mediaItems,
+        source: 'wechat-channels-local-capture',
+        binding: activeBinding,
+        title,
+        noMediaError: '监听窗口未捕获到可转写的视频号媒体资源',
+      });
+      const metadata = transcribedRecord.metadata || {};
+      if (metadata.transcriptionStatus !== 'success') {
+        throw new Error(metadata.transcriptionError || '视频号转写失败');
+      }
+      const transcriptProperties = buildTranscriptPropertyMetadata({
+        transcription: metadata.transcription,
+        title,
+      });
+      const finalRecord = {
+        ...transcribedRecord,
+        metadata: {
+          ...metadata,
+          title: metadata.title || title,
+          author: metadata.author || profile.author || '',
+          platform: '视频号',
+          contentCategory: '视频',
+          coverUrl: metadata.coverUrl || profile.coverUrl || '',
+          dynamicExportId: metadata.dynamicExportId || profile.dynamicExportId || '',
+          description: metadata.description || transcriptProperties.description,
+          keywords: getRecordKeywords(metadata).length ? getRecordKeywords(metadata) : transcriptProperties.keywords,
+          aiMetadataSource: metadata.aiMetadataSource || transcriptProperties.aiMetadataSource,
+          wechatChannelsDecodeKey: metadata.wechatChannelsDecodeKey || decryptKey,
+          wechatChannelsEncryptedMedia: Boolean(metadata.wechatChannelsDecodeKey || decryptKey),
+        },
+      };
+      const result = await this.writeCapturedWechatChannelsRecord(finalRecord, now, activeBinding);
+      this.wechatChannelsCapturedMediaKeys.add(captureKey);
+      new Notice(`视频号转写已保存：${result.title}`);
+      return result;
+    } catch (error) {
+      new Notice(`视频号转写失败：${error.message || error}`);
+      return null;
+    } finally {
+      this.wechatChannelsCaptureInFlight.delete(captureKey);
+    }
+  }
+
+  async writeCapturedWechatChannelsRecord(record, syncedAt, binding = null) {
+    const dateFolder = getDateFolderName(record.createdAt);
+    const rootDir = this.settings.inboxDir;
+    const noteDir = this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`;
+    await this.ensureFolder(rootDir);
+    await this.ensureFolder(noteDir);
+    const title = await this.nextRecordTitle(noteDir, record, '');
+    const recordForMarkdown = await this.enrichRecordMetadataWithAi(record, binding);
+    const markdown = buildMarkdownForRecord({
+      record: recordForMarkdown,
+      title,
+      syncedAt,
+      propertyFields: this.settings.notePropertyFields,
+    });
+    const filePath = `${noteDir}/${title}.md`;
+    await this.app.vault.adapter.write(filePath, markdown);
+    return {
+      recordId: getRecordId(record),
+      filePath,
+      title,
+      conversionWarning: getRecordConversionWarning(recordForMarkdown),
+    };
+  }
+
   async cacheLocalTranscriptionEntitlementStatus(status) {
     this.settings = mergeSettings({
       ...this.settings,
@@ -6259,6 +7452,16 @@ class WechatObsidianInboxPlugin extends Plugin {
   async enrichRecordMetadataWithAi(record, binding = null) {
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
+    const hasAccess = await this.hasProFeatureAccess();
+    if (!hasAccess) {
+      return {
+        ...record,
+        metadata: {
+          ...metadata,
+          aiMetadataError: 'Pro 权限未开通，已跳过简介与关键词生成。',
+        },
+      };
+    }
     let generated;
     try {
       generated = await this.generateMetadataWithDeepSeek(record, binding);
@@ -6321,7 +7524,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     const currentBindings = normalizeBindings(this.settings);
     const existing = currentBindings.find((item) => item.token === tokenToBind);
-    if (!existing && currentBindings.length >= MAX_PLUGIN_BINDINGS) {
+    if (!canAddPluginBinding(this.settings, tokenToBind)) {
       new Notice(`最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码`);
       return;
     }
@@ -6361,6 +7564,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       new Notice('绑定成功');
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
+      if (
+        message.includes('PLUGIN_BINDING_LIMIT_EXCEEDED')
+        || message.includes('免费版最多绑定')
+        || message.includes('Pro 版最多绑定')
+      ) {
+        new Notice(message);
+        return;
+      }
       if (message.includes('409') || message.includes('already bound') || message.includes('already-bound')) {
         new Notice('绑定电脑名额已满，请在小程序绑定页新增电脑名额后再试');
         return;
@@ -6394,6 +7605,92 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error('录音文件下载失败');
     }
     return response.arrayBuffer;
+  }
+
+  async buildXiaohongshuOcrImagePayload(imageUrls = []) {
+    const items = [];
+    const selected = (Array.isArray(imageUrls) ? imageUrls : [])
+      .filter(Boolean)
+      .slice(0, XIAOHONGSHU_OCR_MAX_IMAGES);
+    for (let index = 0; index < selected.length; index += 1) {
+      const imageUrl = selected[index];
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const headers = await getXiaohongshuRequestHeaders(imageUrl);
+        // eslint-disable-next-line no-await-in-loop
+        const arrayBuffer = await this.downloadArrayBuffer(imageUrl, headers);
+        const buffer = Buffer.from(arrayBuffer);
+        if (!buffer.length || buffer.length > XIAOHONGSHU_OCR_MAX_IMAGE_BYTES) continue;
+        items.push({
+          imageUrl,
+          imageBase64: buffer.toString('base64'),
+          index: index + 1,
+        });
+      } catch (error) {
+        // Keep OCR best-effort; normal Xiaohongshu extraction must not fail.
+      }
+    }
+    return items;
+  }
+
+  async requestXiaohongshuImageOcr(imageUrls = [], {
+    pageUrl = '',
+    title = '',
+    binding = null,
+  } = {}) {
+    await this.ensureProFeatureAccess('小红书图片 OCR');
+    const images = await this.buildXiaohongshuOcrImagePayload(imageUrls);
+    if (!images.length) return [];
+    const ocrTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-'));
+    const items = [];
+    try {
+      for (const image of images) {
+        const ext = getImageFileExtension(image.imageUrl);
+        const tempImagePath = path.join(ocrTempDir, `image-${image.index || items.length + 1}.${ext}`);
+        fs.writeFileSync(tempImagePath, Buffer.from(image.imageBase64 || '', 'base64'));
+        // eslint-disable-next-line no-await-in-loop
+        const text = await this.runLocalImageOcr(tempImagePath);
+        items.push({
+          imageUrl: image.imageUrl,
+          index: image.index,
+          text,
+        });
+      }
+    } finally {
+      try {
+        fs.rmSync(ocrTempDir, { recursive: true, force: true });
+      } catch (error) {
+        // Best-effort cleanup only.
+      }
+    }
+    return normalizeXiaohongshuOcrItems(items);
+  }
+
+  async enrichXiaohongshuExtractionWithOcr(extracted, {
+    pageUrl = '',
+    binding = null,
+  } = {}) {
+    if (!extracted || !Array.isArray(extracted.imageUrls) || !extracted.imageUrls.length) return extracted;
+    let items = [];
+    try {
+      items = await this.requestXiaohongshuImageOcr(extracted.imageUrls, {
+        pageUrl,
+        title: extracted.title || '',
+        binding,
+      });
+    } catch (error) {
+      return {
+        ...extracted,
+        ocrError: error.message || String(error),
+      };
+    }
+    if (!items.length) return extracted;
+    return {
+      ...extracted,
+      markdown: appendXiaohongshuOcrMarkdown(extracted.markdown, items),
+      ocrItems: items,
+      ocrTextHeavy: isLikelyImageTextNote(items),
+    };
   }
 
   showSyncProgress(progress = {}) {
@@ -6540,12 +7837,124 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getConfiguredLocalAsrInstallRoot(mode = this.settings.localAsrInstallMode) {
-    return getLocalAsrInstallRoot(os.homedir(), mode, this.getConfiguredLocalAsrPlatform());
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const commandRoot = extractLocalAsrInstallRootFromCommand(this.settings.localTranscriptionCommand, platform);
+    if (commandRoot && normalizeLocalAsrInstallMode(mode) === normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode)) {
+      const status = getLocalAsrInstallStatus(commandRoot, fs.existsSync, platform);
+      if (status.ready) return commandRoot;
+    }
+    return getLocalAsrInstallRoot(os.homedir(), mode, platform);
   }
 
   getBundledLocalAsrInstallerPath() {
     const fileName = this.getConfiguredLocalAsrPlatform() === 'darwin' ? 'install-local-asr-macos.sh' : 'install-local-asr.ps1';
     return path.join(this.getPluginBaseDir(), 'local-asr', fileName);
+  }
+
+  getConfiguredLocalOcrInstallRoot() {
+    return getLocalOcrInstallRoot(os.homedir(), this.getConfiguredLocalAsrPlatform());
+  }
+
+  getBundledLocalOcrInstallerPath() {
+    const fileName = this.getConfiguredLocalAsrPlatform() === 'darwin' ? 'install-local-ocr-macos.sh' : 'install-local-ocr.ps1';
+    return path.join(this.getPluginBaseDir(), 'local-ocr', fileName);
+  }
+
+  getLocalOcrInstallStatus() {
+    return getLocalOcrInstallStatus(
+      this.getConfiguredLocalOcrInstallRoot(),
+      fs.existsSync,
+      this.getConfiguredLocalAsrPlatform(),
+    );
+  }
+
+  async installLocalOcr() {
+    if (this.localOcrInstallPromise) {
+      new Notice('本地转写组件的图片文字识别模块正在安装中，请等待当前安装完成后再重试。');
+      return await this.localOcrInstallPromise;
+    }
+    this.localOcrInstallPromise = this.doInstallLocalOcr();
+    try {
+      return await this.localOcrInstallPromise;
+    } finally {
+      this.localOcrInstallPromise = null;
+    }
+  }
+
+  async doInstallLocalOcr() {
+    await this.ensureProFeatureAccess('本地转写组件安装');
+    const installerPath = this.getBundledLocalOcrInstallerPath();
+    if (!fs.existsSync(installerPath)) {
+      throw new Error(`本地转写组件的图片文字识别安装器不存在：${installerPath}`);
+    }
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const installRoot = this.getConfiguredLocalOcrInstallRoot();
+    const command = buildLocalOcrInstallCommand(installerPath, platform, platform === 'win32' ? installRoot : '');
+    new Notice('开始安装本地转写组件的图片文字识别模块，可能需要几分钟。');
+    await new Promise((resolve, reject) => {
+      childProcess.exec(command, {
+        timeout: LOCAL_OCR_INSTALL_TIMEOUT_MS,
+        maxBuffer: 20 * 1024 * 1024,
+        windowsHide: true,
+      }, (error, stdout, stderr) => {
+        if (error) {
+          const timedOut = error.killed || error.signal === 'SIGTERM' || /timed out|timeout/i.test(error.message || '');
+          const errorText = timedOut
+            ? '本地转写组件安装超时：图片文字识别模块安装超过 10 分钟仍未完成。通常是 Python 或依赖下载源访问过慢，安装已中止。'
+            : (stderr || stdout || error.message || String(error));
+          reject(new Error(errorText));
+          return;
+        }
+        resolve({ stdout, stderr });
+      });
+    });
+    const status = this.getLocalOcrInstallStatus();
+    if (!status.ready) {
+      const missingText = status.missingReasons && status.missingReasons.length
+        ? status.missingReasons.join('；')
+        : '图片文字识别模块不完整';
+      throw new Error(`本地转写组件安装不完整：${missingText}`);
+    }
+    new Notice('本地转写组件的图片文字识别模块已安装。');
+  }
+
+  async runLocalImageOcr(imagePath) {
+    const status = this.getLocalOcrInstallStatus();
+    if (!status.ready) {
+      const missingText = status.missingReasons && status.missingReasons.length
+        ? status.missingReasons.join('；')
+        : '图片文字识别模块未安装';
+      throw new Error(`${missingText}。请先在 Pro 高级选项里安装本地转写组件。`);
+    }
+    const outputPath = path.join(os.tmpdir(), `wechat-inbox-ocr-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.txt`);
+    try {
+      await new Promise((resolve, reject) => {
+        childProcess.execFile(status.pythonPath, [
+          status.scriptPath,
+          '--input',
+          imagePath,
+          '--output',
+          outputPath,
+        ], {
+          timeout: LOCAL_OCR_RUN_TIMEOUT_MS,
+          maxBuffer: 10 * 1024 * 1024,
+          windowsHide: true,
+        }, (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(stderr || stdout || error.message || String(error)));
+            return;
+          }
+          resolve({ stdout, stderr });
+        });
+      });
+      return fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8').trim() : '';
+    } finally {
+      try {
+        fs.rmSync(outputPath, { force: true });
+      } catch (error) {
+        // Best-effort cleanup only.
+      }
+    }
   }
 
   async getAvailableLocalAsrInstallerPath() {
@@ -6562,6 +7971,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           && source.includes('transcribe-last.log')
           && source.includes('python-venv')
           && source.includes('validate_local_asr_inference')
+          && source.includes('TENCENT_MODEL_URL=')
+          && source.includes('MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")')
           && source.includes('exec "\\$WHISPER_CPP_BIN" "\\$@"');
       }
       return source.includes('Invoke-NativeProcess')
@@ -6571,6 +7982,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         && source.includes('Install-ExtractedPackage')
         && !source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')
         && source.includes('safeModelPath')
+        && source.includes('$TencentCosAssetBaseUrl')
+        && source.includes('$WhisperWindowsTencentUrls')
+        && source.includes('$FfmpegTencentUrls')
+        && source.includes('$ModelTencentUrls')
+        && source.includes('Get-EnabledAssetUrls')
+        && source.includes('$WhisperWindowsFallbackUrls')
+        && source.includes('GitHub release page parsing failed')
+        && source.includes('INSTALLER FAILED')
+        && source.includes('$DownloadTimeoutSeconds = 1200')
+        && source.includes('--max-time $DownloadTimeoutSeconds')
         && source.includes('System.Text.UTF8Encoding')
         && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
         && source.includes('WriteAllText($OutputPath');
@@ -6726,16 +8147,171 @@ class WechatObsidianInboxPlugin extends Plugin {
     return inactiveStatus;
   }
 
-  async ensureLocalTranscriptionAccess() {
-    const status = await this.getLocalTranscriptionEntitlementStatus();
+  async getProFeatureAccessStatus(options = {}) {
+    const code = normalizeBindCodeInput(this.settings.pendingRedeemCode);
+    if (!code) {
+      const missingStatus = buildMissingRedeemCodeStatus();
+      await this.cacheLocalTranscriptionEntitlementStatus(missingStatus);
+      return missingStatus;
+    }
+    const cached = this.settings && this.settings.localTranscriptionEntitlementStatus;
+    if (!options.forceRefresh && isCachedProStatusActiveForCode(cached, code)) return cached;
+    return await this.validateProRedeemCodeAccess(code);
+  }
+
+  async hasProFeatureAccess() {
+    const cached = this.settings && this.settings.localTranscriptionEntitlementStatus;
+    if (isCachedProStatusActive(cached)) return true;
+    try {
+      const status = await this.getProFeatureAccessStatus();
+      return isCachedProStatusActive(status);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async ensureProFeatureAccess(featureName = '该功能') {
+    const status = await this.getProFeatureAccessStatus();
     if (status.hasAccess) return status;
+    if (status.status === 'missing_redeem_code') {
+      throw new Error(`${featureName}需要先在 Pro 高级选项里输入或自动识别有效兑换码。`);
+    }
     if (status.status === 'unbound') {
-      throw new Error('本地转写权限未开通：请先绑定小程序，并在小程序里输入兑换码开通。');
+      throw new Error(`${featureName}需要先绑定小程序绑定码，再兑换或购买 Pro。`);
     }
     if (status.status === 'expired') {
-      throw new Error('本地转写权限已过期：请在小程序里输入新的周期兑换码后再使用。');
+      throw new Error(`${featureName}需要有效 Pro，当前权限已过期。`);
     }
-    throw new Error('本地转写权限未开通：请在小程序里输入兑换码开通后再使用。');
+    throw new Error(`${featureName}需要有效 Pro：${status.message || '请先输入有效兑换码。'}`);
+  }
+
+  async validateProRedeemCodeAccess(code, options = {}) {
+    const normalizedCode = normalizeBindCodeInput(code);
+    if (!normalizedCode) {
+      const missingStatus = buildMissingRedeemCodeStatus();
+      await this.cacheLocalTranscriptionEntitlementStatus(missingStatus);
+      if (options.throwOnError) throw new Error('请先输入兑换码。');
+      return missingStatus;
+    }
+    const bindings = this.getActiveBindings();
+    if (!bindings.length) {
+      const unboundStatus = {
+        hasAccess: false,
+        plan: LOCAL_TRANSCRIPTION_PLAN,
+        status: 'unbound',
+        expiresAt: '',
+        code: normalizedCode,
+        message: '请先绑定小程序绑定码，再输入兑换码。',
+      };
+      await this.cacheLocalTranscriptionEntitlementStatus(unboundStatus);
+      if (options.throwOnError) throw new Error(unboundStatus.message);
+      return unboundStatus;
+    }
+    const binding = bindings[0];
+    try {
+      const payload = await this.requestJson('/entitlements/redeem', 'POST', { code: normalizedCode }, binding);
+      const status = payload && payload.data ? payload.data : payload;
+      const activeStatus = {
+        ...status,
+        hasAccess: Boolean(status && status.hasAccess),
+        code: normalizeBindCodeInput((status && status.code) || normalizedCode),
+        bindingToken: binding.token,
+        bindingLabel: binding.label || '',
+      };
+      await this.cacheLocalTranscriptionEntitlementStatus(activeStatus);
+      if (activeStatus.code && this.settings.pendingRedeemCode !== activeStatus.code) {
+        await this.saveSettings({
+          ...this.settings,
+          pendingRedeemCode: activeStatus.code,
+        });
+      }
+      if (!activeStatus.hasAccess && options.throwOnError) {
+        throw new Error(formatRedeemAccessError(new Error(activeStatus.message || ''), 'redeem'));
+      }
+      return activeStatus;
+    } catch (error) {
+      const message = formatRedeemAccessError(error, options.mode || 'redeem');
+      const inactiveStatus = {
+        hasAccess: false,
+        plan: LOCAL_TRANSCRIPTION_PLAN,
+        status: /过期/.test(message) ? 'expired' : 'invalid_redeem_code',
+        expiresAt: '',
+        code: normalizedCode,
+        message,
+        bindingToken: binding.token,
+        bindingLabel: binding.label || '',
+      };
+      await this.cacheLocalTranscriptionEntitlementStatus(inactiveStatus);
+      if (options.throwOnError) throw new Error(message);
+      return inactiveStatus;
+    }
+  }
+
+  async redeemProCode() {
+    const code = normalizeBindCodeInput(this.settings.pendingRedeemCode);
+    if (!code) {
+      new Notice('请填写兑换码');
+      return null;
+    }
+    try {
+      const status = await this.validateProRedeemCodeAccess(code, { throwOnError: true, mode: 'redeem' });
+      new Notice(status && status.expiresAt
+        ? `Pro 权限已开通，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}`
+        : 'Pro 权限已开通');
+      return status;
+    } catch (error) {
+      new Notice(`兑换失败：${formatRedeemAccessError(error, 'redeem')}`);
+      return null;
+    }
+  }
+
+  async autoRedeemProCode(options = {}) {
+    const bindings = this.getActiveBindings();
+    if (!bindings.length) {
+      if (!options.silent) new Notice('请先绑定小程序绑定码，再自动识别兑换码。');
+      return null;
+    }
+    let lastError = null;
+    for (const binding of bindings) {
+      try {
+        const payload = await this.requestJson('/entitlements/auto-redeem', 'POST', {}, binding);
+        const status = payload && payload.data ? payload.data : payload;
+        if (status && status.hasAccess) {
+          const cachedStatus = {
+            ...status,
+            code: normalizeBindCodeInput(status.code || ''),
+            bindingToken: binding.token,
+            bindingLabel: binding.label || '',
+          };
+          if (!cachedStatus.code) {
+            lastError = new Error('没有识别到可用兑换码');
+            continue;
+          }
+          await this.cacheLocalTranscriptionEntitlementStatus(cachedStatus);
+          await this.saveSettings({
+            ...this.settings,
+            pendingRedeemCode: cachedStatus.code,
+          });
+          if (!options.silent) {
+            new Notice(status.autoRedeemed
+              ? `已自动识别并开通 Pro，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}`
+              : `Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`);
+          }
+          return cachedStatus;
+        }
+        lastError = status;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!options.silent) {
+      new Notice(`自动识别兑换码失败：${formatRedeemAccessError(lastError, 'auto')}`);
+    }
+    return null;
+  }
+
+  async ensureLocalTranscriptionAccess() {
+    return await this.ensureProFeatureAccess('音视频转写权限');
   }
 
   async installLocalAsr(options = {}) {
@@ -6765,11 +8341,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {
       childProcess.exec(command, {
-        timeout: 30 * 60 * 1000,
+        timeout: LOCAL_ASR_INSTALL_TIMEOUT_MS,
         maxBuffer: 20 * 1024 * 1024,
         windowsHide: true,
       }, (error, stdout, stderr) => {
         if (error) {
+          const timedOut = error.killed || error.signal === 'SIGTERM' || /timed out|timeout/i.test(error.message || '');
+          const errorText = timedOut
+            ? '本地转写组件安装超时：安装超过 20 分钟仍未完成。通常是 GitHub、ffmpeg 或模型下载源无法访问/速度过慢。安装已中止，请复制诊断信息联系开发者。'
+            : (error.message || String(error));
           const logPath = writeLocalAsrInstallLog({
             installRoot,
             platform,
@@ -6777,10 +8357,10 @@ class WechatObsidianInboxPlugin extends Plugin {
             command,
             stdout,
             stderr,
-            error: error.message || String(error),
+            error: errorText,
             status: 'failed',
           });
-          const message = stderr || stdout || error.message || String(error);
+          const message = timedOut ? errorText : (stderr || stdout || errorText);
           reject(new Error(`${message}${logPath ? `\n安装日志：${logPath}` : ''}`));
           return;
         }
@@ -7061,6 +8641,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       inputPath = await this.downloadMediaToTempFile(audioUrl, {
         sourceUrl: options.sourceUrl || options.url || '',
+        decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || '',
         signal: abortController.signal,
         onProgress: (progress = {}) => {
           if (typeof progress.percent === 'number') {
@@ -7162,7 +8743,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       ? await resolveRedirectUrl(audioUrl, 5, 'GET')
       : audioUrl;
     throwIfAborted(options.signal);
-    const buffer = Buffer.from(await this.downloadArrayBuffer(
+    const downloadedBuffer = Buffer.from(await this.downloadArrayBuffer(
       resolvedUrl,
       getSocialRequestHeaders(options.sourceUrl || resolvedUrl),
       {
@@ -7171,9 +8752,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       },
     ));
     throwIfAborted(options.signal);
-    const head = buffer.subarray(0, Math.min(buffer.length, 256)).toString('utf8').trim().toLowerCase();
-    if (buffer.length < 512 || head.startsWith('<!doctype') || head.startsWith('<html') || head.includes('<body')) {
-      throw new Error('下载到的媒体不是有效音视频文件，可能是平台风控页或无效视频地址');
+    const buffer = options.decryptKey
+      ? decryptWechatChannelsMediaBuffer(downloadedBuffer, options.decryptKey)
+      : downloadedBuffer;
+    const invalidReason = getInvalidDownloadedMediaReason(buffer);
+    if (invalidReason) {
+      throw new Error(`${invalidReason}：${cleanDisplayUrl(resolvedUrl || audioUrl)}`);
     }
     const ext = getAudioFormatFromUrl(resolvedUrl || audioUrl);
     const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
@@ -7552,6 +9136,45 @@ class WechatObsidianInboxPlugin extends Plugin {
         nextMetadata.conversionError = error.message || String(error);
       }
 
+      if (isAudioVideoAttachmentExt(fileExt)) {
+        try {
+          this.showSyncProgress({ ...progress, stage: 'transcribing', title: fileName });
+          const result = await this.runConfiguredTranscription(tempFileURL, {
+            binding,
+            fileID: metadata.fileID,
+            title,
+            source: 'file-attachment',
+            forceLocal: metadata.transcriptionMode === 'local',
+            durationSeconds: Math.max(60, Math.ceil((Number(metadata.duration) || 0) / 1000) || 60),
+          });
+          const transcriptProperties = buildTranscriptPropertyMetadata({
+            transcription: result.transcription,
+            title: metadata.title || title || fileName,
+          });
+          nextMetadata.transcription = result.transcription;
+          nextMetadata.transcriptionStatus = 'success';
+          nextMetadata.transcriptionProvider = result.source;
+          nextMetadata.transcriptionSource = 'file-attachment';
+          nextMetadata.conversionStatus = 'success';
+          nextMetadata.cloudTranscriptionProvider = result.cloudProvider || '';
+          nextMetadata.cloudTranscriptionRequestId = result.cloudRequestId || '';
+          nextMetadata.cloudTranscriptionUsedSeconds = result.cloudUsedSeconds || 0;
+          nextMetadata.cloudTranscriptionRemainingSeconds = result.cloudRemainingSeconds || 0;
+          nextMetadata.description = nextMetadata.description || transcriptProperties.description;
+          nextMetadata.keywords = getRecordKeywords(nextMetadata).length ? getRecordKeywords(nextMetadata) : transcriptProperties.keywords;
+          nextMetadata.aiMetadataSource = nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource;
+          nextMetadata.contentCategory = nextMetadata.contentCategory || (['mp4', 'mov', 'm4v'].includes(fileExt) ? '视频' : '音频');
+        } catch (error) {
+          nextMetadata.transcription = '';
+          nextMetadata.transcriptionStatus = 'failed';
+          nextMetadata.transcriptionError = error.message || String(error);
+          nextMetadata.transcriptionProvider = this.settings.aiProvider;
+          nextMetadata.transcriptionSource = 'file-attachment';
+          nextMetadata.conversionStatus = 'failed';
+          nextMetadata.contentCategory = nextMetadata.contentCategory || (['mp4', 'mov', 'm4v'].includes(fileExt) ? '视频' : '音频');
+        }
+      }
+
       return {
         ...record,
         metadata: nextMetadata,
@@ -7600,6 +9223,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     platform,
     mediaUrl = '',
     mediaUrls = [],
+    mediaItems = [],
     subtitleText = '',
     subtitleUrl = '',
     source = '',
@@ -7625,7 +9249,43 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
     }
 
-    const candidates = sortMediaUrlsForTranscription([mediaUrl, ...(Array.isArray(mediaUrls) ? mediaUrls : [])]);
+    const candidateMap = new Map();
+    const addCandidate = (value, extra = {}) => {
+      let candidateUrl = '';
+      let candidateMetadata = { ...extra };
+      if (typeof value === 'string') {
+        candidateUrl = value;
+      } else if (value && typeof value === 'object') {
+        candidateUrl = value.url || value.mediaUrl || value.videoUrl || '';
+        candidateMetadata = { ...value, ...extra };
+      }
+      const normalizedUrl = normalizeExtractedUrl(candidateUrl);
+      if (!/^https?:\/\//i.test(normalizedUrl) || !isLikelyMediaUrl(normalizedUrl)) return;
+      const existing = candidateMap.get(normalizedUrl) || { url: normalizedUrl };
+      const decryptKey = String(
+        candidateMetadata.decryptKey
+        || candidateMetadata.decodeKey
+        || candidateMetadata.decode_key
+        || candidateMetadata.wechatChannelsDecodeKey
+        || existing.decryptKey
+        || existing.decodeKey
+        || '',
+      ).trim();
+      candidateMap.set(normalizedUrl, {
+        ...existing,
+        ...candidateMetadata,
+        url: normalizedUrl,
+        decryptKey,
+        decodeKey: decryptKey || existing.decodeKey || '',
+      });
+    };
+
+    addCandidate(mediaUrl);
+    (Array.isArray(mediaUrls) ? mediaUrls : []).forEach((item) => addCandidate(item));
+    (Array.isArray(mediaItems) ? mediaItems : []).forEach((item) => addCandidate(item));
+    const candidates = sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))
+      .map((candidateUrl) => candidateMap.get(candidateUrl))
+      .filter(Boolean);
 
     if (!candidates.length) {
       return {
@@ -7648,27 +9308,32 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       for (const candidate of candidates) {
         try {
-          const useCloudForWebpage = metadata.transcriptionMode === 'cloud'
-            || metadata.cloudTranscriptionRequested === true;
+          const candidateUrl = candidate.url;
+          const candidateDecryptKey = String(candidate.decryptKey || candidate.decodeKey || '').trim();
+          const useCloudForWebpage = !candidateDecryptKey && (
+            metadata.transcriptionMode === 'cloud'
+            || metadata.cloudTranscriptionRequested === true
+          );
           const result = useCloudForWebpage
-            ? await this.runCloudFallbackTranscription(candidate, {
+            ? await this.runCloudFallbackTranscription(candidateUrl, {
               binding,
               title: title || metadata.title || '',
               source: source || 'media-url',
               localError: 'user selected cloud transcription',
               allowCloudUrlFallback: true,
             })
-            : await this.runConfiguredTranscription(candidate, {
+            : await this.runConfiguredTranscription(candidateUrl, {
               allowCloudUrlFallback: true,
               title: metadata.title || '',
               source: source || 'media-url',
               sourceUrl: url,
+              decryptKey: candidateDecryptKey,
               forceLocal: metadata.transcriptionMode === 'local',
             });
           const nextMetadata = buildTranscriptOnlyMetadata(metadata, {
             url,
             platform,
-            mediaUrl: candidate,
+            mediaUrl: candidateUrl,
             subtitleUrl,
             transcription: result.transcription,
             transcriptionStatus: 'success',
@@ -7683,6 +9348,8 @@ class WechatObsidianInboxPlugin extends Plugin {
               cloudTranscriptionRequestId: result.cloudRequestId || nextMetadata.cloudTranscriptionRequestId || '',
               cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || nextMetadata.cloudTranscriptionUsedSeconds || 0,
               cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || nextMetadata.cloudTranscriptionRemainingSeconds || 0,
+              wechatChannelsDecodeKey: candidateDecryptKey || nextMetadata.wechatChannelsDecodeKey || '',
+              wechatChannelsEncryptedMedia: Boolean(candidateDecryptKey) || Boolean(nextMetadata.wechatChannelsEncryptedMedia),
             },
           };
         } catch (candidateError) {
@@ -7808,6 +9475,134 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
 
+  async fetchWechatChannelsFeedInfo(url) {
+    const payload = extractWechatChannelsRequestPayload(url);
+    if (!payload.shortUri && !payload.exportId) {
+      throw new Error('无法识别视频号链接 ID');
+    }
+
+    const response = await requestUrl({
+      url: WECHAT_CHANNELS_FEED_INFO_URL,
+      method: 'POST',
+      headers: {
+        ...getSocialRequestHeaders(url),
+        'Content-Type': 'application/json; charset=utf-8',
+        Accept: 'application/json, text/plain, */*',
+        Origin: 'https://channels.weixin.qq.com',
+        Referer: 'https://channels.weixin.qq.com/',
+      },
+      body: JSON.stringify({
+        baseReq: { generalToken: '' },
+        ...payload,
+      }),
+      throw: false,
+    });
+
+    if (response.status && (response.status < 200 || response.status >= 300)) {
+      throw new Error(`视频号文案接口请求失败：HTTP ${response.status}`);
+    }
+
+    const body = response.json || tryParseJson(response.text || '') || {};
+    if (Number(body.errCode || 0) !== 0) {
+      throw new Error(body.errMsg || '视频号文案接口返回失败');
+    }
+    return normalizeWechatChannelsFeedPayload(body);
+  }
+
+  async hydrateWechatChannelsTranscript(record, url, binding = null, title = '') {
+    const metadata = record.metadata || {};
+    const feed = await this.fetchWechatChannelsFeedInfo(url);
+    let mediaUrl = feed.videoUrl || '';
+    let mediaUrls = Array.isArray(feed.mediaUrls) ? feed.mediaUrls : [];
+    const mediaItems = Array.isArray(feed.mediaItems) ? feed.mediaItems : [];
+    let mediaSource = mediaUrl ? 'wechat-channels-feed' : 'video';
+
+    if (typeof this.renderSocialMediaUrls === 'function') {
+      try {
+        const renderedUrls = await this.renderSocialMediaUrls(buildWechatChannelsPreviewUrl(url));
+        mediaUrls = sortMediaUrlsForTranscription([mediaUrl, ...mediaUrls, ...renderedUrls]);
+        mediaUrl = mediaUrls[0] || '';
+        if (renderedUrls && renderedUrls.length) {
+          mediaSource = mediaSource === 'wechat-channels-feed'
+            ? 'wechat-channels-feed-rendered'
+            : 'video-rendered';
+        }
+      } catch (error) {
+        mediaUrls = sortMediaUrlsForTranscription([mediaUrl, ...mediaUrls]);
+        mediaUrl = mediaUrls[0] || '';
+      }
+    }
+    mediaUrls = sortMediaUrlsForTranscription([mediaUrl, ...mediaUrls]);
+    mediaUrl = mediaUrls[0] || '';
+
+    if (mediaUrl) {
+      const transcribedRecord = await this.buildTranscriptRecordFromMedia(record, {
+        url,
+        platform: '视频号',
+        mediaUrl,
+        mediaUrls,
+        mediaItems,
+        source: mediaSource,
+        binding,
+        title,
+        noMediaError: '视频号网页端未返回可转写的视频资源',
+      });
+      const nextMetadata = transcribedRecord.metadata || {};
+      const transcriptProperties = nextMetadata.transcriptionStatus === 'success'
+        ? buildTranscriptPropertyMetadata({
+          transcription: nextMetadata.transcription,
+          title: metadata.title || nextMetadata.title || '视频号口播文案',
+        })
+        : { description: '', keywords: [], aiMetadataSource: '' };
+      return {
+        ...transcribedRecord,
+        metadata: {
+          ...nextMetadata,
+          title: metadata.title || nextMetadata.title || '视频号口播文案',
+          author: metadata.author || feed.author || nextMetadata.author || '',
+          platform: metadata.platform || '视频号',
+          contentCategory: metadata.contentCategory || '视频',
+          coverUrl: feed.coverUrl || metadata.coverUrl || nextMetadata.coverUrl || '',
+          dynamicExportId: feed.dynamicExportId || metadata.dynamicExportId || nextMetadata.dynamicExportId || '',
+          wechatChannelsDecodeKey: feed.decodeKey || nextMetadata.wechatChannelsDecodeKey || '',
+          wechatChannelsEncryptedMedia: Boolean(feed.decodeKey) || Boolean(nextMetadata.wechatChannelsEncryptedMedia),
+          description: nextMetadata.description || transcriptProperties.description,
+          keywords: getRecordKeywords(nextMetadata).length ? getRecordKeywords(nextMetadata) : transcriptProperties.keywords,
+          aiMetadataSource: nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource,
+        },
+      };
+    }
+
+    return {
+      ...record,
+      metadata: {
+        ...buildTranscriptOnlyMetadata(metadata, {
+          url,
+          platform: '视频号',
+          transcription: '',
+          transcriptionStatus: 'failed',
+          transcriptionSource: 'wechat-channels-preview',
+          transcriptionError: feed.errMsg || '视频号网页端未返回可转写的视频资源，无法提取视频口播文案',
+          conversionStatus: 'link_saved',
+        }),
+        markdown: buildWechatChannelsUnavailableMarkdown(
+          url,
+          feed,
+          feed.errMsg || '视频号网页端未返回可转写的视频资源，无法提取视频口播文案',
+        ),
+        conversionStatus: 'link_saved',
+        title: metadata.title || feed.title || '视频号口播文案',
+        author: metadata.author || feed.author || '',
+        platform: metadata.platform || '视频号',
+        contentCategory: metadata.contentCategory || '视频',
+        coverUrl: feed.coverUrl || metadata.coverUrl || '',
+        dynamicExportId: feed.dynamicExportId || metadata.dynamicExportId || '',
+        wechatChannelsDecodeKey: feed.decodeKey || metadata.wechatChannelsDecodeKey || '',
+        wechatChannelsEncryptedMedia: Boolean(feed.decodeKey) || Boolean(metadata.wechatChannelsEncryptedMedia),
+      },
+    };
+  }
+
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
@@ -7892,6 +9687,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           : getSocialRequestHeaders(resolvedUrl);
         const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers });
         const html = response.text || '';
+        const hasProAdvancedAccess = isXiaohongshuUrl(url)
+          ? await this.hasProFeatureAccess()
+          : false;
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
@@ -7923,8 +9721,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         let extractedXiaohongshu = null;
         if (isXiaohongshuUrl(url)) {
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
-            includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
+            includeComments: hasProAdvancedAccess && this.settings.xiaohongshuCommentsEnabled !== false,
           });
+          if (hasProAdvancedAccess) {
+            extractedXiaohongshu = await this.enrichXiaohongshuExtractionWithOcr(extractedXiaohongshu, {
+              pageUrl: resolvedUrl,
+              binding,
+            });
+          }
           if (hasReadableXiaohongshuGraphicContent(extractedXiaohongshu, html, resolvedUrl) && !extractedXiaohongshu.videoUrl) {
             return {
               ...record,
@@ -7938,6 +9742,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 contentCategory: '图文',
                 markdown: extractedXiaohongshu.markdown,
                 imageUrls: extractedXiaohongshu.imageUrls || [],
+                xiaohongshuOcrTextHeavy: Boolean(extractedXiaohongshu.ocrTextHeavy),
+                xiaohongshuOcrError: extractedXiaohongshu.ocrError || '',
                 videoUrl: '',
                 conversionStatus: 'success',
               },
@@ -7995,7 +9801,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
 
         const extracted = extractedXiaohongshu || extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
-          includeComments: this.settings.xiaohongshuCommentsEnabled !== false,
+          includeComments: hasProAdvancedAccess && this.settings.xiaohongshuCommentsEnabled !== false,
         });
         return {
           ...record,
@@ -8422,6 +10228,17 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
   }
 
+  async runLocalAsrButtonTask(button, originalText, runningText, task) {
+    button.setButtonText(runningText);
+    button.setDisabled(true);
+    try {
+      await task();
+    } finally {
+      button.setButtonText(originalText);
+      button.setDisabled(false);
+    }
+  }
+
   display() {
     const { containerEl } = this;
     containerEl.empty();
@@ -8454,71 +10271,82 @@ class WechatInboxSettingTab extends PluginSettingTab {
     });
 
     const bindings = normalizeBindings(this.plugin.settings);
-    if (bindings.length) {
-      bindings.forEach((binding, index) => {
-        const isUnbound = binding.status === 'unbound';
-        const statusDesc = isUnbound
-          ? `已解除/已失效${binding.lastError ? `：${binding.lastError}` : ''}`
-          : (binding.enabled === false ? '已暂停同步' : '同步时会拉取这个微信里的收集内容');
-        new Setting(containerEl)
-          .setName(`${binding.label || `已完成绑定的微信 ${index + 1}`}：${binding.token}`)
-          .setDesc(statusDesc)
-          .addText((text) => text
-            .setPlaceholder(`已完成绑定的微信 ${index + 1}`)
-            .setValue(binding.label || '')
-            .onChange(async (value) => {
-              const nextBindings = normalizeBindings(this.plugin.settings).map((item) => (
-                item.token === binding.token ? { ...item, label: value } : item
-              ));
-              await this.plugin.saveSettings({ ...this.plugin.settings, bindings: nextBindings });
-            }))
-          .addToggle((toggle) => toggle
-            .setValue(binding.enabled !== false)
-            .onChange(async (value) => {
+    const primaryBinding = bindings[0] || null;
+    const extraBindings = bindings.slice(1);
+    const renderBindingSetting = (parentEl, binding, indexLabel) => {
+      const isUnbound = binding.status === 'unbound';
+      const statusDesc = isUnbound
+        ? `已解除/已失效${binding.lastError ? `：${binding.lastError}` : ''}`
+        : (binding.enabled === false ? '已暂停同步' : '同步时会拉取这个微信里的收集内容');
+      new Setting(parentEl)
+        .setName(`${binding.label || indexLabel}：${binding.token}`)
+        .setDesc(statusDesc)
+        .addText((text) => text
+          .setPlaceholder(indexLabel)
+          .setValue(binding.label || '')
+          .onChange(async (value) => {
+            const nextBindings = normalizeBindings(this.plugin.settings).map((item) => (
+              item.token === binding.token ? { ...item, label: value } : item
+            ));
+            await this.plugin.saveSettings({ ...this.plugin.settings, bindings: nextBindings });
+          }))
+        .addToggle((toggle) => toggle
+          .setValue(binding.enabled !== false)
+          .onChange(async (value) => {
+            if (isUnbound) return;
+            const nextBindings = normalizeBindings(this.plugin.settings).map((item) => (
+              item.token === binding.token ? { ...item, enabled: value, status: value ? 'bound' : 'paused' } : item
+            ));
+            await this.plugin.saveSettings({ ...this.plugin.settings, bindings: nextBindings });
+            this.display();
+          }))
+        .addButton((button) => {
+          button
+            .setButtonText(isUnbound ? '已解除' : '解除本机')
+            .onClick(async () => {
               if (isUnbound) return;
-              const nextBindings = normalizeBindings(this.plugin.settings).map((item) => (
-                item.token === binding.token ? { ...item, enabled: value, status: value ? 'bound' : 'paused' } : item
-              ));
-              await this.plugin.saveSettings({ ...this.plugin.settings, bindings: nextBindings });
-              this.display();
-            }))
-          .addButton((button) => {
-            button
-              .setButtonText(isUnbound ? '已解除' : '解除本机')
-              .onClick(async () => {
-                if (isUnbound) return;
               await this.plugin.unbindBinding(binding.token);
               this.display();
-              });
-            if (isUnbound) {
-              button.setDisabled(true);
-            }
-          });
-      });
-    }
-
+            });
+          if (isUnbound) {
+            button.setDisabled(true);
+          }
+        });
+    };
     new Setting(containerEl)
-      .setName('立即绑定')
-      .setDesc(bindings.length >= MAX_PLUGIN_BINDINGS
-        ? `已达到上限：最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码。`
-        : `打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。点击立即绑定后会加入上方列表，不会覆盖已有绑定。当前 ${bindings.length}/${MAX_PLUGIN_BINDINGS}。`)
+      .setName('输入绑定码')
+      .setDesc(primaryBinding
+        ? '绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 高级选项里增加设备。'
+        : '基础绑定区只保留 1 个小程序绑定码。打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。')
       .addText((text) => text
         .setPlaceholder('例如 ABC-123')
-        .setValue(this.plugin.settings.pendingBindCode || '')
+        .setValue(primaryBinding ? primaryBinding.token : (this.plugin.settings.pendingBindCode || ''))
+        .setDisabled(Boolean(primaryBinding))
         .onChange(async (value) => {
           await this.plugin.saveSettings({ ...this.plugin.settings, pendingBindCode: value });
         }))
       .addButton((button) => {
         button
-          .setButtonText('立即绑定')
+          .setButtonText(primaryBinding ? '绑定成功' : '立即绑定')
           .setCta()
           .onClick(async () => {
+            if (primaryBinding) return;
             await this.plugin.bindCurrentCode();
             this.display();
           });
-        if (bindings.length >= MAX_PLUGIN_BINDINGS) {
+        if (primaryBinding) {
           button.setDisabled(true);
         }
+      })
+      .addButton((button) => {
+        button
+          .setButtonText('解除本机')
+          .onClick(async () => {
+            if (!primaryBinding) return;
+            await this.plugin.unbindBinding(primaryBinding.token);
+            this.display();
+          });
+        if (!primaryBinding) button.setDisabled(true);
       });
 
     containerEl.createEl('h3', {
@@ -8595,32 +10423,108 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
     containerEl.createEl('h3', {
-      text: '高级选项',
+      text: 'Pro 高级选项',
       cls: 'wechat-inbox-sync-section-heading',
     });
 
-    const aiPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    aiPanel.createEl('summary', { text: 'AI 简介与关键词' });
-    aiPanel.createDiv({
-      text: '默认开启，使用云端内嵌配置给 Pro 用户生成 description 和 keywords；不需要在插件里填写 DeepSeek API Key。',
+    const proStatusText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
+    const proPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    proPanel.open = true;
+    proPanel.createEl('summary', { text: '兑换码与权限状态' });
+    proPanel.createDiv({
+      text: `Pro 高级功能只以这里的兑换码为准；兑换码为空或无效时，即使小程序账号已开通 Pro，也不会执行高级功能。${proStatusText}`,
       cls: 'wechat-inbox-sync-muted',
     });
-    new Setting(aiPanel)
-      .setName('启用 AI 简介与关键词')
-      .setDesc('同步写入前自动生成内容简介与关键词；小红书会结合正文和评论区一起生成。')
-      .addToggle((toggle) => toggle
-        .setValue(Boolean(this.plugin.settings.aiMetadataEnabled))
+    new Setting(proPanel)
+      .setName('输入兑换码')
+      .setDesc('兑换码会绑定到当前插件设备，不能在多个插件里重复使用；已购买 Pro 的用户不受这个限制。')
+      .addText((text) => text
+        .setPlaceholder('例如 OBPROT93C6')
+        .setValue(this.plugin.settings.pendingRedeemCode || '')
         .onChange(async (value) => {
           await this.plugin.saveSettings({
             ...this.plugin.settings,
-            aiMetadataEnabled: value,
+            pendingRedeemCode: value,
           });
+        }))
+      .addButton((button) => button
+        .setButtonText('兑换并刷新')
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.redeemProCode();
+          this.display();
+        }))
+      .addButton((button) => button
+        .setButtonText('自动识别')
+        .onClick(async () => {
+          await this.plugin.autoRedeemProCode({ silent: false });
+          this.display();
+        }))
+      .addButton((button) => button
+        .setButtonText('刷新权限')
+        .onClick(async () => {
+          try {
+            const status = await this.plugin.getProFeatureAccessStatus({ forceRefresh: true });
+            if (status.hasAccess) {
+              new Notice(`Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`);
+            } else if (status.status === 'missing_redeem_code') {
+              new Notice('无可用兑换码，请先输入或自动识别兑换码。');
+            } else {
+              new Notice(status.message || '兑换码无效、已过期，或不属于当前绑定微信。');
+            }
+            this.display();
+          } catch (error) {
+            new Notice(`权限查询失败：${formatRedeemAccessError(error, 'redeem')}`);
+          }
         }));
+
+    proPanel.createDiv({
+      text: 'AI 简介与关键词自动生成：已默认开启；小红书图文 OCR：已默认开启。以上能力会在 Pro 权限有效时自动执行，不需要额外打开开关。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+
+    const extraBindingsPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    extraBindingsPanel.createEl('summary', { text: '额外绑定设备' });
+    extraBindingsPanel.createDiv({
+      text: 'Pro 功能。免费版只保留 1 个基础绑定码；Pro 有效期内可以继续绑定第 2、3 个小程序绑定码。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+    extraBindings.forEach((binding, index) => {
+      renderBindingSetting(extraBindingsPanel, binding, `额外绑定微信 ${index + 2}`);
+    });
+    new Setting(extraBindingsPanel)
+      .setName('绑定额外设备')
+      .setDesc(bindings.length >= MAX_PLUGIN_BINDINGS
+        ? `已达到上限：最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码。`
+        : '先确认 Pro 仍在有效期内，再把新的小程序绑定码绑定到当前插件。')
+      .addText((text) => text
+        .setPlaceholder('例如 ABC-123')
+        .setValue(this.plugin.settings.pendingBindCode || '')
+        .setDisabled(bindings.length >= MAX_PLUGIN_BINDINGS)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({ ...this.plugin.settings, pendingBindCode: value });
+        }))
+      .addButton((button) => {
+        button
+          .setButtonText('绑定额外设备')
+          .onClick(async () => {
+            try {
+              await this.plugin.ensureProFeatureAccess('额外绑定设备');
+              await this.plugin.bindCurrentCode();
+              this.display();
+            } catch (error) {
+              new Notice(`绑定额外设备失败：${error.message || error}`);
+            }
+          });
+        if (bindings.length >= MAX_PLUGIN_BINDINGS) {
+          button.setDisabled(true);
+        }
+      });
 
     const socialPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     socialPanel.createEl('summary', { text: '小红书评论区提取' });
     socialPanel.createDiv({
-      text: '同步小红书图文时保留可解析到的评论区内容；如果评论区提取失败，请先登录小红书。',
+      text: 'Pro 功能。同步小红书图文时保留可解析到的评论区内容；如果评论区提取失败，请先登录小红书。',
       cls: 'wechat-inbox-sync-muted',
     });
     const xiaohongshuLoginBtn = new Setting(socialPanel)
@@ -8653,13 +10557,14 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
 
     const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    localAsrPanel.createEl('summary', { text: '本地转写组件（高级/备用）' });
+    localAsrPanel.createEl('summary', { text: '本地转写组件安装' });
     localAsrPanel.createDiv({
-      text: '默认走本地转写；这里只在需要安装、更新或排查本地转写组件时使用。',
+      text: 'Pro 功能。默认走本地转写；这里统一安装、更新和排查本地转写组件，包括音视频转写和小红书图文 OCR；OCR 会在本机识别图片文字，不上传图片到云端。',
       cls: 'wechat-inbox-sync-muted',
     });
 
     const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
+    const localOcrStatus = this.plugin.getLocalOcrInstallStatus();
     const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
     new Setting(localAsrPanel)
       .setName('本地转写系统')
@@ -8684,23 +10589,27 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
     new Setting(localAsrPanel)
       .setName('本地转写权限')
-      .setDesc(`音视频文案提取功能为付费功能，请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
+      .setDesc(`本地转写功能为付费功能，包含音视频转写和小红书图片文字 OCR。请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
       .addButton((button) => button
         .setButtonText('刷新权限')
         .setCta()
         .onClick(async () => {
           try {
-            const status = await this.plugin.getLocalTranscriptionEntitlementStatus();
-            new Notice(status.hasAccess
-              ? `本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`
-              : '本地转写权限未开通或已过期');
+            const status = await this.plugin.getProFeatureAccessStatus({ forceRefresh: true });
+            if (status.hasAccess) {
+              new Notice(`本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`);
+            } else if (status.status === 'missing_redeem_code') {
+              new Notice('无可用兑换码，请先在 Pro 高级选项输入或自动识别兑换码。');
+            } else {
+              new Notice(status.message || '兑换码无效、已过期，或不属于当前绑定微信。');
+            }
             this.display();
           } catch (error) {
-            new Notice(`权限查询失败：${error.message || error}`);
+            new Notice(`权限查询失败：${formatRedeemAccessError(error, 'redeem')}`);
           }
         }));
     new Setting(localAsrPanel)
-      .setName('本地转写组件')
+      .setName('本地转写组件安装')
       .setDesc(localAsrStatus.ready
         ? `已安装：${localAsrStatus.installRoot}`
         : `未完整安装：${localAsrStatus.installRoot}`)
@@ -8723,22 +10632,26 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .setButtonText('一键安装')
         .setCta()
         .onClick(async () => {
-          try {
-            await this.plugin.installLocalAsr();
-            this.display();
-          } catch (error) {
-            new Notice(`本地转写组件安装失败：${error.message || error}`);
-          }
+          await this.runLocalAsrButtonTask(button, '一键安装', '安装中...', async () => {
+            try {
+              await this.plugin.installLocalAsr();
+              this.display();
+            } catch (error) {
+              new Notice(`本地转写组件安装失败：${error.message || error}`);
+            }
+          });
         }))
       .addButton((button) => button
         .setButtonText('检测并修复')
         .onClick(async () => {
-          try {
-            await this.plugin.checkAndRepairLocalAsr();
-            this.display();
-          } catch (error) {
-            new Notice(`检测并修复失败：${error.message || error}`);
-          }
+          await this.runLocalAsrButtonTask(button, '检测并修复', '修复中...', async () => {
+            try {
+              await this.plugin.checkAndRepairLocalAsr();
+              this.display();
+            } catch (error) {
+              new Notice(`检测并修复失败：${error.message || error}`);
+            }
+          });
         }))
       .addButton((button) => button
         .setButtonText('停止当前转写')
@@ -8754,6 +10667,33 @@ class WechatInboxSettingTab extends PluginSettingTab {
           } catch (error) {
             new Notice(`复制诊断信息失败：${error.message || error}`);
           }
+        }));
+
+    new Setting(localAsrPanel)
+      .setName('图片文字识别 OCR 模块')
+      .setDesc(localOcrStatus.ready
+        ? `已安装：${localOcrStatus.installRoot}`
+        : `未完整安装：${localOcrStatus.installRoot}`)
+      .addButton((button) => button
+        .setButtonText('检测状态')
+        .onClick(() => {
+          const status = this.plugin.getLocalOcrInstallStatus();
+          new Notice(status.ready
+            ? '图片文字识别 OCR 模块可用'
+            : `图片文字识别 OCR 模块未完整安装：${status.missingReasons.join('；')}`);
+        }))
+      .addButton((button) => button
+        .setButtonText('一键安装')
+        .setCta()
+        .onClick(async () => {
+          await this.runLocalAsrButtonTask(button, '一键安装', '安装中...', async () => {
+            try {
+              await this.plugin.installLocalOcr();
+              this.display();
+            } catch (error) {
+              new Notice(`本地转写组件 OCR 模块安装失败：${error.message || error}`);
+            }
+          });
         }));
 
     const status = containerEl.createDiv({ cls: 'wechat-inbox-sync-status' });
@@ -8772,6 +10712,7 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_PLATFORM_NAMES,
   NOTE_PROPERTY_FIELD_KEYS,
   NOTE_SAVE_MODES,
+  canAddPluginBinding,
   getLocalAsrPlatform,
   normalizeLocalAsrPlatform,
   normalizeLocalAsrInstallMode,
@@ -8779,10 +10720,13 @@ WechatObsidianInboxPlugin.__test = {
   normalizeNoteSaveMode,
   normalizeCloudPreTranscriptionThresholdMinutes,
   isAsciiPath,
+  extractLocalAsrInstallRootFromCommand,
   hasLocalAsrNativeCrash,
   getLocalAsrRepairAction,
   resolveLocalAsrPlatform,
   getLocalAsrPlatformMismatchMessage,
+  formatRedeemAccessError,
+  isCachedProStatusActiveForCode,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
   buildDoubaoAsrQueryRequest,
@@ -8797,15 +10741,27 @@ WechatObsidianInboxPlugin.__test = {
   buildRecordTitleBase,
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
+  appendXiaohongshuOcrMarkdown,
+  buildXiaohongshuOcrMarkdown,
+  isLikelyImageTextNote,
+  normalizeXiaohongshuOcrItems,
   buildMarkdownForRecord,
   enrichExtractedWebpageMetadata,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
   extractSocialMediaUrlsFromHtml,
   extractSocialMediaUrlFromHtml,
+  WECHAT_CHANNELS_FEED_INFO_URL,
+  isWechatChannelsUrl,
+  extractWechatChannelsRequestPayload,
+  normalizeWechatChannelsFeedPayload,
+  extractWechatChannelsProfilesFromText,
+  generateWechatChannelsDecryptorBytes,
+  decryptWechatChannelsMediaBuffer,
   extractDouyinAwemeId,
   extractDouyinMediaUrlsFromDetailPayload,
   isUnavailableXiaohongshuPage,
+  normalizeBrowserCapturedMediaUrls,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,
   isWechatMpArticleUrl,
@@ -8814,6 +10770,7 @@ WechatObsidianInboxPlugin.__test = {
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
   buildAudioTranscriptMarkdown,
+  buildTranscriptPropertyMetadata,
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
   buildSkippedSyncNotice,
@@ -8826,6 +10783,10 @@ WechatObsidianInboxPlugin.__test = {
   getSafeLocalAsrInstallRoot,
   getLocalAsrInstallRoot,
   getLocalAsrInstallStatus,
+  getLocalOcrInstallRoot,
+  getLocalOcrInstallStatus,
+  getLocalOcrPythonPath,
+  getLocalOcrScriptPath,
   getLocalAsrScriptVersionStatus,
   explainLocalAsrExitCode,
   getLocalAsrRunLogPath,
@@ -8833,6 +10794,7 @@ WechatObsidianInboxPlugin.__test = {
   appendLocalAsrRunLog,
   readLocalAsrRunLog,
   buildLocalAsrInstallCommand,
+  buildLocalOcrInstallCommand,
   downloadTextViaNode,
   getSocialRequestHeaders,
   getXiaohongshuCookieHeader,
@@ -8846,6 +10808,7 @@ WechatObsidianInboxPlugin.__test = {
   extractWebpageMetadataFromHtml,
   extractFeishuMarkdownFromHtml,
   extractFeishuMarkdownFromClientVars,
+  mergeFeishuRenderedAndClientVarsMarkdown,
   extractFeishuDocumentTokenFromUrl,
   buildFeishuClientVarsApiUrl,
   normalizeGeneratedKeywords,

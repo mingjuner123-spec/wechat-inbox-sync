@@ -26,14 +26,28 @@ Module._load = function mockObsidian(request, parent, isMain) {
 const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
 Module._load = originalLoad;
 
+const {
+  appendXiaohongshuOcrMarkdown,
+  isLikelyImageTextNote,
+  normalizeXiaohongshuOcrItems,
+} = PluginClass.__test;
+
 function createPlugin({ requestUrl, files = {}, settings = {} }) {
   requestUrlMock = requestUrl;
   const plugin = new PluginClass();
   plugin.settings = PluginClass.__test.mergeSettings({
     apiBase: 'https://api.example.com/sync',
     token: 'ABC-123',
+    pendingRedeemCode: 'OBPROT93C6',
     inboxDir: '临时收集',
     aiProvider: 'off',
+    localTranscriptionEntitlementStatus: {
+      hasAccess: true,
+      status: 'active',
+      plan: 'local_transcription_beta',
+      expiresAt: '2026-07-03T08:00:00.000Z',
+      code: 'OBPROT93C6',
+    },
     ...settings,
   });
   plugin.app = {
@@ -127,6 +141,25 @@ function createDocxBuffer(text) {
   });
 }
 
+{
+  const ocrItems = normalizeXiaohongshuOcrItems([
+    {
+      imageUrl: 'https://img.example.com/cover.jpg',
+      text: '第一张图是一张长图文字，里面讲了为什么图片笔记需要 OCR。这里有很多连续正文，适合转成 Obsidian 里的可搜索文字。',
+    },
+    {
+      imageUrl: 'https://img.example.com/page-2.jpg',
+      text: '第二张图继续补充操作步骤：先保留原图，再把识别结果追加到图片文字 OCR 测试版章节，避免影响原来的图文结构。',
+    },
+  ]);
+  assert.strictEqual(isLikelyImageTextNote(ocrItems), true);
+  const markdown = appendXiaohongshuOcrMarkdown('## 图片\n\n![封面](https://img.example.com/cover.jpg)', ocrItems);
+  assert.ok(markdown.includes('## 图片文字 OCR（测试版）'));
+  assert.ok(markdown.includes('### 图片 1'));
+  assert.ok(markdown.includes('为什么图片笔记需要 OCR'));
+  assert.ok(markdown.includes('![封面](https://img.example.com/cover.jpg)'));
+}
+
 function createPdfBuffer(text) {
   const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
   return Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n%%EOF`, 'latin1');
@@ -200,6 +233,28 @@ function createPdfBufferWithControlNoise() {
     PluginClass.__test.isRequestUrlTransportError('Request failed, status 500'),
     true
   );
+
+  {
+    const { plugin } = createPlugin({
+      requestUrl: async () => ({ arrayBuffer: Buffer.from('image') }),
+    });
+    plugin.downloadArrayBuffer = async () => Buffer.from('image');
+    plugin.runLocalImageOcr = async (imagePath) => {
+      if (imagePath.includes('image-1.')) return '第一张图里有足够多的正文文字，用来验证 OCR 会保留前面的图片内容。';
+      if (imagePath.includes('image-2.')) return '第二张图里也有足够多的正文文字，用来验证连续图片识别。';
+      if (imagePath.includes('image-11.')) return '第十一张图里有后半段正文，如果 OCR 只处理前四张，这段文字就会丢失。';
+      return '';
+    };
+    plugin.ensureProFeatureAccess = async () => true;
+    const imageUrls = Array.from({ length: 11 }, (_, index) => `https://img.example.com/page-${index + 1}.jpg`);
+
+    const items = await plugin.requestXiaohongshuImageOcr(imageUrls);
+    const markdown = appendXiaohongshuOcrMarkdown('## 图片', items);
+
+    assert.strictEqual(items.length, 3);
+    assert.ok(markdown.includes('### 图片 11'));
+    assert.ok(markdown.includes('第十一张图里有后半段正文'));
+  }
 
   {
     const { plugin, files } = createPlugin({
