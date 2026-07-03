@@ -6325,32 +6325,69 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
           bodyText.split(/\\n+/).forEach(pushLine);
           document.querySelectorAll('img').forEach(pushImage);
         };
-        const scrollables = () => Array.from(document.querySelectorAll('[class*="scroll"], [class*="container"], [class*="content"], [class*="doc"], main, body, html'))
-          .filter((node) => {
-            try { return node && node.scrollHeight > node.clientHeight + 20; } catch (error) { return false; }
+        const getMainScrollTarget = () => {
+          const selectors = [
+            '[class*="scroll"]',
+            '[class*="container"]',
+            '[class*="content"]',
+            '[class*="doc"]',
+            '[class*="Doc"]',
+            '[class*="editor"]',
+            '[data-docx-has-block-data]',
+            '[data-page-id]',
+            'main',
+            'article',
+            'body',
+            'html',
+          ];
+          const candidates = [];
+          selectors.forEach((selector) => {
+            try {
+              document.querySelectorAll(selector).forEach((node) => {
+                if (!node || candidates.includes(node)) return;
+                const scrollRange = Number(node.scrollHeight || 0) - Number(node.clientHeight || 0);
+                if (scrollRange <= 20) return;
+                const textLength = String(node.innerText || node.textContent || '').length;
+                candidates.push({ node, scrollRange, textLength });
+              });
+            } catch (error) {}
           });
+          candidates.sort((a, b) => {
+            const aScore = a.scrollRange + Math.min(a.textLength, 20000);
+            const bScore = b.scrollRange + Math.min(b.textLength, 20000);
+            return bScore - aScore;
+          });
+          return candidates.length ? candidates[0].node : (document.scrollingElement || document.documentElement || document.body);
+        };
         collect();
-        for (let index = 0; index < 56; index += 1) {
+        let stableRounds = 0;
+        let lastSignature = '';
+        for (let index = 0; index < 140; index += 1) {
           const beforeCount = lines.length;
-          const before = Math.max(
-            document.documentElement ? document.documentElement.scrollHeight : 0,
-            document.body ? document.body.scrollHeight : 0
-          );
-          window.scrollBy(0, Math.max(500, Math.floor(window.innerHeight * 0.85)));
-          scrollables().forEach((node) => {
-            try { node.scrollTop = Math.min(node.scrollTop + Math.max(500, Math.floor(node.clientHeight * 0.85)), node.scrollHeight); } catch (error) {}
-          });
-          await sleep(520);
+          const target = getMainScrollTarget();
+          const beforeTop = target ? Number(target.scrollTop || 0) : Number(window.scrollY || 0);
+          const step = Math.max(480, Math.floor((target && target.clientHeight ? target.clientHeight : window.innerHeight || 900) * 0.72));
+          try {
+            if (target && target !== document.body && target !== document.documentElement && target !== document.scrollingElement) {
+              target.scrollTop = Math.min(Number(target.scrollTop || 0) + step, Number(target.scrollHeight || 0));
+            } else {
+              window.scrollBy(0, step);
+            }
+          } catch (error) {
+            window.scrollBy(0, step);
+          }
+          await sleep(index < 12 ? 700 : 380);
           collect();
-          const after = Math.max(
-            document.documentElement ? document.documentElement.scrollHeight : 0,
-            document.body ? document.body.scrollHeight : 0
-          );
-          const atDocumentBottom = window.innerHeight + window.scrollY >= after - 8;
-          const atScrollableBottom = scrollables().every((node) => {
-            try { return node.scrollTop + node.clientHeight >= node.scrollHeight - 8; } catch (error) { return true; }
-          });
-          if (atDocumentBottom && atScrollableBottom && Math.abs(after - before) < 20 && lines.length === beforeCount) break;
+          const afterTop = target ? Number(target.scrollTop || 0) : Number(window.scrollY || 0);
+          const atBottom = target
+            ? afterTop + Number(target.clientHeight || window.innerHeight || 0) >= Number(target.scrollHeight || 0) - 12
+            : true;
+          const tail = lines.slice(-24).join('\\n');
+          const signature = String(lines.length) + ':' + tail;
+          if (signature === lastSignature || (lines.length === beforeCount && Math.abs(afterTop - beforeTop) < 8 && atBottom)) stableRounds += 1;
+          else stableRounds = 0;
+          lastSignature = signature;
+          if (stableRounds >= 10) break;
         }
         const toDataUrl = (blob) => new Promise((resolve, reject) => {
           const reader = new FileReader();
