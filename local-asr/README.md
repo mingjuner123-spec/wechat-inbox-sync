@@ -36,10 +36,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.wechat-in
 /bin/bash ./install-local-asr-macos.sh
 ```
 
-安装脚本会通过 Homebrew 安装：
+安装脚本会通过 uv（自动安装 Python）完成环境搭建，无需手动安装 Homebrew。
 
-- whisper-cpp
-- ffmpeg
+安装内容：
+
+- Python 3.12（如系统无可用 Python 则自动下载）
+- whisper.cpp（通过 Python wheel）
+- ffmpeg（通过 Python imageio-ffmpeg）
 - Whisper small 模型
 
 默认安装到：
@@ -54,7 +57,7 @@ $HOME/.wechat-inbox-local-asr
 /bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}
 ```
 
-如果电脑没有 Homebrew，脚本会提示先安装 Homebrew。苹果芯片和 Intel Mac 都走同一套安装逻辑。
+苹果芯片（M1/M2/M3）和 Intel Mac 都可使用，无需额外配置。
 
 ## 适用范围
 

@@ -18,8 +18,8 @@ const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvn
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
-const LOCAL_ASR_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1';
-const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh';
+const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
+const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
 const LOCAL_OCR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1';
 const LOCAL_OCR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh';
 const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -69,6 +69,11 @@ const DEFAULT_SETTINGS = {
   xiaohongshuCommentsEnabled: true,
   xiaohongshuImageOcrEnabled: true,
   wechatChannelsExperimentUrl: '',
+  feishuCloudOAuthEnabled: true,
+  feishuOAuthStatus: null,
+  feishuOpenApiEnabled: false,
+  feishuAppId: '',
+  feishuAppSecret: '',
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -132,6 +137,8 @@ const CHINA_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
 const TENCENT_ASR_HOST = 'asr.tencentcloudapi.com';
 const TENCENT_ASR_VERSION = '2019-06-14';
 const TENCENT_ASR_SERVICE = 'asr';
+const FEISHU_OPEN_API_PAGE_SIZE = 500;
+const FEISHU_OPEN_API_MAX_PAGES = 50;
 const DOUBAO_ASR_SUBMIT_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit';
 const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/query';
 const DOUBAO_ASR_RESOURCE_ID = 'volc.seedasr.auc';
@@ -1149,6 +1156,15 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     : merged.xiaohongshuCommentsEnabled !== false;
   merged.xiaohongshuImageOcrEnabled = true;
   merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || '').trim();
+  merged.feishuCloudOAuthEnabled = merged.feishuCloudOAuthEnabled !== false;
+  merged.feishuOAuthStatus = merged.feishuOAuthStatus
+    && typeof merged.feishuOAuthStatus === 'object'
+    && !Array.isArray(merged.feishuOAuthStatus)
+    ? merged.feishuOAuthStatus
+    : null;
+  merged.feishuOpenApiEnabled = Boolean(merged.feishuOpenApiEnabled);
+  merged.feishuAppId = String(merged.feishuAppId || '').trim();
+  merged.feishuAppSecret = String(merged.feishuAppSecret || '').trim();
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
@@ -2357,7 +2373,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
       return;
     }
 
-    if (options.feishuTitle && shouldDropFeishuLine(text, options.feishuTitle)) {
+    if (options.feishuTitle && shouldDropFeishuLine(text, options.feishuTitle) && !isFeishuCodeLanguageLine(text)) {
       return;
     }
 
@@ -2387,7 +2403,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
       text = formatFeishuHeadingLine(text, options.feishuTitle);
     }
 
-    if (options.dedupe) {
+    if (options.dedupe && !text.startsWith('|')) {
       const key = text
         .replace(/^#{1,6}\s+/, '')
         .replace(/\*\*/g, '')
@@ -2404,7 +2420,11 @@ function cleanMarkdownForStorage(markdown, options = {}) {
     lastWasBlank = false;
   });
 
-  return restoreFlattenedSarBandTables(out).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  let cleaned = restoreFlattenedSarBandTables(out).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (options.feishuTitle) {
+    cleaned = postProcessFeishuMarkdown(cleaned, options.feishuTitle);
+  }
+  return cleaned;
 }
 
 function stripMarkdownCodeBlocks(markdown) {
@@ -2518,6 +2538,7 @@ function normalizeFeishuMarkdownLine(line) {
 function shouldDropFeishuLine(line, title) {
   const text = String(line || '').trim();
   if (!text) return true;
+  const plainText = text.replace(/^#{1,6}\s+/, '').replace(/^[-*]\s+/, '').trim();
   const normalized = normalizeTitleForCompare(text);
   const normalizedTitle = normalizeTitleForCompare(title);
   const noise = new Set([
@@ -2543,8 +2564,35 @@ function shouldDropFeishuLine(line, title) {
     'Plain Text',
     'Plain Text复制',
     '复制',
+    'Bash',
+    '重播',
+    '播放',
+    '直播',
+    '进入全屏',
+    '画中画',
+    '原画',
+    '点击按住可拖动视频',
+    '星辰大海',
+    '蟹',
+    '蟹老板-老王1',
+    '正在以画中画形式播放',
+    '语句划分',
+    '音频时长核定',
+    '画面规划',
+    '画面代码审查',
+    '多AIAGENT优化',
+    '人点赞',
   ]);
-  if (noise.has(text)) return true;
+  if (noise.has(text) || noise.has(plainText)) return true;
+  if (/^\d{1,3}%$/.test(plainText)) return true;
+  if (/^\d+(?:\.\d+)?\s*(?:KB|MB|GB)$/i.test(plainText)) return true;
+  if (/^(?:-\s*)?\d{3,4}p$/i.test(plainText)) return true;
+  if (/^(?:-\s*)?\d+(?:\.\d+)?x$/i.test(plainText)) return true;
+  if (/^\d{1,2}月\d{1,2}日修改$/.test(plainText)) return true;
+  if (/^(?:\d{1,2}:\d{2}|\/|[0-9]+(?:\.[0-9]+)?x)$/.test(plainText)) return true;
+  if (/^\S{1,30}的云文档$/.test(plainText)) return true;
+  if (/^[\u{1F300}-\u{1FAFF}\u2600-\u27BF]+$/u.test(plainText)) return true;
+  if (normalizedTitle && normalized.includes(normalizedTitle) && normalized !== normalizedTitle && normalized.length <= normalizedTitle.length + 24) return true;
   if (/添加快捷方式\s*最近修改\s*[:：]?/.test(text)) return true;
   if (/^最近修改\s*[:：]?/.test(text)) return true;
   if (/^你可能还想问/.test(text)) return true;
@@ -2577,17 +2625,284 @@ function shouldDropFeishuLine(line, title) {
 
 function formatFeishuHeadingLine(line) {
   const text = String(line || '').trim();
+  if (/^#\s+(?:创建项目|或者克隆|应输出)/.test(text)) return `\\${text}`;
   if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
     return text;
   }
+  const numericSection = text.match(/^(\d+)\.(\d{1,3})(.+)$/);
+  if (numericSection && Number(numericSection[1]) <= 6 && !/^(?:[+]|MB|GB|KB|（推荐|推荐)/i.test(numericSection[3].trim())) {
+    return numericSection[2].length >= 2 ? `### ${text}` : `## ${text}`;
+  }
   const length = Array.from(text).length;
   if (length >= 4 && length <= 34) {
+    if (/^[一二三四五六七八九十]+[、.．]\s*.+/.test(text)) return `# ${text}`;
+    if (/^[（(]\d+[）)]\s*.+/.test(text)) return `### ${text}`;
     if (/^\d{4}年之前，我没有任何目标$/.test(text)) return `## ${text}`;
     if (/^(第[一二三四五六七八九十\d]+[、.．]?\s*)?[^，。！？!?]{0,16}风口[：:]/.test(text)) return `## ${text}`;
     if (/^(什么是.+原理|举个例子|最后|知识付费的下一个形态)$/.test(text)) return `## ${text}`;
     if (/^第[一二三四五六七八九十\d]+[步层：:]/.test(text)) return `### ${text}`;
   }
   return text;
+}
+
+function isFeishuTocBulletLine(line) {
+  const text = String(line || '').trim().replace(/^[-*]\s+/, '');
+  return /^[一二三四五六七八九十]+[、.．]/.test(text)
+    || /^\d+\.\d/.test(text)
+    || /^[（(]\d+[）)]/.test(text)
+    || /^第[一二三四五六七八九十\d]+[步层：:]/.test(text)
+    || /^.+(?:成果|经验|收获|流程|配置|安装|教学|优化|什么|想法|视频|画面|审查|制作|下一步).*$/.test(text);
+}
+
+function removeFeishuTocBlocks(lines) {
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = String(lines[index] || '');
+    if (!/^[-*]\s+/.test(line.trim())) {
+      output.push(line);
+      continue;
+    }
+    const block = [];
+    let cursor = index;
+    while (cursor < lines.length && /^[-*]\s+/.test(String(lines[cursor] || '').trim())) {
+      block.push(String(lines[cursor] || ''));
+      cursor += 1;
+    }
+    const tocCount = block.filter(isFeishuTocBulletLine).length;
+    if (block.length >= 4 && tocCount >= Math.ceil(block.length * 0.65)) {
+      index = cursor - 1;
+      continue;
+    }
+    output.push(...block);
+    index = cursor - 1;
+  }
+  return output;
+}
+
+function repairFeishuMarkdownTables(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = String(lines[index] || '').trim();
+    if (current === '|') continue;
+    const nextNonBlank = [];
+    let scan = index;
+    while (scan < lines.length && nextNonBlank.length < 8) {
+      const value = String(lines[scan] || '').trim();
+      if (value && value !== '|') nextNonBlank.push({ value, index: scan });
+      scan += 1;
+    }
+    let headers = null;
+    let separatorPattern = null;
+    if (
+      current === '组件'
+      && nextNonBlank.some((item) => item.value === '要求')
+      && nextNonBlank.some((item) => item.value === '说明')
+    ) {
+      headers = ['组件', '要求', '说明'];
+      separatorPattern = /^\|\s*---\s*\|\s*---\s*\|\s*---\s*\|$/;
+    } else if (
+      current === '序号'
+      && nextNonBlank.some((item) => item.value === '版本')
+      && nextNonBlank.some((item) => item.value === '用途')
+      && nextNonBlank.some((item) => item.value === '是否必须')
+    ) {
+      headers = ['序号', '版本', '用途', '是否必须'];
+      separatorPattern = /^\|\s*---\s*\|\s*---\s*\|\s*---\s*\|\s*---\s*(?:\|\s*---\s*)?\|$/;
+    }
+    if (!headers || !nextNonBlank.some((item) => separatorPattern.test(item.value))) {
+      output.push(lines[index]);
+      continue;
+    }
+
+    const separator = nextNonBlank.find((item) => separatorPattern.test(item.value));
+    const cells = [];
+    let cursor = separator.index + 1;
+    while (cursor < lines.length) {
+      const value = String(lines[cursor] || '').trim();
+      if (!value) {
+        cursor += 1;
+        continue;
+      }
+      if (value === '|' || /^#{1,6}\s+/.test(value) || /^!\[/.test(value) || /^\[[^\]]+]\(/.test(value)) break;
+      if (headers.includes(value) && cells.length) break;
+      if (shouldDropFeishuLine(value, '')) {
+        cursor += 1;
+        continue;
+      }
+      cells.push(value.replace(/\|/g, '\\|'));
+      cursor += 1;
+      if (cells.length >= 30) break;
+    }
+    const rows = [];
+    for (let cellIndex = 0; cellIndex + headers.length - 1 < cells.length; cellIndex += headers.length) {
+      rows.push(cells.slice(cellIndex, cellIndex + headers.length));
+    }
+    if (rows.length) {
+      output.push(`| ${headers.join(' | ')} |`);
+      output.push(`| ${headers.map(() => '---').join(' | ')} |`);
+      rows.forEach((row) => output.push(`| ${row.join(' | ')} |`));
+      index = Math.max(index, cursor - 1);
+      continue;
+    }
+    output.push(lines[index]);
+  }
+  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function removeFeishuResidualTableLines(markdown) {
+  const residue = new Set(['组件', '要求', '说明', 'CPU', '内存', '硬盘', '序号', '版本', '用途', '是否必须']);
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  let recentlySawTable = 0;
+  lines.forEach((line) => {
+    const text = String(line || '').trim();
+    if (/^\|.+\|$/.test(text)) {
+      recentlySawTable = 8;
+      output.push(line);
+      return;
+    }
+    if (recentlySawTable > 0 && residue.has(text)) {
+      recentlySawTable -= 1;
+      return;
+    }
+    if (recentlySawTable > 0) recentlySawTable -= 1;
+    output.push(line);
+  });
+  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function isFeishuCodeLanguageLine(line) {
+  return /^(?:Bash|Shell|PowerShell|JavaScript|TypeScript|Python|JSON|YAML|HTML|CSS)$/i.test(String(line || '').trim());
+}
+
+function isFeishuCommandLikeLine(line) {
+  const text = String(line || '').trim();
+  if (!text) return false;
+  if (/^#\s+/.test(text)) return true;
+  if (/^\\#\s+/.test(text)) return true;
+  if (/^(?:npx|npm|pnpm|yarn|node|python|pip|conda|ffmpeg|git|cd|mkdir|curl|brew|uv|powershell|pwsh|setx|export)\b/i.test(text)) return true;
+  if (/^(?:[A-Za-z]:\\|\.\/|\.\.\/|~\/)/.test(text)) return true;
+  if (/^[A-Z_][A-Z0-9_]*=/.test(text)) return true;
+  return false;
+}
+
+function isFeishuNarrativeAfterCode(line) {
+  const text = String(line || '').trim();
+  if (!text) return true;
+  if (/^#{1,6}\s+/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text) || /^\|.+\|$/.test(text)) return true;
+  return /[。！？；：]$/.test(text) || /^[\u4e00-\u9fa5].{4,}$/.test(text);
+}
+
+function formatFeishuCodeBlocks(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  const output = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const current = String(lines[index] || '').trim();
+    if (!isFeishuCodeLanguageLine(current)) {
+      output.push(lines[index]);
+      continue;
+    }
+    const language = current.toLowerCase() === 'bash' || current.toLowerCase() === 'shell' ? 'bash' : current.toLowerCase();
+    const codeLines = [];
+    let cursor = index + 1;
+    while (cursor < lines.length) {
+      const value = String(lines[cursor] || '').trim();
+      if (!value) {
+        cursor += 1;
+        continue;
+      }
+      if (isFeishuCodeLanguageLine(value) || /^```/.test(value) || /^#{1,6}\s+/.test(value) || /^\|.+\|$/.test(value)) break;
+      if (isFeishuCommandLikeLine(value)) {
+        codeLines.push(value.replace(/^\\#/, '#'));
+        cursor += 1;
+        continue;
+      }
+      if (codeLines.length && isFeishuNarrativeAfterCode(value)) break;
+      if (!codeLines.length) break;
+      codeLines.push(value.replace(/^\\#/, '#'));
+      cursor += 1;
+    }
+    if (!codeLines.length) {
+      output.push(lines[index]);
+      continue;
+    }
+    if (output.length && String(output[output.length - 1] || '').trim()) output.push('');
+    output.push(`\`\`\`${language}`);
+    output.push(...codeLines);
+    output.push('```');
+    output.push('');
+    index = cursor - 1;
+  }
+  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function isFeishuRecommendationTitleLine(line) {
+  const text = String(line || '').trim();
+  if (!text || /^#{1,6}\s+/.test(text) || /^[-*]\s+/.test(text) || /^\|.+\|$/.test(text) || /^!\[/.test(text) || /^\[[^\]]+]\(/.test(text)) return false;
+  if (text.length < 8 || text.length > 80) return false;
+  if (/[。！？；：]$/.test(text)) return false;
+  return /(?:REMOTION|Remotion|AI|Agent|Hermes|Qwen|TTS|部署|教程|经验|分享|方法|踩坑|实操|策略|指南)/i.test(text);
+}
+
+function trimFeishuTrailingRecommendations(lines) {
+  const source = Array.isArray(lines) ? lines.slice() : [];
+  let lastContentIndex = source.length - 1;
+  while (lastContentIndex >= 0 && !String(source[lastContentIndex] || '').trim()) lastContentIndex -= 1;
+  if (lastContentIndex < 0) return source;
+  let start = lastContentIndex;
+  while (start >= 0 && isFeishuRecommendationTitleLine(source[start])) start -= 1;
+  const count = lastContentIndex - start;
+  if (count >= 3) return source.slice(0, start + 1);
+  return source;
+}
+
+function hasFeishuDanglingTableTail(lines) {
+  const source = (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line || '').trim())
+    .filter(Boolean);
+  if (source.length < 10) return false;
+  const joined = source.join('\n');
+  if (!/(?:安装清单总览|逐步安装指南|配置要求|以下是所有需要安装的软件和工具)/.test(joined)) return false;
+  const tail = source.slice(-18);
+  const shortFragmentCount = tail.filter((line) => {
+    if (/^#{1,6}\s+/.test(line) || /^[-*]\s+/.test(line) || /^!\[/.test(line)) return false;
+    if (/[。！？；：]$/.test(line)) return false;
+    return line.length <= 28;
+  }).length;
+  const toolFragmentCount = tail.filter((line) => /^(?:Node\.js|npm|FFmpeg|Python|Conda|CUDA Toolkit|Remotion|v?\d|必须|推荐|用途|版本|序号|是否必须)/i.test(line)).length;
+  return shortFragmentCount >= 8 && toolFragmentCount >= 4;
+}
+
+function isFeishuMarkdownLikelyTruncated(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const trimmed = trimFeishuTrailingRecommendations(lines);
+  if (trimmed.length <= lines.length - 3) return true;
+  if (hasFeishuDanglingTableTail(lines)) return true;
+  if (lines.length < 20) return false;
+  const lastHeadingIndex = lines.map((line, index) => (/^#{1,6}\s+/.test(line) ? index : -1)).filter((index) => index >= 0).pop() ?? -1;
+  const tail = lines.slice(Math.max(0, lines.length - 12));
+  return lastHeadingIndex >= 0
+    && lines.length - lastHeadingIndex < 12
+    && tail.filter(isFeishuRecommendationTitleLine).length >= 3;
+}
+
+function postProcessFeishuMarkdown(markdown, title = '') {
+  let lines = String(markdown || '').split(/\r?\n/)
+    .map((line) => String(line || '').trim())
+    .filter((line) => line && (!shouldDropFeishuLine(line, title) || isFeishuCodeLanguageLine(line)));
+  const commentsIndex = lines.findIndex((line) => /^(?:真诚点赞，手留余香|全文评论)$/.test(line));
+  if (commentsIndex >= 0) {
+    lines = lines.slice(0, commentsIndex);
+  }
+  lines = removeFeishuTocBlocks(lines);
+  lines = lines.map((line) => {
+    if (/^[-*]\s+读完这篇/.test(line)) return line.replace(/^[-*]\s+/, '# ');
+    if (/^[-*]\s+/.test(line) && isFeishuTocBulletLine(line)) return '';
+    return formatFeishuHeadingLine(line);
+  }).filter(Boolean);
+  lines = trimFeishuTrailingRecommendations(lines);
+  return formatFeishuCodeBlocks(removeFeishuResidualTableLines(repairFeishuMarkdownTables(lines.join('\n')))).replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function sanitizeAttachmentName(fileName, fallbackName) {
@@ -5807,6 +6122,21 @@ async function renderUrlToMarkdownWithElectron(url) {
           imageAssets.push({ src, alt, width, height });
           return '\\n\\n![' + alt + '](' + src + ')\\n\\n';
         };
+        const mediaToMarkdown = (node) => {
+          const tag = String(node && node.tagName || '').toLowerCase();
+          const label = tag === 'audio' ? '音频文件' : '视频文件';
+          const urls = [];
+          const push = (value) => {
+            const src = String(value || '').trim();
+            if (!src || /^blob:/i.test(src) || urls.includes(src)) return;
+            urls.push(src);
+          };
+          push(node.currentSrc || node.src || node.getAttribute('src') || node.getAttribute('data-src') || '');
+          if (node.querySelectorAll) {
+            node.querySelectorAll('source').forEach((source) => push(source.src || source.getAttribute('src') || ''));
+          }
+          return urls.map((src, index) => '\\n\\n[' + label + (urls.length > 1 ? ' ' + (index + 1) : '') + '](' + src + ')\\n\\n').join('');
+        };
         const tableToMarkdown = (table) => {
           const rows = Array.from(table.querySelectorAll('tr')).map((row) => {
             return Array.from(row.children)
@@ -5834,6 +6164,7 @@ async function renderUrlToMarkdownWithElectron(url) {
           const tag = node.tagName.toLowerCase();
           if (tag === 'script' || tag === 'style' || tag === 'noscript') return '';
           if (tag === 'img') return imageToMarkdown(node);
+          if (tag === 'video' || tag === 'audio' || tag === 'source') return mediaToMarkdown(node);
           if (tag === 'table') return tableToMarkdown(node);
           if (tag === 'pre' || tag === 'code') {
             const code = String(node.innerText || node.textContent || '').replace(/\\u00a0/g, ' ').replace(/^\\n+|\\n+$/g, '');
@@ -5851,7 +6182,7 @@ async function renderUrlToMarkdownWithElectron(url) {
         const collected = [];
         const collectVisibleBlocks = () => {
           const blocks = [];
-          const candidates = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,table,[data-block-id],[data-block-type],[class*="block"],[class*="paragraph"],[class*="docx"],[class*="text"]'));
+          const candidates = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,table,video,audio,source,[data-block-id],[data-block-type],[class*="block"],[class*="paragraph"],[class*="docx"],[class*="text"]'));
           candidates.forEach((node) => {
             const text = clean(node.innerText || node.textContent || '');
             if (!text || text.length < 2 || seen.has(text)) return;
@@ -5927,6 +6258,13 @@ async function renderUrlToMarkdownWithElectron(url) {
             } catch (error) {}
           } else if (asset.src.startsWith('data:')) {
             next.dataUrl = asset.src;
+          } else if (/feishu\.cn|feishu\.net|internal-api-drive-stream/i.test(asset.src)) {
+            try {
+              const blob = await fetch(asset.src, { credentials: 'include' }).then((response) => response.blob());
+              if (blob && blob.size && /^image\//i.test(blob.type || '')) {
+                next.dataUrl = await toDataUrl(blob);
+              }
+            } catch (error) {}
           }
           uniqueAssets.push(next);
         }
@@ -5943,12 +6281,272 @@ async function renderUrlToMarkdownWithElectron(url) {
     if (result && result.needsLogin) {
       throw new Error('飞书页面需要先登录。请在插件设置中点击“登录飞书”，登录后再同步。');
     }
+    let __feishuDiag = 'no-clientVars';
     if (result && result.clientVars) {
       try {
-        const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(result.clientVars);
+        const cv = result.clientVars;
+        const bm = cv.block_map || cv.blockMap || {};
+        const cvBlockCount = Object.keys(bm).length;
+        const seqLen = Array.isArray(cv.block_sequence) ? cv.block_sequence.length : -1;
+        const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(cv);
+        const renderedLen = String(result.markdown || '').length;
         result.markdown = mergeFeishuRenderedAndClientVarsMarkdown(result.markdown, clientVarsMarkdown);
-      } catch (error) {}
+        __feishuDiag = `cv:ok bm=${cvBlockCount} seq=${seqLen} rendered=${renderedLen} structured=${clientVarsMarkdown.length} merged=${result.markdown.length}`;
+      } catch (error) {
+        __feishuDiag = `cv:fail ${error.message}`;
+      }
     }
+    result.__feishuDiag = __feishuDiag;
+    if (!result || !result.markdown || result.markdown.length < 20) {
+      throw new Error('隐藏浏览器未读取到足够正文');
+    }
+    return result;
+  } finally {
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
+}
+
+async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
+  }
+
+  const wechatSession = getWechatSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1600,
+    show: false,
+    webPreferences: {
+      session: wechatSession || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  try {
+    const loaded = waitForWebContents(win.webContents);
+    await win.loadURL(url);
+    await loaded;
+    const result = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const clean = (text) => String(text || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/[ \\t]+/g, ' ')
+          .trim();
+        const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn/i.test(location.href)
+          || /扫码登录|登录飞书|Login Required/i.test(document.body ? String(document.body.innerText || document.body.textContent || '') : '');
+        const getPathToken = () => {
+          const match = String(location.pathname || '').match(/\\/(?:docx|wiki)\\/([^/?#]+)/i);
+          return match ? decodeURIComponent(match[1]) : '';
+        };
+        const getFeishuClientVars = async () => {
+          const token = getPathToken();
+          const candidates = [
+            window.DATA && window.DATA.clientVars && window.DATA.clientVars.data,
+            window.DATA && token && window.DATA[token] && window.DATA[token].CLIENT_VARS && window.DATA[token].CLIENT_VARS.data,
+            window.SERVER_DATA && window.SERVER_DATA.clientVars && window.SERVER_DATA.clientVars.data,
+            window.SERVER_RUNTIME_DATA && window.SERVER_RUNTIME_DATA.clientVars && window.SERVER_RUNTIME_DATA.clientVars.data,
+          ].filter(Boolean);
+          const existing = candidates.find((item) => item && (item.block_map || item.blockMap));
+          if (existing) return existing;
+          if (!token || isLoginPage()) return null;
+          try {
+            const response = await fetch('/space/api/docx/pages/client_vars?id=' + encodeURIComponent(token), {
+              credentials: 'include',
+              headers: { accept: 'application/json, text/plain, */*' },
+            });
+            const json = await response.json();
+            if (json && json.code && json.code !== 0) return null;
+            return json && json.data ? json.data : json;
+          } catch (error) {
+            return null;
+          }
+        };
+        const lines = [];
+        const seenLines = new Set();
+        const imageAssets = [];
+        const seenImages = new Set();
+        const pushLine = (value) => {
+          const text = clean(value);
+          if (!text || text.length < 2 || seenLines.has(text)) return;
+          seenLines.add(text);
+          lines.push(text);
+        };
+        const pushImage = (img) => {
+          try {
+            const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+            if (!src || seenImages.has(src)) return;
+            const width = Number(img.naturalWidth || img.width || 0);
+            const height = Number(img.naturalHeight || img.height || 0);
+            const className = String(img.className || '');
+            if ((width && height && (width < 80 || height < 80)) || /avatar|portrait|icon|logo/i.test(className)) return;
+            seenImages.add(src);
+            const alt = clean(img.alt || '图片') || '图片';
+            imageAssets.push({ src, alt, width, height });
+            lines.push('![' + alt + '](' + src + ')');
+          } catch (error) {}
+        };
+        const feishuTableSeen = new Set();
+        const collectFeishuTables = () => {
+          // 飞书 docx 表格在 DOM 里是 <table>，innerText 会把单元格打散成散落文本。
+          // 先从 DOM 提取 <table> 转 markdown 表格，标记已处理的表格节点，避免重复。
+          document.querySelectorAll('table').forEach((tableEl) => {
+            if (feishuTableSeen.has(tableEl)) return;
+            feishuTableSeen.add(tableEl);
+            const tableHtml = tableEl.outerHTML || '';
+            if (!tableHtml) return;
+            // 复用公众号路径的 htmlTableToMarkdown 逻辑（正则解析 tr/td/th）
+            const md = (function (html) {
+              const rows = [];
+              const rowPattern = /<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi;
+              let rowMatch;
+              while ((rowMatch = rowPattern.exec(html))) {
+                const cells = [];
+                const cellPattern = /<(?:th|td)\\b[^>]*>([\\s\\S]*?)<\\/(?:th|td)>/gi;
+                let cellMatch;
+                while ((cellMatch = cellPattern.exec(rowMatch[1] || ''))) {
+                  const cellText = String(cellMatch[1] || '').replace(/<[^>]+>/g, '').replace(/\\s+/g, ' ').trim().replace(/\\|/g, '\\\\|');
+                  cells.push(cellText);
+                }
+                if (cells.some(Boolean)) rows.push(cells);
+              }
+              if (!rows.length) return '';
+              const colCount = Math.max.apply(null, rows.map(function (r) { return r.length; }));
+              const norm = rows.map(function (r) { var n = r.slice(0, colCount); while (n.length < colCount) n.push(''); return n; });
+              var header = norm[0];
+              var lines = ['| ' + header.join(' | ') + ' |', '| ' + header.map(function () { return '---'; }).join(' | ') + ' |'];
+              for (var i = 1; i < norm.length; i++) lines.push('| ' + norm[i].join(' | ') + ' |');
+              return lines.join('\\n');
+            })(tableHtml);
+            if (md) lines.push(md);
+          });
+        };
+        const collect = () => {
+          // 先提取表格（结构化），再提取纯文本和图片
+          collectFeishuTables();
+          const bodyText = document.body ? String(document.body.innerText || document.body.textContent || '') : '';
+          bodyText.split(/\\n+/).forEach(pushLine);
+          document.querySelectorAll('img').forEach(pushImage);
+        };
+        const getMainScrollTarget = () => {
+          const selectors = [
+            '[class*="scroll"]',
+            '[class*="container"]',
+            '[class*="content"]',
+            '[class*="doc"]',
+            '[class*="Doc"]',
+            '[class*="editor"]',
+            '[data-docx-has-block-data]',
+            '[data-page-id]',
+            'main',
+            'article',
+            'body',
+            'html',
+          ];
+          const candidates = [];
+          selectors.forEach((selector) => {
+            try {
+              document.querySelectorAll(selector).forEach((node) => {
+                if (!node || candidates.includes(node)) return;
+                const scrollRange = Number(node.scrollHeight || 0) - Number(node.clientHeight || 0);
+                if (scrollRange <= 20) return;
+                const textLength = String(node.innerText || node.textContent || '').length;
+                candidates.push({ node, scrollRange, textLength });
+              });
+            } catch (error) {}
+          });
+          candidates.sort((a, b) => {
+            const aScore = a.scrollRange + Math.min(a.textLength, 20000);
+            const bScore = b.scrollRange + Math.min(b.textLength, 20000);
+            return bScore - aScore;
+          });
+          return candidates.length ? candidates[0].node : (document.scrollingElement || document.documentElement || document.body);
+        };
+        collect();
+        let stableRounds = 0;
+        let lastSignature = '';
+        for (let index = 0; index < 300; index += 1) {
+          const beforeCount = lines.length;
+          const target = getMainScrollTarget();
+          const beforeTop = target ? Number(target.scrollTop || 0) : Number(window.scrollY || 0);
+          const step = Math.max(480, Math.floor((target && target.clientHeight ? target.clientHeight : window.innerHeight || 900) * 0.72));
+          try {
+            if (target && target !== document.body && target !== document.documentElement && target !== document.scrollingElement) {
+              target.scrollTop = Math.min(Number(target.scrollTop || 0) + step, Number(target.scrollHeight || 0));
+            } else {
+              window.scrollBy(0, step);
+            }
+          } catch (error) {
+            window.scrollBy(0, step);
+          }
+          await sleep(index < 12 ? 700 : 380);
+          collect();
+          const afterTop = target ? Number(target.scrollTop || 0) : Number(window.scrollY || 0);
+          const atBottom = target
+            ? afterTop + Number(target.clientHeight || window.innerHeight || 0) >= Number(target.scrollHeight || 0) - 12
+            : true;
+          const tail = lines.slice(-24).join('\\n');
+          const signature = String(lines.length) + ':' + tail;
+          if (signature === lastSignature || (lines.length === beforeCount && Math.abs(afterTop - beforeTop) < 8 && atBottom)) stableRounds += 1;
+          else stableRounds = 0;
+          lastSignature = signature;
+          if (stableRounds >= 20) break;
+        }
+        const toDataUrl = (blob) => new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(reader.error || new Error('image read failed'));
+          reader.readAsDataURL(blob);
+        });
+        const uniqueAssets = [];
+        for (const asset of imageAssets) {
+          const next = { src: asset.src, alt: asset.alt || '图片' };
+          if (asset.src.startsWith('data:')) {
+            next.dataUrl = asset.src;
+          } else if (/feishu\\.cn|feishu\\.net|internal-api-drive-stream/i.test(asset.src)) {
+            try {
+              const blob = await fetch(asset.src, { credentials: 'include' }).then((response) => response.blob());
+              if (blob && blob.size && /^image\\//i.test(blob.type || '')) {
+                next.dataUrl = await toDataUrl(blob);
+              }
+            } catch (error) {}
+          }
+          uniqueAssets.push(next);
+        }
+        return {
+          title: document.title || '',
+          markdown: lines.join('\\n'),
+          needsLogin: isLoginPage(),
+          clientVars: await getFeishuClientVars(),
+          assets: uniqueAssets,
+        };
+      })()
+    `);
+
+    if (result && result.needsLogin) {
+      throw new Error('飞书页面需要先登录。请在插件设置中点击“登录飞书”，登录后再同步。');
+    }
+    let __feishuDiag = 'no-clientVars';
+    if (result && result.clientVars) {
+      try {
+        const cv = result.clientVars;
+        const bm = cv.block_map || cv.blockMap || {};
+        const cvBlockCount = Object.keys(bm).length;
+        const seqLen = Array.isArray(cv.block_sequence) ? cv.block_sequence.length : -1;
+        const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(cv);
+        const renderedLen = String(result.markdown || '').length;
+        result.markdown = mergeFeishuRenderedAndClientVarsMarkdown(result.markdown, clientVarsMarkdown);
+        __feishuDiag = `cv:ok bm=${cvBlockCount} seq=${seqLen} rendered=${renderedLen} structured=${clientVarsMarkdown.length} merged=${result.markdown.length}`;
+      } catch (error) {
+        __feishuDiag = `cv:fail ${error.message}`;
+      }
+    }
+    result.__feishuDiag = __feishuDiag;
     if (!result || !result.markdown || result.markdown.length < 20) {
       throw new Error('隐藏浏览器未读取到足够正文');
     }
@@ -6329,9 +6927,38 @@ function collectFeishuRichText(value, output = [], key = '') {
   return output;
 }
 
+const FEISHU_NUMERIC_BLOCK_TYPE_NAMES = {
+  1: 'page',
+  2: 'text',
+  3: 'heading1',
+  4: 'heading2',
+  5: 'heading3',
+  6: 'heading4',
+  7: 'heading5',
+  8: 'heading6',
+  9: 'heading7',
+  10: 'heading8',
+  11: 'heading9',
+  12: 'bullet',
+  13: 'ordered',
+  14: 'code',
+  15: 'quote',
+  17: 'todo',
+  23: 'file',
+  27: 'image',
+  31: 'table',
+  32: 'table_cell',
+  33: 'view',
+};
+
+function normalizeFeishuBlockTypeName(value) {
+  const text = String(value || '').toLowerCase();
+  return FEISHU_NUMERIC_BLOCK_TYPE_NAMES[text] || text;
+}
+
 function getFeishuBlockType(block) {
   const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
-  return String(data.type || data.block_type || block.type || block.block_type || '').toLowerCase();
+  return normalizeFeishuBlockTypeName(data.type || data.block_type || block.type || block.block_type || '');
 }
 
 function getFeishuBlockText(block) {
@@ -6339,6 +6966,39 @@ function getFeishuBlockText(block) {
   return Array.from(new Set(collectFeishuRichText(data)))
     .join(' ')
     .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function collectFeishuCodeText(value, output = [], key = '') {
+  if (value === undefined || value === null) return output;
+  const normalizedKey = String(key || '').toLowerCase();
+  if (typeof value === 'string') {
+    if (['content', 'text', 'plain_text', 'plaintext'].includes(normalizedKey)) {
+      output.push(value);
+    }
+    return output;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectFeishuCodeText(item, output, key));
+    return output;
+  }
+  if (typeof value !== 'object') return output;
+  if (value.text_run && typeof value.text_run === 'object') {
+    collectFeishuCodeText(value.text_run, output, 'text_run');
+  }
+  Object.entries(value).forEach(([childKey, childValue]) => {
+    if (['id', 'token', 'parent_id', 'parentId', 'children', 'type', 'block_type'].includes(childKey)) return;
+    collectFeishuCodeText(childValue, output, childKey);
+  });
+  return output;
+}
+
+function getFeishuBlockCodeText(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const source = data.code || data.Code || data;
+  return collectFeishuCodeText(source)
+    .join('')
+    .replace(/\r\n/g, '\n')
     .trim();
 }
 
@@ -6397,16 +7057,110 @@ function formatMarkdownTableRows(rows) {
   ].join('\n');
 }
 
-function formatFeishuClientVarTableBlock(block) {
+function isFeishuTableType(type) {
+  const t = String(type || '').toLowerCase();
+  return t === 'table' || t === '31';
+}
+
+function isFeishuTableCellType(type) {
+  const t = String(type || '').toLowerCase();
+  return t === 'table_cell' || t === 'tablecell' || t === '32';
+}
+
+function isFeishuImageType(type) {
+  const t = String(type || '').toLowerCase();
+  return t === 'image' || t === '27';
+}
+
+// 只取 children 相关键的子 block ID（不取 id/token，避免把 block 自身 ID 误当子节点）
+function getFeishuBlockChildrenIds(value) {
+  const ids = [];
+  if (!value || typeof value !== 'object') return ids;
+  const keys = ['children', 'child_ids', 'childIds', 'children_ids', 'childrenIds', 'block_ids', 'blockIds'];
+  keys.forEach((key) => {
+    const v = value[key];
+    if (!Array.isArray(v)) return;
+    v.forEach((item) => {
+      if (typeof item === 'string' && item.trim()) {
+        ids.push(item.trim());
+      } else if (item && typeof item === 'object') {
+        const id = item.id || item.block_id || item.blockId;
+        if (typeof id === 'string' && id.trim()) ids.push(id.trim());
+      }
+    });
+  });
+  return ids;
+}
+
+// 递归提取 TableCell（或任意容器 block）内的纯文本，通过 blockMap 查子 block
+function getFeishuCellTextFromBlock(block, blockMap, depth = 0) {
+  if (!block || depth > 6) return '';
   const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
-  const rows = collectFeishuTableRowsFromValue(data, []);
-  if (rows.length < 2) return '';
-  return formatMarkdownTableRows(rows);
+  let text = getFeishuBlockText(block);
+  if (text) return text;
+  const childIds = getFeishuBlockChildrenIds(data);
+  if (!childIds.length || !blockMap) return '';
+  const parts = [];
+  childIds.forEach((cid) => {
+    const cb = blockMap[cid];
+    if (!cb) return;
+    const t = getFeishuCellTextFromBlock(cb, blockMap, depth + 1);
+    if (t) parts.push(t);
+  });
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// 飞书 docx table: { table: { property: { row_size, column_size }, cells: [cellBlockId...] } }
+// cells 按行优先排列，长度 = row_size * column_size；每个 cellId 指向 table_cell block（内容在其 children）
+function formatFeishuClientVarTableBlock(block, blockMap) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const table = data.table || data.Table || data;
+  const property = (table && table.property) || (table && table.Property) || {};
+  let rowSize = Number(property.row_size || property.rowSize || 0);
+  let colSize = Number(property.column_size || property.columnSize || 0);
+  const cellIds = (table && (table.cells || table.Cells)) || [];
+
+  if (Array.isArray(cellIds) && cellIds.length && blockMap) {
+    if (!colSize) colSize = Math.ceil(Math.sqrt(cellIds.length));
+    if (!rowSize) rowSize = Math.ceil(cellIds.length / colSize);
+    if (rowSize > 0 && colSize > 0) {
+      const matrix = [];
+      cellIds.forEach((cellId, index) => {
+        const r = Math.floor(index / colSize);
+        const c = index % colSize;
+        if (!matrix[r]) matrix[r] = [];
+        const id = String(cellId || '').trim();
+        const cellBlock = blockMap[id];
+        matrix[r][c] = cellBlock ? getFeishuCellTextFromBlock(cellBlock, blockMap) : '';
+      });
+      const rows = matrix.filter(Boolean).map((row) => row.map((cell) => String(cell || '').trim()));
+      if (rows.length >= 1 && rows.some((row) => row.some(Boolean))) {
+        return formatMarkdownTableRows(rows);
+      }
+    }
+  }
+
+  // 兼容旧结构（rows/cells 对象数组，非 docx blockId 数组）
+  const legacyRows = collectFeishuTableRowsFromValue(data, []);
+  if (legacyRows.length >= 2) return formatMarkdownTableRows(legacyRows);
+  return '';
+}
+
+function extractFeishuImageToken(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const img = data.image || data.Image || {};
+  const token = img.token || img.file_token || img.fileToken || data.token || data.file_token || data.fileToken;
+  return String(token || '').trim();
 }
 
 function collectFeishuBlockImageUrls(block) {
   const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
   const urls = [];
+  // 飞书 docx image block: 图片标识在 image.token，输出 feishu-image:{token} 占位供后续关联下载
+  const token = extractFeishuImageToken(block);
+  if (token && !urls.includes(`feishu-image:${token}`)) {
+    urls.push(`feishu-image:${token}`);
+  }
   collectFeishuImageUrls(JSON.stringify(data || {})).forEach((url) => pushUniqueUrl(urls, url));
   collectJsonStringValues(JSON.stringify(data || {}), [
     'origin_url',
@@ -6423,6 +7177,44 @@ function collectFeishuBlockImageUrls(block) {
   return urls;
 }
 
+function collectFeishuBlockMediaUrls(block) {
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const urls = [];
+  collectJsonStringValues(JSON.stringify(data || {}), [
+    'origin_url',
+    'originUrl',
+    'preview_url',
+    'previewUrl',
+    'download_url',
+    'downloadUrl',
+    'src',
+    'url',
+    'file_url',
+    'fileUrl',
+    'media_url',
+    'mediaUrl',
+    'video_url',
+    'videoUrl',
+    'play_url',
+    'playUrl',
+  ]).forEach((url) => {
+    if (isLikelyMediaUrl(url)) pushUniqueUrl(urls, url);
+  });
+  return urls;
+}
+
+function getFeishuBlockMediaLabel(block, text = '') {
+  if (isFeishuAssetPlaceholderLine(text)) return text;
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const labels = collectJsonStringValues(JSON.stringify(data || {}), [
+    'name',
+    'file_name',
+    'fileName',
+    'title',
+  ]).filter((item) => /\.(?:mp4|mov|m4v|webm|avi|mkv|mp3|m4a|wav|aac|flac)$/i.test(String(item || '').trim()));
+  return labels[0] || text || '媒体文件';
+}
+
 function getFeishuHeadingLevelFromBlock(block, type) {
   const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
   const headingMatch = String(type || '').match(/heading[_-]?([1-6])|h([1-6])/);
@@ -6431,23 +7223,41 @@ function getFeishuHeadingLevelFromBlock(block, type) {
   return numericLevel >= 1 && numericLevel <= 6 ? numericLevel : 0;
 }
 
-function formatFeishuClientVarBlock(block) {
+function formatFeishuClientVarBlock(block, blockMap) {
   const text = getFeishuBlockText(block);
   const type = getFeishuBlockType(block);
 
-  if (/table|sheet|grid/i.test(type)) {
-    const table = formatFeishuClientVarTableBlock(block);
+  // table_cell 由父 table block 整体处理，单独出现时跳过，避免散落成纯文本
+  if (isFeishuTableCellType(type)) return '';
+
+  if (isFeishuTableType(type) || /sheet|grid/i.test(type)) {
+    const table = formatFeishuClientVarTableBlock(block, blockMap);
     if (table) return table;
   }
 
-  if (/image|picture|diagram/i.test(type)) {
+  if (isFeishuImageType(type) || /picture|diagram/i.test(type)) {
     const imageUrls = collectFeishuBlockImageUrls(block);
     if (imageUrls.length) {
       return imageUrls.map((url, index) => `![图片${index ? ` ${index + 1}` : ''}](${url})`).join('\n\n');
     }
+    // image block 没有可识别 token/URL 时不降级为裸文件名文本，直接跳过
+    return '';
+  }
+
+  if (/video|audio|media|file|attachment/i.test(type) || isFeishuAssetPlaceholderLine(text)) {
+    const mediaUrls = collectFeishuBlockMediaUrls(block);
+    if (mediaUrls.length) {
+      const label = getFeishuBlockMediaLabel(block, text);
+      return mediaUrls.map((url, index) => {
+        const suffix = mediaUrls.length > 1 ? ` ${index + 1}` : '';
+        return `[${label}${suffix}](${url})`;
+      }).join('\n\n');
+    }
   }
 
   if (!text || shouldDropFeishuLine(text, '')) return '';
+  if (/code/.test(type)) return `\`\`\`\n${getFeishuBlockCodeText(block) || text}\n\`\`\``;
+  if (/quote/.test(type)) return text.split(/\r?\n/).map((line) => `> ${line}`).join('\n');
   const headingLevel = getFeishuHeadingLevelFromBlock(block, type);
   if (headingLevel) {
     const level = headingLevel;
@@ -6458,6 +7268,89 @@ function formatFeishuClientVarBlock(block) {
   return formatFeishuHeadingLine(text);
 }
 
+function collectFeishuBlockChildIds(value, ids = []) {
+  if (!value) return ids;
+  if (typeof value === 'string') {
+    if (value.trim()) ids.push(value.trim());
+    return ids;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectFeishuBlockChildIds(item, ids));
+    return ids;
+  }
+  if (typeof value !== 'object') return ids;
+
+  const directKeys = [
+    'children',
+    'child_ids',
+    'childIds',
+    'children_ids',
+    'childrenIds',
+    'block_ids',
+    'blockIds',
+  ];
+  directKeys.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      collectFeishuBlockChildIds(value[key], ids);
+    }
+  });
+  ['id', 'block_id', 'blockId', 'token'].forEach((key) => {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) ids.push(candidate.trim());
+  });
+  return ids;
+}
+
+function markFeishuDescendantsSeen(blockId, blockMap, seen) {
+  const block = blockMap[blockId];
+  if (!block) return;
+  const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+  const table = data.table || data.Table;
+  const childIds = Array.isArray(table && (table.cells || table.Cells))
+    ? (table.cells || table.Cells)
+    : getFeishuBlockChildrenIds(data);
+  childIds.forEach((cid) => {
+    const id = typeof cid === 'string' ? cid.trim() : String((cid && (cid.id || cid.block_id)) || '').trim();
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      markFeishuDescendantsSeen(id, blockMap, seen);
+    }
+  });
+}
+
+function buildFeishuClientVarBlockSequence(clientVars, blockMap) {
+  const initial = Array.isArray(clientVars.block_sequence)
+    ? clientVars.block_sequence
+    : (Array.isArray(clientVars.blockSequence) ? clientVars.blockSequence : []);
+  const ordered = [];
+  const seen = new Set();
+  const push = (id) => {
+    const key = String(id || '').trim();
+    if (!key || seen.has(key) || !blockMap[key]) return;
+    seen.add(key);
+    ordered.push(key);
+    const block = blockMap[key];
+    const data = block && block.data && typeof block.data === 'object' ? block.data : block || {};
+    const blockType = getFeishuBlockType(block);
+    if (isFeishuTableType(blockType)) {
+      // table 后代（table_cell 及其内容子 block）由 formatFeishuClientVarTableBlock 整体处理，
+      // 标记为 seen，防止末尾兜底把它们重复输出为散落文本
+      markFeishuDescendantsSeen(key, blockMap, seen);
+    } else if (!isFeishuTableCellType(blockType)) {
+      collectFeishuBlockChildIds(data).forEach(push);
+    }
+  };
+  initial.forEach(push);
+  if (!ordered.length) {
+    Object.entries(blockMap).forEach(([id, block]) => {
+      const type = getFeishuBlockType(block);
+      if (type === 'page' || type === 'root') push(id);
+    });
+  }
+  Object.keys(blockMap).forEach(push);
+  return ordered;
+}
+
 function extractFeishuMarkdownFromClientVars(payload) {
   const clientVars = unwrapFeishuClientVarsPayload(payload);
   const blockMap = clientVars && (clientVars.block_map || clientVars.blockMap);
@@ -6465,9 +7358,7 @@ function extractFeishuMarkdownFromClientVars(payload) {
     throw new Error('飞书 client_vars 中未找到 block_map');
   }
 
-  const sequence = Array.isArray(clientVars.block_sequence)
-    ? clientVars.block_sequence
-    : (Array.isArray(clientVars.blockSequence) ? clientVars.blockSequence : Object.keys(blockMap));
+  const sequence = buildFeishuClientVarBlockSequence(clientVars, blockMap);
   const seen = new Set();
   const lines = [];
   sequence.forEach((id) => {
@@ -6475,9 +7366,13 @@ function extractFeishuMarkdownFromClientVars(payload) {
     if (!block) return;
     const type = getFeishuBlockType(block);
     if (type === 'page' || type === 'root') return;
-    const line = formatFeishuClientVarBlock(block);
-    if (!line || seen.has(line)) return;
-    seen.add(line);
+    const line = formatFeishuClientVarBlock(block, blockMap);
+    if (!line) return;
+    // markdown 表格行（| 开头）不参与去重，避免表格内重复单元格被误删
+    if (!line.startsWith('|')) {
+      if (seen.has(line)) return;
+      seen.add(line);
+    }
     lines.push(line);
   });
 
@@ -6490,6 +7385,9 @@ function extractFeishuMarkdownFromClientVars(payload) {
 
 function appendMissingMarkdownImages(markdown, fallbackMarkdown = '') {
   const source = String(markdown || '').trim();
+  // 若已含飞书 image token 占位，图片由 replaceFeishuImageTokenPlaceholders 专门关联处理，
+  // 不再追加 fallback 渲染图片，避免同一图片出现两次
+  if (source.includes('feishu-image:')) return source;
   const existing = new Set();
   const collect = (text) => {
     const pattern = /!\[[^\]]*]\(([^)]+)\)/g;
@@ -6505,19 +7403,110 @@ function appendMissingMarkdownImages(markdown, fallbackMarkdown = '') {
   while ((match = pattern.exec(String(fallbackMarkdown || '')))) {
     const alt = match[1] || '图片';
     const url = match[2] || '';
-    if (!url || existing.has(url) || !isLikelyImageUrl(url)) continue;
+    if (!url || existing.has(url) || !isLikelyImageUrl(url) || isLikelyFeishuShellImage(alt, url)) continue;
     existing.add(url);
     additions.push(`![${alt || '图片'}](${url})`);
   }
   return additions.length ? `${source}\n\n${additions.join('\n\n')}`.trim() : source;
 }
 
-function mergeFeishuRenderedAndClientVarsMarkdown(renderedMarkdown = '', clientVarsMarkdown = '') {
-  const structured = String(clientVarsMarkdown || '').trim();
-  if (structured.length >= 20) {
-    return appendMissingMarkdownImages(structured, renderedMarkdown);
+function isFeishuAssetPlaceholderLine(line) {
+  const text = String(line || '').trim();
+  if (!text || /^!\[/.test(text) || /^\[.+]\(.+\)$/.test(text)) return false;
+  return /^[^\s\\/<>|?*:"]{2,180}\.(?:jpe?g|png|webp|gif|mp4|mov|m4v|webm|avi|mkv)$/i.test(text);
+}
+
+function isLikelyFeishuShellImage(alt = '', url = '') {
+  const source = `${alt || ''} ${url || ''}`.toLowerCase();
+  if (!source) return false;
+  if (/^blob:/.test(String(url || '').trim())) return true;
+  return /avatar|portrait|profile|user[-_]?avatar|icon|logo|emoji|sticker|reaction|comment|header|toolbar/.test(source)
+    || /头像|图标|表情|评论/.test(`${alt || ''} ${url || ''}`);
+}
+
+function getFirstMarkdownHeading(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/);
+  for (const line of lines) {
+    const match = String(line || '').trim().match(/^#{1,6}\s+(.+)$/);
+    if (match && match[1]) return match[1].trim();
   }
-  return String(renderedMarkdown || '').trim();
+  return '';
+}
+
+function cleanFeishuRenderedMarkdown(markdown, structuredMarkdown = '') {
+  const title = getFirstMarkdownHeading(structuredMarkdown);
+  const cleaned = cleanMarkdownForStorage(markdown, {
+    dedupe: true,
+    feishuTitle: title,
+  });
+  return cleaned
+    .split(/\r?\n/)
+    .filter((line) => {
+      const imageMatch = String(line || '').trim().match(/^!\[([^\]]*)]\(([^)]+)\)$/);
+      if (!imageMatch) return true;
+      return !isLikelyFeishuShellImage(imageMatch[1], imageMatch[2]);
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function getFeishuMarkdownBodyScore(markdown) {
+  return String(markdown || '')
+    .split(/\r?\n/)
+    .map((line) => String(line || '').trim())
+    .filter((line) => line && !/^!\[/.test(line) && !isFeishuAssetPlaceholderLine(line) && !shouldDropFeishuLine(line, ''))
+    .join('\n')
+    .replace(/\[[^\]]+]\([^)]+\)/g, ' ')
+    .replace(/https?:\/\/[^\s<>()\]]+/gi, ' ')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/\s+/g, '')
+    .length;
+}
+
+function countFeishuAssetPlaceholders(markdown) {
+  return String(markdown || '')
+    .split(/\r?\n/)
+    .filter((line) => isFeishuAssetPlaceholderLine(line))
+    .length;
+}
+
+function countMarkdownImages(markdown) {
+  return (String(markdown || '').match(/!\[[^\]]*]\([^)]+\)/g) || []).length;
+}
+
+function shouldRefreshFeishuMarkdownFromSource(url, metadata = {}) {
+  if (!isFeishuUrl(url)) return false;
+  const markdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '').trim();
+  if (!markdown) return false;
+  if (isFeishuMarkdownLikelyTruncated(markdown)) return true;
+  const placeholderCount = countFeishuAssetPlaceholders(markdown);
+  if (!placeholderCount) return false;
+  const bodyScore = getFeishuMarkdownBodyScore(markdown);
+  const imageCount = countMarkdownImages(markdown);
+  const hasLinkedMedia = /\[[^\]]+\]\(https?:\/\/[^)]+\.(?:mp4|mov|m4v|webm|mp3|m4a|wav|aac|flac)(?:[?#][^)]*)?\)/i.test(markdown);
+  return placeholderCount >= 2
+    || (placeholderCount >= 1 && !imageCount && !hasLinkedMedia)
+    || (placeholderCount >= 1 && bodyScore < 1500);
+}
+
+function mergeFeishuRenderedAndClientVarsMarkdown(renderedMarkdown = '', clientVarsMarkdown = '') {
+  const structured = cleanMarkdownForStorage(String(clientVarsMarkdown || '').trim(), { dedupe: true });
+  const rendered = cleanFeishuRenderedMarkdown(renderedMarkdown, structured);
+  if (structured.length >= 20) {
+    const structuredScore = getFeishuMarkdownBodyScore(structured);
+    const renderedScore = getFeishuMarkdownBodyScore(rendered);
+    const structuredPlaceholders = countFeishuAssetPlaceholders(structured);
+    const renderedHasBodyMedia = countMarkdownImages(rendered) > 0;
+    const renderedIsSubstantiallyRicher = renderedScore >= 160
+      && renderedScore >= Math.max(structuredScore * 1.45, structuredScore + 80);
+    if (rendered && (renderedIsSubstantiallyRicher || (structuredPlaceholders >= 2 && renderedHasBodyMedia && renderedScore > structuredScore))) {
+      return appendMissingMarkdownImages(rendered, structured);
+    }
+    return appendMissingMarkdownImages(structured, rendered);
+  }
+  return rendered || String(renderedMarkdown || '').trim();
 }
 
 function extractFeishuDocumentTokenFromUrl(url) {
@@ -6541,6 +7530,225 @@ function buildFeishuClientVarsApiUrl(url) {
   return parsed.toString();
 }
 
+function extractFeishuOpenApiUrlInfo(url) {
+  const source = String(url || '').trim();
+  if (!source) return null;
+  let parsed = null;
+  try {
+    parsed = new URL(source);
+  } catch (error) {
+    parsed = null;
+  }
+  const path = parsed ? parsed.pathname : source;
+  const match = String(path || '').match(/\/(wiki|docx|docs|doc)\/([^/?#]+)/i);
+  if (!match) return null;
+  const host = String((parsed && parsed.hostname) || '').toLowerCase();
+  const isLark = /(?:^|\.)larksuite\.com$|(?:^|\.)larkoffice\.com$/.test(host);
+  const kind = match[1].toLowerCase();
+  return {
+    apiBase: isLark ? 'https://open.larksuite.com/open-apis' : 'https://open.feishu.cn/open-apis',
+    kind: kind === 'docs' ? 'doc' : kind,
+    token: decodeURIComponent(match[2]),
+  };
+}
+
+function buildFeishuOpenApiUrl(apiBase, path, params = {}) {
+  const base = String(apiBase || 'https://open.feishu.cn/open-apis').replace(/\/+$/, '');
+  const url = new URL(`${base}${path.startsWith('/') ? path : `/${path}`}`);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && String(value) !== '') {
+      url.searchParams.set(key, String(value));
+    }
+  });
+  return url.toString();
+}
+
+async function requestFeishuOpenApiJson({
+  apiBase,
+  path,
+  method = 'GET',
+  token = '',
+  body = null,
+  params = {},
+  requestJson = requestUrl,
+}) {
+  const url = /^https?:\/\//i.test(String(path || ''))
+    ? String(path)
+    : buildFeishuOpenApiUrl(apiBase, path, params);
+  const headers = {
+    'Content-Type': 'application/json; charset=utf-8',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await requestJson({
+    url,
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+    throw: false,
+  });
+  const status = Number(response && response.status);
+  const payload = (response && response.json) || tryParseJson((response && response.text) || '') || {};
+  const apiErrorMessage = payload && (payload.msg || payload.message)
+    ? `飞书 OpenAPI 返回 code ${payload.code || status}：${payload.msg || payload.message}`
+    : '';
+  if (status && (status < 200 || status >= 300)) {
+    throw new Error(apiErrorMessage || `飞书 OpenAPI 请求失败：HTTP ${status}`);
+  }
+  if (payload && Number(payload.code || 0) !== 0) {
+    throw new Error(apiErrorMessage || `飞书 OpenAPI 返回 code ${payload.code}`);
+  }
+  return payload;
+}
+
+async function fetchFeishuTenantAccessToken({ apiBase, appId, appSecret, requestJson = requestUrl }) {
+  const normalizedAppId = String(appId || '').trim();
+  const normalizedSecret = String(appSecret || '').trim();
+  if (!normalizedAppId || !normalizedSecret) {
+    throw new Error('未配置飞书 App ID / App Secret');
+  }
+  const payload = await requestFeishuOpenApiJson({
+    apiBase,
+    path: '/auth/v3/tenant_access_token/internal',
+    method: 'POST',
+    body: {
+      app_id: normalizedAppId,
+      app_secret: normalizedSecret,
+    },
+    requestJson,
+  });
+  const token = String(payload.tenant_access_token || '').trim();
+  if (!token) throw new Error('飞书 OpenAPI 未返回 tenant_access_token');
+  return {
+    token,
+    expire: Number(payload.expire || 0),
+  };
+}
+
+async function resolveFeishuOpenApiDocument(url, token, { requestJson = requestUrl } = {}) {
+  const info = extractFeishuOpenApiUrlInfo(url);
+  if (!info || !info.token) throw new Error('飞书链接中未找到文档 token');
+  if (info.kind === 'wiki') {
+    const payload = await requestFeishuOpenApiJson({
+      apiBase: info.apiBase,
+      path: '/wiki/v2/spaces/get_node',
+      token,
+      params: { token: info.token },
+      requestJson,
+    });
+    const node = payload && payload.data && payload.data.node;
+    const documentId = String((node && node.obj_token) || '').trim();
+    const objType = String((node && node.obj_type) || '').toLowerCase();
+    if (!documentId) throw new Error('飞书 wiki 节点未返回真实文档 token');
+    if (objType && !/doc|docx/.test(objType)) {
+      throw new Error(`飞书 wiki 节点不是文档类型：${objType}`);
+    }
+    return {
+      ...info,
+      documentId,
+      title: String((node && node.title) || '').trim(),
+      objType,
+    };
+  }
+  return {
+    ...info,
+    documentId: info.token,
+    title: '',
+    objType: info.kind,
+  };
+}
+
+async function fetchFeishuOpenApiDocumentTitle(documentInfo, token, { requestJson = requestUrl } = {}) {
+  try {
+    const payload = await requestFeishuOpenApiJson({
+      apiBase: documentInfo.apiBase,
+      path: `/docx/v1/documents/${encodeURIComponent(documentInfo.documentId)}`,
+      token,
+      requestJson,
+    });
+    const document = payload && payload.data && payload.data.document;
+    return String((document && document.title) || payload.title || documentInfo.title || '').trim();
+  } catch (error) {
+    return documentInfo.title || '';
+  }
+}
+
+async function fetchFeishuOpenApiDocumentBlocks(documentInfo, token, { requestJson = requestUrl } = {}) {
+  const items = [];
+  let pageToken = '';
+  for (let pageIndex = 0; pageIndex < FEISHU_OPEN_API_MAX_PAGES; pageIndex += 1) {
+    const payload = await requestFeishuOpenApiJson({
+      apiBase: documentInfo.apiBase,
+      path: `/docx/v1/documents/${encodeURIComponent(documentInfo.documentId)}/blocks`,
+      token,
+      params: {
+        page_size: FEISHU_OPEN_API_PAGE_SIZE,
+        page_token: pageToken,
+      },
+      requestJson,
+    });
+    const data = (payload && payload.data) || {};
+    const pageItems = Array.isArray(data.items) ? data.items : [];
+    pageItems.forEach((item) => {
+      if (item && typeof item === 'object') items.push(item);
+    });
+    if (!data.has_more) break;
+    pageToken = String(data.page_token || '').trim();
+    if (!pageToken) {
+      throw new Error('飞书 OpenAPI 分页中断：has_more=true 但缺少 page_token');
+    }
+  }
+  if (!items.length) throw new Error('飞书 OpenAPI 未返回文档 block');
+  return items;
+}
+
+function extractFeishuMarkdownFromOpenApiBlocks(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  const blockMap = {};
+  const sequence = [];
+  list.forEach((block) => {
+    if (!block || typeof block !== 'object') return;
+    const id = String(block.block_id || block.id || '').trim();
+    if (!id) return;
+    blockMap[id] = block;
+    sequence.push(id);
+  });
+  if (!sequence.length) throw new Error('飞书 OpenAPI blocks 中未找到 block_id');
+  return extractFeishuMarkdownFromClientVars({
+    block_sequence: sequence,
+    block_map: blockMap,
+  });
+}
+
+async function fetchFeishuOpenApiMarkdownFromUrl(url, {
+  appId = '',
+  appSecret = '',
+  tenantAccessToken = '',
+  requestJson = requestUrl,
+} = {}) {
+  const info = extractFeishuOpenApiUrlInfo(url);
+  if (!info) throw new Error('不是可识别的飞书文档链接');
+  const accessToken = String(tenantAccessToken || '').trim()
+    || (await fetchFeishuTenantAccessToken({
+      apiBase: info.apiBase,
+      appId,
+      appSecret,
+      requestJson,
+    })).token;
+  const documentInfo = await resolveFeishuOpenApiDocument(url, accessToken, { requestJson });
+  const [title, blocks] = await Promise.all([
+    fetchFeishuOpenApiDocumentTitle(documentInfo, accessToken, { requestJson }),
+    fetchFeishuOpenApiDocumentBlocks(documentInfo, accessToken, { requestJson }),
+  ]);
+  const markdown = extractFeishuMarkdownFromOpenApiBlocks(blocks);
+  return {
+    source: 'feishu-open-api',
+    title: title || documentInfo.title || getFirstMarkdownHeading(markdown) || '飞书链接',
+    markdown,
+    documentId: documentInfo.documentId,
+    blockCount: blocks.length,
+  };
+}
+
 function getFeishuRequestHeaders(url) {
   return {
     Accept: 'application/json, text/plain, */*',
@@ -6562,6 +7770,43 @@ async function fetchFeishuClientVarsMarkdown(url) {
     throw new Error(payload.msg || `飞书 client_vars 接口返回 code ${payload.code}`);
   }
   return extractFeishuMarkdownFromClientVars(payload);
+}
+
+// 基于文档 host 构造飞书图片下载 URL（需登录态，作为找不到 DOM 对应图时的兜底占位）
+function buildFeishuImageFallbackUrl(token, docUrl) {
+  const t = String(token || '').trim();
+  if (!t) return '';
+  let origin = '';
+  try {
+    origin = new URL(String(docUrl || '')).origin;
+  } catch (error) {
+    origin = 'https://feishu.cn';
+  }
+  return `${origin}/space/api/box/stream/download/v2/cover/${encodeURIComponent(t)}?width=0&height=0&policy=equal`;
+}
+
+// 把 markdown 里的 feishu-image:{token} 占位关联到 DOM 图片 assets 的真实 src，
+// 使 saveWebpageImageAssets 能按 src 匹配下载到本地；找不到则用飞书下载 URL 兜底
+function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl) {
+  let result = String(markdown || '');
+  if (!result.includes('feishu-image:')) return result;
+  const tokenPattern = /!\[([^\]]*)\]\(feishu-image:([^)]+)\)/g;
+  result = result.replace(tokenPattern, (full, alt, token) => {
+    const t = String(token || '').trim();
+    if (!t) return full;
+    if (Array.isArray(assets)) {
+      for (const asset of assets) {
+        const src = String((asset && asset.src) || '');
+        // 飞书 docx 图片 DOM src 通常含 token，且为 https 可下载链接
+        if (src && src.indexOf(t) !== -1 && /^https?:\/\//i.test(src)) {
+          return `![${alt || '图片'}](${src})`;
+        }
+      }
+    }
+    const fallback = buildFeishuImageFallbackUrl(t, docUrl);
+    return fallback ? `![${alt || '图片'}](${fallback})` : full;
+  });
+  return result;
 }
 
 function yamlValue(value, options = {}) {
@@ -7431,6 +8676,43 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload || {};
   }
 
+  async fetchFeishuCloudOAuthMarkdownFromUrl(url, binding = null) {
+    const payload = await this.requestJson('/feishu/extract', 'POST', {
+      url,
+    }, binding || undefined);
+    const data = payload && payload.data ? payload.data : payload;
+    const blocks = Array.isArray(data && data.blocks) ? data.blocks : [];
+    if (!blocks.length) {
+      throw new Error('Feishu cloud OAuth returned no document blocks');
+    }
+    return {
+      source: 'feishu-cloud-oauth',
+      title: String((data && data.title) || '').trim(),
+      markdown: extractFeishuMarkdownFromOpenApiBlocks(blocks),
+      documentId: String((data && data.documentId) || '').trim(),
+      blockCount: Number((data && data.blockCount) || blocks.length) || blocks.length,
+    };
+  }
+
+  async connectFeishuCloudOAuth(binding = null) {
+    const payload = await this.requestJson('/feishu/oauth/start', 'POST', {}, binding || undefined);
+    const data = payload && payload.data ? payload.data : payload;
+    const authUrl = String((data && data.authUrl) || '').trim();
+    if (!authUrl) throw new Error('Feishu OAuth did not return authUrl');
+    await openExternalUrl(authUrl);
+    return data;
+  }
+
+  async refreshFeishuCloudOAuthStatus(binding = null) {
+    const payload = await this.requestJson('/feishu/oauth/status', 'GET', {}, binding || undefined);
+    const data = payload && payload.data ? payload.data : payload;
+    await this.saveSettings({
+      ...this.settings,
+      feishuOAuthStatus: data || null,
+    });
+    return data || null;
+  }
+
   async generateMetadataWithCloud(record, binding = null) {
     const inputText = extractAiMetadataInputText(record);
     if (!inputText) return { description: '', keywords: [] };
@@ -7961,7 +9243,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isMac) {
         return source.includes('TENCENT_OCR_ASSET_BASE_URL')
           && source.includes('TENCENT_PIP_INDEX_URL')
-          && source.includes('download_text_file');
+          && source.includes('download_text_file')
+          && source.includes('detect_uv_arch');
       }
       return source.includes('$TencentOcrAssetBaseUrl')
         && source.includes('$TencentPipIndexUrl')
@@ -8043,11 +9326,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isMac) {
         return source.includes('CHUNK_SECONDS=600')
           && source.includes('transcribe-last.log')
-          && source.includes('python-venv')
           && source.includes('validate_local_asr_inference')
           && source.includes('TENCENT_MODEL_URL=')
-          && source.includes('MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")')
-          && source.includes('exec "\\$WHISPER_CPP_BIN" "\\$@"');
+          && source.includes('bootstrap_uv')
+          && source.includes('detect_uv_arch')
+          && source.includes('setup_python_and_packages');
       }
       return source.includes('Invoke-NativeProcess')
         && source.includes('Convert-ExitCodeToHex')
@@ -9680,33 +10963,109 @@ class WechatObsidianInboxPlugin extends Plugin {
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
-    if (!url || metadata.markdown || metadata.snapshot || metadata.contentSnapshot) {
+    if (!url) {
+      return record;
+    }
+    if ((metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       return record;
     }
 
     try {
       if (isFeishuUrl(url)) {
+        let openApiError = null;
+        const shouldUseFeishuCloudOAuth = this.settings.feishuCloudOAuthEnabled !== false
+          && this.settings.feishuOAuthStatus
+          && this.settings.feishuOAuthStatus.connected;
+        if (shouldUseFeishuCloudOAuth) {
+          try {
+            const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
+            const feishuTitle = metadata.title || cloudOpenApiResult.title || '椋炰功閾炬帴';
+            const cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
+                dedupe: true,
+                feishuTitle,
+              }),
+              [],
+              url,
+            );
+            return {
+              ...record,
+              metadata: enrichExtractedWebpageMetadata({
+                ...metadata,
+                title: feishuTitle,
+                markdown: cleanedCloudOpenApiMarkdown,
+                conversionStatus: 'success',
+                conversionSource: 'feishu-cloud-oauth',
+                conversionNote: `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
+              }),
+            };
+          } catch (error) {
+            openApiError = error;
+          }
+        }
+        if (this.settings.feishuOpenApiEnabled && this.settings.feishuAppId && this.settings.feishuAppSecret) {
+          try {
+            const openApiResult = await fetchFeishuOpenApiMarkdownFromUrl(url, {
+              appId: this.settings.feishuAppId,
+              appSecret: this.settings.feishuAppSecret,
+            });
+            const feishuTitle = metadata.title || openApiResult.title || '飞书链接';
+            const cleanedOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanMarkdownForStorage(openApiResult.markdown, {
+                dedupe: true,
+                feishuTitle,
+              }),
+              [],
+              url,
+            );
+            return {
+              ...record,
+              metadata: enrichExtractedWebpageMetadata({
+                ...metadata,
+                title: feishuTitle,
+                markdown: cleanedOpenApiMarkdown,
+                conversionStatus: 'success',
+                conversionSource: 'feishu-open-api',
+                conversionNote: `feishu-open-api blocks=${openApiResult.blockCount || 0}`,
+              }),
+            };
+          } catch (error) {
+            openApiError = error;
+          }
+        }
         try {
-          const rendered = await renderUrlToMarkdownWithElectron(url);
+          const rendered = await renderFeishuUrlToSimpleMarkdownWithElectron(url);
+          const feishuTitle = metadata.title || rendered.title || '飞书链接';
+          let cleanedRenderedMarkdown = cleanMarkdownForStorage(rendered.markdown, {
+            dedupe: true,
+            feishuTitle,
+          });
+          // 把 feishu-image:{token} 占位关联到 DOM 图片真实 src，让 saveWebpageImageAssets 能下载到本地
+          cleanedRenderedMarkdown = replaceFeishuImageTokenPlaceholders(cleanedRenderedMarkdown, rendered.assets, url);
           const markdown = await this.saveWebpageImageAssets(
-            rendered.markdown,
+            cleanedRenderedMarkdown,
             rendered.assets,
             rootDir,
             dateFolder,
             title,
           );
+          const openApiDiag = openApiError
+            ? `\n\n<!-- feishu-openapi-error: ${String(openApiError.message || openApiError).replace(/-->/g, '-- >')} -->`
+            : '';
+          const diagComment = rendered.__feishuDiag ? `\n\n<!-- feishu-diag: ${rendered.__feishuDiag} -->` : '';
           return {
             ...record,
             metadata: enrichExtractedWebpageMetadata({
-              ...metadata,
-              title: metadata.title || rendered.title || '飞书链接',
-              markdown,
-              conversionStatus: 'success',
-            }),
+                ...metadata,
+                title: feishuTitle,
+                markdown: markdown + openApiDiag + diagComment,
+                conversionStatus: 'success',
+                conversionNote: openApiError ? `feishu-open-api: ${openApiError.message || openApiError}` : metadata.conversionNote,
+              }),
           };
         } catch (renderError) {
           try {
-            const markdown = await fetchFeishuClientVarsMarkdown(url);
+            const markdown = replaceFeishuImageTokenPlaceholders(await fetchFeishuClientVarsMarkdown(url), [], url);
             return {
               ...record,
               metadata: enrichExtractedWebpageMetadata({
@@ -9714,7 +11073,10 @@ class WechatObsidianInboxPlugin extends Plugin {
                 title: metadata.title || '飞书链接',
                 markdown,
                 conversionStatus: 'success',
-                conversionNote: renderError.message || String(renderError),
+                conversionNote: [
+                  openApiError ? `feishu-open-api: ${openApiError.message || String(openApiError)}` : '',
+                  renderError.message || String(renderError),
+                ].filter(Boolean).join('；'),
               }),
             };
           } catch (clientVarsError) {
@@ -9730,6 +11092,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                   markdown,
                   conversionStatus: 'success',
                   conversionNote: [
+                    openApiError ? `feishu-open-api: ${openApiError.message || String(openApiError)}` : '',
                     renderError.message || String(renderError),
                     clientVarsError.message || String(clientVarsError),
                   ].filter(Boolean).join('；'),
@@ -9737,6 +11100,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               };
             } catch (staticError) {
               throw new Error([
+                openApiError ? `feishu-open-api: ${openApiError.message || String(openApiError)}` : '',
                 renderError.message || String(renderError),
                 clientVarsError.message || String(clientVarsError),
                 staticError.message || String(staticError),
@@ -10056,6 +11420,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           (normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId))
           || (normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl))
         ) {
+          if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
+            continue;
+          }
           return file.path || filePath;
         }
       } catch (error) {
@@ -10430,6 +11797,47 @@ class WechatInboxSettingTab extends PluginSettingTab {
       cls: 'wechat-inbox-sync-section-heading',
     });
 
+    const feishuOAuthStatus = this.plugin.settings.feishuOAuthStatus || {};
+    const feishuOAuthDesc = feishuOAuthStatus.connected
+      ? `已连接飞书官方 API；token 有效期至 ${feishuOAuthStatus.expiresAt || '未知'}。同步飞书链接时会优先走官方授权通道。`
+      : '未连接飞书官方 API。点击连接后在浏览器完成授权，插件会用云端保存的 refresh_token 长期续期。';
+    new Setting(containerEl)
+      .setName('连接飞书官方 API')
+      .setDesc(feishuOAuthDesc)
+      .addButton((button) => button
+        .setButtonText('连接飞书')
+        .setCta()
+        .onClick(async () => {
+          try {
+            await this.plugin.connectFeishuCloudOAuth();
+            new Notice('已打开飞书授权页，授权完成后请回到 Obsidian 点击“刷新状态”。');
+          } catch (error) {
+            new Notice(`打开飞书授权失败：${error.message || error}`);
+          }
+        }))
+      .addButton((button) => button
+        .setButtonText('刷新状态')
+        .onClick(async () => {
+          try {
+            await this.plugin.refreshFeishuCloudOAuthStatus();
+            this.display();
+          } catch (error) {
+            new Notice(`刷新飞书授权状态失败：${error.message || error}`);
+          }
+        }));
+
+    new Setting(containerEl)
+      .setName('优先使用云端飞书授权')
+      .setDesc('开启后，飞书链接会先走用户授权的官方 OpenAPI；未连接或权限不足时，仍会自动回退到网页解析。')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.feishuCloudOAuthEnabled !== false)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            feishuCloudOAuthEnabled: value,
+          });
+        }));
+
     const feishuLoginBtn = new Setting(containerEl)
       .setName('登录飞书')
       .setDesc('插件会优先尝试无登录提取；如果飞书要求登录，请先点这里登录，之后同步会复用登录状态。')
@@ -10445,6 +11853,44 @@ class WechatInboxSettingTab extends PluginSettingTab {
       if (loggedIn) {
         feishuLoginBtn.setDesc('已保存飞书登录状态；飞书文档同步会优先无登录提取，必要时复用该状态。');
       }
+    });
+
+    new Setting(containerEl)
+      .setName('飞书官方 API 实验通道')
+      .setDesc('用于测试长文档完整提取。需要在飞书开放平台创建自建应用，并给应用开通云文档读取权限；失败时会自动回退到网页解析。')
+      .addToggle((toggle) => toggle
+        .setValue(Boolean(this.plugin.settings.feishuOpenApiEnabled))
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            feishuOpenApiEnabled: value,
+          });
+        }));
+
+    new Setting(containerEl)
+      .setName('飞书 App ID')
+      .setDesc('自建应用的 App ID，只保存在当前 Obsidian 插件本地。')
+      .addText((text) => text
+        .setPlaceholder('cli_xxxxxxxxxxxxx')
+        .setValue(this.plugin.settings.feishuAppId || '')
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            feishuAppId: value,
+          });
+        }));
+
+    this.addPasswordSetting(containerEl, {
+      name: '飞书 App Secret',
+      desc: '自建应用的 App Secret，只保存在当前 Obsidian 插件本地。',
+      placeholder: 'App Secret',
+      value: this.plugin.settings.feishuAppSecret || '',
+      onChange: async (value) => {
+        await this.plugin.saveSettings({
+          ...this.plugin.settings,
+          feishuAppSecret: value,
+        });
+      },
     });
 
     new Setting(containerEl)
@@ -10887,8 +12333,12 @@ WechatObsidianInboxPlugin.__test = {
   extractFeishuMarkdownFromHtml,
   extractFeishuMarkdownFromClientVars,
   mergeFeishuRenderedAndClientVarsMarkdown,
+  shouldRefreshFeishuMarkdownFromSource,
   extractFeishuDocumentTokenFromUrl,
   buildFeishuClientVarsApiUrl,
+  extractFeishuOpenApiUrlInfo,
+  extractFeishuMarkdownFromOpenApiBlocks,
+  fetchFeishuOpenApiMarkdownFromUrl,
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   extractAiMetadataInputText,
