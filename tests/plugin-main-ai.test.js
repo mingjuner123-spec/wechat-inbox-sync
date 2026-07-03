@@ -2547,6 +2547,53 @@ async function runAsyncHydrationTests() {
     undefined,
   ]]);
 
+  const cloudStatusRefreshPlugin = new PluginClass();
+  const cloudStatusRefreshCalls = [];
+  cloudStatusRefreshPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: null,
+  });
+  cloudStatusRefreshPlugin.requestJson = async (path, method, body, binding) => {
+    cloudStatusRefreshCalls.push([path, method, body && body.url, binding && binding.token]);
+    if (path === '/feishu/oauth/status') {
+      return { success: true, data: { connected: true, expiresAt: '2026-07-10T00:00:00.000Z' } };
+    }
+    if (path === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: '云端刷新标题',
+          documentId: 'refreshDocxToken',
+          blockCount: 1,
+          blocks: [
+            { block_id: 'p1', block_type: 2, text: { elements: [{ text_run: { content: '云端状态刷新后应该重新提取，不再复用旧网页解析缓存。' } }] } },
+          ],
+        },
+      };
+    }
+    throw new Error(`Unexpected cloud Feishu refresh path ${path}`);
+  };
+  const refreshedCloudHydrated = await cloudStatusRefreshPlugin.hydrateWebpageMarkdown({
+    _id: 'feishu-cloud-oauth-refresh-hydrate',
+    type: 'webpage',
+    content: 'https://my.feishu.cn/docx/refreshDocxToken',
+    metadata: {
+      url: 'https://my.feishu.cn/docx/refreshDocxToken',
+      markdown: '旧网页解析缓存不应该阻止云端授权提取。',
+    },
+  }, '临时收集', '2026-07-04', '飞书云端授权刷新测试');
+  assert.strictEqual(refreshedCloudHydrated.metadata.conversionSource, 'feishu-cloud-oauth', JSON.stringify({
+    calls: cloudStatusRefreshCalls,
+    metadata: refreshedCloudHydrated.metadata,
+  }));
+  assert.ok(refreshedCloudHydrated.metadata.markdown.includes('云端状态刷新后应该重新提取'));
+  assert.deepStrictEqual(cloudStatusRefreshCalls, [
+    ['/feishu/oauth/status', 'GET', undefined, undefined],
+    ['/feishu/extract', 'POST', 'https://my.feishu.cn/docx/refreshDocxToken', undefined],
+  ]);
+
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.douyin.com/video/123') {
       return {

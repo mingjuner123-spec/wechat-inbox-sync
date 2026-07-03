@@ -8696,11 +8696,26 @@ class WechatObsidianInboxPlugin extends Plugin {
   async refreshFeishuCloudOAuthStatus(binding = null) {
     const payload = await this.requestJson('/feishu/oauth/status', 'GET', {}, binding || undefined);
     const data = payload && payload.data ? payload.data : payload;
-    await this.saveSettings({
-      ...this.settings,
-      feishuOAuthStatus: data || null,
-    });
+    try {
+      await this.saveSettings({
+        ...this.settings,
+        feishuOAuthStatus: data || null,
+      });
+    } catch (error) {
+      this.settings.feishuOAuthStatus = data || null;
+    }
     return data || null;
+  }
+
+  async getFeishuCloudOAuthStatus(binding = null) {
+    if (this.settings.feishuOAuthStatus && this.settings.feishuOAuthStatus.connected) {
+      return this.settings.feishuOAuthStatus;
+    }
+    try {
+      return await this.refreshFeishuCloudOAuthStatus(binding);
+    } catch (error) {
+      return this.settings.feishuOAuthStatus || null;
+    }
   }
 
   async generateMetadataWithCloud(record, binding = null) {
@@ -10956,15 +10971,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!url) {
       return record;
     }
-    if ((metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
+    const isFeishuLink = isFeishuUrl(url);
+    const feishuCloudOAuthStatus = isFeishuLink
+      ? await this.getFeishuCloudOAuthStatus(binding)
+      : null;
+    if (!feishuCloudOAuthStatus?.connected
+      && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot)
+      && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       return record;
     }
 
     try {
-      if (isFeishuUrl(url)) {
+      if (isFeishuLink) {
         let openApiError = null;
-        const shouldUseFeishuCloudOAuth = this.settings.feishuOAuthStatus
-          && this.settings.feishuOAuthStatus.connected;
+        const shouldUseFeishuCloudOAuth = feishuCloudOAuthStatus && feishuCloudOAuthStatus.connected;
         if (shouldUseFeishuCloudOAuth) {
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
