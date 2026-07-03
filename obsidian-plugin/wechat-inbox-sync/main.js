@@ -6162,8 +6162,28 @@ async function renderUrlToMarkdownWithElectron(url) {
           return clean(blocks.join('\\n\\n'));
         };
         const scrollables = () => {
+          const selectors = [
+            '[class*="scroll"]',
+            '[class*="Scroll"]',
+            '[class*="container"]',
+            '[class*="Container"]',
+            '[class*="content"]',
+            '[class*="Content"]',
+            '[class*="doc"]',
+            '[class*="Doc"]',
+            '[class*="editor"]',
+            '[data-testid*="scroll"]',
+            '[data-testid*="doc"]',
+            '[data-docx-has-block-data]',
+            '[data-page-id]',
+            '[data-block-id]',
+            'main',
+            'article',
+          ];
           const nodes = [document.scrollingElement, document.documentElement, document.body]
-            .concat(Array.from(document.querySelectorAll('*')));
+            .concat(selectors.flatMap((selector) => {
+              try { return Array.from(document.querySelectorAll(selector)); } catch (error) { return []; }
+            }));
           const unique = Array.from(new Set(nodes.filter(Boolean)));
           return unique
           .filter((node) => {
