@@ -238,21 +238,33 @@ assert.strictEqual(typeof helpers.downloadTextViaNode, 'function');
 assert.strictEqual(helpers.LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_beta');
 assert.strictEqual(
   helpers.LOCAL_ASR_INSTALLER_URL,
-  'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1',
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1',
 );
 assert.strictEqual(
   helpers.LOCAL_ASR_MACOS_INSTALLER_URL,
-  'https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh',
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh',
+);
+assert.strictEqual(
+  helpers.LOCAL_OCR_INSTALLER_URL,
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1',
+);
+assert.strictEqual(
+  helpers.LOCAL_OCR_MACOS_INSTALLER_URL,
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh',
 );
 assert.ok(pluginMainSource.includes('getAvailableLocalAsrInstallerPath'));
-assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr.ps1'));
-assert.ok(pluginMainSource.includes('raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/local-asr/install-local-asr-macos.sh'));
+assert.ok(pluginMainSource.includes('getAvailableLocalOcrInstallerPath'));
+assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1'));
+assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh'));
+assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1'));
+assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh'));
 assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
-assert.ok(pluginMainSource.includes("source.includes('python-venv')"));
+assert.ok(pluginMainSource.includes("source.includes('CHUNK_SECONDS=600')"));
 assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
-assert.ok(pluginMainSource.includes("source.includes('exec \"\\\\$WHISPER_CPP_BIN\" \"\\\\$@\"')"));
 assert.ok(pluginMainSource.includes("source.includes('TENCENT_MODEL_URL=')"));
-assert.ok(pluginMainSource.includes("source.includes('MODEL_URLS=(\"$TENCENT_MODEL_URL\" \"$MODEL_MIRROR_URL\" \"$MODEL_URL\")')"));
+assert.ok(pluginMainSource.includes("source.includes('bootstrap_uv')"));
+assert.ok(pluginMainSource.includes("source.includes('detect_uv_arch')"));
+assert.ok(pluginMainSource.includes("source.includes('setup_python_and_packages')"));
 assert.ok(pluginMainSource.includes("source.includes('[string]$InstallRoot')"));
 assert.ok(pluginMainSource.includes("source.includes('safeModelPath')"));
 assert.ok(pluginMainSource.includes("source.includes('$TencentCosAssetBaseUrl')"));
@@ -703,7 +715,7 @@ const feishuDirtyTitleBase = helpers.buildRecordTitleBase({
 assert.strictEqual(feishuDirtyTitleBase, '飞书-踩中5次风口，赚');
 const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
   id: 'root',
-  block_sequence: ['root', 'heading-block', 'paragraph-block', 'table-block', 'image-block', 'bullet-block'],
+  block_sequence: ['root', 'heading-block', 'paragraph-block', 'table-block', 'image-block', 'video-block', 'bullet-block'],
   block_map: {
     root: { id: 'root', data: { type: 'page' } },
     'heading-block': {
@@ -737,6 +749,14 @@ const feishuClientVarsMarkdown = helpers.extractFeishuMarkdownFromClientVars({
         image: { origin_url: 'https://example.com/feishu-image.png' },
       },
     },
+    'video-block': {
+      id: 'video-block',
+      data: {
+        type: 'file',
+        name: '演示视频.mp4',
+        file: { download_url: 'https://example.com/feishu-demo.mp4' },
+      },
+    },
     'bullet-block': {
       id: 'bullet-block',
       data: {
@@ -752,6 +772,7 @@ assert.strictEqual(feishuClientVarsMarkdown.includes('## 目录'), false);
 assert.ok(feishuClientVarsMarkdown.includes('| 频段 | 频率 |'));
 assert.ok(feishuClientVarsMarkdown.includes('| Ka | 27-40GHz |'));
 assert.ok(feishuClientVarsMarkdown.includes('![图片](https://example.com/feishu-image.png)'));
+assert.ok(feishuClientVarsMarkdown.includes('[演示视频.mp4](https://example.com/feishu-demo.mp4)'));
 assert.ok(feishuClientVarsMarkdown.includes('- 列表项目'));
 const feishuMergedMarkdown = helpers.mergeFeishuRenderedAndClientVarsMarkdown([
   '# 飞书云文档',
@@ -784,6 +805,157 @@ assert.ok(feishuMergedMarkdown.includes('### 二级目录'));
 assert.strictEqual(feishuMergedMarkdown.includes('上传日志'), false);
 assert.strictEqual(feishuMergedMarkdown.includes('联系客服'), false);
 assert.strictEqual(feishuMergedMarkdown.includes('墨度'), false);
+const feishuRenderedWinsWhenStructuredIsIncomplete = helpers.mergeFeishuRenderedAndClientVarsMarkdown([
+  '# 飞书云文档',
+  '',
+  '搜索',
+  '',
+  '![头像](https://s1-imfile.feishucdn.com/static-resource/v1/avatar.png)',
+  '',
+  '# 读完这篇，你能做到什么',
+  '',
+  '一套属于自己的声音克隆',
+  '',
+  '一个能跑通的 Remotion 项目',
+  '',
+  '![成果截图](https://s1-imfile.feishucdn.com/static-resource/v1/remotion-result.png)',
+  '',
+  '## 3.0 整体流程图',
+  '',
+  '文案 -> 文案审查 -> 语句划分 -> 语音克隆 -> 音频时长核定 -> 画面规划 -> Remotion 画面 -> 渲染成片。这一段代表隐藏浏览器读到的真实长正文，不能被 client_vars 里的短占位文件名截断。',
+  '',
+  '联系客服',
+].join('\n'), [
+  '# 读完这篇，你能做到什么',
+  '',
+  'b6b20254ef3cf62a0f8e6009f59dcc08.jpg',
+  '',
+  'REMOITON做视频.mp4',
+].join('\n'));
+assert.ok(feishuRenderedWinsWhenStructuredIsIncomplete.includes('一个能跑通的 Remotion 项目'));
+assert.ok(feishuRenderedWinsWhenStructuredIsIncomplete.includes('## 3.0 整体流程图'));
+assert.ok(feishuRenderedWinsWhenStructuredIsIncomplete.includes('真实长正文，不能被 client_vars'));
+assert.ok(feishuRenderedWinsWhenStructuredIsIncomplete.includes('![成果截图](https://s1-imfile.feishucdn.com/static-resource/v1/remotion-result.png)'));
+assert.strictEqual(feishuRenderedWinsWhenStructuredIsIncomplete.includes('avatar.png'), false);
+assert.strictEqual(feishuRenderedWinsWhenStructuredIsIncomplete.includes('联系客服'), false);
+assert.strictEqual(helpers.shouldRefreshFeishuMarkdownFromSource(
+  'https://fv2fbshiww0.feishu.cn/wiki/KTQtw8R56igHE7kkKwHcoTBun9e',
+  {
+    markdown: [
+      '# 飞书标题',
+      '',
+      'b6b20254ef3cf62a0f8e6009f59dcc08.jpg',
+      '',
+      'REMOITON做视频.mp4',
+      '',
+      'CUDA Toolkit',
+    ].join('\n'),
+  },
+), true);
+assert.strictEqual(helpers.shouldRefreshFeishuMarkdownFromSource(
+  'https://fv2fbshiww0.feishu.cn/wiki/KTQtw8R56igHE7kkKwHcoTBun9e',
+  {
+    markdown: [
+      '# 飞书标题',
+      '',
+      '![成果截图](https://s1-imfile.feishucdn.com/static-resource/v1/remotion-result.png)',
+      '',
+      '[演示视频.mp4](https://example.com/feishu-demo.mp4)',
+      '',
+      '这是一段已经包含真实图片和视频链接的飞书正文，不需要重新提取。',
+    ].join('\n'),
+  },
+), false);
+const cleanedFeishuRenderedMarkdown = helpers.cleanMarkdownForStorage([
+  '# 飞书云文档',
+  '',
+  '蟹',
+  '',
+  '蟹老板-老王1的云文档',
+  '',
+  '星辰大海蟹老板-老王1REMOTION制作AI视频，深度经验分享',
+  '',
+  '- REMOTION制作AI视频，深度经验分享',
+  '- 读完这篇，你能做到什么',
+  '',
+  '蟹老板-老王1',
+  '',
+  '6月27日修改',
+  '',
+  '😀',
+  '',
+  '一套属于自己的声音克隆',
+  '',
+  '一、成果',
+  '',
+  '1.1 我的数据：2个月、1000万播放、5万粉丝',
+  '',
+  '61%',
+  '',
+  '- 一、成果',
+  '- 1.1 我的数据：2个月、1000万播放、5万粉丝',
+  '- 1.2 不是我一个人的想法',
+  '- 二、Remotion能做什么：',
+  '- 三、实战教学：从0到出片',
+  '',
+  '重播',
+  '',
+  '播放',
+  '',
+  '00:00',
+  '/',
+  '直播',
+  '进入全屏',
+  '画中画',
+  '1080p',
+  '- 360p',
+  '- 1080p',
+  '- 原画',
+  '1x',
+  '- 2x',
+  '- 1.5x',
+  '- 1x',
+  '- 0.75x',
+  '- 0.5x',
+  '点击按住可拖动视频',
+  '',
+  '3.11remotion安装',
+  '',
+  'Bash',
+  '',
+  '# 创建项目（如果还没有的话）',
+  '',
+  'npx create-video@latest',
+  '',
+  '|',
+  '组件',
+  '|',
+  '要求',
+  '说明',
+  '| --- | --- | --- |',
+  'CPU',
+  '4核以上',
+  '渲染视频时 CPU 占用高',
+  '内存',
+  '8GB以上',
+  'Remotion 渲染',
+].join('\n'), {
+  dedupe: true,
+  feishuTitle: 'REMOTION制作AI视频，深度经验分享',
+});
+assert.ok(cleanedFeishuRenderedMarkdown.includes('# 读完这篇，你能做到什么'));
+assert.ok(cleanedFeishuRenderedMarkdown.includes('# 一、成果'));
+assert.ok(cleanedFeishuRenderedMarkdown.includes('## 1.1 我的数据：2个月、1000万播放、5万粉丝'));
+assert.ok(cleanedFeishuRenderedMarkdown.includes('### 3.11remotion安装'));
+assert.ok(cleanedFeishuRenderedMarkdown.includes('| 组件 | 要求 | 说明 |'));
+assert.ok(cleanedFeishuRenderedMarkdown.includes('| CPU | 4核以上 | 渲染视频时 CPU 占用高 |'));
+assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('蟹老板'), false);
+assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('飞书云文档'), false);
+assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('6月27日修改'), false);
+assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('- 一、成果'), false);
+assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('重播'), false);
+assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('点击按住可拖动视频'), false);
+assert.strictEqual(cleanedFeishuRenderedMarkdown.includes('61%'), false);
 assert.strictEqual(typeof helpers.extractWebpageMetadataFromHtml, 'function');
 const articleMeta = helpers.extractWebpageMetadataFromHtml(`
   <html>
@@ -845,6 +1017,23 @@ assert.ok(aiMetadataInput.includes('飞书机器人直播回放'));
 assert.ok(aiMetadataInput.includes('这是正文第一段'));
 assert.ok(aiMetadataInput.includes('要点一'));
 assert.strictEqual(aiMetadataInput.includes('const hidden = true;'), false);
+assert.strictEqual(aiMetadataInput.includes('https://example.com/post'), false);
+const transcriptAiMetadataInput = helpers.extractAiMetadataInputText({
+  type: 'webpage',
+  content: 'https://v.douyin.com/uTXolAGel5w/',
+  metadata: {
+    title: '抖音口播文案',
+    transcriptOnly: true,
+    transcriptionStatus: 'success',
+    transcription: '所有平台都在阻止你把他们的内容变成你的私有财产。今天我们从零开始讲如何把内容保存到 Obsidian。',
+    description: '旧的非 AI 摘要 https://v.douyin.com/uTXolAGel5w/',
+    keywords: ['Obsidian', 'AI'],
+  },
+});
+assert.ok(transcriptAiMetadataInput.includes('抖音口播文案'));
+assert.ok(transcriptAiMetadataInput.includes('所有平台都在阻止你'));
+assert.strictEqual(transcriptAiMetadataInput.includes('https://v.douyin.com'), false);
+assert.strictEqual(transcriptAiMetadataInput.includes('旧的非 AI 摘要'), false);
 assert.strictEqual(
   helpers.getLocalAsrInstallRoot('C:\\Users\\demo', 'default', 'win32'),
   'C:\\Users\\demo\\.wechat-inbox-local-asr',
@@ -1752,6 +1941,8 @@ assert.ok(transcriptMarkdown.includes('## 口播/音频文案'));
 assert.ok(transcriptMarkdown.includes('这是视频里真正说出来的内容。'));
 assert.strictEqual(transcriptMarkdown.includes('## 标题'), false);
 assert.strictEqual(transcriptMarkdown.includes('## 标签'), false);
+assert.strictEqual(transcriptMarkdown.includes('原始链接：'), false);
+assert.strictEqual(transcriptMarkdown.includes('转写来源：'), false);
 
 const failedTranscriptMarkdown = helpers.buildAudioTranscriptMarkdown({
   url: 'https://www.douyin.com/video/123',
@@ -3207,7 +3398,7 @@ async function runLocalTranscriptionEntitlementTests() {
       hasAccess: true,
       plan: 'local_transcription_beta',
       status: 'active',
-      expiresAt: '2026-07-03T08:00:00.000Z',
+      expiresAt: '2026-08-03T08:00:00.000Z',
       code: 'OBPROT93C6',
     },
     bindings: [{
