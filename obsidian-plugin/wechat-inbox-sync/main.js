@@ -6296,6 +6296,33 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
           .trim();
         const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn/i.test(location.href)
           || /扫码登录|登录飞书|Login Required/i.test(document.body ? String(document.body.innerText || document.body.textContent || '') : '');
+        const getPathToken = () => {
+          const match = String(location.pathname || '').match(/\\/(?:docx|wiki)\\/([^/?#]+)/i);
+          return match ? decodeURIComponent(match[1]) : '';
+        };
+        const getFeishuClientVars = async () => {
+          const token = getPathToken();
+          const candidates = [
+            window.DATA && window.DATA.clientVars && window.DATA.clientVars.data,
+            window.DATA && token && window.DATA[token] && window.DATA[token].CLIENT_VARS && window.DATA[token].CLIENT_VARS.data,
+            window.SERVER_DATA && window.SERVER_DATA.clientVars && window.SERVER_DATA.clientVars.data,
+            window.SERVER_RUNTIME_DATA && window.SERVER_RUNTIME_DATA.clientVars && window.SERVER_RUNTIME_DATA.clientVars.data,
+          ].filter(Boolean);
+          const existing = candidates.find((item) => item && (item.block_map || item.blockMap));
+          if (existing) return existing;
+          if (!token || isLoginPage()) return null;
+          try {
+            const response = await fetch('/space/api/docx/pages/client_vars?id=' + encodeURIComponent(token), {
+              credentials: 'include',
+              headers: { accept: 'application/json, text/plain, */*' },
+            });
+            const json = await response.json();
+            if (json && json.code && json.code !== 0) return null;
+            return json && json.data ? json.data : json;
+          } catch (error) {
+            return null;
+          }
+        };
         const lines = [];
         const seenLines = new Set();
         const imageAssets = [];
@@ -6414,12 +6441,19 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
           title: document.title || '',
           markdown: lines.join('\\n'),
           needsLogin: isLoginPage(),
+          clientVars: await getFeishuClientVars(),
           assets: uniqueAssets,
         };
       })()
     `);
     if (result && result.needsLogin) {
       throw new Error('飞书页面需要先登录。请在插件设置中点击“登录飞书”，登录后再同步。');
+    }
+    if (result && result.clientVars) {
+      try {
+        const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(result.clientVars);
+        result.markdown = mergeFeishuRenderedAndClientVarsMarkdown(result.markdown, clientVarsMarkdown);
+      } catch (error) {}
     }
     if (!result || !result.markdown || result.markdown.length < 20) {
       throw new Error('隐藏浏览器未读取到足够正文');

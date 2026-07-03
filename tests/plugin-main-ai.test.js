@@ -29,6 +29,12 @@ assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));
 assert.ok(pluginMainSource.includes('const rendered = await renderFeishuUrlToSimpleMarkdownWithElectron(url);'));
+const simpleFeishuRendererSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async function renderFeishuUrlToSimpleMarkdownWithElectron'),
+  pluginMainSource.indexOf('async function renderSocialMediaUrlsWithElectron'),
+);
+assert.ok(simpleFeishuRendererSource.includes('getFeishuClientVars'));
+assert.ok(simpleFeishuRendererSource.includes('mergeFeishuRenderedAndClientVarsMarkdown'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
