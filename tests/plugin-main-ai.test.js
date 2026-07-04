@@ -2590,7 +2590,7 @@ async function runAsyncHydrationTests() {
   }));
   assert.ok(refreshedCloudHydrated.metadata.markdown.includes('云端状态刷新后应该重新提取'));
   assert.deepStrictEqual(cloudStatusRefreshCalls, [
-    ['/feishu/oauth/status', 'GET', undefined, undefined],
+    ['/feishu/oauth/status', 'GET', undefined, 'ABC-123'],
     ['/feishu/extract', 'POST', 'https://my.feishu.cn/docx/refreshDocxToken', undefined],
   ]);
 
@@ -3345,6 +3345,50 @@ async function runMissingClientIdRequestTest() {
       () => plugin.requestJson('/bind', 'POST', {}),
       /本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定/,
     );
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
+async function runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const calls = [];
+  requestUrlMock = async (options) => {
+    calls.push(options);
+    return {
+      status: 200,
+      json: {
+        success: true,
+        data: {
+          connected: false,
+          status: 'not_connected',
+        },
+      },
+    };
+  };
+
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: '',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'ABC-123',
+      label: '微信 1',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+
+  try {
+    const payload = await plugin.requestJson('/feishu/oauth/status', 'GET', {});
+    assert.deepStrictEqual(payload.data, {
+      connected: false,
+      status: 'not_connected',
+    });
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].headers.Authorization, 'Bearer ABC-123');
+    assert.strictEqual(calls[0].headers['X-Wechat-Inbox-Client-Id'], 'test-client');
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
@@ -4240,6 +4284,7 @@ async function main() {
   await runOpenExternalUrlTests();
   await runCloudRequestFallbackTests();
   await runMissingClientIdRequestTest();
+  await runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest();
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runExistingLocalRecordDedupSyncTest();

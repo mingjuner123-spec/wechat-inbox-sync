@@ -1234,6 +1234,27 @@ function isRequestUrlTransportError(message) {
     || /Request failed,\s*status\s+5\d\d/i.test(text);
 }
 
+function isRequestUrlHttpStatusError(message) {
+  return /Request failed,\s*status\s+\d+/i.test(String(message || ''));
+}
+
+function formatSyncApiErrorMessage(payload, fallback = '') {
+  const raw = String(
+    (payload && (
+      payload.errMsg
+      || payload.message
+      || (payload.error && (payload.error.message || payload.error.errMsg))
+      || payload.code
+    ))
+    || fallback
+    || '',
+  );
+  if (/InsufficientBalance|Function is Unavailable|AvailableStatus\s*=\s*InsufficientBalance/i.test(raw)) {
+    return '云端同步服务暂时不可用：腾讯云资源包或账户余额不足，请先在腾讯云控制台续费/充值后再重试。';
+  }
+  return raw || '同步 API 请求失败';
+}
+
 function requestJsonViaNode(options) {
   return new Promise((resolve, reject) => {
     let parsedUrl;
@@ -8581,9 +8602,15 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async requestJson(path, method = 'GET', body = {}, binding = null) {
+    const fallbackToken = getPrimaryBoundToken(normalizeBindings(this.settings));
     const token = normalizeBindCodeInput(
-      typeof binding === 'string' ? binding : ((binding && binding.token) || this.settings.token),
+      typeof binding === 'string'
+        ? binding
+        : ((binding && binding.token) || this.settings.token || fallbackToken),
     );
+    if (!token) {
+      throw new Error('请先在插件设置里输入小程序绑定码并完成绑定。');
+    }
     const requestOptions = {
       url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
       method,
@@ -8685,7 +8712,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async connectFeishuCloudOAuth(binding = null) {
-    const payload = await this.requestJson('/feishu/oauth/start', 'POST', {}, binding || undefined);
+    const activeBinding = binding || this.getActiveBindings()[0] || null;
+    const payload = await this.requestJson('/feishu/oauth/start', 'POST', {}, activeBinding || undefined);
     const data = payload && payload.data ? payload.data : payload;
     const authUrl = String((data && data.authUrl) || '').trim();
     if (!authUrl) throw new Error('Feishu OAuth did not return authUrl');
@@ -8694,7 +8722,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async refreshFeishuCloudOAuthStatus(binding = null) {
-    const payload = await this.requestJson('/feishu/oauth/status', 'GET', {}, binding || undefined);
+    const activeBinding = binding || this.getActiveBindings()[0] || null;
+    const payload = await this.requestJson('/feishu/oauth/status', 'GET', {}, activeBinding || undefined);
     const data = payload && payload.data ? payload.data : payload;
     try {
       await this.saveSettings({
@@ -10983,6 +11012,34 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     try {
       if (isFeishuLink) {
+        if (!feishuCloudOAuthStatus || !feishuCloudOAuthStatus.connected) {
+          throw new Error('飞书官方 API 未连接，请先在插件设置里连接飞书后再同步飞书文档。');
+        }
+        try {
+          const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
+          const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
+          const cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+            cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
+              dedupe: true,
+              feishuTitle,
+            }),
+            [],
+            url,
+          );
+          return {
+            ...record,
+            metadata: enrichExtractedWebpageMetadata({
+              ...metadata,
+              title: feishuTitle,
+              markdown: cleanedCloudOpenApiMarkdown,
+              conversionStatus: 'success',
+              conversionSource: 'feishu-cloud-oauth',
+              conversionNote: `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
+            }),
+          };
+        } catch (error) {
+          throw new Error(`飞书官方 API 提取失败：${error.message || String(error)}`);
+        }
         let openApiError = null;
         const shouldUseFeishuCloudOAuth = feishuCloudOAuthStatus && feishuCloudOAuthStatus.connected;
         if (shouldUseFeishuCloudOAuth) {
@@ -11010,6 +11067,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             };
           } catch (error) {
             openApiError = error;
+            throw error;
           }
         }
         try {
