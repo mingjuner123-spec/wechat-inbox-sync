@@ -1,11 +1,13 @@
 const DEFAULT_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
-const DEFAULT_ANNOUNCEMENT = 'Pro 版，已开启7天全面体验。前往开通 Pro 领取会员和查看教程。';
-const DEFAULT_PLUGIN_VERSION = '1.2.7';
-const DEFAULT_PLUGIN_UPDATED_AT = '2026-06-14';
-const DEFAULT_ANNOUNCEMENT_VERSION = '2026-06-14-local-transcription-first';
+const DEFAULT_ANNOUNCEMENT = '插件 v1.3.0 已发布：修复绑定码与 Pro 权限链路，飞书文档转存可优先使用官方 API 通道。';
+const DEFAULT_PLUGIN_VERSION = '1.3.0';
+const DEFAULT_PLUGIN_UPDATED_AT = '2026-07-05 07:13';
+const DEFAULT_ANNOUNCEMENT_VERSION = '2026-07-05-plugin-130-feishu-fix';
 const DEFAULT_UPDATE_ITEMS = [
-  'Pro 版，已开启7天全面体验',
-  '前往开通 Pro 领取会员和查看教程',
+  '插件 v1.3.0 已发布，整理 Pro 高级功能、绑定码和同步/安装失败诊断入口',
+  '飞书文档转存已支持官方 API 通道，标题、正文和图片提取更完整；未连接时仍保留旧解析方式',
+  '修复绑定码、兑换码和 Pro 权限读取异常，已开通用户刷新权限后即可恢复高级功能',
+  'Pro 自动能力继续支持本地转写、小红书 OCR/评论区提取、AI 简介与关键词属性生成',
 ];
 
 function normalizeText(value) {

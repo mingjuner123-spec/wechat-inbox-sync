@@ -9,16 +9,22 @@ const {
   isAudioVideoWebpageUrl,
 } = require('./inbox-utils');
 const { createInboxService } = require('../../services/inbox-service');
+const {
+  buildMembershipDisplayState,
+  shouldShowAdEntry,
+} = require('../../utils/membership-display');
 
 const APP_VERSION = '0.1.0';
-const DEFAULT_PLUGIN_VERSION = '1.2.8';
-const DEFAULT_PLUGIN_UPDATED_AT = '2026-06-14';
+const DEFAULT_PLUGIN_VERSION = '1.3.0';
+const DEFAULT_PLUGIN_UPDATED_AT = '2026-07-05 07:13';
 const TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
-const DEFAULT_ANNOUNCEMENT = 'Pro 版，已开启7天全面体验。前往开通 Pro 领取会员和查看教程。';
-const ANNOUNCEMENT_VERSION = '2026-06-14-local-transcription-first';
+const DEFAULT_ANNOUNCEMENT = '插件 v1.3.0 已发布：修复绑定码与 Pro 权限链路，飞书文档转存可优先使用官方 API 通道。';
+const ANNOUNCEMENT_VERSION = '2026-07-05-plugin-130-feishu-fix';
 const DEFAULT_UPDATE_ITEMS = [
-  'Pro 版，已开启7天全面体验',
-  '前往开通 Pro 领取会员和查看教程',
+  '插件 v1.3.0 已发布，整理 Pro 高级功能、绑定码和同步/安装失败诊断入口',
+  '飞书文档转存已支持官方 API 通道，标题、正文和图片提取更完整；未连接时仍保留旧解析方式',
+  '修复绑定码、兑换码和 Pro 权限读取异常，已开通用户刷新权限后即可恢复高级功能',
+  'Pro 自动能力继续支持本地转写、小红书 OCR/评论区提取、AI 简介与关键词属性生成',
 ];
 const CONTACT_WECHAT = 'heyhmjx';
 const SHARE_TITLE = 'Obsidian 内容同步助手';
@@ -326,6 +332,7 @@ Page({
       shareUnlocked: false,
       adUnlockCount: 0,
     },
+    dailyUsageLoaded: false,
     usageStatusText: buildUsageStatusText(),
     redeemVisible: false,
     redeemCodeInput: '',
@@ -336,6 +343,10 @@ Page({
     trialRedeemCodeExpiresAt: '',
     trialRedeemCodeExpiresLabel: '',
     trialRedeemCodeExpired: false,
+    showTrialClaim: true,
+    showRedeemCode: false,
+    showMembershipExpiry: false,
+    showAdEntry: false,
     entitlementStatusLoaded: false,
     entitlementStatus: {
       hasAccess: false,
@@ -387,7 +398,6 @@ Page({
     }
     this.enableShareMenu();
     this.setupRecorder();
-    this.setupRewardedVideoAd();
     this.loadCloudTranscriptionPreference();
     this.loadPublicConfig();
     this.loadDailyUsageStatus();
@@ -407,6 +417,9 @@ Page({
     }
     if (this.inboxService) {
       this.consumeForwardMaterialsFromApp();
+    }
+    if (this.inboxService && this.data.entitlementStatusLoaded) {
+      this.loadEntitlementStatus();
     }
   },
 
@@ -582,6 +595,7 @@ Page({
   },
 
   setupRewardedVideoAd() {
+    if (this.rewardedVideoAd) return;
     if (!REWARDED_AD_UNIT_ID || !wx.createRewardedVideoAd) return;
     this.rewardedVideoAd = wx.createRewardedVideoAd({
       adUnitId: REWARDED_AD_UNIT_ID,
@@ -659,8 +673,8 @@ Page({
         announcementText: useRemoteAnnouncement ? (config.announcement || DEFAULT_ANNOUNCEMENT) : DEFAULT_ANNOUNCEMENT,
         announcementVersion,
         updateItems,
-        pluginVersion: config.pluginVersion || DEFAULT_PLUGIN_VERSION,
-        pluginUpdatedAt: config.updatedAt || DEFAULT_PLUGIN_UPDATED_AT,
+        pluginVersion: useRemoteAnnouncement ? (config.pluginVersion || DEFAULT_PLUGIN_VERSION) : DEFAULT_PLUGIN_VERSION,
+        pluginUpdatedAt: useRemoteAnnouncement ? (config.updatedAt || DEFAULT_PLUGIN_UPDATED_AT) : DEFAULT_PLUGIN_UPDATED_AT,
         tutorialUrl: TUTORIAL_URL,
       });
       this.showLaunchAnnouncementIfNeeded({ announcementVersion, updateItems });
@@ -833,18 +847,6 @@ Page({
     });
   },
 
-  copyFormalMembershipWechat() {
-    wx.setClipboardData({
-      data: this.data.contactWechat || CONTACT_WECHAT,
-      success: () => {
-        wx.showToast({
-          title: '微信已复制，备注开通正式会员',
-          icon: 'none',
-        });
-      },
-    });
-  },
-
   switchMainTab(event) {
     const target = event.currentTarget && event.currentTarget.dataset
       ? String(event.currentTarget.dataset.view || '')
@@ -905,6 +907,10 @@ Page({
   },
 
   showQuotaUnlockSheet() {
+    if (!this.data.showAdEntry) {
+      this.loadDailyUsageStatus();
+      return;
+    }
     this.setData({
       quotaUnlockVisible: true,
       quotaUnlockPending: true,
@@ -941,10 +947,16 @@ Page({
   },
 
   showRewardedAdForQuota() {
+    if (!this.data.showAdEntry) {
+      this.hideQuotaUnlockSheet();
+      this.loadDailyUsageStatus();
+      return;
+    }
     this.setData({
       quotaUnlockVisible: false,
       quotaUnlockPending: false,
     });
+    this.setupRewardedVideoAd();
     if (!this.rewardedVideoAd) {
       wx.showToast({
         title: '广告位待配置，暂时不能看广告解锁',
@@ -1005,12 +1017,16 @@ Page({
           membershipCard: buildMembershipCard(entitlementStatus),
           usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
           cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
-          ...buildTrialState(entitlementStatus),
+          showAdEntry: shouldShowAdEntry(entitlementStatus, this.data.dailyUsage, this.data.dailyUsageLoaded),
+          ...buildMembershipDisplayState(entitlementStatus),
         });
       }
     } catch (error) {
       // 权益状态失败不影响主流程。
-      this.setData({ entitlementStatusLoaded: true });
+      this.setData({
+        entitlementStatusLoaded: true,
+        showAdEntry: false,
+      });
     }
   },
 
@@ -1021,7 +1037,9 @@ Page({
         const dailyUsage = response.result.data || this.data.dailyUsage;
         this.setData({
           dailyUsage,
+          dailyUsageLoaded: true,
           usageStatusText: buildUsageStatusText(dailyUsage, this.data.entitlementStatus),
+          showAdEntry: shouldShowAdEntry(this.data.entitlementStatus, dailyUsage, this.data.entitlementStatusLoaded),
         });
       }
     } catch (error) {
@@ -1033,7 +1051,9 @@ Page({
     if (!quota) return;
     this.setData({
       dailyUsage: quota,
+      dailyUsageLoaded: true,
       usageStatusText: buildUsageStatusText(quota, this.data.entitlementStatus),
+      showAdEntry: shouldShowAdEntry(this.data.entitlementStatus, quota, this.data.entitlementStatusLoaded),
     });
   },
 
@@ -1117,8 +1137,9 @@ Page({
         membershipCard: buildMembershipCard(entitlementStatus),
         usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
         cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
+        showAdEntry: shouldShowAdEntry(entitlementStatus, this.data.dailyUsage, this.data.dailyUsageLoaded),
         trialRedeemCodeCreatedAt: data.createdAt || '',
-        ...buildTrialState(entitlementStatus),
+        ...buildMembershipDisplayState(entitlementStatus),
       });
       wx.showToast({
         title: data.alreadyActivated ? '已读取体验资格' : '7 天体验已开通',
@@ -1179,7 +1200,8 @@ Page({
         membershipCard: buildMembershipCard(entitlementStatus),
         usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
         cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
-        ...buildTrialState(entitlementStatus),
+        showAdEntry: shouldShowAdEntry(entitlementStatus, this.data.dailyUsage, this.data.dailyUsageLoaded),
+        ...buildMembershipDisplayState(entitlementStatus),
       });
       wx.showToast({
         title: entitlementStatus.alreadyRedeemed ? '该兑换码已激活过' : '兑换成功',

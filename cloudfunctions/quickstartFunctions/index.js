@@ -42,15 +42,35 @@ const {
 } = require('./redeem-code-core');
 const {
   createPaymentOrderDocument,
+  PAYMENT_PLANS,
   buildPaymentOrderState,
+  createVirtualPaymentPayload,
+  createVirtualPaymentQueryOrderRequest,
+  createVirtualPaymentProvideGoodsRequest,
+  normalizeWechatVirtualPaymentOrder,
+  normalizeVirtualPaymentEnv,
   createPaidEntitlementFromOrder,
+  pickPaymentCarryoverEntitlement,
+  mergePaidEntitlementWithCarryover,
+  createPaidRedeemCodeDocument,
+  buildPaymentNotificationWebhookPayload,
+  parseVirtualPaymentNotifyBody,
+  createVirtualPaymentNotifyResponse,
 } = require('./payment-core');
 
+const PRODUCTION_WECHAT_DATA_ENV = 'he02-d8gebzv050ed6c4ef';
+
+function getCloudDataEnv() {
+  return String(process.env.WECHAT_DATA_ENV || '').trim() || PRODUCTION_WECHAT_DATA_ENV || cloud.DYNAMIC_CURRENT_ENV;
+}
+
 cloud.init({
-  env: cloud.DYNAMIC_CURRENT_ENV,
+  env: getCloudDataEnv(),
 });
 
-const db = cloud.database();
+const db = cloud.database({
+  env: getCloudDataEnv(),
+});
 const _ = db.command;
 const REQUEST_TIMEOUT_MS = 10000;
 const DOUBAO_ASR_SUBMIT_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit';
@@ -64,6 +84,19 @@ const CLOUD_TRANSCRIPTION_QUEUE_BATCH_SIZE = 3;
 const CLOUD_TRANSCRIPTION_QUEUE_MAX_READ = 5000;
 const CLOUD_TRANSCRIPTION_POLL_INTERVAL_MS = 60 * 1000;
 const CLOUD_TRANSCRIPTION_MAX_POLL_ATTEMPTS = 240;
+const FEISHU_OAUTH_STATE_CODE_PREFIX = 'FEISHU_OAUTH_STATE_';
+
+function isRealBindCodeDocument(item) {
+  const code = String((item && item.code) || '').trim();
+  const kind = String((item && item.kind) || '').trim();
+  return Boolean(item)
+    && (!kind || kind === 'bind_code')
+    && !code.startsWith(FEISHU_OAUTH_STATE_CODE_PREFIX);
+}
+
+function pickFirstRealBindCode(docs = []) {
+  return (docs || []).find(isRealBindCodeDocument) || null;
+}
 
 function collectRecordFileIds(record) {
   const metadata = (record && record.metadata) || {};
@@ -196,11 +229,34 @@ function getCloudRuntimeConfigStatusData() {
   const doubaoKey = String(process.env.DOUBAO_ASR_API_KEY || '').trim();
   const mediaResolverUrl = getMediaResolverUrl();
   const mediaResolverSecret = getMediaResolverSecret();
+  const paymentEnv = normalizeVirtualPaymentEnv(process.env.VIRTUAL_PAY_ENV);
+  const paymentOfferId = String(process.env.VIRTUAL_PAY_OFFER_ID || '').trim();
+  const paymentAppKey = String(
+    paymentEnv === 1
+      ? process.env.VIRTUAL_PAY_APP_KEY_SANDBOX
+      : process.env.VIRTUAL_PAY_APP_KEY_PROD
+  || '').trim();
+  const wechatAppSecret = String(process.env.WECHAT_APP_SECRET || '').trim();
+  const virtualPaymentMissing = [];
+  if (!paymentOfferId) virtualPaymentMissing.push('VIRTUAL_PAY_OFFER_ID');
+  if (!paymentAppKey) virtualPaymentMissing.push(paymentEnv === 1 ? 'VIRTUAL_PAY_APP_KEY_SANDBOX' : 'VIRTUAL_PAY_APP_KEY_PROD');
+  if (!wechatAppSecret) virtualPaymentMissing.push('WECHAT_APP_SECRET');
   return {
     doubaoAsrApiKeyConfigured: Boolean(doubaoKey),
     doubaoAsrApiKeyLength: doubaoKey.length,
     mediaResolverUrlConfigured: Boolean(mediaResolverUrl),
     mediaResolverSecretConfigured: Boolean(mediaResolverSecret),
+    virtualPaymentConfigured: virtualPaymentMissing.length === 0,
+    virtualPaymentMissing,
+    virtualPaymentEnv: paymentEnv,
+    virtualPaymentOfferIdConfigured: Boolean(paymentOfferId),
+    virtualPaymentAppKeyConfigured: Boolean(paymentAppKey),
+    wechatAppSecretConfigured: Boolean(wechatAppSecret),
+    paymentPlanPricesFen: {
+      pro_month: PAYMENT_PLANS.pro_month.priceFen,
+      pro_year: PAYMENT_PLANS.pro_year.priceFen,
+    },
+    paymentDiagnosticsVersion: '2026-06-29-virtual-payment-early-bird',
     checkedAt: new Date().toISOString(),
   };
 }
@@ -474,7 +530,7 @@ function postJson({ url, headers = {}, body = {}, timeoutMs = 30000 }) {
       port: parsed.port || undefined,
       path: `${parsed.pathname}${parsed.search}`,
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
         'Content-Length': Buffer.byteLength(rawBody),
         ...headers,
       },
@@ -1007,6 +1063,9 @@ async function findRedeemCodeForOpenid(openid) {
   const redeemCodeOpenidFields = [
     'lastRedeemedOpenId',
     'redeemedOpenId',
+    'trialOwnerOpenid',
+    'paidOwnerOpenid',
+    'deliveredTo',
     'openid',
     'openId',
     'userOpenId',
@@ -1025,7 +1084,7 @@ async function findRedeemCodeForOpenid(openid) {
   }
 
   const codeDoc = pickLatestRedeemCodeDocument(codeMatches);
-  if (codeDoc) return codeDoc;
+  if (codeDoc) return { ...codeDoc, _sourceCollection: 'redeem_codes' };
 
   await ensureCollection('user_entitlements');
   try {
@@ -1033,8 +1092,9 @@ async function findRedeemCodeForOpenid(openid) {
       .where({ openid: safeOpenid })
       .limit(50)
       .get();
-    return pickLatestRedeemCodeDocument((entitlementResult.data || [])
+    const entitlementCodeDoc = pickLatestRedeemCodeDocument((entitlementResult.data || [])
       .filter((item) => isLocalTranscriptionPlan(item.plan)));
+    return entitlementCodeDoc ? { ...entitlementCodeDoc, _sourceCollection: 'user_entitlements' } : null;
   } catch (error) {
     return null;
   }
@@ -1047,23 +1107,81 @@ async function hydrateEntitlementWithRedeemCode(openid, entitlement) {
 
   const codeDoc = await findRedeemCodeForOpenid(openid);
   const code = normalizeRedeemCode(codeDoc && codeDoc.code);
+  const now = new Date().toISOString();
+  const isPaidEntitlement = entitlement.source === 'payment'
+    || entitlement.paymentOrderNo
+    || entitlement.latestPaymentOrderNo
+    || entitlement.lastPaidAt;
   if (!code) {
+    if (isPaidEntitlement) {
+      const repaired = await ensurePaidRedeemCodeForPayment({
+        openid,
+        order: {
+          orderNo: entitlement.latestPaymentOrderNo || entitlement.paymentOrderNo || '',
+          paidAt: entitlement.lastPaidAt || entitlement.redeemedAt || now,
+        },
+        entitlement: {
+          ...entitlement,
+          source: 'payment',
+        },
+        now,
+      });
+      if (entitlement._id) {
+        try {
+          await db.collection('user_entitlements').doc(entitlement._id).update({
+            data: {
+              code: repaired.code,
+              source: 'payment',
+              durationDays: Number(repaired.durationDays) || Number(entitlement.durationDays) || 0,
+              updatedAt: now,
+            },
+          });
+        } catch (error) {
+          // 兑换码自愈失败不阻断会员状态读取。
+        }
+      }
+      return repaired;
+    }
     return entitlement;
   }
 
-  const now = new Date().toISOString();
   const hydrated = {
     ...entitlement,
     code,
-    source: 'redeem_code',
-    durationDays: Number(codeDoc.durationDays) || Number(entitlement.durationDays) || 0,
+    source: isPaidEntitlement ? 'payment' : 'redeem_code',
+    durationDays: Number(entitlement.durationDays) || Number(codeDoc.durationDays) || 0,
   };
+  if (isPaidEntitlement) {
+    try {
+      const existingCodeDoc = { ...(codeDoc || {}) };
+      delete existingCodeDoc._sourceCollection;
+      const paidCodeDoc = createPaidRedeemCodeDocument({
+        code,
+        openid,
+        entitlement: hydrated,
+        order: {
+          orderNo: entitlement.latestPaymentOrderNo || entitlement.paymentOrderNo || '',
+          paidAt: entitlement.lastPaidAt || entitlement.redeemedAt || now,
+        },
+        now,
+        existingCodeDoc,
+      });
+      const { _id, ...codeUpdateData } = paidCodeDoc;
+      if (codeDoc && codeDoc._sourceCollection === 'redeem_codes' && codeDoc._id) {
+        await db.collection('redeem_codes').doc(codeDoc._id).update({ data: codeUpdateData });
+      } else {
+        await db.collection('redeem_codes').add({ data: codeUpdateData });
+      }
+    } catch (error) {
+      // 兑换码自愈失败不阻断会员状态读取。
+    }
+  }
   if (entitlement._id) {
     try {
       await db.collection('user_entitlements').doc(entitlement._id).update({
         data: {
           code,
-          source: 'redeem_code',
+          source: hydrated.source,
           durationDays: hydrated.durationDays,
           updatedAt: now,
         },
@@ -1079,8 +1197,14 @@ async function hydrateEntitlementWithRedeemCode(openid, entitlement) {
 async function getEntitlementStatus(event) {
   const wxContext = cloud.getWXContext();
   const plan = String(event.plan || DEFAULT_REDEEM_PLAN).trim() || DEFAULT_REDEEM_PLAN;
-  const entitlement = await getUserEntitlement(wxContext.OPENID, plan);
-  const hydratedEntitlement = event && event.includeRedeemCode
+  let entitlement = await getUserEntitlement(wxContext.OPENID, plan);
+  if (!buildEntitlementState(entitlement).hasAccess && plan === DEFAULT_REDEEM_PLAN) {
+    await reconcileLatestPendingVirtualPaymentOrder(wxContext.OPENID, wxContext.APPID);
+    entitlement = await getUserEntitlement(wxContext.OPENID, plan);
+  }
+  const shouldHydrateRedeemCode = plan === DEFAULT_REDEEM_PLAN
+    || Boolean(event && event.includeRedeemCode);
+  const hydratedEntitlement = shouldHydrateRedeemCode
     ? await hydrateEntitlementWithRedeemCode(wxContext.OPENID, entitlement)
     : entitlement;
   return {
@@ -1151,6 +1275,12 @@ async function redeemAccessCode(event) {
   }
   if (codeDoc.trialOwnerOpenid && codeDoc.trialOwnerOpenid !== wxContext.OPENID) {
     const error = new Error('兑换码无效、已过期或已被使用');
+    error.code = 'INVALID_REDEEM_CODE';
+    throw error;
+  }
+
+  if (codeDoc.paidOwnerOpenid && codeDoc.paidOwnerOpenid !== wxContext.OPENID) {
+    const error = new Error('Invalid redeem code');
     error.code = 'INVALID_REDEEM_CODE';
     throw error;
   }
@@ -1384,22 +1514,185 @@ async function getTrialRedeemCode() {
   };
 }
 
+function getVirtualPaymentConfig(appid) {
+  const env = normalizeVirtualPaymentEnv(process.env.VIRTUAL_PAY_ENV);
+  const offerId = String(process.env.VIRTUAL_PAY_OFFER_ID || '').trim();
+  const rawAppKey = env === 1
+    ? process.env.VIRTUAL_PAY_APP_KEY_SANDBOX
+    : process.env.VIRTUAL_PAY_APP_KEY_PROD;
+  const appKey = String(rawAppKey || '').trim();
+  const appSecret = String(process.env.WECHAT_APP_SECRET || '').trim();
+  const miniProgramAppId = String(appid || process.env.WECHAT_APP_ID || '').trim();
+  const missing = [];
+  if (!offerId) missing.push('VIRTUAL_PAY_OFFER_ID');
+  if (!appKey) missing.push(env === 1 ? 'VIRTUAL_PAY_APP_KEY_SANDBOX' : 'VIRTUAL_PAY_APP_KEY_PROD');
+  if (!appSecret) missing.push('WECHAT_APP_SECRET');
+  if (!miniProgramAppId) missing.push('WECHAT_APP_ID');
+  return {
+    env,
+    offerId,
+    appKey,
+    appSecret,
+    appid: miniProgramAppId,
+    configured: missing.length === 0,
+    missing,
+  };
+}
+
+function fetchJsonUrl(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        const json = tryParseJson(text);
+        if (!json) {
+          reject(new Error('WeChat API returned invalid JSON'));
+          return;
+        }
+        if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+          reject(new Error(`WeChat API request failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        resolve(json);
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('WeChat API request timed out'));
+    });
+  });
+}
+
+function postJsonUrl(url, body, timeoutMs = REQUEST_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(String(body || ''));
+    const req = https.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': payload.length,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        const json = tryParseJson(text);
+        if (!json) {
+          reject(new Error('WeChat API returned invalid JSON'));
+          return;
+        }
+        if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+          reject(new Error(`WeChat API request failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        resolve(json);
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('WeChat API request timed out'));
+    });
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function getWechatAccessToken({ appid, appSecret }) {
+  const url = 'https://api.weixin.qq.com/cgi-bin/token'
+    + '?grant_type=client_credential'
+    + `&appid=${encodeURIComponent(appid)}`
+    + `&secret=${encodeURIComponent(appSecret)}`;
+  const data = await fetchJsonUrl(url);
+  if (!data.access_token) {
+    throw new Error(`WeChat access_token failed: ${data.errmsg || data.errcode || 'empty token'}`);
+  }
+  return data.access_token;
+}
+
+async function getSessionKeyByLoginCode({ appid, appSecret, loginCode, expectedOpenid }) {
+  const code = String(loginCode || '').trim();
+  if (!code) throw new Error('缺少微信登录 code');
+  const url = 'https://api.weixin.qq.com/sns/jscode2session'
+    + `?appid=${encodeURIComponent(appid)}`
+    + `&secret=${encodeURIComponent(appSecret)}`
+    + `&js_code=${encodeURIComponent(code)}`
+    + '&grant_type=authorization_code';
+  const data = await fetchJsonUrl(url);
+  if (data.errcode) {
+    throw new Error(`微信登录态获取失败：${data.errmsg || data.errcode}`);
+  }
+  const sessionOpenid = String(data.openid || '').trim();
+  if (expectedOpenid && sessionOpenid && sessionOpenid !== expectedOpenid) {
+    throw new Error('微信登录态与当前用户不一致，请重新进入小程序后再试');
+  }
+  const sessionKey = String(data.session_key || '').trim();
+  if (!sessionKey) {
+    throw new Error('微信登录态获取失败，请稍后再试');
+  }
+  return {
+    openid: sessionOpenid,
+    sessionKey,
+  };
+}
+
 async function createPaymentOrder(event = {}) {
   const wxContext = cloud.getWXContext();
   const openid = wxContext.OPENID;
   if (!openid) throw new Error('OpenID is required');
   await ensureCollection('payment_orders');
   const now = new Date().toISOString();
+  const paymentConfig = getVirtualPaymentConfig(wxContext.APPID);
+  const loginCode = String(event.loginCode || '').trim();
+  let virtualPayment = null;
+  let paymentEnabled = false;
+  let payMode = 'manual_pending';
+  let message = paymentConfig.configured
+    ? '请继续完成微信虚拟支付，支付后等待订单确认，确认后 Pro 权益生效。'
+    : `微信虚拟支付配置未完成：${paymentConfig.missing.join('、')}。当前订单可人工确认。`;
+
+  let session = null;
+  if (paymentConfig.configured && loginCode) {
+    session = await getSessionKeyByLoginCode({
+      appid: paymentConfig.appid,
+      appSecret: paymentConfig.appSecret,
+      loginCode,
+      expectedOpenid: openid,
+    });
+    paymentEnabled = true;
+    payMode = 'virtual_payment';
+  } else if (paymentConfig.configured && !loginCode) {
+    message = '缺少微信登录 code，当前订单可人工确认。';
+  }
+
   const order = createPaymentOrderDocument({
     openid,
     planId: event.planId,
     now,
+    paymentEnabled,
+    payMode,
+    virtualPaymentEnv: paymentConfig.env,
+    message,
   });
+  if (paymentEnabled) {
+    virtualPayment = createVirtualPaymentPayload({
+      order,
+      offerId: paymentConfig.offerId,
+      appKey: paymentConfig.appKey,
+      sessionKey: session.sessionKey,
+      env: paymentConfig.env,
+    });
+  }
   const created = await db.collection('payment_orders').add({ data: order });
   return {
     success: true,
     data: {
-      ...buildPaymentOrderState(order),
+      ...buildPaymentOrderState({
+        ...order,
+        virtualPayment,
+      }),
       _id: created._id,
     },
   };
@@ -1418,31 +1711,242 @@ async function queryPaymentOrder(event = {}) {
     .get();
   const order = result.data && result.data[0] ? result.data[0] : null;
   if (!order) throw new Error('订单不存在');
+  const latestOrder = await syncWechatVirtualPaymentOrderIfPaid(order, wxContext.APPID);
   return {
     success: true,
-    data: buildPaymentOrderState(order),
+    data: buildPaymentOrderState(latestOrder),
+  };
+}
+
+async function ensurePaidRedeemCodeForPayment({ openid, order, entitlement, now }) {
+  await ensureCollection('redeem_codes');
+  let code = normalizeRedeemCode(entitlement && entitlement.code);
+
+  if (!code) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const [candidate] = createAdminRedeemCodeDocuments({
+        count: 1,
+        prefix: 'OBPRO',
+        durationDays: Number(entitlement && entitlement.durationDays) || 30,
+        note: 'virtual-payment-pro',
+        plan: DEFAULT_REDEEM_PLAN,
+        now,
+      });
+      const candidateCode = normalizeRedeemCode(candidate && candidate.code);
+      const exists = await db.collection('redeem_codes')
+        .where({ code: candidateCode })
+        .limit(1)
+        .get();
+      if (exists.data && exists.data[0]) continue;
+      const paidCodeDoc = createPaidRedeemCodeDocument({
+        code: candidateCode,
+        openid,
+        entitlement,
+        order,
+        now,
+        existingCodeDoc: candidate,
+      });
+      const { _id, ...data } = paidCodeDoc;
+      await db.collection('redeem_codes').add({ data });
+      return {
+        ...entitlement,
+        code: paidCodeDoc.code,
+      };
+    }
+    throw new Error('Failed to create paid redeem code');
+  }
+
+  const codeResult = await db.collection('redeem_codes')
+    .where({ code })
+    .limit(1)
+    .get();
+  const existingCodeDoc = codeResult.data && codeResult.data[0] ? codeResult.data[0] : {};
+  const paidCodeDoc = createPaidRedeemCodeDocument({
+    code,
+    openid,
+    entitlement,
+    order,
+    now,
+    existingCodeDoc,
+  });
+  const { _id, ...data } = paidCodeDoc;
+  if (existingCodeDoc && existingCodeDoc._id) {
+    await db.collection('redeem_codes').doc(existingCodeDoc._id).update({ data });
+  } else {
+    await db.collection('redeem_codes').add({ data });
+  }
+  return {
+    ...entitlement,
+    code: paidCodeDoc.code,
   };
 }
 
 async function applyPaidPaymentOrder(order, now = new Date().toISOString()) {
-  const entitlement = createPaidEntitlementFromOrder({ order, now });
   await ensureCollection('user_entitlements');
   const currentResult = await db.collection('user_entitlements')
     .where({
       openid: order.openid,
-      plan: entitlement.plan,
-      status: 'active',
     })
-    .orderBy('redeemedAt', 'desc')
-    .limit(1)
+    .limit(100)
     .get();
-  const current = currentResult.data && currentResult.data[0] ? currentResult.data[0] : null;
+  const carryover = pickPaymentCarryoverEntitlement(currentResult.data || [], now);
+  const current = carryover.current;
+  const entitlement = createPaidEntitlementFromOrder({
+    order,
+    now,
+    baseExpiresAt: current && current.expiresAt,
+  });
+  let updateData = mergePaidEntitlementWithCarryover({
+    entitlement,
+    current,
+    codeSource: carryover.codeSource,
+    order,
+    now,
+  });
+  updateData = await ensurePaidRedeemCodeForPayment({
+    openid: order.openid,
+    order,
+    entitlement: updateData,
+    now,
+  });
   if (current && current._id) {
-    await db.collection('user_entitlements').doc(current._id).update({ data: entitlement });
+    await db.collection('user_entitlements').doc(current._id).update({ data: updateData });
   } else {
-    await db.collection('user_entitlements').add({ data: entitlement });
+    await db.collection('user_entitlements').add({ data: updateData });
   }
-  return entitlement;
+  return updateData;
+}
+
+async function queryWechatVirtualPaymentOrder(order, paymentConfig) {
+  const accessToken = await getWechatAccessToken({
+    appid: paymentConfig.appid,
+    appSecret: paymentConfig.appSecret,
+  });
+  const request = createVirtualPaymentQueryOrderRequest({
+    order,
+    appKey: paymentConfig.appKey,
+    accessToken,
+    env: paymentConfig.env,
+  });
+  const response = await postJsonUrl(request.url, request.body);
+  if (response.errcode) {
+    throw new Error(`WeChat virtual payment query failed: ${response.errmsg || response.errcode}`);
+  }
+  return {
+    accessToken,
+    order: normalizeWechatVirtualPaymentOrder(response),
+  };
+}
+
+async function notifyWechatVirtualPaymentProvideGoods(order, paymentConfig, accessToken, wxOrderId) {
+  const request = createVirtualPaymentProvideGoodsRequest({
+    order,
+    appKey: paymentConfig.appKey,
+    accessToken,
+    wxOrderId,
+    env: paymentConfig.env,
+  });
+  const response = await postJsonUrl(request.url, request.body);
+  if (response.errcode) {
+    throw new Error(`WeChat virtual payment provide goods failed: ${response.errmsg || response.errcode}`);
+  }
+  return response;
+}
+
+async function syncWechatVirtualPaymentOrderIfPaid(order, appid) {
+  if (!order || !order._id || order.status === 'paid' || order.payMode !== 'virtual_payment') {
+    return order;
+  }
+  const paymentConfig = getVirtualPaymentConfig(appid);
+  if (!paymentConfig.configured) return order;
+  try {
+    const queried = await queryWechatVirtualPaymentOrder(order, paymentConfig);
+    const wechatOrder = queried.order;
+    if (!wechatOrder.paid) return order;
+    if (wechatOrder.orderNo && wechatOrder.orderNo !== order.orderNo) {
+      throw new Error('WeChat virtual payment order number mismatch');
+    }
+    if (wechatOrder.paidFee && Number(order.amountFen) && wechatOrder.paidFee !== Number(order.amountFen)) {
+      throw new Error('WeChat virtual payment amount mismatch');
+    }
+    const now = new Date().toISOString();
+    const paidAt = order.paidAt || wechatOrder.paidAt || now;
+    const updateData = {
+      status: 'paid',
+      paidAt,
+      updatedAt: now,
+      payMode: 'virtual_payment',
+      paymentEnabled: true,
+      virtualPaymentQueriedAt: now,
+      wechatPaymentStatus: wechatOrder.status,
+    };
+    if (wechatOrder.wxOrderId) updateData.wxOrderId = wechatOrder.wxOrderId;
+    if (wechatOrder.wxpayOrderId) updateData.wxpayOrderId = wechatOrder.wxpayOrderId;
+    if (wechatOrder.channelOrderId) updateData.channelOrderId = wechatOrder.channelOrderId;
+    const entitlement = await applyPaidPaymentOrder({ ...order, ...updateData }, paidAt);
+    await db.collection('payment_orders').doc(order._id).update({ data: updateData });
+    notifyPaidPaymentOrderSoon({
+      orderId: order._id,
+      order: { ...order, ...updateData },
+      entitlement,
+      source: '用户主动查单',
+    });
+    if (wechatOrder.status !== 4 && wechatOrder.wxOrderId) {
+      const provideStartedAt = now;
+      notifyWechatVirtualPaymentProvideGoods(order, paymentConfig, queried.accessToken, wechatOrder.wxOrderId).then(async () => {
+        await db.collection('payment_orders').doc(order._id).update({
+          data: {
+            virtualPaymentProvidedAt: provideStartedAt,
+            virtualPaymentProvideError: '',
+          },
+        });
+      }).catch(async (provideError) => {
+        try {
+          await db.collection('payment_orders').doc(order._id).update({
+            data: {
+              virtualPaymentProvideError: provideError.message || String(provideError),
+            },
+          });
+        } catch (updateError) {
+          console.warn('record virtual payment provide error failed', {
+            orderNo: order.orderNo,
+            errMsg: updateError.message || String(updateError),
+          });
+        }
+      });
+    }
+    return { ...order, ...updateData };
+  } catch (error) {
+    console.warn('syncWechatVirtualPaymentOrderIfPaid failed', {
+      orderNo: order.orderNo,
+      errMsg: error.message || String(error),
+    });
+    return order;
+  }
+}
+
+async function reconcileLatestPendingVirtualPaymentOrder(openid, appid) {
+  const safeOpenid = String(openid || '').trim();
+  if (!safeOpenid) return null;
+  await ensureCollection('payment_orders');
+  const result = await db.collection('payment_orders')
+    .where({
+      openid: safeOpenid,
+      status: 'pending',
+      payMode: 'virtual_payment',
+    })
+    .orderBy('createdAt', 'desc')
+    .limit(3)
+    .get();
+  const orders = result.data || [];
+  for (const order of orders) {
+    // eslint-disable-next-line no-await-in-loop
+    const syncedOrder = await syncWechatVirtualPaymentOrderIfPaid(order, appid);
+    if (syncedOrder && syncedOrder.status === 'paid') {
+      return syncedOrder;
+    }
+  }
+  return null;
 }
 
 async function adminListPaymentOrders(event = {}) {
@@ -1466,6 +1970,19 @@ async function adminListPaymentOrders(event = {}) {
         openid: item.openid || '',
         ...buildPaymentOrderState(item),
         updatedAt: item.updatedAt || '',
+        wxOrderId: item.wxOrderId || '',
+        wxpayOrderId: item.wxpayOrderId || '',
+        channelOrderId: item.channelOrderId || '',
+        transactionId: item.transactionId || '',
+        mchOrderNo: item.mchOrderNo || '',
+        wechatPaymentStatus: item.wechatPaymentStatus || '',
+        virtualPaymentNotifiedAt: item.virtualPaymentNotifiedAt || '',
+        virtualPaymentQueriedAt: item.virtualPaymentQueriedAt || '',
+        virtualPaymentProvidedAt: item.virtualPaymentProvidedAt || '',
+        virtualPaymentProvideError: item.virtualPaymentProvideError || '',
+        paymentNotifyStatus: item.paymentNotifyStatus || '',
+        paymentNotifySentAt: item.paymentNotifySentAt || '',
+        paymentNotifyError: item.paymentNotifyError || '',
       })),
       total: filtered.length,
     },
@@ -1491,13 +2008,23 @@ async function adminUpdatePaymentOrder(event = {}) {
     updateData.status = 'paid';
     updateData.paidAt = order.paidAt || now;
     updateData.payMode = order.payMode || 'manual_pending';
-    entitlement = await applyPaidPaymentOrder({ ...order, ...updateData }, updateData.paidAt);
+    if (order.status !== 'paid') {
+      entitlement = await applyPaidPaymentOrder({ ...order, ...updateData }, updateData.paidAt);
+    }
   } else if (action === 'cancel') {
     updateData.status = 'cancelled';
   } else {
     throw new Error('不支持的订单操作');
   }
   await db.collection('payment_orders').doc(order._id).update({ data: updateData });
+  if (entitlement) {
+    notifyPaidPaymentOrderSoon({
+      orderId: order._id,
+      order: { ...order, ...updateData },
+      entitlement,
+      source: '后台手动确认',
+    });
+  }
   return {
     success: true,
     data: {
@@ -1505,6 +2032,59 @@ async function adminUpdatePaymentOrder(event = {}) {
       entitlement: entitlement ? buildEntitlementState(entitlement, now) : null,
     },
   };
+}
+
+async function processVirtualPaymentNotifyEvent(event = {}) {
+  const notify = parseVirtualPaymentNotifyBody(event.notify || event.body || event);
+  if (notify.event && notify.event !== 'xpay_goods_deliver_notify') {
+    return createVirtualPaymentNotifyResponse();
+  }
+  const orderNo = String(notify.orderNo || '').trim();
+  if (!orderNo) throw new Error('Missing payment order number');
+
+  await ensureCollection('payment_orders');
+  const result = await db.collection('payment_orders')
+    .where({ orderNo })
+    .limit(1)
+    .get();
+  const order = result.data && result.data[0] ? result.data[0] : null;
+  if (!order || !order._id) throw new Error('Payment order not found');
+
+  if (notify.openid && order.openid && notify.openid !== order.openid) {
+    throw new Error('Payment notification OpenID mismatch');
+  }
+  if (notify.productId && order.productId && notify.productId !== order.productId) {
+    throw new Error('Payment notification product mismatch');
+  }
+
+  const now = new Date().toISOString();
+  const paidAt = order.paidAt || notify.paidAt || now;
+  const updateData = {
+    status: 'paid',
+    paidAt,
+    updatedAt: now,
+    payMode: 'virtual_payment',
+    paymentEnabled: true,
+    virtualPaymentNotifiedAt: now,
+  };
+  if (notify.transactionId) updateData.transactionId = notify.transactionId;
+  if (notify.mchOrderNo) updateData.mchOrderNo = notify.mchOrderNo;
+
+  let entitlement = null;
+  if (order.status !== 'paid') {
+    entitlement = await applyPaidPaymentOrder({ ...order, ...updateData }, paidAt);
+  }
+  await db.collection('payment_orders').doc(order._id).update({ data: updateData });
+  if (entitlement) {
+    notifyPaidPaymentOrderSoon({
+      orderId: order._id,
+      order: { ...order, ...updateData },
+      entitlement,
+      source: '微信支付回调',
+    });
+  }
+
+  return createVirtualPaymentNotifyResponse();
 }
 
 function assertRedeemAdmin(event) {
@@ -1591,9 +2171,20 @@ function getRemainingDays(expiresAt, now) {
   return Math.ceil((expiresTime - nowTime) / 86400000);
 }
 
+function isRedeemCodeAssigned(item) {
+  if (!item) return false;
+  if ((Number(item.redeemedCount) || 0) > 0) return true;
+  const deliveryStatus = String(item.deliveryStatus || '').trim().toLowerCase();
+  const status = String(item.status || '').trim().toLowerCase();
+  return deliveryStatus === 'activated'
+    || status === 'redeemed'
+    || Boolean(item.lastRedeemedOpenId || item.redeemedOpenId)
+    || Boolean(item.paidOwnerOpenid || item.trialOwnerOpenid)
+    || Boolean(item.paymentOrderNo || item.latestPaymentOrderNo);
+}
+
 function buildRedeemCodeDeliveryState(item) {
-  const redeemedCount = Number(item && item.redeemedCount) || 0;
-  if (redeemedCount > 0) {
+  if (isRedeemCodeAssigned(item)) {
     return {
       deliveryStatus: 'activated',
       deliveryStatusText: '已激活',
@@ -1703,6 +2294,11 @@ async function adminListRedeemCodes(event) {
         note: item.note || '',
         lastRedeemedAt: item.lastRedeemedAt || '',
         lastRedeemedOpenId: item.lastRedeemedOpenId || '',
+        trialOwnerOpenid: item.trialOwnerOpenid || '',
+        paidOwnerOpenid: item.paidOwnerOpenid || '',
+        paymentOrderNo: item.paymentOrderNo || '',
+        latestPaymentOrderNo: item.latestPaymentOrderNo || '',
+        paymentPaidAt: item.paymentPaidAt || '',
         createdAt: item.createdAt || '',
         updatedAt: item.updatedAt || '',
         remainingDays: item.expiresAt ? getRemainingDays(item.expiresAt, now) : null,
@@ -1771,6 +2367,7 @@ async function adminListBindCodes(event) {
     .get();
   const now = new Date().toISOString();
   const items = (result.data || [])
+    .filter(isRealBindCodeDocument)
     .filter((item) => includesAdminKeyword(item, keyword, ['code', 'openid', 'status', 'clientId']))
     .slice(0, limit)
     .map((item) => {
@@ -1876,11 +2473,15 @@ async function adminGetDashboard(event) {
     readAdminCollectionSnapshot('bind_codes', { orderField: 'createdAt', maxRead }),
     readAdminCollectionSnapshot('analytics_events', { orderField: 'lastAt', maxRead }),
   ]);
+  const bindCodes = (bindResult.data || []).filter(isRealBindCodeDocument);
   const scope = buildAdminDashboardScope({
     records: recordsResult,
     redeemCodes: redeemResult,
     entitlements: entitlementResult,
-    bindCodes: bindResult,
+    bindCodes: {
+      ...bindResult,
+      data: bindCodes,
+    },
     analyticsEvents: analyticsResult,
   });
 
@@ -1890,7 +2491,7 @@ async function adminGetDashboard(event) {
       records: recordsResult.data || [],
       redeemCodes: redeemResult.data || [],
       entitlements: entitlementResult.data || [],
-      bindCodes: bindResult.data || [],
+      bindCodes,
       analyticsEvents: analyticsResult.data || [],
       now,
       sampleLimit: maxRead,
@@ -1963,6 +2564,72 @@ async function adminUpdateEntitlement(event) {
       ...updateData,
       _id: entitlementId,
       remainingDays: getRemainingDays(updateData.expiresAt || entitlement.expiresAt, now),
+    },
+  };
+}
+
+async function adminRepairPaidEntitlements(event) {
+  assertRedeemAdmin(event);
+  await ensureCollection('user_entitlements');
+  const now = new Date().toISOString();
+  const entitlementId = String(event.entitlementId || '').trim();
+  let entitlements = [];
+
+  if (entitlementId) {
+    const result = await db.collection('user_entitlements').doc(entitlementId).get();
+    if (result.data) {
+      entitlements = [{ ...result.data, _id: entitlementId }];
+    }
+  } else {
+    const result = await db.collection('user_entitlements')
+      .where({
+        source: 'payment',
+        status: 'active',
+      })
+      .limit(100)
+      .get();
+    entitlements = result.data || [];
+  }
+
+  const repaired = [];
+  for (const entitlement of entitlements) {
+    if (!entitlement || !entitlement._id || normalizeRedeemCode(entitlement.code)) continue;
+    if (entitlement.source !== 'payment' && !entitlement.paymentOrderNo && !entitlement.latestPaymentOrderNo) continue;
+    const fixed = await ensurePaidRedeemCodeForPayment({
+      openid: entitlement.openid,
+      order: {
+        orderNo: entitlement.latestPaymentOrderNo || entitlement.paymentOrderNo || '',
+        planId: event.planId || 'pro_month',
+        productId: event.productId || event.planId || 'pro_month',
+        paidAt: entitlement.lastPaidAt || entitlement.redeemedAt || now,
+      },
+      entitlement: {
+        ...entitlement,
+        source: 'payment',
+      },
+      now,
+    });
+    const updateData = {
+      code: fixed.code,
+      source: 'payment',
+      durationDays: Number(fixed.durationDays) || Number(entitlement.durationDays) || 30,
+      cloudQuotaSeconds: Number(fixed.cloudQuotaSeconds) || Number(entitlement.cloudQuotaSeconds) || 0,
+      updatedAt: now,
+    };
+    await db.collection('user_entitlements').doc(entitlement._id).update({ data: updateData });
+    repaired.push({
+      _id: entitlement._id,
+      openid: entitlement.openid,
+      code: fixed.code,
+      expiresAt: fixed.expiresAt || entitlement.expiresAt || '',
+    });
+  }
+
+  return {
+    success: true,
+    data: {
+      repaired,
+      repairedCount: repaired.length,
     },
   };
 }
@@ -2520,10 +3187,10 @@ async function createBindCode() {
       status: _.neq('revoked'),
     })
     .orderBy('createdAt', 'desc')
-    .limit(1)
+    .limit(100)
     .get();
 
-  const current = currentResult.data && currentResult.data[0] ? currentResult.data[0] : null;
+  const current = pickFirstRealBindCode(currentResult.data || []);
   if (current) {
     return {
       success: true,
@@ -2577,18 +3244,24 @@ async function replaceBindCode() {
   const now = new Date().toISOString();
 
   await ensureCollection('bind_codes');
-  await db.collection('bind_codes')
+  const currentResult = await db.collection('bind_codes')
     .where({
       openid: wxContext.OPENID,
       status: _.neq('revoked'),
     })
+    .limit(100)
+    .get()
+    .catch(() => {});
+  const currentCodes = ((currentResult && currentResult.data) || []).filter(isRealBindCodeDocument);
+  await Promise.all(currentCodes.map((item) => db.collection('bind_codes')
+    .doc(item._id)
     .update({
       data: {
         status: 'revoked',
         revokedAt: now,
       },
     })
-    .catch(() => {});
+    .catch(() => {})));
 
   return await createFreshBindCode(wxContext.OPENID, now);
 }
@@ -2607,10 +3280,10 @@ async function getBindStatus(event) {
       openid: wxContext.OPENID,
       code: _.in(candidates),
     })
-    .limit(1)
+    .limit(10)
     .get();
 
-  const bindCode = result.data && result.data[0] ? result.data[0] : null;
+  const bindCode = pickFirstRealBindCode(result.data || []);
 
   return {
     success: true,
@@ -2634,10 +3307,10 @@ async function increaseBindDeviceLimit(event) {
   const result = await db.collection('bind_codes')
     .where(query)
     .orderBy('createdAt', 'desc')
-    .limit(1)
+    .limit(100)
     .get();
 
-  const bindCode = result.data && result.data[0] ? result.data[0] : null;
+  const bindCode = pickFirstRealBindCode(result.data || []);
   if (!bindCode) {
     throw new Error('Bind code is required');
   }
@@ -2678,10 +3351,10 @@ async function unbindBindClient(event) {
       code: _.in(getBindCodeLookupCandidates(code)),
       status: _.neq('revoked'),
     })
-    .limit(1)
+    .limit(10)
     .get();
 
-  const bindCode = result.data && result.data[0] ? result.data[0] : null;
+  const bindCode = pickFirstRealBindCode(result.data || []);
   if (!bindCode) {
     throw new Error('Bind code is required');
   }
@@ -2745,6 +3418,111 @@ function postFeishuWebhookJson(url, payload) {
     });
     req.write(requestBody);
     req.end();
+  });
+}
+
+function getPaymentNotifyWebhookConfig() {
+  const webhook = String(
+    process.env.PAYMENT_NOTIFY_WEBHOOK
+    || process.env.PAYMENT_NOTIFY_WEBHOOK_URL
+    || process.env.FEISHU_FEEDBACK_WEBHOOK
+    || ''
+  ).trim();
+  const enabledValue = String(process.env.PAYMENT_NOTIFY_ENABLED || '').trim().toLowerCase();
+  return {
+    webhook,
+    webhookType: String(process.env.PAYMENT_NOTIFY_WEBHOOK_TYPE || 'feishu').trim().toLowerCase(),
+    enabled: Boolean(webhook) && enabledValue !== 'false',
+  };
+}
+
+async function postWebhookJson(url, payload, timeoutMs = REQUEST_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    if (!url) {
+      reject(new Error('Payment notify webhook is not configured'));
+      return;
+    }
+    const requestBody = JSON.stringify(payload);
+    const req = https.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(requestBody),
+      },
+    }, (res) => {
+      let body = '';
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(body);
+          return;
+        }
+        reject(new Error(`Payment notify webhook failed: HTTP ${res.statusCode} ${body.slice(0, 200)}`));
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('Payment notify webhook request timed out'));
+    });
+    req.write(requestBody);
+    req.end();
+  });
+}
+
+async function notifyPaidPaymentOrder({ orderId, order, entitlement, source }) {
+  const config = getPaymentNotifyWebhookConfig();
+  if (!config.enabled) {
+    if (orderId) {
+      await db.collection('payment_orders').doc(orderId).update({
+        data: {
+          paymentNotifyStatus: 'skipped',
+          paymentNotifyError: 'PAYMENT_NOTIFY_WEBHOOK is not configured',
+        },
+      });
+    }
+    return { status: 'skipped' };
+  }
+  const notifiedAt = new Date().toISOString();
+  const payload = buildPaymentNotificationWebhookPayload({
+    order,
+    entitlement,
+    source,
+    webhookType: config.webhookType,
+  });
+  try {
+    await postWebhookJson(config.webhook, payload);
+    if (orderId) {
+      await db.collection('payment_orders').doc(orderId).update({
+        data: {
+          paymentNotifyStatus: 'sent',
+          paymentNotifySentAt: notifiedAt,
+          paymentNotifyError: '',
+        },
+      });
+    }
+    return { status: 'sent' };
+  } catch (error) {
+    const message = error.message || String(error);
+    if (orderId) {
+      await db.collection('payment_orders').doc(orderId).update({
+        data: {
+          paymentNotifyStatus: 'failed',
+          paymentNotifyError: message,
+        },
+      });
+    }
+    return { status: 'failed', error: message };
+  }
+}
+
+function notifyPaidPaymentOrderSoon(args) {
+  notifyPaidPaymentOrder(args).catch((error) => {
+    console.warn('notifyPaidPaymentOrder failed', {
+      orderNo: args && args.order && args.order.orderNo,
+      errMsg: error.message || String(error),
+    });
   });
 }
 
@@ -2918,6 +3696,12 @@ exports.main = async (event) => {
     if (event && (event.Type === 'Timer' || event.TriggerName || event.timer || event.type === 'timer')) {
       return await processCloudTranscriptionQueue(event);
     }
+    if (event && (
+      event.Event === 'xpay_goods_deliver_notify'
+      || event.type === 'virtualPaymentNotify'
+    )) {
+      return await processVirtualPaymentNotifyEvent(event);
+    }
     switch (event.type) {
       case 'getOpenId':
         return await getOpenId();
@@ -2955,6 +3739,8 @@ exports.main = async (event) => {
         return await adminGetDashboard(event);
       case 'adminUpdateEntitlement':
         return await adminUpdateEntitlement(event);
+      case 'adminRepairPaidEntitlements':
+        return await adminRepairPaidEntitlements(event);
       case 'adminUpdateRedeemCode':
         return await adminUpdateRedeemCode(event);
       case 'adminListPaymentOrders':

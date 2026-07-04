@@ -17,6 +17,8 @@ DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 UV_VERSION="0.9.14"
 UV_BIN="${INSTALL_ROOT}/bin/uv"
+export UV_PYTHON_DOWNLOADS=automatic
+export UV_PYTHON_PREFERENCE=managed
 
 mkdir -p "$INSTALL_ROOT"
 
@@ -105,8 +107,12 @@ setup_python_venv() {
 
   # Create venv.  uv auto-downloads Python if needed.
   log "Setting up Python environment (this may take a few minutes on first run)..."
-  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
-    if ! "$UV_BIN" venv "$VENV_DIR" --python 3 2>&1; then
+  if ! "$UV_BIN" python install 3.12 2>&1; then
+    log "ERROR: Failed to install managed Python 3.12 via uv. Please check your network connection and retry."
+    return 1
+  fi
+  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python 2>&1; then
+    if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
       log "ERROR: 无法创建 Python 虚拟环境。"
       log "请尝试在终端运行: xcode-select --install"
       log "安装 Xcode Command Line Tools 后重试。"

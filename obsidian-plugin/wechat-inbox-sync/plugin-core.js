@@ -1,7 +1,7 @@
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const NOTE_SAVE_MODES = {
@@ -228,17 +228,31 @@ function mergeSettings(savedSettings, platform = process.platform) {
   };
 
   merged.apiBase = normalizeApiBase(merged.apiBase);
-  merged.bindings = normalizeBindings(merged);
-  const normalizedToken = normalizeBindCodeInput(merged.token);
-  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
-  merged.token = tokenBinding ? normalizedToken : getPrimaryBoundToken(merged.bindings);
-  merged.pendingBindCode = normalizeBindCodeInput(merged.pendingBindCode);
-  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
-  merged.localTranscriptionEntitlementStatus = merged.localTranscriptionEntitlementStatus
+  const rawEntitlementStatus = merged.localTranscriptionEntitlementStatus
     && typeof merged.localTranscriptionEntitlementStatus === 'object'
     && !Array.isArray(merged.localTranscriptionEntitlementStatus)
     ? merged.localTranscriptionEntitlementStatus
     : null;
+  const entitlementBindingToken = normalizeBindCodeInput(rawEntitlementStatus && rawEntitlementStatus.bindingToken);
+  const entitlementRedeemCode = normalizeBindCodeInput(
+    (rawEntitlementStatus && (rawEntitlementStatus.code || rawEntitlementStatus.redeemCode)) || '',
+  );
+  const pendingBindToken = normalizeBindCodeInput(merged.pendingBindCode);
+  const hasSourceBinding = Array.isArray(merged.bindings)
+    && merged.bindings.some((item) => normalizeBindCodeInput(item && item.token) && item.status !== 'unbound');
+  if (!merged.token && (entitlementBindingToken || (!hasSourceBinding ? pendingBindToken : ''))) {
+    merged.token = entitlementBindingToken || pendingBindToken;
+  }
+  if (!merged.pendingRedeemCode && entitlementRedeemCode) {
+    merged.pendingRedeemCode = entitlementRedeemCode;
+  }
+  merged.bindings = normalizeBindings(merged);
+  const normalizedToken = normalizeBindCodeInput(merged.token);
+  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
+  merged.token = tokenBinding ? normalizedToken : getPrimaryBoundToken(merged.bindings);
+  merged.pendingBindCode = merged.token === pendingBindToken ? '' : pendingBindToken;
+  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
+  merged.localTranscriptionEntitlementStatus = rawEntitlementStatus;
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);

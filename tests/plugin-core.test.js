@@ -13,8 +13,8 @@ const {
   normalizeBindCodeInput,
 } = require('../obsidian-plugin/wechat-inbox-sync/plugin-core');
 
-const STABLE_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
-const LEGACY_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const STABLE_OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const EMPTY_MIGRATION_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 
 assert.strictEqual(OFFICIAL_SYNC_API_BASE, STABLE_OFFICIAL_SYNC_API_BASE);
 assert.strictEqual(MAX_PLUGIN_BINDINGS, 3);
@@ -97,13 +97,51 @@ assert.strictEqual(mergeSettings({ xiaohongshuImageOcrEnabled: false }).xiaohong
 {
   const merged = mergeSettings({ token: 'ABC-123' });
   assert.strictEqual(merged.token, 'ABC-123');
+  assert.strictEqual(merged.bindings.length, 1);
+  assert.strictEqual(merged.bindings[0].token, 'ABC-123');
   assert.match(merged.clientId, /^obsidian-[a-f0-9]{32}$/);
+}
+
+{
+  const merged = mergeSettings({
+    token: '',
+    pendingBindCode: 'TT7-7L6',
+    pendingRedeemCode: 'OBPROT93C6',
+    bindings: [],
+  });
+  assert.strictEqual(merged.token, 'TT7-7L6');
+  assert.strictEqual(merged.pendingBindCode, '');
+  assert.strictEqual(merged.pendingRedeemCode, 'OBPROT93C6');
+  assert.strictEqual(merged.bindings.length, 1);
+  assert.strictEqual(merged.bindings[0].token, 'TT7-7L6');
+  assert.strictEqual(merged.bindings[0].status, 'bound');
+}
+
+{
+  const merged = mergeSettings({
+    token: '',
+    pendingRedeemCode: '',
+    bindings: [],
+    localTranscriptionEntitlementStatus: {
+      hasAccess: false,
+      status: 'invalid_redeem_code',
+      bindingToken: 'OLD-123',
+      bindingLabel: '微信 1',
+      code: 'OBPROT93C6',
+      message: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists INVALID_ENV',
+    },
+  });
+  assert.strictEqual(merged.token, 'OLD-123');
+  assert.strictEqual(merged.pendingRedeemCode, 'OBPROT93C6');
+  assert.strictEqual(merged.bindings.length, 1);
+  assert.strictEqual(merged.bindings[0].token, 'OLD-123');
+  assert.strictEqual(merged.bindings[0].status, 'bound');
 }
 
 assert.match(mergeSettings({ clientId: '' }).clientId, /^obsidian-[a-f0-9]{32}$/);
 
 assert.strictEqual(
-  mergeSettings({ apiBase: LEGACY_OFFICIAL_SYNC_API_BASE }).apiBase,
+  mergeSettings({ apiBase: EMPTY_MIGRATION_SYNC_API_BASE }).apiBase,
   OFFICIAL_SYNC_API_BASE,
 );
 
