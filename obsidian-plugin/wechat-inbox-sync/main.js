@@ -15,6 +15,7 @@ const LEGACY_OFFICIAL_SYNC_API_BASES = [
 ];
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
+const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
@@ -23,6 +24,8 @@ const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-
 const LOCAL_OCR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1';
 const LOCAL_OCR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh';
 const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
+const PRO_SETUP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const PRO_SETUP_PROMPT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
@@ -58,6 +61,8 @@ const DEFAULT_SETTINGS = {
   pendingBindCode: '',
   pendingRedeemCode: '',
   localTranscriptionEntitlementStatus: null,
+  proSetupLastCheckedAt: '',
+  proSetupInstallPromptSnoozedUntil: '',
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
@@ -70,6 +75,8 @@ const DEFAULT_SETTINGS = {
   xiaohongshuImageOcrEnabled: true,
   wechatChannelsExperimentUrl: '',
   feishuOAuthStatus: null,
+  feishuAppId: '',
+  feishuAppSecret: '',
   deepseekApiKey: '',
   deepseekModel: 'deepseek-chat',
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
@@ -849,24 +856,24 @@ function formatEntitlementExpiresAt(expiresAt) {
 
 function buildLocalTranscriptionEntitlementText(status) {
   if (!status || typeof status !== 'object') {
-    return '权限状态：未刷新。请先在小程序里兑换，再回到插件点击「刷新权限」。';
+    return '权限状态：未刷新。请先绑定小程序并开通 Pro，再回到插件点击「刷新权限」。';
   }
   if (status.hasAccess) {
     return `权限状态：已开通${status.code ? `，兑换码：${status.code}` : ''}${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}${status.bindingLabel ? `，绑定：${status.bindingLabel}` : ''}`;
   }
   if (status.status === 'missing_redeem_code') {
-    return '权限状态：无可用兑换码。请输入或自动识别兑换码后刷新。';
+    return '权限状态：未识别到 Pro。请确认已绑定小程序并在小程序里开通 Pro。';
   }
   if (status.status === 'invalid_redeem_code') {
     return `权限状态：兑换码无效${status.code ? `（${status.code}）` : ''}。`;
   }
   if (status.status === 'expired') {
-    return `权限状态：已过期${status.expiresAt ? `，到期时间 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}。请在小程序里输入新的兑换码续期。`;
+    return `权限状态：已过期${status.expiresAt ? `，到期时间 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}。请在小程序里续费 Pro 后刷新权限。`;
   }
   if (status.status === 'unbound') {
     return '权限状态：未绑定小程序。请先完成小程序绑定。';
   }
-  return '权限状态：未开通。请在小程序里输入兑换码开通后，再回到插件刷新权限。';
+  return '权限状态：未开通。请在小程序开通 Pro 后，再回到插件刷新权限。';
 }
 
 function isCachedProStatusActive(status, now = Date.now()) {
@@ -1139,6 +1146,8 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     && !Array.isArray(merged.localTranscriptionEntitlementStatus)
     ? merged.localTranscriptionEntitlementStatus
     : null;
+  merged.proSetupLastCheckedAt = String(merged.proSetupLastCheckedAt || '').trim();
+  merged.proSetupInstallPromptSnoozedUntil = String(merged.proSetupInstallPromptSnoozedUntil || '').trim();
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
@@ -1159,8 +1168,8 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     : null;
   delete merged.feishuCloudOAuthEnabled;
   delete merged.feishuOpenApiEnabled;
-  delete merged.feishuAppId;
-  delete merged.feishuAppSecret;
+  merged.feishuAppId = String(merged.feishuAppId || '').trim();
+  merged.feishuAppSecret = String(merged.feishuAppSecret || '').trim();
   merged.deepseekApiKey = String(merged.deepseekApiKey || '').trim();
   merged.deepseekModel = String(merged.deepseekModel || '').trim() || DEFAULT_SETTINGS.deepseekModel;
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
@@ -8693,10 +8702,28 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload || {};
   }
 
+  getFeishuCustomAppConfig({ requireComplete = false } = {}) {
+    const appId = String(this.settings.feishuAppId || '').trim();
+    const appSecret = String(this.settings.feishuAppSecret || '').trim();
+    if (!appId && !appSecret) return null;
+    if (!appId || !appSecret) {
+      if (requireComplete) {
+        throw new Error('请同时填写飞书 App ID 和 App Secret，或清空两项后使用默认飞书连接。');
+      }
+      return null;
+    }
+    return { appId, appSecret };
+  }
+
+  withFeishuCustomAppConfig(body = {}) {
+    const config = this.getFeishuCustomAppConfig({ requireComplete: true });
+    return config ? { ...(body || {}), feishuApp: config } : (body || {});
+  }
+
   async fetchFeishuCloudOAuthMarkdownFromUrl(url, binding = null) {
-    const payload = await this.requestJson('/feishu/extract', 'POST', {
+    const payload = await this.requestJson('/feishu/extract', 'POST', this.withFeishuCustomAppConfig({
       url,
-    }, binding || undefined);
+    }), binding || undefined);
     const data = payload && payload.data ? payload.data : payload;
     const blocks = Array.isArray(data && data.blocks) ? data.blocks : [];
     if (!blocks.length) {
@@ -8713,7 +8740,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async connectFeishuCloudOAuth(binding = null) {
     const activeBinding = binding || this.getActiveBindings()[0] || null;
-    const payload = await this.requestJson('/feishu/oauth/start', 'POST', {}, activeBinding || undefined);
+    const payload = await this.requestJson('/feishu/oauth/start', 'POST', this.withFeishuCustomAppConfig({}), activeBinding || undefined);
     const data = payload && payload.data ? payload.data : payload;
     const authUrl = String((data && data.authUrl) || '').trim();
     if (!authUrl) throw new Error('Feishu OAuth did not return authUrl');
@@ -8809,7 +8836,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
     const hasAccess = await this.hasProFeatureAccess();
     if (!hasAccess) {
-      return fail('Pro 权限未开通，或插件未识别到有效兑换码。请在 Pro 高级选项里自动识别/手动输入兑换码后刷新权限。');
+      return fail('Pro 权限未开通，或插件还没有识别到当前绑定码的 Pro 状态。请先绑定小程序并开通 Pro，然后在插件里刷新权限。');
     }
     let generated;
     try {
@@ -8908,6 +8935,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         bindings: nextBindings,
       });
       new Notice('绑定成功');
+      this.refreshProAndMaybePromptLocalComponentInstall({ reason: 'bind', force: true }).catch((error) => {
+        new Notice(`Pro 组件检查失败：${error.message || error}`);
+      });
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
       if (
@@ -8984,7 +9014,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     title = '',
     binding = null,
   } = {}) {
-    await this.ensureProFeatureAccess('小红书图片 OCR');
+    await this.ensureLocalComponentReadyForUse('小红书图片 OCR', {
+      reason: 'first-use',
+      requireAsr: false,
+      requireOcr: true,
+    });
     const images = await this.buildXiaohongshuOcrImagePayload(imageUrls);
     if (!images.length) return [];
     const ocrTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-'));
@@ -9319,7 +9353,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const missingText = status.missingReasons && status.missingReasons.length
         ? status.missingReasons.join('；')
         : '图片文字识别模块未安装';
-      throw new Error(`${missingText}。请先在 Pro 高级选项里安装本地转写组件。`);
+      throw new Error(`${missingText}。请在插件设置的 Pro 自动能力状态里修复本地转写组件。`);
     }
     const outputPath = path.join(os.tmpdir(), `wechat-inbox-ocr-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.txt`);
     try {
@@ -9467,6 +9501,23 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.getLocalAsrDiagnosticText();
   }
 
+  async copyTextToClipboard(text) {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    try {
+      const electron = require('electron');
+      if (electron && electron.clipboard && electron.clipboard.writeText) {
+        electron.clipboard.writeText(text);
+        return true;
+      }
+    } catch (error) {
+      // Obsidian mobile/electron variants may not expose electron here.
+    }
+    return false;
+  }
+
   async copyDiagnosticText(text, fileName = 'diagnostic.txt') {
     if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text);
@@ -9523,10 +9574,17 @@ class WechatObsidianInboxPlugin extends Plugin {
               plan: data.plan || plan,
               status: data.status || 'active',
               expiresAt: data.expiresAt || '',
+              code: normalizeBindCodeInput(data.code || data.redeemCode || ''),
               bindingToken: binding.token,
               bindingLabel: binding.label || '',
             };
             await this.cacheLocalTranscriptionEntitlementStatus(activeStatus);
+            if (activeStatus.code && this.settings.pendingRedeemCode !== activeStatus.code) {
+              await this.saveSettings({
+                ...this.settings,
+                pendingRedeemCode: activeStatus.code,
+              });
+            }
             return activeStatus;
           }
           lastError = data;
@@ -9548,14 +9606,14 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async getProFeatureAccessStatus(options = {}) {
     const code = normalizeBindCodeInput(this.settings.pendingRedeemCode);
-    if (!code) {
-      const missingStatus = buildMissingRedeemCodeStatus();
-      await this.cacheLocalTranscriptionEntitlementStatus(missingStatus);
-      return missingStatus;
-    }
     const cached = this.settings && this.settings.localTranscriptionEntitlementStatus;
-    if (!options.forceRefresh && isCachedProStatusActiveForCode(cached, code)) return cached;
-    return await this.validateProRedeemCodeAccess(code);
+    if (!options.forceRefresh && isCachedProStatusActive(cached)) return cached;
+    const bindingStatus = await this.getLocalTranscriptionEntitlementStatus();
+    if (bindingStatus && bindingStatus.hasAccess) return bindingStatus;
+    if (code) {
+      return await this.validateProRedeemCodeAccess(code);
+    }
+    return bindingStatus || buildMissingRedeemCodeStatus();
   }
 
   async hasProFeatureAccess() {
@@ -9573,15 +9631,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     const status = await this.getProFeatureAccessStatus();
     if (status.hasAccess) return status;
     if (status.status === 'missing_redeem_code') {
-      throw new Error(`${featureName}需要先在 Pro 高级选项里输入或自动识别有效兑换码。`);
+      throw new Error(`${featureName}需要有效 Pro。请先绑定小程序并开通 Pro。`);
     }
     if (status.status === 'unbound') {
-      throw new Error(`${featureName}需要先绑定小程序绑定码，再兑换或购买 Pro。`);
+      throw new Error(`${featureName}需要有效 Pro。请先绑定小程序绑定码。`);
     }
     if (status.status === 'expired') {
       throw new Error(`${featureName}需要有效 Pro，当前权限已过期。`);
     }
-    throw new Error(`${featureName}需要有效 Pro：${status.message || '请先输入有效兑换码。'}`);
+    throw new Error(`${featureName}需要有效 Pro，${status.message || '请先在小程序开通 Pro 后刷新权限。'}`);
   }
 
   async validateProRedeemCodeAccess(code, options = {}) {
@@ -9709,6 +9767,153 @@ class WechatObsidianInboxPlugin extends Plugin {
     return null;
   }
 
+  getLocalTranscriptionComponentReadiness() {
+    const asrStatus = this.getLocalAsrInstallStatus();
+    const ocrStatus = this.getLocalOcrInstallStatus();
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const missingComponents = [];
+    if (!asrStatus.ready) missingComponents.push('音视频转写');
+    if (!ocrStatus.ready) missingComponents.push('图片文字识别 OCR');
+    return {
+      ready: missingComponents.length === 0,
+      platform,
+      platformName: LOCAL_ASR_PLATFORM_NAMES[platform] || platform,
+      missingComponents,
+      asrStatus,
+      ocrStatus,
+    };
+  }
+
+  async refreshProAndMaybePromptLocalComponentInstall(options = {}) {
+    const reason = options.reason || 'settings-open';
+    const now = Date.now();
+    const lastCheckedAt = Date.parse(this.settings.proSetupLastCheckedAt || '');
+    if (
+      !options.force
+      && reason === 'settings-open'
+      && Number.isFinite(lastCheckedAt)
+      && now - lastCheckedAt < PRO_SETUP_CHECK_INTERVAL_MS
+    ) {
+      const cached = this.settings.localTranscriptionEntitlementStatus;
+      if (!isCachedProStatusActive(cached)) return cached || buildMissingRedeemCodeStatus();
+    }
+
+    let status = null;
+    try {
+      status = await this.getProFeatureAccessStatus({ forceRefresh: Boolean(options.force) });
+    } finally {
+      if (reason === 'settings-open') {
+        await this.saveSettings({
+          ...this.settings,
+          proSetupLastCheckedAt: new Date(now).toISOString(),
+        });
+      }
+    }
+
+    if (!status || !status.hasAccess) return status;
+
+    const readiness = this.getLocalTranscriptionComponentReadiness();
+    if (readiness.ready) return status;
+
+    const snoozedUntil = Date.parse(this.settings.proSetupInstallPromptSnoozedUntil || '');
+    if (
+      !options.force
+      && reason !== 'first-use'
+      && Number.isFinite(snoozedUntil)
+      && snoozedUntil > now
+    ) {
+      return status;
+    }
+
+    const accepted = await this.confirmLocalComponentInstall(status, reason, readiness);
+    if (!accepted) {
+      await this.saveSettings({
+        ...this.settings,
+        proSetupInstallPromptSnoozedUntil: new Date(now + PRO_SETUP_PROMPT_COOLDOWN_MS).toISOString(),
+      });
+      return status;
+    }
+
+    await this.installLocalTranscriptionComponents({ reason, readiness });
+    return status;
+  }
+
+  async confirmLocalComponentInstall(status, reason, readiness) {
+    const missingText = readiness.missingComponents.join('、') || '本地转写组件';
+    const reasonText = reason === 'first-use'
+      ? '当前操作需要使用本地转写组件。'
+      : '检测到你已开通 Pro，但本地转写组件还没有准备完整。';
+    const message = [
+      reasonText,
+      `缺少：${missingText}`,
+      `当前电脑：${readiness.platformName || '当前系统'}`,
+      '这个组件用于音视频转写和小红书图片文字识别，图片会在本机识别，不上传到云端。',
+      '现在开始安装/修复吗？',
+    ].join('\n');
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      return Boolean(window.confirm(message));
+    }
+    new Notice(`Pro 已开通，但缺少${missingText}。请在插件设置的 Pro 自动能力状态里安装本地转写组件。`, 10000);
+    return false;
+  }
+
+  async installLocalTranscriptionComponents(options = {}) {
+    if (this.localComponentInstallPromise) {
+      new Notice('本地转写组件正在准备中，请等待当前安装完成后再重试。');
+      return await this.localComponentInstallPromise;
+    }
+    this.localComponentInstallPromise = this.doInstallLocalTranscriptionComponents(options);
+    try {
+      return await this.localComponentInstallPromise;
+    } finally {
+      this.localComponentInstallPromise = null;
+    }
+  }
+
+  async doInstallLocalTranscriptionComponents(options = {}) {
+    await this.ensureProFeatureAccess('本地转写组件安装');
+    const readiness = options.readiness || this.getLocalTranscriptionComponentReadiness();
+    if (!readiness.asrStatus || !readiness.asrStatus.ready) {
+      await this.installLocalAsr({ installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode), reason: options.reason });
+    }
+    const ocrStatus = this.getLocalOcrInstallStatus();
+    if (!ocrStatus.ready) {
+      await this.installLocalOcr({ reason: options.reason });
+    }
+    return {
+      installed: true,
+      reason: options.reason || '',
+      readiness: this.getLocalTranscriptionComponentReadiness(),
+    };
+  }
+
+  async ensureLocalComponentReadyForUse(featureName = '该功能', options = {}) {
+    const status = await this.ensureProFeatureAccess(featureName);
+    const readiness = this.getLocalTranscriptionComponentReadiness();
+    const requireAsr = options.requireAsr !== false;
+    const requireOcr = Boolean(options.requireOcr);
+    const asrMissing = requireAsr && (!readiness.asrStatus || !readiness.asrStatus.ready);
+    const ocrMissing = requireOcr && (!readiness.ocrStatus || !readiness.ocrStatus.ready);
+    if (!asrMissing && !ocrMissing) return status;
+
+    const accepted = await this.confirmLocalComponentInstall(status, options.reason || 'first-use', readiness);
+    if (!accepted) {
+      throw new Error(`${featureName}需要先安装本地转写组件。`);
+    }
+    await this.installLocalTranscriptionComponents({
+      reason: options.reason || 'first-use',
+      readiness,
+    });
+
+    const nextReadiness = this.getLocalTranscriptionComponentReadiness();
+    const stillAsrMissing = requireAsr && (!nextReadiness.asrStatus || !nextReadiness.asrStatus.ready);
+    const stillOcrMissing = requireOcr && (!nextReadiness.ocrStatus || !nextReadiness.ocrStatus.ready);
+    if (stillAsrMissing || stillOcrMissing) {
+      throw new Error(`${featureName}需要本地转写组件安装完整后才能使用。`);
+    }
+    return status;
+  }
+
   async ensureLocalTranscriptionAccess() {
     return await this.ensureProFeatureAccess('音视频转写权限');
   }
@@ -9747,7 +9952,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (error) {
           const timedOut = error.killed || error.signal === 'SIGTERM' || /timed out|timeout/i.test(error.message || '');
           const errorText = timedOut
-            ? '本地转写组件安装超时：安装超过 20 分钟仍未完成。通常是 GitHub、ffmpeg 或模型下载源无法访问/速度过慢。安装已中止，请复制诊断信息联系开发者。'
+            ? '本地转写组件安装超时：安装超过 20 分钟仍未完成。通常是腾讯云下载源、ffmpeg、模型文件或 Python 依赖访问过慢。安装已中止，请复制诊断信息联系开发者。'
             : (error.message || String(error));
           const logPath = writeLocalAsrInstallLog({
             installRoot,
@@ -9978,7 +10183,11 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async runLocalTranscription(audioUrl, options = {}) {
-    await this.ensureLocalTranscriptionAccess();
+    await this.ensureLocalComponentReadyForUse('音视频转写', {
+      reason: 'first-use',
+      requireAsr: true,
+      requireOcr: false,
+    });
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
     if (installStatus.scriptOutdated) {
@@ -11020,40 +11229,12 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     try {
       if (isFeishuLink) {
-        if (!feishuCloudOAuthStatus || !feishuCloudOAuthStatus.connected) {
-          throw new Error('飞书官方 API 未连接，请先在插件设置里连接飞书后再同步飞书文档。');
-        }
-        try {
-          const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
-          const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
-          const cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-            cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
-              dedupe: true,
-              feishuTitle,
-            }),
-            [],
-            url,
-          );
-          return {
-            ...record,
-            metadata: enrichExtractedWebpageMetadata({
-              ...metadata,
-              title: feishuTitle,
-              markdown: cleanedCloudOpenApiMarkdown,
-              conversionStatus: 'success',
-              conversionSource: 'feishu-cloud-oauth',
-              conversionNote: `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
-            }),
-          };
-        } catch (error) {
-          throw new Error(`飞书官方 API 提取失败：${error.message || String(error)}`);
-        }
         let openApiError = null;
         const shouldUseFeishuCloudOAuth = feishuCloudOAuthStatus && feishuCloudOAuthStatus.connected;
         if (shouldUseFeishuCloudOAuth) {
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
-            const feishuTitle = metadata.title || cloudOpenApiResult.title || '椋炰功閾炬帴';
+            const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
             const cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
                 dedupe: true,
@@ -11075,7 +11256,6 @@ class WechatObsidianInboxPlugin extends Plugin {
             };
           } catch (error) {
             openApiError = error;
-            throw error;
           }
         }
         try {
@@ -11716,15 +11896,97 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
   }
 
-  async runLocalAsrButtonTask(button, originalText, runningText, task) {
-    button.setButtonText(runningText);
-    button.setDisabled(true);
-    try {
-      await task();
-    } finally {
-      button.setButtonText(originalText);
-      button.setDisabled(false);
-    }
+  renderFeishuSettings(containerEl) {
+    const feishuPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    feishuPanel.createEl('summary', { text: '连接飞书文档' });
+    const feishuOAuthStatus = this.plugin.settings.feishuOAuthStatus || {};
+    feishuPanel.createDiv({
+      text: feishuOAuthStatus.connected
+        ? `已连接飞书官方 API；token 有效期至 ${feishuOAuthStatus.expiresAt || '未知'}。同步飞书链接时会优先走官方授权通道。`
+        : '未连接飞书官方 API 时仍会使用旧解析方式转存飞书链接，但可能出现内容不全、图片缺失或结构不稳定；建议按教程连接官方 API。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+
+    new Setting(feishuPanel)
+      .setName('飞书官方 API 连接教程')
+      .setDesc(`按教程创建飞书自建应用、配置权限和回调地址：${FEISHU_OFFICIAL_API_TUTORIAL_URL}`)
+      .addButton((button) => button
+        .setButtonText('打开教程')
+        .onClick(async () => {
+          const opened = await openExternalUrl(FEISHU_OFFICIAL_API_TUTORIAL_URL);
+          if (!opened) {
+            new Notice(`请复制链接到浏览器打开：${FEISHU_OFFICIAL_API_TUTORIAL_URL}`);
+          }
+        }));
+
+    const feishuCallbackUrl = `${trimTrailingSlash(this.plugin.settings.apiBase || OFFICIAL_SYNC_API_BASE)}/feishu/oauth/callback`;
+    new Setting(feishuPanel)
+      .setName('飞书回调地址')
+      .setDesc(`在飞书自建应用后台配置这个重定向 URL：${feishuCallbackUrl}`)
+      .addButton((button) => button
+        .setButtonText('复制')
+        .onClick(async () => {
+          const copied = await this.plugin.copyTextToClipboard(feishuCallbackUrl);
+          new Notice(copied ? '飞书回调地址已复制' : `请手动复制：${feishuCallbackUrl}`);
+        }));
+
+    new Setting(feishuPanel)
+      .setName('飞书 App ID')
+      .setDesc('填写你自己在飞书开放平台创建的企业自建应用 App ID。')
+      .addText((text) => text
+        .setPlaceholder('cli_xxx')
+        .setValue(this.plugin.settings.feishuAppId || '')
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            feishuAppId: String(value || '').trim(),
+            feishuOAuthStatus: null,
+          });
+        }));
+
+    new Setting(feishuPanel)
+      .setName('飞书 App Secret')
+      .setDesc('只保存在当前 Obsidian 插件本地；授权和提取时会通过 HTTPS 临时发送给云端使用。')
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text
+          .setPlaceholder('App Secret')
+          .setValue(this.plugin.settings.feishuAppSecret || '')
+          .onChange(async (value) => {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              feishuAppSecret: String(value || '').trim(),
+              feishuOAuthStatus: null,
+            });
+          });
+      });
+
+    new Setting(feishuPanel)
+      .setName(feishuOAuthStatus.connected ? '更换飞书账号' : '连接飞书官方 API')
+      .setDesc(feishuOAuthStatus.connected
+        ? '需要切换飞书账号或重新授权时，点击后在浏览器完成授权。'
+        : '连接后同步飞书链接会优先走官方 API，文字、图片和标题结构更稳定。')
+      .addButton((button) => button
+        .setButtonText(feishuOAuthStatus.connected ? '重新连接' : '连接飞书')
+        .setCta()
+        .onClick(async () => {
+          try {
+            await this.plugin.connectFeishuCloudOAuth();
+            new Notice('已打开飞书授权页，授权完成后请回到 Obsidian 点击“刷新状态”。');
+          } catch (error) {
+            new Notice(`打开飞书授权失败：${error.message || error}`);
+          }
+        }))
+      .addButton((button) => button
+        .setButtonText('刷新状态')
+        .onClick(async () => {
+          try {
+            await this.plugin.refreshFeishuCloudOAuthStatus();
+            this.display();
+          } catch (error) {
+            new Notice(`刷新飞书授权状态失败：${error.message || error}`);
+          }
+        }));
   }
 
   display() {
@@ -11804,7 +12066,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('输入绑定码')
       .setDesc(primaryBinding
-        ? '绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 高级选项里增加设备。'
+        ? '绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 自动能力状态里增加设备。'
         : '基础绑定区只保留 1 个小程序绑定码。打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。')
       .addText((text) => text
         .setPlaceholder('例如 ABC-123')
@@ -11836,40 +12098,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
           });
         if (!primaryBinding) button.setDisabled(true);
       });
-
-    containerEl.createEl('h3', {
-      text: '飞书文档提取',
-      cls: 'wechat-inbox-sync-section-heading',
-    });
-
-    const feishuOAuthStatus = this.plugin.settings.feishuOAuthStatus || {};
-    const feishuOAuthDesc = feishuOAuthStatus.connected
-      ? `已连接飞书官方 API；token 有效期至 ${feishuOAuthStatus.expiresAt || '未知'}。同步飞书链接时会优先走官方授权通道。`
-      : '未连接飞书官方 API。点击连接后在浏览器完成授权，插件会用云端保存的 refresh_token 长期续期。';
-    new Setting(containerEl)
-      .setName('连接飞书官方 API')
-      .setDesc(feishuOAuthDesc)
-      .addButton((button) => button
-        .setButtonText('连接飞书')
-        .setCta()
-        .onClick(async () => {
-          try {
-            await this.plugin.connectFeishuCloudOAuth();
-            new Notice('已打开飞书授权页，授权完成后请回到 Obsidian 点击“刷新状态”。');
-          } catch (error) {
-            new Notice(`打开飞书授权失败：${error.message || error}`);
-          }
-        }))
-      .addButton((button) => button
-        .setButtonText('刷新状态')
-        .onClick(async () => {
-          try {
-            await this.plugin.refreshFeishuCloudOAuthStatus();
-            this.display();
-          } catch (error) {
-            new Notice(`刷新飞书授权状态失败：${error.message || error}`);
-          }
-        }));
 
     new Setting(containerEl)
       .setName('保存根目录')
@@ -11921,65 +12149,65 @@ class WechatInboxSettingTab extends PluginSettingTab {
           }
         }));
 
+    containerEl.createEl('h3', {
+      text: '登录设置',
+      cls: 'wechat-inbox-sync-section-heading',
+    });
+    this.renderFeishuSettings(containerEl);
+
     containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
     containerEl.createEl('h3', {
-      text: 'Pro 高级选项',
+      text: 'Pro 自动能力状态',
       cls: 'wechat-inbox-sync-section-heading',
     });
 
     const proStatusText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
     const proPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     proPanel.open = true;
-    proPanel.createEl('summary', { text: '兑换码与权限状态' });
+    proPanel.createEl('summary', { text: 'Pro 状态' });
     proPanel.createDiv({
-      text: `Pro 高级功能只以这里的兑换码为准；兑换码为空或无效时，即使小程序账号已开通 Pro，也不会执行高级功能。${proStatusText}`,
+      text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；开通 Pro 后点击刷新即可更新有效期和本地组件状态。${proStatusText}`,
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(proPanel)
-      .setName('输入兑换码')
-      .setDesc('兑换码会绑定到当前插件设备，不能在多个插件里重复使用；已购买 Pro 的用户不受这个限制。')
-      .addText((text) => text
-        .setPlaceholder('例如 OBPROT93C6')
-        .setValue(this.plugin.settings.pendingRedeemCode || '')
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            pendingRedeemCode: value,
-          });
-        }))
-      .addButton((button) => button
-        .setButtonText('兑换并刷新')
-        .setCta()
-        .onClick(async () => {
-          await this.plugin.redeemProCode();
-          this.display();
-        }))
-      .addButton((button) => button
-        .setButtonText('自动识别')
-        .onClick(async () => {
-          await this.plugin.autoRedeemProCode({ silent: false });
-          this.display();
-        }))
+      .setName('刷新 Pro 权限')
+      .setDesc(this.plugin.settings.pendingRedeemCode
+        ? `兑换码：${this.plugin.settings.pendingRedeemCode}`
+        : '兑换码会在成功识别 Pro 后自动显示；普通使用只需要绑定小程序并开通 Pro。')
       .addButton((button) => button
         .setButtonText('刷新权限')
+        .setCta()
         .onClick(async () => {
           try {
-            const status = await this.plugin.getProFeatureAccessStatus({ forceRefresh: true });
+            const status = await this.plugin.refreshProAndMaybePromptLocalComponentInstall({
+              reason: 'manual-refresh',
+              force: true,
+            });
             if (status.hasAccess) {
               new Notice(`Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`);
             } else if (status.status === 'missing_redeem_code') {
-              new Notice('无可用兑换码，请先输入或自动识别兑换码。');
+              new Notice('未识别到 Pro，请确认已绑定小程序并在小程序里开通 Pro。');
             } else {
-              new Notice(status.message || '兑换码无效、已过期，或不属于当前绑定微信。');
+              new Notice(status.message || 'Pro 未开通或已过期，请在小程序开通/续费后刷新。');
             }
             this.display();
           } catch (error) {
-            new Notice(`权限查询失败：${formatRedeemAccessError(error, 'redeem')}`);
+            new Notice(`权限查询失败：${error.message || error}`);
           }
         }));
 
     proPanel.createDiv({
       text: 'AI 简介与关键词自动生成：已默认开启；小红书图文 OCR：已默认开启。以上能力会在 Pro 权限有效时自动执行，不需要额外打开开关。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+    const proComponentReadiness = this.plugin.getLocalTranscriptionComponentReadiness();
+    const proComponentStatusText = this.plugin.localComponentInstallPromise
+      ? '准备中'
+      : (proComponentReadiness.ready
+        ? '已安装'
+        : `需修复：${proComponentReadiness.missingComponents.join('、')}`);
+    proPanel.createDiv({
+      text: `本地转写组件：${proComponentStatusText}；当前系统：${proComponentReadiness.platformName || '自动识别'}`,
       cls: 'wechat-inbox-sync-muted',
     });
 
@@ -12022,7 +12250,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     const socialPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    socialPanel.createEl('summary', { text: '小红书评论区提取' });
+    socialPanel.createEl('summary', { text: '登录小红书评论区' });
     socialPanel.createDiv({
       text: 'Pro 功能。同步小红书图文时保留可解析到的评论区内容；如果评论区提取失败，请先登录小红书。',
       cls: 'wechat-inbox-sync-muted',
@@ -12044,167 +12272,19 @@ class WechatInboxSettingTab extends PluginSettingTab {
       }
     });
 
-    new Setting(socialPanel)
-      .setName('提取小红书评论区')
-      .setDesc('关闭后只保存标题、正文、标签、图片和视频，不附加评论区。')
-      .addToggle((toggle) => toggle
-        .setValue(this.plugin.settings.xiaohongshuCommentsEnabled !== false)
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            xiaohongshuCommentsEnabled: value,
-          });
-        }));
-
-    const localAsrPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    localAsrPanel.createEl('summary', { text: '本地转写组件安装' });
-    localAsrPanel.createDiv({
-      text: 'Pro 功能。默认走本地转写；这里统一安装、更新和排查本地转写组件，包括音视频转写和小红书图文 OCR；OCR 会在本机识别图片文字，不上传图片到云端。',
-      cls: 'wechat-inbox-sync-muted',
-    });
-
-    const localAsrStatus = this.plugin.getLocalAsrInstallStatus();
-    const localOcrStatus = this.plugin.getLocalOcrInstallStatus();
-    const entitlementText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
-    new Setting(localAsrPanel)
-      .setName('本地转写系统')
-      .setDesc('默认自动识别；如果苹果电脑安装失败，请手动选择 macOS 后再安装。云端转写请在微信小程序保存音视频时选择。')
-      .addDropdown((dropdown) => {
-        Object.entries(LOCAL_ASR_PLATFORM_NAMES).forEach(([value, label]) => {
-          dropdown.addOption(value, label);
-        });
-        dropdown
-          .setValue(this.plugin.settings.localAsrPlatform || 'auto')
-          .onChange(async (value) => {
-            const localAsrPlatform = normalizeLocalAsrPlatform(value);
-            const platform = resolveLocalAsrPlatform(localAsrPlatform);
-            await this.plugin.saveSettings({
-              ...this.plugin.settings,
-              aiProvider: 'local',
-              localAsrPlatform,
-              localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform),
-            });
-            this.display();
-          });
-      });
-    new Setting(localAsrPanel)
-      .setName('本地转写权限')
-      .setDesc(`本地转写功能为付费功能，包含音视频转写和小红书图片文字 OCR。请在微信小程序【Obsidian 内容同步助手】里输入兑换码开通。${entitlementText}`)
-      .addButton((button) => button
-        .setButtonText('刷新权限')
-        .setCta()
-        .onClick(async () => {
-          try {
-            const status = await this.plugin.getProFeatureAccessStatus({ forceRefresh: true });
-            if (status.hasAccess) {
-              new Notice(`本地转写权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`);
-            } else if (status.status === 'missing_redeem_code') {
-              new Notice('无可用兑换码，请先在 Pro 高级选项输入或自动识别兑换码。');
-            } else {
-              new Notice(status.message || '兑换码无效、已过期，或不属于当前绑定微信。');
-            }
-            this.display();
-          } catch (error) {
-            new Notice(`权限查询失败：${formatRedeemAccessError(error, 'redeem')}`);
-          }
-        }));
-    new Setting(localAsrPanel)
-      .setName('本地转写组件安装')
-      .setDesc(localAsrStatus.ready
-        ? `已安装：${localAsrStatus.installRoot}`
-        : `未完整安装：${localAsrStatus.installRoot}`)
-      .addButton((button) => button
-        .setButtonText('检测状态')
-        .onClick(async () => {
-          const status = this.plugin.getLocalAsrInstallStatus();
-          let entitlementText = '';
-          try {
-            const entitlement = await this.plugin.getLocalTranscriptionEntitlementStatus();
-            entitlementText = entitlement.hasAccess
-              ? `权限有效${entitlement.expiresAt ? `，到期时间：${entitlement.expiresAt}` : ''}`
-              : '权限未开通或已过期';
-          } catch (error) {
-            entitlementText = '权限状态查询失败';
-          }
-          new Notice(`${status.ready ? '本地转写组件可用' : '本地转写组件未完整安装'}；${entitlementText}`);
-        }))
-      .addButton((button) => button
-        .setButtonText('一键安装')
-        .setCta()
-        .onClick(async () => {
-          await this.runLocalAsrButtonTask(button, '一键安装', '安装中...', async () => {
-            try {
-              await this.plugin.installLocalAsr();
-              this.display();
-            } catch (error) {
-              new Notice(`本地转写组件安装失败：${error.message || error}`);
-            }
-          });
-        }))
-      .addButton((button) => button
-        .setButtonText('检测并修复')
-        .onClick(async () => {
-          await this.runLocalAsrButtonTask(button, '检测并修复', '修复中...', async () => {
-            try {
-              await this.plugin.checkAndRepairLocalAsr();
-              this.display();
-            } catch (error) {
-              new Notice(`检测并修复失败：${error.message || error}`);
-            }
-          });
-        }))
-      .addButton((button) => button
-        .setButtonText('停止当前转写')
-        .onClick(() => {
-          this.plugin.stopCurrentTranscription();
-        }))
-      .addButton((button) => button
-        .setButtonText('复制诊断信息')
-        .onClick(async () => {
-          try {
-            await this.plugin.copyLocalAsrDiagnosticText();
-            new Notice('本地转写诊断信息已复制');
-          } catch (error) {
-            new Notice(`复制诊断信息失败：${error.message || error}`);
-          }
-        }));
-
-    new Setting(localAsrPanel)
-      .setName('图片文字识别 OCR 模块')
-      .setDesc(localOcrStatus.ready
-        ? `已安装：${localOcrStatus.installRoot}`
-        : `未完整安装：${localOcrStatus.installRoot}`)
-      .addButton((button) => button
-        .setButtonText('检测状态')
-        .onClick(() => {
-          const status = this.plugin.getLocalOcrInstallStatus();
-          new Notice(status.ready
-            ? '图片文字识别 OCR 模块可用'
-            : `图片文字识别 OCR 模块未完整安装：${status.missingReasons.join('；')}`);
-        }))
-      .addButton((button) => button
-        .setButtonText('一键安装')
-        .setCta()
-        .onClick(async () => {
-          await this.runLocalAsrButtonTask(button, '一键安装', '安装中...', async () => {
-            try {
-              await this.plugin.installLocalOcr();
-              this.display();
-            } catch (error) {
-              new Notice(`本地转写组件 OCR 模块安装失败：${error.message || error}`);
-            }
-          });
-        }));
-
     const status = containerEl.createDiv({ cls: 'wechat-inbox-sync-status' });
     status.setText(this.plugin.settings.noteSaveMode === 'root'
       ? '同步后会生成：临时收集/文本-示例.md、临时收集/公众号-示例.md。语音附件仍会放入临时收集/语音附件/YYYY-MM-DD/。'
       : '同步后会生成：临时收集/YYYY-MM-DD/文本-示例.md、公众号-示例.md。语音附件会放入临时收集/语音附件/YYYY-MM-DD/。');
+    this.plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open' }).catch((error) => {
+      new Notice(`Pro 自动能力检查失败：${error.message || error}`);
+    });
   }
 }
 
 WechatObsidianInboxPlugin.__test = {
   FEISHU_TUTORIAL_URL,
+  FEISHU_OFFICIAL_API_TUTORIAL_URL,
   MAX_PLUGIN_BINDINGS,
   LOCAL_TRANSCRIPTION_PLAN,
   LOCAL_ASR_INSTALLER_URL,
