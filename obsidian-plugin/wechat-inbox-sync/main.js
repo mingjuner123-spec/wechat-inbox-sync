@@ -9278,7 +9278,11 @@ class WechatObsidianInboxPlugin extends Plugin {
         return source.includes('TENCENT_OCR_ASSET_BASE_URL')
           && source.includes('TENCENT_PIP_INDEX_URL')
           && source.includes('download_text_file')
-          && source.includes('detect_uv_arch');
+          && source.includes('detect_uv_arch')
+          && source.includes('UV_PYTHON_DOWNLOADS=automatic')
+          && source.includes('UV_PYTHON_PREFERENCE=managed')
+          && source.includes('"$UV_BIN" python install 3.12')
+          && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
       }
       return source.includes('$TencentOcrAssetBaseUrl')
         && source.includes('$TencentPipIndexUrl')
@@ -9364,7 +9368,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           && source.includes('TENCENT_MODEL_URL=')
           && source.includes('bootstrap_uv')
           && source.includes('detect_uv_arch')
-          && source.includes('setup_python_and_packages');
+          && source.includes('setup_python_and_packages')
+          && source.includes('UV_PYTHON_DOWNLOADS=automatic')
+          && source.includes('UV_PYTHON_PREFERENCE=managed')
+          && source.includes('"$UV_BIN" python install 3.12')
+          && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
       }
       return source.includes('Invoke-NativeProcess')
         && source.includes('Convert-ExitCodeToHex')
