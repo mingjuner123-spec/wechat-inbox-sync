@@ -11,9 +11,10 @@ const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsid
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
@@ -1135,17 +1136,55 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   };
 
   merged.apiBase = normalizeApiBase(merged.apiBase);
-  merged.bindings = normalizeBindings(merged);
-  const normalizedToken = normalizeBindCodeInput(merged.token);
-  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
-  merged.token = tokenBinding ? normalizedToken : getPrimaryBindingToken(merged.bindings);
-  merged.pendingBindCode = normalizeBindCodeInput(merged.pendingBindCode);
-  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
-  merged.localTranscriptionEntitlementStatus = merged.localTranscriptionEntitlementStatus
+  const rawEntitlementStatus = merged.localTranscriptionEntitlementStatus
     && typeof merged.localTranscriptionEntitlementStatus === 'object'
     && !Array.isArray(merged.localTranscriptionEntitlementStatus)
     ? merged.localTranscriptionEntitlementStatus
     : null;
+  const entitlementBindingToken = normalizeBindCodeInput(rawEntitlementStatus && rawEntitlementStatus.bindingToken);
+  const entitlementRedeemCode = normalizeBindCodeInput(
+    (rawEntitlementStatus && (rawEntitlementStatus.code || rawEntitlementStatus.redeemCode)) || '',
+  );
+  const pendingBindToken = normalizeBindCodeInput(merged.pendingBindCode);
+  if (entitlementRedeemCode && !merged.pendingRedeemCode) {
+    merged.pendingRedeemCode = entitlementRedeemCode;
+  }
+  const hasSourceBinding = Array.isArray(merged.bindings)
+    && merged.bindings.some((item) => normalizeBindCodeInput(item && item.token) && item.status !== 'unbound');
+  const normalizedToken = normalizeBindCodeInput(merged.token)
+    || entitlementBindingToken
+    || (!hasSourceBinding ? pendingBindToken : '');
+  if (normalizedToken && !hasSourceBinding) {
+    merged.bindings = [{
+      token: normalizedToken,
+      label: String((rawEntitlementStatus && rawEntitlementStatus.bindingLabel) || '').trim() || '微信 1',
+      enabled: true,
+      status: 'bound',
+      boundAt: '',
+      lastSyncAt: '',
+      unboundAt: '',
+      lastError: '',
+    }];
+  }
+  merged.bindings = normalizeBindings(merged);
+  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
+  merged.token = tokenBinding ? normalizedToken : getPrimaryBindingToken(merged.bindings);
+  merged.pendingBindCode = merged.token === pendingBindToken ? '' : pendingBindToken;
+  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
+  merged.localTranscriptionEntitlementStatus = rawEntitlementStatus;
+  if (isInvalidCloudBaseEnvMessage(merged.localTranscriptionEntitlementStatus && merged.localTranscriptionEntitlementStatus.message)) {
+    merged.localTranscriptionEntitlementStatus = null;
+  }
+  if (!merged.token && !merged.bindings.length) {
+    if (merged.localTranscriptionEntitlementStatus && !merged.localTranscriptionEntitlementStatus.hasAccess) {
+      merged.localTranscriptionEntitlementStatus = {
+        hasAccess: false,
+        plan: LOCAL_TRANSCRIPTION_PLAN,
+        status: 'unbound',
+        expiresAt: '',
+      };
+    }
+  }
   merged.proSetupLastCheckedAt = String(merged.proSetupLastCheckedAt || '').trim();
   merged.proSetupInstallPromptSnoozedUntil = String(merged.proSetupInstallPromptSnoozedUntil || '').trim();
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
@@ -1220,6 +1259,11 @@ function isBindingInvalidMessage(message) {
     || text.includes('Invalid bind code')
     || text.includes('Invalid or expired token')
     || text.includes('403');
+}
+
+function isInvalidCloudBaseEnvMessage(message) {
+  const text = String(message || '');
+  return /INVALID_ENV/i.test(text) || /Env Not Exists/i.test(text);
 }
 
 function getPrimaryBoundToken(bindings) {
@@ -8620,16 +8664,49 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!token) {
       throw new Error('请先在插件设置里输入小程序绑定码并完成绑定。');
     }
+    const retryWithOfficialApiBaseIfNeeded = async (message) => {
+      const currentApiBase = trimTrailingSlash(this.settings.apiBase || '');
+      const officialApiBase = trimTrailingSlash(OFFICIAL_SYNC_API_BASE);
+      const shouldRetry = isInvalidCloudBaseEnvMessage(message)
+        || /Invalid or expired token|Invalid bind code|绑定码未绑定或已失效|403/i.test(String(message || ''));
+      if (!shouldRetry || currentApiBase === officialApiBase) {
+        return null;
+      }
+      await this.saveSettings({
+        ...this.settings,
+        apiBase: OFFICIAL_SYNC_API_BASE,
+      });
+      return await this.requestJson(path, method, body, binding);
+    };
+    const isFeishuOAuthRequest = /^\/feishu\/oauth(?:\/|$)/.test(String(path || ''));
+    const apiBaseForRequest = isFeishuOAuthRequest
+      ? FEISHU_OAUTH_SYNC_API_BASE
+      : this.settings.apiBase;
+    let requestPath = path;
+    let requestBody = body || {};
+    if (isFeishuOAuthRequest) {
+      if (method === 'GET') {
+        const separator = String(requestPath || '').includes('?') ? '&' : '?';
+        requestPath = `${requestPath}${separator}authToken=${encodeURIComponent(token)}&clientId=${encodeURIComponent(this.settings.clientId)}`;
+      } else {
+        requestBody = {
+          ...requestBody,
+          authToken: token,
+          clientId: this.settings.clientId,
+        };
+      }
+    }
     const requestOptions = {
-      url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
+      url: `${trimTrailingSlash(apiBaseForRequest)}${requestPath}`,
       method,
       headers: {
         Authorization: `Bearer ${token}`,
+        'X-Wechat-Inbox-Token': token,
         'X-Wechat-Inbox-Client-Id': this.settings.clientId,
         Accept: 'application/json',
         'Content-Type': 'application/json',
       },
-      body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
+      body: method === 'POST' ? JSON.stringify(requestBody || {}) : undefined,
     };
 
     let response;
@@ -8662,6 +8739,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (response.status && (response.status < 200 || response.status >= 300)) {
       const message = (payload && payload.errMsg) || `HTTP ${response.status}`;
+      const officialRetryPayload = await retryWithOfficialApiBaseIfNeeded(message);
+      if (officialRetryPayload) return officialRetryPayload;
       if (response.status === 400 && message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
@@ -8669,6 +8748,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (!payload || payload.success === false) {
       const message = (payload && payload.errMsg) || '同步 API 请求失败';
+      const officialRetryPayload = await retryWithOfficialApiBaseIfNeeded(message);
+      if (officialRetryPayload) return officialRetryPayload;
       if (message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
@@ -9140,7 +9221,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       new Notice('已解除当前电脑绑定');
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
-      if (isBindingInvalidMessage(message)) {
+      if (false && isBindingInvalidMessage(message)) {
         await this.markBindingUnbound(normalizedToken, '绑定码已失效或已被更换');
         new Notice('绑定码已失效，已在本地标记为已解除');
         return;
@@ -11919,7 +12000,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
           }
         }));
 
-    const feishuCallbackUrl = `${trimTrailingSlash(this.plugin.settings.apiBase || OFFICIAL_SYNC_API_BASE)}/feishu/oauth/callback`;
+    const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;
     new Setting(feishuPanel)
       .setName('飞书回调地址')
       .setDesc(`在飞书自建应用后台配置这个重定向 URL：${feishuCallbackUrl}`)

@@ -346,6 +346,49 @@ assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).noteP
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 30 }).cloudPreTranscriptionThresholdMinutes, 30);
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 999 }).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
+assert.ok(pluginMainSource.includes("const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';"));
+assert.ok(pluginMainSource.includes("const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';"));
+assert.strictEqual(
+  helpers.normalizeApiBase('https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync'),
+  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+);
+{
+  const restored = helpers.mergeSettings({
+    apiBase: 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
+    token: '',
+    pendingBindCode: 'TT7-7L6',
+    pendingRedeemCode: 'OBPROT93C6',
+    bindings: [],
+  });
+  assert.strictEqual(restored.apiBase, 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync');
+  assert.strictEqual(restored.token, 'TT7-7L6');
+  assert.strictEqual(restored.pendingBindCode, '');
+  assert.strictEqual(restored.pendingRedeemCode, 'OBPROT93C6');
+  assert.strictEqual(restored.bindings.length, 1);
+  assert.strictEqual(restored.bindings[0].token, 'TT7-7L6');
+  assert.strictEqual(restored.bindings[0].status, 'bound');
+}
+{
+  const restored = helpers.mergeSettings({
+    token: '',
+    pendingBindCode: '',
+    pendingRedeemCode: '',
+    bindings: [],
+    localTranscriptionEntitlementStatus: {
+      hasAccess: false,
+      status: 'invalid_redeem_code',
+      code: 'OBPROT93C6',
+      bindingToken: 'OLD-123',
+      bindingLabel: '微信 1',
+      message: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists INVALID_ENV',
+    },
+  });
+  assert.strictEqual(restored.localTranscriptionEntitlementStatus, null);
+  assert.strictEqual(restored.token, 'OLD-123');
+  assert.strictEqual(restored.pendingRedeemCode, 'OBPROT93C6');
+  assert.strictEqual(restored.bindings.length, 1);
+  assert.strictEqual(restored.bindings[0].token, 'OLD-123');
+}
 assert.strictEqual(pluginMainSource.includes(".setName('同步 API 地址')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('启动时自动同步')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('本地转写命令')"), false);
@@ -3420,6 +3463,115 @@ async function runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest() {
   }
 }
 
+async function runRequestJsonRecoversFromInvalidCloudBaseEnvTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const officialApiBase = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+  const brokenApiBase = 'https://broken-cloudbase.example.com/sync';
+  const calls = [];
+  requestUrlMock = async (options) => {
+    calls.push(options);
+    if (options.url === `${brokenApiBase}/unbind-self`) {
+      return {
+        status: 500,
+        json: {
+          success: false,
+          errMsg: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists INVALID_ENV',
+        },
+      };
+    }
+    if (options.url === `${officialApiBase}/unbind-self`) {
+      return {
+        status: 200,
+        json: {
+          success: true,
+          data: { status: 'unbound' },
+        },
+      };
+    }
+    throw new Error(`unexpected url ${options.url}`);
+  };
+
+  const plugin = new PluginClass();
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+  plugin.settings = helpers.mergeSettings({
+    apiBase: brokenApiBase,
+    token: 'ABC-123',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'ABC-123',
+      label: '微信 1',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+
+  try {
+    const payload = await plugin.requestJson('/unbind-self', 'POST', { clientId: 'test-client' });
+    assert.deepStrictEqual(payload.data, { status: 'unbound' });
+    assert.deepStrictEqual(calls.map((item) => item.url), [
+      `${brokenApiBase}/unbind-self`,
+      `${officialApiBase}/unbind-self`,
+    ]);
+    assert.strictEqual(plugin.settings.apiBase, officialApiBase);
+    assert.strictEqual(savedSettings.apiBase, officialApiBase);
+    assert.strictEqual(calls[1].headers.Authorization, 'Bearer ABC-123');
+    assert.strictEqual(calls[1].headers['X-Wechat-Inbox-Client-Id'], 'test-client');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
+async function runRequestJsonRecoversFromEmptyMigrationApiBaseTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const officialApiBase = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+  const calls = [];
+  requestUrlMock = async (options) => {
+    calls.push(options);
+    if (options.url === `${officialApiBase}/entitlements/status?plan=local_transcription_beta`) {
+      return {
+        status: 200,
+        json: {
+          success: true,
+          data: { hasAccess: true, status: 'active', code: 'OBPROT93C6' },
+        },
+      };
+    }
+    throw new Error(`unexpected url ${options.url}`);
+  };
+
+  const plugin = new PluginClass();
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
+    token: 'TT7-7L6',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'TT7-7L6',
+      label: '微信 1',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+
+  try {
+    const payload = await plugin.requestJson('/entitlements/status?plan=local_transcription_beta', 'GET', {});
+    assert.strictEqual(payload.data.hasAccess, true);
+    assert.deepStrictEqual(calls.map((item) => item.url), [
+      `${officialApiBase}/entitlements/status?plan=local_transcription_beta`,
+    ]);
+    assert.strictEqual(plugin.settings.apiBase, officialApiBase);
+    assert.strictEqual(savedSettings, null);
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
 async function runFeishuCustomAppConfigRequestTests() {
   const previousWindow = global.window;
   const openedUrls = [];
@@ -3769,7 +3921,7 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
   ]]);
 }
 
-async function runUnbindInvalidCodeMarksLocalUnboundTest() {
+async function runUnbindInvalidCodePreservesLocalBindingTest() {
   const previousRequestUrlMock = requestUrlMock;
   requestUrlMock = async () => ({
     status: 403,
@@ -3785,6 +3937,16 @@ async function runUnbindInvalidCodeMarksLocalUnboundTest() {
     apiBase: 'https://example.com/sync',
     token: 'OLD-123',
     clientId: 'test-client',
+    pendingRedeemCode: 'OBPROT93C6',
+    localTranscriptionEntitlementStatus: {
+      hasAccess: false,
+      plan: 'local_transcription_beta',
+      status: 'invalid_redeem_code',
+      code: 'OBPROT93C6',
+      message: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists INVALID_ENV',
+      bindingToken: 'OLD-123',
+      bindingLabel: '旧微信',
+    },
     bindings: [{
       token: 'OLD-123',
       label: '旧微信',
@@ -3799,9 +3961,21 @@ async function runUnbindInvalidCodeMarksLocalUnboundTest() {
 
   try {
     await plugin.unbindBinding('OLD-123');
-    assert.deepStrictEqual(plugin.settings.bindings, []);
-    assert.strictEqual(plugin.settings.token, '');
-    assert.deepStrictEqual(savedSettings.bindings, []);
+    assert.deepStrictEqual(plugin.settings.bindings, [{
+      token: 'OLD-123',
+      label: '旧微信',
+      enabled: true,
+      status: 'bound',
+      boundAt: '',
+      lastSyncAt: '',
+      unboundAt: '',
+      lastError: '',
+    }]);
+    assert.strictEqual(plugin.settings.token, 'OLD-123');
+    assert.strictEqual(plugin.settings.pendingRedeemCode, 'OBPROT93C6');
+    assert.strictEqual(savedSettings.bindings[0].token, 'OLD-123');
+    assert.strictEqual(savedSettings.token, 'OLD-123');
+    assert.strictEqual(savedSettings.pendingRedeemCode, 'OBPROT93C6');
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
@@ -4539,12 +4713,14 @@ async function main() {
   await runCloudRequestFallbackTests();
   await runMissingClientIdRequestTest();
   await runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest();
+  await runRequestJsonRecoversFromInvalidCloudBaseEnvTest();
+  await runRequestJsonRecoversFromEmptyMigrationApiBaseTest();
   await runFeishuCustomAppConfigRequestTests();
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();
-  await runUnbindInvalidCodeMarksLocalUnboundTest();
+  await runUnbindInvalidCodePreservesLocalBindingTest();
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
