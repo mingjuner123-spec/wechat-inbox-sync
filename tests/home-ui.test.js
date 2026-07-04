@@ -120,8 +120,8 @@ assert.match(wxss, /\.view-mine/);
 assert.match(wxss, /\.usage-status/);
 assert.match(wxss, /\.upload-progress-card/);
 
-assert.match(js, /DEFAULT_PLUGIN_VERSION = '1\.3\.0'/);
-assert.match(js, /ANNOUNCEMENT_VERSION = '2026-07-05-plugin-130-feishu-fix'/);
+assert.match(js, /DEFAULT_PLUGIN_VERSION = '1\.3\.2'/);
+assert.match(js, /ANNOUNCEMENT_VERSION = '2026-07-05-plugin-132-market-update'/);
 assert.match(js, /DEFAULT_PLUGIN_UPDATED_AT = '2026-07-05 07:13'/);
 assert.match(js, /pluginVersion: useRemoteAnnouncement \? \(config\.pluginVersion \|\| DEFAULT_PLUGIN_VERSION\) : DEFAULT_PLUGIN_VERSION/);
 assert.match(js, /pluginUpdatedAt: useRemoteAnnouncement \? \(config\.updatedAt \|\| DEFAULT_PLUGIN_UPDATED_AT\) : DEFAULT_PLUGIN_UPDATED_AT/);
