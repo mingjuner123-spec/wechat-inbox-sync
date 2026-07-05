@@ -3483,6 +3483,48 @@ async function runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest() {
   }
 }
 
+async function runRequestJsonRoutesFeishuExtractToOAuthApiBaseTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const calls = [];
+  requestUrlMock = async (options) => {
+    calls.push(options);
+    return {
+      status: 200,
+      json: {
+        success: true,
+        data: {
+          title: 'Feishu API OK',
+          blocks: [],
+        },
+      },
+    };
+  };
+
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example-short-base.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'ABC-123',
+      label: '微信 1',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+
+  try {
+    await plugin.requestJson('/feishu/extract', 'POST', { url: 'https://my.feishu.cn/wiki/wikiToken123' });
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(
+      calls[0].url,
+      'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync/feishu/extract',
+    );
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
 async function runRequestJsonRecoversFromInvalidCloudBaseEnvTest() {
   const previousRequestUrlMock = requestUrlMock;
   const officialApiBase = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
@@ -4744,6 +4786,7 @@ async function main() {
   await runCloudRequestFallbackTests();
   await runMissingClientIdRequestTest();
   await runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest();
+  await runRequestJsonRoutesFeishuExtractToOAuthApiBaseTest();
   await runRequestJsonRecoversFromInvalidCloudBaseEnvTest();
   await runRequestJsonRecoversFromEmptyMigrationApiBaseTest();
   await runFeishuCustomAppConfigRequestTests();

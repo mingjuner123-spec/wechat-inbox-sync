@@ -8787,8 +8787,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       return await this.requestJson(path, method, body, binding);
     };
+    const isFeishuCloudRequest = /^\/feishu(?:\/|$)/.test(String(path || ''));
     const isFeishuOAuthRequest = /^\/feishu\/oauth(?:\/|$)/.test(String(path || ''));
-    const apiBaseForRequest = isFeishuOAuthRequest
+    const apiBaseForRequest = isFeishuCloudRequest
       ? FEISHU_OAUTH_SYNC_API_BASE
       : this.settings.apiBase;
     let requestPath = path;
