@@ -6,14 +6,22 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
-const { Notice, Plugin, PluginSettingTab, Setting, requestUrl } = require('obsidian');
+const {
+  Modal,
+  Notice,
+  Plugin,
+  PluginSettingTab,
+  Setting,
+  requestUrl,
+} = require('obsidian');
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
-  'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync',
+  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
 ];
-const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/EPHhwqRobijHqfkAqjMcDEgvnlf?from=from_copylink';
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
@@ -639,7 +647,7 @@ function explainLocalAsrExitCode(value) {
     return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
   }
   if (text.includes('-1073740791') || text.toUpperCase().includes('0XC0000409')) {
-    return 'whisper.cpp 原生程序崩溃（0xC0000409）。常见原因是 Windows 本机运行环境、CPU 指令集兼容性、中文路径或当前音视频片段触发了 whisper.cpp 崩溃。请先重新点击“安装/更新本地转写组件”，新版会用安全路径和真实推理校验修复；如果仍失败，需要复制同步失败诊断里的 transcribe-last.log 继续定位。';
+    return 'whisper.cpp 原生程序崩溃（0xC0000409）。常见原因是 Windows 本机运行环境、CPU 指令集兼容性、中文路径或当前音视频片段触发了 whisper.cpp 崩溃。请先重新点击“安装/更新本地转写组件”，新版会用安全路径和真实推理校验修复；如果仍失败，需要复制同步/安装失败诊断里的 transcribe-last.log 继续定位。';
   }
   return '';
 }
@@ -1135,17 +1143,55 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   };
 
   merged.apiBase = normalizeApiBase(merged.apiBase);
-  merged.bindings = normalizeBindings(merged);
-  const normalizedToken = normalizeBindCodeInput(merged.token);
-  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
-  merged.token = tokenBinding ? normalizedToken : getPrimaryBindingToken(merged.bindings);
-  merged.pendingBindCode = normalizeBindCodeInput(merged.pendingBindCode);
-  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
-  merged.localTranscriptionEntitlementStatus = merged.localTranscriptionEntitlementStatus
+  const rawEntitlementStatus = merged.localTranscriptionEntitlementStatus
     && typeof merged.localTranscriptionEntitlementStatus === 'object'
     && !Array.isArray(merged.localTranscriptionEntitlementStatus)
     ? merged.localTranscriptionEntitlementStatus
     : null;
+  const entitlementBindingToken = normalizeBindCodeInput(rawEntitlementStatus && rawEntitlementStatus.bindingToken);
+  const entitlementRedeemCode = normalizeBindCodeInput(
+    (rawEntitlementStatus && (rawEntitlementStatus.code || rawEntitlementStatus.redeemCode)) || '',
+  );
+  const pendingBindToken = normalizeBindCodeInput(merged.pendingBindCode);
+  if (entitlementRedeemCode && !merged.pendingRedeemCode) {
+    merged.pendingRedeemCode = entitlementRedeemCode;
+  }
+  const hasSourceBinding = Array.isArray(merged.bindings)
+    && merged.bindings.some((item) => normalizeBindCodeInput(item && item.token) && item.status !== 'unbound');
+  const normalizedToken = normalizeBindCodeInput(merged.token)
+    || entitlementBindingToken
+    || (!hasSourceBinding ? pendingBindToken : '');
+  if (normalizedToken && !hasSourceBinding) {
+    merged.bindings = [{
+      token: normalizedToken,
+      label: String((rawEntitlementStatus && rawEntitlementStatus.bindingLabel) || '').trim() || '微信 1',
+      enabled: true,
+      status: 'bound',
+      boundAt: '',
+      lastSyncAt: '',
+      unboundAt: '',
+      lastError: '',
+    }];
+  }
+  merged.bindings = normalizeBindings(merged);
+  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== 'unbound');
+  merged.token = tokenBinding ? normalizedToken : getPrimaryBindingToken(merged.bindings);
+  merged.pendingBindCode = merged.token === pendingBindToken ? '' : pendingBindToken;
+  merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
+  merged.localTranscriptionEntitlementStatus = rawEntitlementStatus;
+  if (isInvalidCloudBaseEnvMessage(merged.localTranscriptionEntitlementStatus && merged.localTranscriptionEntitlementStatus.message)) {
+    merged.localTranscriptionEntitlementStatus = null;
+  }
+  if (!merged.token && !merged.bindings.length) {
+    if (merged.localTranscriptionEntitlementStatus && !merged.localTranscriptionEntitlementStatus.hasAccess) {
+      merged.localTranscriptionEntitlementStatus = {
+        hasAccess: false,
+        plan: LOCAL_TRANSCRIPTION_PLAN,
+        status: 'unbound',
+        expiresAt: '',
+      };
+    }
+  }
   merged.proSetupLastCheckedAt = String(merged.proSetupLastCheckedAt || '').trim();
   merged.proSetupInstallPromptSnoozedUntil = String(merged.proSetupInstallPromptSnoozedUntil || '').trim();
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
@@ -1245,6 +1291,11 @@ function isRequestUrlTransportError(message) {
 
 function isRequestUrlHttpStatusError(message) {
   return /Request failed,\s*status\s+\d+/i.test(String(message || ''));
+}
+
+function isInvalidCloudBaseEnvMessage(message) {
+  const text = String(message || '');
+  return /INVALID_ENV/i.test(text) || /Env Not Exists/i.test(text);
 }
 
 function formatSyncApiErrorMessage(payload, fallback = '') {
@@ -2958,6 +3009,19 @@ function getImageExtFromMime(mimeType) {
   if (type.includes('gif')) return 'gif';
   if (type.includes('svg')) return 'svg';
   return 'png';
+}
+
+function getImageExtFromBuffer(buffer, fallbackUrl = '') {
+  const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  if (data.length >= 8
+    && data[0] === 0x89
+    && data[1] === 0x50
+    && data[2] === 0x4e
+    && data[3] === 0x47) return 'png';
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'jpg';
+  if (data.length >= 6 && data.slice(0, 6).toString('ascii').startsWith('GIF')) return 'gif';
+  if (data.length >= 12 && data.slice(0, 4).toString('ascii') === 'RIFF' && data.slice(8, 12).toString('ascii') === 'WEBP') return 'webp';
+  return getImageFileExtension(fallbackUrl) || 'png';
 }
 
 function getAttachmentExt(fileName, fallbackExt) {
@@ -7813,13 +7877,17 @@ function buildFeishuImageFallbackUrl(token, docUrl) {
 
 // 把 markdown 里的 feishu-image:{token} 占位关联到 DOM 图片 assets 的真实 src，
 // 使 saveWebpageImageAssets 能按 src 匹配下载到本地；找不到则用飞书下载 URL 兜底
-function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl) {
+function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl, tokenUrlMap = {}) {
   let result = String(markdown || '');
   if (!result.includes('feishu-image:')) return result;
   const tokenPattern = /!\[([^\]]*)\]\(feishu-image:([^)]+)\)/g;
   result = result.replace(tokenPattern, (full, alt, token) => {
     const t = String(token || '').trim();
     if (!t) return full;
+    const mappedUrl = String(tokenUrlMap && tokenUrlMap[t] || '').trim();
+    if (/^https?:\/\//i.test(mappedUrl)) {
+      return `![${alt || '图片'}](${mappedUrl})`;
+    }
     if (Array.isArray(assets)) {
       for (const asset of assets) {
         const src = String((asset && asset.src) || '');
@@ -8242,6 +8310,126 @@ function isAudioVideoTranscriptionIncompleteRecord(record) {
   return ['pending', 'queued', 'processing', 'failed'].includes(status);
 }
 
+const LocalComponentInstallConfirmModalBase = Modal || class {};
+
+class LocalComponentInstallConfirmModal extends LocalComponentInstallConfirmModalBase {
+  constructor(app, options = {}) {
+    super(app);
+    this.message = String(options.message || '');
+    this.resolve = typeof options.resolve === 'function' ? options.resolve : () => {};
+    this.finished = false;
+  }
+
+  finish(value) {
+    if (this.finished) return;
+    this.finished = true;
+    this.resolve(Boolean(value));
+    this.close();
+  }
+
+  onOpen() {
+    const contentEl = this.contentEl;
+    if (!contentEl) return;
+    contentEl.empty();
+    contentEl.createEl('h3', { text: '本地转写组件准备' });
+    this.message
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .forEach((line) => contentEl.createEl('p', { text: line }));
+
+    const buttonRow = contentEl.createDiv({ cls: 'wechat-inbox-sync-modal-actions' });
+    const confirmButton = buttonRow.createEl('button', { text: '开始安装/修复' });
+    if (typeof confirmButton.addClass === 'function') {
+      confirmButton.addClass('mod-cta');
+    } else {
+      confirmButton.className = `${confirmButton.className || ''} mod-cta`.trim();
+    }
+    confirmButton.addEventListener('click', () => this.finish(true));
+
+    const laterButton = buttonRow.createEl('button', { text: '稍后再试' });
+    laterButton.addEventListener('click', () => this.finish(false));
+  }
+
+  onClose() {
+    if (this.contentEl) this.contentEl.empty();
+    if (!this.finished) {
+      this.finished = true;
+      this.resolve(false);
+    }
+  }
+}
+
+function showLocalComponentInstallConfirm(app, message) {
+  if (!Modal || !app) return null;
+  return new Promise((resolve) => {
+    new LocalComponentInstallConfirmModal(app, { message, resolve }).open();
+  });
+}
+
+class LocalComponentInstallFailureModal extends LocalComponentInstallConfirmModalBase {
+  constructor(app, options = {}) {
+    super(app);
+    this.message = String(options.message || '');
+  }
+
+  onOpen() {
+    const contentEl = this.contentEl;
+    if (!contentEl) return;
+    contentEl.empty();
+    contentEl.createEl('h3', { text: '本地转写组件安装失败' });
+    this.message
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .forEach((line) => contentEl.createEl('p', { text: line }));
+
+    const buttonRow = contentEl.createDiv({ cls: 'wechat-inbox-sync-modal-actions' });
+    const closeButton = buttonRow.createEl('button', { text: '知道了' });
+    if (typeof closeButton.addClass === 'function') {
+      closeButton.addClass('mod-cta');
+    } else {
+      closeButton.className = `${closeButton.className || ''} mod-cta`.trim();
+    }
+    closeButton.addEventListener('click', () => this.close());
+  }
+
+  onClose() {
+    if (this.contentEl) this.contentEl.empty();
+  }
+}
+
+function showLocalComponentInstallFailure(app, message) {
+  if (!Modal || !app) return null;
+  return new Promise((resolve) => {
+    const modal = new LocalComponentInstallFailureModal(app, { message });
+    const originalOnClose = modal.onClose.bind(modal);
+    modal.onClose = () => {
+      originalOnClose();
+      resolve(true);
+    };
+    modal.open();
+  });
+}
+
+function formatLocalComponentInstallFailureReason(error) {
+  const rawMessage = String(error && (error.message || error) || '未知错误').trim();
+  const lines = rawMessage
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const isCurlProgressLine = (line) => /^%?\s*Total\s+%?\s*Received/i.test(line)
+    || /Dload\s+Upload\s+Total\s+Spent\s+Left\s+Speed/i.test(line)
+    || /^\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+/.test(line)
+    || /^-+:\s*-+:\s*-+/.test(line);
+  const isFailureLine = (line) => /curl:\s*\(\d+\)|status\s*=\s*failed|failed|failure|error|exception|traceback|connection reset|timed out|timeout|not found|permission denied|denied|无法|失败|错误|异常|超时|未找到|拒绝/i.test(line);
+  const failureLines = lines.filter((line) => !isCurlProgressLine(line) && isFailureLine(line));
+  const cleanLines = failureLines.length
+    ? failureLines
+    : lines.filter((line) => !isCurlProgressLine(line));
+  return cleanLines.slice(0, 6).join('\n') || '未知错误';
+}
+
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
@@ -8620,16 +8808,50 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!token) {
       throw new Error('请先在插件设置里输入小程序绑定码并完成绑定。');
     }
+    const retryWithOfficialApiBaseIfNeeded = async (message) => {
+      const currentApiBase = trimTrailingSlash(this.settings.apiBase || '');
+      const officialApiBase = trimTrailingSlash(OFFICIAL_SYNC_API_BASE);
+      const shouldRetry = isInvalidCloudBaseEnvMessage(message)
+        || /Invalid or expired token|Invalid bind code|绑定码未绑定或已失效|403/i.test(String(message || ''));
+      if (!shouldRetry || currentApiBase === officialApiBase) {
+        return null;
+      }
+      await this.saveSettings({
+        ...this.settings,
+        apiBase: OFFICIAL_SYNC_API_BASE,
+      });
+      return await this.requestJson(path, method, body, binding);
+    };
+    const isFeishuCloudRequest = /^\/feishu(?:\/|$)/.test(String(path || ''));
+    const isFeishuOAuthRequest = /^\/feishu\/oauth(?:\/|$)/.test(String(path || ''));
+    const apiBaseForRequest = isFeishuCloudRequest
+      ? FEISHU_OAUTH_SYNC_API_BASE
+      : this.settings.apiBase;
+    let requestPath = path;
+    let requestBody = body || {};
+    if (isFeishuOAuthRequest) {
+      if (method === 'GET') {
+        const separator = String(requestPath || '').includes('?') ? '&' : '?';
+        requestPath = `${requestPath}${separator}authToken=${encodeURIComponent(token)}&clientId=${encodeURIComponent(this.settings.clientId)}`;
+      } else {
+        requestBody = {
+          ...requestBody,
+          authToken: token,
+          clientId: this.settings.clientId,
+        };
+      }
+    }
     const requestOptions = {
-      url: `${trimTrailingSlash(this.settings.apiBase)}${path}`,
+      url: `${trimTrailingSlash(apiBaseForRequest)}${requestPath}`,
       method,
       headers: {
         Authorization: `Bearer ${token}`,
+        'X-Wechat-Inbox-Token': token,
         'X-Wechat-Inbox-Client-Id': this.settings.clientId,
         Accept: 'application/json',
         'Content-Type': 'application/json',
       },
-      body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
+      body: method === 'POST' ? JSON.stringify(requestBody || {}) : undefined,
     };
 
     let response;
@@ -8662,6 +8884,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (response.status && (response.status < 200 || response.status >= 300)) {
       const message = (payload && payload.errMsg) || `HTTP ${response.status}`;
+      const officialRetryPayload = await retryWithOfficialApiBaseIfNeeded(message);
+      if (officialRetryPayload) return officialRetryPayload;
       if (response.status === 400 && message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
@@ -8669,6 +8893,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (!payload || payload.success === false) {
       const message = (payload && payload.errMsg) || '同步 API 请求失败';
+      const officialRetryPayload = await retryWithOfficialApiBaseIfNeeded(message);
+      if (officialRetryPayload) return officialRetryPayload;
       if (message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
@@ -8735,6 +8961,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       markdown: extractFeishuMarkdownFromOpenApiBlocks(blocks),
       documentId: String((data && data.documentId) || '').trim(),
       blockCount: Number((data && data.blockCount) || blocks.length) || blocks.length,
+      imageTmpDownloadUrls: data && data.imageTmpDownloadUrls && typeof data.imageTmpDownloadUrls === 'object'
+        ? data.imageTmpDownloadUrls
+        : {},
+      imageTokenCount: Number(data && data.imageTokenCount || 0) || 0,
+      imageDownloadError: String(data && data.imageDownloadError || '').trim(),
     };
   }
 
@@ -8965,11 +9196,26 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!normalizedToken) return;
     const nextBindings = normalizeBindings(this.settings)
       .filter((item) => item.token !== normalizedToken);
-    await this.saveSettings({
+    const currentEntitlement = this.settings.localTranscriptionEntitlementStatus || null;
+    const shouldClearProStatus = !nextBindings.length
+      || normalizeBindCodeInput(currentEntitlement && currentEntitlement.bindingToken) === normalizedToken;
+    const nextSettings = {
       ...this.settings,
       token: getPrimaryBoundToken(nextBindings),
       bindings: nextBindings,
-    });
+    };
+    if (shouldClearProStatus) {
+      nextSettings.pendingRedeemCode = '';
+      nextSettings.localTranscriptionEntitlementStatus = nextBindings.length
+        ? null
+        : {
+          hasAccess: false,
+          plan: LOCAL_TRANSCRIPTION_PLAN,
+          status: 'unbound',
+          expiresAt: '',
+        };
+    }
+    await this.saveSettings(nextSettings);
   }
 
   async downloadArrayBuffer(url, headers = {}, options = {}) {
@@ -9140,11 +9386,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       new Notice('已解除当前电脑绑定');
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
-      if (isBindingInvalidMessage(message)) {
-        await this.markBindingUnbound(normalizedToken, '绑定码已失效或已被更换');
-        new Notice('绑定码已失效，已在本地标记为已解除');
-        return;
-      }
       new Notice(`解除绑定失败：${message || error}`);
     }
   }
@@ -9240,6 +9481,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     return path.join(this.getPluginBaseDir(), 'local-ocr', fileName);
   }
 
+  copyBundledLocalOcrRuntimeAssets(installerPath) {
+    if (!installerPath) return;
+    const sourcePath = path.join(this.getPluginBaseDir(), 'local-ocr', 'ocr_image.py');
+    const targetPath = path.join(path.dirname(installerPath), 'ocr_image.py');
+    try {
+      if (!fs.existsSync(sourcePath)) return;
+      if (path.resolve(sourcePath) === path.resolve(targetPath)) return;
+      fs.copyFileSync(sourcePath, targetPath);
+    } catch (error) {
+      console.warn('Failed to copy bundled OCR runtime asset:', error);
+    }
+  }
+
   getLocalOcrInstallStatus() {
     return getLocalOcrInstallStatus(
       this.getConfiguredLocalOcrInstallRoot(),
@@ -9311,10 +9565,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isMac) {
         return source.includes('TENCENT_OCR_ASSET_BASE_URL')
           && source.includes('TENCENT_PIP_INDEX_URL')
-          && source.includes('download_text_file')
+          && source.includes('download_with_retry')
+          && source.includes('find_existing_python')
           && source.includes('detect_uv_arch')
           && source.includes('UV_PYTHON_DOWNLOADS=automatic')
           && source.includes('UV_PYTHON_PREFERENCE=managed')
+          && source.includes('.wechat-inbox-local-asr/python-venv/bin/python')
           && source.includes('"$UV_BIN" python install 3.12')
           && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
       }
@@ -9335,6 +9591,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw new Error('Local OCR installer download returned outdated or invalid content');
       }
       fs.writeFileSync(downloadedPath, scriptText, 'utf8');
+      this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
       return downloadedPath;
     } catch (downloadError) {
       if (fs.existsSync(installerPath)) {
@@ -9353,7 +9610,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const missingText = status.missingReasons && status.missingReasons.length
         ? status.missingReasons.join('；')
         : '图片文字识别模块未安装';
-      throw new Error(`${missingText}。请在插件设置的 Pro 自动能力状态里修复本地转写组件。`);
+      throw new Error(`${missingText}。请在插件设置的 Pro 高级功能里修复本地转写组件。`);
     }
     const outputPath = path.join(os.tmpdir(), `wechat-inbox-ocr-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.txt`);
     try {
@@ -9467,7 +9724,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const syncLogText = readSyncDiagnosticLog(installRoot);
     const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : '';
     return [
-      'WeChat Inbox Sync 同步失败诊断',
+      'WeChat Inbox Sync 同步/安装失败诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
       `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
@@ -9498,7 +9755,68 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getSyncDiagnosticText() {
-    return this.getLocalAsrDiagnosticText();
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const asrRoot = this.getConfiguredLocalAsrInstallRoot();
+    const ocrRoot = this.getConfiguredLocalOcrInstallRoot();
+    const asrStatus = typeof this.getLocalAsrInstallStatus === 'function'
+      ? this.getLocalAsrInstallStatus()
+      : getLocalAsrInstallStatus(asrRoot, fs.existsSync, platform);
+    const ocrStatus = typeof this.getLocalOcrInstallStatus === 'function'
+      ? this.getLocalOcrInstallStatus()
+      : getLocalOcrInstallStatus(ocrRoot, fs.existsSync, platform);
+    const asrInstallLog = readLocalAsrInstallLog(asrRoot);
+    const asrRunLog = readLocalAsrRunLog(asrRoot);
+    const ocrInstallLog = readLocalAsrInstallLog(ocrRoot);
+    const syncLogText = readSyncDiagnosticLog(asrRoot);
+    const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : syncLogText;
+    const hasFailureSignal = (text) => /status\s*=\s*failed|failed|failure|error|exception|traceback|curl:\s*\(\d+\)|connection reset|timed out|timeout|not found|permission denied|denied|未找到|失败|错误|异常|超时|缺失|不完整/i.test(String(text || ''));
+    const appendFailedLog = (lines, title, text) => {
+      const source = String(text || '').trim();
+      if (!source || !hasFailureSignal(source)) return;
+      lines.push(title, source);
+    };
+    const formatMissingReasons = (status) => (
+      status && Array.isArray(status.missingReasons) && status.missingReasons.length
+        ? status.missingReasons.join('；')
+        : '无'
+    );
+    const lines = [
+      'WeChat Inbox Sync 同步/安装失败诊断',
+      `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
+      `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
+      `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
+      `实际使用系统：${platform}`,
+      `API 地址：${this.settings.apiBase || '-'}`,
+      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
+      `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      '',
+      '组件状态：',
+      `音视频转写 ASR：${asrStatus.ready ? '可用' : '不可用'}`,
+      `ASR 安装目录：${asrStatus.installRoot || asrRoot}`,
+      `ASR 缺失项：${formatMissingReasons(asrStatus)}`,
+      `图片文字识别 OCR：${ocrStatus.ready ? '可用' : '不可用'}`,
+      `OCR 安装目录：${ocrStatus.installRoot || ocrRoot}`,
+      `OCR 缺失项：${formatMissingReasons(ocrStatus)}`,
+    ];
+
+    if (lastSyncText && hasFailureSignal(lastSyncText)) {
+      lines.push('', '最近同步失败状态：', lastSyncText);
+    }
+    if (!asrStatus.ready) {
+      appendFailedLog(lines, 'ASR 最近安装失败日志：', asrInstallLog);
+      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog);
+    } else {
+      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog);
+    }
+    if (!ocrStatus.ready) {
+      appendFailedLog(lines, 'OCR 最近安装失败日志：', ocrInstallLog);
+    }
+    if (!lines.some((line) => /失败日志|失败状态/.test(line))) {
+      lines.push('', '未检测到失败日志；已省略成功日志。');
+    } else {
+      lines.push('', '已省略成功日志，只保留失败相关信息。');
+    }
+    return lines.join('\n');
   }
 
   async copyTextToClipboard(text) {
@@ -9850,10 +10168,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       '这个组件用于音视频转写和小红书图片文字识别，图片会在本机识别，不上传到云端。',
       '现在开始安装/修复吗？',
     ].join('\n');
+    const modalResult = showLocalComponentInstallConfirm(this.app, message);
+    if (modalResult) {
+      return await modalResult;
+    }
     if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
       return Boolean(window.confirm(message));
     }
-    new Notice(`Pro 已开通，但缺少${missingText}。请在插件设置的 Pro 自动能力状态里安装本地转写组件。`, 10000);
+    new Notice(`Pro 已开通，但缺少${missingText}。请在插件设置的 Pro 高级功能里安装本地转写组件。`, 10000);
     return false;
   }
 
@@ -9865,9 +10187,26 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.localComponentInstallPromise = this.doInstallLocalTranscriptionComponents(options);
     try {
       return await this.localComponentInstallPromise;
+    } catch (error) {
+      await this.showLocalComponentInstallFailure(error);
+      throw error;
     } finally {
       this.localComponentInstallPromise = null;
     }
+  }
+
+  async showLocalComponentInstallFailure(error) {
+    const reason = formatLocalComponentInstallFailureReason(error);
+    const message = [
+      `失败原因：${reason}`,
+      '如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。',
+    ].join('\n');
+    const modalResult = showLocalComponentInstallFailure(this.app, message);
+    if (modalResult) {
+      await modalResult;
+      return;
+    }
+    new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。`, 12000);
   }
 
   async doInstallLocalTranscriptionComponents(options = {}) {
@@ -10826,6 +11165,54 @@ class WechatObsidianInboxPlugin extends Plugin {
     return nextMarkdown;
   }
 
+  async saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title) {
+    if (!markdown
+      || !this.app
+      || !this.app.vault
+      || !this.app.vault.adapter
+      || typeof this.app.vault.adapter.writeBinary !== 'function') {
+      return markdown;
+    }
+    const imageMatches = Array.from(String(markdown).matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
+    if (!imageMatches.length) return markdown;
+
+    const imageRootDir = `${rootDir}/网页图片`;
+    const imageDayDir = `${imageRootDir}/${dateFolder}`;
+    let nextMarkdown = String(markdown || '');
+    let index = 1;
+    const savedByUrl = new Map();
+    const safeTitle = sanitizeAttachmentName(title, '网页图片');
+
+    await this.ensureFolder(imageRootDir);
+    await this.ensureFolder(imageDayDir);
+
+    for (const match of imageMatches) {
+      const imageUrl = String(match[2] || '').trim();
+      if (!imageUrl || savedByUrl.has(imageUrl)) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const arrayBuffer = await this.downloadArrayBuffer(imageUrl);
+        const buffer = Buffer.from(arrayBuffer || []);
+        if (!buffer.length) continue;
+        const ext = getImageExtFromBuffer(buffer, imageUrl);
+        const imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${ext}`;
+        // eslint-disable-next-line no-await-in-loop
+        await this.app.vault.adapter.writeBinary(imagePath, buffer);
+        savedByUrl.set(imageUrl, imagePath);
+        index += 1;
+      } catch (error) {
+        // Remote image localization is best-effort. Keep the original URL if download fails.
+      }
+    }
+
+    savedByUrl.forEach((imagePath, imageUrl) => {
+      const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, 'g');
+      nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
+    });
+
+    return nextMarkdown;
+  }
+
   async buildTranscriptRecordFromMedia(record, {
     url,
     platform,
@@ -11235,13 +11622,20 @@ class WechatObsidianInboxPlugin extends Plugin {
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
-            const cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+            let cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
                 dedupe: true,
                 feishuTitle,
               }),
               [],
               url,
+              cloudOpenApiResult.imageTmpDownloadUrls || {},
+            );
+            cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
+              cleanedCloudOpenApiMarkdown,
+              rootDir,
+              dateFolder,
+              feishuTitle,
             );
             return {
               ...record,
@@ -11251,7 +11645,11 @@ class WechatObsidianInboxPlugin extends Plugin {
                 markdown: cleanedCloudOpenApiMarkdown,
                 conversionStatus: 'success',
                 conversionSource: 'feishu-cloud-oauth',
-                conversionNote: `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
+                conversionNote: [
+                  `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
+                  cloudOpenApiResult.imageTokenCount ? `images=${cloudOpenApiResult.imageTokenCount}` : '',
+                  cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
+                ].filter(Boolean).join('; '),
               }),
             };
           } catch (error) {
@@ -11898,6 +12296,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
   renderFeishuSettings(containerEl) {
     const feishuPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    feishuPanel.open = true;
     feishuPanel.createEl('summary', { text: '连接飞书文档' });
     const feishuOAuthStatus = this.plugin.settings.feishuOAuthStatus || {};
     feishuPanel.createDiv({
@@ -11919,7 +12318,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
           }
         }));
 
-    const feishuCallbackUrl = `${trimTrailingSlash(this.plugin.settings.apiBase || OFFICIAL_SYNC_API_BASE)}/feishu/oauth/callback`;
+    const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;
     new Setting(feishuPanel)
       .setName('飞书回调地址')
       .setDesc(`在飞书自建应用后台配置这个重定向 URL：${feishuCallbackUrl}`)
@@ -11981,7 +12380,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .setButtonText('刷新状态')
         .onClick(async () => {
           try {
-            await this.plugin.refreshFeishuCloudOAuthStatus();
+            const status = await this.plugin.refreshFeishuCloudOAuthStatus();
+            new Notice(status && status.connected
+              ? '飞书连接状态已刷新：已连接'
+              : '飞书连接状态已刷新：未连接或已过期');
             this.display();
           } catch (error) {
             new Notice(`刷新飞书授权状态失败：${error.message || error}`);
@@ -12066,7 +12468,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('输入绑定码')
       .setDesc(primaryBinding
-        ? '绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 自动能力状态里增加设备。'
+        ? '绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 高级功能里增加设备。'
         : '基础绑定区只保留 1 个小程序绑定码。打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。')
       .addText((text) => text
         .setPlaceholder('例如 ABC-123')
@@ -12136,16 +12538,16 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .onClick(() => this.plugin.syncInbox()));
 
     new Setting(containerEl)
-      .setName('同步失败诊断')
+      .setName('同步/安装失败诊断')
       .setDesc('同步失败、转写失败、下载卡住时，点这里复制诊断信息发给开发者张张（微信：heyhmjx）。里面包含最近同步阶段、转写日志和安装日志。')
       .addButton((button) => button
-        .setButtonText('复制同步诊断')
+        .setButtonText('复制诊断信息')
         .onClick(async () => {
           try {
             await this.plugin.copySyncDiagnosticText();
-            new Notice('同步失败诊断信息已复制');
+            new Notice('诊断信息已复制');
           } catch (error) {
-            new Notice(`复制同步诊断失败：${error.message || error}`);
+            new Notice(`复制诊断信息失败：${error.message || error}`);
           }
         }));
 
@@ -12157,7 +12559,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     containerEl.createDiv({ cls: 'wechat-inbox-sync-section-spacer' });
     containerEl.createEl('h3', {
-      text: 'Pro 自动能力状态',
+      text: 'Pro 高级功能',
       cls: 'wechat-inbox-sync-section-heading',
     });
 
@@ -12264,6 +12666,19 @@ class WechatInboxSettingTab extends PluginSettingTab {
           xiaohongshuLoginBtn.setDesc('正在打开小红书登录窗口...');
           await this.plugin.loginXiaohongshu();
           this.display();
+        }))
+      .addButton((button) => button
+        .setButtonText('检测登录状态')
+        .onClick(async () => {
+          xiaohongshuLoginBtn.setDesc('正在检测小红书登录状态...');
+          const loggedIn = await this.plugin.checkXiaohongshuLogin();
+          if (loggedIn) {
+            xiaohongshuLoginBtn.setDesc('小红书登录状态正常；同步小红书图文时会复用该状态提取评论区。');
+            new Notice('小红书登录状态正常');
+          } else {
+            xiaohongshuLoginBtn.setDesc('未检测到小红书登录状态，或登录状态已过期；如需提取评论区，请重新登录小红书。');
+            new Notice('未检测到小红书登录状态，或登录状态已过期');
+          }
         }));
 
     this.plugin.checkXiaohongshuLogin().then((loggedIn) => {
@@ -12308,6 +12723,7 @@ WechatObsidianInboxPlugin.__test = {
   resolveLocalAsrPlatform,
   getLocalAsrPlatformMismatchMessage,
   formatRedeemAccessError,
+  formatLocalComponentInstallFailureReason,
   isCachedProStatusActiveForCode,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,

@@ -17,6 +17,8 @@ DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 UV_VERSION="0.9.14"
 UV_BIN="${INSTALL_ROOT}/bin/uv"
+export UV_PYTHON_DOWNLOADS=automatic
+export UV_PYTHON_PREFERENCE=managed
 
 mkdir -p "$INSTALL_ROOT"
 
@@ -25,6 +27,127 @@ log() {
 }
 
 # ── uv bootstrap ────────────────────────────────────────────────────────────
+
+curl_supports_retry_all_errors() {
+  command -v curl >/dev/null 2>&1 && curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'
+}
+
+download_with_curl() {
+  local url="$1"
+  local out_file="$2"
+  local max_time="${3:-300}"
+  if curl_supports_retry_all_errors; then
+    curl -fL --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors \
+      --connect-timeout 30 \
+      --max-time "$max_time" \
+      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \
+      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+      -o "$out_file" "$url"
+  else
+    curl -fL --silent --show-error --retry 5 --retry-delay 2 \
+      --connect-timeout 30 \
+      --max-time "$max_time" \
+      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \
+      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+      -o "$out_file" "$url"
+  fi
+}
+
+download_with_retry() {
+  local url="$1"
+  local out_file="$2"
+  local label="${3:-file}"
+  local max_time="${4:-300}"
+  local attempt
+  for attempt in 1 2 3; do
+    log "Downloading ${label} (attempt ${attempt}/3): ${url}"
+    rm -f "$out_file"
+    if command -v curl >/dev/null 2>&1; then
+      if download_with_curl "$url" "$out_file" "$max_time" && [ -s "$out_file" ]; then
+        return 0
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      if wget -q --tries=3 --timeout=30 -O "$out_file" "$url" && [ -s "$out_file" ]; then
+        return 0
+      fi
+    else
+      log "ERROR: Neither curl nor wget is available."
+      return 1
+    fi
+    rm -f "$out_file"
+    sleep $((attempt * 2))
+  done
+  log "ERROR: Download failed for ${label}: ${url}"
+  return 1
+}
+
+is_python_usable() {
+  local python_bin="$1"
+  [ -n "$python_bin" ] || return 1
+  if [ ! -x "$python_bin" ]; then
+    python_bin="$(command -v "$python_bin" 2>/dev/null || true)"
+    [ -n "$python_bin" ] || return 1
+  fi
+  "$python_bin" -c 'import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
+}
+
+find_existing_python() {
+  local candidates=(
+    "${HOME}/.wechat-inbox-local-asr/python-venv/bin/python"
+    "${HOME}/.wechat-inbox-local-asr/venv/bin/python"
+    "${HOME}/.wechat-inbox-local-asr/.venv/bin/python"
+    "/opt/homebrew/bin/python3"
+    "/usr/local/bin/python3"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if is_python_usable "$candidate"; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  candidate="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$candidate" ] && is_python_usable "$candidate"; then
+    echo "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+validate_ocr_python() {
+  local python_bin="$1"
+  "$python_bin" -c "from rapidocr_onnxruntime import RapidOCR; print('rapidocr-ready')" 2>&1
+}
+
+install_ocr_packages_with_python() {
+  local python_bin="$1"
+  export PIP_DISABLE_PIP_VERSION_CHECK=1
+  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  "$python_bin" -m pip install --upgrade pip \
+    -i "$TENCENT_PIP_INDEX_URL" \
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
+  if "$python_bin" -m pip install --upgrade rapidocr-onnxruntime pillow \
+    -i "$TENCENT_PIP_INDEX_URL" \
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+    return 0
+  fi
+  log "Tencent PyPI mirror install failed; retrying with PyPI only."
+  "$python_bin" -m pip install --upgrade rapidocr-onnxruntime pillow \
+    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
+}
+
+install_ocr_packages_with_uv() {
+  export VIRTUAL_ENV="$VENV_DIR"
+  "$UV_BIN" pip install --upgrade pip 2>&1 || true
+  if "$UV_BIN" pip install --upgrade rapidocr-onnxruntime pillow \
+    -i "$TENCENT_PIP_INDEX_URL" \
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+    return 0
+  fi
+  log "Tencent PyPI mirror install failed; retrying with PyPI only."
+  "$UV_BIN" pip install --upgrade rapidocr-onnxruntime pillow \
+    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
+}
 
 detect_uv_arch() {
   local arch
@@ -57,27 +180,21 @@ download_uv() {
   )
 
   for url in "${urls[@]}"; do
-    log "Downloading uv from $url"
     rm -f "$uv_temp"
 
-    if command -v curl >/dev/null 2>&1; then
-      if curl -L --retry 2 --retry-delay 2 --connect-timeout 30 \
-        --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \
-        --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
-        -o "$uv_temp" "$url" 2>&1; then
-        # Check if it's a tar.gz (GitHub) or raw binary (CDN)
-        if file "$uv_temp" 2>/dev/null | grep -q 'gzip'; then
-          tar xzf "$uv_temp" -C "$INSTALL_ROOT/bin" --strip-components=1 2>/dev/null || true
-          rm -f "$uv_temp"
-          if [ -x "$UV_BIN" ]; then
-            return 0
-          fi
-        else
-          mv "$uv_temp" "$UV_BIN"
-          chmod +x "$UV_BIN"
-          if [ -x "$UV_BIN" ]; then
-            return 0
-          fi
+    if download_with_retry "$url" "$uv_temp" "uv" 600; then
+      # Check if it's a tar.gz (GitHub) or raw binary (CDN)
+      if [[ "$url" == *.tar.gz ]] || file "$uv_temp" 2>/dev/null | grep -q 'gzip'; then
+        tar xzf "$uv_temp" -C "$INSTALL_ROOT/bin" --strip-components=1 2>/dev/null || true
+        rm -f "$uv_temp"
+        if [ -x "$UV_BIN" ]; then
+          return 0
+        fi
+      else
+        mv "$uv_temp" "$UV_BIN"
+        chmod +x "$UV_BIN"
+        if [ -x "$UV_BIN" ]; then
+          return 0
         fi
       fi
     fi
@@ -94,9 +211,25 @@ download_uv() {
 setup_python_venv() {
   # If venv already exists and works, skip.
   local venv_python="${VENV_DIR}/bin/python"
-  if [ -x "$venv_python" ] && "$venv_python" -c 'from rapidocr_onnxruntime import RapidOCR; print("rapidocr-ready")' >/dev/null 2>&1; then
+  if [ -x "$venv_python" ] && validate_ocr_python "$venv_python" >/dev/null 2>&1; then
     log "OCR Python environment is already ready."
     return 0
+  fi
+
+  local existing_python
+  existing_python="$(find_existing_python || true)"
+  if [ -n "$existing_python" ]; then
+    log "Reusing existing Python for OCR environment: $existing_python"
+    rm -rf "$VENV_DIR"
+    if "$existing_python" -m venv "$VENV_DIR" 2>&1 \
+      && [ -x "$venv_python" ] \
+      && install_ocr_packages_with_python "$venv_python" \
+      && validate_ocr_python "$venv_python" >/dev/null 2>&1; then
+      log "Python OCR environment ready via existing Python."
+      return 0
+    fi
+    log "Existing Python OCR setup failed; falling back to uv managed Python."
+    rm -rf "$VENV_DIR"
   fi
 
   local uv_arch
@@ -105,8 +238,12 @@ setup_python_venv() {
 
   # Create venv.  uv auto-downloads Python if needed.
   log "Setting up Python environment (this may take a few minutes on first run)..."
-  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
-    if ! "$UV_BIN" venv "$VENV_DIR" --python 3 2>&1; then
+  if ! "$UV_BIN" python install 3.12 2>&1; then
+    log "ERROR: Failed to install managed Python 3.12 via uv. Please check your network connection and retry."
+    return 1
+  fi
+  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python 2>&1; then
+    if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
       log "ERROR: 无法创建 Python 虚拟环境。"
       log "请尝试在终端运行: xcode-select --install"
       log "安装 Xcode Command Line Tools 后重试。"
@@ -120,17 +257,13 @@ setup_python_venv() {
   fi
 
   log "Installing rapidocr-onnxruntime and pillow..."
-  export VIRTUAL_ENV="$VENV_DIR"
-  "$UV_BIN" pip install --upgrade pip 2>&1 || true
-  if ! "$UV_BIN" pip install --upgrade rapidocr-onnxruntime pillow \
-    -i "$TENCENT_PIP_INDEX_URL" \
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+  if ! install_ocr_packages_with_uv; then
     log "ERROR: rapidocr-onnxruntime / pillow 安装失败。请检查网络连接后重试。"
     return 1
   fi
 
   # Validate.
-  if ! "$venv_python" -c "from rapidocr_onnxruntime import RapidOCR; print('rapidocr-ready')" 2>&1; then
+  if ! validate_ocr_python "$venv_python"; then
     log "ERROR: rapidocr-onnxruntime 导入验证失败。"
     return 1
   fi
@@ -144,15 +277,7 @@ setup_python_venv() {
 download_text_file() {
   local url="$1"
   local out_file="$2"
-  log "Downloading $url"
-  if command -v curl >/dev/null 2>&1; then
-    curl -L --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 120 -o "$out_file" "$url"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$out_file" "$url"
-  else
-    log "ERROR: Neither curl nor wget is available."
-    return 1
-  fi
+  download_with_retry "$url" "$out_file" "ocr script" 180
   test -s "$out_file" || {
     log "ERROR: Downloaded file is empty or invalid: $url"
     return 1

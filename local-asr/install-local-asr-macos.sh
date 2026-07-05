@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.0"
+INSTALLER_SCRIPT_VERSION="1.3.1"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -58,6 +58,8 @@ acquire_install_lock() {
 
 UV_VERSION="0.9.14"
 UV_BIN="$INSTALL_ROOT/bin/uv"
+export UV_PYTHON_DOWNLOADS=automatic
+export UV_PYTHON_PREFERENCE=managed
 
 detect_uv_arch() {
   local arch
@@ -150,9 +152,15 @@ setup_python_and_packages() {
   # Create venv.  uv will use system Python 3 if a working one exists;
   # otherwise it auto-downloads a standalone Python build.
   echo "Setting up Python environment (this may take a few minutes on first run)..."
-  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
+  if ! "$UV_BIN" python install 3.12 2>&1; then
+    echo "" >&2
+    echo "Failed to install managed Python 3.12 via uv." >&2
+    echo "Please check your network connection and retry. No Terminal command is required." >&2
+    return 1
+  fi
+  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python 2>&1; then
     # If 3.12 is unavailable, let uv pick the best available Python.
-    if ! "$UV_BIN" venv "$VENV_DIR" --python 3 2>&1; then
+    if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
       echo "" >&2
       echo "无法创建 Python 虚拟环境。" >&2
       echo "请尝试在终端运行: xcode-select --install" >&2

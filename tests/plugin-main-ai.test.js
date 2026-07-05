@@ -7,6 +7,7 @@ const originalLoad = Module._load;
 Module._load = function mockObsidian(request, parent, isMain) {
   if (request === 'obsidian') {
     return {
+      Modal: class Modal {},
       Notice: class Notice {},
       Plugin: class Plugin {},
       PluginSettingTab: class PluginSettingTab {},
@@ -25,6 +26,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const pluginMainSource = fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8');
+const macOcrInstallerSource = fs.readFileSync(
+  path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-ocr', 'install-local-ocr-macos.sh'),
+  'utf8',
+);
 assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));
@@ -275,7 +280,21 @@ assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479
 assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh'));
 assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1'));
 assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh'));
+assert.ok(pluginMainSource.includes("const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';"));
+assert.ok(pluginMainSource.includes("const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';"));
+assert.ok(pluginMainSource.includes('const isFeishuOAuthRequest = /^\\/feishu\\/oauth(?:\\/|$)/.test(String(path || \'\'));'));
+assert.ok(pluginMainSource.includes('const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;'));
+assert.ok(pluginMainSource.includes("'X-Wechat-Inbox-Token': token"));
+assert.ok(pluginMainSource.includes('authToken=${encodeURIComponent(token)}&clientId=${encodeURIComponent(this.settings.clientId)}'));
+assert.ok(pluginMainSource.includes('authToken: token'));
 assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
+assert.ok(pluginMainSource.includes('copyBundledLocalOcrRuntimeAssets'));
+assert.ok(pluginMainSource.includes("fs.copyFileSync(sourcePath, targetPath)"));
+assert.ok(macOcrInstallerSource.includes('find_existing_python'));
+assert.ok(macOcrInstallerSource.includes('.wechat-inbox-local-asr/python-venv/bin/python'));
+assert.ok(macOcrInstallerSource.includes('download_with_retry'));
+assert.ok(macOcrInstallerSource.includes('--retry-all-errors'));
+assert.ok(macOcrInstallerSource.includes('--silent --show-error'));
 assert.ok(pluginMainSource.includes("source.includes('CHUNK_SECONDS=600')"));
 assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
 assert.ok(pluginMainSource.includes("source.includes('TENCENT_MODEL_URL=')"));
@@ -340,6 +359,50 @@ assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
+{
+  const restoredFromPendingBindCode = helpers.mergeSettings({
+    token: '',
+    pendingBindCode: 'TT7-7L6',
+    pendingRedeemCode: 'OBPROT93C6',
+    bindings: [],
+  });
+  assert.strictEqual(restoredFromPendingBindCode.token, 'TT7-7L6');
+  assert.strictEqual(restoredFromPendingBindCode.pendingBindCode, '');
+  assert.strictEqual(restoredFromPendingBindCode.pendingRedeemCode, 'OBPROT93C6');
+  assert.strictEqual(restoredFromPendingBindCode.bindings.length, 1);
+  assert.strictEqual(restoredFromPendingBindCode.bindings[0].token, 'TT7-7L6');
+}
+assert.strictEqual(helpers.mergeSettings({
+  pendingRedeemCode: 'OBPROT93C6',
+  localTranscriptionEntitlementStatus: {
+    hasAccess: false,
+    status: 'invalid_redeem_code',
+    code: 'OBPROT93C6',
+    bindingToken: 'OLD-123',
+    bindingLabel: '微信 1',
+    message: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists (85ab9ac4-006f-4935-918d-e2c97ac3828e) INVALID_ENV',
+  },
+}).localTranscriptionEntitlementStatus, null);
+{
+  const restored = helpers.mergeSettings({
+    token: '',
+    pendingRedeemCode: '',
+    bindings: [],
+    localTranscriptionEntitlementStatus: {
+      hasAccess: false,
+      status: 'invalid_redeem_code',
+      code: 'OBPROT93C6',
+      bindingToken: 'OLD-123',
+      bindingLabel: '微信 1',
+      message: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists INVALID_ENV',
+    },
+  });
+  assert.strictEqual(restored.localTranscriptionEntitlementStatus, null);
+  assert.strictEqual(restored.token, 'OLD-123');
+  assert.strictEqual(restored.pendingRedeemCode, 'OBPROT93C6');
+  assert.strictEqual(restored.bindings.length, 1);
+  assert.strictEqual(restored.bindings[0].token, 'OLD-123');
+}
 assert.strictEqual(helpers.mergeSettings({}).deepseekApiKey, '');
 assert.strictEqual(helpers.mergeSettings({}).deepseekModel, 'deepseek-chat');
 assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
@@ -369,7 +432,7 @@ assert.strictEqual(pluginMainSource.includes(".setButtonText('新增绑定码')"
 assert.ok(pluginMainSource.includes("text: '使用教程'"));
 assert.ok(pluginMainSource.includes("text: '绑定小程序'"));
 assert.strictEqual(pluginMainSource.includes("text: 'Pro 本地转写功能'"), false);
-assert.ok(pluginMainSource.includes("text: 'Pro 自动能力状态'"));
+assert.ok(pluginMainSource.includes("text: 'Pro 高级功能'"));
 assert.ok(pluginMainSource.includes("text: 'Pro 状态'"));
 assert.strictEqual(pluginMainSource.includes("text: 'Pro 高级选项'"), false);
 assert.strictEqual(pluginMainSource.includes("text: '兑换码与权限状态'"), false);
@@ -378,6 +441,7 @@ assert.ok(pluginMainSource.includes("/entitlements/auto-redeem"));
 assert.ok(pluginMainSource.includes('refreshProAndMaybePromptLocalComponentInstall'));
 assert.ok(pluginMainSource.includes('installLocalTranscriptionComponents'));
 assert.ok(pluginMainSource.includes('confirmLocalComponentInstall'));
+assert.ok(pluginMainSource.includes("createEl('button', { text: '稍后再试' })"));
 assert.ok(pluginMainSource.includes('ensureLocalComponentReadyForUse'));
 assert.ok(pluginMainSource.includes('PRO_SETUP_CHECK_INTERVAL_MS'));
 assert.ok(pluginMainSource.includes('PRO_SETUP_PROMPT_COOLDOWN_MS'));
@@ -410,6 +474,7 @@ assert.strictEqual(pluginMainSource.includes("text: '公众号评论区提取（
 assert.strictEqual(pluginMainSource.includes(".setName('笔记属性字段')"), false);
 assert.ok(pluginMainSource.includes("text: '登录设置'"));
 assert.ok(pluginMainSource.includes("text: '连接飞书文档'"));
+assert.ok(pluginMainSource.includes('feishuPanel.open = true'));
 assert.ok(pluginMainSource.includes('未连接飞书官方 API 时仍会使用旧解析方式转存飞书链接'));
 assert.ok(pluginMainSource.includes('FEISHU_OFFICIAL_API_TUTORIAL_URL'));
 assert.ok(pluginMainSource.includes("this.renderFeishuSettings(containerEl);"));
@@ -428,7 +493,7 @@ assert.ok(pluginMainSource.includes('withFeishuCustomAppConfig'));
 assert.strictEqual(pluginMainSource.includes("text: 'Feishu link extraction'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('Feishu web login')"), false);
 assert.strictEqual(pluginMainSource.includes(".setButtonText('Login Feishu')"), false);
-assert.ok(pluginMainSource.includes("text: 'Pro 自动能力状态'"));
+assert.ok(pluginMainSource.includes("text: 'Pro 高级功能'"));
 assert.ok(pluginMainSource.includes("text: 'Pro 状态'"));
 assert.ok(pluginMainSource.includes("text: '登录小红书评论区'"));
 assert.strictEqual(pluginMainSource.includes(".setName('提取小红书评论区')"), false);
@@ -445,7 +510,7 @@ assert.ok(pluginMainSource.includes('本地转写组件：'));
 assert.ok(pluginMainSource.includes('wechat-inbox-sync-section-spacer'));
 assert.ok(pluginMainSource.indexOf("text: '使用教程'") < pluginMainSource.indexOf("text: '绑定小程序'"));
 assert.ok(pluginMainSource.indexOf("text: '绑定小程序'") < pluginMainSource.indexOf("text: '登录设置'"));
-assert.ok(pluginMainSource.indexOf("text: '登录设置'") < pluginMainSource.indexOf("text: 'Pro 自动能力状态'"));
+assert.ok(pluginMainSource.indexOf("text: '登录设置'") < pluginMainSource.indexOf("text: 'Pro 高级功能'"));
 assert.strictEqual(pluginMainSource.includes('本地转写系统'), false);
 assert.strictEqual(pluginMainSource.includes('如果苹果电脑安装失败，请手动选择 macOS'), false);
 assert.ok(pluginMainSource.includes('install.log'));
@@ -455,9 +520,27 @@ assert.ok(pluginMainSource.includes('showSyncProgress'));
 assert.ok(pluginMainSource.includes('syncStatusBar'));
 assert.ok(pluginMainSource.includes('setText(message)'));
 assert.ok(pluginMainSource.includes('lastSyncDiagnostic'));
-assert.ok(pluginMainSource.includes('复制同步诊断'));
-assert.ok(pluginMainSource.includes('同步失败诊断'));
+assert.ok(pluginMainSource.includes("setButtonText('复制诊断信息')"));
+assert.strictEqual(pluginMainSource.includes("setButtonText('复制同步诊断')"), false);
+assert.ok(pluginMainSource.includes('同步/安装失败诊断'));
+assert.strictEqual(pluginMainSource.includes(".setName('同步失败诊断')"), false);
 assert.ok(pluginMainSource.includes('发给开发者张张（微信：heyhmjx）'));
+assert.ok(pluginMainSource.includes('本地转写组件安装失败'));
+assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制诊断信息」'));
+assert.strictEqual(
+  helpers.formatLocalComponentInstallFailureReason([
+    '% Total % Received % Xferd Average Speed Time Time Time Current',
+    'Dload Upload Total Spent Left Speed',
+    '0 0 0 0 0 0 0 --:--:-- --:--:-- --:--:-- 0',
+    'curl: (35) Recv failure: Connection reset by peer',
+  ].join('\n')),
+  'curl: (35) Recv failure: Connection reset by peer',
+);
+assert.ok(pluginMainSource.includes("setButtonText('检测登录状态')"));
+assert.ok(pluginMainSource.includes('小红书登录状态正常'));
+assert.ok(pluginMainSource.includes('未检测到小红书登录状态'));
+assert.ok(pluginMainSource.includes('飞书连接状态已刷新：已连接'));
+assert.ok(pluginMainSource.includes('飞书连接状态已刷新：未连接或已过期'));
 assert.ok(pluginMainSource.includes('/transcriptions/cloud'));
 assert.ok(pluginMainSource.includes('runCloudFallbackTranscription'));
 assert.ok(pluginMainSource.includes('local-cloud-fallback'));
@@ -2532,12 +2615,32 @@ async function runAsyncHydrationTests() {
 
   const cloudFeishuPlugin = new PluginClass();
   const cloudFeishuCalls = [];
+  const cloudFeishuFiles = {};
   cloudFeishuPlugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
     bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true },
   });
+  cloudFeishuPlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        writeBinary: async (filePath, buffer) => {
+          cloudFeishuFiles[filePath] = Buffer.from(buffer);
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://internal-api-drive-stream.feishu.cn/cloud-image-1') {
+      return {
+        arrayBuffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]),
+      };
+    }
+    return {};
+  };
   cloudFeishuPlugin.requestJson = async (path, method, body, binding) => {
     cloudFeishuCalls.push([path, method, body.url, binding && binding.token]);
     if (path === '/feishu/extract') {
@@ -2550,7 +2653,12 @@ async function runAsyncHydrationTests() {
           blocks: [
             { block_id: 'h1', block_type: 3, heading1: { elements: [{ text_run: { content: '云端授权一级标题' } }] } },
             { block_id: 'p1', block_type: 2, text: { elements: [{ text_run: { content: '云端授权正文内容。' } }] } },
+            { block_id: 'img1', block_type: 27, image: { token: 'boxcnCloudImageToken' } },
           ],
+          imageTokenCount: 1,
+          imageTmpDownloadUrls: {
+            boxcnCloudImageToken: 'https://internal-api-drive-stream.feishu.cn/cloud-image-1',
+          },
         },
       };
     }
@@ -2566,6 +2674,8 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(cloudHydrated.metadata.title, '云端授权标题');
   assert.ok(cloudHydrated.metadata.markdown.includes('# 云端授权一级标题'));
   assert.ok(cloudHydrated.metadata.markdown.includes('云端授权正文内容。'));
+  assert.ok(cloudHydrated.metadata.markdown.includes('![[临时收集/网页图片/2026-07-04/云端授权标题-image-01.png]]'));
+  assert.ok(Buffer.isBuffer(cloudFeishuFiles['临时收集/网页图片/2026-07-04/云端授权标题-image-01.png']));
   assert.deepStrictEqual(cloudFeishuCalls, [[
     '/feishu/extract',
     'POST',
@@ -3420,6 +3530,167 @@ async function runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest() {
   }
 }
 
+async function runRequestJsonRoutesFeishuExtractToOAuthApiBaseTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const calls = [];
+  requestUrlMock = async (options) => {
+    calls.push(options);
+    return {
+      status: 200,
+      json: {
+        success: true,
+        data: {
+          title: 'Feishu API OK',
+          blocks: [],
+        },
+      },
+    };
+  };
+
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example-short-base.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'ABC-123',
+      label: '微信 1',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+
+  try {
+    await plugin.requestJson('/feishu/extract', 'POST', { url: 'https://my.feishu.cn/wiki/wikiToken123' });
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(
+      calls[0].url,
+      'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync/feishu/extract',
+    );
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
+async function runRequestJsonRecoversFromInvalidCloudBaseEnvTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const officialApiBase = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+  const brokenApiBase = 'https://broken-cloudbase.example.com/sync';
+  const calls = [];
+  requestUrlMock = async (options) => {
+    calls.push(options);
+    if (options.url === `${brokenApiBase}/unbind-self`) {
+      return {
+        status: 500,
+        json: {
+          success: false,
+          errMsg: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists (859a7fdd-648c-4c9e-8e48-562dd4a3e90f) INVALID_ENV',
+        },
+      };
+    }
+    if (options.url === `${officialApiBase}/unbind-self`) {
+      return {
+        status: 200,
+        json: {
+          success: true,
+          data: { status: 'unbound' },
+        },
+      };
+    }
+    throw new Error(`unexpected url ${options.url}`);
+  };
+
+  const plugin = new PluginClass();
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+  plugin.settings = helpers.mergeSettings({
+    apiBase: brokenApiBase,
+    token: 'ABC-123',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'ABC-123',
+      label: '微信 1',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+
+  try {
+    const payload = await plugin.requestJson('/unbind-self', 'POST', { clientId: 'test-client' });
+    assert.deepStrictEqual(payload.data, { status: 'unbound' });
+    assert.deepStrictEqual(calls.map((item) => item.url), [
+      `${brokenApiBase}/unbind-self`,
+      `${officialApiBase}/unbind-self`,
+    ]);
+    assert.strictEqual(plugin.settings.apiBase, officialApiBase);
+    assert.strictEqual(savedSettings.apiBase, officialApiBase);
+    assert.strictEqual(calls[1].headers.Authorization, 'Bearer ABC-123');
+    assert.strictEqual(calls[1].headers['X-Wechat-Inbox-Client-Id'], 'test-client');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
+async function runRequestJsonRecoversFromEmptyMigrationApiBaseTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const officialApiBase = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+  const emptyMigrationApiBase = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+  const calls = [];
+  requestUrlMock = async (options) => {
+    calls.push(options);
+    if (options.url === `${emptyMigrationApiBase}/entitlements/status?plan=local_transcription_trial`) {
+      return {
+        status: 403,
+        json: {
+          success: false,
+          errMsg: 'Invalid or expired token',
+        },
+      };
+    }
+    if (options.url === `${officialApiBase}/entitlements/status?plan=local_transcription_trial`) {
+      return {
+        status: 200,
+        json: {
+          success: true,
+          data: { hasAccess: true, status: 'active', code: 'OBPROT93C6' },
+        },
+      };
+    }
+    throw new Error(`unexpected url ${options.url}`);
+  };
+
+  const plugin = new PluginClass();
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+  plugin.settings = helpers.mergeSettings({
+    apiBase: emptyMigrationApiBase,
+    token: 'TT7-7L6',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'TT7-7L6',
+      label: '微信 1',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+
+  try {
+    const payload = await plugin.requestJson('/entitlements/status?plan=local_transcription_trial', 'GET', {});
+    assert.strictEqual(payload.data.hasAccess, true);
+    assert.deepStrictEqual(calls.map((item) => item.url), [
+      `${officialApiBase}/entitlements/status?plan=local_transcription_trial`,
+    ]);
+    assert.strictEqual(plugin.settings.apiBase, officialApiBase);
+    assert.strictEqual(savedSettings, null);
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
 async function runFeishuCustomAppConfigRequestTests() {
   const previousWindow = global.window;
   const openedUrls = [];
@@ -3769,7 +4040,7 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
   ]]);
 }
 
-async function runUnbindInvalidCodeMarksLocalUnboundTest() {
+async function runUnbindInvalidCodePreservesLocalBindingTest() {
   const previousRequestUrlMock = requestUrlMock;
   requestUrlMock = async () => ({
     status: 403,
@@ -3785,6 +4056,16 @@ async function runUnbindInvalidCodeMarksLocalUnboundTest() {
     apiBase: 'https://example.com/sync',
     token: 'OLD-123',
     clientId: 'test-client',
+    pendingRedeemCode: 'OBPROT93C6',
+    localTranscriptionEntitlementStatus: {
+      hasAccess: false,
+      plan: 'local_transcription_beta',
+      status: 'invalid_redeem_code',
+      code: 'OBPROT93C6',
+      message: 'collection.get:fail -501001 resource system error. [100003] Env Not Exists (85ab9ac4-006f-4935-918d-e2c97ac3828e) INVALID_ENV',
+      bindingToken: 'OLD-123',
+      bindingLabel: '旧微信',
+    },
     bindings: [{
       token: 'OLD-123',
       label: '旧微信',
@@ -3799,9 +4080,22 @@ async function runUnbindInvalidCodeMarksLocalUnboundTest() {
 
   try {
     await plugin.unbindBinding('OLD-123');
-    assert.deepStrictEqual(plugin.settings.bindings, []);
-    assert.strictEqual(plugin.settings.token, '');
-    assert.deepStrictEqual(savedSettings.bindings, []);
+    assert.deepStrictEqual(plugin.settings.bindings, [{
+      token: 'OLD-123',
+      label: '旧微信',
+      enabled: true,
+      status: 'bound',
+      boundAt: '',
+      lastSyncAt: '',
+      unboundAt: '',
+      lastError: '',
+    }]);
+    assert.strictEqual(plugin.settings.token, 'OLD-123');
+    assert.strictEqual(plugin.settings.pendingRedeemCode, 'OBPROT93C6');
+    assert.strictEqual(plugin.settings.localTranscriptionEntitlementStatus, null);
+    assert.strictEqual(savedSettings.bindings[0].token, 'OLD-123');
+    assert.strictEqual(savedSettings.token, 'OLD-123');
+    assert.strictEqual(savedSettings.pendingRedeemCode, 'OBPROT93C6');
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
@@ -4533,24 +4827,84 @@ async function runLocalAsrRepairDecisionTests() {
   }
 }
 
+async function runDiagnosticFailureLogFilteringTests() {
+  const asrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-diagnostic-'));
+  const ocrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-diagnostic-'));
+  try {
+    fs.writeFileSync(path.join(asrRoot, 'transcribe-last.log'), 'status=success\nASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED', 'utf8');
+    fs.writeFileSync(path.join(asrRoot, 'install.log'), 'status=success\nASR INSTALL SUCCESS SHOULD NOT BE COPIED', 'utf8');
+    fs.writeFileSync(path.join(ocrRoot, 'install.log'), 'status=failed\ncurl: (35) Recv failure: Connection reset by peer', 'utf8');
+
+    const plugin = new PluginClass();
+    plugin.manifest = { version: '1.3.3' };
+    plugin.settings = helpers.mergeSettings({
+      apiBase: 'https://example.com/sync',
+      token: 'ABC-123',
+      localAsrPlatform: 'darwin',
+      localTranscriptionEntitlementStatus: { hasAccess: true, status: 'active' },
+      bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
+    });
+    plugin.getConfiguredLocalAsrPlatform = () => 'darwin';
+    plugin.getConfiguredLocalAsrInstallRoot = () => asrRoot;
+    plugin.getConfiguredLocalOcrInstallRoot = () => ocrRoot;
+    plugin.getLocalAsrInstallStatus = () => ({
+      ready: true,
+      installRoot: asrRoot,
+      transcribeScript: `${asrRoot}/transcribe.sh`,
+      scriptVersion: 'ok',
+      scriptOutdated: false,
+      hasTranscribeScript: true,
+      hasWhisper: true,
+      hasFfmpeg: true,
+      hasModel: true,
+      whisperPath: `${asrRoot}/bin/whisper-cli`,
+      ffmpegPath: `${asrRoot}/bin/ffmpeg`,
+      modelPath: `${asrRoot}/models/ggml-small.bin`,
+      missingReasons: [],
+    });
+    plugin.getLocalOcrInstallStatus = () => ({
+      ready: false,
+      installRoot: ocrRoot,
+      pythonPath: `${ocrRoot}/venv/bin/python`,
+      scriptPath: `${ocrRoot}/ocr_image.py`,
+      hasPython: false,
+      hasScript: false,
+      missingReasons: ['Python OCR 运行环境未找到'],
+    });
+
+    const diagnostic = plugin.getSyncDiagnosticText();
+    assert.ok(diagnostic.includes('图片文字识别 OCR'));
+    assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
+    assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
+    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false);
+  } finally {
+    fs.rmSync(asrRoot, { recursive: true, force: true });
+    fs.rmSync(ocrRoot, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await runAsyncHydrationTests();
   await runOpenExternalUrlTests();
   await runCloudRequestFallbackTests();
   await runMissingClientIdRequestTest();
   await runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest();
+  await runRequestJsonRoutesFeishuExtractToOAuthApiBaseTest();
+  await runRequestJsonRecoversFromInvalidCloudBaseEnvTest();
+  await runRequestJsonRecoversFromEmptyMigrationApiBaseTest();
   await runFeishuCustomAppConfigRequestTests();
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();
-  await runUnbindInvalidCodeMarksLocalUnboundTest();
+  await runUnbindInvalidCodePreservesLocalBindingTest();
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
   await runAudioVideoFileAttachmentTranscriptionTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
+  await runDiagnosticFailureLogFilteringTests();
 }
 
 main().catch((error) => {
