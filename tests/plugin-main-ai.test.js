@@ -90,6 +90,8 @@ assert.strictEqual(typeof helpers.buildRecordTitleBase, 'function');
 assert.strictEqual(typeof helpers.hasRecordIdInFrontmatter, 'function');
 assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
+assert.strictEqual(typeof helpers.hasXiaohongshuLoginCookies, 'function');
+assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.enrichExtractedWebpageMetadata, 'function');
 assert.strictEqual(typeof helpers.extractSocialVideoMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
@@ -359,6 +361,27 @@ assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
+assert.strictEqual(
+  helpers.hasXiaohongshuLoginCookies([
+    { name: 'a1', value: 'browser-device-cookie' },
+    { name: 'gid', value: 'guest-id' },
+    { name: 'webId', value: 'anonymous-web-id' },
+    { name: 'xsecappid', value: 'xhs-pc-web' },
+  ]),
+  false,
+);
+assert.strictEqual(
+  helpers.hasXiaohongshuLoginCookies([
+    { name: 'web_session', value: '0123456789abcdef0123456789abcdef' },
+  ]),
+  true,
+);
+assert.strictEqual(
+  helpers.hasXiaohongshuLoginCookies([
+    { name: 'web_session', value: '' },
+  ]),
+  false,
+);
 {
   const restoredFromPendingBindCode = helpers.mergeSettings({
     token: '',
@@ -497,6 +520,23 @@ assert.ok(pluginMainSource.includes("text: 'Pro 高级功能'"));
 assert.ok(pluginMainSource.includes("text: 'Pro 状态'"));
 assert.ok(pluginMainSource.includes("text: '登录小红书评论区'"));
 assert.strictEqual(pluginMainSource.includes(".setName('提取小红书评论区')"), false);
+assert.ok(pluginMainSource.includes('renderXiaohongshuCommentsWithElectron'));
+assert.ok(pluginMainSource.includes('renderXiaohongshuPageWithElectron'));
+assert.ok(pluginMainSource.includes('appendSocialCommentsToMarkdown'));
+assert.ok(pluginMainSource.includes('renderedXiaohongshuComments'));
+assert.strictEqual(pluginMainSource.includes('renderedXiaohongshuExtraction'), false);
+assert.ok(pluginMainSource.includes('fetchXiaohongshuCommentsFromCapturedRequests'));
+assert.ok(pluginMainSource.includes('Network.getResponseBody'));
+assert.ok(pluginMainSource.includes('debuggerComments'));
+assert.ok(pluginMainSource.includes('staticXiaohongshuComments'));
+assert.ok(pluginMainSource.includes('mergeSocialComments'));
+assert.ok(pluginMainSource.includes('commentApiRequests'));
+assert.ok(pluginMainSource.includes('onBeforeSendHeaders'));
+assert.ok(pluginMainSource.includes('const XIAOHONGSHU_SESSION_PARTITION'));
+assert.ok(pluginMainSource.includes('function getXiaohongshuSession'));
+assert.ok(pluginMainSource.includes('async function probeXiaohongshuLoginStatus'));
+assert.ok(pluginMainSource.includes('resolve(await probeXiaohongshuLoginStatus(loginUrl));'));
+assert.ok(pluginMainSource.includes('return await probeXiaohongshuLoginStatus();'));
 assert.strictEqual(pluginMainSource.includes("text: '视频号转写实验'"), false);
 assert.strictEqual(pluginMainSource.includes("id: 'open-wechat-channels-listener'"), false);
 assert.strictEqual(pluginMainSource.includes("text: '音视频转写组件安装'"), false);
@@ -1789,6 +1829,21 @@ const xiaohongshuJsonCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('## 评论区'));
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('**JSON用户**：JSON里的评论正文'));
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('**嵌套用户**：第二条评论'));
+assert.deepStrictEqual(
+  helpers.extractSocialCommentsFromHtml([
+    '<div class="comments-container">',
+    '<div class="comment-item">共 84 条评论 - 回复</div>',
+    '<div class="comment-item">12</div>',
+    '</div>',
+  ].join('')),
+  [],
+);
+assert.deepStrictEqual(
+  helpers.extractSocialCommentsFromHtml([
+    '<script>window.__INITIAL_STATE__={comment_list:[{content:"真实评论内容",user_info:{nickname:"真实用户"},like_count:6}]};</script>',
+  ].join('')),
+  [{ author: '真实用户', content: '真实评论内容', time: '', likes: '6' }],
+);
 
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
