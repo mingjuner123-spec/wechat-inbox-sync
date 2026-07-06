@@ -297,6 +297,10 @@ assert.ok(macOcrInstallerSource.includes('.wechat-inbox-local-asr/python-venv/bi
 assert.ok(macOcrInstallerSource.includes('download_with_retry'));
 assert.ok(macOcrInstallerSource.includes('--retry-all-errors'));
 assert.ok(macOcrInstallerSource.includes('--silent --show-error'));
+assert.ok(pluginMainSource.includes("source.includes('Install-Uv')"));
+assert.ok(pluginMainSource.includes("source.includes('uv-x86_64-pc-windows-msvc.zip')"));
+assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_DOWNLOADS')"));
+assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_PREFERENCE')"));
 assert.ok(pluginMainSource.includes("source.includes('CHUNK_SECONDS=600')"));
 assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
 assert.ok(pluginMainSource.includes("source.includes('TENCENT_MODEL_URL=')"));

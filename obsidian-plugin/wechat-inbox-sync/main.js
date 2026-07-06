@@ -9931,7 +9931,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       return source.includes('$TencentOcrAssetBaseUrl')
         && source.includes('$TencentPipIndexUrl')
-        && source.includes('Download-TextFile');
+        && source.includes('Download-TextFile')
+        && source.includes('Install-Uv')
+        && source.includes('uv-x86_64-pc-windows-msvc.zip')
+        && source.includes('$env:UV_PYTHON_DOWNLOADS')
+        && source.includes('$env:UV_PYTHON_PREFERENCE')
+        && source.includes('& $UvExe python install 3.12')
+        && source.includes('& $UvExe venv $VenvDir --python 3.12');
     };
 
     try {

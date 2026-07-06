@@ -9,12 +9,19 @@ $PythonScript = Join-Path $ScriptDir "ocr_image.py"
 $VenvDir = Join-Path $InstallRoot "venv"
 $RuntimeScript = Join-Path $InstallRoot "ocr_image.py"
 $LogPath = Join-Path $InstallRoot "install.log"
+$BinDir = Join-Path $InstallRoot "bin"
+$UvExe = Join-Path $BinDir "uv.exe"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
 $TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
 $TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
 $PypiFallbackIndexUrl = "https://pypi.org/simple"
+$UvVersion = "0.9.14"
+$env:UV_PYTHON_DOWNLOADS = "automatic"
+$env:UV_PYTHON_PREFERENCE = "managed"
+$env:UV_LINK_MODE = "copy"
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 function Write-InstallLog {
   param([string]$Message)
@@ -23,18 +30,54 @@ function Write-InstallLog {
   Write-Host $Message
 }
 
-function Find-Python {
-  $candidates = @("py", "python", "python3")
-  foreach ($candidate in $candidates) {
-    try {
-      $version = & $candidate --version 2>&1
-      if ($LASTEXITCODE -eq 0 -and "$version" -match "Python") {
-        return $candidate
-      }
-    } catch {
-    }
+function Invoke-NativeCommand {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
   }
-  throw "Python not found. Please install Python 3.9-3.12 and rerun this installer."
+}
+
+function Invoke-DownloadFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Url,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [int]$TimeoutSec = 300
+  )
+  $outDir = Split-Path -Parent $OutFile
+  if ($outDir) {
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+  }
+  Write-InstallLog "Downloading $Url"
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($curl) {
+    & $curl.Source `
+      -L `
+      --fail `
+      --silent `
+      --show-error `
+      --retry 3 `
+      --retry-delay 2 `
+      --connect-timeout 30 `
+      --max-time $TimeoutSec `
+      -o $OutFile `
+      $Url
+    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 100)) {
+      return
+    }
+    Write-InstallLog "curl download failed with exit code $LASTEXITCODE; retrying with PowerShell."
+  }
+  Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -Headers $Headers -TimeoutSec $TimeoutSec
+  if (!(Test-Path -LiteralPath $OutFile) -or ((Get-Item -LiteralPath $OutFile).Length -le 100)) {
+    throw "Downloaded file is empty or invalid: $Url"
+  }
 }
 
 function Download-TextFile {
@@ -42,16 +85,169 @@ function Download-TextFile {
     [Parameter(Mandatory = $true)][string]$Url,
     [Parameter(Mandatory = $true)][string]$OutFile
   )
-  Write-InstallLog "Downloading $Url"
   try {
-    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -Headers $Headers -TimeoutSec 120
-    if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 100)) {
-      return
-    }
+    Invoke-DownloadFile -Url $Url -OutFile $OutFile -TimeoutSec 180
   } catch {
     throw "Failed to download $Url. $($_.Exception.Message)"
   }
-  throw "Downloaded file is empty or invalid: $Url"
+}
+
+function Test-PythonUsable {
+  param([Parameter(Mandatory = $true)][string]$Command)
+  try {
+    $version = & $Command -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>&1
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
+function Find-Python {
+  $candidates = @("python", "python3")
+  foreach ($candidate in $candidates) {
+    if (Test-PythonUsable -Command $candidate) {
+      return $candidate
+    }
+  }
+  try {
+    $pyVersion = & py -3 -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      return "py -3"
+    }
+  } catch {
+  }
+  return $null
+}
+
+function Invoke-Python {
+  param(
+    [Parameter(Mandatory = $true)][string]$PythonCommand,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+  )
+  if ($PythonCommand -eq "py -3") {
+    & py -3 @Arguments
+    return $LASTEXITCODE
+  }
+  & $PythonCommand @Arguments
+  return $LASTEXITCODE
+}
+
+function Test-OcrPythonReady {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  try {
+    & $PythonPath -c "from rapidocr_onnxruntime import RapidOCR; print('rapidocr-ready')" 2>&1 | Out-Host
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
+function Install-Uv {
+  if ((Test-Path -LiteralPath $UvExe) -and (& $UvExe --version 2>$null)) {
+    Write-InstallLog "uv is already available: $UvExe"
+    return
+  }
+
+  $uvZip = Join-Path $BinDir "uv-x86_64-pc-windows-msvc.zip"
+  $uvStage = Join-Path $BinDir ("uv-stage-" + [guid]::NewGuid().ToString("N"))
+  $assetBase = $TencentOcrAssetBaseUrl.TrimEnd("/")
+  $urls = @(
+    "$assetBase/uv-x86_64-pc-windows-msvc.zip",
+    "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
+  )
+
+  $downloaded = $false
+  foreach ($url in $urls) {
+    try {
+      Remove-Item -LiteralPath $uvZip -Force -ErrorAction SilentlyContinue
+      Invoke-DownloadFile -Url $url -OutFile $uvZip -TimeoutSec 600
+      $downloaded = $true
+      break
+    } catch {
+      Write-InstallLog "uv download failed from $url. $($_.Exception.Message)"
+    }
+  }
+  if (-not $downloaded) {
+    throw "uv download failed. Please check network and retry."
+  }
+
+  Remove-Item -LiteralPath $uvStage -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path $uvStage | Out-Null
+  Expand-Archive -LiteralPath $uvZip -DestinationPath $uvStage -Force
+  $foundUv = Get-ChildItem -LiteralPath $uvStage -Recurse -File -Filter "uv.exe" | Select-Object -First 1
+  if (-not $foundUv) {
+    throw "uv package is invalid: uv.exe not found"
+  }
+  Copy-Item -LiteralPath $foundUv.FullName -Destination $UvExe -Force
+  Remove-Item -LiteralPath $uvStage -Recurse -Force -ErrorAction SilentlyContinue
+  & $UvExe --version | Out-Host
+  if ($LASTEXITCODE -ne 0) {
+    throw "uv validation failed"
+  }
+  Write-InstallLog "uv installed to $UvExe"
+}
+
+function Install-OcrPackagesWithPip {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "pip", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl) | Out-Null
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl)
+  if ($exitCode -eq 0) {
+    return $true
+  }
+  Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $PypiFallbackIndexUrl)
+  return $exitCode -eq 0
+}
+
+function Install-OcrPackagesWithUv {
+  $env:VIRTUAL_ENV = $VenvDir
+  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments @("pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl)
+  if ($exitCode -eq 0) {
+    return $true
+  }
+  Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
+  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments @("pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $PypiFallbackIndexUrl)
+  return $exitCode -eq 0
+}
+
+function Setup-PythonEnvironment {
+  $venvPython = Join-Path $VenvDir "Scripts\python.exe"
+  if ((Test-Path -LiteralPath $venvPython) -and (Test-OcrPythonReady -PythonPath $venvPython)) {
+    Write-InstallLog "OCR Python environment is already ready."
+    return $venvPython
+  }
+
+  $python = Find-Python
+  if ($python) {
+    Write-InstallLog "Using existing Python command: $python"
+    Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+    Invoke-Python -PythonCommand $python -m venv $VenvDir | Out-Null
+    if ((Test-Path -LiteralPath $venvPython) -and (Install-OcrPackagesWithPip -PythonPath $venvPython) -and (Test-OcrPythonReady -PythonPath $venvPython)) {
+      Write-InstallLog "Python OCR environment ready via existing Python."
+      return $venvPython
+    }
+    Write-InstallLog "Existing Python OCR setup failed; falling back to uv managed Python."
+    Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  Install-Uv
+  Write-InstallLog "Setting up managed Python 3.12 with uv..."
+  & $UvExe python install 3.12
+  if ($LASTEXITCODE -ne 0) {
+    throw "uv failed to install managed Python 3.12. Please check network and retry."
+  }
+  & $UvExe venv $VenvDir --python 3.12
+  if (!(Test-Path -LiteralPath $venvPython)) {
+    throw "venv python not found: $venvPython"
+  }
+  if (!(Install-OcrPackagesWithUv)) {
+    throw "rapidocr-onnxruntime / pillow install failed. Please check network and retry."
+  }
+  if (!(Test-OcrPythonReady -PythonPath $venvPython)) {
+    throw "rapidocr-onnxruntime import validation failed."
+  }
+  Write-InstallLog "Python OCR environment ready via uv."
+  return $venvPython
 }
 
 Write-InstallLog "Installing local OCR component into $InstallRoot"
@@ -62,23 +258,8 @@ if (!(Test-Path -LiteralPath $PythonScript)) {
   $PythonScript = $downloadedScript
 }
 
-$Python = Find-Python
-Write-InstallLog "Using Python command: $Python"
-
-if (!(Test-Path -LiteralPath $VenvDir)) {
-  & $Python -m venv $VenvDir
-}
-
-$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-if (!(Test-Path -LiteralPath $VenvPython)) {
-  throw "venv python not found: $VenvPython"
-}
-
-& $VenvPython -m pip install --upgrade pip -i $TencentPipIndexUrl --extra-index-url $PypiFallbackIndexUrl
-& $VenvPython -m pip install --upgrade rapidocr-onnxruntime pillow -i $TencentPipIndexUrl --extra-index-url $PypiFallbackIndexUrl
-
+$VenvPython = Setup-PythonEnvironment
 Copy-Item -LiteralPath $PythonScript -Destination $RuntimeScript -Force
-& $VenvPython -c "from rapidocr_onnxruntime import RapidOCR; print('rapidocr-ready')"
 
 Write-InstallLog "Local OCR component installed."
 Write-Host "Python: $VenvPython"

@@ -57,6 +57,15 @@ assert.ok(windowsOcrInstaller.includes('$TencentOcrAssetBaseUrl = "https://he02-
 assert.ok(windowsOcrInstaller.includes('$TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"'));
 assert.ok(windowsOcrInstaller.includes('$PypiFallbackIndexUrl = "https://pypi.org/simple"'));
 assert.ok(windowsOcrInstaller.includes('Download-TextFile'));
+assert.ok(windowsOcrInstaller.includes('$env:UV_PYTHON_DOWNLOADS'));
+assert.ok(windowsOcrInstaller.includes('$env:UV_PYTHON_PREFERENCE'));
+assert.ok(windowsOcrInstaller.includes('uv-x86_64-pc-windows-msvc.zip'));
+assert.ok(windowsOcrInstaller.includes('Install-Uv'));
+assert.ok(windowsOcrInstaller.includes('Invoke-NativeCommand'));
+assert.ok(windowsOcrInstaller.includes('& $UvExe python install 3.12'));
+assert.ok(windowsOcrInstaller.includes('& $UvExe venv $VenvDir --python 3.12'));
+assert.strictEqual(windowsOcrInstaller.includes('& $UvExe pip install --upgrade pip 2>$null | Out-Host'), false);
+assert.strictEqual(windowsOcrInstaller.includes('Please install Python 3.9-3.12'), false);
 assert.ok(macOcrInstaller.includes('rapidocr-onnxruntime'));
 assert.ok(macOcrInstaller.includes('TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"'));
 assert.ok(macOcrInstaller.includes('TENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"'));
