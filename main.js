@@ -535,11 +535,31 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('set -euo pipefail')
       && source.includes('SIMPLIFIED_PROMPT')
       && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
+      && source.includes('SHORT_CHUNK_SECONDS=120')
+      && source.includes('LONG_CHUNK_SECONDS=600')
+      && source.includes('LONG_MEDIA_THRESHOLD_SECONDS=600')
+      && source.includes('choose_chunk_seconds')
+      && source.includes('get_media_duration_seconds')
+      && source.includes('metalResourcesPath=')
+      && source.includes('metalAcceleration=failed')
+      && source.includes('progressPercent')
+    ) {
+      return {
+        scriptVersion: 'adaptive-chunked-bash-simplified-progress-metal-diagnostics-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('CHUNK_SECONDS')
+      && source.includes('set -euo pipefail')
+      && source.includes('SIMPLIFIED_PROMPT')
+      && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
       && source.includes('progressPercent')
     ) {
       return {
         scriptVersion: 'chunked-bash-simplified-progress-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     if (

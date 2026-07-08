@@ -1572,7 +1572,7 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('/Users/demo/.wechat-inbox-local-asr/transcribe.sh', {
     existsSync: () => true,
-    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nfind_metal_resources_dir\nGGML_METAL_PATH_RESOURCES\nCHUNK_SECONDS=120\nchoose_chunk_seconds\nmetalAcceleration=failed\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
+    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nSHORT_CHUNK_SECONDS=120\nLONG_CHUNK_SECONDS=600\nLONG_MEDIA_THRESHOLD_SECONDS=600\nCHUNK_SECONDS="$(choose_chunk_seconds "$DURATION_SECONDS")"\nget_media_duration_seconds\nmetalResourcesPath=\nmetalAcceleration=failed\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
   }),
   {
     scriptVersion: 'adaptive-chunked-bash-simplified-progress-metal-diagnostics-run-log',
