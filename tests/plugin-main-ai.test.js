@@ -3074,6 +3074,54 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(xhsVideoRecord.metadata.markdown, undefined);
   assert.strictEqual(xhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs.mp4');
 
+  const xhsVideoWithCommentsPlugin = new PluginClass();
+  xhsVideoWithCommentsPlugin.settings = helpers.mergeSettings({
+    aiProvider: 'off',
+    settingsVersion: 2,
+    xiaohongshuCommentsEnabled: true,
+  });
+  xhsVideoWithCommentsPlugin.hasProFeatureAccess = async () => true;
+  xhsVideoWithCommentsPlugin.runConfiguredTranscription = async () => ({
+    transcription: '视频口播正文',
+    source: 'local',
+  });
+  const previousXhsCommentRequestUrlMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/video-comments') {
+      return {
+        text: [
+          '<html><head>',
+          '<meta property="og:title" content="XHS Video Comments">',
+          '<meta property="og:video" content="https://video.example.com/xhs-comments.mp4">',
+          '</head><body>',
+          '<div class="comment-item"><span class="user-name">真实用户</span><span class="comment-content">真实评论内容</span><span class="like-count">6</span></div>',
+          '</body></html>',
+        ].join(''),
+      };
+    }
+    throw new Error(`unexpected xhs comment video request ${url}`);
+  };
+  try {
+    const xhsVideoWithCommentsRecord = await xhsVideoWithCommentsPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/video-comments',
+      metadata: { url: 'https://www.xiaohongshu.com/explore/video-comments' },
+    }, '', '', '小红书视频评论区');
+    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.transcriptOnly, true);
+    assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('## 评论区'));
+    assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('**真实用户**：真实评论内容'));
+    const xhsVideoWithCommentsMarkdown = helpers.buildMarkdownForRecord({
+      record: xhsVideoWithCommentsRecord,
+      title: '小红书视频评论区',
+      syncedAt: '2026-07-08T00:00:00.000Z',
+    });
+    assert.ok(xhsVideoWithCommentsMarkdown.includes('视频口播正文'));
+    assert.ok(xhsVideoWithCommentsMarkdown.includes('## 评论区'));
+    assert.ok(xhsVideoWithCommentsMarkdown.includes('真实评论内容'));
+  } finally {
+    requestUrlMock = previousXhsCommentRequestUrlMock;
+  }
+
   const forcedXhsVideoPlugin = new PluginClass();
   forcedXhsVideoPlugin.settings = { aiProvider: 'off' };
   forcedXhsVideoPlugin.renderSocialMediaUrls = async (url) => {

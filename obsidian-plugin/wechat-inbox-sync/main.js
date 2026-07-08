@@ -2214,13 +2214,14 @@ function buildWebpageMarkdownBody(record, title) {
     return `${snapshot}\n`;
   }
   if (metadata.transcriptOnly) {
-    return buildAudioTranscriptMarkdown({
+    const transcriptMarkdown = buildAudioTranscriptMarkdown({
       url,
       transcription: metadata.transcription || '',
       transcriptionStatus: metadata.transcriptionStatus || metadata.conversionStatus || 'pending',
       transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
       transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
     });
+    return snapshot ? `${transcriptMarkdown.trim()}\n\n${snapshot}\n` : transcriptMarkdown;
   }
 
   const status = metadata.conversionStatus || 'pending';
@@ -2325,6 +2326,7 @@ function buildTranscriptOnlyMetadata(metadata, {
   transcriptionSource = '',
   transcriptionError = '',
   conversionStatus = '',
+  markdown: supplementalMarkdown = '',
 } = {}) {
   const {
     markdown,
@@ -2336,6 +2338,7 @@ function buildTranscriptOnlyMetadata(metadata, {
   } = metadata || {};
 
   const sourceName = platform || getWebpageSourcePrefix(url) || '网页';
+  const cleanedSupplementalMarkdown = String(supplementalMarkdown || '').trim();
   return {
     ...rest,
     title: `${sourceName}口播文案`,
@@ -2349,6 +2352,7 @@ function buildTranscriptOnlyMetadata(metadata, {
     transcriptionSource,
     transcriptionError,
     conversionStatus: conversionStatus || transcriptionStatus,
+    ...(cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {}),
   };
 }
 
@@ -11610,6 +11614,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     noMediaError = '',
     binding = null,
     title = '',
+    markdown = '',
   }) {
     const metadata = record.metadata || {};
 
@@ -11625,6 +11630,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionStatus: 'success',
           transcriptionSource: source || 'subtitle',
           conversionStatus: 'success',
+          markdown,
         }),
       };
     }
@@ -11680,6 +11686,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionError: noMediaError || '未能从链接中提取到可转写的音频或视频地址',
           transcriptionSource: source || 'media-url',
           conversionStatus: 'failed',
+          markdown,
         }),
       };
     }
@@ -11719,6 +11726,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             transcriptionStatus: 'success',
             transcriptionSource: result.source,
             conversionStatus: 'success',
+            markdown,
           });
           return {
             ...record,
@@ -11753,6 +11761,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionError: error.message || String(error),
           transcriptionSource: source || this.settings.aiProvider || 'unknown',
           conversionStatus: 'failed',
+          markdown,
         }),
       };
     }
@@ -12257,6 +12266,12 @@ class WechatObsidianInboxPlugin extends Plugin {
             title,
             noMediaError: isUnavailableXhs
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
+              : '',
+            markdown: isXiaohongshuUrl(url)
+              && extractedXiaohongshu
+              && Array.isArray(extractedXiaohongshu.comments)
+              && extractedXiaohongshu.comments.length
+              ? extractedXiaohongshu.markdown
               : '',
           });
         }
