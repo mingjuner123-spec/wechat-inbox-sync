@@ -3,10 +3,13 @@
     <view class="eyebrow">{{membership.badge}}</view>
     <view class="trial-title">{{membership.title}}</view>
     <view wx:if="{{membership.desc}}" class="trial-desc">{{membership.desc}}</view>
-    <view wx:if="{{!trialRedeemCode}}" class="trial-desc">点击后会直接开通 7 天体验，不需要再输入兑换码。</view>
+    <view wx:if="{{showMembershipExpiry && !showRedeemCode}}" class="trial-expiry active">
+      有效期至 {{membership.expiresLabel}}
+    </view>
+    <view wx:if="{{showTrialClaim}}" class="trial-desc">点击后会直接开通 7 天体验，不需要再输入兑换码。</view>
 
     <button
-      wx:if="{{!trialRedeemCode}}"
+      wx:if="{{showTrialClaim}}"
       class="primary-button"
       disabled="{{trialCodeLoading}}"
       bindtap="claimTrialRedeemCode"
@@ -14,7 +17,7 @@
       {{trialCodeLoading ? '开通中' : '领取 7 天 Pro 体验'}}
     </button>
 
-    <block wx:if="{{trialRedeemCode}}">
+    <block wx:if="{{showRedeemCode}}">
       <view class="trial-code-label">兑换码</view>
       <view class="trial-code-box">{{trialRedeemCode}}</view>
       <view wx:if="{{trialRedeemCodeExpiresLabel && !trialRedeemCodeExpired}}" class="trial-expiry">
@@ -28,9 +31,9 @@
   </view>
 
   <view class="compare-card payment-card">
-    <view class="card-title">购买 Pro 正式版</view>
-    <view class="redeem-desc">微信支付商户号配置完成后会直接拉起支付；当前可先生成订单，人工确认后开通。</view>
-    <view class="redeem-desc">可选：Pro 月卡 / Pro 年卡</view>
+    <view class="card-kicker">早鸟价</view>
+    <view class="card-title">{{membership.paymentTitle}}</view>
+    <view class="redeem-desc">选择月卡或年卡后，会直接拉起微信虚拟支付。支付后请等待订单确认，权益刷新后即可使用。</view>
     <view class="payment-plan-list">
       <view
         wx:for="{{paymentPlans}}"
@@ -39,79 +42,23 @@
         data-plan-id="{{item.id}}"
         bindtap="selectPaymentPlan"
       >
-        <view>
-          <view class="payment-plan-name">{{item.name}}</view>
+        <view class="payment-plan-main">
+          <view class="payment-plan-head">
+            <view class="payment-plan-name">{{item.name}}</view>
+            <view wx:if="{{item.badge}}" class="payment-plan-badge">{{item.badge}}</view>
+          </view>
           <view class="payment-plan-desc">{{item.desc}}</view>
         </view>
         <view class="payment-plan-price">{{item.price}}</view>
       </view>
     </view>
+    <view class="price-reset-tip">早鸟价截止到 7 月 10 日，之后恢复原价：月卡 19.9 元/月，年卡 68 元/年。</view>
     <button class="primary-button pay-button" disabled="{{paymentOrderLoading}}" bindtap="createFormalPaymentOrder">
-      {{paymentOrderLoading ? '生成订单中' : '购买 Pro 正式版'}}
+      {{paymentOrderLoading ? '拉起支付中' : membership.paymentButtonText}}
     </button>
     <view wx:if="{{latestPaymentOrder}}" class="payment-order-tip">
       已生成订单：{{latestPaymentOrder.orderNo}} · {{latestPaymentOrder.amountText}} · {{latestPaymentOrder.status}}
     </view>
   </view>
 
-  <view class="compare-card">
-    <view class="card-title">Pro 和免费版的权益对比</view>
-    <view class="benefit-table">
-      <view class="benefit-table-header">
-        <view class="benefit-cell benefit-name">权益</view>
-        <view class="benefit-cell">免费版</view>
-        <view class="benefit-cell pro-col">Pro版</view>
-      </view>
-      <view class="benefit-table-row">
-        <view class="benefit-cell benefit-name">使用次数</view>
-        <view class="benefit-cell">5次/天</view>
-        <view class="benefit-cell pro-col">不限</view>
-      </view>
-      <view class="benefit-table-row">
-        <view class="benefit-cell benefit-name">文字、文件转写</view>
-        <view class="benefit-cell">√</view>
-        <view class="benefit-cell pro-col">√</view>
-      </view>
-      <view class="benefit-table-row">
-        <view class="benefit-cell benefit-name">语音、MP3转写</view>
-        <view class="benefit-cell">×</view>
-        <view class="benefit-cell pro-col">√</view>
-      </view>
-      <view class="benefit-table-row">
-        <view class="benefit-cell benefit-name">图文链接转写</view>
-        <view class="benefit-cell">√</view>
-        <view class="benefit-cell pro-col">√</view>
-      </view>
-      <view class="benefit-table-row">
-        <view class="benefit-cell benefit-name">音视频链接转写</view>
-        <view class="benefit-cell">×</view>
-        <view class="benefit-cell pro-col">√</view>
-      </view>
-    </view>
-  </view>
-
-  <view class="tutorial-card">
-    <view class="card-title">Pro 开通详细教程</view>
-
-    <view class="tutorial-step">
-      <view class="tutorial-step-title">1. 领取 7 天体验</view>
-      <view class="redeem-desc">点击上方按钮，成功后这里会显示兑换码和有效期。</view>
-    </view>
-
-    <view class="tutorial-step">
-      <view class="tutorial-step-title">2. 更新插件为最新版本</view>
-      <image class="tutorial-image" src="../../images/tutorials/pro-install-local-asr.png" mode="widthFix" />
-    </view>
-
-    <view class="tutorial-step">
-      <view class="tutorial-step-title">3. 安装本地转写组件即可开始转写音视频</view>
-      <image class="tutorial-image" src="../../images/tutorials/pro-update-plugin.png" mode="widthFix" />
-    </view>
-
-    <view class="tutorial-actions">
-      <button class="secondary-button" bindtap="copyProTutorialLink">详细教程，飞书链接</button>
-      <button class="ghost-button" bindtap="copyUserGroupWechat">加入用户群（备注 OB 群）</button>
-      <button class="ghost-button" bindtap="copyFormalMembershipWechat">复制正式会员客服微信</button>
-    </view>
-  </view>
 </view>

@@ -16,6 +16,7 @@ const {
 } = require('obsidian');
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
+const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -535,11 +536,27 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('set -euo pipefail')
       && source.includes('SIMPLIFIED_PROMPT')
       && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
+      && source.includes('CHUNK_SECONDS=120')
+      && source.includes('find_metal_resources_dir')
+      && source.includes('GGML_METAL_PATH_RESOURCES')
+      && source.includes('progressPercent')
+    ) {
+      return {
+        scriptVersion: 'chunked-bash-simplified-progress-metal-resources-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('CHUNK_SECONDS')
+      && source.includes('set -euo pipefail')
+      && source.includes('SIMPLIFIED_PROMPT')
+      && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
       && source.includes('progressPercent')
     ) {
       return {
         scriptVersion: 'chunked-bash-simplified-progress-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     if (
@@ -3011,6 +3028,19 @@ function getImageExtFromMime(mimeType) {
   return 'png';
 }
 
+function getImageExtFromBuffer(buffer, fallbackUrl = '') {
+  const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  if (data.length >= 8
+    && data[0] === 0x89
+    && data[1] === 0x50
+    && data[2] === 0x4e
+    && data[3] === 0x47) return 'png';
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'jpg';
+  if (data.length >= 6 && data.slice(0, 6).toString('ascii').startsWith('GIF')) return 'gif';
+  if (data.length >= 12 && data.slice(0, 4).toString('ascii') === 'RIFF' && data.slice(8, 12).toString('ascii') === 'WEBP') return 'webp';
+  return getImageFileExtension(fallbackUrl) || 'png';
+}
+
 function getAttachmentExt(fileName, fallbackExt) {
   const fromName = String(fileName || '').split('.').pop();
   const ext = String(fallbackExt || fromName || '').toLowerCase().replace(/^\./, '');
@@ -5284,12 +5314,25 @@ function normalizeSocialComment(comment) {
   const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
+  if (isNoisySocialCommentContent(content, author)) return null;
   return {
     author,
     content,
     time: String(comment.time || '').trim(),
     likes: String(comment.likes || '').trim(),
   };
+}
+
+function isNoisySocialCommentContent(content, author = '') {
+  const text = String(content || '').replace(/\s+/g, ' ').trim();
+  const byAuthor = String(author || '').trim();
+  if (!text) return true;
+  if (/^\d+$/.test(text)) return true;
+  if (/^(?:回复|评论|点赞|分享|收藏|展开|收起|查看|更多|写评论|发布|发送)$/.test(text)) return true;
+  if (/^共\s*\d+\s*(?:条|則|个)?\s*(?:评论|回复)/.test(text)) return true;
+  if (/(?:共\s*\d+\s*(?:条|个)?\s*评论).*(?:回复|展开|查看)/.test(text)) return true;
+  if (!byAuthor && text.length <= 4 && /^[\d\s赞回复评论]+$/.test(text)) return true;
+  return false;
 }
 
 function pushSocialComment(comments, seen, comment) {
@@ -5299,6 +5342,17 @@ function pushSocialComment(comments, seen, comment) {
   if (seen.has(key)) return;
   seen.add(key);
   comments.push(normalized);
+}
+
+function mergeSocialComments(groups = [], limit = 50) {
+  const comments = [];
+  const seen = new Set();
+  (Array.isArray(groups) ? groups : []).forEach((group) => {
+    (Array.isArray(group) ? group : []).forEach((comment) => {
+      if (comments.length < limit) pushSocialComment(comments, seen, comment);
+    });
+  });
+  return comments.slice(0, limit);
 }
 
 function pushWechatComment(comments, seen, comment) {
@@ -5512,14 +5566,78 @@ function buildWechatCommentsMarkdown(comments = []) {
   return buildSocialCommentsMarkdown(comments);
 }
 
+function appendSocialCommentsToMarkdown(markdown, comments = []) {
+  const source = String(markdown || '').trim();
+  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
+  const commentMarkdown = buildSocialCommentsMarkdown(comments);
+  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
+}
+
 function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
   const source = String(markdown || '').trim();
   if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
   const comments = Array.isArray(htmlOrComments)
     ? htmlOrComments
     : extractWechatCommentsFromHtml(htmlOrComments);
-  const commentMarkdown = buildWechatCommentsMarkdown(comments);
-  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
+  return appendSocialCommentsToMarkdown(markdown, comments);
+}
+
+function isXiaohongshuCommentApiUrl(url) {
+  return /xiaohongshu\.com\/api\/sns\/web\/v\d+\/comment/i.test(String(url || ''));
+}
+
+function sanitizeXiaohongshuCapturedHeaders(headers = {}, cookieHeader = '') {
+  const result = {};
+  Object.entries(headers || {}).forEach(([key, value]) => {
+    const name = String(key || '').trim();
+    if (!name || /^(?:host|content-length|connection|accept-encoding)$/i.test(name)) return;
+    if (typeof value === 'undefined' || value === null) return;
+    result[name] = value;
+  });
+  if (cookieHeader && !Object.keys(result).some((key) => /^cookie$/i.test(key))) {
+    result.Cookie = cookieHeader;
+  }
+  if (!Object.keys(result).some((key) => /^referer$/i.test(key))) {
+    result.Referer = 'https://www.xiaohongshu.com/';
+  }
+  if (!Object.keys(result).some((key) => /^user-agent$/i.test(key))) {
+    result['User-Agent'] = 'Mozilla/5.0 WeChat-Inbox-Sync';
+  }
+  return result;
+}
+
+async function fetchXiaohongshuCommentsFromCapturedRequests(commentApiRequests = [], limit = 50) {
+  const comments = [];
+  const seen = new Set();
+  const cookieHeader = await getXiaohongshuCookieHeader();
+  const uniqueRequests = [];
+  const seenUrls = new Set();
+  (commentApiRequests || []).forEach((request) => {
+    const url = String(request && request.url || '').trim();
+    if (!isXiaohongshuCommentApiUrl(url) || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    uniqueRequests.push(request);
+  });
+  for (const request of uniqueRequests.slice(-8)) {
+    if (comments.length >= limit) break;
+    try {
+      const response = await requestJsonViaNode({
+        url: request.url,
+        method: 'GET',
+        headers: sanitizeXiaohongshuCapturedHeaders(request.requestHeaders || {}, cookieHeader),
+        timeout: 15000,
+      });
+      if (!response || response.status < 200 || response.status >= 300) continue;
+      if (response.json) {
+        extractCommentsFromObject(response.json, comments, seen, limit);
+      } else if (response.text) {
+        collectJsonObjectCandidates(response.text).forEach((candidate) => {
+          extractCommentsFromObject(parseLooseJsonCandidate(candidate), comments, seen, limit);
+        });
+      }
+    } catch (error) {}
+  }
+  return comments.slice(0, limit);
 }
 
 function extractHtmlTitle(html) {
@@ -5775,6 +5893,16 @@ function getWechatSession() {
   }
 }
 
+function getXiaohongshuSession() {
+  const remote = getElectronRemote();
+  if (!remote) return null;
+  try {
+    return remote.session.fromPartition(XIAOHONGSHU_SESSION_PARTITION);
+  } catch (error) {
+    return null;
+  }
+}
+
 async function checkWechatLoginStatus() {
   const session = getWechatSession();
   if (!session) return false;
@@ -5798,7 +5926,7 @@ async function checkFeishuLoginStatus() {
 }
 
 async function getXiaohongshuCookies() {
-  const session = getWechatSession();
+  const session = getXiaohongshuSession();
   if (!session) return [];
   try {
     const groups = await Promise.all([
@@ -5814,9 +5942,73 @@ async function getXiaohongshuCookies() {
   }
 }
 
+function hasXiaohongshuLoginCookies(cookies = []) {
+  return (cookies || []).some((cookie) => {
+    const name = String(cookie && cookie.name || '').trim();
+    const value = String(cookie && cookie.value || '').trim();
+    if (name !== 'web_session') return false;
+    if (!value || /^(?:null|undefined|deleted|expired)$/i.test(value)) return false;
+    return value.length >= 8;
+  });
+}
+
 async function checkXiaohongshuLoginStatus() {
   const cookies = await getXiaohongshuCookies();
-  return cookies.some((cookie) => ['web_session', 'webId', 'a1', 'gid', 'xsecappid'].includes(cookie.name));
+  return hasXiaohongshuLoginCookies(cookies);
+}
+
+async function probeXiaohongshuLoginStatus(targetUrl = '') {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    return await checkXiaohongshuLoginStatus();
+  }
+  const session = getXiaohongshuSession();
+  if (!session) return false;
+  const win = new BrowserWindow({
+    width: 980,
+    height: 820,
+    show: false,
+    webPreferences: {
+      session,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  try {
+    const url = targetUrl || 'https://www.xiaohongshu.com/';
+    const loaded = waitForWebContents(win.webContents, 15000);
+    await win.loadURL(url);
+    await loaded;
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const state = await win.webContents.executeJavaScript(`
+      (async () => {
+        const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\\s+/g, ' ').trim();
+        const hasLoginWall = /登录后|请登录|登录小红书|手机号登录|验证码登录|扫码登录|未登录/.test(text);
+        const hasUserSignal = Boolean(document.querySelector('[href*="/user/profile"], [class*="avatar"], [class*="user-info"], [class*="userInfo"]'));
+        let hasAccountApiSignal = false;
+        try {
+          const response = await fetch('https://edith.xiaohongshu.com/api/sns/web/v1/user/selfinfo', {
+            credentials: 'include',
+            headers: { accept: 'application/json, text/plain, */*' },
+          });
+          const payload = await response.clone().json().catch(async () => ({ text: await response.text().catch(() => '') }));
+          const payloadText = JSON.stringify(payload || {});
+          hasAccountApiSignal = response.ok && /user_?id|nickname|red_?id|avatar/i.test(payloadText) && !/login|登录|unauthorized|forbidden/i.test(payloadText);
+        } catch (error) {}
+        return { hasLoginWall, hasUserSignal, hasAccountApiSignal, text: text.slice(0, 500) };
+      })()
+    `);
+    if (state && state.hasLoginWall) return false;
+    const hasCookie = await checkXiaohongshuLoginStatus();
+    return Boolean(hasCookie && state && (state.hasAccountApiSignal || state.hasUserSignal));
+  } catch (error) {
+    return false;
+  } finally {
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
 }
 
 async function getXiaohongshuCookieHeader() {
@@ -5970,7 +6162,7 @@ async function loginXiaohongshuWeb(targetUrl) {
     throw new Error('当前 Obsidian 环境不支持浏览器窗口');
   }
 
-  const session = getWechatSession();
+  const session = getXiaohongshuSession();
   if (!session) {
     throw new Error('无法创建小红书登录会话');
   }
@@ -6005,24 +6197,13 @@ async function loginXiaohongshuWeb(targetUrl) {
         reject(error);
         return;
       }
-      resolve(await checkXiaohongshuLoginStatus());
+      resolve(await probeXiaohongshuLoginStatus(loginUrl));
     };
 
-    const timer = setInterval(async () => {
-      try {
-        if (await checkXiaohongshuLoginStatus()) {
-          clearInterval(timer);
-          finish();
-        }
-      } catch (error) {}
-    }, 1500);
-
     win.on('closed', async () => {
-      clearInterval(timer);
       finish();
     });
     win.loadURL(loginUrl).catch((error) => {
-      clearInterval(timer);
       finish(error);
     });
   });
@@ -6732,6 +6913,209 @@ async function renderSocialMediaUrlsWithElectron(url) {
       win.destroy();
     }
   }
+}
+
+async function renderXiaohongshuPageWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('Current Obsidian environment does not support hidden browser rendering');
+  }
+
+  const wechatSession = getXiaohongshuSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 960,
+    show: false,
+    webPreferences: {
+      session: wechatSession || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  const commentApiRequests = [];
+  const browserSession = (win.webContents && win.webContents.session) || wechatSession;
+  const captureCommentApiRequest = (details) => {
+    const requestUrl = String(details && details.url || '').trim();
+    if (!isXiaohongshuCommentApiUrl(requestUrl)) return;
+    commentApiRequests.push({
+      url: requestUrl,
+      requestHeaders: details && details.requestHeaders ? { ...details.requestHeaders } : {},
+    });
+  };
+  try {
+    if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeSendHeaders === 'function') {
+      browserSession.webRequest.onBeforeSendHeaders({ urls: ['*://*.xiaohongshu.com/*'] }, (details, callback) => {
+        captureCommentApiRequest(details);
+        if (typeof callback === 'function') callback({ requestHeaders: details.requestHeaders });
+      });
+    }
+  } catch (error) {}
+
+  const debuggerComments = [];
+  const debuggerSeen = new Set();
+  const debuggerBodyTasks = [];
+  const debuggerRequestUrls = new Map();
+  let debuggerAttached = false;
+  const debuggerApi = win.webContents && win.webContents.debugger;
+  const parseCommentApiText = (text) => {
+    if (!text) return;
+    try {
+      extractCommentsFromObject(JSON.parse(text), debuggerComments, debuggerSeen, 50);
+      return;
+    } catch (error) {}
+    collectJsonObjectCandidates(text).forEach((candidate) => {
+      extractCommentsFromObject(parseLooseJsonCandidate(candidate), debuggerComments, debuggerSeen, 50);
+    });
+  };
+  try {
+    if (debuggerApi && typeof debuggerApi.attach === 'function' && typeof debuggerApi.sendCommand === 'function') {
+      if (!debuggerApi.isAttached || !debuggerApi.isAttached()) {
+        debuggerApi.attach('1.3');
+        debuggerAttached = true;
+      }
+      debuggerApi.sendCommand('Network.enable').catch(() => {});
+      debuggerApi.on('message', (_event, method, params = {}) => {
+        try {
+          if (method === 'Network.responseReceived') {
+            const responseUrl = String(params.response && params.response.url || '').trim();
+            if (params.requestId && isXiaohongshuCommentApiUrl(responseUrl)) {
+              debuggerRequestUrls.set(params.requestId, responseUrl);
+            }
+          }
+          if (method === 'Network.loadingFinished' && debuggerRequestUrls.has(params.requestId)) {
+            const requestId = params.requestId;
+            debuggerBodyTasks.push((async () => {
+              try {
+                const body = await debuggerApi.sendCommand('Network.getResponseBody', { requestId });
+                const text = body && body.base64Encoded
+                  ? Buffer.from(String(body.body || ''), 'base64').toString('utf8')
+                  : String(body && body.body || '');
+                parseCommentApiText(text);
+              } catch (error) {}
+            })());
+          }
+        } catch (error) {}
+      });
+    }
+  } catch (error) {}
+
+  try {
+    const loaded = waitForWebContents(win.webContents, 20000);
+    await win.loadURL(url);
+    await loaded;
+    const renderedPayload = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+        const comments = [];
+        const seen = new Set();
+        const push = (author, content, time, likes) => {
+          const body = clean(content);
+          if (!body || body.length < 2) return;
+          if (/^(?:回复|评论|点赞|赞|展开|更多|查看|分享|收藏|[0-9]+)$/.test(body)) return;
+          if (/^共\\s*\\d+\\s*条评论/.test(body)) return;
+          const name = clean(author);
+          const key = name + '|' + body;
+          if (seen.has(key)) return;
+          seen.add(key);
+          comments.push({ author: name, content: body, time: clean(time), likes: clean(likes) });
+        };
+        const clickUsefulButtons = () => {
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"], .show-more, .more, .expand, [class*="more"], [class*="expand"]'));
+          buttons.forEach((node) => {
+            const text = String(node.innerText || node.textContent || node.getAttribute('aria-label') || '').trim();
+            if (/评论|回复|展开|更多|查看/i.test(text)) {
+              try { node.click(); } catch (error) {}
+            }
+          });
+        };
+        const collectDomComments = () => {
+          const selectors = [
+            '.comment-item',
+            '[class*="comment-item"]',
+            '[class*="CommentItem"]',
+            '[class*="comment"][class*="item"]',
+            '[class*="reply-item"]',
+            '[class*="ReplyItem"]',
+          ];
+          const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
+          nodes.forEach((node) => {
+            const pick = (selectorsToTry) => {
+              for (const selector of selectorsToTry) {
+                const candidates = Array.from(node.querySelectorAll(selector));
+                for (const child of candidates) {
+                  const value = clean(child.innerText || child.textContent || '');
+                  if (value) return value;
+                }
+              }
+              return '';
+            };
+            const author = pick(['[class*="name"]', '[class*="nick"]', '[class*="author"]', '[class*="user"]']);
+            const time = pick(['[class*="time"]', '[class*="date"]']);
+            const likes = pick(['[class*="like"]', '[class*="praise"]']);
+            let content = pick(['[class*="content"]', '[class*="text"]', '[class*="desc"]']);
+            if (!content) {
+              const text = clean(node.innerText || node.textContent || '');
+              const parts = text.split(/\\s+/).filter(Boolean);
+              content = parts.find((part) => part.length >= 2 && !/^(?:回复|评论|点赞|赞|展开|更多|查看|分享|收藏|[0-9]+)$/.test(part)) || text;
+            }
+            push(author, content, time, likes);
+          });
+        };
+        for (let index = 0; index < 18; index += 1) {
+          clickUsefulButtons();
+          collectDomComments();
+          window.scrollBy(0, Math.max(600, Math.floor(window.innerHeight * 0.8)));
+          await sleep(700);
+        }
+        clickUsefulButtons();
+        collectDomComments();
+        await sleep(1000);
+        collectDomComments();
+        return {
+          html: document.documentElement ? document.documentElement.outerHTML : '',
+          comments,
+        };
+      })()
+    `);
+    await Promise.allSettled(debuggerBodyTasks);
+    const renderedHtml = renderedPayload && typeof renderedPayload === 'object'
+      ? String(renderedPayload.html || '')
+      : String(renderedPayload || '');
+    const inlineDomComments = renderedPayload && typeof renderedPayload === 'object' && Array.isArray(renderedPayload.comments)
+      ? renderedPayload.comments
+      : [];
+    const apiComments = await fetchXiaohongshuCommentsFromCapturedRequests(commentApiRequests, 50);
+    const domComments = extractSocialCommentsFromHtml(renderedHtml, 50);
+    const comments = mergeSocialComments([debuggerComments, apiComments, inlineDomComments, domComments], 50);
+    return {
+      html: renderedHtml,
+      comments,
+      commentApiRequestCount: commentApiRequests.length,
+      debuggerCommentCount: debuggerComments.length,
+    };
+  } finally {
+    try {
+      if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeSendHeaders === 'function') {
+        browserSession.webRequest.onBeforeSendHeaders({ urls: ['*://*.xiaohongshu.com/*'] }, null);
+      }
+    } catch (error) {}
+    try {
+      if (debuggerAttached && debuggerApi && typeof debuggerApi.detach === 'function') {
+        debuggerApi.detach();
+      }
+    } catch (error) {}
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
+}
+
+async function renderXiaohongshuCommentsWithElectron(url) {
+  const page = await renderXiaohongshuPageWithElectron(url);
+  return page && Array.isArray(page.comments) ? page.comments : [];
 }
 
 async function renderSocialMediaUrlWithElectron(url) {
@@ -7864,13 +8248,17 @@ function buildFeishuImageFallbackUrl(token, docUrl) {
 
 // 把 markdown 里的 feishu-image:{token} 占位关联到 DOM 图片 assets 的真实 src，
 // 使 saveWebpageImageAssets 能按 src 匹配下载到本地；找不到则用飞书下载 URL 兜底
-function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl) {
+function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl, tokenUrlMap = {}) {
   let result = String(markdown || '');
   if (!result.includes('feishu-image:')) return result;
   const tokenPattern = /!\[([^\]]*)\]\(feishu-image:([^)]+)\)/g;
   result = result.replace(tokenPattern, (full, alt, token) => {
     const t = String(token || '').trim();
     if (!t) return full;
+    const mappedUrl = String(tokenUrlMap && tokenUrlMap[t] || '').trim();
+    if (/^https?:\/\//i.test(mappedUrl)) {
+      return `![${alt || '图片'}](${mappedUrl})`;
+    }
     if (Array.isArray(assets)) {
       for (const asset of assets) {
         const src = String((asset && asset.src) || '');
@@ -8395,6 +8783,24 @@ function showLocalComponentInstallFailure(app, message) {
   });
 }
 
+function formatLocalComponentInstallFailureReason(error) {
+  const rawMessage = String(error && (error.message || error) || '未知错误').trim();
+  const lines = rawMessage
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const isCurlProgressLine = (line) => /^%?\s*Total\s+%?\s*Received/i.test(line)
+    || /Dload\s+Upload\s+Total\s+Spent\s+Left\s+Speed/i.test(line)
+    || /^\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+/.test(line)
+    || /^-+:\s*-+:\s*-+/.test(line);
+  const isFailureLine = (line) => /curl:\s*\(\d+\)|status\s*=\s*failed|failed|failure|error|exception|traceback|connection reset|timed out|timeout|not found|permission denied|denied|无法|失败|错误|异常|超时|未找到|拒绝/i.test(line);
+  const failureLines = lines.filter((line) => !isCurlProgressLine(line) && isFailureLine(line));
+  const cleanLines = failureLines.length
+    ? failureLines
+    : lines.filter((line) => !isCurlProgressLine(line));
+  return cleanLines.slice(0, 6).join('\n') || '未知错误';
+}
+
 class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
@@ -8463,7 +8869,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async checkXiaohongshuLogin() {
     try {
-      return await checkXiaohongshuLoginStatus();
+      return await probeXiaohongshuLoginStatus();
     } catch (error) {
       return false;
     }
@@ -8926,6 +9332,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       markdown: extractFeishuMarkdownFromOpenApiBlocks(blocks),
       documentId: String((data && data.documentId) || '').trim(),
       blockCount: Number((data && data.blockCount) || blocks.length) || blocks.length,
+      imageTmpDownloadUrls: data && data.imageTmpDownloadUrls && typeof data.imageTmpDownloadUrls === 'object'
+        ? data.imageTmpDownloadUrls
+        : {},
+      imageTokenCount: Number(data && data.imageTokenCount || 0) || 0,
+      imageDownloadError: String(data && data.imageDownloadError || '').trim(),
     };
   }
 
@@ -9441,6 +9852,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     return path.join(this.getPluginBaseDir(), 'local-ocr', fileName);
   }
 
+  copyBundledLocalOcrRuntimeAssets(installerPath) {
+    if (!installerPath) return;
+    const sourcePath = path.join(this.getPluginBaseDir(), 'local-ocr', 'ocr_image.py');
+    const targetPath = path.join(path.dirname(installerPath), 'ocr_image.py');
+    try {
+      if (!fs.existsSync(sourcePath)) return;
+      if (path.resolve(sourcePath) === path.resolve(targetPath)) return;
+      fs.copyFileSync(sourcePath, targetPath);
+    } catch (error) {
+      console.warn('Failed to copy bundled OCR runtime asset:', error);
+    }
+  }
+
   getLocalOcrInstallStatus() {
     return getLocalOcrInstallStatus(
       this.getConfiguredLocalOcrInstallRoot(),
@@ -9512,16 +9936,24 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isMac) {
         return source.includes('TENCENT_OCR_ASSET_BASE_URL')
           && source.includes('TENCENT_PIP_INDEX_URL')
-          && source.includes('download_text_file')
+          && source.includes('download_with_retry')
+          && source.includes('find_existing_python')
           && source.includes('detect_uv_arch')
           && source.includes('UV_PYTHON_DOWNLOADS=automatic')
           && source.includes('UV_PYTHON_PREFERENCE=managed')
+          && source.includes('.wechat-inbox-local-asr/python-venv/bin/python')
           && source.includes('"$UV_BIN" python install 3.12')
           && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
       }
       return source.includes('$TencentOcrAssetBaseUrl')
         && source.includes('$TencentPipIndexUrl')
-        && source.includes('Download-TextFile');
+        && source.includes('Download-TextFile')
+        && source.includes('Install-Uv')
+        && source.includes('uv-x86_64-pc-windows-msvc.zip')
+        && source.includes('$env:UV_PYTHON_DOWNLOADS')
+        && source.includes('$env:UV_PYTHON_PREFERENCE')
+        && source.includes('& $UvExe python install 3.12')
+        && source.includes('& $UvExe venv $VenvDir --python 3.12');
     };
 
     try {
@@ -9536,6 +9968,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw new Error('Local OCR installer download returned outdated or invalid content');
       }
       fs.writeFileSync(downloadedPath, scriptText, 'utf8');
+      this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
       return downloadedPath;
     } catch (downloadError) {
       if (fs.existsSync(installerPath)) {
@@ -9597,7 +10030,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       const source = String(scriptText || '');
       if (!source.includes('.wechat-inbox-local-asr')) return false;
       if (isMac) {
-        return source.includes('CHUNK_SECONDS=600')
+        return source.includes('CHUNK_SECONDS=120')
+          && source.includes('find_metal_resources_dir')
+          && source.includes('GGML_METAL_PATH_RESOURCES')
           && source.includes('transcribe-last.log')
           && source.includes('validate_local_asr_inference')
           && source.includes('TENCENT_MODEL_URL=')
@@ -9699,7 +10134,68 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getSyncDiagnosticText() {
-    return this.getLocalAsrDiagnosticText();
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const asrRoot = this.getConfiguredLocalAsrInstallRoot();
+    const ocrRoot = this.getConfiguredLocalOcrInstallRoot();
+    const asrStatus = typeof this.getLocalAsrInstallStatus === 'function'
+      ? this.getLocalAsrInstallStatus()
+      : getLocalAsrInstallStatus(asrRoot, fs.existsSync, platform);
+    const ocrStatus = typeof this.getLocalOcrInstallStatus === 'function'
+      ? this.getLocalOcrInstallStatus()
+      : getLocalOcrInstallStatus(ocrRoot, fs.existsSync, platform);
+    const asrInstallLog = readLocalAsrInstallLog(asrRoot);
+    const asrRunLog = readLocalAsrRunLog(asrRoot);
+    const ocrInstallLog = readLocalAsrInstallLog(ocrRoot);
+    const syncLogText = readSyncDiagnosticLog(asrRoot);
+    const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : syncLogText;
+    const hasFailureSignal = (text) => /status\s*=\s*failed|failed|failure|error|exception|traceback|curl:\s*\(\d+\)|connection reset|timed out|timeout|not found|permission denied|denied|未找到|失败|错误|异常|超时|缺失|不完整/i.test(String(text || ''));
+    const appendFailedLog = (lines, title, text) => {
+      const source = String(text || '').trim();
+      if (!source || !hasFailureSignal(source)) return;
+      lines.push(title, source);
+    };
+    const formatMissingReasons = (status) => (
+      status && Array.isArray(status.missingReasons) && status.missingReasons.length
+        ? status.missingReasons.join('；')
+        : '无'
+    );
+    const lines = [
+      'WeChat Inbox Sync 同步/安装失败诊断',
+      `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
+      `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
+      `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
+      `实际使用系统：${platform}`,
+      `API 地址：${this.settings.apiBase || '-'}`,
+      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
+      `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      '',
+      '组件状态：',
+      `音视频转写 ASR：${asrStatus.ready ? '可用' : '不可用'}`,
+      `ASR 安装目录：${asrStatus.installRoot || asrRoot}`,
+      `ASR 缺失项：${formatMissingReasons(asrStatus)}`,
+      `图片文字识别 OCR：${ocrStatus.ready ? '可用' : '不可用'}`,
+      `OCR 安装目录：${ocrStatus.installRoot || ocrRoot}`,
+      `OCR 缺失项：${formatMissingReasons(ocrStatus)}`,
+    ];
+
+    if (lastSyncText && hasFailureSignal(lastSyncText)) {
+      lines.push('', '最近同步失败状态：', lastSyncText);
+    }
+    if (!asrStatus.ready) {
+      appendFailedLog(lines, 'ASR 最近安装失败日志：', asrInstallLog);
+      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog);
+    } else {
+      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog);
+    }
+    if (!ocrStatus.ready) {
+      appendFailedLog(lines, 'OCR 最近安装失败日志：', ocrInstallLog);
+    }
+    if (!lines.some((line) => /失败日志|失败状态/.test(line))) {
+      lines.push('', '未检测到失败日志；已省略成功日志。');
+    } else {
+      lines.push('', '已省略成功日志，只保留失败相关信息。');
+    }
+    return lines.join('\n');
   }
 
   async copyTextToClipboard(text) {
@@ -10079,13 +10575,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async showLocalComponentInstallFailure(error) {
-    const rawMessage = String(error && (error.message || error) || '未知错误').trim();
-    const reason = rawMessage
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, 6)
-      .join('\n') || '未知错误';
+    const reason = formatLocalComponentInstallFailureReason(error);
     const message = [
       `失败原因：${reason}`,
       '如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。',
@@ -11054,6 +11544,54 @@ class WechatObsidianInboxPlugin extends Plugin {
     return nextMarkdown;
   }
 
+  async saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title) {
+    if (!markdown
+      || !this.app
+      || !this.app.vault
+      || !this.app.vault.adapter
+      || typeof this.app.vault.adapter.writeBinary !== 'function') {
+      return markdown;
+    }
+    const imageMatches = Array.from(String(markdown).matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
+    if (!imageMatches.length) return markdown;
+
+    const imageRootDir = `${rootDir}/网页图片`;
+    const imageDayDir = `${imageRootDir}/${dateFolder}`;
+    let nextMarkdown = String(markdown || '');
+    let index = 1;
+    const savedByUrl = new Map();
+    const safeTitle = sanitizeAttachmentName(title, '网页图片');
+
+    await this.ensureFolder(imageRootDir);
+    await this.ensureFolder(imageDayDir);
+
+    for (const match of imageMatches) {
+      const imageUrl = String(match[2] || '').trim();
+      if (!imageUrl || savedByUrl.has(imageUrl)) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const arrayBuffer = await this.downloadArrayBuffer(imageUrl);
+        const buffer = Buffer.from(arrayBuffer || []);
+        if (!buffer.length) continue;
+        const ext = getImageExtFromBuffer(buffer, imageUrl);
+        const imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${ext}`;
+        // eslint-disable-next-line no-await-in-loop
+        await this.app.vault.adapter.writeBinary(imagePath, buffer);
+        savedByUrl.set(imageUrl, imagePath);
+        index += 1;
+      } catch (error) {
+        // Remote image localization is best-effort. Keep the original URL if download fails.
+      }
+    }
+
+    savedByUrl.forEach((imagePath, imageUrl) => {
+      const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, 'g');
+      nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
+    });
+
+    return nextMarkdown;
+  }
+
   async buildTranscriptRecordFromMedia(record, {
     url,
     platform,
@@ -11463,13 +12001,20 @@ class WechatObsidianInboxPlugin extends Plugin {
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
-            const cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+            let cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
                 dedupe: true,
                 feishuTitle,
               }),
               [],
               url,
+              cloudOpenApiResult.imageTmpDownloadUrls || {},
+            );
+            cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
+              cleanedCloudOpenApiMarkdown,
+              rootDir,
+              dateFolder,
+              feishuTitle,
             );
             return {
               ...record,
@@ -11479,7 +12024,11 @@ class WechatObsidianInboxPlugin extends Plugin {
                 markdown: cleanedCloudOpenApiMarkdown,
                 conversionStatus: 'success',
                 conversionSource: 'feishu-cloud-oauth',
-                conversionNote: `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
+                conversionNote: [
+                  `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
+                  cloudOpenApiResult.imageTokenCount ? `images=${cloudOpenApiResult.imageTokenCount}` : '',
+                  cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
+                ].filter(Boolean).join('; '),
               }),
             };
           } catch (error) {
@@ -11609,11 +12158,46 @@ class WechatObsidianInboxPlugin extends Plugin {
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
           || /\/video\//i.test(resolvedUrl);
+        const shouldIncludeXiaohongshuComments = hasProAdvancedAccess
+          && this.settings.xiaohongshuCommentsEnabled !== false;
         let extractedXiaohongshu = null;
         if (isXiaohongshuUrl(url)) {
+          const staticXiaohongshuComments = shouldIncludeXiaohongshuComments
+            ? extractSocialCommentsFromHtml(html, 50)
+            : [];
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
-            includeComments: hasProAdvancedAccess && this.settings.xiaohongshuCommentsEnabled !== false,
+            includeComments: false,
           });
+          if (shouldIncludeXiaohongshuComments) {
+            try {
+              const renderedXiaohongshuPage = await renderXiaohongshuPageWithElectron(resolvedUrl);
+              const renderedXiaohongshuComments = renderedXiaohongshuPage && Array.isArray(renderedXiaohongshuPage.comments)
+                ? renderedXiaohongshuPage.comments
+                : [];
+              const mergedXiaohongshuComments = mergeSocialComments([staticXiaohongshuComments, renderedXiaohongshuComments], 50);
+              if (mergedXiaohongshuComments.length) {
+                extractedXiaohongshu = {
+                  ...extractedXiaohongshu,
+                  comments: mergedXiaohongshuComments,
+                  markdown: appendSocialCommentsToMarkdown(extractedXiaohongshu.markdown, mergedXiaohongshuComments),
+                };
+              }
+            } catch (xiaohongshuRenderError) {
+              if (staticXiaohongshuComments.length) {
+                extractedXiaohongshu = {
+                  ...extractedXiaohongshu,
+                  comments: staticXiaohongshuComments,
+                  markdown: appendSocialCommentsToMarkdown(extractedXiaohongshu.markdown, staticXiaohongshuComments),
+                };
+              }
+            }
+          } else if (staticXiaohongshuComments.length) {
+            extractedXiaohongshu = {
+              ...extractedXiaohongshu,
+              comments: staticXiaohongshuComments,
+              markdown: appendSocialCommentsToMarkdown(extractedXiaohongshu.markdown, staticXiaohongshuComments),
+            };
+          }
           if (hasProAdvancedAccess) {
             extractedXiaohongshu = await this.enrichXiaohongshuExtractionWithOcr(extractedXiaohongshu, {
               pageUrl: resolvedUrl,
@@ -11692,7 +12276,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
 
         const extracted = extractedXiaohongshu || extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
-          includeComments: hasProAdvancedAccess && this.settings.xiaohongshuCommentsEnabled !== false,
+          includeComments: shouldIncludeXiaohongshuComments,
         });
         return {
           ...record,
@@ -12553,6 +13137,7 @@ WechatObsidianInboxPlugin.__test = {
   resolveLocalAsrPlatform,
   getLocalAsrPlatformMismatchMessage,
   formatRedeemAccessError,
+  formatLocalComponentInstallFailureReason,
   isCachedProStatusActiveForCode,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
@@ -12568,6 +13153,7 @@ WechatObsidianInboxPlugin.__test = {
   buildRecordTitleBase,
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
+  extractSocialCommentsFromHtml,
   appendXiaohongshuOcrMarkdown,
   buildXiaohongshuOcrMarkdown,
   isLikelyImageTextNote,
@@ -12624,6 +13210,7 @@ WechatObsidianInboxPlugin.__test = {
   buildLocalOcrInstallCommand,
   downloadTextViaNode,
   getSocialRequestHeaders,
+  hasXiaohongshuLoginCookies,
   getXiaohongshuCookieHeader,
   getXiaohongshuRequestHeaders,
   checkXiaohongshuLoginStatus,

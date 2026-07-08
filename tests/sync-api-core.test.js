@@ -1,4 +1,5 @@
 const assert = require('assert');
+const crypto = require('crypto');
 
 const {
   buildSyncedRecordCleanupData,
@@ -24,6 +25,15 @@ const {
       if (token === 'token-bound') {
         return {
           status: 'already-bound',
+        };
+      }
+      if (token === 'limit-code') {
+        return {
+          status: 'plugin-binding-limit-exceeded',
+          currentCount: 1,
+          limit: 1,
+          hasProBinding: false,
+          errMsg: 'Free plan allows 1 binding; Pro allows 3 bindings',
         };
       }
       return {
@@ -118,20 +128,20 @@ const {
         tempFileURL: 'https://temp.example.com/voice.mp3',
       };
     },
-    async getEntitlement(openid, plan) {
-      calls.push(['getEntitlement', openid, plan]);
+    async getEntitlement(openid, plan, context = {}) {
+      calls.push(['getEntitlement', openid, plan, context.clientId || '']);
       return openid === 'openid-1' && plan === 'local_transcription_beta'
         ? {
           plan,
           status: 'active',
-          expiresAt: '2026-07-03T08:00:00.000Z',
+          expiresAt: '2036-07-03T08:00:00.000Z',
         }
         : null;
     },
-    async redeemAccessCode(openid, code) {
-      calls.push(['redeemAccessCode', openid, code]);
+    async redeemAccessCode(openid, code, context = {}) {
+      calls.push(['redeemAccessCode', openid, code, context.clientId || '']);
       if (code === 'BADCODE') {
-        const error = new Error('兑换码无效、已过期或已被使用');
+        const error = new Error('Invalid redeem code');
         error.code = 'INVALID_REDEEM_CODE';
         throw error;
       }
@@ -140,7 +150,7 @@ const {
           hasAccess: true,
           plan: 'local_transcription_beta',
           status: 'active',
-          expiresAt: '2026-07-03T08:00:00.000Z',
+          expiresAt: '2036-07-03T08:00:00.000Z',
         }
         : {
           hasAccess: false,
@@ -155,6 +165,72 @@ const {
     authorization: 'Bearer token-123',
     'x-wechat-inbox-client-id': 'client-1',
   };
+
+  const notifySignature = crypto.createHash('sha1')
+    .update(['notify-token', '1778044072', 'nonce-1'].sort().join(''))
+    .digest('hex');
+  const notifyVerifyResponse = await handleSyncApiRequest({
+    request: {
+      method: 'GET',
+      path: '/sync/virtual-payment/notify',
+      query: {
+        signature: notifySignature,
+        timestamp: '1778044072',
+        nonce: 'nonce-1',
+        echostr: 'wechat-ok',
+      },
+      headers: {},
+    },
+    repository: {
+      virtualPaymentNotifyToken: 'notify-token',
+    },
+  });
+  assert.strictEqual(notifyVerifyResponse.statusCode, 200);
+  assert.strictEqual(notifyVerifyResponse.body, 'wechat-ok');
+
+  const notifyCalls = [];
+  const notifyPostResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/virtual-payment/notify',
+      query: {
+        signature: notifySignature,
+        timestamp: '1778044072',
+        nonce: 'nonce-1',
+      },
+      headers: {},
+      body: JSON.stringify({
+        Event: 'xpay_goods_deliver_notify',
+        OpenId: 'openid-1',
+        OutTradeNo: 'OBPAY20260615100000ABC123',
+        GoodsInfo: {
+          ProductId: 'pro_year',
+        },
+        WeChatPayInfo: {
+          TransactionId: 'TRANSACTION001',
+          PaidTime: 1778044072,
+        },
+      }),
+    },
+    repository: {
+      virtualPaymentNotifyToken: 'notify-token',
+      async handleVirtualPaymentNotify(notify) {
+        notifyCalls.push(['handleVirtualPaymentNotify', notify.orderNo, notify.openid, notify.productId]);
+        return {
+          orderNo: notify.orderNo,
+          status: 'paid',
+        };
+      },
+    },
+  });
+  assert.strictEqual(notifyPostResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(notifyPostResponse.body), {
+    ErrCode: 0,
+    ErrMsg: 'success',
+  });
+  assert.deepStrictEqual(notifyCalls, [
+    ['handleVirtualPaymentNotify', 'OBPAY20260615100000ABC123', 'openid-1', 'pro_year'],
+  ]);
 
   const listResponse = await handleSyncApiRequest({
     request: {
@@ -233,13 +309,79 @@ const {
     hasAccess: true,
     plan: 'local_transcription_beta',
     status: 'active',
-    expiresAt: '2026-07-03T08:00:00.000Z',
+    expiresAt: '2036-07-03T08:00:00.000Z',
     code: '',
     source: '',
     durationDays: 0,
     cloudQuotaSeconds: 0,
     cloudUsedSeconds: 0,
     cloudRemainingSeconds: 0,
+  });
+
+  const autoExistingResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/entitlements/auto-redeem',
+      query: {},
+      headers: clientHeaders,
+      body: '{}',
+    },
+    repository,
+  });
+
+  assert.strictEqual(autoExistingResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(autoExistingResponse.body).data, {
+    hasAccess: true,
+    plan: 'local_transcription_beta',
+    status: 'active',
+    expiresAt: '2036-07-03T08:00:00.000Z',
+    code: '',
+    source: '',
+    durationDays: 0,
+    cloudQuotaSeconds: 0,
+    cloudUsedSeconds: 0,
+    cloudRemainingSeconds: 0,
+    autoRedeemed: false,
+  });
+
+  const autoRedeemedRepository = {
+    ...repository,
+    async getEntitlement(openid, plan, context = {}) {
+      calls.push(['autoGetEntitlement', openid, plan, context.clientId || '']);
+      return null;
+    },
+    async autoRedeemAccessCode(openid, context = {}) {
+      calls.push(['autoRedeemAccessCode', openid, context.clientId || '']);
+      return {
+        hasAccess: true,
+        plan: 'local_transcription_beta',
+        status: 'active',
+        expiresAt: '2026-07-30T08:00:00.000Z',
+        code: 'OBPROT93C6',
+        source: 'redeem_code',
+      };
+    },
+  };
+  const autoRedeemedResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/entitlements/auto-redeem',
+      query: {},
+      headers: clientHeaders,
+      body: '{}',
+    },
+    repository: autoRedeemedRepository,
+  });
+
+  assert.strictEqual(autoRedeemedResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(autoRedeemedResponse.body).data, {
+    hasAccess: true,
+    plan: 'local_transcription_beta',
+    status: 'active',
+    expiresAt: '2026-07-30T08:00:00.000Z',
+    code: 'OBPROT93C6',
+    source: 'redeem_code',
+    autoRedeemed: true,
   });
 
   const redeemResponse = await handleSyncApiRequest({
@@ -258,7 +400,7 @@ const {
     hasAccess: true,
     plan: 'local_transcription_beta',
     status: 'active',
-    expiresAt: '2026-07-03T08:00:00.000Z',
+    expiresAt: '2036-07-03T08:00:00.000Z',
   });
 
   const invalidRedeemResponse = await handleSyncApiRequest({
@@ -274,7 +416,7 @@ const {
 
   assert.strictEqual(invalidRedeemResponse.statusCode, 400);
   assert.strictEqual(JSON.parse(invalidRedeemResponse.body).errCode, 'INVALID_REDEEM_CODE');
-  assert.strictEqual(JSON.parse(invalidRedeemResponse.body).errMsg, '兑换码无效、已过期或已被使用');
+  assert.strictEqual(JSON.parse(invalidRedeemResponse.body).errMsg, 'Invalid redeem code');
 
   const foreignFileResponse = await handleSyncApiRequest({
     request: {
@@ -334,6 +476,29 @@ const {
   assert.strictEqual(invalidBindResponse.statusCode, 403);
   assert.strictEqual(JSON.parse(invalidBindResponse.body).errMsg, 'Invalid bind code');
 
+  const bindLimitResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/bind',
+      query: {},
+      headers: { authorization: 'Bearer limit-code' },
+      body: JSON.stringify({ clientId: 'client-4' }),
+    },
+    repository,
+  });
+
+  assert.strictEqual(bindLimitResponse.statusCode, 403);
+  assert.deepStrictEqual(JSON.parse(bindLimitResponse.body), {
+    success: false,
+    errCode: 'PLUGIN_BINDING_LIMIT_EXCEEDED',
+    errMsg: 'Free plan allows 1 binding; Pro allows 3 bindings',
+    data: {
+      currentCount: 1,
+      limit: 1,
+      hasProBinding: false,
+    },
+  });
+
   const unbindSelfResponse = await handleSyncApiRequest({
     request: {
       method: 'POST',
@@ -368,7 +533,7 @@ const {
         return {
           plan,
           status: 'active',
-          expiresAt: '2026-07-03T08:00:00.000Z',
+          expiresAt: '2036-07-03T08:00:00.000Z',
           cloudQuotaSeconds: 3600,
           cloudUsedSeconds: 60,
         };
@@ -436,7 +601,7 @@ const {
         return {
           plan,
           status: 'active',
-          expiresAt: '2026-07-03T08:00:00.000Z',
+          expiresAt: '2036-07-03T08:00:00.000Z',
           cloudQuotaSeconds: 300,
           cloudUsedSeconds: 0,
         };
@@ -466,7 +631,7 @@ const {
         return {
           plan,
           status: 'active',
-          expiresAt: '2026-07-03T08:00:00.000Z',
+          expiresAt: '2036-07-03T08:00:00.000Z',
           cloudQuotaSeconds: 3600,
           cloudUsedSeconds: 0,
         };
@@ -474,7 +639,7 @@ const {
       async transcribeCloudAudio(openid, payload) {
         calls.push(['transcribeCloudAudioByUrl', openid, payload.audioUrl, payload.durationSeconds, payload.localError]);
         return {
-          transcription: '小红书云端兜底转写结果',
+          transcription: 'xhs cloud fallback transcript',
           provider: 'doubao',
           requestId: 'request-url-1',
           billedSeconds: 60,
@@ -488,7 +653,7 @@ const {
 
   assert.strictEqual(cloudTranscriptionByUrlResponse.statusCode, 200);
   assert.deepStrictEqual(JSON.parse(cloudTranscriptionByUrlResponse.body).data, {
-    transcription: '小红书云端兜底转写结果',
+    transcription: 'xhs cloud fallback transcript',
     provider: 'doubao',
     requestId: 'request-url-1',
     usedSeconds: 60,
@@ -571,6 +736,112 @@ const {
     cloudPreTranscriptionThresholdMinutes: 30,
   });
 
+  const ocrResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/ocr/images',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        images: [
+          { imageUrl: 'https://img.example.com/1.jpg', imageBase64: 'aW1n', index: 1 },
+        ],
+      }),
+    },
+    repository: {
+      ...repository,
+      async getEntitlement(openid, plan, context = {}) {
+        calls.push(['ocrGetEntitlement', openid, plan, context.clientId || '']);
+        return {
+          plan,
+          status: 'active',
+          expiresAt: '2036-07-03T08:00:00.000Z',
+        };
+      },
+      async recognizeImageTexts(openid, payload) {
+        calls.push(['recognizeImageTexts', openid, payload.images.length, payload.images[0].imageUrl]);
+        return {
+          provider: 'mock-ocr',
+          items: [
+            { imageUrl: payload.images[0].imageUrl, index: 1, text: 'image text content for OCR' },
+          ],
+        };
+      },
+    },
+  });
+
+  assert.strictEqual(ocrResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(ocrResponse.body).data.items, [
+    {
+      imageUrl: 'https://img.example.com/1.jpg',
+      text: 'image text content for OCR',
+      index: 1,
+      readableChars: 22,
+      substantial: false,
+    },
+  ]);
+
+  const metadataGenerateResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/metadata/generate',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        title: 'wechat channels transcript',
+        source: 'wechat channels',
+        content: 'comments are a useful topic library with user questions and needs',
+      }),
+    },
+    repository: {
+      ...repository,
+      async generateMetadata(openid, payload) {
+        calls.push(['generateMetadata', openid, payload.title, payload.source, payload.content.slice(0, 10)]);
+        return {
+          description: 'comments can be used as a topic library',
+          keywords: ['评论区选题', '用户痛点', '内容创作'],
+        };
+      },
+    },
+  });
+
+  assert.strictEqual(metadataGenerateResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(metadataGenerateResponse.body).data, {
+    description: 'comments can be used as a topic library',
+    keywords: ['评论区选题', '用户痛点', '内容创作'],
+  });
+
+  const metadataNoModelResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/metadata/generate',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        title: '抖音口播文案',
+        source: 'douyin audio video',
+        content: 'platforms make it hard to keep content as your own private asset',
+      }),
+    },
+    repository: {
+      async findOpenIdByToken() {
+        return 'openid-1';
+      },
+      async getEntitlement() {
+        return {
+          plan: 'local_transcription_beta',
+          status: 'active',
+          expiresAt: '2036-07-03T08:00:00.000Z',
+        };
+      },
+      async generateMetadata() {
+        return null;
+      },
+    },
+  });
+  assert.strictEqual(metadataNoModelResponse.statusCode, 502);
+  assert.strictEqual(JSON.parse(metadataNoModelResponse.body).errCode, 'AI_METADATA_UNAVAILABLE');
+
   assert.deepStrictEqual(calls, [
     ['findOpenIdByToken', 'token-123', 'client-1'],
     ['listPendingRecords', 'openid-1'],
@@ -583,16 +854,22 @@ const {
     ['isFileOwnedByOpenId', 'openid-1', 'cloud://voices/002.mp3'],
     ['getTempFileURL', 'openid-1', 'cloud://voices/002.mp3'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
-    ['getEntitlement', 'openid-1', 'local_transcription_beta'],
+    ['getEntitlement', 'openid-1', 'local_transcription_beta', 'client-1'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
-    ['redeemAccessCode', 'openid-1', 'ZZAI030'],
+    ['getEntitlement', 'openid-1', 'local_transcription_beta', 'client-1'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
-    ['redeemAccessCode', 'openid-1', 'BADCODE'],
+    ['autoGetEntitlement', 'openid-1', 'local_transcription_beta', 'client-1'],
+    ['autoRedeemAccessCode', 'openid-1', 'client-1'],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['redeemAccessCode', 'openid-1', 'ZZAI030', 'client-1'],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['redeemAccessCode', 'openid-1', 'BADCODE', 'client-1'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
     ['isFileOwnedByOpenId', 'openid-1', 'cloud://voices/foreign.mp3'],
     ['bindClientByToken', 'token-123', 'client-1'],
     ['bindClientByToken', 'token-bound', 'client-2'],
     ['bindClientByToken', 'wrong-code', 'client-3'],
+    ['bindClientByToken', 'limit-code', 'client-4'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
     ['unbindClientByToken', 'token-123', 'client-1'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
@@ -612,6 +889,12 @@ const {
     ['prepareWebpageMedia', 'openid-1', 'https://www.douyin.com/video/123', 'record-web-media-1'],
     ['findOpenIdByToken', 'token-123', 'client-1'],
     ['saveTranscriptionPreferences', 'openid-1', true, 30],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['ocrGetEntitlement', 'openid-1', 'local_transcription_beta', 'client-1'],
+    ['recognizeImageTexts', 'openid-1', 1, 'https://img.example.com/1.jpg'],
+    ['findOpenIdByToken', 'token-123', 'client-1'],
+    ['getEntitlement', 'openid-1', 'local_transcription_beta', 'client-1'],
+    ['generateMetadata', 'openid-1', 'wechat channels transcript', 'wechat channels', 'comments a'],
   ]);
 
   assert.deepStrictEqual(collectRecordFileIds({
@@ -698,7 +981,7 @@ const {
     status: 'pending',
     metadata: {
       url: 'http://xhslink.com/o/2rths0HGbgt',
-      shareText: 'AI时代，我为什么推荐每个人使用Obsidian？ 跳转【小红书】看看笔记详情~',
+      shareText: 'AI era, I recommend Obsidian. Jump to Xiaohongshu for details.',
       conversionStatus: 'pending',
       webpageMediaType: 'audio_video',
       transcriptionStatus: 'pending',
@@ -708,7 +991,7 @@ const {
     },
   }).metadata, {
     url: 'http://xhslink.com/o/2rths0HGbgt',
-    shareText: 'AI时代，我为什么推荐每个人使用Obsidian？ 跳转【小红书】看看笔记详情~',
+    shareText: 'AI era, I recommend Obsidian. Jump to Xiaohongshu for details.',
     conversionStatus: 'pending',
   });
   assert.strictEqual(shouldKeepRecordPendingForTranscription({
@@ -716,7 +999,7 @@ const {
     content: 'http://xhslink.com/o/2rths0HGbgt',
     metadata: {
       url: 'http://xhslink.com/o/2rths0HGbgt',
-      shareText: 'AI时代，我为什么推荐每个人使用Obsidian？ 跳转【小红书】看看笔记详情~',
+      shareText: 'AI era, I recommend Obsidian. Jump to Xiaohongshu for details.',
       webpageMediaType: 'audio_video',
       transcriptionStatus: 'pending',
       transcriptionMode: 'local',
@@ -752,6 +1035,138 @@ const {
       ok: true,
     },
   });
+
+  const feishuStartResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/feishu/oauth/start',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        feishuApp: {
+          appId: 'cli_custom_app',
+          appSecret: 'custom-secret',
+        },
+      }),
+    },
+    repository: {
+      ...repository,
+      async createFeishuOAuthStart(openid, clientId, request, payload) {
+        calls.push(['createFeishuOAuthStart', openid, clientId, request.path, payload.feishuApp]);
+        return {
+          authUrl: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=state-1',
+          expiresAt: '2026-07-04T10:05:00.000Z',
+        };
+      },
+    },
+  });
+  assert.strictEqual(feishuStartResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(feishuStartResponse.body).data, {
+    authUrl: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=state-1',
+    expiresAt: '2026-07-04T10:05:00.000Z',
+  });
+
+  const feishuStatusResponse = await handleSyncApiRequest({
+    request: {
+      method: 'GET',
+      path: '/sync/feishu/oauth/status',
+      query: {},
+      headers: clientHeaders,
+      body: '',
+    },
+    repository: {
+      ...repository,
+      async getFeishuOAuthStatus(openid, clientId) {
+        calls.push(['getFeishuOAuthStatus', openid, clientId]);
+        return {
+          connected: true,
+          scope: 'offline_access docx:document:readonly',
+          expiresAt: '2026-07-04T12:00:00.000Z',
+        };
+      },
+    },
+  });
+  assert.strictEqual(feishuStatusResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(feishuStatusResponse.body).data, {
+    connected: true,
+    scope: 'offline_access docx:document:readonly',
+    expiresAt: '2026-07-04T12:00:00.000Z',
+  });
+
+  const feishuExtractResponse = await handleSyncApiRequest({
+    request: {
+      method: 'POST',
+      path: '/sync/feishu/extract',
+      query: {},
+      headers: clientHeaders,
+      body: JSON.stringify({
+        url: 'https://example.feishu.cn/wiki/wikiToken123',
+        feishuApp: {
+          appId: 'cli_custom_app',
+          appSecret: 'custom-secret',
+        },
+      }),
+    },
+    repository: {
+      ...repository,
+      async extractFeishuDocument(openid, clientId, payload) {
+        calls.push(['extractFeishuDocument', openid, clientId, payload.url, payload.feishuApp]);
+        return {
+          title: 'OpenAPI document',
+          documentId: 'docxToken123',
+          blockCount: 2,
+          blocks: [{ block_id: 'b1' }, { block_id: 'b2' }],
+        };
+      },
+    },
+  });
+  assert.strictEqual(feishuExtractResponse.statusCode, 200);
+  assert.deepStrictEqual(JSON.parse(feishuExtractResponse.body).data, {
+    title: 'OpenAPI document',
+    documentId: 'docxToken123',
+    blockCount: 2,
+    blocks: [{ block_id: 'b1' }, { block_id: 'b2' }],
+  });
+  assert.deepStrictEqual(calls.filter((item) => item[0] === 'createFeishuOAuthStart')[0], [
+    'createFeishuOAuthStart',
+    'openid-1',
+    'client-1',
+    '/sync/feishu/oauth/start',
+    { appId: 'cli_custom_app', appSecret: 'custom-secret' },
+  ]);
+  assert.deepStrictEqual(calls.filter((item) => item[0] === 'extractFeishuDocument')[0], [
+    'extractFeishuDocument',
+    'openid-1',
+    'client-1',
+    'https://example.feishu.cn/wiki/wikiToken123',
+    { appId: 'cli_custom_app', appSecret: 'custom-secret' },
+  ]);
+
+  const feishuCallbackResponse = await handleSyncApiRequest({
+    request: {
+      method: 'GET',
+      path: '/sync/feishu/oauth/callback',
+      query: {
+        code: 'oauth-code-1',
+        state: 'state-1',
+      },
+      headers: {},
+      body: '',
+    },
+    repository: {
+      async completeFeishuOAuthCallback(input) {
+        assert.deepStrictEqual(input, {
+          code: 'oauth-code-1',
+          state: 'state-1',
+        });
+        return {
+          connected: true,
+        };
+      },
+    },
+  });
+  assert.strictEqual(feishuCallbackResponse.statusCode, 200);
+  assert.ok(feishuCallbackResponse.body.includes('Feishu connected'));
 
   const unauthorized = await handleSyncApiRequest({
     request: {

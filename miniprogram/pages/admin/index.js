@@ -25,8 +25,20 @@ function formatRemainingDays(value) {
 
 function formatDeliveryStatus(item) {
   if (item && item.deliveryStatusText) return item.deliveryStatusText;
-  if (Number(item && item.redeemedCount) > 0) return '已激活';
+  if (isRedeemCodeAssigned(item)) return '已激活';
   return item && item.deliveryStatus === 'sent' ? '已发放未激活' : '未发放';
+}
+
+function isRedeemCodeAssigned(item) {
+  if (!item) return false;
+  if ((Number(item.redeemedCount) || 0) > 0) return true;
+  const deliveryStatus = String(item.deliveryStatus || '').trim().toLowerCase();
+  const status = String(item.status || '').trim().toLowerCase();
+  return deliveryStatus === 'activated'
+    || status === 'redeemed'
+    || Boolean(item.lastRedeemedOpenId || item.redeemedOpenId)
+    || Boolean(item.paidOwnerOpenid || item.trialOwnerOpenid)
+    || Boolean(item.paymentOrderNo || item.latestPaymentOrderNo);
 }
 
 function formatBytes(value) {
@@ -43,6 +55,7 @@ function normalizeList(items = []) {
     ...item,
     createdAtText: formatDateTime(item.createdAt),
     updatedAtText: formatDateTime(item.updatedAt),
+    paidAtText: formatDateTime(item.paidAt),
     redeemedAtText: formatDateTime(item.redeemedAt),
     expiresAtText: formatDateTime(item.expiresAt),
     lastRedeemedAtText: formatDateTime(item.lastRedeemedAt),
@@ -89,6 +102,7 @@ Page({
     isLoading: false,
     redeemCodes: [],
     entitlements: [],
+    paymentOrders: [],
     bindCodes: [],
     dashboard: normalizeDashboard(),
     generatedCodes: [],
@@ -149,6 +163,7 @@ Page({
 
   async refreshAll() {
     await this.loadDashboard();
+    await this.loadPaymentOrders();
     await this.loadRedeemCodes();
     await this.loadEntitlements();
     await this.loadBindCodes();
@@ -201,6 +216,17 @@ Page({
     if (!response || !response.result || !response.result.success) return;
     this.setData({
       redeemCodes: normalizeList((response.result.data && response.result.data.items) || []),
+    });
+  },
+
+  async loadPaymentOrders() {
+    const response = await this.runAdminAction(() => this.inboxService.adminListPaymentOrders(this.getAdminPayload({
+      keyword: this.data.keyword,
+      limit: 50,
+    })), '读取支付订单失败');
+    if (!response || !response.result || !response.result.success) return;
+    this.setData({
+      paymentOrders: normalizeList((response.result.data && response.result.data.items) || []),
     });
   },
 

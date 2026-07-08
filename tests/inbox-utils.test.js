@@ -17,6 +17,7 @@ const {
 assert.strictEqual(classifyContent('https://developers.weixin.qq.com/miniprogram'), 'LINK');
 assert.strictEqual(classifyContent('https://mp.weixin.qq.com/s/example'), 'WEBPAGE');
 assert.strictEqual(classifyContent('http://xhslink.com/o/5xRiTruK9EQ'), 'WEBPAGE');
+assert.strictEqual(classifyContent('https://weixin.qq.com/sph/A7ULN6a876'), 'WEBPAGE');
 assert.strictEqual(classifyContent('http://example.com'), 'LINK');
 assert.strictEqual(classifyContent('关于这款产品的初步想法'), 'TEXT');
 assert.strictEqual(classifyContent(''), 'TEXT');
@@ -33,6 +34,7 @@ assert.strictEqual(extractHttpUrl('没有链接的一段文字'), '');
 assert.strictEqual(isAudioVideoWebpageUrl('https://www.douyin.com/video/123'), true);
 assert.strictEqual(isAudioVideoWebpageUrl('https://www.bilibili.com/video/BV123'), true);
 assert.strictEqual(isAudioVideoWebpageUrl('https://www.xiaoyuzhoufm.com/episode/1'), true);
+assert.strictEqual(isAudioVideoWebpageUrl('https://weixin.qq.com/sph/A7ULN6a876'), false);
 assert.strictEqual(isAudioVideoWebpageUrl('https://mp.weixin.qq.com/s/example'), false);
 assert.strictEqual(isAudioVideoWebpageUrl('https://www.xiaohongshu.com/explore/abc?type=video'), true);
 assert.strictEqual(isAudioVideoWebpageUrl('http://xhslink.com/o/5xRiTruK9EQ', '小红书视频分享'), false);
@@ -65,6 +67,12 @@ assert.deepStrictEqual(buildTextOrLinkPayload('https://mp.weixin.qq.com/s/exampl
   contentType: 'webpage',
   content: 'https://mp.weixin.qq.com/s/example',
   url: 'https://mp.weixin.qq.com/s/example',
+});
+
+assert.deepStrictEqual(buildTextOrLinkPayload('https://weixin.qq.com/sph/A7ULN6a876'), {
+  contentType: 'webpage',
+  content: 'https://weixin.qq.com/sph/A7ULN6a876',
+  url: 'https://weixin.qq.com/sph/A7ULN6a876',
 });
 
 assert.deepStrictEqual(buildTextOrLinkPayload('share text https://mp.weixin.qq.com/s/example'), {

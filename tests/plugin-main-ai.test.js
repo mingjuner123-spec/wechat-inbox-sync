@@ -26,6 +26,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const pluginMainSource = fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8');
+const macOcrInstallerSource = fs.readFileSync(
+  path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-ocr', 'install-local-ocr-macos.sh'),
+  'utf8',
+);
 assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));
@@ -86,6 +90,8 @@ assert.strictEqual(typeof helpers.buildRecordTitleBase, 'function');
 assert.strictEqual(typeof helpers.hasRecordIdInFrontmatter, 'function');
 assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
+assert.strictEqual(typeof helpers.hasXiaohongshuLoginCookies, 'function');
+assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.enrichExtractedWebpageMetadata, 'function');
 assert.strictEqual(typeof helpers.extractSocialVideoMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
@@ -284,7 +290,19 @@ assert.ok(pluginMainSource.includes("'X-Wechat-Inbox-Token': token"));
 assert.ok(pluginMainSource.includes('authToken=${encodeURIComponent(token)}&clientId=${encodeURIComponent(this.settings.clientId)}'));
 assert.ok(pluginMainSource.includes('authToken: token'));
 assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
-assert.ok(pluginMainSource.includes("source.includes('CHUNK_SECONDS=600')"));
+assert.ok(pluginMainSource.includes('copyBundledLocalOcrRuntimeAssets'));
+assert.ok(pluginMainSource.includes("fs.copyFileSync(sourcePath, targetPath)"));
+assert.ok(macOcrInstallerSource.includes('find_existing_python'));
+assert.ok(macOcrInstallerSource.includes('.wechat-inbox-local-asr/python-venv/bin/python'));
+assert.ok(macOcrInstallerSource.includes('download_with_retry'));
+assert.ok(macOcrInstallerSource.includes('--retry-all-errors'));
+assert.ok(macOcrInstallerSource.includes('--silent --show-error'));
+assert.ok(pluginMainSource.includes("source.includes('Install-Uv')"));
+assert.ok(pluginMainSource.includes("source.includes('uv-x86_64-pc-windows-msvc.zip')"));
+assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_DOWNLOADS')"));
+assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_PREFERENCE')"));
+assert.ok(pluginMainSource.includes("source.includes('CHUNK_SECONDS=120')"));
+assert.ok(pluginMainSource.includes("source.includes('GGML_METAL_PATH_RESOURCES')"));
 assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
 assert.ok(pluginMainSource.includes("source.includes('TENCENT_MODEL_URL=')"));
 assert.ok(pluginMainSource.includes("source.includes('bootstrap_uv')"));
@@ -348,6 +366,27 @@ assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
 assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
+assert.strictEqual(
+  helpers.hasXiaohongshuLoginCookies([
+    { name: 'a1', value: 'browser-device-cookie' },
+    { name: 'gid', value: 'guest-id' },
+    { name: 'webId', value: 'anonymous-web-id' },
+    { name: 'xsecappid', value: 'xhs-pc-web' },
+  ]),
+  false,
+);
+assert.strictEqual(
+  helpers.hasXiaohongshuLoginCookies([
+    { name: 'web_session', value: '0123456789abcdef0123456789abcdef' },
+  ]),
+  true,
+);
+assert.strictEqual(
+  helpers.hasXiaohongshuLoginCookies([
+    { name: 'web_session', value: '' },
+  ]),
+  false,
+);
 {
   const restoredFromPendingBindCode = helpers.mergeSettings({
     token: '',
@@ -486,6 +525,23 @@ assert.ok(pluginMainSource.includes("text: 'Pro 高级功能'"));
 assert.ok(pluginMainSource.includes("text: 'Pro 状态'"));
 assert.ok(pluginMainSource.includes("text: '登录小红书评论区'"));
 assert.strictEqual(pluginMainSource.includes(".setName('提取小红书评论区')"), false);
+assert.ok(pluginMainSource.includes('renderXiaohongshuCommentsWithElectron'));
+assert.ok(pluginMainSource.includes('renderXiaohongshuPageWithElectron'));
+assert.ok(pluginMainSource.includes('appendSocialCommentsToMarkdown'));
+assert.ok(pluginMainSource.includes('renderedXiaohongshuComments'));
+assert.strictEqual(pluginMainSource.includes('renderedXiaohongshuExtraction'), false);
+assert.ok(pluginMainSource.includes('fetchXiaohongshuCommentsFromCapturedRequests'));
+assert.ok(pluginMainSource.includes('Network.getResponseBody'));
+assert.ok(pluginMainSource.includes('debuggerComments'));
+assert.ok(pluginMainSource.includes('staticXiaohongshuComments'));
+assert.ok(pluginMainSource.includes('mergeSocialComments'));
+assert.ok(pluginMainSource.includes('commentApiRequests'));
+assert.ok(pluginMainSource.includes('onBeforeSendHeaders'));
+assert.ok(pluginMainSource.includes('const XIAOHONGSHU_SESSION_PARTITION'));
+assert.ok(pluginMainSource.includes('function getXiaohongshuSession'));
+assert.ok(pluginMainSource.includes('async function probeXiaohongshuLoginStatus'));
+assert.ok(pluginMainSource.includes('resolve(await probeXiaohongshuLoginStatus(loginUrl));'));
+assert.ok(pluginMainSource.includes('return await probeXiaohongshuLoginStatus();'));
 assert.strictEqual(pluginMainSource.includes("text: '视频号转写实验'"), false);
 assert.strictEqual(pluginMainSource.includes("id: 'open-wechat-channels-listener'"), false);
 assert.strictEqual(pluginMainSource.includes("text: '音视频转写组件安装'"), false);
@@ -516,6 +572,15 @@ assert.strictEqual(pluginMainSource.includes(".setName('同步失败诊断')"), 
 assert.ok(pluginMainSource.includes('发给开发者张张（微信：heyhmjx）'));
 assert.ok(pluginMainSource.includes('本地转写组件安装失败'));
 assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制诊断信息」'));
+assert.strictEqual(
+  helpers.formatLocalComponentInstallFailureReason([
+    '% Total % Received % Xferd Average Speed Time Time Time Current',
+    'Dload Upload Total Spent Left Speed',
+    '0 0 0 0 0 0 0 --:--:-- --:--:-- --:--:-- 0',
+    'curl: (35) Recv failure: Connection reset by peer',
+  ].join('\n')),
+  'curl: (35) Recv failure: Connection reset by peer',
+);
 assert.ok(pluginMainSource.includes("setButtonText('检测登录状态')"));
 assert.ok(pluginMainSource.includes('小红书登录状态正常'));
 assert.ok(pluginMainSource.includes('未检测到小红书登录状态'));
@@ -1499,6 +1564,16 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'chunked-bash-simplified-progress-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('/Users/demo/.wechat-inbox-local-asr/transcribe.sh', {
+    existsSync: () => true,
+    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nfind_metal_resources_dir\nGGML_METAL_PATH_RESOURCES\nCHUNK_SECONDS=120\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
+  }),
+  {
+    scriptVersion: 'chunked-bash-simplified-progress-metal-resources-run-log',
     scriptOutdated: false,
   },
 );
@@ -1769,6 +1844,21 @@ const xiaohongshuJsonCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('## 评论区'));
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('**JSON用户**：JSON里的评论正文'));
 assert.ok(xiaohongshuJsonCommentNote.markdown.includes('**嵌套用户**：第二条评论'));
+assert.deepStrictEqual(
+  helpers.extractSocialCommentsFromHtml([
+    '<div class="comments-container">',
+    '<div class="comment-item">共 84 条评论 - 回复</div>',
+    '<div class="comment-item">12</div>',
+    '</div>',
+  ].join('')),
+  [],
+);
+assert.deepStrictEqual(
+  helpers.extractSocialCommentsFromHtml([
+    '<script>window.__INITIAL_STATE__={comment_list:[{content:"真实评论内容",user_info:{nickname:"真实用户"},like_count:6}]};</script>',
+  ].join('')),
+  [{ author: '真实用户', content: '真实评论内容', time: '', likes: '6' }],
+);
 
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
@@ -2595,12 +2685,32 @@ async function runAsyncHydrationTests() {
 
   const cloudFeishuPlugin = new PluginClass();
   const cloudFeishuCalls = [];
+  const cloudFeishuFiles = {};
   cloudFeishuPlugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
     bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true },
   });
+  cloudFeishuPlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        writeBinary: async (filePath, buffer) => {
+          cloudFeishuFiles[filePath] = Buffer.from(buffer);
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://internal-api-drive-stream.feishu.cn/cloud-image-1') {
+      return {
+        arrayBuffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]),
+      };
+    }
+    return {};
+  };
   cloudFeishuPlugin.requestJson = async (path, method, body, binding) => {
     cloudFeishuCalls.push([path, method, body.url, binding && binding.token]);
     if (path === '/feishu/extract') {
@@ -2613,7 +2723,12 @@ async function runAsyncHydrationTests() {
           blocks: [
             { block_id: 'h1', block_type: 3, heading1: { elements: [{ text_run: { content: '云端授权一级标题' } }] } },
             { block_id: 'p1', block_type: 2, text: { elements: [{ text_run: { content: '云端授权正文内容。' } }] } },
+            { block_id: 'img1', block_type: 27, image: { token: 'boxcnCloudImageToken' } },
           ],
+          imageTokenCount: 1,
+          imageTmpDownloadUrls: {
+            boxcnCloudImageToken: 'https://internal-api-drive-stream.feishu.cn/cloud-image-1',
+          },
         },
       };
     }
@@ -2629,6 +2744,8 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(cloudHydrated.metadata.title, '云端授权标题');
   assert.ok(cloudHydrated.metadata.markdown.includes('# 云端授权一级标题'));
   assert.ok(cloudHydrated.metadata.markdown.includes('云端授权正文内容。'));
+  assert.ok(cloudHydrated.metadata.markdown.includes('![[临时收集/网页图片/2026-07-04/云端授权标题-image-01.png]]'));
+  assert.ok(Buffer.isBuffer(cloudFeishuFiles['临时收集/网页图片/2026-07-04/云端授权标题-image-01.png']));
   assert.deepStrictEqual(cloudFeishuCalls, [[
     '/feishu/extract',
     'POST',
@@ -4780,6 +4897,62 @@ async function runLocalAsrRepairDecisionTests() {
   }
 }
 
+async function runDiagnosticFailureLogFilteringTests() {
+  const asrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-diagnostic-'));
+  const ocrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-diagnostic-'));
+  try {
+    fs.writeFileSync(path.join(asrRoot, 'transcribe-last.log'), 'status=success\nASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED', 'utf8');
+    fs.writeFileSync(path.join(asrRoot, 'install.log'), 'status=success\nASR INSTALL SUCCESS SHOULD NOT BE COPIED', 'utf8');
+    fs.writeFileSync(path.join(ocrRoot, 'install.log'), 'status=failed\ncurl: (35) Recv failure: Connection reset by peer', 'utf8');
+
+    const plugin = new PluginClass();
+    plugin.manifest = { version: '1.3.3' };
+    plugin.settings = helpers.mergeSettings({
+      apiBase: 'https://example.com/sync',
+      token: 'ABC-123',
+      localAsrPlatform: 'darwin',
+      localTranscriptionEntitlementStatus: { hasAccess: true, status: 'active' },
+      bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
+    });
+    plugin.getConfiguredLocalAsrPlatform = () => 'darwin';
+    plugin.getConfiguredLocalAsrInstallRoot = () => asrRoot;
+    plugin.getConfiguredLocalOcrInstallRoot = () => ocrRoot;
+    plugin.getLocalAsrInstallStatus = () => ({
+      ready: true,
+      installRoot: asrRoot,
+      transcribeScript: `${asrRoot}/transcribe.sh`,
+      scriptVersion: 'ok',
+      scriptOutdated: false,
+      hasTranscribeScript: true,
+      hasWhisper: true,
+      hasFfmpeg: true,
+      hasModel: true,
+      whisperPath: `${asrRoot}/bin/whisper-cli`,
+      ffmpegPath: `${asrRoot}/bin/ffmpeg`,
+      modelPath: `${asrRoot}/models/ggml-small.bin`,
+      missingReasons: [],
+    });
+    plugin.getLocalOcrInstallStatus = () => ({
+      ready: false,
+      installRoot: ocrRoot,
+      pythonPath: `${ocrRoot}/venv/bin/python`,
+      scriptPath: `${ocrRoot}/ocr_image.py`,
+      hasPython: false,
+      hasScript: false,
+      missingReasons: ['Python OCR 运行环境未找到'],
+    });
+
+    const diagnostic = plugin.getSyncDiagnosticText();
+    assert.ok(diagnostic.includes('图片文字识别 OCR'));
+    assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
+    assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
+    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false);
+  } finally {
+    fs.rmSync(asrRoot, { recursive: true, force: true });
+    fs.rmSync(ocrRoot, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await runAsyncHydrationTests();
   await runOpenExternalUrlTests();
@@ -4801,6 +4974,7 @@ async function main() {
   await runAudioVideoFileAttachmentTranscriptionTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
+  await runDiagnosticFailureLogFilteringTests();
 }
 
 main().catch((error) => {

@@ -28,7 +28,7 @@ const {
 
 assert.strictEqual(DAILY_FREE_LIMIT, 5);
 assert.strictEqual(DAILY_SHARE_LIMIT, 10);
-assert.strictEqual(DAILY_AD_BONUS, 10);
+assert.strictEqual(DAILY_AD_BONUS, 5);
 assert.strictEqual(CLOUD_PRE_TRANSCRIPTION_TEMP_DISABLED, true);
 assert.strictEqual(DEFAULT_BIND_DEVICE_LIMIT, 1);
 assert.strictEqual(MAX_BIND_DEVICE_LIMIT, 3);
@@ -99,6 +99,23 @@ const linkWechatRecord = createInboxRecordDocument({
 assert.strictEqual(linkWechatRecord.type, 'webpage');
 assert.strictEqual(linkWechatRecord.metadata.url, 'https://mp.weixin.qq.com/s/example');
 assert.strictEqual(linkWechatRecord.metadata.conversionStatus, 'pending');
+
+const linkWechatChannelsRecord = createInboxRecordDocument({
+  event: {
+    contentType: 'link',
+    content: 'https://weixin.qq.com/sph/A7ULN6a876',
+    url: 'https://weixin.qq.com/sph/A7ULN6a876',
+  },
+  openid: 'openid-1',
+  now: '2026-05-08T12:00:00.000Z',
+});
+
+assert.strictEqual(linkWechatChannelsRecord.type, 'webpage');
+assert.strictEqual(linkWechatChannelsRecord.metadata.url, 'https://weixin.qq.com/sph/A7ULN6a876');
+assert.strictEqual(linkWechatChannelsRecord.metadata.webpageMediaType, undefined);
+assert.strictEqual(linkWechatChannelsRecord.metadata.transcriptionMode, undefined);
+assert.strictEqual(linkWechatChannelsRecord.metadata.transcriptionStatus, undefined);
+assert.strictEqual(isAudioVideoWebpageUrl('https://weixin.qq.com/sph/A7ULN6a876'), false);
 
 const webpageRecord = createInboxRecordDocument({
   event: {

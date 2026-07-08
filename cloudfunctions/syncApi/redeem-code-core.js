@@ -4,6 +4,15 @@ const LOCAL_TRANSCRIPTION_PLAN_ALIASES = [
   'local_transcription_pro',
   'local_transcription_trial',
   'pro',
+  'pro_month',
+  'pro_year',
+];
+const FORMAL_PRO_PLAN_ALIASES = [
+  DEFAULT_REDEEM_PLAN,
+  'local_transcription_pro',
+  'pro',
+  'pro_month',
+  'pro_year',
 ];
 const DEFAULT_REDEEM_DURATION_DAYS = 30;
 const DEFAULT_REDEEM_MAX_REDEMPTIONS = 1;
@@ -37,6 +46,10 @@ function isLocalTranscriptionPlan(plan) {
   return LOCAL_TRANSCRIPTION_PLAN_ALIASES.includes(String(plan || '').trim());
 }
 
+function isFormalProPlan(plan) {
+  return FORMAL_PRO_PLAN_ALIASES.includes(String(plan || '').trim());
+}
+
 function getEntitlementExpiresTime(entitlement) {
   const expiresAt = entitlement && entitlement.expiresAt;
   if (!expiresAt) return 0;
@@ -67,6 +80,14 @@ function pickBestLocalTranscriptionEntitlement(entitlements = [], now = new Date
     })[0] || null;
 }
 
+function isRedeemEntitlementAllowedForClient(entitlement, clientId = '') {
+  if (!entitlement) return false;
+  if (entitlement.source !== 'redeem_code') return true;
+  const lockedClientId = String(entitlement.clientId || '').trim();
+  if (!lockedClientId) return true;
+  return Boolean(clientId) && lockedClientId === String(clientId || '').trim();
+}
+
 function isRedeemCodeActive(codeDoc, now) {
   if (!codeDoc) return false;
   if (codeDoc.status && codeDoc.status !== 'active') return false;
@@ -76,12 +97,12 @@ function isRedeemCodeActive(codeDoc, now) {
   return redeemedCount < 1;
 }
 
-function createEntitlementDocument({ openid, codeDoc, now }) {
+function createEntitlementDocument({ openid, codeDoc, now, clientId = '' }) {
   if (!openid) throw new Error('OpenID is required');
   if (!codeDoc || !codeDoc.code) throw new Error('Redeem code is required');
   const plan = codeDoc.plan || DEFAULT_REDEEM_PLAN;
   const durationDays = Number(codeDoc.durationDays) || DEFAULT_REDEEM_DURATION_DAYS;
-  return {
+  const doc = {
     openid,
     plan,
     status: 'active',
@@ -94,6 +115,8 @@ function createEntitlementDocument({ openid, codeDoc, now }) {
     expiresAt: codeDoc.entitlementExpiresAt || codeDoc.accessExpiresAt || addDaysIso(now, durationDays),
     updatedAt: now,
   };
+  if (clientId) doc.clientId = String(clientId).trim();
+  return doc;
 }
 
 function createRedeemCodeDocument({
@@ -231,12 +254,15 @@ function buildEntitlementState(entitlement, now = new Date().toISOString()) {
 module.exports = {
   DEFAULT_REDEEM_PLAN,
   LOCAL_TRANSCRIPTION_PLAN_ALIASES,
+  FORMAL_PRO_PLAN_ALIASES,
   DEFAULT_REDEEM_DURATION_DAYS,
   DEFAULT_REDEEM_MAX_REDEMPTIONS,
   getDefaultCloudQuotaSeconds,
   addDaysIso,
   normalizeRedeemCode,
+  isFormalProPlan,
   isLocalTranscriptionPlan,
+  isRedeemEntitlementAllowedForClient,
   pickBestLocalTranscriptionEntitlement,
   isRedeemCodeActive,
   createRedeemCodeDocument,

@@ -1,7 +1,7 @@
 const SUPPORTED_TYPES = ['text', 'link', 'webpage', 'voice', 'file'];
 const DAILY_FREE_LIMIT = 5;
 const DAILY_SHARE_LIMIT = 10;
-const DAILY_AD_BONUS = 10;
+const DAILY_AD_BONUS = 5;
 const DEFAULT_BIND_DEVICE_LIMIT = 1;
 const MAX_BIND_DEVICE_LIMIT = 3;
 const BIND_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -29,7 +29,9 @@ function isSupportedWebpageUrl(url) {
     || text.includes('bilibili.com')
     || text.includes('b23.tv')
     || text.includes('xiaoyuzhoufm.com')
-    || text.includes('xiaoyuzhou.com');
+    || text.includes('xiaoyuzhou.com')
+    || text.includes('channels.weixin.qq.com')
+    || text.includes('weixin.qq.com/sph/');
 }
 
 function extractHttpUrl(content) {
@@ -357,6 +359,69 @@ function normalizeBindClients(bindCode) {
   return clients.slice(0, MAX_BIND_DEVICE_LIMIT);
 }
 
+function getBindCodeIdentity(bindCode) {
+  return String((bindCode && (bindCode._id || bindCode.code)) || '').trim();
+}
+
+function isClientBoundToBindCode(bindCode, clientId) {
+  const normalizedClientId = String(clientId || '').trim();
+  if (!bindCode || !normalizedClientId) return false;
+  return normalizeBindClients(bindCode).some((item) => item.clientId === normalizedClientId);
+}
+
+function evaluatePluginBindingLimit({
+  clientId = '',
+  existingBindCodes = [],
+  targetBindCode = null,
+  proOpenids = [],
+} = {}) {
+  const normalizedClientId = String(clientId || '').trim();
+  const proOpenidSet = new Set((Array.isArray(proOpenids) ? proOpenids : [])
+    .map((openid) => String(openid || '').trim())
+    .filter(Boolean));
+  const existingBoundCodes = (existingBindCodes || [])
+    .filter((bindCode) => isClientBoundToBindCode(bindCode, normalizedClientId));
+  const existingIds = new Set(existingBoundCodes.map(getBindCodeIdentity).filter(Boolean));
+  const targetId = getBindCodeIdentity(targetBindCode);
+  const targetAlreadyBound = Boolean(targetId && existingIds.has(targetId))
+    || isClientBoundToBindCode(targetBindCode, normalizedClientId);
+  const relatedOpenids = [
+    ...existingBoundCodes.map((bindCode) => bindCode && bindCode.openid),
+    targetBindCode && targetBindCode.openid,
+  ].map((openid) => String(openid || '').trim()).filter(Boolean);
+  const hasProBinding = relatedOpenids.some((openid) => proOpenidSet.has(openid));
+  const limit = hasProBinding ? MAX_BIND_DEVICE_LIMIT : DEFAULT_BIND_DEVICE_LIMIT;
+  const currentCount = existingIds.size || existingBoundCodes.length;
+
+  if (targetAlreadyBound) {
+    return {
+      allowed: true,
+      reason: '',
+      currentCount,
+      limit,
+      hasProBinding,
+    };
+  }
+
+  if (currentCount >= limit) {
+    return {
+      allowed: false,
+      reason: hasProBinding ? 'pro-plugin-binding-limit' : 'free-plugin-binding-limit',
+      currentCount,
+      limit,
+      hasProBinding,
+    };
+  }
+
+  return {
+    allowed: true,
+    reason: '',
+    currentCount,
+    limit,
+    hasProBinding,
+  };
+}
+
 function bindClientToCodeDocument(bindCode, clientId, now) {
   const normalizedClientId = String(clientId || '').trim();
   if (!bindCode || !normalizedClientId) {
@@ -560,6 +625,7 @@ module.exports = {
   createBindStatusResponse,
   bindClientToCodeDocument,
   unbindClientFromCodeDocument,
+  evaluatePluginBindingLimit,
   isBindClientAllowed,
   normalizeBindClients,
   normalizeBindDeviceLimit,

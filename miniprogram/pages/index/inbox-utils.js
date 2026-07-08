@@ -32,7 +32,9 @@ function isSupportedWebpageUrl(url) {
     || text.includes('bilibili.com')
     || text.includes('b23.tv')
     || text.includes('xiaoyuzhoufm.com')
-    || text.includes('xiaoyuzhou.com');
+    || text.includes('xiaoyuzhou.com')
+    || text.includes('channels.weixin.qq.com')
+    || text.includes('weixin.qq.com/sph/');
 }
 
 function hasXiaohongshuAudioVideoIntent(url) {
@@ -135,6 +137,8 @@ function buildWebpagePayload(url, sourceText, options = {}) {
   }
   if (options.webpageMediaType) {
     payload.webpageMediaType = options.webpageMediaType;
+  } else if (isAudioVideoWebpageUrl(text, originalText)) {
+    payload.webpageMediaType = 'audio_video';
   }
   if (options.cloudPreTranscription) {
     payload.cloudPreTranscription = options.cloudPreTranscription;

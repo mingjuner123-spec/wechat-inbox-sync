@@ -12,24 +12,28 @@ const { createInboxService } = require('../../services/inbox-service');
 const {
   buildMembershipDisplayState,
   shouldShowAdEntry,
+  shouldShowGeneralAd,
 } = require('../../utils/membership-display');
 
 const APP_VERSION = '0.1.0';
-const DEFAULT_PLUGIN_VERSION = '1.3.2';
-const DEFAULT_PLUGIN_UPDATED_AT = '2026-07-05 07:13';
+const DEFAULT_PLUGIN_VERSION = '1.3.3';
+const DEFAULT_PLUGIN_UPDATED_AT = '2026-07-05 08:04';
 const TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
-const DEFAULT_ANNOUNCEMENT = '插件 v1.3.2 已发布：修复绑定码与 Pro 权限链路，飞书文档转存可优先使用官方 API 通道。';
-const ANNOUNCEMENT_VERSION = '2026-07-05-plugin-132-market-update';
+const DEFAULT_ANNOUNCEMENT = '小程序内已支持直接开通 Pro，年卡早鸟价 49.9 元，7 月 10 日后恢复 68 元/年。';
+const ANNOUNCEMENT_VERSION = '2026-07-05-plugin-133-pro-price';
 const DEFAULT_UPDATE_ITEMS = [
-  '插件 v1.3.2 已发布，整理 Pro 高级功能、绑定码和同步/安装失败诊断入口',
-  '飞书文档转存已支持官方 API 通道，标题、正文和图片提取更完整；未连接时仍保留旧解析方式',
-  '修复绑定码、兑换码和 Pro 权限读取异常，已开通用户刷新权限后即可恢复高级功能',
-  'Pro 自动能力继续支持本地转写、小红书 OCR/评论区提取、AI 简介与关键词属性生成',
+  '小程序内已支持直接开通 Pro，年卡早鸟价 49.9 元，7 月 10 日后恢复 68 元/年。',
+  'Pro 用户支持小红书长文笔记提取图片文字。',
+  '飞书文档转存支持接入飞书官方 API。',
 ];
 const CONTACT_WECHAT = 'heyhmjx';
 const SHARE_TITLE = 'Obsidian 内容同步助手';
 const SHARE_PATH = 'pages/index/index';
 const REWARDED_AD_UNIT_ID = 'adunit-d21c10ffc8e30f1d';
+const INTERSTITIAL_AD_UNIT_ID = 'adunit-080aa7a67f50b9de';
+const NATIVE_TEMPLATE_AD_UNIT_ID = 'adunit-a9b616c898835639';
+const INTERSTITIAL_AD_STORAGE_KEY = 'wechat_inbox_last_interstitial_ad_at';
+const INTERSTITIAL_AD_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const MAX_RECORDER_DURATION_MS = 600000;
 const MAX_CHAT_UPLOAD_COUNT = 10;
 const MAX_ALBUM_UPLOAD_COUNT = 9;
@@ -317,6 +321,19 @@ Page({
     announcementVisible: false,
     statusText: '已保存，等待 Obsidian 同步',
     statusVisible: false,
+    supportVisible: false,
+    supportSubmitting: false,
+    supportCategory: 'question',
+    supportCategories: [
+      { id: 'question', label: '使用咨询' },
+      { id: 'bug', label: '小 bug' },
+      { id: 'billing', label: '订单问题' },
+      { id: 'feedback', label: '反馈建议' },
+    ],
+    supportContent: '',
+    supportContact: '',
+    supportLastContent: '',
+    supportReplyText: '',
     uploadProgressVisible: false,
     uploadProgressPercent: 0,
     uploadProgressText: '',
@@ -347,6 +364,8 @@ Page({
     showRedeemCode: false,
     showMembershipExpiry: false,
     showAdEntry: false,
+    showNativeTemplateAd: false,
+    nativeTemplateAdUnitId: NATIVE_TEMPLATE_AD_UNIT_ID,
     entitlementStatusLoaded: false,
     entitlementStatus: {
       hasAccess: false,
@@ -622,6 +641,83 @@ Page({
     });
   },
 
+  shouldShowGeneralAd() {
+    return shouldShowGeneralAd(this.data.entitlementStatus, this.data.entitlementStatusLoaded);
+  },
+
+  refreshGeneralAdState(entitlementStatus = this.data.entitlementStatus, entitlementStatusLoaded = this.data.entitlementStatusLoaded) {
+    return {
+      showNativeTemplateAd: shouldShowGeneralAd(entitlementStatus, entitlementStatusLoaded),
+    };
+  },
+
+  setupInterstitialAd() {
+    if (this.interstitialAd) return;
+    if (!INTERSTITIAL_AD_UNIT_ID || !wx.createInterstitialAd) return;
+    this.interstitialAd = wx.createInterstitialAd({
+      adUnitId: INTERSTITIAL_AD_UNIT_ID,
+    });
+    this.interstitialAdShowing = false;
+    this.interstitialAdLastError = '';
+    if (this.interstitialAd.onLoad) {
+      this.interstitialAd.onLoad(() => {
+        this.interstitialAdLastError = '';
+      });
+    }
+    if (this.interstitialAd.onClose) {
+      this.interstitialAd.onClose(() => {
+        this.interstitialAdShowing = false;
+      });
+    }
+    if (this.interstitialAd.onError) {
+      this.interstitialAd.onError((error) => {
+        this.interstitialAdLastError = getRewardedAdErrorMessage(error);
+        this.interstitialAdShowing = false;
+      });
+    }
+  },
+
+  getLastInterstitialAdShownAt() {
+    try {
+      return Number(wx.getStorageSync(INTERSTITIAL_AD_STORAGE_KEY)) || 0;
+    } catch (error) {
+      return 0;
+    }
+  },
+
+  setLastInterstitialAdShownAt(value) {
+    try {
+      wx.setStorageSync(INTERSTITIAL_AD_STORAGE_KEY, value);
+    } catch (error) {
+      // Storage failure should not block the save flow.
+    }
+  },
+
+  maybeShowInterstitialAd() {
+    if (!this.shouldShowGeneralAd()) return;
+    if (this.interstitialAdShowing) return;
+    const now = Date.now();
+    const lastShownAt = this.getLastInterstitialAdShownAt();
+    if (lastShownAt && now - lastShownAt < INTERSTITIAL_AD_MIN_INTERVAL_MS) return;
+
+    this.setupInterstitialAd();
+    if (!this.interstitialAd || !this.interstitialAd.show) return;
+    this.interstitialAdShowing = true;
+    this.interstitialAd.show()
+      .then(() => {
+        this.setLastInterstitialAdShownAt(now);
+      })
+      .catch(() => {
+        this.interstitialAdShowing = false;
+      });
+  },
+
+  handleNativeTemplateAdError() {
+    this.setData({
+      showNativeTemplateAd: false,
+    });
+  },
+
   onHide() {
     this.stopBindStatusPolling();
   },
@@ -651,6 +747,102 @@ Page({
     this.setData({
       inputValue: event.detail.value,
     });
+  },
+
+  showSupportPanel() {
+    this.setData({
+      supportVisible: true,
+      supportLastContent: '',
+      supportReplyText: '',
+    });
+  },
+
+  hideSupportPanel() {
+    if (this.data.supportSubmitting) return;
+    this.setData({ supportVisible: false });
+  },
+
+  selectSupportCategory(event) {
+    const category = event.currentTarget && event.currentTarget.dataset
+      ? String(event.currentTarget.dataset.category || 'question')
+      : 'question';
+    this.setData({ supportCategory: category });
+  },
+
+  onSupportContentInput(event) {
+    this.setData({
+      supportContent: event.detail.value,
+    });
+  },
+
+  onSupportContactInput(event) {
+    this.setData({
+      supportContact: event.detail.value,
+    });
+  },
+
+  async submitSupportFeedback() {
+    const content = String(this.data.supportContent || '').trim();
+    if (!content) {
+      wx.showToast({
+        title: '请先填写问题',
+        icon: 'none',
+      });
+      return;
+    }
+    if (!this.inboxService || this.data.supportSubmitting) return;
+
+    this.setData({
+      supportSubmitting: true,
+      supportLastContent: content,
+      supportReplyText: '',
+    });
+    try {
+      const response = await this.inboxService.submitFeedback({
+        kind: 'support_ticket',
+        category: this.data.supportCategory,
+        content,
+        contact: String(this.data.supportContact || '').trim(),
+        appVersion: APP_VERSION,
+        autoReplyEnabled: true,
+      });
+      if (!response.result || !response.result.success) {
+        throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '提交失败');
+      }
+      const resultData = response.result.data || {};
+      const hermesReply = String(resultData.hermesReply || resultData.reply || '').trim();
+      if (hermesReply) {
+        this.setData({
+          supportSubmitting: false,
+          supportReplyText: hermesReply,
+          supportContent: '',
+        });
+        wx.showToast({
+          title: 'Hermes 已回复',
+          icon: 'none',
+        });
+        return;
+      }
+      this.setData({
+        supportVisible: false,
+        supportSubmitting: false,
+          supportCategory: 'question',
+          supportContent: '',
+          supportContact: '',
+          supportLastContent: content,
+          supportReplyText: '',
+        });
+      wx.showToast({
+        title: resultData.hermesStatus === 'queued' ? '已交给 Hermes' : '已提交',
+        icon: 'none',
+      });
+    } catch (error) {
+      this.setData({ supportSubmitting: false });
+      wx.showToast({
+        title: getErrorMessage(error, '提交失败，请稍后再试'),
+        icon: 'none',
+      });
+    }
   },
 
   prependRecentItems(items) {
@@ -994,7 +1186,7 @@ Page({
       if (response.result && response.result.success) {
         this.updateDailyUsageStatus(response.result.data);
         wx.showToast({
-          title: '已增加10次同步次数',
+          title: '已增加5次同步次数',
           icon: 'none',
         });
       }
@@ -1018,6 +1210,7 @@ Page({
           usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
           cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
           showAdEntry: shouldShowAdEntry(entitlementStatus, this.data.dailyUsage, this.data.dailyUsageLoaded),
+          ...this.refreshGeneralAdState(entitlementStatus, true),
           ...buildMembershipDisplayState(entitlementStatus),
         });
       }
@@ -1026,6 +1219,7 @@ Page({
       this.setData({
         entitlementStatusLoaded: true,
         showAdEntry: false,
+        showNativeTemplateAd: false,
       });
     }
   },
@@ -1138,6 +1332,7 @@ Page({
         usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
         cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
         showAdEntry: shouldShowAdEntry(entitlementStatus, this.data.dailyUsage, this.data.dailyUsageLoaded),
+        ...this.refreshGeneralAdState(entitlementStatus, true),
         trialRedeemCodeCreatedAt: data.createdAt || '',
         ...buildMembershipDisplayState(entitlementStatus),
       });
@@ -1201,6 +1396,8 @@ Page({
         usageStatusText: buildUsageStatusText(this.data.dailyUsage, entitlementStatus),
         cloudQuotaSummary: buildCloudQuotaSummary(entitlementStatus),
         showAdEntry: shouldShowAdEntry(entitlementStatus, this.data.dailyUsage, this.data.dailyUsageLoaded),
+        entitlementStatusLoaded: true,
+        ...this.refreshGeneralAdState(entitlementStatus, true),
         ...buildMembershipDisplayState(entitlementStatus),
       });
       wx.showToast({
@@ -1364,6 +1561,7 @@ Page({
         recentList: this.prependRecentItems(item),
       });
       this.showStatus(isAudioVideoLink ? '音视频链接已保存，等待转写' : '网页链接已上传，等待转 Markdown');
+      this.maybeShowInterstitialAd();
     } catch (error) {
       this.setData({ isSaving: false });
       this.showStatus('网页保存失败，请重试');
@@ -1454,6 +1652,7 @@ Page({
       });
       this.resetUploadProgress();
       this.showStatus(`已上传 ${recentItems.length} 个素材，等待 Obsidian 同步`);
+      this.maybeShowInterstitialAd();
     } catch (error) {
       this.setData({
         isSaving: false,
@@ -1537,6 +1736,7 @@ Page({
       });
       this.resetUploadProgress();
       this.showStatus('文件已上传，等待 Obsidian 同步');
+      this.maybeShowInterstitialAd();
     } catch (error) {
       this.setData({ isSaving: false });
       this.resetUploadProgress();
@@ -1603,6 +1803,7 @@ Page({
       });
       this.resetUploadProgress();
       this.showStatus('语音已上传转写中');
+      this.maybeShowInterstitialAd();
     } catch (error) {
       this.setData({
         isSaving: false,
@@ -1650,6 +1851,7 @@ Page({
       });
 
       this.showStatus('已保存，等待 Obsidian 同步');
+      this.maybeShowInterstitialAd();
     } catch (error) {
       this.setData({
         isSaving: false,

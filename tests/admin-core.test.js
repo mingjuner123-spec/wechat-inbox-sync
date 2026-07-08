@@ -85,6 +85,13 @@ const dashboard = summarizeAdminDashboard({
     { code: 'A', redeemedCount: 0, deliveryStatus: 'sent' },
     { code: 'B', redeemedCount: 0, deliveryStatus: 'unsent' },
     { code: 'C', redeemedCount: 1, deliveryStatus: 'activated' },
+    {
+      code: 'D',
+      redeemedCount: 0,
+      deliveryStatus: 'activated',
+      paidOwnerOpenid: 'u4',
+      paymentOrderNo: 'OBPAY20260702000000PAID',
+    },
   ],
   entitlements: [
     { openid: 'u1', status: 'active', expiresAt: '2026-06-10T10:00:00.000Z' },
@@ -126,7 +133,7 @@ assert.strictEqual(dashboard.pro.activeEntitlements, 3);
 assert.strictEqual(dashboard.pro.expiringEntitlements, 2);
 assert.strictEqual(dashboard.pro.sentUnactivatedCodes, 1);
 assert.strictEqual(dashboard.pro.unsentCodes, 1);
-assert.strictEqual(dashboard.pro.activatedCodes, 1);
+assert.strictEqual(dashboard.pro.activatedCodes, 2);
 assert.strictEqual(dashboard.scope.isFullScan, true);
 assert.strictEqual(dashboard.scope.label, '已按当前数据库总数统计');
 assert.strictEqual(dashboard.funnel.visitUsers, 3);

@@ -41,6 +41,12 @@ function createPlugin({ requestUrl, files = {}, settings = {} }) {
     token: 'ABC-123',
     inboxDir: '临时收集',
     aiProvider: 'off',
+    localTranscriptionEntitlementStatus: {
+      hasAccess: true,
+      status: 'active',
+      plan: 'local_transcription_beta',
+      expiresAt: '2036-07-03T08:00:00.000Z',
+    },
     ...settings,
   });
   plugin.app = {
@@ -67,14 +73,19 @@ function createPlugin({ requestUrl, files = {}, settings = {} }) {
 (async () => {
   assert.strictEqual(pluginCore.DEFAULT_SETTINGS.aiMetadataEnabled, true);
   assert.strictEqual(pluginCore.DEFAULT_SETTINGS.xiaohongshuCommentsEnabled, true);
+  assert.strictEqual(pluginCore.DEFAULT_SETTINGS.xiaohongshuImageOcrEnabled, true);
   assert.strictEqual(pluginCore.mergeSettings({ aiMetadataEnabled: false }).aiMetadataEnabled, true);
   assert.strictEqual(pluginCore.mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, true);
-  assert.strictEqual(pluginCore.mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, false);
+  assert.strictEqual(pluginCore.mergeSettings({ settingsVersion: 2, aiMetadataEnabled: false }).aiMetadataEnabled, true);
   assert.strictEqual(pluginCore.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
+  assert.strictEqual(pluginCore.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
 
-  assert.ok(pluginSource.includes("text: 'AI 简介与关键词'"));
-  assert.ok(pluginSource.includes("text: '小红书评论区提取'"));
-  assert.ok(pluginSource.includes(".setName('提取小红书评论区')"));
+  assert.ok(pluginSource.includes('AI 简介与关键词自动生成：已默认开启'));
+  assert.ok(pluginSource.includes('小红书图文 OCR：已默认开启'));
+  assert.strictEqual(pluginSource.includes(".setName('启用 AI 简介与关键词')"), false);
+  assert.strictEqual(pluginSource.includes(".setName('启用小红书图片 OCR')"), false);
+  assert.ok(pluginSource.includes("text: '登录小红书评论区'"));
+  assert.ok(pluginSource.includes(".setName('登录小红书')"));
   assert.ok(pluginSource.includes("id: 'login-xiaohongshu-web'"));
   assert.ok(pluginSource.includes("async function checkXiaohongshuLoginStatus"));
   assert.ok(pluginSource.includes("async function getXiaohongshuCookieHeader"));
@@ -162,14 +173,18 @@ function createPlugin({ requestUrl, files = {}, settings = {} }) {
           url: 'https://my.feishu.cn/docx/contract-token',
           platform: '飞书',
           contentCategory: '文档',
+          extractedDescription: '飞书描述: 包含冒号也必须是安全属性',
+          extractedKeywords: ['小红书:AI', '知识库'],
           description: '飞书描述: 包含冒号也必须是安全属性',
           keywords: ['小红书:AI', '知识库'],
+          aiMetadataSource: 'contract',
           conversionStatus: 'success',
           markdown: '## 一级标题\n\n正文内容',
         },
       },
       title: '飞书-飞书属性防回退',
       syncedAt: '2026-06-24T08:05:00.000Z',
+      propertyFields: 'title,author,url,synced_at,source,description,keywords',
     });
     const frontmatter = markdown.split('---')[1];
     assert.ok(frontmatter.split('\n').some((line) => /^description: ".+"$/.test(line)));

@@ -24,9 +24,16 @@ const {
 } = require('./inbox-core');
 const {
   buildFeishuFeedbackMessage,
+  createHermesTaskDocument,
   createFeedbackDocument,
+  normalizeHermesApiResponse,
+  prepareHermesDispatch,
   prepareFeedbackNotification,
 } = require('./feedback-core');
+const {
+  buildDailyOpsReport,
+  buildDailyOpsReportWebhookPayload,
+} = require('./ops-report-core');
 const { buildPublicConfig } = require('./public-config-core');
 const { processVoiceMetadata } = require('./voice-ai');
 const {
@@ -3442,9 +3449,15 @@ async function postWebhookJson(url, payload, timeoutMs = REQUEST_TIMEOUT_MS) {
       reject(new Error('Payment notify webhook is not configured'));
       return;
     }
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'http:' ? http : https;
     const requestBody = JSON.stringify(payload);
-    const req = https.request(url, {
+    const req = client.request({
       method: 'POST',
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: `${parsed.pathname}${parsed.search}`,
       headers: {
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Length': Buffer.byteLength(requestBody),
@@ -3526,6 +3539,96 @@ function notifyPaidPaymentOrderSoon(args) {
   });
 }
 
+function getHermesDispatchConfig() {
+  return {
+    webhook: String(process.env.HERMES_WEBHOOK_URL || process.env.HERMES_SUPPORT_WEBHOOK_URL || '').trim(),
+    enabled: process.env.HERMES_WEBHOOK_ENABLED || process.env.HERMES_ENABLED || '',
+    localQueueEnabled: process.env.HERMES_LOCAL_QUEUE_ENABLED || '',
+  };
+}
+
+async function dispatchHermesSupportTicket({ feedbackId, feedback, now }) {
+  const config = getHermesDispatchConfig();
+  const dispatch = prepareHermesDispatch({
+    feedback,
+    feedbackId,
+    webhook: config.webhook,
+    enabled: config.enabled,
+    localQueueEnabled: config.localQueueEnabled,
+  });
+  if (!dispatch.shouldDispatch) {
+    if (feedback && feedback.kind === 'support_ticket') {
+      await db.collection('feedback').doc(feedbackId).update({
+        data: {
+          hermesStatus: 'skipped',
+          hermesError: '',
+          updatedAt: now,
+        },
+      });
+    }
+    return { status: 'skipped', mode: dispatch.mode };
+  }
+
+  if (dispatch.mode === 'local_queue') {
+    await ensureCollection('hermes_tasks');
+    const task = createHermesTaskDocument({
+      payload: dispatch.payload,
+      mode: dispatch.mode,
+      now,
+    });
+    const created = await db.collection('hermes_tasks').add({ data: task });
+    await db.collection('feedback').doc(feedbackId).update({
+      data: {
+        hermesStatus: 'queued',
+        hermesMode: 'local_queue',
+        hermesTaskId: created._id,
+        hermesError: '',
+        updatedAt: now,
+      },
+    });
+    return { status: 'queued', mode: 'local_queue', taskId: created._id };
+  }
+
+  try {
+    const responseText = await postWebhookJson(config.webhook, dispatch.payload);
+    const hermesApiResponse = normalizeHermesApiResponse(tryParseJson(responseText) || responseText);
+    await db.collection('feedback').doc(feedbackId).update({
+      data: {
+        hermesStatus: hermesApiResponse.status,
+        hermesMode: 'webhook',
+        hermesDispatchedAt: now,
+        hermesReply: hermesApiResponse.reply,
+        hermesActions: hermesApiResponse.actions,
+        hermesRawResponse: hermesApiResponse.raw,
+        hermesError: '',
+        requiresHumanReview: hermesApiResponse.requiresHumanReview,
+        humanReviewReason: hermesApiResponse.requiresHumanReview ? 'hermes_requested_review' : '',
+        updatedAt: now,
+      },
+    });
+    return {
+      status: hermesApiResponse.status,
+      mode: 'webhook',
+      reply: hermesApiResponse.reply,
+      requiresHumanReview: hermesApiResponse.requiresHumanReview,
+      actions: hermesApiResponse.actions,
+    };
+  } catch (error) {
+    const message = error.message || String(error);
+    await db.collection('feedback').doc(feedbackId).update({
+      data: {
+        hermesStatus: 'failed',
+        hermesMode: 'webhook',
+        hermesError: message,
+        requiresHumanReview: true,
+        humanReviewReason: 'hermes_dispatch_failed',
+        updatedAt: now,
+      },
+    });
+    return { status: 'failed', mode: 'webhook', error: message };
+  }
+}
+
 async function submitFeedback(event) {
   const wxContext = cloud.getWXContext();
   const now = new Date().toISOString();
@@ -3547,49 +3650,271 @@ async function submitFeedback(event) {
   await ensureCollection('feedback');
   const result = await db.collection('feedback').add({ data });
   const feedbackId = result._id;
+  const hermesResult = await dispatchHermesSupportTicket({
+    feedbackId,
+    feedback: data,
+    now,
+  });
 
-  if (!notification.shouldNotify) {
-    return {
-      success: true,
-      data: {
-        id: feedbackId,
-        notificationStatus: 'skipped',
-        notificationError: '',
-      },
-    };
-  }
-
-  try {
-    await postFeishuWebhookJson(feishuWebhook, buildFeishuFeedbackMessage({
-      feedback: data,
-      feedbackId,
-    }));
-    await db.collection('feedback').doc(feedbackId).update({
-      data: {
-        notificationStatus: 'sent',
-        notifiedAt: new Date().toISOString(),
-        notificationError: '',
-      },
-    });
-    data.notificationStatus = 'sent';
-  } catch (error) {
-    const message = error.message || String(error);
-    await db.collection('feedback').doc(feedbackId).update({
-      data: {
-        notificationStatus: 'failed',
-        notificationError: message,
-      },
-    });
-    data.notificationStatus = 'failed';
-    data.notificationError = message;
+  if (notification.shouldNotify) {
+    try {
+      await postFeishuWebhookJson(feishuWebhook, buildFeishuFeedbackMessage({
+        feedback: data,
+        feedbackId,
+      }));
+      await db.collection('feedback').doc(feedbackId).update({
+        data: {
+          notificationStatus: 'sent',
+          notifiedAt: new Date().toISOString(),
+          notificationError: '',
+        },
+      });
+      data.notificationStatus = 'sent';
+    } catch (error) {
+      const message = error.message || String(error);
+      await db.collection('feedback').doc(feedbackId).update({
+        data: {
+          notificationStatus: 'failed',
+          notificationError: message,
+        },
+      });
+      data.notificationStatus = 'failed';
+      data.notificationError = message;
+    }
   }
 
   return {
     success: true,
     data: {
       id: feedbackId,
-      notificationStatus: data.notificationStatus,
-      notificationError: data.notificationError,
+      notificationStatus: data.notificationStatus || 'skipped',
+      notificationError: data.notificationError || '',
+      hermesStatus: hermesResult.status,
+      hermesMode: hermesResult.mode,
+      hermesTaskId: hermesResult.taskId || '',
+      hermesReply: hermesResult.reply || '',
+      hermesActions: hermesResult.actions || [],
+      requiresHumanReview: Boolean(hermesResult.requiresHumanReview),
+      hermesError: hermesResult.error || '',
+    },
+  };
+}
+
+function getDailyOpsReportWebhook() {
+  return String(
+    process.env.OPS_REPORT_WEBHOOK
+    || process.env.DAILY_REPORT_WEBHOOK
+    || process.env.PAYMENT_NOTIFY_WEBHOOK
+    || process.env.FEISHU_FEEDBACK_WEBHOOK
+    || ''
+  ).trim();
+}
+
+async function readDailyOpsReportSnapshot(collectionName, orderField = 'createdAt') {
+  try {
+    await ensureCollection(collectionName);
+    return await readAdminCollectionSnapshot(collectionName, {
+      orderField,
+      maxRead: 5000,
+    });
+  } catch (error) {
+    console.warn('daily ops snapshot unavailable', {
+      collectionName,
+      errMsg: error.message || String(error),
+    });
+    return { data: [] };
+  }
+}
+
+async function sendDailyOpsReport(event = {}) {
+  if (!event.fromTimer) {
+    assertRedeemAdmin(event);
+  }
+  const now = new Date().toISOString();
+  const day = String(event.day || '').trim() || getChinaLocalDay(now);
+  const [orders, feedbacks, hermesTasks] = await Promise.all([
+    readDailyOpsReportSnapshot('payment_orders', 'createdAt'),
+    readDailyOpsReportSnapshot('feedback', 'createdAt'),
+    readDailyOpsReportSnapshot('hermes_tasks', 'updatedAt'),
+  ]);
+  const report = buildDailyOpsReport({
+    day,
+    orders: orders.data || [],
+    feedbacks: feedbacks.data || [],
+    hermesTasks: hermesTasks.data || [],
+  });
+  await ensureCollection('ops_reports');
+  const created = await db.collection('ops_reports').add({
+    data: {
+      ...report,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    },
+  });
+  const webhook = getDailyOpsReportWebhook();
+  if (!webhook) {
+    await db.collection('ops_reports').doc(created._id).update({
+      data: {
+        status: 'skipped',
+        error: 'OPS_REPORT_WEBHOOK is not configured',
+        updatedAt: now,
+      },
+    });
+    return {
+      success: true,
+      data: {
+        id: created._id,
+        status: 'skipped',
+        report,
+      },
+    };
+  }
+  try {
+    await postWebhookJson(webhook, buildDailyOpsReportWebhookPayload(report));
+    await db.collection('ops_reports').doc(created._id).update({
+      data: {
+        status: 'sent',
+        sentAt: new Date().toISOString(),
+        error: '',
+      },
+    });
+    return {
+      success: true,
+      data: {
+        id: created._id,
+        status: 'sent',
+        report,
+      },
+    };
+  } catch (error) {
+    const message = error.message || String(error);
+    await db.collection('ops_reports').doc(created._id).update({
+      data: {
+        status: 'failed',
+        error: message,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    return {
+      success: true,
+      data: {
+        id: created._id,
+        status: 'failed',
+        error: message,
+        report,
+      },
+    };
+  }
+}
+
+function normalizeHermesTaskStatus(value, fallback = 'pending') {
+  const status = String(value || '').trim();
+  if (['pending', 'running', 'done', 'failed', 'needs_review'].includes(status)) return status;
+  return fallback;
+}
+
+async function adminCreateHermesTask(event = {}) {
+  assertRedeemAdmin(event);
+  await ensureCollection('hermes_tasks');
+  const now = new Date().toISOString();
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const data = {
+    ...createHermesTaskDocument({
+      payload,
+      mode: event.mode || 'local_queue',
+      now,
+    }),
+    taskType: String(event.taskType || payload.taskType || 'local_fix').trim() || 'local_fix',
+    title: String(event.title || payload.title || '').trim(),
+    priority: String(event.priority || 'normal').trim() || 'normal',
+    source: String(event.source || 'hermes').trim() || 'hermes',
+  };
+  const created = await db.collection('hermes_tasks').add({ data });
+  return {
+    success: true,
+    data: {
+      id: created._id,
+      ...data,
+    },
+  };
+}
+
+async function adminListHermesTasks(event = {}) {
+  assertRedeemAdmin(event);
+  await ensureCollection('hermes_tasks');
+  const status = String(event.status || 'pending').trim();
+  const taskType = String(event.taskType || '').trim();
+  const limit = normalizeAdminPositiveInteger(event.limit, 1, 100, 50);
+  const snapshot = await readAdminCollectionSnapshot('hermes_tasks', {
+    orderField: 'createdAt',
+    order: 'asc',
+    maxRead: normalizeAdminPositiveInteger(event.maxRead, 100, 5000, 5000),
+  });
+  const items = (snapshot.data || [])
+    .filter((item) => !status || item.status === status)
+    .filter((item) => !taskType || item.taskType === taskType)
+    .slice(0, limit)
+    .map((item) => ({
+      _id: item._id,
+      taskType: item.taskType || '',
+      title: item.title || '',
+      status: item.status || '',
+      priority: item.priority || '',
+      payload: item.payload || {},
+      result: item.result || null,
+      error: item.error || '',
+      createdAt: item.createdAt || '',
+      updatedAt: item.updatedAt || '',
+    }));
+  return {
+    success: true,
+    data: {
+      total: snapshot.total,
+      items,
+    },
+  };
+}
+
+async function adminUpdateHermesTask(event = {}) {
+  assertRedeemAdmin(event);
+  await ensureCollection('hermes_tasks');
+  const taskId = String(event.taskId || event.id || '').trim();
+  if (!taskId) throw new Error('Missing Hermes task id');
+  const now = new Date().toISOString();
+  const status = normalizeHermesTaskStatus(event.status, 'done');
+  const updateData = {
+    status,
+    updatedAt: now,
+  };
+  if (status === 'running') updateData.startedAt = event.startedAt || now;
+  if (['done', 'failed', 'needs_review'].includes(status)) updateData.completedAt = event.completedAt || now;
+  if (Object.prototype.hasOwnProperty.call(event, 'result')) {
+    updateData.result = event.result && typeof event.result === 'object' ? event.result : { value: event.result };
+  }
+  if (Object.prototype.hasOwnProperty.call(event, 'error')) {
+    updateData.error = String(event.error || '').trim();
+  }
+  await db.collection('hermes_tasks').doc(taskId).update({ data: updateData });
+
+  const feedbackId = String(event.feedbackId || (updateData.result && updateData.result.feedbackId) || '').trim();
+  const reply = String(event.reply || (updateData.result && updateData.result.reply) || '').trim();
+  if (feedbackId && reply) {
+    await db.collection('feedback').doc(feedbackId).update({
+      data: {
+        hermesStatus: 'replied',
+        hermesReply: reply,
+        requiresHumanReview: status === 'needs_review',
+        updatedAt: now,
+      },
+    });
+  }
+
+  return {
+    success: true,
+    data: {
+      id: taskId,
+      ...updateData,
     },
   };
 }
@@ -3608,6 +3933,53 @@ async function getPublicConfig() {
   return {
     success: true,
     data: buildPublicConfig(config),
+  };
+}
+
+async function adminUpsertPublicConfig(event = {}) {
+  assertRedeemAdmin(event);
+  await ensureCollection('public_config');
+  const now = new Date().toISOString();
+  const config = buildPublicConfig({
+    announcement: event.announcement,
+    tutorialUrl: event.tutorialUrl,
+    pluginVersion: event.pluginVersion,
+    updatedAt: event.updatedAt,
+    announcementVersion: event.announcementVersion,
+    updateItems: event.updateItems,
+  });
+  const data = {
+    key: 'home',
+    ...config,
+    updatedConfigAt: now,
+  };
+
+  const result = await db.collection('public_config')
+    .where({
+      key: 'home',
+    })
+    .limit(1)
+    .get();
+  const existing = result.data && result.data[0] ? result.data[0] : null;
+
+  if (existing && existing._id) {
+    await db.collection('public_config').doc(existing._id).update({ data });
+    return {
+      success: true,
+      data: {
+        id: existing._id,
+        ...config,
+      },
+    };
+  }
+
+  const addResult = await db.collection('public_config').add({ data });
+  return {
+    success: true,
+    data: {
+      id: addResult._id,
+      ...config,
+    },
   };
 }
 
@@ -3694,6 +4066,9 @@ async function markInboxRecordSynced(event) {
 exports.main = async (event) => {
   try {
     if (event && (event.Type === 'Timer' || event.TriggerName || event.timer || event.type === 'timer')) {
+      if (event.TriggerName === 'daily-ops-report-at-night' || event.triggerName === 'daily-ops-report-at-night') {
+        return await sendDailyOpsReport({ ...event, fromTimer: true });
+      }
       return await processCloudTranscriptionQueue(event);
     }
     if (event && (
@@ -3749,6 +4124,8 @@ exports.main = async (event) => {
         return await adminUpdatePaymentOrder(event);
       case 'adminRetryCloudPreTranscription':
         return await adminRetryCloudPreTranscription(event);
+      case 'adminUpsertPublicConfig':
+        return await adminUpsertPublicConfig(event);
       case 'trackAnalyticsEvent':
         return await trackAnalyticsEvent(event);
       case 'getCloudRuntimeConfigStatus':
@@ -3759,6 +4136,14 @@ exports.main = async (event) => {
         return await processCloudPreTranscription(event);
       case 'processCloudTranscriptionQueue':
         return await processCloudTranscriptionQueue(event);
+      case 'sendDailyOpsReport':
+        return await sendDailyOpsReport(event);
+      case 'adminCreateHermesTask':
+        return await adminCreateHermesTask(event);
+      case 'adminListHermesTasks':
+        return await adminListHermesTasks(event);
+      case 'adminUpdateHermesTask':
+        return await adminUpdateHermesTask(event);
       case 'createBindCode':
         return await createBindCode(event);
       case 'replaceBindCode':

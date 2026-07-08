@@ -64,6 +64,18 @@ function createAdminRedeemCodeDocuments({
   return documents;
 }
 
+function isRedeemCodeActivatedForAdmin(item) {
+  if (!item) return false;
+  if ((Number(item.redeemedCount) || 0) > 0) return true;
+  const deliveryStatus = String(item.deliveryStatus || '').trim().toLowerCase();
+  const status = String(item.status || '').trim().toLowerCase();
+  return deliveryStatus === 'activated'
+    || status === 'redeemed'
+    || Boolean(item.lastRedeemedOpenId || item.redeemedOpenId)
+    || Boolean(item.paidOwnerOpenid || item.trialOwnerOpenid)
+    || Boolean(item.paymentOrderNo || item.latestPaymentOrderNo);
+}
+
 function getAdminTimeRange(now = new Date().toISOString()) {
   const nowTime = new Date(now).getTime();
   const safeNow = Number.isNaN(nowTime) ? Date.now() : nowTime;
@@ -555,9 +567,9 @@ function summarizeAdminDashboard({
     return (item.status || 'active') === 'active' && (!expiresAt || isDateAfter(expiresAt, range.now));
   });
   const expiringEntitlements = activeEntitlements.filter((item) => item.expiresAt && isDateBefore(item.expiresAt, range.expiringSoon));
-  const sentUnactivatedCodes = redeemCodes.filter((item) => (Number(item.redeemedCount) || 0) <= 0 && item.deliveryStatus === 'sent');
-  const unsentCodes = redeemCodes.filter((item) => (Number(item.redeemedCount) || 0) <= 0 && item.deliveryStatus !== 'sent');
-  const activatedCodes = redeemCodes.filter((item) => (Number(item.redeemedCount) || 0) > 0);
+  const sentUnactivatedCodes = redeemCodes.filter((item) => !isRedeemCodeActivatedForAdmin(item) && item.deliveryStatus === 'sent');
+  const unsentCodes = redeemCodes.filter((item) => !isRedeemCodeActivatedForAdmin(item) && item.deliveryStatus !== 'sent');
+  const activatedCodes = redeemCodes.filter((item) => isRedeemCodeActivatedForAdmin(item));
   const boundCodes = bindCodes.filter((item) => item.status === 'bound');
   const totalBoundClients = bindCodes.reduce((sum, item) => {
     const clients = Array.isArray(item.clients) ? item.clients : [];

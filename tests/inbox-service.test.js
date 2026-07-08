@@ -178,6 +178,7 @@ const wxMock = {
       data: {
         type: 'getEntitlementStatus',
         plan: 'local_transcription_beta',
+        includeRedeemCode: true,
       },
     },
   ]);
@@ -217,7 +218,7 @@ const wxMock = {
     },
   ]);
 
-  await service.createPaymentOrder('pro_year');
+  await service.createPaymentOrder('pro_year', 'LOGIN_CODE_1');
   assert.deepStrictEqual(calls[15], [
     'callFunction',
     {
@@ -225,6 +226,7 @@ const wxMock = {
       data: {
         type: 'createPaymentOrder',
         planId: 'pro_year',
+        loginCode: 'LOGIN_CODE_1',
       },
     },
   ]);

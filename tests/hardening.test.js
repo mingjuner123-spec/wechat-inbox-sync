@@ -69,8 +69,8 @@ assert.match(
 );
 assert.match(
   quickstartIndex,
-  /env:\s*cloud\.DYNAMIC_CURRENT_ENV/,
-  'quickstartFunctions should use the current deployed WeChat cloud environment'
+  /env:\s*getCloudDataEnv\(\)/,
+  'quickstartFunctions should initialize wx-server-sdk with the resolved data environment'
 );
 assert.match(
   syncApiIndex,
@@ -96,6 +96,45 @@ assert.match(
   syncApiIndex,
   /env:\s*getCloudDataEnv\(\)/,
   'syncApi should initialize wx-server-sdk with the resolved data environment'
+);
+assert.match(
+  syncApiIndex,
+  /cloud\.database\(\{\s*env:\s*getCloudDataEnv\(\),\s*\}\)/,
+  'syncApi database handle should explicitly use the resolved data environment'
+);
+assert.match(
+  syncAdminHandler,
+  /cloud\.database\(\{\s*env:\s*getCloudDataEnv\(\),\s*\}\)/,
+  'syncApi admin handler database handle should explicitly use the resolved data environment'
+);
+const activeAiMetadataBody = syncApiIndex.slice(
+  syncApiIndex.lastIndexOf('async function generateAiMetadataWithModel'),
+  syncApiIndex.indexOf('function downloadPreparedMedia'),
+);
+assert.match(
+  activeAiMetadataBody,
+  /Title: \$\{title\}/,
+  'AI metadata prompt should send the real title to the model'
+);
+assert.match(
+  activeAiMetadataBody,
+  /Content:\\n\$\{content\}/,
+  'AI metadata prompt should send the real content to the model'
+);
+assert.match(
+  activeAiMetadataBody,
+  /Simplified Chinese/,
+  'AI metadata prompt should require Chinese output for mostly Chinese content'
+);
+assert.doesNotMatch(
+  activeAiMetadataBody,
+  /\{payload\.content \|\| ''\}/,
+  'AI metadata prompt must not send a literal payload placeholder'
+);
+assert.doesNotMatch(
+  activeAiMetadataBody,
+  /[\u6D63\u9350\u93C1]\S{2,}/,
+  'active AI metadata prompt should not contain mojibake text'
 );
 assert.ok(
   syncApiIndex.indexOf("cloud.init({") < syncApiIndex.indexOf("require('./admin-handler')"),

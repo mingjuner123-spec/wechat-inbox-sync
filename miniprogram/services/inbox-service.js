@@ -73,10 +73,11 @@ function createInboxService(wxApi) {
     });
   }
 
-  function getEntitlementStatus(plan) {
+  function getEntitlementStatus(plan, options = {}) {
     return callInboxFunction({
       type: 'getEntitlementStatus',
       plan,
+      includeRedeemCode: options.includeRedeemCode !== false,
     });
   }
 
@@ -93,10 +94,11 @@ function createInboxService(wxApi) {
     });
   }
 
-  function createPaymentOrder(planId) {
+  function createPaymentOrder(planId, loginCode) {
     return callInboxFunction({
       type: 'createPaymentOrder',
       planId,
+      loginCode,
     });
   }
 

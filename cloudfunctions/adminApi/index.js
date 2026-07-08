@@ -14,6 +14,9 @@ const {
 const {
   buildPaymentOrderState,
   createPaidEntitlementFromOrder,
+  pickPaymentCarryoverEntitlement,
+  mergePaidEntitlementWithCarryover,
+  createPaidRedeemCodeDocument,
 } = require('../quickstartFunctions/payment-core');
 
 const PRODUCTION_WECHAT_DATA_ENV = 'he02-d8gebzv050ed6c4ef';
@@ -182,9 +185,20 @@ function formatRemainingDays(expiresAt, now = new Date().toISOString()) {
   return Math.ceil((expiresTime - nowTime) / 86400000);
 }
 
+function isRedeemCodeAssigned(item) {
+  if (!item) return false;
+  if ((Number(item.redeemedCount) || 0) > 0) return true;
+  const deliveryStatus = String(item.deliveryStatus || '').trim().toLowerCase();
+  const status = String(item.status || '').trim().toLowerCase();
+  return deliveryStatus === 'activated'
+    || status === 'redeemed'
+    || Boolean(item.lastRedeemedOpenId || item.redeemedOpenId)
+    || Boolean(item.paidOwnerOpenid || item.trialOwnerOpenid)
+    || Boolean(item.paymentOrderNo || item.latestPaymentOrderNo);
+}
+
 function normalizeCodeDeliveryState(item) {
-  const redeemedCount = Number(item && item.redeemedCount) || 0;
-  if (redeemedCount > 0) {
+  if (isRedeemCodeAssigned(item)) {
     return {
       deliveryStatus: 'activated',
       deliveryStatusText: '已激活',
@@ -201,6 +215,14 @@ function addDays(baseIso, days) {
   const date = new Date(baseIso);
   if (Number.isNaN(date.getTime())) return '';
   date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString();
+}
+
+function normalizeExpiresAtInput(value) {
+  const date = new Date(String(value || '').trim());
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('Invalid Pro expiration time');
+  }
   return date.toISOString();
 }
 
@@ -511,6 +533,11 @@ async function listRedeemCodes(request) {
     deliveredAt: item.deliveredAt || '',
     lastRedeemedAt: item.lastRedeemedAt || '',
     lastRedeemedOpenId: item.lastRedeemedOpenId || '',
+    trialOwnerOpenid: item.trialOwnerOpenid || '',
+    paidOwnerOpenid: item.paidOwnerOpenid || '',
+    paymentOrderNo: item.paymentOrderNo || '',
+    latestPaymentOrderNo: item.latestPaymentOrderNo || '',
+    paymentPaidAt: item.paymentPaidAt || '',
     createdAt: item.createdAt || '',
     updatedAt: item.updatedAt || '',
     ...normalizeCodeDeliveryState(item),
@@ -593,7 +620,7 @@ async function updateEntitlement(request) {
   const entitlementId = String(request.body.entitlementId || '').trim();
   const action = String(request.body.action || '').trim();
   if (!entitlementId) throw new Error('缺少 Pro 用户记录 ID');
-  if (!['extend', 'disable', 'activate', 'addCloudQuota'].includes(action)) throw new Error('不支持的 Pro 用户操作');
+  if (!['extend', 'disable', 'activate', 'addCloudQuota', 'setExpiresAt'].includes(action)) throw new Error('不支持的 Pro 用户操作');
   const result = await db.collection('user_entitlements').doc(entitlementId).get();
   const entitlement = result.data;
   if (!entitlement) throw new Error('Pro 用户记录不存在');
@@ -604,6 +631,25 @@ async function updateEntitlement(request) {
     const base = entitlement.expiresAt && new Date(entitlement.expiresAt).getTime() > new Date(now).getTime() ? entitlement.expiresAt : now;
     updateData.status = 'active';
     updateData.expiresAt = addDays(base, days);
+  }
+  if (action === 'setExpiresAt') {
+    updateData.status = 'active';
+    updateData.expiresAt = normalizeExpiresAtInput(request.body.expiresAt);
+    if (Object.prototype.hasOwnProperty.call(request.body, 'code')) {
+      updateData.code = normalizeRedeemCode(request.body.code);
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'source')) {
+      updateData.source = String(request.body.source || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'paymentOrderNo')) {
+      updateData.paymentOrderNo = String(request.body.paymentOrderNo || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'latestPaymentOrderNo')) {
+      updateData.latestPaymentOrderNo = String(request.body.latestPaymentOrderNo || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'durationDays')) {
+      updateData.durationDays = normalizeAdminPositiveInteger(request.body.durationDays, 1, 9999, entitlement.durationDays || 30);
+    }
   }
   if (action === 'disable') updateData.status = 'disabled';
   if (action === 'activate') updateData.status = 'active';
@@ -693,24 +739,101 @@ async function listRecords(request) {
 }
 
 async function applyPaidPaymentOrder(order, now = new Date().toISOString()) {
-  const entitlement = createPaidEntitlementFromOrder({ order, now });
   await ensureCollection('user_entitlements');
+  async function ensurePaidRedeemCodeForPayment({ openid, order: paidOrder, entitlement, now: paidNow }) {
+    await ensureCollection('redeem_codes');
+    let code = normalizeRedeemCode(entitlement && entitlement.code);
+    if (!code) {
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const [candidate] = createAdminRedeemCodeDocuments({
+          count: 1,
+          prefix: 'OBPRO',
+          durationDays: Number(entitlement && entitlement.durationDays) || 30,
+          note: 'virtual-payment-pro',
+          plan: DEFAULT_REDEEM_PLAN,
+          now: paidNow,
+        });
+        const candidateCode = normalizeRedeemCode(candidate && candidate.code);
+        const exists = await db.collection('redeem_codes')
+          .where({ code: candidateCode })
+          .limit(1)
+          .get();
+        if (exists.data && exists.data[0]) continue;
+        const paidCodeDoc = createPaidRedeemCodeDocument({
+          code: candidateCode,
+          openid,
+          entitlement,
+          order: paidOrder,
+          now: paidNow,
+          existingCodeDoc: candidate,
+        });
+        const { _id, ...data } = paidCodeDoc;
+        await db.collection('redeem_codes').add({ data });
+        return {
+          ...entitlement,
+          code: paidCodeDoc.code,
+        };
+      }
+      throw new Error('Failed to create paid redeem code');
+    }
+
+    const codeResult = await db.collection('redeem_codes')
+      .where({ code })
+      .limit(1)
+      .get();
+    const existingCodeDoc = codeResult.data && codeResult.data[0] ? codeResult.data[0] : {};
+    const paidCodeDoc = createPaidRedeemCodeDocument({
+      code,
+      openid,
+      entitlement,
+      order: paidOrder,
+      now: paidNow,
+      existingCodeDoc,
+    });
+    const { _id, ...data } = paidCodeDoc;
+    if (existingCodeDoc && existingCodeDoc._id) {
+      await db.collection('redeem_codes').doc(existingCodeDoc._id).update({ data });
+    } else {
+      await db.collection('redeem_codes').add({ data });
+    }
+    return {
+      ...entitlement,
+      code: paidCodeDoc.code,
+    };
+  }
+
   const currentResult = await db.collection('user_entitlements')
     .where({
       openid: order.openid,
-      plan: entitlement.plan,
-      status: 'active',
     })
-    .orderBy('redeemedAt', 'desc')
-    .limit(1)
+    .limit(100)
     .get();
-  const current = currentResult.data && currentResult.data[0] ? currentResult.data[0] : null;
+  const carryover = pickPaymentCarryoverEntitlement(currentResult.data || [], now);
+  const current = carryover.current;
+  const entitlement = createPaidEntitlementFromOrder({
+    order,
+    now,
+    baseExpiresAt: current && current.expiresAt,
+  });
+  let updateData = mergePaidEntitlementWithCarryover({
+    entitlement,
+    current,
+    codeSource: carryover.codeSource,
+    order,
+    now,
+  });
+  updateData = await ensurePaidRedeemCodeForPayment({
+    openid: order.openid,
+    order,
+    entitlement: updateData,
+    now,
+  });
   if (current && current._id) {
-    await db.collection('user_entitlements').doc(current._id).update({ data: entitlement });
+    await db.collection('user_entitlements').doc(current._id).update({ data: updateData });
   } else {
-    await db.collection('user_entitlements').add({ data: entitlement });
+    await db.collection('user_entitlements').add({ data: updateData });
   }
-  return entitlement;
+  return updateData;
 }
 
 async function listPaymentOrders(request) {
@@ -727,6 +850,19 @@ async function listPaymentOrders(request) {
       openid: item.openid || '',
       ...buildPaymentOrderState(item),
       updatedAt: item.updatedAt || '',
+      wxOrderId: item.wxOrderId || '',
+      wxpayOrderId: item.wxpayOrderId || '',
+      channelOrderId: item.channelOrderId || '',
+      transactionId: item.transactionId || '',
+      mchOrderNo: item.mchOrderNo || '',
+      wechatPaymentStatus: item.wechatPaymentStatus || '',
+      virtualPaymentNotifiedAt: item.virtualPaymentNotifiedAt || '',
+      virtualPaymentQueriedAt: item.virtualPaymentQueriedAt || '',
+      virtualPaymentProvidedAt: item.virtualPaymentProvidedAt || '',
+      virtualPaymentProvideError: item.virtualPaymentProvideError || '',
+      paymentNotifyStatus: item.paymentNotifyStatus || '',
+      paymentNotifySentAt: item.paymentNotifySentAt || '',
+      paymentNotifyError: item.paymentNotifyError || '',
     }));
   return {
     items: rows.slice(0, limit),

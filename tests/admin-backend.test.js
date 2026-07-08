@@ -4,6 +4,10 @@ const path = require('path');
 
 const root = path.resolve(__dirname, '..');
 const indexSource = fs.readFileSync(path.join(root, 'cloudfunctions/quickstartFunctions/index.js'), 'utf8');
+const syncAdminHandlerSource = fs.readFileSync(path.join(root, 'cloudfunctions/syncApi/admin-handler.js'), 'utf8');
+const syncApiSource = fs.readFileSync(path.join(root, 'cloudfunctions/syncApi/index.js'), 'utf8');
+const adminApiSource = fs.readFileSync(path.join(root, 'cloudfunctions/adminApi/index.js'), 'utf8');
+const paymentCoreSource = fs.readFileSync(path.join(root, 'cloudfunctions/quickstartFunctions/payment-core.js'), 'utf8');
 const cloudbaseConfig = JSON.parse(fs.readFileSync(path.join(root, 'cloudbaserc.json'), 'utf8'));
 
 [
@@ -13,10 +17,15 @@ const cloudbaseConfig = JSON.parse(fs.readFileSync(path.join(root, 'cloudbaserc.
   'adminListBindCodes',
   'adminGetDashboard',
   'adminUpdateEntitlement',
+  'adminRepairPaidEntitlements',
   'adminUpdateRedeemCode',
   'trackAnalyticsEvent',
   'processCloudPreTranscription',
   'processCloudTranscriptionQueue',
+  'sendDailyOpsReport',
+  'adminCreateHermesTask',
+  'adminListHermesTasks',
+  'adminUpdateHermesTask',
   'getCloudRuntimeConfigStatus',
   'adminRetryCloudPreTranscription',
 ].forEach((name) => {
@@ -42,7 +51,42 @@ assert.match(indexSource, /assertRedeemAdmin\(event\)/);
 assert.match(indexSource, /REDEEM_ADMIN_SECRET/);
 assert.match(indexSource, /createAdminRedeemCodeDocuments/);
 assert.match(indexSource, /adminUpdateEntitlement/);
+assert.match(indexSource, /adminRepairPaidEntitlements/);
+assert.match(indexSource, /ensurePaidRedeemCodeForPayment/);
 assert.match(indexSource, /action === 'extend'/);
+assert.match(syncAdminHandlerSource, /setExpiresAt/);
+assert.match(syncAdminHandlerSource, /Invalid Pro expiration time/);
+assert.match(syncAdminHandlerSource, /paymentOrderNo/);
+assert.match(syncAdminHandlerSource, /latestPaymentOrderNo/);
+assert.match(syncAdminHandlerSource, /wxOrderId/);
+assert.match(syncAdminHandlerSource, /transactionId/);
+assert.match(syncAdminHandlerSource, /paymentNotifyStatus/);
+assert.match(syncAdminHandlerSource, /paymentNotifyWebhookConfigured/);
+assert.match(syncAdminHandlerSource, /PAYMENT_NOTIFY_WEBHOOK/);
+assert.match(adminApiSource, /setExpiresAt/);
+assert.match(adminApiSource, /Invalid Pro expiration time/);
+assert.match(adminApiSource, /paymentOrderNo/);
+assert.match(adminApiSource, /latestPaymentOrderNo/);
+assert.match(adminApiSource, /wxOrderId/);
+assert.match(adminApiSource, /transactionId/);
+assert.match(adminApiSource, /paymentNotifyStatus/);
+[
+  indexSource,
+  syncAdminHandlerSource,
+  adminApiSource,
+  syncApiSource,
+].forEach((source) => {
+  assert.match(source, /pickPaymentCarryoverEntitlement/);
+  assert.match(source, /mergePaidEntitlementWithCarryover/);
+  assert.match(source, /ensurePaidRedeemCodeForPayment/);
+  assert.match(source, /createPaidRedeemCodeDocument/);
+});
+assert.match(paymentCoreSource, /paidOwnerOpenid/);
+assert.match(indexSource, /codeDoc\.paidOwnerOpenid/);
+assert.match(syncApiSource, /effectiveCodeDoc\.paidOwnerOpenid/);
+assert.match(indexSource, /trialOwnerOpenid/);
+assert.match(indexSource, /paidOwnerOpenid/);
+assert.match(indexSource, /createPaidRedeemCodeDocument\(\{\s*code,/);
 assert.match(indexSource, /markSent/);
 assert.match(indexSource, /markUnsent/);
 assert.match(indexSource, /deliveryStatus/);
@@ -54,12 +98,31 @@ assert.match(indexSource, /collection\.count\(\)/);
 assert.match(indexSource, /maxRead/);
 assert.match(indexSource, /buildAdminDashboardScope/);
 assert.match(indexSource, /analytics_events/);
+assert.match(indexSource, /HERMES_WEBHOOK_URL/);
+assert.match(indexSource, /HERMES_LOCAL_QUEUE_ENABLED/);
+assert.match(indexSource, /hermes_tasks/);
+assert.match(indexSource, /buildDailyOpsReport/);
+assert.match(indexSource, /buildDailyOpsReportWebhookPayload/);
+assert.match(indexSource, /TriggerName === 'daily-ops-report-at-night'/);
 assert.match(indexSource, /app_visit/);
 assert.match(indexSource, /bind_page_view/);
 assert.match(indexSource, /bind_success/);
 assert.match(indexSource, /DOUBAO_ASR_API_KEY/);
 assert.match(indexSource, /doubaoAsrApiKeyConfigured/);
 assert.match(indexSource, /doubaoAsrApiKeyLength/);
+assert.match(indexSource, /virtualPaymentConfigured/);
+assert.match(indexSource, /virtualPaymentMissing/);
+assert.match(indexSource, /virtualPaymentEnv/);
+assert.match(indexSource, /virtualPaymentOfferIdConfigured/);
+assert.match(indexSource, /virtualPaymentAppKeyConfigured/);
+assert.match(indexSource, /wechatAppSecretConfigured/);
+assert.match(indexSource, /paymentPlanPricesFen/);
+assert.match(indexSource, /paymentDiagnosticsVersion/);
+assert.match(indexSource, /application\/json; charset=utf-8/);
+assert.match(fs.readFileSync(path.join(root, 'cloudfunctions/syncApi/index.js'), 'utf8'), /application\/json; charset=utf-8/);
+assert.match(indexSource, /function getCloudDataEnv/);
+assert.match(indexSource, /process\.env\.WECHAT_DATA_ENV/);
+assert.strictEqual(cloudbaseConfig.functions.find((item) => item.name === 'quickstartFunctions').envVariables.WECHAT_DATA_ENV, 'he02-d8gebzv050ed6c4ef');
 assert.match(indexSource, /const http = require\('http'\)/);
 assert.match(indexSource, /runDoubaoCloudTranscription/);
 assert.match(indexSource, /submitDoubaoCloudTranscription/);
@@ -113,6 +176,11 @@ assert.deepStrictEqual(quickstartFunctionConfig.triggers, [
     type: 'timer',
     config: '0 */1 * * * * *',
   },
+  {
+    name: 'daily-ops-report-at-night',
+    type: 'timer',
+    config: '0 30 21 * * * *',
+  },
 ]);
 
 const cloudPreTranscriptionBody = indexSource.slice(
@@ -134,7 +202,8 @@ const entitlementStatusBody = indexSource.slice(
   indexSource.indexOf('async function getEntitlementStatus'),
   indexSource.indexOf('async function redeemAccessCode'),
 );
-assert.match(entitlementStatusBody, /event && event\.includeRedeemCode/);
+assert.match(entitlementStatusBody, /shouldHydrateRedeemCode/);
+assert.match(entitlementStatusBody, /plan === DEFAULT_REDEEM_PLAN/);
 assert.match(entitlementStatusBody, /hydrateEntitlementWithRedeemCode/);
 assert.match(indexSource, /async function hydrateEntitlementWithRedeemCode/);
 assert.match(indexSource, /async function findRedeemCodeForOpenid/);
@@ -142,7 +211,13 @@ assert.match(indexSource, /lastRedeemedOpenId/);
 assert.match(indexSource, /db\.collection\('user_entitlements'\)[\s\S]*where\(\{\s*openid/);
 assert.match(indexSource, /normalizeRedeemCode\(item\.code\)/);
 assert.match(indexSource, /db\.collection\('user_entitlements'\)\.doc\(entitlement\._id\)\.update/);
-assert.match(indexSource, /source: 'redeem_code'/);
+assert.match(indexSource, /source: isPaidEntitlement \? 'payment' : 'redeem_code'/);
+assert.match(indexSource, /trialOwnerOpenid/);
+assert.match(indexSource, /paidOwnerOpenid/);
+assert.match(indexSource, /_sourceCollection: 'redeem_codes'/);
+assert.match(indexSource, /_sourceCollection: 'user_entitlements'/);
+assert.match(indexSource, /delete existingCodeDoc\._sourceCollection/);
+assert.match(indexSource, /const repaired = await ensurePaidRedeemCodeForPayment/);
 
 const createInboxRecordBody = indexSource.slice(
   indexSource.indexOf('async function createInboxRecord'),

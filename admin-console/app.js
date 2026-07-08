@@ -56,7 +56,7 @@ function getRedeemCodeStatusMeta(item) {
   const status = String(item && item.status ? item.status : 'active');
   const redeemedCount = Number(item && item.redeemedCount) || 0;
   if (status === 'disabled') return { text: '已失效', className: 'tag warn' };
-  if (status === 'redeemed' || redeemedCount > 0) return { text: '已兑换', className: 'tag warn' };
+  if (status === 'redeemed' || redeemedCount > 0 || isRedeemCodeAssigned(item)) return { text: '已激活', className: 'tag warn' };
   if (status === 'active') return { text: '可兑换', className: 'tag' };
   return { text: status, className: 'tag warn' };
 }
@@ -72,8 +72,19 @@ function getProStatusMeta(user) {
 
 function isRedeemCodeAvailable(item) {
   const status = String(item && item.status ? item.status : 'active');
-  const redeemedCount = Number(item && item.redeemedCount) || 0;
-  return status === 'active' && redeemedCount <= 0;
+  return status === 'active' && !isRedeemCodeAssigned(item);
+}
+
+function isRedeemCodeAssigned(item) {
+  if (!item) return false;
+  if ((Number(item.redeemedCount) || 0) > 0) return true;
+  const deliveryStatus = String(item.deliveryStatus || '').trim().toLowerCase();
+  const status = String(item.status || '').trim().toLowerCase();
+  return deliveryStatus === 'activated'
+    || status === 'redeemed'
+    || Boolean(item.lastRedeemedOpenId || item.redeemedOpenId)
+    || Boolean(item.paidOwnerOpenid || item.trialOwnerOpenid)
+    || Boolean(item.paymentOrderNo || item.latestPaymentOrderNo);
 }
 
 function showNotice(message, tone = 'warn') {
@@ -316,12 +327,24 @@ function buildRedeemCodeMap(items) {
 function attachRedeemActivationInfo(user, redeemCodeMap) {
   const code = String((user && user.redeemCode) || '').toUpperCase();
   const codeInfo = redeemCodeMap.get(code) || {};
+  const assigned = isRedeemCodeAssigned(codeInfo);
   return {
     ...user,
-    redeemedCount: Number(codeInfo.redeemedCount) || Number(user && user.redeemedCount) || 0,
+    redeemedCount: Number(codeInfo.redeemedCount) || (assigned ? 1 : Number(user && user.redeemedCount) || 0),
     maxRedemptions: 1,
-    lastRedeemedOpenId: codeInfo.lastRedeemedOpenId || codeInfo.redeemedOpenId || (user && user.openid) || '',
-    lastRedeemedAt: codeInfo.lastRedeemedAt || codeInfo.redeemedAt || (user && user.redeemedAt) || '',
+    lastRedeemedOpenId: codeInfo.lastRedeemedOpenId
+      || codeInfo.redeemedOpenId
+      || codeInfo.paidOwnerOpenid
+      || codeInfo.trialOwnerOpenid
+      || codeInfo.deliveredTo
+      || (user && user.openid)
+      || '',
+    lastRedeemedAt: codeInfo.lastRedeemedAt
+      || codeInfo.redeemedAt
+      || codeInfo.paymentPaidAt
+      || codeInfo.deliveredAt
+      || (user && user.redeemedAt)
+      || '',
   };
 }
 

@@ -15,9 +15,14 @@ const {
 const {
   buildPaymentOrderState,
   createPaidEntitlementFromOrder,
+  pickPaymentCarryoverEntitlement,
+  mergePaidEntitlementWithCarryover,
+  createPaidRedeemCodeDocument,
 } = require('./payment-core');
 
 const PRODUCTION_WECHAT_DATA_ENV = 'he02-d8gebzv050ed6c4ef';
+const FEISHU_OAUTH_STATE_KIND = 'feishu_oauth_state';
+const FEISHU_OAUTH_STATE_CODE_PREFIX = 'FEISHU_OAUTH_STATE_';
 
 function getCloudDataEnv() {
   return String(process.env.WECHAT_DATA_ENV || '').trim() || PRODUCTION_WECHAT_DATA_ENV || cloud.DYNAMIC_CURRENT_ENV;
@@ -27,7 +32,9 @@ cloud.init({
   env: getCloudDataEnv(),
 });
 
-const db = cloud.database();
+const db = cloud.database({
+  env: getCloudDataEnv(),
+});
 const _ = db.command;
 
 const JSON_HEADERS = {
@@ -94,6 +101,21 @@ function assertAdminSecret(secret) {
     error.statusCode = 403;
     throw error;
   }
+}
+
+function getPaymentNotifyRuntimeConfig() {
+  const webhook = String(
+    process.env.PAYMENT_NOTIFY_WEBHOOK
+    || process.env.PAYMENT_NOTIFY_WEBHOOK_URL
+    || process.env.FEISHU_FEEDBACK_WEBHOOK
+    || ''
+  ).trim();
+  const enabledValue = String(process.env.PAYMENT_NOTIFY_ENABLED || '').trim().toLowerCase();
+  return {
+    paymentNotifyWebhookConfigured: Boolean(webhook),
+    paymentNotifyWebhookType: String(process.env.PAYMENT_NOTIFY_WEBHOOK_TYPE || 'feishu').trim().toLowerCase(),
+    paymentNotifyEnabled: Boolean(webhook) && enabledValue !== 'false',
+  };
 }
 
 async function ensureCollection(name) {
@@ -183,9 +205,33 @@ function formatRemainingDays(expiresAt, now = new Date().toISOString()) {
   return Math.ceil((expiresTime - nowTime) / 86400000);
 }
 
+function isRedeemCodeAssigned(item) {
+  if (!item) return false;
+  if ((Number(item.redeemedCount) || 0) > 0) return true;
+  const deliveryStatus = String(item.deliveryStatus || '').trim().toLowerCase();
+  const status = String(item.status || '').trim().toLowerCase();
+  return deliveryStatus === 'activated'
+    || status === 'redeemed'
+    || Boolean(item.lastRedeemedOpenId || item.redeemedOpenId)
+    || Boolean(item.paidOwnerOpenid || item.trialOwnerOpenid)
+    || Boolean(item.paymentOrderNo || item.latestPaymentOrderNo);
+}
+
+function isFeishuOAuthStateBindCode(item) {
+  const code = String((item && item.code) || '').trim();
+  const kind = String((item && item.kind) || '').trim();
+  return kind === FEISHU_OAUTH_STATE_KIND || code.startsWith(FEISHU_OAUTH_STATE_CODE_PREFIX);
+}
+
+function isRealBindCodeDocument(item) {
+  const kind = String((item && item.kind) || '').trim();
+  return Boolean(item)
+    && (!kind || kind === 'bind_code')
+    && !isFeishuOAuthStateBindCode(item);
+}
+
 function normalizeCodeDeliveryState(item) {
-  const redeemedCount = Number(item && item.redeemedCount) || 0;
-  if (redeemedCount > 0) {
+  if (isRedeemCodeAssigned(item)) {
     return {
       deliveryStatus: 'activated',
       deliveryStatusText: '已激活',
@@ -202,6 +248,14 @@ function addDays(baseIso, days) {
   const date = new Date(baseIso);
   if (Number.isNaN(date.getTime())) return '';
   date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString();
+}
+
+function normalizeExpiresAtInput(value) {
+  const date = new Date(String(value || '').trim());
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('Invalid Pro expiration time');
+  }
   return date.toISOString();
 }
 
@@ -396,7 +450,8 @@ async function getSummary(request) {
   const rangeSpan = windowStartMap[range];
   const windowStart = rangeSpan ? new Date(new Date(now).getTime() - rangeSpan).toISOString() : '';
   const records = (snapshots.records.data || []).filter((item) => isDateInRange(item.createdAt || item.updatedAt, range, now));
-  const bindCodes = (snapshots.bindCodes.data || []).filter((item) => isDateInRange(item.createdAt || item.boundAt, range, now));
+  const realBindCodeDocs = (snapshots.bindCodes.data || []).filter(isRealBindCodeDocument);
+  const bindCodes = realBindCodeDocs.filter((item) => isDateInRange(item.createdAt || item.boundAt, range, now));
   const entitlements = (snapshots.entitlements.data || []).filter((item) => range === 'all' || isDateInRange(item.redeemedAt || item.updatedAt, range, now) || ((item.status || 'active') === 'active'));
   const redeemCodes = (snapshots.redeemCodes.data || []).filter((item) => isDateInRange(item.updatedAt || item.createdAt, range, now));
   const analyticsEvents = (snapshots.analyticsEvents.data || []).filter((item) => isDateInRange(item.lastAt || item.firstAt || item.createdAt, range, now));
@@ -408,7 +463,7 @@ async function getSummary(request) {
     analyticsEvents,
     allRecords: snapshots.records.data || [],
     allEntitlements: snapshots.entitlements.data || [],
-    allBindCodes: snapshots.bindCodes.data || [],
+    allBindCodes: realBindCodeDocs,
     allAnalyticsEvents: snapshots.analyticsEvents.data || [],
     rangeKey: range,
     windowStart,
@@ -426,7 +481,7 @@ async function listUsers(request) {
   const snapshots = await loadAdminSnapshots(maxRead);
   const rows = buildUserRows({
     records: snapshots.records.data || [],
-    bindCodes: snapshots.bindCodes.data || [],
+    bindCodes: (snapshots.bindCodes.data || []).filter(isRealBindCodeDocument),
     entitlements: snapshots.entitlements.data || [],
     analyticsEvents: snapshots.analyticsEvents.data || [],
     now,
@@ -512,6 +567,11 @@ async function listRedeemCodes(request) {
     deliveredAt: item.deliveredAt || '',
     lastRedeemedAt: item.lastRedeemedAt || '',
     lastRedeemedOpenId: item.lastRedeemedOpenId || '',
+    trialOwnerOpenid: item.trialOwnerOpenid || '',
+    paidOwnerOpenid: item.paidOwnerOpenid || '',
+    paymentOrderNo: item.paymentOrderNo || '',
+    latestPaymentOrderNo: item.latestPaymentOrderNo || '',
+    paymentPaidAt: item.paymentPaidAt || '',
     createdAt: item.createdAt || '',
     updatedAt: item.updatedAt || '',
     ...normalizeCodeDeliveryState(item),
@@ -594,7 +654,7 @@ async function updateEntitlement(request) {
   const entitlementId = String(request.body.entitlementId || '').trim();
   const action = String(request.body.action || '').trim();
   if (!entitlementId) throw new Error('缺少 Pro 用户记录 ID');
-  if (!['extend', 'disable', 'activate', 'addCloudQuota'].includes(action)) throw new Error('不支持的 Pro 用户操作');
+  if (!['extend', 'disable', 'activate', 'addCloudQuota', 'setExpiresAt'].includes(action)) throw new Error('不支持的 Pro 用户操作');
   const result = await db.collection('user_entitlements').doc(entitlementId).get();
   const entitlement = result.data;
   if (!entitlement) throw new Error('Pro 用户记录不存在');
@@ -605,6 +665,25 @@ async function updateEntitlement(request) {
     const base = entitlement.expiresAt && new Date(entitlement.expiresAt).getTime() > new Date(now).getTime() ? entitlement.expiresAt : now;
     updateData.status = 'active';
     updateData.expiresAt = addDays(base, days);
+  }
+  if (action === 'setExpiresAt') {
+    updateData.status = 'active';
+    updateData.expiresAt = normalizeExpiresAtInput(request.body.expiresAt);
+    if (Object.prototype.hasOwnProperty.call(request.body, 'code')) {
+      updateData.code = normalizeRedeemCode(request.body.code);
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'source')) {
+      updateData.source = String(request.body.source || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'paymentOrderNo')) {
+      updateData.paymentOrderNo = String(request.body.paymentOrderNo || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'latestPaymentOrderNo')) {
+      updateData.latestPaymentOrderNo = String(request.body.latestPaymentOrderNo || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(request.body, 'durationDays')) {
+      updateData.durationDays = normalizeAdminPositiveInteger(request.body.durationDays, 1, 9999, entitlement.durationDays || 30);
+    }
   }
   if (action === 'disable') updateData.status = 'disabled';
   if (action === 'activate') updateData.status = 'active';
@@ -631,20 +710,22 @@ async function listBindCodes(request) {
   const keyword = request.body.keyword || request.query.keyword || '';
   const snapshot = await readCollection('bind_codes', { orderField: 'createdAt', maxRead: 5000 });
   const now = new Date().toISOString();
-  const items = (snapshot.data || []).map((item) => {
-    const status = createBindStatusResponse(item, now);
-    return {
-      _id: item._id,
-      openid: item.openid || '',
-      code: status.code,
-      status: status.status,
-      clientCount: status.clientCount,
-      clients: status.clients || [],
-      deviceLimit: status.deviceLimit,
-      createdAt: status.createdAt,
-      boundAt: status.boundAt || '',
-    };
-  });
+  const items = (snapshot.data || [])
+    .filter(isRealBindCodeDocument)
+    .map((item) => {
+      const status = createBindStatusResponse(item, now);
+      return {
+        _id: item._id,
+        openid: item.openid || '',
+        code: status.code,
+        status: status.status,
+        clientCount: status.clientCount,
+        clients: status.clients || [],
+        deviceLimit: status.deviceLimit,
+        createdAt: status.createdAt,
+        boundAt: status.boundAt || '',
+      };
+    });
   return {
     items: filterByKeyword(items, keyword, ['openid', 'code', 'status']).slice(0, limit),
     total: items.length,
@@ -737,24 +818,140 @@ async function debugEntitlementLookup(request) {
 }
 
 async function applyPaidPaymentOrder(order, now = new Date().toISOString()) {
-  const entitlement = createPaidEntitlementFromOrder({ order, now });
   await ensureCollection('user_entitlements');
+  async function ensurePaidRedeemCodeForPayment({ openid, order: paidOrder, entitlement, now: paidNow }) {
+    await ensureCollection('redeem_codes');
+    let code = normalizeRedeemCode(entitlement && entitlement.code);
+    if (!code) {
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const [candidate] = createAdminRedeemCodeDocuments({
+          count: 1,
+          prefix: 'OBPRO',
+          durationDays: Number(entitlement && entitlement.durationDays) || 30,
+          note: 'virtual-payment-pro',
+          plan: DEFAULT_REDEEM_PLAN,
+          now: paidNow,
+        });
+        const candidateCode = normalizeRedeemCode(candidate && candidate.code);
+        const exists = await db.collection('redeem_codes')
+          .where({ code: candidateCode })
+          .limit(1)
+          .get();
+        if (exists.data && exists.data[0]) continue;
+        const paidCodeDoc = createPaidRedeemCodeDocument({
+          code: candidateCode,
+          openid,
+          entitlement,
+          order: paidOrder,
+          now: paidNow,
+          existingCodeDoc: candidate,
+        });
+        const { _id, ...data } = paidCodeDoc;
+        await db.collection('redeem_codes').add({ data });
+        return {
+          ...entitlement,
+          code: paidCodeDoc.code,
+        };
+      }
+      throw new Error('Failed to create paid redeem code');
+    }
+
+    const codeResult = await db.collection('redeem_codes')
+      .where({ code })
+      .limit(1)
+      .get();
+    const existingCodeDoc = codeResult.data && codeResult.data[0] ? codeResult.data[0] : {};
+    const paidCodeDoc = createPaidRedeemCodeDocument({
+      code,
+      openid,
+      entitlement,
+      order: paidOrder,
+      now: paidNow,
+      existingCodeDoc,
+    });
+    const { _id, ...data } = paidCodeDoc;
+    if (existingCodeDoc && existingCodeDoc._id) {
+      await db.collection('redeem_codes').doc(existingCodeDoc._id).update({ data });
+    } else {
+      await db.collection('redeem_codes').add({ data });
+    }
+    return {
+      ...entitlement,
+      code: paidCodeDoc.code,
+    };
+  }
+
   const currentResult = await db.collection('user_entitlements')
     .where({
       openid: order.openid,
-      plan: entitlement.plan,
-      status: 'active',
     })
-    .orderBy('redeemedAt', 'desc')
-    .limit(1)
+    .limit(100)
     .get();
-  const current = currentResult.data && currentResult.data[0] ? currentResult.data[0] : null;
+  const carryover = pickPaymentCarryoverEntitlement(currentResult.data || [], now);
+  const current = carryover.current;
+  const entitlement = createPaidEntitlementFromOrder({
+    order,
+    now,
+    baseExpiresAt: current && current.expiresAt,
+  });
+  let updateData = mergePaidEntitlementWithCarryover({
+    entitlement,
+    current,
+    codeSource: carryover.codeSource,
+    order,
+    now,
+  });
+  updateData = await ensurePaidRedeemCodeForPayment({
+    openid: order.openid,
+    order,
+    entitlement: updateData,
+    now,
+  });
   if (current && current._id) {
-    await db.collection('user_entitlements').doc(current._id).update({ data: entitlement });
+    await db.collection('user_entitlements').doc(current._id).update({ data: updateData });
   } else {
-    await db.collection('user_entitlements').add({ data: entitlement });
+    await db.collection('user_entitlements').add({ data: updateData });
   }
-  return entitlement;
+  return updateData;
+}
+
+async function cleanupFeishuOAuthStateBindCodes(request) {
+  await ensureCollection('bind_codes');
+  const dryRun = request.body.dryRun === true || String(request.query.dryRun || '').toLowerCase() === 'true';
+  const snapshot = await readCollection('bind_codes', { orderField: 'createdAt', maxRead: 5000 });
+  const now = new Date().toISOString();
+  const targets = (snapshot.data || [])
+    .filter((item) => isFeishuOAuthStateBindCode(item))
+    .filter((item) => String(item.status || '').trim() !== 'revoked');
+  if (!dryRun) {
+    await Promise.all(targets.map((item) => db.collection('bind_codes')
+      .doc(item._id)
+      .update({
+        data: {
+          status: 'revoked',
+          revokedAt: now,
+          cleanupReason: 'feishu_oauth_state_not_bind_code',
+        },
+      })
+      .catch((error) => ({
+        id: item._id,
+        error: error && error.message ? error.message : String(error),
+      }))));
+  }
+  return {
+    dryRun,
+    scanned: (snapshot.data || []).length,
+    updated: dryRun ? 0 : targets.length,
+    matched: targets.length,
+    items: targets.slice(0, 20).map((item) => ({
+      _id: item._id || '',
+      code: item.code || '',
+      kind: item.kind || '',
+      openid: item.openid || '',
+      status: item.status || '',
+      createdAt: item.createdAt || '',
+    })),
+  };
 }
 
 async function listPaymentOrders(request) {
@@ -771,6 +968,19 @@ async function listPaymentOrders(request) {
       openid: item.openid || '',
       ...buildPaymentOrderState(item),
       updatedAt: item.updatedAt || '',
+      wxOrderId: item.wxOrderId || '',
+      wxpayOrderId: item.wxpayOrderId || '',
+      channelOrderId: item.channelOrderId || '',
+      transactionId: item.transactionId || '',
+      mchOrderNo: item.mchOrderNo || '',
+      wechatPaymentStatus: item.wechatPaymentStatus || '',
+      virtualPaymentNotifiedAt: item.virtualPaymentNotifiedAt || '',
+      virtualPaymentQueriedAt: item.virtualPaymentQueriedAt || '',
+      virtualPaymentProvidedAt: item.virtualPaymentProvidedAt || '',
+      virtualPaymentProvideError: item.virtualPaymentProvideError || '',
+      paymentNotifyStatus: item.paymentNotifyStatus || '',
+      paymentNotifySentAt: item.paymentNotifySentAt || '',
+      paymentNotifyError: item.paymentNotifyError || '',
     }));
   return {
     items: rows.slice(0, limit),
@@ -813,6 +1023,8 @@ async function getRuntimeDiagnostic() {
     namespace: process.env.TCB_ENV || process.env.SCF_NAMESPACE || '',
     dynamicCurrentEnv: String(cloud.DYNAMIC_CURRENT_ENV || ''),
     configuredDataEnv: String(process.env.WECHAT_DATA_ENV || ''),
+    activeDataEnv: getCloudDataEnv(),
+    paymentNotify: getPaymentNotifyRuntimeConfig(),
     counts: {
       inbox_records: records.total,
       bind_codes: bindCodes.total,
@@ -842,6 +1054,7 @@ async function dispatch(request) {
   if (request.path === '/payment-orders' || request.path === 'payment-orders') return await listPaymentOrders(request);
   if (request.path === '/payment-orders/update' || request.path === 'payment-orders/update') return await updatePaymentOrder(request);
   if (request.path === '/bind-codes' || request.path === 'bind-codes') return await listBindCodes(request);
+  if (request.path === '/bind-codes/cleanup-feishu-oauth-state' || request.path === 'bind-codes/cleanup-feishu-oauth-state') return await cleanupFeishuOAuthStateBindCodes(request);
   if (request.path === '/records' || request.path === 'records') return await listRecords(request);
   const error = new Error('未知管理接口');
   error.statusCode = 404;

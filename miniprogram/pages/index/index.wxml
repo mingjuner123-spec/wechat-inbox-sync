@@ -61,7 +61,7 @@
             <button class="capture-action-button" disabled="{{isSaving}}" bindtap="readClipboard">读取剪贴板</button>
             <button class="capture-action-button" disabled="{{isSaving}}" bindtap="saveWebpageFromClipboardOrInput">读取网页链接</button>
             <button class="capture-action-button {{isRecording ? 'recording-active' : ''}}" disabled="{{isSaving && !isRecording}}" bindtap="toggleRecording">{{isRecording ? '结束录音' : '录音'}}</button>
-            <button class="capture-action-button" disabled="{{isSaving}}" bindtap="showImportMaterialSheet">导入素材</button>
+            <button class="capture-action-button import-action-button" disabled="{{isSaving}}" bindtap="showImportMaterialSheet">导入微信/上传文件</button>
           </view>
           <button class="save-button {{isSaving ? 'saving' : ''}}" disabled="{{isSaving || isRecording}}" bindtap="handleSave">
             {{isSaving ? '保存中' : '保存'}}
@@ -71,11 +71,11 @@
         <view class="home-capability-strip">
           <view class="home-capability-row free">
             <text class="home-capability-label">免费</text>
-            <text class="home-capability-text">文本、图文链接、本地图文文件</text>
+            <text class="home-capability-text">5次/天，文本、图文链接、本地图文文件（PDF、Word 等）</text>
           </view>
           <view class="home-capability-row pro">
             <text class="home-capability-label">Pro</text>
-            <text class="home-capability-text">录音、音视频链接、本地MP3文件</text>
+            <text class="home-capability-text">无限次，录音、音视频链接、本地音视频文件（MP3、MP4），小红书评论区提取，关键词与简介属性生成</text>
           </view>
         </view>
         <view wx:if="{{false}}" class="transcription-mode-row {{entitlementStatus.hasAccess ? 'pro' : 'free'}}" bindtap="showCloudTranscriptionSettings">
@@ -127,6 +127,14 @@
       </view>
     </view>
 
+    <view wx:if="{{showNativeTemplateAd}}" class="native-template-ad-section">
+      <ad-custom
+        unit-id="{{nativeTemplateAdUnitId}}"
+        ad-intervals="60"
+        binderror="handleNativeTemplateAdError"
+      ></ad-custom>
+    </view>
+
     <view wx:if="{{recentList.length}}" class="recent-section compact">
       <view class="recent-title">最近同步</view>
       <view class="recent-list">
@@ -141,7 +149,6 @@
       </view>
     </view>
 
-    <view class="home-ad-slot"></view>
   </view>
 
   <view wx:elif="{{currentView === 'bind'}}" class="view-bind page-with-tabbar">
@@ -219,10 +226,13 @@
       </view>
       <view class="membership-title">{{membershipCard.title}}</view>
       <view wx:if="{{membershipCard.desc}}" class="membership-desc">{{membershipCard.desc}}</view>
-      <view wx:if="{{!trialRedeemCode}}" class="membership-desc">点击后会直接开通 7 天体验，不需要再输入兑换码。</view>
+      <view wx:if="{{showMembershipExpiry && !showRedeemCode}}" class="trial-expiry dark">
+        有效期至 {{trialRedeemCodeExpiresLabel}}
+      </view>
+      <view wx:if="{{showTrialClaim}}" class="membership-desc">点击后会直接开通 7 天体验，不需要再输入兑换码。</view>
 
       <button
-        wx:if="{{!trialRedeemCode}}"
+        wx:if="{{showTrialClaim}}"
         class="membership-primary full"
         disabled="{{trialCodeLoading}}"
         bindtap="claimTrialRedeemCode"
@@ -230,7 +240,7 @@
         {{trialCodeLoading ? '开通中' : '领取 7 天 Pro 体验'}}
       </button>
 
-      <block wx:if="{{trialRedeemCode}}">
+      <block wx:if="{{showRedeemCode}}">
         <view class="trial-code-label dark">兑换码</view>
         <view class="trial-code-box light">{{trialRedeemCode}}</view>
         <view wx:if="{{trialRedeemCodeExpiresLabel && !trialRedeemCodeExpired}}" class="trial-expiry dark">
@@ -239,7 +249,7 @@
         <view wx:if="{{trialRedeemCodeExpiresLabel && trialRedeemCodeExpired}}" class="trial-expiry dark expired">
           该兑换码已到期，请联系张张续期。
         </view>
-        <button class="membership-primary full" bindtap="copyFormalMembershipWechat">开通正式会员</button>
+        <button class="membership-primary full" bindtap="navigateToPro">开通正式会员</button>
         <button class="membership-secondary full" bindtap="copyTrialRedeemCode">一键复制兑换码</button>
       </block>
     </view>
@@ -253,18 +263,8 @@
           <view class="benefit-cell pro-col">pro版</view>
         </view>
         <view class="benefit-table-row">
-          <view class="benefit-cell benefit-name">使用次数</view>
-          <view class="benefit-cell">5次/天</view>
-          <view class="benefit-cell pro-col">不限</view>
-        </view>
-        <view class="benefit-table-row">
           <view class="benefit-cell benefit-name">文字、文件转写</view>
           <view class="benefit-cell">√</view>
-          <view class="benefit-cell pro-col">√</view>
-        </view>
-        <view class="benefit-table-row">
-          <view class="benefit-cell benefit-name">语音、MP3转写</view>
-          <view class="benefit-cell">×</view>
           <view class="benefit-cell pro-col">√</view>
         </view>
         <view class="benefit-table-row">
@@ -273,9 +273,39 @@
           <view class="benefit-cell pro-col">√</view>
         </view>
         <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">使用次数</view>
+          <view class="benefit-cell">5次/天</view>
+          <view class="benefit-cell pro-col">不限</view>
+        </view>
+        <view class="benefit-table-row">
           <view class="benefit-cell benefit-name">音视频链接转写</view>
           <view class="benefit-cell">×</view>
           <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">语音、MP3转写</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">提取小红书评论区</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">生成简介与关键词属性</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">免广告</view>
+          <view class="benefit-cell">×</view>
+          <view class="benefit-cell pro-col">√</view>
+        </view>
+        <view class="benefit-table-row">
+          <view class="benefit-cell benefit-name">一个插件支持绑定设备数</view>
+          <view class="benefit-cell">1</view>
+          <view class="benefit-cell pro-col">3</view>
         </view>
       </view>
     </view>
@@ -304,6 +334,8 @@
     <button class="tabbar-item {{currentView === 'bind' ? 'active' : ''}}" data-view="bind" bindtap="switchMainTab">绑定 Obsidian</button>
     <button class="tabbar-item {{currentView === 'mine' ? 'active' : ''}}" data-view="mine" bindtap="switchMainTab">开通 Pro</button>
   </view>
+
+  <button wx:if="{{false}}" class="support-bubble-button" bindtap="showSupportPanel">客服</button>
 
   <view wx:if="{{announcementVisible}}" class="announcement-mask" bindtap="hideAnnouncementSheet">
     <view class="announcement-sheet" catchtap="noop">
@@ -335,10 +367,70 @@
   <view wx:if="{{quotaUnlockVisible}}" class="quota-mask" bindtap="hideQuotaUnlockSheet">
     <view class="quota-panel" catchtap="noop">
       <view class="quota-title">今日免费次数已用完</view>
-      <view class="quota-desc">可以分享解锁到 10 次，或看广告再加 10 次。</view>
+      <view class="quota-desc">可以分享解锁到 10 次，或看广告再加 5 次。</view>
       <button class="quota-share-button" open-type="share">分享解锁到10次</button>
-      <button class="quota-ad-button" bindtap="showRewardedAdForQuota">看广告再加10次</button>
+      <button wx:if="{{showAdEntry}}" class="quota-ad-button" bindtap="showRewardedAdForQuota">看广告再加5次</button>
       <button class="quota-cancel-button" bindtap="hideQuotaUnlockSheet">稍后再说</button>
+    </view>
+  </view>
+
+  <view wx:if="{{supportVisible}}" class="support-mask" bindtap="hideSupportPanel">
+    <view class="support-chat-panel" catchtap="noop">
+      <view class="support-chat-header">
+        <view class="support-chat-heading">
+          <view class="support-title">Hermes 客服</view>
+          <view class="support-desc">直接提交给 Hermes，结合知识库回复；复杂问题会转人工处理。</view>
+        </view>
+        <button class="support-close-button" disabled="{{supportSubmitting}}" bindtap="hideSupportPanel">×</button>
+      </view>
+      <view class="support-chat-body">
+        <view class="support-message assistant">
+          <view class="support-message-name">Hermes</view>
+          <view class="support-message-bubble">把问题发给我，我会先查飞书知识库，再给你答复。</view>
+        </view>
+        <view wx:if="{{supportLastContent}}" class="support-message user">
+          <view class="support-message-bubble">{{supportLastContent}}</view>
+        </view>
+        <view wx:if="{{supportSubmitting}}" class="support-message hermes-loading">
+          <view class="support-message-name">Hermes</view>
+          <view class="support-message-bubble">正在处理...</view>
+        </view>
+        <view wx:if="{{supportReplyText}}" class="support-message hermes">
+          <view class="support-message-name">Hermes</view>
+          <view class="support-message-bubble">{{supportReplyText}}</view>
+        </view>
+      </view>
+      <view class="support-category-list">
+        <button
+          wx:for="{{supportCategories}}"
+          wx:key="id"
+          class="support-category-button {{supportCategory === item.id ? 'active' : ''}}"
+          data-category="{{item.id}}"
+          bindtap="selectSupportCategory"
+        >
+          {{item.label}}
+        </button>
+      </view>
+      <view class="support-input-card">
+        <textarea
+          class="support-textarea"
+          value="{{supportContent}}"
+          maxlength="1200"
+          placeholder="输入你的问题、bug、订单疑问或反馈"
+          placeholder-class="input-placeholder"
+          bindinput="onSupportContentInput"
+        />
+        <input
+          class="support-contact-input"
+          value="{{supportContact}}"
+          placeholder="联系方式，可选"
+          placeholder-class="input-placeholder"
+          bindinput="onSupportContactInput"
+        />
+        <button class="support-submit-button" disabled="{{supportSubmitting}}" bindtap="submitSupportFeedback">
+          {{supportSubmitting ? '问 Hermes 中' : '发送'}}
+        </button>
+      </view>
     </view>
   </view>
 

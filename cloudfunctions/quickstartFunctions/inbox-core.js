@@ -1,7 +1,7 @@
 const SUPPORTED_TYPES = ['text', 'link', 'webpage', 'voice', 'file'];
 const DAILY_FREE_LIMIT = 5;
 const DAILY_SHARE_LIMIT = 10;
-const DAILY_AD_BONUS = 10;
+const DAILY_AD_BONUS = 5;
 const DEFAULT_BIND_DEVICE_LIMIT = 1;
 const MAX_BIND_DEVICE_LIMIT = 3;
 const BIND_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -30,7 +30,9 @@ function isSupportedWebpageUrl(url) {
     || text.includes('bilibili.com')
     || text.includes('b23.tv')
     || text.includes('xiaoyuzhoufm.com')
-    || text.includes('xiaoyuzhou.com');
+    || text.includes('xiaoyuzhou.com')
+    || text.includes('channels.weixin.qq.com')
+    || text.includes('weixin.qq.com/sph/');
 }
 
 function extractHttpUrl(content) {

@@ -45,7 +45,7 @@ function createPlugin({ requestUrl, files = {}, settings = {} }) {
       hasAccess: true,
       status: 'active',
       plan: 'local_transcription_beta',
-      expiresAt: '2026-07-03T08:00:00.000Z',
+      expiresAt: '2036-07-03T08:00:00.000Z',
       code: 'OBPROT93C6',
     },
     ...settings,
@@ -502,7 +502,8 @@ function createPdfBufferWithControlNoise() {
     }, '2026-05-13T12:06:00.000Z');
 
     const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
-    assert.ok(note.includes('飞书链接已保存'));
+    assert.ok(note.includes('飞书正文提取失败'));
+    assert.ok(note.includes('Feishu page should not be fetched directly'));
     assert.ok(note.includes('https://my.feishu.cn/wiki/example'));
   }
 
@@ -629,6 +630,7 @@ function createPdfBufferWithControlNoise() {
     const { plugin, files } = createPlugin({
       settings: {
         aiMetadataEnabled: true,
+        aiProvider: 'local',
       },
       requestUrl: async (options) => {
         if (String(options.url || '').endsWith('/metadata/generate')) {
@@ -654,7 +656,9 @@ function createPdfBufferWithControlNoise() {
       type: 'text',
       content: 'Cloud metadata source text',
       createdAt: '2026-05-13T12:08:30.000Z',
-      metadata: {},
+      metadata: {
+        markdown: 'Cloud metadata source text',
+      },
     }, '2026-05-13T12:08:40.000Z');
 
     const note = Object.entries(files).find(([path]) => path.endsWith('.md'))[1];
@@ -845,6 +849,28 @@ function createPdfBufferWithControlNoise() {
 
     assert.ok(markdown.includes('![[临时收集/网页图片/2026-05-14/网页-101632-image-01.png]]'));
     assert.ok(Buffer.isBuffer(files['临时收集/网页图片/2026-05-14/网页-101632-image-01.png']));
+  }
+
+  {
+    const { plugin, files } = createPlugin({
+      requestUrl: async (options) => {
+        if (options.url === 'https://internal-api-drive-stream.feishu.cn/image-token-1') {
+          return {
+            arrayBuffer: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]),
+          };
+        }
+        return {};
+      },
+    });
+    const markdown = await plugin.saveMarkdownRemoteImageAssets(
+      '正文\n\n![图片](https://internal-api-drive-stream.feishu.cn/image-token-1)\n',
+      '临时收集',
+      '2026-07-05',
+      '飞书图片测试',
+    );
+
+    assert.ok(markdown.includes('![[临时收集/网页图片/2026-07-05/飞书图片测试-image-01.png]]'));
+    assert.ok(Buffer.isBuffer(files['临时收集/网页图片/2026-07-05/飞书图片测试-image-01.png']));
   }
 
   {

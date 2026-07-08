@@ -137,6 +137,20 @@
   </view>
 
   <view class="admin-card">
+    <view class="section-title">支付订单列表</view>
+    <view wx:if="{{!paymentOrders.length}}" class="empty-text">暂无支付订单</view>
+    <view wx:for="{{paymentOrders}}" wx:key="_id" class="list-item">
+      <view class="item-main">
+        <view class="item-title">{{item.orderNo}}</view>
+        <view class="item-meta">{{item.status}} · {{item.planName}} · {{item.amountText}}</view>
+        <view class="item-meta">创建：{{item.createdAtText}} · 支付：{{item.paidAtText}}</view>
+        <view class="item-meta">openid：{{item.openid}}</view>
+        <view class="item-meta">通知：{{item.paymentNotifyStatus || '-'}}</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="admin-card">
     <view class="section-title">兑换码列表</view>
     <view wx:if="{{!redeemCodes.length}}" class="empty-text">暂无兑换码</view>
     <view wx:for="{{redeemCodes}}" wx:key="_id" class="list-item">

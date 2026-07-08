@@ -2,7 +2,11 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
-const { createMediaResolver } = require('./resolver-core');
+const {
+  WECHAT_CHANNELS_FEED_INFO_URL,
+  createMediaResolver,
+  extractWechatChannelsRequestPayload,
+} = require('./resolver-core');
 
 const PORT = Number(process.env.PORT || 8787);
 const RESOLVER_SECRET = String(process.env.RESOLVER_SECRET || '');
@@ -169,10 +173,72 @@ function resolveFinalUrl(url, redirectCount = 0) {
   });
 }
 
+function postJson(url, payload, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'http:' ? http : https;
+    const body = JSON.stringify(payload || {});
+    const req = client.request({
+      method: 'POST',
+      protocol: parsed.protocol,
+      hostname: parsed.hostname,
+      port: parsed.port || undefined,
+      path: `${parsed.pathname}${parsed.search}`,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        ...headers,
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (response.statusCode && (response.statusCode < 200 || response.statusCode >= 300)) {
+          reject(new Error(`wechat channels feed failed: HTTP ${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(text ? JSON.parse(text) : {});
+        } catch (error) {
+          reject(new Error('wechat channels feed returned invalid json'));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+      req.destroy(new Error('wechat channels feed timed out'));
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+async function fetchWechatChannelsFeedInfo(url) {
+  const payload = extractWechatChannelsRequestPayload(url);
+  if (!payload.shortUri && !payload.exportId) {
+    throw new Error('invalid wechat channels link');
+  }
+  const body = await postJson(WECHAT_CHANNELS_FEED_INFO_URL, {
+    baseReq: { generalToken: '' },
+    ...payload,
+  }, {
+    'User-Agent': 'Mozilla/5.0 WeChatInboxMediaResolver/1.0',
+    Accept: 'application/json, text/plain, */*',
+    Origin: 'https://channels.weixin.qq.com',
+    Referer: 'https://channels.weixin.qq.com/',
+  });
+  if (Number(body.errCode || 0) !== 0) {
+    throw new Error(body.errMsg || 'wechat channels feed returned failure');
+  }
+  return body;
+}
+
 const resolver = createMediaResolver({
   runYtDlp,
   fetchHtml,
   resolveFinalUrl,
+  fetchWechatChannelsFeedInfo,
 });
 
 function isAuthorized(req) {

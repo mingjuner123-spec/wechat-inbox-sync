@@ -1,7 +1,35 @@
 const { createInboxService } = require('../../services/inbox-service');
+const { buildMembershipDisplayState } = require('../../utils/membership-display');
 
-const CONTACT_WECHAT = 'heyhmjx';
-const PRO_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
+function wxLogin() {
+  return new Promise((resolve, reject) => {
+    wx.login({
+      success: resolve,
+      fail: reject,
+    });
+  });
+}
+
+function requestVirtualPayment(virtualPayment) {
+  return new Promise((resolve, reject) => {
+    if (typeof wx.requestVirtualPayment !== 'function') {
+      reject(new Error('当前微信版本暂不支持虚拟支付，请升级微信后再试'));
+      return;
+    }
+    if (typeof wx.canIUse === 'function' && !wx.canIUse('requestVirtualPayment')) {
+      reject(new Error('当前微信版本暂不支持虚拟支付，请升级微信后再试'));
+      return;
+    }
+    wx.requestVirtualPayment({
+      mode: virtualPayment.mode,
+      signData: virtualPayment.signData,
+      paySig: virtualPayment.paySig,
+      signature: virtualPayment.signature,
+      success: resolve,
+      fail: reject,
+    });
+  });
+}
 
 function formatDateLabel(value) {
   if (!value) return '';
@@ -29,6 +57,24 @@ function getRemainingDays(value) {
 
 function getErrorMessage(error, fallback) {
   const message = (error && (error.errMsg || error.message)) || String(error || '');
+  const errCode = error && (error.errCode || error.err_code);
+  const paymentMessages = {
+    '-15002': '订单号已使用，请重新发起支付',
+    '-15005': '支付用户签名错误，请联系客服处理',
+    '-15006': '支付签名错误，请联系客服处理',
+    '-15007': '微信登录态已过期，请重新支付',
+    '-15010': '道具尚未发布或未生效，请稍后再试',
+    '-15013': '道具价格不一致，请联系客服处理',
+    '-15014': '道具发布还未生效，请稍后再试',
+    '-15020': '操作太快，请稍后再试',
+    '-15021': '交易过于频繁，请稍后再试',
+  };
+  if (errCode !== undefined && paymentMessages[String(errCode)]) {
+    return paymentMessages[String(errCode)];
+  }
+  if (/cancel|取消/i.test(message)) {
+    return '已取消支付';
+  }
   if (/FUNCTIONS_TIME_LIMIT_EXCEEDED|timed out|timeout|cloud\.callFunction/i.test(message)) {
     return '网络繁忙，请稍后再试';
   }
@@ -60,12 +106,16 @@ function buildMembership(status = {}) {
   const hasAccess = Boolean(status.hasAccess);
   const daysLeft = getRemainingDays(status.expiresAt || '');
   const isTrial = String(status.plan || '').includes('trial') || String(status.source || '').includes('trial');
+  const expiresLabel = formatDateLabel(status.expiresAt || '');
 
   if (hasAccess) {
     return {
       badge: isTrial ? 'Pro 体验中' : 'Pro 已开通',
       title: isTrial ? `体验剩余 ${daysLeft || 1} 天` : 'Pro 已开通',
       desc: '音视频文案提取功能已可用。',
+      expiresLabel,
+      paymentTitle: '续费 Pro',
+      paymentButtonText: '立即续费 Pro',
     };
   }
 
@@ -74,6 +124,9 @@ function buildMembership(status = {}) {
       badge: 'Pro 已到期',
       title: '体验已到期',
       desc: '该兑换码已到期，请联系张张续期。',
+      expiresLabel,
+      paymentTitle: '开通 Pro',
+      paymentButtonText: '立即开通 Pro',
     };
   }
 
@@ -81,6 +134,9 @@ function buildMembership(status = {}) {
     badge: '免费版',
     title: '领取 7 天 Pro 体验',
     desc: '',
+    expiresLabel: '',
+    paymentTitle: '开通 Pro',
+    paymentButtonText: '立即开通 Pro',
   };
 }
 
@@ -97,21 +153,22 @@ function buildTrialState(status = {}) {
 
 Page({
   data: {
-    contactWechat: CONTACT_WECHAT,
-    proTutorialUrl: PRO_TUTORIAL_URL,
     trialCodeLoading: false,
     paymentOrderLoading: false,
     selectedPaymentPlanId: 'pro_year',
     latestPaymentOrder: null,
     paymentPlans: [
-      { id: 'pro_month', name: 'Pro 月卡', price: '29 元', desc: '适合先正式体验 1 个月' },
-      { id: 'pro_year', name: 'Pro 年卡', price: '199 元', desc: '适合长期使用，本地转写更划算' },
+      { id: 'pro_month', name: 'Pro 月卡', price: '9.9 元/月', desc: '早鸟体验价，7 月 10 日后恢复 19.9 元/月', badge: '' },
+      { id: 'pro_year', name: 'Pro 年卡', price: '49.9 元/年', desc: '早鸟年卡，7 月 10 日后恢复 68 元/年', badge: '早鸟推荐' },
     ],
     trialRedeemCode: '',
     trialRedeemCodeCreatedAt: '',
     trialRedeemCodeExpiresAt: '',
     trialRedeemCodeExpiresLabel: '',
     trialRedeemCodeExpired: false,
+    showTrialClaim: true,
+    showRedeemCode: false,
+    showMembershipExpiry: false,
     quotaRefreshing: false,
     entitlementStatusLoading: false,
     entitlementStatusLoaded: false,
@@ -149,17 +206,43 @@ Page({
     if (this.data.paymentOrderLoading) return;
     this.setData({ paymentOrderLoading: true });
     try {
-      const response = await this.inboxService.createPaymentOrder(this.data.selectedPaymentPlanId);
+      const login = await wxLogin();
+      if (!login || !login.code) {
+        throw new Error('微信登录失败，请稍后再试');
+      }
+      const loginCode = login.code;
+      const response = await this.inboxService.createPaymentOrder(this.data.selectedPaymentPlanId, loginCode);
       if (!response.result || !response.result.success) {
         throw new Error(response.result && response.result.errMsg ? response.result.errMsg : '订单创建失败');
       }
       const order = response.result.data || {};
       this.setData({ latestPaymentOrder: order });
+      if (order.paymentEnabled && order.virtualPayment) {
+        await requestVirtualPayment(order.virtualPayment);
+        let latestOrder = order;
+        try {
+          const queryResponse = await this.inboxService.queryPaymentOrder(order.orderNo);
+          if (queryResponse.result && queryResponse.result.success) {
+            latestOrder = queryResponse.result.data || order;
+            this.setData({ latestPaymentOrder: latestOrder });
+          }
+        } catch (queryError) {
+          // Payment already returned from WeChat; entitlement refresh can still catch up later.
+        }
+        const entitlementStatus = await this.loadEntitlementStatus({ silent: true, force: true });
+        const expiresLabel = formatDateLabel(entitlementStatus && entitlementStatus.expiresAt);
+        wx.showModal({
+          title: latestOrder.status === 'paid' ? 'Pro 已开通' : '支付已提交',
+          content: latestOrder.status === 'paid'
+            ? `Pro 权益已生效${expiresLabel ? `，有效期至 ${expiresLabel}` : ''}，可以继续使用音视频转写等高级功能。`
+            : '支付后请等待订单确认。如权益暂未刷新，请稍后点刷新或联系客服。',
+          showCancel: false,
+        });
+        return;
+      }
       wx.showModal({
-        title: '订单已生成',
-        content: order.paymentEnabled
-          ? '微信支付已准备好，请继续完成付款。'
-          : `当前微信支付商户号还在配置中，订单号：${order.orderNo || ''}。你可以先联系客服人工确认。`,
+        title: '支付配置未生效',
+        content: order.message || `当前微信虚拟支付还没有拉起，订单号：${order.orderNo || ''}。请检查云函数环境变量并重新部署 quickstartFunctions。`,
         showCancel: false,
       });
     } catch (error) {
@@ -173,7 +256,7 @@ Page({
   },
 
   async loadEntitlementStatus(options = {}) {
-    if (this.data.entitlementStatusLoading) return;
+    if (this.data.entitlementStatusLoading && !options.force) return this.data.entitlementStatus;
     this.setData({
       entitlementStatusLoading: true,
       quotaRefreshing: Boolean(options.refreshing),
@@ -187,9 +270,11 @@ Page({
           entitlementStatus,
           cloudQuota: buildCloudQuota(entitlementStatus),
           membership: buildMembership(entitlementStatus),
-          ...buildTrialState(entitlementStatus),
+          ...buildMembershipDisplayState(entitlementStatus),
         });
+        return entitlementStatus;
       }
+      return this.data.entitlementStatus;
     } catch (error) {
       this.setData({ entitlementStatusLoaded: true });
       if (options.refreshing) {
@@ -198,6 +283,7 @@ Page({
           icon: 'none',
         });
       }
+      return this.data.entitlementStatus;
     } finally {
       this.setData({
         entitlementStatusLoading: false,
@@ -237,7 +323,7 @@ Page({
         cloudQuota: buildCloudQuota(entitlementStatus),
         membership: buildMembership(entitlementStatus),
         trialRedeemCodeCreatedAt: data.createdAt || '',
-        ...buildTrialState(entitlementStatus),
+        ...buildMembershipDisplayState(entitlementStatus),
       });
       wx.showToast({
         title: data.alreadyActivated ? '已读取体验资格' : '7 天体验已开通',
@@ -273,39 +359,4 @@ Page({
     });
   },
 
-  copyProTutorialLink() {
-    wx.setClipboardData({
-      data: PRO_TUTORIAL_URL,
-      success: () => {
-        wx.showToast({
-          title: '教程链接已复制',
-          icon: 'none',
-        });
-      },
-    });
-  },
-
-  copyUserGroupWechat() {
-    wx.setClipboardData({
-      data: this.data.contactWechat || CONTACT_WECHAT,
-      success: () => {
-        wx.showToast({
-          title: '微信已复制，备注 OB 群',
-          icon: 'none',
-        });
-      },
-    });
-  },
-
-  copyFormalMembershipWechat() {
-    wx.setClipboardData({
-      data: this.data.contactWechat || CONTACT_WECHAT,
-      success: () => {
-        wx.showToast({
-          title: '微信已复制，备注开通正式会员',
-          icon: 'none',
-        });
-      },
-    });
-  },
 });

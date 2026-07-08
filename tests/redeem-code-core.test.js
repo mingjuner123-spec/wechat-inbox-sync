@@ -7,6 +7,7 @@ const {
   DEFAULT_REDEEM_MAX_REDEMPTIONS,
   getDefaultCloudQuotaSeconds,
   normalizeRedeemCode,
+  isFormalProPlan,
   isLocalTranscriptionPlan,
   isRedeemCodeActive,
   createRedeemCodeDocument,
@@ -23,12 +24,25 @@ assert.deepStrictEqual(LOCAL_TRANSCRIPTION_PLAN_ALIASES, [
   'local_transcription_pro',
   'local_transcription_trial',
   'pro',
+  'pro_month',
+  'pro_year',
 ]);
 assert.strictEqual(isLocalTranscriptionPlan('local_transcription_beta'), true);
 assert.strictEqual(isLocalTranscriptionPlan('local_transcription_pro'), true);
 assert.strictEqual(isLocalTranscriptionPlan('local_transcription_trial'), true);
 assert.strictEqual(isLocalTranscriptionPlan('pro'), true);
+assert.strictEqual(isLocalTranscriptionPlan('pro_month'), true);
+assert.strictEqual(isLocalTranscriptionPlan('pro_year'), true);
 assert.strictEqual(isLocalTranscriptionPlan('other_product'), false);
+assert.strictEqual(isFormalProPlan('local_transcription_beta'), true);
+assert.strictEqual(isFormalProPlan('local_transcription_pro'), true);
+assert.strictEqual(isFormalProPlan('pro'), true);
+assert.strictEqual(isFormalProPlan('pro_month'), true);
+assert.strictEqual(isFormalProPlan('pro_year'), true);
+assert.strictEqual(isFormalProPlan('local_transcription_trial'), false);
+assert.strictEqual(isFormalProPlan('other_product'), false);
+assert.strictEqual(syncRedeemCodeCore.isFormalProPlan('pro_year'), true);
+assert.strictEqual(syncRedeemCodeCore.isFormalProPlan('local_transcription_trial'), false);
 assert.strictEqual(DEFAULT_REDEEM_DURATION_DAYS, 30);
 assert.strictEqual(DEFAULT_REDEEM_MAX_REDEMPTIONS, 1);
 assert.strictEqual(getDefaultCloudQuotaSeconds(3), 1200);
@@ -280,6 +294,25 @@ assert.strictEqual(pickBestLocalTranscriptionEntitlement([
   },
 ], '2026-06-03T08:00:00.000Z')._id, 'paid-pro');
 
+assert.strictEqual(pickBestLocalTranscriptionEntitlement([
+  {
+    _id: 'monthly-payment-plan-id',
+    plan: 'pro_month',
+    status: 'active',
+    code: 'OBPAYMONTH',
+    expiresAt: '2026-07-03T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+  {
+    _id: 'yearly-payment-plan-id',
+    plan: 'pro_year',
+    status: 'active',
+    code: 'OBPAYYEAR',
+    expiresAt: '2027-06-03T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+], '2026-06-03T08:00:00.000Z')._id, 'yearly-payment-plan-id');
+
 assert.strictEqual(syncRedeemCodeCore.pickBestLocalTranscriptionEntitlement([
   {
     _id: 'trial-entitlement',
@@ -288,3 +321,13 @@ assert.strictEqual(syncRedeemCodeCore.pickBestLocalTranscriptionEntitlement([
     redeemedAt: '2026-06-03T08:00:00.000Z',
   },
 ], '2026-06-03T08:00:00.000Z')._id, 'trial-entitlement');
+
+assert.strictEqual(syncRedeemCodeCore.pickBestLocalTranscriptionEntitlement([
+  {
+    _id: 'sync-payment-plan-id',
+    plan: 'pro_month',
+    status: 'active',
+    expiresAt: '2026-07-03T08:00:00.000Z',
+    redeemedAt: '2026-06-03T08:00:00.000Z',
+  },
+], '2026-06-03T08:00:00.000Z')._id, 'sync-payment-plan-id');

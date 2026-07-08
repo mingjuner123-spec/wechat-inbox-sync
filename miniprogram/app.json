@@ -3,8 +3,7 @@
     "pages/index/index",
     "pages/pro/index",
     "pages/admin/index",
-    "pages/help/index",
-    "pages/example/index"
+    "pages/help/index"
   ],
   "window": {
     "backgroundColor": "#F5F4EF",

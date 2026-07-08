@@ -12,8 +12,7 @@ page {
 }
 
 .trial-card,
-.compare-card,
-.tutorial-card {
+.compare-card {
   margin-top: 28rpx;
   padding: 32rpx;
   border-radius: 30rpx;
@@ -47,6 +46,22 @@ page {
   font-weight: 800;
 }
 
+.card-kicker {
+  display: inline-flex;
+  height: 42rpx;
+  padding: 0 18rpx;
+  border-radius: 999rpx;
+  align-items: center;
+  background: #1f2719;
+  color: #f8f4df;
+  font-size: 21rpx;
+  font-weight: 900;
+}
+
+.card-kicker + .card-title {
+  margin-top: 16rpx;
+}
+
 .trial-title {
   margin-top: 22rpx;
   font-size: 44rpx;
@@ -65,9 +80,7 @@ page {
 }
 
 .primary-button,
-.secondary-button,
-.trial-copy-button,
-.ghost-button {
+.trial-copy-button {
   width: 100%;
   height: 82rpx;
   margin: 28rpx 0 0;
@@ -82,9 +95,7 @@ page {
 }
 
 .primary-button::after,
-.secondary-button::after,
-.trial-copy-button::after,
-.ghost-button::after {
+.trial-copy-button::after {
   border: 0;
 }
 
@@ -94,19 +105,8 @@ page {
   color: #1f2719;
 }
 
-.secondary-button {
-  background: #6f7b59;
-  color: #ffffff;
-}
-
-.ghost-button {
-  margin-top: 14rpx;
-  background: #e8ebe3;
-  color: #465037;
-}
-
 .payment-card {
-  background: #fff8e7;
+  background: #fffaf0;
 }
 
 .payment-plan-list {
@@ -116,9 +116,10 @@ page {
 }
 
 .payment-plan {
-  padding: 24rpx;
-  border-radius: 22rpx;
-  border: 2rpx solid #eadfbe;
+  min-height: 126rpx;
+  padding: 24rpx 22rpx;
+  border-radius: 18rpx;
+  border: 2rpx solid #e8dfc6;
   background: #ffffff;
   display: flex;
   align-items: center;
@@ -131,9 +132,31 @@ page {
   box-shadow: 0 8rpx 22rpx rgba(31, 39, 25, 0.12);
 }
 
+.payment-plan-main {
+  min-width: 0;
+}
+
+.payment-plan-head {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  flex-wrap: wrap;
+}
+
 .payment-plan-name {
   color: #1d1d1b;
   font-size: 28rpx;
+  font-weight: 900;
+}
+
+.payment-plan-badge {
+  height: 34rpx;
+  padding: 0 12rpx;
+  border-radius: 999rpx;
+  background: #f1c66a;
+  color: #3e3216;
+  font-size: 20rpx;
+  line-height: 34rpx;
   font-weight: 900;
 }
 
@@ -149,6 +172,17 @@ page {
   color: #1f2719;
   font-size: 32rpx;
   font-weight: 900;
+}
+
+.price-reset-tip {
+  margin-top: 18rpx;
+  padding: 16rpx 18rpx;
+  border-radius: 16rpx;
+  background: rgba(241, 198, 106, 0.18);
+  color: #6d5621;
+  font-size: 23rpx;
+  line-height: 1.45;
+  font-weight: 700;
 }
 
 .pay-button {
@@ -197,85 +231,16 @@ page {
   font-weight: 700;
 }
 
+.trial-expiry.active {
+  display: inline-flex;
+  min-height: 48rpx;
+  padding: 0 18rpx;
+  border-radius: 999rpx;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.13);
+  color: #ffffff;
+}
+
 .trial-expiry.expired {
   color: #ffd4c8;
-}
-
-.benefit-table {
-  margin-top: 24rpx;
-  border: 1rpx solid #e8e4d9;
-  border-radius: 18rpx;
-  overflow: hidden;
-  background: #ffffff;
-}
-
-.benefit-table-header,
-.benefit-table-row {
-  min-height: 78rpx;
-  display: grid;
-  grid-template-columns: 1.15fr 1fr 1fr;
-  border-bottom: 1rpx solid #eee9df;
-}
-
-.benefit-table-row:last-child {
-  border-bottom: 0;
-}
-
-.benefit-table-header {
-  background: #f0eee7;
-  font-weight: 800;
-}
-
-.benefit-cell {
-  min-width: 0;
-  padding: 18rpx 14rpx;
-  box-sizing: border-box;
-  color: #3f3f3c;
-  font-size: 24rpx;
-  line-height: 1.35;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  border-right: 1rpx solid #eee9df;
-  word-break: break-word;
-}
-
-.benefit-cell:last-child {
-  border-right: 0;
-}
-
-.benefit-name {
-  justify-content: flex-start;
-  text-align: left;
-  color: #1d1d1b;
-  font-weight: 800;
-}
-
-.pro-col {
-  color: #5c6845;
-  font-weight: 800;
-}
-
-.tutorial-step {
-  margin-top: 28rpx;
-}
-
-.tutorial-step-title {
-  color: #1d1d1b;
-  font-size: 28rpx;
-  line-height: 1.35;
-  font-weight: 800;
-}
-
-.tutorial-image {
-  width: 100%;
-  margin-top: 18rpx;
-  border-radius: 18rpx;
-  border: 1rpx solid #eee9df;
-  background: #ffffff;
-}
-
-.tutorial-actions {
-  margin-top: 30rpx;
 }

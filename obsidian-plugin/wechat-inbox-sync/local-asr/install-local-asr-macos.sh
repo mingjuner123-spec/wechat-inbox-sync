@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.1"
+INSTALLER_SCRIPT_VERSION="1.3.2"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -138,6 +138,87 @@ bootstrap_uv() {
 VENV_DIR="$INSTALL_ROOT/python-venv"
 VENV_PYTHON="$VENV_DIR/bin/python"
 
+find_metal_resources_dir() {
+  local binary_path="${1:-}"
+  local candidate=""
+  if [ -n "$binary_path" ] && [ -e "$binary_path" ]; then
+    candidate="$(find "$(dirname "$binary_path")" -maxdepth 4 -type f -name 'ggml-metal.metal' 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ]; then
+      dirname "$candidate"
+      return
+    fi
+  fi
+  if [ -n "${VENV_DIR:-}" ] && [ -d "$VENV_DIR" ]; then
+    candidate="$(find "$VENV_DIR" -type f -name 'ggml-metal.metal' 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ]; then
+      dirname "$candidate"
+      return
+    fi
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    local brew_prefix
+    brew_prefix="$(brew --prefix whisper-cpp 2>/dev/null || true)"
+    if [ -n "$brew_prefix" ] && [ -f "$brew_prefix/share/whisper-cpp/ggml-metal.metal" ]; then
+      echo "$brew_prefix/share/whisper-cpp"
+      return
+    fi
+  fi
+  local dir
+  for dir in \
+    "$INSTALL_ROOT/share/whisper-cpp" \
+    /opt/homebrew/opt/whisper-cpp/share/whisper-cpp \
+    /opt/homebrew/share/whisper-cpp \
+    /usr/local/opt/whisper-cpp/share/whisper-cpp \
+    /usr/local/share/whisper-cpp; do
+    if [ -f "$dir/ggml-metal.metal" ]; then
+      echo "$dir"
+      return
+    fi
+  done
+}
+
+extract_whisper_wrapper_target() {
+  local wrapper_path="$1"
+  local target=""
+  if [ -f "$wrapper_path" ]; then
+    target="$(sed -n 's/^WHISPER_CPP_BIN="\(.*\)"$/\1/p' "$wrapper_path" 2>/dev/null | head -n 1 || true)"
+  fi
+  if [ -n "$target" ] && [ -x "$target" ]; then
+    echo "$target"
+  fi
+}
+
+resolve_symlink_target() {
+  local link_path="$1"
+  local target
+  target="$(readlink "$link_path" 2>/dev/null || true)"
+  if [ -z "$target" ]; then
+    echo "$link_path"
+    return
+  fi
+  case "$target" in
+    /*) echo "$target" ;;
+    *) echo "$(cd "$(dirname "$link_path")" && cd "$(dirname "$target")" && pwd)/$(basename "$target")" ;;
+  esac
+}
+
+write_whisper_wrapper() {
+  local whisper_target="$1"
+  local metal_resources_dir
+  metal_resources_dir="$(find_metal_resources_dir "$whisper_target" || true)"
+  rm -f "$INSTALL_ROOT/bin/whisper-cli"
+  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
+#!/usr/bin/env bash
+WHISPER_CPP_BIN="$whisper_target"
+GGML_METAL_RESOURCES_DIR="$metal_resources_dir"
+if [ -n "\$GGML_METAL_RESOURCES_DIR" ] && [ -f "\$GGML_METAL_RESOURCES_DIR/ggml-metal.metal" ]; then
+  export GGML_METAL_PATH_RESOURCES="\$GGML_METAL_RESOURCES_DIR"
+fi
+exec "\$WHISPER_CPP_BIN" "\$@"
+SCRIPT
+  chmod +x "$INSTALL_ROOT/bin/whisper-cli"
+}
+
 setup_python_and_packages() {
   # If everything is already set up and working, skip.
   if [ -x "$VENV_PYTHON" ] && [ -x "$INSTALL_ROOT/bin/whisper-cli" ] && [ -x "$INSTALL_ROOT/bin/ffmpeg" ]; then
@@ -203,19 +284,14 @@ setup_python_and_packages() {
     return 1
   fi
 
-  # Create wrapper scripts.
-  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
-#!/usr/bin/env bash
-WHISPER_CPP_BIN="$whisper_cpp_bin"
-exec "\$WHISPER_CPP_BIN" "\$@"
-SCRIPT
+  write_whisper_wrapper "$whisper_cpp_bin"
 
   cat > "$INSTALL_ROOT/bin/ffmpeg" <<SCRIPT
 #!/usr/bin/env bash
 exec "$VENV_PYTHON" -c 'import os, sys, imageio_ffmpeg; exe = imageio_ffmpeg.get_ffmpeg_exe(); os.execv(exe, [exe] + sys.argv[1:])' "\$@"
 SCRIPT
 
-  chmod +x "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg"
+  chmod +x "$INSTALL_ROOT/bin/ffmpeg"
 
   if ! "$INSTALL_ROOT/bin/whisper-cli" -h >/dev/null 2>&1; then
     echo "whisper-cli validation failed." >&2
@@ -481,9 +557,20 @@ if [ -z "$FFMPEG_BIN" ]; then
   exit 1
 fi
 
-# Symlink into our bin directory.
-if [ "$WHISPER_BIN" != "$INSTALL_ROOT/bin/whisper-cli" ]; then
-  ln -sf "$WHISPER_BIN" "$INSTALL_ROOT/bin/whisper-cli"
+# Refresh the whisper wrapper so existing installs pick up Metal resource discovery.
+EXISTING_WHISPER_TARGET=""
+if [ "$WHISPER_BIN" = "$INSTALL_ROOT/bin/whisper-cli" ]; then
+  if [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
+    EXISTING_WHISPER_TARGET="$(resolve_symlink_target "$INSTALL_ROOT/bin/whisper-cli")"
+  else
+    EXISTING_WHISPER_TARGET="$(extract_whisper_wrapper_target "$INSTALL_ROOT/bin/whisper-cli" || true)"
+  fi
+  if [ -n "$EXISTING_WHISPER_TARGET" ]; then
+    WHISPER_BIN="$EXISTING_WHISPER_TARGET"
+  fi
+fi
+if [ "$WHISPER_BIN" != "$INSTALL_ROOT/bin/whisper-cli" ] || [ -n "$EXISTING_WHISPER_TARGET" ] || [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
+  write_whisper_wrapper "$WHISPER_BIN"
 fi
 if [ "$FFMPEG_BIN" != "$INSTALL_ROOT/bin/ffmpeg" ]; then
   ln -sf "$FFMPEG_BIN" "$INSTALL_ROOT/bin/ffmpeg"
@@ -565,7 +652,7 @@ fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 TEMP_WORK_DIR="${TMPDIR:-/tmp}/wechat-inbox-local-asr-$(uuidgen 2>/dev/null || date +%s%N)"
-CHUNK_SECONDS=600
+CHUNK_SECONDS=120
 OUTPUT_BASE="$OUTPUT_PATH"
 case "$OUTPUT_BASE" in
   *.txt) OUTPUT_BASE="${OUTPUT_BASE%.txt}" ;;
