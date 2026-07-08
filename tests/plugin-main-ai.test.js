@@ -302,6 +302,8 @@ assert.ok(pluginMainSource.includes("source.includes('uv-x86_64-pc-windows-msvc.
 assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_DOWNLOADS')"));
 assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_PREFERENCE')"));
 assert.ok(pluginMainSource.includes("source.includes('CHUNK_SECONDS=120')"));
+assert.ok(pluginMainSource.includes("source.includes('choose_chunk_seconds')"));
+assert.ok(pluginMainSource.includes("source.includes('metalAcceleration=failed')"));
 assert.ok(pluginMainSource.includes("source.includes('GGML_METAL_PATH_RESOURCES')"));
 assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
 assert.ok(pluginMainSource.includes("source.includes('TENCENT_MODEL_URL=')"));
@@ -1570,10 +1572,10 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('/Users/demo/.wechat-inbox-local-asr/transcribe.sh', {
     existsSync: () => true,
-    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nfind_metal_resources_dir\nGGML_METAL_PATH_RESOURCES\nCHUNK_SECONDS=120\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
+    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nfind_metal_resources_dir\nGGML_METAL_PATH_RESOURCES\nCHUNK_SECONDS=120\nchoose_chunk_seconds\nmetalAcceleration=failed\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
   }),
   {
-    scriptVersion: 'chunked-bash-simplified-progress-metal-resources-run-log',
+    scriptVersion: 'adaptive-chunked-bash-simplified-progress-metal-diagnostics-run-log',
     scriptOutdated: false,
   },
 );

@@ -537,12 +537,14 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('SIMPLIFIED_PROMPT')
       && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
       && source.includes('CHUNK_SECONDS=120')
+      && source.includes('choose_chunk_seconds')
       && source.includes('find_metal_resources_dir')
       && source.includes('GGML_METAL_PATH_RESOURCES')
+      && source.includes('metalAcceleration=failed')
       && source.includes('progressPercent')
     ) {
       return {
-        scriptVersion: 'chunked-bash-simplified-progress-metal-resources-run-log',
+        scriptVersion: 'adaptive-chunked-bash-simplified-progress-metal-diagnostics-run-log',
         scriptOutdated: false,
       };
     }
@@ -10031,8 +10033,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!source.includes('.wechat-inbox-local-asr')) return false;
       if (isMac) {
         return source.includes('CHUNK_SECONDS=120')
+          && source.includes('choose_chunk_seconds')
           && source.includes('find_metal_resources_dir')
           && source.includes('GGML_METAL_PATH_RESOURCES')
+          && source.includes('metalAcceleration=failed')
           && source.includes('transcribe-last.log')
           && source.includes('validate_local_asr_inference')
           && source.includes('TENCENT_MODEL_URL=')
