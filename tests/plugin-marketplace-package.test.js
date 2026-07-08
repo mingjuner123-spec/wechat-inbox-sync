@@ -260,6 +260,8 @@ assert.ok(macInstaller.includes('validate_local_asr_inference'));
 assert.ok(macInstaller.includes('Local ASR inference validation passed'));
 assert.ok(macInstaller.includes('find_metal_resources_dir'));
 assert.ok(macInstaller.includes('GGML_METAL_PATH_RESOURCES'));
+assert.ok(macInstaller.includes('legacyPluginScriptCheck=find_metal_resources_dir'));
+assert.ok(macInstaller.includes('legacyPluginScriptCheck=GGML_METAL_PATH_RESOURCES'));
 assert.ok(macInstaller.includes('get_media_duration_seconds'));
 assert.ok(macInstaller.includes('choose_chunk_seconds'));
 assert.ok(macInstaller.includes('durationSeconds=$DURATION_SECONDS'));

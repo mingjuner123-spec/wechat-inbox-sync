@@ -653,6 +653,8 @@ rm -f "$CACHE_ROOT/ggml-small.bin"
 cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+# legacyPluginScriptCheck=find_metal_resources_dir
+# legacyPluginScriptCheck=GGML_METAL_PATH_RESOURCES
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 INPUT_PATH=""
