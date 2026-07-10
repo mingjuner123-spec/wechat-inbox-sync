@@ -297,11 +297,10 @@ assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479
 assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh'));
 assert.ok(pluginMainSource.includes("const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';"));
 assert.ok(pluginMainSource.includes("const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';"));
-assert.ok(pluginMainSource.includes('const isFeishuOAuthRequest = /^\\/feishu\\/oauth(?:\\/|$)/.test(String(path || \'\'));'));
 assert.ok(pluginMainSource.includes('const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;'));
 assert.ok(pluginMainSource.includes("'X-Wechat-Inbox-Token': token"));
-assert.ok(pluginMainSource.includes('authToken=${encodeURIComponent(token)}&clientId=${encodeURIComponent(this.settings.clientId)}'));
-assert.ok(pluginMainSource.includes('authToken: token'));
+assert.strictEqual(pluginMainSource.includes('authToken=${encodeURIComponent(token)}'), false);
+assert.strictEqual(pluginMainSource.includes('authToken: token'), false);
 assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
 assert.ok(pluginMainSource.includes('copyBundledLocalOcrRuntimeAssets'));
 assert.ok(pluginMainSource.includes("fs.copyFileSync(sourcePath, targetPath)"));
@@ -3658,6 +3657,9 @@ async function runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest() {
     assert.strictEqual(calls.length, 1);
     assert.strictEqual(calls[0].headers.Authorization, 'Bearer ABC-123');
     assert.strictEqual(calls[0].headers['X-Wechat-Inbox-Client-Id'], 'test-client');
+    assert.strictEqual(calls[0].url, 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync/feishu/oauth/status');
+    assert.strictEqual(calls[0].url.includes('authToken='), false);
+    assert.strictEqual(calls[0].url.includes('clientId='), false);
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
@@ -4784,6 +4786,32 @@ async function runLocalTranscriptionEntitlementTests() {
   };
   const freeSetupStatus = await freeSetupPlugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
   assert.strictEqual(freeSetupStatus.hasAccess, false);
+
+  const expiredPlugin = new PluginClass();
+  expiredPlugin.saveData = async () => {};
+  expiredPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'EXPIRED-PRO',
+    clientId: 'expired-client',
+    bindings: [{ token: 'EXPIRED-PRO', label: '已到期微信', enabled: true, status: 'bound' }],
+    localTranscriptionEntitlementStatus: {
+      hasAccess: true,
+      status: 'active',
+      expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+    },
+  });
+  expiredPlugin.requestJson = async () => ({
+    success: true,
+    data: {
+      hasAccess: true,
+      status: 'active',
+      expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+    },
+  });
+  await assert.rejects(
+    () => expiredPlugin.ensureProFeatureAccess('音视频转写'),
+    /Pro/,
+  );
 }
 
 async function runCloudFailedVoiceLocalFallbackTests() {
@@ -5135,6 +5163,7 @@ async function runDiagnosticFailureLogFilteringTests() {
     assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
     assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
     assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false);
+    assert.strictEqual(diagnostic.includes('ABC-123'), false);
 
     fs.rmSync(path.join(ocrRoot, 'install.log'), { force: true });
     plugin.getLocalOcrInstallStatus = () => ({

@@ -906,9 +906,9 @@ function buildLocalTranscriptionEntitlementText(status) {
 function isCachedProStatusActive(status, now = Date.now()) {
   if (!status || typeof status !== 'object') return false;
   if (!status.hasAccess || status.status === 'expired') return false;
-  if (!status.expiresAt) return true;
+  if (!status.expiresAt) return false;
   const expiresAt = new Date(status.expiresAt).getTime();
-  return Number.isNaN(expiresAt) || expiresAt > now;
+  return Number.isFinite(expiresAt) && expiresAt > now;
 }
 
 function isCachedProStatusActiveForCode(status, code, now = Date.now()) {
@@ -1104,6 +1104,38 @@ function normalizeBindCodeInput(code) {
     .toUpperCase()
     .replace(/[‐-‒–—―]/g, '-')
     .replace(/\s+/g, '');
+}
+
+function redactSensitiveObject(value, key = '') {
+  if (/token|code|secret|authorization|cookie/i.test(String(key || ''))) return '[REDACTED]';
+  if (Array.isArray(value)) return value.map((item) => redactSensitiveObject(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entryValue]) => [
+        entryKey,
+        redactSensitiveObject(entryValue, entryKey),
+      ])
+    );
+  }
+  return value;
+}
+
+function redactKnownCredentials(text, settings = {}) {
+  const entitlement = settings.localTranscriptionEntitlementStatus || {};
+  const credentials = [
+    settings.token,
+    settings.pendingRedeemCode,
+    entitlement.code,
+    entitlement.bindingToken,
+    ...(Array.isArray(settings.bindings) ? settings.bindings.map((item) => item && item.token) : []),
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  return credentials.reduce(
+    (result, credential) => result.split(credential).join('[REDACTED]'),
+    String(text || '')
+  );
 }
 
 function normalizeBindings(settings) {
@@ -9213,24 +9245,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       return await this.requestJson(path, method, body, binding);
     };
     const isFeishuCloudRequest = /^\/feishu(?:\/|$)/.test(String(path || ''));
-    const isFeishuOAuthRequest = /^\/feishu\/oauth(?:\/|$)/.test(String(path || ''));
     const apiBaseForRequest = isFeishuCloudRequest
       ? FEISHU_OAUTH_SYNC_API_BASE
       : this.settings.apiBase;
-    let requestPath = path;
-    let requestBody = body || {};
-    if (isFeishuOAuthRequest) {
-      if (method === 'GET') {
-        const separator = String(requestPath || '').includes('?') ? '&' : '?';
-        requestPath = `${requestPath}${separator}authToken=${encodeURIComponent(token)}&clientId=${encodeURIComponent(this.settings.clientId)}`;
-      } else {
-        requestBody = {
-          ...requestBody,
-          authToken: token,
-          clientId: this.settings.clientId,
-        };
-      }
-    }
+    const requestPath = path;
+    const requestBody = body || {};
     const requestOptions = {
       url: `${trimTrailingSlash(apiBaseForRequest)}${requestPath}`,
       method,
@@ -10152,7 +10171,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const runLogText = readLocalAsrRunLog(installRoot);
     const syncLogText = readSyncDiagnosticLog(installRoot);
     const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : '';
-    return [
+    const diagnosticText = [
       'WeChat Inbox Sync 同步/安装失败诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
       `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
@@ -10172,8 +10191,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       `模型路径：${status.modelPath}`,
       `组件可用：${status.ready ? '是' : '否'}`,
       `缺失项：${status.missingReasons && status.missingReasons.length ? status.missingReasons.join('；') : '无'}`,
-      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
-      `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:[REDACTED]`).join(', ') || '-'}`,
+      `权限缓存：${JSON.stringify(redactSensitiveObject(this.settings.localTranscriptionEntitlementStatus || {}))}`,
       '最近同步状态：',
       lastSyncText || syncLogText || '暂无 sync-last.log',
       '最近转写日志：',
@@ -10181,6 +10200,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       '最近安装日志：',
       logText || '暂无 install.log',
     ].join('\n');
+    return redactKnownCredentials(diagnosticText, this.settings);
   }
 
   getSyncDiagnosticText() {
@@ -10229,8 +10249,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
       `实际使用系统：${platform}`,
       `API 地址：${this.settings.apiBase || '-'}`,
-      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:${item.token}`).join(', ') || '-'}`,
-      `权限缓存：${JSON.stringify(this.settings.localTranscriptionEntitlementStatus || {})}`,
+      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:[REDACTED]`).join(', ') || '-'}`,
+      `权限缓存：${JSON.stringify(redactSensitiveObject(this.settings.localTranscriptionEntitlementStatus || {}))}`,
       '',
       '组件状态：',
       `音视频转写 ASR：${asrStatus.ready ? '可用' : '不可用'}`,
@@ -10265,7 +10285,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     } else {
       lines.push('', '已省略成功日志，只保留失败相关信息。');
     }
-    return lines.join('\n');
+    return redactKnownCredentials(lines.join('\n'), this.settings);
   }
 
   async copyTextToClipboard(text) {
@@ -10376,7 +10396,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const cached = this.settings && this.settings.localTranscriptionEntitlementStatus;
     if (!options.forceRefresh && isCachedProStatusActive(cached)) return cached;
     const bindingStatus = await this.getLocalTranscriptionEntitlementStatus();
-    if (bindingStatus && bindingStatus.hasAccess) return bindingStatus;
+    if (isCachedProStatusActive(bindingStatus)) return bindingStatus;
     if (code) {
       return await this.validateProRedeemCodeAccess(code);
     }
@@ -10395,8 +10415,12 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async ensureProFeatureAccess(featureName = '该功能') {
-    const status = await this.getProFeatureAccessStatus();
-    if (status.hasAccess) return status;
+    let status = await this.getProFeatureAccessStatus();
+    if (isCachedProStatusActive(status)) return status;
+    const expiresAt = status && status.expiresAt ? new Date(status.expiresAt).getTime() : 0;
+    if (status && status.hasAccess && expiresAt && expiresAt <= Date.now()) {
+      status = { ...status, hasAccess: false, status: 'expired' };
+    }
     if (status.status === 'missing_redeem_code') {
       throw new Error(`${featureName}需要有效 Pro。请先绑定小程序并开通 Pro。`);
     }
