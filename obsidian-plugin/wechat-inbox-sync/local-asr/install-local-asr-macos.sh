@@ -12,6 +12,7 @@ LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
 
 TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
+TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
 TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
@@ -57,9 +58,12 @@ acquire_install_lock() {
 # Primary download from Tencent CDN, fallback to GitHub releases.
 
 UV_VERSION="0.9.14"
+PYTHON_BUILD_STANDALONE_BUILD="20260623"
 UV_BIN="$INSTALL_ROOT/bin/uv"
 export UV_PYTHON_DOWNLOADS=automatic
 export UV_PYTHON_PREFERENCE=managed
+export UV_PYTHON_INSTALL_MIRROR="$TENCENT_PYTHON_INSTALL_MIRROR"
+export UV_PYTHON_CPYTHON_BUILD="$PYTHON_BUILD_STANDALONE_BUILD"
 
 detect_uv_arch() {
   local arch

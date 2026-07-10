@@ -10,15 +10,21 @@ LOG_PATH="${INSTALL_ROOT}/install.log"
 
 TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
 TENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"
+TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+OCR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-ocr/wheels"
 TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
 PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
 
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 UV_VERSION="0.9.14"
+PYTHON_BUILD_STANDALONE_BUILD="20260623"
 UV_BIN="${INSTALL_ROOT}/bin/uv"
+OCR_PACKAGE_REQUIREMENTS=("rapidocr-onnxruntime==1.4.4" "pillow==12.3.0")
 export UV_PYTHON_DOWNLOADS=automatic
 export UV_PYTHON_PREFERENCE=managed
+export UV_PYTHON_INSTALL_MIRROR="$TENCENT_PYTHON_INSTALL_MIRROR"
+export UV_PYTHON_CPYTHON_BUILD="$PYTHON_BUILD_STANDALONE_BUILD"
 
 mkdir -p "$INSTALL_ROOT"
 : > "$LOG_PATH"
@@ -120,33 +126,72 @@ validate_ocr_python() {
   "$python_bin" -c "from rapidocr_onnxruntime import RapidOCR; print('rapidocr-ready')" 2>&1
 }
 
+detect_ocr_wheel_platform() {
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64)  echo "macosx_11_0_arm64" ;;
+    x86_64) echo "macosx_11_0_x86_64" ;;
+    *)
+      log "ERROR: Unsupported macOS wheelhouse architecture: $arch"
+      return 1
+      ;;
+  esac
+}
+
+ocr_wheelhouse_url() {
+  local wheel_platform
+  wheel_platform="$(detect_ocr_wheel_platform)" || return 1
+  echo "${OCR_WHEELHOUSE_BASE_URL%/}/${wheel_platform}/index.html"
+}
+
+install_ocr_packages_from_wheelhouse() {
+  local installer="$1"
+  shift
+  local wheelhouse_url
+  wheelhouse_url="$(ocr_wheelhouse_url)" || return 1
+  log "Installing OCR packages from CDN wheelhouse: $wheelhouse_url"
+  "$installer" "$@" install --upgrade \
+    --no-index \
+    --find-links "$wheelhouse_url" \
+    "${OCR_PACKAGE_REQUIREMENTS[@]}" 2>&1
+}
+
 install_ocr_packages_with_python() {
   local python_bin="$1"
   export PIP_DISABLE_PIP_VERSION_CHECK=1
   "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  if install_ocr_packages_from_wheelhouse "$python_bin" -m pip; then
+    return 0
+  fi
+  log "CDN OCR wheelhouse install failed; retrying package indexes."
   "$python_bin" -m pip install --upgrade pip \
     -i "$TENCENT_PIP_INDEX_URL" \
     --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
-  if "$python_bin" -m pip install --upgrade rapidocr-onnxruntime pillow \
+  if "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
     -i "$TENCENT_PIP_INDEX_URL" \
     --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
     return 0
   fi
   log "Tencent PyPI mirror install failed; retrying with PyPI only."
-  "$python_bin" -m pip install --upgrade rapidocr-onnxruntime pillow \
+  "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
     -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
 }
 
 install_ocr_packages_with_uv() {
   export VIRTUAL_ENV="$VENV_DIR"
+  if install_ocr_packages_from_wheelhouse "$UV_BIN" pip; then
+    return 0
+  fi
+  log "CDN OCR wheelhouse install failed; retrying package indexes."
   "$UV_BIN" pip install --upgrade pip 2>&1 || true
-  if "$UV_BIN" pip install --upgrade rapidocr-onnxruntime pillow \
+  if "$UV_BIN" pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
     -i "$TENCENT_PIP_INDEX_URL" \
     --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
     return 0
   fi
   log "Tencent PyPI mirror install failed; retrying with PyPI only."
-  "$UV_BIN" pip install --upgrade rapidocr-onnxruntime pillow \
+  "$UV_BIN" pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
     -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
 }
 

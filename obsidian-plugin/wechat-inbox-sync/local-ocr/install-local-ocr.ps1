@@ -13,11 +13,17 @@ $BinDir = Join-Path $InstallRoot "bin"
 $UvExe = Join-Path $BinDir "uv.exe"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
 $TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
+$TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"
+$OcrWheelhouseBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/wheels"
 $TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
 $PypiFallbackIndexUrl = "https://pypi.org/simple"
 $UvVersion = "0.9.14"
+$PythonBuildStandaloneBuild = "20260623"
+$OcrPackageRequirements = @("rapidocr-onnxruntime==1.4.4", "pillow==12.3.0")
 $env:UV_PYTHON_DOWNLOADS = "automatic"
 $env:UV_PYTHON_PREFERENCE = "managed"
+$env:UV_PYTHON_INSTALL_MIRROR = $TencentPythonInstallMirror
+$env:UV_PYTHON_CPYTHON_BUILD = $PythonBuildStandaloneBuild
 $env:UV_LINK_MODE = "copy"
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
@@ -187,26 +193,57 @@ function Install-Uv {
   Write-InstallLog "uv installed to $UvExe"
 }
 
+function Get-OcrWheelhouseUrl {
+  $platform = "win_amd64"
+  return "$($OcrWheelhouseBaseUrl.TrimEnd("/"))/$platform/index.html"
+}
+
+function Install-OcrPackagesFromWheelhouse {
+  param(
+    [string]$PythonPath = "",
+    [switch]$Uv
+  )
+  $wheelhouseUrl = Get-OcrWheelhouseUrl
+  Write-InstallLog "Installing OCR packages from CDN wheelhouse: $wheelhouseUrl"
+  if ($Uv) {
+    $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments (@("pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
+    return $exitCode -eq 0
+  }
+  if ([string]::IsNullOrWhiteSpace($PythonPath)) {
+    return $false
+  }
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
+  return $exitCode -eq 0
+}
+
 function Install-OcrPackagesWithPip {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
+  if (Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath) {
+    return $true
+  }
+  Write-InstallLog "CDN OCR wheelhouse install failed; retrying package indexes."
   Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "pip", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl) | Out-Null
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl)
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
   if ($exitCode -eq 0) {
     return $true
   }
   Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $PypiFallbackIndexUrl)
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl))
   return $exitCode -eq 0
 }
 
 function Install-OcrPackagesWithUv {
   $env:VIRTUAL_ENV = $VenvDir
-  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments @("pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl)
+  if (Install-OcrPackagesFromWheelhouse -Uv) {
+    return $true
+  }
+  Write-InstallLog "CDN OCR wheelhouse install failed; retrying package indexes."
+  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments (@("pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
   if ($exitCode -eq 0) {
     return $true
   }
   Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
-  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments @("pip", "install", "--upgrade", "rapidocr-onnxruntime", "pillow", "-i", $PypiFallbackIndexUrl)
+  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments (@("pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl))
   return $exitCode -eq 0
 }
 
