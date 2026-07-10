@@ -259,6 +259,19 @@ assert.strictEqual(typeof helpers.getLocalAsrScriptVersionStatus, 'function');
 assert.strictEqual(typeof helpers.explainLocalAsrExitCode, 'function');
 assert.strictEqual(typeof helpers.buildLocalAsrInstallCommand, 'function');
 assert.strictEqual(typeof helpers.downloadTextViaNode, 'function');
+assert.strictEqual(typeof helpers.normalizeInstallerScriptText, 'function');
+assert.strictEqual(
+  helpers.normalizeInstallerScriptText('#!/bin/bash\r\nset -euo pipefail\r\necho ok\r\n', true),
+  '#!/bin/bash\nset -euo pipefail\necho ok\n',
+);
+assert.strictEqual(
+  helpers.normalizeInstallerScriptText('\uFEFF#!/bin/bash\r\nset -euo pipefail\r', true),
+  '#!/bin/bash\nset -euo pipefail\n',
+);
+assert.strictEqual(
+  helpers.normalizeInstallerScriptText('param()\r\nWrite-Host ok\r\n', false),
+  'param()\r\nWrite-Host ok\r\n',
+);
 assert.strictEqual(helpers.LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_beta');
 assert.strictEqual(
   helpers.LOCAL_ASR_INSTALLER_URL,
@@ -1572,7 +1585,7 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('/Users/demo/.wechat-inbox-local-asr/transcribe.sh', {
     existsSync: () => true,
-    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nSHORT_CHUNK_SECONDS=120\nLONG_CHUNK_SECONDS=600\nLONG_MEDIA_THRESHOLD_SECONDS=600\nCHUNK_SECONDS="$(choose_chunk_seconds "$DURATION_SECONDS")"\nget_media_duration_seconds\nmetalResourcesPath=\nmetalAcceleration=failed\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
+    readFileSync: () => 'set -euo pipefail\nSIMPLIFIED_PROMPT="$(printf)"\nfind_metal_resources_dir\nGGML_METAL_PATH_RESOURCES\nCHUNK_SECONDS=120\nchoose_chunk_seconds\nmetalAcceleration=failed\nRUN_LOG="$ROOT/transcribe-last.log"\n--prompt "$SIMPLIFIED_PROMPT"\nprogressPercent=100',
   }),
   {
     scriptVersion: 'adaptive-chunked-bash-simplified-progress-metal-diagnostics-run-log',
@@ -4160,6 +4173,69 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
   ]]);
 }
 
+async function runMarkSyncedRecordNotFoundIsIdempotentTest() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    inboxDir: '临时收集',
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'record-vanished-after-write',
+          type: 'text',
+          content: '本地已经写入，云端标记时记录已被清理',
+          createdAt: '2026-06-25T08:00:00.000Z',
+          metadata: {},
+        }],
+      };
+    }
+    if (path === '/records/record-vanished-after-write/synced') {
+      throw new Error('Record not found');
+    }
+    return {
+      success: true,
+      data: {},
+    };
+  };
+  plugin.writeRecord = async (record) => ({
+    recordId: record._id,
+    title: '文本-本地已经写入',
+    filePath: '临时收集/2026-06-25/文本-本地已经写入.md',
+  });
+
+  const result = await plugin.syncBinding({
+    token: 'ABC-123',
+    label: '测试微信',
+  }, false);
+
+  assert.deepStrictEqual(result.written, [{
+    recordId: 'record-vanished-after-write',
+    title: '文本-本地已经写入',
+    filePath: '临时收集/2026-06-25/文本-本地已经写入.md',
+  }]);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(result.skipped, []);
+  assert.deepStrictEqual(calls, [[
+    '/records?status=pending',
+    'GET',
+    {},
+    'ABC-123',
+  ], [
+    '/records/record-vanished-after-write/synced',
+    'POST',
+    {},
+    'ABC-123',
+  ]]);
+}
+
 async function runUnbindInvalidCodePreservesLocalBindingTest() {
   const previousRequestUrlMock = requestUrlMock;
   requestUrlMock = async () => ({
@@ -4619,6 +4695,64 @@ async function runLocalTranscriptionEntitlementTests() {
   assert.strictEqual(confirmSetupReason, 'bind');
   assert.deepStrictEqual(installComponentCalls, ['bind']);
 
+  const ocrOnlyPlugin = new PluginClass();
+  ocrOnlyPlugin.settings = helpers.mergeSettings({});
+  ocrOnlyPlugin.ensureProFeatureAccess = async () => ({ hasAccess: true });
+  let ocrOnlyReady = false;
+  let ocrOnlyAsrCalls = 0;
+  let ocrOnlyOcrCalls = 0;
+  ocrOnlyPlugin.getLocalAsrInstallStatus = () => ({
+    ready: false,
+    missingReasons: ['whisper 未找到'],
+  });
+  ocrOnlyPlugin.getLocalOcrInstallStatus = () => ({
+    ready: ocrOnlyReady,
+    missingReasons: ocrOnlyReady ? [] : ['Python OCR 运行环境未找到'],
+  });
+  ocrOnlyPlugin.installLocalAsr = async () => {
+    ocrOnlyAsrCalls += 1;
+    throw new Error('OCR-only install should not install ASR');
+  };
+  ocrOnlyPlugin.installLocalOcr = async () => {
+    ocrOnlyOcrCalls += 1;
+    ocrOnlyReady = true;
+  };
+  await ocrOnlyPlugin.installLocalTranscriptionComponents({
+    reason: 'first-use',
+    requireAsr: false,
+    requireOcr: true,
+  });
+  assert.strictEqual(ocrOnlyAsrCalls, 0);
+  assert.strictEqual(ocrOnlyOcrCalls, 1);
+
+  const installAllPlugin = new PluginClass();
+  installAllPlugin.settings = helpers.mergeSettings({});
+  installAllPlugin.ensureProFeatureAccess = async () => ({ hasAccess: true });
+  let installAllOcrCalls = 0;
+  installAllPlugin.getLocalAsrInstallStatus = () => ({
+    ready: false,
+    missingReasons: ['whisper 未找到'],
+  });
+  installAllPlugin.getLocalOcrInstallStatus = () => ({
+    ready: false,
+    missingReasons: ['Python OCR 运行环境未找到'],
+  });
+  installAllPlugin.installLocalAsr = async () => {
+    throw new Error('ASR install failed');
+  };
+  installAllPlugin.installLocalOcr = async () => {
+    installAllOcrCalls += 1;
+  };
+  await assert.rejects(
+    () => installAllPlugin.doInstallLocalTranscriptionComponents({
+      reason: 'settings-open',
+      requireAsr: true,
+      requireOcr: true,
+    }),
+    /ASR install failed/,
+  );
+  assert.strictEqual(installAllOcrCalls, 1);
+
   const freeSetupPlugin = new PluginClass();
   freeSetupPlugin.saveData = async () => {};
   freeSetupPlugin.settings = helpers.mergeSettings({
@@ -4951,7 +5085,11 @@ async function runDiagnosticFailureLogFilteringTests() {
   const asrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-diagnostic-'));
   const ocrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-diagnostic-'));
   try {
-    fs.writeFileSync(path.join(asrRoot, 'transcribe-last.log'), 'status=success\nASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED', 'utf8');
+    fs.writeFileSync(
+      path.join(asrRoot, 'transcribe-last.log'),
+      'status=success\nASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED\n--- stderr ---\nmetal backend ready\n--- error ---\n',
+      'utf8',
+    );
     fs.writeFileSync(path.join(asrRoot, 'install.log'), 'status=success\nASR INSTALL SUCCESS SHOULD NOT BE COPIED', 'utf8');
     fs.writeFileSync(path.join(ocrRoot, 'install.log'), 'status=failed\ncurl: (35) Recv failure: Connection reset by peer', 'utf8');
 
@@ -4997,6 +5135,21 @@ async function runDiagnosticFailureLogFilteringTests() {
     assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
     assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
     assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false);
+
+    fs.rmSync(path.join(ocrRoot, 'install.log'), { force: true });
+    plugin.getLocalOcrInstallStatus = () => ({
+      ready: false,
+      installRoot: ocrRoot,
+      pythonPath: `${ocrRoot}/venv/bin/python`,
+      scriptPath: `${ocrRoot}/ocr_image.py`,
+      hasPython: true,
+      hasScript: false,
+      missingReasons: ['OCR 脚本未找到，请安装/更新本地转写组件'],
+    });
+    const missingScriptDiagnostic = plugin.getSyncDiagnosticText();
+    assert.ok(missingScriptDiagnostic.includes('Python 环境已安装，仅 OCR 脚本缺失'));
+    assert.ok(missingScriptDiagnostic.includes('OCR 安装日志未找到或没有记录失败信息'));
+    assert.strictEqual(missingScriptDiagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
   } finally {
     fs.rmSync(asrRoot, { recursive: true, force: true });
     fs.rmSync(ocrRoot, { recursive: true, force: true });
@@ -5017,6 +5170,7 @@ async function main() {
   await runCloudProcessingRecordSkipSyncTest();
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();
+  await runMarkSyncedRecordNotFoundIsIdempotentTest();
   await runUnbindInvalidCodePreservesLocalBindingTest();
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();

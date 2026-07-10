@@ -536,12 +536,10 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('set -euo pipefail')
       && source.includes('SIMPLIFIED_PROMPT')
       && source.includes('--prompt "$SIMPLIFIED_PROMPT"')
-      && source.includes('SHORT_CHUNK_SECONDS=120')
-      && source.includes('LONG_CHUNK_SECONDS=600')
-      && source.includes('LONG_MEDIA_THRESHOLD_SECONDS=600')
+      && source.includes('CHUNK_SECONDS=120')
       && source.includes('choose_chunk_seconds')
-      && source.includes('get_media_duration_seconds')
-      && source.includes('metalResourcesPath=')
+      && source.includes('find_metal_resources_dir')
+      && source.includes('GGML_METAL_PATH_RESOURCES')
       && source.includes('metalAcceleration=failed')
       && source.includes('progressPercent')
     ) {
@@ -995,6 +993,14 @@ function downloadTextViaNode(url) {
   });
 }
 
+function normalizeInstallerScriptText(scriptText, isMac = false) {
+  const source = String(scriptText || '');
+  if (!isMac) return source;
+  return source
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n');
+}
+
 function createRetryableTranscriptionError(message) {
   const error = new Error(message);
   error.retryable = true;
@@ -1009,6 +1015,11 @@ function isRetryableTranscriptionError(error) {
 function isRemoteAsrDownloadFailure(error) {
   const message = String((error && error.message) || error || '');
   return /Invalid audio URI|audio download failed|Audio download failed/i.test(message);
+}
+
+function isRecordNotFoundError(error) {
+  const message = String((error && error.message) || error || '');
+  return /Record not found/i.test(message);
 }
 
 function getDefaultLocalTranscriptionScriptPath(platform = os.platform(), installRoot = '') {
@@ -2344,6 +2355,7 @@ function buildTranscriptOnlyMetadata(metadata, {
     title: `${sourceName}口播文案`,
     url: url || rest.url || '',
     transcriptOnly: true,
+    ...(cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {}),
     mediaUrl,
     audioUrl: mediaUrl,
     subtitleUrl,
@@ -2352,7 +2364,6 @@ function buildTranscriptOnlyMetadata(metadata, {
     transcriptionSource,
     transcriptionError,
     conversionStatus: conversionStatus || transcriptionStatus,
-    ...(cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {}),
   };
 }
 
@@ -9904,7 +9915,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installRoot = this.getConfiguredLocalOcrInstallRoot();
     const command = buildLocalOcrInstallCommand(installerPath, platform, platform === 'win32' ? installRoot : '');
     new Notice('开始安装本地转写组件的图片文字识别模块，可能需要几分钟。');
-    await new Promise((resolve, reject) => {
+    const installResult = await new Promise((resolve, reject) => {
       childProcess.exec(command, {
         timeout: LOCAL_OCR_INSTALL_TIMEOUT_MS,
         maxBuffer: 20 * 1024 * 1024,
@@ -9915,6 +9926,16 @@ class WechatObsidianInboxPlugin extends Plugin {
           const errorText = timedOut
             ? '本地转写组件安装超时：图片文字识别模块安装超过 10 分钟仍未完成。通常是 Python 或依赖下载源访问过慢，安装已中止。'
             : (stderr || stdout || error.message || String(error));
+          writeLocalAsrInstallLog({
+            installRoot,
+            platform,
+            installerPath,
+            command,
+            stdout,
+            stderr,
+            error: errorText,
+            status: 'failed',
+          });
           reject(new Error(errorText));
           return;
         }
@@ -9926,6 +9947,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       const missingText = status.missingReasons && status.missingReasons.length
         ? status.missingReasons.join('；')
         : '图片文字识别模块不完整';
+      writeLocalAsrInstallLog({
+        installRoot,
+        platform,
+        installerPath,
+        command,
+        stdout: installResult && installResult.stdout,
+        stderr: installResult && installResult.stderr,
+        error: missingText,
+        status: 'failed',
+      });
       throw new Error(`本地转写组件安装不完整：${missingText}`);
     }
     new Notice('本地转写组件的图片文字识别模块已安装。');
@@ -9975,13 +10006,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!isInstallerCurrent(scriptText)) {
         throw new Error('Local OCR installer download returned outdated or invalid content');
       }
-      fs.writeFileSync(downloadedPath, scriptText, 'utf8');
+      fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(scriptText, isMac), 'utf8');
       this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
       return downloadedPath;
     } catch (downloadError) {
       if (fs.existsSync(installerPath)) {
         const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
         if (isInstallerCurrent(bundledScriptText)) {
+          if (isMac) {
+            fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
+            this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
+            return downloadedPath;
+          }
           return installerPath;
         }
       }
@@ -10087,12 +10123,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!isInstallerCurrent(scriptText)) {
         throw new Error('Local ASR installer download returned outdated or invalid content');
       }
-      fs.writeFileSync(downloadedPath, scriptText, 'utf8');
+      fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(scriptText, isMac), 'utf8');
       return downloadedPath;
     } catch (downloadError) {
       if (fs.existsSync(installerPath)) {
         const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
         if (isInstallerCurrent(bundledScriptText)) {
+          if (isMac) {
+            fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
+            return downloadedPath;
+          }
           return installerPath;
         }
       }
@@ -10159,10 +10199,23 @@ class WechatObsidianInboxPlugin extends Plugin {
     const syncLogText = readSyncDiagnosticLog(asrRoot);
     const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : syncLogText;
     const hasFailureSignal = (text) => /status\s*=\s*failed|failed|failure|error|exception|traceback|curl:\s*\(\d+\)|connection reset|timed out|timeout|not found|permission denied|denied|未找到|失败|错误|异常|超时|缺失|不完整/i.test(String(text || ''));
-    const appendFailedLog = (lines, title, text) => {
+    const hasAsrRunFailureSignal = (text) => {
+      const source = String(text || '');
+      const errorSectionMatch = source.match(/--- error ---\s*([\s\S]*)$/i);
+      const explicitError = errorSectionMatch ? errorSectionMatch[1].trim() : '';
+      return Boolean(explicitError)
+        || /status\s*=\s*failed|whisper failed|ffmpeg failed|failed with exit code|command failed|runtimeexception|fullyqualifiederrorid|operationstopped|traceback|enoent|permission denied|timed out|timeout/i.test(source);
+    };
+    const tailLog = (text, maxLines = 50) => String(text || '')
+      .split(/\r?\n/)
+      .slice(-maxLines)
+      .join('\n')
+      .trim();
+    const appendFailedLog = (lines, title, text, detector = hasFailureSignal) => {
       const source = String(text || '').trim();
-      if (!source || !hasFailureSignal(source)) return;
-      lines.push(title, source);
+      if (!source || !detector(source)) return false;
+      lines.push(title, tailLog(source));
+      return true;
     };
     const formatMissingReasons = (status) => (
       status && Array.isArray(status.missingReasons) && status.missingReasons.length
@@ -10185,6 +10238,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       `ASR 缺失项：${formatMissingReasons(asrStatus)}`,
       `图片文字识别 OCR：${ocrStatus.ready ? '可用' : '不可用'}`,
       `OCR 安装目录：${ocrStatus.installRoot || ocrRoot}`,
+      `OCR 安装日志：${getLocalAsrInstallLogPath(ocrRoot)}`,
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`,
     ];
 
@@ -10193,12 +10247,18 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (!asrStatus.ready) {
       appendFailedLog(lines, 'ASR 最近安装失败日志：', asrInstallLog);
-      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog);
+      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog, hasAsrRunFailureSignal);
     } else {
-      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog);
+      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog, hasAsrRunFailureSignal);
     }
     if (!ocrStatus.ready) {
-      appendFailedLog(lines, 'OCR 最近安装失败日志：', ocrInstallLog);
+      const appendedOcrLog = appendFailedLog(lines, 'OCR 最近安装失败日志：', ocrInstallLog);
+      if (ocrStatus.hasPython && !ocrStatus.hasScript) {
+        lines.push('', 'OCR 修复建议：Python 环境已安装，仅 OCR 脚本缺失；重新安装会复用现有环境并补齐脚本。');
+      }
+      if (!appendedOcrLog) {
+        lines.push('', 'OCR 安装日志未找到或没有记录失败信息；请重新安装/修复本地转写组件以生成新的分阶段日志。');
+      }
     }
     if (!lines.some((line) => /失败日志|失败状态/.test(line))) {
       lines.push('', '未检测到失败日志；已省略成功日志。');
@@ -10601,12 +10661,35 @@ class WechatObsidianInboxPlugin extends Plugin {
   async doInstallLocalTranscriptionComponents(options = {}) {
     await this.ensureProFeatureAccess('本地转写组件安装');
     const readiness = options.readiness || this.getLocalTranscriptionComponentReadiness();
-    if (!readiness.asrStatus || !readiness.asrStatus.ready) {
-      await this.installLocalAsr({ installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode), reason: options.reason });
+    const requireAsr = options.requireAsr !== false;
+    const requireOcr = options.requireOcr !== false;
+    const failures = [];
+    if (requireAsr && (!readiness.asrStatus || !readiness.asrStatus.ready)) {
+      try {
+        await this.installLocalAsr({ installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode), reason: options.reason });
+      } catch (error) {
+        failures.push({
+          component: '音视频转写 ASR',
+          error,
+        });
+      }
     }
     const ocrStatus = this.getLocalOcrInstallStatus();
-    if (!ocrStatus.ready) {
-      await this.installLocalOcr({ reason: options.reason });
+    if (requireOcr && !ocrStatus.ready) {
+      try {
+        await this.installLocalOcr({ reason: options.reason });
+      } catch (error) {
+        failures.push({
+          component: '图片文字识别 OCR',
+          error,
+        });
+      }
+    }
+    if (failures.length) {
+      const message = failures
+        .map((item) => `${item.component}：${item.error && item.error.message ? item.error.message : item.error}`)
+        .join('\n');
+      throw new Error(message);
     }
     return {
       installed: true,
@@ -10631,6 +10714,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.installLocalTranscriptionComponents({
       reason: options.reason || 'first-use',
       readiness,
+      requireAsr,
+      requireOcr,
     });
 
     const nextReadiness = this.getLocalTranscriptionComponentReadiness();
@@ -11612,9 +11697,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     subtitleUrl = '',
     source = '',
     noMediaError = '',
+    markdown = '',
     binding = null,
     title = '',
-    markdown = '',
   }) {
     const metadata = record.metadata || {};
 
@@ -12262,16 +12347,16 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl,
             mediaUrls,
             source: 'video',
-            binding,
-            title,
-            noMediaError: isUnavailableXhs
-              ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
-              : '',
             markdown: isXiaohongshuUrl(url)
               && extractedXiaohongshu
               && Array.isArray(extractedXiaohongshu.comments)
               && extractedXiaohongshu.comments.length
               ? extractedXiaohongshu.markdown
+              : '',
+            binding,
+            title,
+            noMediaError: isUnavailableXhs
+              ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
           });
         }
@@ -12595,7 +12680,11 @@ class WechatObsidianInboxPlugin extends Plugin {
             filePath: existingFilePath,
           });
           this.showSyncProgress({ ...progress, stage: 'marking', title: buildRecordTitleBase(record) });
-          await this.requestJson(`/records/${encodeURIComponent(recordId)}/synced`, 'POST', {}, binding);
+          try {
+            await this.requestJson(`/records/${encodeURIComponent(recordId)}/synced`, 'POST', {}, binding);
+          } catch (markError) {
+            if (!isRecordNotFoundError(markError)) throw markError;
+          }
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, progress);
@@ -12604,7 +12693,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           conversionWarnings.push(item.conversionWarning);
         }
         this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
-        await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
+        try {
+          await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
+        } catch (markError) {
+          if (!isRecordNotFoundError(markError)) throw markError;
+        }
       } catch (error) {
         const message = error.message || String(error);
         let failedTitle = '';
@@ -13230,6 +13323,7 @@ WechatObsidianInboxPlugin.__test = {
   buildLocalAsrInstallCommand,
   buildLocalOcrInstallCommand,
   downloadTextViaNode,
+  normalizeInstallerScriptText,
   getSocialRequestHeaders,
   hasXiaohongshuLoginCookies,
   getXiaohongshuCookieHeader,

@@ -21,6 +21,7 @@ export UV_PYTHON_DOWNLOADS=automatic
 export UV_PYTHON_PREFERENCE=managed
 
 mkdir -p "$INSTALL_ROOT"
+: > "$LOG_PATH"
 
 log() {
   echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") $*" | tee -a "$LOG_PATH"
@@ -285,39 +286,71 @@ download_text_file() {
 }
 
 install_ocr_script() {
-  # If the bundled script exists alongside the installer, use it directly.
-  if [ -f "$PYTHON_SCRIPT" ] && [ -s "$PYTHON_SCRIPT" ]; then
-    cp "$PYTHON_SCRIPT" "$RUNTIME_SCRIPT"
-    log "OCR script copied from bundled source."
-    return 0
-  fi
-
-  # Otherwise download from CDN.
+  local source_script=""
   local downloaded_script="${INSTALL_ROOT}/ocr_image.downloaded.py"
-  if download_text_file "${TENCENT_OCR_ASSET_BASE_URL%/}/ocr_image.py" "$downloaded_script"; then
-    cp "$downloaded_script" "$RUNTIME_SCRIPT"
-    log "OCR script downloaded from CDN."
+  local staged_script="${INSTALL_ROOT}/.ocr_image.py.tmp.$$"
+
+  is_valid_ocr_script() {
+    local candidate="$1"
+    [ -s "$candidate" ] \
+      && grep -q 'RapidOCR' "$candidate" \
+      && grep -q -- '--input' "$candidate" \
+      && grep -q -- '--output' "$candidate"
+  }
+
+  if is_valid_ocr_script "$RUNTIME_SCRIPT"; then
+    log "OCR script is already ready."
     return 0
   fi
 
-  log "ERROR: 无法获取 OCR 脚本。请检查网络连接后重试。"
-  return 1
+  # Community plugin updates may not include extra runtime files, so bundled
+  # assets are preferred but the CDN remains the normal fallback.
+  if is_valid_ocr_script "$PYTHON_SCRIPT"; then
+    source_script="$PYTHON_SCRIPT"
+    log "Using bundled OCR script."
+  elif download_text_file "${TENCENT_OCR_ASSET_BASE_URL%/}/ocr_image.py" "$downloaded_script" \
+    && is_valid_ocr_script "$downloaded_script"; then
+    source_script="$downloaded_script"
+    log "OCR script downloaded from CDN."
+  fi
+
+  if [ -z "$source_script" ]; then
+    log "ERROR: 无法获取有效的 OCR 脚本。请检查网络连接后重试。"
+    return 1
+  fi
+
+  rm -f "$staged_script"
+  cp "$source_script" "$staged_script"
+  if ! is_valid_ocr_script "$staged_script"; then
+    rm -f "$staged_script"
+    log "ERROR: OCR 脚本校验失败。"
+    return 1
+  fi
+  mv -f "$staged_script" "$RUNTIME_SCRIPT"
+  log "OCR script installed atomically."
+  return 0
 }
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
 log "Installing local OCR component into $INSTALL_ROOT"
 
-setup_python_venv || {
-  log "OCR component installation failed at Python environment step."
-  exit 1
-}
-
 install_ocr_script || {
+  log "status=failed"
+  log "stage=ocr_script"
   log "OCR component installation failed at script download step."
   exit 1
 }
 
+setup_python_venv || {
+  log "status=failed"
+  log "stage=python_environment"
+  log "OCR component installation failed at Python environment step."
+  exit 1
+}
+
+log "status=success"
+log "stage=complete"
 log "Local OCR component installed."
 echo "Python: ${VENV_DIR}/bin/python"
 echo "Script: $RUNTIME_SCRIPT"

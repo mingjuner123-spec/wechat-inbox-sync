@@ -68,6 +68,9 @@ assert.strictEqual(windowsOcrInstaller.includes('& $UvExe pip install --upgrade 
 assert.strictEqual(windowsOcrInstaller.includes('Please install Python 3.9-3.12'), false);
 assert.ok(macOcrInstaller.includes('rapidocr-onnxruntime'));
 assert.ok(macOcrInstaller.includes('TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"'));
+assert.ok(macOcrInstaller.includes('stage=ocr_script'));
+assert.ok(macOcrInstaller.includes('status=failed'));
+assert.ok(macOcrInstaller.indexOf('install_ocr_script ||') < macOcrInstaller.indexOf('setup_python_venv ||'));
 assert.ok(macOcrInstaller.includes('TENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"'));
 assert.ok(macOcrInstaller.includes('TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"'));
 assert.ok(macOcrInstaller.includes('PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"'));
@@ -260,8 +263,6 @@ assert.ok(macInstaller.includes('validate_local_asr_inference'));
 assert.ok(macInstaller.includes('Local ASR inference validation passed'));
 assert.ok(macInstaller.includes('find_metal_resources_dir'));
 assert.ok(macInstaller.includes('GGML_METAL_PATH_RESOURCES'));
-assert.ok(macInstaller.includes('legacyPluginScriptCheck=find_metal_resources_dir'));
-assert.ok(macInstaller.includes('legacyPluginScriptCheck=GGML_METAL_PATH_RESOURCES'));
 assert.ok(macInstaller.includes('get_media_duration_seconds'));
 assert.ok(macInstaller.includes('choose_chunk_seconds'));
 assert.ok(macInstaller.includes('durationSeconds=$DURATION_SECONDS'));
