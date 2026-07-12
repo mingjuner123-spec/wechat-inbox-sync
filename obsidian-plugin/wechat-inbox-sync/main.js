@@ -6887,7 +6887,7 @@ async function renderSocialMediaUrlsWithElectron(url) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
   }
 
-  const wechatSession = getWechatSession();
+  const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();
   const win = new BrowserWindow({
     width: 1280,
     height: 900,

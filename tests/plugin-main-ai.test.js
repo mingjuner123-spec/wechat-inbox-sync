@@ -40,6 +40,11 @@ const simpleFeishuRendererSource = pluginMainSource.slice(
 );
 assert.ok(simpleFeishuRendererSource.includes('getFeishuClientVars'));
 assert.ok(simpleFeishuRendererSource.includes('mergeFeishuRenderedAndClientVarsMarkdown'));
+const socialMediaRendererSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async function renderSocialMediaUrlsWithElectron'),
+  pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
+);
+assert.ok(socialMediaRendererSource.includes('const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
