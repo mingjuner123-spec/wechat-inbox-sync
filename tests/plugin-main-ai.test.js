@@ -3134,6 +3134,43 @@ async function runAsyncHydrationTests() {
     requestUrlMock = previousXhsCommentRequestUrlMock;
   }
 
+  const genericXhsLandingVideoPlugin = new PluginClass();
+  genericXhsLandingVideoPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
+  genericXhsLandingVideoPlugin.hasProFeatureAccess = async () => false;
+  genericXhsLandingVideoPlugin.renderSocialMediaUrls = async () => [
+    'https://sns-video-v6.xhscdn.com/stream/demo.mp4?sign=test',
+  ];
+  genericXhsLandingVideoPlugin.runConfiguredTranscription = async () => ({
+    transcription: '从通用落地页恢复的视频口播文案',
+    source: 'local',
+  });
+  const previousGenericXhsRequestUrlMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/generic-video') {
+      return {
+        text: [
+          '<html><head>',
+          '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+          '<meta name="description" content="该内容来自小红书，请打开小红书查看精彩笔记。">',
+          '</head><body>小红书</body></html>',
+        ].join(''),
+      };
+    }
+    throw new Error(`unexpected generic xhs request ${url}`);
+  };
+  try {
+    const genericXhsLandingVideoRecord = await genericXhsLandingVideoPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/generic-video',
+      metadata: { url: 'https://www.xiaohongshu.com/explore/generic-video' },
+    }, '', '', '小红书通用落地页视频');
+    assert.strictEqual(genericXhsLandingVideoRecord.metadata.transcriptOnly, true);
+    assert.strictEqual(genericXhsLandingVideoRecord.metadata.transcriptionStatus, 'success');
+    assert.strictEqual(genericXhsLandingVideoRecord.metadata.transcription, '从通用落地页恢复的视频口播文案');
+  } finally {
+    requestUrlMock = previousGenericXhsRequestUrlMock;
+  }
+
   const forcedXhsVideoPlugin = new PluginClass();
   forcedXhsVideoPlugin.settings = { aiProvider: 'off' };
   forcedXhsVideoPlugin.renderSocialMediaUrls = async (url) => {
@@ -5164,6 +5201,16 @@ async function runDiagnosticFailureLogFilteringTests() {
     assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
     assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false);
     assert.strictEqual(diagnostic.includes('ABC-123'), false);
+
+    helpers.appendLocalAsrRunLog({
+      installRoot: asrRoot,
+      status: 'failed',
+      command: '',
+      error: '媒体下载超时',
+    });
+    const preAsrFailureDiagnostic = plugin.getSyncDiagnosticText();
+    assert.ok(preAsrFailureDiagnostic.includes('媒体下载超时'));
+    assert.strictEqual(preAsrFailureDiagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
 
     fs.rmSync(path.join(ocrRoot, 'install.log'), { force: true });
     plugin.getLocalOcrInstallStatus = () => ({
