@@ -1,10 +1,8 @@
 # WeChat Inbox Sync
 
-Sync content collected from a WeChat mini program into your local Obsidian vault.
+把微信中收集的公众号文章、飞书文档、小红书、抖音、B站、小宇宙等网页链接、PDF、MP3、MP4 等文件和速记，一键同步到 Obsidian，自动整理为可检索笔记。
 
-This plugin is designed for a "send now, organize later" workflow: save text, links,
-webpages, audio clips, and files from WeChat, then pull them into Obsidian as
-Markdown notes and local attachments.
+WeChat Inbox Sync follows a "send now, organize later" workflow: the mini program captures content, and the plugin writes it into the local vault as Markdown notes and attachments.
 
 ## Features
 
