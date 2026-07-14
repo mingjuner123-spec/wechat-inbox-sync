@@ -1821,6 +1821,35 @@ function getAudioFormatFromUrl(audioUrl) {
   return 'mp3';
 }
 
+function hasVideoTrackInMediaBuffer(value) {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value || []);
+  if (!buffer.length) return false;
+  return buffer.includes(Buffer.from('vide'))
+    || buffer.includes(Buffer.from('vp09'))
+    || buffer.includes(Buffer.from('avc1')) && buffer.includes(Buffer.from('moov'));
+}
+
+function cleanTrailingTranscriptionHallucinations(text) {
+  const lines = String(text || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 2) return lines.join('\n');
+  const isCredit = (line) => /^(?:字幕|字幕\s*by|字幕\s*:|翻译|校对|制作|subtitles?\s*(?:by|:))/i.test(line);
+  let cutoff = lines.length;
+  for (let index = lines.length - 1; index >= 1; index -= 1) {
+    const line = lines[index];
+    const repeated = line === lines[index - 1];
+    if (isCredit(line) || repeated) {
+      cutoff = Math.min(cutoff, repeated ? index - 1 : index);
+      continue;
+    }
+    if (cutoff < lines.length && (/^[a-z\s'.,!?-]{1,40}$/i.test(line) || /画面/.test(line))) {
+      cutoff = index;
+      continue;
+    }
+    break;
+  }
+  return lines.slice(0, cutoff).join('\n').trim();
+}
+
 function bufferStartsWith(buffer, bytes) {
   if (!buffer || buffer.length < bytes.length) return false;
   return bytes.every((byte, index) => buffer[index] === byte);
@@ -4764,6 +4793,22 @@ function extractBilibiliAudioUrlFromPlayurlPayload(payload) {
     if (url) return url;
   }
 
+  return '';
+}
+
+function extractBilibiliProgressiveVideoUrlFromPlayurlPayload(payload) {
+  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
+  const playData = data && data.data ? data.data : {};
+  const durlList = Array.isArray(playData.durl) ? playData.durl : [];
+  for (const item of durlList) {
+    const url = normalizeExtractedUrl(item && item.url);
+    if (url) return url;
+    const backups = (item && (item.backupUrl || item.backup_url)) || [];
+    if (Array.isArray(backups) && backups.length) {
+      const backupUrl = normalizeExtractedUrl(backups[0]);
+      if (backupUrl) return backupUrl;
+    }
+  }
   return '';
 }
 
@@ -11304,7 +11349,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const outputText = fs.existsSync(outputPath)
         ? fs.readFileSync(outputPath, 'utf8')
         : stdout;
-      const transcription = String(outputText || '').trim();
+      const transcription = cleanTrailingTranscriptionHallucinations(String(outputText || '').trim());
       if (!transcription) {
         throw new Error('本地转写命令没有返回文本');
       }
@@ -13583,6 +13628,9 @@ WechatObsidianInboxPlugin.__test = {
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
+  extractBilibiliProgressiveVideoUrlFromPlayurlPayload,
+  hasVideoTrackInMediaBuffer,
+  cleanTrailingTranscriptionHallucinations,
   buildAudioTranscriptMarkdown,
   buildTranscriptPropertyMetadata,
   buildTranscriptOnlyMetadata,

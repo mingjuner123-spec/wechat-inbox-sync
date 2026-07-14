@@ -114,6 +114,9 @@ assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliSubtitleUrlsFromHtml, 'function');
 assert.strictEqual(typeof helpers.parseBilibiliSubtitlePayload, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliAudioUrlFromPlayurlPayload, 'function');
+assert.strictEqual(typeof helpers.extractBilibiliProgressiveVideoUrlFromPlayurlPayload, 'function');
+assert.strictEqual(typeof helpers.hasVideoTrackInMediaBuffer, 'function');
+assert.strictEqual(typeof helpers.cleanTrailingTranscriptionHallucinations, 'function');
 assert.strictEqual(typeof helpers.isWechatChannelsUrl, 'function');
 assert.strictEqual(typeof helpers.extractWechatChannelsRequestPayload, 'function');
 assert.strictEqual(typeof helpers.normalizeWechatChannelsFeedPayload, 'function');
@@ -521,6 +524,7 @@ assert.ok(pluginMainSource.includes(".setName('绑定额外设备')"));
 assert.ok(pluginMainSource.includes("ensureProFeatureAccess('额外绑定设备')"));
 assert.ok(pluginMainSource.includes("new Setting(proPanel)\n      .setName('保存原始音视频到本地')"));
 assert.ok(pluginMainSource.includes('Pro 功能。默认关闭；开启后，新同步且可下载的音频或视频会保存到'));
+assert.ok(pluginMainSource.includes("cleanTrailingTranscriptionHallucinations(String(outputText || '').trim())"));
 assert.strictEqual(pluginMainSource.includes("text: '已绑定小程序码'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('新增绑定码')"), false);
 assert.strictEqual(pluginMainSource.includes(".setButtonText('新增绑定码')"), false);
@@ -2358,6 +2362,22 @@ assert.strictEqual(helpers.extractBilibiliAudioUrlFromPlayurlPayload({
     },
   },
 }), 'https://upos.example.com/audio.m4s?deadline=1');
+
+assert.strictEqual(helpers.extractBilibiliProgressiveVideoUrlFromPlayurlPayload({
+  data: {
+    durl: [{ url: 'https://upos.example.com/video.mp4?deadline=1' }],
+  },
+}), 'https://upos.example.com/video.mp4?deadline=1');
+assert.strictEqual(helpers.hasVideoTrackInMediaBuffer(Buffer.from('0000ftypisom0000mp4a')), false);
+assert.strictEqual(helpers.hasVideoTrackInMediaBuffer(Buffer.from('0000ftypisom0000avc10000vide0000mp4a')), true);
+assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
+  '这是正文最后一句。',
+  'i know you',
+  '画面的画面',
+  '画面的画面',
+  '字幕by索兰娅',
+  '字幕:J Chong',
+].join('\n')), '这是正文最后一句。');
 
 assert.strictEqual(helpers.extractBilibiliAudioUrlFromPlayurlPayload({
   data: {
