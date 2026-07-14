@@ -1991,6 +1991,43 @@ assert.strictEqual(
   }]).comments.length,
   2,
 );
+const xiaohongshuReplyPagedComments = helpers.mergeXiaohongshuReplyPages([
+  {
+    id: 'root-with-replies',
+    author: '主评论用户',
+    content: '需要展开回复的主评论',
+    replies: [{ id: 'reply-1', author: '回复用户甲', content: '首屏回复' }],
+  },
+], 'root-with-replies', [
+  {
+    data: {
+      comments: [{ id: 'reply-2', root_comment_id: 'root-with-replies', content: '第二条折叠回复', user_info: { nickname: '回复用户乙' } }],
+      cursor: 'reply-cursor-2',
+      has_more: true,
+    },
+  },
+  {
+    data: {
+      comments: [{ id: 'reply-3', root_comment_id: 'root-with-replies', content: '第三条折叠回复', user_info: { nickname: '回复用户丙' } }],
+      has_more: false,
+    },
+  },
+]);
+assert.strictEqual(xiaohongshuReplyPagedComments[0].replies.length, 3);
+assert.ok(helpers.buildSocialCommentsMarkdown(xiaohongshuReplyPagedComments).includes('  - ↳ **回复用户丙**：第三条折叠回复'));
+assert.strictEqual(
+  helpers.mergeXiaohongshuReplyPages([{
+    id: 'root-many-replies',
+    author: '主评论用户',
+    content: '有很多回复的主评论',
+    replies: Array.from({ length: 25 }, (_unused, index) => ({
+      id: `many-reply-${index}`,
+      author: '回复用户',
+      content: `第 ${index} 条回复`,
+    })),
+  }], 'root-many-replies', [])[0].replies.length,
+  25,
+);
 
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
