@@ -172,6 +172,25 @@ externalNavigationHandlers['will-frame-navigate']({
 }, 'bytedance://aweme/detail/123');
 assert.strictEqual(preventedExternalFrameNavigation, true);
 assert.strictEqual(typeof externalWindowOpenHandler, 'function');
+let preventedExternalFrameNavigationDetails = false;
+externalNavigationHandlers['will-frame-navigate']({
+  preventDefault() {
+    preventedExternalFrameNavigationDetails = true;
+  },
+}, {
+  url: 'bytedance://aweme/detail/123',
+  isMainFrame: false,
+});
+assert.strictEqual(preventedExternalFrameNavigationDetails, true);
+let preventedExternalFrameNavigationEvent = false;
+externalNavigationHandlers['will-frame-navigate']({
+  url: 'bytedance://aweme/detail/123',
+  isMainFrame: false,
+  preventDefault() {
+    preventedExternalFrameNavigationEvent = true;
+  },
+});
+assert.strictEqual(preventedExternalFrameNavigationEvent, true);
 let preventedExternalRedirect = false;
 externalNavigationHandlers['will-redirect']({
   preventDefault() {

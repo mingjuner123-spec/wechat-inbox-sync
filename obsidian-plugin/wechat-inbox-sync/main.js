@@ -4449,7 +4449,10 @@ function shouldBlockExternalAppUrl(value) {
 function installExternalAppNavigationGuards(webContents) {
   if (!webContents) return;
   const preventExternalNavigation = (event, navigationUrl) => {
-    if (shouldBlockExternalAppUrl(navigationUrl) && event && typeof event.preventDefault === 'function') {
+    const targetUrl = typeof navigationUrl === 'string'
+      ? navigationUrl
+      : (navigationUrl && navigationUrl.url) || (event && event.url);
+    if (shouldBlockExternalAppUrl(targetUrl) && event && typeof event.preventDefault === 'function') {
       event.preventDefault();
     }
   };
