@@ -5569,6 +5569,24 @@ function collectSocialCommentFallbackIdentities(comments = [], target = new Set(
   return target;
 }
 
+function getSocialCommentAuthorKey(author) {
+  return String(author || '')
+    .replace(/^[:：]+|[:：]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function parseXiaohongshuDomReply(comment) {
+  const content = String(comment && comment.content || '').trim();
+  const match = content.match(/^回复\s+(.{1,80}?)\s*[:：]\s*(.+)$/u);
+  if (!match || !match[1] || !match[2]) return null;
+  return {
+    targetAuthorKey: getSocialCommentAuthorKey(match[1]),
+    content: match[2].trim(),
+  };
+}
+
 function pushSocialComment(comments, seen, comment) {
   const normalized = normalizeSocialComment(comment || {});
   if (!normalized) return;
@@ -5673,6 +5691,8 @@ function mergeXiaohongshuCommentSources({
   const canonicalKeys = collectSocialCommentFallbackIdentities(comments);
   let dedupedFallbackCount = 0;
   let fallbackAddedCount = 0;
+  let fallbackReplyAddedCount = 0;
+  let unmatchedFallbackReplyCount = 0;
 
   (Array.isArray(fallbackGroups) ? fallbackGroups : []).forEach((group) => {
     (Array.isArray(group) ? group : []).forEach((comment) => {
@@ -5681,6 +5701,41 @@ function mergeXiaohongshuCommentSources({
       const key = getSocialCommentFallbackIdentity(normalized);
       if (key && canonicalKeys.has(key)) {
         dedupedFallbackCount += 1;
+        return;
+      }
+      const domReply = parseXiaohongshuDomReply(normalized);
+      if (domReply) {
+        const matchingRootIndexes = comments
+          .map((root, index) => (getSocialCommentAuthorKey(root && root.author) === domReply.targetAuthorKey ? index : -1))
+          .filter((index) => index >= 0);
+        if (matchingRootIndexes.length !== 1) {
+          unmatchedFallbackReplyCount += 1;
+          return;
+        }
+        const rootIndex = matchingRootIndexes[0];
+        const root = comments[rootIndex];
+        const reply = normalizeSocialComment({
+          ...normalized,
+          content: domReply.content,
+        });
+        if (!reply) {
+          unmatchedFallbackReplyCount += 1;
+          return;
+        }
+        const existingReplies = Array.isArray(root.replies) ? root.replies : [];
+        const mergedReplies = mergeXiaohongshuNetworkComments([
+          existingReplies,
+          [reply],
+        ], XIAOHONGSHU_REPLY_COMMENT_LIMIT);
+        if (mergedReplies.length === existingReplies.length) {
+          dedupedFallbackCount += 1;
+          return;
+        }
+        comments[rootIndex] = { ...root, replies: mergedReplies };
+        const replyKey = getSocialCommentFallbackIdentity(reply);
+        if (replyKey) canonicalKeys.add(replyKey);
+        fallbackAddedCount += 1;
+        fallbackReplyAddedCount += 1;
         return;
       }
       if (comments.length >= max) return;
@@ -5695,6 +5750,8 @@ function mergeXiaohongshuCommentSources({
     comments: comments.slice(0, max),
     dedupedFallbackCount,
     fallbackAddedCount,
+    fallbackReplyAddedCount,
+    unmatchedFallbackReplyCount,
   };
 }
 
@@ -8035,7 +8092,7 @@ async function renderXiaohongshuPageWithElectron(url) {
       finalReplyCount: finalCommentStats.replyCount,
       fallbackAddedCount: mergedCommentSources.fallbackAddedCount,
       dedupedFallbackCount: mergedCommentSources.dedupedFallbackCount,
-      unmatchedReplyCount: browserNetworkResult.unmatchedReplyCount,
+      unmatchedReplyCount: browserNetworkResult.unmatchedReplyCount + mergedCommentSources.unmatchedFallbackReplyCount,
       invalidPayloadCount: browserNetworkResult.invalidPayloadCount,
       scrollMode: renderedPayload && renderedPayload.scrollMode,
       pageApiStopReason: capturedDiagnostic.stopReason,
@@ -13324,6 +13381,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 finalReplyCount: finalXiaohongshuStats.replyCount,
                 fallbackAddedCount: Number(renderedDiagnosticDetails.fallbackAddedCount || 0) + finalXiaohongshuMerge.fallbackAddedCount,
                 dedupedFallbackCount: Number(renderedDiagnosticDetails.dedupedFallbackCount || 0) + finalXiaohongshuMerge.dedupedFallbackCount,
+                unmatchedReplyCount: Number(renderedDiagnosticDetails.unmatchedReplyCount || 0) + finalXiaohongshuMerge.unmatchedFallbackReplyCount,
               };
               extractedXiaohongshu = {
                 ...extractedXiaohongshu,

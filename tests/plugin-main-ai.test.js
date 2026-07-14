@@ -2102,6 +2102,32 @@ const mergedXiaohongshuNetworkVariants = helpers.mergeXiaohongshuCommentSources(
 assert.strictEqual(mergedXiaohongshuNetworkVariants.comments.length, 1);
 assert.strictEqual(mergedXiaohongshuNetworkVariants.comments[0].replies.length, 2);
 
+const attachedDomReply = helpers.mergeXiaohongshuCommentSources({
+  networkComments: [{ id: 'dom-parent-1', author: '父评论用户', content: '父评论正文' }],
+  fallbackGroups: [[{
+    author: '回复用户',
+    content: '回复 父评论用户 : DOM 中新增的回复',
+    time: '1天前广东',
+  }]],
+  limit: 200,
+});
+assert.strictEqual(attachedDomReply.comments.length, 1);
+assert.strictEqual(attachedDomReply.comments[0].replies.length, 1);
+assert.strictEqual(attachedDomReply.comments[0].replies[0].content, 'DOM 中新增的回复');
+assert.strictEqual(attachedDomReply.fallbackReplyAddedCount, 1);
+
+const unmatchedDomReply = helpers.mergeXiaohongshuCommentSources({
+  networkComments: [],
+  fallbackGroups: [[{
+    author: '回复用户',
+    content: '回复 不存在的父评论 : 不能平铺成主评论',
+    time: '1天前广东',
+  }]],
+  limit: 200,
+});
+assert.deepStrictEqual(unmatchedDomReply.comments, []);
+assert.strictEqual(unmatchedDomReply.unmatchedFallbackReplyCount, 1);
+
 const unmatchedCapturedXiaohongshuReplies = helpers.mergeXiaohongshuCapturedCommentPayloads([
   {
     url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/sub/page?note_id=note-1&root_comment_id=missing-root',
