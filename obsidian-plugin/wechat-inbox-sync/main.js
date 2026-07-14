@@ -5538,6 +5538,29 @@ function getSocialCommentIdentity(comment) {
   return `text:${String(comment && comment.author || '').trim()}|${String(comment && comment.content || '').trim()}|${String(comment && comment.time || '').trim()}`;
 }
 
+function getSocialCommentFallbackIdentity(comment) {
+  const author = String(comment && comment.author || '')
+    .replace(/^[:：]+|[:：]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const content = String(comment && comment.content || '')
+    .replace(/^回复\s+[^:：]{1,80}\s*[:：]\s*/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return author && content ? `${author}|${content}` : '';
+}
+
+function collectSocialCommentFallbackIdentities(comments = [], target = new Set()) {
+  (Array.isArray(comments) ? comments : []).forEach((comment) => {
+    const key = getSocialCommentFallbackIdentity(comment);
+    if (key) target.add(key);
+    collectSocialCommentFallbackIdentities(comment && comment.replies, target);
+  });
+  return target;
+}
+
 function pushSocialComment(comments, seen, comment) {
   const normalized = normalizeSocialComment(comment || {});
   if (!normalized) return;
@@ -5582,6 +5605,41 @@ function mergeSocialComments(groups = [], limit = 50) {
     });
   });
   return comments.slice(0, limit);
+}
+
+function mergeXiaohongshuCommentSources({
+  networkComments = [],
+  fallbackGroups = [],
+  limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT,
+} = {}) {
+  const max = Math.max(1, Math.min(Number(limit) || XIAOHONGSHU_ROOT_COMMENT_LIMIT, XIAOHONGSHU_ROOT_COMMENT_LIMIT));
+  const comments = mergeSocialComments([networkComments], max);
+  const canonicalKeys = collectSocialCommentFallbackIdentities(comments);
+  let dedupedFallbackCount = 0;
+  let fallbackAddedCount = 0;
+
+  (Array.isArray(fallbackGroups) ? fallbackGroups : []).forEach((group) => {
+    (Array.isArray(group) ? group : []).forEach((comment) => {
+      const normalized = normalizeSocialComment(comment);
+      if (!normalized) return;
+      const key = getSocialCommentFallbackIdentity(normalized);
+      if (key && canonicalKeys.has(key)) {
+        dedupedFallbackCount += 1;
+        return;
+      }
+      if (comments.length >= max) return;
+      comments.push(normalized);
+      if (key) canonicalKeys.add(key);
+      collectSocialCommentFallbackIdentities(normalized.replies, canonicalKeys);
+      fallbackAddedCount += 1;
+    });
+  });
+
+  return {
+    comments: comments.slice(0, max),
+    dedupedFallbackCount,
+    fallbackAddedCount,
+  };
 }
 
 function pushWechatComment(comments, seen, comment) {
@@ -5994,22 +6052,32 @@ function mergeXiaohongshuCapturedCommentPayloads(entries = [], limit = XIAOHONGS
 
   const rootResult = collectXiaohongshuCommentPages(rootPayloads, limit);
   let comments = rootResult.comments;
+  let unmatchedReplyCount = 0;
+  let unmatchedReplyPayloadCount = 0;
   replyPayloadGroups.forEach((payloads, rootCommentId) => {
+    const hasMatchingRoot = comments.some((comment) => getSocialCommentId(comment) === rootCommentId);
+    if (!hasMatchingRoot) {
+      unmatchedReplyPayloadCount += payloads.length;
+      payloads.forEach((payload) => {
+        unmatchedReplyCount += getXiaohongshuCommentPageItems(payload).length;
+      });
+      return;
+    }
     comments = mergeXiaohongshuReplyPages(comments, rootCommentId, payloads);
   });
   if (orphanReplyPayloads.length) {
-    const orphanComments = [];
-    const orphanSeen = new Set();
     orphanReplyPayloads.forEach((payload) => {
-      extractCommentsFromObject(getXiaohongshuCommentPageItems(payload), orphanComments, orphanSeen, limit);
+      unmatchedReplyCount += getXiaohongshuCommentPageItems(payload).length;
     });
-    comments = mergeSocialComments([comments, orphanComments], limit);
+    unmatchedReplyPayloadCount += orphanReplyPayloads.length;
   }
   return {
     comments: comments.slice(0, limit),
     rootPayloadCount,
     replyPayloadCount,
     orphanReplyPayloadCount: orphanReplyPayloads.length,
+    unmatchedReplyCount,
+    unmatchedReplyPayloadCount,
     rootCount: rootResult.comments.length,
     replyCount: countSocialCommentReplies(comments),
     pageCount: rootResult.pageCount + replyPayloadCount,
@@ -14054,6 +14122,7 @@ WechatObsidianInboxPlugin.__test = {
   collectXiaohongshuCommentPages,
   mergeXiaohongshuReplyPages,
   mergeXiaohongshuCapturedCommentPayloads,
+  mergeXiaohongshuCommentSources,
   buildXiaohongshuCommentDiagnostic,
   appendXiaohongshuCommentDiagnostic,
   getXiaohongshuCommentPaginationScript,

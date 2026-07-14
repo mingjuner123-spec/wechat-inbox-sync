@@ -2043,6 +2043,46 @@ assert.strictEqual(capturedXiaohongshuCommentResult.comments[0].replies.length, 
 assert.strictEqual(capturedXiaohongshuCommentResult.comments[0].replies[0].content, '折叠回复内容');
 assert.strictEqual(capturedXiaohongshuCommentResult.rootPayloadCount, 1);
 assert.strictEqual(capturedXiaohongshuCommentResult.replyPayloadCount, 1);
+assert.strictEqual(typeof helpers.mergeXiaohongshuCommentSources, 'function');
+const canonicalXiaohongshuComments = helpers.mergeXiaohongshuCommentSources({
+  networkComments: [{
+    id: 'canonical-root-1',
+    author: '用户甲',
+    content: '同一条评论',
+    time: '1780000000000',
+    replies: [{
+      id: 'canonical-reply-1',
+      author: '用户乙',
+      content: '折叠回复',
+      time: '1780000001000',
+    }],
+  }],
+  fallbackGroups: [[
+    { author: '用户甲', content: '同一条评论', time: '1天前上海' },
+    { author: '用户乙', content: '折叠回复', time: '1天前广东' },
+    { author: '用户丙', content: '真正新增评论', time: '刚刚' },
+  ]],
+  limit: 200,
+});
+assert.strictEqual(canonicalXiaohongshuComments.comments.length, 2);
+assert.strictEqual(canonicalXiaohongshuComments.comments[0].replies.length, 1);
+assert.strictEqual(canonicalXiaohongshuComments.comments[1].content, '真正新增评论');
+assert.strictEqual(canonicalXiaohongshuComments.dedupedFallbackCount, 2);
+assert.strictEqual(canonicalXiaohongshuComments.fallbackAddedCount, 1);
+
+const unmatchedCapturedXiaohongshuReplies = helpers.mergeXiaohongshuCapturedCommentPayloads([
+  {
+    url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/sub/page?note_id=note-1&root_comment_id=missing-root',
+    payload: {
+      data: {
+        comments: [{ id: 'unmatched-reply-1', root_comment_id: 'missing-root', content: '不能平铺的回复', user_info: { nickname: '回复用户' } }],
+        has_more: false,
+      },
+    },
+  },
+]);
+assert.deepStrictEqual(unmatchedCapturedXiaohongshuReplies.comments, []);
+assert.strictEqual(unmatchedCapturedXiaohongshuReplies.unmatchedReplyCount, 1);
 assert.strictEqual(
   helpers.mergeXiaohongshuReplyPages([{
     id: 'root-many-replies',
