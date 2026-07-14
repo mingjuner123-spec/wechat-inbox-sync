@@ -10542,8 +10542,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async ensureProFeatureAccess(featureName = '该功能') {
-    let status = await this.getProFeatureAccessStatus();
+  async ensureProFeatureAccess(featureName = '该功能', options = {}) {
+    let status = await this.getProFeatureAccessStatus({
+      forceRefresh: options.forceRefresh === true,
+    });
     if (isCachedProStatusActive(status)) return status;
     const expiresAt = status && status.expiresAt ? new Date(status.expiresAt).getTime() : 0;
     if (status && status.hasAccess && expiresAt && expiresAt <= Date.now()) {

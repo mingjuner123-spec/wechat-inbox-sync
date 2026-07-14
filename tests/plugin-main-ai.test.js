@@ -4858,6 +4858,19 @@ async function runLocalTranscriptionEntitlementTests() {
   const freeSetupStatus = await freeSetupPlugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
   assert.strictEqual(freeSetupStatus.hasAccess, false);
 
+  const forceRefreshPlugin = new PluginClass();
+  let receivedOptions = null;
+  forceRefreshPlugin.getProFeatureAccessStatus = async (options) => {
+    receivedOptions = options;
+    return {
+      hasAccess: true,
+      status: 'active',
+      expiresAt: '2026-08-01T00:00:00.000Z',
+    };
+  };
+  await forceRefreshPlugin.ensureProFeatureAccess('保存原始音视频到本地', { forceRefresh: true });
+  assert.deepStrictEqual(receivedOptions, { forceRefresh: true });
+
   const expiredPlugin = new PluginClass();
   expiredPlugin.saveData = async () => {};
   expiredPlugin.settings = helpers.mergeSettings({
