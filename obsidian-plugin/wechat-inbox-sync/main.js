@@ -12915,7 +12915,8 @@ class WechatObsidianInboxPlugin extends Plugin {
               markdown: appendSocialCommentsToMarkdown(extractedXiaohongshu.markdown, staticXiaohongshuComments),
             };
           }
-          if (hasProAdvancedAccess) {
+          const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);
+          if (hasProAdvancedAccess && !isXiaohongshuVideoNote) {
             extractedXiaohongshu = await this.enrichXiaohongshuExtractionWithOcr(extractedXiaohongshu, {
               pageUrl: resolvedUrl,
               binding,
