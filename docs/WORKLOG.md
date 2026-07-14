@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-15 08:05 - 发布 Obsidian 插件 1.3.28：PDF 自动 OCR 与本地转写质量修复
+
+- 目标：把已完成的 PDF 文本层质量检测、异常 PDF 自动本地 OCR、简繁转换和本地 ASR 复读质量门合并到最新插件市场基线，并完整发布给用户。
+- 影响范围：Obsidian 插件发布源、Windows/macOS 本地 ASR/OCR 安装器、插件回归测试和发布元数据；不修改小程序、云函数、支付、绑定码、Pro 云端权益或用户数据。
+- 修改：普通 PDF 继续优先读取文本层；扫描版、空文本、特殊编码或疑似乱码 PDF 自动切换到本地逐页 OCR。OCR 增加 `PyMuPDF` 与 OpenCC 依赖、300 DPI 渲染、阅读顺序整理和简体中文输出；旧 OCR 组件在首次需要 PDF OCR 时自动升级。PDF OCR 继续通过云端 Pro 权限校验，非 Pro 不开放。ASR 去掉内容提示词，并在保存前拦截提示词泄漏和高密度复读，失败时继续尝试备用媒体地址。
+- 兼容处理：以线上 `1.3.27` 为基线合并，保留该版本的小红书评论、抖音外部协议守卫和原始音视频附件能力；没有用旧分支整文件覆盖线上插件。
+- 线上动作：提交 `349cda7` 已推送到默认分支 `main`，标签 `1.3.28` 已推送，GitHub Actions Release 成功。GitHub Release：<https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.28>；本地安装包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.28.zip`。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、插件 `node --check`、两份 Windows 安装器 PowerShell 解析、OCR Python AST 解析、四份发布 JSON 解析和 `git diff --check` 通过。发布检查器确认默认分支与 Raw manifest、versions、Release 标签与五项资产、Release 内 manifest、桌面 ZIP 内 manifest 均为 `1.3.28`。仓库历史测试 `release-social-feishu-ai.test.js` 仍把版本写死为 `1.2.97`，移动端兼容测试仍尝试加载明确标记为桌面专用的插件，均作为既有测试债务记录，不作为本次发布门禁。
+- 结果：`1.3.28` 已满足 Obsidian 社区插件市场自动发现条件，用户可通过社区插件检查更新；手动安装 ZIP 也已就绪。
+- 已知风险：macOS 安装器通过静态语法和插件回归，仍需 Apple Silicon 用户用扫描版或乱码 PDF 做一次端到端 OCR 冒烟；公开包索引不可用时安装器仍依赖现有腾讯云/备用下载链路。
+- 下一步：收集 Windows 与 Apple Silicon 各一份真实 PDF 结果；后续单独清理两组过时测试，不与本次已发布功能混改。
+
 ### 2026-07-15 07:32 - 发布 Obsidian 插件 1.3.27：补全小红书评论与折叠回复
 
 - 目标：解决小红书评论常停在首屏约 10 条、折叠回复遗漏、API/DOM 重复、回复被误写成主评论，以及长时间处理中缺少可诊断信息的问题。
