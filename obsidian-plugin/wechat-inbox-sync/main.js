@@ -3970,6 +3970,7 @@ function extractDouyinAwemeId(url) {
   const patterns = [
     /\/video\/(\d{8,})/i,
     /\/share\/video\/(\d{8,})/i,
+    /\/aweme\/detail\/(\d{8,})/i,
     /[?&](?:aweme_id|item_id|item_ids)=(\d{8,})/i,
   ];
   for (const pattern of patterns) {
@@ -3977,6 +3978,23 @@ function extractDouyinAwemeId(url) {
     if (match && match[1]) return match[1];
   }
   return '';
+}
+
+function normalizeDouyinTargetUrl(originalUrl, resolvedUrl = '') {
+  const original = String(originalUrl || '').trim();
+  const resolved = String(resolvedUrl || '').trim();
+  const awemeId = extractDouyinAwemeId(resolved) || extractDouyinAwemeId(original);
+  if (awemeId) {
+    return {
+      awemeId,
+      url: `https://www.douyin.com/video/${awemeId}`,
+    };
+  }
+  const candidate = resolved || original;
+  if (/^https?:\/\//i.test(candidate) && isDouyinUrl(candidate)) {
+    return { awemeId: '', url: candidate };
+  }
+  return { awemeId: '', url: '' };
 }
 
 function getDouyinAwemeDetailUrls(awemeId) {
@@ -14692,6 +14710,7 @@ WechatObsidianInboxPlugin.__test = {
   generateWechatChannelsDecryptorBytes,
   decryptWechatChannelsMediaBuffer,
   extractDouyinAwemeId,
+  normalizeDouyinTargetUrl,
   extractDouyinMediaUrlsFromDetailPayload,
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,

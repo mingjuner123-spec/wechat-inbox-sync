@@ -2672,6 +2672,41 @@ assert.strictEqual(
   helpers.extractDouyinAwemeId('https://www.iesdouyin.com/share/video/7644238277092174409/?region=CN'),
   '7644238277092174409',
 );
+assert.strictEqual(
+  helpers.extractDouyinAwemeId('bytedance://aweme/detail/7644566503081119019'),
+  '7644566503081119019',
+);
+assert.deepStrictEqual(
+  helpers.normalizeDouyinTargetUrl(
+    'https://v.douyin.com/demo/',
+    'bytedance://aweme/detail/7644566503081119019',
+  ),
+  {
+    awemeId: '7644566503081119019',
+    url: 'https://www.douyin.com/video/7644566503081119019',
+  },
+);
+assert.deepStrictEqual(
+  helpers.normalizeDouyinTargetUrl(
+    'https://v.douyin.com/demo/',
+    'snssdk1128://aweme/detail/7644566503081119019',
+  ),
+  {
+    awemeId: '7644566503081119019',
+    url: 'https://www.douyin.com/video/7644566503081119019',
+  },
+);
+assert.deepStrictEqual(
+  helpers.normalizeDouyinTargetUrl('https://www.douyin.com/video/7644566503081119019', ''),
+  {
+    awemeId: '7644566503081119019',
+    url: 'https://www.douyin.com/video/7644566503081119019',
+  },
+);
+assert.deepStrictEqual(
+  helpers.normalizeDouyinTargetUrl('https://v.douyin.com/demo/', 'bytedance://user/profile/abc'),
+  { awemeId: '', url: '' },
+);
 assert.deepStrictEqual(
   helpers.extractDouyinMediaUrlsFromDetailPayload({
     aweme_detail: {
