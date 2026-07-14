@@ -5037,6 +5037,93 @@ async function runAudioVideoFileAttachmentTranscriptionTests() {
   assert.match(markdown, /^keywords: .+/m);
 }
 
+async function runSourceMediaAttachmentTests() {
+  assert.strictEqual(helpers.mergeSettings({}).saveOriginalMediaEnabled, false);
+
+  const mediaBytes = Buffer.alloc(640, 0);
+  mediaBytes.write('ftyp', 4, 'ascii');
+  const written = [];
+  const folders = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    inboxDir: '临时收集',
+    saveOriginalMediaEnabled: true,
+  });
+  plugin.app = {
+    vault: {
+      adapter: {
+        writeBinary: async (filePath, buffer) => {
+          written.push([filePath, Buffer.from(buffer)]);
+        },
+      },
+    },
+  };
+  plugin.ensureFolder = async (folder) => folders.push(folder);
+  plugin.downloadArrayBuffer = async (url) => {
+    assert.strictEqual(url, 'https://media.example.com/demo.mp4?token=private');
+    return mediaBytes;
+  };
+
+  const sourceRecord = {
+    _id: 'media-record-001',
+    type: 'webpage',
+    content: 'https://www.example.com/demo',
+    metadata: {
+      url: 'https://www.example.com/demo',
+      transcriptOnly: true,
+      mediaUrl: 'https://media.example.com/demo.mp4?token=private',
+      transcription: '这是一段已经成功取得的口播文案。',
+      transcriptionStatus: 'success',
+      transcriptionSource: 'local',
+    },
+  };
+  const savedRecord = await plugin.saveSourceMediaAttachment(sourceRecord, '临时收集', '2026-07-14', '演示视频');
+  assert.deepStrictEqual(folders, [
+    '临时收集/音视频附件',
+    '临时收集/音视频附件/2026-07-14',
+  ]);
+  assert.strictEqual(written.length, 1);
+  assert.strictEqual(written[0][0], '临时收集/音视频附件/2026-07-14/演示视频-media-record.mp4');
+  assert.strictEqual(savedRecord.metadata.sourceMediaAttachmentPath, written[0][0]);
+  const savedMarkdown = helpers.buildMarkdownForRecord({
+    record: savedRecord,
+    title: '演示视频',
+    syncedAt: '2026-07-14T00:00:00.000Z',
+  });
+  assert.ok(savedMarkdown.includes('## 原始音视频'));
+  assert.ok(savedMarkdown.includes('![[临时收集/音视频附件/2026-07-14/演示视频-media-record.mp4]]'));
+  assert.ok(savedMarkdown.indexOf('## 原始音视频') < savedMarkdown.indexOf('## 口播/音频文案'));
+
+  const disabledPlugin = new PluginClass();
+  disabledPlugin.settings = helpers.mergeSettings({ inboxDir: '临时收集' });
+  disabledPlugin.downloadArrayBuffer = async () => {
+    throw new Error('disabled media save must not download');
+  };
+  const disabledRecord = await disabledPlugin.saveSourceMediaAttachment(sourceRecord, '临时收集', '2026-07-14', '演示视频');
+  assert.strictEqual(disabledRecord, sourceRecord);
+
+  const failedPlugin = new PluginClass();
+  failedPlugin.settings = helpers.mergeSettings({
+    inboxDir: '临时收集',
+    saveOriginalMediaEnabled: true,
+  });
+  failedPlugin.app = {
+    vault: {
+      adapter: {
+        writeBinary: async () => {
+          throw new Error('disk full');
+        },
+      },
+    },
+  };
+  failedPlugin.ensureFolder = async () => {};
+  failedPlugin.downloadArrayBuffer = async () => mediaBytes;
+  const failedRecord = await failedPlugin.saveSourceMediaAttachment(sourceRecord, '临时收集', '2026-07-14', '演示视频');
+  assert.strictEqual(failedRecord.metadata.transcription, sourceRecord.metadata.transcription);
+  assert.strictEqual(failedRecord.metadata.sourceMediaAttachmentPath, '');
+  assert.strictEqual(failedRecord.metadata.sourceMediaAttachmentError, '原始音视频未能保存到本地。');
+}
+
 async function runPodcastDownloadHeaderTests() {
   const plugin = new PluginClass();
   let capturedHeaders = null;
@@ -5286,6 +5373,7 @@ async function main() {
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
   await runAudioVideoFileAttachmentTranscriptionTests();
+  await runSourceMediaAttachmentTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
   await runDiagnosticFailureLogFilteringTests();

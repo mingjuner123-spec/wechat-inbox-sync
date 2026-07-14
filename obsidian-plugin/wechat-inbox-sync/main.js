@@ -82,6 +82,7 @@ const DEFAULT_SETTINGS = {
   aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
   xiaohongshuImageOcrEnabled: true,
+  saveOriginalMediaEnabled: false,
   wechatChannelsExperimentUrl: '',
   feishuOAuthStatus: null,
   feishuAppId: '',
@@ -1276,6 +1277,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     ? true
     : merged.xiaohongshuCommentsEnabled !== false;
   merged.xiaohongshuImageOcrEnabled = true;
+  merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
   merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || '').trim();
   merged.feishuOAuthStatus = merged.feishuOAuthStatus
     && typeof merged.feishuOAuthStatus === 'object'
@@ -2263,6 +2265,7 @@ function buildWebpageMarkdownBody(record, title) {
     return `${snapshot}\n`;
   }
   if (metadata.transcriptOnly) {
+    const sourceMediaMarkdown = buildSourceMediaAttachmentMarkdown(metadata);
     const transcriptMarkdown = buildAudioTranscriptMarkdown({
       url,
       transcription: metadata.transcription || '',
@@ -2270,7 +2273,10 @@ function buildWebpageMarkdownBody(record, title) {
       transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
       transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
     });
-    return snapshot ? `${transcriptMarkdown.trim()}\n\n${snapshot}\n` : transcriptMarkdown;
+    return [sourceMediaMarkdown, transcriptMarkdown, snapshot]
+      .filter(Boolean)
+      .join('\n\n')
+      .trim() + '\n';
   }
 
   const status = metadata.conversionStatus || 'pending';
@@ -2339,6 +2345,21 @@ function buildAudioTranscriptMarkdown({
     content,
     '',
   ].filter((line) => line !== '').join('\n');
+}
+
+function buildSourceMediaAttachmentMarkdown(metadata = {}) {
+  const attachmentPath = String(metadata.sourceMediaAttachmentPath || '').trim();
+  if (attachmentPath) {
+    return [
+      '## 原始音视频',
+      '',
+      `![[${attachmentPath}]]`,
+    ].join('\n');
+  }
+  if (metadata.sourceMediaAttachmentError) {
+    return '> 原始音视频未能保存到本地，已保留转写结果。';
+  }
+  return '';
 }
 
 function buildTranscriptPropertyMetadata({
@@ -11818,6 +11839,54 @@ class WechatObsidianInboxPlugin extends Plugin {
     return nextMarkdown;
   }
 
+  async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
+    const metadata = (record && record.metadata) || {};
+    const mediaUrl = String(metadata.mediaUrl || metadata.audioUrl || '').trim();
+    if (!this.settings.saveOriginalMediaEnabled || !metadata.transcriptOnly || !mediaUrl) {
+      return record;
+    }
+
+    const attachmentFailure = () => ({
+      ...record,
+      metadata: {
+        ...metadata,
+        sourceMediaAttachmentPath: '',
+        sourceMediaAttachmentError: '原始音视频未能保存到本地。',
+      },
+    });
+    if (!this.app || !this.app.vault || !this.app.vault.adapter || typeof this.app.vault.adapter.writeBinary !== 'function') {
+      return attachmentFailure();
+    }
+
+    try {
+      const sourceUrl = String(metadata.url || record.content || mediaUrl).trim();
+      const headers = isXiaohongshuUrl(sourceUrl)
+        ? await getXiaohongshuRequestHeaders(mediaUrl)
+        : getSocialRequestHeaders(sourceUrl || mediaUrl);
+      const buffer = Buffer.from(await this.downloadArrayBuffer(mediaUrl, headers));
+      if (getInvalidDownloadedMediaReason(buffer)) return attachmentFailure();
+      const extension = getAudioFormatFromUrl(mediaUrl);
+      const recordShortId = sanitizeAttachmentName(getRecordId(record), 'media').slice(0, 12) || 'media';
+      const safeTitle = sanitizeAttachmentName(title || metadata.title, '音视频');
+      const attachmentRootDir = `${rootDir}/音视频附件`;
+      const attachmentDayDir = `${attachmentRootDir}/${dateFolder}`;
+      const attachmentPath = `${attachmentDayDir}/${safeTitle}-${recordShortId}.${extension}`;
+      await this.ensureFolder(attachmentRootDir);
+      await this.ensureFolder(attachmentDayDir);
+      await this.app.vault.adapter.writeBinary(attachmentPath, buffer);
+      return {
+        ...record,
+        metadata: {
+          ...metadata,
+          sourceMediaAttachmentPath: attachmentPath,
+          sourceMediaAttachmentError: '',
+        },
+      };
+    } catch (error) {
+      return attachmentFailure();
+    }
+  }
+
   async buildTranscriptRecordFromMedia(record, {
     url,
     platform,
@@ -12755,6 +12824,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         title,
         binding,
       );
+      recordForMarkdown = await this.saveSourceMediaAttachment(recordForMarkdown, rootDir, dateFolder, title);
       title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
     }
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
@@ -13198,6 +13268,18 @@ class WechatInboxSettingTab extends PluginSettingTab {
             this.display();
           });
       });
+
+    new Setting(containerEl)
+      .setName('保存原始音视频到本地')
+      .setDesc('默认关闭。开启后，新同步且可下载的音频或视频会保存到“音视频附件/日期”目录，并在笔记中插入本地链接；无法下载时仍会保留转写结果。')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.saveOriginalMediaEnabled === true)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            saveOriginalMediaEnabled: value === true,
+          });
+        }));
 
     new Setting(containerEl)
       .setName('立即同步')
