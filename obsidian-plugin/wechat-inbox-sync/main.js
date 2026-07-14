@@ -5375,17 +5375,32 @@ function decodeJsonLikeText(value) {
     .trim();
 }
 
-function normalizeSocialComment(comment) {
+function normalizeSocialComment(comment, depth = 0) {
   const author = String(comment.author || '').replace(/^[:：]+|[:：]+$/g, '').trim();
   const content = String(comment.content || '').replace(/\s+/g, ' ').trim();
   if (!content || content.length < 2) return null;
   if (isNoisySocialCommentContent(content, author)) return null;
-  return {
+  const normalized = {
     author,
     content,
     time: String(comment.time || '').trim(),
     likes: String(comment.likes || '').trim(),
   };
+  if (depth < 4 && Array.isArray(comment.replies)) {
+    const replySeen = new Set();
+    const replies = comment.replies
+      .map((reply) => normalizeSocialComment(reply, depth + 1))
+      .filter((reply) => {
+        if (!reply) return false;
+        const key = `${reply.author}|${reply.content}`;
+        if (replySeen.has(key)) return false;
+        replySeen.add(key);
+        return true;
+      })
+      .slice(0, 20);
+    if (replies.length) normalized.replies = replies;
+  }
+  return normalized;
 }
 
 function isNoisySocialCommentContent(content, author = '') {
@@ -5407,6 +5422,32 @@ function pushSocialComment(comments, seen, comment) {
   if (seen.has(key)) return;
   seen.add(key);
   comments.push(normalized);
+  const markRepliesSeen = (replies = []) => {
+    (Array.isArray(replies) ? replies : []).forEach((reply) => {
+      const replyKey = `${reply.author}|${reply.content}`;
+      seen.add(replyKey);
+      markRepliesSeen(reply.replies);
+    });
+  };
+  markRepliesSeen(normalized.replies);
+}
+
+function getSocialCommentReplyValues(value) {
+  if (!value || typeof value !== 'object') return [];
+  const replies = [];
+  [
+    'replies',
+    'replyList',
+    'reply_list',
+    'subComments',
+    'sub_comments',
+    'subCommentList',
+    'sub_comment_list',
+    'children',
+  ].forEach((key) => {
+    if (Array.isArray(value[key])) replies.push(...value[key]);
+  });
+  return replies;
 }
 
 function mergeSocialComments(groups = [], limit = 50) {
@@ -5482,7 +5523,20 @@ function extractCommentsFromObject(value, comments, seen, limit = 20, depth = 0)
     ]);
     const time = readCommentField(value, ['create_time', 'createTime', 'time', 'date']);
     const likes = readCommentField(value, ['like_num', 'likeNum', 'likeCount', 'likedCount', 'liked_count', 'like_count', 'likes']);
-    pushSocialComment(comments, seen, { author, content, time, likes });
+    const replies = [];
+    const replySeen = new Set();
+    getSocialCommentReplyValues(value).forEach((reply) => {
+      if (replies.length >= 20) return;
+      extractCommentsFromObject(reply, replies, replySeen, 20, depth + 1);
+    });
+    pushSocialComment(comments, seen, {
+      author,
+      content,
+      time,
+      likes,
+      replies,
+    });
+    return;
   }
 
   Object.keys(value).forEach((key) => {
@@ -5619,10 +5673,14 @@ function buildSocialCommentsMarkdown(comments = []) {
   const items = (comments || []).map(normalizeSocialComment).filter(Boolean);
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
-  items.forEach((comment) => {
+  const appendComment = (comment, indent = '', reply = false) => {
     const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
     const prefix = comment.author ? `**${comment.author}**：` : '';
-    lines.push(`- ${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
+    lines.push(`${indent}- ${reply ? '↳ ' : ''}${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
+    (Array.isArray(comment.replies) ? comment.replies : []).forEach((child) => appendComment(child, `${indent}  `, true));
+  };
+  items.forEach((comment) => {
+    appendComment(comment);
   });
   return lines.join('\n').trim();
 }
@@ -13317,6 +13375,7 @@ WechatObsidianInboxPlugin.__test = {
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
   extractSocialCommentsFromHtml,
+  buildSocialCommentsMarkdown,
   appendXiaohongshuOcrMarkdown,
   buildXiaohongshuOcrMarkdown,
   isLikelyImageTextNote,

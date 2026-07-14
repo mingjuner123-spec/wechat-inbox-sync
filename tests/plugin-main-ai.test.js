@@ -1879,6 +1879,28 @@ assert.deepStrictEqual(
   [{ author: '真实用户', content: '真实评论内容', time: '', likes: '6' }],
 );
 
+const xiaohongshuNestedComments = helpers.extractSocialCommentsFromHtml([
+  '<script>window.__INITIAL_STATE__={comments:[',
+  '{content:"父评论",user_info:{nickname:"主评论用户"},like_count:8,sub_comments:[',
+  '{content:"展开后的回复",user_info:{nickname:"回复用户"},like_count:2},',
+  '{content:"展开后的回复",user_info:{nickname:"回复用户"},like_count:2}',
+  ']}]};</script>',
+].join(''), 100);
+assert.deepStrictEqual(xiaohongshuNestedComments, [{
+  author: '主评论用户',
+  content: '父评论',
+  time: '',
+  likes: '8',
+  replies: [{
+    author: '回复用户',
+    content: '展开后的回复',
+    time: '',
+    likes: '2',
+  }],
+}]);
+assert.strictEqual(typeof helpers.buildSocialCommentsMarkdown, 'function');
+assert.ok(helpers.buildSocialCommentsMarkdown(xiaohongshuNestedComments).includes('  - ↳ **回复用户**：展开后的回复（2 赞）'));
+
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<meta property="og:title" content="XHS Image Array Title">',
