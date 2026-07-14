@@ -140,6 +140,7 @@ helpers.installExternalAppNavigationGuards({
 });
 assert.strictEqual(typeof externalNavigationHandlers['will-navigate'], 'function');
 assert.strictEqual(typeof externalNavigationHandlers['will-frame-navigate'], 'function');
+assert.strictEqual(typeof externalNavigationHandlers['will-redirect'], 'function');
 let preventedExternalFrameNavigation = false;
 externalNavigationHandlers['will-frame-navigate']({
   preventDefault() {
@@ -147,6 +148,13 @@ externalNavigationHandlers['will-frame-navigate']({
   },
 }, 'bytedance://aweme/detail/123');
 assert.strictEqual(preventedExternalFrameNavigation, true);
+let preventedExternalRedirect = false;
+externalNavigationHandlers['will-redirect']({
+  preventDefault() {
+    preventedExternalRedirect = true;
+  },
+}, 'bytedance://aweme/detail/123');
+assert.strictEqual(preventedExternalRedirect, true);
 let preventedSafeNavigation = false;
 externalNavigationHandlers['will-navigate']({
   preventDefault() {
@@ -2683,6 +2691,40 @@ async function runAsyncHydrationTests() {
     assert.deepStrictEqual(redirectMethods, ['HEAD:/o/demo', 'GET:/o/demo', 'HEAD:/final']);
   } finally {
     http.request = originalHttpRequest;
+  }
+
+  const previousRequestUrlMock = requestUrlMock;
+  const unsafePageRequests = [];
+  http.request = (parsed, options, callback) => {
+    const request = {
+      setTimeout: () => request,
+      on: () => request,
+      destroy: () => {},
+      end: () => callback({
+        statusCode: 302,
+        headers: { location: 'bytedance://aweme/detail/7644566503081119019' },
+        resume: () => {},
+      }),
+    };
+    return request;
+  };
+  requestUrlMock = async ({ url }) => {
+    unsafePageRequests.push(url);
+    return { text: '' };
+  };
+  try {
+    const unsafeRedirectPlugin = new PluginClass();
+    unsafeRedirectPlugin.settings = { aiProvider: 'off' };
+    const unsafeRedirectRecord = await unsafeRedirectPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://v.douyin.com/unsafe-redirect/',
+      metadata: { url: 'http://v.douyin.com/unsafe-redirect/' },
+    }, '', '', '抖音外部协议');
+    assert.deepStrictEqual(unsafePageRequests, []);
+    assert.strictEqual(unsafeRedirectRecord.metadata.transcriptionStatus, 'failed');
+  } finally {
+    http.request = originalHttpRequest;
+    requestUrlMock = previousRequestUrlMock;
   }
 
   assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);

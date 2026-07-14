@@ -4269,6 +4269,7 @@ function installExternalAppNavigationGuards(webContents) {
   if (typeof webContents.on === 'function') {
     webContents.on('will-navigate', preventExternalNavigation);
     webContents.on('will-frame-navigate', preventExternalNavigation);
+    webContents.on('will-redirect', preventExternalNavigation);
   }
   if (typeof webContents.setWindowOpenHandler === 'function') {
     webContents.setWindowOpenHandler((details) => (
@@ -12550,6 +12551,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
         const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+        if (shouldBlockExternalAppUrl(resolvedUrl)) {
+          throw new Error(`已阻止网页尝试打开外部应用协议：${new URL(resolvedUrl).protocol}`);
+        }
         const headers = isXiaohongshuUrl(resolvedUrl)
           ? await getXiaohongshuRequestHeaders(resolvedUrl)
           : getSocialRequestHeaders(resolvedUrl);
