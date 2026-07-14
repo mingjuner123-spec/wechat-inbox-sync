@@ -2291,7 +2291,11 @@ function buildWebpageMarkdownBody(record, title) {
   const pageTitle = metadata.title || title;
   let snapshot = cleanMarkdownForStorage(
     metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '',
-    { dedupe: isFeishuUrl(url), feishuTitle: isFeishuUrl(url) ? pageTitle : '' },
+    {
+      dedupe: isFeishuUrl(url),
+      feishuTitle: isFeishuUrl(url) ? pageTitle : '',
+      preserveListIndent: isXiaohongshuUrl(url),
+    },
   );
   if (snapshot && isXiaohongshuUrl(url)) {
     snapshot = sanitizeXiaohongshuMarkdownImages(snapshot);
@@ -2551,6 +2555,10 @@ function cleanMarkdownForStorage(markdown, options = {}) {
 
   lines.forEach((line) => {
     const rawLine = String(line || '').replace(/\u200b/g, '').replace(/\ufeff/g, '');
+    const listIndentMatch = options.preserveListIndent
+      ? rawLine.match(/^([ \t]+)(?=[-*]\s+)/)
+      : null;
+    const listIndent = listIndentMatch && listIndentMatch[1] ? listIndentMatch[1] : '';
     if (/^\s*```/.test(rawLine)) {
       out.push(rawLine.trim());
       inFence = !inFence;
@@ -2629,7 +2637,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
       seen.set(key, count + 1);
     }
 
-    out.push(text);
+    out.push(listIndent && /^[-*]\s+/.test(text) ? `${listIndent}${text}` : text);
     lastWasBlank = false;
   });
 
@@ -6014,6 +6022,16 @@ function countSocialCommentReplies(comments = []) {
   return count;
 }
 
+function getSocialCommentTreeStats(comments = []) {
+  const roots = (Array.isArray(comments) ? comments : [])
+    .map((comment) => normalizeSocialComment(comment))
+    .filter(Boolean);
+  return {
+    rootCount: roots.length,
+    replyCount: countSocialCommentReplies(roots),
+  };
+}
+
 function mergeXiaohongshuCapturedCommentPayloads(entries = [], limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT) {
   const rootPayloads = [];
   const replyPayloadGroups = new Map();
@@ -6090,7 +6108,7 @@ function buildXiaohongshuCommentDiagnostic(details = {}) {
   const source = String(details.source || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'unknown';
   const toCount = (value) => Math.max(0, Math.floor(Number(value) || 0));
   const stopReason = String(details.stopReason || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'unknown';
-  return `<!-- xhs-comment-diag: source=${source}; root=${toCount(details.rootCount)}; replies=${toCount(details.replyCount)}; pages=${toCount(details.pageCount)}; stop=${stopReason} -->`;
+  return `<!-- xhs-comment-diag: source=${source}; root=${toCount(details.rootCount)}; replies=${toCount(details.replyCount)}; pages=${toCount(details.pageCount)}; root_pages=${toCount(details.rootPageCount)}; reply_pages=${toCount(details.replyPageCount)}; final_root=${toCount(details.finalRootCount)}; final_replies=${toCount(details.finalReplyCount)}; fallback=${toCount(details.fallbackAddedCount)}; deduped=${toCount(details.dedupedFallbackCount)}; unmatched=${toCount(details.unmatchedReplyCount)}; stop=${stopReason} -->`;
 }
 
 function appendXiaohongshuCommentDiagnostic(markdown, details = {}) {
@@ -14127,6 +14145,7 @@ WechatObsidianInboxPlugin.__test = {
   appendXiaohongshuCommentDiagnostic,
   getXiaohongshuCommentPaginationScript,
   buildSocialCommentsMarkdown,
+  getSocialCommentTreeStats,
   getXiaohongshuCapturedRequestBody,
   appendXiaohongshuOcrMarkdown,
   buildXiaohongshuOcrMarkdown,

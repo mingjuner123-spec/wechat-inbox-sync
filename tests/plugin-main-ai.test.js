@@ -1962,6 +1962,16 @@ assert.deepStrictEqual(xiaohongshuNestedComments, [{
 }]);
 assert.strictEqual(typeof helpers.buildSocialCommentsMarkdown, 'function');
 assert.ok(helpers.buildSocialCommentsMarkdown(xiaohongshuNestedComments).includes('  - ↳ **回复用户**：展开后的回复（2 赞）'));
+assert.strictEqual(typeof helpers.getSocialCommentTreeStats, 'function');
+assert.deepStrictEqual(helpers.getSocialCommentTreeStats(xiaohongshuNestedComments), {
+  rootCount: 1,
+  replyCount: 1,
+});
+const storedXiaohongshuNestedMarkdown = helpers.cleanMarkdownForStorage(
+  helpers.buildSocialCommentsMarkdown(xiaohongshuNestedComments),
+  { preserveListIndent: true },
+);
+assert.ok(storedXiaohongshuNestedMarkdown.includes('\n  - ↳ **回复用户**：展开后的回复（2 赞）'));
 
 const xiaohongshuPagedCommentPayloads = Array.from({ length: 4 }, (_unused, pageIndex) => ({
   data: {
@@ -2101,10 +2111,17 @@ const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
   rootCount: 200,
   replyCount: 3,
   pageCount: 4,
+  rootPageCount: 4,
+  replyPageCount: 0,
+  finalRootCount: 198,
+  finalReplyCount: 3,
+  fallbackAddedCount: 2,
+  dedupedFallbackCount: 8,
+  unmatchedReplyCount: 0,
   stopReason: 'limit_reached',
   cookie: 'must-not-leak',
 });
-assert.match(xiaohongshuCommentDiagnostic, /^<!-- xhs-comment-diag: source=page-api; root=200; replies=3; pages=4; stop=limit_reached -->$/);
+assert.match(xiaohongshuCommentDiagnostic, /^<!-- xhs-comment-diag: source=page-api; root=200; replies=3; pages=4; root_pages=4; reply_pages=0; final_root=198; final_replies=3; fallback=2; deduped=8; unmatched=0; stop=limit_reached -->$/);
 assert.strictEqual(xiaohongshuCommentDiagnostic.includes('must-not-leak'), false);
 assert.strictEqual(
   helpers.appendXiaohongshuCommentDiagnostic('# 正文\n\n<!-- xhs-comment-diag: source=old; root=1; replies=0; pages=1; stop=old -->', xiaohongshuCommentDiagnostic),
