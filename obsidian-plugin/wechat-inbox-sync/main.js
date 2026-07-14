@@ -27,6 +27,7 @@ const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVn
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
 const XIAOHONGSHU_ROOT_COMMENT_LIMIT = 200;
+const XIAOHONGSHU_REPLY_COMMENT_LIMIT = 100;
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
@@ -5507,7 +5508,7 @@ function normalizeSocialComment(comment, depth = 0) {
         replySeen.add(key);
         return true;
       })
-      .slice(0, 20);
+      .slice(0, XIAOHONGSHU_REPLY_COMMENT_LIMIT);
     if (replies.length) normalized.replies = replies;
   }
   return normalized;
@@ -5877,6 +5878,30 @@ function collectXiaohongshuCommentPages(payloads = [], limit = XIAOHONGSHU_ROOT_
     previousCursor = cursor;
   }
   return { comments: comments.slice(0, max), pageCount, stopReason };
+}
+
+function mergeXiaohongshuReplyPages(rootComments = [], rootCommentId = '', payloads = [], limit = XIAOHONGSHU_REPLY_COMMENT_LIMIT) {
+  const targetId = String(rootCommentId || '').trim();
+  const replyLimit = Math.max(1, Math.min(Number(limit) || XIAOHONGSHU_REPLY_COMMENT_LIMIT, XIAOHONGSHU_REPLY_COMMENT_LIMIT));
+  return (Array.isArray(rootComments) ? rootComments : [])
+    .map((comment) => normalizeSocialComment(comment))
+    .filter(Boolean)
+    .map((comment) => {
+      if (!targetId || getSocialCommentId(comment) !== targetId) return comment;
+      const replies = [];
+      const seen = new Set();
+      (Array.isArray(comment.replies) ? comment.replies : []).forEach((reply) => pushSocialComment(replies, seen, reply));
+      (Array.isArray(payloads) ? payloads : []).forEach((payload) => {
+        if (replies.length >= replyLimit) return;
+        const pageReplies = [];
+        extractCommentsFromObject(getXiaohongshuCommentPageItems(payload), pageReplies, new Set(), replyLimit - replies.length);
+        pageReplies.forEach((reply) => {
+          if (getSocialCommentId(reply) === targetId) return;
+          if (replies.length < replyLimit) pushSocialComment(replies, seen, reply);
+        });
+      });
+      return replies.length ? { ...comment, replies } : comment;
+    });
 }
 
 function sanitizeXiaohongshuCapturedHeaders(headers = {}, cookieHeader = '') {
@@ -13701,6 +13726,7 @@ WechatObsidianInboxPlugin.__test = {
   extractXiaohongshuMarkdownFromHtml,
   extractSocialCommentsFromHtml,
   collectXiaohongshuCommentPages,
+  mergeXiaohongshuReplyPages,
   buildSocialCommentsMarkdown,
   getXiaohongshuCapturedRequestBody,
   appendXiaohongshuOcrMarkdown,
