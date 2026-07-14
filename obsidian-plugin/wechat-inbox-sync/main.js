@@ -12159,6 +12159,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderSocialMediaUrlWithElectron(url);
   }
 
+  async fetchDouyinMediaUrlsWithSession(pageUrl, awemeId) {
+    return fetchDouyinMediaUrlsWithSession({ pageUrl, awemeId });
+  }
+
   async renderSocialMediaUrls(url) {
     if (
       Object.prototype.hasOwnProperty.call(this, 'renderSocialMediaUrl')
@@ -13617,7 +13621,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
-        const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+        const redirectedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+        const douyinTarget = isDouyinUrl(url) || isDouyinUrl(redirectedUrl)
+          ? normalizeDouyinTargetUrl(url, redirectedUrl)
+          : { awemeId: '', url: '' };
+        const resolvedUrl = douyinTarget.url || redirectedUrl;
+        let douyinAwemeId = douyinTarget.awemeId;
         if (shouldBlockExternalAppUrl(resolvedUrl)) {
           throw new Error(`已阻止网页尝试打开外部应用协议：${new URL(resolvedUrl).protocol}`);
         }
@@ -13633,12 +13642,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
-          const awemeId = extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
-          for (const detailUrl of getDouyinAwemeDetailUrls(awemeId)) {
+          douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
+          for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
             try {
               // Douyin's rendered page can load recommendation videos; the detail API is pinned to one aweme id.
               const detailResponse = await requestUrl({ url: detailUrl, method: 'GET', headers: getSocialRequestHeaders(detailUrl) });
-              const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailResponse.json || JSON.parse(detailResponse.text || '{}'));
+              const detailPayload = detailResponse.json || JSON.parse(detailResponse.text || '{}');
+              if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
+              const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailPayload);
               if (detailUrls.length) {
                 mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
@@ -13647,6 +13658,18 @@ class WechatObsidianInboxPlugin extends Plugin {
               }
             } catch (detailError) {
               // Fall back to page extraction/rendering below.
+            }
+          }
+          if (!hasPreciseDouyinMedia && douyinAwemeId && typeof this.fetchDouyinMediaUrlsWithSession === 'function') {
+            try {
+              const sessionUrls = await this.fetchDouyinMediaUrlsWithSession(resolvedUrl, douyinAwemeId);
+              if (sessionUrls.length) {
+                mediaUrls = sortMediaUrlsForTranscription([...sessionUrls, ...mediaUrls]);
+                mediaUrl = mediaUrls[0] || mediaUrl;
+                hasPreciseDouyinMedia = true;
+              }
+            } catch (sessionError) {
+              // Fall back to hidden browser rendering below.
             }
           }
         }

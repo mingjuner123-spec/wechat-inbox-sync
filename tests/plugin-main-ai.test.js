@@ -3101,13 +3101,25 @@ async function runAsyncHydrationTests() {
   try {
     const unsafeRedirectPlugin = new PluginClass();
     unsafeRedirectPlugin.settings = { aiProvider: 'off' };
+    unsafeRedirectPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
+      assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
+      assert.strictEqual(awemeId, '7644566503081119019');
+      return ['https://v11-weba.douyinvod.com/app-redirect-target/?mime_type=video_mp4'];
+    };
+    unsafeRedirectPlugin.renderSocialMediaUrls = async () => {
+      throw new Error('normalized app redirect should resolve before browser rendering');
+    };
     const unsafeRedirectRecord = await unsafeRedirectPlugin.hydrateWebpageMarkdown({
       type: 'webpage',
       content: 'http://v.douyin.com/unsafe-redirect/',
       metadata: { url: 'http://v.douyin.com/unsafe-redirect/' },
     }, '', '', '抖音外部协议');
-    assert.deepStrictEqual(unsafePageRequests, []);
-    assert.strictEqual(unsafeRedirectRecord.metadata.transcriptionStatus, 'failed');
+    assert.strictEqual(unsafePageRequests[0], 'https://www.douyin.com/video/7644566503081119019');
+    assert.strictEqual(unsafePageRequests.some((url) => url.startsWith('bytedance://')), false);
+    assert.strictEqual(
+      unsafeRedirectRecord.metadata.mediaUrl,
+      'https://v11-weba.douyinvod.com/app-redirect-target/?mime_type=video_mp4',
+    );
   } finally {
     http.request = originalHttpRequest;
     requestUrlMock = previousRequestUrlMock;
@@ -3570,6 +3582,65 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(preciseDouyinRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4');
   assert.strictEqual(preciseDouyinRecord.metadata.title, '抖音口播文案');
   assert.strictEqual(preciseDouyinRenderCalled, false);
+
+  const sessionFirstPlugin = new PluginClass();
+  sessionFirstPlugin.settings = { aiProvider: 'off' };
+  let sessionFirstRenderCalls = 0;
+  sessionFirstPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
+    assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644238277092174409');
+    assert.strictEqual(awemeId, '7644238277092174409');
+    return ['https://v11-weba.douyinvod.com/session-first/?mime_type=video_mp4'];
+  };
+  sessionFirstPlugin.renderSocialMediaUrls = async () => {
+    sessionFirstRenderCalls += 1;
+    return ['https://v11-weba.douyinvod.com/rendered-recommendation/?mime_type=video_mp4'];
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.douyin.com/video/7644238277092174409') return { text: '<html></html>' };
+    if (url.includes('/aweme/v1/web/aweme/detail/')) {
+      return {
+        json: {
+          aweme_detail: {
+            aweme_id: '9999999999999999999',
+            video: {
+              play_addr: {
+                url_list: ['https://v11-weba.douyinvod.com/direct-recommendation/?mime_type=video_mp4'],
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`unexpected session-first request ${url}`);
+  };
+  const sessionFirstRecord = await sessionFirstPlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/7644238277092174409',
+    metadata: { url: 'https://www.douyin.com/video/7644238277092174409' },
+  }, '', '', 'Session 优先抖音');
+  assert.strictEqual(sessionFirstRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/session-first/?mime_type=video_mp4');
+  assert.strictEqual(sessionFirstRenderCalls, 0);
+
+  const sessionFallbackPlugin = new PluginClass();
+  sessionFallbackPlugin.settings = { aiProvider: 'off' };
+  let sessionFallbackRenderCalls = 0;
+  sessionFallbackPlugin.fetchDouyinMediaUrlsWithSession = async () => [];
+  sessionFallbackPlugin.renderSocialMediaUrls = async () => {
+    sessionFallbackRenderCalls += 1;
+    return ['https://www.douyin.com/aweme/v1/play/?video_id=sessionfallback&ratio=720p'];
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.douyin.com/video/7644566503081119019') return { text: '<html></html>' };
+    if (url.includes('/aweme/v1/web/aweme/detail/')) return { text: '' };
+    throw new Error(`unexpected session-fallback request ${url}`);
+  };
+  const sessionFallbackRecord = await sessionFallbackPlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/7644566503081119019',
+    metadata: { url: 'https://www.douyin.com/video/7644566503081119019' },
+  }, '', '', 'Session 失败回退');
+  assert.strictEqual(sessionFallbackRecord.metadata.mediaUrl.includes('sessionfallback'), true);
+  assert.strictEqual(sessionFallbackRenderCalls, 1);
 
   const renderedDouyinPlugin = new PluginClass();
   renderedDouyinPlugin.settings = { aiProvider: 'off' };
