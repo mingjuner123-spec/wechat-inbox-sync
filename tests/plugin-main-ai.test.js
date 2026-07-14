@@ -25,7 +25,9 @@ const helpers = PluginClass.__test;
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const pluginMainSource = fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8');
+const pluginMainSource = fs
+  .readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8')
+  .replace(/\r\n/g, '\n');
 const macOcrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-ocr', 'install-local-ocr-macos.sh'),
   'utf8',
@@ -45,6 +47,8 @@ const socialMediaRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
 );
 assert.ok(socialMediaRendererSource.includes('const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();'));
+assert.ok(socialMediaRendererSource.includes('shouldBlockExternalAppUrl(details && details.url)'));
+assert.ok(socialMediaRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -114,6 +118,41 @@ assert.strictEqual(typeof helpers.isWechatChannelsUrl, 'function');
 assert.strictEqual(typeof helpers.extractWechatChannelsRequestPayload, 'function');
 assert.strictEqual(typeof helpers.normalizeWechatChannelsFeedPayload, 'function');
 assert.strictEqual(typeof helpers.normalizeBrowserCapturedMediaUrls, 'function');
+assert.strictEqual(typeof helpers.shouldBlockExternalAppUrl, 'function');
+assert.strictEqual(typeof helpers.installExternalAppNavigationGuards, 'function');
+assert.strictEqual(helpers.shouldBlockExternalAppUrl('bytedance://aweme/detail/123'), true);
+assert.strictEqual(helpers.shouldBlockExternalAppUrl('snssdk1128://aweme/detail/123'), true);
+assert.strictEqual(helpers.shouldBlockExternalAppUrl('https://www.douyin.com/video/123'), false);
+assert.strictEqual(helpers.shouldBlockExternalAppUrl('blob:https://www.douyin.com/demo'), false);
+assert.strictEqual(helpers.shouldBlockExternalAppUrl('data:text/plain,media'), false);
+const externalNavigationHandlers = {};
+let externalWindowOpenHandler = null;
+helpers.installExternalAppNavigationGuards({
+  on(eventName, handler) {
+    externalNavigationHandlers[eventName] = handler;
+  },
+  setWindowOpenHandler(handler) {
+    externalWindowOpenHandler = handler;
+  },
+});
+assert.strictEqual(typeof externalNavigationHandlers['will-navigate'], 'function');
+assert.strictEqual(typeof externalNavigationHandlers['will-frame-navigate'], 'function');
+let preventedExternalFrameNavigation = false;
+externalNavigationHandlers['will-frame-navigate']({
+  preventDefault() {
+    preventedExternalFrameNavigation = true;
+  },
+}, 'bytedance://aweme/detail/123');
+assert.strictEqual(preventedExternalFrameNavigation, true);
+let preventedSafeNavigation = false;
+externalNavigationHandlers['will-navigate']({
+  preventDefault() {
+    preventedSafeNavigation = true;
+  },
+}, 'https://www.douyin.com/video/123');
+assert.strictEqual(preventedSafeNavigation, false);
+assert.deepStrictEqual(externalWindowOpenHandler({ url: 'snssdk1128://aweme/detail/123' }), { action: 'deny' });
+assert.deepStrictEqual(externalWindowOpenHandler({ url: 'https://www.douyin.com/video/123' }), { action: 'allow' });
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');

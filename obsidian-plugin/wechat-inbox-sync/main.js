@@ -4209,6 +4209,37 @@ function normalizeBrowserCapturedMediaUrls(items) {
   return sortMediaUrlsForTranscription(urls);
 }
 
+function shouldBlockExternalAppUrl(value) {
+  const url = String(value || '').trim();
+  if (!url) return false;
+  try {
+    const protocol = new URL(url).protocol.toLowerCase();
+    return !['http:', 'https:', 'blob:', 'data:', 'about:'].includes(protocol);
+  } catch (error) {
+    return false;
+  }
+}
+
+function installExternalAppNavigationGuards(webContents) {
+  if (!webContents) return;
+  const preventExternalNavigation = (event, navigationUrl) => {
+    if (shouldBlockExternalAppUrl(navigationUrl) && event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+  };
+  if (typeof webContents.on === 'function') {
+    webContents.on('will-navigate', preventExternalNavigation);
+    webContents.on('will-frame-navigate', preventExternalNavigation);
+  }
+  if (typeof webContents.setWindowOpenHandler === 'function') {
+    webContents.setWindowOpenHandler((details) => (
+      shouldBlockExternalAppUrl(details && details.url)
+        ? { action: 'deny' }
+        : { action: 'allow' }
+    ));
+  }
+}
+
 function isLikelyImageUrl(value) {
   const url = normalizeExtractedUrl(value);
   if (!url) return false;
@@ -7015,10 +7046,13 @@ async function renderSocialMediaUrlsWithElectron(url) {
 
   installWebRequestHandler('onBeforeRequest', (details, callback) => {
     captureWebRequestDetails(details);
-    if (typeof callback === 'function') callback({});
+    if (typeof callback === 'function') {
+      callback(shouldBlockExternalAppUrl(details && details.url) ? { cancel: true } : {});
+    }
   });
   installWebRequestHandler('onBeforeRedirect', captureWebRequestDetails);
   installWebRequestHandler('onCompleted', captureWebRequestDetails);
+  installExternalAppNavigationGuards(win.webContents);
 
   try {
     const loaded = waitForWebContents(win.webContents, 18000);
@@ -13540,6 +13574,8 @@ WechatObsidianInboxPlugin.__test = {
   extractDouyinMediaUrlsFromDetailPayload,
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,
+  shouldBlockExternalAppUrl,
+  installExternalAppNavigationGuards,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,
   isWechatMpArticleUrl,
