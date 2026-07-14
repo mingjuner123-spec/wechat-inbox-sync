@@ -97,6 +97,13 @@ assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.hasXiaohongshuLoginCookies, 'function');
 assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
+assert.strictEqual(typeof helpers.getXiaohongshuCapturedRequestBody, 'function');
+assert.strictEqual(
+  helpers.getXiaohongshuCapturedRequestBody({
+    uploadData: [{ bytes: Buffer.from('cursor=next-comment-page', 'utf8') }],
+  }),
+  'cursor=next-comment-page',
+);
 assert.strictEqual(typeof helpers.enrichExtractedWebpageMetadata, 'function');
 assert.strictEqual(typeof helpers.extractSocialVideoMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
