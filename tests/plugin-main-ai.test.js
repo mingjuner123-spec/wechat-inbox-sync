@@ -1953,6 +1953,37 @@ assert.deepStrictEqual(xiaohongshuNestedComments, [{
 assert.strictEqual(typeof helpers.buildSocialCommentsMarkdown, 'function');
 assert.ok(helpers.buildSocialCommentsMarkdown(xiaohongshuNestedComments).includes('  - ↳ **回复用户**：展开后的回复（2 赞）'));
 
+const xiaohongshuPagedCommentPayloads = Array.from({ length: 4 }, (_unused, pageIndex) => ({
+  data: {
+    comments: Array.from({ length: 50 }, (_comment, commentIndex) => {
+      const id = pageIndex * 50 + commentIndex;
+      return {
+        id: `root-${id}`,
+        content: `第 ${id} 条分页评论`,
+        user_info: { nickname: '分页用户' },
+      };
+    }),
+    cursor: pageIndex < 3 ? `cursor-${pageIndex + 1}` : '',
+    has_more: pageIndex < 3,
+  },
+}));
+const xiaohongshuPagedComments = helpers.collectXiaohongshuCommentPages(xiaohongshuPagedCommentPayloads);
+assert.strictEqual(xiaohongshuPagedComments.comments.length, 200);
+assert.strictEqual(xiaohongshuPagedComments.pageCount, 4);
+assert.strictEqual(xiaohongshuPagedComments.stopReason, 'exhausted');
+assert.strictEqual(
+  helpers.collectXiaohongshuCommentPages([{
+    data: {
+      comments: [
+        { id: 'duplicate-a', content: '同一用户的重复文案', user_info: { nickname: '重复用户' } },
+        { id: 'duplicate-b', content: '同一用户的重复文案', user_info: { nickname: '重复用户' } },
+      ],
+      has_more: false,
+    },
+  }]).comments.length,
+  2,
+);
+
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<meta property="og:title" content="XHS Image Array Title">',
