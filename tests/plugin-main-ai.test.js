@@ -90,6 +90,27 @@ assert.strictEqual(typeof helpers.buildDoubaoAsrQueryRequest, 'function');
 assert.strictEqual(typeof helpers.parseAliyunTranscriptionResult, 'function');
 assert.strictEqual(typeof helpers.parseDoubaoAsrResult, 'function');
 assert.strictEqual(typeof helpers.parseDoubaoAsrTaskState, 'function');
+assert.strictEqual(typeof helpers.getTranscriptionQualityIssue, 'function');
+assert.strictEqual(typeof helpers.assertUsableTranscription, 'function');
+assert.strictEqual(
+  helpers.getTranscriptionQualityIssue(Array(12).fill('我们现在就来看看我们的临化设备').join('\n')),
+  'repeated-lines',
+);
+assert.strictEqual(
+  helpers.getTranscriptionQualityIssue([
+    ...Array(8).fill('我们选择的问题就是'),
+    ...Array(3).fill('请输入简体中文'),
+  ].join('\n')),
+  'prompt-leak',
+);
+assert.strictEqual(
+  helpers.getTranscriptionQualityIssue('这是第一段正常内容。\n这里为了强调重复一次。\n这里为了强调重复一次。\n最后继续讲新的内容。'),
+  '',
+);
+assert.throws(
+  () => helpers.assertUsableTranscription(Array(10).fill('我们选择的问题就是').join('\n'), '本地转写'),
+  (error) => error && error.code === 'TRANSCRIPTION_LOW_QUALITY' && error.message.includes('重复句循环'),
+);
 assert.strictEqual(typeof helpers.formatHttpError, 'function');
 assert.strictEqual(typeof helpers.buildTencentCreateRecTaskBody, 'function');
 assert.strictEqual(typeof helpers.buildTencentRequest, 'function');
@@ -125,9 +146,11 @@ assert.strictEqual(typeof helpers.shouldBlockExternalAppUrl, 'function');
 assert.strictEqual(typeof helpers.installExternalAppNavigationGuards, 'function');
 assert.strictEqual(helpers.shouldBlockExternalAppUrl('bytedance://aweme/detail/123'), true);
 assert.strictEqual(helpers.shouldBlockExternalAppUrl('snssdk1128://aweme/detail/123'), true);
+assert.strictEqual(helpers.shouldBlockExternalAppUrl('bytedance://open?url=https%3A%2F%2Fwww.douyin.com%2F'), true);
 assert.strictEqual(helpers.shouldBlockExternalAppUrl('https://www.douyin.com/video/123'), false);
 assert.strictEqual(helpers.shouldBlockExternalAppUrl('blob:https://www.douyin.com/demo'), false);
 assert.strictEqual(helpers.shouldBlockExternalAppUrl('data:text/plain,media'), false);
+assert.strictEqual(helpers.shouldBlockExternalAppUrl('about:blank'), false);
 const externalNavigationHandlers = {};
 let externalWindowOpenHandler = null;
 helpers.installExternalAppNavigationGuards({
@@ -148,6 +171,7 @@ externalNavigationHandlers['will-frame-navigate']({
   },
 }, 'bytedance://aweme/detail/123');
 assert.strictEqual(preventedExternalFrameNavigation, true);
+assert.strictEqual(typeof externalWindowOpenHandler, 'function');
 let preventedExternalRedirect = false;
 externalNavigationHandlers['will-redirect']({
   preventDefault() {
@@ -163,6 +187,7 @@ externalNavigationHandlers['will-navigate']({
 }, 'https://www.douyin.com/video/123');
 assert.strictEqual(preventedSafeNavigation, false);
 assert.deepStrictEqual(externalWindowOpenHandler({ url: 'snssdk1128://aweme/detail/123' }), { action: 'deny' });
+assert.deepStrictEqual(externalWindowOpenHandler({ url: 'bytedance://aweme/detail/123' }), { action: 'deny' });
 assert.deepStrictEqual(externalWindowOpenHandler({ url: 'https://www.douyin.com/video/123' }), { action: 'allow' });
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
@@ -365,6 +390,8 @@ assert.strictEqual(pluginMainSource.includes('authToken=${encodeURIComponent(tok
 assert.strictEqual(pluginMainSource.includes('authToken: token'), false);
 assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
 assert.ok(pluginMainSource.includes('copyBundledLocalOcrRuntimeAssets'));
+assert.ok(pluginMainSource.includes("source.includes('PyMuPDF')"), 'plugin must reject old CDN OCR installers without PDF support');
+assert.ok(pluginMainSource.includes("source.includes('opencc-python-reimplemented')"), 'plugin must reject OCR installers without Simplified Chinese conversion');
 assert.ok(pluginMainSource.includes("fs.copyFileSync(sourcePath, targetPath)"));
 assert.ok(macOcrInstallerSource.includes('find_existing_python'));
 assert.ok(macOcrInstallerSource.includes('.wechat-inbox-local-asr/python-venv/bin/python'));
@@ -1507,7 +1534,7 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
   fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(
     path.join(tempAsrRoot, 'transcribe.ps1'),
-    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$SimplifiedPrompt = [string]::Concat([char]0x8bf7)\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n"--prompt", $SimplifiedPrompt\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nrecoveryTriggered=1',
+    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\nTRANSCRIPT_HALLUCINATION\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nrecoveryTriggered=1',
     'utf8',
   );
   const recursiveStatus = helpers.getLocalAsrInstallStatus(tempAsrRoot, fs.existsSync, os.platform());
@@ -1615,6 +1642,16 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'adaptive-chunked-start-process-repeat-guard-progress-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => 'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nrecoveryTriggered=1\nTRANSCRIPT_HALLUCINATION',
+  }),
+  {
+    scriptVersion: 'adaptive-chunked-start-process-repeat-guard-v2-progress-run-log',
     scriptOutdated: false,
   },
 );
@@ -1625,7 +1662,7 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'chunked-start-process-utf8-simplified-fallback-safe-model-progress-run-log',
-    scriptOutdated: false,
+    scriptOutdated: true,
   },
 );
 assert.deepStrictEqual(
@@ -1655,6 +1692,16 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'adaptive-chunked-bash-simplified-progress-metal-diagnostics-run-log',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('/Users/demo/.wechat-inbox-local-asr/transcribe.sh', {
+    existsSync: () => true,
+    readFileSync: () => 'set -euo pipefail\nTRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"\nfind_metal_resources_dir\nGGML_METAL_PATH_RESOURCES\nCHUNK_SECONDS=120\nchoose_chunk_seconds\nmetalAcceleration=failed\nRUN_LOG="$ROOT/transcribe-last.log"\nprogressPercent=100',
+  }),
+  {
+    scriptVersion: 'adaptive-chunked-bash-repeat-guard-v2-progress-metal-diagnostics-run-log',
     scriptOutdated: false,
   },
 );
@@ -1855,6 +1902,18 @@ const chineseBookPdfText = helpers.extractPdfMarkdown(createUtf16BePdfBuffer([
 ].join('\n')));
 assert.ok(chineseBookPdfText.includes('如果目标是实现10倍增长'));
 assert.ok(chineseBookPdfText.includes('TheAgonyandtheEcstasy'));
+
+const corruptedPdfText = [
+  '更部移两移少理随躁少么梳的主回过识表本不随谱随内容么消全流程随份案领稳玩随这',
+  '险课法的是理物何需随更部移两移少理随际随图随本不份个部少么梳的主回过识表云需',
+  '它持则么消内容总随份个是背的物是理很成么图本不少盘的过识表编要么稳玩本断了味展',
+  '持不下去要么书了份统东味不过道这么需总这险课的索领主部是成过识表不是评完什的第',
+].join('').repeat(8);
+assert.throws(
+  () => helpers.extractPdfMarkdown(createUtf16BePdfBuffer(corruptedPdfText)),
+  (error) => error && error.code === 'PDF_OCR_REQUIRED',
+  '长串、低标点且重复度异常的 PDF 文本层应转入 OCR，而不是保存乱码',
+);
 
 assert.strictEqual(helpers.buildRecordTitleBase({
   type: 'file',
@@ -3981,6 +4040,76 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(doubaoPlugin.settings.pendingDoubaoTasks[taskKey], undefined);
 }
 
+async function runLocalTranscriptionQualityFallbackTests() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
+  const calls = [];
+  plugin.runConfiguredTranscription = async (mediaUrl) => {
+    calls.push(mediaUrl);
+    if (mediaUrl.endsWith('/bad-audio.m4a')) {
+      return {
+        transcription: helpers.assertUsableTranscription(
+          Array(12).fill('我们现在就来看看我们的临化设备').join('\n'),
+          '本地转写',
+        ),
+        source: 'local',
+      };
+    }
+    return {
+      transcription: '这是从备用抖音媒体地址得到的正常口播内容。',
+      source: 'local',
+    };
+  };
+
+  const recovered = await plugin.buildTranscriptRecordFromMedia({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/quality-fallback',
+    metadata: {
+      url: 'https://www.douyin.com/video/quality-fallback',
+      transcriptionMode: 'local',
+    },
+  }, {
+    url: 'https://www.douyin.com/video/quality-fallback',
+    platform: '抖音',
+    mediaUrl: 'https://media.example.com/bad-audio.m4a',
+    mediaUrls: ['https://media.example.com/good-video.mp4'],
+    source: 'video',
+  });
+  assert.deepStrictEqual(calls, [
+    'https://media.example.com/bad-audio.m4a',
+    'https://media.example.com/good-video.mp4',
+  ]);
+  assert.strictEqual(recovered.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(recovered.metadata.mediaUrl, 'https://media.example.com/good-video.mp4');
+  assert.strictEqual(recovered.metadata.transcription, '这是从备用抖音媒体地址得到的正常口播内容。');
+
+  const allBadPlugin = new PluginClass();
+  allBadPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
+  allBadPlugin.runConfiguredTranscription = async () => ({
+    transcription: helpers.assertUsableTranscription(
+      Array(3).fill('请输出简体中文').join('\n'),
+      '本地转写',
+    ),
+    source: 'local',
+  });
+  const failed = await allBadPlugin.buildTranscriptRecordFromMedia({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/all-quality-failed',
+    metadata: {
+      url: 'https://www.douyin.com/video/all-quality-failed',
+      transcriptionMode: 'local',
+    },
+  }, {
+    url: 'https://www.douyin.com/video/all-quality-failed',
+    platform: '抖音',
+    mediaUrl: 'https://media.example.com/only-bad.mp4',
+    source: 'video',
+  });
+  assert.strictEqual(failed.metadata.transcriptionStatus, 'failed');
+  assert.strictEqual(failed.metadata.transcription, '');
+  assert.ok(failed.metadata.transcriptionError.includes('提示词泄漏'));
+}
+
 async function runOpenExternalUrlTests() {
   const originalWindow = global.window;
   global.window = {
@@ -5567,6 +5696,50 @@ async function runSourceMediaAttachmentTests() {
   assert.strictEqual(failedRecord.metadata.sourceMediaAttachmentError, '原始音视频未能保存到本地。');
 }
 
+async function runPdfOcrFallbackTests() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({});
+  plugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => true,
+        writeBinary: async () => {},
+      },
+      createFolder: async () => {},
+    },
+  };
+  plugin.requestFileDownloadUrl = async () => 'https://temp.example.com/corrupted.pdf';
+  const corruptedPdfBuffer = createUtf16BePdfBuffer([
+    '更部移两移少理随躁少么梳的主回过识表本不随谱随内容么消全流程随份案领稳玩随这',
+    '险课法的是理物何需随更部移两移少理随际随图随本不份个部少么梳的主回过识表云需',
+  ].join('').repeat(12));
+  plugin.downloadArrayBuffer = async () => corruptedPdfBuffer;
+  plugin.showSyncProgress = () => {};
+  const ocrCalls = [];
+  plugin.runLocalPdfOcr = async (buffer) => {
+    ocrCalls.push(Buffer.from(buffer));
+    return '## 第 1 页\n\n这是经过 OCR 识别并转换为简体中文的正文。';
+  };
+
+  const result = await plugin.writeFileAttachment({
+    _id: 'record-corrupted-pdf',
+    type: 'file',
+    content: 'corrupted.pdf',
+    createdAt: '2026-07-15T10:00:00.000Z',
+    metadata: {
+      fileID: 'cloud://files/corrupted.pdf',
+      fileName: 'corrupted.pdf',
+      fileExt: 'pdf',
+    },
+  }, '临时收集', '2026-07-15', 'pdf-乱码测试', { token: 'PRO-123' });
+
+  assert.strictEqual(ocrCalls.length, 1, '乱码 PDF 必须自动进入本地 OCR');
+  assert.ok(ocrCalls[0].equals(corruptedPdfBuffer));
+  assert.strictEqual(result.metadata.conversionStatus, 'success');
+  assert.strictEqual(result.metadata.conversionProvider, 'local-pdf-ocr');
+  assert.ok(result.metadata.convertedMarkdown.includes('这是经过 OCR 识别并转换为简体中文的正文'));
+}
+
 async function runPodcastDownloadHeaderTests() {
   const plugin = new PluginClass();
   let capturedHeaders = null;
@@ -5643,12 +5816,22 @@ async function runLocalAsrRepairDecisionTests() {
     localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\ADMIN\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
   });
   const originalFsExistsSync = fs.existsSync;
+  const originalFsReadFileSync = fs.readFileSync;
+  const currentWindowsAsrScriptSource = originalFsReadFileSync(
+    path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr.ps1'),
+    'utf8',
+  );
   fs.existsSync = (filePath) => {
     const value = String(filePath || '');
     if (value.startsWith('C:\\Users\\ADMIN\\.wechat-inbox-local-asr')) return true;
     if (value.startsWith('C:\\Users\\11266\\.wechat-inbox-local-asr')) return false;
     return originalFsExistsSync(filePath);
   };
+  fs.readFileSync = (filePath, ...args) => (
+    String(filePath || '') === 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr\\transcribe.ps1'
+      ? currentWindowsAsrScriptSource
+      : originalFsReadFileSync(filePath, ...args)
+  );
   try {
     assert.strictEqual(
       commandRootPlugin.getConfiguredLocalAsrInstallRoot(),
@@ -5659,6 +5842,7 @@ async function runLocalAsrRepairDecisionTests() {
     assert.strictEqual(status.ready, true);
   } finally {
     fs.existsSync = originalFsExistsSync;
+    fs.readFileSync = originalFsReadFileSync;
   }
 
   const healthyPlugin = new PluginClass();
@@ -5798,6 +5982,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
 async function main() {
   await runAsyncHydrationTests();
+  await runLocalTranscriptionQualityFallbackTests();
   await runOpenExternalUrlTests();
   await runCloudRequestFallbackTests();
   await runMissingClientIdRequestTest();
@@ -5817,6 +6002,7 @@ async function main() {
   await runCloudFailedVoiceLocalFallbackTests();
   await runAudioVideoFileAttachmentTranscriptionTests();
   await runSourceMediaAttachmentTests();
+  await runPdfOcrFallbackTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
   await runDiagnosticFailureLogFilteringTests();

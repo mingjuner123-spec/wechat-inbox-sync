@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.3"
+INSTALLER_SCRIPT_VERSION="1.3.5"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -688,7 +688,7 @@ fi
 WHISPER="$ROOT/bin/whisper-cli"
 FFMPEG="$ROOT/bin/ffmpeg"
 MODEL="$ROOT/models/ggml-small.bin"
-SIMPLIFIED_PROMPT="$(printf '\350\257\267\350\276\223\345\207\272\347\256\200\344\275\223\344\270\255\346\226\207')"
+TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"
 
 if [ ! -x "$WHISPER" ]; then
   echo "whisper-cli not found. Please rerun install-local-asr-macos.sh." >&2
@@ -802,7 +802,7 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   {
     echo "--- $(basename "$chunk") ---"
   } >> "$RUN_LOG"
-  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh --prompt "$SIMPLIFIED_PROMPT" -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
+  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
   if [ ! -f "$chunk_txt" ]; then
     echo "Whisper did not generate transcript: $chunk_txt" >&2
     echo "status=failed" >> "$RUN_LOG"

@@ -19,7 +19,16 @@ $TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
 $PypiFallbackIndexUrl = "https://pypi.org/simple"
 $UvVersion = "0.9.14"
 $PythonBuildStandaloneBuild = "20260623"
-$OcrPackageRequirements = @("rapidocr-onnxruntime==1.4.4", "pillow==12.3.0")
+$PythonBuildStandaloneVersion = "3.12.13+20260623"
+$OcrPackageRequirements = @("rapidocr-onnxruntime==1.4.4", "pillow==12.3.0", "PyMuPDF", "opencc-python-reimplemented")
+$MicrosoftVisualCppRuntimeUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+$MicrosoftVisualCppRuntimeInstaller = Join-Path $BinDir "vc_redist.x64.exe"
+$script:LastOcrImportFailureModule = ""
+$script:LastOcrImportFailureMessage = ""
+$script:LastOcrImportFailureText = ""
+$script:VisualCppRuntimeRepairAttempted = $false
+$script:VisualCppRuntimeRepairFailureMessage = ""
+$script:VisualCppRuntimeRestartRequired = $false
 $env:UV_PYTHON_DOWNLOADS = "automatic"
 $env:UV_PYTHON_PREFERENCE = "managed"
 $env:UV_PYTHON_INSTALL_MIRROR = $TencentPythonInstallMirror
@@ -138,14 +147,146 @@ function Invoke-Python {
   return $LASTEXITCODE
 }
 
-function Test-OcrPythonReady {
+function Test-OcrPythonImports {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
+
+  $probeCode = @'
+import importlib
+import json
+import traceback
+
+for module_name in ('numpy', 'cv2', 'onnxruntime', 'rapidocr_onnxruntime', 'fitz', 'opencc'):
+    try:
+        module = importlib.import_module(module_name)
+        if module_name == 'rapidocr_onnxruntime':
+            getattr(module, 'RapidOCR')
+        print(json.dumps({'stage': 'ocr-import', 'module': module_name, 'ok': True}, ensure_ascii=False))
+    except Exception as exc:
+        print(json.dumps({
+            'stage': 'ocr-import',
+            'module': module_name,
+            'ok': False,
+            'error': str(exc),
+            'traceback': traceback.format_exc(),
+        }, ensure_ascii=False))
+        raise SystemExit(1)
+'@
+
+  $output = @()
+  $exitCode = 1
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
   try {
-    & $PythonPath -c "from rapidocr_onnxruntime import RapidOCR; print('rapidocr-ready')" 2>&1 | Out-Host
-    return $LASTEXITCODE -eq 0
+    $output = @(& $PythonPath -c $probeCode 2>&1 | ForEach-Object { [string]$_ })
+    $exitCode = $LASTEXITCODE
   } catch {
+    $output += [string]$_.Exception.Message
+    $exitCode = 1
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  $script:LastOcrImportFailureModule = ""
+  $script:LastOcrImportFailureMessage = ""
+  $script:LastOcrImportFailureText = ($output -join "`n").Trim()
+  foreach ($line in $output) {
+    Write-InstallLog "OCR import probe: $line"
+    try {
+      $result = $line | ConvertFrom-Json -ErrorAction Stop
+      if ($result.stage -eq "ocr-import" -and $result.ok -eq $false) {
+        $script:LastOcrImportFailureModule = [string]$result.module
+        $script:LastOcrImportFailureMessage = [string]$result.error
+      }
+    } catch {
+    }
+  }
+  return $exitCode -eq 0
+}
+
+function Test-MissingVisualCppRuntime {
+  param([string]$FailureText = $script:LastOcrImportFailureText)
+  if ([string]::IsNullOrWhiteSpace($FailureText)) {
     return $false
   }
+  return $FailureText -match '(?i)(DLL load failed|WinError\s*(126|127|193)|onnxruntime_pybind11_state|VCRUNTIME|MSVCP140|api-ms-win-crt|initialization routine failed|dynamic link library)'
+}
+
+function Install-MicrosoftVisualCppRuntime {
+  Write-InstallLog "OCR native dependency is unavailable; downloading the official Microsoft Visual C++ x64 runtime."
+  Remove-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller -Force -ErrorAction SilentlyContinue
+  Invoke-DownloadFile -Url $MicrosoftVisualCppRuntimeUrl -OutFile $MicrosoftVisualCppRuntimeInstaller -TimeoutSec 600
+  if (!(Test-Path -LiteralPath $MicrosoftVisualCppRuntimeInstaller) -or ((Get-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller).Length -lt 1MB)) {
+    throw "Microsoft Visual C++ runtime download is incomplete."
+  }
+
+  $signature = Get-AuthenticodeSignature -FilePath $MicrosoftVisualCppRuntimeInstaller
+  $signerSubject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { "" }
+  if ($signature.Status -ne "Valid" -or $signerSubject -notmatch 'Microsoft Corporation') {
+    throw "Microsoft Visual C++ runtime signature validation failed; installation was stopped."
+  }
+
+  Write-InstallLog "Starting the Microsoft Visual C++ runtime installer. Windows may request administrator approval."
+  try {
+    $process = Start-Process `
+      -FilePath $MicrosoftVisualCppRuntimeInstaller `
+      -ArgumentList @("/install", "/quiet", "/norestart") `
+      -Verb RunAs `
+      -WindowStyle Hidden `
+      -Wait `
+      -PassThru
+  } catch {
+    throw "Microsoft Visual C++ runtime installation was cancelled or could not start. $($_.Exception.Message)"
+  }
+
+  $exitCode = [int]$process.ExitCode
+  if ($exitCode -in @(3010, 1641)) {
+    $script:VisualCppRuntimeRestartRequired = $true
+  }
+  if ($exitCode -notin @(0, 1638, 3010, 1641)) {
+    throw "Microsoft Visual C++ runtime installation failed with exit code $exitCode."
+  }
+  Write-InstallLog "Microsoft Visual C++ runtime installer completed with exit code $exitCode."
+}
+
+function Test-OcrPythonReady {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  if (Test-OcrPythonImports -PythonPath $PythonPath) {
+    return $true
+  }
+
+  if ($script:VisualCppRuntimeRepairAttempted -or !(Test-MissingVisualCppRuntime)) {
+    return $false
+  }
+
+  $script:VisualCppRuntimeRepairAttempted = $true
+  Write-InstallLog "OCR import failure matches a missing Visual C++ runtime; starting one automatic repair attempt."
+  try {
+    Install-MicrosoftVisualCppRuntime
+  } catch {
+    $script:VisualCppRuntimeRepairFailureMessage = [string]$_.Exception.Message
+    Write-InstallLog "Visual C++ runtime repair failed: $($script:VisualCppRuntimeRepairFailureMessage)"
+    return $false
+  }
+
+  Write-InstallLog "Visual C++ runtime repair finished; retrying OCR import validation."
+  Start-Sleep -Seconds 2
+  return Test-OcrPythonImports -PythonPath $PythonPath
+}
+
+function Get-OcrImportFailureDetail {
+  $details = @()
+  if ($script:VisualCppRuntimeRepairFailureMessage) {
+    $details += $script:VisualCppRuntimeRepairFailureMessage
+  }
+  if ($script:VisualCppRuntimeRestartRequired) {
+    $details += "Microsoft Visual C++ runtime was installed, but Windows must be restarted before OCR can be validated."
+  }
+  if ($script:LastOcrImportFailureModule -or $script:LastOcrImportFailureMessage) {
+    $moduleName = if ($script:LastOcrImportFailureModule) { $script:LastOcrImportFailureModule } else { "unknown module" }
+    $message = if ($script:LastOcrImportFailureMessage) { $script:LastOcrImportFailureMessage } else { "unknown import error" }
+    $details += "OCR import failed at ${moduleName}: $message"
+  }
+  return ($details -join " ").Trim()
 }
 
 function Install-Uv {
@@ -278,10 +419,14 @@ function Setup-PythonEnvironment {
     throw "venv python not found: $venvPython"
   }
   if (!(Install-OcrPackagesWithUv)) {
-    throw "rapidocr-onnxruntime / pillow install failed. Please check network and retry."
+    throw "OCR / PDF OCR dependencies install failed. Please check network and retry."
   }
   if (!(Test-OcrPythonReady -PythonPath $venvPython)) {
-    throw "rapidocr-onnxruntime import validation failed."
+    $failureDetail = Get-OcrImportFailureDetail
+    if ($failureDetail) {
+      throw "rapidocr-onnxruntime import validation failed. $failureDetail"
+    }
+    throw "rapidocr-onnxruntime import validation failed. See the OCR import probe in install.log."
   }
   Write-InstallLog "Python OCR environment ready via uv."
   return $venvPython

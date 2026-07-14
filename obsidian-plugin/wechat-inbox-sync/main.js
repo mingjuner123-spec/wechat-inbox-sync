@@ -163,6 +163,7 @@ const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 const LOCAL_OCR_HOME = '.wechat-inbox-local-ocr';
 const LOCAL_OCR_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const LOCAL_OCR_RUN_TIMEOUT_MS = 90 * 1000;
+const LOCAL_PDF_OCR_RUN_TIMEOUT_MS = 30 * 60 * 1000;
 
 function getLocalAsrPlatform(platform = os.platform()) {
   if (platform === 'win32') return 'win32';
@@ -291,6 +292,13 @@ function getLocalOcrInstallStatus(installRoot = getLocalOcrInstallRoot(), exists
   };
 }
 
+function localOcrScriptSupportsPdf(scriptText) {
+  const source = String(scriptText || '');
+  return source.includes('pdf-page-ocr-v1')
+    && source.includes('import fitz')
+    && source.includes('from opencc import OpenCC');
+}
+
 function joinLocalAsrPath(platform, ...segments) {
   if (getLocalAsrPlatform(platform) === 'darwin') {
     const [first, ...rest] = segments;
@@ -382,6 +390,42 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('Invoke-RecoverRepeatedChunkText')
       && source.includes('$ChunkRetrySeconds')
       && source.includes('$ChunkSeconds = 120')
+      && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
+      && source.includes('TRANSCRIPT_HALLUCINATION')
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('Start-Process')
+      && source.includes('RedirectStandardOutput')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Convert-ExitCodeToHex')
+      && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+      && source.includes('safeModelPath')
+      && source.includes('progressPercent')
+      && !source.includes('$SimplifiedPrompt')
+      && !source.includes('"--prompt"')
+      && !source.includes('DataReceivedEventHandler')
+      && !source.includes('BeginOutputReadLine')
+    ) {
+      return {
+        scriptVersion: 'adaptive-chunked-start-process-repeat-guard-v2-progress-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('recoveryTriggered=')
+      && source.includes('Split-AudioToChunks')
+      && source.includes('Test-TranscriptHasRepeatHallucination')
+      && source.includes('Invoke-RecoverRepeatedChunkText')
+      && source.includes('$ChunkRetrySeconds')
+      && source.includes('$ChunkSeconds = 120')
       && source.includes('Invoke-NativeProcess')
       && source.includes('Start-Process')
       && source.includes('RedirectStandardOutput')
@@ -404,7 +448,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     ) {
       return {
         scriptVersion: 'adaptive-chunked-start-process-repeat-guard-progress-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     if (
@@ -432,6 +476,25 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     ) {
       return {
         scriptVersion: 'chunked-start-process-utf8-simplified-fallback-safe-model-progress-run-log',
+        scriptOutdated: true,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('CHUNK_SECONDS')
+      && source.includes('set -euo pipefail')
+      && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"')
+      && source.includes('CHUNK_SECONDS=120')
+      && source.includes('choose_chunk_seconds')
+      && source.includes('find_metal_resources_dir')
+      && source.includes('GGML_METAL_PATH_RESOURCES')
+      && source.includes('metalAcceleration=failed')
+      && source.includes('progressPercent')
+      && !source.includes('SIMPLIFIED_PROMPT')
+      && !source.includes('--prompt "$SIMPLIFIED_PROMPT"')
+    ) {
+      return {
+        scriptVersion: 'adaptive-chunked-bash-repeat-guard-v2-progress-metal-diagnostics-run-log',
         scriptOutdated: false,
       };
     }
@@ -548,7 +611,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     ) {
       return {
         scriptVersion: 'adaptive-chunked-bash-simplified-progress-metal-diagnostics-run-log',
-        scriptOutdated: false,
+        scriptOutdated: true,
       };
     }
     if (
@@ -2218,6 +2281,85 @@ function dedupeRepeatedTranscriptionLines(text) {
   return deduped.join('\n').trim();
 }
 
+function normalizeTranscriptionQualityUnit(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+    .trim();
+}
+
+function getTranscriptionQualityUnits(text) {
+  const source = String(text || '').trim();
+  if (!source) return [];
+
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const rawUnits = lines.length >= 3
+    ? lines
+    : (source.match(/[^。！？!?；;\r\n]+[。！？!?；;]?/g) || lines);
+  return rawUnits
+    .map(normalizeTranscriptionQualityUnit)
+    .filter((unit) => unit.length >= 4);
+}
+
+function getTranscriptionQualityIssue(text) {
+  const units = getTranscriptionQualityUnits(text);
+  if (!units.length) return '';
+
+  const promptLeakPattern = /^(?:请|請)(?:输入|輸入|输出|輸出)(?:简体|簡體)中文$/;
+  const promptLeakCount = units.filter((unit) => promptLeakPattern.test(unit)).length;
+  if (promptLeakCount >= 2 || (promptLeakCount === 1 && units.length === 1)) {
+    return 'prompt-leak';
+  }
+
+  const counts = new Map();
+  let longestConsecutiveRun = 1;
+  let currentRun = 1;
+  let previousUnit = '';
+  units.forEach((unit) => {
+    counts.set(unit, (counts.get(unit) || 0) + 1);
+    if (unit === previousUnit) {
+      currentRun += 1;
+      longestConsecutiveRun = Math.max(longestConsecutiveRun, currentRun);
+    } else {
+      currentRun = 1;
+      previousUnit = unit;
+    }
+  });
+
+  const maxCount = Math.max(...counts.values());
+  if (
+    longestConsecutiveRun >= 3
+    || maxCount >= 6
+    || (units.length >= 8 && maxCount >= 5 && maxCount / units.length >= 0.6)
+  ) {
+    return 'repeated-lines';
+  }
+  return '';
+}
+
+function createTranscriptionQualityError(text, source = '转写') {
+  const issue = getTranscriptionQualityIssue(text);
+  if (!issue) return null;
+  const reason = issue === 'prompt-leak' ? '检测到提示词泄漏' : '检测到重复句循环';
+  const error = new Error(`${source}结果质量异常：${reason}，已放弃该媒体地址并尝试备用地址。`);
+  error.code = 'TRANSCRIPTION_LOW_QUALITY';
+  error.qualityIssue = issue;
+  return error;
+}
+
+function assertUsableTranscription(text, source = '转写') {
+  const transcription = String(text || '').trim();
+  if (!transcription) {
+    throw new Error(`${source}命令没有返回文本`);
+  }
+  const qualityError = createTranscriptionQualityError(transcription, source);
+  if (qualityError) throw qualityError;
+  return transcription;
+}
+
 function parseDoubaoAsrResult(payload) {
   const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
   const result = data && data.result;
@@ -3538,9 +3680,40 @@ function isSuspectPdfGlyphEncoding(text) {
   const cjkRatio = compact ? compactCjk.length / Array.from(compact).length : 0;
   const hasReadableCjkText = compactCjk.length >= 80 && cjkRatio >= 0.25;
 
+  const cjkCharacters = Array.from(compactCjk);
+  const uniqueCjkRatio = cjkCharacters.length
+    ? new Set(cjkCharacters).size / cjkCharacters.length
+    : 1;
+  const sentencePunctuationCount = (source.match(/[。！？!?；;]/g) || []).length;
+  const sentencePunctuationRatio = cjkCharacters.length
+    ? sentencePunctuationCount / cjkCharacters.length
+    : 0;
+  const longestLineLength = String(source)
+    .split(/\r?\n/)
+    .reduce((max, line) => Math.max(max, Array.from(line.replace(/\s+/g, '')).length), 0);
+  const trigramCounts = new Map();
+  let maxTrigramCount = 0;
+  for (let index = 0; index <= cjkCharacters.length - 3; index += 1) {
+    const trigram = cjkCharacters.slice(index, index + 3).join('');
+    const count = (trigramCounts.get(trigram) || 0) + 1;
+    trigramCounts.set(trigram, count);
+    if (count > maxTrigramCount) maxTrigramCount = count;
+  }
+  const hasCorruptedCjkRun = cjkCharacters.length >= 200
+    && longestLineLength >= 180
+    && sentencePunctuationRatio < 0.004
+    && (uniqueCjkRatio < 0.28 || maxTrigramCount >= 6);
+
   if (knownGlyphNoise.length >= 4) return true;
+  if (hasCorruptedCjkRun) return true;
   if (!hasReadableCjkText && longLatinWords.length >= 6 && latinWords.length >= 12) return true;
   return compactCjk.length >= 1000 && oddCjkTokens.length >= 8 && longLatinWords.length >= 3;
+}
+
+function createPdfOcrRequiredError(message) {
+  const error = new Error(message || 'PDF 需要图片文字识别 OCR。');
+  error.code = 'PDF_OCR_REQUIRED';
+  return error;
 }
 
 function cleanPdfExtractedText(text) {
@@ -3686,17 +3859,17 @@ function extractPdfMarkdown(bufferLike) {
     .replace(/\n{3,}/g, '\n\n');
 
   if (isLowQualityPdfExtraction(rawText)) {
-    throw new Error('PDF 文本提取质量过低。该文件可能使用特殊编码或扫描版，需要 OCR/高级解析。');
+    throw createPdfOcrRequiredError('PDF 文本提取质量过低，将自动改用图片文字识别 OCR。');
   }
 
   const text = cleanPdfExtractedText(rawText);
 
   if (isSuspectPdfGlyphEncoding(text)) {
-    throw new Error('PDF 文本层编码异常，已保存原始附件，但暂不强制转 Markdown，避免生成乱码。建议使用 OCR 或导出为可复制文本的 PDF 后再同步。');
+    throw createPdfOcrRequiredError('PDF 文本层编码异常，将自动改用图片文字识别 OCR。');
   }
 
   if (!text) {
-    throw new Error('PDF 未提取到文本。扫描版 PDF 或特殊编码 PDF 需要 OCR/高级解析。');
+    throw createPdfOcrRequiredError('PDF 未提取到文本，将自动改用图片文字识别 OCR。');
   }
 
   return text;
@@ -4258,6 +4431,10 @@ function normalizeBrowserCapturedMediaUrls(items) {
   return sortMediaUrlsForTranscription(urls);
 }
 
+// Social pages can attempt to hand off short links or media playback to a
+// native app (for example, bytedance://). The sync pipeline must never let
+// those protocols escape to the operating system: ordinary HTTP parsing keeps
+// working, while an unsafe hand-off is stopped before Windows can prompt.
 function shouldBlockExternalAppUrl(value) {
   const url = String(value || '').trim();
   if (!url) return false;
@@ -10955,6 +11132,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       const source = String(scriptText || '');
       if (!source.includes('.wechat-inbox-local-ocr')) return false;
       if (!source.includes('rapidocr')) return false;
+      if (!source.includes('PyMuPDF')) return false;
+      if (!source.includes('opencc-python-reimplemented')) return false;
       if (isMac) {
         return source.includes('TENCENT_OCR_ASSET_BASE_URL')
           && source.includes('TENCENT_PIP_INDEX_URL')
@@ -11044,6 +11223,69 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (error) {
         // Best-effort cleanup only.
       }
+    }
+  }
+
+  async runLocalPdfOcr(pdfBuffer) {
+    await this.ensureLocalComponentReadyForUse('PDF 图片文字识别', {
+      reason: 'pdf-ocr',
+      requireAsr: false,
+      requireOcr: true,
+    });
+
+    let status = this.getLocalOcrInstallStatus();
+    let scriptText = status.scriptPath && fs.existsSync(status.scriptPath)
+      ? fs.readFileSync(status.scriptPath, 'utf8')
+      : '';
+    if (!localOcrScriptSupportsPdf(scriptText)) {
+      new Notice('正在升级本地 OCR 组件以支持 PDF 识别和繁转简。');
+      await this.installLocalOcr({ reason: 'pdf-ocr-upgrade' });
+      status = this.getLocalOcrInstallStatus();
+      scriptText = status.scriptPath && fs.existsSync(status.scriptPath)
+        ? fs.readFileSync(status.scriptPath, 'utf8')
+        : '';
+    }
+    if (!status.ready || !localOcrScriptSupportsPdf(scriptText)) {
+      throw new Error('本地 OCR 组件版本过旧，自动升级后仍未具备 PDF 识别能力。请复制诊断信息联系开发者。');
+    }
+
+    const suffix = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const inputPath = path.join(os.tmpdir(), `wechat-inbox-pdf-ocr-${suffix}.pdf`);
+    const outputPath = path.join(os.tmpdir(), `wechat-inbox-pdf-ocr-${suffix}.md`);
+    try {
+      fs.writeFileSync(inputPath, toNodeBuffer(pdfBuffer));
+      await new Promise((resolve, reject) => {
+        childProcess.execFile(status.pythonPath, [
+          status.scriptPath,
+          '--input',
+          inputPath,
+          '--output',
+          outputPath,
+        ], {
+          timeout: LOCAL_PDF_OCR_RUN_TIMEOUT_MS,
+          maxBuffer: 10 * 1024 * 1024,
+          windowsHide: true,
+        }, (error, stdout, stderr) => {
+          if (error) {
+            reject(new Error(stderr || stdout || error.message || String(error)));
+            return;
+          }
+          resolve({ stdout, stderr });
+        });
+      });
+      const markdown = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8').trim() : '';
+      if (!markdown) {
+        throw new Error('PDF OCR 已运行，但没有识别到可用文字。');
+      }
+      return markdown;
+    } finally {
+      [inputPath, outputPath].forEach((filePath) => {
+        try {
+          fs.rmSync(filePath, { force: true });
+        } catch (error) {
+          // Best-effort cleanup only.
+        }
+      });
     }
   }
 
@@ -12106,10 +12348,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       const outputText = fs.existsSync(outputPath)
         ? fs.readFileSync(outputPath, 'utf8')
         : stdout;
-      const transcription = cleanTrailingTranscriptionHallucinations(String(outputText || '').trim());
-      if (!transcription) {
-        throw new Error('本地转写命令没有返回文本');
-      }
+      const transcription = assertUsableTranscription(
+        cleanTrailingTranscriptionHallucinations(String(outputText || '').trim()),
+        '本地转写',
+      );
       writeLocalAsrRunLog({
         installRoot,
         status: 'success',
@@ -12534,7 +12776,16 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'pdf') {
           this.showSyncProgress({ ...progress, stage: 'processing', title: fileName });
-          nextMetadata.convertedMarkdown = extractPdfMarkdown(nodeBuffer);
+          try {
+            nextMetadata.convertedMarkdown = extractPdfMarkdown(nodeBuffer);
+            nextMetadata.conversionProvider = 'pdf-text-layer';
+          } catch (error) {
+            if (!error || error.code !== 'PDF_OCR_REQUIRED') throw error;
+            this.showSyncProgress({ ...progress, stage: 'processing', title: `${fileName}（OCR）` });
+            nextMetadata.convertedMarkdown = await this.runLocalPdfOcr(nodeBuffer);
+            nextMetadata.conversionProvider = 'local-pdf-ocr';
+            nextMetadata.pdfOcrFallbackReason = error.message || 'PDF 文本层不可用';
+          }
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'doc') {
           nextMetadata.conversionStatus = 'attachment_saved';
@@ -14459,6 +14710,9 @@ WechatObsidianInboxPlugin.__test = {
   buildSyncProgressMessage,
   buildSkippedSyncNotice,
   parseLocalAsrProgressLog,
+  getTranscriptionQualityIssue,
+  createTranscriptionQualityError,
+  assertUsableTranscription,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
   isRemoteAsrDownloadFailure,
@@ -14471,6 +14725,7 @@ WechatObsidianInboxPlugin.__test = {
   getLocalOcrInstallStatus,
   getLocalOcrPythonPath,
   getLocalOcrScriptPath,
+  localOcrScriptSupportsPdf,
   getLocalAsrScriptVersionStatus,
   explainLocalAsrExitCode,
   getLocalAsrRunLogPath,

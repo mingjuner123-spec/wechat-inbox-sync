@@ -20,7 +20,8 @@ DOWNLOAD_LOW_SPEED_TIME=180
 UV_VERSION="0.9.14"
 PYTHON_BUILD_STANDALONE_BUILD="20260623"
 UV_BIN="${INSTALL_ROOT}/bin/uv"
-OCR_PACKAGE_REQUIREMENTS=("rapidocr-onnxruntime==1.4.4" "pillow==12.3.0")
+PORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python"
+OCR_PACKAGE_REQUIREMENTS=("rapidocr-onnxruntime==1.4.4" "pillow==12.3.0" "PyMuPDF" "opencc-python-reimplemented")
 export UV_PYTHON_DOWNLOADS=automatic
 export UV_PYTHON_PREFERENCE=managed
 export UV_PYTHON_INSTALL_MIRROR="$TENCENT_PYTHON_INSTALL_MIRROR"
@@ -123,7 +124,7 @@ find_existing_python() {
 
 validate_ocr_python() {
   local python_bin="$1"
-  "$python_bin" -c "from rapidocr_onnxruntime import RapidOCR; print('rapidocr-ready')" 2>&1
+  "$python_bin" -c "from rapidocr_onnxruntime import RapidOCR; import fitz, opencc; print('rapidocr-pdf-ready')" 2>&1
 }
 
 detect_ocr_wheel_platform() {
@@ -302,9 +303,9 @@ setup_python_venv() {
     return 1
   fi
 
-  log "Installing rapidocr-onnxruntime and pillow..."
+  log "Installing image OCR, PDF renderer, and Simplified Chinese conversion..."
   if ! install_ocr_packages_with_uv; then
-    log "ERROR: rapidocr-onnxruntime / pillow 安装失败。请检查网络连接后重试。"
+    log "ERROR: OCR / PDF OCR 依赖安装失败。请检查网络连接后重试。"
     return 1
   fi
 

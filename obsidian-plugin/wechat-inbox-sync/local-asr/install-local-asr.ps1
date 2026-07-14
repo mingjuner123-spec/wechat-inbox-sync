@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.21"
+$InstallerScriptVersion = "1.2.22"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 90
 $DownloadTimeoutSeconds = 1200
@@ -894,7 +894,7 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 }
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$SimplifiedPrompt = [string]::Concat([char]0x8bf7, [char]0x8f93, [char]0x51fa, [char]0x7b80, [char]0x4f53, [char]0x4e2d, [char]0x6587)
+$TranscriptQualityGuardVersion = "repeat-guard-v2"
 @(
   "time=$(Get-Date -Format o)"
   "status=pending"
@@ -1121,8 +1121,7 @@ function Invoke-WhisperChunk {
   $arguments = @(
     "-m", (& $PathForNative $attemptModelPath),
     "-f", (& $PathForNative $ChunkPath),
-    "-l", "zh",
-    "--prompt", $SimplifiedPrompt
+    "-l", "zh"
   ) + $ExtraArguments + @(
     "-otxt",
     "-of", (& $PathForNative $ChunkBase)
@@ -1289,6 +1288,8 @@ function Invoke-TranscribeAttempt {
           $whisperLogs.Add($recovered.Logs)
           if ($recovered.ExitCode -eq 0 -and $recovered.Text.Trim() -and -not (Test-TranscriptHasRepeatHallucination $recovered.Text)) {
             $normalizedText = $recovered.Text
+          } else {
+            throw "TRANSCRIPT_HALLUCINATION: repeated transcript remained after local retry for $($chunk.Name)."
           }
         }
         $mergedText.Add($normalizedText)
@@ -1380,6 +1381,9 @@ try {
   }
   Write-AttemptLog -Attempt $normalAttempt -FallbackAttempt $fallbackAttempt
 
+  if ($finalAttempt.Error -and $finalAttempt.Error -match "TRANSCRIPT_HALLUCINATION") {
+    throw $finalAttempt.Error
+  }
   if ($finalAttempt.FfmpegExit -ne 0) {
     throw "ffmpeg failed with exit code $($finalAttempt.FfmpegExit). See $RunLog"
   }

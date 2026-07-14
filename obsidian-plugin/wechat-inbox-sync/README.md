@@ -100,7 +100,7 @@ Then choose **Local transcription** in the plugin settings and click **One-click
 
 - Private or login-only webpages may only save the original link.
 - Some platforms change their public page structure frequently, so extraction quality may vary.
-- Scanned PDFs and highly encoded PDFs may require OCR and may not extract clean text.
+- PDFs use the embedded text layer first. Scanned PDFs, empty text layers, and suspiciously garbled text layers automatically fall back to local page OCR for Pro users; OCR output is converted to Simplified Chinese.
 - WeChat voice bubbles cannot be read directly by a mini program. Audio must be uploaded as a file or recorded inside the mini program.
 
 ## Development

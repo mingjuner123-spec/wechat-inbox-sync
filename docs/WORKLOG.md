@@ -12,3 +12,809 @@
 - 已知风险：现有笔记只能验证合并和层级规则，真实小红书页面的登录态、风控、页面结构仍可能变化；最终端到端效果需要用户在 Obsidian 更新到 1.3.27 后用原问题链接复测。若平台未返回完整数据，诊断中的 `stop`、`api_stop`、`unmatched` 和页数可用于下一步定位。
 - 结果：插件市场发布链路已完成，等待用户实测评论总数、折叠回复层级和处理耗时。
 - 下一步：用户更新到 1.3.27 后复测原链接；如仍不完整，提供该条笔记末尾诊断和截图，不需重复描述环境。
+### 2026-07-15 07:35 - 修复 1.3.26 对新版 Electron 导航事件的协议拦截漏口
+
+- 目标：定位并修复用户已在 `1.3.26` 仍出现 Windows“获取打开此 bytedance 链接的应用”弹窗的问题，同时保持抖音媒体解析与转写路径不变。
+- 影响范围：Obsidian 插件外部协议导航守卫、插件回归测试、本机已安装插件；不涉及小程序、云函数、支付、绑定、媒体提取或用户数据。
+- 修改文件：隔离工作区 `.worktrees/douyin-protocol-event-shape/obsidian-plugin/wechat-inbox-sync/main.js`、`.worktrees/douyin-protocol-event-shape/tests/plugin-main-ai.test.js`；并将同一导航守卫修复安装到当前知识库 `.obsidian/plugins/wechat-inbox-sync/main.js`。本日志记录在 `docs/WORKLOG.md`。
+- 线上动作：无。未推送 GitHub、未创建标签或 Release、未发布插件市场版本。
+- 数据变更：无；本机插件 `data.json` 未修改。
+- 验证：在原始 `1.3.26` 上直接调用真实守卫，旧 URL 字符串参数返回 `true`，Electron 对象参数返回 `false`；新增对象参数回归后运行 `node tests/plugin-main-ai.test.js`，按预期以 `false !== true` 失败。修复后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 均退出码 0；本机安装文件的对象参数与事件对象两种调用均实测拦截为 `true`。
+- 结果：根因不是版本未更新，而是 `installExternalAppNavigationGuards` 只识别旧式字符串参数；新版 Electron 可把 URL 放在导航 details/事件对象的 `url` 字段中，导致抖音 iframe 的 `bytedance://` 跳转漏过。修复兼容字符串、details 对象和事件对象三种签名，不改变 HTTP/HTTPS、媒体请求或转写逻辑。
+- 已知风险：尚需重载 Obsidian 后用真实抖音链接做一次实机验证；抖音仍可能引入新的协议触发方式，需保留网络请求、导航、重定向和新窗口四层守卫。
+- 下一步：用户实测无弹窗且解析成功后，从该 `origin/main@1.3.26` 隔离分支发布 `1.3.27`，再由插件市场分发。
+
+### 2026-07-15 07:14 - 复核批量抖音复读与 PDF OCR 的真实生效状态
+
+- 目标：回答批量转写 38 条后少数笔记整句复读是否已经根治，并解释 PDF OCR “待收尾”的准确含义。
+- 影响范围：当前知识库已安装插件、本机 ASR 运行脚本、安装日志、插件回归测试与文档；不修改业务逻辑、不发布版本。
+- 修改文件：`docs/WORKLOG.md`。
+- 线上动作：无。
+- 数据变更：无。
+- 验证：当前正式 `1.3.26` 已安装插件不包含 `getTranscriptionQualityIssue`、`assertUsableTranscription`、`runLocalPdfOcr` 或 `PDF_OCR_REQUIRED`；同步循环按 `for` + `await this.writeRecord` 串行处理记录。`C:\Users\ADMIN\.wechat-inbox-local-asr\install.log` 显示 07:12 自动修复使用临时安装器，读取该临时文件确认它是旧 `1.2.21`，仍生成 `$SimplifiedPrompt` 与 `--prompt`；当前实际 `transcribe.ps1` 的修改时间同为 07:12，且同样包含旧提示词。`.install-state.json` 虽写着 `1.2.22`，但与实际运行脚本不一致，不能作为生效证明。`tests/plugin-upload-sync.test.js:482` 仍断言旧行为应写入“PDF 文本提取质量过低”，而开发中的新设计应改为自动 OCR，因此该测试与新行为尚未统一。
+- 结果：抖音复读根因已定位，但当前已安装链路尚未彻底修复；批量 38 条本身不是共享上下文污染，失败集中在少数记录更符合对应媒体音轨/分块触发 Whisper 幻觉。PDF OCR 改动仅存在于落后的开发分支，未移植到正式 `1.3.26`，截图中的 PDF 乱码问题当前仍可能发生。
+- 已知风险：插件自动修复会从远端重新安装旧 ASR 脚本，覆盖手工更新；只改本机脚本无法形成稳定修复。缺少发生复读的原始链接或 MP4，尚不能对同一批 38 条做端到端复测。
+- 下一步：以正式 `1.3.26` 为基线同时移植 ASR 最终质量门与 PDF OCR 回退；升级插件版本识别和远端/随包安装器，阻止旧脚本回灌；用用户提供的失败链接或 MP4 做“正常转写 / 30 秒重试 / 备用媒体地址 / 全失败不写垃圾正文”的端到端验收后再发布。
+
+### 2026-07-15 07:10 - 核对 bytedance 弹窗与原视频保存的因果关系
+
+- 目标：确认 Windows 的 `bytedance://` / Microsoft Store 弹窗是否由“下载并保存原始 MP4”功能引入，并判断是否需要退回该功能之前的版本。
+- 影响范围：Obsidian 插件 Git 历史、当前本机插件候选状态与文档；不修改业务逻辑、不发布版本、不改用户配置。
+- 修改文件：`docs/WORKLOG.md`；同时把上一任务误同步到当前知识库的落后分支 `main.js` 从自动备份恢复。
+- 线上动作：无。未发布、未推送、未覆盖 CDN。
+- 数据变更：无。当前知识库插件的 `data.json` 保持原样。
+- 验证：Git 时间线显示 `1.3.17` 已存在抖音隐藏浏览器 `renderSocialMediaUrlsWithElectron`、`win.loadURL(url)` 以及抖音媒体回退调用；保存原始音视频由提交 `d8f2832` 在 `1.3.18` 加入，默认关闭，只在转写记录建立后调用 `saveSourceMediaAttachment`。当前 `1.3.26` 的代码顺序仍是抖音页面渲染与媒体提取在前、可选原视频下载在后。同步前备份与恢复后的本机 `main.js` SHA-256 均为 `08F902F147D88CD3F2C4DDF84414C2733146BA0D530F64E84029A5B659BFF6A5`，`node --check` 通过，`data.json` 存在。
+- 结果：`bytedance://` 的源头是抖音网页在隐藏 Electron 页面解析阶段发起原生 App 跳转，不是后续的 MP4 下载。退回 `1.3.17` 会保留该页面加载路径，同时移除后续协议拦截和其他修复，因此不采用整版回退。
+- 已知风险：抖音可以继续改变页面跳转方式；需要保留请求、导航、重定向和新窗口四层协议拦截，并用真实短链持续回归。
+- 下一步：维持正式 `1.3.26` 基线；如需做产品侧 A/B，只关闭“保存原始音视频到本地”开关，不回退插件版本，但这不会替代 `bytedance://` 源头拦截。
+
+### 2026-07-15 07:05 - 本地 ASR 复读幻觉拦截与备用媒体重试
+
+- 目标：修复部分抖音音视频本地转写生成整句循环、重复输出“请输入/请输出简体中文”且仍被保存为成功笔记的问题；全程不依赖云端转写。
+- 影响范围：Obsidian 插件 / Windows 与 macOS 本地 ASR 组件 / 插件测试 / 文档；不涉及小程序、云函数、支付、绑定码或线上业务数据。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1`、`obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`docs/DECISIONS.md`、`docs/WORKLOG.md`。
+- 线上动作：无。未发布插件市场，未覆盖腾讯云 CDN；曾把候选 `main.js` 与 `local-asr/` 同步到当前知识库，随后发现当前开发分支落后于正式 `1.3.26`，已立即用自动备份恢复正式插件 `main.js`，保留 `1.3.26` manifest 与原有 `data.json`；本机 ASR 脚本曾升级，但之后被插件自动修复下载的旧安装器覆盖，当前不能视为 `1.2.22` 新逻辑已生效。
+- 数据变更：无。
+- 验证：先新增回归并确认旧实现分别因缺少质量检测函数和缺少脚本能力标记而失败；开发分支修复后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-core.test.js`、`node tests/plugin-sync-core.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/media-resolver-core.test.js`、`node tests/media-resolver-windows.test.js` 全部通过；`node --check obsidian-plugin/wechat-inbox-sync/main.js`、Windows 安装器与生成 `transcribe.ps1` 的 PowerShell 解析、macOS 安装器的 Git Bash `bash -n`、`git diff --check` 均通过。本机安装器曾复用现有 Whisper/ffmpeg/model 并完成推理校验，但 07:12 后实际脚本再次出现旧提示词，证明安装状态随后被旧安装器覆盖。补充运行 `node tests/plugin-upload-sync.test.js` 时仍有一条 PDF OCR 旧行为断言未更新。
+- 结果：当前开发分支中的 Windows/macOS Whisper 命令不再注入“请输出简体中文”提示词，插件最终质量门与备用媒体地址逻辑也已通过分支内测试；但该分支落后于正式 `1.3.26`，而本机新 ASR 脚本又被远端旧安装器回灌，因此这些能力当前均不能视为正式生效，发布前必须移植到以 `origin/main` 为基线的新分支并解决安装器覆盖问题。
+- 已知风险：macOS 仅完成静态语法与插件层质量门验证，尚未在 Apple Silicon 真机跑问题音视频；重复检测使用保守阈值，但极少数真实内容若连续三次逐字重复同一句，也会被判为低质量并切换备用地址。
+- 下一步：以 `origin/main` / `1.3.26` 为新基线移植 ASR 质量门和需要保留的 PDF OCR 改动，统一回归后再发布并同步两份 ASR 安装器；随后在 Windows 与 Apple Silicon 各用本次失败的抖音样本做一次端到端实测。
+
+### 2026-07-15 00:49 - PDF 文本层自动判定与本地 OCR 回退
+
+- 目标：避免特殊编码或扫描版 PDF 生成连续乱码；自动识别文本层质量，异常时改走本地逐页 OCR，并统一输出简体中文。
+- 影响范围：Obsidian 插件 / Windows 与 macOS 本地 OCR 组件 / 插件测试 / 文档；不涉及小程序、云函数、支付、绑定码或线上业务数据。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`obsidian-plugin/wechat-inbox-sync/local-ocr/ocr_image.py`、两份 OCR 安装器、两份 OCR/插件 README、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、PDF OCR 设计与实施计划、`docs/DECISIONS.md`、`docs/WORKLOG.md`。
+- 线上动作：无。未发布插件市场，未覆盖腾讯云 CDN；已把候选程序文件同步到本机知识库的 `.obsidian/plugins/wechat-inbox-sync/`，且未修改 `data.json`。
+- 数据变更：无。仅在本机安装/升级 `~/.wechat-inbox-local-ocr` 运行环境以完成端到端验证。
+- 验证：乱码 PDF 回归先确认旧逻辑未抛错，再实现 `PDF_OCR_REQUIRED`；`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/inbox-core.test.js`、插件 `node --check`、Windows OCR 安装器 scriptblock 解析和 `git diff --check` 通过；Python 脚本编译及阅读顺序单元检查通过；实际 Windows 安装器成功导入 `rapidocr_onnxruntime`、`fitz`、`opencc`；使用 300 DPI 扫描 PDF 端到端识别成功，并验证繁体“這是”输出为简体“这是”；源码与本地插件目录 6 个文件 SHA-256 一致。
+- 结果：PDF 先走快速文本层；空文本、低质量文本、已知乱码或长串低标点重复乱码会自动转入本地 PDF OCR。OCR 按 300 DPI 逐页渲染、按识别框坐标排序、保留页标题，单页失败不阻断其他页，最终使用 OpenCC `t2s` 转简体。已安装的旧 OCR 脚本在首次遇到需 OCR 的 PDF 时会自动升级。
+- 已知风险：当前腾讯云 OCR wheelhouse 尚未包含 `PyMuPDF` 与 `opencc-python-reimplemented`，安装会先快速失败再回退腾讯/官方 PyPI；插件已拒绝缺少这两项的新旧 CDN 安装器并使用随插件打包的安装器。当前 Windows 环境没有 Bash，macOS 安装器只完成静态依赖断言，尚需 Apple Silicon 真机安装与 PDF 冒烟测试。
+- 下一步：在本机 Obsidian 重载插件后，用问题 PDF 验证笔记排版；通过后发布新插件版本，并把两项新依赖补入三平台 CDN wheelhouse、更新 CDN 安装器与 OCR 运行脚本，再由 Windows 和 Apple Silicon 各做一次新用户安装测试。
+
+### 2026-07-14 23:10 - 修复回归优惠预览误显示为有效 Pro 续费提醒
+
+- 目标：让所有者白名单测试展示“已过期用户的 48 小时回归优惠”，不再把测试到期时间误当成真实 Pro 有效期。
+- 影响范围：`quickstartFunctions` 短环境运行代码 / 小程序开发版回归预览 / 测试 / 文档；不修改真实 Pro 权益、支付、绑定码、兑换码或广告权限。
+- 修改文件：`cloudfunctions/quickstartFunctions/expiry-reminder-preview-core.js`、`cloudfunctions/quickstartFunctions/index.js`、`miniprogram/pages/index/index.js`、`tests/expiry-reminder-preview-core.test.js`、`tests/home-ui.test.js`。
+- 线上动作：此前新逻辑只更新到长环境；本次确认小程序通过 `miniprogram/app.js` 调用短环境 `he02-d8gebzv050ed6c4ef` 后，使用微信开发者工具 CLI 仅增量更新短环境 `quickstartFunctions` 的 `expiry-reminder-preview-core.js` 和 `index.js`。小程序开发版仍为 `1.3.29`，无需重新上传客户端代码。
+- 数据变更：所有者测试白名单保留 `previewMode=recovery`，真实 Pro 到期时间和权益记录未修改。
+- 验证：`node tests/expiry-reminder-preview-core.test.js`、`node tests/home-ui.test.js`、`node tests/pro-offer-notice.test.js` 及两份 JavaScript 语法检查通过；重新下载短环境函数确认包含 recovery 分支、`offerNoticePreview` 返回和 `previewMode` 写入，且 `payment-core.js` 与 `payment-delivery-lock.js` 的 SHA-256 和本地已验证版本一致。
+- 结果：短环境已具备独立回归优惠预览，首页会员状态仍使用真实权益；错误的有效 Pro 续费提示与回归优惠使用不同本地去重键，不会互相遮挡。
+- 已知风险：仍需所有者在真机彻底关闭并重开小程序，确认卡片标题为“48 小时回归优惠”且弹窗标题为“48 小时回归优惠已到账”。
+- 下一步：真机视觉确认后禁用所有者测试白名单，避免长期保留测试入口。
+
+### 2026-07-14 - Publish Obsidian plugin 1.3.26: replay Xiaohongshu folded replies
+
+- Goal: fix Xiaohongshu comment extraction when folded replies are loaded only after the signed page requests are triggered by the logged-in browser.
+- Scope: `obsidian-plugin/wechat-inbox-sync/` plugin release source and its regression/marketplace tests; no Mini Program, cloud function, entitlement, or user data changes.
+- Changed: capture actual browser `comment/page` and `comment/sub/page` response bodies through the renderer debugger, classify root/reply payloads, associate replies by `root_comment_id`, retain DOM expansion clicks, and prefer the browser-network result over the rejected unsigned fallback request. No login, CAPTCHA, or platform security bypass was added.
+- Online action: pushed commit `efe6ce4` to `main`, pushed tag `1.3.26`, and published GitHub Release [1.3.26](https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.26).
+- Verification: `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, `node --check obsidian-plugin/wechat-inbox-sync/main.js`, and `git diff --check` passed. The release checker confirmed the default branch, raw manifest, release assets, and local ZIP all report `1.3.26`; local package: `C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.26.zip`.
+- Result: the plugin marketplace release is ready for real logged-in Xiaohongshu testing. The generated diagnostic now reports `browser-network` when signed comment payloads were captured.
+- Known risk: Xiaohongshu may change response shapes or require an active session; if the browser emits no signed comment response, the existing DOM/API fallback and diagnostic stop reason remain in place.
+- Next: install/update to 1.3.26 and test a note with folded replies; compare the saved `## 评论区` section and diagnostic footer with the visible comment thread.
+
+### 2026-07-14 - Add owner-only 48-hour recovery-offer preview
+
+- Goal: let the owner visually verify the homepage recovery card and first-entry modal without expiring or editing the real Pro entitlement.
+- Changed: the existing `entitlement_reminder_test_whitelist` now supports an optional `recovery` preview mode. For a matched active entitlement, `getEntitlementStatus` returns a separate `offerNoticePreview`; only the homepage notice builder consumes it. Membership cards, ads, Pro access, payment offers, refund state, and plugin permissions continue using the real entitlement response.
+- Online actions: updated `quickstartFunctions` code only, uploaded Mini Program development version `1.3.29`, and switched the owner redemption code `OBPROT93C6` whitelist record to `recovery` mode with a display expiry of `2026-07-16T14:48:51.670Z` (`2026-07-16 22:48` Beijing time).
+- Verification: added failing tests for the missing recovery preview and client routing, then passed `tests/expiry-reminder-preview-core.test.js`, `tests/home-ui.test.js`, `tests/pro-offer-notice.test.js`, and JavaScript syntax checks. The deployed administrator action returned the expected active record with `previewMode=recovery`.
+- Cleanup: disable the whitelist record after the owner finishes visual testing. Development version `1.3.29` has not been submitted for review or formally released.
+
+### 2026-07-14 - 发布 Obsidian 插件 1.3.25：小红书视频跳过图片 OCR
+
+- 目标：关闭小红书视频笔记（含封面/预览图）的图片 OCR；仅让图文长文笔记继续使用图片 OCR。
+- 范围：仅修改 Obsidian 插件发布源、插件测试和版本清单；未修改小程序、云函数、业务数据、本地 OCR 安装器、视频下载或音视频转写。
+- 根因与修复：原逻辑在识别笔记是否为视频前执行 OCR，带封面图的视频会把封面送入 OCR。现在当小红书解析结果包含 `videoUrl`，或已解析到 `mediaUrl` 时，标记为视频并跳过 `enrichXiaohongshuExtractionWithOcr`；无视频媒体的图文笔记保留原有 OCR 路径。
+- 测试：先新增视频 OCR 守卫的回归断言，并确认旧代码按预期失败；修复后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 与 `git diff --check` 均通过。
+- 发布：已推送默认分支提交 `f3f7a23`，已推送标签 `1.3.25`，GitHub Release：<https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.25>。本地安装包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.25.zip`。
+- 发布核验：发布检查确认默认分支、raw manifest、Release tag、`main.js`/`manifest.json`/`styles.css`/`versions.json`/zip 资产和本地 zip manifest 均为 `1.3.25`。
+- 风险与下一步：视频媒体若因平台限制未能解析到 `videoUrl` 或 `mediaUrl`，该笔记仍会走图文 OCR 路径；请以一篇带封面图的小红书视频实测确认媒体解析正常时不再出现 OCR 段落，同时确认图文长文仍会产出 OCR。
+
+### 2026-07-14 - 发布 Obsidian 插件 1.3.24：小红书评论分页与折叠回复采集
+
+- 目标：改善小红书评论区采集不全的问题；默认最多采集 200 条主评论，并继续采集已折叠评论下的回复。
+- 范围：仅修改 `obsidian-plugin/wechat-inbox-sync/` 的插件发布源、对应测试和版本清单；未修改小程序、云函数、业务数据或用户配置。
+- 实现：在已登录的小红书页面会话内，按游标分页请求主评论接口和子回复接口（携带页面会话凭据）；保留原有网络响应、调试器与 DOM 展开/滚动兜底；评论去重改为 ID 优先，避免相同作者、相同文本的不同评论被错误合并。采集结果会写入不含 Cookie、授权头等敏感信息的停止原因诊断注释。
+- 发布：已推送插件市场主分支提交 `a2eee5e` 与标签 `1.3.24`，GitHub Release：<https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.24>。本地安装包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.24.zip`。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`git diff --check` 和插件发布检查脚本均通过；已核对 Release 与本地 zip 中的 manifest 均为 `1.3.24`。
+- 风险与下一步：小红书可能因登录失效、验证码或接口变动少返回评论；插件不会绕过这些平台限制，会保留安全的诊断停止原因。下一步由用户在真实、已登录的小红书笔记（多页评论且有折叠回复）中验证采集效果。
+
+### 2026-07-14 - Refresh owner seven-day expiry-reminder preview
+
+- Goal: let the owner verify the homepage Pro countdown after the reminder window was shortened from 30 days to 7 days.
+- Online data change: updated the active `entitlement_reminder_test_whitelist` record for redemption code `OBPROT93C6`; the display-only expiry is `2026-07-20T14:24:49.770Z` (`2026-07-20 22:24` Beijing time), about six days from the update.
+- Safety: the record only supplies `displayExpiresAt` for the homepage reminder. The real entitlement expiry, Pro access, payment pricing, refund state, and subscription-message schedule are unchanged.
+- Verification: the deployed `quickstartFunctions` administrator action returned success with the matching code, active status, and new preview expiry.
+- Cleanup: after visual verification, disable this whitelist record through `adminUpsertExpiryReminderPreviewWhitelist` with `status: disabled`.
+
+### 2026-07-14 - 补全抖音外部协议重定向拦截
+
+- 目标：修复插件更新后处理部分抖音短链时仍弹出“获取打开此 bytedance 链接的应用 / Microsoft Store”的问题。
+- 根因：`1.3.20` 已拦截页面导航、子框架和新窗口，但 Electron 的程序化 `loadURL` 不触发 `will-navigate`，服务器侧重定向需要单独使用可取消的 `will-redirect`；同时短链解析结果可能直接变成 `bytedance://`，旧代码仍会把它交给 `requestUrl`。
+- 影响范围：仅修改隔离工作区 `.worktrees/release-plugin-1.3.20/` 中的插件发布源 `obsidian-plugin/wechat-inbox-sync/main.js` 与 `tests/plugin-main-ai.test.js`；未修改小程序、云函数、支付、绑定或用户数据。
+- 修改：隐藏社交网页增加 `will-redirect` 外部协议拦截；抖音/小红书短链解析后若结果为非网页外部协议，则在进入 Obsidian/Electron 请求前终止。正常 `http/https` 页面、媒体下载、转写和原视频保存路径保持不变。
+- 基线：发现远端主分支已发布 `1.3.21`，已将修复迁移到提交 `b983dcd` 的最新基线，避免覆盖 `1.3.21` 新增的原视频保存校验能力。
+- 验证：回归测试先分别复现缺少 `will-redirect` 和 `bytedance://` 被交给网页请求的失败，再完成修复；`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、插件 `node --check` 与 `git diff --check` 通过。
+- 发布：已基于远端 `1.3.21` 发布 `1.3.22`。修复提交为 `1b9523c`，版本提交为 `fa71af7`；默认分支 `main`、tag、GitHub Release、raw manifest、Release 资产和桌面 zip 均回读为 `1.3.22`。正式地址：`https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.22`，桌面包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.22.zip`。
+- 发布后验证：GitHub Actions Release 成功；Obsidian 发布检查器全部通过。按用户要求先发布再实机测试，下一步使用原问题抖音链接在 Windows Obsidian 中确认不再出现 Microsoft Store 弹窗，并确认转写及原视频保存仍正常。
+
+### 2026-07-14 - Pro 到期提醒窗口缩短为 7 天
+
+- 目标：避免 Pro 有效期还很长时过早展示倒计时和续费提醒。
+- 影响范围：小程序首页 Pro 优惠提醒状态、对应回归测试和设计文档；不修改 Pro 权限、价格、支付、订阅消息或管理后台的续费关注名单。
+- 修改：用户端提醒窗口由 30 天缩短为 7 天；剩余时间正好等于 7 天时显示，超过 7 天隐藏，过期后仍按既有一次性 48 小时回归优惠逻辑处理。
+- 线上动作：已上传微信小程序开发版 `1.3.28`，描述为“Pro到期提醒改为7天内展示”；尚未提交审核或正式发布。
+- 验证：先新增窗口常量和 7 天边界断言，确认旧 30 天实现按预期失败；修复后 `node tests/pro-offer-notice.test.js`、`node tests/home-ui.test.js`、相关 JavaScript 语法检查和 `git diff --check` 通过。
+- 下一步：用一个剩余 7 天以内和一个剩余超过 7 天的测试账号验证首页展示差异，再决定是否提交正式版审核。
+
+### 2026-07-14 - 同步首页插件公告到 GitHub 最新版本
+
+- 目标：让首页插件更新公告显示 GitHub 当前最新 Release，而不是继续停留在 `1.3.3`。
+- 影响范围：小程序首页默认配置、`quickstartFunctions` 公共配置默认值、首页与公共配置回归测试、短业务环境 `public_config` 数据；不修改公告功能、Pro 价格或支付逻辑。
+- 版本依据：GitHub Release API 最终回读最新版本为 `1.3.20`，发布时间为 `2026-07-14T13:50:23Z`，首页按北京时间展示 `2026-07-14 21:50`。
+- 线上动作：通过长环境函数读取和更新短业务数据环境的首页公共配置，回读确认 `pluginVersion=1.3.20`、`updatedAt=2026-07-14 21:50`；先上传的开发版 `1.3.26` 在并发发布 `1.3.20` 前使用了 `1.3.19`，随后已上传开发版 `1.3.27` 覆盖；尚未提交审核或正式发布。
+- 验证：先更新版本断言并确认旧代码按预期失败；修改后 `node tests/home-ui.test.js`、`node tests/public-config-core.test.js`、相关 JavaScript 语法检查和 `git diff --check` 通过。
+- 结果：已发布的小程序可通过云端公共配置读取最新公告；开发版和未来代码回退路径也使用相同版本与时间。
+
+### 2026-07-14 - 发布插件 1.3.20 并拦截抖音外部应用弹窗
+
+- 目标：在完整保留正式版 `1.3.19` 的 Pro 原始音视频保存与转写能力的前提下，阻止后台解析抖音时触发 `bytedance://` 等协议并弹出 Microsoft Store。
+- 影响范围：插件 / 测试 / 发布资产 / 文档；不涉及小程序、云函数、支付、绑定码或用户数据。
+- 修改文件：隔离工作区 `.worktrees/release-plugin-1.3.20/` 中的 `obsidian-plugin/wechat-inbox-sync/main.js`、两份 `manifest.json`、两份 `versions.json`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`；主项目更新本工作日志。
+- 线上动作：已将提交 `adee292` 推送到 GitHub 默认分支 `main`，创建并推送 tag `1.3.20`；GitHub Actions Release 成功，正式地址为 `https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.20`。
+- 数据变更：无。
+- 验证：确认线上正式 `1.3.19` 提交 `c3db2e9` 未包含此前隔离分支中的协议拦截，因此用户仍弹窗不是转写回退；从该正式提交创建 `1.3.20`。协议回归先失败后通过，覆盖网络请求、主页面导航、子框架导航和新窗口，验证 `bytedance://`、`snssdk...://` 被阻止且 `http/https/blob/data/about` 放行。`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、插件语法检查、`git diff --check` 通过；差异检查确认没有修改 `saveSourceMediaAttachment`、Pro 媒体开关或既有转写实现。
+- 结果：Obsidian 发布检查脚本全部通过，默认分支与 raw manifest 为 `1.3.20`，Release 含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 zip；线上 `main.js` Git blob 与提交完全一致，并同时包含协议拦截和 `1.3.19` 媒体保存功能。桌面安装包为 `C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.20.zip`。
+- 已知风险：自动测试和线上资产已闭环，但仍需在真实 Windows Obsidian 中用触发过弹窗的同一条抖音链接做一次用户侧冒烟验证；若抖音改用 Electron 事件之外的系统调用，需要根据新日志继续补充拦截。
+- 下一步：在 Obsidian 社区插件里检查更新到 `1.3.20`，用原问题链接同步一次，确认不再弹 Microsoft Store 且转写与可选原始媒体保存继续正常。
+
+### 2026-07-14 - 优化首页 Pro 优惠提醒卡片
+
+- 目标：解决首页 Pro 到期/续费提醒文字发白、位置突兀的问题，并把提醒放到插件更新公告下方。
+- 影响范围：小程序首页 UI、首页回归测试；不修改优惠资格、价格、支付、Pro 权限或云端数据。
+- 根因：通用 `.notice-bar` 按钮重置样式位于文件后部，把提醒卡原有深色背景覆盖为透明，但白色文字仍然保留，形成低对比度显示。
+- 修改：固定插件更新公告在上、Pro 优惠提醒在下；使用首页专属高优先级样式，将提醒改为暖白底、金色边框、深色正文和深绿续费按钮。
+- 验证：先增加布局顺序和关键视觉样式断言，确认旧实现按预期失败；修复后 `node tests/home-ui.test.js`、`node tests/pro-offer-notice.test.js`、`node --check miniprogram/pages/index/index.js` 和相关文件 `git diff --check` 通过。
+- 线上动作：已上传微信小程序开发版 `1.3.25`，描述为“优化Pro优惠提醒卡片展示”；尚未提交审核或发布正式版。
+- 下一步：在微信开发者工具和真机检查窄屏下两张公告卡的间距、文字换行和按钮可读性，通过后再提交正式版审核。
+
+### 2026-07-14 - 拦截抖音解析时的外部应用协议弹窗
+
+- 目标：修复插件后台解析抖音链接时触发 `bytedance://`，导致 Windows 提示前往 Microsoft Store 查找应用的问题。
+- 影响范围：插件 / 测试 / 文档。
+- 修改文件：隔离工作区 `.worktrees/douyin-external-protocol/` 中的根目录与 `obsidian-plugin/wechat-inbox-sync/` 发布资产、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`；主项目仅更新本工作日志。
+- 线上动作：无；尚未推送 GitHub 或发布插件市场版本。候选分支 `codex/fix-douyin-external-protocol` 已提交为 `38d854f`，并生成桌面候选包 `wechat-inbox-sync-1.3.19-rc.zip`。
+- 数据变更：无。
+- 验证：在远端最新 `1.3.18` 基线上先运行测试确认协议接线断言失败，再实现修复；随后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、两份 `main.js` 语法检查、发布资产一致性、相关文件 `git diff --check` 通过。候选 zip 包含必需资产，内置 `manifest.json` 为 `1.3.19`。
+- 结果：`1.3.19` 候选版的抖音隐藏解析窗口会在网络请求、页面跳转和新窗口三个入口拦截 `bytedance://`、`snssdk...://` 等外部应用协议；`http/https/blob/data/about` 仍正常放行，不影响网页和媒体抓取。
+- 已知风险：现有市场版本不会自动获得该行为；仍需推送默认分支、创建 `1.3.19` GitHub Release，并用真实 Windows 环境的抖音链接验证系统弹窗不再出现。
+- 下一步：选择保留候选分支、推送并创建 PR，或执行正式 `1.3.19` 发布；正式发布后运行市场发布检查脚本验证默认分支、tag、Release 资产和 raw manifest。
+
+### 2026-07-14 - Clarify post-expiry pricing and one-time recovery copy
+
+- Goal: remove ambiguity from the new Pro offer notices without changing any pricing or eligibility behavior.
+- Copy: active trial/Pro notices now say `到期后开通/续费会员恢复原价`; the recovery modal, homepage entry, expired membership card, and Pro pricing tip state that each user has only one recovery-offer opportunity.
+- Verification: notice, homepage UI, pricing wiring, and payment tests passed; Mini Program utility and Pro page syntax checks plus `git diff --check` passed.
+- Deployment: uploaded Mini Program development version `1.3.24` with description `优化Pro到期与回归优惠说明`; formal review/release remains pending true-device validation.
+
+### 2026-07-14 - Add visible Pro renewal and 48-hour return-offer notices
+
+- Goal: make active Pro/trial users and eligible expired users clearly aware of their current renewal pricing without introducing coupon state or changing payment eligibility.
+- Mini Program behavior: active Pro/trial users in the final 30 days receive one modal per `expiresAt` explaining 68/108 renewal pricing and 78/118 post-expiry pricing; eligible expired users receive one modal per server recovery record with its exact Beijing-time expiry. Dismissing either modal leaves the existing homepage countdown entry visible.
+- Safety: local storage only records that a modal was seen. Recovery eligibility and its fixed 48-hour window continue to come from `quickstartFunctions`; refreshing or changing the device clock cannot extend it. The modal waits behind the plugin update announcement instead of stacking over it.
+- Files: added `miniprogram/utils/pro-offer-notice.js` and `tests/pro-offer-notice.test.js`; integrated the pure notice state and modal queue in `miniprogram/pages/index/index.js`; updated the homepage source-contract test and product decision documentation.
+- Verification: the new notice test first failed because the module did not exist, then passed after implementation. Fifteen focused pricing, payment, reminder, homepage, binding/sync, infrastructure, and regression tests passed, along with syntax checks for the new utility, homepage, Pro page, and main cloud function. `git diff --check` passed.
+- Deployment: uploaded Mini Program development version `1.3.23` with description `Pro续费与48小时回归优惠提醒`. No cloud-function deployment or user-data migration was needed for this UI-only change; formal review/release remains pending true-device validation.
+- Remaining validation: true-device check one active trial, one paid Pro inside the final 30 days, and one eligible expired account; confirm each modal appears once, “稍后再说” preserves the homepage entry, and “立即续费” opens the Pro page.
+
+### 2026-07-14 - Simplify Pro renewal pricing and preserve the one-time return offer
+
+- 目标：停止优惠券方案，统一为服务端自动选价，并把用户已发布的年卡原价从 79 元同步为 78 元。
+- 影响范围：小程序 Pro 页面、`quickstartFunctions`、`syncApi`、支付与价格回归测试、订阅消息文案、产品决策文档。
+- 修改文件：两份 `trial-pricing-core.js`、两份 `payment-core.js`、`miniprogram/pages/pro/index.js`、`pro-expiry-subscribe-core.js` 及对应测试和决策文档。
+- 行为：月卡 19.9 元；免费/过期用户年卡 78 元、两年卡 118 元；有效 Pro（含体验与正式会员）自动使用 68/108；不增加优惠券领取或核销状态。
+- 48 小时回归：历史过期用户第一次在过期后查询权益时，服务端为该 OpenID 创建唯一回归记录，并从创建时刻固定计算 48 小时；刷新或再次进入不会延长，回归价支付成功后标记为已使用。
+- 数据变更：无。没有创建优惠券集合，也没有修改现有权益、订单或兑换码数据。
+- 线上动作：已用腾讯云 CLI 更新长环境 `quickstartFunctions` 与 `syncApi`；已用微信开发者工具 CLI 更新短业务环境同名两函数；已上传小程序开发版 `1.3.22`，尚未提交审核或发布正式版。
+- 验证：价格、支付、UI、订阅消息的聚焦测试先对旧 79 元实现产生预期失败，修改后通过；`trial-pricing-core`、`trial-pricing-wiring`、`payment-core`、支付发货锁与接线、订阅提醒、首页 UI、绑定/同步、会员展示、`syncApi`、基础设施双环境与回归契约共 14 个测试通过，7 个相关 JavaScript 文件语法检查通过。
+- 已知风险：微信后台 `pro_year` 道具必须确实已发布为 78 元，否则会因客户端/服务端签名金额与道具价格不一致导致支付失败。
+- 线上回读：短环境和长环境下载后的 `trial-pricing-core.js` 均包含 7800/6800/10800 且不含 7900；短环境两份 `payment-core.js` 包含 7800 且不含 7900。
+- 下一步：在开发版真机分别验证免费/过期、有效体验、有效正式 Pro 和 48 小时回归用户；确认显示价格与订单金额、道具 ID 一致后再提交正式版审核。
+
+### 2026-07-14 - 确认 Pro 续费价格采用简化方案
+
+- 目标：停止建设优惠券状态机，恢复按有效 Pro 状态自动选择续费价的简单方案。
+- 最终规则：月卡 19.9 元；年卡原价 78 元、Pro 有效期内 68 元；两年卡原价 118 元、Pro 有效期内 108 元。体验期属于有效 Pro，过期后恢复原价。
+- 兼容：保留现有一次性历史用户回归优惠和支付价格保护；不新增优惠券集合、领券 UI、券核销或优惠券提醒。
+- 文档：新增 `docs/superpowers/specs/2026-07-14-pro-renewal-pricing-simplification-design.md`，并明确其取代同日优惠券设计。
+- 线上动作：无。本次仅完成设计存档，尚未修改、部署或发布运行代码。
+- 下一步：复核设计后编写实施计划，再修改云函数、小程序和测试。
+
+### 2026-07-14 - Windows OCR 自动修复 Visual C++ 运行库
+
+- 目标：解决 OCR 依赖已安装但 `rapidocr_onnxruntime` 导入验证失败时只能返回笼统错误、用户需要手动排查系统运行库的问题。
+- 影响范围：Windows OCR 安装器、插件发布包回归测试、腾讯云静态托管安装器；不修改 ASR、macOS、小程序、云函数或用户数据。
+- 根因证据：用户诊断显示 Python 3.12 和 14 个 OCR 包均已安装，失败发生在原生模块导入阶段；当前安装器吞掉了具体导入模块和 traceback。ONNX Runtime Windows 构建依赖 Microsoft Visual C++ Runtime。
+- 修改：Windows 安装器按 `numpy`、`cv2`、`onnxruntime`、`rapidocr_onnxruntime` 分阶段验证并记录真实错误；仅当错误命中 DLL/VC++ 特征时，从微软官方地址下载 x64 Redistributable，校验 Microsoft Authenticode 签名后通过 UAC 安装一次，并自动重试导入。取消 UAC、签名异常、安装失败或需要重启都会返回明确原因。
+- 线上动作：已上传 `install-local-ocr.ps1` 到长环境静态托管 `local-ocr/common/install-local-ocr.ps1`；公网 CDN 回读 SHA-256 与本地一致。插件 `1.3.17` 会动态下载该安装器，因此本次无需发布插件市场版本。
+- 验证：新增断言先失败后通过；`node tests/plugin-marketplace-package.test.js`、PowerShell AST 语法检查通过；微软下载文件签名验证为 `Microsoft Corporation`；独立临时目录完整安装 OCR 成功，四个 Python 模块逐级导入成功。
+- 已知风险：真正缺少运行库的电脑会出现一次 Windows UAC 确认，系统安全策略拒绝提权时无法自动安装；若导入失败并非 DLL/VC++ 原因，安装器不会误装运行库，而会在诊断中保留具体失败模块。
+- 下一步：让该 Windows 用户重新点击安装/修复；同时重新绑定其已显示 `unbound` 的小程序绑定码。若仍失败，新的诊断会直接给出 `cv2` 或 `onnxruntime` 的底层错误。
+
+### 2026-07-14 - Create a Feishu operations-reporting copy
+
+- Goal: preserve the owner's current manual operations spreadsheet while creating a separate copy for reporting automation and future AI-assisted operations analysis.
+- Online action: created `Obsidian 内容同步助手｜运营数据日报（副本）` at `https://my.feishu.cn/wiki/XvRDwXfSDiTJU4kVAMXcdEjgnfc` without modifying the original spreadsheet.
+- Data: the copy inherited the original historical rows and values. Its workbook now contains `每日经营日报`, `付费订单明细`, `内容流量明细`, and `周运营建议` worksheets.
+- Verification: Feishu reported `Saved to cloud`; the copied daily sheet was reopened and visually verified to contain the historical traffic, user, trial, payment, conversion-rate, and revenue values.
+- Remaining work: the three new detail/advice sheets are structural placeholders. Automatic order enrichment, daily aggregation, Feishu API writes, timers, and the weekly analysis Agent are not connected yet.
+
+### 2026-07-14 - Switch Pro trial expiry reminders to the detailed member-expiry template
+
+- Goal: make the subscription message explain both why the user should renew and how pricing changes after the trial expires.
+- New template: `vy3I06dFZ_b4v_7YalDOdaygi3A2uJ6lyixQt9ttHs0` with `thing1` 会员权益, `time3` 到期时间, `thing5` 温馨提示, and `thing2` 会员类型.
+- Message fields: 会员权益=`到期前优惠：年68元，两年108元`; 到期时间=the entitlement's real Beijing-time expiry; 温馨提示=`到期后原价：年79元，两年118元`; 会员类型=`7天Pro体验会员`.
+- Compatibility: new trial claims request authorization for the new template. Existing accepted records keep their stored old template ID and continue using the old field mapping, so historical authorizations are not invalidated by the migration.
+- Online actions: redeployed `quickstartFunctions`, downloaded the deployed source and verified both template mappings; uploaded Mini Program development version `1.3.21` with description `Pro体验到期提醒模板升级`.
+- Verification: the focused subscription-message test failed against the old mapping, then passed after implementation. `node tests/pro-expiry-subscribe-core.test.js`, `node tests/home-ui.test.js`, `node tests/expiry-reminder-preview-core.test.js`, relevant syntax checks, and `git diff --check` passed.
+- Remaining validation: use a fresh test account in development build `1.3.21`, claim the 7-day trial and allow the native subscription prompt. The real reminder remains scheduled for the final 25 hours of the trial.
+
+### 2026-07-14 - Clarify trial-expiry renewal pricing in the subscription message
+
+- Goal: make the trial-expiry subscription message clearly distinguish the renewal price before expiry from the standard price after expiry.
+- Changed: the approved template's `thing2` value is now `到期将至：68/108；过期79/118`; it keeps `time3` for the trial start time and `time4` for the exact expiry time. The message opens the Pro page, where 68/108 map to the annual/two-year cards and 79/118 map to the corresponding standard prices.
+- Constraint: the WeChat `thing` keyword is short, so the complete wording with all units does not fit safely in that one field. The compact text preserves all four price points and avoids a rejected subscription-message request.
+- Online action: redeployed `quickstartFunctions` and downloaded the deployed source to verify `thing2`, `time3`, and `time4` are present with the new value.
+- Verification: `node tests/pro-expiry-subscribe-core.test.js`, `node --check cloudfunctions/quickstartFunctions/pro-expiry-subscribe-core.js`, and `git diff --check` passed.
+- Result: users who granted the subscription-message authorization receive the expiry time plus the before/after renewal price distinction, then can tap through to the full Pro pricing page.
+
+### 2026-07-14 - Fix owner expiry-reminder preview state compatibility
+
+- Goal: make the owner-only homepage reminder render for the existing active entitlement whose real expiry is in 2038.
+- Root cause: the active entitlement's redemption code (`OBPROT93C6`) matches the whitelist and the runtime uses the correct short business-data environment, but the preview helper rejected legacy entitlement documents when their `status` field was absent. The main entitlement state builder correctly treats that same legacy shape as active, so the two checks were inconsistent.
+- Changed: `expiry-reminder-preview-core.js` now treats a missing status as active while still rejecting an explicit non-active status. Added a regression test for the legacy document shape.
+- Online action: redeployed `quickstartFunctions` and downloaded the deployed source to verify the corrected condition.
+- Verification: `node tests/expiry-reminder-preview-core.test.js`, `node tests/pro-expiry-subscribe-core.test.js`, `node tests/home-ui.test.js`, syntax checks, and `git diff --check` passed.
+- Result: on the next homepage entitlement refresh, the owner sees the display-only 29-day renewal reminder. Actual expiry, payment, and Pro permission data are unchanged.
+
+### 2026-07-14 - Repair owner expiry-reminder preview data
+
+- Goal: restore the owner-only homepage expiry-reminder visual preview without changing the real Pro entitlement expiry.
+- Root cause: the deployed code and Mini Program already supported `displayExpiresAt`, but no active matching document existed in the short business-data environment's `entitlement_reminder_test_whitelist` collection. The earlier preview write had not reached the runtime data store.
+- Online action: invoked `adminUpsertExpiryReminderPreviewWhitelist` through `quickstartFunctions` and created an active record for the owner's current redemption code with `previewExpiresAt` set to `2026-08-12T12:00:00.000Z`.
+- Result: the next entitlement refresh returns the display-only expiry for the owner, so the homepage shows the under-30-days renewal reminder. The real `expiresAt`, access control, payment pricing, and refund state remain unchanged.
+- Verification: confirmed the deployed function contains the whitelist lookup and return field; the administrator call returned a successful created record; `node tests/expiry-reminder-preview-core.test.js` and `node tests/home-ui.test.js` passed.
+- Cleanup: set this whitelist record to `disabled` through the same admin function after the visual test is complete.
+
+### 2026-07-14 10:30 - Update the plugin Feishu tutorial link
+
+- Goal: replace the plugin's general Feishu-hosted tutorial link with the owner-provided wiki URL.
+- Impact: Obsidian plugin release metadata and settings-page tutorial button only; Mini Program, cloud functions, payment, binding, and Feishu OAuth behavior are unchanged.
+- Changed files: `obsidian-plugin/wechat-inbox-sync/main.js`, both plugin manifest/version mirrors, and plugin regression tests. The release source is the plugin subdirectory.
+- Online actions: pushed `main` commit `0aaacae`, created tag `1.3.17`, and published GitHub Release `1.3.17`.
+- Data changes: none.
+- Verification: first changed `tests/plugin-main-ai.test.js` and observed its expected failure against the old URL; then ran `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, `node --check obsidian-plugin/wechat-inbox-sync/main.js`, `git diff --check`, and `check_obsidian_release.ps1` for `mingjuner123-spec/wechat-inbox-sync@1.3.17`. All passed; the release contains `main.js`, `manifest.json`, `styles.css`, `versions.json`, and the ZIP, whose embedded manifest is `1.3.17`.
+- Result: the plugin's general tutorial button now opens `Lm5kw8QXdiQE96kaDUYcnIsVnAd`; the separate Feishu official-API connection tutorial link remains unchanged.
+- Known risk: the Community Plugins directory may take time to scan the new release, but existing installed users obtain updates from the GitHub release.
+- Next step: install or update to `1.3.17` and verify the tutorial button opens the new page.
+
+### 2026-07-14 - Pro 7-day trial expiry subscription reminder
+
+- Goal: request a user-authorized Mini Program subscription message while a user claims the 7-day Pro trial, then send exactly one reminder shortly before the trial expires.
+- Changed files: `miniprogram/pages/index/index.js`, `miniprogram/pages/pro/index.js`, `miniprogram/services/inbox-service.js`, `miniprogram/utils/pro-expiry-subscription.js`, `cloudfunctions/quickstartFunctions/index.js`, `cloudfunctions/quickstartFunctions/pro-expiry-subscribe-core.js`, the function `config.json`, `cloudbaserc.json`, focused tests, and `docs/DECISIONS.md`.
+- Behavior: the native WeChat authorization request is invoked only from the direct claim tap. Rejecting, closing, or not supporting the request does not block trial activation. An accepted decision is stored in `pro_expiry_subscriptions`; a server timer runs every 30 minutes and sends once during the final 25 hours of an active trial. Paid, refunded, expired, or already-notified accounts are skipped. Conditional status updates prevent duplicate sends and allow at most three failed delivery attempts.
+- Template migration: new claims now use the detailed member-expiry template recorded above. Existing accepted records from the original `账户余额提醒` template retain their stored template ID and continue using its `thing2` / `time3` / `time4` mapping. Values use Beijing time and the card opens `pages/pro/index` when tapped.
+- Online actions: uploaded the Mini Program development version `1.3.20` (`Pro体验到期订阅提醒`); uploaded `quickstartFunctions` code using `tcb fn code update`; created trigger `pro-trial-expiry-reminder-every-30-minutes` with cron `0 */30 * * * * *`. The original combined `tcb fn deploy` command failed in the CLI after starting deployment, so code and trigger were deployed and verified separately. On 2026-07-14 the function was deployed again after adding the complete three-field payload. The deployed function was downloaded again and confirmed to include the handler, `subscribeMessage.send` permission configuration, all three template fields, and timer routing.
+- Verification: `node tests/pro-expiry-subscribe-core.test.js`, `node tests/home-ui.test.js`, JavaScript syntax checks for cloud function and Mini Program files, `git diff --check`, successful code upload, downloaded deployed source verification, and trigger detail verification all passed.
+- Remaining validation: use a separate test account in the `1.3.20` development build, claim the trial, tap Allow on the native prompt, then confirm the `pro_expiry_subscriptions` record appears. The real delivery is intentionally scheduled for the final day of the 7-day trial; no production user should be force-expired merely to test it.
+
+### 2026-07-14 - Owner-only expiry-reminder preview whitelist
+
+- Goal: allow a controlled preview of the homepage reminder for an active Pro account without changing its real entitlement expiry, purchase price, refund state, or access rights.
+- Changed files: `cloudfunctions/quickstartFunctions/index.js`, `cloudfunctions/quickstartFunctions/expiry-reminder-preview-core.js`, `miniprogram/pages/index/index.js`, `tests/expiry-reminder-preview-core.test.js`, and `tests/home-ui.test.js`.
+- Online actions: deployed `quickstartFunctions` to the long function environment, which continues to use the short business-data environment; created one owner-only record in `entitlement_reminder_test_whitelist` with a display expiry about 29.5 days ahead; uploaded Mini Program development version `1.3.19` (not submitted or released).
+- Behavior: only an active entitlement whose current redemption code matches an active server-side whitelist record receives `displayExpiresAt`. The client uses that field only for the homepage reminder countdown; `expiresAt` and all server-side Pro/payment decisions remain unchanged.
+- Verification: `node tests/expiry-reminder-preview-core.test.js`, `node tests/home-ui.test.js`, syntax checks for the edited JS files, `git diff --check`, function deployment success, and successful administrator creation of the preview record.
+- Next step: test the `1.3.19` development build with the owner account. Disable the whitelist record through `adminUpsertExpiryReminderPreviewWhitelist` with `status: disabled` when the visual check is complete.
+
+### 2026-07-14 - Remove the stale announcement summary from the homepage card
+
+- Goal: remove the static “recent update” summary from the homepage announcement card so stale pricing or feature copy is not shown alongside the version metadata.
+- Changed files: `miniprogram/pages/index/index.wxml`, `tests/home-ui.test.js`.
+- Online actions: none. A Mini Program upload and release is required before phones reflect this layout.
+- Verification: `node tests/home-ui.test.js`, `node --check miniprogram/pages/index/index.js`, and `git diff --check` passed.
+- Result: the homepage card now shows only the plugin version, update time, and “view details”; the detailed update sheet remains available.
+
+### 2026-07-14 - Show renewal reminder for every Pro account expiring within 30 days
+
+- Goal: extend the homepage renewal reminder from trial users only to every active Pro user whose entitlement expires in less than 30 days.
+- Changed files: `miniprogram/pages/index/index.js`, `tests/home-ui.test.js`.
+- Online actions: none. This requires a Mini Program code upload and release before it reaches phones.
+- Verification: `node tests/home-ui.test.js`, `node --check miniprogram/pages/index/index.js`, and `git diff --check` passed.
+- Result: trial users retain trial-specific wording; formal Pro users see their remaining validity time and the same 68-yuan annual / 108-yuan two-year renewal reminder. Accounts with 30 days or more remaining do not see this card.
+- Risk: this is a display reminder only; payment offers continue to be selected by the server.
+
+### 2026-07-14 - Trial countdown, one-time return pricing, and payment price protection
+
+- Goal: show active trial users a personal renewal countdown, give previously expired users one 48-hour return-price window, and preserve a discounted pending payment price for 30 minutes.
+- Impact: Mini Program / quickstartFunctions / syncApi shared payment core / tests / documentation.
+- Changed files: `miniprogram/pages/index/*`, `miniprogram/pages/pro/*`, `cloudfunctions/quickstartFunctions/index.js`, both `trial-pricing-core.js` and `payment-core.js` copies, public config defaults, and focused tests.
+- Online actions: none. No Mini Program upload, cloud-function deployment, payment-item change, or production data change was performed.
+- Data changes: none during development. After deployment, `trial_expiry_recovery_offers` is created lazily and stores only each eligible account's single return-offer timestamps and status.
+- Verification: `node tests/home-ui.test.js`, `node tests/public-config-core.test.js`, `node tests/trial-pricing-core.test.js`, `node tests/trial-pricing-wiring.test.js`, `node tests/payment-core.test.js`, `node tests/sync-api-core.test.js`, `node tests/inbox-service.test.js`, `node tests/admin-backend.test.js`, relevant `node --check` commands, and `git diff --check` all passed.
+- Result: active trials display an in-app countdown and an urgent final-day message; expired trial/historical Pro users receive one durable 48-hour 68/108 return offer on their next status request; paid/expired/refunded states cannot repeatedly create the offer; pending discounted orders preserve the original server-selected price for 30 minutes.
+- Known risks: WeChat subscription-message push is not enabled because no approved template ID/field mapping is configured; the current expiry reminder is the in-app countdown. Production behavior requires deployment to the short business-data environment and Mini Program upload/release.
+- Next step: deploy `quickstartFunctions` to the short business environment, upload the Mini Program code, then test an active trial, a historical expired account, an expired return offer, and a retry within/after the 30-minute payment-protection window.
+
+### 2026-07-14 - 修复插件市场描述自动校验
+
+- 目标：恢复 `wechat-inbox-sync` 在 Obsidian 社区目录中的可见性；此前 `1.3.15` 因描述包含 “Obsidian” 且未以市场接受的英文标点结尾，自动检查失败并导致条目下架。
+- 改动：发布 `1.3.16`，将插件市场描述改为中文的“本地知识库”表述，以英文句号收尾；同步根目录镜像、插件发布源、版本映射和 README；新增回归断言，禁止描述再出现 “Obsidian”，并要求以 `.`, `!` 或 `?` 结尾。
+- 部署：已推送 `main`（提交 `7e13896`）并创建 `1.3.16` 标签；GitHub Actions 已生成 [Release 1.3.16](https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.16)，含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 ZIP。
+- 验证：红灯阶段 `node tests/plugin-marketplace-package.test.js` 因旧版本 `1.3.15` 失败；改动后同测试、`node tests/plugin-main-ai.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 和 `git diff --check` 均通过。发布检查脚本确认默认分支、Release 资产和本地 ZIP 内的 manifest 均为 `1.3.16`。
+- 风险与下一步：本次只解决阻塞性 manifest 描述错误。官方社区注册表当前尚未镜像回该条目，需等待社区后台完成新版本自动检查并恢复列出；“额外不支持文件”和 artifact attestation 属于建议项，不阻止列出。文件系统、Shell、剪贴板权限提示为功能审核提示，需另行评估，不在本次改动范围内。
+
+### 2026-07-13 - Keep renewal offer badges beside their plan names
+
+- Goal: keep the "限时特惠" label for both annual and two-year active-Pro renewal plans on the same row as the plan name.
+- Changed: the payment-plan heading now does not wrap; the plan title and badge do not shrink, while the plan content takes the remaining width.
+- Impact: Mini Program Pro purchase-card styling only. Payment item IDs, amounts, entitlement checks, and payment flow are unchanged.
+- Verification: `node tests/home-ui.test.js`, `node --check miniprogram/pages/pro/index.js`, and targeted `git diff --check` passed.
+- Deployment: Mini Program development version `1.3.18` ("统一 Pro 续费标签排版", 299180 bytes) was uploaded. It still requires formal review and release before phone users see it.
+- Risk: on extremely narrow layouts the title and badge intentionally take priority over a wrapped badge; price rendering remains in its own fixed-width group.
+
+### 2026-07-13 - Active-Pro renewal pricing: 68/year and 108/two-year
+
+- Goal: active Pro users, including active trial users, see 68 yuan/year and 108 yuan/two-year. Expired/free users see 79 yuan/year and 118 yuan/two-year. The monthly plan remains 19.9 yuan for everyone.
+- Changed: server-side offer resolution, payment-order pricing-kind validation, Pro page price mapping, and targeted regression tests.
+- UI: active Pro sees `79/年` struck through before `68/年`, and `118/两年` struck through before `108/两年`. Both are labelled as limited-time offers, and the page explicitly states that prices return to 79 yuan/year and 118 yuan/two-year after Pro expires. Expired/free users see only their actual prices.
+- Home announcement: the compact notice reads: "新用户可领 7 天 Pro 体验。体验期内开通：年卡 68 元/年、两年卡 108 元/两年；到期恢复 79 元/年、118 元/两年。" Its announcement version is advanced to `2026-07-13-pro-trial-price-copy-v2` so this copy is shown again after the mini-program update.
+- Payment item mapping: `pro_month` is 19.9 yuan; expired/free users use `pro_year` (79 yuan) and `Pro_2years` (118 yuan); active Pro users use `Pro_year_group` (68 yuan) and a published 108-yuan `Pro_2years_group` item. The two active-Pro item IDs are built-in defaults and may be overridden only with `VIRTUAL_PAY_ACTIVE_PRO_YEAR_PRODUCT_ID` and `VIRTUAL_PAY_ACTIVE_PRO_TWO_YEAR_PRODUCT_ID`.
+- Deployment: the four virtual-payment items are reported published, including the 108-yuan `Pro_2years_group`. `quickstartFunctions` and `syncApi` were deployed to the long function environment on 2026-07-13 and their runtime `WECHAT_DATA_ENV` was verified as the short business environment. Mini Program development version `1.3.17` ("精简 Pro 价格公告", 299085 bytes) was uploaded; it has not been submitted for review or formally released.
+- Verification: targeted pricing, payment, home UI, infrastructure, syntax, and whitespace checks passed locally. Both deployed function sources were downloaded after deployment and verified to contain the 10800-fen active two-year offer and `Pro_2years_group` mapping.
+- Risk: the development upload does not change the production Mini Program. Submit and release `1.3.17`, then verify one active-Pro account sees 79/118 struck through before 68/108 and one expired/free account sees only 79/118. The mini program must not be relied on to force the payment price locally; the server remains the payment-price authority.
+
+### 2026-07-13 - 插件市场首屏中文承诺
+
+- 目标：将 Obsidian 插件市场首屏描述替换为已确认的中文承诺，明确公众号、飞书、小红书、抖音、B站、小宇宙、网页链接、PDF、MP3、MP4、文件与速记的收集范围。
+- 影响范围：Obsidian 插件发布元数据、README、发布包测试与文档；不涉及小程序、云函数、同步行为、权益或支付。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/manifest.json`、根目录 `manifest.json` 市场镜像、两份 `versions.json`、`obsidian-plugin/wechat-inbox-sync/README.md`、`tests/plugin-marketplace-package.test.js`、文案规格与实施计划。
+- 线上动作：已推送默认分支 `main`，创建标签 `1.3.15` 并由 GitHub Actions 生成 [Release 1.3.15](https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.15)。Obsidian 社区目录尚在缓存 `1.3.14`，需等待其抓取刷新后才会显示中文。
+- 数据变更：无。
+- 验证：先运行 `node tests/plugin-marketplace-package.test.js`，确认新文案断言按预期失败；更新后重新运行 `node tests/plugin-marketplace-package.test.js`、`node tests/plugin-main-ai.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 与 `git diff --check`，均以退出码 0 通过。GitHub Release 列出 7 个资源；从 Release 实际下载的 `manifest.json`、`versions.json` 和 ZIP 均验证为 `1.3.15`，raw 默认分支 manifest 已显示中文文案。
+- 结果：已发布 `1.3.15`；插件发布源、根目录市场镜像、Release 资产和 README 使用同一中文价值承诺，发布包测试会防止日后漂移。
+- 已知风险：公开页面内容受登录限制或页面结构变动影响，文案不保证私密或登录后内容一定能完整解析。
+- 下一步：等待并确认 Obsidian 社区目录刷新到 `1.3.15`；刷新后，搜索和详情页将显示中文介绍。
+
+### 2026-07-13 - Hide group-buy offer UI without removing its backend
+
+- Goal: temporarily hide the group-buy discount entry and popup from the Pro page while retaining existing campaign, code, order, and historical payment behavior.
+- Impact: Mini Program Pro page / home UI regression test / work log.
+- Changed files: `miniprogram/pages/pro/index.js`, `miniprogram/pages/pro/index.wxml`, and `tests/home-ui.test.js`.
+- Online actions: none. A Mini Program code upload and release is required before phone users stop seeing the entry.
+- Data changes: none.
+- Verification: added a failing regression assertion for a disabled group-buy UI gate, then ran `node tests/home-ui.test.js`, `node --check miniprogram/pages/pro/index.js`, and targeted `git diff --check`.
+- Result: the group-buy UI gate defaults to disabled; campaign loading, the entry, and the popup all require that gate. Backend validation and already-created group-buy records remain untouched.
+- Known risk: a developer could re-enable the explicit UI flag in a future code change; it remains intentionally code-controlled rather than tied to the backend campaign state.
+- Next: include this Mini Program change with the separately approved trial-pricing release, then upload and verify the Pro page on a real device.
+
+### 2026-07-13 - Route AI metadata through CloudBase Hunyuan only
+
+- Goal: generate Pro descriptions and keywords for text, converted documents, webpages, and audio/video through the shared Hunyuan quota, without any local DeepSeek key.
+- Impact: Obsidian plugin / `syncApi` / plugin and sync API regression tests / decision log.
+- Changed files: `obsidian-plugin/wechat-inbox-sync/main.js`, `obsidian-plugin/wechat-inbox-sync/plugin-core.js`, `cloudfunctions/syncApi/index.js`, `tests/plugin-main-ai.test.js`, `tests/plugin-core.test.js`, `tests/hardening.test.js`, and `docs/DECISIONS.md`.
+- Online actions: none. This requires a plugin release and a `syncApi` deployment together before users receive the new behavior.
+- Data changes: none. No API keys or user records were changed.
+- Verification: wrote regression tests first and observed failures for plain-text input and the active DeepSeek fallback; then ran `node tests/plugin-main-ai.test.js`, `node tests/plugin-core.test.js`, `node tests/hardening.test.js`, `node tests/sync-api-core.test.js`, `node tests/plugin-marketplace-package.test.js`, and syntax checks for the modified plugin and cloud function.
+- Result: AI input now includes `record.content` and `metadata.convertedMarkdown`; all six record types are covered by regression assertions. Metadata failures are saved as short redacted Markdown comments when non-blocking. The active cloud route uses CloudBase Hunyuan only, and the plugin removes legacy local DeepSeek settings on load.
+- Known risk: any existing DeepSeek variables in the CloudBase console are now unused by this metadata route, but should be removed separately only after confirming they are not used by another cloud function.
+- Next: deploy `syncApi`, release the plugin, then validate one Pro text note and one Pro PDF/DOCX note on a real account.
+
+### 2026-07-13 - Refund policy anchored to the original trial window
+
+- Goal: make Pro refund eligibility follow the user's first 7-day trial period, rather than restarting a new 7-day window from payment time.
+- Impact: `quickstartFunctions` / `syncApi` / admin console / payment tests / decision log.
+- Changed files: `cloudfunctions/quickstartFunctions/index.js`, `cloudfunctions/quickstartFunctions/payment-core.js`, `cloudfunctions/syncApi/admin-handler.js`, `cloudfunctions/syncApi/payment-core.js`, `admin-console/app.js`, related tests, and `docs/DECISIONS.md`.
+- Online actions: none. The matching `quickstartFunctions` and `syncApi` sources still need to be uploaded together; the admin-console static deployment also needs its normal publish step before the confirmation wording is visible.
+- Data changes: none.
+- Verification: added failing tests first for trial-window eligibility and trial-start lookup, then ran `node tests/payment-core.test.js`, `node tests/admin-backend.test.js`, `node tests/admin-console.test.js`, `node tests/payment-delivery-lock.test.js`, `node tests/payment-delivery-wiring.test.js`, `node tests/support-ops-core.test.js`, JavaScript syntax checks for both payment cores, both handlers, and the admin console, plus targeted `git diff --check`.
+- Result: refunds are allowed only when payment and administrator confirmation both occur before the first trial's seven-day deadline. Historical trial start is recovered from `redeem_codes.trialOwnerOpenid`; new trial entitlements persist `trialStartedAt`. The admin action now requires an explicit confirmation that the original payment has already been refunded in WeChat before it rolls back the Pro entitlement and redemption code.
+- Known risk: this remains a business-side refund confirmation, not an automatic money refund request. An automatic provider refund must be implemented as a separate, idempotent workflow with merchant configuration and provider status reconciliation.
+- Next: upload `quickstartFunctions` and `syncApi` together, verify one in-window and one expired-trial test order in the admin console, then publish the admin static assets.
+
+### 2026-07-13 - Payment support entry in the Pro purchase card
+
+- Goal: give users a direct support route when virtual payment cannot be completed, without restoring the hidden home-page customer-service button.
+- Changes: added a small "支付碰到问题？点击咨询客服" entry below the Pro purchase controls. It uses the native Mini Program customer-service button and sends a minimal support context containing the current order number, selected plan, order status, and payment error code when present. No WeChat ID or payment credential is included.
+- Deployment: not uploaded or released. This is a `miniprogram/` change and requires a new Mini Program code upload/release before phone users see it. The Obsidian plugin is unaffected.
+- Verification: `node tests/home-ui.test.js`, `node --check miniprogram/pages/pro/index.js`, and `git diff --check` for the modified files passed.
+- Next: configure the customer-service recipient in the Mini Program backend, then upload a development build and confirm a real support message can be received from this page.
+
+### 2026-07-12 - Refund entitlement recovery for `OBTRYCRBHG`
+
+- Goal: revoke all access for a user whose payment was already refunded through the mini-program payment backend, including any retained trial/base period.
+- Data change: verified the long-environment `syncApi` was reading the short business data environment, then reconciled paid order `OBPAY20260709072835DMGY1A` through the internal refund path. The order is now `refunded`; `OBTRYCRBHG` is `disabled`; its only associated entitlement is `disabled` and expires at the reconciliation timestamp. No second payment-provider refund was initiated.
+- Verification: read back the order, redemption code, and all entitlements for the code owner. There was exactly one entitlement, and it is disabled. No other independent entitlement was present.
+- Note: direct code disable alone is insufficient for a refund because a pre-existing active entitlement can remain usable; refunds must reconcile order, entitlement, and code together.
+
+### 2026-07-12 - Release 1.3.14: reuse Xiaohongshu login state for media probing
+
+- Goal: ensure Xiaohongshu audio/video media probing is independent from comment extraction and can reuse the saved Xiaohongshu login state when it exists.
+- Changes: `renderSocialMediaUrlsWithElectron` now selects the Xiaohongshu session for Xiaohongshu URLs; all other platforms retain the existing session. Anonymous probing remains the default when the user has not logged in.
+- Release: committed `a1d4712`, pushed to `main`, tagged `1.3.14`, and verified GitHub Release assets plus the local ZIP.
+- Verification: added a regression assertion for the session selection; `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, `node --check obsidian-plugin/wechat-inbox-sync/main.js`, `git diff --check`, and the Obsidian release checker passed.
+- Remaining risk: Xiaohongshu can still withhold a real media page from anonymous visitors. Login increases retrieval success, but comments are not a prerequisite for video transcription.
+
+### 2026-07-12 - Release 1.3.13: recover Xiaohongshu videos from generic landing pages
+
+- Goal: fix macOS cases where a Xiaohongshu video returns the generic "小红书 - 你的生活兴趣社区" landing page, is saved as a graphic note, and never reaches local transcription.
+- Changes: only for that generic landing-page signature, the plugin now performs a hidden-page media probe using the Xiaohongshu session. When a media URL is found, it follows the existing audio/video transcription route; ordinary graphic notes keep their existing path. Diagnostic logging also replaces stale successful ASR text when a media download fails before transcription starts.
+- Release: committed `d290eb7`, pushed to `main`, tagged `1.3.13`, and created GitHub Release `1.3.13` with `main.js`, `manifest.json`, `styles.css`, `versions.json`, and `wechat-inbox-sync-1.3.13.zip`.
+- Verification: added regression coverage for the generic landing-page video case and pre-ASR download-failure log isolation; `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, `node --check obsidian-plugin/wechat-inbox-sync/main.js`, `git diff --check`, package inspection, and the Obsidian release checker all passed.
+- Remaining risk: a media URL can still be unavailable or reset by Xiaohongshu's CDN. That is a transport failure after classification, not a graphic/video misclassification. The new isolated diagnostic will expose it cleanly for a specific link.
+
+### 2026-07-12 - Isolate pre-ASR media download failures in diagnostics
+
+- Goal: prevent a failed media download from appending to the previous successful transcript and making diagnostic reports misleading.
+- Changes: when no transcription command has started, the plugin now replaces `transcribe-last.log` with the current failure wrapper. Failures after the native ASR command starts still retain that same run's native log.
+- Deployment: not released to the Obsidian marketplace in this task.
+- Verification: added a regression case for a prior successful transcript followed by `媒体下载超时`; `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, and `node --check obsidian-plugin/wechat-inbox-sync/main.js` passed.
+- Next: include this diagnostic-only change in the next isolated plugin release; do not publish the current dirty workspace as-is.
+
+### 2026-07-11 14:20 - Group-buy test whitelist and deployment audit
+
+- Goal: let the current account test a group-buy purchase without weakening the new-customer rule or generating affiliate records.
+- Scope: quickstartFunctions / syncApi / admin-console / tests / documentation.
+- Changes: added a code-owned `group_buy_test_whitelist`; the cloud function checks that the caller's entitlement owns the whitelisted redemption code. Qualified test purchases persist `groupBuy.testMode`, then skip attribution, commission, and partner-count updates. The admin dashboard can add, list, and disable whitelist records.
+- Online actions: attempted six incremental cloud-function uploads to the short environment, in dependency order, then one minimal retry after the user reauthenticated WeChat Developer Tools. All seven failed before upload at the WeChat Developer Tools signing request (`getCloudAPISignedHeader`, error 41002). A fresh function download verified that no whitelist module or wiring was uploaded.
+- Data changes: none. No redemption code, OpenID, or whitelist record was written to cloud data.
+- Verification: red-green tests for whitelist ownership and payment marker; `node tests/group-buy-test-whitelist-core.test.js`, `node tests/group-buy-test-whitelist-wiring.test.js`, `node tests/group-buy-core.test.js`, `node tests/payment-core.test.js`, `node tests/admin-console.test.js`, `node tests/admin-backend.test.js`, `node tests/home-ui.test.js`, `node tests/inbox-service.test.js`, `node tests/sync-api-core.test.js`; syntax checks for the modified JS files all passed.
+- Result: implementation is local and verified. Production remains unchanged because the upload signing service rejected every request.
+- Known risk: reauthentication alone did not restore the upload signature. Until an account with short-environment deployment signing permission can upload the functions, the existing account will still be rejected as a historical paid user, and the dashboard cannot add the whitelist record.
+- Next: use the short-environment owner/cloud-development administrator account to deploy from the Developer Tools file tree, or resolve the WeChat signing service error; rerun the six-file incremental deployment, download both functions to verify the new modules, then add the test redemption code in the deployed admin dashboard and perform one test purchase.
+
+### 2026-07-11 - 限时团购价与推广归因（本地实现，未部署）
+
+- 目标：保持 19.9 / 68 / 118 正价套餐可见，仅在活动期通过团购码开放 59 元年卡与 108 元两年卡，并为码所属推广员记录首单和长期佣金。
+- 修改：新增团购规则核心、活动价订单覆盖、Pro 页团购弹层、团购活动/码/佣金后台 HTTP 接口；支付成功写入归因和 7 天待确认佣金，退款作废记录。
+- 数据集合：`group_buy_campaigns`、`group_buy_codes`、`group_buy_attributions`、`group_buy_commissions`。
+- 部署：未部署。上线前必须在微信虚拟支付后台创建并发布 59 元年卡、108 元两年卡两个活动道具，再通过后台创建活动并填入对应 productId。
+- 验证：`payment-core`、`group-buy-core`、`inbox-service`、`home-ui`、`sync-api-core`、`admin-backend` 测试及相关 JS 语法检查通过。
+- 已知风险：本次仅新增后台 HTTP 管理接口，静态 `admin-console` 的可视化团购管理区尚未接入；`syncApi` 的支付通知镜像尚未写入团购账本，生产支付回调必须继续命中 `quickstartFunctions` 或补齐镜像后才能上线。
+
+### 2026-07-11 - Harden macOS ASR package installation
+- Goal: remove the remaining public-package-index dependency after fixing the managed Python download failure on macOS.
+- Changes: macOS ASR installer now uses a Tencent CDN wheelhouse first for `whisper.cpp-cli==0.0.3` and `imageio-ffmpeg==0.6.0`; Apple Silicon and Intel wheel sets were uploaded under `local-asr/wheels/`.
+- Deployment: updated `local-asr/common/install-local-asr-macos.sh` on CloudBase static hosting. No Obsidian marketplace release is required for currently installed clients to retrieve the updated remote installer.
+- Verification: Tencent CDN ARM and Intel wheelhouse indexes both resolved the exact pinned macOS wheels through pip's target-platform resolver; installer syntax and plugin package tests passed.
+- Remaining risk: first installation still needs network access for the fixed Python archive, ASR model, and wheel downloads. Each normal-path asset is now served from Tencent CDN; public sources are fallbacks only.
+
+### 2026-07-11 - 修复 macOS ASR 固定 Python 下载链
+
+- 目标：修复 Apple Silicon macOS 安装 ASR 时 uv 请求不存在的 `cpython-3.12-macos-aarch64-none`，导致整套本地组件无法完成的问题。
+- 影响范围：Obsidian 插件 macOS ASR 安装器 / 腾讯云静态托管 CDN / 测试 / 文档。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh`、`obsidian-plugin/wechat-inbox-sync/main.js`、相关插件测试、`docs/DECISIONS.md`、`docs/WORKLOG.md`。
+- 线上动作：已上传 macOS ASR 安装器到长环境静态托管 `local-asr/common/install-local-asr-macos.sh`；未发布新的 Obsidian 插件版本。
+- 数据变更：无。
+- 验证：用户诊断确认失败发生在 ASR 的 uv Python 下载阶段；确认 Apple Silicon 固定 Python 包可访问且含 `python/bin/python`；运行 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、macOS shell 语法检查均通过；CDN 回读 SHA-256 与本地脚本一致，旧插件的安装器校验仍接受该脚本。
+- 结果：macOS ASR 与 OCR 都优先直接使用腾讯云固定 Python 包；当前用户重新点击安装/修复即可获取脚本，无需等待插件市场更新。
+- 已知风险：ASR Python 包 `whisper.cpp-cli` 与 `imageio-ffmpeg` 仍需要网络安装，真实 macOS 需继续验证该阶段；Windows ASR 不依赖 Python。
+- 下一步：收集该用户新的诊断信息；若 Python 阶段通过但 ASR 包安装失败，再单独镜像 ASR Python 包，不混入 Python 下载问题。
+
+### 2026-07-11 - 修复 OCR 固定 Python 下载链
+
+- 目标：修复 Windows/macOS 本地 OCR 安装时 uv 无法从自有 CDN 解析 Python 3.12，导致 OCR 安装失败的问题。
+- 影响范围：Obsidian 插件本地 OCR 安装器 / 腾讯云静态托管 CDN / 测试 / 文档。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1`、`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh`、`obsidian-plugin/wechat-inbox-sync/main.js`、相关插件测试、`docs/DECISIONS.md`、`docs/WORKLOG.md`。
+- 线上动作：已上传 Windows 和 macOS OCR 安装器到长环境静态托管 `local-ocr/common/`；未发布新的 Obsidian 插件版本。
+- 数据变更：无。
+- 验证：复现线上 uv 0.9.14 请求 `cpython-3.12-windows-x86_64-none` 失败；验证三个 Python 运行时对象与三个 wheelhouse 均可访问；在无系统 Python 的 Windows 临时环境中，直接下载固定 Python、创建 venv、离线安装 OCR wheelhouse 并导入 `RapidOCR` 成功；运行 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、PowerShell/Bash 安装器语法检查均通过；CDN 回读的两个安装器 SHA-256 与本地一致。
+- 结果：当前插件重新点击安装/修复 OCR 时会优先走固定腾讯云 Python 包，不再依赖 uv 的镜像文件命名规则；旧插件的安装器校验仍接受新脚本，因此不必等待插件市场更新。
+- 已知风险：macOS 的完整安装需由真实 macOS 用户再验一次；本地插件发布源此前与 CDN 脚本发生过漂移，下一次插件发布必须从干净发布基线制作并包含本次脚本与 `main.js` 的新鲜度校验。
+- 下一步：收集一位 Windows 和一位 macOS 用户的最新安装诊断；确认后再走独立的插件市场发布流程。
+
+本文件记录当前项目状态和最近上下文，帮助新对话、新窗口、新 agent 快速接上工作。
+
+更新时间：2026-07-10
+
+## 当前稳定理解
+
+项目是一个多端产品：
+
+- 微信小程序负责收集内容、绑定 Obsidian、开通 Pro、广告、虚拟支付。
+- 云函数负责收集箱数据、绑定码、Pro 权益、兑换码、支付订单、飞书 OAuth、同步 API。
+- Obsidian 插件负责把云端收集内容同步到本地 vault，并执行本地转写/OCR/飞书官方 API 同步等能力。
+- CloudBase 采用双环境兼容结构：函数部署在长环境，绑定码、兑换码、Pro 和同步记录仍以短业务数据环境为准。
+- 普通插件同步暂时使用短域名；飞书 OAuth、管理后台和新代码验证使用长域名。域名、函数命名空间和数据环境不能混为一谈。
+- 域名迁移必须保留原绑定码，通过双入口兼容、静默探测和失败回退完成，不能要求所有用户重新绑定。
+
+## 最近完成的工作
+
+- 修复支付发放幂等：同一支付订单重复通知不会再次增加 Pro 有效期。
+- 增加 7 天退款业务状态与权益回滚逻辑；真实微信资金退款接口仍需单独接入。
+- 纠正 3 条历史重复加年的 Pro 权益，确认每条只有 1 笔真实支付订单。
+- 建立基础设施长期记忆和护栏：
+  - 新增 `docs/ARCHITECTURE.md`，记录短/长环境、域名和业务数据关系。
+  - 在 `AGENTS.md` 增加基础设施红线和任务结束强制回填规则。
+  - 新增 `docs/TASK_CLOSEOUT_TEMPLATE.md`。
+  - 新增 `tests/infrastructure-contract.test.js` 并接入回归 CI。
+  - 补充 `DECISIONS.md`、`RUNBOOK.md` 和 `RELEASE_CHECKLIST.md`。
+- 小程序广告改为自主接入思路：
+  - 激励广告保留。
+  - 插屏广告位：`adunit-080aa7a67f50b9de`。
+  - 原生模板广告位：`adunit-a9b616c898835639`。
+  - 原生模板广告放在收集页支持平台图标下方、最近同步上方。
+  - Pro 用户和 Pro 状态未确认时不展示广告。
+- 看广告加次数从 10 次改为 5 次：
+  - `cloudfunctions/quickstartFunctions/inbox-core.js`
+  - `cloudfunctions/syncApi/inbox-core.js`
+  - `miniprogram/pages/index/index.js`
+  - `miniprogram/pages/index/index.wxml`
+- 首页客服按钮已隐藏，客服弹窗和后端逻辑暂时保留。
+- 补充了小程序首页和会员展示相关测试。
+
+## 最近验证过的命令
+
+```powershell
+node tests/infrastructure-contract.test.js
+node tests/admin-backend.test.js
+node tests/payment-core.test.js
+node tests/inbox-core.test.js
+node tests/home-ui.test.js
+node tests/membership-display.test.js
+node --check miniprogram/pages/index/index.js
+node --check miniprogram/utils/membership-display.js
+node --check cloudfunctions/quickstartFunctions/inbox-core.js
+```
+
+## 当前已知风险
+
+- 短域名仍运行历史同步实现，长域名承载当前部署的 `syncApi`。在完成兼容迁移前，两边代码版本可能漂移。
+- 支付通知 URL 必须确认命中带有最新幂等逻辑的函数版本，不能只看“部署成功”。
+- 插件当前会把误写入的长 API 地址归一化回短稳定入口，这是恢复绑定后的兼容策略，不应被随手删除。
+- 根目录存在 `main.js`、`manifest.json`、`versions.json`，和 `obsidian-plugin/wechat-inbox-sync/` 下的插件发布文件容易混淆。
+- 工作区里存在大量未跟踪临时目录和发布包，容易干扰 Git 判断。
+- README 里有历史编码乱码，短期不要依赖它作为唯一项目说明。
+- 小程序、云函数、插件三端经常同时涉及同一业务，改动前要先判断是否需要同步部署/上传/发布。
+- CloudBase、飞书、微信支付等敏感配置不能写入仓库文档。
+
+## 下次开工优先读
+
+1. `AGENTS.md`
+2. `docs/WORKLOG.md`
+3. 涉及跨端、域名或 CloudBase 时读 `docs/ARCHITECTURE.md`
+4. `docs/RUNBOOK.md`
+5. `git status --short`
+6. 本次任务相关代码和测试
+
+## 下次可继续优化
+
+- 梳理根目录插件镜像文件和插件发布源的关系。
+- 清理 `.tmp-*`、zip 发布包、`.bak` 等未跟踪文件，但清理前先确认不需要保留。
+- 建立小程序上传、云函数部署、插件发布的统一脚本或检查脚本。
+- 为 Pro 权限、绑定码、兑换码、广告展示建立更完整的回归测试。
+- 按 `docs/ARCHITECTURE.md` 分阶段实现自有 API 前门和绑定码无感迁移，不直接替换现有短域名。
+- 给云函数增加稳定的 build ID/health 探针，部署后自动验证“请求实际命中了新版本”，而不是只相信部署成功提示。
+- 建立脱敏 smoke test：同一测试绑定码在短/长入口的绑定状态、Pro 状态和到期时间必须一致。
+- 建立数据迁移脚本目录和审计格式，涉及权益、兑换码、订单的历史数据修复不得再使用一次性临时命令。
+- 增加 staging/canary 发布路径，绑定、支付、Pro、同步等高风险改动先小流量验证。
+- 最终消除根目录插件镜像与正式插件发布目录的双源问题，由一个构建步骤生成发布资产。
+- 研究微信“小绿书/图文笔记”的链接转存能力。该类型不是公众号文章，不能直接套用公众号文章提取或公众号图片 OCR；开始实现前需要真实分享链接样本，确认链接是否公开可访问、页面数据结构和图片资源授权方式。
+
+## 最近任务记录
+
+### 2026-07-11 07:12 - 修复 Pro 管理页 `plan is not defined`
+
+- 目标：修复 Pro 管理页加载时的前端运行时错误。
+- 影响范围：管理后台静态前端 / 测试 / 文档。
+- 修改文件：`admin-console/app.js`、`tests/admin-console.test.js`、`docs/WORKLOG.md`。
+- 线上动作：无。实际运营后台发布路径仍未登记。
+- 数据变更：无。
+- 验证：先在 `tests/admin-console.test.js` 增加“不允许存在 `plan.includes`”断言，运行 `node tests/admin-console.test.js` 按预期失败并定位未声明变量；删除该错误引用后运行 `node tests/admin-console.test.js`、`node tests/admin-backend.test.js`、`node --check admin-console/app.js`、`git diff --check -- admin-console/app.js tests/admin-console.test.js` 均通过。
+- 结果：体验用户分支默认归为体验用户；付费、已到期体验和付费续费提醒分类规则不变。
+- 已知风险：需要将修复后的静态管理页发布到实际运营后台地址后，外部用户才会看到修复。
+- 下一步：确认实际运营后台静态发布路径，上传 `admin-console/` 资产并刷新验证页面。
+
+### 2026-07-11 07:05 - 重组 Pro 管理为付费、体验和续费提醒分层
+
+- 目标：删除后台“可用兑换码”列表，把 Pro 管理改为付费订单、付费 Pro、体验 Pro、已到期体验用户和临近/已到期付费用户五块，便于后续统计体验转化与付费续费。
+- 影响范围：管理后台静态前端 / 测试 / 设计与实施文档。
+- 修改文件：`admin-console/index.html`、`admin-console/app.js`、`tests/admin-console.test.js`、`docs/superpowers/specs/2026-07-11-pro-management-segmentation-design.md`、`docs/superpowers/plans/2026-07-11-pro-management-segmentation.md`、`docs/WORKLOG.md`。
+- 线上动作：无。已确认 CloudBase 静态托管的 `cloud-admin/index.html` 是腾讯云后台壳页，不是本项目的 `admin-console/` 发布资产，因此未覆盖错误目标。
+- 数据变更：无。
+- 验证：先改 `tests/admin-console.test.js`，运行 `node tests/admin-console.test.js` 观察到旧页面缺少 `paidProTable` 的预期失败；实现后运行 `node tests/admin-console.test.js`、`node tests/admin-backend.test.js`、`node --check admin-console/app.js`、`git diff --check -- admin-console/index.html admin-console/app.js tests/admin-console.test.js` 均通过。
+- 结果：付费用户定义为“存在已支付订单、已有支付关联/支付来源，或剩余有效期超过 300 天”；有效的非付费用户为体验用户；已到期列表仅放体验用户；付费用户中剩余有效期少于 30 天（含负数）进入续费提醒列表。保留生成兑换码和用户表里的兑换激活信息，删除可用兑换码列表及其筛选/操作控件。
+- 已知风险：后台实际静态页发布地址尚未在仓库或运行手册登记，不能凭 CloudBase 中的 `cloud-admin/` 壳页推断并覆盖。
+- 下一步：确认运营后台实际 URL 或静态发布路径后，只上传 `admin-console/` 对应资产；不需要再修改云函数或业务数据。
+
+### 2026-07-11 06:49 - 上传小程序开发版 1.3.13 并完成短环境支付验证
+
+- 目标：完成标准价与两年卡小程序版本上传，并在短环境支付函数更新后验证实际支付契约。
+- 影响范围：小程序 / quickstartFunctions / syncApi / 文档。
+- 修改文件：`docs/WORKLOG.md`；上传内容使用已通过验证的现有小程序改动。
+- 线上动作：已上传微信小程序开发版 `1.3.13`，描述为“Pro价格调整与两年卡”，上传包总大小 288497 字节；用户已手动部署短环境的 `quickstartFunctions` 与 `syncApi`；未提交审核、未发布。
+- 数据变更：无。
+- 验证：重新运行 `node tests/payment-core.test.js`、`node tests/payment-delivery-wiring.test.js`、`node tests/sync-api-core.test.js`、`node tests/home-ui.test.js`、`node tests/public-config-core.test.js`、`node tests/redeem-code-core.test.js`、`node tests/support-ops-core.test.js`、`node tests/admin-backend.test.js` 及四个相关 JS 的 `node --check` 均成功；微信开发者工具 CLI 上传命令返回 `upload` 成功并回读上传大小。部署后从短环境重新下载两份函数，分别以 `createPaymentOrderDocument` 断言月卡 1990 分/30 天、年卡 6800 分/365 天、两年卡 11800 分/730 天和 `Pro_2years`，两份函数均通过；两份 `payment-delivery-lock.js` 均存在。
+- 结果：开发版已可在微信后台看到，短环境的实际支付契约已更新；尚未对线上用户发布。
+- 已知风险：提交审核和正式发布仍是两个独立步骤；发布前应复核三项微信道具仍为 19.9 / 68 / 118 元。
+- 下一步：在用户确认后提交审核；审核通过后，在用户确认的最终发布动作前再次复核道具价格。
+
+### 2026-07-11 06:30 - Pro 标准价短环境部署被微信上传签名服务阻断
+
+- 目标：在用户已发布三个微信虚拟支付道具后，把月卡 19.9 元、年卡 68 元、两年卡 118 元（`Pro_2years`）部署到实际小程序调用的短业务环境，并继续上传小程序。
+- 影响范围：quickstartFunctions / syncApi / 小程序 / 文档。
+- 修改文件：`docs/WORKLOG.md`；本地支付与小程序改动沿用上一任务记录，未额外修改业务源码。
+- 线上动作：已把长环境的两份函数以线上回读基线部署为最小价格补丁；短环境部署尝试两次均失败，未上传或发布小程序。
+- 数据变更：无。
+- 验证：微信开发者工具 CLI 能读取短环境、下载两份函数并查询到函数均为 `Active`，登录状态为有效；短环境回读确认原有 `payment-delivery-lock` 仍在。最小补丁在临时线上基线上通过两份 `node --check` 和三档订单映射断言。两次短环境部署均在微信上传签名接口返回 `getCloudAPISignedHeader ... ret:41002 system error`；失败后再次回读 `quickstartFunctions/payment-core.js`，仍为 990/4990 分，说明没有半成功上线。
+- 结果：短环境当前仍是旧价格，用户看不到新版小程序，也不会遇到“新展示价但旧支付价”。
+- 已知风险：微信开发者工具的上传签名服务或其登录会话未能为部署生成签名，虽然普通登录、环境查询、函数查询和下载均正常；不能在该状态下上传/发布小程序。
+- 下一步：在微信开发者工具重新登录后，以短环境线上回读目录部署 `quickstartFunctions` 与 `syncApi`；回读确认 1990/6800/11800 分及 `Pro_2years` 后，上传小程序版本，最后由用户在微信后台确认正式发布。
+
+### 2026-07-11 06:17 - 完成本地 Pro 标准价切换，线上发布被浏览器安全检查中止
+
+- 目标：把月卡/年卡从 9.9/49.9 调整为 19.9/68，保留两年卡 118 元，并完成微信道具、云函数和小程序上线。
+- 影响范围：quickstartFunctions / syncApi / 小程序 / 测试 / 文档；线上发布尚未发生。
+- 修改文件：`cloudfunctions/quickstartFunctions/payment-core.js`、`cloudfunctions/syncApi/payment-core.js`、`tests/payment-core.test.js`、`docs/WORKLOG.md`。
+- 线上动作：无。未部署云函数，未修改或发布微信道具，未上传或发布小程序。
+- 数据变更：无。
+- 验证：先把 `tests/payment-core.test.js` 改为 1990/6800 分并运行，确认旧实现以 `990 !== 1990` 失败；修改两份支付核心后，`node tests/payment-core.test.js` 通过。随后运行 `node tests/payment-delivery-wiring.test.js`、`node tests/sync-api-core.test.js`、`node tests/home-ui.test.js`、`node tests/public-config-core.test.js`、`node tests/inbox-service.test.js`、`node tests/redeem-code-core.test.js`、`node tests/support-ops-core.test.js`、`node tests/admin-backend.test.js` 和相关 JS 的 `node --check`，全部通过。
+- 结果：本地代码三档价格为月卡 1990 分、年卡 6800 分、两年卡 11800 分；两年卡内部 planId 为 `pro_two_year`，微信 productId 为 `Pro_2years`。
+- 已知风险：工作区存在大量其他未提交改动，不能直接整目录部署；小程序实际支付依赖短环境 `quickstartFunctions`，而当前 CloudBase CLI 只列出长环境。尝试读取已登录 Edge 微信后台时，Windows 控制因无法可靠确认当前网址而被安全策略中止，因此不能宣称线上已生效。
+- 下一步：用户在 Chrome 打开并登录微信公众平台对应小程序后台，或提供可验证的目标后台网址后继续；先发布三项道具价格，再通过微信开发者工具向短环境部署最小支付补丁，上传/发布小程序，最后做线上订单金额和权益探针。
+
+### 2026-07-10 23:24 - 恢复免费飞书并发布 Obsidian 插件 1.3.12
+
+- 目标：纠正飞书官方提取被误纳入 Pro 的回归，确认现有用户兼容性，并完成插件版本管理和正式发布。
+- 影响范围：`syncApi` / Obsidian 插件 / Git / GitHub Release / 测试 / 文档。
+- 修改文件：`cloudfunctions/syncApi/sync-api-core.js`、`tests/sync-api-core.test.js`、`obsidian-plugin/wechat-inbox-sync/main.js`、插件与根目录 `manifest.json`/`versions.json`、`tests/plugin-main-ai.test.js`、相关决策和工作日志。
+- 线上动作：已重新部署 `syncApi`，回读线上代码确认飞书提取 handler 不查询 Pro；从 `origin/main` 的 1.3.11 干净基线创建隔离发布分支，提交 `89ab76e`，快进推送到 `main`，创建并推送 tag `1.3.12`，GitHub Actions 成功创建 Release。
+- 数据变更：无。只读审计 229 条权益，当前有效 81 条；有效权益中缺少到期时间 0 条、到期格式异常 0 条。
+- 验证：先把免费飞书测试改为“不得调用 `getEntitlement`”，确认当前实现返回 500；移除误加的 Pro guard 后 `node tests/sync-api-core.test.js` 通过。发布工作区运行 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 和 `git diff --check` 均通过。发布检查确认默认分支和 raw manifest 均为 1.3.12，`versions.json` 包含 1.3.10/1.3.11/1.3.12，Release tag 与资产完整，本地 zip 内 manifest/main/styles/versions 完整。
+- 结果：基础同步和飞书 OAuth/提取继续免费；Pro 校验仍只用于明确的付费云能力和官方组件下载。插件 1.3.12 已发布，包含凭证脱敏、飞书 URL 不携带凭证、以及本地组件到期校验。
+- 已知风险：本地组件及安装依赖仍有旧公网 CDN 路径，1.3.12 尚未切换到私有 manifest 下载；有能力的用户仍可复制纯本地组件，但不能因此获得服务端付费能力。
+- 下一步：观察 1.3.12 更新与飞书免费链路；完成私有组件对象和 manifest 后再发布下一版插件，旧公网路径在兼容验证完成前不下线。
+
+### 2026-07-10 23:06 - 归档生产内置兑换码并加固 Pro 服务端边界
+
+- 目标：先确认生产内置兑换码是否已有用户使用，在不改变现有权益和支付数据的前提下退役内置码；同时让付费云能力和官方组件 manifest 统一走服务端 Pro 校验，修复插件凭证泄露和到期缓存放行。
+- 影响范围：`quickstartFunctions` / `syncApi` / Obsidian 插件源码 / 生产兑换码数据 / 测试 / 文档。
+- 修改文件：`cloudfunctions/quickstartFunctions/index.js`、`cloudfunctions/quickstartFunctions/redeem-code-core.js`、`cloudfunctions/quickstartFunctions/legacy-redeem-archive-core.js`、`cloudfunctions/syncApi/index.js`、`cloudfunctions/syncApi/sync-api-core.js`、`cloudfunctions/syncApi/redeem-code-core.js`、`obsidian-plugin/wechat-inbox-sync/main.js`、相关测试、设计与实施文档。
+- 线上动作：先回读线上函数并以线上源码为基线生成最小补丁；已部署 `quickstartFunctions` 和 `syncApi`。未发布新的 Obsidian 插件版本，未迁移或删除旧公网 CDN 组件。
+- 数据变更：只读审计发现 10 条权益使用过生产内置码，其中 1 条仍有效、9 条已过期；创建 13 条 `disabled` 兑换码归档，累计关联 10 条原权益。没有删除或修改 `user_entitlements`、`payment_orders`，没有猜测同一用户的支付订单与内置码之间存在直接关系。
+- 验证：归档 dry-run 返回 13 个码、10 条权益、1 条有效权益；提交后回读为 13 个码全部 `disabled`、`redeemedCount` 合计 10，再次 dry-run 仍为 10 条权益/1 条有效权益。线上代码下载回读确认两函数均移除内置码兜底，`syncApi` 包含统一 Pro guard 和组件 manifest 路由；短/长 HTTP 入口无凭证访问均返回 401。运行 `node tests/legacy-redeem-archive.test.js`、`node tests/redeem-code-core.test.js`、`node tests/sync-api-core.test.js`、`node tests/component-manifest-repository.test.js`、`node tests/plugin-main-ai.test.js`、`node tests/admin-backend.test.js`、`node tests/hardening.test.js`、`node tests/infrastructure-contract.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/payment-core.test.js`、`node tests/payment-delivery-wiring.test.js` 及相关 `node --check`，全部通过。
+- 结果：未兑换的历史内置码不能再创建 Pro；已有用户继续按原 `user_entitlements.expiresAt` 使用。云端媒体准备与云转写/OCR/AI 元数据一样由服务端拒绝免费用户；组件 manifest 仅对有效 Pro 开放。飞书官方提取继续免费。插件诊断不再输出完整绑定码/兑换凭证，飞书 GET 不再把凭证放进 URL，官方插件不再接受无有效到期时间或已到期的 Pro 缓存。
+- 已知风险：插件源码修复尚未发布，现有用户要等下一版插件才会获得凭证脱敏和更严格的本地到期检查；`local_component_manifests` 尚未配置私有对象，旧安装器和依赖仍是公网 CDN，因此本次没有宣称已阻止组件文件被复制；工作区原有大量未提交改动，本次云函数部署使用线上回读目录，避免夹带这些本地改动。
+- 下一步：从干净发布基线制作并发布新的 Obsidian 插件；把安装器、Python runtime、wheelhouse 和模型迁入私有对象，写入版本/SHA-256 manifest，再让插件切换到 manifest 下载并退役旧公网路径；上线付费接口调用审计后再按真实基线决定是否加网关限流。
+
+### 2026-07-10 23:00 - 提前接入 118 元两年卡支付契约
+
+- 目标：在不提前切换月卡/年卡价格的前提下，把两年卡接入支付、权益、诊断和经营报表，允许小程序先上传并提交审核。
+- 影响范围：quickstartFunctions / syncApi / 小程序 / 测试 / 文档。
+- 修改文件：`cloudfunctions/quickstartFunctions/payment-core.js`、`cloudfunctions/syncApi/payment-core.js`、`cloudfunctions/quickstartFunctions/redeem-code-core.js`、`cloudfunctions/syncApi/redeem-code-core.js`、`cloudfunctions/quickstartFunctions/ops-report-core.js`、`cloudfunctions/quickstartFunctions/index.js`、`tests/payment-core.test.js`、`tests/redeem-code-core.test.js`、`tests/support-ops-core.test.js`、`tests/admin-backend.test.js`、`docs/WORKLOG.md`。
+- 线上动作：无。未部署云函数，未上传或发布小程序，未修改微信后台道具。
+- 数据变更：无。
+- 验证：先运行 `node tests/payment-core.test.js`、`node tests/redeem-code-core.test.js`、`node tests/support-ops-core.test.js`、`node tests/admin-backend.test.js`，分别确认因缺少两年计划、计划别名、报表分栏和诊断价格而失败；实现后上述测试通过。用户确认微信真实道具 ID 后，再先把断言改为 `Pro_2years` 并确认 `node tests/payment-core.test.js` 因缺少 productId 映射失败；实现映射后运行该测试、`node tests/payment-delivery-wiring.test.js`、`node tests/sync-api-core.test.js`、`node tests/home-ui.test.js`、相关 JS 文件的 `node --check` 和 `git diff --check -- <本次相关文件>`，均通过。
+- 结果：两份支付核心均以内部 planId `pro_two_year` 识别两年卡，价格 11800 分、有效期 730 天；订单、签名和回调校验使用微信后台真实 productId `Pro_2years`。正式 Pro 识别、运行诊断和经营日报/周报均支持两年卡。月卡和年卡仍保持 990/4990 分。
+- 已知风险：本地接入不等于线上生效；正式发布前必须在微信后台发布大小写完全一致的 `Pro_2years`、价格 118 元的道具，并部署实际被小程序调用的 `quickstartFunctions`。审核通过但未发布的小程序不会影响线上用户。
+- 下一步：已把 7 月 11 日 00:01 的续跑任务缩小为只把月卡/年卡改为 1990/6800 分并更新测试；完成后用户可协调三个道具生效、云函数部署和小程序正式发布。
+
+### 2026-07-10 22:50 - 准备 Pro 标准价与两年卡 UI，云函数价格延后切换
+
+- 目标：把 Pro 页面准备为月卡 19.9 元、年卡 68 元、两年卡 118 元，并按要求保持线上及本地支付核心价格到 7 月 11 日 00:00 后再切换。
+- 影响范围：小程序 / quickstartFunctions 公告配置 / 测试 / 文档。
+- 修改文件：`miniprogram/pages/index/index.js`、`miniprogram/pages/pro/index.js`、`miniprogram/pages/pro/index.wxml`、`miniprogram/pages/pro/index.wxss`、`cloudfunctions/quickstartFunctions/public-config-core.js`、`tests/home-ui.test.js`、`tests/public-config-core.test.js`、`tests/payment-core.test.js`、`docs/WORKLOG.md`。
+- 线上动作：无。未部署云函数，未上传或发布小程序，未修改微信后台道具。
+- 数据变更：无。
+- 验证：`node tests/home-ui.test.js`、`node tests/public-config-core.test.js`、`node tests/payment-core.test.js`、`node --check miniprogram/pages/index/index.js`、`node --check miniprogram/pages/pro/index.js`、`git diff --check -- <本次相关文件>` 通过；确认两份 `payment-core.js` 仍为月卡 990 分、年卡 4990 分。
+- 结果：UI 与公告已移除早鸟文案，展示 19.9 元/月、68 元/年、118 元/两年；UI 使用内部 planId `pro_two_year`，后续已映射到微信真实 productId `Pro_2years`。已创建 7 月 11 日 00:01 的当前任务续跑，仅修改本地支付代码和测试。
+- 已知风险：小程序可以提前上传并提交审核，但三个微信道具与云函数价格必须协调生效后才能正式发布。
+- 下一步：00:01 后只把两份支付核心的月卡/年卡改为 1990/6800 分并更新测试；仍不做线上部署，等待用户发布道具并提交小程序。
+
+### 2026-07-10 21:35 - 发布 1.3.11 并完成 Python runtime / rapidocr 离线依赖 CDN
+
+- 目标：把 `uv / Python / rapidocr` 下载失败从“只能重试网络”改成“优先走自有 CDN 镜像和离线 wheelhouse”，并发布包含同样 fallback 逻辑的 Obsidian 插件版本。
+- 影响范围：Obsidian 插件 / 本地 ASR macOS 安装器 / 本地 OCR macOS 与 Windows 安装器 / CloudBase 静态托管 CDN / 测试 / 文档。
+- 修改文件：`manifest.json`、`versions.json`、`obsidian-plugin/wechat-inbox-sync/manifest.json`、`obsidian-plugin/wechat-inbox-sync/versions.json`、`obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh`、`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh`、`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1`、`tests/plugin-marketplace-package.test.js`、`docs/WORKLOG.md`、`docs/DECISIONS.md`。
+- 线上动作：已上传 python-build-standalone `20260623` 的 CPython `3.12.13` 三个平台包到 `local-python/python-build-standalone/releases/download/20260623/`；已上传 OCR wheelhouse 到 `local-ocr/wheels/win_amd64`、`local-ocr/wheels/macosx_11_0_arm64`、`local-ocr/wheels/macosx_11_0_x86_64`；已更新 CDN 上的 `local-asr/common/install-local-asr-macos.sh`、`local-ocr/common/install-local-ocr-macos.sh`、`local-ocr/common/install-local-ocr.ps1`；已推送 `main` 到提交 `e169a5d`，创建并推送 tag `1.3.11`，GitHub Release 已生成。
+- 数据变更：无。
+- 验证：先新增安装器断言测试并确认 `node tests/plugin-marketplace-package.test.js` 因缺少 `$PythonBuildStandaloneBuild = "20260623"` 失败；实现后运行 `node tests/plugin-marketplace-package.test.js`、`node tests/plugin-main-ai.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、Git Bash `bash -n` 检查两个 macOS 安装脚本、PowerShell scriptblock 解析 `install-local-ocr.ps1`、版本元数据检查、`git diff --check` 均通过；本地 `win_amd64` wheelhouse 使用 `--no-index --find-links` 安装并导入 `rapidocr_onnxruntime` 成功；三平台 wheelhouse 使用公网 CDN `--no-index --find-links` 解析通过；Python runtime、三个安装脚本和三个 wheelhouse index 的公网 SHA256 校验通过；`check_obsidian_release.ps1 -Repo "mingjuner123-spec/wechat-inbox-sync" -ExpectedVersion "1.3.11" -LocalZip "...wechat-inbox-sync-1.3.11.zip" -RepoPath "...local-ocr-offline-deps" -DefaultBranch main` 通过。
+- 结果：安装器会让 uv 通过 `UV_PYTHON_INSTALL_MIRROR` 优先下载自有 CDN 上的 Python runtime，并固定 `UV_PYTHON_CPYTHON_BUILD=20260623`；OCR 依赖优先从 CDN wheelhouse 离线安装 `rapidocr-onnxruntime==1.4.4` 和 `pillow==12.3.0`，失败后才回退腾讯 PyPI / 官方 PyPI。Obsidian 插件 `1.3.11` 发布链路已通过，Release URL：`https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.11`。
+- 关键哈希：Python arm64 macOS `3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16`；Python x64 macOS `7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791`；Python x64 Windows `C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E`；ASR macOS 安装器 `4EF6971DE0F7D3A74C08DD84E7DBF611421CEDE03D2CE7D658B21B52AE0CCA4F`；OCR macOS 安装器 `65A6CA085789CC8E3B07C30D97078F81D1B8659EB1F64669863F1E6F7DBF50D0`；OCR Windows 安装器 `4C99443953B39D883BB65ED73ABCDE3BDCDF76239A56F3E6962B13F7CD07426D`。
+- 已知风险：macOS Intel wheelhouse 目标为 `macosx_11_0_x86_64`，与当前报障用户 Darwin 21/macOS 12 匹配；极老 Intel macOS 可能仍需走包索引回退。Windows ASR 仍主要依赖既有 ASR 二进制与模型 CDN/镜像链路，本次重点解决 uv/Python/OCR 依赖。
+- 下一步：让报错用户升级插件到 `1.3.11` 后重新点击“安装/修复本地转写组件”；若仍失败，收集新的 OCR/ASR 安装日志，重点看是否命中 CDN wheelhouse、Python mirror 和导入验证阶段。
+
+### 2026-07-10 21:08 - 发布 Obsidian 插件 1.3.10 并更新 macOS 本地组件 CDN
+
+- 目标：发布本地转写安装修复版本，解决 macOS ASR/OCR 安装器 CRLF 崩溃、OCR-only 被 ASR 失败阻断、`Record not found` 误报同步失败和诊断日志误判问题，并同步更新 CDN 上的 macOS 安装脚本。
+- 影响范围：Obsidian 插件 / 本地组件 CDN / 测试 / 文档。
+- 修改文件：`manifest.json`、`versions.json`、`obsidian-plugin/wechat-inbox-sync/manifest.json`、`obsidian-plugin/wechat-inbox-sync/versions.json`、`obsidian-plugin/wechat-inbox-sync/main.js`、`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`docs/WORKLOG.md`。
+- 线上动作：已从独立 release worktree 推送 `main` 到提交 `93b051d`，创建并推送 tag `1.3.10`；GitHub Release 已生成并包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.10.zip`；已上传 `local-asr/common/install-local-asr-macos.sh` 与 `local-ocr/common/install-local-ocr-macos.sh` 到 CloudBase 静态托管。
+- 数据变更：无。
+- 验证：`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`git diff --check`、插件版本一致性检查、本地 zip 内 `manifest.json` 版本检查、CloudBase 对象下载哈希检查、公网 CDN 下载哈希检查、`check_obsidian_release.ps1 -Repo "mingjuner123-spec/wechat-inbox-sync" -ExpectedVersion "1.3.10" -LocalZip "...wechat-inbox-sync-1.3.10.zip" -RepoPath "...ob内容同步助手-release-1.3.10" -DefaultBranch main` 均通过。
+- 结果：Obsidian 插件发布链路已闭环，默认分支 `manifest.json` 为 `1.3.10`，`versions.json` 包含 `1.3.10`，GitHub Release tag 与资产完整；macOS CDN 安装器已确认是 LF 版本。ASR CDN SHA256：`1051C710BC93A4E9B280C72A39EADEFA8B96FC2B4091047FB8FD4D3C9FA2975B`；OCR CDN SHA256：`3AF69A1C08A0036B46704A141047E0424152F2D177E2516BFD827D2DE3250645`。
+- 已知风险：`tests/plugin-upload-sync.test.js` 在 1.3.9 发布基线中不存在，因此未运行；Python 运行时、uv 与 `rapidocr-onnxruntime` wheel 仍依赖上游下载，本次 1.3.10 尚未完成离线 wheel/镜像化。
+- 下一步：把 Python runtime、uv 下载源与 `rapidocr`/`onnxruntime`/`numpy` 等 OCR wheel 做腾讯云 CDN 镜像或离线 wheelhouse，安装器优先走自有 CDN，失败时再回退上游。
+
+### 2026-07-10 20:54 - 修复 OCR-only 场景被 ASR 安装失败阻断
+
+- 目标：解释并修复“Python OCR 运行环境未找到”反复出现的问题，避免小红书图片 OCR 首次使用时被 ASR 缺失或 ASR 安装失败挡住。
+- 影响范围：插件 / 本地组件 / 测试 / 文档。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`docs/WORKLOG.md`。
+- 线上动作：无。尚未发布 Obsidian 插件。
+- 数据变更：无。
+- 验证：先运行 `node tests/plugin-main-ai.test.js`，新增 OCR-only 测试因错误调用 ASR 安装失败；修复后运行 `node tests/plugin-main-ai.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-marketplace-package.test.js`、`git diff --check -- obsidian-plugin/wechat-inbox-sync/main.js tests/plugin-main-ai.test.js` 通过。
+- 结果：`ensureLocalComponentReadyForUse` 会把 `requireAsr/requireOcr` 传给安装调度；小红书图片 OCR 只会安装 OCR，不再先安装 ASR。安装全部组件时 ASR 与 OCR 会分别尝试，ASR 失败不再阻止 OCR 创建 Python venv，最后统一汇总失败项。
+- 已知风险：如果用户的网络无法下载 uv、Python 或 `rapidocr-onnxruntime`，OCR Python 仍会安装失败，但现在诊断会指向 OCR 自己的安装日志，而不是被 ASR 失败连带遮住。
+- 下一步：发布新插件后，让出现该问题的用户重新点击“安装/修复本地转写组件”，并回传新的 OCR 安装日志确认是否是网络/依赖下载问题。
+
+### 2026-07-10 20:47 - 修复 macOS 本地转写安装器换行与同步标记幂等
+
+- 目标：根据 3 份插件诊断拆分 ASR 安装失败、OCR 半安装、同步标记失败和绑定失效问题；修复可由插件侧解决的 macOS 安装器 CRLF 崩溃与 `Record not found` 误报同步失败。
+- 影响范围：插件 / 本地组件 / 测试 / 文档。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`docs/WORKLOG.md`。
+- 线上动作：无。尚未发布 Obsidian 插件，尚未重新上传 CDN 安装器。
+- 数据变更：无。
+- 验证：先运行 `node tests/plugin-main-ai.test.js` 观察到新增测试因 `normalizeInstallerScriptText` 缺失失败；修复后运行 `node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`git diff --check -- obsidian-plugin/wechat-inbox-sync/main.js tests/plugin-main-ai.test.js` 通过。
+- 结果：macOS ASR/OCR 下载或回退的 `.sh` 安装器在执行前会移除 BOM 并把 CRLF/CR 归一为 LF，避免 `/bin/bash` 在 `set -euo pipefail\r` 崩溃；插件在本地内容已写入后，标记云端已同步返回 `Record not found` 时按幂等成功处理，不再把整次同步标成失败。
+- 已知风险：绑定码“未绑定或已失效”仍必须通过重新点击插件「立即绑定」或后台核验解决，不能用本地权限缓存绕过云端绑定校验；用户要拿到安装器换行和诊断过滤修复，需要发布新插件，并建议重新上传/校验 CDN 安装器对象。
+- 下一步：发布插件版本并上传/校验 macOS ASR/OCR 安装器 CDN 文件；对报绑定失效的绑定码做脱敏后台核验。
+
+### 2026-07-10 11:15 - 修复 macOS OCR 半安装状态与首页绑定误提示
+
+- 目标：修复 OCR 脚本缺失的半安装状态，缩短失败诊断，并避免小程序首页在绑定状态返回前误显示未绑定。
+- 影响范围：Obsidian 插件 / macOS OCR 安装器 / 小程序首页 / 文档 / 测试。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh`、`miniprogram/pages/index/index.js`、`miniprogram/pages/index/index.wxml`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`tests/home-ui.test.js`、`docs/RUNBOOK.md`、`docs/WORKLOG.md`。
+- 线上动作：macOS OCR 安装器已上传腾讯云静态托管并完成对象与公网 CDN 哈希校验；插件市场未发布；小程序未上传。
+- 数据变更：无。
+- 验证：OCR CDN 文件和本地 SHA256 一致；macOS shell 语法检查通过；插件诊断、插件发布包、小程序首页测试和 JS 语法检查通过。
+- 结果：OCR 脚本改为先安装并原子替换，Python 安装中断不会再造成“Python 已有但脚本缺失”；成功 ASR 日志不再被空 `--- error ---` 标题误判；首页绑定提醒等待云端状态返回后再显示。
+- 已知风险：用户要看到新的诊断逻辑需要发布新插件；小程序首页修复需要上传并发布小程序代码。
+- 下一步：本地验证后发布插件和小程序；小绿书链接转存另行获取样本评估，不在本次实现。
+
+### 2026-07-10 13:30 - 支付失败查单与 iOS 错误可诊断化
+
+- 目标：支付接口回调失败时不误判为未支付；不因用户已有 Pro 状态限制续费。
+- 影响范围：小程序 Pro 页 / 首页页面回归测试。
+- 修改文件：`miniprogram/pages/pro/index.js`、`tests/home-ui.test.js`、`docs/WORKLOG.md`。
+- 行为：`requestVirtualPayment` 失败后立即按订单号查单；若微信侧已支付则刷新权益并显示成功，未支付时展示原始错误信息、错误码和订单号。购买入口不读取或拦截既有 Pro 状态。
+- 验证：`node tests/home-ui.test.js`、`node tests/payment-core.test.js`、`node tests/inbox-service.test.js`、`node --check miniprogram/pages/pro/index.js`、`git diff --check` 通过。
+- 部署：尚未上传小程序代码。此改动属于 `miniprogram/`，只有上传/发布小程序后手机端才会生效，不涉及 Obsidian 插件发布。
+- 已知风险：当前 CLI 只能管理长环境；手机端实际支付调用的短环境不在当前 CLI 账号列表中。禁止为了处理 iOS 支付错误而对长环境盲目回滚或改写短/长环境配置。
+
+### 2026-07-10 15:00 - 支付回调与主动查单并发重复发货诊断
+
+- 证据：支付通知中，同一 `orderNo` 会在同一秒出现“用户主动查单”和“微信支付回调”。短业务环境实际运行的 `quickstartFunctions` 未包含此前本地/长环境的支付幂等代码。
+- 根因：两个入口同时读取到订单 `pending`，各自发放一次权益；原有“先读权益、再判断订单号”的逻辑不是原子操作，不能阻止并发竞争。
+- 本地修复：新增 `payment-delivery-lock.js`，用订单状态的条件更新把 `pending` 原子领取为 `fulfilling`；仅领取成功的入口可发放权益、标记 `paid`、发送到账通知。失败会释放回 `pending`，以便后续重试。已覆盖 `quickstartFunctions` 查单/支付回调/后台手动确认，以及 `syncApi` 支付回调/后台手动确认。
+- 验证：新增 `tests/payment-delivery-lock.test.js`（并发只有一个领取成功）和 `tests/payment-delivery-wiring.test.js`；支付核心、后台、同步 API 测试及语法检查均通过。
+- 历史数据修复：
+  - `OBTRYXQ43Q` 仅有 1 笔年卡订单，权益已从 `2028-07-16` 修正为 `2027-07-17`。
+  - `OBTRYFYTR6` 仅有 1 笔年卡订单，权益已从 `2028-07-09` 修正为 `2027-07-10`。
+- 部署状态：已由开发者在微信开发者工具中手动上传到短业务环境 `he02-d8gebzv050ed6c4ef`。随后通过 CLI 分别下载 `quickstartFunctions` 与 `syncApi` 回读验证：两个函数均包含原子领取锁、订单号二次幂等保护和 `payment-delivery-lock.js`，线上热修已生效。未改动长环境。
+
+### 2026-07-10 10:59 - 建立双环境长期记忆与工程护栏
+
+- 目标：解释短/长域名的真实关系，制定不要求用户重新绑定的迁移方案，并减少新对话重复诊断。
+- 影响范围：文档 / 测试 / CI。
+- 修改文件：`AGENTS.md`、`docs/ARCHITECTURE.md`、`docs/DECISIONS.md`、`docs/RUNBOOK.md`、`docs/RELEASE_CHECKLIST.md`、`docs/TASK_CLOSEOUT_TEMPLATE.md`、`docs/WORKLOG.md`、`tests/infrastructure-contract.test.js`、`scripts/run-regression-guards.ps1`、`.github/workflows/regression-guards.yml`。
+- 线上动作：无。本任务未修改或部署小程序、插件和云函数运行逻辑。
+- 数据变更：无。
+- 验证：运行基础设施契约测试、关键同步测试和文档引用检查。
+- 结果：双环境不变量已文档化，并增加 CI 防回退检查。
+- 已知风险：短/长入口仍是两份运行代码，迁移完成前仍需防止版本漂移。
+- 下一步：建立自有 API 前门；先让长入口完全兼容，再让插件静默探测并逐步迁移。
+
+### 2026-07-10 - 支付幂等、退款状态与历史权益纠偏
+
+- 目标：阻止同一支付订单重复增加有效期，并修复历史重复加年数据。
+- 影响范围：`quickstartFunctions` / `syncApi` / 管理后台 / 测试 / 线上数据。
+- 线上动作：已部署相关云函数；已对 3 条历史权益做定向纠偏。
+- 数据变更：仅修改目标权益与兑换码到期时间，不记录用户隐私明细。
+- 验证：`payment-core`、后台接口测试、语法检查及线上订单/权益回查通过。
+- 结果：每条历史记录均确认只有 1 笔真实支付，剩余有效期恢复到约 1 年。
+- 已知风险：微信资金原路退款尚未接入；短域名支付通知是否命中新版本仍需单独核验。
+- 下一步：确认支付通知使用包含最新幂等逻辑的稳定入口。
