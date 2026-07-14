@@ -2017,6 +2017,32 @@ const xiaohongshuReplyPagedComments = helpers.mergeXiaohongshuReplyPages([
 ]);
 assert.strictEqual(xiaohongshuReplyPagedComments[0].replies.length, 3);
 assert.ok(helpers.buildSocialCommentsMarkdown(xiaohongshuReplyPagedComments).includes('  - ↳ **回复用户丙**：第三条折叠回复'));
+assert.strictEqual(typeof helpers.mergeXiaohongshuCapturedCommentPayloads, 'function');
+const capturedXiaohongshuCommentResult = helpers.mergeXiaohongshuCapturedCommentPayloads([
+  {
+    url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=note-1',
+    payload: {
+      data: {
+        comments: [{ id: 'captured-root-1', user_info: { nickname: '主评论用户' }, content: '主评论内容' }],
+        has_more: false,
+      },
+    },
+  },
+  {
+    url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/sub/page?note_id=note-1&root_comment_id=captured-root-1',
+    payload: {
+      data: {
+        comments: [{ id: 'captured-reply-1', user_info: { nickname: '回复用户' }, content: '折叠回复内容' }],
+        has_more: false,
+      },
+    },
+  },
+]);
+assert.strictEqual(capturedXiaohongshuCommentResult.comments.length, 1);
+assert.strictEqual(capturedXiaohongshuCommentResult.comments[0].replies.length, 1);
+assert.strictEqual(capturedXiaohongshuCommentResult.comments[0].replies[0].content, '折叠回复内容');
+assert.strictEqual(capturedXiaohongshuCommentResult.rootPayloadCount, 1);
+assert.strictEqual(capturedXiaohongshuCommentResult.replyPayloadCount, 1);
 assert.strictEqual(
   helpers.mergeXiaohongshuReplyPages([{
     id: 'root-many-replies',
@@ -2049,6 +2075,9 @@ assert.match(xiaohongshuCommentPaginationScript, /credentials:\s*'include'/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/page/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/sub\/page/);
 assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_LIMIT/);
+assert.match(pluginMainSource, /mergeXiaohongshuCapturedCommentPayloads/);
+assert.match(pluginMainSource, /debuggerCommentPayloads/);
+assert.match(pluginMainSource, /data-testid\*="reply"/);
 
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
