@@ -4921,6 +4921,11 @@ function extractDouyinMediaUrlsFromDetailPayload(payload) {
   return sortMediaUrlsForTranscription(urls);
 }
 
+function getDouyinDetailAwemeId(payload) {
+  const detail = payload && (payload.aweme_detail || payload.awemeDetail || payload.item_list && payload.item_list[0]);
+  return String(detail && (detail.aweme_id || detail.awemeId) || '').trim();
+}
+
 function isUnavailableXiaohongshuPage(html, url = '') {
   const source = decodeHtmlEntities(String(html || ''));
   const target = String(url || '');
@@ -6916,6 +6921,50 @@ function getWechatSession() {
   } catch (error) {
     return null;
   }
+}
+
+async function readSessionFetchText(session, url, headers, timeoutMs = 12000) {
+  if (!session || typeof session.fetch !== 'function' || !/^https?:\/\//i.test(String(url || ''))) return '';
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await session.fetch(url, {
+      method: 'GET',
+      headers,
+      credentials: 'include',
+      redirect: 'follow',
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    return response && typeof response.text === 'function' ? await response.text() : '';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchDouyinMediaUrlsWithSession({ pageUrl, awemeId, session = getWechatSession() }) {
+  const target = normalizeDouyinTargetUrl(pageUrl, pageUrl);
+  const id = String(awemeId || target.awemeId || '').trim();
+  if (!session || typeof session.fetch !== 'function' || !id || !target.url) return [];
+
+  try {
+    await readSessionFetchText(session, target.url, getSocialRequestHeaders(target.url));
+  } catch (error) {
+    // Existing cookies may still make the pinned detail request usable.
+  }
+
+  for (const detailUrl of getDouyinAwemeDetailUrls(id)) {
+    try {
+      const text = await readSessionFetchText(session, detailUrl, getSocialRequestHeaders(detailUrl));
+      const payload = JSON.parse(text || '{}');
+      if (getDouyinDetailAwemeId(payload) !== id) continue;
+      const urls = extractDouyinMediaUrlsFromDetailPayload(payload)
+        .filter((url) => /^https?:\/\//i.test(url));
+      if (urls.length) return sortMediaUrlsForTranscription(urls);
+    } catch (error) {
+      // Try the alternate pinned detail endpoint before browser rendering.
+    }
+  }
+  return [];
 }
 
 function getXiaohongshuSession() {
@@ -14712,6 +14761,7 @@ WechatObsidianInboxPlugin.__test = {
   extractDouyinAwemeId,
   normalizeDouyinTargetUrl,
   extractDouyinMediaUrlsFromDetailPayload,
+  fetchDouyinMediaUrlsWithSession,
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,
   shouldBlockExternalAppUrl,

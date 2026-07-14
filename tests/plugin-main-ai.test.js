@@ -3113,6 +3113,92 @@ async function runAsyncHydrationTests() {
     requestUrlMock = previousRequestUrlMock;
   }
 
+  const sessionFetchCalls = [];
+  const sessionMediaUrls = await helpers.fetchDouyinMediaUrlsWithSession({
+    pageUrl: 'https://www.douyin.com/video/7644238277092174409',
+    awemeId: '7644238277092174409',
+    session: {
+      fetch: async (url, options) => {
+        sessionFetchCalls.push({ url, options });
+        if (url === 'https://www.douyin.com/video/7644238277092174409') {
+          return { text: async () => '<html><body>cookie warmup</body></html>' };
+        }
+        return {
+          text: async () => JSON.stringify({
+            aweme_detail: {
+              aweme_id: '7644238277092174409',
+              video: {
+                play_addr: {
+                  url_list: ['https://v11-weba.douyinvod.com/session-target/?mime_type=video_mp4'],
+                },
+              },
+            },
+          }),
+        };
+      },
+    },
+  });
+  assert.deepStrictEqual(sessionMediaUrls, [
+    'https://v11-weba.douyinvod.com/session-target/?mime_type=video_mp4',
+  ]);
+  assert.strictEqual(sessionFetchCalls[0].options.credentials, 'include');
+  assert.strictEqual(sessionFetchCalls.length, 2);
+
+  const mismatchedSessionMedia = await helpers.fetchDouyinMediaUrlsWithSession({
+    pageUrl: 'https://www.douyin.com/video/7644238277092174409',
+    awemeId: '7644238277092174409',
+    session: {
+      fetch: async (url) => ({
+        text: async () => url.includes('/aweme/v1/web/aweme/detail/')
+          ? JSON.stringify({
+            aweme_detail: {
+              aweme_id: '9999999999999999999',
+              video: {
+                play_addr: {
+                  url_list: ['https://v11-weba.douyinvod.com/recommendation/?mime_type=video_mp4'],
+                },
+              },
+            },
+          })
+          : '',
+      }),
+    },
+  });
+  assert.deepStrictEqual(mismatchedSessionMedia, []);
+
+  const warmupFailureMedia = await helpers.fetchDouyinMediaUrlsWithSession({
+    pageUrl: 'https://www.douyin.com/video/7644238277092174409',
+    awemeId: '7644238277092174409',
+    session: {
+      fetch: async (url) => {
+        if (url === 'https://www.douyin.com/video/7644238277092174409') {
+          throw new Error('page warmup failed');
+        }
+        return {
+          text: async () => JSON.stringify({
+            aweme_detail: {
+              aweme_id: '7644238277092174409',
+              video: {
+                play_addr: {
+                  url_list: ['https://v11-weba.douyinvod.com/existing-session/?mime_type=video_mp4'],
+                },
+              },
+            },
+          }),
+        };
+      },
+    },
+  });
+  assert.deepStrictEqual(warmupFailureMedia, [
+    'https://v11-weba.douyinvod.com/existing-session/?mime_type=video_mp4',
+  ]);
+
+  assert.deepStrictEqual(await helpers.fetchDouyinMediaUrlsWithSession({
+    pageUrl: 'https://www.douyin.com/video/7644238277092174409',
+    awemeId: '7644238277092174409',
+    session: null,
+  }), []);
+
   assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);
 
   const feishuOpenApiRequests = [];
