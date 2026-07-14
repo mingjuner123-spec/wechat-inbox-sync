@@ -5173,6 +5173,38 @@ async function runSourceMediaAttachmentTests() {
   assert.ok(savedMarkdown.includes('![[临时收集/音视频附件/2026-07-14/演示视频-media-record.mp4]]'));
   assert.ok(savedMarkdown.indexOf('## 原始音视频') < savedMarkdown.indexOf('## 口播/音频文案'));
 
+  const videoBytes = Buffer.alloc(640, 0);
+  videoBytes.write('ftyp', 4, 'ascii');
+  videoBytes.write('vide', 48, 'ascii');
+  const videoWrites = [];
+  const videoDownloads = [];
+  const videoPlugin = new PluginClass();
+  videoPlugin.settings = helpers.mergeSettings({ inboxDir: '临时收集', saveOriginalMediaEnabled: true });
+  videoPlugin.ensureProFeatureAccess = async () => ({ hasAccess: true, status: 'active', expiresAt: '2026-08-01T00:00:00.000Z' });
+  videoPlugin.app = { vault: { adapter: { writeBinary: async (filePath, buffer) => videoWrites.push([filePath, Buffer.from(buffer)]) } } };
+  videoPlugin.ensureFolder = async () => {};
+  videoPlugin.downloadArrayBuffer = async (candidateUrl) => {
+    videoDownloads.push(candidateUrl);
+    return candidateUrl.includes('video-candidate') ? videoBytes : mediaBytes;
+  };
+  const videoRecord = await videoPlugin.saveSourceMediaAttachment({
+    ...sourceRecord,
+    metadata: {
+      ...sourceRecord.metadata,
+      platform: '抖音',
+      mediaUrls: [
+        'https://media.example.com/audio-candidate',
+        'https://media.example.com/video-candidate',
+      ],
+    },
+  }, '临时收集', '2026-07-14', '抖音视频');
+  assert.deepStrictEqual(videoDownloads, [
+    'https://media.example.com/audio-candidate',
+    'https://media.example.com/video-candidate',
+  ]);
+  assert.strictEqual(videoWrites[0][0], '临时收集/音视频附件/2026-07-14/抖音视频-media-record.mp4');
+  assert.strictEqual(videoRecord.metadata.sourceMediaAttachmentPath, videoWrites[0][0]);
+
   const disabledPlugin = new PluginClass();
   disabledPlugin.settings = helpers.mergeSettings({ inboxDir: '临时收集' });
   disabledPlugin.downloadArrayBuffer = async () => {

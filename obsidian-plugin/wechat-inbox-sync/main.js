@@ -1829,6 +1829,11 @@ function hasVideoTrackInMediaBuffer(value) {
     || buffer.includes(Buffer.from('avc1')) && buffer.includes(Buffer.from('moov'));
 }
 
+function isVideoPlatform(platform, url = '') {
+  const source = `${String(platform || '')} ${String(url || '')}`.toLowerCase();
+  return /抖音|小红书|b站|bilibili|douyin|xiaohongshu/.test(source);
+}
+
 function cleanTrailingTranscriptionHallucinations(text) {
   const lines = String(text || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length < 2) return lines.join('\n');
@@ -2419,6 +2424,7 @@ function buildTranscriptOnlyMetadata(metadata, {
   url = '',
   platform = '',
   mediaUrl = '',
+  mediaUrls = [],
   subtitleUrl = '',
   transcription = '',
   transcriptionStatus = 'failed',
@@ -2438,6 +2444,10 @@ function buildTranscriptOnlyMetadata(metadata, {
 
   const sourceName = platform || getWebpageSourcePrefix(url) || '网页';
   const cleanedSupplementalMarkdown = String(supplementalMarkdown || '').trim();
+  const normalizedMediaUrls = Array.from(new Set((Array.isArray(mediaUrls) ? mediaUrls : [])
+    .map((item) => normalizeExtractedUrl(typeof item === 'string' ? item : (item && item.url)))
+    .filter((item) => /^https?:\/\//i.test(item))));
+  if (mediaUrl && !normalizedMediaUrls.includes(mediaUrl)) normalizedMediaUrls.unshift(mediaUrl);
   return {
     ...rest,
     title: `${sourceName}口播文案`,
@@ -2446,6 +2456,7 @@ function buildTranscriptOnlyMetadata(metadata, {
     ...(cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {}),
     mediaUrl,
     audioUrl: mediaUrl,
+    mediaUrls: normalizedMediaUrls,
     subtitleUrl,
     transcription,
     transcriptionStatus,
@@ -11933,12 +11944,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       return record;
     }
 
-    const attachmentFailure = () => ({
+    const videoPlatform = isVideoPlatform(metadata.platform, metadata.url || record.content || '');
+    const attachmentFailure = (message = '') => ({
       ...record,
       metadata: {
         ...metadata,
         sourceMediaAttachmentPath: '',
-        sourceMediaAttachmentError: '原始音视频未能保存到本地。',
+        sourceMediaAttachmentError: message || (videoPlatform ? '未取得原视频，已保留转写结果。' : '原始音视频未能保存到本地。'),
       },
     });
     if (!this.app || !this.app.vault || !this.app.vault.adapter || typeof this.app.vault.adapter.writeBinary !== 'function') {
@@ -11947,12 +11959,26 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     try {
       const sourceUrl = String(metadata.url || record.content || mediaUrl).trim();
-      const headers = isXiaohongshuUrl(sourceUrl)
-        ? await getXiaohongshuRequestHeaders(mediaUrl)
-        : getSocialRequestHeaders(sourceUrl || mediaUrl);
-      const buffer = Buffer.from(await this.downloadArrayBuffer(mediaUrl, headers));
-      if (getInvalidDownloadedMediaReason(buffer)) return attachmentFailure();
-      const extension = getAudioFormatFromUrl(mediaUrl);
+      const candidates = Array.from(new Set([
+        ...(Array.isArray(metadata.mediaUrls) ? metadata.mediaUrls : []),
+        mediaUrl,
+      ].map((item) => String(item || '').trim()).filter(Boolean)));
+      let selectedBuffer = null;
+      let selectedUrl = '';
+      for (const candidateUrl of candidates) {
+        const headers = isXiaohongshuUrl(sourceUrl)
+          ? await getXiaohongshuRequestHeaders(candidateUrl)
+          : getSocialRequestHeaders(sourceUrl || candidateUrl);
+        // eslint-disable-next-line no-await-in-loop
+        const buffer = Buffer.from(await this.downloadArrayBuffer(candidateUrl, headers));
+        if (getInvalidDownloadedMediaReason(buffer)) continue;
+        if (videoPlatform && !hasVideoTrackInMediaBuffer(buffer)) continue;
+        selectedBuffer = buffer;
+        selectedUrl = candidateUrl;
+        break;
+      }
+      if (!selectedBuffer || !selectedUrl) return attachmentFailure();
+      const extension = videoPlatform ? 'mp4' : getAudioFormatFromUrl(selectedUrl);
       const recordShortId = sanitizeAttachmentName(getRecordId(record), 'media').slice(0, 12) || 'media';
       const safeTitle = sanitizeAttachmentName(title || metadata.title, '音视频');
       const attachmentRootDir = `${rootDir}/音视频附件`;
@@ -11960,7 +11986,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const attachmentPath = `${attachmentDayDir}/${safeTitle}-${recordShortId}.${extension}`;
       await this.ensureFolder(attachmentRootDir);
       await this.ensureFolder(attachmentDayDir);
-      await this.app.vault.adapter.writeBinary(attachmentPath, buffer);
+      await this.app.vault.adapter.writeBinary(attachmentPath, selectedBuffer);
       return {
         ...record,
         metadata: {
@@ -11997,6 +12023,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           url,
           platform,
           mediaUrl,
+          mediaUrls,
           subtitleUrl,
           transcription: subtitleText,
           transcriptionStatus: 'success',
@@ -12093,6 +12120,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             url,
             platform,
             mediaUrl: candidateUrl,
+            mediaUrls: candidates.map((candidate) => candidate.url),
             subtitleUrl,
             transcription: result.transcription,
             transcriptionStatus: 'success',
@@ -12183,6 +12211,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     let bvid = extractBilibiliBvid(resolvedUrl) || extractBilibiliBvid(url) || extractBilibiliBvid(html);
     let cid = '';
     let playurlAudioUrl = '';
+    let progressiveVideoUrl = '';
 
     if (bvid) {
       try {
@@ -12207,6 +12236,16 @@ class WechatObsidianInboxPlugin extends Plugin {
             headers: getSocialRequestHeaders(resolvedUrl),
           });
           playurlAudioUrl = extractBilibiliAudioUrlFromPlayurlPayload(playurlResponse.json || playurlResponse.text);
+          try {
+            const progressiveResponse = await requestUrl({
+              url: `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&fnval=0&fourk=0`,
+              method: 'GET',
+              headers: getSocialRequestHeaders(resolvedUrl),
+            });
+            progressiveVideoUrl = extractBilibiliProgressiveVideoUrlFromPlayurlPayload(progressiveResponse.json || progressiveResponse.text);
+          } catch (progressiveError) {
+            // Keep the audio/transcript fallback when Bilibili does not expose a progressive video stream.
+          }
         }
       } catch (error) {
         // Fall back to media transcription below.
@@ -12218,6 +12257,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       return this.buildTranscriptRecordFromMedia(record, {
         url,
         platform: 'B站',
+        mediaUrl: progressiveVideoUrl,
+        mediaUrls: progressiveVideoUrl ? [progressiveVideoUrl] : [],
         subtitleText: subtitle.transcription,
         subtitleUrl: subtitle.subtitleUrl,
         source: 'bilibili-subtitle',
@@ -12230,6 +12271,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       url,
       platform: 'B站',
       mediaUrl: playurlAudioUrl || extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
+      mediaUrls: [progressiveVideoUrl, playurlAudioUrl].filter(Boolean),
       source: 'audio',
       binding,
       title,
