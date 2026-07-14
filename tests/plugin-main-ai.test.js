@@ -2028,6 +2028,25 @@ assert.strictEqual(
   }], 'root-many-replies', [])[0].replies.length,
   25,
 );
+const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
+  source: 'page-api',
+  rootCount: 200,
+  replyCount: 3,
+  pageCount: 4,
+  stopReason: 'limit_reached',
+  cookie: 'must-not-leak',
+});
+assert.match(xiaohongshuCommentDiagnostic, /^<!-- xhs-comment-diag: source=page-api; root=200; replies=3; pages=4; stop=limit_reached -->$/);
+assert.strictEqual(xiaohongshuCommentDiagnostic.includes('must-not-leak'), false);
+assert.strictEqual(
+  helpers.appendXiaohongshuCommentDiagnostic('# 正文\n\n<!-- xhs-comment-diag: source=old; root=1; replies=0; pages=1; stop=old -->', xiaohongshuCommentDiagnostic),
+  `# 正文\n\n${xiaohongshuCommentDiagnostic}`,
+);
+const xiaohongshuCommentPaginationScript = helpers.getXiaohongshuCommentPaginationScript('https://www.xiaohongshu.com/explore/demo-note?xsec_token=demo-token');
+assert.match(xiaohongshuCommentPaginationScript, /credentials:\s*'include'/);
+assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/page/);
+assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/sub\/page/);
+assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_LIMIT/);
 
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
