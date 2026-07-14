@@ -508,24 +508,23 @@ git commit -m "fix: isolate douyin app protocols in electron session"
 ```powershell
 node tests/plugin-main-ai.test.js
 node tests/plugin-marketplace-package.test.js
-node tests/inbox-core.test.js
-node tests/plugin-core.test.js
-node tests/plugin-sync-core.test.js
 node --check obsidian-plugin/wechat-inbox-sync/main.js
 git diff --check
 ```
 
 Expected: every command exits 0.
 
+说明：正式 `1.3.28` 基线没有 `inbox-core.test.js`、`plugin-core.test.js`、`plugin-sync-core.test.js`；移动端测试读取的是仓库根目录旧发布镜像，`release-social-feishu-ai.test.js` 仍硬编码 `1.2.97`，两者不作为本次唯一发布源 `obsidian-plugin/wechat-inbox-sync/` 的验收门槛。
+
 - [ ] **Step 2: Install only the candidate main.js locally**
 
-先比较目标插件 manifest 为 `1.3.26` 并备份现有 `main.js`，再将候选复制到：
+先整目录备份目标插件，再把正式 `1.3.28` 的 `main.js`、`manifest.json`、`styles.css`、`local-asr/`、`local-ocr/` 与本次候选代码一起安装到：
 
 ```text
 D:\内容创作系统\张张的内容创作知识库\.obsidian\plugins\wechat-inbox-sync\main.js
 ```
 
-不得修改该目录的 `data.json`，不得升级 manifest 或创建 Release。
+安装前后比较所有运行文件与 `data.json` 的 SHA-256；不得创建 Release。
 
 - [ ] **Step 3: Verify installed-file identity and syntax**
 
