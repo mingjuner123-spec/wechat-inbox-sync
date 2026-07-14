@@ -1825,8 +1825,7 @@ function hasVideoTrackInMediaBuffer(value) {
   const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value || []);
   if (!buffer.length) return false;
   return buffer.includes(Buffer.from('vide'))
-    || buffer.includes(Buffer.from('vp09'))
-    || buffer.includes(Buffer.from('avc1')) && buffer.includes(Buffer.from('moov'));
+    || buffer.includes(Buffer.from('vp09'));
 }
 
 function isVideoPlatform(platform, url = '') {

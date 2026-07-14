@@ -2369,6 +2369,7 @@ assert.strictEqual(helpers.extractBilibiliProgressiveVideoUrlFromPlayurlPayload(
   },
 }), 'https://upos.example.com/video.mp4?deadline=1');
 assert.strictEqual(helpers.hasVideoTrackInMediaBuffer(Buffer.from('0000ftypisom0000mp4a')), false);
+assert.strictEqual(helpers.hasVideoTrackInMediaBuffer(Buffer.from('0000ftypisom0000avc10000moov0000mp4a')), false);
 assert.strictEqual(helpers.hasVideoTrackInMediaBuffer(Buffer.from('0000ftypisom0000avc10000vide0000mp4a')), true);
 assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
   '这是正文最后一句。',
