@@ -4464,6 +4464,43 @@ function shouldBlockExternalAppUrl(value) {
   }
 }
 
+const DOUYIN_EXTERNAL_PROTOCOLS = ['bytedance', 'snssdk1128'];
+
+async function installDouyinExternalProtocolHandlers(session) {
+  const protocol = session && session.protocol;
+  if (!protocol) return false;
+  let installedAny = false;
+  for (const scheme of DOUYIN_EXTERNAL_PROTOCOLS) {
+    try {
+      if (typeof protocol.handle === 'function') {
+        const handled = typeof protocol.isProtocolHandled === 'function'
+          ? protocol.isProtocolHandled(scheme)
+          : false;
+        if (!handled) {
+          protocol.handle(scheme, async () => new Response(null, { status: 204 }));
+          installedAny = true;
+        }
+        continue;
+      }
+      if (typeof protocol.registerStringProtocol === 'function') {
+        const registered = typeof protocol.isProtocolRegistered === 'function'
+          ? protocol.isProtocolRegistered(scheme)
+          : false;
+        if (!registered) {
+          protocol.registerStringProtocol(
+            scheme,
+            (_request, callback) => callback({ data: '', mimeType: 'text/plain' }),
+          );
+          installedAny = true;
+        }
+      }
+    } catch (error) {
+      // Navigation and webRequest guards remain active if protocol registration is unavailable.
+    }
+  }
+  return installedAny;
+}
+
 function installExternalAppNavigationGuards(webContents) {
   if (!webContents) return;
   const preventExternalNavigation = (event, navigationUrl) => {
@@ -7897,6 +7934,9 @@ async function renderSocialMediaUrlsWithElectron(url) {
   }
 
   const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();
+  if (isDouyinUrl(url)) {
+    await installDouyinExternalProtocolHandlers(wechatSession);
+  }
   const win = new BrowserWindow({
     width: 1280,
     height: 900,
@@ -14788,6 +14828,7 @@ WechatObsidianInboxPlugin.__test = {
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,
   shouldBlockExternalAppUrl,
+  installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,

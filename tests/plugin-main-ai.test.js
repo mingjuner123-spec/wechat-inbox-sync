@@ -49,6 +49,11 @@ const socialMediaRendererSource = pluginMainSource.slice(
 assert.ok(socialMediaRendererSource.includes('const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();'));
 assert.ok(socialMediaRendererSource.includes('shouldBlockExternalAppUrl(details && details.url)'));
 assert.ok(socialMediaRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
+assert.ok(socialMediaRendererSource.includes('await installDouyinExternalProtocolHandlers(wechatSession)'));
+assert.ok(
+  socialMediaRendererSource.indexOf('await installDouyinExternalProtocolHandlers(wechatSession)')
+    < socialMediaRendererSource.indexOf('new BrowserWindow'),
+);
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -3210,6 +3215,44 @@ async function runAsyncHydrationTests() {
     awemeId: '7644238277092174409',
     session: null,
   }), []);
+
+  const handledSchemes = [];
+  const modernProtocol = {
+    handled: new Set(),
+    isProtocolHandled(scheme) {
+      return this.handled.has(scheme);
+    },
+    handle(scheme, handler) {
+      handledSchemes.push({ scheme, handler });
+      this.handled.add(scheme);
+    },
+  };
+  const modernSession = { protocol: modernProtocol };
+  await helpers.installDouyinExternalProtocolHandlers(modernSession);
+  await helpers.installDouyinExternalProtocolHandlers(modernSession);
+  assert.deepStrictEqual(handledSchemes.map((item) => item.scheme), ['bytedance', 'snssdk1128']);
+  const blockedResponse = await handledSchemes[0].handler({ url: 'bytedance://aweme/detail/123' });
+  assert.strictEqual(blockedResponse.status, 204);
+
+  const legacyRegistered = [];
+  const legacyProtocol = {
+    registered: new Set(),
+    isProtocolRegistered(scheme) {
+      return this.registered.has(scheme);
+    },
+    registerStringProtocol(scheme, handler) {
+      legacyRegistered.push({ scheme, handler });
+      this.registered.add(scheme);
+    },
+  };
+  await helpers.installDouyinExternalProtocolHandlers({ protocol: legacyProtocol });
+  await helpers.installDouyinExternalProtocolHandlers({ protocol: legacyProtocol });
+  assert.deepStrictEqual(legacyRegistered.map((item) => item.scheme), ['bytedance', 'snssdk1128']);
+  let legacyPayload = null;
+  legacyRegistered[0].handler({}, (payload) => { legacyPayload = payload; });
+  assert.deepStrictEqual(legacyPayload, { data: '', mimeType: 'text/plain' });
+
+  assert.strictEqual(await helpers.installDouyinExternalProtocolHandlers(null), false);
 
   assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);
 
