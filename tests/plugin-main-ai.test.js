@@ -5049,6 +5049,11 @@ async function runSourceMediaAttachmentTests() {
     inboxDir: '临时收集',
     saveOriginalMediaEnabled: true,
   });
+  plugin.ensureProFeatureAccess = async () => ({
+    hasAccess: true,
+    status: 'active',
+    expiresAt: '2026-08-01T00:00:00.000Z',
+  });
   plugin.app = {
     vault: {
       adapter: {
@@ -5102,10 +5107,26 @@ async function runSourceMediaAttachmentTests() {
   const disabledRecord = await disabledPlugin.saveSourceMediaAttachment(sourceRecord, '临时收集', '2026-07-14', '演示视频');
   assert.strictEqual(disabledRecord, sourceRecord);
 
+  const noProPlugin = new PluginClass();
+  noProPlugin.settings = helpers.mergeSettings({ saveOriginalMediaEnabled: true });
+  noProPlugin.ensureProFeatureAccess = async () => {
+    throw new Error('保存原始音视频到本地需要有效 Pro。');
+  };
+  noProPlugin.downloadArrayBuffer = async () => {
+    throw new Error('non-Pro media save must not download');
+  };
+  const noProRecord = await noProPlugin.saveSourceMediaAttachment(sourceRecord, '临时收集', '2026-07-14', '演示视频');
+  assert.strictEqual(noProRecord, sourceRecord);
+
   const failedPlugin = new PluginClass();
   failedPlugin.settings = helpers.mergeSettings({
     inboxDir: '临时收集',
     saveOriginalMediaEnabled: true,
+  });
+  failedPlugin.ensureProFeatureAccess = async () => ({
+    hasAccess: true,
+    status: 'active',
+    expiresAt: '2026-08-01T00:00:00.000Z',
   });
   failedPlugin.app = {
     vault: {

@@ -11846,6 +11846,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       return record;
     }
 
+    try {
+      await this.ensureProFeatureAccess('保存原始音视频到本地', { forceRefresh: true });
+    } catch (error) {
+      return record;
+    }
+
     const attachmentFailure = () => ({
       ...record,
       metadata: {
