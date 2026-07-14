@@ -13278,18 +13278,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('保存原始音视频到本地')
-      .setDesc('默认关闭。开启后，新同步且可下载的音频或视频会保存到“音视频附件/日期”目录，并在笔记中插入本地链接；无法下载时仍会保留转写结果。')
-      .addToggle((toggle) => toggle
-        .setValue(this.plugin.settings.saveOriginalMediaEnabled === true)
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({
-            ...this.plugin.settings,
-            saveOriginalMediaEnabled: value === true,
-          });
-        }));
-
-    new Setting(containerEl)
       .setName('立即同步')
       .setDesc('手动拉取云端收集箱，并写入当前 vault。')
       .addButton((button) => button
@@ -13355,6 +13343,35 @@ class WechatInboxSettingTab extends PluginSettingTab {
             this.display();
           } catch (error) {
             new Notice(`权限查询失败：${error.message || error}`);
+          }
+        }));
+
+    new Setting(proPanel)
+      .setName('保存原始音视频到本地')
+      .setDesc('Pro 功能。默认关闭；开启后，新同步且可下载的音频或视频会保存到“音视频附件/日期”目录，并在笔记中插入本地链接；无法下载时仍会保留转写结果。')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.saveOriginalMediaEnabled === true)
+        .onChange(async (value) => {
+          if (!value) {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              saveOriginalMediaEnabled: false,
+            });
+            return;
+          }
+          try {
+            await this.plugin.ensureProFeatureAccess('保存原始音视频到本地', { forceRefresh: true });
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              saveOriginalMediaEnabled: true,
+            });
+          } catch (error) {
+            await this.plugin.saveSettings({
+              ...this.plugin.settings,
+              saveOriginalMediaEnabled: false,
+            });
+            new Notice(error.message || String(error));
+            this.display();
           }
         }));
 
