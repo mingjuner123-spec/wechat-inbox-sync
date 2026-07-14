@@ -2053,6 +2053,9 @@ assert.strictEqual(capturedXiaohongshuCommentResult.comments[0].replies.length, 
 assert.strictEqual(capturedXiaohongshuCommentResult.comments[0].replies[0].content, '折叠回复内容');
 assert.strictEqual(capturedXiaohongshuCommentResult.rootPayloadCount, 1);
 assert.strictEqual(capturedXiaohongshuCommentResult.replyPayloadCount, 1);
+assert.strictEqual(capturedXiaohongshuCommentResult.rootPageCount, 1);
+assert.strictEqual(capturedXiaohongshuCommentResult.replyPageCount, 1);
+assert.strictEqual(capturedXiaohongshuCommentResult.stopReason, 'exhausted');
 assert.strictEqual(typeof helpers.mergeXiaohongshuCommentSources, 'function');
 const canonicalXiaohongshuComments = helpers.mergeXiaohongshuCommentSources({
   networkComments: [{
@@ -2079,6 +2082,25 @@ assert.strictEqual(canonicalXiaohongshuComments.comments[0].replies.length, 1);
 assert.strictEqual(canonicalXiaohongshuComments.comments[1].content, '真正新增评论');
 assert.strictEqual(canonicalXiaohongshuComments.dedupedFallbackCount, 2);
 assert.strictEqual(canonicalXiaohongshuComments.fallbackAddedCount, 1);
+
+const mergedXiaohongshuNetworkVariants = helpers.mergeXiaohongshuCommentSources({
+  networkComments: [
+    { id: 'network-root-variant', author: '主评论用户', content: '同一条主评论' },
+    {
+      id: 'network-root-variant',
+      author: '主评论用户',
+      content: '同一条主评论',
+      replies: [
+        { id: 'network-reply-a', author: '回复用户甲', content: '第一条回复' },
+        { id: 'network-reply-b', author: '回复用户乙', content: '第二条回复' },
+      ],
+    },
+  ],
+  fallbackGroups: [],
+  limit: 200,
+});
+assert.strictEqual(mergedXiaohongshuNetworkVariants.comments.length, 1);
+assert.strictEqual(mergedXiaohongshuNetworkVariants.comments[0].replies.length, 2);
 
 const unmatchedCapturedXiaohongshuReplies = helpers.mergeXiaohongshuCapturedCommentPayloads([
   {
@@ -2118,10 +2140,13 @@ const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
   fallbackAddedCount: 2,
   dedupedFallbackCount: 8,
   unmatchedReplyCount: 0,
+  invalidPayloadCount: 1,
+  scrollMode: 'comment_container',
+  pageApiStopReason: 'root_unavailable',
   stopReason: 'limit_reached',
   cookie: 'must-not-leak',
 });
-assert.match(xiaohongshuCommentDiagnostic, /^<!-- xhs-comment-diag: source=page-api; root=200; replies=3; pages=4; root_pages=4; reply_pages=0; final_root=198; final_replies=3; fallback=2; deduped=8; unmatched=0; stop=limit_reached -->$/);
+assert.match(xiaohongshuCommentDiagnostic, /^<!-- xhs-comment-diag: source=page-api; root=200; replies=3; pages=4; root_pages=4; reply_pages=0; final_root=198; final_replies=3; fallback=2; deduped=8; unmatched=0; invalid=1; scroll=comment_container; api_stop=root_unavailable; stop=limit_reached -->$/);
 assert.strictEqual(xiaohongshuCommentDiagnostic.includes('must-not-leak'), false);
 assert.strictEqual(
   helpers.appendXiaohongshuCommentDiagnostic('# 正文\n\n<!-- xhs-comment-diag: source=old; root=1; replies=0; pages=1; stop=old -->', xiaohongshuCommentDiagnostic),
@@ -2135,6 +2160,53 @@ assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_LIMIT
 assert.match(pluginMainSource, /mergeXiaohongshuCapturedCommentPayloads/);
 assert.match(pluginMainSource, /debuggerCommentPayloads/);
 assert.match(pluginMainSource, /data-testid\*="reply"/);
+const xiaohongshuRendererSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
+  pluginMainSource.indexOf('async function renderXiaohongshuCommentsWithElectron'),
+);
+assert.match(xiaohongshuRendererSource, /findCommentScrollContainer/);
+assert.match(xiaohongshuRendererSource, /scrollTop\s*=\s*Math\.min/);
+assert.match(xiaohongshuRendererSource, /dispatchEvent\(new Event\('scroll'/);
+assert.match(xiaohongshuRendererSource, /dispatchEvent\(new WheelEvent\('wheel'/);
+assert.match(xiaohongshuRendererSource, /idleRounds/);
+assert.match(xiaohongshuRendererSource, /mergeXiaohongshuCommentSources/);
+assert.strictEqual(xiaohongshuRendererSource.includes('for (let index = 0; index < 24; index += 1)'), false);
+
+const rejectedCapturedXiaohongshuPayload = helpers.mergeXiaohongshuCapturedCommentPayloads([{
+  url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=note-1',
+  payload: { success: false, code: -100, msg: 'request rejected' },
+}]);
+assert.strictEqual(rejectedCapturedXiaohongshuPayload.rootPayloadCount, 0);
+assert.strictEqual(rejectedCapturedXiaohongshuPayload.invalidPayloadCount, 1);
+
+const outOfOrderCapturedXiaohongshuPages = helpers.mergeXiaohongshuCapturedCommentPayloads([
+  {
+    sequence: 2,
+    url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=note-1&cursor=next',
+    payload: {
+      data: {
+        comments: [{ id: 'ordered-root-2', content: '第二页评论', user_info: { nickname: '分页用户' } }],
+        has_more: false,
+      },
+    },
+  },
+  {
+    sequence: 1,
+    url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=note-1',
+    payload: {
+      data: {
+        comments: [{ id: 'ordered-root-1', content: '第一页评论', user_info: { nickname: '分页用户' } }],
+        cursor: 'next',
+        has_more: true,
+      },
+    },
+  },
+]);
+assert.deepStrictEqual(
+  outOfOrderCapturedXiaohongshuPages.comments.map((comment) => comment.id),
+  ['ordered-root-1', 'ordered-root-2'],
+);
+assert.strictEqual(outOfOrderCapturedXiaohongshuPages.rootPageCount, 2);
 
 const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
