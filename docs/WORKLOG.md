@@ -1,17 +1,17 @@
 # Worklog
 
-### 2026-07-15 08:20 - 抖音 Session 优先解析与外部协议隔离候选
+### 2026-07-15 08:20 - 发布 Obsidian 插件 1.3.29：抖音 Session 优先解析与外部协议隔离
 
 - 目标：在解析成功率优先的前提下，从根源减少抖音隐藏页面触发 `bytedance://` / Microsoft Store 弹窗，并拒绝批量解析时误取推荐作品媒体；不依赖云端解析。
 - 影响范围：Obsidian 插件抖音地址标准化、精确详情校验、持久化 Electron Session HTTP 解析、隐藏浏览器协议隔离、导航守卫与插件回归测试；不涉及小程序、云函数、支付、绑定码、Pro 云端权益或业务数据。
 - 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、抖音设计/实施计划、`docs/WORKLOG.md`。实施期间远端已发布 `1.3.28`，本分支已重放到最新 `origin/main@1.3.28`，保留 PDF OCR、本地 ASR 质量门和小红书评论能力。
 - 实现：短链跳到 `bytedance://aweme/detail/<id>` 或 `snssdk1128://...` 时只提取作品 ID并改写为规范 HTTPS；直接详情与 Session 详情都必须匹配目标 `aweme_id`；静态接口失败后用 `persist:wechat-inbox-wechat` 的 `session.fetch` 预热 Cookie 并请求两条固定详情接口；仍失败才进入原隐藏浏览器。隐藏窗口创建前，在同一专用 Session 上幂等注册两个自定义协议空响应处理器，并继续保留 webRequest、导航、重定向、新窗口四层事件守卫。
-- 线上动作：无。未推送 GitHub、未创建 `1.3.29` 标签或 Release、未发布插件市场版本。
+- 线上动作：用户明确要求直接发布。提交 `8ec7b86` 已快进推送到默认分支 `main`，标签 `1.3.29` 已推送并触发 GitHub Actions；Release 已生成：<https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.29>。桌面手动安装包为 `C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.29.zip`。
 - 本机安装：用户先通过插件市场更新到正式 `1.3.28`，已把该完整目录备份到 `C:\Users\ADMIN\AppData\Local\Temp\wechat-inbox-sync-official-1.3.28-before-1.3.29-20260715-075236`，再安装基于正式 28 的 `1.3.29` 候选。10 个运行文件逐项 SHA-256 一致，manifest 为 `1.3.29`，候选 `main.js` SHA-256 为 `774A5D76D63B97328B0330F68699006372A701672E9D86F4F69A1F7AD5D9C938`；安装动作前后 `data.json` SHA-256 均为 `D2CC6738D958056D01BC60CE06A0A0D19BC4194D5F2196D2B9DFD314DD0E496E`。
-- 验证：按 TDD 分别观察到自定义协议 ID 提取失败、Session 函数缺失、直接详情误收推荐作品、协议处理器缺失四组预期红灯，再实现到绿灯。重放到 `1.3.28` 后，`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`git diff --check` 均退出码 0。仓库没有计划初稿引用的三份 core 测试；移动端测试仍加载根目录桌面插件镜像，release 历史测试仍硬编码 `1.2.97`，两项在原 `1.3.28` 基线就失败且本任务未修改对应文件。
-- 结果：代码实现、自动回归和本机候选安装已完成；真实 Obsidian 端到端验收尚未完成，不能在用户复测前宣称弹窗已经根治。尝试控制本机 Obsidian 重载时，Windows 捕获接口返回 `SetIsBorderRequired failed: 不支持此接口 (0x80004002)`，已按桌面控制安全规则停止输入操作，没有改用非授权键鼠脚本。
+- 验证：按 TDD 分别观察到自定义协议 ID 提取失败、Session 函数缺失、直接详情误收推荐作品、协议处理器缺失四组预期红灯，再实现到绿灯。重放到 `1.3.28` 后，`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`git diff --check` 均退出码 0。发布检查器确认默认分支和 Raw manifest 为 `1.3.29`、versions 包含 `1.3.29`、最新/目标 Release 正确、五项 Release 资产齐全、Release 内 manifest/versions 正确、桌面 ZIP 的四项核心文件与 manifest 版本正确。仓库没有计划初稿引用的三份 core 测试；移动端测试仍加载根目录桌面插件镜像，release 历史测试仍硬编码 `1.2.97`，两项在原 `1.3.28` 基线就失败且本任务未修改对应文件。
+- 结果：`1.3.29` 已满足 Obsidian 社区插件市场自动发现条件，代码、自动回归、本机安装包和发布链路均已完成。真实 Obsidian 抖音端到端验收仍由用户更新/重载后进行，不能在实际复测前宣称弹窗已经根治。尝试控制本机 Obsidian 重载时，Windows 捕获接口返回 `SetIsBorderRequired failed: 不支持此接口 (0x80004002)`，已按桌面控制安全规则停止输入操作，没有改用非授权键鼠脚本。
 - 已知风险：抖音继续调整接口时 Session HTTP 可能仍取不到媒体，但会进入原浏览器兜底；实机尚需确认 Obsidian 1.12.7 中 Session 协议处理器能完全吞掉页面 iframe 发起的外部协议，同时不影响媒体请求和 MP4 保存。
-- 下一步：用户重载 Obsidian 后先用本次问题链接验证“正确作品转写 + 无 Microsoft Store 弹窗”，再用 3 条旧链接和至少 10 条批量链接验证无串单；通过后升级并发布 `1.3.29`。
+- 下一步：用户在 Obsidian 检查更新到 `1.3.29` 后，先用本次问题链接验证“正确作品转写 + 无 Microsoft Store 弹窗”，再用 3 条旧链接和至少 10 条批量链接验证无串单；如仍有弹窗，记录触发链接和发生时间用于继续定位。
 
 ### 2026-07-15 08:05 - 发布 Obsidian 插件 1.3.28：PDF 自动 OCR 与本地转写质量修复
 
