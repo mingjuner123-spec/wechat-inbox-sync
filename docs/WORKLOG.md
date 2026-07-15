@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-15 13:26 - 发布插件 1.3.39：恢复小红书/抖音视频的本地转写链路
+
+- 目标：处理用户反馈的“小红书视频口播文案为空”和抖音链接无法进入下载/转写；优先恢复解析和转写成功，同时不重新引入 `bytedance://` 外部应用唤起。
+- 根因证据：本机 `小红书-小红书口播文案.md` 已保存视频、图片和评论，但转写段为“未配置可用的音频转写方案”；同机 `data.json` 的 Pro 权益和本地 ASR 均可用，却保留了历史 `aiProvider: "off"`。旧逻辑把该遗留值当成明确禁用，绕开本地 ASR。抖音短链 `v.douyin.com/blEhzLRl0e8` 可解析精确 `aweme_id=7659778280362429711`，但桌面详情页/API 返回空正文，`yt-dlp` 也要求新鲜 Cookie；同一作品的匿名移动分享 SSR 页则包含精确作品的 `aweme.snssdk.com/aweme/v1/playwm` 媒体地址，且实际响应为 MP4。
+- 修改：当用户具备有效 Pro 权益且已可运行本地 ASR 时，遗留的 `aiProvider: "off"` 自动走本地转写，不影响真正不可用或无权益的情形。抖音解析新增匿名移动分享 SSR 优先路径，严格按目标 `aweme_id` 提取媒体，识别 `snssdk.com` 播放地址；只有该路径无结果才保留原详情 API、Session 和隐藏浏览器兜底。未使用或恢复 `bytedance://` 协议。
+- TDD 与验证：先新增“Pro + 本地 ASR 可用 + 历史 off 配置必须自动转写”和“分享页混有推荐作品时只能取目标 aweme 媒体”的回归，旧代码分别失败；实现后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node scripts/check-local-ocr-cdn.js`、版本 JSON 解析和 `git diff --check` 全部通过。真实移动分享 HTML 也已用本次目标作品验证可提取其精确播放地址。
+- 本机安装：已将 `main.js` 与 `manifest.json` 安装到 `D:\内容创作系统\张张的内容创作知识库\.obsidian\plugins\wechat-inbox-sync`，版本为 `1.3.39`；安装前备份位于 `.backup-before-1.3.39-20260715-132547`，安装前后 `data.json` SHA-256 一致，未改绑定码、Pro 缓存或用户设置。
+- 发布：默认分支已推送提交 `b0db3a5`，标签 `1.3.39` 已推送，GitHub Actions Release 成功。正式 Release：<https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.39>；资产包含 `main.js`、`manifest.json`、`styles.css`、`versions.json`、`wechat-inbox-sync-1.3.39.zip`。桌面安装包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.39.zip`，SHA-256 `3483D677A9ECEBD8677792DA29706CBA92549E428D0F914282E2DF13EE634ECF`。
+- 市场验证：`check_obsidian_release.ps1` 已确认 `main` 与 Raw manifest/versions、正式 latest Release、五项 Release 资产、Release asset manifest/versions 与本地 ZIP 都是 `1.3.39`。
+- 已知风险：抖音移动分享页属于平台公开 SSR 输出，页面字段或反爬策略未来仍可能变化；此时插件会继续走原有详情 API、Session 和隐藏浏览器兜底，但不能保证被平台限制的视频一定可下载。转写内容质量仍依赖本地 Whisper 与原音质量，本次修复的是“未进入转写/无目标媒体”的链路问题。
+- 下一步：重载或重启 Obsidian 使已运行的 renderer 加载 1.3.39，然后用一条新的小红书视频和当前抖音链接各同步一次；确认笔记同时出现媒体附件与“口播/音频文案”。
+
 ### 2026-07-15 12:35 - 发布插件 1.3.38：固定 OCR Python 运行时并清理抖音转写结尾幻觉
 
 - 目标：修复 Windows/macOS 用户在已有 Python 3.13+ 时无法安装 OCR 的问题，并把上一任务已完成的抖音转写结尾幻觉清理合并发布为插件市场 `1.3.38`。
