@@ -2156,7 +2156,7 @@ const canonicalXiaohongshuComments = helpers.mergeXiaohongshuCommentSources({
   fallbackGroups: [[
     { author: '用户甲', content: '同一条评论', time: '1天前上海' },
     { author: '用户乙', content: '折叠回复', time: '1天前广东' },
-    { author: '用户丙', content: '真正新增评论', time: '刚刚' },
+    { author: '用户丙', content: '真正新增评论', time: '刚刚', domRole: 'root' },
   ]],
   limit: 200,
 });
@@ -2165,6 +2165,53 @@ assert.strictEqual(canonicalXiaohongshuComments.comments[0].replies.length, 1);
 assert.strictEqual(canonicalXiaohongshuComments.comments[1].content, '真正新增评论');
 assert.strictEqual(canonicalXiaohongshuComments.dedupedFallbackCount, 2);
 assert.strictEqual(canonicalXiaohongshuComments.fallbackAddedCount, 1);
+
+const hardenedXiaohongshuFallback = helpers.mergeXiaohongshuCommentSources({
+  networkComments: [{
+    id: 'hardened-root-1',
+    author: '蓝爽',
+    content: '刚开始操作，还想把视频保存下来有没有方法[笑哭R]',
+  }],
+  fallbackGroups: [[
+    { author: '蓝爽', content: '刚开始操作，还想把视频保存下来有没有方法……展开', domRole: 'root' },
+    { author: '问一问', content: '小红书评论区大家都在问什么？问一问为你总结', domRole: 'root' },
+    { author: '蓝爽', content: '蓝爽', domRole: 'root' },
+    { author: '结构不明用户', content: '不能证明是主评论的 DOM 文本' },
+  ]],
+  limit: 200,
+});
+assert.strictEqual(hardenedXiaohongshuFallback.comments.length, 1);
+assert.strictEqual(hardenedXiaohongshuFallback.dedupedFallbackCount, 1);
+assert.strictEqual(hardenedXiaohongshuFallback.droppedFallbackCount, 3);
+
+const structuredDomReply = helpers.mergeXiaohongshuCommentSources({
+  networkComments: [{ id: 'structured-parent-1', author: '父评论用户', content: '父评论正文' }],
+  fallbackGroups: [[{
+    author: '回复用户',
+    content: 'DOM 中没有“回复某人”前缀的折叠回复',
+    domRole: 'reply',
+    parentCommentId: 'structured-parent-1',
+  }]],
+  limit: 200,
+});
+assert.strictEqual(structuredDomReply.comments.length, 1);
+assert.strictEqual(structuredDomReply.comments[0].replies.length, 1);
+assert.strictEqual(structuredDomReply.comments[0].replies[0].content, 'DOM 中没有“回复某人”前缀的折叠回复');
+
+const formattedXiaohongshuComments = helpers.buildSocialCommentsMarkdown([{
+  author: '格式用户',
+  content: '格式化评论',
+  time: '1712102400000',
+  likes: '赞',
+  replies: [{ author: '回复用户', content: '格式化回复', likes: '35赞' }],
+}]);
+assert.ok(formattedXiaohongshuComments.includes('2024-04-03 · 赞'));
+assert.ok(formattedXiaohongshuComments.includes('35 赞'));
+assert.strictEqual(formattedXiaohongshuComments.includes('赞 赞'), false);
+assert.deepStrictEqual(helpers.getSocialCommentMarkdownStats(formattedXiaohongshuComments), {
+  rootCount: 1,
+  replyCount: 1,
+});
 
 const mergedXiaohongshuNetworkVariants = helpers.mergeXiaohongshuCommentSources({
   networkComments: [
@@ -2255,7 +2302,7 @@ const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
   stopReason: 'limit_reached',
   cookie: 'must-not-leak',
 });
-assert.match(xiaohongshuCommentDiagnostic, /^<!-- xhs-comment-diag: source=page-api; root=200; replies=3; pages=4; root_pages=4; reply_pages=0; final_root=198; final_replies=3; fallback=2; deduped=8; unmatched=0; invalid=1; scroll=comment_container; api_stop=root_unavailable; stop=limit_reached -->$/);
+assert.match(xiaohongshuCommentDiagnostic, /^<!-- xhs-comment-diag: source=page-api; root=200; replies=3; pages=4; root_pages=4; reply_pages=0; final_root=198; final_replies=3; fallback=2; deduped=8; dropped=0; unmatched=0; invalid=1; scroll=comment_container; api_stop=root_unavailable; stop=limit_reached -->$/);
 assert.strictEqual(xiaohongshuCommentDiagnostic.includes('must-not-leak'), false);
 assert.strictEqual(
   helpers.appendXiaohongshuCommentDiagnostic('# 正文\n\n<!-- xhs-comment-diag: source=old; root=1; replies=0; pages=1; stop=old -->', xiaohongshuCommentDiagnostic),
@@ -2778,6 +2825,14 @@ assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
   '字幕by索兰娅',
   '字幕:J Chong',
 ].join('\n')), '这是正文最后一句。');
+assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
+  '这句话在正文中提到“我们下身再见”这个错听案例，不应该被删除。',
+  '最后一段正常正文。',
+  '我现在就以为我们下身再见',
+].join('\n')), [
+  '这句话在正文中提到“我们下身再见”这个错听案例，不应该被删除。',
+  '最后一段正常正文。',
+].join('\n'));
 
 assert.strictEqual(helpers.extractBilibiliAudioUrlFromPlayurlPayload({
   data: {

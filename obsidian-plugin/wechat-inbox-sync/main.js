@@ -1902,11 +1902,12 @@ function cleanTrailingTranscriptionHallucinations(text) {
   const lines = String(text || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length < 2) return lines.join('\n');
   const isCredit = (line) => /^(?:字幕|字幕\s*by|字幕\s*:|翻译|校对|制作|subtitles?\s*(?:by|:))/i.test(line);
+  const isCorruptedClosing = (line) => /(?:我们|咱们).{0,10}(?:下身|下生|下声|下省)(?:再见|见)[。！!]?$/u.test(line);
   let cutoff = lines.length;
   for (let index = lines.length - 1; index >= 1; index -= 1) {
     const line = lines[index];
     const repeated = line === lines[index - 1];
-    if (isCredit(line) || repeated) {
+    if (isCredit(line) || isCorruptedClosing(line) || repeated) {
       cutoff = Math.min(cutoff, repeated ? index - 1 : index);
       continue;
     }
@@ -5746,6 +5747,12 @@ function normalizeSocialComment(comment, depth = 0) {
   };
   const id = getSocialCommentId(comment);
   if (id) normalized.id = id;
+  const domRole = String(comment.domRole || '').trim().toLowerCase();
+  if (['root', 'reply', 'unknown'].includes(domRole)) normalized.domRole = domRole;
+  const parentCommentId = String(comment.parentCommentId || comment.parent_comment_id || '').trim();
+  const parentAuthor = String(comment.parentAuthor || '').trim();
+  if (parentCommentId) normalized.parentCommentId = parentCommentId;
+  if (parentAuthor) normalized.parentAuthor = parentAuthor;
   if (depth < 4 && Array.isArray(comment.replies)) {
     const replySeen = new Set();
     const replies = comment.replies
@@ -5771,8 +5778,21 @@ function isNoisySocialCommentContent(content, author = '') {
   if (/^(?:回复|评论|点赞|分享|收藏|展开|收起|查看|更多|写评论|发布|发送)$/.test(text)) return true;
   if (/^共\s*\d+\s*(?:条|則|个)?\s*(?:评论|回复)/.test(text)) return true;
   if (/(?:共\s*\d+\s*(?:条|个)?\s*评论).*(?:回复|展开|查看)/.test(text)) return true;
+  if (/问一问.{0,30}(?:总结|都在问什么|为你)/.test(text) || /^问一问$/.test(byAuthor)) return true;
+  if (byAuthor && getSocialCommentCanonicalText(text) === getSocialCommentCanonicalText(byAuthor)) return true;
   if (!byAuthor && text.length <= 4 && /^[\d\s赞回复评论]+$/.test(text)) return true;
   return false;
+}
+
+function getSocialCommentCanonicalText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/^回复\s+[^:：]{1,80}\s*[:：]\s*/u, '')
+    .replace(/\[[^\]\r\n]{1,16}R\]/giu, '')
+    .replace(/(?:\.{3,}|…{2,})?\s*(?:展开|收起|查看全部)\s*$/u, '')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+    .trim();
 }
 
 function getSocialCommentId(comment) {
@@ -5787,16 +5807,8 @@ function getSocialCommentIdentity(comment) {
 }
 
 function getSocialCommentFallbackIdentity(comment) {
-  const author = String(comment && comment.author || '')
-    .replace(/^[:：]+|[:：]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-  const content = String(comment && comment.content || '')
-    .replace(/^回复\s+[^:：]{1,80}\s*[:：]\s*/u, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
+  const author = getSocialCommentCanonicalText(String(comment && comment.author || '').replace(/^[:：]+|[:：]+$/g, ''));
+  const content = getSocialCommentCanonicalText(comment && comment.content);
   return author && content ? `${author}|${content}` : '';
 }
 
@@ -5819,6 +5831,13 @@ function getSocialCommentAuthorKey(author) {
 
 function parseXiaohongshuDomReply(comment) {
   const content = String(comment && comment.content || '').trim();
+  if (String(comment && comment.domRole || '').toLowerCase() === 'reply') {
+    return {
+      parentCommentId: String(comment && comment.parentCommentId || '').trim(),
+      targetAuthorKey: getSocialCommentAuthorKey(comment && comment.parentAuthor),
+      content,
+    };
+  }
   const match = content.match(/^回复\s+(.{1,80}?)\s*[:：]\s*(.+)$/u);
   if (!match || !match[1] || !match[2]) return null;
   return {
@@ -5933,11 +5952,16 @@ function mergeXiaohongshuCommentSources({
   let fallbackAddedCount = 0;
   let fallbackReplyAddedCount = 0;
   let unmatchedFallbackReplyCount = 0;
+  let droppedFallbackCount = 0;
+  const hasNetworkRoots = comments.length > 0;
 
   (Array.isArray(fallbackGroups) ? fallbackGroups : []).forEach((group) => {
     (Array.isArray(group) ? group : []).forEach((comment) => {
       const normalized = normalizeSocialComment(comment);
-      if (!normalized) return;
+      if (!normalized) {
+        droppedFallbackCount += 1;
+        return;
+      }
       const key = getSocialCommentFallbackIdentity(normalized);
       if (key && canonicalKeys.has(key)) {
         dedupedFallbackCount += 1;
@@ -5945,9 +5969,17 @@ function mergeXiaohongshuCommentSources({
       }
       const domReply = parseXiaohongshuDomReply(normalized);
       if (domReply) {
-        const matchingRootIndexes = comments
-          .map((root, index) => (getSocialCommentAuthorKey(root && root.author) === domReply.targetAuthorKey ? index : -1))
-          .filter((index) => index >= 0);
+        let matchingRootIndexes = [];
+        if (domReply.parentCommentId) {
+          matchingRootIndexes = comments
+            .map((root, index) => (getSocialCommentId(root) === domReply.parentCommentId ? index : -1))
+            .filter((index) => index >= 0);
+        }
+        if (!matchingRootIndexes.length && domReply.targetAuthorKey) {
+          matchingRootIndexes = comments
+            .map((root, index) => (getSocialCommentAuthorKey(root && root.author) === domReply.targetAuthorKey ? index : -1))
+            .filter((index) => index >= 0);
+        }
         if (matchingRootIndexes.length !== 1) {
           unmatchedFallbackReplyCount += 1;
           return;
@@ -5978,6 +6010,10 @@ function mergeXiaohongshuCommentSources({
         fallbackReplyAddedCount += 1;
         return;
       }
+      if (hasNetworkRoots && normalized.domRole !== 'root') {
+        droppedFallbackCount += 1;
+        return;
+      }
       if (comments.length >= max) return;
       comments.push(normalized);
       if (key) canonicalKeys.add(key);
@@ -5992,6 +6028,7 @@ function mergeXiaohongshuCommentSources({
     fallbackAddedCount,
     fallbackReplyAddedCount,
     unmatchedFallbackReplyCount,
+    droppedFallbackCount,
   };
 }
 
@@ -6210,7 +6247,7 @@ function buildSocialCommentsMarkdown(comments = []) {
   if (!items.length) return '';
   const lines = ['## 评论区', ''];
   const appendComment = (comment, indent = '', reply = false) => {
-    const meta = [comment.time, comment.likes ? `${comment.likes} 赞` : ''].filter(Boolean).join(' · ');
+    const meta = [formatSocialCommentTime(comment.time), formatSocialCommentLikes(comment.likes)].filter(Boolean).join(' · ');
     const prefix = comment.author ? `**${comment.author}**：` : '';
     lines.push(`${indent}- ${reply ? '↳ ' : ''}${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
     (Array.isArray(comment.replies) ? comment.replies : []).forEach((child) => appendComment(child, `${indent}  `, true));
@@ -6219,6 +6256,45 @@ function buildSocialCommentsMarkdown(comments = []) {
     appendComment(comment);
   });
   return lines.join('\n').trim();
+}
+
+function formatSocialCommentTime(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{10,13}$/.test(text)) return text;
+  const timestamp = Number(text) * (text.length === 10 ? 1000 : 1);
+  if (!Number.isFinite(timestamp)) return text;
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? text : date.toISOString().slice(0, 10);
+}
+
+function formatSocialCommentLikes(value) {
+  const text = String(value || '').replace(/\s+/g, '').trim();
+  if (!text) return '';
+  if (/^(?:赞|点赞)$/.test(text)) return '赞';
+  const count = text.match(/^(\d+(?:\.\d+)?(?:万|w)?)(?:赞|点赞)?$/i);
+  return count ? `${count[1]} 赞` : text.replace(/(?:赞\s*){2,}$/u, '赞');
+}
+
+function getSocialCommentMarkdownStats(markdown = '') {
+  let rootCount = 0;
+  let replyCount = 0;
+  let inComments = false;
+  String(markdown || '').split(/\r?\n/).forEach((line) => {
+    if (/^##\s+评论区\s*$/.test(line.trim())) {
+      inComments = true;
+      return;
+    }
+    if (inComments && /^##\s+/.test(line.trim())) {
+      inComments = false;
+      return;
+    }
+    if (!inComments) return;
+    const match = line.match(/^(\s*)-\s+(?:↳\s+)?/u);
+    if (!match) return;
+    if (match[1].length > 0) replyCount += 1;
+    else rootCount += 1;
+  });
+  return { rootCount, replyCount };
 }
 
 function buildWechatCommentsMarkdown(comments = []) {
@@ -6487,7 +6563,7 @@ function buildXiaohongshuCommentDiagnostic(details = {}) {
   const scrollMode = toLabel(details.scrollMode);
   const pageApiStopReason = toLabel(details.pageApiStopReason);
   const stopReason = String(details.stopReason || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'unknown';
-  return `<!-- xhs-comment-diag: source=${source}; root=${toCount(details.rootCount)}; replies=${toCount(details.replyCount)}; pages=${toCount(details.pageCount)}; root_pages=${toCount(details.rootPageCount)}; reply_pages=${toCount(details.replyPageCount)}; final_root=${toCount(details.finalRootCount)}; final_replies=${toCount(details.finalReplyCount)}; fallback=${toCount(details.fallbackAddedCount)}; deduped=${toCount(details.dedupedFallbackCount)}; unmatched=${toCount(details.unmatchedReplyCount)}; invalid=${toCount(details.invalidPayloadCount)}; scroll=${scrollMode}; api_stop=${pageApiStopReason}; stop=${stopReason} -->`;
+  return `<!-- xhs-comment-diag: source=${source}; root=${toCount(details.rootCount)}; replies=${toCount(details.replyCount)}; pages=${toCount(details.pageCount)}; root_pages=${toCount(details.rootPageCount)}; reply_pages=${toCount(details.replyPageCount)}; final_root=${toCount(details.finalRootCount)}; final_replies=${toCount(details.finalReplyCount)}; fallback=${toCount(details.fallbackAddedCount)}; deduped=${toCount(details.dedupedFallbackCount)}; dropped=${toCount(details.droppedFallbackCount)}; unmatched=${toCount(details.unmatchedReplyCount)}; invalid=${toCount(details.invalidPayloadCount)}; scroll=${scrollMode}; api_stop=${pageApiStopReason}; stop=${stopReason} -->`;
 }
 
 function appendXiaohongshuCommentDiagnostic(markdown, details = {}) {
@@ -8164,10 +8240,11 @@ async function renderXiaohongshuPageWithElectron(url) {
     const renderedPayload = await win.webContents.executeJavaScript(`
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const XIAOHONGSHU_ROOT_COMMENT_LIMIT = ${XIAOHONGSHU_ROOT_COMMENT_LIMIT};
         const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
         const comments = [];
         const seen = new Set();
-        const push = (author, content, time, likes) => {
+        const push = (author, content, time, likes, structure = {}) => {
           const body = clean(content);
           if (!body || body.length < 2) return;
           if (/^(?:回复|评论|点赞|赞|展开|更多|查看|分享|收藏|[0-9]+)$/.test(body)) return;
@@ -8176,7 +8253,15 @@ async function renderXiaohongshuPageWithElectron(url) {
           const key = name + '|' + body;
           if (seen.has(key)) return;
           seen.add(key);
-          comments.push({ author: name, content: body, time: clean(time), likes: clean(likes) });
+          comments.push({
+            author: name,
+            content: body,
+            time: clean(time),
+            likes: clean(likes),
+            domRole: structure.domRole || 'unknown',
+            parentAuthor: clean(structure.parentAuthor),
+            parentCommentId: clean(structure.parentCommentId),
+          });
         };
         const clickUsefulButtons = () => {
           const buttons = Array.from(document.querySelectorAll('button, [role="button"], .show-more, .more, .expand, [class*="more"], [class*="expand"], [class*="reply"], [class*="Reply"], [class*="sub-comment"], [class*="subComment"], [data-testid*="reply"], [data-testid*="comment"]'));
@@ -8200,9 +8285,9 @@ async function renderXiaohongshuPageWithElectron(url) {
           ];
           const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
           nodes.forEach((node) => {
-            const pick = (selectorsToTry) => {
+            const pickFrom = (root, selectorsToTry) => {
               for (const selector of selectorsToTry) {
-                const candidates = Array.from(node.querySelectorAll(selector));
+                const candidates = Array.from(root && root.querySelectorAll ? root.querySelectorAll(selector) : []);
                 for (const child of candidates) {
                   const value = clean(child.innerText || child.textContent || '');
                   if (value) return value;
@@ -8210,6 +8295,7 @@ async function renderXiaohongshuPageWithElectron(url) {
               }
               return '';
             };
+            const pick = (selectorsToTry) => pickFrom(node, selectorsToTry);
             const author = pick(['[class*="name"]', '[class*="nick"]', '[class*="author"]', '[class*="user"]']);
             const time = pick(['[class*="time"]', '[class*="date"]']);
             const likes = pick(['[class*="like"]', '[class*="praise"]']);
@@ -8219,7 +8305,28 @@ async function renderXiaohongshuPageWithElectron(url) {
               const parts = text.split(/\\s+/).filter(Boolean);
               content = parts.find((part) => part.length >= 2 && !/^(?:回复|评论|点赞|赞|展开|更多|查看|分享|收藏|[0-9]+)$/.test(part)) || text;
             }
-            push(author, content, time, likes);
+            const marker = clean(String(node.className || '') + ' ' + String(node.id || ''));
+            const replyAncestor = node.closest
+              ? node.closest('[class*="reply"], [class*="Reply"], [class*="sub-comment"], [class*="subComment"]')
+              : null;
+            const isReplyNode = /reply|sub[-_]?comment/i.test(marker)
+              || Boolean(replyAncestor && replyAncestor !== node.closest('.comments-container, [class*="comment-list"], [class*="CommentList"]'));
+            const rootSelector = '.comment-item, [class*="comment-item"], [class*="CommentItem"], [class*="comment"][class*="item"]';
+            let parentRoot = null;
+            if (isReplyNode && node.parentElement && node.parentElement.closest) {
+              parentRoot = node.parentElement.closest(rootSelector);
+            }
+            const parentAuthor = parentRoot
+              ? pickFrom(parentRoot, ['[class*="name"]', '[class*="nick"]', '[class*="author"]', '[class*="user"]'])
+              : '';
+            const parentCommentId = parentRoot
+              ? clean(parentRoot.getAttribute('data-comment-id') || parentRoot.getAttribute('data-id') || parentRoot.id || '')
+              : '';
+            push(author, content, time, likes, {
+              domRole: isReplyNode ? 'reply' : 'root',
+              parentAuthor,
+              parentCommentId,
+            });
           });
         };
         const findCommentScrollContainer = () => {
@@ -8288,26 +8395,35 @@ async function renderXiaohongshuPageWithElectron(url) {
         let idleRounds = 0;
         let completedRounds = 0;
         let lastCommentCount = -1;
-        let lastScrollHeight = -1;
+        let lastNetworkCommentCount = -1;
         let scrollMode = 'unknown';
         let collectionStopReason = 'max_rounds';
-        const maxRounds = 45;
+        const maxRounds = 90;
         for (let index = 0; index < maxRounds; index += 1) {
           clickUsefulButtons();
           collectDomComments();
           const movement = advanceCommentScroll();
           scrollMode = movement.mode;
-          await sleep(650);
+          await sleep(450);
           clickUsefulButtons();
           collectDomComments();
-          const progressed = comments.length > lastCommentCount
-            || movement.height > lastScrollHeight
-            || movement.moved;
+          let networkCommentCount = 0;
+          try {
+            networkCommentCount = performance.getEntriesByType('resource')
+              .filter((entry) => /xiaohongshu\\.com\\/api\\/sns\\/web\\/v\\d+\\/comment/i.test(String(entry && entry.name || '')))
+              .length;
+          } catch (error) {}
+          const progressed = comments.length > lastCommentCount || networkCommentCount > lastNetworkCommentCount;
           idleRounds = progressed ? 0 : idleRounds + 1;
           lastCommentCount = comments.length;
-          lastScrollHeight = movement.height;
+          lastNetworkCommentCount = networkCommentCount;
           completedRounds = index + 1;
-          if (idleRounds >= 4 && index >= 3) {
+          const rootCommentCount = comments.filter((comment) => comment && comment.domRole === 'root').length;
+          if (rootCommentCount >= XIAOHONGSHU_ROOT_COMMENT_LIMIT) {
+            collectionStopReason = 'limit_reached';
+            break;
+          }
+          if (idleRounds >= 10 && index >= 9) {
             collectionStopReason = 'idle';
             break;
           }
@@ -8379,10 +8495,11 @@ async function renderXiaohongshuPageWithElectron(url) {
       finalReplyCount: finalCommentStats.replyCount,
       fallbackAddedCount: mergedCommentSources.fallbackAddedCount,
       dedupedFallbackCount: mergedCommentSources.dedupedFallbackCount,
+      droppedFallbackCount: mergedCommentSources.droppedFallbackCount,
       unmatchedReplyCount: browserNetworkResult.unmatchedReplyCount + mergedCommentSources.unmatchedFallbackReplyCount,
       invalidPayloadCount: browserNetworkResult.invalidPayloadCount,
       scrollMode: renderedPayload && renderedPayload.scrollMode,
-      pageApiStopReason: capturedDiagnostic.stopReason,
+      pageApiStopReason: hasBrowserNetworkPayload ? 'network_primary' : capturedDiagnostic.stopReason,
       stopReason: hasBrowserNetworkPayload ? browserStopReason : (capturedDiagnostic.stopReason || pagedRootResult.stopReason),
     };
     const commentDiagnostic = buildXiaohongshuCommentDiagnostic(commentDiagnosticDetails);
@@ -13753,27 +13870,29 @@ class WechatObsidianInboxPlugin extends Plugin {
                 limit: XIAOHONGSHU_ROOT_COMMENT_LIMIT,
               });
               const mergedXiaohongshuComments = finalXiaohongshuMerge.comments;
-              const finalXiaohongshuStats = getSocialCommentTreeStats(mergedXiaohongshuComments);
               const renderedDiagnosticDetails = renderedXiaohongshuPage
                 && renderedXiaohongshuPage.commentDiagnosticDetails
                 && typeof renderedXiaohongshuPage.commentDiagnosticDetails === 'object'
                 ? renderedXiaohongshuPage.commentDiagnosticDetails
                 : {};
+              const markdownWithXiaohongshuComments = mergedXiaohongshuComments.length
+                ? appendSocialCommentsToMarkdown(extractedXiaohongshu.markdown, mergedXiaohongshuComments)
+                : extractedXiaohongshu.markdown;
+              const finalXiaohongshuStats = getSocialCommentMarkdownStats(markdownWithXiaohongshuComments);
               const finalDiagnosticDetails = {
                 ...renderedDiagnosticDetails,
                 finalRootCount: finalXiaohongshuStats.rootCount,
                 finalReplyCount: finalXiaohongshuStats.replyCount,
                 fallbackAddedCount: Number(renderedDiagnosticDetails.fallbackAddedCount || 0) + finalXiaohongshuMerge.fallbackAddedCount,
                 dedupedFallbackCount: Number(renderedDiagnosticDetails.dedupedFallbackCount || 0) + finalXiaohongshuMerge.dedupedFallbackCount,
+                droppedFallbackCount: Number(renderedDiagnosticDetails.droppedFallbackCount || 0) + finalXiaohongshuMerge.droppedFallbackCount,
                 unmatchedReplyCount: Number(renderedDiagnosticDetails.unmatchedReplyCount || 0) + finalXiaohongshuMerge.unmatchedFallbackReplyCount,
               };
               extractedXiaohongshu = {
                 ...extractedXiaohongshu,
                 comments: mergedXiaohongshuComments,
                 markdown: appendXiaohongshuCommentDiagnostic(
-                  mergedXiaohongshuComments.length
-                    ? appendSocialCommentsToMarkdown(extractedXiaohongshu.markdown, mergedXiaohongshuComments)
-                    : extractedXiaohongshu.markdown,
+                  markdownWithXiaohongshuComments,
                   finalDiagnosticDetails,
                 ),
               };
@@ -14803,6 +14922,7 @@ WechatObsidianInboxPlugin.__test = {
   getXiaohongshuCommentPaginationScript,
   buildSocialCommentsMarkdown,
   getSocialCommentTreeStats,
+  getSocialCommentMarkdownStats,
   getXiaohongshuCapturedRequestBody,
   appendXiaohongshuOcrMarkdown,
   buildXiaohongshuOcrMarkdown,
