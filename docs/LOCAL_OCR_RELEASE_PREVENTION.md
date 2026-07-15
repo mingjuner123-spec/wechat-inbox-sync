@@ -26,7 +26,8 @@
 
 - PDF 不再进入 OCR；小红书长图文等图片 OCR 保留。
 - Windows 与 macOS OCR 组件恢复 RapidOCR + Pillow 的图片专用依赖。
-- GitHub tag 发布前强制运行 `node scripts/check-local-ocr-cdn.js`，从公网下载 Windows 安装器、macOS 安装器和 `ocr_image.py`，与仓库发布源做逐字节 SHA-256 比对；任一不一致则禁止创建 Release。
+- GitHub tag 发布前强制运行 `node scripts/check-local-ocr-cdn.js`，从公网下载 Windows 安装器、macOS 安装器和 `ocr_image.py`，与仓库发布源的 LF 字节做 SHA-256 比对；任一不一致则禁止创建 Release。
+- `.gitattributes` 固定三份 OCR 文本资产为 LF，防止 Windows 工作区上传 CRLF、GitHub Linux 检出 LF 所造成的跨平台字节漂移和 macOS shell 风险。
 - 固定顺序为：测试发布源 → 上传 CDN → 公网回读校验 → 提升插件版本 → 推送 main → 推送 tag。
 
 ## 后续结构性改造

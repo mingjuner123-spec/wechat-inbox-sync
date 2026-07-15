@@ -18,6 +18,10 @@ function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex').toUpperCase();
 }
 
+function releaseBytes(buffer) {
+  return Buffer.from(buffer.toString('utf8').replace(/\r\n?/g, '\n'), 'utf8');
+}
+
 async function fetchPublicAsset(fileName) {
   const url = `${baseUrl}/${fileName}?release_check=${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const response = await fetch(url, {
@@ -34,7 +38,7 @@ async function fetchPublicAsset(fileName) {
 
 async function main() {
   for (const fileName of assets) {
-    const local = fs.readFileSync(path.join(pluginOcrDir, fileName));
+    const local = releaseBytes(fs.readFileSync(path.join(pluginOcrDir, fileName)));
     const remote = await fetchPublicAsset(fileName);
     const localHash = sha256(local);
     const remoteHash = sha256(remote);
