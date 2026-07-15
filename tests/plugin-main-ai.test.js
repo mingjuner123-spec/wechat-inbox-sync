@@ -51,6 +51,16 @@ assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource,
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(macAsrInstallerSource, true), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleMacAsrInstallerSource, true), false);
+assert.strictEqual(typeof helpers.enableDebuggerNetworkCapture, 'function');
+let debuggerNetworkCommand = '';
+const neverSettlingDebuggerCommand = new Promise(() => {});
+assert.strictEqual(helpers.enableDebuggerNetworkCapture({
+  sendCommand(command) {
+    debuggerNetworkCommand = command;
+    return neverSettlingDebuggerCommand;
+  },
+}), true);
+assert.strictEqual(debuggerNetworkCommand, 'Network.enable');
 assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));

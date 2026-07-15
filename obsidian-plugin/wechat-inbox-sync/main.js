@@ -4598,6 +4598,19 @@ function installExternalAppNavigationGuards(webContents) {
   }
 }
 
+function enableDebuggerNetworkCapture(debuggerApi) {
+  if (!debuggerApi || typeof debuggerApi.sendCommand !== 'function') return false;
+  try {
+    const command = debuggerApi.sendCommand('Network.enable');
+    if (command && typeof command.catch === 'function') {
+      command.catch(() => {});
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
 function isLikelyImageUrl(value) {
   const url = normalizeExtractedUrl(value);
   if (!url) return false;
@@ -8227,7 +8240,7 @@ async function renderSocialMediaUrlsWithElectron(url) {
         debuggerApi.attach('1.3');
         debuggerAttached = true;
       }
-      await debuggerApi.sendCommand('Network.enable');
+      enableDebuggerNetworkCapture(debuggerApi);
       debuggerMessageHandler = (_event, method, params = {}) => {
         try {
           if (method === 'Network.responseReceived') {
@@ -15218,6 +15231,7 @@ WechatObsidianInboxPlugin.__test = {
   shouldBlockExternalAppUrl,
   installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
+  enableDebuggerNetworkCapture,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,
   isWechatMpArticleUrl,

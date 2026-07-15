@@ -14,6 +14,19 @@
 - 已知风险：小红书登录失效、验证码、平台不继续返回主评论页或 DOM 不暴露根评论 ID 时，仍可能留下 `unmatched>0`；插件不会绕过平台安全限制，也不会把无法确认父级的回复伪造成主评论。
 - 下一步：重载或重启 Obsidian 后重新同步同一批三条链接，重点核对 `root_pages` 不再停在 1、`lost_root=0`、`lost_replies=0`，并对照页面可见评论/回复确认真实完整度。
 
+### 2026-07-15 10:39 - 修复 1.3.32 抖音同步卡在“正在处理”，安装 1.3.33 本地候选
+
+- 目标：修复 1.3.32 同步抖音短链时长时间停留在“正在处理 1/1”且没有进入下载/转写的问题，同时保持按目标作品 ID 捕获真实媒体的能力。
+- 影响范围：Obsidian 插件抖音隐藏浏览器网络捕获、版本元数据、回归测试、本机候选安装和工程决策；不修改云函数、小程序、支付、绑定码、Pro 权益、ASR 模型或业务数据。本次未发布插件市场。
+- 现场证据：`C:\Users\ADMIN\.wechat-inbox-local-asr\sync-last.log` 自 10:32:32 起停在 `stage=processing`、标题 `抖音-blEhzLRl0e8`，超过三分钟没有更新；`transcribe-last.log` 仍停在 10:28:06，系统没有 Whisper/FFmpeg 进程。目标短链、作品页和详情接口本机网络探针分别约 1.03 秒、0.28 秒和 0.23 秒返回，详情接口正文为空，因此流程必然进入 Session/隐藏浏览器增强路径。
+- 根因：1.3.32 新增抖音 DevTools 响应体捕获后，在创建隐藏浏览器页面前执行 `await debuggerApi.sendCommand('Network.enable')`。该命令是可选增强但没有超时，一旦 Electron Promise 不返回，下游 `waitForWebContents(..., 18000)` 永远无法开始；同项目稳定的小红书实现对相同命令采用非阻塞启动。
+- 修改：新增同步的 `enableDebuggerNetworkCapture`，触发 `Network.enable` 后只登记异步错误处理并立即返回；抛错、不支持或永不完成都不会阻塞页面加载。抖音的 debugger 消息监听、目标 `aweme_id` 过滤和响应体媒体提取保持不变。版本从正式 `1.3.32` 顺延为本地候选 `1.3.33`，根目录和插件目录的 manifest/versions 同步更新。
+- 验证：按 TDD 先用永不 settle 的 Promise 断言非阻塞入口并观察到 helper 缺失红灯，再实现到绿灯；`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、插件语法、四份版本 JSON 和 `git diff --check` 通过。
+- 本机安装：旧插件备份到 `D:\内容创作系统\张张的内容创作知识库\.obsidian\plugins\wechat-inbox-sync\.backup-before-1.3.33-20260715-103908`；已安装 manifest 为 `1.3.33`，源码与安装目录 `main.js` SHA-256 均为 `D80B8647C2B3EB3DAFB5D1FC87FEFDF0602ACEA0C3A39AA82DB2D97A19474A5F`，安装前后 `data.json` SHA-256 均为 `6388F96C1E83C481F19B74725D377C66C6EC3448D7BC9E6E58497AC6174A1D23`，用户配置未改。
+- 结果：磁盘上的 1.3.33 候选已消除本次新增的无限等待点；当前 Obsidian 内存里仍运行已经卡住的 1.3.32 调用，必须完整重启 Obsidian 才能销毁旧隐藏窗口并加载候选代码。
+- 已知风险：抖音当前对未签名详情接口返回空正文，解析仍依赖 Session/隐藏浏览器，真实成功率受平台风控影响；本次只移除无限等待，不降低目标作品 ID 校验，也不把失败结果伪装成其他平台。尚未完成重启后的真实短链端到端复测。
+- 下一步：用户确认笔记已保存后完整退出并重开 Obsidian，再同步同一条记录；预期会继续到下载/转写，或在取不到目标媒体时明确生成抖音失败笔记，不再无限停留。实测通过后再发布 1.3.33。
+
 ### 2026-07-15 10:12 - 发布 Obsidian 插件 1.3.32
 
 - 目标：把已经完成的抖音平台误判修复和 Windows/macOS ASR 旧安装器防回灌能力正式发布到插件市场更新链路。
