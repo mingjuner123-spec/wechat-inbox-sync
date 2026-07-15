@@ -2937,6 +2937,18 @@ assert.deepStrictEqual(
   }),
   ['https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4'],
 );
+const douyinMobileShareHtml = [
+  '<html><body><script>',
+  'window._ROUTER_DATA = {"loaderData":{"video_(id)/page":{"videoInfoRes":{"item_list":[',
+  '{"aweme_id":"9999999999999999999","video":{"play_addr":{"url_list":["https://v11-weba.douyinvod.com/recommendation/?mime_type=video_mp4"]}}},',
+  '{"aweme_id":"7659778280362429711","video":{"play_addr":{"url_list":["https://aweme.snssdk.com/aweme/v1/playwm/?video_id=v0200fg10000target&ratio=720p&line=0"]}}}',
+  ']}}}}};',
+  '</script></body></html>',
+].join('');
+assert.deepStrictEqual(
+  helpers.extractDouyinMediaUrlsFromShareHtml(douyinMobileShareHtml, '7659778280362429711'),
+  ['https://aweme.snssdk.com/aweme/v1/playwm/?video_id=v0200fg10000target&ratio=720p&line=0'],
+);
 
 const podcastAudioUrl = helpers.extractPodcastAudioUrlFromHtml([
   '<html><head>',
@@ -4298,6 +4310,22 @@ async function runAsyncHydrationTests() {
   });
   assert.deepStrictEqual(forcedLocalResult, {
     transcription: '小程序选择本地后的转写结果',
+    source: 'local',
+  });
+
+  const automaticLocalProPlugin = new PluginClass();
+  automaticLocalProPlugin.settings = { aiProvider: 'off' };
+  automaticLocalProPlugin.canRunLocalTranscription = () => true;
+  automaticLocalProPlugin.hasProFeatureAccess = async () => true;
+  automaticLocalProPlugin.runLocalTranscription = async (audioUrl) => {
+    assert.strictEqual(audioUrl, 'https://sns-video-v6.xhscdn.com/stream/pro-video.mp4?sign=test');
+    return 'Pro 本地组件应自动转写视频文案';
+  };
+  const automaticLocalProResult = await automaticLocalProPlugin.runConfiguredTranscription(
+    'https://sns-video-v6.xhscdn.com/stream/pro-video.mp4?sign=test',
+  );
+  assert.deepStrictEqual(automaticLocalProResult, {
+    transcription: 'Pro 本地组件应自动转写视频文案',
     source: 'local',
   });
 

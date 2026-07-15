@@ -28,6 +28,7 @@ const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi88
 const MAX_PLUGIN_BINDINGS = 3;
 const XIAOHONGSHU_ROOT_COMMENT_LIMIT = 200;
 const XIAOHONGSHU_REPLY_COMMENT_LIMIT = 100;
+const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211AC) AppleWebKit/537.36 Chrome/119.0.0.0 Mobile Safari/537.36';
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
@@ -4025,7 +4026,7 @@ function isDouyinUrl(url) {
 }
 
 function isDouyinMediaUrl(url) {
-  return /douyinvod\.com|zjcdn\.com\/tos-|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ''));
+  return /douyinvod\.com|zjcdn\.com\/tos-|snssdk\.com\/aweme\/v1\/play|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ''));
 }
 
 function extractDouyinAwemeId(url) {
@@ -4068,6 +4069,74 @@ function getDouyinAwemeDetailUrls(awemeId) {
     `https://www.douyin.com/aweme/v1/web/aweme/detail/?${query}`,
     `https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=${encodeURIComponent(id)}&aid=1128&device_platform=webapp`,
   ];
+}
+
+function getDouyinMobileSharePageUrls(awemeId) {
+  const id = String(awemeId || '').trim();
+  if (!id) return [];
+  return [`https://www.iesdouyin.com/share/video/${encodeURIComponent(id)}/?from_ssr=1`];
+}
+
+function getDouyinMobileShareRequestHeaders(url) {
+  return {
+    ...getSocialRequestHeaders(url),
+    'User-Agent': DOUYIN_MOBILE_SHARE_USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    Referer: 'https://www.iesdouyin.com/',
+  };
+}
+
+function parseJsonObjectAssignedTo(source, variableName) {
+  const text = String(source || '');
+  const assignmentIndex = text.indexOf(variableName);
+  if (assignmentIndex < 0) return null;
+  const objectStart = text.indexOf('{', assignmentIndex + variableName.length);
+  if (objectStart < 0) return null;
+
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let index = objectStart; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(objectStart, index + 1));
+        } catch (error) {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function extractDouyinMediaUrlsFromShareHtml(html, awemeId) {
+  const source = String(html || '');
+  const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+  while ((match = scriptPattern.exec(source))) {
+    const payload = parseJsonObjectAssignedTo(match[1], 'window._ROUTER_DATA');
+    const urls = extractDouyinMediaUrlsForAweme(payload, awemeId);
+    if (urls.length) return urls;
+  }
+  return extractDouyinMediaUrlsForAweme(parseJsonObjectAssignedTo(source, 'window._ROUTER_DATA'), awemeId);
 }
 
 function shouldResolveMediaDownloadUrl(url) {
@@ -4409,7 +4478,7 @@ function isLikelyMediaUrl(value) {
   const url = normalizeExtractedUrl(value);
   if (!url) return false;
   if (/\.(?:mp3|m4a|aac|wav|ogg|flac|mp4|m4s|m3u8)(?:[?#]|$)/i.test(url)) return true;
-  return /(?:media\.xyzcdn\.net|finder\.video\.qq\.com|mpvideo|bilivideo\.com|bilibili\.com\/.*audio|douyin\.com\/aweme\/v1\/play|douyinvod\.com|zjcdn\.com\/tos-|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video)/i.test(url);
+  return /(?:media\.xyzcdn\.net|finder\.video\.qq\.com|mpvideo|bilivideo\.com|bilibili\.com\/.*audio|(?:douyin\.com|snssdk\.com)\/aweme\/v1\/play|douyinvod\.com|zjcdn\.com\/tos-|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video)/i.test(url);
 }
 
 function pushUniqueMediaUrl(list, value) {
@@ -12567,6 +12636,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       return runLocalFallback('');
     }
 
+    // Local transcription is a Pro capability with no user-facing provider picker.
+    // Older installations can still retain the legacy "off" provider value after
+    // the ASR component has been installed, which must not silently disable every
+    // social-video transcription.
+    if (provider === 'off' && this.canRunLocalTranscription() && await this.hasProFeatureAccess()) {
+      return runLocalFallback('');
+    }
+
     if (['aliyun', 'doubao', 'tencent'].includes(provider) && isHeaderProtectedMediaUrl(audioUrl)) {
       if (this.canRunLocalTranscription()) {
         return runLocalFallback(provider);
@@ -14004,7 +14081,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           ? await getXiaohongshuRequestHeaders(resolvedUrl)
           : getSocialRequestHeaders(resolvedUrl);
         const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers });
-        const html = response.text || '';
+        let html = response.text || '';
         const hasProAdvancedAccess = isXiaohongshuUrl(url)
           ? await this.hasProFeatureAccess()
           : false;
@@ -14013,21 +14090,43 @@ class WechatObsidianInboxPlugin extends Plugin {
         let hasPreciseDouyinMedia = false;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
-          for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
+          for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
             try {
-              // Douyin's rendered page can load recommendation videos; the detail API is pinned to one aweme id.
-              const detailResponse = await requestUrl({ url: detailUrl, method: 'GET', headers: getSocialRequestHeaders(detailUrl) });
-              const detailPayload = detailResponse.json || JSON.parse(detailResponse.text || '{}');
-              if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
-              const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailPayload);
-              if (detailUrls.length) {
-                mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
+              const shareResponse = await requestUrl({
+                url: shareUrl,
+                method: 'GET',
+                headers: getDouyinMobileShareRequestHeaders(shareUrl),
+              });
+              const shareHtml = shareResponse.text || '';
+              const shareUrls = extractDouyinMediaUrlsFromShareHtml(shareHtml, douyinAwemeId);
+              if (shareUrls.length) {
+                html = shareHtml;
+                mediaUrls = sortMediaUrlsForTranscription([...shareUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
                 break;
               }
-            } catch (detailError) {
-              // Fall back to page extraction/rendering below.
+            } catch (shareError) {
+              // The share page is an anonymous, cookie-free fast path. Continue with other resolvers.
+            }
+          }
+          if (!hasPreciseDouyinMedia) {
+            for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
+              try {
+                // Douyin's rendered page can load recommendation videos; the detail API is pinned to one aweme id.
+                const detailResponse = await requestUrl({ url: detailUrl, method: 'GET', headers: getSocialRequestHeaders(detailUrl) });
+                const detailPayload = detailResponse.json || JSON.parse(detailResponse.text || '{}');
+                if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
+                const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailPayload);
+                if (detailUrls.length) {
+                  mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
+                  mediaUrl = mediaUrls[0] || mediaUrl;
+                  hasPreciseDouyinMedia = true;
+                  break;
+                }
+              } catch (detailError) {
+                // Fall back to page extraction/rendering below.
+              }
             }
           }
           if (!hasPreciseDouyinMedia && douyinAwemeId && typeof this.fetchDouyinMediaUrlsWithSession === 'function') {
@@ -15188,6 +15287,8 @@ WechatObsidianInboxPlugin.__test = {
   decryptWechatChannelsMediaBuffer,
   extractDouyinAwemeId,
   normalizeDouyinTargetUrl,
+  getDouyinMobileSharePageUrls,
+  extractDouyinMediaUrlsFromShareHtml,
   extractDouyinMediaUrlsFromDetailPayload,
   extractDouyinMediaUrlsForAweme,
   fetchDouyinMediaUrlsWithSession,
