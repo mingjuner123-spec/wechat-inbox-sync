@@ -1,5 +1,18 @@
 # Worklog
 
+### 2026-07-15 09:58 - 修复 Windows ASR 旧安装器回灌并更新 CDN
+
+- 目标：修复 Windows 用户反复点击“安装/更新本地转写组件”仍收到“转写脚本过旧”的闭环故障，并阻止旧 CDN 安装器再次覆盖新版转写脚本。
+- 影响范围：Obsidian 插件 Windows ASR 安装器新鲜度校验、腾讯云静态托管 `local-asr/common/install-local-asr.ps1`、本机 ASR 安装和工程决策；不修改 OCR、小程序、云函数、支付、绑定码、Pro 权益、模型或业务数据。
+- 根因：项目发布源已经包含安装器 `1.2.22`，但公网 CDN 仍是 `1.2.21`，且旧安装器包含 `$SimplifiedPrompt` / `--prompt`。插件原下载校验只检查通用能力标记，错误接受了旧安装器；旧安装器成功覆盖 `transcribe.ps1` 后，安装结束状态检查又正确判定该脚本过旧，形成“每次重装都重新装旧脚本”的循环。故障日志中的 Whisper、FFmpeg 和模型均正常，不是下载、权限或推理依赖问题。
+- 修改：提取并导出 `isLocalAsrInstallerCurrent`，Windows 安装器必须声明版本不低于 `1.2.22`、包含 `repeat-guard-v2` 质量门、且不得包含 `$SimplifiedPrompt` 或 `--prompt`；下载和随包回退统一使用该校验。回归用真实当前安装器构造旧版样本，确保旧内容被拒绝、当前内容被接受。
+- 线上动作：已将发布源 `install-local-asr.ps1` 上传到长环境静态托管 `local-asr/common/install-local-asr.ps1`。云端对象下载与带随机查询参数、`Cache-Control: no-cache` 的公网 CDN 回读 SHA-256 均为 `4CFDF0B2BFEDA838EE46F5020355453A7A14946A6E6E03C3F5928BFC99E0F7E8`，版本为 `1.2.22`，无提示词参数并包含新版质量门。未发布新的 Obsidian 插件市场版本。
+- 本机修复：旧脚本备份到 `C:\Users\ADMIN\.wechat-inbox-local-asr\.backup-before-installer-1.2.22-20260715-095533` 后运行正确安装器；现有 Whisper、FFmpeg 和模型均复用，真实推理验证通过，`.install-state.json` 为 `installerScriptVersion: 1.2.22`、`validationStatus: passed`。插件运行文件备份到 `D:\内容创作系统\张张的内容创作知识库\.obsidian\plugins\wechat-inbox-sync\.backup-before-asr-installer-validator-20260715-095738`，随后安装 `1.3.32` 候选；源码和安装目录 `main.js` SHA-256 均为 `5A309C1BA339926AB61DD0F1E8248B5FA2C6C6587174CBC582D37886F97F4613`，安装前后 `data.json` SHA-256 均为 `6400341FB7133A2909DA513447645D1366A3489023AA0B80B5C80FAABFBA9E63`。
+- 验证：按 TDD 先新增 `isLocalAsrInstallerCurrent` 行为断言并观察到 helper 缺失红灯，再实现到绿灯；本机正确安装器输出 `Local ASR inference validation passed` 和 `Local ASR install validation passed`。插件实际状态为 `scriptOutdated: false`、`hasWhisper/hasFfmpeg/hasModel: true`、`missingReasons: []`、`ready: true`。`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、Windows 安装器 PowerShell 解析和 `git diff --check` 均通过；源码/安装目录 `main.js` 一致，旧安装器被拒绝，当前安装器被接受。
+- 结果：远端动态安装链和本机组件都已脱离旧 `1.2.21`；已经安装正确脚本的用户无需重新下载 Whisper、FFmpeg 或模型。本机 Obsidian 仍需重载或重启，才会从旧内存代码切换到磁盘上的 `1.3.32` 校验逻辑。
+- 已知风险：`1.3.31` 及更早插件仍使用旧的通用标记校验，但 CDN 已更新为正确安装器，因此当前可直接修复；只有 CDN 未来再次被错误覆盖时，这些旧插件才可能重复接受旧文件。`1.3.32` 的严格校验会在这种情况下拒绝远端文件，而不是静默回灌。
+- 下一步：重载 Obsidian 后重新打开诊断，确认运行版本为 `1.3.32`、ASR 可用；再用一条短音频做端到端转写。与抖音平台误判修复一起完成实测后，再决定是否发布 `1.3.32`。
+
 ### 2026-07-15 09:47 - 修复抖音无媒体时误写为小红书，并安装 1.3.32 本地候选
 
 - 目标：修复正式 `1.3.29` 同步抖音短链 `https://v.douyin.com/blEhzLRl0e8/` 后生成 `source: 小红书视频`、标题“小红书笔记”的平台误判，同时提升抖音详情接口被风控时从真实浏览器响应中提取目标作品媒体的成功率。

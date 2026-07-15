@@ -1,5 +1,19 @@
 # Engineering decisions
 
+## 2026-07-15：Windows ASR 安装器新鲜度是发布契约
+
+决策：
+
+- Windows ASR 动态安装器不得只按通用函数或下载能力标记判断新鲜度；必须同时校验最低安装器版本、当前转写质量门标记，并拒绝已经退役的内容提示词参数。
+- 当前最低可接受版本为 `1.2.22`，必须包含 `repeat-guard-v2`，且不得包含 `$SimplifiedPrompt` 或 `--prompt`。
+- 发布源安装器变更后必须同步更新腾讯云静态托管 `local-asr/common/install-local-asr.ps1`，并分别通过 `tcb hosting download` 与带缓存绕过参数的公网 URL 回读，确认两份 SHA-256 都与发布源一致。
+- 远端安装器不满足契约时，新插件必须拒绝执行并回退到满足同一契约的随包文件；不得先安装旧脚本、再依赖安装后检查报错。
+
+原因：
+
+- CDN 上的 `1.2.21` 曾在项目发布源升级到 `1.2.22` 后继续存在，插件的宽松检查接受旧文件，导致每次“修复”都重新覆盖回过期转写脚本。
+- 安装前拒绝旧资产可以保护用户现有可用组件；云端对象与公网 CDN 双回读可以同时发现上传目标错误和缓存未刷新。
+
 ## 2026-07-15: Xiaohongshu comments use browser-network data as the canonical source
 
 - Signed comment responses captured from the logged-in browser are authoritative. Responses are replayed in request order before cursor/stop-state aggregation.

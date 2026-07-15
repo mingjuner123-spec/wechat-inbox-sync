@@ -1073,6 +1073,57 @@ function normalizeInstallerScriptText(scriptText, isMac = false) {
     .replace(/\r\n?/g, '\n');
 }
 
+function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
+  const source = String(scriptText || '');
+  if (!source.includes('.wechat-inbox-local-asr')) return false;
+  if (isMac) {
+    return source.includes('CHUNK_SECONDS=120')
+      && source.includes('choose_chunk_seconds')
+      && source.includes('find_metal_resources_dir')
+      && source.includes('GGML_METAL_PATH_RESOURCES')
+      && source.includes('metalAcceleration=failed')
+      && source.includes('transcribe-last.log')
+      && source.includes('validate_local_asr_inference')
+      && source.includes('TENCENT_MODEL_URL=')
+      && source.includes('bootstrap_uv')
+      && source.includes('detect_uv_arch')
+      && source.includes('setup_python_and_packages')
+      && source.includes('UV_PYTHON_DOWNLOADS=automatic')
+      && source.includes('UV_PYTHON_PREFERENCE=managed')
+      && source.includes('"$UV_BIN" python install 3.12')
+      && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
+  }
+  const versionMatch = source.match(/\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/);
+  const versionParts = versionMatch ? versionMatch.slice(1).map((value) => Number(value)) : [];
+  const [major = 0, minor = 0, patch = 0] = versionParts;
+  const versionCurrent = versionParts.length === 3
+    && (major > 1 || (major === 1 && (minor > 2 || (minor === 2 && patch >= 22))));
+  return versionCurrent
+    && !source.includes('$SimplifiedPrompt')
+    && !source.includes('--prompt')
+    && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
+    && source.includes('Invoke-NativeProcess')
+    && source.includes('Convert-ExitCodeToHex')
+    && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+    && source.includes('[string]$InstallRoot')
+    && source.includes('Install-ExtractedPackage')
+    && !source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')
+    && source.includes('safeModelPath')
+    && source.includes('$TencentCosAssetBaseUrl')
+    && source.includes('$WhisperWindowsTencentUrls')
+    && source.includes('$FfmpegTencentUrls')
+    && source.includes('$ModelTencentUrls')
+    && source.includes('Get-EnabledAssetUrls')
+    && source.includes('$WhisperWindowsFallbackUrls')
+    && source.includes('GitHub release page parsing failed')
+    && source.includes('INSTALLER FAILED')
+    && source.includes('$DownloadTimeoutSeconds = 1200')
+    && source.includes('--max-time $DownloadTimeoutSeconds')
+    && source.includes('System.Text.UTF8Encoding')
+    && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
+    && source.includes('WriteAllText($OutputPath');
+}
+
 function createRetryableTranscriptionError(message) {
   const error = new Error(message);
   error.retryable = true;
@@ -11634,47 +11685,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
 
-    const isInstallerCurrent = (scriptText) => {
-      const source = String(scriptText || '');
-      if (!source.includes('.wechat-inbox-local-asr')) return false;
-      if (isMac) {
-        return source.includes('CHUNK_SECONDS=120')
-          && source.includes('choose_chunk_seconds')
-          && source.includes('find_metal_resources_dir')
-          && source.includes('GGML_METAL_PATH_RESOURCES')
-          && source.includes('metalAcceleration=failed')
-          && source.includes('transcribe-last.log')
-          && source.includes('validate_local_asr_inference')
-          && source.includes('TENCENT_MODEL_URL=')
-          && source.includes('bootstrap_uv')
-          && source.includes('detect_uv_arch')
-          && source.includes('setup_python_and_packages')
-          && source.includes('UV_PYTHON_DOWNLOADS=automatic')
-          && source.includes('UV_PYTHON_PREFERENCE=managed')
-          && source.includes('"$UV_BIN" python install 3.12')
-          && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
-      }
-      return source.includes('Invoke-NativeProcess')
-        && source.includes('Convert-ExitCodeToHex')
-        && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
-        && source.includes('[string]$InstallRoot')
-        && source.includes('Install-ExtractedPackage')
-        && !source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')
-        && source.includes('safeModelPath')
-        && source.includes('$TencentCosAssetBaseUrl')
-        && source.includes('$WhisperWindowsTencentUrls')
-        && source.includes('$FfmpegTencentUrls')
-        && source.includes('$ModelTencentUrls')
-        && source.includes('Get-EnabledAssetUrls')
-        && source.includes('$WhisperWindowsFallbackUrls')
-        && source.includes('GitHub release page parsing failed')
-        && source.includes('INSTALLER FAILED')
-        && source.includes('$DownloadTimeoutSeconds = 1200')
-        && source.includes('--max-time $DownloadTimeoutSeconds')
-        && source.includes('System.Text.UTF8Encoding')
-        && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
-        && source.includes('WriteAllText($OutputPath');
-    };
+    const isInstallerCurrent = (scriptText) => isLocalAsrInstallerCurrent(scriptText, isMac);
 
     try {
       let scriptText = '';
@@ -15009,6 +15020,7 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_MACOS_INSTALLER_URL,
   LOCAL_OCR_INSTALLER_URL,
   LOCAL_OCR_MACOS_INSTALLER_URL,
+  isLocalAsrInstallerCurrent,
   LOCAL_ASR_PLATFORM_NAMES,
   NOTE_PROPERTY_FIELD_KEYS,
   NOTE_SAVE_MODES,

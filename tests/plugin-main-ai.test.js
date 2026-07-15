@@ -32,6 +32,16 @@ const macOcrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-ocr', 'install-local-ocr-macos.sh'),
   'utf8',
 );
+const windowsAsrInstallerSource = fs.readFileSync(
+  path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr.ps1'),
+  'utf8',
+);
+const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
+  .replace('$InstallerScriptVersion = "1.2.22"', '$InstallerScriptVersion = "1.2.21"')
+  .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
+assert.strictEqual(typeof helpers.isLocalAsrInstallerCurrent, 'function');
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource, false), true);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));
