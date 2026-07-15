@@ -3428,6 +3428,19 @@ async function runAsyncHydrationTests() {
     'https://v11-weba.douyinvod.com/existing-session/?mime_type=video_mp4',
   ]);
 
+  const ignoredAbortSessionResult = await Promise.race([
+    helpers.fetchDouyinMediaUrlsWithSession({
+      pageUrl: 'https://www.douyin.com/video/7644238277092174409',
+      awemeId: '7644238277092174409',
+      requestTimeoutMs: 20,
+      session: {
+        fetch: async () => new Promise(() => {}),
+      },
+    }).then((urls) => ({ status: 'done', urls })),
+    new Promise((resolve) => setTimeout(() => resolve({ status: 'hung' }), 250)),
+  ]);
+  assert.deepStrictEqual(ignoredAbortSessionResult, { status: 'done', urls: [] });
+
   assert.deepStrictEqual(await helpers.fetchDouyinMediaUrlsWithSession({
     pageUrl: 'https://www.douyin.com/video/7644238277092174409',
     awemeId: '7644238277092174409',
