@@ -31,6 +31,12 @@ jobs:
             exit 1
           fi
 
+      - name: Run plugin regression tests
+        run: |
+          node tests/plugin-main-ai.test.js
+          node tests/plugin-marketplace-package.test.js
+          node --check obsidian-plugin/wechat-inbox-sync/main.js
+
       - name: Verify public OCR component assets
         run: node scripts/check-local-ocr-cdn.js
 

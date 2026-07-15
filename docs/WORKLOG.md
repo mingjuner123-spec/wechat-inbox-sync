@@ -9,6 +9,20 @@
 - 验证：标签对象说明包含真实复测日期、核心修复和 Pro 刷新提交；本地与远端标签均解析到 `fd6183d`，且与 `1.3.42^{commit}` 一致；插件主回归、市场包回归、语法检查和文档差异检查通过。
 - 数据变更：无；未修改小程序、云函数、支付、绑定码、Pro 权益、同步记录、本地插件文件或用户 `data.json`。
 
+### 2026-07-15 15:36 - 发布插件 1.3.43：修复正确 OCR 安装器被误判为过期
+
+- 目标：解决 1.3.41/1.3.42 用户点击安装或修复 OCR 时提示 `Local OCR installer download returned outdated or invalid content`，恢复 Windows 与 macOS 图片 OCR 安装；从线上 1.3.42 增量发布，不回退小红书评论、ASR、抖音及既有 OCR 能力。
+- 影响范围：Obsidian 插件 OCR 安装器新鲜度校验、插件版本元数据、回归测试、GitHub Release 工作流和发布文档；未修改小程序、云函数、业务数据、OCR 安装器、OCR Python 依赖或腾讯云 CDN 文件。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、根目录与插件目录的 `manifest.json` / `versions.json`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`.github/workflows/release.yml`、`docs/DECISIONS.md`、`docs/LOCAL_OCR_RELEASE_PREVENTION.md`、`docs/WORKLOG.md`。
+- 根因：`1.3.38` 已把 Windows/macOS OCR 从 uv 下载 Python 切换为固定便携 CPython `3.12.13+20260623`，但插件下载后的校验仍要求 `Install-Uv`、`UV_PYTHON_DOWNLOADS` 等旧标记。腾讯云和随包安装器均为正确新版本，却在运行前被插件误拒绝，所以没有新 `install.log`，最终只显示 Python OCR 环境和脚本缺失。
+- 修复与防复发：提取 Windows/macOS 共用的生产校验函数，按当前固定 Python、RapidOCR `1.4.4`、Pillow `12.3.0` 和镜像/venv 标记验证；测试直接把当前两端安装器原文交给该函数并加入旧标记负例。Release 工作流新增插件回归步骤，再结合公网 CDN 逐字节门禁，防止以后出现“CDN 文件正确、插件校验落后”的版本漂移。
+- 线上动作：`1.3.43` 版本提交 `46e40b5` 与同名标签已推送，随后在默认分支补充未来发版门禁；正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.43>，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.43.zip`，并标记为 Latest。此次腾讯云 OCR 文件本身正确，未覆盖 CDN，只做公网回读验证。
+- 数据变更：无；未修改绑定码、兑换码、Pro 权益、设备、同步记录、用户笔记或本地插件 `data.json`。
+- 验证：TDD 先确认旧代码没有当前 OCR 校验 helper，修改后 Windows/macOS 当前安装器通过、关键安装标记被替换时拒绝；`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node scripts/check-local-ocr-cdn.js`、JSON 解析和 `git diff --check` 通过。真实腾讯云 Windows/macOS 安装器通过生产校验函数；公网两端安装器、OCR 脚本和三平台固定 Python 运行时 SHA-256 与发布源一致。专用发布检查确认默认分支、raw manifest/versions、Latest Release、五项 Release 资产、Release 内 manifest/versions 和本地 ZIP 均为 1.3.43；下载后的四个独立 Release 文件与发布源规范化换行后逐字节一致，Release ZIP 内含完整 ASR/OCR 资产并保留 1.3.42/1.3.43 版本记录。
+- 结果：用户更新到 1.3.43 后，可直接再次点击安装/修复 OCR；无需删除 ASR，也无需重新上传腾讯云组件。桌面手动安装包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.43.zip`，SHA-256 `70233CFEC8BF3AB05489EDAB71784E15B9C04DBF7ACB504654BAA5A5E047ACB5`。
+- 已知风险：macOS 已验证安装器语法、双架构公网资产、生产校验和发布包完整性，但本次没有 Apple Silicon/Intel 真机端到端重装；若用户更新后仍失败，应复制新的 OCR 安装分阶段日志，此时已能越过本次安装器误判阶段。
+- 下一步：让报错用户更新至 1.3.43，在插件设置中点击安装/修复 OCR；安装完成后确认“图片文字识别 OCR：可用”，再用一张小红书长图文做真实识别。
+
 ### 2026-07-15 15:35 - 发布小红书评论完整性修复 1.3.42，并确认后续 1.3.43 无回退
 
 - 目标：把用户真实复测通过的小红书评论单一树修复发布为 `1.3.42`；必须以官方 `1.3.41` 为基线，完整保留新领取/续费 Pro 后立即刷新有效期的改动。

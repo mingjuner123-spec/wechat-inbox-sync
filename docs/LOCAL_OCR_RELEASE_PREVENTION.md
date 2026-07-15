@@ -26,7 +26,9 @@
 
 - PDF 不再进入 OCR；小红书长图文等图片 OCR 保留。
 - Windows 与 macOS OCR 组件恢复 RapidOCR + Pillow 的图片专用依赖。
+- `1.3.43` 将插件的新鲜度校验切换到当前固定 CPython `3.12.13+20260623` 安装策略，不再要求已经退役的 uv 标记；Windows/macOS 当前安装器均直接通过同一个生产校验函数的回归测试。
 - GitHub tag 发布前强制运行 `node scripts/check-local-ocr-cdn.js`，从公网下载 Windows 安装器、macOS 安装器和 `ocr_image.py`，与仓库发布源的 LF 字节做 SHA-256 比对；任一不一致则禁止创建 Release。
+- GitHub Release 工作流在 CDN 哈希门禁前执行插件回归测试；“当前随包安装器通过生产校验”与“公网安装器逐字节等于随包安装器”必须同时成立，才允许创建 Release。
 - `.gitattributes` 固定三份 OCR 文本资产为 LF，防止 Windows 工作区上传 CRLF、GitHub Linux 检出 LF 所造成的跨平台字节漂移和 macOS shell 风险。
 - 固定顺序为：测试发布源 → 上传 CDN → 公网回读校验 → 提升插件版本 → 推送 main → 推送 tag。
 
