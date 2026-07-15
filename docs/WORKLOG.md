@@ -1,5 +1,15 @@
 # Worklog
 
+### 2026-07-15 11:17 - 正式发布 Obsidian 插件 1.3.34：统一小红书完整评论与抖音超时边界
+
+- 目标：纠正市场版本停留在 `1.3.33`、本机已使用合并版 `1.3.34` 的版本不一致；以正式 `1.3.33` 小红书评论完整性修复为基线，叠加抖音隐藏浏览器非阻塞启动和有界收尾，统一发布 `1.3.34`。
+- 用户决策：用户明确指出后续更新应基于已安装的 `1.3.34`，并沿用此前“直接推到插件市场”的发布授权；因此不再把合并版保留为仅本地候选。抖音真实链接的成功率仍受平台 Session/风控影响，但本次自动化回归已证明可选浏览器 Promise 不会无限阻塞。
+- Git 与线上动作：`main` 已从 `ba7ca3f` 快进到合并提交 `6e751e7`，标签 `1.3.34` 已推送并触发 GitHub Actions；正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.34>，latest、非 draft、非 prerelease。
+- 发布资产：Release 包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 与 `wechat-inbox-sync-1.3.34.zip`；本地安装包为 `C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.34.zip`，包内 manifest 为 `1.3.34`，SHA-256 为 `E3CFA214095D1AAF710A87744749F316B1F3236E635524A2157065B3F18D5ECD`。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、四份版本 JSON 解析和 `git diff --check origin/main...HEAD` 均通过；测试前后真实 `sync-last.log` SHA-256 都是 `F8E191A00E2B583DFA43DCBF266806F8548A71600E6FE0817846ACF6D536F02B`。发布清单中的 `tests/plugin-core.test.js` 与 `tests/plugin-upload-sync.test.js` 当前仓库不存在，已如实记录，未伪装为通过。
+- 市场检查：专用发布检查器确认默认分支 manifest/versions、Raw manifest、latest/目标 Release、五项 Release 资产、资产内 manifest/versions 和本地 ZIP 全部为 `1.3.34`，满足 Obsidian 社区插件市场自动更新条件。
+- 风险与下一步：本机磁盘已安装合并版，但用户仍需在 Obsidian 中按 `Ctrl+R` 或完整重启，让运行中的旧 renderer 加载 `1.3.34`。随后分别复测小红书评论诊断 `lost_root=0/lost_replies=0`，以及抖音在有界等待后进入下载/转写或明确失败、不再无限停留在“正在处理”。
+
 ### 2026-07-15 11:02 - 合并小红书 1.3.33 与抖音 1.3.34 候选并重新安装
 
 - 目标：处理并发发布冲突，避免旧 `1.3.32` 基线上的抖音候选覆盖已正式发布的小红书 `1.3.33` 评论树修复；把抖音隐藏浏览器的非阻塞 debugger 启动和整条链路时间边界重放到 `origin/main@ba7ca3f`，统一形成 `1.3.34` 候选。
