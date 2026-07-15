@@ -1,5 +1,15 @@
 # Worklog
 
+### 2026-07-15 15:35 - 发布小红书评论完整性修复 1.3.42，并确认后续 1.3.43 无回退
+
+- 目标：把用户真实复测通过的小红书评论单一树修复发布为 `1.3.42`；必须以官方 `1.3.41` 为基线，完整保留新领取/续费 Pro 后立即刷新有效期的改动。
+- 基线与合并：先把评论修复提交重放到 `origin/main@7a4433e`（包含 `1.3.41` 标签提交 `0e92e94`），再生成版本提交 `fd6183d`。`1.3.42` 的核心修复为 `7058d4d`：修正 `Array.map` 把索引误传成评论递归深度而导致仅前四条根评论保留回复的问题；最终收尾统一删除旧评论区并只渲染一次权威评论树，同时保留 emoji 去重、主评论/回复独立进度及 `lost_*` 诊断。
+- Pro 防回退：相对 `1.3.41`，评论修复没有修改 `getProEntitlementStatusFingerprint`、`proEntitlementLastError`、强制刷新/no-cache、接口异常时保留既有有效权益、无效缓存继续复查云端或设置页权益变化重绘逻辑；对应回归用例仍全部通过。
+- 发布：默认分支与标签 `1.3.42` 已推送至提交 `fd6183d`，正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.42>，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.42.zip`。随后并发任务发布了 `1.3.43`（提交 `46e40b5`），其父提交正是 `fd6183d`，因此完整继承 `1.3.42` 评论修复与 `1.3.41` Pro 刷新，仅追加 OCR 固定 Python 安装器兼容修复；未用旧基线覆盖远端。
+- 验证：在最新 `1.3.43` 继承链上重新运行 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node scripts/check-local-ocr-cdn.js` 和 `git diff --check`，全部通过。专用发布检查器确认默认分支、raw manifest、latest Release、五项 Release 资产、资产内 manifest/versions 和本地 ZIP 均为 `1.3.43`；版本历史同时保留 `1.3.41`、`1.3.42` 和 `1.3.43`。
+- 本地包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.42.zip`，SHA-256 `53D8C12EE998E4F9FB8B5702E657570D6F3E993472D9052BC061D3313114BCB1`；后续最新包为 `C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.43.zip`。
+- 数据变更：无；未修改小程序、云函数、支付、绑定码、Pro 业务数据或本地插件 `data.json`。
+
 ### 2026-07-15 14:50 - 发布插件 1.3.41：新领取体验立即刷新并保留 1.3.40 全部能力
 
 - 目标：用户在小程序领取或续费体验后，插件能够立即查询到有效权益并使用 Pro 功能；发布必须从线上 1.3.40 基线增量制作，不能回退 1.3.40 已有的转写正文保留、OCR、ASR、抖音等能力。
