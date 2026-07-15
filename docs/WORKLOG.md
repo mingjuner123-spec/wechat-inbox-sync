@@ -1,5 +1,19 @@
 # Worklog
 
+### 2026-07-15 10:55 - 发布 Obsidian 插件 1.3.33：修复小红书主评论与回复漏采
+
+- 目标：修复 `1.3.32` 真实笔记中“回复已被浏览器网络捕获但最终 Markdown 数量减少”、折叠回复因主评论未出现而被丢弃、滚动误选嵌套回复容器，以及 Emoji/纯符号昵称导致跨来源重复的问题；主评论上限保持 200，每条主评论回复上限保持 100。
+- 影响范围：Obsidian 插件发布源、根目录市场发现元数据、插件回归测试、设计/实施文档、本机已安装插件、GitHub 默认分支和 `1.3.33` Release；不修改小程序、云函数、支付、绑定码、Pro 权益、OCR、ASR 或用户业务数据。
+- 根因证据：三篇 2026-07-15 实测笔记分别出现 `replies=6/final_replies=4`、`19/4`、`40/23`；第三篇同时只有 `root_pages=1`、却有 `reply_pages=11` 并以 `network_idle` 停止，另有 8 条未归属回复。旧容器评分给 `comment` 与 `reply` 相同高分，嵌套回复区可能胜过主评论列表；未命中根 ID 的回复响应会在 DOM 补根之前被丢弃；纯符号昵称标准化后为空，无法命中网络副本。
+- 修改：浏览器网络评论树增加无损保留层，后续来源只能补充、不能删除已有回复；未归属回复响应延迟到网络/DOM 根评论合并后再次挂载；DOM 根/回复同时保留可取得的评论 ID；主评论容器按根评论覆盖度加分，嵌套回复容器及其祖先降权；Debugger 响应体任务连续排空两轮，避免尾页刚返回就结束；符号昵称使用 NFKC 原值作为去重后备键；诊断新增 `merged_*`、`restored_*` 与 `lost_*` 字段。
+- Git 管理：从 `origin/main@683fb5c` 创建隔离分支 `codex/xhs-comment-completeness-1.3.33`；改代码前先提交设计和实施计划 `3ca0393`，核心修复提交 `b81f00e`，版本提交 `b66c00f`。默认分支已快进到 `b66c00f`，标签 `1.3.33` 指向该版本提交。
+- 线上动作：GitHub Actions Release 运行 `29385044710` 成功；正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.33>，latest、非 draft、非 prerelease，资产包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.33.zip`。
+- 本机安装：完整手动安装包为 `C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.33.zip`，SHA-256 `A8F4327319EAE303C97C512D3D02E4468E2A8C1E5BA2F93C2FF52066F5F86DB4`；当前知识库已安装并启用 `1.3.33`，备份位于 `.obsidian/plugins/wechat-inbox-sync/.backup-before-1.3.33-20260715-105001`。安装源码与本机 `main.js` 哈希一致，`data.json` 安装前后 SHA-256 均为 `D6F28E23E36C5A055E03C9A9E02793827E4A8ABD94705F6CDBB3B863A156BE55`。
+- 验证：新回归均先在旧实现上失败，再在修复后通过；`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、插件语法检查、四份版本 JSON 解析和 `git diff --check` 均通过。专用发布检查器确认默认分支 manifest/versions、Raw manifest、latest/目标 Release、五项 Release 资产及资产 manifest 均为 `1.3.33`；本地 ZIP 内 manifest 也为 `1.3.33`。
+- 结果：本机与插件市场均已获得小红书评论无损收尾逻辑。新笔记诊断中 `lost_root=0`、`lost_replies=0` 表示网络合并到最终 Markdown 没有再丢节点；`unmatched` 只表示平台响应中仍无法找到父评论的剩余回复。
+- 已知风险：小红书登录失效、验证码、平台不继续返回主评论页或 DOM 不暴露根评论 ID 时，仍可能留下 `unmatched>0`；插件不会绕过平台安全限制，也不会把无法确认父级的回复伪造成主评论。
+- 下一步：重载或重启 Obsidian 后重新同步同一批三条链接，重点核对 `root_pages` 不再停在 1、`lost_root=0`、`lost_replies=0`，并对照页面可见评论/回复确认真实完整度。
+
 ### 2026-07-15 10:12 - 发布 Obsidian 插件 1.3.32
 
 - 目标：把已经完成的抖音平台误判修复和 Windows/macOS ASR 旧安装器防回灌能力正式发布到插件市场更新链路。
