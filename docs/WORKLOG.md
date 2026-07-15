@@ -1,5 +1,18 @@
 # Worklog
 
+### 2026-07-15 - 发布 Obsidian 插件 1.3.30：小红书评论输出加固
+
+- 目标：修复 2026-07-15 三份真实小红书笔记中仍存在的 API/DOM 重复、评论区操作噪音、折叠回复平铺、原始时间戳、`赞 赞` 和诊断计数失真；同时保守清理仅出现在转写末尾的高置信错听结束语。
+- 影响范围：Obsidian 插件的小红书评论采集/合并/Markdown 输出、本地转写末尾清理、插件回归测试、版本元数据与设计/实施文档；不涉及小程序、云函数、支付、绑定码、Pro 云端权益或用户数据。
+- 实现：网络响应继续作为权威评论树；DOM 项新增主评论/回复角色与父评论 ID/作者，已有网络数据时不再把无结构 DOM 硬追加为主评论。跨源指纹统一小红书表情占位、标点、空白和尾部“展开”；过滤作者自重复及“问一问”摘要；结构化回复优先按父 ID、其次按唯一父作者归属，无法归属时只计诊断。页面滚动同时观察 DOM 评论数和评论接口资源数，稳定 10 轮或达到 200 条主评论上限后停止；真实页面触发的签名网络请求为主通道，诊断不再把并行无签名直连的 `root_unavailable` 显示成主故障。
+- 输出：Unix 秒/毫秒时间转为 ISO 日期；点赞只输出一次；新增 `dropped` 诊断字段；`final_root/final_replies` 从最终 Markdown 重新统计。转写清理只删除最后一行匹配“下身/下生/下声/下省再见”的高置信错听结束语，不改写正文中间内容。
+- Git：开发期间远端先发布了 `1.3.29` 抖音修复，本分支已变基到最新 `origin/main@1.3.29`，保留全部抖音 Session 与协议隔离改动。默认分支已快进到提交 `ac9a4c9`，标签 `1.3.30` 已推送并触发 GitHub Actions Release。
+- 线上动作：GitHub Release 已生成：<https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.30>；本地安装包为 `C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.30.zip`，SHA-256 为 `9F154AF4D10F2A30E5A953FEBC4C63D2DEAE97C5C3D8AFC1AC70AD3F577E0E58`。
+- 验证：按 TDD 先观察到 1.3.29 基线把 5 个样本项合并成 5 条而不是 1 条，再实现到绿灯。变基和版本升级后，`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 与 `git diff --check` 均退出码 0。发布检查器确认默认分支与 Raw manifest 为 `1.3.30`、versions 包含 `1.3.30`、Release 非草稿/非预发布、五项资产齐全、Release 内 manifest/versions 正确、本地 ZIP 四项核心文件与 manifest 正确。
+- 结果：`1.3.30` 已满足 Obsidian 社区插件市场自动发现条件。代码与发布链路已完成；真实小红书登录态页面的评论总数、折叠回复层级和耗时仍需用户更新插件后用原链接端到端复测。
+- 已知风险：小红书页面结构或接口风控继续变化时，平台可能不返回全部评论；保守策略会丢弃无法证明归属的 DOM 独有项，以避免污染主评论。末尾错听规则不等于全文语义纠错，不会擅自改写“废书/钢区”等正文中间的 ASR 错词。
+- 下一步：用户更新到 `1.3.30` 后复测原问题链接，核对 `## 评论区` 与末尾诊断中的 `final_root/final_replies/dropped/unmatched/stop`；若仍有折叠回复缺失，直接提供新笔记文件即可继续按真实响应定位。
+
 ### 2026-07-15 08:20 - 发布 Obsidian 插件 1.3.29：抖音 Session 优先解析与外部协议隔离
 
 - 目标：在解析成功率优先的前提下，从根源减少抖音隐藏页面触发 `bytedance://` / Microsoft Store 弹窗，并拒绝批量解析时误取推荐作品媒体；不依赖云端解析。
