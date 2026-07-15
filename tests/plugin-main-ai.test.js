@@ -453,8 +453,8 @@ assert.strictEqual(pluginMainSource.includes('authToken=${encodeURIComponent(tok
 assert.strictEqual(pluginMainSource.includes('authToken: token'), false);
 assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
 assert.ok(pluginMainSource.includes('copyBundledLocalOcrRuntimeAssets'));
-assert.ok(pluginMainSource.includes("source.includes('PyMuPDF')"), 'plugin must reject old CDN OCR installers without PDF support');
-assert.ok(pluginMainSource.includes("source.includes('opencc-python-reimplemented')"), 'plugin must reject OCR installers without Simplified Chinese conversion');
+assert.strictEqual(pluginMainSource.includes("source.includes('PyMuPDF')"), false, 'image OCR installer validation must not require PDF dependencies');
+assert.strictEqual(pluginMainSource.includes("source.includes('opencc-python-reimplemented')"), false, 'image OCR installer validation must not require OpenCC');
 assert.ok(pluginMainSource.includes("fs.copyFileSync(sourcePath, targetPath)"));
 assert.ok(macOcrInstallerSource.includes('find_existing_python'));
 assert.ok(macOcrInstallerSource.includes('.wechat-inbox-local-asr/python-venv/bin/python'));
@@ -1974,8 +1974,8 @@ const corruptedPdfText = [
 ].join('').repeat(8);
 assert.throws(
   () => helpers.extractPdfMarkdown(createUtf16BePdfBuffer(corruptedPdfText)),
-  (error) => error && error.code === 'PDF_OCR_REQUIRED',
-  '长串、低标点且重复度异常的 PDF 文本层应转入 OCR，而不是保存乱码',
+  (error) => error && !error.code && /PDF/.test(error.message),
+  '长串、低标点且重复度异常的 PDF 文本层应作为普通转换失败处理',
 );
 
 assert.strictEqual(helpers.buildRecordTitleBase({
@@ -6191,7 +6191,7 @@ async function runSourceMediaAttachmentTests() {
   assert.strictEqual(failedRecord.metadata.sourceMediaAttachmentError, '原始音视频未能保存到本地。');
 }
 
-async function runPdfOcrFallbackTests() {
+async function runPdfNoOcrFallbackTests() {
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({});
   plugin.app = {
@@ -6210,10 +6210,8 @@ async function runPdfOcrFallbackTests() {
   ].join('').repeat(12));
   plugin.downloadArrayBuffer = async () => corruptedPdfBuffer;
   plugin.showSyncProgress = () => {};
-  const ocrCalls = [];
-  plugin.runLocalPdfOcr = async (buffer) => {
-    ocrCalls.push(Buffer.from(buffer));
-    return '## 第 1 页\n\n这是经过 OCR 识别并转换为简体中文的正文。';
+  plugin.runLocalPdfOcr = async () => {
+    throw new Error('PDF must not invoke local OCR');
   };
 
   const result = await plugin.writeFileAttachment({
@@ -6228,11 +6226,11 @@ async function runPdfOcrFallbackTests() {
     },
   }, '临时收集', '2026-07-15', 'pdf-乱码测试', { token: 'PRO-123' });
 
-  assert.strictEqual(ocrCalls.length, 1, '乱码 PDF 必须自动进入本地 OCR');
-  assert.ok(ocrCalls[0].equals(corruptedPdfBuffer));
-  assert.strictEqual(result.metadata.conversionStatus, 'success');
-  assert.strictEqual(result.metadata.conversionProvider, 'local-pdf-ocr');
-  assert.ok(result.metadata.convertedMarkdown.includes('这是经过 OCR 识别并转换为简体中文的正文'));
+  assert.strictEqual(result.metadata.conversionStatus, 'attachment_saved');
+  assert.strictEqual(result.metadata.filePath, '临时收集/文件附件/2026-07-15/pdf-乱码测试-corrupted.pdf');
+  assert.ok(result.metadata.conversionError.includes('PDF'));
+  assert.strictEqual(result.metadata.conversionProvider, undefined);
+  assert.strictEqual(result.metadata.convertedMarkdown, undefined);
 }
 
 async function runPodcastDownloadHeaderTests() {
@@ -6510,7 +6508,7 @@ async function main() {
   await runCloudFailedVoiceLocalFallbackTests();
   await runAudioVideoFileAttachmentTranscriptionTests();
   await runSourceMediaAttachmentTests();
-  await runPdfOcrFallbackTests();
+  await runPdfNoOcrFallbackTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
   await runDiagnosticFailureLogFilteringTests();

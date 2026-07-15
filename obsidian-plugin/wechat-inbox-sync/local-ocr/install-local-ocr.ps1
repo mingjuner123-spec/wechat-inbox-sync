@@ -20,7 +20,7 @@ $PypiFallbackIndexUrl = "https://pypi.org/simple"
 $UvVersion = "0.9.14"
 $PythonBuildStandaloneBuild = "20260623"
 $PythonBuildStandaloneVersion = "3.12.13+20260623"
-$OcrPackageRequirements = @("rapidocr-onnxruntime==1.4.4", "pillow==12.3.0", "PyMuPDF", "opencc-python-reimplemented")
+$OcrPackageRequirements = @("rapidocr-onnxruntime==1.4.4", "pillow==12.3.0")
 $MicrosoftVisualCppRuntimeUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 $MicrosoftVisualCppRuntimeInstaller = Join-Path $BinDir "vc_redist.x64.exe"
 $script:LastOcrImportFailureModule = ""
@@ -155,7 +155,7 @@ import importlib
 import json
 import traceback
 
-for module_name in ('numpy', 'cv2', 'onnxruntime', 'rapidocr_onnxruntime', 'fitz', 'opencc'):
+for module_name in ('numpy', 'cv2', 'onnxruntime', 'rapidocr_onnxruntime'):
     try:
         module = importlib.import_module(module_name)
         if module_name == 'rapidocr_onnxruntime':
@@ -419,7 +419,7 @@ function Setup-PythonEnvironment {
     throw "venv python not found: $venvPython"
   }
   if (!(Install-OcrPackagesWithUv)) {
-    throw "OCR / PDF OCR dependencies install failed. Please check network and retry."
+    throw "rapidocr-onnxruntime / pillow install failed. Please check network and retry."
   }
   if (!(Test-OcrPythonReady -PythonPath $venvPython)) {
     $failureDetail = Get-OcrImportFailureDetail

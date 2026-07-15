@@ -1,11 +1,6 @@
 # Local OCR Component
 
-This component installs RapidOCR into a local Python virtual environment. It supports:
-
-- Image OCR.
-- PDF page OCR rendered at 300 DPI with PyMuPDF.
-- Reading-order sorting based on OCR coordinates.
-- Traditional-to-Simplified Chinese conversion with OpenCC.
+This component installs RapidOCR into a local Python virtual environment for image OCR, including text-heavy Xiaohongshu images.
 
 Windows:
 

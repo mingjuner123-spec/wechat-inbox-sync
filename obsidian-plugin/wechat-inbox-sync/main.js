@@ -163,7 +163,6 @@ const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 const LOCAL_OCR_HOME = '.wechat-inbox-local-ocr';
 const LOCAL_OCR_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const LOCAL_OCR_RUN_TIMEOUT_MS = 90 * 1000;
-const LOCAL_PDF_OCR_RUN_TIMEOUT_MS = 30 * 60 * 1000;
 
 function getLocalAsrPlatform(platform = os.platform()) {
   if (platform === 'win32') return 'win32';
@@ -290,13 +289,6 @@ function getLocalOcrInstallStatus(installRoot = getLocalOcrInstallRoot(), exists
     missingReasons,
     ready: hasPython && hasScript,
   };
-}
-
-function localOcrScriptSupportsPdf(scriptText) {
-  const source = String(scriptText || '');
-  return source.includes('pdf-page-ocr-v1')
-    && source.includes('import fitz')
-    && source.includes('from opencc import OpenCC');
 }
 
 function joinLocalAsrPath(platform, ...segments) {
@@ -3783,12 +3775,6 @@ function isSuspectPdfGlyphEncoding(text) {
   return compactCjk.length >= 1000 && oddCjkTokens.length >= 8 && longLatinWords.length >= 3;
 }
 
-function createPdfOcrRequiredError(message) {
-  const error = new Error(message || 'PDF 需要图片文字识别 OCR。');
-  error.code = 'PDF_OCR_REQUIRED';
-  return error;
-}
-
 function cleanPdfExtractedText(text) {
   const lines = String(text || '')
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
@@ -3932,17 +3918,17 @@ function extractPdfMarkdown(bufferLike) {
     .replace(/\n{3,}/g, '\n\n');
 
   if (isLowQualityPdfExtraction(rawText)) {
-    throw createPdfOcrRequiredError('PDF 文本提取质量过低，将自动改用图片文字识别 OCR。');
+    throw new Error('PDF 文本提取质量过低，已保留原始 PDF 附件。');
   }
 
   const text = cleanPdfExtractedText(rawText);
 
   if (isSuspectPdfGlyphEncoding(text)) {
-    throw createPdfOcrRequiredError('PDF 文本层编码异常，将自动改用图片文字识别 OCR。');
+    throw new Error('PDF 文本层编码异常，已保留原始 PDF 附件。');
   }
 
   if (!text) {
-    throw createPdfOcrRequiredError('PDF 未提取到文本，将自动改用图片文字识别 OCR。');
+    throw new Error('PDF 未提取到文本，已保留原始 PDF 附件。');
   }
 
   return text;
@@ -11681,8 +11667,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       const source = String(scriptText || '');
       if (!source.includes('.wechat-inbox-local-ocr')) return false;
       if (!source.includes('rapidocr')) return false;
-      if (!source.includes('PyMuPDF')) return false;
-      if (!source.includes('opencc-python-reimplemented')) return false;
       if (isMac) {
         return source.includes('TENCENT_OCR_ASSET_BASE_URL')
           && source.includes('TENCENT_PIP_INDEX_URL')
@@ -11772,69 +11756,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (error) {
         // Best-effort cleanup only.
       }
-    }
-  }
-
-  async runLocalPdfOcr(pdfBuffer) {
-    await this.ensureLocalComponentReadyForUse('PDF 图片文字识别', {
-      reason: 'pdf-ocr',
-      requireAsr: false,
-      requireOcr: true,
-    });
-
-    let status = this.getLocalOcrInstallStatus();
-    let scriptText = status.scriptPath && fs.existsSync(status.scriptPath)
-      ? fs.readFileSync(status.scriptPath, 'utf8')
-      : '';
-    if (!localOcrScriptSupportsPdf(scriptText)) {
-      new Notice('正在升级本地 OCR 组件以支持 PDF 识别和繁转简。');
-      await this.installLocalOcr({ reason: 'pdf-ocr-upgrade' });
-      status = this.getLocalOcrInstallStatus();
-      scriptText = status.scriptPath && fs.existsSync(status.scriptPath)
-        ? fs.readFileSync(status.scriptPath, 'utf8')
-        : '';
-    }
-    if (!status.ready || !localOcrScriptSupportsPdf(scriptText)) {
-      throw new Error('本地 OCR 组件版本过旧，自动升级后仍未具备 PDF 识别能力。请复制诊断信息联系开发者。');
-    }
-
-    const suffix = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-    const inputPath = path.join(os.tmpdir(), `wechat-inbox-pdf-ocr-${suffix}.pdf`);
-    const outputPath = path.join(os.tmpdir(), `wechat-inbox-pdf-ocr-${suffix}.md`);
-    try {
-      fs.writeFileSync(inputPath, toNodeBuffer(pdfBuffer));
-      await new Promise((resolve, reject) => {
-        childProcess.execFile(status.pythonPath, [
-          status.scriptPath,
-          '--input',
-          inputPath,
-          '--output',
-          outputPath,
-        ], {
-          timeout: LOCAL_PDF_OCR_RUN_TIMEOUT_MS,
-          maxBuffer: 10 * 1024 * 1024,
-          windowsHide: true,
-        }, (error, stdout, stderr) => {
-          if (error) {
-            reject(new Error(stderr || stdout || error.message || String(error)));
-            return;
-          }
-          resolve({ stdout, stderr });
-        });
-      });
-      const markdown = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8').trim() : '';
-      if (!markdown) {
-        throw new Error('PDF OCR 已运行，但没有识别到可用文字。');
-      }
-      return markdown;
-    } finally {
-      [inputPath, outputPath].forEach((filePath) => {
-        try {
-          fs.rmSync(filePath, { force: true });
-        } catch (error) {
-          // Best-effort cleanup only.
-        }
-      });
     }
   }
 
@@ -13289,16 +13210,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'pdf') {
           this.showSyncProgress({ ...progress, stage: 'processing', title: fileName });
-          try {
-            nextMetadata.convertedMarkdown = extractPdfMarkdown(nodeBuffer);
-            nextMetadata.conversionProvider = 'pdf-text-layer';
-          } catch (error) {
-            if (!error || error.code !== 'PDF_OCR_REQUIRED') throw error;
-            this.showSyncProgress({ ...progress, stage: 'processing', title: `${fileName}（OCR）` });
-            nextMetadata.convertedMarkdown = await this.runLocalPdfOcr(nodeBuffer);
-            nextMetadata.conversionProvider = 'local-pdf-ocr';
-            nextMetadata.pdfOcrFallbackReason = error.message || 'PDF 文本层不可用';
-          }
+          nextMetadata.convertedMarkdown = extractPdfMarkdown(nodeBuffer);
+          nextMetadata.conversionProvider = 'pdf-text-layer';
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'doc') {
           nextMetadata.conversionStatus = 'attachment_saved';
@@ -15299,7 +15212,6 @@ WechatObsidianInboxPlugin.__test = {
   getLocalOcrInstallStatus,
   getLocalOcrPythonPath,
   getLocalOcrScriptPath,
-  localOcrScriptSupportsPdf,
   getLocalAsrScriptVersionStatus,
   explainLocalAsrExitCode,
   getLocalAsrRunLogPath,
