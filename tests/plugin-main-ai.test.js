@@ -61,6 +61,16 @@ assert.strictEqual(helpers.enableDebuggerNetworkCapture({
   },
 }), true);
 assert.strictEqual(debuggerNetworkCommand, 'Network.enable');
+assert.strictEqual(typeof helpers.beginBestEffortBrowserLoad, 'function');
+let browserLoadUrl = '';
+assert.strictEqual(helpers.beginBestEffortBrowserLoad({
+  loadURL(url) {
+    browserLoadUrl = url;
+    return new Promise(() => {});
+  },
+}, 'https://www.douyin.com/video/123456789'), true);
+assert.strictEqual(browserLoadUrl, 'https://www.douyin.com/video/123456789');
+assert.strictEqual(typeof helpers.waitForBrowserTasksWithin, 'function');
 assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));
@@ -6465,7 +6475,20 @@ async function runDiagnosticFailureLogFilteringTests() {
   }
 }
 
+async function runBoundedBrowserTaskTests() {
+  const neverSettlingTask = new Promise(() => {});
+  const result = await helpers.waitForBrowserTasksWithin(
+    [neverSettlingTask],
+    2000,
+    async () => 'timeout',
+  );
+  assert.strictEqual(result, 'timeout');
+  assert.strictEqual(await helpers.waitForBrowserTasksWithin([], 2000), 'empty');
+  assert.strictEqual(await helpers.waitForBrowserTasksWithin([Promise.resolve('ok')], 2000), 'settled');
+}
+
 async function main() {
+  await runBoundedBrowserTaskTests();
   await runAsyncHydrationTests();
   await runLocalTranscriptionQualityFallbackTests();
   await runOpenExternalUrlTests();

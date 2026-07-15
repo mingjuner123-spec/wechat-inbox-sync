@@ -4611,6 +4611,38 @@ function enableDebuggerNetworkCapture(debuggerApi) {
   }
 }
 
+function beginBestEffortBrowserLoad(browserWindow, url) {
+  if (!browserWindow || typeof browserWindow.loadURL !== 'function') return false;
+  try {
+    const loadTask = browserWindow.loadURL(url);
+    if (loadTask && typeof loadTask.catch === 'function') {
+      loadTask.catch(() => {});
+    }
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function waitForBrowserTasksWithin(tasks, timeoutMs = 2500, timeoutTaskFactory = null) {
+  const pendingTasks = Array.isArray(tasks) ? tasks.filter(Boolean) : [];
+  if (!pendingTasks.length) return 'empty';
+  let timer = null;
+  const timeoutTask = typeof timeoutTaskFactory === 'function'
+    ? Promise.resolve().then(() => timeoutTaskFactory(timeoutMs))
+    : new Promise((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), timeoutMs);
+    });
+  try {
+    return await Promise.race([
+      Promise.allSettled(pendingTasks).then(() => 'settled'),
+      timeoutTask,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function isLikelyImageUrl(value) {
   const url = normalizeExtractedUrl(value);
   if (!url) return false;
@@ -8285,7 +8317,9 @@ async function renderSocialMediaUrlsWithElectron(url) {
 
   try {
     const loaded = waitForWebContents(win.webContents, 18000);
-    await win.loadURL(url);
+    if (!beginBestEffortBrowserLoad(win, url)) {
+      throw new Error('隐藏浏览器未能开始加载抖音页面');
+    }
     await loaded;
     const payload = await win.webContents.executeJavaScript(`
       (async () => {
@@ -8323,7 +8357,7 @@ async function renderSocialMediaUrlsWithElectron(url) {
       })()
     `);
 
-    await Promise.allSettled(debuggerBodyTasks);
+    await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     return normalizeBrowserCapturedMediaUrls([capturedRequests, payload, debuggerMediaUrls]);
   } finally {
     installedWebRequestHandlers.forEach((method) => {
@@ -15232,6 +15266,8 @@ WechatObsidianInboxPlugin.__test = {
   installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
   enableDebuggerNetworkCapture,
+  beginBestEffortBrowserLoad,
+  waitForBrowserTasksWithin,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,
   isWechatMpArticleUrl,
