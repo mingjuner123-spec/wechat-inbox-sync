@@ -5,6 +5,8 @@ INSTALL_ROOT="${HOME}/.wechat-inbox-local-ocr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON_SCRIPT="${SCRIPT_DIR}/ocr_image.py"
 VENV_DIR="${INSTALL_ROOT}/venv"
+PYTHON_RUNTIME_DIR="${INSTALL_ROOT}/python-runtime"
+CACHE_DIR="${INSTALL_ROOT}/cache"
 RUNTIME_SCRIPT="${INSTALL_ROOT}/ocr_image.py"
 LOG_PATH="${INSTALL_ROOT}/install.log"
 
@@ -17,24 +19,21 @@ PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
 
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
-UV_VERSION="0.9.14"
 PYTHON_BUILD_STANDALONE_BUILD="20260623"
-UV_BIN="${INSTALL_ROOT}/bin/uv"
-PORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python"
+PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"
+PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"
+PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"
+PORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python3"
 OCR_PACKAGE_REQUIREMENTS=("rapidocr-onnxruntime==1.4.4" "pillow==12.3.0")
-export UV_PYTHON_DOWNLOADS=automatic
-export UV_PYTHON_PREFERENCE=managed
-export UV_PYTHON_INSTALL_MIRROR="$TENCENT_PYTHON_INSTALL_MIRROR"
-export UV_PYTHON_CPYTHON_BUILD="$PYTHON_BUILD_STANDALONE_BUILD"
 
-mkdir -p "$INSTALL_ROOT"
+mkdir -p "$INSTALL_ROOT" "$CACHE_DIR"
 : > "$LOG_PATH"
 
 log() {
   echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") $*" | tee -a "$LOG_PATH"
 }
 
-# ── uv bootstrap ────────────────────────────────────────────────────────────
+# ── Downloads ───────────────────────────────────────────────────────────────
 
 curl_supports_retry_all_errors() {
   command -v curl >/dev/null 2>&1 && curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'
@@ -96,7 +95,7 @@ is_python_usable() {
     python_bin="$(command -v "$python_bin" 2>/dev/null || true)"
     [ -n "$python_bin" ] || return 1
   fi
-  "$python_bin" -c 'import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
+  "$python_bin" -c 'import sys, venv; raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 13) else 1)' >/dev/null 2>&1
 }
 
 find_existing_python() {
@@ -179,29 +178,12 @@ install_ocr_packages_with_python() {
     -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
 }
 
-install_ocr_packages_with_uv() {
-  export VIRTUAL_ENV="$VENV_DIR"
-  if install_ocr_packages_from_wheelhouse "$UV_BIN" pip; then
-    return 0
-  fi
-  log "CDN OCR wheelhouse install failed; retrying package indexes."
-  "$UV_BIN" pip install --upgrade pip 2>&1 || true
-  if "$UV_BIN" pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
-    -i "$TENCENT_PIP_INDEX_URL" \
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
-    return 0
-  fi
-  log "Tencent PyPI mirror install failed; retrying with PyPI only."
-  "$UV_BIN" pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
-    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
-}
-
-detect_uv_arch() {
+python_runtime_file_name() {
   local arch
   arch="$(uname -m)"
   case "$arch" in
-    arm64)  echo "aarch64-apple-darwin" ;;
-    x86_64) echo "x86_64-apple-darwin"   ;;
+    arm64)  echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;
+    x86_64) echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-x86_64-apple-darwin-install_only.tar.gz" ;;
     *)
       log "ERROR: Unsupported macOS architecture: $arch"
       return 1
@@ -209,51 +191,70 @@ detect_uv_arch() {
   esac
 }
 
-download_uv() {
-  local uv_arch="$1"
+python_runtime_sha256() {
+  case "$(uname -m)" in
+    arm64) echo "$PYTHON_RUNTIME_SHA256_ARM64" ;;
+    x86_64) echo "$PYTHON_RUNTIME_SHA256_X64" ;;
+    *) return 1 ;;
+  esac
+}
 
-  # If uv already exists and works, skip.
-  if [ -x "$UV_BIN" ] && "$UV_BIN" --version >/dev/null 2>&1; then
-    log "uv is already available: $UV_BIN"
+file_sha256() {
+  shasum -a 256 "$1" | awk '{ print toupper($1) }'
+}
+
+verify_sha256() {
+  local file_path="$1"
+  local expected_sha256="$2"
+  [ -s "$file_path" ] || return 1
+  [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]
+}
+
+install_portable_python() {
+  if is_python_usable "$PORTABLE_PYTHON"; then
+    log "Pinned portable Python is already ready: $PORTABLE_PYTHON"
     return 0
   fi
 
-  mkdir -p "$INSTALL_ROOT/bin"
-  local uv_temp="${INSTALL_ROOT}/bin/uv-download"
+  local file_name expected_sha256 archive_path runtime_url stage_dir staged_python
+  file_name="$(python_runtime_file_name)" || return 1
+  expected_sha256="$(python_runtime_sha256)" || return 1
+  archive_path="${CACHE_DIR}/${file_name}"
+  runtime_url="${TENCENT_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}"
 
-  local urls=(
-    "${TENCENT_BASE_URL}/local-asr/common/uv-${uv_arch}"
-    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz"
-  )
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    rm -f "$archive_path"
+    download_with_retry "$runtime_url" "$archive_path" "pinned Python runtime" 1200 || return 1
+  fi
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    log "ERROR: Pinned Python runtime SHA256 validation failed."
+    return 1
+  fi
 
-  for url in "${urls[@]}"; do
-    rm -f "$uv_temp"
+  stage_dir="$(mktemp -d "${INSTALL_ROOT}/.python-runtime-stage.XXXXXX")"
+  if ! tar -xzf "$archive_path" -C "$stage_dir"; then
+    rm -rf "$stage_dir"
+    log "ERROR: Pinned Python runtime extraction failed."
+    return 1
+  fi
+  staged_python="${stage_dir}/python/bin/python3"
+  if ! is_python_usable "$staged_python"; then
+    rm -rf "$stage_dir"
+    log "ERROR: Pinned Python runtime validation failed after extraction."
+    return 1
+  fi
 
-    if download_with_retry "$url" "$uv_temp" "uv" 600; then
-      # Check if it's a tar.gz (GitHub) or raw binary (CDN)
-      if [[ "$url" == *.tar.gz ]] || file "$uv_temp" 2>/dev/null | grep -q 'gzip'; then
-        tar xzf "$uv_temp" -C "$INSTALL_ROOT/bin" --strip-components=1 2>/dev/null || true
-        rm -f "$uv_temp"
-        if [ -x "$UV_BIN" ]; then
-          return 0
-        fi
-      else
-        mv "$uv_temp" "$UV_BIN"
-        chmod +x "$UV_BIN"
-        if [ -x "$UV_BIN" ]; then
-          return 0
-        fi
-      fi
-    fi
-    rm -f "$uv_temp"
-    log "uv download failed from $url, trying next source."
-  done
-
-  log "ERROR: 无法下载 uv（Python 安装工具）。请检查网络连接后重试。"
-  return 1
+  rm -rf "$PYTHON_RUNTIME_DIR"
+  mv "$stage_dir" "$PYTHON_RUNTIME_DIR"
+  if ! is_python_usable "$PORTABLE_PYTHON"; then
+    log "ERROR: Pinned portable Python was not installed correctly."
+    return 1
+  fi
+  log "Pinned portable Python installed: $PORTABLE_PYTHON"
+  return 0
 }
 
-# ── Python venv via uv ──────────────────────────────────────────────────────
+# ── Python venv via pinned portable runtime ─────────────────────────────────
 
 setup_python_venv() {
   # If venv already exists and works, skip.
@@ -275,27 +276,16 @@ setup_python_venv() {
       log "Python OCR environment ready via existing Python."
       return 0
     fi
-    log "Existing Python OCR setup failed; falling back to uv managed Python."
+    log "Existing Python OCR setup failed; falling back to pinned portable Python."
     rm -rf "$VENV_DIR"
   fi
 
-  local uv_arch
-  uv_arch="$(detect_uv_arch)" || return 1
-  download_uv "$uv_arch" || return 1
-
-  # Create venv.  uv auto-downloads Python if needed.
-  log "Setting up Python environment (this may take a few minutes on first run)..."
-  if ! "$UV_BIN" python install 3.12 2>&1; then
-    log "ERROR: Failed to install managed Python 3.12 via uv. Please check your network connection and retry."
+  install_portable_python || return 1
+  log "Creating an isolated OCR environment with pinned Python 3.12."
+  rm -rf "$VENV_DIR"
+  if ! "$PORTABLE_PYTHON" -m venv "$VENV_DIR" 2>&1; then
+    log "ERROR: Pinned Python 3.12 failed to create the OCR virtual environment."
     return 1
-  fi
-  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python 2>&1; then
-    if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
-      log "ERROR: 无法创建 Python 虚拟环境。"
-      log "请尝试在终端运行: xcode-select --install"
-      log "安装 Xcode Command Line Tools 后重试。"
-      return 1
-    fi
   fi
 
   if [ ! -x "$venv_python" ]; then
@@ -304,7 +294,7 @@ setup_python_venv() {
   fi
 
   log "Installing rapidocr-onnxruntime and pillow..."
-  if ! install_ocr_packages_with_uv; then
+  if ! install_ocr_packages_with_python "$venv_python"; then
     log "ERROR: rapidocr-onnxruntime / pillow 安装失败。请检查网络连接后重试。"
     return 1
   fi

@@ -10,16 +10,19 @@ $VenvDir = Join-Path $InstallRoot "venv"
 $RuntimeScript = Join-Path $InstallRoot "ocr_image.py"
 $LogPath = Join-Path $InstallRoot "install.log"
 $BinDir = Join-Path $InstallRoot "bin"
-$UvExe = Join-Path $BinDir "uv.exe"
+$CacheDir = Join-Path $InstallRoot "cache"
+$PythonRuntimeDir = Join-Path $InstallRoot "python-runtime"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
 $TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
 $TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"
 $OcrWheelhouseBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/wheels"
 $TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
 $PypiFallbackIndexUrl = "https://pypi.org/simple"
-$UvVersion = "0.9.14"
 $PythonBuildStandaloneBuild = "20260623"
 $PythonBuildStandaloneVersion = "3.12.13+20260623"
+$PythonRuntimeFileName = "cpython-$PythonBuildStandaloneVersion-x86_64-pc-windows-msvc-install_only.tar.gz"
+$PythonRuntimeSha256 = "C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E"
+$PortablePython = Join-Path $PythonRuntimeDir "python\python.exe"
 $OcrPackageRequirements = @("rapidocr-onnxruntime==1.4.4", "pillow==12.3.0")
 $MicrosoftVisualCppRuntimeUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 $MicrosoftVisualCppRuntimeInstaller = Join-Path $BinDir "vc_redist.x64.exe"
@@ -29,14 +32,9 @@ $script:LastOcrImportFailureText = ""
 $script:VisualCppRuntimeRepairAttempted = $false
 $script:VisualCppRuntimeRepairFailureMessage = ""
 $script:VisualCppRuntimeRestartRequired = $false
-$env:UV_PYTHON_DOWNLOADS = "automatic"
-$env:UV_PYTHON_PREFERENCE = "managed"
-$env:UV_PYTHON_INSTALL_MIRROR = $TencentPythonInstallMirror
-$env:UV_PYTHON_CPYTHON_BUILD = $PythonBuildStandaloneBuild
-$env:UV_LINK_MODE = "copy"
-
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
 
 function Write-InstallLog {
   param([string]$Message)
@@ -110,7 +108,7 @@ function Download-TextFile {
 function Test-PythonUsable {
   param([Parameter(Mandatory = $true)][string]$Command)
   try {
-    $version = & $Command -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>&1
+    $version = & $Command -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.version_info < (3, 13) else 1)" 2>&1
     return $LASTEXITCODE -eq 0
   } catch {
     return $false
@@ -125,9 +123,9 @@ function Find-Python {
     }
   }
   try {
-    $pyVersion = & py -3 -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>&1
+    $pyVersion = & py -3.12 -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.version_info < (3, 13) else 1)" 2>&1
     if ($LASTEXITCODE -eq 0) {
-      return "py -3"
+      return "py -3.12"
     }
   } catch {
   }
@@ -139,8 +137,8 @@ function Invoke-Python {
     [Parameter(Mandatory = $true)][string]$PythonCommand,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
   )
-  if ($PythonCommand -eq "py -3") {
-    & py -3 @Arguments
+  if ($PythonCommand -eq "py -3.12") {
+    & py -3.12 @Arguments
     return $LASTEXITCODE
   }
   & $PythonCommand @Arguments
@@ -289,49 +287,62 @@ function Get-OcrImportFailureDetail {
   return ($details -join " ").Trim()
 }
 
-function Install-Uv {
-  if ((Test-Path -LiteralPath $UvExe) -and (& $UvExe --version 2>$null)) {
-    Write-InstallLog "uv is already available: $UvExe"
-    return
-  }
-
-  $uvZip = Join-Path $BinDir "uv-x86_64-pc-windows-msvc.zip"
-  $uvStage = Join-Path $BinDir ("uv-stage-" + [guid]::NewGuid().ToString("N"))
-  $assetBase = $TencentOcrAssetBaseUrl.TrimEnd("/")
-  $urls = @(
-    "$assetBase/uv-x86_64-pc-windows-msvc.zip",
-    "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
+function Test-FileSha256 {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$ExpectedSha256
   )
+  if (!(Test-Path -LiteralPath $Path)) {
+    return $false
+  }
+  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant()
+  return $actual -eq $ExpectedSha256.ToUpperInvariant()
+}
 
-  $downloaded = $false
-  foreach ($url in $urls) {
-    try {
-      Remove-Item -LiteralPath $uvZip -Force -ErrorAction SilentlyContinue
-      Invoke-DownloadFile -Url $url -OutFile $uvZip -TimeoutSec 600
-      $downloaded = $true
-      break
-    } catch {
-      Write-InstallLog "uv download failed from $url. $($_.Exception.Message)"
+function Install-PortablePython {
+  if ((Test-Path -LiteralPath $PortablePython) -and (Test-PythonUsable -Command $PortablePython)) {
+    Write-InstallLog "Pinned portable Python is already ready: $PortablePython"
+    return $PortablePython
+  }
+
+  $runtimeUrl = "$($TencentPythonInstallMirror.TrimEnd('/'))/$PythonBuildStandaloneBuild/$PythonRuntimeFileName"
+  $archivePath = Join-Path $CacheDir $PythonRuntimeFileName
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $PythonRuntimeSha256)) {
+    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+    Invoke-DownloadFile -Url $runtimeUrl -OutFile $archivePath -TimeoutSec 1200
+  }
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $PythonRuntimeSha256)) {
+    throw "Pinned Python runtime SHA256 validation failed."
+  }
+
+  $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+  if (-not $tar) {
+    throw "Windows tar.exe is required to install the pinned Python runtime."
+  }
+
+  $stageDir = Join-Path $InstallRoot (".python-runtime-stage-" + [guid]::NewGuid().ToString("N"))
+  try {
+    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+    $exitCode = Invoke-NativeCommand -FilePath $tar.Source -Arguments @("-xzf", $archivePath, "-C", $stageDir)
+    if ($exitCode -ne 0) {
+      throw "Pinned Python runtime extraction failed with exit code $exitCode."
     }
-  }
-  if (-not $downloaded) {
-    throw "uv download failed. Please check network and retry."
+    $stagedPython = Join-Path $stageDir "python\python.exe"
+    if (!(Test-Path -LiteralPath $stagedPython) -or !(Test-PythonUsable -Command $stagedPython)) {
+      throw "Pinned Python runtime validation failed after extraction."
+    }
+
+    Remove-Item -LiteralPath $PythonRuntimeDir -Recurse -Force -ErrorAction SilentlyContinue
+    Move-Item -LiteralPath $stageDir -Destination $PythonRuntimeDir -Force
+  } finally {
+    Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 
-  Remove-Item -LiteralPath $uvStage -Recurse -Force -ErrorAction SilentlyContinue
-  New-Item -ItemType Directory -Force -Path $uvStage | Out-Null
-  Expand-Archive -LiteralPath $uvZip -DestinationPath $uvStage -Force
-  $foundUv = Get-ChildItem -LiteralPath $uvStage -Recurse -File -Filter "uv.exe" | Select-Object -First 1
-  if (-not $foundUv) {
-    throw "uv package is invalid: uv.exe not found"
+  if (!(Test-Path -LiteralPath $PortablePython) -or !(Test-PythonUsable -Command $PortablePython)) {
+    throw "Pinned portable Python was not installed correctly."
   }
-  Copy-Item -LiteralPath $foundUv.FullName -Destination $UvExe -Force
-  Remove-Item -LiteralPath $uvStage -Recurse -Force -ErrorAction SilentlyContinue
-  & $UvExe --version | Out-Host
-  if ($LASTEXITCODE -ne 0) {
-    throw "uv validation failed"
-  }
-  Write-InstallLog "uv installed to $UvExe"
+  Write-InstallLog "Pinned portable Python installed: $PortablePython"
+  return $PortablePython
 }
 
 function Get-OcrWheelhouseUrl {
@@ -340,19 +351,9 @@ function Get-OcrWheelhouseUrl {
 }
 
 function Install-OcrPackagesFromWheelhouse {
-  param(
-    [string]$PythonPath = "",
-    [switch]$Uv
-  )
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
   $wheelhouseUrl = Get-OcrWheelhouseUrl
   Write-InstallLog "Installing OCR packages from CDN wheelhouse: $wheelhouseUrl"
-  if ($Uv) {
-    $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments (@("pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
-    return $exitCode -eq 0
-  }
-  if ([string]::IsNullOrWhiteSpace($PythonPath)) {
-    return $false
-  }
   $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
   return $exitCode -eq 0
 }
@@ -373,21 +374,6 @@ function Install-OcrPackagesWithPip {
   return $exitCode -eq 0
 }
 
-function Install-OcrPackagesWithUv {
-  $env:VIRTUAL_ENV = $VenvDir
-  if (Install-OcrPackagesFromWheelhouse -Uv) {
-    return $true
-  }
-  Write-InstallLog "CDN OCR wheelhouse install failed; retrying package indexes."
-  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments (@("pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
-  if ($exitCode -eq 0) {
-    return $true
-  }
-  Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
-  $exitCode = Invoke-NativeCommand -FilePath $UvExe -Arguments (@("pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl))
-  return $exitCode -eq 0
-}
-
 function Setup-PythonEnvironment {
   $venvPython = Join-Path $VenvDir "Scripts\python.exe"
   if ((Test-Path -LiteralPath $venvPython) -and (Test-OcrPythonReady -PythonPath $venvPython)) {
@@ -404,21 +390,21 @@ function Setup-PythonEnvironment {
       Write-InstallLog "Python OCR environment ready via existing Python."
       return $venvPython
     }
-    Write-InstallLog "Existing Python OCR setup failed; falling back to uv managed Python."
+    Write-InstallLog "Existing Python OCR setup failed; falling back to pinned portable Python."
     Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 
-  Install-Uv
-  Write-InstallLog "Setting up managed Python 3.12 with uv..."
-  & $UvExe python install 3.12
+  $python = Install-PortablePython
+  Write-InstallLog "Creating an isolated OCR environment with pinned Python 3.12."
+  Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+  Invoke-Python -PythonCommand $python -m venv $VenvDir | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    throw "uv failed to install managed Python 3.12. Please check network and retry."
+    throw "Pinned Python 3.12 failed to create the OCR virtual environment."
   }
-  & $UvExe venv $VenvDir --python 3.12
   if (!(Test-Path -LiteralPath $venvPython)) {
     throw "venv python not found: $venvPython"
   }
-  if (!(Install-OcrPackagesWithUv)) {
+  if (!(Install-OcrPackagesWithPip -PythonPath $venvPython)) {
     throw "rapidocr-onnxruntime / pillow install failed. Please check network and retry."
   }
   if (!(Test-OcrPythonReady -PythonPath $venvPython)) {
@@ -428,7 +414,7 @@ function Setup-PythonEnvironment {
     }
     throw "rapidocr-onnxruntime import validation failed. See the OCR import probe in install.log."
   }
-  Write-InstallLog "Python OCR environment ready via uv."
+  Write-InstallLog "Python OCR environment ready via pinned portable Python."
   return $venvPython
 }
 
