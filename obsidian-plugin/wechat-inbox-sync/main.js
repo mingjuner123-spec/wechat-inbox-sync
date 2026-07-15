@@ -73,6 +73,8 @@ const DEFAULT_SETTINGS = {
   pendingBindCode: '',
   pendingRedeemCode: '',
   localTranscriptionEntitlementStatus: null,
+  proEntitlementLastError: '',
+  proEntitlementLastErrorAt: '',
   proSetupLastCheckedAt: '',
   proSetupInstallPromptSnoozedUntil: '',
   bindings: [],
@@ -946,6 +948,17 @@ function formatEntitlementExpiresAt(expiresAt) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function getProEntitlementStatusFingerprint(status) {
+  const source = status && typeof status === 'object' ? status : {};
+  return JSON.stringify({
+    hasAccess: source.hasAccess === true,
+    status: String(source.status || ''),
+    expiresAt: String(source.expiresAt || ''),
+    code: normalizeBindCodeInput(source.code || source.redeemCode || ''),
+    bindingToken: normalizeBindCodeInput(source.bindingToken || ''),
+  });
+}
+
 function buildLocalTranscriptionEntitlementText(status) {
   if (!status || typeof status !== 'object') {
     return '权限状态：未刷新。请先绑定小程序并开通 Pro，再回到插件点击「刷新权限」。';
@@ -1394,6 +1407,8 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     }
   }
   merged.proSetupLastCheckedAt = String(merged.proSetupLastCheckedAt || '').trim();
+  merged.proEntitlementLastError = String(merged.proEntitlementLastError || '').trim();
+  merged.proEntitlementLastErrorAt = String(merged.proEntitlementLastErrorAt || '').trim();
   merged.proSetupInstallPromptSnoozedUntil = String(merged.proSetupInstallPromptSnoozedUntil || '').trim();
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
@@ -10986,6 +11001,23 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.settings = mergeSettings({
       ...this.settings,
       localTranscriptionEntitlementStatus: status,
+      proEntitlementLastError: '',
+      proEntitlementLastErrorAt: '',
+    });
+    if (typeof this.saveData === 'function') {
+      await this.saveData(this.settings);
+    }
+  }
+
+  async cacheProEntitlementQueryError(error) {
+    const message = redactKnownCredentials(
+      error && error.message ? error.message : String(error || '权限查询失败'),
+      this.settings,
+    ).slice(0, 1000);
+    this.settings = mergeSettings({
+      ...this.settings,
+      proEntitlementLastError: message,
+      proEntitlementLastErrorAt: new Date().toISOString(),
     });
     if (typeof this.saveData === 'function') {
       await this.saveData(this.settings);
@@ -11020,7 +11052,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload;
   }
 
-  async requestJson(path, method = 'GET', body = {}, binding = null) {
+  async requestJson(path, method = 'GET', body = {}, binding = null, options = {}) {
     const fallbackToken = getPrimaryBoundToken(normalizeBindings(this.settings));
     const token = normalizeBindCodeInput(
       typeof binding === 'string'
@@ -11042,7 +11074,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...this.settings,
         apiBase: OFFICIAL_SYNC_API_BASE,
       });
-      return await this.requestJson(path, method, body, binding);
+      return await this.requestJson(path, method, body, binding, options);
     };
     const isFeishuCloudRequest = /^\/feishu(?:\/|$)/.test(String(path || ''));
     const apiBaseForRequest = isFeishuCloudRequest
@@ -11059,6 +11091,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         'X-Wechat-Inbox-Client-Id': this.settings.clientId,
         Accept: 'application/json',
         'Content-Type': 'application/json',
+        ...(options.noCache === true ? {
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+        } : {}),
       },
       body: method === 'POST' ? JSON.stringify(requestBody || {}) : undefined,
     };
@@ -11953,6 +11989,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       `缺失项：${status.missingReasons && status.missingReasons.length ? status.missingReasons.join('；') : '无'}`,
       `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:[REDACTED]`).join(', ') || '-'}`,
       `权限缓存：${JSON.stringify(redactSensitiveObject(this.settings.localTranscriptionEntitlementStatus || {}))}`,
+      `最近权限查询失败：${this.settings.proEntitlementLastError
+        ? `${this.settings.proEntitlementLastErrorAt || '时间未知'} ${this.settings.proEntitlementLastError}`
+        : '无'}`,
       '最近同步状态：',
       lastSyncText || syncLogText || '暂无 sync-last.log',
       '最近转写日志：',
@@ -12011,6 +12050,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       `API 地址：${this.settings.apiBase || '-'}`,
       `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:[REDACTED]`).join(', ') || '-'}`,
       `权限缓存：${JSON.stringify(redactSensitiveObject(this.settings.localTranscriptionEntitlementStatus || {}))}`,
+      `最近权限查询失败：${this.settings.proEntitlementLastError
+        ? `${this.settings.proEntitlementLastErrorAt || '时间未知'} ${this.settings.proEntitlementLastError}`
+        : '无'}`,
       '',
       '组件状态：',
       `音视频转写 ASR：${asrStatus.ready ? '可用' : '不可用'}`,
@@ -12095,7 +12137,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.copyDiagnosticText(this.getSyncDiagnosticText(), 'sync-diagnostic.txt');
   }
 
-  async getLocalTranscriptionEntitlementStatus() {
+  async getLocalTranscriptionEntitlementStatus(options = {}) {
     const bindings = this.getActiveBindings();
     if (!bindings.length) {
       const unboundStatus = {
@@ -12109,11 +12151,18 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
 
     const plans = [LOCAL_TRANSCRIPTION_PLAN, ...LOCAL_TRANSCRIPTION_FALLBACK_PLANS];
-    let lastError = null;
+    let lastInactiveStatus = null;
+    const queryErrors = [];
     for (const binding of bindings) {
       for (const plan of plans) {
         try {
-          const payload = await this.requestJson(`/entitlements/status?plan=${encodeURIComponent(plan)}`, 'GET', {}, binding);
+          const payload = await this.requestJson(
+            `/entitlements/status?plan=${encodeURIComponent(plan)}`,
+            'GET',
+            {},
+            binding,
+            { noCache: options.forceRefresh === true },
+          );
           const data = payload && payload.data ? payload.data : {};
           if (data.hasAccess) {
             const activeStatus = {
@@ -12134,18 +12183,24 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
             return activeStatus;
           }
-          lastError = data;
+          lastInactiveStatus = data;
         } catch (error) {
-          lastError = error;
+          queryErrors.push(error);
         }
       }
+    }
+
+    if (queryErrors.length) {
+      const queryError = queryErrors[queryErrors.length - 1];
+      await this.cacheProEntitlementQueryError(queryError);
+      throw queryError;
     }
 
     const inactiveStatus = {
       hasAccess: false,
       plan: LOCAL_TRANSCRIPTION_PLAN,
-      status: (lastError && lastError.status) || 'inactive',
-      expiresAt: (lastError && lastError.expiresAt) || '',
+      status: (lastInactiveStatus && lastInactiveStatus.status) || 'inactive',
+      expiresAt: (lastInactiveStatus && lastInactiveStatus.expiresAt) || '',
     };
     await this.cacheLocalTranscriptionEntitlementStatus(inactiveStatus);
     return inactiveStatus;
@@ -12155,7 +12210,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     const code = normalizeBindCodeInput(this.settings.pendingRedeemCode);
     const cached = this.settings && this.settings.localTranscriptionEntitlementStatus;
     if (!options.forceRefresh && isCachedProStatusActive(cached)) return cached;
-    const bindingStatus = await this.getLocalTranscriptionEntitlementStatus();
+    const bindingStatus = await this.getLocalTranscriptionEntitlementStatus({
+      forceRefresh: options.forceRefresh === true,
+    });
     if (isCachedProStatusActive(bindingStatus)) return bindingStatus;
     if (code) {
       return await this.validateProRedeemCodeAccess(code);
@@ -12348,7 +12405,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       && now - lastCheckedAt < PRO_SETUP_CHECK_INTERVAL_MS
     ) {
       const cached = this.settings.localTranscriptionEntitlementStatus;
-      if (!isCachedProStatusActive(cached)) return cached || buildMissingRedeemCodeStatus();
+      if (isCachedProStatusActive(cached)) return cached;
     }
 
     let status = null;
@@ -15086,6 +15143,9 @@ class WechatInboxSettingTab extends PluginSettingTab {
       cls: 'wechat-inbox-sync-section-heading',
     });
 
+    const renderedProStatusFingerprint = getProEntitlementStatusFingerprint(
+      this.plugin.settings.localTranscriptionEntitlementStatus,
+    );
     const proStatusText = buildLocalTranscriptionEntitlementText(this.plugin.settings.localTranscriptionEntitlementStatus);
     const proPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     proPanel.open = true;
@@ -15243,9 +15303,18 @@ class WechatInboxSettingTab extends PluginSettingTab {
     status.setText(this.plugin.settings.noteSaveMode === 'root'
       ? '同步后会生成：临时收集/文本-示例.md、临时收集/公众号-示例.md。语音附件仍会放入临时收集/语音附件/YYYY-MM-DD/。'
       : '同步后会生成：临时收集/YYYY-MM-DD/文本-示例.md、公众号-示例.md。语音附件会放入临时收集/语音附件/YYYY-MM-DD/。');
-    this.plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open' }).catch((error) => {
-      new Notice(`Pro 自动能力检查失败：${error.message || error}`);
-    });
+    this.plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open' })
+      .then(() => {
+        const currentProStatusFingerprint = getProEntitlementStatusFingerprint(
+          this.plugin.settings.localTranscriptionEntitlementStatus,
+        );
+        if (currentProStatusFingerprint !== renderedProStatusFingerprint) {
+          this.display();
+        }
+      })
+      .catch((error) => {
+        new Notice(`Pro 自动能力检查失败：${error.message || error}`);
+      });
   }
 }
 
@@ -15278,6 +15347,7 @@ WechatObsidianInboxPlugin.__test = {
   formatRedeemAccessError,
   formatLocalComponentInstallFailureReason,
   isCachedProStatusActiveForCode,
+  getProEntitlementStatusFingerprint,
   buildAliyunVoiceRequest,
   buildDoubaoAsrRequest,
   buildDoubaoAsrQueryRequest,

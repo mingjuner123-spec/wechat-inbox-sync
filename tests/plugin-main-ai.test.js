@@ -71,6 +71,28 @@ assert.strictEqual(helpers.beginBestEffortBrowserLoad({
 }, 'https://www.douyin.com/video/123456789'), true);
 assert.strictEqual(browserLoadUrl, 'https://www.douyin.com/video/123456789');
 assert.strictEqual(typeof helpers.waitForBrowserTasksWithin, 'function');
+assert.strictEqual(typeof helpers.getProEntitlementStatusFingerprint, 'function');
+const inactiveProFingerprint = helpers.getProEntitlementStatusFingerprint({
+  hasAccess: false,
+  status: 'inactive',
+  expiresAt: '',
+});
+const activeProFingerprint = helpers.getProEntitlementStatusFingerprint({
+  hasAccess: true,
+  status: 'active',
+  expiresAt: '2026-07-22T04:46:17.347Z',
+  code: 'OBTRYTEST1',
+});
+assert.notStrictEqual(inactiveProFingerprint, activeProFingerprint);
+assert.strictEqual(
+  activeProFingerprint,
+  helpers.getProEntitlementStatusFingerprint({
+    hasAccess: true,
+    status: 'active',
+    expiresAt: '2026-07-22T04:46:17.347Z',
+    code: 'OBTRYTEST1',
+  }),
+);
 assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));
@@ -5496,6 +5518,25 @@ async function runLocalTranscriptionEntitlementTests() {
   });
 
   requestUrlMock = async ({ url, method, headers, body }) => {
+    if (method === 'GET') {
+      assert.ok([
+        'https://example.com/sync/entitlements/status?plan=local_transcription_beta',
+        'https://example.com/sync/entitlements/status?plan=local_transcription_trial',
+      ].includes(url));
+      assert.strictEqual(headers.Authorization, 'Bearer ABC-123');
+      assert.strictEqual(headers['Cache-Control'], 'no-cache');
+      return {
+        status: 200,
+        text: JSON.stringify({
+          success: true,
+          data: {
+            hasAccess: false,
+            plan: 'local_transcription_beta',
+            status: 'inactive',
+          },
+        }),
+      };
+    }
     assert.strictEqual(method, 'POST');
     assert.strictEqual(url, 'https://example.com/sync/entitlements/redeem');
     assert.strictEqual(headers.Authorization, 'Bearer ABC-123');
@@ -5581,6 +5622,8 @@ async function runLocalTranscriptionEntitlementTests() {
     assert.strictEqual(method, 'GET');
     assert.strictEqual(url, 'https://example.com/sync/entitlements/status?plan=local_transcription_beta');
     assert.strictEqual(headers.Authorization, 'Bearer BIND-PRO');
+    assert.strictEqual(headers['Cache-Control'], 'no-cache');
+    assert.strictEqual(headers.Pragma, 'no-cache');
     return {
       status: 200,
       text: JSON.stringify({
@@ -5606,9 +5649,41 @@ async function runLocalTranscriptionEntitlementTests() {
     assert.strictEqual(status.bindingLabel, '已购微信');
     assert.strictEqual(bindingEntitlementPlugin.settings.localTranscriptionEntitlementStatus.hasAccess, true);
     assert.strictEqual(bindingEntitlementPlugin.settings.pendingRedeemCode, 'OBPROT93C6');
+    const usableStatus = await bindingEntitlementPlugin.ensureProFeatureAccess('图片 OCR');
+    assert.strictEqual(usableStatus.hasAccess, true);
   } finally {
     requestUrlMock = previousRequestUrlMock;
   }
+
+  const queryFailurePlugin = new PluginClass();
+  queryFailurePlugin.saveData = async () => {};
+  const existingActiveEntitlement = {
+    hasAccess: true,
+    plan: 'local_transcription_trial',
+    status: 'active',
+    expiresAt: '2026-08-03T08:00:00.000Z',
+    code: 'OBPROKEEP1',
+  };
+  queryFailurePlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'QUERY-FAIL',
+    clientId: 'query-fail-client',
+    localTranscriptionEntitlementStatus: existingActiveEntitlement,
+    bindings: [{ token: 'QUERY-FAIL', label: '查询失败微信', enabled: true, status: 'bound' }],
+  });
+  queryFailurePlugin.requestJson = async () => {
+    throw new Error('权限接口连接失败');
+  };
+  await assert.rejects(
+    () => queryFailurePlugin.getProFeatureAccessStatus({ forceRefresh: true }),
+    /权限接口连接失败/,
+  );
+  assert.deepStrictEqual(
+    queryFailurePlugin.settings.localTranscriptionEntitlementStatus,
+    existingActiveEntitlement,
+  );
+  assert.ok(queryFailurePlugin.settings.proEntitlementLastError.includes('权限接口连接失败'));
+  assert.ok(queryFailurePlugin.settings.proEntitlementLastErrorAt);
 
   const trialFallbackPlugin = new PluginClass();
   trialFallbackPlugin.saveData = async () => {};
@@ -5627,7 +5702,10 @@ async function runLocalTranscriptionEntitlementTests() {
   });
   requestUrlMock = async ({ url, method, headers }) => {
     assert.strictEqual(method, 'GET');
-    assert.strictEqual(url, 'https://example.com/sync/entitlements/status?plan=local_transcription_beta');
+    assert.ok([
+      'https://example.com/sync/entitlements/status?plan=local_transcription_beta',
+      'https://example.com/sync/entitlements/status?plan=local_transcription_trial',
+    ].includes(url));
     assert.strictEqual(headers.Authorization, 'Bearer TRIAL-123');
     return {
       status: 200,
@@ -5766,7 +5844,10 @@ async function runLocalTranscriptionEntitlementTests() {
   });
   requestUrlMock = async ({ url, method, headers }) => {
     assert.strictEqual(method, 'GET');
-    assert.strictEqual(url, 'https://example.com/sync/entitlements/status?plan=local_transcription_beta');
+    assert.ok([
+      'https://example.com/sync/entitlements/status?plan=local_transcription_beta',
+      'https://example.com/sync/entitlements/status?plan=local_transcription_trial',
+    ].includes(url));
     assert.strictEqual(headers.Authorization, 'Bearer DEF-456');
     return {
       status: 200,
@@ -5934,6 +6015,32 @@ async function runLocalTranscriptionEntitlementTests() {
   };
   const freeSetupStatus = await freeSetupPlugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
   assert.strictEqual(freeSetupStatus.hasAccess, false);
+
+  const recentInactivePlugin = new PluginClass();
+  recentInactivePlugin.saveData = async () => {};
+  recentInactivePlugin.settings = helpers.mergeSettings({
+    proSetupLastCheckedAt: new Date().toISOString(),
+    localTranscriptionEntitlementStatus: {
+      hasAccess: false,
+      status: 'inactive',
+      expiresAt: '',
+    },
+  });
+  let recentInactiveCloudCalls = 0;
+  recentInactivePlugin.getProFeatureAccessStatus = async () => {
+    recentInactiveCloudCalls += 1;
+    return {
+      hasAccess: true,
+      status: 'active',
+      expiresAt: '2026-08-01T00:00:00.000Z',
+    };
+  };
+  recentInactivePlugin.getLocalTranscriptionComponentReadiness = () => ({ ready: true });
+  const refreshedRecentInactiveStatus = await recentInactivePlugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'settings-open',
+  });
+  assert.strictEqual(recentInactiveCloudCalls, 1);
+  assert.strictEqual(refreshedRecentInactiveStatus.hasAccess, true);
 
   const forceRefreshPlugin = new PluginClass();
   let receivedOptions = null;
@@ -6482,6 +6589,8 @@ async function runDiagnosticFailureLogFilteringTests() {
       token: 'ABC-123',
       localAsrPlatform: 'darwin',
       localTranscriptionEntitlementStatus: { hasAccess: true, status: 'active' },
+      proEntitlementLastError: '权限接口连接失败',
+      proEntitlementLastErrorAt: '2026-07-15T06:30:00.000Z',
       bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
     });
     plugin.getConfiguredLocalAsrPlatform = () => 'darwin';
@@ -6514,6 +6623,9 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
+    assert.ok(diagnostic.includes('最近权限查询失败'));
+    assert.ok(diagnostic.includes('权限接口连接失败'));
+    assert.ok(diagnostic.includes('2026-07-15T06:30:00.000Z'));
     assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
     assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
     assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false);
