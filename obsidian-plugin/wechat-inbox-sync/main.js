@@ -5913,7 +5913,12 @@ function getSocialCommentIdentity(comment) {
 }
 
 function getSocialCommentFallbackIdentity(comment) {
-  const author = getSocialCommentCanonicalText(String(comment && comment.author || '').replace(/^[:：]+|[:：]+$/g, ''));
+  const rawAuthor = String(comment && comment.author || '')
+    .replace(/^[:：]+|[:：]+$/g, '')
+    .normalize('NFKC')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+  const author = getSocialCommentCanonicalText(rawAuthor) || rawAuthor;
   const content = getSocialCommentCanonicalText(comment && comment.content);
   return author && content ? `${author}|${content}` : '';
 }
@@ -6046,19 +6051,30 @@ function mergeXiaohongshuNetworkComments(groups = [], limit = XIAOHONGSHU_ROOT_C
   return comments.slice(0, max);
 }
 
+function preserveXiaohongshuPrimaryCommentTree(primaryComments = [], candidateComments = [], limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT) {
+  return mergeXiaohongshuNetworkComments([
+    Array.isArray(primaryComments) ? primaryComments : [],
+    Array.isArray(candidateComments) ? candidateComments : [],
+  ], limit);
+}
+
 function mergeXiaohongshuCommentSources({
   networkComments = [],
+  deferredReplyGroups = [],
   fallbackGroups = [],
   limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT,
 } = {}) {
   const max = Math.max(1, Math.min(Number(limit) || XIAOHONGSHU_ROOT_COMMENT_LIMIT, XIAOHONGSHU_ROOT_COMMENT_LIMIT));
-  const comments = mergeXiaohongshuNetworkComments([networkComments], max);
+  let comments = mergeXiaohongshuNetworkComments([networkComments], max);
+  const networkStats = getSocialCommentTreeStats(comments);
   const canonicalKeys = collectSocialCommentFallbackIdentities(comments);
   let dedupedFallbackCount = 0;
   let fallbackAddedCount = 0;
   let fallbackReplyAddedCount = 0;
   let unmatchedFallbackReplyCount = 0;
   let droppedFallbackCount = 0;
+  let restoredReplyCount = 0;
+  let unmatchedDeferredReplyCount = 0;
   const hasNetworkRoots = comments.length > 0;
 
   (Array.isArray(fallbackGroups) ? fallbackGroups : []).forEach((group) => {
@@ -6128,12 +6144,36 @@ function mergeXiaohongshuCommentSources({
     });
   });
 
+  (Array.isArray(deferredReplyGroups) ? deferredReplyGroups : []).forEach((group) => {
+    const rootCommentId = String(group && group.rootCommentId || '').trim();
+    const payloads = Array.isArray(group && group.payloads) ? group.payloads : [];
+    const hasMatchingRoot = Boolean(rootCommentId)
+      && comments.some((comment) => getSocialCommentId(comment) === rootCommentId);
+    if (!hasMatchingRoot) {
+      payloads.forEach((payload) => {
+        unmatchedDeferredReplyCount += getXiaohongshuCommentPageItems(payload).length;
+      });
+      return;
+    }
+    const beforeReplyCount = countSocialCommentReplies(comments);
+    comments = mergeXiaohongshuReplyPages(comments, rootCommentId, payloads);
+    restoredReplyCount += Math.max(0, countSocialCommentReplies(comments) - beforeReplyCount);
+  });
+
+  const finalStats = getSocialCommentTreeStats(comments);
   return {
     comments: comments.slice(0, max),
+    networkRootCount: networkStats.rootCount,
+    networkReplyCount: networkStats.replyCount,
+    restoredRootCount: 0,
+    restoredReplyCount,
+    lostRootCount: Math.max(0, networkStats.rootCount - finalStats.rootCount),
+    lostReplyCount: Math.max(0, networkStats.replyCount - finalStats.replyCount),
     dedupedFallbackCount,
     fallbackAddedCount,
     fallbackReplyAddedCount,
     unmatchedFallbackReplyCount,
+    unmatchedDeferredReplyCount,
     droppedFallbackCount,
   };
 }
@@ -6625,11 +6665,13 @@ function mergeXiaohongshuCapturedCommentPayloads(entries = [], limit = XIAOHONGS
 
   const rootResult = collectXiaohongshuCommentPages(rootPayloads, limit);
   let comments = rootResult.comments;
+  const deferredReplyGroups = [];
   let unmatchedReplyCount = 0;
   let unmatchedReplyPayloadCount = 0;
   replyPayloadGroups.forEach((payloads, rootCommentId) => {
     const hasMatchingRoot = comments.some((comment) => getSocialCommentId(comment) === rootCommentId);
     if (!hasMatchingRoot) {
+      deferredReplyGroups.push({ rootCommentId, payloads: [...payloads] });
       unmatchedReplyPayloadCount += payloads.length;
       payloads.forEach((payload) => {
         unmatchedReplyCount += getXiaohongshuCommentPageItems(payload).length;
@@ -6639,6 +6681,7 @@ function mergeXiaohongshuCapturedCommentPayloads(entries = [], limit = XIAOHONGS
     comments = mergeXiaohongshuReplyPages(comments, rootCommentId, payloads);
   });
   if (orphanReplyPayloads.length) {
+    deferredReplyGroups.push({ rootCommentId: '', payloads: [...orphanReplyPayloads] });
     orphanReplyPayloads.forEach((payload) => {
       unmatchedReplyCount += getXiaohongshuCommentPageItems(payload).length;
     });
@@ -6652,6 +6695,7 @@ function mergeXiaohongshuCapturedCommentPayloads(entries = [], limit = XIAOHONGS
     orphanReplyPayloadCount: orphanReplyPayloads.length,
     unmatchedReplyCount,
     unmatchedReplyPayloadCount,
+    deferredReplyGroups,
     rootCount: rootResult.comments.length,
     replyCount: countSocialCommentReplies(comments),
     rootPageCount: rootResult.pageCount,
@@ -6669,7 +6713,7 @@ function buildXiaohongshuCommentDiagnostic(details = {}) {
   const scrollMode = toLabel(details.scrollMode);
   const pageApiStopReason = toLabel(details.pageApiStopReason);
   const stopReason = String(details.stopReason || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'unknown';
-  return `<!-- xhs-comment-diag: source=${source}; root=${toCount(details.rootCount)}; replies=${toCount(details.replyCount)}; pages=${toCount(details.pageCount)}; root_pages=${toCount(details.rootPageCount)}; reply_pages=${toCount(details.replyPageCount)}; final_root=${toCount(details.finalRootCount)}; final_replies=${toCount(details.finalReplyCount)}; fallback=${toCount(details.fallbackAddedCount)}; deduped=${toCount(details.dedupedFallbackCount)}; dropped=${toCount(details.droppedFallbackCount)}; unmatched=${toCount(details.unmatchedReplyCount)}; invalid=${toCount(details.invalidPayloadCount)}; scroll=${scrollMode}; api_stop=${pageApiStopReason}; stop=${stopReason} -->`;
+  return `<!-- xhs-comment-diag: source=${source}; root=${toCount(details.rootCount)}; replies=${toCount(details.replyCount)}; pages=${toCount(details.pageCount)}; root_pages=${toCount(details.rootPageCount)}; reply_pages=${toCount(details.replyPageCount)}; merged_root=${toCount(details.mergedRootCount)}; merged_replies=${toCount(details.mergedReplyCount)}; restored_root=${toCount(details.restoredRootCount)}; restored_replies=${toCount(details.restoredReplyCount)}; final_root=${toCount(details.finalRootCount)}; final_replies=${toCount(details.finalReplyCount)}; lost_root=${toCount(details.lostRootCount)}; lost_replies=${toCount(details.lostReplyCount)}; fallback=${toCount(details.fallbackAddedCount)}; deduped=${toCount(details.dedupedFallbackCount)}; dropped=${toCount(details.droppedFallbackCount)}; unmatched=${toCount(details.unmatchedReplyCount)}; invalid=${toCount(details.invalidPayloadCount)}; scroll=${scrollMode}; api_stop=${pageApiStopReason}; stop=${stopReason} -->`;
 }
 
 function appendXiaohongshuCommentDiagnostic(markdown, details = {}) {
@@ -8352,6 +8396,23 @@ async function renderXiaohongshuPageWithElectron(url) {
   let debuggerResponseSequence = 0;
   let debuggerAttached = false;
   const debuggerApi = win.webContents && win.webContents.debugger;
+  const drainDebuggerBodyTasks = async () => {
+    let settledCount = 0;
+    let idlePasses = 0;
+    for (let pass = 0; pass < 20 && idlePasses < 2; pass += 1) {
+      const pending = debuggerBodyTasks.slice(settledCount);
+      if (pending.length) {
+        await Promise.allSettled(pending);
+        settledCount += pending.length;
+        idlePasses = 0;
+      } else {
+        idlePasses += 1;
+      }
+      if (idlePasses < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+    }
+  };
   const parseCommentApiText = (responseUrl, text, sequence = 0) => {
     if (!text) return;
     const payloads = [];
@@ -8392,6 +8453,7 @@ async function renderXiaohongshuPageWithElectron(url) {
           if (method === 'Network.loadingFinished' && debuggerRequestUrls.has(params.requestId)) {
             const requestId = params.requestId;
             const responseDetails = debuggerRequestUrls.get(requestId) || {};
+            debuggerRequestUrls.delete(requestId);
             debuggerBodyTasks.push((async () => {
               try {
                 const body = await debuggerApi.sendCommand('Network.getResponseBody', { requestId });
@@ -8442,6 +8504,7 @@ async function renderXiaohongshuPageWithElectron(url) {
             content: body,
             time: clean(time),
             likes: clean(likes),
+            id: clean(structure.id),
             domRole: structure.domRole || 'unknown',
             parentAuthor: clean(structure.parentAuthor),
             parentCommentId: clean(structure.parentCommentId),
@@ -8506,7 +8569,9 @@ async function renderXiaohongshuPageWithElectron(url) {
             const parentCommentId = parentRoot
               ? clean(parentRoot.getAttribute('data-comment-id') || parentRoot.getAttribute('data-id') || parentRoot.id || '')
               : '';
+            const commentId = clean(node.getAttribute('data-comment-id') || node.getAttribute('data-id') || node.id || '');
             push(author, content, time, likes, {
+              id: commentId,
               domRole: isReplyNode ? 'reply' : 'root',
               parentAuthor,
               parentCommentId,
@@ -8543,10 +8608,24 @@ async function renderXiaohongshuPageWithElectron(url) {
               let overflowY = '';
               try { overflowY = String(getComputedStyle(node).overflowY || ''); } catch (error) {}
               const marker = String(node.className || '') + ' ' + String(node.id || '');
-              const commentBonus = /comment|reply/i.test(marker) ? 1000000 : 0;
+              let nestedReplyAncestor = null;
+              try {
+                nestedReplyAncestor = node.closest('[class*="reply"], [class*="Reply"], [class*="sub-comment"], [class*="subComment"]');
+              } catch (error) {}
+              const nestedReplyPenalty = /reply|sub[-_]?comment/i.test(marker) || nestedReplyAncestor ? -2000000 : 0;
+              const mainCommentListBonus = !nestedReplyPenalty && /comments?[-_\s]?(?:container|list)|commentlist/i.test(marker)
+                ? 1200000
+                : 0;
+              let rootCommentCount = 0;
+              try {
+                rootCommentCount = Array.from(node.querySelectorAll('.comment-item, [class*="comment-item"], [class*="CommentItem"], [class*="comment"][class*="item"]'))
+                  .filter((item) => !item.closest('[class*="reply"], [class*="Reply"], [class*="sub-comment"], [class*="subComment"]'))
+                  .length;
+              } catch (error) {}
+              const rootCoverageBonus = Math.min(rootCommentCount, 50) * 10000;
               const overflowBonus = /auto|scroll/i.test(overflowY) ? 500000 : 0;
               const documentPenalty = node === document.scrollingElement || node === document.body || node === document.documentElement ? -250000 : 0;
-              return { node, score: commentBonus + overflowBonus + available + documentPenalty };
+              return { node, score: mainCommentListBonus + rootCoverageBonus + overflowBonus + available + nestedReplyPenalty + documentPenalty };
             })
             .filter(Boolean)
             .sort((a, b) => b.score - a.score);
@@ -8626,7 +8705,7 @@ async function renderXiaohongshuPageWithElectron(url) {
         };
       })()
     `);
-    await Promise.allSettled(debuggerBodyTasks);
+    await drainDebuggerBodyTasks();
     const renderedHtml = renderedPayload && typeof renderedPayload === 'object'
       ? String(renderedPayload.html || '')
       : String(renderedPayload || '');
@@ -8644,14 +8723,20 @@ async function renderXiaohongshuPageWithElectron(url) {
       XIAOHONGSHU_ROOT_COMMENT_LIMIT,
     );
     const domComments = extractSocialCommentsFromHtml(renderedHtml, XIAOHONGSHU_ROOT_COMMENT_LIMIT);
-    const networkComments = mergeXiaohongshuNetworkComments([
+    const candidateNetworkComments = mergeXiaohongshuNetworkComments([
       browserNetworkResult.comments,
       pagedComments,
       debuggerComments,
       apiComments,
     ], XIAOHONGSHU_ROOT_COMMENT_LIMIT);
+    const networkComments = preserveXiaohongshuPrimaryCommentTree(
+      browserNetworkResult.comments,
+      candidateNetworkComments,
+      XIAOHONGSHU_ROOT_COMMENT_LIMIT,
+    );
     const mergedCommentSources = mergeXiaohongshuCommentSources({
       networkComments,
+      deferredReplyGroups: browserNetworkResult.deferredReplyGroups,
       fallbackGroups: [
       inlineDomComments,
       domComments,
@@ -8675,12 +8760,18 @@ async function renderXiaohongshuPageWithElectron(url) {
       pageCount: hasBrowserNetworkPayload ? browserNetworkResult.pageCount : (capturedDiagnostic.pageCount || pagedRootResult.pageCount),
       rootPageCount: hasBrowserNetworkPayload ? browserNetworkResult.rootPageCount : pagedRootResult.pageCount,
       replyPageCount: hasBrowserNetworkPayload ? browserNetworkResult.replyPageCount : Math.max(0, Number(capturedDiagnostic.pageCount || 0) - pagedRootResult.pageCount),
+      mergedRootCount: finalCommentStats.rootCount,
+      mergedReplyCount: finalCommentStats.replyCount,
+      restoredRootCount: mergedCommentSources.restoredRootCount,
+      restoredReplyCount: mergedCommentSources.restoredReplyCount,
       finalRootCount: finalCommentStats.rootCount,
       finalReplyCount: finalCommentStats.replyCount,
+      lostRootCount: Math.max(0, browserNetworkResult.rootCount - finalCommentStats.rootCount),
+      lostReplyCount: Math.max(0, browserNetworkResult.replyCount - finalCommentStats.replyCount),
       fallbackAddedCount: mergedCommentSources.fallbackAddedCount,
       dedupedFallbackCount: mergedCommentSources.dedupedFallbackCount,
       droppedFallbackCount: mergedCommentSources.droppedFallbackCount,
-      unmatchedReplyCount: browserNetworkResult.unmatchedReplyCount + mergedCommentSources.unmatchedFallbackReplyCount,
+      unmatchedReplyCount: mergedCommentSources.unmatchedDeferredReplyCount + mergedCommentSources.unmatchedFallbackReplyCount,
       invalidPayloadCount: browserNetworkResult.invalidPayloadCount,
       scrollMode: renderedPayload && renderedPayload.scrollMode,
       pageApiStopReason: hasBrowserNetworkPayload ? 'network_primary' : capturedDiagnostic.stopReason,
@@ -14025,8 +14116,20 @@ class WechatObsidianInboxPlugin extends Plugin {
               const finalXiaohongshuStats = getSocialCommentMarkdownStats(markdownWithXiaohongshuComments);
               const finalDiagnosticDetails = {
                 ...renderedDiagnosticDetails,
+                mergedRootCount: Number(renderedDiagnosticDetails.mergedRootCount || finalXiaohongshuMerge.networkRootCount),
+                mergedReplyCount: Number(renderedDiagnosticDetails.mergedReplyCount || finalXiaohongshuMerge.networkReplyCount),
+                restoredRootCount: Number(renderedDiagnosticDetails.restoredRootCount || 0) + finalXiaohongshuMerge.restoredRootCount,
+                restoredReplyCount: Number(renderedDiagnosticDetails.restoredReplyCount || 0) + finalXiaohongshuMerge.restoredReplyCount,
                 finalRootCount: finalXiaohongshuStats.rootCount,
                 finalReplyCount: finalXiaohongshuStats.replyCount,
+                lostRootCount: Math.max(
+                  Number(renderedDiagnosticDetails.lostRootCount || 0),
+                  Math.max(0, Number(renderedDiagnosticDetails.mergedRootCount || 0) - finalXiaohongshuStats.rootCount),
+                ),
+                lostReplyCount: Math.max(
+                  Number(renderedDiagnosticDetails.lostReplyCount || 0),
+                  Math.max(0, Number(renderedDiagnosticDetails.mergedReplyCount || 0) - finalXiaohongshuStats.replyCount),
+                ),
                 fallbackAddedCount: Number(renderedDiagnosticDetails.fallbackAddedCount || 0) + finalXiaohongshuMerge.fallbackAddedCount,
                 dedupedFallbackCount: Number(renderedDiagnosticDetails.dedupedFallbackCount || 0) + finalXiaohongshuMerge.dedupedFallbackCount,
                 droppedFallbackCount: Number(renderedDiagnosticDetails.droppedFallbackCount || 0) + finalXiaohongshuMerge.droppedFallbackCount,
@@ -15080,6 +15183,7 @@ WechatObsidianInboxPlugin.__test = {
   mergeXiaohongshuReplyPages,
   mergeXiaohongshuCapturedCommentPayloads,
   mergeXiaohongshuCommentSources,
+  preserveXiaohongshuPrimaryCommentTree,
   buildXiaohongshuCommentDiagnostic,
   appendXiaohongshuCommentDiagnostic,
   getXiaohongshuCommentPaginationScript,
