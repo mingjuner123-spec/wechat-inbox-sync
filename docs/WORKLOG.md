@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-15 10:06 - 修复 macOS ASR 旧安装器回灌并更新 CDN
+
+- 目标：修复 macOS 用户点击“安装/更新本地转写组件”后，Whisper、FFmpeg、模型均存在但仍报告“转写脚本过旧”的循环故障。
+- 影响范围：Obsidian 插件 macOS ASR 安装器新鲜度校验、腾讯云静态托管 `local-asr/common/install-local-asr-macos.sh`、回归测试和工程决策；不修改 OCR、小程序、云函数、支付、绑定码、Pro 权益、模型或业务数据。
+- 根因：项目发布源 macOS 安装器已是 `1.3.5`，公网 CDN 仍为 `1.3.4`；旧文件继续生成 `SIMPLIFIED_PROMPT` / `--prompt` 转写命令且缺少 `repeat-guard-v2`。插件只校验通用能力标记，因此会下载并执行旧安装器；安装结束后的状态检查再把其生成脚本判为过期。该问题与 Windows 旧安装器故障同源，不是 macOS Intel 架构、权限或依赖下载失败。
+- 修改：macOS 动态安装器必须声明版本不低于 `1.3.5`、包含 `TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"`，且不得包含 `SIMPLIFIED_PROMPT` 或 `--prompt`；Windows 与 macOS 共用数字版本比较器。回归用当前安装器构造 `1.3.4` 旧版样本，确保旧内容被拒绝、当前内容被接受。
+- 线上动作：已把发布源 `install-local-asr-macos.sh` 上传到长环境静态托管 `local-asr/common/install-local-asr-macos.sh`。云端对象下载与带随机查询参数、`Cache-Control: no-cache` 的公网 CDN 回读 SHA-256 均为 `B7AED33EB50966EBBCF07D603B4E2E555A80185DF7658FB70B8A4C7CBF9CE173`；版本为 `1.3.5`，无旧提示词参数并包含 `repeat-guard-v2`。未发布新的 Obsidian 插件市场版本。
+- 验证：按 TDD 先观察到旧 macOS 样本被错误接受的红灯，再实现严格校验使 `node tests/plugin-main-ai.test.js` 与插件语法检查通过；云端对象和公网 CDN 内容均与发布源逐字节一致。当前 Windows 环境只能做脚本语法/静态验证，尚未替远端用户完成一次真实 macOS 推理。
+- 结果：运行 `1.3.30` 的 macOS 用户无需先更新插件，重新点击安装/更新即可从 CDN 获取正确的 `1.3.5`；已有 Whisper、FFmpeg 和模型会被复用。候选 `1.3.32` 同时增加安装前严格拦截，防止 CDN 将来被旧文件覆盖时再次回灌。
+- 已知风险：远端 Mac 的首次真实安装和短音频转写仍需用户复测；若仍失败，需获取新的安装诊断以区分脚本执行、文件权限或实际推理阶段。
+- 下一步：让报障用户重新点击安装/更新并重启或重载 Obsidian，确认 ASR 状态可用，再用一条短音频做端到端转写；抖音平台修复实测通过后再决定是否发布 `1.3.32`。
+
 ### 2026-07-15 09:58 - 修复 Windows ASR 旧安装器回灌并更新 CDN
 
 - 目标：修复 Windows 用户反复点击“安装/更新本地转写组件”仍收到“转写脚本过旧”的闭环故障，并阻止旧 CDN 安装器再次覆盖新版转写脚本。

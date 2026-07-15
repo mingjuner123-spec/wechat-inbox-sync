@@ -1073,11 +1073,33 @@ function normalizeInstallerScriptText(scriptText, isMac = false) {
     .replace(/\r\n?/g, '\n');
 }
 
+function hasMinimumInstallerVersion(source, pattern, minimumVersion) {
+  const versionMatch = String(source || '').match(pattern);
+  if (!versionMatch) return false;
+  const versionParts = versionMatch.slice(1).map((value) => Number(value));
+  if (versionParts.length !== minimumVersion.length || versionParts.some((value) => !Number.isFinite(value))) {
+    return false;
+  }
+  for (let index = 0; index < minimumVersion.length; index += 1) {
+    if (versionParts[index] > minimumVersion[index]) return true;
+    if (versionParts[index] < minimumVersion[index]) return false;
+  }
+  return true;
+}
+
 function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   const source = String(scriptText || '');
   if (!source.includes('.wechat-inbox-local-asr')) return false;
   if (isMac) {
-    return source.includes('CHUNK_SECONDS=120')
+    return hasMinimumInstallerVersion(
+      source,
+      /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
+      [1, 3, 5],
+    )
+      && !source.includes('SIMPLIFIED_PROMPT')
+      && !source.includes('--prompt')
+      && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"')
+      && source.includes('CHUNK_SECONDS=120')
       && source.includes('choose_chunk_seconds')
       && source.includes('find_metal_resources_dir')
       && source.includes('GGML_METAL_PATH_RESOURCES')
@@ -1093,12 +1115,11 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('"$UV_BIN" python install 3.12')
       && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
   }
-  const versionMatch = source.match(/\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/);
-  const versionParts = versionMatch ? versionMatch.slice(1).map((value) => Number(value)) : [];
-  const [major = 0, minor = 0, patch = 0] = versionParts;
-  const versionCurrent = versionParts.length === 3
-    && (major > 1 || (major === 1 && (minor > 2 || (minor === 2 && patch >= 22))));
-  return versionCurrent
+  return hasMinimumInstallerVersion(
+    source,
+    /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
+    [1, 2, 22],
+  )
     && !source.includes('$SimplifiedPrompt')
     && !source.includes('--prompt')
     && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
