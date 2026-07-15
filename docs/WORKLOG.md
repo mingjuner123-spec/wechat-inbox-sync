@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-15 12:35 - 发布插件 1.3.38：固定 OCR Python 运行时并清理抖音转写结尾幻觉
+
+- 目标：修复 Windows/macOS 用户在已有 Python 3.13+ 时无法安装 OCR 的问题，并把上一任务已完成的抖音转写结尾幻觉清理合并发布为插件市场 `1.3.38`。
+- 影响范围：Obsidian 插件 / Windows 与 macOS 本地 OCR 安装器 / OCR CDN 发布门禁 / 插件版本元数据 / 文档；不修改小程序、云函数、支付、绑定码、用户数据或本地插件 `data.json`。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1`、`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh`、两份 `manifest.json`、两份 `versions.json`、`scripts/check-local-ocr-cdn.js`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`docs/DECISIONS.md`、`docs/WORKLOG.md`。
+- 线上动作：已将 Windows/macOS OCR 安装器和 `ocr_image.py` 上传到长环境静态托管 `local-ocr/common/` 并通过公网逐字节校验；已快进推送官方 `main`，创建并推送 tag `1.3.38`，GitHub Release 已发布且包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.38.zip`。
+- 数据变更：无。
+- 验证：回归测试先在旧实现上因缺少固定 Python 运行时失败，实现后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node --check scripts/check-local-ocr-cdn.js`、Windows PowerShell 解析和 macOS Bash `-n` 均通过；在完全隐藏系统 Python 的全新 Windows 临时目录中实跑安装器，成功下载 CPython `3.12.13+20260623`、创建隔离 venv、从 CDN wheelhouse 安装并导入 RapidOCR，真实图片 OCR 输出 `TEST 123`；`node scripts/check-local-ocr-cdn.js` 验证三份 OCR 文件及 Windows/macOS 三个平台 Python 运行时 SHA-256 全部一致；`check_obsidian_release.ps1` 对 `1.3.38` 的默认分支、raw manifest、Release 资产和本地 zip 检查全部通过。
+- 结果：系统 Python 3.13+ 不再被误判为可直接使用，也不会被卸载或降级；OCR 会优先复用兼容的 Python 3.10-3.12，否则直接下载插件专用的固定 Python 3.12.13，不再由 uv 猜测镜像版本。插件市场 `1.3.38` 同时包含抖音已知结尾幻觉清理。
+- 已知风险：macOS 安装器已通过语法、双架构运行时公网哈希和包索引验证，但本次没有 Apple Silicon / Intel 真机端到端安装；仓库中历史移动端镜像测试与当前 `isDesktopOnly: true` 发布源不一致，仍处于既有失败状态，本次未扩展范围修复。
+- 下一步：让报错用户更新到 `1.3.38` 后重新点击安装/修复 OCR；若仍失败，收集新的 OCR 安装日志，重点核对运行时下载、解压、VC++ 修复或 RapidOCR 导入阶段。
+
 ### 2026-07-15 12:15 - 识别并清理抖音本地转写的少量片尾字幕幻觉
 
 - 目标：处理 `1.3.37` 已完成到 100% 且主体正确，但笔记末尾混入“明镜点赞话术、无关食材、MING PAO、CC 字幕制作”等少量非正文的问题；保持解析成功和正文召回优先。
