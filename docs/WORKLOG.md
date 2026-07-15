@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-15 11:50 - 基于正式 1.3.36 发布 Obsidian 插件 1.3.37，修复抖音 Session 永久等待
+
+- 目标：用户确认云端已更新到 `1.3.36`，要求只以该正式版本为基线发布 `1.3.37`，随后从插件市场更新并复测抖音；不得用旧候选覆盖 `1.3.36` 的 OCR 发布修复。
+- 基线与合并：远端 `origin/main@822f4cb`、标签 `1.3.36@bb0c6e9` 已包含 OCR 资产 LF 固定和公网一致性门禁，但不包含抖音 Session 墙钟超时。新分支从 `origin/main` 建立，仅移植经红绿测试的修复为 `9ae5ce7`，版本提交为 `823ab0e`；保留 1.3.36 全部内容。
+- 根因与修复：`session.fetch()` 即使收到 `AbortSignal`，Electron 远端 Session 仍可能不结算请求 Promise，令流程永久停在 `processing`、无法进入隐藏浏览器和 ASR。`readSessionFetchText` 现在对 `fetch + response.text` 完整任务使用主进程墙钟 `Promise.race`；超时只结束当前 Session 尝试，继续原有浏览器解析、目标作品 ID 校验、媒体候选和本地转写路径。
+- TDD 与回归：先用永不 settle 且忽略 abort 的 Session 复现旧实现 250ms 后仍为 `hung`，修复后同一样本按预算返回并继续兜底。`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、四份版本 JSON 解析和 `git diff --check` 全部通过；测试前后已备份并恢复真实 `sync-last.log`。
+- OCR 发布门禁：`node scripts/check-local-ocr-cdn.js` 通过，Windows 安装器、macOS 安装器和 `ocr_image.py` 公网 SHA-256 均与 `1.3.36` 基线发布源一致，没有绕过已有门禁。
+- 发布：默认分支已推到 `823ab0e`，标签 `1.3.37` 已推送，GitHub Actions 成功创建 latest、非 draft、非 prerelease Release：<https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.37>。资产包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.37.zip`。
+- 市场验证：专用检查器确认默认分支 manifest/versions、Raw manifest、latest/目标 Release、五项 Release 资产、资产内 manifest/versions 与本地 ZIP 全部为 `1.3.37`，满足 Obsidian 社区插件市场发现与更新条件。
+- 本地包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.37.zip`，SHA-256 `7E96D1027F081E405EC7BD5D9942F1A12594A63D4AE64F7FB648A407CFB268B0`，包内 manifest 为 `1.3.37`。按用户要求未直接覆盖知识库插件，等待用户从插件市场更新后做真实抖音复测。
+- 下一步：用户在 Obsidian 社区插件中检查更新到 `1.3.37`，按 `Ctrl+R` 或完整重启后重新同步当前 pending 抖音记录；观察流程是否进入下载/转写或明确失败，并核对不再永久停留在 processing。真实平台解析成功仍受抖音风控与媒体可用性影响，本次修复保证 Session 无响应时能够继续现有兜底路径。
+
 ### 2026-07-15 11:40 - 发布 1.3.36，回退 PDF OCR 并建立 OCR CDN 发布门禁
 
 - 目标：PDF 恢复文本层提取/原附件保留，不再触发耗时本地 OCR；保留小红书长图文图片 OCR；修复插件与腾讯云组件版本漂移，并建立防复发门禁。
