@@ -1968,6 +1968,8 @@ function cleanTrailingTranscriptionHallucinations(text) {
   if (lines.length < 2) return lines.join('\n');
   const isCredit = (line) => /^(?:字幕|字幕\s*by|字幕\s*:|翻译|校对|制作|subtitles?\s*(?:by|:))/i.test(line);
   const isCorruptedClosing = (line) => /(?:我们|咱们).{0,10}(?:下身|下生|下声|下省)(?:再见|见)[。！!]?$/u.test(line);
+  const isShortAsciiNoise = (line) => /^[a-z\s'.,!?-]{1,40}$/i.test(line);
+  const isRepeatedVisualNoise = (line) => /画面.{0,8}画面/u.test(line);
   const knownTailHallucinationStart = lines.findIndex((line, index) => (
     index >= Math.max(1, lines.length - 12)
     && /请不吝.{0,12}点赞.{0,12}订阅.{0,12}转发.{0,12}打赏.{0,20}明镜/u.test(line)
@@ -1980,11 +1982,46 @@ function cleanTrailingTranscriptionHallucinations(text) {
       cutoff = Math.min(cutoff, repeated ? index - 1 : index);
       continue;
     }
-    if (cutoff < lines.length && (/^[a-z\s'.,!?-]{1,40}$/i.test(line) || /画面/.test(line))) {
+    if (cutoff < lines.length && (isShortAsciiNoise(line) || isRepeatedVisualNoise(line))) {
       cutoff = index;
       continue;
     }
     break;
+  }
+
+  // Whisper may return a complete, useful transcript followed by a silent-end
+  // hallucination loop. The loop can end with one unrelated short word, which
+  // means a simple backward adjacent-line check never reaches it. When a
+  // high-frequency loop is confined to the tail and a substantive prefix
+  // exists, retain that prefix instead of rejecting the whole media item.
+  const tailStart = Math.max(3, lines.length - 36);
+  const tailOccurrences = new Map();
+  lines.slice(tailStart).forEach((line, offset) => {
+    const normalized = normalizeTranscriptionQualityUnit(line);
+    if (normalized.length < 4) return;
+    const indexes = tailOccurrences.get(normalized) || [];
+    indexes.push(tailStart + offset);
+    tailOccurrences.set(normalized, indexes);
+  });
+  let repeatedTailStart = lines.length;
+  tailOccurrences.forEach((indexes) => {
+    if (indexes.length >= 6) {
+      repeatedTailStart = Math.min(repeatedTailStart, indexes[0]);
+    }
+  });
+  if (repeatedTailStart < lines.length) {
+    const prefix = lines.slice(0, repeatedTailStart).join('');
+    if (repeatedTailStart >= 3 && prefix.length >= 80) {
+      cutoff = Math.min(cutoff, repeatedTailStart);
+      for (let index = cutoff - 1; index >= 1; index -= 1) {
+        const line = lines[index];
+        if (isCredit(line) || isShortAsciiNoise(line) || isRepeatedVisualNoise(line)) {
+          cutoff = index;
+          continue;
+        }
+        break;
+      }
+    }
   }
   return lines.slice(0, cutoff).join('\n').trim();
 }

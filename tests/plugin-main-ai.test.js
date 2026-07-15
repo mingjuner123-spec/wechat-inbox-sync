@@ -3000,6 +3000,28 @@ assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
   '字幕by索兰娅',
   '字幕:J Chong',
 ].join('\n')), '这是正文最后一句。');
+const douyinRecoveredTailTranscript = [
+  '所有的内容都可以进行同步。',
+  '如果你在使用上有任何问题或者建议都可以联系我。',
+  '以上就是我们今天的全部内容，我们下条视频再见。',
+  '安装完成后，音视频链接和文件里的口播文案都会自动提取并保存到本地知识库。',
+  'i know you',
+  '用笔记画面画面的画面',
+  ...Array(13).fill('画面的画面'),
+  '字幕by索兰娅',
+  '字幕by索兰娅',
+  '得音！',
+].join('\n');
+assert.strictEqual(
+  helpers.cleanTrailingTranscriptionHallucinations(douyinRecoveredTailTranscript),
+  [
+    '所有的内容都可以进行同步。',
+    '如果你在使用上有任何问题或者建议都可以联系我。',
+    '以上就是我们今天的全部内容，我们下条视频再见。',
+    '安装完成后，音视频链接和文件里的口播文案都会自动提取并保存到本地知识库。',
+  ].join('\n'),
+  '重试转写在正确正文后产生高频重复尾巴和短噪声时，应保留正文并截掉整个污染尾段',
+);
 assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
   '这句话在正文中提到“我们下身再见”这个错听案例，不应该被删除。',
   '最后一段正常正文。',
