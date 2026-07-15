@@ -26,8 +26,11 @@ const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-135
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
-const XIAOHONGSHU_ROOT_COMMENT_LIMIT = 200;
+const XIAOHONGSHU_TOTAL_COMMENT_LIMIT = 300;
+const XIAOHONGSHU_ROOT_COMMENT_LIMIT = XIAOHONGSHU_TOTAL_COMMENT_LIMIT;
 const XIAOHONGSHU_REPLY_COMMENT_LIMIT = 100;
+const XIAOHONGSHU_COMMENT_TIMEOUT_MS = 90000;
+const XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS = 10000;
 const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211AC) AppleWebKit/537.36 Chrome/119.0.0.0 Mobile Safari/537.36';
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
@@ -6796,6 +6799,40 @@ function getSocialCommentTreeStats(comments = []) {
   };
 }
 
+function limitSocialCommentTreeTotal(comments = [], limit = XIAOHONGSHU_TOTAL_COMMENT_LIMIT) {
+  const max = Math.max(1, Math.min(
+    Number(limit) || XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+    XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+  ));
+  let remaining = max;
+  const takeComment = (comment) => {
+    if (remaining <= 0) return null;
+    const normalized = normalizeSocialComment(comment);
+    if (!normalized) return null;
+    remaining -= 1;
+    const limited = { ...normalized };
+    const replies = Array.isArray(normalized.replies) ? normalized.replies : [];
+    delete limited.replies;
+    if (remaining > 0 && replies.length) {
+      const limitedReplies = [];
+      for (const reply of replies) {
+        const limitedReply = takeComment(reply);
+        if (limitedReply) limitedReplies.push(limitedReply);
+        if (remaining <= 0) break;
+      }
+      if (limitedReplies.length) limited.replies = limitedReplies;
+    }
+    return limited;
+  };
+  const limitedComments = [];
+  for (const comment of Array.isArray(comments) ? comments : []) {
+    const limited = takeComment(comment);
+    if (limited) limitedComments.push(limited);
+    if (remaining <= 0) break;
+  }
+  return limitedComments;
+}
+
 function mergeXiaohongshuCapturedCommentPayloads(entries = [], limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT) {
   const rootPayloads = [];
   const replyPayloadGroups = new Map();
@@ -6943,7 +6980,7 @@ function isPartialXiaohongshuCommentResult(details = {}) {
   if (Number(details.lostRootCount || 0) > 0 || Number(details.lostReplyCount || 0) > 0) return true;
   if (Number(details.unmatchedReplyCount || 0) > 0) return true;
   const stopReason = String(details.stopReason || '').toLowerCase();
-  return /(?:idle|unavailable|missing|failed|rejected|captcha|timeout|max_rounds|source_exhausted)/.test(stopReason);
+  return /(?:idle|unavailable|missing|failed|rejected|captcha|timeout|time_budget_exceeded|limit_reached|max_rounds|source_exhausted)/.test(stopReason);
 }
 
 function finalizeXiaohongshuComments({
@@ -6963,7 +7000,10 @@ function finalizeXiaohongshuComments({
       fallbackGroups: [staticComments],
       limit: max,
     });
-  const comments = hasRenderedTree ? renderedTree : fallbackMerge.comments;
+  const comments = limitSocialCommentTreeTotal(
+    hasRenderedTree ? renderedTree : fallbackMerge.comments,
+    XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+  );
   const stats = getSocialCommentTreeStats(comments);
   const inputStats = getSocialCommentTreeStats(renderedComments);
   const markdownWithoutDiagnostic = replaceSocialCommentsInMarkdown(baseMarkdown, comments);
@@ -7021,12 +7061,51 @@ function didXiaohongshuRootCollectionProgress(previous = {}, current = {}) {
     || value(current, 'scrollHeight') > value(previous, 'scrollHeight') + 1;
 }
 
-function getXiaohongshuCommentPaginationScript(url = '') {
+function getXiaohongshuCommentBudgetState({
+  deadlineAt = 0,
+  now = Date.now(),
+  totalCount = 0,
+  limit = XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+} = {}) {
+  const currentTime = Number(now) || 0;
+  const deadline = Number(deadlineAt) || currentTime;
+  const max = Math.max(1, Math.min(
+    Number(limit) || XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+    XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+  ));
+  const remainingMs = Math.max(0, deadline - currentTime);
+  if (Math.max(0, Number(totalCount) || 0) >= max) {
+    return { shouldStop: true, stopReason: 'total_limit_reached', remainingMs };
+  }
+  if (remainingMs <= 0) {
+    return { shouldStop: true, stopReason: 'time_budget_exceeded', remainingMs: 0 };
+  }
+  return { shouldStop: false, stopReason: '', remainingMs };
+}
+
+function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
+  const requestedDeadlineAt = Number(options && options.deadlineAt);
+  const deadlineAt = Number.isFinite(requestedDeadlineAt) && requestedDeadlineAt > 0
+    ? Math.floor(requestedDeadlineAt)
+    : Date.now() + XIAOHONGSHU_COMMENT_TIMEOUT_MS;
+  const requestedTotalLimit = Number(options && options.totalLimit);
+  const totalLimit = Math.max(1, Math.min(
+    Number.isFinite(requestedTotalLimit) ? requestedTotalLimit : XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+    XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+  ));
   return `
     (async () => {
       const XIAOHONGSHU_ROOT_COMMENT_LIMIT = ${XIAOHONGSHU_ROOT_COMMENT_LIMIT};
       const XIAOHONGSHU_REPLY_COMMENT_LIMIT = ${XIAOHONGSHU_REPLY_COMMENT_LIMIT};
+      const XIAOHONGSHU_TOTAL_COMMENT_LIMIT = ${totalLimit};
+      const deadlineAt = ${deadlineAt};
+      const requestTimeoutMs = ${XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS};
       const inputUrl = ${JSON.stringify(cleanDisplayUrl(url))};
+      const getBudgetStopReason = (totalCount) => {
+        if (Number(totalCount || 0) >= XIAOHONGSHU_TOTAL_COMMENT_LIMIT) return 'total_limit_reached';
+        if (Date.now() >= deadlineAt) return 'time_budget_exceeded';
+        return '';
+      };
       const safeUrl = (value) => { try { return new URL(value || location.href, location.href); } catch (error) { return null; } };
       const readField = (value, keys) => {
         for (const key of keys) {
@@ -7069,17 +7148,26 @@ function getXiaohongshuCommentPaginationScript(url = '') {
         return match && match[1] ? String(match[1]).trim() : '';
       })();
       const requestJson = async (path, params) => {
+        const remainingMs = Math.max(0, deadlineAt - Date.now());
+        if (remainingMs <= 0) throw new Error('time_budget_exceeded');
         const query = new URLSearchParams();
         Object.entries(params || {}).forEach(([key, value]) => {
           if (value !== undefined && value !== null && String(value) !== '') query.set(key, String(value));
         });
-        const response = await fetch(path + '?' + query.toString(), {
-          method: 'GET',
-          credentials: 'include',
-          headers: { Accept: 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest' },
-        });
-        if (!response.ok) throw new Error('http_' + response.status);
-        return JSON.parse(await response.text());
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), Math.max(1, Math.min(requestTimeoutMs, remainingMs)));
+        try {
+          const response = await fetch(path + '?' + query.toString(), {
+            method: 'GET',
+            credentials: 'include',
+            signal: controller.signal,
+            headers: { Accept: 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest' },
+          });
+          if (!response.ok) throw new Error('http_' + response.status);
+          return JSON.parse(await response.text());
+        } finally {
+          clearTimeout(timer);
+        }
       };
       const diagnostic = { source: 'page-api', rootCount: 0, replyCount: 0, pageCount: 0, stopReason: 'unknown' };
       const rootPayloads = [];
@@ -7091,12 +7179,18 @@ function getXiaohongshuCommentPaginationScript(url = '') {
       const baseParams = { note_id: noteId, xsec_token: xsecToken, image_scenes: 'FD_WM_WEBP,CRD_WM_WEBP', image_formats: 'jpg,webp,avif' };
       const roots = [];
       let cursor = '';
-      for (let page = 0; page < 20 && roots.length < XIAOHONGSHU_ROOT_COMMENT_LIMIT; page += 1) {
+      for (let page = 0; page < 30 && roots.length < XIAOHONGSHU_ROOT_COMMENT_LIMIT; page += 1) {
+        const budgetStopReason = getBudgetStopReason(roots.length + diagnostic.replyCount);
+        if (budgetStopReason) {
+          diagnostic.stopReason = budgetStopReason;
+          break;
+        }
         let payload;
         try {
           payload = await requestJson('/api/sns/web/v2/comment/page', { ...baseParams, cursor, top_comment_id: '' });
         } catch (error) {
-          diagnostic.stopReason = roots.length ? 'root_request_failed' : 'root_unavailable';
+          diagnostic.stopReason = getBudgetStopReason(roots.length + diagnostic.replyCount)
+            || (roots.length ? 'root_request_failed' : 'root_unavailable');
           break;
         }
         rootPayloads.push(payload);
@@ -7118,30 +7212,47 @@ function getXiaohongshuCommentPaginationScript(url = '') {
       }
       diagnostic.rootCount = roots.length;
       for (const root of roots) {
+        const rootBudgetStopReason = getBudgetStopReason(roots.length + diagnostic.replyCount);
+        if (rootBudgetStopReason) {
+          diagnostic.stopReason = rootBudgetStopReason;
+          break;
+        }
         const rootCommentId = getId(root);
         if (!rootCommentId) continue;
         const inlineReplies = readField(root, ['sub_comments', 'subComments', 'reply_list', 'replyList']);
         const inlineCount = Array.isArray(inlineReplies) ? inlineReplies.length : 0;
         const declaredCount = Number(readField(root, ['sub_comment_count', 'subCommentCount', 'sub_comment_num', 'reply_count', 'replyCount']) || 0);
         const hasHiddenReplies = declaredCount > inlineCount || readField(root, ['sub_comment_cursor', 'subCommentCursor', 'sub_comment_has_more', 'subCommentHasMore']) !== undefined;
-        diagnostic.replyCount += inlineCount;
+        diagnostic.replyCount += Math.min(
+          inlineCount,
+          Math.max(0, XIAOHONGSHU_TOTAL_COMMENT_LIMIT - roots.length - diagnostic.replyCount),
+        );
         if (!hasHiddenReplies) continue;
         const payloads = [];
         let replyCursor = '';
         let replyTotal = inlineCount;
         for (let page = 0; page < 10 && replyTotal < XIAOHONGSHU_REPLY_COMMENT_LIMIT; page += 1) {
+          const replyBudgetStopReason = getBudgetStopReason(roots.length + diagnostic.replyCount);
+          if (replyBudgetStopReason) {
+            diagnostic.stopReason = replyBudgetStopReason;
+            break;
+          }
           let payload;
           try {
             payload = await requestJson('/api/sns/web/v2/comment/sub/page', { ...baseParams, root_comment_id: rootCommentId, cursor: replyCursor, num: 20 });
           } catch (error) {
-            if (diagnostic.stopReason === 'exhausted') diagnostic.stopReason = 'reply_request_failed';
+            diagnostic.stopReason = getBudgetStopReason(roots.length + diagnostic.replyCount)
+              || 'reply_request_failed';
             break;
           }
           payloads.push(payload);
           diagnostic.pageCount += 1;
           const replies = getItems(payload).filter((reply) => getId(reply) !== rootCommentId);
           replyTotal += replies.length;
-          diagnostic.replyCount += replies.length;
+          diagnostic.replyCount += Math.min(
+            replies.length,
+            Math.max(0, XIAOHONGSHU_TOTAL_COMMENT_LIMIT - roots.length - diagnostic.replyCount),
+          );
           if (!hasMore(payload)) break;
           const nextCursor = getCursor(payload);
           if (!nextCursor || nextCursor === replyCursor) {
@@ -7153,7 +7264,9 @@ function getXiaohongshuCommentPaginationScript(url = '') {
         }
         if (payloads.length) replyPayloadGroups.push({ rootCommentId, payloads });
       }
-      if (diagnostic.stopReason === 'unknown') diagnostic.stopReason = roots.length >= XIAOHONGSHU_ROOT_COMMENT_LIMIT ? 'limit_reached' : 'source_exhausted';
+      const finalBudgetStopReason = getBudgetStopReason(roots.length + diagnostic.replyCount);
+      if (finalBudgetStopReason) diagnostic.stopReason = finalBudgetStopReason;
+      if (diagnostic.stopReason === 'unknown') diagnostic.stopReason = roots.length >= XIAOHONGSHU_ROOT_COMMENT_LIMIT ? 'total_limit_reached' : 'source_exhausted';
       return { rootPayloads, replyPayloadGroups, diagnostic };
     })()
   `;
@@ -7191,9 +7304,18 @@ function getXiaohongshuCapturedRequestBody(details = {}) {
   return parts.join('&');
 }
 
-async function fetchXiaohongshuCommentsFromCapturedRequests(commentApiRequests = [], limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT) {
+async function fetchXiaohongshuCommentsFromCapturedRequests(
+  commentApiRequests = [],
+  limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT,
+  options = {},
+) {
   const comments = [];
   const seen = new Set();
+  const deadlineAt = Number(options && options.deadlineAt) || (Date.now() + XIAOHONGSHU_COMMENT_TIMEOUT_MS);
+  const totalLimit = Math.max(1, Math.min(
+    Number(options && options.totalLimit) || XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+    XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+  ));
   const cookieHeader = await getXiaohongshuCookieHeader();
   const uniqueRequests = [];
   const seenRequests = new Set();
@@ -7207,14 +7329,19 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(commentApiRequests =
     uniqueRequests.push(request);
   });
   for (const request of uniqueRequests.slice(-8)) {
-    if (comments.length >= limit) break;
+    const budget = getXiaohongshuCommentBudgetState({
+      deadlineAt,
+      totalCount: comments.length,
+      limit: totalLimit,
+    });
+    if (comments.length >= limit || budget.shouldStop) break;
     try {
       const response = await requestJsonViaNode({
         url: request.url,
         method: String(request.method || 'GET').toUpperCase(),
         body: String(request.method || 'GET').toUpperCase() === 'GET' ? '' : String(request.body || ''),
         headers: sanitizeXiaohongshuCapturedHeaders(request.requestHeaders || {}, cookieHeader),
-        timeout: 15000,
+        timeout: Math.max(1, Math.min(XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS, budget.remainingMs)),
       });
       if (!response || response.status < 200 || response.status >= 300) continue;
       if (response.json) {
@@ -8653,6 +8780,12 @@ async function renderXiaohongshuPageWithElectron(url) {
   if (!BrowserWindow) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
   }
+  const deadlineAt = Date.now() + XIAOHONGSHU_COMMENT_TIMEOUT_MS;
+  const getCommentBudget = (totalCount = 0) => getXiaohongshuCommentBudgetState({
+    deadlineAt,
+    totalCount,
+    limit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+  });
 
   const wechatSession = getXiaohongshuSession();
   const win = new BrowserWindow({
@@ -8712,18 +8845,25 @@ async function renderXiaohongshuPageWithElectron(url) {
     let settledCount = 0;
     let idlePasses = 0;
     for (let pass = 0; pass < 20 && idlePasses < 2; pass += 1) {
+      const budget = getCommentBudget(debuggerComments.length);
+      if (budget.shouldStop) return budget.stopReason;
       const pending = debuggerBodyTasks.slice(settledCount);
       if (pending.length) {
-        await Promise.allSettled(pending);
+        const remainingMs = budget.remainingMs;
+        const waitStatus = await waitForBrowserTasksWithin(pending, remainingMs);
+        if (waitStatus === 'timeout') return 'time_budget_exceeded';
         settledCount += pending.length;
         idlePasses = 0;
       } else {
         idlePasses += 1;
       }
       if (idlePasses < 2) {
-        await new Promise((resolve) => setTimeout(resolve, 120));
+        const remainingMs = getCommentBudget(debuggerComments.length).remainingMs;
+        if (remainingMs <= 0) return 'time_budget_exceeded';
+        await new Promise((resolve) => setTimeout(resolve, Math.min(120, remainingMs)));
       }
     }
+    return '';
   };
   const parseCommentApiText = (responseUrl, text, sequence = 0) => {
     if (!text) return;
@@ -8782,28 +8922,69 @@ async function renderXiaohongshuPageWithElectron(url) {
   } catch (error) {}
 
   try {
-    const loaded = waitForWebContents(win.webContents, 20000);
-    await win.loadURL(url);
+    const loadBudget = getCommentBudget(0);
+    const loaded = waitForWebContents(win.webContents, Math.min(20000, loadBudget.remainingMs));
+    beginBestEffortBrowserLoad(win, url);
     await loaded;
-    let pageApiPayload = null;
-    try {
-      pageApiPayload = await win.webContents.executeJavaScript(getXiaohongshuCommentPaginationScript(url));
-    } catch (error) {
-      pageApiPayload = {
-        rootPayloads: [],
-        replyPayloadGroups: [],
-        diagnostic: { source: 'page-api', stopReason: 'page_script_failed' },
-      };
+    let pageApiPayload = {
+      rootPayloads: [],
+      replyPayloadGroups: [],
+      diagnostic: { source: 'page-api', stopReason: 'page_script_skipped' },
+    };
+    const pageApiBudget = getCommentBudget(debuggerComments.length);
+    if (!pageApiBudget.shouldStop) {
+      const pageApiTask = Promise.resolve(win.webContents.executeJavaScript(getXiaohongshuCommentPaginationScript(url, {
+        deadlineAt,
+        totalLimit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+      }))).then((value) => {
+        pageApiPayload = value;
+      }).catch(() => {
+        pageApiPayload = {
+          rootPayloads: [],
+          replyPayloadGroups: [],
+          diagnostic: { source: 'page-api', stopReason: 'page_script_failed' },
+        };
+      });
+      const pageApiWaitStatus = await waitForBrowserTasksWithin([pageApiTask], pageApiBudget.remainingMs);
+      if (pageApiWaitStatus === 'timeout') {
+        pageApiPayload = {
+          rootPayloads: [],
+          replyPayloadGroups: [],
+          diagnostic: { source: 'page-api', stopReason: 'time_budget_exceeded' },
+        };
+      }
     }
-    const renderedPayload = await win.webContents.executeJavaScript(`
+    const capturedPageDiagnostic = pageApiPayload && pageApiPayload.diagnostic && typeof pageApiPayload.diagnostic === 'object'
+      ? pageApiPayload.diagnostic
+      : {};
+    let renderedPayload = {
+      html: '',
+      comments: [],
+      collectionStopReason: capturedPageDiagnostic.stopReason === 'time_budget_exceeded'
+        ? 'time_budget_exceeded'
+        : 'page_render_skipped',
+    };
+    const renderedBudget = getCommentBudget(
+      Number(capturedPageDiagnostic.rootCount || 0) + Number(capturedPageDiagnostic.replyCount || 0),
+    );
+    if (!renderedBudget.shouldStop) {
+      const renderedTask = Promise.resolve(win.webContents.executeJavaScript(`
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const XIAOHONGSHU_ROOT_COMMENT_LIMIT = ${XIAOHONGSHU_ROOT_COMMENT_LIMIT};
+        const XIAOHONGSHU_TOTAL_COMMENT_LIMIT = ${XIAOHONGSHU_TOTAL_COMMENT_LIMIT};
+        const deadlineAt = ${deadlineAt};
+        const getCollectionStopReason = () => {
+          if (comments.length >= XIAOHONGSHU_TOTAL_COMMENT_LIMIT) return 'total_limit_reached';
+          if (Date.now() >= deadlineAt) return 'time_budget_exceeded';
+          return '';
+        };
         const didRootCollectionProgress = (${didXiaohongshuRootCollectionProgress.toString()});
         const clean = (text) => String(text || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
         const comments = [];
         const seen = new Set();
         const push = (author, content, time, likes, structure = {}) => {
+          if (comments.length >= XIAOHONGSHU_TOTAL_COMMENT_LIMIT) return;
           const body = clean(content);
           if (!body || body.length < 2) return;
           if (/^(?:回复|评论|点赞|赞|展开|更多|查看|分享|收藏|[0-9]+)$/.test(body)) return;
@@ -8986,11 +9167,16 @@ async function renderXiaohongshuPageWithElectron(url) {
         let collectionStopReason = 'max_rounds';
         const maxRounds = 90;
         for (let index = 0; index < maxRounds; index += 1) {
+          const beforeRoundStopReason = getCollectionStopReason();
+          if (beforeRoundStopReason) {
+            collectionStopReason = beforeRoundStopReason;
+            break;
+          }
           clickUsefulButtons();
           collectDomComments();
           const movement = advanceCommentScroll();
           scrollMode = movement.mode;
-          await sleep(450);
+          await sleep(Math.max(0, Math.min(450, deadlineAt - Date.now())));
           clickUsefulButtons();
           collectDomComments();
           let resourceUrls = [];
@@ -9015,8 +9201,9 @@ async function renderXiaohongshuPageWithElectron(url) {
           idleRounds = progressed ? 0 : idleRounds + 1;
           lastRootSnapshot = currentRootSnapshot;
           completedRounds = index + 1;
-          if (rootCommentCount >= XIAOHONGSHU_ROOT_COMMENT_LIMIT) {
-            collectionStopReason = 'limit_reached';
+          const afterRoundStopReason = getCollectionStopReason();
+          if (afterRoundStopReason) {
+            collectionStopReason = afterRoundStopReason;
             break;
           }
           if (idleRounds >= 10 && index >= 9) {
@@ -9031,9 +9218,14 @@ async function renderXiaohongshuPageWithElectron(url) {
           replyRequestCount,
         };
         for (let index = 0; index < 6 && replyIdleRounds < 2; index += 1) {
+          const beforeReplyStopReason = getCollectionStopReason();
+          if (beforeReplyStopReason) {
+            collectionStopReason = beforeReplyStopReason;
+            break;
+          }
           clickUsefulButtons();
           collectDomComments();
-          await sleep(450);
+          await sleep(Math.max(0, Math.min(450, deadlineAt - Date.now())));
           collectDomComments();
           let nextReplyRequestCount = replyRequestCount;
           try {
@@ -9053,6 +9245,8 @@ async function renderXiaohongshuPageWithElectron(url) {
           };
           replySettlingRounds = index + 1;
         }
+        const finalCollectionStopReason = getCollectionStopReason();
+        if (finalCollectionStopReason) collectionStopReason = finalCollectionStopReason;
         return {
           html: document.documentElement ? document.documentElement.outerHTML : '',
           comments,
@@ -9067,8 +9261,27 @@ async function renderXiaohongshuPageWithElectron(url) {
           collectionStopReason,
         };
       })()
-    `);
-    await drainDebuggerBodyTasks();
+    `)).then((value) => {
+        renderedPayload = value;
+      }).catch(() => {
+        renderedPayload = {
+          html: '',
+          comments: [],
+          collectionStopReason: getCommentBudget(0).shouldStop ? 'time_budget_exceeded' : 'page_render_failed',
+        };
+      });
+      const renderedWaitStatus = await waitForBrowserTasksWithin([renderedTask], renderedBudget.remainingMs);
+      if (renderedWaitStatus === 'timeout') {
+        renderedPayload = {
+          html: '',
+          comments: [],
+          collectionStopReason: 'time_budget_exceeded',
+        };
+      }
+    } else {
+      renderedPayload.collectionStopReason = renderedBudget.stopReason;
+    }
+    const debuggerDrainStopReason = await drainDebuggerBodyTasks();
     const renderedHtml = renderedPayload && typeof renderedPayload === 'object'
       ? String(renderedPayload.html || '')
       : String(renderedPayload || '');
@@ -9080,7 +9293,17 @@ async function renderXiaohongshuPageWithElectron(url) {
     (Array.isArray(pageApiPayload && pageApiPayload.replyPayloadGroups) ? pageApiPayload.replyPayloadGroups : []).forEach((group) => {
       pagedComments = mergeXiaohongshuReplyPages(pagedComments, group && group.rootCommentId, group && group.payloads);
     });
-    const apiComments = await fetchXiaohongshuCommentsFromCapturedRequests(commentApiRequests, XIAOHONGSHU_ROOT_COMMENT_LIMIT);
+    let apiComments = [];
+    const signedReplayBudget = getCommentBudget(
+      debuggerComments.length + getSocialCommentTreeStats(pagedComments).rootCount + getSocialCommentTreeStats(pagedComments).replyCount,
+    );
+    if (!signedReplayBudget.shouldStop) {
+      apiComments = await fetchXiaohongshuCommentsFromCapturedRequests(
+        commentApiRequests,
+        XIAOHONGSHU_ROOT_COMMENT_LIMIT,
+        { deadlineAt, totalLimit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT },
+      );
+    }
     const browserNetworkResult = mergeXiaohongshuCapturedCommentPayloads(
       debuggerCommentPayloads,
       XIAOHONGSHU_ROOT_COMMENT_LIMIT,
@@ -9106,7 +9329,10 @@ async function renderXiaohongshuPageWithElectron(url) {
       ],
       limit: XIAOHONGSHU_ROOT_COMMENT_LIMIT,
     });
-    const comments = mergedCommentSources.comments;
+    const comments = limitSocialCommentTreeTotal(
+      mergedCommentSources.comments,
+      XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+    );
     const finalCommentStats = getSocialCommentTreeStats(comments);
     const capturedDiagnostic = pageApiPayload && pageApiPayload.diagnostic && typeof pageApiPayload.diagnostic === 'object'
       ? pageApiPayload.diagnostic
@@ -9116,6 +9342,14 @@ async function renderXiaohongshuPageWithElectron(url) {
       && renderedPayload && renderedPayload.collectionStopReason
       ? `network_${renderedPayload.collectionStopReason}`
       : browserNetworkResult.stopReason;
+    const finalBudget = getCommentBudget(finalCommentStats.rootCount + finalCommentStats.replyCount);
+    const explicitBudgetStopReason = [
+      capturedDiagnostic.stopReason,
+      renderedPayload && renderedPayload.collectionStopReason,
+      debuggerDrainStopReason,
+      signedReplayBudget.stopReason,
+      finalBudget.stopReason,
+    ].find((reason) => reason === 'time_budget_exceeded' || reason === 'total_limit_reached') || '';
     const commentDiagnosticDetails = {
       source: hasBrowserNetworkPayload ? browserNetworkResult.source : (capturedDiagnostic.source || 'page-api'),
       rootCount: hasBrowserNetworkPayload ? browserNetworkResult.rootCount : (capturedDiagnostic.rootCount || comments.length),
@@ -9140,7 +9374,8 @@ async function renderXiaohongshuPageWithElectron(url) {
       invalidPayloadCount: browserNetworkResult.invalidPayloadCount,
       scrollMode: renderedPayload && renderedPayload.scrollMode,
       pageApiStopReason: hasBrowserNetworkPayload ? 'network_primary' : capturedDiagnostic.stopReason,
-      stopReason: hasBrowserNetworkPayload ? browserStopReason : (capturedDiagnostic.stopReason || pagedRootResult.stopReason),
+      stopReason: explicitBudgetStopReason
+        || (hasBrowserNetworkPayload ? browserStopReason : (capturedDiagnostic.stopReason || pagedRootResult.stopReason)),
     };
     commentDiagnosticDetails.partial = isPartialXiaohongshuCommentResult(commentDiagnosticDetails);
     const commentDiagnostic = buildXiaohongshuCommentDiagnostic(commentDiagnosticDetails);
@@ -15465,6 +15700,8 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+  XIAOHONGSHU_COMMENT_TIMEOUT_MS,
   FEISHU_TUTORIAL_URL,
   FEISHU_OFFICIAL_API_TUTORIAL_URL,
   MAX_PLUGIN_BINDINGS,
@@ -15517,11 +15754,13 @@ WechatObsidianInboxPlugin.__test = {
   preserveXiaohongshuPrimaryCommentTree,
   finalizeXiaohongshuComments,
   didXiaohongshuRootCollectionProgress,
+  getXiaohongshuCommentBudgetState,
   buildXiaohongshuCommentDiagnostic,
   appendXiaohongshuCommentDiagnostic,
   getXiaohongshuCommentPaginationScript,
   buildSocialCommentsMarkdown,
   getSocialCommentTreeStats,
+  limitSocialCommentTreeTotal,
   getSocialCommentMarkdownStats,
   getXiaohongshuCapturedRequestBody,
   appendXiaohongshuOcrMarkdown,

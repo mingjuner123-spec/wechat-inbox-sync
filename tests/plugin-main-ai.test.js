@@ -2526,6 +2526,58 @@ assert.strictEqual(
   }], 'root-many-replies', [])[0].replies.length,
   25,
 );
+assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 300);
+assert.strictEqual(typeof helpers.limitSocialCommentTreeTotal, 'function');
+const oversizedXiaohongshuCommentTree = Array.from({ length: 3 }, (_unused, rootIndex) => ({
+  id: `budget-root-${rootIndex}`,
+  author: `一级评论用户${rootIndex}`,
+  content: `一级评论正文${rootIndex}`,
+  replies: Array.from({ length: 150 }, (_replyUnused, replyIndex) => ({
+    id: `budget-reply-${rootIndex}-${replyIndex}`,
+    author: `回复用户${rootIndex}-${replyIndex}`,
+    content: `回复正文${rootIndex}-${replyIndex}`,
+  })),
+}));
+const limitedXiaohongshuCommentTree = helpers.limitSocialCommentTreeTotal(
+  oversizedXiaohongshuCommentTree,
+  helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
+);
+const limitedXiaohongshuCommentStats = helpers.getSocialCommentTreeStats(limitedXiaohongshuCommentTree);
+assert.strictEqual(limitedXiaohongshuCommentStats.rootCount + limitedXiaohongshuCommentStats.replyCount, 300);
+assert.deepStrictEqual(
+  limitedXiaohongshuCommentTree.map((comment) => comment.id),
+  ['budget-root-0', 'budget-root-1', 'budget-root-2'],
+);
+assert.strictEqual(oversizedXiaohongshuCommentTree[1].replies.length, 150);
+const finalizedXiaohongshuCommentBudget = helpers.finalizeXiaohongshuComments({
+  baseMarkdown: '# 正文',
+  renderedComments: oversizedXiaohongshuCommentTree,
+  diagnosticDetails: { stopReason: 'total_limit_reached' },
+  limit: 300,
+});
+assert.strictEqual(
+  finalizedXiaohongshuCommentBudget.stats.rootCount + finalizedXiaohongshuCommentBudget.stats.replyCount,
+  300,
+);
+assert.strictEqual(
+  finalizedXiaohongshuCommentBudget.markdownStats.rootCount + finalizedXiaohongshuCommentBudget.markdownStats.replyCount,
+  300,
+);
+assert.strictEqual(finalizedXiaohongshuCommentBudget.diagnosticDetails.partial, true);
+assert.strictEqual(helpers.XIAOHONGSHU_COMMENT_TIMEOUT_MS, 90000);
+assert.strictEqual(typeof helpers.getXiaohongshuCommentBudgetState, 'function');
+assert.deepStrictEqual(
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 299 }),
+  { shouldStop: false, stopReason: '', remainingMs: 1 },
+);
+assert.deepStrictEqual(
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 100000, totalCount: 299 }),
+  { shouldStop: true, stopReason: 'time_budget_exceeded', remainingMs: 0 },
+);
+assert.deepStrictEqual(
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 90000, totalCount: 300 }),
+  { shouldStop: true, stopReason: 'total_limit_reached', remainingMs: 10000 },
+);
 const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
   source: 'page-api',
   rootCount: 200,
@@ -2559,11 +2611,19 @@ assert.strictEqual(
   helpers.appendXiaohongshuCommentDiagnostic('# 正文\n\n<!-- xhs-comment-diag: source=old; root=1; replies=0; pages=1; stop=old -->', xiaohongshuCommentDiagnostic),
   `# 正文\n\n${xiaohongshuCommentDiagnostic}`,
 );
-const xiaohongshuCommentPaginationScript = helpers.getXiaohongshuCommentPaginationScript('https://www.xiaohongshu.com/explore/demo-note?xsec_token=demo-token');
+const xiaohongshuCommentPaginationScript = helpers.getXiaohongshuCommentPaginationScript(
+  'https://www.xiaohongshu.com/explore/demo-note?xsec_token=demo-token',
+  { deadlineAt: 123456, totalLimit: 300 },
+);
 assert.match(xiaohongshuCommentPaginationScript, /credentials:\s*'include'/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/page/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/sub\/page/);
 assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_LIMIT/);
+assert.match(xiaohongshuCommentPaginationScript, /const deadlineAt = 123456/);
+assert.match(xiaohongshuCommentPaginationScript, /AbortController/);
+assert.match(xiaohongshuCommentPaginationScript, /time_budget_exceeded/);
+assert.match(xiaohongshuCommentPaginationScript, /total_limit_reached/);
+assert.doesNotThrow(() => new Function(`return ${xiaohongshuCommentPaginationScript};`));
 assert.match(pluginMainSource, /mergeXiaohongshuCapturedCommentPayloads/);
 assert.match(pluginMainSource, /debuggerCommentPayloads/);
 assert.match(pluginMainSource, /data-testid\*="reply"/);
@@ -2585,6 +2645,11 @@ assert.match(xiaohongshuRendererSource, /mainCommentListBonus/);
 assert.match(xiaohongshuRendererSource, /nestedReplyPenalty/);
 assert.match(xiaohongshuRendererSource, /nestedReplyAncestor/);
 assert.match(xiaohongshuRendererSource, /drainDebuggerBodyTasks/);
+assert.match(xiaohongshuRendererSource, /beginBestEffortBrowserLoad\(win, url\)/);
+assert.strictEqual(xiaohongshuRendererSource.includes('await win.loadURL(url)'), false);
+assert.match(xiaohongshuRendererSource, /XIAOHONGSHU_COMMENT_TIMEOUT_MS/);
+assert.match(xiaohongshuRendererSource, /getXiaohongshuCommentBudgetState/);
+assert.match(xiaohongshuRendererSource, /waitForBrowserTasksWithin\(pending, remainingMs\)/);
 assert.match(xiaohongshuRendererSource, /deferredReplyGroups:\s*browserNetworkResult\.deferredReplyGroups/);
 assert.match(xiaohongshuRendererSource, /preserveXiaohongshuPrimaryCommentTree/);
 assert.strictEqual(xiaohongshuRendererSource.includes('const commentBonus = /comment|reply/i.test(marker)'), false);
