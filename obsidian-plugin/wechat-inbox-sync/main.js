@@ -4964,6 +4964,40 @@ function getDouyinDetailAwemeId(payload) {
   return String(detail && (detail.aweme_id || detail.awemeId) || '').trim();
 }
 
+function extractDouyinMediaUrlsForAweme(payload, awemeId) {
+  const targetId = String(awemeId || '').trim();
+  if (!targetId) return [];
+  let root = payload;
+  if (typeof root === 'string') {
+    try {
+      root = JSON.parse(root || '{}');
+    } catch (error) {
+      return [];
+    }
+  }
+  if (!root || typeof root !== 'object') return [];
+
+  const urls = [];
+  const seen = new Set();
+  const visit = (value, depth = 0) => {
+    if (!value || typeof value !== 'object' || depth > 16 || seen.size > 10000 || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+
+    const candidateId = String(value.aweme_id || value.awemeId || '').trim();
+    if (candidateId === targetId && value.video && typeof value.video === 'object') {
+      extractDouyinMediaUrlsFromDetailPayload({ aweme_detail: value })
+        .forEach((url) => pushUniqueMediaUrl(urls, url));
+    }
+    Object.values(value).forEach((item) => visit(item, depth + 1));
+  };
+  visit(root);
+  return sortMediaUrlsForTranscription(urls);
+}
+
 function isUnavailableXiaohongshuPage(html, url = '') {
   const source = decodeHtmlEntities(String(html || ''));
   const target = String(url || '');
@@ -6851,6 +6885,17 @@ function buildXiaohongshuFallbackMarkdown(url, reason = '') {
   ].filter((line) => line !== '').join('\n');
 }
 
+function buildDouyinFallbackMarkdown(url, reason = '') {
+  return [
+    '抖音链接已保存。',
+    '',
+    `原始链接：${url || ''}`,
+    '',
+    reason ? `> 抖音视频转写失败：${reason}` : '',
+    '> 插件没有把该作品误认成其他平台；可以稍后重试，或从手机相册/文件导入视频继续转写。',
+  ].filter((line) => line !== '').join('\n');
+}
+
 function imageTagToMarkdown(tag) {
   const sourceMatch = String(tag || '').match(/\s(?:data-src|src)=["']([^"']+)["']/i);
   if (!sourceMatch || !sourceMatch[1]) return '';
@@ -8026,8 +8071,15 @@ async function renderSocialMediaUrlsWithElectron(url) {
   });
 
   const capturedRequests = [];
+  const targetDouyinAwemeId = isDouyinUrl(url) ? extractDouyinAwemeId(url) : '';
   const browserSession = (win.webContents && win.webContents.session) || wechatSession;
   const installedWebRequestHandlers = [];
+  const debuggerApi = targetDouyinAwemeId && win.webContents && win.webContents.debugger;
+  const debuggerResponseRequests = new Map();
+  const debuggerBodyTasks = [];
+  const debuggerMediaUrls = [];
+  let debuggerAttached = false;
+  let debuggerMessageHandler = null;
   const captureWebRequestDetails = (details) => {
     capturedRequests.push({
       url: details && details.url,
@@ -8052,6 +8104,55 @@ async function renderSocialMediaUrlsWithElectron(url) {
   installWebRequestHandler('onBeforeRedirect', captureWebRequestDetails);
   installWebRequestHandler('onCompleted', captureWebRequestDetails);
   installExternalAppNavigationGuards(win.webContents);
+
+  if (debuggerApi && typeof debuggerApi.attach === 'function' && typeof debuggerApi.sendCommand === 'function') {
+    try {
+      if (!debuggerApi.isAttached || !debuggerApi.isAttached()) {
+        debuggerApi.attach('1.3');
+        debuggerAttached = true;
+      }
+      await debuggerApi.sendCommand('Network.enable');
+      debuggerMessageHandler = (_event, method, params = {}) => {
+        try {
+          if (method === 'Network.responseReceived') {
+            const response = params.response || {};
+            const responseUrl = String(response.url || '').trim();
+            const responseType = String(params.type || '').toLowerCase();
+            const mimeType = String(response.mimeType || '').toLowerCase();
+            const isJsonCandidate = responseType === 'xhr'
+              || responseType === 'fetch'
+              || mimeType.includes('json')
+              || /\/aweme\/|\/feed(?:[/?]|$)|\/detail(?:[/?]|$)/i.test(responseUrl);
+            if (
+              params.requestId
+              && isDouyinUrl(responseUrl)
+              && isJsonCandidate
+              && debuggerResponseRequests.size < 120
+            ) {
+              debuggerResponseRequests.set(params.requestId, responseUrl);
+            }
+          }
+          if (method === 'Network.loadingFinished' && debuggerResponseRequests.has(params.requestId)) {
+            const requestId = params.requestId;
+            debuggerResponseRequests.delete(requestId);
+            debuggerBodyTasks.push((async () => {
+              try {
+                const body = await debuggerApi.sendCommand('Network.getResponseBody', { requestId });
+                const text = body && body.base64Encoded
+                  ? Buffer.from(String(body.body || ''), 'base64').toString('utf8')
+                  : String(body && body.body || '');
+                extractDouyinMediaUrlsForAweme(text, targetDouyinAwemeId)
+                  .forEach((mediaUrl) => pushUniqueMediaUrl(debuggerMediaUrls, mediaUrl));
+              } catch (error) {}
+            })());
+          }
+        } catch (error) {}
+      };
+      debuggerApi.on('message', debuggerMessageHandler);
+    } catch (error) {
+      debuggerMessageHandler = null;
+    }
+  }
 
   try {
     const loaded = waitForWebContents(win.webContents, 18000);
@@ -8093,7 +8194,8 @@ async function renderSocialMediaUrlsWithElectron(url) {
       })()
     `);
 
-    return normalizeBrowserCapturedMediaUrls([capturedRequests, payload]);
+    await Promise.allSettled(debuggerBodyTasks);
+    return normalizeBrowserCapturedMediaUrls([capturedRequests, payload, debuggerMediaUrls]);
   } finally {
     installedWebRequestHandlers.forEach((method) => {
       try {
@@ -8102,6 +8204,16 @@ async function renderSocialMediaUrlsWithElectron(url) {
         }
       } catch (error) {}
     });
+    try {
+      if (debuggerApi && debuggerMessageHandler && typeof debuggerApi.removeListener === 'function') {
+        debuggerApi.removeListener('message', debuggerMessageHandler);
+      }
+    } catch (error) {}
+    try {
+      if (debuggerAttached && debuggerApi && typeof debuggerApi.detach === 'function') {
+        debuggerApi.detach();
+      }
+    } catch (error) {}
     if (win && typeof win.destroy === 'function') {
       win.destroy();
     }
@@ -13995,6 +14107,24 @@ class WechatObsidianInboxPlugin extends Plugin {
             },
           };
         }
+        if (isVideoIntent && (isDouyinUrl(url) || isDouyinUrl(resolvedUrl))) {
+          const noMediaError = '未能从抖音作品页获取到与目标作品一致的音频或视频地址';
+          return {
+            ...record,
+            metadata: {
+              ...metadata,
+              title: metadata.title || extractHtmlTitle(html) || '抖音链接',
+              url,
+              markdown: buildDouyinFallbackMarkdown(url, noMediaError),
+              platform: '抖音',
+              contentCategory: '视频',
+              transcriptionStatus: 'failed',
+              transcriptionError: noMediaError,
+              transcriptionSource: 'video',
+              conversionStatus: 'link_saved',
+            },
+          };
+        }
 
         const extracted = extractedXiaohongshu || extractXiaohongshuMarkdownFromHtml(html, resolvedUrl, metadata.shareText || record.content || '', {
           includeComments: shouldIncludeXiaohongshuComments,
@@ -14944,6 +15074,7 @@ WechatObsidianInboxPlugin.__test = {
   extractDouyinAwemeId,
   normalizeDouyinTargetUrl,
   extractDouyinMediaUrlsFromDetailPayload,
+  extractDouyinMediaUrlsForAweme,
   fetchDouyinMediaUrlsWithSession,
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,

@@ -2760,6 +2760,42 @@ assert.deepStrictEqual(
   { awemeId: '', url: '' },
 );
 assert.deepStrictEqual(
+  helpers.extractDouyinMediaUrlsForAweme({
+    feed: [
+      {
+        aweme_id: '9999999999999999999',
+        video: {
+          play_addr: {
+            url_list: ['https://v11-weba.douyinvod.com/recommendation/?mime_type=video_mp4'],
+          },
+        },
+      },
+      {
+        aweme_id: '7659778280362429711',
+        video: {
+          play_addr: {
+            url_list: ['https://v11-weba.douyinvod.com/browser-target/?mime_type=video_mp4'],
+          },
+        },
+      },
+    ],
+  }, '7659778280362429711'),
+  ['https://v11-weba.douyinvod.com/browser-target/?mime_type=video_mp4'],
+);
+assert.deepStrictEqual(
+  helpers.extractDouyinMediaUrlsForAweme(JSON.stringify({
+    aweme_detail: {
+      aweme_id: '9999999999999999999',
+      video: {
+        play_addr: {
+          url_list: ['https://v11-weba.douyinvod.com/wrong-target/?mime_type=video_mp4'],
+        },
+      },
+    },
+  }), '7659778280362429711'),
+  [],
+);
+assert.deepStrictEqual(
   helpers.extractDouyinMediaUrlsFromDetailPayload({
     aweme_detail: {
       aweme_id: '7644238277092174409',
@@ -3761,6 +3797,29 @@ async function runAsyncHydrationTests() {
   }, '', '', '抖音真实页');
   assert.strictEqual(renderedDouyinRecord.metadata.transcriptOnly, true);
   assert.strictEqual(renderedDouyinRecord.metadata.mediaUrl, 'https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000rendered&ratio=720p&line=0');
+
+  const unavailableDouyinPlugin = new PluginClass();
+  unavailableDouyinPlugin.settings = { aiProvider: 'off' };
+  unavailableDouyinPlugin.fetchDouyinMediaUrlsWithSession = async () => [];
+  unavailableDouyinPlugin.renderSocialMediaUrls = async () => [];
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.douyin.com/video/7659778280362429711') {
+      return { text: '<html><head><meta charset="UTF-8"></head><body></body></html>' };
+    }
+    if (url.includes('/aweme/v1/web/aweme/detail/')) return { text: '' };
+    throw new Error(`unexpected unavailable douyin request ${url}`);
+  };
+  const unavailableDouyinRecord = await unavailableDouyinPlugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: 'https://www.douyin.com/video/7659778280362429711',
+    metadata: { url: 'https://www.douyin.com/video/7659778280362429711' },
+  }, '', '', '抖音链接');
+  assert.strictEqual(unavailableDouyinRecord.metadata.platform, '抖音');
+  assert.strictEqual(unavailableDouyinRecord.metadata.contentCategory, '视频');
+  assert.strictEqual(unavailableDouyinRecord.metadata.transcriptionStatus, 'failed');
+  assert.strictEqual(unavailableDouyinRecord.metadata.conversionStatus, 'link_saved');
+  assert.strictEqual(unavailableDouyinRecord.metadata.markdown.includes('抖音链接已保存'), true);
+  assert.strictEqual(unavailableDouyinRecord.metadata.markdown.includes('小红书'), false);
 
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.xiaohongshu.com/explore/video') {
