@@ -1,5 +1,18 @@
 # Worklog
 
+### 2026-07-15 11:40 - 发布 1.3.36，回退 PDF OCR 并建立 OCR CDN 发布门禁
+
+- 目标：PDF 恢复文本层提取/原附件保留，不再触发耗时本地 OCR；保留小红书长图文图片 OCR；修复插件与腾讯云组件版本漂移，并建立防复发门禁。
+- 影响范围：Obsidian 插件 / Windows 与 macOS 本地 OCR 组件 / 腾讯云静态托管 / GitHub Release / 发布工作流 / 文档。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`obsidian-plugin/wechat-inbox-sync/local-ocr/*`、`manifest.json`、`versions.json`、插件目录版本文件、`.github/workflows/release.yml`、`.gitattributes`、`scripts/check-local-ocr-cdn.js`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`docs/LOCAL_OCR_RELEASE_PREVENTION.md`、`docs/DECISIONS.md`、`docs/WORKLOG.md`。
+- 线上动作：已上传 Windows OCR 安装器、macOS OCR 安装器和 `ocr_image.py` 到长环境静态托管 `local-ocr/common/`；已推送 `main` 和正式标签 `1.3.36`，GitHub Actions Release 成功，正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.36>。`1.3.35` 标签因首版字节门禁发现 CRLF/LF 差异而失败，未创建 Release，未强推改写，版本顺延。
+- 数据变更：无；未修改业务数据环境、绑定码、Pro 权益或同步记录。
+- 验证：先确认 `1.3.31` PDF OCR 代码晚于 CDN Windows/macOS 安装器、运行脚本和 wheelhouse；回退测试先因生产代码仍要求 PDF 依赖而失败，实现后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、PowerShell/ Bash 安装器语法检查通过。GitHub `1.3.36` Release 工作流成功；Raw manifest 缓存绕过返回 `1.3.36`；五项 Release 资产直链存在，Release ZIP 内 `manifest.json` 为 `1.3.36`。完整目录中的旧移动端测试仍因桌面专用根代码加载 `child_process` 失败，`release-social-feishu-ai.test.js` 仍引用已经移除的历史 helper，两者均为 `origin/main@1.3.34` 既存问题且不在上一版插件发布门禁中，本次未伪装为通过。
+- CDN 公网 SHA-256：Windows 安装器 `174647158C74606FF14FD024751DF0144F8B0B26D3A307B52E6CA929CBE46928`；macOS 安装器 `8367432F693248E196F8F5EC588E61ED7E5952C8D491C4E62D9236B4B67519A5`；OCR 运行脚本 `52D32BFB9384EC5BE1DBFB25938D6316A46A51D7B56A43A9C40552BD1F2DE291`。
+- 结果：PDF 提取失败时保留原附件，不安装/升级/调用 OCR；图片 OCR 继续使用 RapidOCR + Pillow。tag 发布前会从公网下载三份 OCR 资产并与仓库 LF 发布字节做 SHA-256 比对，任一不一致则禁止创建 Release；`.gitattributes` 固定三份资产为 LF。
+- 已知风险：当前 CDN 仍使用可覆盖的 `local-ocr/common/*` 路径，自动门禁能阻止发布时漂移，但不能提供不可变历史版本；GitHub 公共 API 检查期间遇到匿名限流，已改用 Release 直链和 Raw 缓存绕过完成验证。
+- 下一步：把组件迁移到 `local-ocr/releases/<componentVersion>/`，生成含 Git 提交、平台和 SHA-256 的 manifest；插件固定组件版本，升级/回滚只切换 manifest 指针，不覆盖历史文件。
+
 ### 2026-07-15 11:17 - 正式发布 Obsidian 插件 1.3.34：统一小红书完整评论与抖音超时边界
 
 - 目标：纠正市场版本停留在 `1.3.33`、本机已使用合并版 `1.3.34` 的版本不一致；以正式 `1.3.33` 小红书评论完整性修复为基线，叠加抖音隐藏浏览器非阻塞启动和有界收尾，统一发布 `1.3.34`。
