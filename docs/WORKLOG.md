@@ -11,6 +11,19 @@
 - 本地包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.41.zip`，SHA-256 `B2B563B2C1D7F97ED48DF0D5B54D6DA5AD6A4D62BE383C1EC5256A5E8B0310A0`；包内 manifest 为 1.3.41，versions 同时包含 1.3.40 和 1.3.41。
 - 数据变更：无；未修改小程序、云函数、兑换码、绑定码、权益、设备、同步记录或本地插件 `data.json`。
 
+### 2026-07-15 14:50 - 安装 1.3.41 小红书评论单一树候选版（待真实复测，未发布）
+
+- 目标：修复三篇真实小红书笔记中网络已捕获回复、最终 Markdown 却大量丢失，以及 `[doge]`/无 emoji、绝对/相对时间副本重复的问题；先安装本地候选版复测，真实样本通过前不发布插件市场。
+- 影响范围：仅 Obsidian 插件的小红书评论合并、Markdown 渲染、采集进展诊断、版本元数据和回归测试；不修改小程序、云函数、登录、支付、Pro、媒体下载、ASR/OCR 或业务数据。
+- 根因证据：现有三篇笔记诊断分别为 `19→3`、`6→4`、`39→23` 条回复，合计捕获 64 条、最终仅 30 条。生产形态红灯复现中，74 根/19 回复的评论树经旧 Markdown 渲染后精确变成 74 根/4 回复。原因是 `buildSocialCommentsMarkdown` 直接把带 `depth` 参数的 `normalizeSocialComment` 传给 `Array.map`，导致根评论下标被误当成递归深度，只有前 4 个根评论渲染回复；最终流程还会在正文已有局部 `## 评论区` 时跳过权威评论树。
+- 修改：改用单参数回调调用递归标准化；新增唯一 `finalizeXiaohongshuComments` 收尾入口，先移除旧评论区，再从浏览器最终评论树完整渲染一次，浏览器已有评论树时不再与初始静态 HTML 二次通用合并；无 ID 去重忽略 `[doge]` 等展示型方括号 emoji；主评论进展与回复进展分开统计，并新增 `root_requests`、`reply_requests`、`partial` 诊断字段。
+- TDD：先新增 74 根/19 回复、已有 3 条旧回复、emoji/时间变体、不同 ID 同文案和“只有回复增长”进展判定用例；旧实现先因缺少最终入口失败，最小实现后进一步暴露 19→4 的真实渲染缺陷；修复后评论树与 Markdown 均保持 74/19，旧评论区被替换，`lost_root=0`、`lost_replies=0`。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 与 `git diff --check` 通过；直接加载已安装运行文件复放 74/19 fixture，树统计和 Markdown 统计均为 74/19，旧评论区已移除。
+- 本机安装：已把候选 `1.3.41` 的 `main.js`、`manifest.json`、`styles.css` 安装到 `D:\内容创作系统\张张的内容创作知识库\.obsidian\plugins\wechat-inbox-sync`；备份位于 `C:\Users\ADMIN\AppData\Local\Temp\wechat-inbox-sync-before-1.3.41-20260715-144657`。三项运行文件与发布源 SHA-256 一致；安装前后 `data.json` SHA-256 均为 `EE9B321B531A7592FAEB80738FE8D64BD81330EBD10A4F600EAC9D5C1A43E665`。
+- 线上动作：无。未推送默认分支、未创建 `1.3.41` 标签或 GitHub Release、未发布插件市场。
+- 已知风险：当前运行中的 Obsidian renderer 仍需用户重载后才会加载候选代码；平台登录态或风控可能让评论源本身不完整，此时新诊断应显示 `partial=1`，但插件内部不得再把已捕获回复丢掉。
+- 下一步：用户重载 Obsidian 后重新同步三条问题小红书记录；核对新笔记 `merged_replies=final_replies`、`lost_root=0`、`lost_replies=0`，可见评论无跨来源重复，并检查 `partial/stop` 是否准确。通过后再发布 1.3.42。
+
 ### 2026-07-15 14:00 - 发布插件 1.3.40：保留抖音转写正确正文并截断重复幻觉尾段
 
 - 目标：解决抖音链接已下载、Whisper 已转写到 100%，但因为片尾出现大量重复句而把整条同步判为失败的问题；优先保留已经正确转出的正文，同时继续拒绝纯重复或正文不足的低质量结果。
