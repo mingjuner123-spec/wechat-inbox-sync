@@ -2,6 +2,7 @@
 
 ## Before Publishing
 
+- [ ] 版本号必须同时检查远端标签、默认分支、本机已安装插件和现存发布工作区；本机已安装或已打包的候选版本也视为已占用，即使它从未创建远端标签或 Release，也必须顺延新版本，禁止复用。
 - [ ] Create a public GitHub repository for `wechat-inbox-sync`.
 - [ ] Put `main.js`, `manifest.json`, `styles.css`, `versions.json`, `README.md`, and `LICENSE` in the repository.
 - [ ] Confirm `manifest.json` uses the final plugin id: `wechat-inbox-sync`.
