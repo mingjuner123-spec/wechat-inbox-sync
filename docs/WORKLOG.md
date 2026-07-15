@@ -1,5 +1,19 @@
 # Worklog
 
+### 2026-07-15 14:00 - 发布插件 1.3.40：保留抖音转写正确正文并截断重复幻觉尾段
+
+- 目标：解决抖音链接已下载、Whisper 已转写到 100%，但因为片尾出现大量重复句而把整条同步判为失败的问题；优先保留已经正确转出的正文，同时继续拒绝纯重复或正文不足的低质量结果。
+- 影响范围：Obsidian 插件的本地音视频转写结果清理、插件版本元数据、回归测试与 GitHub Release；不修改小程序、云函数、支付、绑定码、Pro 权益、ASR/OCR 安装器或业务数据。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、根目录与插件目录的 `manifest.json` / `versions.json`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`。
+- 根因证据：同一条待同步抖音真实媒体被本地 ASR 分为 3 个音频块，前 48 行为完整的正常中文正文；结尾 18 行包含高频“画面的画面”、字幕署名、短英文和无关短词。旧的尾部清理器会被最后一个无关短词提前截断，随后质量门禁检测到前面的循环并拒绝整条结果。
+- 修改：尾部清理器仅在最后 36 行内发现同一句至少重复 6 次、且此前至少已有 80 个字符的正文时，从首次循环处裁掉尾部；同时向前去掉紧邻的字幕署名、短英文和“画面…画面”噪声。纯循环结果、正文过短结果和正文中偶发的正常重复仍交由原有质量门禁拒绝。
+- 数据变更：无。已把候选 `main.js` 与 `manifest.json` 安装到本机知识库插件目录，安装前备份为 `.backup-before-1.3.40-20260715-135655`；安装操作未写入 `data.json`。
+- 验证：先新增“正确正文 + 短噪声 + 13 次重复画面 + 字幕尾巴”的回归用例，旧实现失败、修改后通过；`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node scripts/check-local-ocr-cdn.js` 与 `git diff --check` 均通过。对真实抖音媒体重新运行本地 ASR 后，清理结果从 66 行保留为前 48 行，质量检查无异常。线上 Release 的 `main.js` 与发布源按规范化换行计算的 SHA-256 一致，且包含本次尾部循环修复标记。
+- 线上动作：默认分支已推送提交 `567fed1`，标签 `1.3.40` 已推送；GitHub Actions Release `29392902080` 成功，正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.40>，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 与 `wechat-inbox-sync-1.3.40.zip`。`check_obsidian_release.ps1` 已验证默认分支、Release 和 ZIP 均为 1.3.40。
+- 结果：失败记录可在重载后的 1.3.40 中重新同步，无需重新发送链接；正确正文会保留，已识别的循环尾部不会再导致整条作废。
+- 已知风险：静音、片尾字幕或原始音频极差时 Whisper 仍可能产生其他类型错误；本次只对具有高频重复特征且明确位于正文后方的尾段裁剪，不会擅自改写正文内容。
+- 下一步：重载或重启 Obsidian 后重新同步现有待处理抖音记录，确认生成的笔记含完整正文且不含重复尾巴；若仍异常，收集新生成的 `transcribe-last.log` 与对应笔记，不用旧日志替代现场证据。
+
 ### 2026-07-15 13:26 - 发布插件 1.3.39：恢复小红书/抖音视频的本地转写链路
 
 - 目标：处理用户反馈的“小红书视频口播文案为空”和抖音链接无法进入下载/转写；优先恢复解析和转写成功，同时不重新引入 `bytedance://` 外部应用唤起。
