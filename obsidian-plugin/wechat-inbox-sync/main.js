@@ -1151,6 +1151,36 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('WriteAllText($OutputPath');
 }
 
+function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
+  const source = String(scriptText || '');
+  if (!source.includes('.wechat-inbox-local-ocr')) return false;
+  if (!source.includes('rapidocr-onnxruntime==1.4.4')) return false;
+  if (!source.includes('pillow==12.3.0')) return false;
+  if (isMac) {
+    return source.includes('TENCENT_OCR_ASSET_BASE_URL')
+      && source.includes('TENCENT_PIP_INDEX_URL')
+      && source.includes('TENCENT_PYTHON_INSTALL_MIRROR')
+      && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"')
+      && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"')
+      && source.includes('PORTABLE_PYTHON=')
+      && source.includes('download_with_retry')
+      && source.includes('find_existing_python')
+      && source.includes('install_portable_python')
+      && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"')
+      && source.includes('.wechat-inbox-local-asr/python-venv/bin/python');
+  }
+  return source.includes('$TencentOcrAssetBaseUrl')
+    && source.includes('$TencentPipIndexUrl')
+    && source.includes('$TencentPythonInstallMirror')
+    && source.includes('$PythonBuildStandaloneBuild = "20260623"')
+    && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"')
+    && source.includes('$PortablePython')
+    && source.includes('Download-TextFile')
+    && source.includes('function Install-PortablePython')
+    && source.includes('$python = Install-PortablePython')
+    && source.includes('Invoke-Python -PythonCommand $python -m venv $VenvDir');
+}
+
 function createRetryableTranscriptionError(message) {
   const error = new Error(message);
   error.retryable = true;
@@ -11987,33 +12017,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installerUrl = isMac ? LOCAL_OCR_MACOS_INSTALLER_URL : LOCAL_OCR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-ocr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
 
-    const isInstallerCurrent = (scriptText) => {
-      const source = String(scriptText || '');
-      if (!source.includes('.wechat-inbox-local-ocr')) return false;
-      if (!source.includes('rapidocr')) return false;
-      if (isMac) {
-        return source.includes('TENCENT_OCR_ASSET_BASE_URL')
-          && source.includes('TENCENT_PIP_INDEX_URL')
-          && source.includes('download_with_retry')
-          && source.includes('find_existing_python')
-          && source.includes('detect_uv_arch')
-          && source.includes('UV_PYTHON_DOWNLOADS=automatic')
-          && source.includes('UV_PYTHON_PREFERENCE=managed')
-          && source.includes('.wechat-inbox-local-asr/python-venv/bin/python')
-          && source.includes('"$UV_BIN" python install 3.12')
-          && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
-      }
-      return source.includes('$TencentOcrAssetBaseUrl')
-        && source.includes('$TencentPipIndexUrl')
-        && source.includes('Download-TextFile')
-        && source.includes('Install-Uv')
-        && source.includes('uv-x86_64-pc-windows-msvc.zip')
-        && source.includes('$env:UV_PYTHON_DOWNLOADS')
-        && source.includes('$env:UV_PYTHON_PREFERENCE')
-        && source.includes('& $UvExe python install 3.12')
-        && source.includes('& $UvExe venv $VenvDir --python 3.12');
-    };
-
     try {
       let scriptText = '';
       try {
@@ -12022,7 +12025,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (error) {
         scriptText = await downloadTextViaNode(`${installerUrl}?t=${Date.now()}`);
       }
-      if (!isInstallerCurrent(scriptText)) {
+      if (!isLocalOcrInstallerCurrent(scriptText, isMac)) {
         throw new Error('Local OCR installer download returned outdated or invalid content');
       }
       fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(scriptText, isMac), 'utf8');
@@ -12031,7 +12034,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (downloadError) {
       if (fs.existsSync(installerPath)) {
         const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
-        if (isInstallerCurrent(bundledScriptText)) {
+        if (isLocalOcrInstallerCurrent(bundledScriptText, isMac)) {
           if (isMac) {
             fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
             this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
@@ -15471,6 +15474,7 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_OCR_INSTALLER_URL,
   LOCAL_OCR_MACOS_INSTALLER_URL,
   isLocalAsrInstallerCurrent,
+  isLocalOcrInstallerCurrent,
   LOCAL_ASR_PLATFORM_NAMES,
   NOTE_PROPERTY_FIELD_KEYS,
   NOTE_SAVE_MODES,

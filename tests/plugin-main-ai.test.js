@@ -32,6 +32,10 @@ const macOcrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-ocr', 'install-local-ocr-macos.sh'),
   'utf8',
 );
+const windowsOcrInstallerSource = fs.readFileSync(
+  path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-ocr', 'install-local-ocr.ps1'),
+  'utf8',
+);
 const windowsAsrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr.ps1'),
   'utf8',
@@ -51,6 +55,17 @@ assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource,
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(macAsrInstallerSource, true), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleMacAsrInstallerSource, true), false);
+assert.strictEqual(typeof helpers.isLocalOcrInstallerCurrent, 'function');
+assert.strictEqual(helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource, false), true);
+assert.strictEqual(helpers.isLocalOcrInstallerCurrent(macOcrInstallerSource, true), true);
+assert.strictEqual(
+  helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('Install-PortablePython', 'Install-LegacyPython'), false),
+  false,
+);
+assert.strictEqual(
+  helpers.isLocalOcrInstallerCurrent(macOcrInstallerSource.replaceAll('install_portable_python', 'install_legacy_python'), true),
+  false,
+);
 assert.strictEqual(typeof helpers.enableDebuggerNetworkCapture, 'function');
 let debuggerNetworkCommand = '';
 const neverSettlingDebuggerCommand = new Promise(() => {});
@@ -483,10 +498,16 @@ assert.ok(macOcrInstallerSource.includes('.wechat-inbox-local-asr/python-venv/bi
 assert.ok(macOcrInstallerSource.includes('download_with_retry'));
 assert.ok(macOcrInstallerSource.includes('--retry-all-errors'));
 assert.ok(macOcrInstallerSource.includes('--silent --show-error'));
-assert.ok(pluginMainSource.includes("source.includes('Install-Uv')"));
-assert.ok(pluginMainSource.includes("source.includes('uv-x86_64-pc-windows-msvc.zip')"));
-assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_DOWNLOADS')"));
-assert.ok(pluginMainSource.includes("source.includes('$env:UV_PYTHON_PREFERENCE')"));
+const localOcrInstallerValidatorSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('function isLocalOcrInstallerCurrent'),
+  pluginMainSource.indexOf('function createRetryableTranscriptionError'),
+);
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Install-PortablePython')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('$PythonBuildStandaloneBuild = \"20260623\"')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('install_portable_python')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('PYTHON_BUILD_STANDALONE_BUILD=\"20260623\"')"));
+assert.strictEqual(localOcrInstallerValidatorSource.includes('Install-Uv'), false);
+assert.strictEqual(localOcrInstallerValidatorSource.includes('UV_PYTHON_DOWNLOADS'), false);
 assert.ok(pluginMainSource.includes("source.includes('CHUNK_SECONDS=120')"));
 assert.ok(pluginMainSource.includes("source.includes('choose_chunk_seconds')"));
 assert.ok(pluginMainSource.includes("source.includes('metalAcceleration=failed')"));
