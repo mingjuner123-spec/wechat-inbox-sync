@@ -1,5 +1,20 @@
 # Engineering decisions
 
+## 2026-07-15：本地 OCR 与插件必须作为一个发布单元
+
+决策：
+
+- 任何 `local-ocr/` 变更必须先上传腾讯云并通过公网逐字节 SHA-256 校验，之后才允许推送插件 tag。
+- GitHub Release 工作流必须执行 `scripts/check-local-ocr-cdn.js`；Windows 安装器、macOS 安装器或 OCR 运行脚本任一与 tag 内发布源不一致时，发布失败。
+- 在不可变版本路径完成前，禁止把“稍后补传 CDN”作为可接受发布状态。
+- 后续把共享可覆盖路径迁移到 `local-ocr/releases/<componentVersion>/`，由含 SHA-256 的 manifest 选择版本，历史版本不覆盖。
+
+原因：
+
+- `1.3.31` 的插件能力先于 CDN 组件升级，形成跨组件版本漂移；固定 Python 修复仍在，但插件因新增 PDF 依赖拒绝执行旧组件。
+- 人工清单已记录风险却没有阻止 tag，必须把公网一致性从提醒升级为自动门禁。
+- 不可变版本与 manifest 能把回滚从“覆盖文件”变成“切换明确版本”，同时保留审计和快速恢复能力。
+
 ## 2026-07-15：可选的 Electron 网络调试不得阻塞同步主链路
 
 决策：

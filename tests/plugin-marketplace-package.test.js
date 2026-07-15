@@ -18,12 +18,14 @@ const macOcrInstaller = fs.readFileSync(path.join(pluginDir, 'local-ocr/install-
 const localOcrScript = fs.readFileSync(path.join(pluginDir, 'local-ocr/ocr_image.py'), 'utf8');
 const releaseWorkflowPath = path.resolve(__dirname, '../.github/workflows/release.yml');
 const releaseWorkflow = fs.readFileSync(releaseWorkflowPath, 'utf8');
+const cdnVerifierPath = path.resolve(__dirname, '../scripts/check-local-ocr-cdn.js');
+const cdnVerifier = fs.existsSync(cdnVerifierPath) ? fs.readFileSync(cdnVerifierPath, 'utf8') : '';
 const marketplacePromise = '把微信中收集的公众号文章、飞书文档、小红书、抖音、B站、小宇宙等网页链接、PDF、MP3、MP4 等文件和速记，一键同步到本地知识库，自动整理为可检索笔记.';
 
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.34');
+assert.strictEqual(manifest.version, '1.3.35');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
@@ -57,6 +59,12 @@ assert.ok(releaseWorkflow.includes('root_manifest_version="$(node -p'));
 assert.ok(releaseWorkflow.includes('subdir manifest.json version'));
 assert.ok(releaseWorkflow.includes('root manifest.json version'));
 assert.ok(releaseWorkflow.includes('if [ "$manifest_version" != "$TAG_NAME" ]; then'));
+assert.strictEqual(fs.existsSync(cdnVerifierPath), true, 'release must include a public CDN consistency verifier');
+assert.ok(releaseWorkflow.includes('node scripts/check-local-ocr-cdn.js'), 'release must verify CDN assets before creating a GitHub Release');
+assert.ok(cdnVerifier.includes('install-local-ocr.ps1'));
+assert.ok(cdnVerifier.includes('install-local-ocr-macos.sh'));
+assert.ok(cdnVerifier.includes('ocr_image.py'));
+assert.ok(cdnVerifier.includes("createHash('sha256')"));
 assert.ok(releaseWorkflow.includes('zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr local-ocr'));
 assert.ok(windowsOcrInstaller.includes('rapidocr-onnxruntime'));
 assert.strictEqual(windowsOcrInstaller.includes('PyMuPDF'), false, 'Windows image OCR installer must not install the PDF renderer');
