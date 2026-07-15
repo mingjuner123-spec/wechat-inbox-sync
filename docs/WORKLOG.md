@@ -1,5 +1,16 @@
 # Worklog
 
+### 2026-07-15 14:50 - 发布插件 1.3.41：新领取体验立即刷新并保留 1.3.40 全部能力
+
+- 目标：用户在小程序领取或续费体验后，插件能够立即查询到有效权益并使用 Pro 功能；发布必须从线上 1.3.40 基线增量制作，不能回退 1.3.40 已有的转写正文保留、OCR、ASR、抖音等能力。
+- 根因：旧逻辑会把权限接口异常合成为 `inactive`，设置页又会在 6 小时内复用近期无效缓存，导致真实有效权益仍显示“未开通或已过期”。
+- 修改：只有云端明确返回无权限时才缓存无效状态；强制刷新增加 no-cache 请求头；查询异常保留原有效缓存并写入诊断；近期无效缓存不再阻止云端复查；设置页在权益变化后自动重绘。同步更新两份 `manifest.json` / `versions.json` 和插件回归测试。
+- 防回退：候选分支从 `origin/main@974027d`（1.3.40 发布记录）建立，不使用旧 1.3.36 修复分支直接发版；相对 1.3.40，`styles.css`、README、LICENSE、`local-asr/`、`local-ocr/` 均保持不变；两份 `versions.json` 同时保留 `1.3.40` 并新增 `1.3.41`；1.3.40 的转写幻觉尾段保留回归与完整插件测试均通过。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`git diff --check` 均通过；`node scripts/check-local-ocr-cdn.js` 验证 Windows/macOS OCR 安装器、OCR 脚本及三平台固定 Python 运行时公网 SHA-256 全部一致；发布检查确认默认分支、raw manifest、latest Release、五项发布资产和本地 ZIP 均为 1.3.41。GitHub 展示的四个独立发布文件 SHA-256 与 `1.3.41` 标签 Git blob 逐字节一致。
+- 线上动作：默认分支与标签 `1.3.41` 已推送至提交 `0e92e94`；正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.41>，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.41.zip`，并标记为 Latest。此次未修改本地组件，因此未覆盖腾讯云 CDN 文件，只执行一致性门禁。
+- 本地包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.41.zip`，SHA-256 `B2B563B2C1D7F97ED48DF0D5B54D6DA5AD6A4D62BE383C1EC5256A5E8B0310A0`；包内 manifest 为 1.3.41，versions 同时包含 1.3.40 和 1.3.41。
+- 数据变更：无；未修改小程序、云函数、兑换码、绑定码、权益、设备、同步记录或本地插件 `data.json`。
+
 ### 2026-07-15 14:00 - 发布插件 1.3.40：保留抖音转写正确正文并截断重复幻觉尾段
 
 - 目标：解决抖音链接已下载、Whisper 已转写到 100%，但因为片尾出现大量重复句而把整条同步判为失败的问题；优先保留已经正确转出的正文，同时继续拒绝纯重复或正文不足的低质量结果。
