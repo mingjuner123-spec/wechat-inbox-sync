@@ -1967,7 +1967,11 @@ function cleanTrailingTranscriptionHallucinations(text) {
   if (lines.length < 2) return lines.join('\n');
   const isCredit = (line) => /^(?:字幕|字幕\s*by|字幕\s*:|翻译|校对|制作|subtitles?\s*(?:by|:))/i.test(line);
   const isCorruptedClosing = (line) => /(?:我们|咱们).{0,10}(?:下身|下生|下声|下省)(?:再见|见)[。！!]?$/u.test(line);
-  let cutoff = lines.length;
+  const knownTailHallucinationStart = lines.findIndex((line, index) => (
+    index >= Math.max(1, lines.length - 12)
+    && /请不吝.{0,12}点赞.{0,12}订阅.{0,12}转发.{0,12}打赏.{0,20}明镜/u.test(line)
+  ));
+  let cutoff = knownTailHallucinationStart >= 0 ? knownTailHallucinationStart : lines.length;
   for (let index = lines.length - 1; index >= 1; index -= 1) {
     const line = lines[index];
     const repeated = line === lines[index - 1];

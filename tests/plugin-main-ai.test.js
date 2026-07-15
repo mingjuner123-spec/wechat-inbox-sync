@@ -2996,6 +2996,19 @@ assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
   '这句话在正文中提到“我们下身再见”这个错听案例，不应该被删除。',
   '最后一段正常正文。',
 ].join('\n'));
+assert.strictEqual(helpers.cleanTrailingTranscriptionHallucinations([
+  '如果你在使用上有任何问题或者建议都可以联系我',
+  '以上就是我们今天的全部内容 我们下条视频再见',
+  '请不吝点赞 订阅 转发 打赏支持明镜与点点点点赞 欢迎订阅 转发 打赏支持明镜与点点赞',
+  '. 谢谢大家. 下次见. 拜拜.',
+  '# 当时也有烧烤的食材,可以搭配蒜籽 & 炒鲜肉,可以搭配烤鲜肉 & 蒜籽 & 炒鲜肉',
+  '# 蒜籽可以搭配烤鲜肉 & 炒鲜肉,可以搭配烤鲜肉 & 炒鲜肉',
+  'MING PAO CANADA | MING PAO TORONTO',
+  '(CC字幕制作:贝尔)',
+].join('\n')), [
+  '如果你在使用上有任何问题或者建议都可以联系我',
+  '以上就是我们今天的全部内容 我们下条视频再见',
+].join('\n'));
 
 assert.strictEqual(helpers.extractBilibiliAudioUrlFromPlayurlPayload({
   data: {
