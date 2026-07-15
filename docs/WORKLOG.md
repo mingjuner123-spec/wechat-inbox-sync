@@ -1,5 +1,18 @@
 # Worklog
 
+### 2026-07-15 10:12 - 发布 Obsidian 插件 1.3.32
+
+- 目标：把已经完成的抖音平台误判修复和 Windows/macOS ASR 旧安装器防回灌能力正式发布到插件市场更新链路。
+- 影响范围：Obsidian 插件发布源、根目录市场发现元数据、GitHub 默认分支、`1.3.32` 标签/Release、本地手动安装包和工作日志；不修改小程序、云函数、支付、绑定码、Pro 权益或业务数据。
+- 发布内容：抖音无媒体时不再误落入小红书提取器；Windows ASR 动态安装器必须不低于 `1.2.22`，macOS 必须不低于 `1.3.5`，两端都拒绝旧提示词参数并要求 `repeat-guard-v2`。Windows/macOS 正确安装器此前已分别同步到腾讯云 CDN，因此旧插件用户的当前安装也可恢复，新版插件再增加未来回灌防线。
+- 线上动作：默认分支 `main` 已快进到 `92da082`，标签 `1.3.32` 指向同一提交；GitHub Actions 运行 `29383445788` 成功，正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.32>，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.32.zip`，且标记为 latest、非 draft、非 prerelease。
+- 本地安装包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.32.zip`，SHA-256 为 `048CFE012B34BBC26E980D776DB78A279798326A4AF8A00CE8F976BD07A4A64D`；解包后 manifest 为 `1.3.32`，发布必需文件及 `local-asr` / `local-ocr` 均存在。
+- 验证：`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、四份 manifest/versions JSON 解析和 `git diff --check` 均通过。专用发布检查器确认默认分支 manifest/versions、Raw manifest、latest/目标 Release、五项 Release 资产、资产内 manifest/versions 与本地 ZIP 全部为 `1.3.32`。
+- 基线测试说明：尝试扩大到历史根目录测试时，`mobile-compat.test.js` 因根目录旧 `main.js` 引入 `child_process` 失败，`release-social-feishu-ai.test.js` 仍硬编码 `1.2.97`；这两项都指向 AGENTS 明确排除的根目录历史镜像，相关 `main.js` 相对正式 `1.3.31` 未改且实际发布 manifest 为 `isDesktopOnly: true`，不作为本次桌面插件发布源门禁。后续应单独清理或归档这组过期测试。
+- 结果：插件市场发现所需的默认分支 Raw manifest 已返回 `1.3.32`，Release 资产齐全；用户刷新社区插件更新后即可获得 1.3.32。市场客户端的区域缓存仍可能造成短暂延迟。
+- 已知风险：本次在 Windows 完成自动回归，真实 macOS 端仍需报障用户重新安装 ASR 并用短音频完成端到端复测；抖音风控响应仍可能导致个别链接明确失败，但不会再伪装成小红书笔记。
+- 下一步：在本机从插件市场检查更新到 `1.3.32`，用一条抖音短链和一条短音频验证同步；让 macOS 报障用户重新点“安装/更新本地转写组件”后回传最新诊断。
+
 ### 2026-07-15 10:06 - 修复 macOS ASR 旧安装器回灌并更新 CDN
 
 - 目标：修复 macOS 用户点击“安装/更新本地转写组件”后，Whisper、FFmpeg、模型均存在但仍报告“转写脚本过旧”的循环故障。
