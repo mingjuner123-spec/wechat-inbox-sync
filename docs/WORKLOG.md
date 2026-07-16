@@ -1,16 +1,18 @@
 # Worklog
 
-### 2026-07-16 - 修复小红书匿名访问通用落地页误同步（候选，未发布）
+### 2026-07-16 - 发布 Obsidian 插件 1.3.47：修复小红书通用落地页误同步
 
 - 目标：修复部分用户未登录或匿名访问受限时，只保存“小红书 - 你的生活兴趣社区”、分享口令和失效封面，却被标记为同步成功的问题；保持匿名可读笔记无需登录即可快速提取。
 - 根因：小红书会按链接参数、Cookie、风控和访问频率返回通用落地页。插件 `1.3.46` 只把持久 Electron 会话的渲染结果用于评论，没有用返回的 HTML 恢复正文；可读性判断又会把分享口令或默认图片误当真实内容，最终继续调用 `/synced`。
 - 修改：新增通用落地页分类和严格成功判定；匿名 HTTP 已含真实标题、正文和图片时不启动浏览器；匿名结果不可读时复用插件现有持久小红书会话渲染一次，并让正文与评论共享该结果，同时用恢复出的真实标题覆盖已有通用标题。两条路径仍没有真实图文且也没有视频时，抛出 `XIAOHONGSHU_CONTENT_UNAVAILABLE`，由同步循环记录失败但不调用 `/records/:id/synced`，云端记录保留 pending。
 - 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`docs/superpowers/specs/2026-07-16-xiaohongshu-anonymous-extraction-fallback-design.md`、`docs/superpowers/plans/2026-07-16-xiaohongshu-anonymous-extraction-fallback.md`、`docs/WORKLOG.md`。
 - TDD：先分别确认旧代码缺少通用页分类、不会调用正文渲染恢复、双路径通用页仍正常返回；实现后覆盖默认 Logo 误判、真实 `og:title`/正文/图片不受通用文档标题误伤、匿名快路 0 次渲染、渲染恢复正文/图片/评论且只调用 1 次、不可用记录不发送 `/synced`。
-- 线上动作与数据：无；未改小程序、云函数、绑定码、Pro 权益、用户 Cookie、本地知识库或云端记录，未修改插件版本号，未安装或发布候选版。
-- 验证：`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`git diff --check` 均通过。计划中误写的 `tests/plugin-upload-sync.test.js` 在 `1.3.46` 基线不存在；仓库根镜像移动测试为既有过期失败且不是正式插件发布源，未计入本次门禁。
+- 发布：默认分支已推进到版本提交 `13c80bf`，正式标签 `1.3.47` 已推送。GitHub Actions 运行 <https://github.com/mingjuner123-spec/wechat-inbox-sync/actions/runs/29494309338> 成功；正式 Release <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.47> 为 Latest、非 draft、非 prerelease，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.47.zip`。
+- 线上动作与数据：仅更新 GitHub 默认分支、标签、Release 和插件市场版本元数据；未改小程序、云函数、绑定码、Pro 权益、用户 Cookie、本地知识库、云端同步记录或腾讯云 OCR/CDN 文件。
+- 验证：`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、四份发布 JSON 解析、`node scripts/check-local-ocr-cdn.js`、`git diff --check` 均通过。发布专用检查器已确认默认分支 manifest/versions、Raw manifest、Latest/目标 Release、五项资产、资产内 manifest/versions 与本地 ZIP 全部为 `1.3.47`。计划中误写的 `tests/plugin-upload-sync.test.js` 在 `1.3.46` 基线不存在；仓库根镜像移动测试为既有过期失败且不是正式插件发布源，未计入本次门禁。
+- 本地包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.47.zip`；包内 manifest 为 `1.3.47`，根目录必需资产齐全，SHA-256 `2607A259FCD05E448D18F5C28E973AA602F81EC093D465301CF15668F019ED20`。
 - 已知风险：小红书仍可能要求登录、验证码或触发风控；本修复不绕过平台限制，只复用用户主动建立的插件会话并避免把受限页误报成功。此前已经被云端标记为 synced 的坏记录不会自动回到 pending，需要后台重置或重新收集后再同步。
-- 下一步：如需用户端生效，以本候选分支发布下一插件版本；发布后让问题用户先直接重试，若仍提示内容不可用，再在插件设置里登录小红书。对历史坏记录先恢复为 pending。
+- 下一步：用户在 Obsidian 社区插件中检查更新到 `1.3.47` 并重载后，先直接重新同步新的小红书链接；若仍提示内容不可用，再在插件设置里登录小红书。此前已被标记 synced 的历史坏记录需先恢复为 pending 或重新收集。
 
 ### 2026-07-16 - 发布 Obsidian 插件 1.3.46：远端解绑恢复，并继承小红书评论稳定能力
 
