@@ -2081,6 +2081,50 @@ assert.ok(xiaohongshuNote.markdown.includes('## 评论区'));
 assert.ok(xiaohongshuNote.markdown.includes('**用户甲**：这个角度太有用了'));
 assert.strictEqual(xiaohongshuNote.comments.length, 1);
 
+const genericXiaohongshuLandingHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+  '<meta name="description" content="86【超常儿童，也可能被鸡废了，家长都踩过】分享口令">',
+  '<meta property="og:image" content="https://picasso-static.xiaohongshu.com/fe-platform/default-logo.png">',
+  '</head></html>',
+].join('');
+const genericXiaohongshuExtraction = helpers.extractXiaohongshuMarkdownFromHtml(
+  genericXiaohongshuLandingHtml,
+  'https://www.xiaohongshu.com/explore/generic-note',
+  '86【超常儿童，也可能被鸡废了，家长都踩过】分享口令',
+);
+assert.strictEqual(helpers.isGenericXiaohongshuLandingExtraction(
+  genericXiaohongshuExtraction,
+  genericXiaohongshuLandingHtml,
+), true);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
+  genericXiaohongshuExtraction,
+  genericXiaohongshuLandingHtml,
+  'https://www.xiaohongshu.com/explore/generic-note',
+), false);
+
+const realXiaohongshuNoteWithGenericDocumentTitleHtml = [
+  '<html><head>',
+  '<title>小红书 - 你的生活兴趣社区</title>',
+  '<meta property="og:title" content="真实笔记标题">',
+  '<meta name="description" content="这里是已经匿名返回的真实笔记正文，不能因为文档标题通用就拒绝。">',
+  '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/real-note-cover.jpg">',
+  '</head></html>',
+].join('');
+const realXiaohongshuNoteWithGenericDocumentTitle = helpers.extractXiaohongshuMarkdownFromHtml(
+  realXiaohongshuNoteWithGenericDocumentTitleHtml,
+  'https://www.xiaohongshu.com/explore/real-note-generic-document-title',
+);
+assert.strictEqual(helpers.isGenericXiaohongshuLandingExtraction(
+  realXiaohongshuNoteWithGenericDocumentTitle,
+  realXiaohongshuNoteWithGenericDocumentTitleHtml,
+), false);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
+  realXiaohongshuNoteWithGenericDocumentTitle,
+  realXiaohongshuNoteWithGenericDocumentTitleHtml,
+  'https://www.xiaohongshu.com/explore/real-note-generic-document-title',
+), true);
+
 const xiaohongshuJsonCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><body>',
   '<script>',
@@ -4412,6 +4456,137 @@ async function runAsyncHydrationTests() {
     requestUrlMock = previousGenericXhsRequestUrlMock;
   }
 
+  const renderedFallbackPlugin = new PluginClass();
+  renderedFallbackPlugin.settings = helpers.mergeSettings({
+    aiProvider: 'off',
+    settingsVersion: 2,
+    xiaohongshuCommentsEnabled: true,
+  });
+  renderedFallbackPlugin.hasProFeatureAccess = async () => true;
+  renderedFallbackPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+  renderedFallbackPlugin.renderSocialMediaUrls = async () => [];
+  let renderedFallbackCalls = 0;
+  renderedFallbackPlugin.renderXiaohongshuPage = async () => {
+    renderedFallbackCalls += 1;
+    return {
+      html: [
+        '<html><head>',
+        '<meta property="og:title" content="超常儿童，也可能被鸡废了">',
+        '<meta name="description" content="这是隐藏浏览器恢复出来的完整小红书正文，长度足够通过真实内容判断。">',
+        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/real-cover.jpg">',
+        '</head></html>',
+      ].join(''),
+      comments: [{
+        id: 'rendered-fallback-comment',
+        author: '恢复用户',
+        content: '正文和评论共用同一次页面渲染',
+      }],
+      commentDiagnosticDetails: {
+        source: 'page-api',
+        rootCount: 0,
+        stopReason: 'root_unavailable',
+      },
+    };
+  };
+  const previousRenderedFallbackRequestUrlMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/rendered-fallback') {
+      return { text: genericXiaohongshuLandingHtml };
+    }
+    throw new Error(`unexpected rendered fallback request ${url}`);
+  };
+  try {
+    const renderedFallbackRecord = await renderedFallbackPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/rendered-fallback',
+      metadata: {
+        url: 'https://www.xiaohongshu.com/explore/rendered-fallback',
+        title: '小红书 - 你的生活兴趣社区',
+        shareText: '86【超常儿童，也可能被鸡废了，家长都踩过】分享口令',
+      },
+    }, '', '', '小红书渲染恢复');
+    assert.strictEqual(renderedFallbackCalls, 1);
+    assert.strictEqual(renderedFallbackRecord.metadata.title, '超常儿童，也可能被鸡废了');
+    assert.ok(renderedFallbackRecord.metadata.markdown.includes('隐藏浏览器恢复出来的完整小红书正文'));
+    assert.ok(renderedFallbackRecord.metadata.markdown.includes('real-cover.jpg'));
+    assert.ok(renderedFallbackRecord.metadata.markdown.includes('正文和评论共用同一次页面渲染'));
+  } finally {
+    requestUrlMock = previousRenderedFallbackRequestUrlMock;
+  }
+
+  const anonymousFastPlugin = new PluginClass();
+  anonymousFastPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+  anonymousFastPlugin.hasProFeatureAccess = async () => false;
+  let anonymousFastRenderCalls = 0;
+  anonymousFastPlugin.renderXiaohongshuPage = async () => {
+    anonymousFastRenderCalls += 1;
+    throw new Error('complete anonymous HTML must not need rendered content');
+  };
+  const previousAnonymousFastRequestUrlMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/anonymous-fast-note') {
+      return {
+        text: [
+          '<html><head>',
+          '<meta property="og:title" content="匿名路径真实笔记">',
+          '<meta name="description" content="匿名路径完整正文已经直接返回，不应该再启动隐藏浏览器浪费时间。">',
+          '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/anonymous-cover.jpg">',
+          '</head></html>',
+        ].join(''),
+      };
+    }
+    throw new Error(`unexpected anonymous fast request ${url}`);
+  };
+  try {
+    const anonymousFastRecord = await anonymousFastPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/anonymous-fast-note',
+      metadata: { url: 'https://www.xiaohongshu.com/explore/anonymous-fast-note' },
+    }, '', '', '匿名路径测试');
+    assert.strictEqual(anonymousFastRenderCalls, 0);
+    assert.ok(anonymousFastRecord.metadata.markdown.includes('匿名路径完整正文'));
+  } finally {
+    requestUrlMock = previousAnonymousFastRequestUrlMock;
+  }
+
+  const unavailableGraphicPlugin = new PluginClass();
+  unavailableGraphicPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+  unavailableGraphicPlugin.hasProFeatureAccess = async () => false;
+  unavailableGraphicPlugin.renderSocialMediaUrls = async () => [];
+  unavailableGraphicPlugin.renderXiaohongshuPage = async () => ({
+    html: genericXiaohongshuLandingHtml,
+    comments: [],
+    commentDiagnosticDetails: {
+      source: 'page-api',
+      rootCount: 0,
+      stopReason: 'root_unavailable',
+    },
+  });
+  const previousUnavailableGraphicRequestUrlMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/unavailable-graphic-note') {
+      return { text: genericXiaohongshuLandingHtml };
+    }
+    throw new Error(`unexpected unavailable graphic request ${url}`);
+  };
+  try {
+    await assert.rejects(
+      () => unavailableGraphicPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note',
+        metadata: {
+          url: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note',
+          shareText: '只有分享口令，没有真实正文',
+        },
+      }, '', '', '不可用图文测试'),
+      (error) => error
+        && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
+        && error.message.includes('插件设置中登录小红书'),
+    );
+  } finally {
+    requestUrlMock = previousUnavailableGraphicRequestUrlMock;
+  }
+
   const forcedXhsVideoPlugin = new PluginClass();
   forcedXhsVideoPlugin.settings = { aiProvider: 'off' };
   forcedXhsVideoPlugin.renderSocialMediaUrls = async (url) => {
@@ -5350,6 +5525,54 @@ async function runCloudProcessingRecordSkipSyncTest() {
   assert.deepStrictEqual(result.written, []);
   assert.deepStrictEqual(result.failed, []);
   assert.deepStrictEqual(writeCalls, []);
+  assert.deepStrictEqual(calls, [[
+    '/records?status=pending',
+    'GET',
+    {},
+    'ABC-123',
+  ]]);
+}
+
+async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.findExistingRecordNotePath = async () => '';
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'xhs-content-unavailable-1',
+          type: 'webpage',
+          content: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note',
+          createdAt: '2026-07-16T08:00:00.000Z',
+          metadata: { url: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note' },
+        }],
+      };
+    }
+    return { success: true, data: {} };
+  };
+  plugin.writeRecord = async () => {
+    throw helpers.createRetryableXiaohongshuContentError();
+  };
+
+  const result = await plugin.syncBinding({
+    token: 'ABC-123',
+    label: '测试微信',
+  }, false);
+
+  assert.deepStrictEqual(result.written, []);
+  assert.deepStrictEqual(result.failed, [{
+    recordId: 'xhs-content-unavailable-1',
+    message: '小红书没有返回真实笔记内容，请在插件设置中登录小红书后重试',
+  }]);
   assert.deepStrictEqual(calls, [[
     '/records?status=pending',
     'GET',
@@ -6905,6 +7128,7 @@ async function main() {
   await runFeishuCustomAppConfigRequestTests();
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
+  await runXiaohongshuUnavailableRecordRemainsPendingTest();
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();
   await runMarkSyncedRecordNotFoundIsIdempotentTest();

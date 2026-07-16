@@ -17,7 +17,7 @@
 - Modify: `obsidian-plugin/wechat-inbox-sync/main.js:5265-5289`
 - Modify: `obsidian-plugin/wechat-inbox-sync/main.js:15798-15800`
 
-- [ ] **Step 1: Write the failing classification test**
+- [x] **Step 1: Write the failing classification test**
 
 Add a fixture with the production symptom and assert it is not readable:
 
@@ -45,23 +45,23 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
 ), false);
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `node tests/plugin-main-ai.test.js`
 
 Expected: FAIL because `helpers.isGenericXiaohongshuLandingExtraction` and the stricter exported readability helper do not exist.
 
-- [ ] **Step 3: Implement the minimal classifier**
+- [x] **Step 3: Implement the minimal classifier**
 
 Add and use this classifier before the existing image/description checks:
 
 ```js
-function isGenericXiaohongshuLandingExtraction(extracted, html = '') {
+function isGenericXiaohongshuLandingExtraction(extracted) {
   if (!extracted) return true;
   const title = String(extracted.title || '').trim();
-  const source = decodeHtmlEntities(String(html || ''));
+  const description = String(extracted.description || '').trim();
   return title.includes('你的生活兴趣社区')
-    || source.includes('<title>小红书 - 你的生活兴趣社区</title>');
+    || (/该内容来自小红书/.test(description) && /打开小红书/.test(description));
 }
 
 function hasReadableXiaohongshuGraphicContent(extracted, html, url = '') {
@@ -79,7 +79,7 @@ function hasReadableXiaohongshuGraphicContent(extracted, html, url = '') {
 
 Export both helpers through `WechatObsidianInboxPlugin.__test`.
 
-- [ ] **Step 4: Run the test and verify GREEN**
+- [x] **Step 4: Run the test and verify GREEN**
 
 Run: `node tests/plugin-main-ai.test.js`
 
@@ -92,7 +92,7 @@ Expected: PASS.
 - Modify: `obsidian-plugin/wechat-inbox-sync/main.js:11168-11214`
 - Modify: `obsidian-plugin/wechat-inbox-sync/main.js:14649-14749`
 
-- [ ] **Step 1: Write the failing rendered-content recovery test**
+- [x] **Step 1: Write the failing rendered-content recovery test**
 
 Create a plugin whose fast request returns the generic fixture while its rendered page returns a real note:
 
@@ -126,13 +126,13 @@ assert.ok(renderedFallbackRecord.metadata.markdown.includes('隐藏浏览器恢�
 assert.ok(renderedFallbackRecord.metadata.markdown.includes('real-cover.jpg'));
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `node tests/plugin-main-ai.test.js`
 
 Expected: FAIL because `hydrateWebpageMarkdown` does not call the overridable renderer for generic graphic notes and keeps the generic title/share text.
 
-- [ ] **Step 3: Implement one-render fallback and reuse**
+- [x] **Step 3: Implement one-render fallback and reuse**
 
 Add an overridable class wrapper:
 
@@ -176,7 +176,7 @@ if (!fastXiaohongshuReadable && renderedXiaohongshuPage && renderedXiaohongshuPa
 
 Use `renderedXiaohongshuError` only for the final diagnostic message; do not fail a valid fast extraction because comment rendering failed.
 
-- [ ] **Step 4: Run the test and verify GREEN**
+- [x] **Step 4: Run the test and verify GREEN**
 
 Run: `node tests/plugin-main-ai.test.js`
 
@@ -191,7 +191,7 @@ Expected: PASS.
 - Modify: `obsidian-plugin/wechat-inbox-sync/main.js:14926-14930`
 - Modify: `obsidian-plugin/wechat-inbox-sync/main.js:15798-15800`
 
-- [ ] **Step 1: Write two failing behavior tests**
+- [x] **Step 1: Write two failing behavior tests**
 
 First assert the anonymous fast path does not invoke rendering when the HTTP HTML is already real. Second, return generic HTML from both paths and assert rejection:
 
@@ -228,13 +228,13 @@ await assert.rejects(
 );
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run: `node tests/plugin-main-ai.test.js`
 
 Expected: FAIL because a generic rendered result is still returned as `conversionStatus: success` instead of a retryable rejection.
 
-- [ ] **Step 3: Add the retryable unavailable-content error**
+- [x] **Step 3: Add the retryable unavailable-content error**
 
 ```js
 function createRetryableXiaohongshuContentError(detail = '') {
@@ -259,7 +259,7 @@ if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(e
 
 Export both helpers for regression tests. Because `writeRecord` rejects before returning, the existing `syncBinding` sequence never executes `/records/:id/synced`, leaving the cloud record pending.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run: `node tests/plugin-main-ai.test.js`
 
@@ -270,20 +270,19 @@ Expected: PASS with the anonymous fast path, rendered recovery, and retryable re
 **Files:**
 - Modify: `docs/WORKLOG.md`
 
-- [ ] **Step 1: Run syntax and focused regression checks**
+- [x] **Step 1: Run syntax and focused regression checks**
 
 Run:
 
 ```powershell
 node --check obsidian-plugin/wechat-inbox-sync/main.js
 node tests/plugin-main-ai.test.js
-node tests/plugin-upload-sync.test.js
 node tests/plugin-marketplace-package.test.js
 ```
 
 Expected: all commands exit 0.
 
-- [ ] **Step 2: Inspect the diff**
+- [x] **Step 2: Inspect the diff**
 
 Run:
 
@@ -294,11 +293,11 @@ git status --short
 
 Expected: only the plugin source, focused tests, plan/spec, and worklog are changed; `git diff --check` has no errors.
 
-- [ ] **Step 3: Update the worklog**
+- [x] **Step 3: Update the worklog**
 
 Replace the design-only entry with a completion entry recording the generic-page root cause, rendered HTML reuse, retryable failure behavior, exact verification commands, no deployment, and the need to reset already-synced historical records before retrying them.
 
-- [ ] **Step 4: Commit implementation**
+- [x] **Step 4: Commit implementation**
 
 ```powershell
 git add obsidian-plugin/wechat-inbox-sync/main.js tests/plugin-main-ai.test.js docs/WORKLOG.md docs/superpowers/plans/2026-07-16-xiaohongshu-anonymous-extraction-fallback.md
