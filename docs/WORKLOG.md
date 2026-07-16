@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-17 - Publish Obsidian plugin 1.3.48: reliable Feishu API image localization
+
+- Goal: fix Feishu official API notes whose text and headings sync correctly but images appear as broken placeholders on only some user computers.
+- Scope: Obsidian plugin Feishu image download/localization, focused plugin regression tests, and release metadata only. No Mini Program, cloud function, payment, binding, Pro entitlement, OAuth configuration, or online business data changes.
+- Changed files: `obsidian-plugin/wechat-inbox-sync/main.js`, both release `manifest.json` / `versions.json` copies, `tests/plugin-main-ai.test.js`, `tests/plugin-marketplace-package.test.js`, and this worklog.
+- Online actions: pushed release commit `a687730` to `main`, pushed tag `1.3.48`, and published GitHub Release `https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.48`. GitHub Actions Release run `29541164485` completed successfully.
+- Data changes: none.
+- Verification: `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, `node --check obsidian-plugin/wechat-inbox-sync/main.js`, and `git diff --check` passed. The release checker confirmed default-branch and raw manifests, versions mapping, tag, all required Release assets, and the local ZIP all report `1.3.48`.
+- Result: Feishu image downloads now fall back from Obsidian `requestUrl` to the Node HTTP transport when needed; empty downloads also trigger fallback. Missing Feishu temporary image URLs and local download/write failures are recorded separately, and the final sync notice reports incomplete Feishu images instead of incorrectly reporting missing body text.
+- Known risk: if both local transports are blocked, or the user's Feishu app lacks/requires renewed `docs:document.media:download` authorization, images still cannot be saved; the failure is now visible. Previously generated notes with expired links do not repair themselves. The historical `tests/release-social-feishu-ai.test.js` still pins release `1.2.97` and fails on every modern version; it is not part of the active Release workflow and should be retired or converted to version-agnostic assertions separately.
+- Next step: ask affected users to update to `1.3.48`, save the original Feishu link again, and sync it again. If images still fail, collect the new focused diagnostic message to distinguish missing Feishu media authorization from local network failure.
+
 ### 2026-07-16 - 发布 Obsidian 插件 1.3.47：修复小红书通用落地页误同步
 
 - 目标：修复部分用户未登录或匿名访问受限时，只保存“小红书 - 你的生活兴趣社区”、分享口令和失效封面，却被标记为同步成功的问题；保持匿名可读笔记无需登录即可快速提取。
