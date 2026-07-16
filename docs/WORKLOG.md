@@ -1,5 +1,19 @@
 # Worklog
 
+### 2026-07-16 11:32 - 发布插件 1.3.45：小红书评论 300 条/90 秒上限与跨平台发布修复
+
+- 目标：正式发布小红书评论一级评论与回复合计最多 300 条、评论阶段最长 90 秒的防卡死能力；同时修复首次接入 Ubuntu 发布回归后暴露的跨平台 ASR 安装路径解析问题。
+- 影响范围：Obsidian 插件的小红书评论预算、ASR 安装路径解析、版本元数据、插件回归测试、GitHub Release；不修改小程序、云函数、绑定码、Pro 权益、腾讯云 CDN 文件或业务数据。
+- 根因与修复：`1.3.44` 的 Actions 在 Ubuntu 上运行 `plugin-main-ai.test.js` 时失败。`extractLocalAsrInstallRootFromCommand` 虽按目标平台使用 `path.win32.normalize` / `path.posix.normalize`，随后却调用宿主系统的 `path.basename`，导致 Linux 无法识别传入的 Windows `transcribe.ps1` 路径。现改为按目标平台调用 `path.win32.basename` / `path.posix.basename`，并加入发布回归约束。
+- 版本处理：保留已推送但未生成 Release 的不可变标签 `1.3.44` 及其 versions 历史，不移动标签；修复顺延为 `1.3.45`。默认分支与 `1.3.45` 标签指向提交 `356badc`。
+- 线上动作：GitHub Actions 运行 `29469011916` 成功，正式 Release 为 <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.45>，为 Latest、非 draft、非 prerelease，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.45.zip`。此次本地组件文件未变，只回读校验腾讯云 OCR 资产，未覆盖 CDN。
+- 数据变更：无；未修改用户同步记录、笔记、插件 `data.json`、登录 Cookie、兑换码、权益或设备。
+- 验证：TDD 先确认跨平台 basename 回归约束在旧实现失败，最小修复后通过；`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node scripts/check-local-ocr-cdn.js` 和 `git diff --check` 均通过。Actions 的 Ubuntu 回归、OCR CDN 校验和 Release 创建全部成功；专用发布检查确认默认分支、Raw manifest、Latest/目标 Release 和五项资产均为 `1.3.45`。另通过已认证 Release Asset API 验证正式 manifest、versions 与 ZIP 内 manifest 为 `1.3.45`，ZIP 必需文件无缺失，正式 ZIP SHA-256 为 `E750E60B5F80599FAF0A448574D47BBCBE528AA6A7BE81EC94EE23D6C534BBB9`。
+- 本地包：`C:\Users\ADMIN\AppData\Local\Temp\wechat-inbox-sync-1.3.45.zip`，包内 manifest 为 `1.3.45`，SHA-256 为 `88991088A51730FF540E9FCBE1687AFE779F0E8C305F4A0E8616001DFB103744`。
+- 结果：插件市场更新链路已发布 `1.3.45`；高热度小红书评论达到 300 条或评论阶段达到 90 秒时提前结束评论抓取，并继续保存正文、图片和已取得评论，不再无限停留在“正在处理”。
+- 已知风险：平台验证码、登录失效或限流可能使 90 秒内取得的评论少于 300 条；本次没有在真实 4000+ 评论笔记上完成发布后端到端复测。`1.3.44` 标签存在但没有 Release，属于失败发布记录，不应被复用或移动。
+- 下一步：让问题用户更新到 `1.3.45` 后复测高评论量笔记，确认最长约 90 秒后保存且诊断为 `total_limit_reached` 或 `time_budget_exceeded`；随后进入小程序首页客服气泡、Hermes/Codex/知识库分流和飞书人工介入的产品设计。
+
 ### 2026-07-15 21:42 - 限制小红书评论提取为 300 条和 90 秒
 
 - 目标：解决高热度小红书笔记评论数达到数千条时，插件可能长期停留在“正在处理”且整条链接无法完成保存的问题；按用户确认的产品限制，将一级评论与回复合计设为最多 300 条，并把评论相关阶段的总耗时设为最长 90 秒。
