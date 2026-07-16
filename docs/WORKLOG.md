@@ -12,6 +12,17 @@
 - 已知风险：小红书仍可能要求登录、验证码或触发风控；本修复不绕过平台限制，只复用用户主动建立的插件会话并避免把受限页误报成功。此前已经被云端标记为 synced 的坏记录不会自动回到 pending，需要后台重置或重新收集后再同步。
 - 下一步：如需用户端生效，以本候选分支发布下一插件版本；发布后让问题用户先直接重试，若仍提示内容不可用，再在插件设置里登录小红书。对历史坏记录先恢复为 pending。
 
+### 2026-07-16 - 发布 Obsidian 插件 1.3.46：远端解绑恢复，并继承小红书评论稳定能力
+
+- 目标：解决用户先在小程序解绑后，插件仍保留失效绑定、再次点击“解除本机”反而卡在“绑定码已失效”的问题；用户无需卸载插件即可清除旧绑定并绑定新码。
+- 变更：在插件解除本机绑定的异常分支中，将服务端明确返回的 `Invalid or expired token` / `绑定码未绑定或已失效` 视为幂等解绑成功，复用 `markBindingUnbound` 清理本机旧 token、绑定列表及关联缓存，并提示用户旧绑定已同步清除。网络连接和服务端 5xx 等非失效错误仍保留本机绑定，避免误清除。
+- 小红书评论：本版本继承正式 `1.3.45` 中已上线的小红书完整评论树收集、最终单一权威评论树渲染、重复/回复去重，以及“一级评论与回复合计最多 300 条、评论阶段最多 90 秒”的防卡死边界；稳定锚点 `xhs-comments-stable-1.3.42` 保持不变。
+- Pro 防回退：未修改 `getProEntitlementStatusFingerprint`、权益刷新、缓存保留或设置页重绘逻辑；1.3.41 起的 Pro 有效期刷新改动被完整保留。
+- 发布：`main` 已推进到 `142419e`，正式标签 `1.3.46` 已推送；GitHub Release <https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.46> 为 Latest、非 draft、非 prerelease，包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.46.zip`。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node scripts/check-local-ocr-cdn.js`、版本 JSON 解析及 `git diff --check` 全部通过；发布检查已验证默认分支、raw manifest、Release 资产、Release ZIP 与桌面 ZIP 均为 `1.3.46`。
+- 本地包：`C:\Users\ADMIN\Desktop\wechat-inbox-sync-1.3.46.zip`；SHA-256 `1721091BFF70421C491D2424C17DB1C05EB2FAF502D9C2FD7078FFD344D7DB42`。
+- 数据变更：无；未修改小程序、云函数、绑定码/兑换码/Pro 业务数据、用户同步内容或任何知识库插件 `data.json`。
+
 ### 2026-07-16 - 修复小程序先解绑后插件卡住旧绑定码（候选，未发布）
 
 - 目标：用户在小程序侧先解绑后，插件不再保留失效绑定并卡住“解除本机/立即绑定”；无需卸载重装即可输入并绑定新码。
