@@ -12063,6 +12063,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       new Notice('已解除当前电脑绑定');
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
+      if (isBindingInvalidMessage(message)) {
+        await this.markBindingUnbound(normalizedToken, '小程序已解除绑定，本机同步清理旧绑定');
+        new Notice('该绑定已在小程序解除，本机旧绑定已同步清除。');
+        return;
+      }
       new Notice(`解除绑定失败：${message || error}`);
     }
   }

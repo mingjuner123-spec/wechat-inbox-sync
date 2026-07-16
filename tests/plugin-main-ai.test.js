@@ -5602,7 +5602,7 @@ async function runMarkSyncedRecordNotFoundIsIdempotentTest() {
   ]]);
 }
 
-async function runUnbindInvalidCodePreservesLocalBindingTest() {
+async function runUnbindAlreadyRemoteUnboundClearsLocalBindingTest() {
   const previousRequestUrlMock = requestUrlMock;
   requestUrlMock = async () => ({
     status: 403,
@@ -5642,25 +5642,49 @@ async function runUnbindInvalidCodePreservesLocalBindingTest() {
 
   try {
     await plugin.unbindBinding('OLD-123');
-    assert.deepStrictEqual(plugin.settings.bindings, [{
+    assert.deepStrictEqual(plugin.settings.bindings, []);
+    assert.strictEqual(plugin.settings.token, '');
+    assert.strictEqual(plugin.settings.pendingRedeemCode, '');
+    assert.deepStrictEqual(plugin.settings.localTranscriptionEntitlementStatus, {
+      hasAccess: false,
+      plan: 'local_transcription_beta',
+      status: 'unbound',
+      expiresAt: '',
+    });
+    assert.deepStrictEqual(savedSettings.bindings, []);
+    assert.strictEqual(savedSettings.token, '');
+    assert.strictEqual(savedSettings.pendingRedeemCode, '');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
+async function runUnbindTransportFailurePreservesLocalBindingTest() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'OLD-123',
+    clientId: 'test-client',
+    bindings: [{
       token: 'OLD-123',
       label: '旧微信',
       enabled: true,
       status: 'bound',
-      boundAt: '',
-      lastSyncAt: '',
-      unboundAt: '',
-      lastError: '',
-    }]);
-    assert.strictEqual(plugin.settings.token, 'OLD-123');
-    assert.strictEqual(plugin.settings.pendingRedeemCode, 'OBPROT93C6');
-    assert.strictEqual(plugin.settings.localTranscriptionEntitlementStatus, null);
-    assert.strictEqual(savedSettings.bindings[0].token, 'OLD-123');
-    assert.strictEqual(savedSettings.token, 'OLD-123');
-    assert.strictEqual(savedSettings.pendingRedeemCode, 'OBPROT93C6');
-  } finally {
-    requestUrlMock = previousRequestUrlMock;
-  }
+    }],
+  });
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+  plugin.requestJson = async () => {
+    throw new Error('网络连接失败：socket hang up');
+  };
+
+  await plugin.unbindBinding('OLD-123');
+
+  assert.strictEqual(plugin.settings.token, 'OLD-123');
+  assert.deepStrictEqual(plugin.settings.bindings.map((item) => item.token), ['OLD-123']);
+  assert.strictEqual(savedSettings, null);
 }
 
 async function runSyncInvalidCodePreservesLocalBindingTest() {
@@ -6884,7 +6908,8 @@ async function main() {
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();
   await runMarkSyncedRecordNotFoundIsIdempotentTest();
-  await runUnbindInvalidCodePreservesLocalBindingTest();
+  await runUnbindAlreadyRemoteUnboundClearsLocalBindingTest();
+  await runUnbindTransportFailurePreservesLocalBindingTest();
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
