@@ -10970,6 +10970,18 @@ function buildSyncProgressMessage({
 function getRecordConversionWarning(record) {
   if (!record) return '';
   const metadata = record.metadata || {};
+  const imageLocalizationFailedCount = Number(metadata.imageLocalizationFailedCount) || 0;
+  const imageTempUrlMissingCount = Number(metadata.imageTempUrlMissingCount) || 0;
+  const imageFailureCount = Math.max(imageLocalizationFailedCount, imageTempUrlMissingCount);
+  if (imageFailureCount > 0) {
+    const details = [];
+    if (imageTempUrlMissingCount > 0) {
+      details.push(`飞书未返回 ${imageTempUrlMissingCount} 张图片地址`);
+    }
+    const localizationError = String(metadata.imageLocalizationError || '').trim();
+    if (localizationError) details.push(localizationError);
+    return `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join('；')}` : ''}`;
+  }
   const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
   const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
   if (status === 'failed') {
@@ -10982,6 +10994,14 @@ function getRecordConversionWarning(record) {
     return errorMsg || '网页抓取未成功';
   }
   return '';
+}
+
+function buildConversionWarningsNotice(warnings = []) {
+  const normalized = (Array.isArray(warnings) ? warnings : [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+  if (!normalized.length) return '';
+  return `，${normalized.length} 条内容处理不完整：${normalized[0]}`;
 }
 
 function isCloudTranscriptionWaitingRecord(record) {
@@ -11930,11 +11950,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (options.signal || typeof options.onProgress === 'function') {
       return downloadArrayBufferViaNode(url, headers, options);
     }
-    const response = await requestUrl({ url, method: 'GET', headers });
-    if (!response.arrayBuffer) {
-      throw new Error('录音文件下载失败');
+    try {
+      const response = await requestUrl({ url, method: 'GET', headers });
+      const responseBuffer = response && response.arrayBuffer;
+      const responseBufferSize = responseBuffer
+        ? Number(responseBuffer.byteLength ?? responseBuffer.length ?? 0)
+        : 0;
+      if (responseBuffer && responseBufferSize > 0) {
+        return responseBuffer;
+      }
+    } catch (error) {
+      // Some Electron/Obsidian requestUrl environments cannot download Feishu temporary media URLs.
     }
-    return response.arrayBuffer;
+    return downloadArrayBufferViaNode(url, headers, options);
   }
 
   async buildXiaohongshuOcrImagePayload(imageUrls = []) {
@@ -13940,7 +13968,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return nextMarkdown;
   }
 
-  async saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title) {
+  async saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title, options = {}) {
     if (!markdown
       || !this.app
       || !this.app.vault
@@ -13968,7 +13996,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         // eslint-disable-next-line no-await-in-loop
         const arrayBuffer = await this.downloadArrayBuffer(imageUrl);
         const buffer = Buffer.from(arrayBuffer || []);
-        if (!buffer.length) continue;
+        if (!buffer.length) throw new Error('图片下载结果为空');
         const ext = getImageExtFromBuffer(buffer, imageUrl);
         const imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${ext}`;
         // eslint-disable-next-line no-await-in-loop
@@ -13977,6 +14005,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         index += 1;
       } catch (error) {
         // Remote image localization is best-effort. Keep the original URL if download fails.
+        if (typeof options.onError === 'function') {
+          options.onError({ imageUrl, error });
+        }
       }
     }
 
@@ -14496,11 +14527,22 @@ class WechatObsidianInboxPlugin extends Plugin {
               url,
               cloudOpenApiResult.imageTmpDownloadUrls || {},
             );
+            const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
+            const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {})
+              .filter((value) => /^https?:\/\//i.test(String(value || '').trim()))
+              .length;
+            const missingImageTempUrlCount = Math.max(0, imageTokenCount - imageTempUrlCount);
+            const imageLocalizationErrors = [];
             cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
               cleanedCloudOpenApiMarkdown,
               rootDir,
               dateFolder,
               feishuTitle,
+              {
+                onError: ({ error }) => {
+                  imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+                },
+              },
             );
             return {
               ...record,
@@ -14510,10 +14552,17 @@ class WechatObsidianInboxPlugin extends Plugin {
                 markdown: cleanedCloudOpenApiMarkdown,
                 conversionStatus: 'success',
                 conversionSource: 'feishu-cloud-oauth',
+                imageTempUrlMissingCount: missingImageTempUrlCount,
+                imageLocalizationFailedCount: imageLocalizationErrors.length,
+                imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
-                  cloudOpenApiResult.imageTokenCount ? `images=${cloudOpenApiResult.imageTokenCount}` : '',
+                  imageTokenCount ? `images=${imageTokenCount}` : '',
+                  missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : '',
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
+                  imageLocalizationErrors.length
+                    ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(' | ')}`
+                    : '',
                 ].filter(Boolean).join('; '),
               }),
             };
@@ -15301,9 +15350,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         finalMessage += buildSkippedSyncNotice(skipped);
       }
       if (showNotice || written.length) {
-        if (conversionWarnings.length) {
-          finalMessage += `，${conversionWarnings.length} 条未提取到正文，打开文件查看详情`;
-        }
+        finalMessage += buildConversionWarningsNotice(conversionWarnings);
         if (failed.length) {
           finalMessage += `，${failed.length} 条失败：${failed[0].message}`;
         }
@@ -15911,6 +15958,8 @@ WechatObsidianInboxPlugin.__test = {
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
   buildSkippedSyncNotice,
+  getRecordConversionWarning,
+  buildConversionWarningsNotice,
   parseLocalAsrProgressLog,
   getTranscriptionQualityIssue,
   createTranscriptionQualityError,

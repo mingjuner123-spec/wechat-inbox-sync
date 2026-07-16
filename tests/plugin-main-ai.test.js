@@ -200,6 +200,8 @@ assert.strictEqual(typeof helpers.parseTencentTaskStatusResponse, 'function');
 assert.strictEqual(typeof helpers.buildRecordTitleBase, 'function');
 assert.strictEqual(typeof helpers.hasRecordIdInFrontmatter, 'function');
 assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
+assert.strictEqual(typeof helpers.getRecordConversionWarning, 'function');
+assert.strictEqual(typeof helpers.buildConversionWarningsNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.hasXiaohongshuLoginCookies, 'function');
 assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
@@ -1524,6 +1526,27 @@ assert.strictEqual(
 assert.strictEqual(
   helpers.buildSkippedSyncNotice([{ reason: 'already-synced-local' }, { reason: 'cloud-transcription-processing' }]),
   '，1 条云端转写中，完成后再同步',
+);
+assert.strictEqual(
+  helpers.getRecordConversionWarning({
+    metadata: {
+      imageLocalizationFailedCount: 2,
+      imageLocalizationError: 'read ECONNRESET',
+    },
+  }),
+  '飞书图片有 2 张未保存：read ECONNRESET',
+);
+assert.strictEqual(
+  helpers.getRecordConversionWarning({
+    metadata: {
+      imageTempUrlMissingCount: 3,
+    },
+  }),
+  '飞书图片有 3 张未保存：飞书未返回 3 张图片地址',
+);
+assert.strictEqual(
+  helpers.buildConversionWarningsNotice(['飞书图片有 2 张未保存：read ECONNRESET']),
+  '，1 条内容处理不完整：飞书图片有 2 张未保存：read ECONNRESET',
 );
 assert.deepStrictEqual(
   helpers.normalizeGeneratedKeywords('#飞书机器人, Obsidian，效率提升  AI'),
@@ -3969,6 +3992,128 @@ async function runAsyncHydrationTests() {
     'https://my.feishu.cn/docx/cloudDocxToken',
     undefined,
   ]]);
+
+  const fallbackImageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 4, 5, 6]);
+  let fallbackImageRequestCount = 0;
+  const fallbackImageServer = http.createServer((req, res) => {
+    fallbackImageRequestCount += 1;
+    assert.strictEqual(req.method, 'GET');
+    assert.strictEqual(req.url, '/feishu-image.png');
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': fallbackImageBytes.length,
+    });
+    res.end(fallbackImageBytes);
+  });
+  await new Promise((resolve) => fallbackImageServer.listen(0, '127.0.0.1', resolve));
+  const fallbackImageUrl = `http://127.0.0.1:${fallbackImageServer.address().port}/feishu-image.png`;
+  const feishuImagePreviousRequestUrlMock = requestUrlMock;
+  const fallbackFeishuFiles = {};
+  const fallbackFeishuPlugin = new PluginClass();
+  fallbackFeishuPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: { connected: true },
+  });
+  fallbackFeishuPlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        writeBinary: async (filePath, buffer) => {
+          fallbackFeishuFiles[filePath] = Buffer.from(buffer);
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  requestUrlMock = async ({ url }) => {
+    if (url === fallbackImageUrl) {
+      throw new Error('net::ERR_CONNECTION_RESET');
+    }
+    return {};
+  };
+  fallbackFeishuPlugin.requestJson = async (requestPath) => {
+    if (requestPath === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: '飞书图片下载兜底',
+          documentId: 'fallbackDocxToken',
+          blockCount: 1,
+          blocks: [{ block_id: 'img1', block_type: 27, image: { token: 'boxcnFallbackImageToken' } }],
+          imageTokenCount: 1,
+          imageTmpDownloadUrls: {
+            boxcnFallbackImageToken: fallbackImageUrl,
+          },
+        },
+      };
+    }
+    throw new Error(`Unexpected fallback Feishu path ${requestPath}`);
+  };
+  try {
+    const fallbackHydrated = await fallbackFeishuPlugin.hydrateWebpageMarkdown({
+      _id: 'feishu-cloud-oauth-image-fallback',
+      type: 'webpage',
+      content: 'https://my.feishu.cn/docx/fallbackDocxToken',
+      metadata: { url: 'https://my.feishu.cn/docx/fallbackDocxToken' },
+    }, '临时收集', '2026-07-16', '飞书图片下载兜底');
+    const fallbackImagePath = '临时收集/网页图片/2026-07-16/飞书图片下载兜底-image-01.png';
+    assert.ok(fallbackHydrated.metadata.markdown.includes(`![[${fallbackImagePath}]]`));
+    assert.deepStrictEqual(fallbackFeishuFiles[fallbackImagePath], fallbackImageBytes);
+    assert.strictEqual(fallbackImageRequestCount, 1);
+  } finally {
+    requestUrlMock = feishuImagePreviousRequestUrlMock;
+    await new Promise((resolve) => fallbackImageServer.close(resolve));
+  }
+
+  const failedImagePlugin = new PluginClass();
+  failedImagePlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: { connected: true },
+  });
+  failedImagePlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        writeBinary: async () => {},
+      },
+      createFolder: async () => {},
+    },
+  };
+  failedImagePlugin.downloadArrayBuffer = async () => {
+    throw new Error('read ECONNRESET');
+  };
+  failedImagePlugin.requestJson = async (requestPath) => {
+    if (requestPath === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: '飞书图片失败诊断',
+          documentId: 'failedImageDocxToken',
+          blockCount: 1,
+          blocks: [{ block_id: 'img1', block_type: 27, image: { token: 'boxcnFailedImageToken' } }],
+          imageTokenCount: 1,
+          imageTmpDownloadUrls: {},
+        },
+      };
+    }
+    throw new Error(`Unexpected failed image Feishu path ${requestPath}`);
+  };
+  const failedImageHydrated = await failedImagePlugin.hydrateWebpageMarkdown({
+    _id: 'feishu-cloud-oauth-image-failed',
+    type: 'webpage',
+    content: 'https://my.feishu.cn/docx/failedImageDocxToken',
+    metadata: { url: 'https://my.feishu.cn/docx/failedImageDocxToken' },
+  }, '临时收集', '2026-07-16', '飞书图片失败诊断');
+  assert.ok(failedImageHydrated.metadata.conversionNote.includes('image-localize-failed=1'));
+  assert.ok(failedImageHydrated.metadata.conversionNote.includes('read ECONNRESET'));
+  assert.ok(failedImageHydrated.metadata.conversionNote.includes('image-temp-url-missing=1'));
+  assert.strictEqual(failedImageHydrated.metadata.imageLocalizationFailedCount, 1);
+  assert.strictEqual(failedImageHydrated.metadata.imageTempUrlMissingCount, 1);
+  assert.ok(failedImageHydrated.metadata.imageLocalizationError.includes('read ECONNRESET'));
 
   const cloudStatusRefreshPlugin = new PluginClass();
   const cloudStatusRefreshCalls = [];
