@@ -1876,6 +1876,12 @@ assert.strictEqual(
   ),
   'C:\\Users\\ADMIN\\.wechat-inbox-local-asr',
 );
+const extractLocalAsrInstallRootSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('function extractLocalAsrInstallRootFromCommand'),
+  pluginMainSource.indexOf('function normalizeNoteSaveMode'),
+);
+assert.match(extractLocalAsrInstallRootSource, /path\.win32\.basename/);
+assert.match(extractLocalAsrInstallRootSource, /path\.posix\.basename/);
 assert.strictEqual(
   helpers.getLocalAsrRepairAction({
     platform: 'win32',

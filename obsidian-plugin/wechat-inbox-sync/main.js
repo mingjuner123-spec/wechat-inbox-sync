@@ -1247,7 +1247,10 @@ function extractLocalAsrInstallRootFromCommand(command, platform = os.platform()
   const normalizedScriptPath = localPlatform === 'win32'
     ? path.win32.normalize(scriptPath)
     : path.posix.normalize(scriptPath.replace(/\\/g, '/'));
-  if (path.basename(normalizedScriptPath).toLowerCase() !== scriptName.toLowerCase()) return '';
+  const normalizedScriptName = localPlatform === 'win32'
+    ? path.win32.basename(normalizedScriptPath)
+    : path.posix.basename(normalizedScriptPath);
+  if (normalizedScriptName.toLowerCase() !== scriptName.toLowerCase()) return '';
   return localPlatform === 'win32'
     ? path.win32.dirname(normalizedScriptPath)
     : path.posix.dirname(normalizedScriptPath);
