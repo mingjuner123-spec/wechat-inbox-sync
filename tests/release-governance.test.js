@@ -55,7 +55,7 @@ function yamlBlock(text, headerPattern) {
   return lines.slice(start, end).join('\n');
 }
 
-function executableYamlSteps(jobBlock) {
+function yamlSteps(jobBlock) {
   const lines = jobBlock.split(/\r?\n/);
   const starts = lines.flatMap((line, index) => (
     /^\s*-\s+(?:name|uses|run)\s*:/.test(line) && !line.trimStart().startsWith('#') ? [index] : []
@@ -64,6 +64,15 @@ function executableYamlSteps(jobBlock) {
     .slice(start, starts[index + 1] ?? lines.length)
     .filter((line) => !line.trimStart().startsWith('#'))
     .join('\n'));
+}
+
+function runBody(step) {
+  const lines = step.split(/\r?\n/);
+  const runStart = lines.findIndex((line) => /^\s+run\s*:/.test(line));
+  if (runStart === -1) return '';
+  return lines.slice(runStart)
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
 }
 
 function componentEntries(manifest) {
@@ -116,12 +125,14 @@ test('the manifest checker executes check mode and documents intentional write m
   const check = childProcess.spawnSync(process.execPath, [checkerPath, '--check'], {
     cwd: repoRoot,
     encoding: 'utf8',
+    timeout: 5000,
   });
   assert.equal(check.status, 0, `manifest --check failed:\n${check.stdout}${check.stderr}`);
 
   const help = childProcess.spawnSync(process.execPath, [checkerPath, '--help'], {
     cwd: repoRoot,
     encoding: 'utf8',
+    timeout: 5000,
   });
   assert.equal(help.status, 0, `manifest --help failed:\n${help.stdout}${help.stderr}`);
   assert.match(`${help.stdout}${help.stderr}`, /--write\b/, 'checker help must document intentional --write mode');
@@ -129,6 +140,7 @@ test('the manifest checker executes check mode and documents intentional write m
   const invalid = childProcess.spawnSync(process.execPath, [checkerPath, '--not-a-real-mode'], {
     cwd: repoRoot,
     encoding: 'utf8',
+    timeout: 5000,
   });
   assert.notEqual(invalid.status, 0, 'manifest checker must reject unknown modes');
 });
@@ -143,13 +155,13 @@ test('the main workflow guards main pushes and pull requests with repository con
   assert.match(push, /^\s+branches:\s*(?:\[\s*main\s*\]|(?:\r?\n\s+-\s+main))\s*$/m, 'push trigger must target main');
   assert.match(pullRequest, /^\s+branches:\s*(?:\[\s*main\s*\]|(?:\r?\n\s+-\s+main))\s*$/m, 'pull_request trigger must target main');
 
-  const steps = executableYamlSteps(workflow);
+  const runs = yamlSteps(workflow).map(runBody);
   assert.ok(
-    steps.some((step) => /node tests\/release-governance\.test\.js/.test(step)),
+    runs.some((run) => /node tests\/release-governance\.test\.js/.test(run)),
     'main guard workflow must execute release-governance contracts',
   );
   assert.match(
-    steps.join('\n'),
+    runs.join('\n'),
     /node scripts\/update-local-components-manifest\.js --check/,
     'main guard workflow must reject component-manifest drift',
   );
@@ -159,29 +171,34 @@ test('the component-integrity workflow runs on a schedule and by manual dispatch
   skip: !fileExists(relativePaths.integrityWorkflow),
 }, () => {
   const workflow = readText(relativePaths.integrityWorkflow);
-  assert.match(workflow, /\bschedule\s*:/, 'component integrity must run on a schedule');
-  assert.match(workflow, /\bcron\s*:/, 'component integrity schedule must define a cron');
-  assert.match(workflow, /\bworkflow_dispatch\s*:/, 'component integrity must support manual dispatch');
-  assert.match(
-    workflow,
-    /node scripts\/check-local-components-cdn\.js/,
+  const triggers = yamlBlock(workflow, /^on:\s*$/);
+  const schedule = yamlBlock(triggers, /^  schedule:\s*$/);
+  yamlBlock(triggers, /^  workflow_dispatch:\s*(?:\{\})?\s*$/);
+  assert.match(schedule, /^\s+-\s+cron\s*:/m, 'component integrity schedule must define a cron');
+  const runs = yamlSteps(workflow).map(runBody);
+  assert.ok(
+    runs.some((run) => /node scripts\/check-local-components-cdn\.js/.test(run)),
     'component integrity workflow must run the canonical CDN verifier',
   );
 });
 
 test('tag releases check out full Git history', () => {
   const workflow = readText(relativePaths.releaseWorkflow);
-  assert.match(workflow, /fetch-depth\s*:\s*0/, 'release checkout must fetch full Git history');
+  const releaseJob = yamlBlock(workflow, /^  release:\s*$/);
+  const checkout = yamlSteps(releaseJob)
+    .find((step) => /^\s+uses:\s*actions\/checkout@/m.test(step));
+  assert.ok(checkout, 'release workflow must contain an actions/checkout step');
+  assert.match(checkout, /^\s+fetch-depth\s*:\s*0\s*$/m, 'release checkout must fetch full Git history');
 });
 
 test('tag releases enforce equality with current remote main', () => {
   const workflow = readText(relativePaths.releaseWorkflow);
   const releaseJob = yamlBlock(workflow, /^  release:\s*$/);
-  const steps = executableYamlSteps(releaseJob);
-  const guardIndex = steps.findIndex((step) => /node scripts\/release-source-guard\.js/.test(step));
-  const publishIndex = steps.findIndex((step) => /\bgh release (?:create|upload)\b/.test(step));
+  const runs = yamlSteps(releaseJob).map(runBody);
+  const guardIndex = runs.findIndex((run) => /node scripts\/release-source-guard\.js/.test(run));
+  const publishIndex = runs.findIndex((run) => /\bgh release (?:create|upload)\b/.test(run));
   assert.match(
-    releaseJob,
+    runs.join('\n'),
     /(?:origin\/main|refs\/heads\/main)/,
     'release workflow must identify the current remote main commit',
   );
