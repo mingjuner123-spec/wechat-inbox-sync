@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
@@ -10,8 +11,14 @@ const {
   buildManifestAsset,
   normalizeTextBytes,
   sha256Hex,
+  validateCanonicalManifest,
   validateManifest,
+  validateManifestSchema,
 } = require('../scripts/local-component-manifest-core');
+const {
+  resolveContainedSourcePath,
+  writeFileAtomically,
+} = require('../scripts/update-local-components-manifest');
 
 const repoRoot = path.resolve(__dirname, '..');
 const relativePaths = {
@@ -91,6 +98,13 @@ function componentEntries(manifest) {
   return entries;
 }
 
+function canonicalManifestFixture() {
+  return buildManifest(ASSET_DEFINITIONS.map((definition) => ({
+    ...definition,
+    contents: Buffer.from(`${definition.id}\n`, 'utf8'),
+  })));
+}
+
 test('canonical text hashing treats LF and CRLF source bytes as equivalent', () => {
   const lf = normalizeTextBytes(Buffer.from('alpha\nbeta\ngamma\n', 'utf8'));
   const crlf = normalizeTextBytes(Buffer.from('alpha\r\nbeta\r\ngamma\r\n', 'utf8'));
@@ -98,6 +112,20 @@ test('canonical text hashing treats LF and CRLF source bytes as equivalent', () 
   assert.deepEqual(crlf, lf);
   assert.equal(sha256Hex(crlf), sha256Hex(lf));
   assert.equal(lf.toString('utf8'), 'alpha\nbeta\ngamma\n');
+});
+
+test('canonical text decoding rejects malformed UTF-8 bytes', () => {
+  assert.throws(
+    () => normalizeTextBytes(Buffer.from([0xc3, 0x28])),
+    /UTF-8|encoded data/i,
+  );
+});
+
+test('canonical text decoding intentionally removes one UTF-8 BOM', () => {
+  const plain = normalizeTextBytes(Buffer.from('alpha\n', 'utf8'));
+  const withBom = normalizeTextBytes(Buffer.from([0xef, 0xbb, 0xbf, ...plain]));
+
+  assert.deepEqual(withBom, plain);
 });
 
 test('manifest assets use the full lowercase canonical SHA-256 in immutable paths', () => {
@@ -141,7 +169,7 @@ test('manifest schema validation rejects malformed component metadata', async (t
 
   await t.test('unsupported schema versions', () => {
     assert.throws(
-      () => validateManifest({ ...validManifest, schemaVersion: 2 }),
+      () => validateManifestSchema({ ...validManifest, schemaVersion: 2 }),
       /schemaVersion/i,
     );
   });
@@ -149,20 +177,133 @@ test('manifest schema validation rejects malformed component metadata', async (t
   await t.test('truncated hashes', () => {
     const malformed = structuredClone(validManifest);
     malformed.assets[0].sha256 = malformed.assets[0].sha256.slice(0, 12);
-    assert.throws(() => validateManifest(malformed), /sha256/i);
+    assert.throws(() => validateManifestSchema(malformed), /sha256/i);
   });
 
   await t.test('immutable paths that do not match the full hash', () => {
     const malformed = structuredClone(validManifest);
     malformed.assets[0].immutablePath = 'local-components/by-sha256/short/test-installer.sh';
-    assert.throws(() => validateManifest(malformed), /immutablePath/i);
+    assert.throws(() => validateManifestSchema(malformed), /immutablePath/i);
   });
 
   await t.test('missing compatibility aliases', () => {
     const malformed = structuredClone(validManifest);
     delete malformed.assets[0].compatibilityAlias;
-    assert.throws(() => validateManifest(malformed), /compatibilityAlias/i);
+    assert.throws(() => validateManifestSchema(malformed), /compatibilityAlias/i);
   });
+});
+
+test('canonical manifest validation rejects missing, extra, unknown, or swapped assets', async (t) => {
+  const canonical = canonicalManifestFixture();
+
+  assert.equal(validateCanonicalManifest(canonical), true);
+  assert.equal(validateManifest(canonical), true, 'validateManifest must enforce the canonical contract');
+
+  await t.test('missing canonical assets and wrong counts', () => {
+    const malformed = structuredClone(canonical);
+    malformed.assets.pop();
+    assert.throws(() => validateCanonicalManifest(malformed), /exactly 5 canonical assets/i);
+  });
+
+  await t.test('extra canonical assets and wrong counts', () => {
+    const extraAsset = buildManifestAsset({
+      id: 'unknown-extra',
+      sourcePath: 'local-z/extra.sh',
+      compatibilityAlias: 'local-z/common/extra.sh',
+    }, Buffer.from('extra\n', 'utf8'));
+    const malformed = structuredClone(canonical);
+    malformed.assets.push(extraAsset);
+    assert.throws(() => validateCanonicalManifest(malformed), /exactly 5 canonical assets/i);
+  });
+
+  await t.test('unknown IDs with the expected count', () => {
+    const malformed = structuredClone(canonical);
+    malformed.assets[0].id = 'unknown-id';
+    assert.throws(() => validateCanonicalManifest(malformed), /unknown canonical asset id/i);
+  });
+
+  await t.test('swapped source mappings', () => {
+    const malformed = structuredClone(canonical);
+    [malformed.assets[0].id, malformed.assets[1].id] = [
+      malformed.assets[1].id,
+      malformed.assets[0].id,
+    ];
+    assert.throws(() => validateCanonicalManifest(malformed), /sourcePath/i);
+  });
+
+  await t.test('swapped compatibility aliases', () => {
+    const malformed = structuredClone(canonical);
+    [malformed.assets[0].compatibilityAlias, malformed.assets[1].compatibilityAlias] = [
+      malformed.assets[1].compatibilityAlias,
+      malformed.assets[0].compatibilityAlias,
+    ];
+    assert.throws(() => validateCanonicalManifest(malformed), /compatibilityAlias/i);
+  });
+});
+
+test('repository paths reject Windows, rooted, traversal, NUL, and non-normalized forms', async (t) => {
+  const invalidPaths = [
+    ['Windows drive', 'C:/local-asr/install.sh'],
+    ['backslash', 'local-asr\\install.sh'],
+    ['UNC', '//server/share/install.sh'],
+    ['traversal', 'local-asr/../install.sh'],
+    ['NUL', 'local-asr/\0install.sh'],
+    ['dot segment', './local-asr/install.sh'],
+  ];
+
+  for (const [label, sourcePath] of invalidPaths) {
+    await t.test(label, () => {
+      assert.throws(
+        () => buildManifestAsset({
+          id: 'invalid-path',
+          sourcePath,
+          compatibilityAlias: 'local-asr/common/install.sh',
+        }, Buffer.from('installer\n', 'utf8')),
+        /sourcePath/i,
+      );
+    });
+  }
+});
+
+test('source path resolution proves the resolved file remains inside the plugin root', () => {
+  const pluginRoot = absolutePath('obsidian-plugin/wechat-inbox-sync');
+  assert.equal(
+    resolveContainedSourcePath(pluginRoot, 'local-asr/install-local-asr.ps1'),
+    absolutePath('obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1'),
+  );
+  assert.throws(
+    () => resolveContainedSourcePath(pluginRoot, '../outside.txt'),
+    /escapes plugin root/i,
+  );
+});
+
+test('atomic manifest writes replace the destination and clean temporary files', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'local-component-manifest-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const destination = path.join(directory, 'manifest.json');
+
+  fs.writeFileSync(destination, 'old\n', 'utf8');
+  writeFileAtomically(destination, 'new\n');
+
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'new\n');
+  assert.deepEqual(fs.readdirSync(directory), ['manifest.json']);
+});
+
+test('atomic manifest writes clean temporary files when rename fails', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'local-component-manifest-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const destination = path.join(directory, 'manifest.json');
+  fs.mkdirSync(destination);
+
+  let renameError;
+  try {
+    writeFileAtomically(destination, 'new\n');
+  } catch (error) {
+    renameError = error;
+  }
+  assert.ok(renameError, 'rename over a directory must fail');
+  assert.notEqual(renameError.name, 'TypeError', 'failure must come from the atomic rename');
+  assert.deepEqual(fs.readdirSync(directory), ['manifest.json']);
 });
 
 test('canonical asset definitions preserve every compatibility alias', () => {

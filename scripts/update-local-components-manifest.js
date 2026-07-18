@@ -2,12 +2,14 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const {
   ASSET_DEFINITIONS,
   assertManifestMatches,
   buildManifest,
   serializeManifest,
-  validateManifest,
+  validateCanonicalManifest,
+  validateRepositoryPath,
 } = require('./local-component-manifest-core');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -22,10 +24,43 @@ Modes:
 `;
 
 function buildCurrentManifest() {
-  return buildManifest(ASSET_DEFINITIONS.map((definition) => ({
+  const manifest = buildManifest(ASSET_DEFINITIONS.map((definition) => ({
     ...definition,
-    contents: fs.readFileSync(path.join(PLUGIN_ROOT, ...definition.sourcePath.split('/'))),
+    contents: fs.readFileSync(resolveContainedSourcePath(PLUGIN_ROOT, definition.sourcePath)),
   })));
+  validateCanonicalManifest(manifest);
+  return manifest;
+}
+
+function resolveContainedSourcePath(pluginRoot, sourcePath) {
+  const resolvedRoot = path.resolve(pluginRoot);
+  const resolvedSource = path.resolve(resolvedRoot, sourcePath);
+  const relative = path.relative(resolvedRoot, resolvedSource);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new TypeError(`sourcePath escapes plugin root: ${sourcePath}`);
+  }
+  validateRepositoryPath(sourcePath, 'sourcePath');
+  return resolvedSource;
+}
+
+function writeFileAtomically(destinationPath, contents) {
+  const tempPath = path.join(
+    path.dirname(destinationPath),
+    `.${path.basename(destinationPath)}.tmp-${process.pid}-${randomUUID()}`,
+  );
+  try {
+    fs.writeFileSync(tempPath, contents, { encoding: 'utf8', flag: 'wx' });
+    fs.renameSync(tempPath, destinationPath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (cleanupError) {
+      if (cleanupError.code !== 'ENOENT') {
+        error.message += `; temporary file cleanup failed: ${cleanupError.message}`;
+      }
+    }
+    throw error;
+  }
 }
 
 function checkManifest() {
@@ -39,7 +74,7 @@ function checkManifest() {
   } catch (error) {
     throw new Error(`cannot read committed local component manifest: ${error.message}`);
   }
-  validateManifest(committedManifest);
+  validateCanonicalManifest(committedManifest);
   assertManifestMatches(committedManifest, expectedManifest);
   if (committedText !== expectedText) {
     throw new Error('local component manifest formatting drift detected; run with --write');
@@ -49,7 +84,7 @@ function checkManifest() {
 
 function writeManifest() {
   const manifest = buildCurrentManifest();
-  fs.writeFileSync(MANIFEST_PATH, serializeManifest(manifest), 'utf8');
+  writeFileAtomically(MANIFEST_PATH, serializeManifest(manifest));
   process.stdout.write(`Wrote ${path.relative(REPO_ROOT, MANIFEST_PATH).replace(/\\/g, '/')}.\n`);
 }
 
@@ -86,4 +121,6 @@ if (require.main === module) {
 module.exports = {
   buildCurrentManifest,
   main,
+  resolveContainedSourcePath,
+  writeFileAtomically,
 };

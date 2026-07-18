@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { TextDecoder } = require('node:util');
 
 const ASSET_DEFINITIONS = Object.freeze([
   Object.freeze({
@@ -28,6 +29,7 @@ const ASSET_DEFINITIONS = Object.freeze([
     compatibilityAlias: 'local-ocr/common/ocr_image.py',
   }),
 ]);
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 function compareText(left, right) {
   if (left < right) return -1;
@@ -39,7 +41,7 @@ function normalizeTextBytes(value) {
   if (typeof value !== 'string' && !Buffer.isBuffer(value) && !(value instanceof Uint8Array)) {
     throw new TypeError('text source must be a string, Buffer, or Uint8Array');
   }
-  const text = typeof value === 'string' ? value : Buffer.from(value).toString('utf8');
+  const text = typeof value === 'string' ? value : UTF8_DECODER.decode(value);
   return Buffer.from(text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n'), 'utf8');
 }
 
@@ -50,22 +52,24 @@ function sha256Hex(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-function normalizeRepositoryPath(value, fieldName) {
+function validateRepositoryPath(value, fieldName = 'repository path') {
   if (typeof value !== 'string' || !value) {
     throw new TypeError(`${fieldName} must be a non-empty string`);
   }
-  const normalized = value.replace(/\\/g, '/');
   if (
-    normalized.startsWith('/')
-    || normalized === '.'
-    || normalized === '..'
-    || normalized.startsWith('../')
-    || normalized.includes('/../')
-    || path.posix.normalize(normalized) !== normalized
+    value.includes('\\')
+    || value.includes('\0')
+    || /^[A-Za-z]:/.test(value)
+    || value.startsWith('/')
+    || value === '.'
+    || value === '..'
+    || value.startsWith('../')
+    || value.includes('/../')
+    || path.posix.normalize(value) !== value
   ) {
     throw new TypeError(`${fieldName} must be a normalized repository-relative path`);
   }
-  return normalized;
+  return value;
 }
 
 function buildManifestAsset(definition, contents) {
@@ -75,8 +79,8 @@ function buildManifestAsset(definition, contents) {
   if (typeof definition.id !== 'string' || !definition.id) {
     throw new TypeError('asset id must be a non-empty string');
   }
-  const sourcePath = normalizeRepositoryPath(definition.sourcePath, 'sourcePath');
-  const compatibilityAlias = normalizeRepositoryPath(
+  const sourcePath = validateRepositoryPath(definition.sourcePath, 'sourcePath');
+  const compatibilityAlias = validateRepositoryPath(
     definition.compatibilityAlias,
     'compatibilityAlias',
   );
@@ -100,7 +104,7 @@ function buildManifest(sources) {
       .map(({ contents, ...definition }) => buildManifestAsset(definition, contents))
       .sort((left, right) => compareText(left.sourcePath, right.sourcePath)),
   };
-  validateManifest(manifest);
+  validateManifestSchema(manifest);
   return manifest;
 }
 
@@ -115,7 +119,7 @@ function assertExactKeys(value, expectedKeys, label) {
   }
 }
 
-function validateManifest(manifest) {
+function validateManifestSchema(manifest) {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     throw new TypeError('manifest must be an object');
   }
@@ -144,8 +148,8 @@ function validateManifest(manifest) {
     if (typeof asset.id !== 'string' || !asset.id) {
       throw new TypeError(`${label}.id must be a non-empty string`);
     }
-    const sourcePath = normalizeRepositoryPath(asset.sourcePath, `${label}.sourcePath`);
-    const compatibilityAlias = normalizeRepositoryPath(
+    const sourcePath = validateRepositoryPath(asset.sourcePath, `${label}.sourcePath`);
+    const compatibilityAlias = validateRepositoryPath(
       asset.compatibilityAlias,
       `${label}.compatibilityAlias`,
     );
@@ -178,8 +182,64 @@ function validateManifest(manifest) {
   return true;
 }
 
+function validateCanonicalManifest(manifest, definitions = ASSET_DEFINITIONS) {
+  validateManifestSchema(manifest);
+  if (!Array.isArray(definitions) || definitions.length === 0) {
+    throw new TypeError('canonical asset definitions must be a non-empty array');
+  }
+  if (manifest.assets.length !== definitions.length) {
+    throw new TypeError(
+      `manifest must contain exactly ${definitions.length} canonical assets; `
+      + `received ${manifest.assets.length}`,
+    );
+  }
+
+  const expectedById = new Map();
+  for (const definition of definitions) {
+    if (!definition || typeof definition !== 'object' || Array.isArray(definition)) {
+      throw new TypeError('canonical asset definition must be an object');
+    }
+    if (typeof definition.id !== 'string' || !definition.id) {
+      throw new TypeError('canonical asset definition id must be a non-empty string');
+    }
+    if (expectedById.has(definition.id)) {
+      throw new TypeError(`canonical asset definition id is duplicated: ${definition.id}`);
+    }
+    expectedById.set(definition.id, {
+      sourcePath: validateRepositoryPath(definition.sourcePath, 'canonical sourcePath'),
+      compatibilityAlias: validateRepositoryPath(
+        definition.compatibilityAlias,
+        'canonical compatibilityAlias',
+      ),
+    });
+  }
+
+  for (const asset of manifest.assets) {
+    const expected = expectedById.get(asset.id);
+    if (!expected) {
+      throw new TypeError(`unknown canonical asset id: ${asset.id}`);
+    }
+    if (asset.sourcePath !== expected.sourcePath) {
+      throw new TypeError(
+        `canonical asset ${asset.id} sourcePath must equal ${expected.sourcePath}`,
+      );
+    }
+    if (asset.compatibilityAlias !== expected.compatibilityAlias) {
+      throw new TypeError(
+        `canonical asset ${asset.id} compatibilityAlias must equal `
+        + expected.compatibilityAlias,
+      );
+    }
+  }
+  return true;
+}
+
+function validateManifest(manifest) {
+  return validateCanonicalManifest(manifest);
+}
+
 function canonicalManifestObject(manifest) {
-  validateManifest(manifest);
+  validateManifestSchema(manifest);
   return {
     schemaVersion: manifest.schemaVersion,
     assets: manifest.assets.map((asset) => ({
@@ -213,5 +273,8 @@ module.exports = {
   normalizeTextBytes,
   serializeManifest,
   sha256Hex,
+  validateCanonicalManifest,
   validateManifest,
+  validateManifestSchema,
+  validateRepositoryPath,
 };
