@@ -5,14 +5,17 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.5"
+INSTALLER_SCRIPT_VERSION="1.3.7"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
 
 TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
-TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"
+TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
+PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
 TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
@@ -59,11 +62,16 @@ acquire_install_lock() {
 
 UV_VERSION="0.9.14"
 PYTHON_BUILD_STANDALONE_BUILD="20260623"
+PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"
+PYTHON_RUNTIME_VERSION="${PYTHON_BUILD_STANDALONE_VERSION%%+*}"
+PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"
+PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"
 UV_BIN="$INSTALL_ROOT/bin/uv"
+PYTHON_RUNTIME_DIR="$INSTALL_ROOT/python-runtime"
+PORTABLE_PYTHON="$PYTHON_RUNTIME_DIR/python/bin/python"
+ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")
 export UV_PYTHON_DOWNLOADS=automatic
 export UV_PYTHON_PREFERENCE=managed
-export UV_PYTHON_INSTALL_MIRROR="$TENCENT_PYTHON_INSTALL_MIRROR"
-export UV_PYTHON_CPYTHON_BUILD="$PYTHON_BUILD_STANDALONE_BUILD"
 
 detect_uv_arch() {
   local arch
@@ -76,6 +84,89 @@ detect_uv_arch() {
       return 1
       ;;
   esac
+}
+
+portable_python_is_usable() {
+  local python_bin="$1"
+  [ -x "$python_bin" ] \
+    && "$python_bin" -c 'import sys, venv; raise SystemExit(0 if sys.version.split()[0] == sys.argv[1] else 1)' \
+      "$PYTHON_RUNTIME_VERSION" >/dev/null 2>&1
+}
+
+python_runtime_sha256() {
+  case "$(uname -m)" in
+    arm64) echo "$PYTHON_RUNTIME_SHA256_ARM64" ;;
+    x86_64) echo "$PYTHON_RUNTIME_SHA256_X64" ;;
+    *) return 1 ;;
+  esac
+}
+
+file_sha256() {
+  shasum -a 256 "$1" | awk '{ print toupper($1) }'
+}
+
+verify_sha256() {
+  local file_path="$1"
+  local expected_sha256="$2"
+  [ -s "$file_path" ] || return 1
+  [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]
+}
+
+install_portable_python() {
+  if portable_python_is_usable "$PORTABLE_PYTHON"; then
+    echo "Pinned portable Python is already ready: $PORTABLE_PYTHON"
+    return 0
+  fi
+
+  local arch archive_name archive_path expected_sha256 stage_dir staged_python archive_url
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64) archive_name="cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;
+    x86_64) archive_name="cpython-${PYTHON_BUILD_STANDALONE_VERSION}-x86_64-apple-darwin-install_only.tar.gz" ;;
+    *)
+      echo "Unsupported macOS architecture for portable Python: $arch" >&2
+      return 1
+      ;;
+  esac
+
+  archive_path="$CACHE_ROOT/$archive_name"
+  expected_sha256="$(python_runtime_sha256)" || return 1
+  stage_dir="$TEMP_ROOT/python-runtime-stage"
+  archive_url="${TENCENT_PYTHON_DOWNLOAD_BASE%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}"
+  rm -rf "$stage_dir"
+  mkdir -p "$CACHE_ROOT" "$stage_dir"
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    rm -f "$archive_path"
+    echo "Downloading pinned portable Python from Tencent CDN..."
+    if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
+      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+      --max-time 900 -o "$archive_path" "$archive_url"; then
+      echo "Pinned portable Python download failed." >&2
+      return 1
+    fi
+  fi
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    echo "Pinned portable Python SHA256 validation failed." >&2
+    return 1
+  fi
+  if ! tar xzf "$archive_path" -C "$stage_dir"; then
+    echo "Pinned portable Python archive extraction failed." >&2
+    return 1
+  fi
+  staged_python="$stage_dir/python/bin/python"
+  if ! portable_python_is_usable "$staged_python"; then
+    echo "Pinned portable Python validation failed." >&2
+    return 1
+  fi
+
+  rm -rf "$PYTHON_RUNTIME_DIR"
+  mv "$stage_dir" "$PYTHON_RUNTIME_DIR"
+  if ! portable_python_is_usable "$PORTABLE_PYTHON"; then
+    echo "Installed portable Python validation failed." >&2
+    return 1
+  fi
+  echo "Pinned portable Python is ready: $PORTABLE_PYTHON"
+  return 0
 }
 
 download_uv() {
@@ -251,6 +342,42 @@ find_homebrew_whisper_command() {
   done
 }
 
+asr_wheelhouse_url() {
+  case "$(uname -m)" in
+    arm64) echo "${ASR_WHEELHOUSE_BASE_URL%/}/macosx_11_0_arm64/index.html" ;;
+    x86_64) echo "${ASR_WHEELHOUSE_BASE_URL%/}/macosx_10_12_x86_64/index.html" ;;
+    *)
+      echo "Unsupported macOS architecture for the ASR wheelhouse: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+}
+
+install_asr_packages_from_wheelhouse() {
+  local python_bin="$1"
+  local wheelhouse_url
+  wheelhouse_url="$(asr_wheelhouse_url)" || return 1
+  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  echo "Installing ASR packages from Tencent CDN wheelhouse: $wheelhouse_url"
+  "$python_bin" -m pip install --upgrade --no-index --find-links "$wheelhouse_url" \
+    "${ASR_PACKAGE_REQUIREMENTS[@]}" 2>&1
+}
+
+install_asr_packages() {
+  local python_bin="$1"
+  if install_asr_packages_from_wheelhouse "$python_bin"; then
+    return 0
+  fi
+
+  echo "Tencent CDN ASR wheelhouse install failed; retrying package indexes." >&2
+  "$python_bin" -m pip install --upgrade pip \
+    -i "$TENCENT_PIP_INDEX_URL" \
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
+  "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
+    -i "$TENCENT_PIP_INDEX_URL" \
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1
+}
+
 setup_python_and_packages() {
   # If everything is already set up and working, skip.
   if [ -x "$VENV_PYTHON" ] && [ -x "$INSTALL_ROOT/bin/whisper-cli" ] && [ -x "$INSTALL_ROOT/bin/ffmpeg" ]; then
@@ -260,7 +387,21 @@ setup_python_and_packages() {
     fi
   fi
 
-  bootstrap_uv || return 1
+  local portable_python_ready=0
+  echo "Setting up Python environment (this may take a few minutes on first run)..."
+  if install_portable_python; then
+    rm -rf "$VENV_DIR"
+    if "$PORTABLE_PYTHON" -m venv "$VENV_DIR" 2>&1; then
+      portable_python_ready=1
+      echo "Created ASR venv with pinned portable Python."
+    else
+      echo "Pinned portable Python could not create the ASR venv; trying uv fallback." >&2
+      rm -rf "$VENV_DIR"
+    fi
+  fi
+
+  if [ "$portable_python_ready" -ne 1 ]; then
+    bootstrap_uv || return 1
 
   # Create venv.  uv will use system Python 3 if a working one exists;
   # otherwise it auto-downloads a standalone Python build.
@@ -283,16 +424,15 @@ setup_python_and_packages() {
     fi
   fi
 
+  fi
+
   if [ ! -x "$VENV_PYTHON" ]; then
     echo "Python venv was not created at $VENV_PYTHON" >&2
     return 1
   fi
 
-  # Export VIRTUAL_ENV so uv pip targets this venv.
-  export VIRTUAL_ENV="$VENV_DIR"
-
   echo "Installing whisper.cpp-cli and imageio-ffmpeg..."
-  if ! "$UV_BIN" pip install --upgrade whisper.cpp-cli imageio-ffmpeg 2>&1; then
+  if ! install_asr_packages "$VENV_PYTHON"; then
     echo "" >&2
     echo "whisper.cpp-cli / imageio-ffmpeg 安装失败。" >&2
     echo "请检查网络连接后重试。No Terminal command is required." >&2
@@ -334,7 +474,7 @@ SCRIPT
     return 1
   fi
 
-  echo "Python ASR tools installed successfully via uv."
+  echo "Python ASR tools installed successfully."
   return 0
 }
 

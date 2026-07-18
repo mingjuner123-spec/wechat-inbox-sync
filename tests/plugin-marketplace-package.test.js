@@ -308,14 +308,35 @@ assert.ok(macInstaller.includes('UV_BIN="$INSTALL_ROOT/bin/uv"'));
 assert.ok(macInstaller.includes('UV_PYTHON_DOWNLOADS=automatic'));
 assert.ok(macInstaller.includes('UV_PYTHON_PREFERENCE=managed'));
 assert.ok(macInstaller.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"'));
-assert.ok(macInstaller.includes('TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
-assert.ok(macInstaller.includes('export UV_PYTHON_INSTALL_MIRROR="$TENCENT_PYTHON_INSTALL_MIRROR"'));
-assert.ok(macInstaller.includes('export UV_PYTHON_CPYTHON_BUILD="$PYTHON_BUILD_STANDALONE_BUILD"'));
+assert.ok(macInstaller.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"'));
+assert.ok(macInstaller.includes('PYTHON_RUNTIME_VERSION="${PYTHON_BUILD_STANDALONE_VERSION%%+*}"'));
+assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"'));
+assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"'));
+assert.ok(macInstaller.includes('TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
+assert.ok(macInstaller.includes('PORTABLE_PYTHON="$PYTHON_RUNTIME_DIR/python/bin/python"'));
+assert.ok(macInstaller.includes("sys.version.split()[0] == sys.argv[1]"));
+assert.ok(macInstaller.includes('"$PYTHON_RUNTIME_VERSION"'));
+assert.ok(macInstaller.includes('install_portable_python'));
+assert.ok(macInstaller.includes('shasum -a 256 "$1"'));
+assert.ok(macInstaller.includes('verify_sha256 "$archive_path" "$expected_sha256"'));
+assert.ok(macInstaller.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"'));
+assert.ok(
+  macInstaller.indexOf('if install_portable_python; then') <
+    macInstaller.indexOf('"$UV_BIN" python install 3.12'),
+  'macOS ASR installer should try the pinned portable Python before the uv managed-Python fallback',
+);
+assert.ok(
+  macInstaller.lastIndexOf('if ! verify_sha256 "$archive_path" "$expected_sha256"; then') <
+    macInstaller.indexOf('if ! tar xzf "$archive_path" -C "$stage_dir"; then'),
+  'macOS ASR installer should verify the pinned Python archive before extraction',
+);
 assert.ok(macInstaller.includes('"$UV_BIN" python install 3.12'));
 assert.ok(macInstaller.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python'));
-assert.ok(macInstaller.includes('"$UV_BIN" pip install --upgrade whisper.cpp-cli imageio-ffmpeg'));
+assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"'));
+assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
+assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.5"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.7"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=180'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));

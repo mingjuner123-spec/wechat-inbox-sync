@@ -1100,10 +1100,12 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   const source = String(scriptText || '');
   if (!source.includes('.wechat-inbox-local-asr')) return false;
   if (isMac) {
+    const portablePythonIndex = source.indexOf('if install_portable_python; then');
+    const uvManagedPythonIndex = source.indexOf('"$UV_BIN" python install 3.12');
     return hasMinimumInstallerVersion(
       source,
       /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 3, 5],
+      [1, 3, 7],
     )
       && !source.includes('SIMPLIFIED_PROMPT')
       && !source.includes('--prompt')
@@ -1121,8 +1123,22 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('setup_python_and_packages')
       && source.includes('UV_PYTHON_DOWNLOADS=automatic')
       && source.includes('UV_PYTHON_PREFERENCE=managed')
+      && source.includes('PYTHON_BUILD_STANDALONE_BUILD=')
+      && source.includes('PYTHON_BUILD_STANDALONE_VERSION=')
+      && source.includes('PYTHON_RUNTIME_VERSION=')
+      && source.includes('PYTHON_RUNTIME_SHA256_ARM64=')
+      && source.includes('PYTHON_RUNTIME_SHA256_X64=')
+      && source.includes('TENCENT_PYTHON_DOWNLOAD_BASE=')
+      && source.includes('PORTABLE_PYTHON=')
+      && source.includes('install_portable_python')
+      && source.includes('python_runtime_sha256')
+      && source.includes('verify_sha256 "$archive_path" "$expected_sha256"')
+      && source.includes('sys.version.split()[0] == sys.argv[1]')
+      && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"')
       && source.includes('"$UV_BIN" python install 3.12')
-      && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python');
+      && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python')
+      && portablePythonIndex >= 0
+      && uvManagedPythonIndex > portablePythonIndex;
   }
   return hasMinimumInstallerVersion(
     source,

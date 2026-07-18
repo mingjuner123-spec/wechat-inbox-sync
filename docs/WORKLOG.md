@@ -1,5 +1,19 @@
 # Worklog
 
+### 2026-07-18 - 热修 macOS Apple Silicon ASR 固定 Python 下载链
+
+- 目标：修复 Obsidian 插件 `1.3.48` 在 macOS arm64 安装本地 ASR 时，`uv` 报 `No download found for request: cpython-3.12-macos-aarch64-none`，导致 whisper、ffmpeg、模型和转写脚本均未安装的问题。
+- 根因：正式 `1.3.48` 和线上 CDN 都回退到了 uv-only 安装器；该脚本把 `UV_PYTHON_INSTALL_MIRROR` 指向自有 CDN，但 uv 请求的抽象别名与 CDN 上固定的 `cpython-3.12.13+20260623-...-install_only.tar.gz` 文件名不兼容。此前直接下载固定 Python 的修复存在于分叉开发线，没有进入后续正式发布源，CDN 又被旧脚本覆盖。
+- 影响范围：Obsidian 插件 macOS ASR 安装器、安装器新鲜度校验、插件发布包回归测试、腾讯云静态托管；未修改 Windows ASR、OCR、小程序、云函数、绑定码、Pro 权益、支付或业务数据。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh`、`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`docs/WORKLOG.md`。
+- TDD：先新增“uv-only macOS ASR 安装器必须被拒绝”和“发布包必须先使用固定 portable Python”的断言；在 `1.3.48` 基线上分别因旧校验返回 `true`、缺少 `PYTHON_BUILD_STANDALONE_VERSION` 而失败。合并前审查再补充“Python 归档解压前必须校验双架构 SHA-256”“严格核对已安装运行时版本”和“未来升级固定 Python 构建仍应被结构化校验接受”的红灯用例；实现后全部通过。
+- 线上动作：已把最终安装器 `1.3.7` 上传到长环境静态托管 `local-asr/common/install-local-asr-macos.sh`。CloudBase 对象回读和带随机查询参数、`Cache-Control: no-cache` 的公网 CDN 回读 SHA-256 均为 `613E11D8B2CEFCCB45D2F5DD2D5CFA83ABDF9EB21302A0EDC656ABBCED9596D3`，与本地文件一致，且公网内容已确认包含 `INSTALLER_SCRIPT_VERSION="1.3.7"` 和 SHA 校验调用。未发布新的 Obsidian 插件版本。
+- 数据变更：无。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、Git Bash `bash -n obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh`、`git diff --check` 均通过；CloudBase 环境列表确认目标为 `he02-d8gebzv050ed6c4ef-d350b93bf`；arm64/x86_64 两个固定 CPython 对象均返回 HTTP 200，两套 ASR wheelhouse 索引均包含 `whisper.cpp-cli==0.0.3` 和 `imageio-ffmpeg==0.6.0`。
+- 结果：macOS arm64/x86_64 会优先从腾讯云 CDN 直接下载固定 CPython `3.12.13+20260623`，按架构校验 SHA-256 后才解压执行，用该运行时创建 ASR venv，并优先从腾讯 CDN wheelhouse 安装固定版本的 `whisper.cpp-cli` 与 `imageio-ffmpeg`；只有固定 Python 下载或建 venv 失败时才进入 uv 兜底。插件校验器最低要求安装器 `1.3.7`，并结构化检查 portable Python、双架构哈希、严格运行时版本校验及“直下优先、uv 兜底”的顺序，不再把 uv-only 脚本判为最新，也不把校验器锁死在某一个未来会升级的 Python 构建号。
+- 已知风险：本轮没有在真实 Apple Silicon Mac 上完成从空目录到首次转写的端到端实测；首次安装仍依赖固定 Python 包、ASR wheels 和模型三个 CDN 资产可访问。`1.3.48` 的不可变 GitHub Release 资产仍内置旧脚本，但该版本每次安装都会优先拉取已热修的远端脚本。
+- 下一步：让问题用户在 `1.3.48` 直接重新点击“安装/修复本地转写组件”并回传新诊断；若固定 Python 阶段通过但后续失败，按 wheel、模型或 Metal 推理验证阶段分别处理，不再混为网络问题。
+
 ### 2026-07-17 - Publish Obsidian plugin 1.3.48: reliable Feishu API image localization
 
 - Goal: fix Feishu official API notes whose text and headings sync correctly but images appear as broken placeholders on only some user computers.

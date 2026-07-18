@@ -48,13 +48,27 @@ const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
   .replace('$InstallerScriptVersion = "1.2.22"', '$InstallerScriptVersion = "1.2.21"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.5"', 'INSTALLER_SCRIPT_VERSION="1.3.4"')
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.7"', 'INSTALLER_SCRIPT_VERSION="1.3.6"');
+const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
+const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
+  .replaceAll('install_portable_python', 'install_legacy_python');
+const runtimeVersionUnverifiedMacAsrInstallerSource = macAsrInstallerSource
+  .replace('sys.version.split()[0] == sys.argv[1]', 'sys.version_info >= (3, 10)');
+const futurePythonMacAsrInstallerSource = macAsrInstallerSource
+  .replace('PYTHON_BUILD_STANDALONE_BUILD="20260623"', 'PYTHON_BUILD_STANDALONE_BUILD="20260701"')
+  .replace('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"', 'PYTHON_BUILD_STANDALONE_VERSION="3.12.14+20260701"')
+  .replace(/PYTHON_RUNTIME_SHA256_ARM64="[A-F0-9]{64}"/, `PYTHON_RUNTIME_SHA256_ARM64="${'A'.repeat(64)}"`)
+  .replace(/PYTHON_RUNTIME_SHA256_X64="[A-F0-9]{64}"/, `PYTHON_RUNTIME_SHA256_X64="${'B'.repeat(64)}"`);
 assert.strictEqual(typeof helpers.isLocalAsrInstallerCurrent, 'function');
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource, false), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(macAsrInstallerSource, true), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleMacAsrInstallerSource, true), false);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(promptedMacAsrInstallerSource, true), false);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(legacyUvOnlyMacAsrInstallerSource, true), false);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(runtimeVersionUnverifiedMacAsrInstallerSource, true), false);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(futurePythonMacAsrInstallerSource, true), true);
 assert.strictEqual(typeof helpers.isLocalOcrInstallerCurrent, 'function');
 assert.strictEqual(helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource, false), true);
 assert.strictEqual(helpers.isLocalOcrInstallerCurrent(macOcrInstallerSource, true), true);
