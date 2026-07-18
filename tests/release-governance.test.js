@@ -3,6 +3,15 @@ const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const {
+  ASSET_DEFINITIONS,
+  assertManifestMatches,
+  buildManifest,
+  buildManifestAsset,
+  normalizeTextBytes,
+  sha256Hex,
+  validateManifest,
+} = require('../scripts/local-component-manifest-core');
 
 const repoRoot = path.resolve(__dirname, '..');
 const relativePaths = {
@@ -81,6 +90,95 @@ function componentEntries(manifest) {
   assert.ok(entries.length > 0, 'component manifest must contain at least one component');
   return entries;
 }
+
+test('canonical text hashing treats LF and CRLF source bytes as equivalent', () => {
+  const lf = normalizeTextBytes(Buffer.from('alpha\nbeta\ngamma\n', 'utf8'));
+  const crlf = normalizeTextBytes(Buffer.from('alpha\r\nbeta\r\ngamma\r\n', 'utf8'));
+
+  assert.deepEqual(crlf, lf);
+  assert.equal(sha256Hex(crlf), sha256Hex(lf));
+  assert.equal(lf.toString('utf8'), 'alpha\nbeta\ngamma\n');
+});
+
+test('manifest assets use the full lowercase canonical SHA-256 in immutable paths', () => {
+  const asset = buildManifestAsset({
+    id: 'test-installer',
+    sourcePath: 'local-asr/test-installer.sh',
+    compatibilityAlias: 'local-asr/common/test-installer.sh',
+  }, Buffer.from('first\r\nsecond\r\n', 'utf8'));
+  const expectedHash = sha256Hex(Buffer.from('first\nsecond\n', 'utf8'));
+
+  assert.match(asset.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(asset.sha256, expectedHash);
+  assert.equal(
+    asset.immutablePath,
+    `local-components/by-sha256/${expectedHash}/test-installer.sh`,
+  );
+});
+
+test('manifest matching rejects canonical source changes', () => {
+  const definition = {
+    id: 'test-installer',
+    sourcePath: 'local-asr/test-installer.sh',
+    compatibilityAlias: 'local-asr/common/test-installer.sh',
+  };
+  const committed = buildManifest([{ ...definition, contents: Buffer.from('version one\n', 'utf8') }]);
+  const rebuilt = buildManifest([{ ...definition, contents: Buffer.from('version two\n', 'utf8') }]);
+
+  assert.throws(
+    () => assertManifestMatches(committed, rebuilt),
+    /manifest drift/i,
+  );
+});
+
+test('manifest schema validation rejects malformed component metadata', async (t) => {
+  const validManifest = buildManifest([{
+    id: 'test-installer',
+    sourcePath: 'local-asr/test-installer.sh',
+    compatibilityAlias: 'local-asr/common/test-installer.sh',
+    contents: Buffer.from('installer\n', 'utf8'),
+  }]);
+
+  await t.test('unsupported schema versions', () => {
+    assert.throws(
+      () => validateManifest({ ...validManifest, schemaVersion: 2 }),
+      /schemaVersion/i,
+    );
+  });
+
+  await t.test('truncated hashes', () => {
+    const malformed = structuredClone(validManifest);
+    malformed.assets[0].sha256 = malformed.assets[0].sha256.slice(0, 12);
+    assert.throws(() => validateManifest(malformed), /sha256/i);
+  });
+
+  await t.test('immutable paths that do not match the full hash', () => {
+    const malformed = structuredClone(validManifest);
+    malformed.assets[0].immutablePath = 'local-components/by-sha256/short/test-installer.sh';
+    assert.throws(() => validateManifest(malformed), /immutablePath/i);
+  });
+
+  await t.test('missing compatibility aliases', () => {
+    const malformed = structuredClone(validManifest);
+    delete malformed.assets[0].compatibilityAlias;
+    assert.throws(() => validateManifest(malformed), /compatibilityAlias/i);
+  });
+});
+
+test('canonical asset definitions preserve every compatibility alias', () => {
+  const manifest = buildManifest(ASSET_DEFINITIONS.map((definition) => ({
+    ...definition,
+    contents: Buffer.from(`${definition.id}\n`, 'utf8'),
+  })));
+
+  assert.deepEqual(
+    manifest.assets.map(({ sourcePath, compatibilityAlias }) => [sourcePath, compatibilityAlias]),
+    [...compatibilityMappings].sort(([left], [right]) => (
+      left < right ? -1 : left > right ? 1 : 0
+    )),
+  );
+  assert.equal(manifest.assets.length, compatibilityMappings.length);
+});
 
 for (const [name, relativePath] of Object.entries(relativePaths)) {
   test(`${name} exists at its canonical repository path`, () => {

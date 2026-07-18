@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "id": "asr-macos-installer",
+      "sourcePath": "local-asr/install-local-asr-macos.sh",
+      "sha256": "ee65dd78c84077648472fe7e23fe94b1dc9b5a574e2e1fe1b7a3fc5e0f7075af",
+      "immutablePath": "local-components/by-sha256/ee65dd78c84077648472fe7e23fe94b1dc9b5a574e2e1fe1b7a3fc5e0f7075af/install-local-asr-macos.sh",
+      "compatibilityAlias": "local-asr/common/install-local-asr-macos.sh"
+    },
+    {
+      "id": "asr-windows-installer",
+      "sourcePath": "local-asr/install-local-asr.ps1",
+      "sha256": "6022bed7b0932f116a9305807dd57ba13b8ae23ab280e2bfe1be27d9df2ee99a",
+      "immutablePath": "local-components/by-sha256/6022bed7b0932f116a9305807dd57ba13b8ae23ab280e2bfe1be27d9df2ee99a/install-local-asr.ps1",
+      "compatibilityAlias": "local-asr/common/install-local-asr.ps1"
+    },
+    {
+      "id": "ocr-macos-installer",
+      "sourcePath": "local-ocr/install-local-ocr-macos.sh",
+      "sha256": "de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074",
+      "immutablePath": "local-components/by-sha256/de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074/install-local-ocr-macos.sh",
+      "compatibilityAlias": "local-ocr/common/install-local-ocr-macos.sh"
+    },
+    {
+      "id": "ocr-windows-installer",
+      "sourcePath": "local-ocr/install-local-ocr.ps1",
+      "sha256": "fe124b65fd2f9d51e68caecb014bcbfb33b2ceda1c645e4d6c1b27c604ff684a",
+      "immutablePath": "local-components/by-sha256/fe124b65fd2f9d51e68caecb014bcbfb33b2ceda1c645e4d6c1b27c604ff684a/install-local-ocr.ps1",
+      "compatibilityAlias": "local-ocr/common/install-local-ocr.ps1"
+    },
+    {
+      "id": "ocr-python-script",
+      "sourcePath": "local-ocr/ocr_image.py",
+      "sha256": "52d32bfb9384ec5be1dbfb25938d6316a46a51d7b56a43a9c40552bd1f2de291",
+      "immutablePath": "local-components/by-sha256/52d32bfb9384ec5be1dbfb25938d6316a46a51d7b56a43a9c40552bd1f2de291/ocr_image.py",
+      "compatibilityAlias": "local-ocr/common/ocr_image.py"
+    }
+  ]
+}

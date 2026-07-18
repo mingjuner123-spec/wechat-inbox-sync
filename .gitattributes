@@ -1,3 +1,6 @@
+obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1 text eol=lf
+obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh text eol=lf
 obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1 text eol=lf
 obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh text eol=lf
 obsidian-plugin/wechat-inbox-sync/local-ocr/ocr_image.py text eol=lf
+obsidian-plugin/wechat-inbox-sync/local-components-manifest.json text eol=lf
