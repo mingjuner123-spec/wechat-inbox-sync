@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -15,12 +16,12 @@ const relativePaths = {
   gitAttributes: '.gitattributes',
 };
 
-const compatibilityAliases = [
-  'local-asr/common/install-local-asr.ps1',
-  'local-asr/common/install-local-asr-macos.sh',
-  'local-ocr/common/install-local-ocr.ps1',
-  'local-ocr/common/install-local-ocr-macos.sh',
-  'local-ocr/common/ocr_image.py',
+const compatibilityMappings = [
+  ['local-asr/install-local-asr.ps1', 'local-asr/common/install-local-asr.ps1'],
+  ['local-asr/install-local-asr-macos.sh', 'local-asr/common/install-local-asr-macos.sh'],
+  ['local-ocr/install-local-ocr.ps1', 'local-ocr/common/install-local-ocr.ps1'],
+  ['local-ocr/install-local-ocr-macos.sh', 'local-ocr/common/install-local-ocr-macos.sh'],
+  ['local-ocr/ocr_image.py', 'local-ocr/common/ocr_image.py'],
 ];
 
 function absolutePath(relativePath) {
@@ -32,18 +33,37 @@ function readText(relativePath) {
 }
 
 function fileExists(relativePath) {
-  return fs.existsSync(absolutePath(relativePath));
+  try {
+    return fs.statSync(absolutePath(relativePath)).isFile();
+  } catch {
+    return false;
+  }
 }
 
-function collectStringValues(value, result = []) {
-  if (typeof value === 'string') {
-    result.push(value);
-  } else if (Array.isArray(value)) {
-    value.forEach((item) => collectStringValues(item, result));
-  } else if (value && typeof value === 'object') {
-    Object.values(value).forEach((item) => collectStringValues(item, result));
+function yamlBlock(text, headerPattern) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => headerPattern.test(line));
+  assert.notEqual(start, -1, `missing YAML block matching ${headerPattern}`);
+  const indent = lines[start].match(/^\s*/)[0].length;
+  let end = start + 1;
+  while (end < lines.length) {
+    const line = lines[end];
+    const significant = line.trim() && !line.trimStart().startsWith('#');
+    if (significant && line.match(/^\s*/)[0].length <= indent) break;
+    end += 1;
   }
-  return result;
+  return lines.slice(start, end).join('\n');
+}
+
+function executableYamlSteps(jobBlock) {
+  const lines = jobBlock.split(/\r?\n/);
+  const starts = lines.flatMap((line, index) => (
+    /^\s*-\s+(?:name|uses|run)\s*:/.test(line) && !line.trimStart().startsWith('#') ? [index] : []
+  ));
+  return starts.map((start, index) => lines
+    .slice(start, starts[index + 1] ?? lines.length)
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n'));
 }
 
 function componentEntries(manifest) {
@@ -76,34 +96,60 @@ test('the component manifest uses full SHA-256 content-addressed immutable paths
   }
 });
 
-for (const alias of compatibilityAliases) {
-  test(`the component manifest preserves compatibility alias ${alias}`, {
+for (const [sourceSuffix, alias] of compatibilityMappings) {
+  test(`the component manifest maps ${sourceSuffix} to ${alias}`, {
     skip: !fileExists(relativePaths.componentManifest),
   }, () => {
-    const manifestStrings = new Set(collectStringValues(JSON.parse(readText(relativePaths.componentManifest))));
-    assert.ok(manifestStrings.has(alias), `component manifest must preserve compatibility alias ${alias}`);
+    const entries = componentEntries(JSON.parse(readText(relativePaths.componentManifest)));
+    const entry = entries.find((candidate) => String(candidate.sourcePath || '')
+      .replace(/\\/g, '/')
+      .endsWith(sourceSuffix));
+    assert.ok(entry, `component manifest must contain source ${sourceSuffix}`);
+    assert.equal(entry.compatibilityAlias, alias, `${sourceSuffix} must preserve compatibility alias ${alias}`);
   });
 }
 
-test('the manifest checker exposes check mode for CI and write mode for intentional updates', {
+test('the manifest checker executes check mode and documents intentional write mode', {
   skip: !fileExists(relativePaths.manifestChecker),
 }, () => {
-  const checker = readText(relativePaths.manifestChecker);
-  assert.match(checker, /--check\b/, 'manifest checker must expose --check');
-  assert.match(checker, /--write\b/, 'manifest checker must expose --write');
-  assert.match(checker, /local-components-manifest\.json/, 'manifest checker must target the canonical manifest');
+  const checkerPath = absolutePath(relativePaths.manifestChecker);
+  const check = childProcess.spawnSync(process.execPath, [checkerPath, '--check'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(check.status, 0, `manifest --check failed:\n${check.stdout}${check.stderr}`);
+
+  const help = childProcess.spawnSync(process.execPath, [checkerPath, '--help'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.equal(help.status, 0, `manifest --help failed:\n${help.stdout}${help.stderr}`);
+  assert.match(`${help.stdout}${help.stderr}`, /--write\b/, 'checker help must document intentional --write mode');
+
+  const invalid = childProcess.spawnSync(process.execPath, [checkerPath, '--not-a-real-mode'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  assert.notEqual(invalid.status, 0, 'manifest checker must reject unknown modes');
 });
 
 test('the main workflow guards main pushes and pull requests with repository contracts', {
   skip: !fileExists(relativePaths.mainWorkflow),
 }, () => {
   const workflow = readText(relativePaths.mainWorkflow);
-  assert.match(workflow, /\bpush\s*:/, 'main guard workflow must run on pushes');
-  assert.match(workflow, /\bmain\b/, 'main guard workflow must target main');
-  assert.match(workflow, /\bpull_request\s*:/, 'main guard workflow must run on pull requests');
-  assert.match(workflow, /node tests\/release-governance\.test\.js/, 'main guard workflow must run release-governance contracts');
+  const triggers = yamlBlock(workflow, /^on:\s*$/);
+  const push = yamlBlock(triggers, /^  push:\s*$/);
+  const pullRequest = yamlBlock(triggers, /^  pull_request:\s*$/);
+  assert.match(push, /^\s+branches:\s*(?:\[\s*main\s*\]|(?:\r?\n\s+-\s+main))\s*$/m, 'push trigger must target main');
+  assert.match(pullRequest, /^\s+branches:\s*(?:\[\s*main\s*\]|(?:\r?\n\s+-\s+main))\s*$/m, 'pull_request trigger must target main');
+
+  const steps = executableYamlSteps(workflow);
+  assert.ok(
+    steps.some((step) => /node tests\/release-governance\.test\.js/.test(step)),
+    'main guard workflow must execute release-governance contracts',
+  );
   assert.match(
-    workflow,
+    steps.join('\n'),
     /node scripts\/update-local-components-manifest\.js --check/,
     'main guard workflow must reject component-manifest drift',
   );
@@ -130,37 +176,30 @@ test('tag releases check out full Git history', () => {
 
 test('tag releases enforce equality with current remote main', () => {
   const workflow = readText(relativePaths.releaseWorkflow);
+  const releaseJob = yamlBlock(workflow, /^  release:\s*$/);
+  const steps = executableYamlSteps(releaseJob);
+  const guardIndex = steps.findIndex((step) => /node scripts\/release-source-guard\.js/.test(step));
+  const publishIndex = steps.findIndex((step) => /\bgh release (?:create|upload)\b/.test(step));
   assert.match(
-    workflow,
+    releaseJob,
     /(?:origin\/main|refs\/heads\/main)/,
     'release workflow must identify the current remote main commit',
   );
-  assert.match(
-    workflow,
-    /node scripts\/release-source-guard\.js/,
-    'release workflow must run the main-equality release-source guard',
-  );
+  assert.notEqual(guardIndex, -1, 'release workflow must execute the main-equality release-source guard');
+  assert.notEqual(publishIndex, -1, 'release workflow must contain a GitHub Release publication step');
+  assert.ok(guardIndex < publishIndex, 'release-source guard must execute before GitHub Release publication');
 });
 
-function gitAttributeRules() {
-  return readText(relativePaths.gitAttributes)
-    .split(/\r?\n/)
-    .map((line) => line.trim().replace(/\s+/g, ' '))
-    .filter(Boolean);
+for (const installerPath of [
+  'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1',
+  'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh',
+]) {
+  test(`Git resolves canonical LF bytes for ${installerPath}`, () => {
+    const result = childProcess.spawnSync('git', ['check-attr', 'eol', '--', installerPath], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, `git check-attr failed:\n${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /:\s*eol:\s*lf\s*$/m, `${installerPath} must resolve to eol=lf`);
+  });
 }
-
-test('Git attributes force the Windows ASR installer to canonical LF bytes', () => {
-  const rules = gitAttributeRules();
-  assert.ok(
-    rules.includes('obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1 text eol=lf'),
-    'Windows ASR installer must be committed with LF line endings',
-  );
-});
-
-test('Git attributes force the macOS ASR installer to canonical LF bytes', () => {
-  const rules = gitAttributeRules();
-  assert.ok(
-    rules.includes('obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh text eol=lf'),
-    'macOS ASR installer must be committed with LF line endings',
-  );
-});
