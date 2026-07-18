@@ -39,6 +39,8 @@ const compatibilityMappings = [
   ['local-ocr/install-local-ocr-macos.sh', 'local-ocr/common/install-local-ocr-macos.sh'],
   ['local-ocr/ocr_image.py', 'local-ocr/common/ocr_image.py'],
 ];
+const currentCommit = 'a'.repeat(40);
+const staleCommit = 'b'.repeat(40);
 
 function absolutePath(relativePath) {
   return path.join(repoRoot, ...relativePath.split('/'));
@@ -54,6 +56,25 @@ function fileExists(relativePath) {
   } catch {
     return false;
   }
+}
+
+function loadReleaseSourceGuardCore() {
+  return require('../scripts/release-source-guard-core');
+}
+
+function remoteMainOutput(commit = currentCommit) {
+  return `${commit}\trefs/heads/main\n`;
+}
+
+function runReleaseSourceGuard(args) {
+  return childProcess.spawnSync(process.execPath, [
+    absolutePath(relativePaths.releaseSourceGuard),
+    ...args,
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 5000,
+  });
 }
 
 function yamlBlock(text, headerPattern) {
@@ -382,6 +403,158 @@ test('the manifest checker executes check mode and documents intentional write m
     timeout: 5000,
   });
   assert.notEqual(invalid.status, 0, 'manifest checker must reject unknown modes');
+});
+
+test('release source guard accepts a clean checkout at current remote main', () => {
+  const { validateDeployState } = loadReleaseSourceGuardCore();
+
+  assert.deepEqual(validateDeployState({
+    statusOutput: '',
+    headOutput: `${currentCommit}\n`,
+    remoteMainOutput: remoteMainOutput(),
+  }), {
+    head: currentCommit,
+    remoteMain: currentCommit,
+  });
+});
+
+test('release source guard rejects dirty porcelain status', () => {
+  const { validateDeployState } = loadReleaseSourceGuardCore();
+
+  assert.throws(() => validateDeployState({
+    statusOutput: ' M manifest.json\n',
+    headOutput: `${currentCommit}\n`,
+    remoteMainOutput: remoteMainOutput(),
+  }), /dirty|clean checkout/i);
+});
+
+test('release source guard rejects a stale local HEAD', () => {
+  const { validateDeployState } = loadReleaseSourceGuardCore();
+
+  assert.throws(() => validateDeployState({
+    statusOutput: '',
+    headOutput: `${staleCommit}\n`,
+    remoteMainOutput: remoteMainOutput(),
+  }), /HEAD.*origin\/main|stale/i);
+});
+
+test('release source guard rejects a stale tag commit', () => {
+  const { assertTagMatchesRemote } = loadReleaseSourceGuardCore();
+
+  assert.throws(
+    () => assertTagMatchesRemote(staleCommit, currentCommit),
+    /tag.*origin\/main|stale/i,
+  );
+});
+
+test('release source guard rejects a tag commit differing from checked-out HEAD', () => {
+  const { assertTagMatchesHead } = loadReleaseSourceGuardCore();
+
+  assert.throws(
+    () => assertTagMatchesHead(staleCommit, currentCommit),
+    /tag.*HEAD/i,
+  );
+});
+
+test('release source guard rejects root and plugin manifest version mismatch', () => {
+  const { validateReleaseVersions } = loadReleaseSourceGuardCore();
+
+  assert.throws(
+    () => validateReleaseVersions('1.3.48', '1.3.49', '1.3.49'),
+    /root.*plugin|manifest versions/i,
+  );
+});
+
+test('release source guard rejects tag and manifest version mismatch', () => {
+  const { validateReleaseVersions } = loadReleaseSourceGuardCore();
+
+  assert.throws(
+    () => validateReleaseVersions('1.3.48', '1.3.48', '1.3.49'),
+    /tag.*manifest|version/i,
+  );
+});
+
+test('release source guard accepts a current version tag at current remote main', () => {
+  const { validateTagState } = loadReleaseSourceGuardCore();
+
+  assert.deepEqual(validateTagState({
+    statusOutput: '',
+    headOutput: `${currentCommit}\n`,
+    tagOutput: `${currentCommit}\n`,
+    remoteMainOutput: remoteMainOutput(),
+    tag: '1.3.48',
+    rootVersion: '1.3.48',
+    pluginVersion: '1.3.48',
+  }), {
+    head: currentCommit,
+    tagCommit: currentCommit,
+    remoteMain: currentCommit,
+    version: '1.3.48',
+  });
+});
+
+test('release source guard fails closed on malformed or empty Git output', async (t) => {
+  const {
+    parseCommitOutput,
+    parseRemoteMainOutput,
+    validateDeployState,
+  } = loadReleaseSourceGuardCore();
+
+  for (const [name, probe, pattern] of [
+    ['empty HEAD', () => parseCommitOutput('', 'local HEAD'), /HEAD|commit/i],
+    ['malformed HEAD', () => parseCommitOutput('not-a-commit\n', 'local HEAD'), /HEAD|commit/i],
+    ['extra HEAD output', () => parseCommitOutput(`${currentCommit}\nextra\n`, 'local HEAD'), /HEAD|commit/i],
+    ['empty remote main', () => parseRemoteMainOutput(''), /remote.*main/i],
+    ['wrong remote ref', () => parseRemoteMainOutput(`${currentCommit}\trefs/heads/master\n`), /remote.*main/i],
+    ['multiple remote refs', () => parseRemoteMainOutput(`${remoteMainOutput()}${remoteMainOutput()}`), /remote.*main/i],
+    ['missing status output', () => validateDeployState({
+      headOutput: `${currentCommit}\n`,
+      remoteMainOutput: remoteMainOutput(),
+    }), /status/i],
+  ]) {
+    await t.test(name, () => assert.throws(probe, pattern));
+  }
+});
+
+test('release source guard rejects invalid version tag names', async (t) => {
+  const { validateVersionTag } = loadReleaseSourceGuardCore();
+
+  for (const tag of [
+    '',
+    'v1.3.48',
+    '1.3',
+    '1.3.48-beta.1',
+    '01.3.48',
+    '1.03.48',
+    '1.3.048',
+    '1.3.48\n',
+    'refs/tags/1.3.48',
+  ]) {
+    await t.test(JSON.stringify(tag), () => {
+      assert.throws(() => validateVersionTag(tag), /version tag|X\.Y\.Z/i);
+    });
+  }
+});
+
+test('release source guard CLI documents both modes and rejects invalid arguments', async (t) => {
+  const help = runReleaseSourceGuard(['--help']);
+  assert.equal(help.status, 0, `guard --help failed:\n${help.stdout}${help.stderr}`);
+  assert.match(`${help.stdout}${help.stderr}`, /--deploy\b/);
+  assert.match(`${help.stdout}${help.stderr}`, /--tag\s+<X\.Y\.Z>/);
+
+  for (const args of [
+    [],
+    ['--unknown'],
+    ['--deploy', 'extra'],
+    ['--tag'],
+    ['--tag', '1.3.48', 'extra'],
+    ['--tag', 'v1.3.48'],
+  ]) {
+    await t.test(args.join(' ') || 'missing arguments', () => {
+      const result = runReleaseSourceGuard(args);
+      assert.notEqual(result.status, 0, `guard must reject arguments: ${args.join(' ')}`);
+    });
+  }
 });
 
 test('the main workflow guards main pushes and pull requests with repository contracts', {
