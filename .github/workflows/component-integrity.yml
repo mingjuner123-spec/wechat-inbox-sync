@@ -1,0 +1,29 @@
+name: Component integrity
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Reject local component manifest drift
+        run: node scripts/update-local-components-manifest.js --check
+
+      - name: Verify public local component assets
+        run: node scripts/check-local-components-cdn.js

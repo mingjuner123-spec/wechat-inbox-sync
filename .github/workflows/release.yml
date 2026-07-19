@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - '*'
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
@@ -12,10 +12,28 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout full repository history
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Validate plugin version
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Fetch current remote main
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+
+      - name: Identify current remote main
+        run: git rev-parse --verify refs/remotes/origin/main
+
+      - name: Enforce release source and version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: node scripts/release-source-guard.js --tag "$TAG_NAME"
+
+      - name: Validate release manifest versions
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
@@ -31,18 +49,57 @@ jobs:
             exit 1
           fi
 
-      - name: Run plugin regression tests
+      - name: Run release governance and plugin regressions
         run: |
+          node tests/release-governance.test.js
           node tests/plugin-main-ai.test.js
           node tests/plugin-marketplace-package.test.js
+
+      - name: Check governance and plugin JavaScript syntax
+        run: |
+          node --check tests/release-governance.test.js
+          node --check scripts/local-component-manifest-core.js
+          node --check scripts/update-local-components-manifest.js
+          node --check scripts/release-source-guard-core.js
+          node --check scripts/release-source-guard.js
           node --check obsidian-plugin/wechat-inbox-sync/main.js
 
-      - name: Verify public OCR component assets
-        run: node scripts/check-local-ocr-cdn.js
+      - name: Reject local component manifest drift
+        run: node scripts/update-local-components-manifest.js --check
 
-      - name: Create or update GitHub release
+      - name: Check macOS installer shell syntax
+        run: |
+          bash -n obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh
+          bash -n obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh
+
+      - name: Parse Windows installer PowerShell syntax
+        shell: pwsh
+        run: |
+          $installerPaths = @(
+            'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1'
+            'obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1'
+          )
+          foreach ($installerPath in $installerPaths) {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $installerPath,
+              [ref] $tokens,
+              [ref] $parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
+          }
+
+      - name: Verify public local component assets
+        run: |
+          node scripts/check-local-ocr-cdn.js
+          node scripts/check-local-components-cdn.js
+
+      - name: Package plugin release assets
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -50,6 +107,15 @@ jobs:
           ZIP_NAME="wechat-inbox-sync-$TAG_NAME.zip"
           rm -f "$ZIP_NAME"
           zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr local-ocr
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd obsidian-plugin/wechat-inbox-sync
+          ZIP_NAME="wechat-inbox-sync-$TAG_NAME.zip"
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" main.js manifest.json styles.css versions.json "$ZIP_NAME" --clobber

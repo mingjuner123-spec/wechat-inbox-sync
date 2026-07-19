@@ -39,6 +39,26 @@ const compatibilityMappings = [
   ['local-ocr/install-local-ocr-macos.sh', 'local-ocr/common/install-local-ocr-macos.sh'],
   ['local-ocr/ocr_image.py', 'local-ocr/common/ocr_image.py'],
 ];
+const governanceCommands = [
+  'node tests/release-governance.test.js',
+  'node tests/plugin-main-ai.test.js',
+  'node tests/plugin-marketplace-package.test.js',
+  'node --check tests/release-governance.test.js',
+  'node --check scripts/local-component-manifest-core.js',
+  'node --check scripts/update-local-components-manifest.js',
+  'node --check scripts/release-source-guard-core.js',
+  'node --check scripts/release-source-guard.js',
+  'node --check obsidian-plugin/wechat-inbox-sync/main.js',
+  'node scripts/update-local-components-manifest.js --check',
+];
+const macInstallerPaths = [
+  'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh',
+  'obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr-macos.sh',
+];
+const windowsInstallerPaths = [
+  'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1',
+  'obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1',
+];
 const currentCommit = 'a'.repeat(40);
 const staleCommit = 'b'.repeat(40);
 
@@ -259,11 +279,109 @@ function yamlSteps(jobBlock) {
 
 function runBody(step) {
   const lines = step.split(/\r?\n/);
-  const runStart = lines.findIndex((line) => /^\s+run\s*:/.test(line));
+  const runStart = lines.findIndex((line) => /^\s+(?:-\s+)?run\s*:/.test(line));
   if (runStart === -1) return '';
-  return lines.slice(runStart)
+  const inlineBody = lines[runStart].match(/\brun\s*:\s*(.*)$/)?.[1]?.trim();
+  const bodyLines = inlineBody && !/^[|>][-+0-9]*$/.test(inlineBody)
+    ? [inlineBody, ...lines.slice(runStart + 1)]
+    : lines.slice(runStart + 1);
+  return bodyLines
     .filter((line) => !line.trimStart().startsWith('#'))
     .join('\n');
+}
+
+function workflowJob(workflow, jobName) {
+  const jobs = yamlBlock(workflow, /^jobs:\s*$/);
+  return yamlBlock(jobs, new RegExp(`^  ${jobName}:\\s*$`));
+}
+
+function workflowPermissions(workflow) {
+  return yamlBlock(workflow, /^permissions:\s*$/);
+}
+
+function stepUsing(jobBlock, actionPattern) {
+  const step = yamlSteps(jobBlock)
+    .find((candidate) => actionPattern.test(candidate));
+  assert.ok(step, `missing workflow step using ${actionPattern}`);
+  return step;
+}
+
+function stepWith(step) {
+  return yamlBlock(step, /^\s+with:\s*$/);
+}
+
+function executableRuns(jobBlock) {
+  return yamlSteps(jobBlock).map(runBody).filter(Boolean);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function executableCommandPattern(command) {
+  return new RegExp(`^\\s*${escapeRegExp(command)}\\s*$`, 'm');
+}
+
+function assertExecutableCommand(runs, command, message = `missing executable command: ${command}`) {
+  assert.ok(runs.some((run) => executableCommandPattern(command).test(run)), message);
+}
+
+function assertNode24(jobBlock) {
+  const setupNode = stepUsing(jobBlock, /^\s+uses:\s*actions\/setup-node@v4\s*$/m);
+  assert.match(
+    stepWith(setupNode),
+    /^\s+node-version:\s*['"]?24['"]?\s*$/m,
+    'setup-node must configure Node 24 under its with block',
+  );
+}
+
+function assertFullCheckout(jobBlock) {
+  const checkout = stepUsing(jobBlock, /^\s+uses:\s*actions\/checkout@v4\s*$/m);
+  assert.match(
+    stepWith(checkout),
+    /^\s+fetch-depth:\s*0\s*$/m,
+    'checkout must configure fetch-depth: 0 under its with block',
+  );
+}
+
+function assertGovernanceGates(jobBlock) {
+  const runs = executableRuns(jobBlock);
+  for (const command of governanceCommands) {
+    assertExecutableCommand(runs, command);
+  }
+  for (const installerPath of macInstallerPaths) {
+    assertExecutableCommand(runs, `bash -n ${installerPath}`);
+  }
+  const powershellStep = yamlSteps(jobBlock)
+    .find((step) => /\bParser\]::ParseFile\s*\(/.test(runBody(step)));
+  assert.ok(powershellStep, 'workflow must parse Windows installers with the PowerShell parser');
+  assert.match(
+    powershellStep,
+    /^\s+shell:\s*pwsh\s*$/m,
+    'Windows installer parser gate must execute with pwsh',
+  );
+  const powershellRun = runBody(powershellStep);
+  for (const installerPath of windowsInstallerPaths) {
+    assert.ok(
+      powershellRun.includes(installerPath),
+      `PowerShell parser gate must include ${installerPath}`,
+    );
+  }
+  assert.match(
+    powershellRun,
+    /foreach\s*\(\$installerPath\s+in\s+\$installerPaths\)/,
+    'PowerShell parser gate must iterate over every configured installer path',
+  );
+  assert.match(
+    powershellRun,
+    /Parser\]::ParseFile\s*\(\s*\$installerPath\s*,/,
+    'PowerShell parser gate must pass each installer path to ParseFile',
+  );
+  assert.match(
+    powershellRun,
+    /if\s*\(\$parseErrors\.Count\s+-gt\s+0\)/,
+    'PowerShell parser gate must fail when parser errors are returned',
+  );
 }
 
 function componentEntries(manifest) {
@@ -843,17 +961,12 @@ test('the main workflow guards main pushes and pull requests with repository con
   const pullRequest = yamlBlock(triggers, /^  pull_request:\s*$/);
   assert.match(push, /^\s+branches:\s*(?:\[\s*main\s*\]|(?:\r?\n\s+-\s+main))\s*$/m, 'push trigger must target main');
   assert.match(pullRequest, /^\s+branches:\s*(?:\[\s*main\s*\]|(?:\r?\n\s+-\s+main))\s*$/m, 'pull_request trigger must target main');
+  assert.match(workflowPermissions(workflow), /^\s+contents:\s*read\s*$/m);
 
-  const runs = yamlSteps(workflow).map(runBody);
-  assert.ok(
-    runs.some((run) => /node tests\/release-governance\.test\.js/.test(run)),
-    'main guard workflow must execute release-governance contracts',
-  );
-  assert.match(
-    runs.join('\n'),
-    /node scripts\/update-local-components-manifest\.js --check/,
-    'main guard workflow must reject component-manifest drift',
-  );
+  const guardJob = workflowJob(workflow, 'guards');
+  assertFullCheckout(guardJob);
+  assertNode24(guardJob);
+  assertGovernanceGates(guardJob);
 });
 
 test('the component-integrity workflow runs on a schedule and by manual dispatch', {
@@ -864,36 +977,72 @@ test('the component-integrity workflow runs on a schedule and by manual dispatch
   const schedule = yamlBlock(triggers, /^  schedule:\s*$/);
   yamlBlock(triggers, /^  workflow_dispatch:\s*(?:\{\})?\s*$/);
   assert.match(schedule, /^\s+-\s+cron\s*:/m, 'component integrity schedule must define a cron');
-  const runs = yamlSteps(workflow).map(runBody);
-  assert.ok(
-    runs.some((run) => /node scripts\/check-local-components-cdn\.js/.test(run)),
-    'component integrity workflow must run the canonical CDN verifier',
-  );
+  assert.match(workflowPermissions(workflow), /^\s+contents:\s*read\s*$/m);
+
+  const integrityJob = workflowJob(workflow, 'integrity');
+  assertFullCheckout(integrityJob);
+  assertNode24(integrityJob);
+  const runs = executableRuns(integrityJob);
+  assertExecutableCommand(runs, 'node scripts/update-local-components-manifest.js --check');
+  assertExecutableCommand(runs, 'node scripts/check-local-components-cdn.js');
 });
 
-test('tag releases check out full Git history', () => {
+test('tag releases only trigger for numeric version-shaped tags', () => {
   const workflow = readText(relativePaths.releaseWorkflow);
-  const releaseJob = yamlBlock(workflow, /^  release:\s*$/);
-  const checkout = yamlSteps(releaseJob)
-    .find((step) => /^\s+uses:\s*actions\/checkout@/m.test(step));
-  assert.ok(checkout, 'release workflow must contain an actions/checkout step');
-  assert.match(checkout, /^\s+fetch-depth\s*:\s*0\s*$/m, 'release checkout must fetch full Git history');
-});
-
-test('tag releases enforce equality with current remote main', () => {
-  const workflow = readText(relativePaths.releaseWorkflow);
-  const releaseJob = yamlBlock(workflow, /^  release:\s*$/);
-  const runs = yamlSteps(releaseJob).map(runBody);
-  const guardIndex = runs.findIndex((run) => /node scripts\/release-source-guard\.js/.test(run));
-  const publishIndex = runs.findIndex((run) => /\bgh release (?:create|upload)\b/.test(run));
+  const triggers = yamlBlock(workflow, /^on:\s*$/);
+  const push = yamlBlock(triggers, /^  push:\s*$/);
+  const tags = yamlBlock(push, /^    tags:\s*$/);
   assert.match(
-    runs.join('\n'),
-    /(?:origin\/main|refs\/heads\/main)/,
-    'release workflow must identify the current remote main commit',
+    tags,
+    /^\s+-\s+['"]?\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+['"]?\s*$/m,
+    'release tags must be limited to numeric X.Y.Z-shaped refs',
   );
+  assert.doesNotMatch(tags, /^\s+-\s+['"]?\*['"]?\s*$/m, 'release must not trigger for every tag');
+  assert.match(workflowPermissions(workflow), /^\s+contents:\s*write\s*$/m);
+});
+
+test('tag releases enforce all governance gates before publication', () => {
+  const workflow = readText(relativePaths.releaseWorkflow);
+  const releaseJob = workflowJob(workflow, 'release');
+  assertFullCheckout(releaseJob);
+  assertNode24(releaseJob);
+  assertGovernanceGates(releaseJob);
+
+  const runs = executableRuns(releaseJob);
+  const fetchIndex = runs.findIndex((run) => (
+    /\bgit fetch\b/.test(run) && /refs\/remotes\/origin\/main|origin\/main/.test(run)
+  ));
+  const identifyIndex = runs.findIndex((run) => (
+    /\bgit rev-parse\b/.test(run) && /refs\/remotes\/origin\/main|origin\/main/.test(run)
+  ));
+  const guardIndex = runs.findIndex((run) => (
+    executableCommandPattern('node scripts/release-source-guard.js --tag "$TAG_NAME"').test(run)
+  ));
+  const cdnIndex = runs.findIndex((run) => (
+    executableCommandPattern('node scripts/check-local-components-cdn.js').test(run)
+  ));
+  const packageIndex = runs.findIndex((run) => (
+    executableCommandPattern(
+      'zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr local-ocr',
+    ).test(run)
+  ));
+  const publishIndex = runs.findIndex((run) => /\bgh release (?:create|upload)\b/.test(run));
+  assert.notEqual(fetchIndex, -1, 'release workflow must fetch origin/main explicitly');
+  assert.notEqual(identifyIndex, -1, 'release workflow must identify fetched origin/main');
   assert.notEqual(guardIndex, -1, 'release workflow must execute the main-equality release-source guard');
+  assert.notEqual(cdnIndex, -1, 'release workflow must execute the generic component CDN verifier');
+  assert.notEqual(packageIndex, -1, 'release workflow must preserve the complete plugin release package');
   assert.notEqual(publishIndex, -1, 'release workflow must contain a GitHub Release publication step');
+  assert.ok(fetchIndex < identifyIndex, 'origin/main must be fetched before it is identified');
+  assert.ok(identifyIndex < guardIndex, 'origin/main must be identified before the release-source guard');
   assert.ok(guardIndex < publishIndex, 'release-source guard must execute before GitHub Release publication');
+  assert.ok(cdnIndex < publishIndex, 'generic CDN verification must execute before GitHub Release publication');
+  assert.ok(packageIndex < publishIndex, 'release assets must be packaged before GitHub Release publication');
+  assert.equal(
+    publishIndex,
+    runs.length - 1,
+    'GitHub Release publication must be the final executable workflow step',
+  );
 });
 
 for (const installerPath of [
