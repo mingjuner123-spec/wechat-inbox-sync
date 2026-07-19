@@ -77,6 +77,160 @@ function runReleaseSourceGuard(args) {
   });
 }
 
+function assertNormalExit(result, label) {
+  assert.equal(result.error, undefined, `${label} did not exit normally: ${result.error?.message}`);
+  assert.notEqual(result.status, null, `${label} did not report an exit status (signal: ${result.signal})`);
+  assert.equal(result.signal, null, `${label} was terminated by signal ${result.signal}`);
+}
+
+function runFixtureCommand(file, args, cwd, label, timeout = 10000) {
+  const result = childProcess.spawnSync(file, args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GCM_INTERACTIVE: 'Never',
+    },
+    shell: false,
+    timeout,
+  });
+  assertNormalExit(result, label);
+  assert.equal(
+    result.status,
+    0,
+    `${label} failed:\n${result.stdout || ''}${result.stderr || ''}`,
+  );
+  return result;
+}
+
+function runFixtureGit(repositoryPath, args, label) {
+  return runFixtureCommand('git', args, repositoryPath, label);
+}
+
+function copyFixtureFile(fixtureRoot, relativePath) {
+  const destination = path.join(fixtureRoot, ...relativePath.split('/'));
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(absolutePath(relativePath), destination);
+}
+
+function createReleaseGuardFixture(t, {
+  checkerSource,
+  extraCommit = false,
+} = {}) {
+  const fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'release-source-guard-'));
+  const repositoryPath = path.join(fixtureDirectory, 'repository');
+  const originPath = path.join(fixtureDirectory, 'origin.git');
+  fs.mkdirSync(repositoryPath, { recursive: true });
+  t.after(() => fs.rmSync(fixtureDirectory, { recursive: true, force: true }));
+
+  for (const relativePath of [
+    'scripts/release-source-guard.js',
+    'scripts/release-source-guard-core.js',
+    'scripts/update-local-components-manifest.js',
+    'scripts/local-component-manifest-core.js',
+    'manifest.json',
+    'obsidian-plugin/wechat-inbox-sync/manifest.json',
+    'obsidian-plugin/wechat-inbox-sync/local-components-manifest.json',
+    ...ASSET_DEFINITIONS.map(({ sourcePath }) => (
+      `obsidian-plugin/wechat-inbox-sync/${sourcePath}`
+    )),
+  ]) {
+    copyFixtureFile(repositoryPath, relativePath);
+  }
+  if (checkerSource) {
+    fs.writeFileSync(
+      path.join(repositoryPath, 'scripts', 'update-local-components-manifest.js'),
+      checkerSource,
+      'utf8',
+    );
+  }
+
+  runFixtureGit(repositoryPath, ['init', '-b', 'main'], 'initialize fixture repository');
+  runFixtureGit(repositoryPath, ['config', 'user.name', 'Release Guard Test'], 'configure fixture user name');
+  runFixtureGit(repositoryPath, ['config', 'user.email', 'release-guard@example.invalid'], 'configure fixture user email');
+  runFixtureGit(repositoryPath, ['config', 'commit.gpgSign', 'false'], 'disable fixture commit signing');
+  runFixtureGit(repositoryPath, ['add', '--all'], 'stage fixture repository');
+  runFixtureGit(repositoryPath, ['commit', '-m', 'fixture release source'], 'commit fixture repository');
+
+  if (extraCommit) {
+    fs.writeFileSync(path.join(repositoryPath, 'history-marker.txt'), 'second commit\n', 'utf8');
+    runFixtureGit(repositoryPath, ['add', 'history-marker.txt'], 'stage fixture history marker');
+    runFixtureGit(repositoryPath, ['commit', '-m', 'fixture second commit'], 'create fixture second commit');
+  }
+
+  runFixtureCommand(
+    'git',
+    ['init', '--bare', '--initial-branch=main', originPath],
+    fixtureDirectory,
+    'initialize fixture bare origin',
+  );
+  runFixtureGit(repositoryPath, ['remote', 'add', 'origin', originPath], 'add fixture origin');
+  runFixtureGit(
+    repositoryPath,
+    ['push', '--set-upstream', 'origin', 'main'],
+    'push fixture main',
+  );
+
+  return {
+    guardPath: path.join(repositoryPath, 'scripts', 'release-source-guard.js'),
+    originPath,
+    repositoryPath,
+  };
+}
+
+function runFixtureGuard(fixture, args) {
+  return childProcess.spawnSync(process.execPath, [fixture.guardPath, ...args], {
+    cwd: fixture.repositoryPath,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GCM_INTERACTIVE: 'Never',
+    },
+    shell: false,
+    timeout: 10000,
+  });
+}
+
+function remoteAdvancingCheckerSource() {
+  return `'use strict';
+const childProcess = require('node:child_process');
+const path = require('node:path');
+const repositoryPath = path.resolve(__dirname, '..');
+const options = {
+  cwd: repositoryPath,
+  encoding: 'utf8',
+  env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' },
+  shell: false,
+  stdio: ['ignore', 'pipe', 'pipe'],
+};
+childProcess.execFileSync('git', ['commit', '--allow-empty', '-m', 'advance during manifest check'], options);
+childProcess.execFileSync('git', ['push', 'origin', 'HEAD:refs/heads/main'], options);
+process.stdout.write('fixture manifest check advanced main\\n');
+`;
+}
+
+function tagMovingCheckerSource(tag) {
+  return `'use strict';
+const childProcess = require('node:child_process');
+const path = require('node:path');
+const repositoryPath = path.resolve(__dirname, '..');
+childProcess.execFileSync(
+  'git',
+  ['tag', '--force', '--annotate', ${JSON.stringify(tag)}, 'HEAD~1', '--message', 'move during manifest check'],
+  {
+    cwd: repositoryPath,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' },
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  },
+);
+process.stdout.write('fixture manifest check moved tag\\n');
+`;
+}
+
 function yamlBlock(text, headerPattern) {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => headerPattern.test(line));
@@ -402,6 +556,7 @@ test('the manifest checker executes check mode and documents intentional write m
     encoding: 'utf8',
     timeout: 5000,
   });
+  assertNormalExit(invalid, 'manifest checker invalid-mode rejection');
   assert.notEqual(invalid.status, 0, 'manifest checker must reject unknown modes');
 });
 
@@ -538,6 +693,7 @@ test('release source guard rejects invalid version tag names', async (t) => {
 
 test('release source guard CLI documents both modes and rejects invalid arguments', async (t) => {
   const help = runReleaseSourceGuard(['--help']);
+  assertNormalExit(help, 'guard --help');
   assert.equal(help.status, 0, `guard --help failed:\n${help.stdout}${help.stderr}`);
   assert.match(`${help.stdout}${help.stderr}`, /--deploy\b/);
   assert.match(`${help.stdout}${help.stderr}`, /--tag\s+<X\.Y\.Z>/);
@@ -552,9 +708,130 @@ test('release source guard CLI documents both modes and rejects invalid argument
   ]) {
     await t.test(args.join(' ') || 'missing arguments', () => {
       const result = runReleaseSourceGuard(args);
+      assertNormalExit(result, `guard rejection for ${args.join(' ') || 'missing arguments'}`);
       assert.notEqual(result.status, 0, `guard must reject arguments: ${args.join(' ')}`);
     });
   }
+});
+
+test('release source guard production commands are bounded and Git probes are non-interactive', () => {
+  const guard = readText(relativePaths.releaseSourceGuard);
+  const localTimeout = Number(
+    guard.match(/LOCAL_COMMAND_TIMEOUT_MS\s*=\s*(\d+)/)?.[1],
+  );
+  const remoteTimeout = Number(
+    guard.match(/REMOTE_COMMAND_TIMEOUT_MS\s*=\s*(\d+)/)?.[1],
+  );
+
+  assert.ok(localTimeout >= 1000 && localTimeout <= 60000, 'local child timeout must be bounded');
+  assert.ok(
+    remoteTimeout >= localTimeout && remoteTimeout <= 120000,
+    'remote Git timeout must be bounded and allow at least the local timeout',
+  );
+  assert.match(guard, /\btimeout\s*:/);
+  assert.match(guard, /GIT_TERMINAL_PROMPT\s*:\s*['"]0['"]/);
+  assert.match(guard, /GCM_INTERACTIVE\s*:\s*['"]Never['"]/);
+  assert.match(guard, /\bshell\s*:\s*false/);
+  assert.match(guard, /timed out after/i);
+  assert.doesNotMatch(guard, /\bexecSync\s*\(/, 'guard must not construct shell commands');
+});
+
+test('release source guard CLI integrates with real local Git repositories', async (t) => {
+  await t.test('successful deploy', (t) => {
+    const fixture = createReleaseGuardFixture(t);
+    const result = runFixtureGuard(fixture, ['--deploy']);
+
+    assertNormalExit(result, 'fixture deploy guard');
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /Deploy source guard passed/i);
+  });
+
+  await t.test('successful tag with annotated tag peeling', (t) => {
+    const fixture = createReleaseGuardFixture(t);
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['tag', '--annotate', '1.3.48', '--message', 'fixture annotated release'],
+      'create fixture annotated tag',
+    );
+    const result = runFixtureGuard(fixture, ['--tag', '1.3.48']);
+
+    assertNormalExit(result, 'fixture tag guard');
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /Tag source guard passed/i);
+  });
+
+  await t.test('stale remote main failure', (t) => {
+    const fixture = createReleaseGuardFixture(t);
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['commit', '--allow-empty', '-m', 'advance fixture origin'],
+      'create fixture remote advance',
+    );
+    runFixtureGit(fixture.repositoryPath, ['push', 'origin', 'main'], 'push fixture remote advance');
+    runFixtureGit(fixture.repositoryPath, ['reset', '--hard', 'HEAD~1'], 'restore stale fixture HEAD');
+    const result = runFixtureGuard(fixture, ['--deploy']);
+
+    assertNormalExit(result, 'stale fixture guard rejection');
+    assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /stale|divergent|origin\/main/i);
+  });
+
+  await t.test('dirty worktree failure', (t) => {
+    const fixture = createReleaseGuardFixture(t);
+    fs.writeFileSync(path.join(fixture.repositoryPath, 'dirty.txt'), 'dirty\n', 'utf8');
+    const result = runFixtureGuard(fixture, ['--deploy']);
+
+    assertNormalExit(result, 'dirty fixture guard rejection');
+    assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /dirty|clean checkout/i);
+  });
+
+  await t.test('manifest and source drift failure', (t) => {
+    const fixture = createReleaseGuardFixture(t);
+    const sourcePath = path.join(
+      fixture.repositoryPath,
+      'obsidian-plugin',
+      'wechat-inbox-sync',
+      ...ASSET_DEFINITIONS[0].sourcePath.split('/'),
+    );
+    fs.appendFileSync(sourcePath, '\nfixture drift\n', 'utf8');
+    runFixtureGit(fixture.repositoryPath, ['add', '--all'], 'stage fixture source drift');
+    runFixtureGit(fixture.repositoryPath, ['commit', '-m', 'drift fixture source'], 'commit fixture source drift');
+    runFixtureGit(fixture.repositoryPath, ['push', 'origin', 'main'], 'push fixture source drift');
+    const result = runFixtureGuard(fixture, ['--deploy']);
+
+    assertNormalExit(result, 'manifest drift guard rejection');
+    assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /manifest drift/i);
+  });
+
+  await t.test('remote advance during validation failure', (t) => {
+    const fixture = createReleaseGuardFixture(t, {
+      checkerSource: remoteAdvancingCheckerSource(),
+    });
+    const result = runFixtureGuard(fixture, ['--deploy']);
+
+    assertNormalExit(result, 'concurrent remote advance guard rejection');
+    assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /changed during|snapshot|advance/i);
+  });
+
+  await t.test('annotated tag move during validation failure', (t) => {
+    const fixture = createReleaseGuardFixture(t, {
+      checkerSource: tagMovingCheckerSource('1.3.48'),
+      extraCommit: true,
+    });
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['tag', '--annotate', '1.3.48', '--message', 'fixture annotated release'],
+      'create fixture annotated tag before move',
+    );
+    const result = runFixtureGuard(fixture, ['--tag', '1.3.48']);
+
+    assertNormalExit(result, 'concurrent tag move guard rejection');
+    assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /tag.*HEAD|changed during|snapshot/i);
+  });
 });
 
 test('the main workflow guards main pushes and pull requests with repository contracts', {

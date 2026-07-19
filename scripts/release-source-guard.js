@@ -23,6 +23,13 @@ const MANIFEST_CHECKER_PATH = path.join(
   'scripts',
   'update-local-components-manifest.js',
 );
+const LOCAL_COMMAND_TIMEOUT_MS = 10000;
+const REMOTE_COMMAND_TIMEOUT_MS = 30000;
+const NON_INTERACTIVE_GIT_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: '0',
+  GCM_INTERACTIVE: 'Never',
+};
 const USAGE = `Usage: node scripts/release-source-guard.js <mode>
 
 Modes:
@@ -41,21 +48,32 @@ function commandErrorDetail(error) {
   return stderr || stdout || error.message || String(error);
 }
 
-function runCommand(file, args, label) {
+function runCommand(file, args, label, {
+  env = process.env,
+  timeoutMs = LOCAL_COMMAND_TIMEOUT_MS,
+} = {}) {
   try {
     return childProcess.execFileSync(file, args, {
       cwd: REPO_ROOT,
       encoding: 'utf8',
+      env,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
     });
   } catch (error) {
+    if (error && (error.code === 'ETIMEDOUT' || error.errno === 'ETIMEDOUT')) {
+      throw new Error(`${label} timed out after ${timeoutMs} ms`);
+    }
     throw new Error(`${label} failed: ${commandErrorDetail(error)}`);
   }
 }
 
-function runGit(args, label) {
-  return runCommand('git', args, `Git probe for ${label}`);
+function runGit(args, label, { remote = false } = {}) {
+  return runCommand('git', args, `Git probe for ${label}`, {
+    env: NON_INTERACTIVE_GIT_ENV,
+    timeoutMs: remote ? REMOTE_COMMAND_TIMEOUT_MS : LOCAL_COMMAND_TIMEOUT_MS,
+  });
 }
 
 function readManifestVersion(manifestPath, label) {
@@ -96,45 +114,86 @@ function probeRemoteMain() {
   return runGit(
     ['ls-remote', 'origin', 'refs/heads/main'],
     'remote origin/main',
+    { remote: true },
   );
 }
 
-function runDeployGuard() {
+function probeBaseSnapshot() {
   const statusOutput = probeCleanStatus();
-  const state = validateDeployState({
+  const headOutput = probeHead();
+  const remoteMainOutput = probeRemoteMain();
+  return validateDeployState({
     statusOutput,
-    headOutput: probeHead(),
-    remoteMainOutput: probeRemoteMain(),
+    headOutput,
+    remoteMainOutput,
   });
-  runCanonicalManifestCheck();
-  process.stdout.write(
-    `Deploy source guard passed: HEAD ${state.head} equals current origin/main.\n`,
-  );
 }
 
-function runTagGuard(tag) {
-  validateVersionTag(tag);
-  const statusOutput = probeCleanStatus();
+function probeTagSnapshot(tag, baseSnapshot) {
   const rootVersion = readManifestVersion(ROOT_MANIFEST_PATH, 'root manifest.json');
   const pluginVersion = readManifestVersion(
     PLUGIN_MANIFEST_PATH,
     'plugin manifest.json',
   );
   const state = validateTagState({
-    statusOutput,
-    headOutput: probeHead(),
+    statusOutput: '',
+    headOutput: `${baseSnapshot.head}\n`,
     tagOutput: runGit(
       ['rev-parse', `refs/tags/${tag}^{}`],
       `tag ${tag} commit`,
     ),
-    remoteMainOutput: probeRemoteMain(),
+    remoteMainOutput: `${baseSnapshot.remoteMain}\trefs/heads/main\n`,
     tag,
     rootVersion,
     pluginVersion,
   });
+  return {
+    ...state,
+    rootVersion,
+    pluginVersion,
+  };
+}
+
+function assertSnapshotUnchanged(before, after, fields, label) {
+  const changedFields = fields.filter((field) => before[field] !== after[field]);
+  if (changedFields.length > 0) {
+    throw new Error(
+      `${label} changed during release source guard (${changedFields.join(', ')}); `
+      + 'refusing a moving publication snapshot',
+    );
+  }
+}
+
+function runDeployGuard() {
+  const before = probeBaseSnapshot();
   runCanonicalManifestCheck();
+  const after = probeBaseSnapshot();
+  assertSnapshotUnchanged(
+    before,
+    after,
+    ['head', 'remoteMain'],
+    'deploy source snapshot',
+  );
   process.stdout.write(
-    `Tag source guard passed: ${state.version} and HEAD ${state.head} equal current origin/main.\n`,
+    `Deploy source guard passed: HEAD ${after.head} equals current origin/main.\n`,
+  );
+}
+
+function runTagGuard(tag) {
+  validateVersionTag(tag);
+  const beforeBase = probeBaseSnapshot();
+  const before = probeTagSnapshot(tag, beforeBase);
+  runCanonicalManifestCheck();
+  const afterBase = probeBaseSnapshot();
+  const after = probeTagSnapshot(tag, afterBase);
+  assertSnapshotUnchanged(
+    before,
+    after,
+    ['head', 'tagCommit', 'remoteMain', 'version', 'rootVersion', 'pluginVersion'],
+    'tag source snapshot',
+  );
+  process.stdout.write(
+    `Tag source guard passed: ${after.version} and HEAD ${after.head} equal current origin/main.\n`,
   );
 }
 
