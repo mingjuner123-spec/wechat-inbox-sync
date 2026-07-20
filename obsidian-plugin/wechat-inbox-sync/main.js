@@ -4978,6 +4978,47 @@ function collectJsonArrayBlocks(source, keys) {
   return blocks;
 }
 
+function collectTopLevelJsonObjectBlocks(source) {
+  const blocks = [];
+  const text = String(source || '');
+  let depth = 0;
+  let start = -1;
+  let inString = '';
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (inString) {
+      if (char === inString) inString = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      inString = char;
+      continue;
+    }
+    if (char === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (char === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        blocks.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return blocks;
+}
+
 function collectJsonStringValues(source, keys) {
   const wanted = new Set((keys || []).map((key) => String(key || '').toLowerCase()));
   const values = [];
@@ -5098,6 +5139,31 @@ function collectFilteredImageTagUrls(source) {
   return urls;
 }
 
+function collectPreferredXiaohongshuImageObjectUrl(source) {
+  const preferredKeys = [
+    'original',
+    'originalUrl',
+    'original_url',
+    'urlSizeLarge',
+    'url_size_large',
+    'urlDefault',
+    'url',
+    'src',
+    'image',
+    'imageUrl',
+    'image_url',
+    'cover',
+    'urlPre',
+    'url_pre',
+  ];
+  for (const key of preferredKeys) {
+    const value = collectJsonStringValues(source, [key])
+      .find((url) => isLikelyImageUrl(url) && !isNoisyXiaohongshuImageUrl(url));
+    if (value) return value;
+  }
+  return '';
+}
+
 function collectXiaohongshuNoteImageUrls(html) {
   const source = String(html || '');
   const imageBlocks = collectJsonArrayBlocks(source, [
@@ -5112,6 +5178,13 @@ function collectXiaohongshuNoteImageUrls(html) {
   const structuredUrls = [];
 
   imageBlocks.forEach((block) => {
+    const imageObjects = collectTopLevelJsonObjectBlocks(block);
+    if (imageObjects.length) {
+      imageObjects.forEach((imageObject) => {
+        pushUniqueUrl(structuredUrls, collectPreferredXiaohongshuImageObjectUrl(imageObject));
+      });
+      return;
+    }
     collectJsonStringValues(block, [
       'url',
       'urlDefault',

@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-20 - 小红书图集只保留每页最高质量图片（1.3.52）
+
+- 目标：修复小红书 `imageList` 同一页同时包含缩略图与高质量图时，插件把两者都下载、写入笔记并重复 OCR 的问题。
+- 影响范围：仅 Obsidian 插件的小红书结构化图片提取逻辑、回归测试和工作日志；未修改知识库内已安装插件、既有 Markdown、附件、云函数、小程序或线上数据。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`docs/WORKLOG.md`。
+- 线上动作：正在准备插件 `1.3.52` 发布；尚未覆盖本地插件。
+- 数据变更：无。
+- 验证：先新增 `imageList` 每项同时含 `urlPre` 与 `urlDefault` 的回归样本，确认旧实现错误返回 4 张图；修复后只返回 2 张高质量 `urlDefault` 图片。`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js` 和 `git diff --check` 通过，其中发布治理 122 项全部通过。
+- 结果：结构化 `imageList` 现在保留图片对象边界，每个对象按 `original`、`urlSizeLarge`、`urlDefault`、通用 URL、最后才到 `urlPre` 的顺序只选择一个可用地址；低质量缩略图不会再被下载、写入笔记或 OCR。字符串形式的历史 `imageList` 继续走原有兼容路径。
+- 已知风险：`tests/release-social-feishu-ai.test.js` 仍将版本硬编码为历史值 `1.2.97`，在当前发布基线上失败，与本次图片修复无关；真实小红书页面字段若再次变化，仍需用新样本扩展字段优先级。
+- 下一步：完成合并、`1.3.52` 标签、GitHub Release 与 Obsidian 发布 Skill 门禁；发布后用同一篇 8 页小红书笔记重新采集，验收只生成 8 张高质量图片且 OCR 不重复。
+
 ### 2026-07-20 - 小红书结构化高清图优先与匿名公开页提取（1.3.51）
 
 - 目标：修复小红书图文同时保存 DOM 缩略图和结构化高清原图、8 张图变成 16 张的问题，并明确公开分享页无需登录即可提取的范围。
