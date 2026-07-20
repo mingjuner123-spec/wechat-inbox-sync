@@ -2904,6 +2904,23 @@ assert.strictEqual((xiaohongshuImageArrayNote.markdown.match(/cover!nd_dft_wlteh
 assert.strictEqual((xiaohongshuImageArrayNote.markdown.match(/inner-a!nd_dft_wlteh_jpg_3/g) || []).length, 1);
 assert.strictEqual((xiaohongshuImageArrayNote.markdown.match(/inner-b!nd_dft_wlteh_jpg_3/g) || []).length, 1);
 
+const xiaohongshuMultiQualityImageNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<meta property="og:title" content="XHS Multi Quality Images">',
+  '<meta name="description" content="每页只保留高质量图片。 #高清图">',
+  '</head><body>',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"每页只保留高质量图片。 #高清图","imageList":[',
+  '{"urlPre":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/thumb\\/page-1!nd_prv_wlteh_jpg_1","urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/original\\/page-1!nd_dft_wlteh_jpg_3"},',
+  '{"urlPre":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/thumb\\/page-2!nd_prv_wlteh_jpg_1","urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/original\\/page-2!nd_dft_wlteh_jpg_3"}',
+  ']}}</script>',
+  '</body></html>',
+].join(''), 'https://www.xiaohongshu.com/explore/multi-quality-images');
+assert.deepStrictEqual(xiaohongshuMultiQualityImageNote.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/original/page-1!nd_dft_wlteh_jpg_3',
+  'https://sns-webpic-qc.xhscdn.com/original/page-2!nd_dft_wlteh_jpg_3',
+]);
+assert.strictEqual(xiaohongshuMultiQualityImageNote.markdown.includes('/thumb/'), false);
+
 const xiaohongshuDuplicatedHostNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<meta property="og:title" content="XHS Duplicate Host Title">',
