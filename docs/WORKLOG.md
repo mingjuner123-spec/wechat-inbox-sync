@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-20 - 修复 Windows OCR 安装目录占用并准备 1.3.50
+
+- 目标：修复 Windows OCR 安装器在旧 `venv\Scripts\python.exe` 残留或被占用时继续原地安装并报 `Permission denied`，让普通用户无需结束进程或手动改目录。
+- 影响范围：Windows OCR 安装器、插件启动时的待切换处理、安装状态提示、本地组件清单、插件发布元数据、回归测试和文档；macOS OCR、ASR、云函数、绑定码和 Pro 权益未修改。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1`、`obsidian-plugin/wechat-inbox-sync/main.js`、`obsidian-plugin/wechat-inbox-sync/local-ocr/README.md`、`obsidian-plugin/wechat-inbox-sync/local-components-manifest.json`、两份 `manifest.json`/`versions.json`、相关测试、设计与实施计划。
+- 线上动作：尚未部署本地组件 CDN，尚未合并主分支或发布插件；目标版本为 `1.3.50`。
+- 数据变更：无。
+- 验证：新增测试先分别因缺少 staging 事务标记和插件待切换能力失败；实现后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、Windows PowerShell AST 语法解析和 `git diff --check` 通过。计划中引用的 `plugin-core.test.js` 与 `release-governance-integration.test.js` 在当前公开主分支不存在，已改跑实际的 `release-governance.test.js`。
+- 结果：Windows 修复只保留一个正式 `venv`；新环境在 `venv-staging` 中创建和验证，使用短暂 backup 原子切换并支持失败回滚。若正式环境被占用，插件提示重启一次，并在下次 Obsidian 启动、OCR 尚未运行时自动完成切换和清理。
+- 已知风险：持续性的 Windows Defender/第三方安全软件执行阻止仍可能让新环境无法通过健康检查；此时保留旧环境并报告安全软件/系统策略错误。尚未在受影响用户机器完成真实占用场景回归。
+- 下一步：提交发布候选，完成 CI/代码审查、受控部署新的 OCR 安装器到腾讯云 CDN，发布并核验 Obsidian 插件 `1.3.50`。
+
 ### 2026-07-20 - 设计 Windows OCR 单目录自动修复
 
 - 目标：解决 Windows OCR 安装器在旧 `venv\Scripts\python.exe` 残留或被占用时继续安装并报 `Permission denied`，同时避免要求普通用户结束进程或手动重命名目录。
