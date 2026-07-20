@@ -5593,6 +5593,134 @@ async function runFeishuCustomAppConfigRequestTests() {
   assert.strictEqual(calls[1].body.url, 'https://example.feishu.cn/docx/docxToken123');
 }
 
+async function runBindingInvalidClassificationTests() {
+  assert.strictEqual(helpers.isBindingInvalidMessage('HTTP 403: upstream policy denied'), false);
+  assert.strictEqual(helpers.isBindingInvalidMessage('Invalid bind code'), true);
+  assert.strictEqual(helpers.isBindingInvalidMessage('Invalid or expired token'), true);
+  assert.strictEqual(helpers.isBindingInvalidMessage('绑定码未绑定或已失效'), true);
+}
+
+async function runFeishuOAuthSkipsStalePrimaryBindingTest() {
+  const previousWindow = global.window;
+  const openedUrls = [];
+  global.window = {
+    open(url) {
+      openedUrls.push(url);
+      return {};
+    },
+  };
+
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'OLD-123',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'OLD-123',
+      label: '旧微信',
+      status: 'bound',
+      enabled: true,
+    }, {
+      token: 'NEW-456',
+      label: '新微信',
+      status: 'bound',
+      enabled: true,
+    }],
+  });
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push(binding.token);
+    if (binding.token === 'OLD-123') {
+      throw new Error('绑定码未绑定或已失效，请在插件设置里重新绑定');
+    }
+    return {
+      success: true,
+      data: {
+        authUrl: 'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=state-new',
+      },
+    };
+  };
+
+  try {
+    await plugin.connectFeishuCloudOAuth();
+  } finally {
+    global.window = previousWindow;
+  }
+
+  assert.deepStrictEqual(calls, ['OLD-123', 'NEW-456']);
+  assert.deepStrictEqual(openedUrls, [
+    'https://accounts.feishu.cn/open-apis/authen/v1/authorize?state=state-new',
+  ]);
+}
+
+async function runSuccessfulRebindPromotesNewPrimaryBindingTest() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'OLD-123',
+    pendingBindCode: 'NEW-456',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'OLD-123',
+      label: '旧微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  plugin.saveData = async () => {};
+  plugin.requestJson = async () => ({ success: true, data: { status: 'bound' } });
+  plugin.refreshProAndMaybePromptLocalComponentInstall = async () => null;
+
+  await plugin.bindCurrentCode();
+
+  assert.strictEqual(plugin.settings.token, 'NEW-456');
+  assert.strictEqual(plugin.getActiveBindings()[0].token, 'NEW-456');
+  assert.deepStrictEqual(
+    plugin.settings.bindings.map((item) => item.token),
+    ['NEW-456', 'OLD-123'],
+  );
+}
+
+async function runXiaohongshuRemoteImageLocalizationHeadersTest() {
+  const writes = [];
+  const downloads = [];
+  const plugin = new PluginClass();
+  plugin.app = {
+    vault: {
+      adapter: {
+        async exists() {
+          return true;
+        },
+        async writeBinary(filePath, buffer) {
+          writes.push({ filePath, buffer });
+        },
+      },
+    },
+  };
+  plugin.downloadArrayBuffer = async (url, headers) => {
+    downloads.push({ url, headers });
+    return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  };
+
+  const imageUrl = 'https://sns-webpic-qc.xhscdn.com/spectrum/inner-image!nd_dft_wlteh_jpg_3';
+  const markdown = `![内页图 1](${imageUrl})`;
+  const localized = await plugin.saveMarkdownRemoteImageAssets(
+    markdown,
+    '临时收集',
+    '2026-07-20',
+    '小红书测试',
+    { sourceUrl: 'https://www.xiaohongshu.com/explore/test-note' },
+  );
+
+  assert.strictEqual(downloads.length, 1);
+  assert.strictEqual(downloads[0].url, imageUrl);
+  assert.strictEqual(downloads[0].headers.Referer, 'https://www.xiaohongshu.com/');
+  assert.ok(downloads[0].headers['User-Agent']);
+  assert.strictEqual(writes.length, 1);
+  assert.ok(localized.includes('![[临时收集/网页图片/2026-07-20/'));
+  assert.strictEqual(localized.includes(imageUrl), false);
+}
+
 async function runTranscriptionPreferenceSyncTest() {
   const calls = [];
   const plugin = new PluginClass();
@@ -7288,6 +7416,10 @@ async function main() {
   await runRequestJsonRecoversFromInvalidCloudBaseEnvTest();
   await runRequestJsonRecoversFromEmptyMigrationApiBaseTest();
   await runFeishuCustomAppConfigRequestTests();
+  await runBindingInvalidClassificationTests();
+  await runFeishuOAuthSkipsStalePrimaryBindingTest();
+  await runSuccessfulRebindPromotesNewPrimaryBindingTest();
+  await runXiaohongshuRemoteImageLocalizationHeadersTest();
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runXiaohongshuUnavailableRecordRemainsPendingTest();

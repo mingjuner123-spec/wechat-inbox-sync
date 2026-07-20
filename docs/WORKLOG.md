@@ -1,5 +1,16 @@
 # Worklog
 
+### 2026-07-20 - 插件 1.3.49：修复绑定码误报与小红书图片本地化（发布候选）
+
+- 目标：避免把普通 HTTP 403 一律误报为绑定码失效，恢复新绑定优先和飞书多绑定回退；把小红书远程图片下载为 Obsidian 本地附件，避免 CDN 防盗链或临时链接导致破图。
+- 影响范围：Obsidian 插件、插件测试、版本元数据、设计/实施文档和发布日志；不修改小程序、云函数、业务数据、保存目录逻辑或本地 OCR 安装器。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、插件与根目录 `manifest.json`/`versions.json`、`tests/plugin-main-ai.test.js`、设计/实施文档及本工作日志。
+- 线上动作：待发布 1.3.49；尚未修改云函数、腾讯云 CDN、用户绑定记录、同步记录或知识库文件。
+- 数据变更：无。
+- 验证：TDD 先确认 1.3.48 会把普通 403 判为绑定失效；新增绑定分类、新绑定主序、飞书跳过旧失效绑定和小红书本地化请求头回归，最小实现后 `node tests/plugin-main-ai.test.js` 通过。完整发布门禁和线上发布检查待执行。
+- 结果：发布候选中普通 403 保留原始业务错误，明确绑定失效才触发失效流程；新绑定成为主绑定；飞书 OAuth 可尝试下一有效绑定；小红书图文图片带平台 Referer/Cookie/User-Agent 下载并替换为本地附件链接。
+- 已知风险：小红书登录失效、验证码、风控或图片 URL 已过期时仍可能下载失败；失败时保留远程 URL，不阻断正文保存。
+- 下一步：完成插件回归、版本/ZIP 校验，推送默认分支与 1.3.49 标签，等待 GitHub Actions 创建 Release 后运行专用发布检查器。
 ### 2026-07-20 - Root-cause fix for cross-platform release-governance CI
 
 - Goal: stop `Main guards` from failing on Ubuntu because it runs Windows-only PowerShell deployer probes, while preserving those probes as a required merge gate.

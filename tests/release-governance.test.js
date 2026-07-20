@@ -78,6 +78,8 @@ function readText(relativePath) {
   return fs.readFileSync(absolutePath(relativePath), 'utf8');
 }
 
+const currentReleaseVersion = JSON.parse(readText('manifest.json')).version;
+
 function fileExists(relativePath) {
   try {
     return fs.statSync(absolutePath(relativePath)).isFile();
@@ -1454,10 +1456,10 @@ test('release source guard CLI integrates with real local Git repositories', asy
     const fixture = createReleaseGuardFixture(t);
     runFixtureGit(
       fixture.repositoryPath,
-      ['tag', '--annotate', '1.3.48', '--message', 'fixture annotated release'],
+      ['tag', '--annotate', currentReleaseVersion, '--message', 'fixture annotated release'],
       'create fixture annotated tag',
     );
-    const result = runFixtureGuard(fixture, ['--tag', '1.3.48']);
+    const result = runFixtureGuard(fixture, ['--tag', currentReleaseVersion]);
 
     assertNormalExit(result, 'fixture tag guard');
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
@@ -1522,15 +1524,15 @@ test('release source guard CLI integrates with real local Git repositories', asy
 
   await t.test('annotated tag move during validation failure', (t) => {
     const fixture = createReleaseGuardFixture(t, {
-      checkerSource: tagMovingCheckerSource('1.3.48'),
+      checkerSource: tagMovingCheckerSource(currentReleaseVersion),
       extraCommit: true,
     });
     runFixtureGit(
       fixture.repositoryPath,
-      ['tag', '--annotate', '1.3.48', '--message', 'fixture annotated release'],
+      ['tag', '--annotate', currentReleaseVersion, '--message', 'fixture annotated release'],
       'create fixture annotated tag before move',
     );
-    const result = runFixtureGuard(fixture, ['--tag', '1.3.48']);
+    const result = runFixtureGuard(fixture, ['--tag', currentReleaseVersion]);
 
     assertNormalExit(result, 'concurrent tag move guard rejection');
     assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
