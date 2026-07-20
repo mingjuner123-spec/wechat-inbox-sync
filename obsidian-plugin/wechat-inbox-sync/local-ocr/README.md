@@ -19,3 +19,10 @@ Runtime files are installed under:
 ```text
 ~/.wechat-inbox-local-ocr
 ```
+
+On Windows, repair builds and validates a fresh environment in a temporary
+`venv-staging` directory before replacing the single active `venv`. A
+short-lived `venv-backup` is used only for rollback and is removed after a
+successful switch. If Windows temporarily locks the active Python executable,
+the validated repair is activated automatically the next time Obsidian starts.
+Users do not need to end Python processes or rename component directories.
