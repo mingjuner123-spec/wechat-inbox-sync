@@ -19,7 +19,7 @@ const localOcrScript = fs.readFileSync(path.join(pluginDir, 'local-ocr/ocr_image
 const releaseWorkflowPath = path.resolve(__dirname, '../.github/workflows/release.yml');
 const releaseWorkflow = fs.readFileSync(releaseWorkflowPath, 'utf8');
 const gitAttributes = fs.readFileSync(path.resolve(__dirname, '../.gitattributes'), 'utf8');
-const cdnVerifierPath = path.resolve(__dirname, '../scripts/check-local-ocr-cdn.js');
+const cdnVerifierPath = path.resolve(__dirname, '../scripts/check-local-components-cdn.js');
 const cdnVerifier = fs.existsSync(cdnVerifierPath) ? fs.readFileSync(cdnVerifierPath, 'utf8') : '';
 const marketplacePromise = '把微信中收集的公众号文章、飞书文档、小红书、抖音、B站、小宇宙等网页链接、PDF、MP3、MP4 等文件和速记，一键同步到本地知识库，自动整理为可检索笔记.';
 
@@ -61,11 +61,11 @@ assert.ok(releaseWorkflow.includes('subdir manifest.json version'));
 assert.ok(releaseWorkflow.includes('root manifest.json version'));
 assert.ok(releaseWorkflow.includes('if [ "$manifest_version" != "$TAG_NAME" ]; then'));
 assert.strictEqual(fs.existsSync(cdnVerifierPath), true, 'release must include a public CDN consistency verifier');
-assert.ok(releaseWorkflow.includes('node scripts/check-local-ocr-cdn.js'), 'release must verify CDN assets before creating a GitHub Release');
-assert.ok(cdnVerifier.includes('install-local-ocr.ps1'));
-assert.ok(cdnVerifier.includes('install-local-ocr-macos.sh'));
-assert.ok(cdnVerifier.includes('ocr_image.py'));
-assert.ok(cdnVerifier.includes("createHash('sha256')"));
+assert.ok(releaseWorkflow.includes('node scripts/check-local-components-cdn.js'), 'release must verify all component CDN assets before creating a GitHub Release');
+assert.ok(cdnVerifier.includes('local-components-manifest.json'));
+assert.ok(cdnVerifier.includes('compatibilityAlias'));
+assert.ok(cdnVerifier.includes('immutablePath'));
+assert.ok(cdnVerifier.includes('sha256'));
 assert.ok(gitAttributes.includes('local-ocr/install-local-ocr.ps1 text eol=lf'));
 assert.ok(gitAttributes.includes('local-ocr/install-local-ocr-macos.sh text eol=lf'));
 assert.ok(gitAttributes.includes('local-ocr/ocr_image.py text eol=lf'));

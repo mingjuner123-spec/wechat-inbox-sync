@@ -11,6 +11,7 @@ permissions:
 jobs:
   integrity:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout full repository history
         uses: actions/checkout@v4

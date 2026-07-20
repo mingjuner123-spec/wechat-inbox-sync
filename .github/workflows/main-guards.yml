@@ -12,11 +12,17 @@ permissions:
 jobs:
   guards:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout full repository history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Lint GitHub Actions workflows
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -36,6 +42,8 @@ jobs:
           node --check scripts/update-local-components-manifest.js
           node --check scripts/release-source-guard-core.js
           node --check scripts/release-source-guard.js
+          node --check scripts/check-local-components-cdn.js
+          node --check scripts/check-local-ocr-cdn.js
           node --check obsidian-plugin/wechat-inbox-sync/main.js
 
       - name: Reject local component manifest drift
@@ -52,6 +60,7 @@ jobs:
           $installerPaths = @(
             'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1'
             'obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1'
+            'scripts/deploy-local-components.ps1'
           )
           foreach ($installerPath in $installerPaths) {
             $tokens = $null

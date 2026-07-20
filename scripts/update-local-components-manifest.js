@@ -40,6 +40,25 @@ function resolveContainedSourcePath(pluginRoot, sourcePath) {
     throw new TypeError(`sourcePath escapes plugin root: ${sourcePath}`);
   }
   validateRepositoryPath(sourcePath, 'sourcePath');
+
+  let currentPath = resolvedRoot;
+  for (const segment of sourcePath.split('/')) {
+    currentPath = path.join(currentPath, segment);
+    const stats = fs.lstatSync(currentPath);
+    if (stats.isSymbolicLink()) {
+      throw new TypeError(`sourcePath contains a symbolic link or reparse point: ${sourcePath}`);
+    }
+  }
+  const canonicalRoot = fs.realpathSync.native(resolvedRoot);
+  const canonicalSource = fs.realpathSync.native(resolvedSource);
+  const canonicalRelative = path.relative(canonicalRoot, canonicalSource);
+  if (
+    canonicalRelative === '..'
+    || canonicalRelative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(canonicalRelative)
+  ) {
+    throw new TypeError(`sourcePath escapes plugin root through a reparse point: ${sourcePath}`);
+  }
   return resolvedSource;
 }
 

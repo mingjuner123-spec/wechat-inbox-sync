@@ -1,5 +1,19 @@
 # Worklog
 
+### 2026-07-19 - 根治插件版本回退与本地组件发布源漂移（本地完成，待提交/发布）
+
+- 目标：从发布体系根治“修复已经完成，但插件或代码更新后又退回旧版本”的问题；把当前 `origin/main`、正式插件发布源、GitHub Release 和腾讯云 ASR/OCR 组件绑定到同一个可验证的 Git 提交与 SHA-256 manifest。
+- 根因：macOS ASR portable-Python 修复曾只存在于分叉开发线，不是正式 `1.3.48` 的祖先；腾讯云 `common` 路径可被任意旧 worktree 直接覆盖；旧 Release 流程不要求 tag 等于当前远端主线，也没有 committed manifest、不可变组件路径和持续漂移检测。混合换行又使“本地工作文件等于 CDN”不能证明“Git 中提交的 blob 等于 CDN”。
+- 影响范围：插件发布治理、ASR/OCR canonical manifest、受控 CDN 部署、GitHub 主线/Release/每日完整性工作流和回归测试；未修改小程序、云函数、绑定码、Pro 权益、支付、同步业务数据或用户知识库。
+- 变更：新增 canonical manifest 生成/校验、发布源与 tag guard、内容寻址不可变路径、通用 CDN 完整性验证器和默认 dry-run 的 PowerShell 受控部署器；保留旧 OCR 检查命令为通用验证器的薄兼容入口。主线/PR 工作流加入 actionlint、插件回归、manifest、JS/Bash/PowerShell 检查；Release 只接受当前主线上的数字版本 tag；每日任务检测不可变对象、兼容别名、公开 manifest 和固定 Python 运行时漂移。
+- 防回退约束：正式插件源只认 `obsidian-plugin/wechat-inbox-sync/`；发布身份只认 commit identity；组件版本只认 canonical SHA-256；不可变对象先上传并验证，兼容别名后切换；紧急 CDN 热修必须在下一次插件发版前以相同字节回写主线。直接部署本地组件的 `tcb hosting deploy` 不再是支持的操作。
+- TDD 与审查：release governance 测试从红灯开始覆盖旧分支/脏工作区/tag 版本错配、CRLF/LF 规范化、路径逃逸与 reparse point、不可变对象替换拒绝、CloudBase 严格 JSON envelope、真实 PowerShell dry-run/fake `tcb` 参数、工作流命令存在性与发布顺序。任务按实现、规格和质量三轮检查；最终质量审查为 Approved，无 Critical/Important 问题。
+- 本地验证：`node tests/release-governance.test.js` 119/119、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、相关 `node --check`、manifest `--check`、Windows PowerShell 5.1 AST 与真实 dry-run、两份 macOS 安装器 `bash -n`、`git diff --check` 均通过。工作流另外固定 `docker://rhysd/actionlint:1.7.12` 作为 CI lint 门禁；当前 Windows 环境没有 Docker，因此未在本机执行该镜像。
+- 已完成线上动作：本轮治理代码尚未执行线上变更。此前 macOS ASR 安装器 `1.3.7` 热修已上传腾讯云并双回读验证，官方主线热修提交为 `d89e5e2374fb6015a749988816739e74ed0e5092`。
+- 未完成与外部阻塞：Task 5 最终代码、设计/实施文档和本条日志尚未提交、推送或部署。Codex 账户写 Git/外部发布所需的授权因用量额度被系统拒绝，提示需等到 2026-07-25 11:25 或增加额度；按系统要求没有重试或旁路。由于受控部署器会拒绝未提交/非当前主线状态，当前不能安全执行 `-Execute`。
+- 已知限制：CloudBase CLI 3.5.9 没有 hosting conditional-create，无法做到服务端原子“仅不存在时创建”；现以内容寻址、两次存在性检查、已存在对象下载验证和发布后 CloudBase/公网双校验失败关闭。分支保护仍需治理提交进入 GitHub 后，以仓库权限启用并验证 required check。
+- 下一步：额度恢复后，先把当前 scoped 变更提交并快进推送到 `main`，确认主线门禁通过；再从干净当前主线运行 `scripts/deploy-local-components.ps1 -Execute`、通用公网验证器，并启用/核验主分支 required check。完成这些步骤前，不宣称发布治理已正式上线。
+
 ### 2026-07-18 - 热修 macOS Apple Silicon ASR 固定 Python 下载链
 
 - 目标：修复 Obsidian 插件 `1.3.48` 在 macOS arm64 安装本地 ASR 时，`uv` 报 `No download found for request: cpython-3.12-macos-aarch64-none`，导致 whisper、ffmpeg、模型和转写脚本均未安装的问题。
