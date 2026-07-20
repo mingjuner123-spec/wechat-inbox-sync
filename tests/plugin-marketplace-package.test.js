@@ -12,6 +12,10 @@ const readme = fs.readFileSync(path.join(pluginDir, 'README.md'), 'utf8');
 const license = fs.readFileSync(path.join(pluginDir, 'LICENSE'), 'utf8');
 const checklist = fs.readFileSync(path.join(pluginDir, 'RELEASE_CHECKLIST.md'), 'utf8');
 const windowsInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install-local-asr.ps1'), 'utf8');
+const windowsCompatibilityBuildScript = fs.readFileSync(
+  path.join(repoRoot, 'scripts', 'build-windows-whisper-compat.ps1'),
+  'utf8',
+);
 const macInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install-local-asr-macos.sh'), 'utf8');
 const windowsOcrInstaller = fs.readFileSync(path.join(pluginDir, 'local-ocr/install-local-ocr.ps1'), 'utf8');
 const macOcrInstaller = fs.readFileSync(path.join(pluginDir, 'local-ocr/install-local-ocr-macos.sh'), 'utf8');
@@ -19,7 +23,7 @@ const localOcrScript = fs.readFileSync(path.join(pluginDir, 'local-ocr/ocr_image
 const releaseWorkflowPath = path.resolve(__dirname, '../.github/workflows/release.yml');
 const releaseWorkflow = fs.readFileSync(releaseWorkflowPath, 'utf8');
 const gitAttributes = fs.readFileSync(path.resolve(__dirname, '../.gitattributes'), 'utf8');
-const cdnVerifierPath = path.resolve(__dirname, '../scripts/check-local-ocr-cdn.js');
+const cdnVerifierPath = path.resolve(__dirname, '../scripts/check-local-components-cdn.js');
 const cdnVerifier = fs.existsSync(cdnVerifierPath) ? fs.readFileSync(cdnVerifierPath, 'utf8') : '';
 const marketplacePromise = '把微信中收集的公众号文章、飞书文档、小红书、抖音、B站、小宇宙等网页链接、PDF、MP3、MP4 等文件和速记，一键同步到本地知识库，自动整理为可检索笔记.';
 
@@ -61,11 +65,11 @@ assert.ok(releaseWorkflow.includes('subdir manifest.json version'));
 assert.ok(releaseWorkflow.includes('root manifest.json version'));
 assert.ok(releaseWorkflow.includes('if [ "$manifest_version" != "$TAG_NAME" ]; then'));
 assert.strictEqual(fs.existsSync(cdnVerifierPath), true, 'release must include a public CDN consistency verifier');
-assert.ok(releaseWorkflow.includes('node scripts/check-local-ocr-cdn.js'), 'release must verify CDN assets before creating a GitHub Release');
-assert.ok(cdnVerifier.includes('install-local-ocr.ps1'));
-assert.ok(cdnVerifier.includes('install-local-ocr-macos.sh'));
-assert.ok(cdnVerifier.includes('ocr_image.py'));
-assert.ok(cdnVerifier.includes("createHash('sha256')"));
+assert.ok(releaseWorkflow.includes('node scripts/check-local-components-cdn.js'), 'release must verify all component CDN assets before creating a GitHub Release');
+assert.ok(cdnVerifier.includes('local-components-manifest.json'));
+assert.ok(cdnVerifier.includes('compatibilityAlias'));
+assert.ok(cdnVerifier.includes('immutablePath'));
+assert.ok(cdnVerifier.includes('sha256'));
 assert.ok(gitAttributes.includes('local-ocr/install-local-ocr.ps1 text eol=lf'));
 assert.ok(gitAttributes.includes('local-ocr/install-local-ocr-macos.sh text eol=lf'));
 assert.ok(gitAttributes.includes('local-ocr/ocr_image.py text eol=lf'));
@@ -151,6 +155,10 @@ assert.strictEqual(localOcrScript.includes('from opencc import OpenCC'), false, 
 assert.ok(releaseWorkflow.includes('gh release create "$TAG_NAME"'));
 assert.ok(releaseWorkflow.includes('gh release upload "$TAG_NAME"'));
 assert.ok(windowsInstaller.includes('$ChunkSeconds = 120'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_NATIVE=OFF'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_SSE42=OFF'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_BMI2=OFF'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_AVX2=OFF'));
 assert.ok(windowsInstaller.includes('$ChunkRetrySeconds = 30'));
 assert.ok(windowsInstaller.includes('"-f", "segment"'));
 assert.ok(windowsInstaller.includes('"-segment_time", [string]$SegmentSeconds'));
@@ -200,9 +208,10 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.22"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.23"'));
 assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
+assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilityUrls = @()'));
 assert.ok(windowsInstaller.includes('$FfmpegTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('$ModelTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('function Get-EnabledAssetUrls'));
@@ -211,6 +220,13 @@ assert.ok(windowsInstaller.includes('-PrimaryUrls $WhisperWindowsTencentUrls -Fa
 assert.ok(windowsInstaller.includes('-PrimaryUrls $FfmpegTencentUrls'));
 assert.ok(windowsInstaller.includes('-PrimaryUrls $ModelTencentUrls -FallbackUrls $ModelFallbackUrls'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsFallbackUrls'));
+assert.ok(windowsInstaller.includes('whisper-bin-x64-compat.zip'));
+assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilitySha256'));
+assert.ok(windowsInstaller.includes('Assert-FileSha256 -Path $compatibilityZip'));
+assert.ok(windowsInstaller.includes('function Test-IllegalInstructionExitCode'));
+assert.ok(windowsInstaller.includes('0xC000001D'));
+assert.ok(windowsInstaller.includes('Current whisper.cpp uses unsupported CPU instructions; trying the compatibility build.'));
+assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "whisper-compat.zip"'));
 assert.ok(windowsInstaller.includes('https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip'));
 assert.ok(windowsInstaller.includes('GitHub release page parsing failed'));
 assert.ok(windowsInstaller.includes('INSTALLER FAILED'));
@@ -308,14 +324,35 @@ assert.ok(macInstaller.includes('UV_BIN="$INSTALL_ROOT/bin/uv"'));
 assert.ok(macInstaller.includes('UV_PYTHON_DOWNLOADS=automatic'));
 assert.ok(macInstaller.includes('UV_PYTHON_PREFERENCE=managed'));
 assert.ok(macInstaller.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"'));
-assert.ok(macInstaller.includes('TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
-assert.ok(macInstaller.includes('export UV_PYTHON_INSTALL_MIRROR="$TENCENT_PYTHON_INSTALL_MIRROR"'));
-assert.ok(macInstaller.includes('export UV_PYTHON_CPYTHON_BUILD="$PYTHON_BUILD_STANDALONE_BUILD"'));
+assert.ok(macInstaller.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"'));
+assert.ok(macInstaller.includes('PYTHON_RUNTIME_VERSION="${PYTHON_BUILD_STANDALONE_VERSION%%+*}"'));
+assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"'));
+assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"'));
+assert.ok(macInstaller.includes('TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
+assert.ok(macInstaller.includes('PORTABLE_PYTHON="$PYTHON_RUNTIME_DIR/python/bin/python"'));
+assert.ok(macInstaller.includes("sys.version.split()[0] == sys.argv[1]"));
+assert.ok(macInstaller.includes('"$PYTHON_RUNTIME_VERSION"'));
+assert.ok(macInstaller.includes('install_portable_python'));
+assert.ok(macInstaller.includes('shasum -a 256 "$1"'));
+assert.ok(macInstaller.includes('verify_sha256 "$archive_path" "$expected_sha256"'));
+assert.ok(macInstaller.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"'));
+assert.ok(
+  macInstaller.indexOf('if install_portable_python; then') <
+    macInstaller.indexOf('"$UV_BIN" python install 3.12'),
+  'macOS ASR installer should try the pinned portable Python before the uv managed-Python fallback',
+);
+assert.ok(
+  macInstaller.lastIndexOf('if ! verify_sha256 "$archive_path" "$expected_sha256"; then') <
+    macInstaller.indexOf('if ! tar xzf "$archive_path" -C "$stage_dir"; then'),
+  'macOS ASR installer should verify the pinned Python archive before extraction',
+);
 assert.ok(macInstaller.includes('"$UV_BIN" python install 3.12'));
 assert.ok(macInstaller.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python'));
-assert.ok(macInstaller.includes('"$UV_BIN" pip install --upgrade whisper.cpp-cli imageio-ffmpeg'));
+assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"'));
+assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
+assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.5"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.7"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=180'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));

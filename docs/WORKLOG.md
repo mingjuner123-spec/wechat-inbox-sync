@@ -11,6 +11,74 @@
 - 结果：发布候选中普通 403 保留原始业务错误，明确绑定失效才触发失效流程；新绑定成为主绑定；飞书 OAuth 可尝试下一有效绑定；小红书图文图片带平台 Referer/Cookie/User-Agent 下载并替换为本地附件链接。
 - 已知风险：小红书登录失效、验证码、风控或图片 URL 已过期时仍可能下载失败；失败时保留远程 URL，不阻断正文保存。
 - 下一步：完成插件回归、版本/ZIP 校验，推送默认分支与 1.3.49 标签，等待 GitHub Actions 创建 Release 后运行专用发布检查器。
+### 2026-07-20 - Root-cause fix for cross-platform release-governance CI
+
+- Goal: stop `Main guards` from failing on Ubuntu because it runs Windows-only PowerShell deployer probes, while preserving those probes as a required merge gate.
+- Scope: GitHub Actions workflow, release-governance regression test, and release-governance documentation only. No plugin runtime, Mini Program, cloud function, CloudBase object, user data, entitlement, binding, or CDN bytes were changed.
+- Root cause: PR #1's `guards` job ran on `ubuntu-latest`, but the test suite invoked `powershell.exe` and Windows `.cmd` fixtures. The same suite passed on Windows and therefore represented a platform-mismatched CI configuration rather than an ASR installer or GitHub Git service defect.
+- Changed: added the `windows-deployer` job on `windows-latest` to run the full governance suite, plus a regression assertion that this job must exist with full checkout and Node 24. The current main baseline already skips Windows-runtime-only probes on non-Windows hosts; this change makes their Windows execution explicit rather than dropping coverage.
+- Online action: pushed commit `84862e2` and created PR #4. Main branch protection now requires both `guards` and `windows-deployer` with strict up-to-date status checks. CI execution and merge remain pending. No release or CDN deployment is required.
+- Data changes: none.
+- Verification: TDD red test failed because `windows-deployer` was absent; green test passed after the workflow change. On Windows, `node tests/release-governance.test.js` passed 122/122. With `process.platform` simulated as Linux, 108 checks passed and exactly 5 Windows-only runtime probes skipped. Plugin regression tests, manifest `--check`, Git Bash syntax checks, and `git diff --check` passed. Docker/actionlint is unavailable locally; GitHub Actions remains the authoritative actionlint execution.
+- Result: pending CI. Once both contexts are required and pass, an Ubuntu-only green result can no longer permit a merge that leaves the Windows deployer untested.
+- Known risk: GitHub's branch-protection API cannot prove why PR #1 was merged after its failed check; the protection policy will be re-read after adding the second required context, and future merge attempts will be validated against both checks.
+- Next: wait for the Linux and Windows jobs to pass, merge only after both are green, then re-read main protection and update this worklog with the final outcome.
+
+### 2026-07-20 - Windows ASR illegal-instruction compatibility fallback
+
+- Goal: repair local ASR installation on Windows computers where the default whisper.cpp package exits with `0xC000001D` before transcription begins.
+- Scope: Obsidian plugin local ASR installer, controlled local-component CDN deployment, compatibility-package build/verification tooling, regression tests, and documentation. No Mini Program, cloud function, binding, Pro entitlement, payment, sync data, or user vault data changes.
+- Changed: the Windows installer keeps the optimized whisper.cpp package as the default. Only an explicit illegal-instruction exit (`-1073741795` / `0xC000001D`) triggers a separately cached baseline compatibility package. The archive is SHA-256 pinned; its metadata records whisper.cpp `v1.9.0` and disabled CPU extensions. The controlled deployer now verifies the supplied archive hash, publishes an immutable object before its compatibility alias, and verifies both CloudBase download and public CDN bytes.
+- Online action: pending. The committed source and its exact compatibility archive must first be on current `origin/main`, then `scripts/deploy-local-components.ps1 -Execute -WindowsAsrCompatibilityArchivePath <verified archive>` can publish the installer and fallback archive together.
+- Data changes: none.
+- Verification: regression tests were added for the `0xC000001D` diagnostic and installer freshness contract; PowerShell AST parsing, manifest regeneration/check, deployer dry run, compatibility-package rebuild, extracted `whisper-cli --help`, plugin tests, and `git diff --check` passed locally before publication.
+- Result: unaffected Windows users retain the existing optimized path. Affected CPUs or virtual machines no longer fail immediately; the installer retries once with the compatibility build and then runs the existing inference validation.
+- Known risk: the fallback build was verified on the available Windows x64 host, not on the affected user's exact CPU/virtual-machine configuration. If the fallback fails, the user must return the new installer diagnostic for further investigation.
+- CI follow-up: the protected-main `guards` workflow runs on Ubuntu, while several release-governance tests invoked `powershell.exe` unconditionally. Those Windows-only runtime probes now skip on non-Windows hosts; the workflow continues to parse all PowerShell sources with `pwsh`, and the probes still run on Windows development hosts.
+- Next: publish the controlled CDN update, confirm public hashes, then ask the affected user to click “安装/更新本地转写组件” again. Failure-history logging is explicitly deferred.
+
+### 2026-07-19～20 - 根治插件版本回退与本地组件发布源漂移（已上线）
+
+- 目标：从发布体系根治“修复已经完成，但插件或代码更新后又退回旧版本”的问题；把当前 `origin/main`、正式插件发布源、GitHub Release 和腾讯云 ASR/OCR 组件绑定到同一个可验证的 Git 提交与 SHA-256 manifest。
+- 根因：macOS ASR portable-Python 修复曾只存在于分叉开发线，不是正式 `1.3.48` 的祖先；腾讯云 `common` 路径可被任意旧 worktree 直接覆盖；旧 Release 流程不要求 tag 等于当前远端主线，也没有 committed manifest、不可变组件路径和持续漂移检测。混合换行又使“本地工作文件等于 CDN”不能证明“Git 中提交的 blob 等于 CDN”。
+- 影响范围：插件发布治理、ASR/OCR canonical manifest、受控 CDN 部署、GitHub 主线/Release/每日完整性工作流和回归测试；未修改小程序、云函数、绑定码、Pro 权益、支付、同步业务数据或用户知识库。
+- 变更：新增 canonical manifest 生成/校验、发布源与 tag guard、内容寻址不可变路径、通用 CDN 完整性验证器和默认 dry-run 的 PowerShell 受控部署器；保留旧 OCR 检查命令为通用验证器的薄兼容入口。主线/PR 工作流加入 actionlint、插件回归、manifest、JS/Bash/PowerShell 检查；Release 只接受当前主线上的数字版本 tag；每日任务检测不可变对象、兼容别名、公开 manifest 和固定 Python 运行时漂移。
+- 防回退约束：正式插件源只认 `obsidian-plugin/wechat-inbox-sync/`；发布身份只认 commit identity；组件版本只认 canonical SHA-256；不可变对象先上传并验证，兼容别名后切换；紧急 CDN 热修必须在下一次插件发版前以相同字节回写主线。直接部署本地组件的 `tcb hosting deploy` 不再是支持的操作。
+- TDD 与审查：release governance 测试从红灯开始覆盖旧分支/脏工作区/tag 版本错配、CRLF/LF 规范化、路径逃逸与 reparse point、不可变对象替换拒绝、CloudBase 严格 JSON envelope、真实 PowerShell dry-run/fake `tcb` 参数、工作流命令存在性与发布顺序。任务按实现、规格和质量三轮检查；最终质量审查为 Approved，无 Critical/Important 问题。
+- 部署现场修复：第一次正式执行部署器时，CloudBase CLI 的正常进度行 `- Loading data...` 写到 stderr；普通命令封装在 PowerShell 5.1 的全局 `ErrorActionPreference=Stop` 下把它误判为 `NativeCommandError`，在任何上传前退出。先新增真实 `.cmd` 红灯用例，再让封装仅在原生命令调用期间使用 `Continue`、恢复原策略并以退出码判定成功；治理套件由 119 增至 120 项并全部通过。修复提交为 `fa19fea8efd21b45d0cb2b7ea6705226d04e5982`。
+- 本地验证：`node tests/release-governance.test.js` 120/120、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、相关 `node --check`、manifest `--check`、Windows PowerShell 5.1 AST 与真实 dry-run、两份 macOS 安装器 `bash -n`、`git diff --check` 均通过。工作流固定 `docker://rhysd/actionlint:1.7.12` 作为 CI lint 门禁；当前 Windows 环境没有 Docker，因此未在本机执行该镜像。
+- GitHub 线上动作：治理提交链已从官方热修主线 `d89e5e2` 快进推送到 `main`；完整治理提交为 `5c367e3e3280df30ccc480eb314f9438bd1f013b`，部署器 PowerShell 5.1 兼容修复为 `fa19fea8efd21b45d0cb2b7ea6705226d04e5982`。未创建新插件 tag 或 GitHub Release。
+- CDN 线上动作：从干净且等于远端 `main` 的 `fa19fea` 执行 `scripts/deploy-local-components.ps1 -Execute` 成功。5 个 canonical 组件的完整 SHA-256 不可变路径、5 个兼容别名和 `local-components/manifest.json` 均完成 CloudBase 对象/公网验证；随后独立运行 `node scripts/check-local-components-cdn.js`，上述 11 个对象及 Windows、macOS arm64、macOS x64 三个固定 CPython 运行时全部哈希一致。
+- GitHub 门禁状态：`Main guards` 工作流为 active，正式 push 运行 `29711600567`（`fa19fea`）已创建，但在本次收尾检查时仍处于 GitHub 托管 runner 的 `queued` 状态，尚未取得 success/failure 终态。GitHub 官方状态 API 同期显示 `Actions=partial_outage`、`API Requests=partial_outage`，与仓库多个新运行持续 queued 一致；没有把外部故障下的排队状态视为通过。
+- 分支保护：浏览器没有 GitHub 登录态且本机没有 GitHub CLI，因此改用 Git Credential Manager 中已有的仓库凭据在单次 PowerShell 进程内调用 GitHub API；令牌未写入文件或输出。API 回读确认 `main` 已启用保护：required context 为 `guards`、`strict=true`、`enforce_admins=true`、禁止 force push、禁止删除。后续变更必须通过新门禁，管理员也不能直接绕过。
+- 已知限制：CloudBase CLI 3.5.9 没有 hosting conditional-create，无法做到服务端原子“仅不存在时创建”；现以内容寻址、两次存在性检查、已存在对象下载验证和发布后 CloudBase/公网双校验失败关闭。
+- 下一步：等待最新 `Main guards` 运行进入终态；若失败，按具体 job 日志修复。由于 GitHub 托管 runner 在本次收尾期间持续排队，不能把 queued 误报成门禁通过。
+
+### 2026-07-18 - 热修 macOS Apple Silicon ASR 固定 Python 下载链
+
+- 目标：修复 Obsidian 插件 `1.3.48` 在 macOS arm64 安装本地 ASR 时，`uv` 报 `No download found for request: cpython-3.12-macos-aarch64-none`，导致 whisper、ffmpeg、模型和转写脚本均未安装的问题。
+- 根因：正式 `1.3.48` 和线上 CDN 都回退到了 uv-only 安装器；该脚本把 `UV_PYTHON_INSTALL_MIRROR` 指向自有 CDN，但 uv 请求的抽象别名与 CDN 上固定的 `cpython-3.12.13+20260623-...-install_only.tar.gz` 文件名不兼容。此前直接下载固定 Python 的修复存在于分叉开发线，没有进入后续正式发布源，CDN 又被旧脚本覆盖。
+- 影响范围：Obsidian 插件 macOS ASR 安装器、安装器新鲜度校验、插件发布包回归测试、腾讯云静态托管；未修改 Windows ASR、OCR、小程序、云函数、绑定码、Pro 权益、支付或业务数据。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh`、`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`docs/WORKLOG.md`。
+- TDD：先新增“uv-only macOS ASR 安装器必须被拒绝”和“发布包必须先使用固定 portable Python”的断言；在 `1.3.48` 基线上分别因旧校验返回 `true`、缺少 `PYTHON_BUILD_STANDALONE_VERSION` 而失败。合并前审查再补充“Python 归档解压前必须校验双架构 SHA-256”“严格核对已安装运行时版本”和“未来升级固定 Python 构建仍应被结构化校验接受”的红灯用例；实现后全部通过。
+- 线上动作：已把最终安装器 `1.3.7` 上传到长环境静态托管 `local-asr/common/install-local-asr-macos.sh`。CloudBase 对象回读和带随机查询参数、`Cache-Control: no-cache` 的公网 CDN 回读 SHA-256 均为 `613E11D8B2CEFCCB45D2F5DD2D5CFA83ABDF9EB21302A0EDC656ABBCED9596D3`，与本地文件一致，且公网内容已确认包含 `INSTALLER_SCRIPT_VERSION="1.3.7"` 和 SHA 校验调用。未发布新的 Obsidian 插件版本。
+- 数据变更：无。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、Git Bash `bash -n obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh`、`git diff --check` 均通过；CloudBase 环境列表确认目标为 `he02-d8gebzv050ed6c4ef-d350b93bf`；arm64/x86_64 两个固定 CPython 对象均返回 HTTP 200，两套 ASR wheelhouse 索引均包含 `whisper.cpp-cli==0.0.3` 和 `imageio-ffmpeg==0.6.0`。
+- 结果：macOS arm64/x86_64 会优先从腾讯云 CDN 直接下载固定 CPython `3.12.13+20260623`，按架构校验 SHA-256 后才解压执行，用该运行时创建 ASR venv，并优先从腾讯 CDN wheelhouse 安装固定版本的 `whisper.cpp-cli` 与 `imageio-ffmpeg`；只有固定 Python 下载或建 venv 失败时才进入 uv 兜底。插件校验器最低要求安装器 `1.3.7`，并结构化检查 portable Python、双架构哈希、严格运行时版本校验及“直下优先、uv 兜底”的顺序，不再把 uv-only 脚本判为最新，也不把校验器锁死在某一个未来会升级的 Python 构建号。
+- 已知风险：本轮没有在真实 Apple Silicon Mac 上完成从空目录到首次转写的端到端实测；首次安装仍依赖固定 Python 包、ASR wheels 和模型三个 CDN 资产可访问。`1.3.48` 的不可变 GitHub Release 资产仍内置旧脚本，但该版本每次安装都会优先拉取已热修的远端脚本。
+- 下一步：让问题用户在 `1.3.48` 直接重新点击“安装/修复本地转写组件”并回传新诊断；若固定 Python 阶段通过但后续失败，按 wheel、模型或 Metal 推理验证阶段分别处理，不再混为网络问题。
+
+### 2026-07-17 - Publish Obsidian plugin 1.3.48: reliable Feishu API image localization
+
+- Goal: fix Feishu official API notes whose text and headings sync correctly but images appear as broken placeholders on only some user computers.
+- Scope: Obsidian plugin Feishu image download/localization, focused plugin regression tests, and release metadata only. No Mini Program, cloud function, payment, binding, Pro entitlement, OAuth configuration, or online business data changes.
+- Changed files: `obsidian-plugin/wechat-inbox-sync/main.js`, both release `manifest.json` / `versions.json` copies, `tests/plugin-main-ai.test.js`, `tests/plugin-marketplace-package.test.js`, and this worklog.
+- Online actions: pushed release commit `a687730` to `main`, pushed tag `1.3.48`, and published GitHub Release `https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.48`. GitHub Actions Release run `29541164485` completed successfully.
+- Data changes: none.
+- Verification: `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, `node --check obsidian-plugin/wechat-inbox-sync/main.js`, and `git diff --check` passed. The release checker confirmed default-branch and raw manifests, versions mapping, tag, all required Release assets, and the local ZIP all report `1.3.48`.
+- Result: Feishu image downloads now fall back from Obsidian `requestUrl` to the Node HTTP transport when needed; empty downloads also trigger fallback. Missing Feishu temporary image URLs and local download/write failures are recorded separately, and the final sync notice reports incomplete Feishu images instead of incorrectly reporting missing body text.
+- Known risk: if both local transports are blocked, or the user's Feishu app lacks/requires renewed `docs:document.media:download` authorization, images still cannot be saved; the failure is now visible. Previously generated notes with expired links do not repair themselves. The historical `tests/release-social-feishu-ai.test.js` still pins release `1.2.97` and fails on every modern version; it is not part of the active Release workflow and should be retired or converted to version-agnostic assertions separately.
+- Next step: ask affected users to update to `1.3.48`, save the original Feishu link again, and sync it again. If images still fail, collect the new focused diagnostic message to distinguish missing Feishu media authorization from local network failure.
 
 ### 2026-07-16 - 发布 Obsidian 插件 1.3.47：修复小红书通用落地页误同步
 

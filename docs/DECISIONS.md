@@ -1,5 +1,34 @@
 # Engineering decisions
 
+## 2026-07-20: PowerShell deployer behavior requires a Windows CI gate
+
+Decision:
+
+- Linux `guards` continues to run repository-wide, manifest, plugin, macOS shell, and cross-platform PowerShell-parser checks. Tests that invoke Windows PowerShell or `.cmd` fixtures must skip outside Windows.
+- The `Main guards` workflow must also provide a `windows-deployer` job on `windows-latest`, with a full checkout and Node 24, that runs `node tests/release-governance.test.js`.
+- Both `guards` and `windows-deployer` are release-governance contexts and must be required by main-branch protection. A Linux-only success is insufficient evidence for the controlled Windows component deployer.
+
+Reason:
+
+- PR #1 ran `guards` on Ubuntu, where the governance suite invoked `powershell.exe`; the job failed even though the same suite passed on Windows. Skipping those runtime probes on Linux without a Windows replacement would silently remove verification of the deployer, its strict CloudBase handling, and dry-run safety.
+
+## 2026-07-19：插件与本地组件发布以当前主线提交和内容哈希为唯一身份
+
+决策：
+
+- `obsidian-plugin/wechat-inbox-sync/` 是插件唯一正式发布源；只有干净工作区中与当前 `origin/main` 完全相同的提交可以创建插件 tag、GitHub Release 或发布 ASR/OCR CDN 组件。本地分支名称不构成身份，Git commit identity 才构成身份。
+- 每个受管本地组件必须登记在 `obsidian-plugin/wechat-inbox-sync/local-components-manifest.json`，以 canonical UTF-8/LF 字节的完整 SHA-256 作为版本身份，并发布到 `local-components/by-sha256/<SHA256>/<filename>`。已存在的不可变路径不得被不同字节覆盖。
+- 旧插件依赖的 `local-asr/common/...` 与 `local-ocr/common/...` 继续作为兼容别名，但只能在不可变对象完成 CloudBase 对象回读和公网字节验证后更新；公开 manifest 最后发布。
+- 本地组件只允许通过 `scripts/deploy-local-components.ps1 -Execute` 部署。直接对本地组件执行 `tcb hosting deploy` 属于不受支持的旁路操作；发布脚本默认 dry-run，并在上传前、切换别名前和完成后重复验证主线、manifest 与远端字节。
+- 版本 tag 必须指向当时最新的 `origin/main`，且根目录与正式插件目录版本必须同时等于 tag。主线/PR、Release 和每日完整性工作流共同执行 manifest、发布源、插件回归、脚本语法和 CDN 一致性门禁。
+- 紧急 CDN 热修只能作为短时恢复手段。精确的 canonical bytes 与 manifest 必须在下一次插件发布前回写 `main`；未完成主线闭环时，Release 门禁必须阻止继续发版。
+
+原因：
+
+- macOS ASR portable-Python 修复曾存在于分叉开发线，却不是正式 `1.3.48` 的祖先；旧发布工作区随后又能覆盖可变 CDN 别名，造成“已经修好、更新后退回旧实现”。
+- 只比较文件名、版本字符串、工作区内容或可变公网 URL 都不能证明产物来自哪个 Git 提交；换行差异还会进一步掩盖 working tree 与 committed blob 的来源差异。
+- 当前 CloudBase CLI 3.5.9 不提供 hosting 对象的原子 conditional-create。受控发布因此采用完整内容哈希路径、两次存在性检查、存在对象下载校验及发布后双通道字节验证；诚实并发发布相同内容不会冲突，不同内容会失败关闭。该平台限制不得通过放宽校验解决。
+
 ## 2026-07-15：OCR 安装器校验契约必须随安装策略同步演进
 
 决策：

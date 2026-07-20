@@ -1,5 +1,15 @@
 # Obsidian Community Plugin Release Checklist
 
+## Release source and local components
+
+- [ ] Run every release and local-component deployment from a clean checkout whose `HEAD` is exactly current `origin/main`. Stale branches, divergent worktrees, dirty files, and tags that are not current main are not publishable sources.
+- [ ] Run `node scripts/release-source-guard.js --tag <version>` before publishing a version tag. Root and plugin manifests must both equal the tag.
+- [ ] Run `node scripts/update-local-components-manifest.js --check`. Any intentional ASR/OCR source change must first regenerate and review `obsidian-plugin/wechat-inbox-sync/local-components-manifest.json`.
+- [ ] Publish ASR/OCR only through `powershell -ExecutionPolicy Bypass -File scripts/deploy-local-components.ps1 -Execute`. Direct local-component `tcb hosting deploy` commands are unsupported.
+- [ ] The controlled deployment must publish and verify content-addressed immutable objects before compatibility aliases, then publish the exact committed manifest and pass `node scripts/check-local-components-cdn.js`.
+- [ ] An emergency CDN hotfix is incomplete until the exact canonical bytes and manifest are committed to `main`. The next plugin release is blocked until that reconciliation is complete.
+- [ ] Confirm the `Main and Release Guards` workflow is green. Do not bypass or weaken the source, manifest, workflow-lint, plugin-test, or CDN-integrity gates.
+
 ## Before Publishing
 
 - [ ] Create a public GitHub repository for `wechat-inbox-sync`.
