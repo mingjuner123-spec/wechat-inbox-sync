@@ -30,7 +30,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.49');
+assert.strictEqual(manifest.version, '1.3.50');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
@@ -109,6 +109,16 @@ assert.ok(windowsOcrInstaller.includes('function Install-MicrosoftVisualCppRunti
 assert.ok(windowsOcrInstaller.includes('Get-AuthenticodeSignature'), 'Downloaded Microsoft runtime installer must be signature-verified before execution');
 assert.ok(windowsOcrInstaller.includes('-Verb RunAs'), 'Visual C++ runtime repair must request Windows elevation explicitly');
 assert.ok(windowsOcrInstaller.includes('Visual C++ runtime repair finished; retrying OCR import validation.'), 'Windows OCR installer must retry validation after runtime repair');
+assert.ok(windowsOcrInstaller.includes('$StagingVenvDir'), 'Windows OCR repair must build in a staging venv');
+assert.ok(windowsOcrInstaller.includes('$BackupVenvDir'), 'Windows OCR repair must keep only a short-lived rollback venv');
+assert.ok(windowsOcrInstaller.includes('$PendingSwitchPath'), 'Windows OCR repair must support restart-time activation when files are locked');
+assert.ok(windowsOcrInstaller.includes('function Promote-StagedOcrEnvironment'), 'Windows OCR repair must promote a validated staging environment');
+assert.ok(windowsOcrInstaller.includes('single-dir-transaction-v1'), 'Windows OCR installer must expose the single-directory transaction capability');
+assert.strictEqual(
+  windowsOcrInstaller.includes('Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue'),
+  false,
+  'Windows OCR installer must not silently continue after failing to remove the active venv',
+);
 assert.strictEqual(windowsOcrInstaller.includes('& $UvExe pip install --upgrade pip 2>$null | Out-Host'), false);
 assert.strictEqual(windowsOcrInstaller.includes('Please install Python 3.9-3.12'), false);
 assert.ok(macOcrInstaller.includes('rapidocr-onnxruntime'));

@@ -80,6 +80,98 @@ assert.strictEqual(
   helpers.isLocalOcrInstallerCurrent(macOcrInstallerSource.replaceAll('install_portable_python', 'install_legacy_python'), true),
   false,
 );
+assert.strictEqual(
+  helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('single-dir-transaction-v1', 'legacy-in-place-install'), false),
+  false,
+);
+assert.ok(pluginMainSource.includes('completePendingLocalOcrSwitch'));
+
+function runPendingLocalOcrSwitchTests() {
+  const createFixture = () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-switch-'));
+    const marker = path.join(root, 'pending-venv-switch.json');
+    fs.writeFileSync(marker, JSON.stringify({ capability: 'single-dir-transaction-v1' }), 'utf8');
+    return { root, marker };
+  };
+
+  const noMarkerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-no-switch-'));
+  try {
+    assert.deepStrictEqual(helpers.completePendingLocalOcrSwitch(noMarkerRoot), { status: 'none' });
+  } finally {
+    fs.rmSync(noMarkerRoot, { recursive: true, force: true });
+  }
+
+  const activation = createFixture();
+  try {
+    const oldVenv = path.join(activation.root, 'venv');
+    const stagingVenv = path.join(activation.root, 'venv-staging');
+    fs.mkdirSync(path.join(oldVenv, 'Scripts'), { recursive: true });
+    fs.mkdirSync(path.join(stagingVenv, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(oldVenv, 'Scripts', 'python.exe'), 'old');
+    fs.writeFileSync(path.join(stagingVenv, 'Scripts', 'python.exe'), 'new');
+    const result = helpers.completePendingLocalOcrSwitch(activation.root, {
+      validatePython(pythonPath) {
+        return fs.readFileSync(pythonPath, 'utf8') === 'new';
+      },
+    });
+    assert.strictEqual(result.status, 'activated');
+    assert.strictEqual(fs.readFileSync(path.join(activation.root, 'venv', 'Scripts', 'python.exe'), 'utf8'), 'new');
+    assert.strictEqual(fs.existsSync(path.join(activation.root, 'venv-staging')), false);
+    assert.strictEqual(fs.existsSync(path.join(activation.root, 'venv-backup')), false);
+    assert.strictEqual(fs.existsSync(activation.marker), false);
+  } finally {
+    fs.rmSync(activation.root, { recursive: true, force: true });
+  }
+
+  const locked = createFixture();
+  try {
+    const oldVenv = path.join(locked.root, 'venv');
+    const stagingVenv = path.join(locked.root, 'venv-staging');
+    fs.mkdirSync(path.join(oldVenv, 'Scripts'), { recursive: true });
+    fs.mkdirSync(path.join(stagingVenv, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(stagingVenv, 'Scripts', 'python.exe'), 'new');
+    const result = helpers.completePendingLocalOcrSwitch(locked.root, {
+      validatePython: () => true,
+      rename(from, to) {
+        if (from === oldVenv) throw new Error('EPERM locked');
+        fs.renameSync(from, to);
+      },
+    });
+    assert.strictEqual(result.status, 'pending');
+    assert.strictEqual(fs.existsSync(locked.marker), true);
+    assert.strictEqual(fs.existsSync(stagingVenv), true);
+    assert.strictEqual(fs.existsSync(oldVenv), true);
+  } finally {
+    fs.rmSync(locked.root, { recursive: true, force: true });
+  }
+
+  const rollback = createFixture();
+  try {
+    const oldVenv = path.join(rollback.root, 'venv');
+    const stagingVenv = path.join(rollback.root, 'venv-staging');
+    fs.mkdirSync(path.join(oldVenv, 'Scripts'), { recursive: true });
+    fs.mkdirSync(path.join(stagingVenv, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(oldVenv, 'Scripts', 'python.exe'), 'old');
+    fs.writeFileSync(path.join(stagingVenv, 'Scripts', 'python.exe'), 'new');
+    let validationCount = 0;
+    const result = helpers.completePendingLocalOcrSwitch(rollback.root, {
+      validatePython() {
+        validationCount += 1;
+        return validationCount === 1;
+      },
+    });
+    assert.strictEqual(result.status, 'pending');
+    assert.strictEqual(
+      fs.readFileSync(path.join(rollback.root, 'venv', 'Scripts', 'python.exe'), 'utf8'),
+      'old',
+    );
+    assert.strictEqual(fs.existsSync(rollback.marker), true);
+  } finally {
+    fs.rmSync(rollback.root, { recursive: true, force: true });
+  }
+}
+
+runPendingLocalOcrSwitchTests();
 assert.strictEqual(typeof helpers.enableDebuggerNetworkCapture, 'function');
 let debuggerNetworkCommand = '';
 const neverSettlingDebuggerCommand = new Promise(() => {});
@@ -523,6 +615,7 @@ const localOcrInstallerValidatorSource = pluginMainSource.slice(
 );
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Install-PortablePython')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('$PythonBuildStandaloneBuild = \"20260623\"')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('single-dir-transaction-v1')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('install_portable_python')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('PYTHON_BUILD_STANDALONE_BUILD=\"20260623\"')"));
 assert.strictEqual(localOcrInstallerValidatorSource.includes('Install-Uv'), false);

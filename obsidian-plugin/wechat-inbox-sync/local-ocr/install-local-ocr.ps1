@@ -6,7 +6,12 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonScript = Join-Path $ScriptDir "ocr_image.py"
-$VenvDir = Join-Path $InstallRoot "venv"
+$ActiveVenvDir = Join-Path $InstallRoot "venv"
+$StagingVenvDir = Join-Path $InstallRoot "venv-staging"
+$BackupVenvDir = Join-Path $InstallRoot "venv-backup"
+$PendingSwitchPath = Join-Path $InstallRoot "pending-venv-switch.json"
+$VenvDir = $StagingVenvDir
+$InstallerCapability = "single-dir-transaction-v1"
 $RuntimeScript = Join-Path $InstallRoot "ocr_image.py"
 $LogPath = Join-Path $InstallRoot "install.log"
 $BinDir = Join-Path $InstallRoot "bin"
@@ -41,6 +46,78 @@ function Write-InstallLog {
   $line = "$(Get-Date -Format o) $Message"
   Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
   Write-Host $Message
+}
+
+function Remove-DirectoryStrict {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [int]$MaxAttempts = 4
+  )
+  if (!(Test-Path -LiteralPath $Path)) {
+    return
+  }
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt += 1) {
+    try {
+      Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    } catch {
+      if ($attempt -ge $MaxAttempts) {
+        throw "Cannot remove OCR environment directory '$Path'. Another process or security software may be using it. $($_.Exception.Message)"
+      }
+      Start-Sleep -Milliseconds (250 * $attempt)
+    }
+    if (!(Test-Path -LiteralPath $Path)) {
+      return
+    }
+  }
+  throw "Cannot remove OCR environment directory '$Path'."
+}
+
+function Write-PendingOcrSwitch {
+  $payload = [ordered]@{
+    capability = $InstallerCapability
+    staging = $StagingVenvDir
+    target = $ActiveVenvDir
+    backup = $BackupVenvDir
+    createdAt = (Get-Date).ToUniversalTime().ToString("o")
+  }
+  $payload | ConvertTo-Json | Set-Content -LiteralPath $PendingSwitchPath -Encoding UTF8
+  Write-InstallLog "OCR environment is ready and will be activated after Obsidian restarts."
+}
+
+function Promote-StagedOcrEnvironment {
+  $stagedPython = Join-Path $StagingVenvDir "Scripts\python.exe"
+  if (!(Test-OcrPythonReady -PythonPath $stagedPython)) {
+    throw "Staged OCR environment failed validation before activation."
+  }
+
+  Remove-DirectoryStrict -Path $BackupVenvDir
+  $movedActive = $false
+  try {
+    if (Test-Path -LiteralPath $ActiveVenvDir) {
+      Move-Item -LiteralPath $ActiveVenvDir -Destination $BackupVenvDir -ErrorAction Stop
+      $movedActive = $true
+    }
+    Move-Item -LiteralPath $StagingVenvDir -Destination $ActiveVenvDir -ErrorAction Stop
+  } catch {
+    if ($movedActive -and !(Test-Path -LiteralPath $ActiveVenvDir) -and (Test-Path -LiteralPath $BackupVenvDir)) {
+      Move-Item -LiteralPath $BackupVenvDir -Destination $ActiveVenvDir -ErrorAction SilentlyContinue
+    }
+    Write-PendingOcrSwitch
+    return $false
+  }
+
+  $activePython = Join-Path $ActiveVenvDir "Scripts\python.exe"
+  if (!(Test-OcrPythonReady -PythonPath $activePython)) {
+    Remove-DirectoryStrict -Path $ActiveVenvDir
+    if (Test-Path -LiteralPath $BackupVenvDir) {
+      Move-Item -LiteralPath $BackupVenvDir -Destination $ActiveVenvDir -ErrorAction Stop
+    }
+    throw "Activated OCR environment failed validation; the previous environment was restored."
+  }
+
+  Remove-DirectoryStrict -Path $BackupVenvDir
+  Remove-Item -LiteralPath $PendingSwitchPath -Force -ErrorAction SilentlyContinue
+  return $true
 }
 
 function Invoke-NativeCommand {
@@ -384,19 +461,17 @@ function Setup-PythonEnvironment {
   $python = Find-Python
   if ($python) {
     Write-InstallLog "Using existing Python command: $python"
-    Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
     Invoke-Python -PythonCommand $python -m venv $VenvDir | Out-Null
     if ((Test-Path -LiteralPath $venvPython) -and (Install-OcrPackagesWithPip -PythonPath $venvPython) -and (Test-OcrPythonReady -PythonPath $venvPython)) {
       Write-InstallLog "Python OCR environment ready via existing Python."
       return $venvPython
     }
     Write-InstallLog "Existing Python OCR setup failed; falling back to pinned portable Python."
-    Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-DirectoryStrict -Path $VenvDir
   }
 
   $python = Install-PortablePython
   Write-InstallLog "Creating an isolated OCR environment with pinned Python 3.12."
-  Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
   Invoke-Python -PythonCommand $python -m venv $VenvDir | Out-Null
   if ($LASTEXITCODE -ne 0) {
     throw "Pinned Python 3.12 failed to create the OCR virtual environment."
@@ -426,9 +501,14 @@ if (!(Test-Path -LiteralPath $PythonScript)) {
   $PythonScript = $downloadedScript
 }
 
+$null = $InstallerCapability
+Remove-DirectoryStrict -Path $StagingVenvDir
 $VenvPython = Setup-PythonEnvironment
 Copy-Item -LiteralPath $PythonScript -Destination $RuntimeScript -Force
+$activated = Promote-StagedOcrEnvironment
 
-Write-InstallLog "Local OCR component installed."
-Write-Host "Python: $VenvPython"
+if ($activated) {
+  Write-InstallLog "Local OCR component installed."
+  Write-Host "Python: $(Join-Path $ActiveVenvDir 'Scripts\python.exe')"
+}
 Write-Host "Script: $RuntimeScript"

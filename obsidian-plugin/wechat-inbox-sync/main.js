@@ -297,6 +297,79 @@ function getLocalOcrInstallStatus(installRoot = getLocalOcrInstallRoot(), exists
   };
 }
 
+function completePendingLocalOcrSwitch(installRoot, dependencies = {}) {
+  const exists = dependencies.exists || fs.existsSync;
+  const readFile = dependencies.readFile || ((filePath) => fs.readFileSync(filePath, 'utf8'));
+  const rename = dependencies.rename || ((from, to) => fs.renameSync(from, to));
+  const remove = dependencies.remove || ((target) => fs.rmSync(target, { recursive: true, force: true }));
+  const validatePython = dependencies.validatePython || ((pythonPath) => {
+    if (!exists(pythonPath)) return false;
+    try {
+      childProcess.execFileSync(pythonPath, ['-c', 'import rapidocr_onnxruntime, PIL'], {
+        timeout: 30000,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  });
+  const root = path.resolve(String(installRoot || ''));
+  const markerPath = path.join(root, 'pending-venv-switch.json');
+  const stagingPath = path.join(root, 'venv-staging');
+  const targetPath = path.join(root, 'venv');
+  const backupPath = path.join(root, 'venv-backup');
+  if (!exists(markerPath)) return { status: 'none' };
+
+  let marker;
+  try {
+    marker = JSON.parse(String(readFile(markerPath) || '').replace(/^\uFEFF/, ''));
+  } catch (_) {
+    remove(markerPath);
+    return { status: 'invalid' };
+  }
+  if (!marker || marker.capability !== 'single-dir-transaction-v1') {
+    remove(markerPath);
+    return { status: 'invalid' };
+  }
+
+  const stagingPython = path.join(stagingPath, 'Scripts', 'python.exe');
+  if (!exists(stagingPath) || !validatePython(stagingPython)) {
+    remove(markerPath);
+    if (exists(stagingPath)) remove(stagingPath);
+    return { status: 'invalid' };
+  }
+
+  let movedTarget = false;
+  try {
+    if (exists(backupPath)) remove(backupPath);
+    if (exists(targetPath)) {
+      rename(targetPath, backupPath);
+      movedTarget = true;
+    }
+    rename(stagingPath, targetPath);
+    const activePython = path.join(targetPath, 'Scripts', 'python.exe');
+    if (!validatePython(activePython)) {
+      throw new Error('promoted OCR environment failed validation');
+    }
+    if (exists(backupPath)) remove(backupPath);
+    remove(markerPath);
+    return { status: 'activated', pythonPath: activePython };
+  } catch (error) {
+    try {
+      if (movedTarget && exists(targetPath) && exists(backupPath)) {
+        remove(targetPath);
+      }
+      if (movedTarget && !exists(targetPath) && exists(backupPath)) {
+        rename(backupPath, targetPath);
+      }
+    } catch (_) {
+    }
+    return { status: 'pending', error: error && (error.message || String(error)) };
+  }
+}
+
 function joinLocalAsrPath(platform, ...segments) {
   if (getLocalAsrPlatform(platform) === 'darwin') {
     const [first, ...rest] = segments;
@@ -1204,6 +1277,7 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('$PortablePython')
     && source.includes('Download-TextFile')
     && source.includes('function Install-PortablePython')
+    && source.includes('single-dir-transaction-v1')
     && source.includes('$python = Install-PortablePython')
     && source.includes('Invoke-Python -PythonCommand $python -m venv $VenvDir');
 }
@@ -11186,8 +11260,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.syncStatusBar.setText('');
     }
     this.localAsrInstallPromise = null;
+    this.localOcrInstallPromise = null;
     this.currentTranscriptionAbortController = null;
     this.currentTranscriptionProcess = null;
+    if (this.getConfiguredLocalAsrPlatform() === 'win32') {
+      try {
+        const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
+        if (switchResult.status === 'activated') {
+          new Notice('图片文字识别 OCR 修复已自动完成。');
+        }
+      } catch (error) {
+        console.warn('Failed to complete pending OCR environment switch:', error);
+      }
+    }
 
     this.addCommand({
       id: 'sync-wechat-inbox',
@@ -12343,6 +12428,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
     });
     const status = this.getLocalOcrInstallStatus();
+    const pendingSwitchPath = path.join(installRoot, 'pending-venv-switch.json');
+    if (platform === 'win32' && fs.existsSync(pendingSwitchPath)) {
+      new Notice('图片文字识别 OCR 修复已准备完成，重启 Obsidian 后会自动完成切换。', 10000);
+      return { pendingRestart: true };
+    }
     if (!status.ready) {
       const missingText = status.missingReasons && status.missingReasons.length
         ? status.missingReasons.join('；')
@@ -15920,6 +16010,7 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_OCR_MACOS_INSTALLER_URL,
   isLocalAsrInstallerCurrent,
   isLocalOcrInstallerCurrent,
+  completePendingLocalOcrSwitch,
   LOCAL_ASR_PLATFORM_NAMES,
   NOTE_PROPERTY_FIELD_KEYS,
   NOTE_SAVE_MODES,
