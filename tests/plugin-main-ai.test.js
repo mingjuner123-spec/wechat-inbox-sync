@@ -80,6 +80,11 @@ assert.strictEqual(
   helpers.isLocalOcrInstallerCurrent(macOcrInstallerSource.replaceAll('install_portable_python', 'install_legacy_python'), true),
   false,
 );
+assert.strictEqual(
+  helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('single-dir-transaction-v1', 'legacy-in-place-install'), false),
+  false,
+);
+assert.ok(pluginMainSource.includes('completePendingLocalOcrSwitch'));
 assert.strictEqual(typeof helpers.enableDebuggerNetworkCapture, 'function');
 let debuggerNetworkCommand = '';
 const neverSettlingDebuggerCommand = new Promise(() => {});
@@ -523,6 +528,7 @@ const localOcrInstallerValidatorSource = pluginMainSource.slice(
 );
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Install-PortablePython')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('$PythonBuildStandaloneBuild = \"20260623\"')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('single-dir-transaction-v1')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('install_portable_python')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('PYTHON_BUILD_STANDALONE_BUILD=\"20260623\"')"));
 assert.strictEqual(localOcrInstallerValidatorSource.includes('Install-Uv'), false);
