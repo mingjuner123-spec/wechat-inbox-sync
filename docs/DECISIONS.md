@@ -1,5 +1,17 @@
 # Engineering decisions
 
+## 2026-07-20: PowerShell deployer behavior requires a Windows CI gate
+
+Decision:
+
+- Linux `guards` continues to run repository-wide, manifest, plugin, macOS shell, and cross-platform PowerShell-parser checks. Tests that invoke Windows PowerShell or `.cmd` fixtures must skip outside Windows.
+- The `Main guards` workflow must also provide a `windows-deployer` job on `windows-latest`, with a full checkout and Node 24, that runs `node tests/release-governance.test.js`.
+- Both `guards` and `windows-deployer` are release-governance contexts and must be required by main-branch protection. A Linux-only success is insufficient evidence for the controlled Windows component deployer.
+
+Reason:
+
+- PR #1 ran `guards` on Ubuntu, where the governance suite invoked `powershell.exe`; the job failed even though the same suite passed on Windows. Skipping those runtime probes on Linux without a Windows replacement would silently remove verification of the deployer, its strict CloudBase handling, and dry-run safety.
+
 ## 2026-07-19：插件与本地组件发布以当前主线提交和内容哈希为唯一身份
 
 决策：

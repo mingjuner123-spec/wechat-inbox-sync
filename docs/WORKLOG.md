@@ -1,5 +1,18 @@
 # Worklog
 
+### 2026-07-20 - Root-cause fix for cross-platform release-governance CI
+
+- Goal: stop `Main guards` from failing on Ubuntu because it runs Windows-only PowerShell deployer probes, while preserving those probes as a required merge gate.
+- Scope: GitHub Actions workflow, release-governance regression test, and release-governance documentation only. No plugin runtime, Mini Program, cloud function, CloudBase object, user data, entitlement, binding, or CDN bytes were changed.
+- Root cause: PR #1's `guards` job ran on `ubuntu-latest`, but the test suite invoked `powershell.exe` and Windows `.cmd` fixtures. The same suite passed on Windows and therefore represented a platform-mismatched CI configuration rather than an ASR installer or GitHub Git service defect.
+- Changed: added the `windows-deployer` job on `windows-latest` to run the full governance suite, plus a regression assertion that this job must exist with full checkout and Node 24. The current main baseline already skips Windows-runtime-only probes on non-Windows hosts; this change makes their Windows execution explicit rather than dropping coverage.
+- Online action: pushed commit `84862e2` and created PR #4. Main branch protection now requires both `guards` and `windows-deployer` with strict up-to-date status checks. CI execution and merge remain pending. No release or CDN deployment is required.
+- Data changes: none.
+- Verification: TDD red test failed because `windows-deployer` was absent; green test passed after the workflow change. On Windows, `node tests/release-governance.test.js` passed 122/122. With `process.platform` simulated as Linux, 108 checks passed and exactly 5 Windows-only runtime probes skipped. Plugin regression tests, manifest `--check`, Git Bash syntax checks, and `git diff --check` passed. Docker/actionlint is unavailable locally; GitHub Actions remains the authoritative actionlint execution.
+- Result: pending CI. Once both contexts are required and pass, an Ubuntu-only green result can no longer permit a merge that leaves the Windows deployer untested.
+- Known risk: GitHub's branch-protection API cannot prove why PR #1 was merged after its failed check; the protection policy will be re-read after adding the second required context, and future merge attempts will be validated against both checks.
+- Next: wait for the Linux and Windows jobs to pass, merge only after both are green, then re-read main protection and update this worklog with the final outcome.
+
 ### 2026-07-20 - Windows ASR illegal-instruction compatibility fallback
 
 - Goal: repair local ASR installation on Windows computers where the default whisper.cpp package exits with `0xC000001D` before transcription begins.

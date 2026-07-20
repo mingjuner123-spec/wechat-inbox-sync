@@ -1561,6 +1561,20 @@ test('the main workflow guards main pushes and pull requests with repository con
   assert.match(stepWith(actionlint), /^\s+args:\s*['"]?-color['"]?\s*$/m);
 });
 
+test('the main workflow executes deployer behavior tests on Windows', {
+  skip: !fileExists(relativePaths.mainWorkflow),
+}, () => {
+  const workflow = readText(relativePaths.mainWorkflow);
+  const windowsJob = workflowJob(workflow, 'windows-deployer');
+  assert.match(windowsJob, /^\s+runs-on:\s*windows-latest\s*$/m);
+  assertJobTimeout(windowsJob, 5, 30);
+  assertFullCheckout(windowsJob);
+  assertNode24(windowsJob);
+
+  const runs = executableRuns(windowsJob);
+  assertExecutableCommand(runs, 'node tests/release-governance.test.js');
+});
+
 test('the component-integrity workflow runs on a schedule and by manual dispatch', {
   skip: !fileExists(relativePaths.integrityWorkflow),
 }, () => {
