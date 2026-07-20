@@ -11,9 +11,16 @@
     {
       "id": "asr-windows-installer",
       "sourcePath": "local-asr/install-local-asr.ps1",
-      "sha256": "6022bed7b0932f116a9305807dd57ba13b8ae23ab280e2bfe1be27d9df2ee99a",
-      "immutablePath": "local-components/by-sha256/6022bed7b0932f116a9305807dd57ba13b8ae23ab280e2bfe1be27d9df2ee99a/install-local-asr.ps1",
+      "sha256": "ecf5185879fae712f3ddf7f811d569bcf8c9fbe7459cad08f6a724b69473379f",
+      "immutablePath": "local-components/by-sha256/ecf5185879fae712f3ddf7f811d569bcf8c9fbe7459cad08f6a724b69473379f/install-local-asr.ps1",
       "compatibilityAlias": "local-asr/common/install-local-asr.ps1"
+    },
+    {
+      "id": "asr-windows-compatibility-metadata",
+      "sourcePath": "local-asr/windows/whisper-bin-x64-compat.json",
+      "sha256": "e52bca2bc10f0f647ae50b4ff47425fbc2a3347c5c1fc26132346ee20b767888",
+      "immutablePath": "local-components/by-sha256/e52bca2bc10f0f647ae50b4ff47425fbc2a3347c5c1fc26132346ee20b767888/whisper-bin-x64-compat.json",
+      "compatibilityAlias": "local-asr/windows/whisper-bin-x64-compat.json"
     },
     {
       "id": "ocr-macos-installer",

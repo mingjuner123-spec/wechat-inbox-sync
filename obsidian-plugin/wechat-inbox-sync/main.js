@@ -729,6 +729,9 @@ function explainLocalAsrExitCode(value) {
   if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
     return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
   }
+  if (text.includes('-1073741795') || text.toUpperCase().includes('0XC000001D')) {
+    return 'whisper.cpp 使用了当前 CPU 不支持的指令（0xC000001D）。请重新点击“安装/更新本地转写组件”；新版会自动尝试兼容版本。若兼容版本仍无法运行，请复制同步/安装失败诊断联系支持。';
+  }
   if (text.includes('-1073740791') || text.toUpperCase().includes('0XC0000409')) {
     return 'whisper.cpp 原生程序崩溃（0xC0000409）。常见原因是 Windows 本机运行环境、CPU 指令集兼容性、中文路径或当前音视频片段触发了 whisper.cpp 崩溃。请先重新点击“安装/更新本地转写组件”，新版会用安全路径和真实推理校验修复；如果仍失败，需要复制同步/安装失败诊断里的 transcribe-last.log 继续定位。';
   }
@@ -1143,7 +1146,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-    [1, 2, 22],
+      [1, 2, 23],
   )
     && !source.includes('$SimplifiedPrompt')
     && !source.includes('--prompt')
@@ -1157,10 +1160,15 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('safeModelPath')
     && source.includes('$TencentCosAssetBaseUrl')
     && source.includes('$WhisperWindowsTencentUrls')
+    && source.includes('$WhisperWindowsCompatibilityUrls')
+    && source.includes('$WhisperWindowsCompatibilitySha256')
     && source.includes('$FfmpegTencentUrls')
     && source.includes('$ModelTencentUrls')
     && source.includes('Get-EnabledAssetUrls')
     && source.includes('$WhisperWindowsFallbackUrls')
+    && source.includes('Test-IllegalInstructionExitCode')
+    && source.includes('whisper-bin-x64-compat.zip')
+    && source.includes('Assert-FileSha256')
     && source.includes('GitHub release page parsing failed')
     && source.includes('INSTALLER FAILED')
     && source.includes('$DownloadTimeoutSeconds = 1200')

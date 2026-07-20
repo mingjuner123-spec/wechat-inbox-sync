@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.22"
+$InstallerScriptVersion = "1.2.23"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 90
 $DownloadTimeoutSeconds = 1200
@@ -17,11 +17,14 @@ $InstallMutexName = "Global\WechatInboxLocalAsrInstall"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
 $TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"
 $WhisperWindowsTencentUrls = @()
+$WhisperWindowsCompatibilityUrls = @()
+$WhisperWindowsCompatibilitySha256 = '7B562DEEF031BD8A1A3954E3F5FF43BE0ACE2E86974235518530594BEECFF4B7'
 $FfmpegTencentUrls = @()
 $ModelTencentUrls = @()
 if (-not [string]::IsNullOrWhiteSpace($TencentCosAssetBaseUrl)) {
   $tencentCosAssetBase = $TencentCosAssetBaseUrl.TrimEnd("/")
   $WhisperWindowsTencentUrls += "$tencentCosAssetBase/whisper-bin-x64.zip"
+  $WhisperWindowsCompatibilityUrls += "$tencentCosAssetBase/whisper-bin-x64-compat.zip"
   $FfmpegTencentUrls += "$tencentCosAssetBase/ffmpeg-release-essentials.zip"
   $ModelTencentUrls += "$tencentCosAssetBase/ggml-small.bin"
 }
@@ -403,6 +406,30 @@ function Assert-ExecutableRuns {
   throw "$Label runtime validation failed with exit code $exit/$hex. $output"
 }
 
+function Assert-FileSha256 {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    throw "$Label is missing after download: $Path"
+  }
+  $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+  if ($actualSha256 -ne $ExpectedSha256.ToUpperInvariant()) {
+    throw "$Label SHA-256 mismatch (expected $ExpectedSha256, got $actualSha256)."
+  }
+}
+
+function Test-IllegalInstructionExitCode {
+  param([AllowNull()]$Value)
+  if ($Value -is [int]) {
+    return $Value -eq -1073741795 -or (Convert-ExitCodeToHex -ExitCode $Value) -eq "0xC000001D"
+  }
+  $text = [string]$Value
+  return $text -match "exit code\\s+-1073741795/0xC000001D" -or $text -match "0xC000001D"
+}
+
 function Assert-LocalAsrInference {
   param(
     [Parameter(Mandatory = $true)][string]$WhisperPath,
@@ -631,6 +658,38 @@ function Install-ExtractedPackage {
   return Assert-InstalledFile -Root $DestinationDir -Names $ExpectedFiles -Label $Label
 }
 
+function Install-WhisperCompatibilityPackage {
+  param(
+    [Parameter(Mandatory = $true)][string]$DestinationDir,
+    [Parameter(Mandatory = $true)][string]$StageDir
+  )
+  $compatibilityUrls = Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsCompatibilityUrls
+  if (-not $compatibilityUrls -or $compatibilityUrls.Count -eq 0) {
+    throw "whisper.cpp compatibility build is not configured. Please contact support with the installer diagnostic."
+  }
+  Write-Host "Current whisper.cpp uses unsupported CPU instructions; trying the compatibility build."
+  $optimizedCachePath = Join-Path $CacheRoot "whisper.zip"
+  Remove-Item -LiteralPath $optimizedCachePath -Force -ErrorAction SilentlyContinue
+  $compatibilityZip = Join-Path $CacheRoot "whisper-compat.zip"
+  Install-ZipPackage `
+    -Urls $compatibilityUrls `
+    -ZipPath $compatibilityZip `
+    -StageDir $StageDir `
+    -MinBytes 1MB `
+    -ExpectedFiles @("whisper-cli.exe", "main.exe") `
+    -Label "whisper.cpp compatibility" | Out-Null
+  Assert-FileSha256 -Path $compatibilityZip `
+    -ExpectedSha256 $WhisperWindowsCompatibilitySha256 `
+    -Label "whisper.cpp compatibility"
+  $installed = Install-ExtractedPackage `
+    -StageDir $StageDir `
+    -DestinationDir $DestinationDir `
+    -ExpectedFiles @("whisper-cli.exe", "main.exe") `
+    -Label "whisper.cpp compatibility"
+  Assert-ExecutableRuns -Path $installed.FullName -Arguments @("--help") -Label "whisper.cpp compatibility" -TryInstallVcRuntime | Out-Null
+  return $installed
+}
+
 function Install-ModelPackage {
   param(
     [Parameter(Mandatory = $true)][string[]]$Urls,
@@ -778,7 +837,14 @@ try {
       Remove-Item -LiteralPath $WhisperDir -Recurse -Force
     }
     $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
-    Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+    try {
+      Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+    } catch {
+      if (-not (Test-IllegalInstructionExitCode -Value ($_ | Out-String))) {
+        throw
+      }
+      $installedWhisper = Install-WhisperCompatibilityPackage -DestinationDir $WhisperDir -StageDir (Join-Path $TempRoot "whisper-compat")
+    }
   }
 
   $installedFfmpeg = Find-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe")
@@ -844,8 +910,16 @@ try {
       Remove-Item -LiteralPath $WhisperDir -Recurse -Force
     }
     $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"
-    Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
-    Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+    try {
+      Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null
+      Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+    } catch {
+      if (-not (Test-IllegalInstructionExitCode -Value ($_ | Out-String))) {
+        throw
+      }
+      $installedWhisper = Install-WhisperCompatibilityPackage -DestinationDir $WhisperDir -StageDir (Join-Path $TempRoot "whisper-compat")
+      Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
+    }
     Write-InstallState -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
   }
   Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue

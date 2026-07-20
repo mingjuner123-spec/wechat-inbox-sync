@@ -12,6 +12,10 @@ const readme = fs.readFileSync(path.join(pluginDir, 'README.md'), 'utf8');
 const license = fs.readFileSync(path.join(pluginDir, 'LICENSE'), 'utf8');
 const checklist = fs.readFileSync(path.join(pluginDir, 'RELEASE_CHECKLIST.md'), 'utf8');
 const windowsInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install-local-asr.ps1'), 'utf8');
+const windowsCompatibilityBuildScript = fs.readFileSync(
+  path.join(repoRoot, 'scripts', 'build-windows-whisper-compat.ps1'),
+  'utf8',
+);
 const macInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install-local-asr-macos.sh'), 'utf8');
 const windowsOcrInstaller = fs.readFileSync(path.join(pluginDir, 'local-ocr/install-local-ocr.ps1'), 'utf8');
 const macOcrInstaller = fs.readFileSync(path.join(pluginDir, 'local-ocr/install-local-ocr-macos.sh'), 'utf8');
@@ -151,6 +155,10 @@ assert.strictEqual(localOcrScript.includes('from opencc import OpenCC'), false, 
 assert.ok(releaseWorkflow.includes('gh release create "$TAG_NAME"'));
 assert.ok(releaseWorkflow.includes('gh release upload "$TAG_NAME"'));
 assert.ok(windowsInstaller.includes('$ChunkSeconds = 120'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_NATIVE=OFF'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_SSE42=OFF'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_BMI2=OFF'));
+assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_AVX2=OFF'));
 assert.ok(windowsInstaller.includes('$ChunkRetrySeconds = 30'));
 assert.ok(windowsInstaller.includes('"-f", "segment"'));
 assert.ok(windowsInstaller.includes('"-segment_time", [string]$SegmentSeconds'));
@@ -200,9 +208,10 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.22"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.23"'));
 assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
+assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilityUrls = @()'));
 assert.ok(windowsInstaller.includes('$FfmpegTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('$ModelTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('function Get-EnabledAssetUrls'));
@@ -211,6 +220,13 @@ assert.ok(windowsInstaller.includes('-PrimaryUrls $WhisperWindowsTencentUrls -Fa
 assert.ok(windowsInstaller.includes('-PrimaryUrls $FfmpegTencentUrls'));
 assert.ok(windowsInstaller.includes('-PrimaryUrls $ModelTencentUrls -FallbackUrls $ModelFallbackUrls'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsFallbackUrls'));
+assert.ok(windowsInstaller.includes('whisper-bin-x64-compat.zip'));
+assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilitySha256'));
+assert.ok(windowsInstaller.includes('Assert-FileSha256 -Path $compatibilityZip'));
+assert.ok(windowsInstaller.includes('function Test-IllegalInstructionExitCode'));
+assert.ok(windowsInstaller.includes('0xC000001D'));
+assert.ok(windowsInstaller.includes('Current whisper.cpp uses unsupported CPU instructions; trying the compatibility build.'));
+assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "whisper-compat.zip"'));
 assert.ok(windowsInstaller.includes('https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip'));
 assert.ok(windowsInstaller.includes('GitHub release page parsing failed'));
 assert.ok(windowsInstaller.includes('INSTALLER FAILED'));
