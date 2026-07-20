@@ -1528,8 +1528,7 @@ function isBindingInvalidMessage(message) {
   const text = String(message || '');
   return text.includes('绑定码未绑定或已失效')
     || text.includes('Invalid bind code')
-    || text.includes('Invalid or expired token')
-    || text.includes('403');
+    || text.includes('Invalid or expired token');
 }
 
 function getPrimaryBoundToken(bindings) {
@@ -11549,7 +11548,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const currentApiBase = trimTrailingSlash(this.settings.apiBase || '');
       const officialApiBase = trimTrailingSlash(OFFICIAL_SYNC_API_BASE);
       const shouldRetry = isInvalidCloudBaseEnvMessage(message)
-        || /Invalid or expired token|Invalid bind code|绑定码未绑定或已失效|403/i.test(String(message || ''));
+        || isBindingInvalidMessage(message);
       if (!shouldRetry || currentApiBase === officialApiBase) {
         return null;
       }
@@ -11587,9 +11586,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       response = await requestUrl(requestOptions);
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
-      if (message.includes('403')) {
-        throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
-      }
       if (isRequestUrlTransportError(message)) {
         try {
           response = await requestJsonViaNode(requestOptions);
@@ -11626,7 +11622,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
-      if (message.includes('403') || message.includes('Invalid bind code')) {
+      if (isBindingInvalidMessage(message)) {
         throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
       }
       throw new Error(message);
@@ -11697,9 +11693,33 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
+  async requestFeishuJsonWithBindingFallback(path, method = 'GET', body = {}, binding = null) {
+    const bindings = binding ? [binding] : this.getActiveBindings();
+    if (!bindings.length) {
+      return await this.requestJson(path, method, body, binding || undefined);
+    }
+    let lastError = null;
+    for (const candidate of bindings) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        return await this.requestJson(path, method, body, candidate);
+      } catch (error) {
+        lastError = error;
+        if (!isBindingInvalidMessage(error && error.message ? error.message : error)) {
+          throw error;
+        }
+      }
+    }
+    throw lastError;
+  }
+
   async connectFeishuCloudOAuth(binding = null) {
-    const activeBinding = binding || this.getActiveBindings()[0] || null;
-    const payload = await this.requestJson('/feishu/oauth/start', 'POST', this.withFeishuCustomAppConfig({}), activeBinding || undefined);
+    const payload = await this.requestFeishuJsonWithBindingFallback(
+      '/feishu/oauth/start',
+      'POST',
+      this.withFeishuCustomAppConfig({}),
+      binding,
+    );
     const data = payload && payload.data ? payload.data : payload;
     const authUrl = String((data && data.authUrl) || '').trim();
     if (!authUrl) throw new Error('Feishu OAuth did not return authUrl');
@@ -11708,8 +11728,12 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async refreshFeishuCloudOAuthStatus(binding = null) {
-    const activeBinding = binding || this.getActiveBindings()[0] || null;
-    const payload = await this.requestJson('/feishu/oauth/status', 'GET', {}, activeBinding || undefined);
+    const payload = await this.requestFeishuJsonWithBindingFallback(
+      '/feishu/oauth/status',
+      'GET',
+      {},
+      binding,
+    );
     const data = payload && payload.data ? payload.data : payload;
     try {
       await this.saveSettings({
@@ -11866,30 +11890,31 @@ class WechatObsidianInboxPlugin extends Plugin {
         clientId: this.settings.clientId,
       }, { token: tokenToBind });
       const token = tokenToBind;
-      const nextBindings = existing
-        ? currentBindings.map((item) => (item.token === token ? {
-          ...item,
+      const boundBinding = existing
+        ? {
+          ...existing,
           enabled: true,
           status: 'bound',
           lastError: '',
           unboundAt: '',
-        } : item))
-        : [
-          ...currentBindings,
-          {
-            token,
-            label: `微信 ${currentBindings.length + 1}`,
-            enabled: true,
-            status: 'bound',
-            boundAt: new Date().toISOString(),
-            lastSyncAt: '',
-            unboundAt: '',
-            lastError: '',
-          },
-        ];
+        }
+        : {
+          token,
+          label: `微信 ${currentBindings.length + 1}`,
+          enabled: true,
+          status: 'bound',
+          boundAt: new Date().toISOString(),
+          lastSyncAt: '',
+          unboundAt: '',
+          lastError: '',
+        };
+      const nextBindings = [
+        boundBinding,
+        ...currentBindings.filter((item) => item.token !== token),
+      ];
       await this.saveSettings({
         ...this.settings,
-        token: this.settings.token || token,
+        token,
         pendingBindCode: '',
         bindings: nextBindings,
       });
@@ -13993,8 +14018,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       const imageUrl = String(match[2] || '').trim();
       if (!imageUrl || savedByUrl.has(imageUrl)) continue;
       try {
+        const imageHeaders = isXiaohongshuUrl(options.sourceUrl)
+          ? await getXiaohongshuRequestHeaders(options.sourceUrl)
+          : {};
         // eslint-disable-next-line no-await-in-loop
-        const arrayBuffer = await this.downloadArrayBuffer(imageUrl);
+        const arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
         const buffer = Buffer.from(arrayBuffer || []);
         if (!buffer.length) throw new Error('图片下载结果为空');
         const ext = getImageExtFromBuffer(buffer, imageUrl);
@@ -14861,6 +14889,16 @@ class WechatObsidianInboxPlugin extends Plugin {
             });
           }
           if (hasReadableXiaohongshuGraphic && !extractedXiaohongshu.videoUrl && !mediaUrl) {
+            extractedXiaohongshu = {
+              ...extractedXiaohongshu,
+              markdown: await this.saveMarkdownRemoteImageAssets(
+                extractedXiaohongshu.markdown,
+                rootDir,
+                dateFolder,
+                extractedXiaohongshu.title || title || '小红书图文',
+                { sourceUrl: resolvedUrl },
+              ),
+            };
             return {
               ...record,
               metadata: {
@@ -16015,6 +16053,7 @@ WechatObsidianInboxPlugin.__test = {
   resolveRedirectUrl,
   isRequestUrlTransportError,
   requestJsonViaNode,
+  isBindingInvalidMessage,
   validateSettings,
   mergeSettings,
   normalizeBindings,
