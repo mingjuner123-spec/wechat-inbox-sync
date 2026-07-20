@@ -1,6 +1,6 @@
 # Worklog
 
-### 2026-07-19 - 根治插件版本回退与本地组件发布源漂移（本地完成，待提交/发布）
+### 2026-07-19～20 - 根治插件版本回退与本地组件发布源漂移（已上线）
 
 - 目标：从发布体系根治“修复已经完成，但插件或代码更新后又退回旧版本”的问题；把当前 `origin/main`、正式插件发布源、GitHub Release 和腾讯云 ASR/OCR 组件绑定到同一个可验证的 Git 提交与 SHA-256 manifest。
 - 根因：macOS ASR portable-Python 修复曾只存在于分叉开发线，不是正式 `1.3.48` 的祖先；腾讯云 `common` 路径可被任意旧 worktree 直接覆盖；旧 Release 流程不要求 tag 等于当前远端主线，也没有 committed manifest、不可变组件路径和持续漂移检测。混合换行又使“本地工作文件等于 CDN”不能证明“Git 中提交的 blob 等于 CDN”。
@@ -8,11 +8,14 @@
 - 变更：新增 canonical manifest 生成/校验、发布源与 tag guard、内容寻址不可变路径、通用 CDN 完整性验证器和默认 dry-run 的 PowerShell 受控部署器；保留旧 OCR 检查命令为通用验证器的薄兼容入口。主线/PR 工作流加入 actionlint、插件回归、manifest、JS/Bash/PowerShell 检查；Release 只接受当前主线上的数字版本 tag；每日任务检测不可变对象、兼容别名、公开 manifest 和固定 Python 运行时漂移。
 - 防回退约束：正式插件源只认 `obsidian-plugin/wechat-inbox-sync/`；发布身份只认 commit identity；组件版本只认 canonical SHA-256；不可变对象先上传并验证，兼容别名后切换；紧急 CDN 热修必须在下一次插件发版前以相同字节回写主线。直接部署本地组件的 `tcb hosting deploy` 不再是支持的操作。
 - TDD 与审查：release governance 测试从红灯开始覆盖旧分支/脏工作区/tag 版本错配、CRLF/LF 规范化、路径逃逸与 reparse point、不可变对象替换拒绝、CloudBase 严格 JSON envelope、真实 PowerShell dry-run/fake `tcb` 参数、工作流命令存在性与发布顺序。任务按实现、规格和质量三轮检查；最终质量审查为 Approved，无 Critical/Important 问题。
-- 本地验证：`node tests/release-governance.test.js` 119/119、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、相关 `node --check`、manifest `--check`、Windows PowerShell 5.1 AST 与真实 dry-run、两份 macOS 安装器 `bash -n`、`git diff --check` 均通过。工作流另外固定 `docker://rhysd/actionlint:1.7.12` 作为 CI lint 门禁；当前 Windows 环境没有 Docker，因此未在本机执行该镜像。
-- 已完成线上动作：本轮治理代码尚未执行线上变更。此前 macOS ASR 安装器 `1.3.7` 热修已上传腾讯云并双回读验证，官方主线热修提交为 `d89e5e2374fb6015a749988816739e74ed0e5092`。
-- 未完成与外部阻塞：Task 5 最终代码、设计/实施文档和本条日志尚未提交、推送或部署。Codex 账户写 Git/外部发布所需的授权因用量额度被系统拒绝，提示需等到 2026-07-25 11:25 或增加额度；按系统要求没有重试或旁路。由于受控部署器会拒绝未提交/非当前主线状态，当前不能安全执行 `-Execute`。
-- 已知限制：CloudBase CLI 3.5.9 没有 hosting conditional-create，无法做到服务端原子“仅不存在时创建”；现以内容寻址、两次存在性检查、已存在对象下载验证和发布后 CloudBase/公网双校验失败关闭。分支保护仍需治理提交进入 GitHub 后，以仓库权限启用并验证 required check。
-- 下一步：额度恢复后，先把当前 scoped 变更提交并快进推送到 `main`，确认主线门禁通过；再从干净当前主线运行 `scripts/deploy-local-components.ps1 -Execute`、通用公网验证器，并启用/核验主分支 required check。完成这些步骤前，不宣称发布治理已正式上线。
+- 部署现场修复：第一次正式执行部署器时，CloudBase CLI 的正常进度行 `- Loading data...` 写到 stderr；普通命令封装在 PowerShell 5.1 的全局 `ErrorActionPreference=Stop` 下把它误判为 `NativeCommandError`，在任何上传前退出。先新增真实 `.cmd` 红灯用例，再让封装仅在原生命令调用期间使用 `Continue`、恢复原策略并以退出码判定成功；治理套件由 119 增至 120 项并全部通过。修复提交为 `fa19fea8efd21b45d0cb2b7ea6705226d04e5982`。
+- 本地验证：`node tests/release-governance.test.js` 120/120、`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、相关 `node --check`、manifest `--check`、Windows PowerShell 5.1 AST 与真实 dry-run、两份 macOS 安装器 `bash -n`、`git diff --check` 均通过。工作流固定 `docker://rhysd/actionlint:1.7.12` 作为 CI lint 门禁；当前 Windows 环境没有 Docker，因此未在本机执行该镜像。
+- GitHub 线上动作：治理提交链已从官方热修主线 `d89e5e2` 快进推送到 `main`；完整治理提交为 `5c367e3e3280df30ccc480eb314f9438bd1f013b`，部署器 PowerShell 5.1 兼容修复为 `fa19fea8efd21b45d0cb2b7ea6705226d04e5982`。未创建新插件 tag 或 GitHub Release。
+- CDN 线上动作：从干净且等于远端 `main` 的 `fa19fea` 执行 `scripts/deploy-local-components.ps1 -Execute` 成功。5 个 canonical 组件的完整 SHA-256 不可变路径、5 个兼容别名和 `local-components/manifest.json` 均完成 CloudBase 对象/公网验证；随后独立运行 `node scripts/check-local-components-cdn.js`，上述 11 个对象及 Windows、macOS arm64、macOS x64 三个固定 CPython 运行时全部哈希一致。
+- GitHub 门禁状态：`Main guards` 工作流为 active，正式 push 运行 `29711600567`（`fa19fea`）已创建，但在本次收尾检查时仍处于 GitHub 托管 runner 的 `queued` 状态，尚未取得 success/failure 终态。没有把排队状态视为通过。
+- 未完成与外部限制：主分支 required check/branch protection 尚未启用。本机没有 GitHub CLI，内置浏览器及两个 Chrome 配置均未登录 GitHub，无法在不读取或暴露凭据的前提下修改仓库权限。代码级主线/Release/CDN 门禁已上线，但仓库管理员仍可直接 push；需要登录 GitHub 的仓库管理员补启用 required check。
+- 已知限制：CloudBase CLI 3.5.9 没有 hosting conditional-create，无法做到服务端原子“仅不存在时创建”；现以内容寻址、两次存在性检查、已存在对象下载验证和发布后 CloudBase/公网双校验失败关闭。
+- 下一步：等待 `Main guards` 运行 `29711600567` 进入终态；若失败，按具体 job 日志修复。仓库管理员登录 GitHub 后，把 `Main guards / guards` 设为 `main` 的 required status check，并限制绕过；完成后再通过仓库设置页/API 回读确认。
 
 ### 2026-07-18 - 热修 macOS Apple Silicon ASR 固定 Python 下载链
 

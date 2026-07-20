@@ -173,11 +173,11 @@ node scripts/update-local-components-manifest.js --check
 
 Also run Git Bash syntax checks for macOS installers and PowerShell AST parsing for `scripts/deploy-local-components.ps1`.
 
-- [ ] **Step 3: Commit and push governance code to main**
+- [x] **Step 3: Commit and push governance code to main**
 
 Verify remote main has not advanced, commit the scoped files, and push the fast-forward update.
 
-- [ ] **Step 4: Deploy immutable assets from clean main**
+- [x] **Step 4: Deploy immutable assets from clean main**
 
 Run:
 
@@ -187,12 +187,12 @@ powershell -ExecutionPolicy Bypass -File scripts/deploy-local-components.ps1 -Ex
 
 Expected: immutable objects, compatibility aliases, and public manifest all match the committed manifest.
 
-- [ ] **Step 5: Verify public integrity**
+- [x] **Step 5: Verify public integrity**
 
 Run: `node scripts/check-local-components-cdn.js`
 
 Expected: every asset reports matching source, immutable, and compatibility hashes.
 
-- [ ] **Step 6: Enable branch protection**
+- [x] **Step 6: Enable branch protection**
 
 Require the main governance workflow through GitHub repository settings/API when permissions allow. If repository plan or permissions reject it, record that exact external limitation without weakening local and Release gates.
