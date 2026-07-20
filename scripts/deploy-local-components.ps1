@@ -2,7 +2,8 @@
 param(
     [switch]$Execute,
     [string]$TcbPath,
-    [string]$NodePath
+    [string]$NodePath,
+    [string]$WindowsAsrCompatibilityArchivePath
 )
 
 Set-StrictMode -Version 2.0
@@ -17,6 +18,7 @@ $ImmutableRecheckDelayMilliseconds = 500
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $PluginRoot = Join-Path $RepoRoot 'obsidian-plugin\wechat-inbox-sync'
 $ManifestPath = Join-Path $PluginRoot 'local-components-manifest.json'
+$WindowsAsrCompatibilityMetadataPath = Join-Path $PluginRoot 'local-asr\windows\whisper-bin-x64-compat.json'
 $ManifestCheckerPath = Join-Path $RepoRoot 'scripts\update-local-components-manifest.js'
 $SourceGuardPath = Join-Path $RepoRoot 'scripts\release-source-guard.js'
 $GenericVerifierPath = Join-Path $RepoRoot 'scripts\check-local-components-cdn.js'
@@ -164,6 +166,49 @@ function Get-BytesSha256 {
 function Get-FileSha256 {
     param([string]$LiteralPath)
     return Get-BytesSha256 -Bytes ([System.IO.File]::ReadAllBytes($LiteralPath))
+}
+
+function Read-WindowsAsrCompatibilityMetadata {
+    if (-not (Test-Path -LiteralPath $WindowsAsrCompatibilityMetadataPath -PathType Leaf)) {
+        throw "Windows ASR compatibility metadata is missing: $WindowsAsrCompatibilityMetadataPath"
+    }
+    try {
+        $metadata = [System.IO.File]::ReadAllText($WindowsAsrCompatibilityMetadataPath, $StrictUtf8) | ConvertFrom-Json
+    }
+    catch {
+        throw "Windows ASR compatibility metadata is invalid: $($_.Exception.Message)"
+    }
+    $expectedKeys = @('schemaVersion', 'fileName', 'sha256', 'upstreamTag', 'disabledCpuFeatures')
+    $actualKeys = @($metadata.PSObject.Properties.Name | Sort-Object)
+    if (($metadata.schemaVersion -ne 1) -or ($actualKeys.Count -ne $expectedKeys.Count) -or (Compare-Object $actualKeys ($expectedKeys | Sort-Object))) {
+        throw 'Windows ASR compatibility metadata has an unexpected schema.'
+    }
+    if ($metadata.fileName -ne 'whisper-bin-x64-compat.zip' -or $metadata.sha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw 'Windows ASR compatibility metadata has an invalid file name or SHA-256.'
+    }
+    return [pscustomobject]@{
+        FileName = [string]$metadata.fileName
+        Sha256 = ([string]$metadata.sha256).ToLowerInvariant()
+        ImmutablePath = "local-asr/windows/by-sha256/$(([string]$metadata.sha256).ToLowerInvariant())/$($metadata.fileName)"
+        CompatibilityAlias = "local-asr/windows/$($metadata.fileName)"
+    }
+}
+
+function Resolve-WindowsAsrCompatibilityArchive {
+    param([object]$Metadata)
+    if ([string]::IsNullOrWhiteSpace($WindowsAsrCompatibilityArchivePath)) {
+        throw 'Windows ASR compatibility archive is required. Pass -WindowsAsrCompatibilityArchivePath with the verified whisper-bin-x64-compat.zip file.'
+    }
+    $archivePath = [System.IO.Path]::GetFullPath($WindowsAsrCompatibilityArchivePath)
+    $archive = Get-Item -LiteralPath $archivePath -Force
+    if ($archive.PSIsContainer -or (($archive.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Windows ASR compatibility archive must be a regular file: $archivePath"
+    }
+    $actualHash = Get-FileSha256 -LiteralPath $archivePath
+    if ($actualHash -ne $Metadata.Sha256) {
+        throw "Windows ASR compatibility archive SHA-256 mismatch (metadata $($Metadata.Sha256), archive $actualHash)."
+    }
+    return $archivePath
 }
 
 function Assert-NoReparsePoint {
@@ -471,6 +516,7 @@ if ($MyInvocation.InvocationName -eq '.') {
 $resolvedNode = Resolve-CommandPath -ExplicitPath $NodePath -CommandNames @('node.exe', 'node') -Label 'Node.js'
 Invoke-ManifestCheck -ResolvedNodePath $resolvedNode
 $manifest = Read-ValidatedManifest
+$windowsAsrCompatibilityMetadata = Read-WindowsAsrCompatibilityMetadata
 
 if (-not $Execute) {
     Write-Output 'DRY RUN: controlled local component CDN deployment'
@@ -482,6 +528,8 @@ if (-not $Execute) {
     foreach ($component in $manifest.assets) {
         Write-Output "ALIAS publish-after-guard: $($component.compatibilityAlias) <- $($component.sourcePath) [$($component.sha256)]"
     }
+    Write-Output "WINDOWS ASR COMPATIBILITY immutable verify-or-create: $($windowsAsrCompatibilityMetadata.ImmutablePath) <- -WindowsAsrCompatibilityArchivePath [$($windowsAsrCompatibilityMetadata.Sha256)]"
+    Write-Output "WINDOWS ASR COMPATIBILITY alias publish-after-guard: $($windowsAsrCompatibilityMetadata.CompatibilityAlias) <- -WindowsAsrCompatibilityArchivePath [$($windowsAsrCompatibilityMetadata.Sha256)]"
     Write-Output "MANIFEST publish-last: $PublicManifestPath <- obsidian-plugin/wechat-inbox-sync/local-components-manifest.json"
     Write-Output 'DRY RUN complete. No Git remote check, tcb command, upload, or public network request was performed.'
     return
@@ -495,6 +543,7 @@ $resolvedTcb = Resolve-CommandPath `
 $staging = $null
 try {
     $staging = New-VerifiedStagingTree -ManifestObject $manifest
+    $windowsAsrCompatibilityArchive = Resolve-WindowsAsrCompatibilityArchive -Metadata $windowsAsrCompatibilityMetadata
     Invoke-ReleaseSourceGuard -ResolvedNodePath $resolvedNode -Phase 'pre-immutable'
     $downloadRoot = Join-Path $staging.Root 'downloads'
     [void](New-Item -ItemType Directory -Path $downloadRoot)
@@ -528,6 +577,23 @@ try {
             -Label 'immutable public object'
     }
 
+    $windowsAsrCompatibilityState = Get-RemoteObjectState -ResolvedTcbPath $resolvedTcb `
+        -RemotePath $windowsAsrCompatibilityMetadata.ImmutablePath
+    if (-not $windowsAsrCompatibilityState.Exists) {
+        Start-Sleep -Milliseconds $ImmutableRecheckDelayMilliseconds
+        $windowsAsrCompatibilityState = Get-RemoteObjectState -ResolvedTcbPath $resolvedTcb `
+            -RemotePath $windowsAsrCompatibilityMetadata.ImmutablePath
+        if (-not $windowsAsrCompatibilityState.Exists) {
+            Publish-CloudObject -ResolvedTcbPath $resolvedTcb `
+                -LocalPath $windowsAsrCompatibilityArchive -RemotePath $windowsAsrCompatibilityMetadata.ImmutablePath
+        }
+    }
+    Verify-CloudObject -ResolvedTcbPath $resolvedTcb -RemotePath $windowsAsrCompatibilityMetadata.ImmutablePath `
+        -ExpectedHash $windowsAsrCompatibilityMetadata.Sha256 -DownloadRoot $downloadRoot `
+        -Label 'Windows ASR compatibility immutable object'
+    Verify-PublicObject -RemotePath $windowsAsrCompatibilityMetadata.ImmutablePath `
+        -ExpectedHash $windowsAsrCompatibilityMetadata.Sha256 -Label 'Windows ASR compatibility immutable public object'
+
     Invoke-ReleaseSourceGuard -ResolvedNodePath $resolvedNode -Phase 'pre-alias'
 
     foreach ($asset in $manifest.assets) {
@@ -541,6 +607,13 @@ try {
         Verify-PublicObject -RemotePath $remotePath -ExpectedHash $expectedHash `
             -Label 'compatibility alias'
     }
+    Publish-CloudObject -ResolvedTcbPath $resolvedTcb `
+        -LocalPath $windowsAsrCompatibilityArchive -RemotePath $windowsAsrCompatibilityMetadata.CompatibilityAlias
+    Verify-CloudObject -ResolvedTcbPath $resolvedTcb -RemotePath $windowsAsrCompatibilityMetadata.CompatibilityAlias `
+        -ExpectedHash $windowsAsrCompatibilityMetadata.Sha256 -DownloadRoot $downloadRoot `
+        -Label 'Windows ASR compatibility alias'
+    Verify-PublicObject -RemotePath $windowsAsrCompatibilityMetadata.CompatibilityAlias `
+        -ExpectedHash $windowsAsrCompatibilityMetadata.Sha256 -Label 'Windows ASR compatibility alias'
 
     $manifestHash = $staging.ManifestHash
     Publish-CloudObject -ResolvedTcbPath $resolvedTcb `

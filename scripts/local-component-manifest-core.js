@@ -4,6 +4,11 @@ const { TextDecoder } = require('node:util');
 
 const ASSET_DEFINITIONS = Object.freeze([
   Object.freeze({
+    id: 'asr-windows-compatibility-metadata',
+    sourcePath: 'local-asr/windows/whisper-bin-x64-compat.json',
+    compatibilityAlias: 'local-asr/windows/whisper-bin-x64-compat.json',
+  }),
+  Object.freeze({
     id: 'asr-windows-installer',
     sourcePath: 'local-asr/install-local-asr.ps1',
     compatibilityAlias: 'local-asr/common/install-local-asr.ps1',

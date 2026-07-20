@@ -45,7 +45,7 @@ const macAsrInstallerSource = fs.readFileSync(
   'utf8',
 );
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.22"', '$InstallerScriptVersion = "1.2.21"')
+  .replace('$InstallerScriptVersion = "1.2.23"', '$InstallerScriptVersion = "1.2.22"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const staleMacAsrInstallerSource = macAsrInstallerSource
   .replace('INSTALLER_SCRIPT_VERSION="1.3.7"', 'INSTALLER_SCRIPT_VERSION="1.3.6"');
@@ -460,6 +460,9 @@ assert.strictEqual(typeof helpers.getLocalAsrInstallRoot, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallStatus, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrScriptVersionStatus, 'function');
 assert.strictEqual(typeof helpers.explainLocalAsrExitCode, 'function');
+assert.ok(
+  helpers.explainLocalAsrExitCode('whisper exited -1073741795/0xC000001D').includes('兼容版本'),
+);
 assert.strictEqual(typeof helpers.buildLocalAsrInstallCommand, 'function');
 assert.strictEqual(typeof helpers.downloadTextViaNode, 'function');
 assert.strictEqual(typeof helpers.normalizeInstallerScriptText, 'function');

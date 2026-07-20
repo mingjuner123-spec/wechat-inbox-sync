@@ -38,6 +38,7 @@ const relativePaths = {
 const compatibilityMappings = [
   ['local-asr/install-local-asr.ps1', 'local-asr/common/install-local-asr.ps1'],
   ['local-asr/install-local-asr-macos.sh', 'local-asr/common/install-local-asr-macos.sh'],
+  ['local-asr/windows/whisper-bin-x64-compat.json', 'local-asr/windows/whisper-bin-x64-compat.json'],
   ['local-ocr/install-local-ocr.ps1', 'local-ocr/common/install-local-ocr.ps1'],
   ['local-ocr/install-local-ocr-macos.sh', 'local-ocr/common/install-local-ocr-macos.sh'],
   ['local-ocr/ocr_image.py', 'local-ocr/common/ocr_image.py'],
@@ -67,6 +68,7 @@ const windowsInstallerPaths = [
 ];
 const currentCommit = 'a'.repeat(40);
 const staleCommit = 'b'.repeat(40);
+const requiresWindowsPowerShell = process.platform !== 'win32';
 
 function absolutePath(relativePath) {
   return path.join(repoRoot, ...relativePath.split('/'));
@@ -614,7 +616,7 @@ test('canonical manifest validation rejects missing, extra, unknown, or swapped 
   await t.test('missing canonical assets and wrong counts', () => {
     const malformed = structuredClone(canonical);
     malformed.assets.pop();
-    assert.throws(() => validateCanonicalManifest(malformed), /exactly 5 canonical assets/i);
+    assert.throws(() => validateCanonicalManifest(malformed), new RegExp(`exactly ${ASSET_DEFINITIONS.length} canonical assets`, 'i'));
   });
 
   await t.test('extra canonical assets and wrong counts', () => {
@@ -625,7 +627,7 @@ test('canonical manifest validation rejects missing, extra, unknown, or swapped 
     }, Buffer.from('extra\n', 'utf8'));
     const malformed = structuredClone(canonical);
     malformed.assets.push(extraAsset);
-    assert.throws(() => validateCanonicalManifest(malformed), /exactly 5 canonical assets/i);
+    assert.throws(() => validateCanonicalManifest(malformed), new RegExp(`exactly ${ASSET_DEFINITIONS.length} canonical assets`, 'i'));
   });
 
   await t.test('unknown IDs with the expected count', () => {
@@ -1088,7 +1090,9 @@ test('the controlled deployer stages canonical bytes and enforces immutable-firs
   assert.match(deployer, /concurrent.*identical|differing concurrent bytes/i);
 });
 
-test('the controlled deployer stages exact committed manifest bytes and hash', () => {
+test('the controlled deployer stages exact committed manifest bytes and hash', {
+  skip: requiresWindowsPowerShell,
+}, () => {
   const result = runDeployerPowerShellProbe([
     '$manifest=Read-ValidatedManifest',
     '$staging=New-VerifiedStagingTree -ManifestObject $manifest',
@@ -1128,7 +1132,9 @@ test('the controlled deployer resolves tools safely and fails closed on noisy Cl
   assert.doesNotMatch(deployer, /\bInvoke-Expression\b/);
 });
 
-test('the controlled deployer dot-sources safely and accepts only strict CloudBase list envelopes', async (t) => {
+test('the controlled deployer dot-sources safely and accepts only strict CloudBase list envelopes', {
+  skip: requiresWindowsPowerShell,
+}, async (t) => {
   await t.test('valid and empty documented envelopes', () => {
     const result = runDeployerPowerShellProbe([
       '$valid=Find-JsonValue -Text \'notice: {"data":[{"key":"target/object"}],"meta":{"requestId":"fixture"}} trailing\'',
@@ -1165,7 +1171,9 @@ test('the controlled deployer dot-sources safely and accepts only strict CloudBa
   }
 });
 
-test('CloudBase JSON commands keep stderr separate and pass exact hosting-list argv', (t) => {
+test('CloudBase JSON commands keep stderr separate and pass exact hosting-list argv', {
+  skip: requiresWindowsPowerShell,
+}, (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-tcb-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const fakeTcbPath = path.join(directory, 'fake-tcb.cmd');
@@ -1192,7 +1200,9 @@ test('CloudBase JSON commands keep stderr separate and pass exact hosting-list a
   );
 });
 
-test('successful native commands may emit progress on stderr under ErrorActionPreference Stop', (t) => {
+test('successful native commands may emit progress on stderr under ErrorActionPreference Stop', {
+  skip: requiresWindowsPowerShell,
+}, (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-native-progress-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const fakeCommandPath = path.join(directory, 'fake-progress.cmd');
@@ -1213,7 +1223,9 @@ test('successful native commands may emit progress on stderr under ErrorActionPr
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
-test('the controlled deployer parses in Windows PowerShell and its real dry run needs no tcb or network', () => {
+test('the controlled deployer parses in Windows PowerShell and its real dry run needs no tcb or network', {
+  skip: requiresWindowsPowerShell,
+}, () => {
   const deployerPath = absolutePath(relativePaths.deployScript);
   const encodedDeployerPath = Buffer.from(deployerPath, 'utf16le').toString('base64');
   const parser = childProcess.spawnSync('powershell.exe', [

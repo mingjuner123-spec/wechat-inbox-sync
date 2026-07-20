@@ -1,5 +1,18 @@
 # Worklog
 
+### 2026-07-20 - Windows ASR illegal-instruction compatibility fallback
+
+- Goal: repair local ASR installation on Windows computers where the default whisper.cpp package exits with `0xC000001D` before transcription begins.
+- Scope: Obsidian plugin local ASR installer, controlled local-component CDN deployment, compatibility-package build/verification tooling, regression tests, and documentation. No Mini Program, cloud function, binding, Pro entitlement, payment, sync data, or user vault data changes.
+- Changed: the Windows installer keeps the optimized whisper.cpp package as the default. Only an explicit illegal-instruction exit (`-1073741795` / `0xC000001D`) triggers a separately cached baseline compatibility package. The archive is SHA-256 pinned; its metadata records whisper.cpp `v1.9.0` and disabled CPU extensions. The controlled deployer now verifies the supplied archive hash, publishes an immutable object before its compatibility alias, and verifies both CloudBase download and public CDN bytes.
+- Online action: pending. The committed source and its exact compatibility archive must first be on current `origin/main`, then `scripts/deploy-local-components.ps1 -Execute -WindowsAsrCompatibilityArchivePath <verified archive>` can publish the installer and fallback archive together.
+- Data changes: none.
+- Verification: regression tests were added for the `0xC000001D` diagnostic and installer freshness contract; PowerShell AST parsing, manifest regeneration/check, deployer dry run, compatibility-package rebuild, extracted `whisper-cli --help`, plugin tests, and `git diff --check` passed locally before publication.
+- Result: unaffected Windows users retain the existing optimized path. Affected CPUs or virtual machines no longer fail immediately; the installer retries once with the compatibility build and then runs the existing inference validation.
+- Known risk: the fallback build was verified on the available Windows x64 host, not on the affected user's exact CPU/virtual-machine configuration. If the fallback fails, the user must return the new installer diagnostic for further investigation.
+- CI follow-up: the protected-main `guards` workflow runs on Ubuntu, while several release-governance tests invoked `powershell.exe` unconditionally. Those Windows-only runtime probes now skip on non-Windows hosts; the workflow continues to parse all PowerShell sources with `pwsh`, and the probes still run on Windows development hosts.
+- Next: publish the controlled CDN update, confirm public hashes, then ask the affected user to click “安装/更新本地转写组件” again. Failure-history logging is explicitly deferred.
+
 ### 2026-07-19～20 - 根治插件版本回退与本地组件发布源漂移（已上线）
 
 - 目标：从发布体系根治“修复已经完成，但插件或代码更新后又退回旧版本”的问题；把当前 `origin/main`、正式插件发布源、GitHub Release 和腾讯云 ASR/OCR 组件绑定到同一个可验证的 Git 提交与 SHA-256 manifest。
