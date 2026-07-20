@@ -1,5 +1,18 @@
 # Worklog
 
+### 2026-07-20 - Published Obsidian plugin 1.3.49: binding fallback and Xiaohongshu image localization
+
+- Goal: stop generic HTTP 403 responses from being reported as invalid binding codes, prefer newly bound codes, let Feishu OAuth skip explicitly invalid stale bindings, and save Xiaohongshu images as local Obsidian attachments with platform session headers.
+- Scope: Obsidian plugin runtime, plugin regression tests, release-governance fixture versioning, release metadata, design/implementation docs, and GitHub Release. No Mini Program, cloud function, CloudBase business data, user binding record, sync record, vault content, save-directory logic, or OCR installer was changed.
+- Changed files: `obsidian-plugin/wechat-inbox-sync/main.js`, root/plugin `manifest.json` and `versions.json`, `tests/plugin-main-ai.test.js`, `tests/plugin-marketplace-package.test.js`, `tests/release-governance.test.js`, design/implementation docs, and this worklog.
+- Online actions: PR `#6` passed required `guards` and `windows-deployer` checks and merged as `006f2daa84895a6a03482e15a682e51596cde390`; immutable tag `1.3.49` was pushed; Release workflow `29739186016` succeeded; GitHub Release is `https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.49`.
+- Data changes: none.
+- Verification: TDD reproduced the generic-403 misclassification before implementation. Fresh local checks passed: `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, `node tests/release-governance.test.js` (122/122), `node --check obsidian-plugin/wechat-inbox-sync/main.js`, `git diff --check`, and the public component CDN verifier. Authenticated release verification confirmed default-branch manifest/versions, Raw manifest, Latest/target Release, all five required assets, release manifest/versions, and the official ZIP manifest all report `1.3.49`.
+- Result: only explicit invalid-token signals enter the binding-invalid flow; a successful new bind becomes primary; Feishu OAuth can try the next active binding; Xiaohongshu graphic-note images are downloaded with Referer/Cookie/User-Agent and replaced with local attachment links.
+- Release package: official `wechat-inbox-sync-1.3.49.zip`, SHA-256 `B97C7C5B6E64D278F76E156AA5CE969E6442D09D55786021A2A4437872FA1A17`.
+- Known risk: expired Xiaohongshu login, CAPTCHA, rate limiting, or expired image URLs can still prevent localization. The original remote URL is retained and body sync continues when an individual image download fails. Existing broken notes are not rewritten automatically and must be resynced.
+- Next: affected users update to 1.3.49 and re-run the original Feishu/WeChat binding and Xiaohongshu graphic-note cases; investigate the separate Windows OCR install-permission issue afterward.
+
 ### 2026-07-20 - 插件 1.3.49：修复绑定码误报与小红书图片本地化（发布候选）
 
 - 目标：避免把普通 HTTP 403 一律误报为绑定码失效，恢复新绑定优先和飞书多绑定回退；把小红书远程图片下载为 Obsidian 本地附件，避免 CDN 防盗链或临时链接导致破图。
