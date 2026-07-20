@@ -2919,6 +2919,26 @@ assert.strictEqual(xiaohongshuDuplicatedHostNote.imageUrls.length, 2);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('window.__INITIAL_STATE__'), false);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('imageList'), false);
 
+const xiaohongshuDomThumbnailAndStructuredOriginalNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<title>结构化高清图优先 - 小红书</title>',
+  '<meta property="og:description" content="公开分享页正文。 #高清图">',
+  '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/thumb-assets/slide-a-thumb.jpg">',
+  '</head><body>',
+  '<img src="https://sns-webpic-qc.xhscdn.com/thumb-assets/slide-a-thumb.jpg">',
+  '<img src="https://sns-webpic-qc.xhscdn.com/thumb-assets/slide-b-thumb.jpg">',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"公开分享页正文。 #高清图","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/original-assets\\/slide-a-original.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/original-assets\\/slide-b-original.jpg"}]}}</script>',
+  '</body></html>',
+].join(''), 'https://www.xiaohongshu.com/discovery/item/anonymous-structured-note?xsec_token=public-share-token');
+assert.deepStrictEqual(xiaohongshuDomThumbnailAndStructuredOriginalNote.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/original-assets/slide-a-original.jpg',
+  'https://sns-webpic-qc.xhscdn.com/original-assets/slide-b-original.jpg',
+]);
+assert.strictEqual(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('slide-a-thumb.jpg'), false);
+assert.strictEqual(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('slide-b-thumb.jpg'), false);
+assert.ok(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/original-assets/slide-a-original.jpg)'));
+assert.ok(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/original-assets/slide-b-original.jpg)'));
+
 const xiaohongshuNoisyImagesNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<meta property="og:title" content="XHS Noisy Images Title">',
