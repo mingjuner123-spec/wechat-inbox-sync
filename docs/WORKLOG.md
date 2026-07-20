@@ -13,9 +13,9 @@
 - GitHub 线上动作：治理提交链已从官方热修主线 `d89e5e2` 快进推送到 `main`；完整治理提交为 `5c367e3e3280df30ccc480eb314f9438bd1f013b`，部署器 PowerShell 5.1 兼容修复为 `fa19fea8efd21b45d0cb2b7ea6705226d04e5982`。未创建新插件 tag 或 GitHub Release。
 - CDN 线上动作：从干净且等于远端 `main` 的 `fa19fea` 执行 `scripts/deploy-local-components.ps1 -Execute` 成功。5 个 canonical 组件的完整 SHA-256 不可变路径、5 个兼容别名和 `local-components/manifest.json` 均完成 CloudBase 对象/公网验证；随后独立运行 `node scripts/check-local-components-cdn.js`，上述 11 个对象及 Windows、macOS arm64、macOS x64 三个固定 CPython 运行时全部哈希一致。
 - GitHub 门禁状态：`Main guards` 工作流为 active，正式 push 运行 `29711600567`（`fa19fea`）已创建，但在本次收尾检查时仍处于 GitHub 托管 runner 的 `queued` 状态，尚未取得 success/failure 终态。没有把排队状态视为通过。
-- 未完成与外部限制：主分支 required check/branch protection 尚未启用。本机没有 GitHub CLI，内置浏览器及两个 Chrome 配置均未登录 GitHub，无法在不读取或暴露凭据的前提下修改仓库权限。代码级主线/Release/CDN 门禁已上线，但仓库管理员仍可直接 push；需要登录 GitHub 的仓库管理员补启用 required check。
+- 分支保护：浏览器没有 GitHub 登录态且本机没有 GitHub CLI，因此改用 Git Credential Manager 中已有的仓库凭据在单次 PowerShell 进程内调用 GitHub API；令牌未写入文件或输出。API 回读确认 `main` 已启用保护：required context 为 `guards`、`strict=true`、`enforce_admins=true`、禁止 force push、禁止删除。后续变更必须通过新门禁，管理员也不能直接绕过。
 - 已知限制：CloudBase CLI 3.5.9 没有 hosting conditional-create，无法做到服务端原子“仅不存在时创建”；现以内容寻址、两次存在性检查、已存在对象下载验证和发布后 CloudBase/公网双校验失败关闭。
-- 下一步：等待 `Main guards` 运行 `29711600567` 进入终态；若失败，按具体 job 日志修复。仓库管理员登录 GitHub 后，把 `Main guards / guards` 设为 `main` 的 required status check，并限制绕过；完成后再通过仓库设置页/API 回读确认。
+- 下一步：等待最新 `Main guards` 运行进入终态；若失败，按具体 job 日志修复。由于 GitHub 托管 runner 在本次收尾期间持续排队，不能把 queued 误报成门禁通过。
 
 ### 2026-07-18 - 热修 macOS Apple Silicon ASR 固定 Python 下载链
 
