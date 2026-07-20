@@ -5100,15 +5100,6 @@ function collectFilteredImageTagUrls(source) {
 
 function collectXiaohongshuNoteImageUrls(html) {
   const source = String(html || '');
-  const urls = [];
-  [
-    extractMetaContent(source, ['og:image', 'og:image:url', 'twitter:image']),
-  ].forEach((url) => {
-    if (url && !isNoisyXiaohongshuImageUrl(url)) pushUniqueUrl(urls, url);
-  });
-
-  collectFilteredImageTagUrls(source).forEach((url) => pushUniqueUrl(urls, url));
-
   const imageBlocks = collectJsonArrayBlocks(source, [
     'imageList',
     'image_list',
@@ -5118,6 +5109,7 @@ function collectXiaohongshuNoteImageUrls(html) {
     'imageUrlList',
     'image_url_list',
   ]);
+  const structuredUrls = [];
 
   imageBlocks.forEach((block) => {
     collectJsonStringValues(block, [
@@ -5137,18 +5129,29 @@ function collectXiaohongshuNoteImageUrls(html) {
       'cover',
     ]).forEach((url) => {
       if (isLikelyImageUrl(url) && !isNoisyXiaohongshuImageUrl(url)) {
-        pushUniqueUrl(urls, url);
+        pushUniqueUrl(structuredUrls, url);
       }
     });
     collectLooseXiaohongshuImageUrls(block).forEach((url) => {
-      if (!isNoisyXiaohongshuImageUrl(url)) pushUniqueUrl(urls, url);
+      if (!isNoisyXiaohongshuImageUrl(url)) pushUniqueUrl(structuredUrls, url);
     });
   });
 
-  const noteImages = dedupeImageVariants(urls);
-  if (imageBlocks.length || noteImages.length > 1) {
-    return noteImages;
+  const structuredImages = dedupeImageVariants(structuredUrls);
+  if (structuredImages.length) {
+    return structuredImages;
   }
+
+  const urls = [];
+  [
+    extractMetaContent(source, ['og:image', 'og:image:url', 'twitter:image']),
+  ].forEach((url) => {
+    if (url && !isNoisyXiaohongshuImageUrl(url)) pushUniqueUrl(urls, url);
+  });
+  collectFilteredImageTagUrls(source).forEach((url) => pushUniqueUrl(urls, url));
+
+  const noteImages = dedupeImageVariants(urls);
+  if (noteImages.length > 1) return noteImages;
 
   return dedupeImageVariants(collectImageUrlsFromHtml(source)
     .filter((imageUrl) => !isNoisyXiaohongshuImageUrl(imageUrl))).slice(0, 6);

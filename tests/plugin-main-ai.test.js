@@ -2197,7 +2197,7 @@ const xiaohongshuNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '</head><body>',
   '<img src="https://img.example.com/inner-a.jpg">',
   '<div class="comment-item"><span class="user-name">用户甲</span><span class="comment-content">这个角度太有用了</span><span class="like-count">9</span></div>',
-  '<script>{"note":{"desc":"正文第一段，正文第二段，正文第三段。 #tagOne #tagTwo","imageList":[{"urlDefault":"https:\\/\\/img.example.com\\/inner-b.jpg"},{"url":"https:\\/\\/sns-webpic.example.com\\/inner-c"}]}}</script>',
+  '<script>{"note":{"desc":"正文第一段，正文第二段，正文第三段。 #tagOne #tagTwo","imageList":[{"urlDefault":"https:\\/\\/img.example.com\\/cover.jpg"},{"urlDefault":"https:\\/\\/img.example.com\\/inner-a.jpg"},{"urlDefault":"https:\\/\\/img.example.com\\/inner-b.jpg"},{"url":"https:\\/\\/sns-webpic.example.com\\/inner-c"}]}}</script>',
   '</body></html>',
 ].join(''), 'https://www.xiaohongshu.com/explore/123');
 assert.strictEqual(xiaohongshuNote.title, 'XHS Note Title');
@@ -2890,7 +2890,7 @@ const xiaohongshuImageArrayNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<meta name="description" content="3 亿人的生活经验，都在小红书">',
   '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/spectrum/cover!nd_dft_wlteh_jpg_3">',
   '</head><body>',
-  '<script>window.__INITIAL_STATE__={"note":{"desc":"真正的图文正文第一段。\\n真正的图文正文第二段。 #图文笔记","imageList":["https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/inner-a!nd_dft_wlteh_jpg_3","https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/inner-b!nd_dft_wlteh_jpg_3"]}}</script>',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"真正的图文正文第一段。\\n真正的图文正文第二段。 #图文笔记","imageList":["https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/cover!nd_dft_wlteh_jpg_3","https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/inner-a!nd_dft_wlteh_jpg_3","https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/inner-b!nd_dft_wlteh_jpg_3"]}}</script>',
   '</body></html>',
 ].join(''), 'https://www.xiaohongshu.com/explore/image-array');
 assert.ok(xiaohongshuImageArrayNote.markdown.includes('真正的图文正文第二段'));
@@ -2919,6 +2919,26 @@ assert.strictEqual(xiaohongshuDuplicatedHostNote.imageUrls.length, 2);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('window.__INITIAL_STATE__'), false);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('imageList'), false);
 
+const xiaohongshuDomThumbnailAndStructuredOriginalNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<html><head>',
+  '<title>结构化高清图优先 - 小红书</title>',
+  '<meta property="og:description" content="公开分享页正文。 #高清图">',
+  '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/thumb-assets/slide-a-thumb.jpg">',
+  '</head><body>',
+  '<img src="https://sns-webpic-qc.xhscdn.com/thumb-assets/slide-a-thumb.jpg">',
+  '<img src="https://sns-webpic-qc.xhscdn.com/thumb-assets/slide-b-thumb.jpg">',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"公开分享页正文。 #高清图","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/original-assets\\/slide-a-original.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/original-assets\\/slide-b-original.jpg"}]}}</script>',
+  '</body></html>',
+].join(''), 'https://www.xiaohongshu.com/discovery/item/anonymous-structured-note?xsec_token=public-share-token');
+assert.deepStrictEqual(xiaohongshuDomThumbnailAndStructuredOriginalNote.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/original-assets/slide-a-original.jpg',
+  'https://sns-webpic-qc.xhscdn.com/original-assets/slide-b-original.jpg',
+]);
+assert.strictEqual(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('slide-a-thumb.jpg'), false);
+assert.strictEqual(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('slide-b-thumb.jpg'), false);
+assert.ok(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/original-assets/slide-a-original.jpg)'));
+assert.ok(xiaohongshuDomThumbnailAndStructuredOriginalNote.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/original-assets/slide-b-original.jpg)'));
+
 const xiaohongshuNoisyImagesNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<meta property="og:title" content="XHS Noisy Images Title">',
@@ -2926,7 +2946,7 @@ const xiaohongshuNoisyImagesNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '</head><body>',
   '<img src="https://sns-avatar-qc.xhscdn.com/avatar-user.jpg">',
   '<img src="https://ci.xiaohongshu.com/recommend-banner.jpg">',
-  '<script>window.__INITIAL_STATE__={"note":{"desc":"正文。 #干净图片","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-inner-a!nd_dft_wlteh_jpg_3"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-inner-b!nd_dft_wlteh_jpg_3"}]},"feed":{"items":[{"image":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/recommend-noise!nd_dft_wlteh_jpg_3"}]}}</script>',
+  '<script>window.__INITIAL_STATE__={"note":{"desc":"正文。 #干净图片","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/cover-noisy!nd_dft_wlteh_jpg_3"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-inner-a!nd_dft_wlteh_jpg_3"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/real-inner-b!nd_dft_wlteh_jpg_3"}]},"feed":{"items":[{"image":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/spectrum\\/recommend-noise!nd_dft_wlteh_jpg_3"}]}}</script>',
   '</body></html>',
 ].join(''), 'https://www.xiaohongshu.com/explore/noisy-images');
 assert.ok(xiaohongshuNoisyImagesNote.markdown.includes('cover-noisy'));
