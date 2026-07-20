@@ -1,5 +1,16 @@
 # Worklog
 
+### 2026-07-20 - 设计 Windows OCR 单目录自动修复
+
+- 目标：解决 Windows OCR 安装器在旧 `venv\Scripts\python.exe` 残留或被占用时继续安装并报 `Permission denied`，同时避免要求普通用户结束进程或手动重命名目录。
+- 影响范围：仅设计文档与工作日志；拟议实现限定为 Windows OCR 安装器和 Obsidian 插件本地组件调度。
+- 修改文件：`docs/superpowers/specs/2026-07-20-windows-ocr-single-directory-repair-design.md`、`docs/WORKLOG.md`。
+- 线上动作：无；未上传 CDN、未发布插件、未修改线上配置或业务数据。
+- 验证：从 `origin/main` 创建隔离 worktree；基线 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node --check obsidian-plugin/wechat-inbox-sync/main.js` 通过；设计自查覆盖根因、单目录事务安装、占用延迟切换、回滚、安装锁、状态刷新、兼容性和验收标准。
+- 结果：确认永久只保留一个正式 `venv`；安装期间使用临时 staging，验证成功后切换，极端占用时由下次 Obsidian 启动自动完成，不要求用户操作任务管理器或目录。
+- 已知风险：Windows 文件锁和安全软件拦截需要通过自动化契约测试与可控文件占用模拟验证；本设计尚未实现或发布。
+- 下一步：用户复核书面设计后，编写 TDD 实施计划并实现、验证和发布下一插件版本。
+
 ### 2026-07-20 - Published Obsidian plugin 1.3.49: binding fallback and Xiaohongshu image localization
 
 - Goal: stop generic HTTP 403 responses from being reported as invalid binding codes, prefer newly bound codes, let Feishu OAuth skip explicitly invalid stale bindings, and save Xiaohongshu images as local Obsidian attachments with platform session headers.
