@@ -1192,6 +1192,27 @@ test('CloudBase JSON commands keep stderr separate and pass exact hosting-list a
   );
 });
 
+test('successful native commands may emit progress on stderr under ErrorActionPreference Stop', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-native-progress-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const fakeCommandPath = path.join(directory, 'fake-progress.cmd');
+  fs.writeFileSync(fakeCommandPath, [
+    '@echo off',
+    '>&2 echo - Loading data...',
+    'echo deployment completed',
+    'exit /b 0',
+    '',
+  ].join('\r\n'), 'utf8');
+  const encodedCommand = Buffer.from(fakeCommandPath, 'utf16le').toString('base64');
+  const result = runDeployerPowerShellProbe([
+    `$fakeCommand=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedCommand}'))`,
+    '$output=Invoke-ExternalCommand -FilePath $fakeCommand -Arguments @() -Label \'progress fixture\'',
+    'if($output -notmatch \'deployment completed\'){throw "stdout was not preserved"}',
+  ].join(';'));
+  assertNormalExit(result, 'native stderr progress probe');
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+});
+
 test('the controlled deployer parses in Windows PowerShell and its real dry run needs no tcb or network', () => {
   const deployerPath = absolutePath(relativePaths.deployScript);
   const encodedDeployerPath = Buffer.from(deployerPath, 'utf16le').toString('base64');

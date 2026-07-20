@@ -51,8 +51,15 @@ function Invoke-ExternalCommand {
         [string[]]$Arguments,
         [string]$Label
     )
-    $output = @(& $FilePath @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorPreference
+    }
     $text = ($output | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
     if ($exitCode -ne 0) {
         throw "$Label failed with exit code $exitCode. $text"
