@@ -5736,6 +5736,7 @@ async function runFeishuCustomAppConfigRequestTests() {
 
 async function runBindingInvalidClassificationTests() {
   assert.strictEqual(helpers.isBindingInvalidMessage('HTTP 403: upstream policy denied'), false);
+  assert.strictEqual(helpers.isBindingInvalidMessage('Request failed, status 403'), false);
   assert.strictEqual(helpers.isBindingInvalidMessage('Invalid bind code'), true);
   assert.strictEqual(helpers.isBindingInvalidMessage('Invalid or expired token'), true);
   assert.strictEqual(helpers.isBindingInvalidMessage('绑定码未绑定或已失效'), true);
@@ -5832,7 +5833,7 @@ async function runInvalidBindCodeRemainsEditableTest() {
   });
   plugin.saveData = async () => {};
   plugin.requestJson = async () => {
-    throw new Error('Request failed, status 403: Invalid bind code');
+    throw new Error('Request failed, status 403');
   };
 
   await plugin.bindCurrentCode();
@@ -6333,6 +6334,40 @@ async function runUnbindAlreadyRemoteUnboundClearsLocalBindingTest() {
   }
 }
 
+async function runUnbindObsidianRaw403ClearsLocalBindingTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  requestUrlMock = async () => {
+    throw new Error('Request failed, status 403');
+  };
+
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'OLD-123',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'OLD-123',
+      label: '旧微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+
+  try {
+    await plugin.unbindBinding('OLD-123');
+    assert.deepStrictEqual(plugin.settings.bindings, []);
+    assert.strictEqual(plugin.settings.token, '');
+    assert.deepStrictEqual(savedSettings.bindings, []);
+    assert.strictEqual(savedSettings.token, '');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
 async function runUnbindTransportFailurePreservesLocalBindingTest() {
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({
@@ -6359,6 +6394,51 @@ async function runUnbindTransportFailurePreservesLocalBindingTest() {
   assert.strictEqual(plugin.settings.token, 'OLD-123');
   assert.deepStrictEqual(plugin.settings.bindings.map((item) => item.token), ['OLD-123']);
   assert.strictEqual(savedSettings, null);
+}
+
+async function runUnbindServer5xxPreservesLocalBindingTest() {
+  const server = http.createServer((req, res) => {
+    assert.strictEqual(req.method, 'POST');
+    assert.strictEqual(req.url, '/sync/unbind-self');
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: false,
+      errMsg: 'Temporary server error',
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  const previousRequestUrlMock = requestUrlMock;
+  requestUrlMock = async () => {
+    throw new Error('Request failed, status 500');
+  };
+
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: `http://127.0.0.1:${server.address().port}/sync`,
+    token: 'OLD-123',
+    clientId: 'test-client',
+    bindings: [{
+      token: 'OLD-123',
+      label: '旧微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  let savedSettings = null;
+  plugin.saveData = async (settings) => {
+    savedSettings = settings;
+  };
+
+  try {
+    await plugin.unbindBinding('OLD-123');
+    assert.strictEqual(plugin.settings.token, 'OLD-123');
+    assert.deepStrictEqual(plugin.settings.bindings.map((item) => item.token), ['OLD-123']);
+    assert.strictEqual(savedSettings, null);
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+    await new Promise((resolve) => server.close(resolve));
+  }
 }
 
 async function runSyncInvalidCodePreservesLocalBindingTest() {
@@ -7589,7 +7669,9 @@ async function main() {
   await runExistingLocalRecordUrlDedupSyncTest();
   await runMarkSyncedRecordNotFoundIsIdempotentTest();
   await runUnbindAlreadyRemoteUnboundClearsLocalBindingTest();
+  await runUnbindObsidianRaw403ClearsLocalBindingTest();
   await runUnbindTransportFailurePreservesLocalBindingTest();
+  await runUnbindServer5xxPreservesLocalBindingTest();
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
