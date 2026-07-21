@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-21 - 发布 Obsidian 插件 1.3.54：恢复远端解绑清理
+
+- 目标：把小程序先解绑后插件仍保留旧绑定的回归修复正式发布为 `1.3.54`，同时保留 `1.3.53` 的无效绑定码可重新编辑规则。
+- 影响范围：仅 Obsidian 插件正式发布源、根目录 Marketplace 兼容元数据、插件回归测试和发布日志；不修改小程序、云函数、业务数据或本地转写组件。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、插件与根目录两份 `manifest.json`/`versions.json`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`tests/release-social-feishu-ai.test.js`（退役）和 `docs/WORKLOG.md`。
+- 线上动作：正在准备 `1.3.54` 默认分支、标签、GitHub Release 和本地 ZIP；发布完成后回填实际提交、工作流与公开校验结果。
+- 数据变更：无。
+- 验证：代码修复已经过安全审稿、测试复审和独立最终复验，均为 P0/P1 0；升版后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、`node scripts/update-local-components-manifest.js --check`、`node scripts/check-local-components-cdn.js`、插件 JavaScript 语法及 `git diff --check` 通过。发布清单中列出的 `tests/plugin-core.test.js` 与 `tests/plugin-upload-sync.test.js` 不存在于当前公开仓库，因此未伪报执行成功，实际发布工作流以仓库现有门禁为准。另正式退役未被当前 CI 引用、长期固定在 `1.2.97` 根目录历史镜像且依赖已移除 helper 的 `tests/release-social-feishu-ai.test.js`，避免它继续伪装成当前正式插件源的发布测试。
+- 结果：候选版本元数据已同步到 `1.3.54`；尚待提交、合并、打标签和公开资产回读。
+- 已知风险：Obsidian 裸 403 不携带服务端业务正文；当前仅在固定 `/unbind-self` 调用的异常分支幂等清理，普通绑定和其他接口继续保持 1.3.53 分类规则。
+- 下一步：提交升版、通过独立发布复核、合并默认分支、推送 `1.3.54` 标签，等待 Release 工作流并运行 Obsidian 发布 Skill 的完整校验。
+
 ### 2026-07-21 - 修复小程序先解绑后插件无法清理旧绑定（候选，未发布）
 
 - 目标：恢复 1.3.46 的远端解绑恢复能力，同时完整保留 1.3.53 的“无效绑定码不进入已绑定状态、输入框保持可编辑”规则。
