@@ -109,6 +109,14 @@ assert.ok(windowsOcrInstaller.includes('function Install-MicrosoftVisualCppRunti
 assert.ok(windowsOcrInstaller.includes('Get-AuthenticodeSignature'), 'Downloaded Microsoft runtime installer must be signature-verified before execution');
 assert.ok(windowsOcrInstaller.includes('-Verb RunAs'), 'Visual C++ runtime repair must request Windows elevation explicitly');
 assert.ok(windowsOcrInstaller.includes('Visual C++ runtime repair finished; retrying OCR import validation.'), 'Windows OCR installer must retry validation after runtime repair');
+assert.ok(windowsOcrInstaller.includes('onnxruntime==1.27.0'), 'Windows OCR primary native stack must be reproducibly pinned');
+assert.ok(windowsOcrInstaller.includes('numpy==2.5.1'), 'Windows OCR primary NumPy version must be reproducibly pinned');
+assert.ok(windowsOcrInstaller.includes('opencv-python==5.0.0.93'), 'Windows OCR primary OpenCV version must be reproducibly pinned');
+assert.ok(windowsOcrInstaller.includes('onnxruntime==1.20.1'), 'Windows OCR installer must pin a Windows 10 compatible ONNX Runtime fallback');
+assert.ok(windowsOcrInstaller.includes('numpy==1.26.4'), 'Windows OCR compatibility fallback must pin NumPy instead of resolving a moving native stack');
+assert.ok(windowsOcrInstaller.includes('opencv-python==4.10.0.84'), 'Windows OCR compatibility fallback must pin OpenCV instead of resolving a moving native stack');
+assert.ok(windowsOcrInstaller.includes('function Install-OcrCompatibilityPackages'), 'Windows OCR installer must automatically retry DLL failures with the compatible native stack');
+assert.ok(windowsOcrInstaller.includes('--force-reinstall'), 'Windows OCR compatibility repair must replace the failed native packages completely');
 assert.ok(windowsOcrInstaller.includes('$StagingVenvDir'), 'Windows OCR repair must build in a staging venv');
 assert.ok(windowsOcrInstaller.includes('$BackupVenvDir'), 'Windows OCR repair must keep only a short-lived rollback venv');
 assert.ok(windowsOcrInstaller.includes('$PendingSwitchPath'), 'Windows OCR repair must support restart-time activation when files are locked');

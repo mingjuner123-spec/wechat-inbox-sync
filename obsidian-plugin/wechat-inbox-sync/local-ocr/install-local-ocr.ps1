@@ -28,7 +28,20 @@ $PythonBuildStandaloneVersion = "3.12.13+20260623"
 $PythonRuntimeFileName = "cpython-$PythonBuildStandaloneVersion-x86_64-pc-windows-msvc-install_only.tar.gz"
 $PythonRuntimeSha256 = "C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E"
 $PortablePython = Join-Path $PythonRuntimeDir "python\python.exe"
-$OcrPackageRequirements = @("rapidocr-onnxruntime==1.4.4", "pillow==12.3.0")
+$OcrPackageRequirements = @(
+  "rapidocr-onnxruntime==1.4.4",
+  "pillow==12.3.0",
+  "onnxruntime==1.27.0",
+  "numpy==2.5.1",
+  "opencv-python==5.0.0.93"
+)
+$OcrCompatibilityPackageRequirements = @(
+  "rapidocr-onnxruntime==1.4.4",
+  "pillow==12.3.0",
+  "onnxruntime==1.20.1",
+  "numpy==1.26.4",
+  "opencv-python==4.10.0.84"
+)
 $MicrosoftVisualCppRuntimeUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 $MicrosoftVisualCppRuntimeInstaller = Join-Path $BinDir "vc_redist.x64.exe"
 $script:LastOcrImportFailureModule = ""
@@ -37,6 +50,7 @@ $script:LastOcrImportFailureText = ""
 $script:VisualCppRuntimeRepairAttempted = $false
 $script:VisualCppRuntimeRepairFailureMessage = ""
 $script:VisualCppRuntimeRestartRequired = $false
+$script:OcrCompatibilityRepairAttempted = $false
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
@@ -329,6 +343,20 @@ function Test-OcrPythonReady {
     return $true
   }
 
+  if (!(Test-MissingVisualCppRuntime)) {
+    return $false
+  }
+
+  if (!$script:OcrCompatibilityRepairAttempted) {
+    $script:OcrCompatibilityRepairAttempted = $true
+    Write-InstallLog "OCR DLL import failed; replacing the moving native dependency stack with the Windows 10 compatible stack."
+    if ((Install-OcrCompatibilityPackages -PythonPath $PythonPath) -and (Test-OcrPythonImports -PythonPath $PythonPath)) {
+      Write-InstallLog "OCR import validation passed with the Windows compatibility stack."
+      return $true
+    }
+    Write-InstallLog "OCR compatibility stack did not resolve the DLL import; trying the official Microsoft runtime repair."
+  }
+
   if ($script:VisualCppRuntimeRepairAttempted -or !(Test-MissingVisualCppRuntime)) {
     return $false
   }
@@ -451,6 +479,19 @@ function Install-OcrPackagesWithPip {
   return $exitCode -eq 0
 }
 
+function Install-OcrCompatibilityPackages {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  Write-InstallLog "Installing the pinned OCR Windows compatibility stack."
+  $commonArguments = @("-m", "pip", "install", "--upgrade", "--force-reinstall") + $OcrCompatibilityPackageRequirements
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
+  if ($exitCode -eq 0) {
+    return $true
+  }
+  Write-InstallLog "Tencent PyPI compatibility install failed; retrying with PyPI only."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $PypiFallbackIndexUrl))
+  return $exitCode -eq 0
+}
+
 function Setup-PythonEnvironment {
   $venvPython = Join-Path $VenvDir "Scripts\python.exe"
   if ((Test-Path -LiteralPath $venvPython) -and (Test-OcrPythonReady -PythonPath $venvPython)) {
@@ -468,6 +509,7 @@ function Setup-PythonEnvironment {
     }
     Write-InstallLog "Existing Python OCR setup failed; falling back to pinned portable Python."
     Remove-DirectoryStrict -Path $VenvDir
+    $script:OcrCompatibilityRepairAttempted = $false
   }
 
   $python = Install-PortablePython
