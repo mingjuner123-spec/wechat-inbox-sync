@@ -1,5 +1,32 @@
 # Worklog
 
+### 2026-07-21 - 发布 Obsidian 插件 1.3.54：恢复远端解绑清理
+
+- 目标：把小程序先解绑后插件仍保留旧绑定的回归修复正式发布为 `1.3.54`，同时保留 `1.3.53` 的无效绑定码可重新编辑规则。
+- 影响范围：仅 Obsidian 插件正式发布源、根目录 Marketplace 兼容元数据、插件回归测试和发布日志；不修改小程序、云函数、业务数据或本地转写组件。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、插件与根目录两份 `manifest.json`/`versions.json`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`tests/release-social-feishu-ai.test.js`（退役）和 `docs/WORKLOG.md`。
+- 线上动作：正在准备 `1.3.54` 默认分支、标签、GitHub Release 和本地 ZIP；发布完成后回填实际提交、工作流与公开校验结果。
+- 数据变更：无。
+- 验证：代码修复已经过安全审稿、测试复审和独立最终复验，均为 P0/P1 0；升版后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、`node scripts/update-local-components-manifest.js --check`、`node scripts/check-local-components-cdn.js`、插件 JavaScript 语法及 `git diff --check` 通过。发布清单中列出的 `tests/plugin-core.test.js` 与 `tests/plugin-upload-sync.test.js` 不存在于当前公开仓库，因此未伪报执行成功，实际发布工作流以仓库现有门禁为准。另正式退役未被当前 CI 引用、长期固定在 `1.2.97` 根目录历史镜像且依赖已移除 helper 的 `tests/release-social-feishu-ai.test.js`，避免它继续伪装成当前正式插件源的发布测试。
+- 结果：候选版本元数据已同步到 `1.3.54`；尚待提交、合并、打标签和公开资产回读。
+- 已知风险：Obsidian 裸 403 不携带服务端业务正文；当前仅在固定 `/unbind-self` 调用的异常分支幂等清理，普通绑定和其他接口继续保持 1.3.53 分类规则。
+- 下一步：提交升版、通过独立发布复核、合并默认分支、推送 `1.3.54` 标签，等待 Release 工作流并运行 Obsidian 发布 Skill 的完整校验。
+
+### 2026-07-21 - 修复小程序先解绑后插件无法清理旧绑定（候选，未发布）
+
+- 目标：恢复 1.3.46 的远端解绑恢复能力，同时完整保留 1.3.53 的“无效绑定码不进入已绑定状态、输入框保持可编辑”规则。
+- 根因：1.3.49 为避免把所有 403 误判成绑定失效，从全局 `isBindingInvalidMessage` 中移除了通用 403；真实 Obsidian `requestUrl` 在 `/unbind-self` 返回 403 时只抛出 `Request failed, status 403`，插件拿不到服务端的 `Invalid or expired token` 正文，导致解绑专属的幂等清理分支无法命中。
+- 影响范围：仅 Obsidian 插件的本地解绑异常处理、插件回归测试和工作日志；不修改小程序、quickstartFunctions、syncApi、后台或本地转写组件。
+- 修改：仅在 `unbindBinding` 的 `/unbind-self` 异常分支识别 Obsidian 原始 403 并调用既有 `markBindingUnbound`；全局绑定失效分类保持不接受裸 403，普通 `/bind` 的裸 403 仍提示绑定码无效且保留待输入内容。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`docs/WORKLOG.md`。
+- TDD：新增真实模拟 `requestUrl` 直接抛出裸 403 的解绑回归，确认旧实现保留 `OLD-123` 而失败；最小修复后通过。同步加强 1.3.53 回归，明确裸 403 不进入全局绑定失效分类，错误绑定码仍不写入正式 `token/bindings`；补充 Obsidian 裸 500 且 Node 兜底仍返回 500 时必须保留本地绑定的回归。
+- 线上动作：无；未发布新版本、未修改云函数、业务数据或用户本地插件。
+- 数据变更：无。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、`node --check obsidian-plugin/wechat-inbox-sync/main.js`、`git diff --check` 通过；独立安全审稿、测试复审和独立最终复验均为 P0/P1 0，确认可以提交。
+- 结果：解绑端点裸 403 会清理本地旧绑定；普通绑定裸 403 保持 1.3.53 的无效码可编辑行为；网络错误和服务端 5xx 不清理本地绑定。
+- 已知风险：`requestUrl` 的裸 403 不包含业务正文；若未来 `/unbind-self` 新增其他 403 语义，需要同步收窄客户端条件或让服务端返回可区分错误码。当前服务端契约下该端点的 403 仅表示无效/过期绑定凭证。
+- 下一步：完成插件回归、语法和差异检查后提交候选分支；如需进入插件市场，另行升版并按发布 Skill 执行完整发布门禁。
+
 ### 2026-07-21 - 准备发布无效绑定码修复（1.3.53）
 
 - 目标：将“无效绑定码不进入已绑定状态、输入框可继续修改”的修复正式发布到 Obsidian 插件市场。
