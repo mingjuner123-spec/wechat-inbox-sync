@@ -721,6 +721,17 @@ assert.strictEqual(
   assert.strictEqual(restoredFromPendingBindCode.bindings.length, 1);
   assert.strictEqual(restoredFromPendingBindCode.bindings[0].token, 'TT7-7L6');
 }
+{
+  const draftBinding = helpers.mergeSettings({
+    settingsVersion: 2,
+    token: '',
+    pendingBindCode: 'OBPROT93C6',
+    bindings: [],
+  });
+  assert.strictEqual(draftBinding.token, '');
+  assert.strictEqual(draftBinding.pendingBindCode, 'OBPROT93C6');
+  assert.deepStrictEqual(draftBinding.bindings, []);
+}
 assert.strictEqual(helpers.mergeSettings({
   pendingRedeemCode: 'OBPROT93C6',
   localTranscriptionEntitlementStatus: {
@@ -5811,6 +5822,26 @@ async function runSuccessfulRebindPromotesNewPrimaryBindingTest() {
   );
 }
 
+async function runInvalidBindCodeRemainsEditableTest() {
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    settingsVersion: 2,
+    apiBase: 'https://example.com/sync',
+    pendingBindCode: 'OBPROT93C6',
+    clientId: 'test-client',
+  });
+  plugin.saveData = async () => {};
+  plugin.requestJson = async () => {
+    throw new Error('Request failed, status 403: Invalid bind code');
+  };
+
+  await plugin.bindCurrentCode();
+
+  assert.strictEqual(plugin.settings.pendingBindCode, 'OBPROT93C6');
+  assert.strictEqual(plugin.settings.token, '');
+  assert.deepStrictEqual(plugin.getActiveBindings(), []);
+}
+
 async function runXiaohongshuRemoteImageLocalizationHeadersTest() {
   const writes = [];
   const downloads = [];
@@ -7548,6 +7579,7 @@ async function main() {
   await runFeishuCustomAppConfigRequestTests();
   await runBindingInvalidClassificationTests();
   await runFeishuOAuthSkipsStalePrimaryBindingTest();
+  await runInvalidBindCodeRemainsEditableTest();
   await runSuccessfulRebindPromotesNewPrimaryBindingTest();
   await runXiaohongshuRemoteImageLocalizationHeadersTest();
   await runTranscriptionPreferenceSyncTest();

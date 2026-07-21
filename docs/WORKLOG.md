@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-21 - 无效绑定码保持可编辑
+
+- 目标：用户误把兑换码等无效内容输入绑定码框时，只提示“绑定码无效，请重新输入”，不进入已绑定状态，允许直接修改后重试。
+- 影响范围：仅 Obsidian 插件设置合并逻辑、绑定回归测试、设计/实施文档和工作日志；有效绑定、绑定数量、Pro、同步 API、小程序和云函数规则不变。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、`tests/plugin-main-ai.test.js`、`docs/superpowers/specs/2026-07-21-invalid-bind-code-retry-design.md`、`docs/superpowers/plans/2026-07-21-invalid-bind-code-retry.md`、`docs/WORKLOG.md`。
+- 线上动作：尚未发布插件版本或修改用户本地插件。
+- 数据变更：无。
+- 验证：新增当前 `settingsVersion: 2` 待验证码回归并确认旧实现错误地产生正式 `token/bindings`；修复后该回归、无效 `/bind` 后保留输入回归、原有旧版迁移和有效绑定回归均通过。`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、插件 `node --check` 与 `git diff --check` 通过。
+- 结果：当前版本的 `pendingBindCode` 只作为输入草稿；只有 `/bind` 成功才沿用原流程写入正式绑定。无效码返回 403 后，绑定列表仍为空，输入内容保留并可编辑。旧版设置恢复逻辑通过版本门控继续兼容。
+- 已知风险：已经被旧插件保存成正式绑定的历史错误记录，更新后需点击一次“解除本机”；当前主线已有“服务端返回绑定无效时清除本地旧绑定”的兼容处理，本次不再扩展该逻辑。
+- 下一步：完成分支收尾并发布新的 Obsidian 插件版本后，让用户更新并重新输入正确绑定码。
+
 ### 2026-07-21 - Windows OCR ONNX Runtime DLL 自动兼容修复
 
 - 目标：修复 Windows 上 OCR 依赖安装成功但 `onnxruntime_pybind11_state` 因 DLL 加载失败而无法导入的问题，避免要求用户手动结束 Python 进程、重命名目录或自行安装依赖。

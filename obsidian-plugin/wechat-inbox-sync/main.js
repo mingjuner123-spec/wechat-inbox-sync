@@ -1517,9 +1517,10 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   }
   const hasSourceBinding = Array.isArray(merged.bindings)
     && merged.bindings.some((item) => normalizeBindCodeInput(item && item.token) && item.status !== 'unbound');
+  const canRestoreLegacyPendingBindCode = savedSettingsVersion < DEFAULT_SETTINGS.settingsVersion;
   const normalizedToken = normalizeBindCodeInput(merged.token)
     || entitlementBindingToken
-    || (!hasSourceBinding ? pendingBindToken : '');
+    || (canRestoreLegacyPendingBindCode && !hasSourceBinding ? pendingBindToken : '');
   if (normalizedToken && !hasSourceBinding) {
     merged.bindings = [{
       token: normalizedToken,
