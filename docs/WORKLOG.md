@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-21 - Windows OCR ONNX Runtime DLL 自动兼容修复
+
+- 目标：修复 Windows 上 OCR 依赖安装成功但 `onnxruntime_pybind11_state` 因 DLL 加载失败而无法导入的问题，避免要求用户手动结束 Python 进程、重命名目录或自行安装依赖。
+- 影响范围：仅 Windows OCR 安装器、组件清单、发布包回归测试和工作日志；不修改用户本地插件、已有 OCR 正式目录、ASR、小程序、云函数、绑定码或业务数据。
+- 修改文件：`obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1`、`obsidian-plugin/wechat-inbox-sync/local-components-manifest.json`、`tests/plugin-marketplace-package.test.js`、`docs/WORKLOG.md`。
+- 线上动作：待本修复合并到 `main` 后，通过受控本地组件部署器更新 Windows OCR 安装器的不可变对象、兼容别名和公网组件清单；本次不需要升级 Obsidian 插件版本。
+- 数据变更：无。
+- 验证：先新增固定原生依赖和 DLL 兼容回退断言，确认旧安装器失败；实现后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、组件清单一致性、插件 JavaScript 语法、PowerShell AST 解析和 `git diff --check` 通过。在隔离目录使用固定 CPython `3.12.13` 从腾讯镜像真实安装 `rapidocr-onnxruntime 1.4.4 + onnxruntime 1.20.1 + numpy 1.26.4 + opencv-python 4.10.0.84`，四个模块均成功导入且 `RapidOCR()` 初始化成功。
+- 结果：Windows 首选 OCR 原生依赖由隐式浮动改为完整固定；若导入命中 DLL/VC++ 特征，安装器先自动强制替换为经验证的 Windows 10 兼容栈，仍失败才调用微软官方 VC++ 运行库修复。环境继续在 `venv-staging` 构建并切换为唯一正式 `venv`，不会长期留下多个组件版本目录。
+- 已知风险：尚未在截图对应的故障电脑上回归；若兼容栈和微软运行库修复后仍失败，最可能是安全软件拦截或系统组件损坏，新的 `install.log` 会保留逐模块错误用于继续定位。
+- 下一步：完成合并和受控 CDN 部署后，让受影响用户在插件设置中再次点击一次“安装/修复本地转写组件”。
+
 ### 2026-07-20 - 小红书图集只保留每页最高质量图片（1.3.52）
 
 - 目标：修复小红书 `imageList` 同一页同时包含缩略图与高质量图时，插件把两者都下载、写入笔记并重复 OCR 的问题。
