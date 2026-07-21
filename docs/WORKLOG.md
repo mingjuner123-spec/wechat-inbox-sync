@@ -5,12 +5,12 @@
 - 目标：把小程序先解绑后插件仍保留旧绑定的回归修复正式发布为 `1.3.54`，同时保留 `1.3.53` 的无效绑定码可重新编辑规则。
 - 影响范围：仅 Obsidian 插件正式发布源、根目录 Marketplace 兼容元数据、插件回归测试和发布日志；不修改小程序、云函数、业务数据或本地转写组件。
 - 修改文件：`obsidian-plugin/wechat-inbox-sync/main.js`、插件与根目录两份 `manifest.json`/`versions.json`、`tests/plugin-main-ai.test.js`、`tests/plugin-marketplace-package.test.js`、`tests/release-social-feishu-ai.test.js`（退役）和 `docs/WORKLOG.md`。
-- 线上动作：正在准备 `1.3.54` 默认分支、标签、GitHub Release 和本地 ZIP；发布完成后回填实际提交、工作流与公开校验结果。
+- 线上动作：PR [#18](https://github.com/mingjuner123-spec/wechat-inbox-sync/pull/18) 已通过 `guards` 与 `windows-deployer` 后合并；`main`、标签 `1.3.54` 与发布提交均为 `741f7e72f8650bc0336499ea3bb865dfa79bc600`。GitHub Release 工作流 [29825940867](https://github.com/mingjuner123-spec/wechat-inbox-sync/actions/runs/29825940867) 成功，正式 Release 为 [1.3.54](https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.54)。
 - 数据变更：无。
 - 验证：代码修复已经过安全审稿、测试复审和独立最终复验，均为 P0/P1 0；升版后 `node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、`node scripts/update-local-components-manifest.js --check`、`node scripts/check-local-components-cdn.js`、插件 JavaScript 语法及 `git diff --check` 通过。发布清单中列出的 `tests/plugin-core.test.js` 与 `tests/plugin-upload-sync.test.js` 不存在于当前公开仓库，因此未伪报执行成功，实际发布工作流以仓库现有门禁为准。另正式退役未被当前 CI 引用、长期固定在 `1.2.97` 根目录历史镜像且依赖已移除 helper 的 `tests/release-social-feishu-ai.test.js`，避免它继续伪装成当前正式插件源的发布测试。
-- 结果：候选版本元数据已同步到 `1.3.54`；尚待提交、合并、打标签和公开资产回读。
+- 结果：`1.3.54` 已正式发布。Obsidian 发布 Skill 确认默认分支与 Raw manifest、versions、最新 Release 标签、五项 Release 资产、Release 内 manifest/versions 及本地 ZIP 全部为 `1.3.54`；本地安装包位于 `发布包/wechat-inbox-sync-1.3.54.zip`。
 - 已知风险：Obsidian 裸 403 不携带服务端业务正文；当前仅在固定 `/unbind-self` 调用的异常分支幂等清理，普通绑定和其他接口继续保持 1.3.53 分类规则。
-- 下一步：提交升版、通过独立发布复核、合并默认分支、推送 `1.3.54` 标签，等待 Release 工作流并运行 Obsidian 发布 Skill 的完整校验。
+- 下一步：无需额外部署；用户在 Obsidian 社区插件中检查更新即可获得 `1.3.54`。若市场界面短时缓存旧版本，以 GitHub Release 与 Raw manifest 校验结果为准，稍后刷新即可。
 
 ### 2026-07-21 - 修复小程序先解绑后插件无法清理旧绑定（候选，未发布）
 
