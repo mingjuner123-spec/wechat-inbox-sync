@@ -5,12 +5,12 @@
 - 目标：将“无效绑定码不进入已绑定状态、输入框可继续修改”的修复正式发布到 Obsidian 插件市场。
 - 影响范围：根目录与正式插件发布源的版本元数据、发布包版本断言和工作日志；不修改小程序、云函数、业务数据或用户本地已安装插件。
 - 修改文件：`manifest.json`、`versions.json`、`obsidian-plugin/wechat-inbox-sync/manifest.json`、`obsidian-plugin/wechat-inbox-sync/versions.json`、`tests/plugin-marketplace-package.test.js`、`docs/WORKLOG.md`。
-- 线上动作：PR `#15` 已通过 `guards` 与 `windows-deployer` 并合并为 `7c359b7abca4ebe427a26899c33e041f440f289a`；`1.3.53` 发布尚待版本 PR 合并、标签推送和 Release 工作流完成。
+- 线上动作：PR `#15` 已通过门禁并合并为 `7c359b7abca4ebe427a26899c33e041f440f289a`；版本 PR `#16` 已通过门禁并合并为 `e743eb7e3479f69239724d3c18df5d3c8424c9c9`；不可变标签 `1.3.53` 已推送，Release 工作流 `29816774435` 成功，GitHub Release 为 `https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.53`。
 - 数据变更：无。
 - 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、插件 `node --check` 和 `git diff --check` 通过；两份 manifest 与两份 versions 已同步包含 `1.3.53`。
-- 结果：发布元数据已准备为 `1.3.53`，继续沿用正式发布源 `obsidian-plugin/wechat-inbox-sync/`。
-- 已知风险：发布完成前插件市场仍显示 `1.3.52`；必须完成默认分支、标签、Release 资产、raw manifest 和本地 ZIP 的一致性校验后才能宣布上线。
-- 下一步：合并版本 PR，推送不可变标签 `1.3.53`，等待 Release 工作流完成并执行 Obsidian 发布 Skill 的完整门禁。
+- 结果：`1.3.53` 已正式发布；默认分支与 raw manifest 均为 `1.3.53`，Release 包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 ZIP，本地手动安装包为 `发布包/wechat-inbox-sync-1.3.53.zip`。
+- 已知风险：Obsidian 社区插件索引与客户端缓存可能短暂延迟；若市场界面暂未刷新，可稍后重新检查更新或使用本地 ZIP 手动安装。
+- 下一步：让受影响用户更新到 `1.3.53`，重新输入正确绑定码；旧错误记录先点击一次“解除本机”，再重新输入。
 
 ### 2026-07-21 - 无效绑定码保持可编辑
 
