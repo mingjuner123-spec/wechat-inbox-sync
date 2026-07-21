@@ -1,5 +1,17 @@
 # Worklog
 
+### 2026-07-21 - 准备发布无效绑定码修复（1.3.53）
+
+- 目标：将“无效绑定码不进入已绑定状态、输入框可继续修改”的修复正式发布到 Obsidian 插件市场。
+- 影响范围：根目录与正式插件发布源的版本元数据、发布包版本断言和工作日志；不修改小程序、云函数、业务数据或用户本地已安装插件。
+- 修改文件：`manifest.json`、`versions.json`、`obsidian-plugin/wechat-inbox-sync/manifest.json`、`obsidian-plugin/wechat-inbox-sync/versions.json`、`tests/plugin-marketplace-package.test.js`、`docs/WORKLOG.md`。
+- 线上动作：PR `#15` 已通过 `guards` 与 `windows-deployer` 并合并为 `7c359b7abca4ebe427a26899c33e041f440f289a`；`1.3.53` 发布尚待版本 PR 合并、标签推送和 Release 工作流完成。
+- 数据变更：无。
+- 验证：`node tests/plugin-main-ai.test.js`、`node tests/plugin-marketplace-package.test.js`、`node tests/release-governance.test.js`（122/122）、插件 `node --check` 和 `git diff --check` 通过；两份 manifest 与两份 versions 已同步包含 `1.3.53`。
+- 结果：发布元数据已准备为 `1.3.53`，继续沿用正式发布源 `obsidian-plugin/wechat-inbox-sync/`。
+- 已知风险：发布完成前插件市场仍显示 `1.3.52`；必须完成默认分支、标签、Release 资产、raw manifest 和本地 ZIP 的一致性校验后才能宣布上线。
+- 下一步：合并版本 PR，推送不可变标签 `1.3.53`，等待 Release 工作流完成并执行 Obsidian 发布 Skill 的完整门禁。
+
 ### 2026-07-21 - 无效绑定码保持可编辑
 
 - 目标：用户误把兑换码等无效内容输入绑定码框时，只提示“绑定码无效，请重新输入”，不进入已绑定状态，允许直接修改后重试。
