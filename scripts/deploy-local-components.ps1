@@ -445,7 +445,7 @@ function Get-RemoteObjectState {
 function Test-RetryableCloudBaseListFailure {
     param([System.Management.Automation.ErrorRecord]$Failure)
     $message = [string]$Failure
-    return $message -match '(?i)\b(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|network|timed out|timeout)\b|请求超时|网络'
+    return $message -match '(?i)\b(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|network|timed out|timeout)\b|\u8BF7\u6C42\u8D85\u65F6|\u7F51\u7EDC'
 }
 
 function Publish-CloudObject {

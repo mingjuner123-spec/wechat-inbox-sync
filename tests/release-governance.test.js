@@ -1311,6 +1311,13 @@ test('successful native commands may emit progress on stderr under ErrorActionPr
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
+test('CloudBase retry classifier is ASCII-only for Windows PowerShell source portability', () => {
+  const deployerSource = readText(relativePaths.deployScript);
+  const classifier = deployerSource.match(/function Test-RetryableCloudBaseListFailure \{[\s\S]*?\n\}/);
+  assert.ok(classifier, 'CloudBase retry classifier must exist');
+  assert.doesNotMatch(classifier[0], /[\u4e00-\u9fff]/, 'retry classifier must not rely on the source-file code page');
+});
+
 test('the controlled deployer parses in Windows PowerShell and its real dry run needs no tcb or network', {
   skip: requiresWindowsPowerShell,
 }, () => {
