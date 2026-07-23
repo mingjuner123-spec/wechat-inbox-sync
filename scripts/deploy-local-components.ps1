@@ -14,6 +14,7 @@ $PublicRoot = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp
 $PublicManifestPath = 'local-components/manifest.json'
 $PublicFetchTimeoutSeconds = 20
 $PublicFetchAttempts = 5
+$CloudListAttempts = 3
 $ImmutableRecheckDelayMilliseconds = 500
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $PluginRoot = Join-Path $RepoRoot 'obsidian-plugin\wechat-inbox-sync'
@@ -114,7 +115,7 @@ function Invoke-JsonExternalCommand {
             ''
         })
         if ($exitCode -ne 0) {
-            throw "$Label failed with exit code $exitCode. stderr: $stderrText"
+            throw "$Label failed with exit code $exitCode. stdout: $stdoutText stderr: $stderrText"
         }
         return $stdoutText
     }
@@ -406,9 +407,28 @@ function Get-RemoteObjectState {
         [string]$ResolvedTcbPath,
         [string]$RemotePath
     )
-    $jsonOutput = Invoke-JsonExternalCommand -FilePath $ResolvedTcbPath `
-        -Arguments @('hosting', 'list', $RemotePath, '--json', '-e', $CloudBaseEnvironment) `
-        -Label "CloudBase hosting list for $RemotePath"
+    $jsonOutput = $null
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $CloudListAttempts; $attempt++) {
+        try {
+            $jsonOutput = Invoke-JsonExternalCommand -FilePath $ResolvedTcbPath `
+                -Arguments @('hosting', 'list', $RemotePath, '--json', '-e', $CloudBaseEnvironment) `
+                -Label "CloudBase hosting list for $RemotePath"
+            break
+        }
+        catch {
+            if (-not (Test-RetryableCloudBaseListFailure -Failure $_)) {
+                throw
+            }
+            $lastError = $_
+            if ($attempt -lt $CloudListAttempts) {
+                Start-Sleep -Seconds ([Math]::Pow(2, $attempt - 1))
+            }
+        }
+    }
+    if ($null -eq $jsonOutput) {
+        throw "CloudBase hosting list for $RemotePath failed after $CloudListAttempts attempts: $lastError"
+    }
     $document = Find-JsonValue -Text $jsonOutput
     Assert-CloudListDocument -Document $document
     $matches = New-Object System.Collections.ArrayList
@@ -420,6 +440,12 @@ function Get-RemoteObjectState {
         Exists = ($matches.Count -eq 1)
         Object = $(if ($matches.Count -eq 1) { $matches[0] } else { $null })
     }
+}
+
+function Test-RetryableCloudBaseListFailure {
+    param([System.Management.Automation.ErrorRecord]$Failure)
+    $message = [string]$Failure
+    return $message -match '(?i)\b(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|network|timed out|timeout)\b|\u8BF7\u6C42\u8D85\u65F6|\u7F51\u7EDC'
 }
 
 function Publish-CloudObject {
