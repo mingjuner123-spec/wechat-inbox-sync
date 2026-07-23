@@ -45,10 +45,10 @@ const macAsrInstallerSource = fs.readFileSync(
   'utf8',
 );
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.23"', '$InstallerScriptVersion = "1.2.22"')
+  .replace('$InstallerScriptVersion = "1.2.24"', '$InstallerScriptVersion = "1.2.23"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.7"', 'INSTALLER_SCRIPT_VERSION="1.3.6"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.8"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
@@ -402,9 +402,14 @@ assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildSyncProgressMessage, 'function');
 assert.strictEqual(typeof helpers.parseLocalAsrProgressLog, 'function');
+assert.strictEqual(typeof helpers.buildLocalAsrProgressKey, 'function');
 assert.strictEqual(typeof helpers.extractSocialMediaUrlFromHtml, 'function');
 assert.strictEqual(typeof PluginClass.prototype.stopCurrentTranscription, 'function');
 assert.strictEqual(pluginMainSource.includes("setButtonText('停止当前转写')"), false);
+assert.ok(pluginMainSource.includes('shouldReadBindErrorBody'));
+assert.ok(pluginMainSource.includes('暂时无法确认绑定码状态，请重试。'));
+assert.ok(pluginMainSource.includes("taskkill', ['/PID'"));
+assert.ok(pluginMainSource.includes("'/T', '/F'"));
 assert.strictEqual(
   helpers.extractSocialMediaUrlFromHtml(`
     <script>
@@ -1784,7 +1789,7 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
   fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(
     path.join(tempAsrRoot, 'transcribe.ps1'),
-    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\nTRANSCRIPT_HALLUCINATION\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nrecoveryTriggered=1',
+    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\nTRANSCRIPT_HALLUCINATION\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nprogressHeartbeatAt=now\nprogressPid=1\n-ProgressStage "segmenting"\nrecoveryTriggered=1',
     'utf8',
   );
   const recursiveStatus = helpers.getLocalAsrInstallStatus(tempAsrRoot, fs.existsSync, os.platform());
@@ -1902,7 +1907,7 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'adaptive-chunked-start-process-repeat-guard-v2-progress-run-log',
-    scriptOutdated: false,
+    scriptOutdated: true,
   },
 );
 assert.deepStrictEqual(
@@ -1952,7 +1957,7 @@ assert.deepStrictEqual(
   }),
   {
     scriptVersion: 'adaptive-chunked-bash-repeat-guard-v2-progress-metal-diagnostics-run-log',
-    scriptOutdated: false,
+    scriptOutdated: true,
   },
 );
 assert.ok(helpers.buildLocalAsrInstallCommand('C:\\plugin\\local-asr\\install-local-asr.ps1').includes('-ExecutionPolicy Bypass'));
@@ -1962,12 +1967,15 @@ assert.strictEqual(
   '/bin/bash "/Users/demo/plugin/local-asr/install-local-asr-macos.sh"',
 );
 assert.deepStrictEqual(
-  helpers.parseLocalAsrProgressLog('progressStage=transcribing\nprogressCurrent=2\nprogressTotal=5\nprogressPercent=40\n'),
+  helpers.parseLocalAsrProgressLog('progressStage=transcribing\nprogressCurrent=2\nprogressTotal=5\nprogressPercent=40\nprogressStartedAt=2026-07-23T12:00:00.000Z\nprogressHeartbeatAt=2026-07-23T12:00:05.000Z\nprogressPid=1234\n'),
   {
     stage: 'transcribing',
     current: 2,
     total: 5,
     percent: 40,
+    startedAt: '2026-07-23T12:00:00.000Z',
+    heartbeatAt: '2026-07-23T12:00:05.000Z',
+    pid: 1234,
   },
 );
 assert.deepStrictEqual(
@@ -1977,6 +1985,9 @@ assert.deepStrictEqual(
     current: 3,
     total: 4,
     percent: 75,
+    startedAt: '',
+    heartbeatAt: '',
+    pid: 0,
   },
 );
 assert.strictEqual(
@@ -1987,6 +1998,51 @@ assert.strictEqual(
   helpers.buildSyncProgressMessage({ stage: 'downloading', title: 'podcast.mp3', percent: 25 }).includes('25%'),
   true,
 );
+assert.strictEqual(
+  helpers.buildSyncProgressMessage({
+    stage: 'transcribing',
+    localProgressStage: 'segmenting',
+    localProgressStartedAt: '2026-07-23T12:00:00.000Z',
+    now: new Date('2026-07-23T12:00:12.000Z').getTime(),
+  }).includes('正在准备音频，已运行 12 秒'),
+  true,
+);
+assert.strictEqual(
+  helpers.buildSyncProgressMessage({
+    stage: 'transcribing',
+    localProgressStage: 'transcribing',
+    localProgressCurrent: 0,
+    localProgressTotal: 4,
+    localProgressStartedAt: '2026-07-23T12:00:00.000Z',
+    now: new Date('2026-07-23T12:00:12.000Z').getTime(),
+  }).includes('正在转写第 1/4 段，已运行 12 秒'),
+  true,
+);
+assert.strictEqual(
+  helpers.buildSyncProgressMessage({
+    stage: 'transcribing',
+    localProgressStage: 'transcribing',
+    localProgressHeartbeatAt: '2026-07-23T12:00:00.000Z',
+    now: new Date('2026-07-23T12:00:25.000Z').getTime(),
+  }).includes('任务可能无响应，可暂停后重试'),
+  true,
+);
+assert.notStrictEqual(
+  helpers.buildLocalAsrProgressKey({
+    stage: 'transcribing', current: 0, total: 4, percent: 0, heartbeatAt: '2026-07-23T12:00:00.000Z',
+  }, new Date('2026-07-23T12:00:10.000Z').getTime()),
+  helpers.buildLocalAsrProgressKey({
+    stage: 'transcribing', current: 0, total: 4, percent: 0, heartbeatAt: '2026-07-23T12:00:00.000Z',
+  }, new Date('2026-07-23T12:00:25.000Z').getTime()),
+);
+assert.ok(windowsAsrInstallerSource.includes('progressHeartbeatAt='));
+assert.ok(windowsAsrInstallerSource.includes('progressPid='));
+assert.ok(windowsAsrInstallerSource.includes('-ProgressStage "segmenting"'));
+assert.ok(windowsAsrInstallerSource.includes('WaitForExit(5000)'));
+assert.ok(macAsrInstallerSource.includes('progressHeartbeatAt='));
+assert.ok(macAsrInstallerSource.includes('progressPid='));
+assert.ok(macAsrInstallerSource.includes('run_with_heartbeat segmenting'));
+assert.ok(macAsrInstallerSource.includes('sleep 1'));
 assert.strictEqual(helpers.isAsciiPath('C:\\Users\\Public'), true);
 assert.strictEqual(helpers.isAsciiPath('C:\\用户\\公用'), false);
 assert.strictEqual(
@@ -5110,6 +5166,56 @@ async function runAsyncHydrationTests() {
     }]);
   } finally {
     requestUrlMock = previousRequestUrlForWebMediaFallback;
+  }
+
+  const pausedLocalPlugin = new PluginClass();
+  pausedLocalPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
+  pausedLocalPlugin.runLocalTranscription = async () => {
+    throw helpers.createRetryableTranscriptionError('用户已停止当前转写');
+  };
+  let pausedFallbackCalled = false;
+  pausedLocalPlugin.runCloudFallbackTranscription = async () => {
+    pausedFallbackCalled = true;
+    return { transcription: '不应运行', source: 'cloud' };
+  };
+  await assert.rejects(
+    () => pausedLocalPlugin.runConfiguredTranscription('https://video.example.com/pause.mp4', {
+      allowCloudUrlFallback: true,
+    }),
+    (error) => helpers.isRetryableTranscriptionError(error),
+  );
+  assert.strictEqual(pausedFallbackCalled, false);
+
+  const bindErrorServer = http.createServer((request, response) => {
+    assert.strictEqual(request.url, '/bind');
+    response.writeHead(403, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({
+      success: false,
+      errCode: 'PLUGIN_BINDING_LIMIT_EXCEEDED',
+      errMsg: '体验 Pro 有效期内最多绑定 3 个微信',
+    }));
+  });
+  await new Promise((resolve) => bindErrorServer.listen(0, '127.0.0.1', resolve));
+  const bindErrorPort = bindErrorServer.address().port;
+  const bindErrorPlugin = new PluginClass();
+  bindErrorPlugin.settings = helpers.mergeSettings({
+    apiBase: `http://127.0.0.1:${bindErrorPort}`,
+    token: 'BIND-403',
+    clientId: 'bind-error-client',
+  });
+  const previousRequestUrlForBindError = requestUrlMock;
+  requestUrlMock = async () => {
+    throw new Error('Request failed, status 403');
+  };
+  try {
+    await assert.rejects(
+      () => bindErrorPlugin.requestJson('/bind', 'POST', { clientId: 'bind-error-client' }),
+      (error) => error && error.code === 'PLUGIN_BINDING_LIMIT_EXCEEDED'
+        && error.message === '体验 Pro 有效期内最多绑定 3 个微信',
+    );
+  } finally {
+    requestUrlMock = previousRequestUrlForBindError;
+    await new Promise((resolve) => bindErrorServer.close(resolve));
   }
 
   const cloudWebpagePlugin = new PluginClass();

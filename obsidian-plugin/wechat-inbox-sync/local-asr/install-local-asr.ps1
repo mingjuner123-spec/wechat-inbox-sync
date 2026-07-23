@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.23"
+$InstallerScriptVersion = "1.2.24"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 90
 $DownloadTimeoutSeconds = 1200
@@ -275,7 +275,11 @@ function ConvertTo-NativeArgument {
 function Invoke-NativeProcess {
   param(
     [Parameter(Mandatory = $true)][string]$FilePath,
-    [Parameter(Mandatory = $true)][string[]]$Arguments
+    [Parameter(Mandatory = $true)][string[]]$Arguments,
+    [switch]$ReportProgress,
+    [string]$ProgressStage = "transcribing",
+    [int]$ProgressCurrent = 0,
+    [int]$ProgressTotal = 0
   )
   $stdoutPath = Join-Path $TempRoot ("native-stdout-" + [guid]::NewGuid().ToString("N") + ".log")
   $stderrPath = Join-Path $TempRoot ("native-stderr-" + [guid]::NewGuid().ToString("N") + ".log")
@@ -284,10 +288,17 @@ function Invoke-NativeProcess {
       -FilePath $FilePath `
       -ArgumentList $Arguments `
       -NoNewWindow `
-      -Wait `
       -PassThru `
       -RedirectStandardOutput $stdoutPath `
       -RedirectStandardError $stderrPath
+    while (-not $process.HasExited) {
+      if ($ReportProgress) {
+        Write-ProgressLog -Stage $ProgressStage -Current $ProgressCurrent -Total $ProgressTotal -ProcessId $process.Id
+      }
+      $null = $process.WaitForExit(5000)
+      $process.Refresh()
+    }
+    $process.WaitForExit()
     $exitCode = $process.ExitCode
     $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
     $stderrText = if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
@@ -1070,7 +1081,11 @@ function Test-WhisperNativeCrashExitCode {
 function Invoke-NativeProcess {
   param(
     [Parameter(Mandatory = $true)][string]$FilePath,
-    [Parameter(Mandatory = $true)][string[]]$Arguments
+    [Parameter(Mandatory = $true)][string[]]$Arguments,
+    [switch]$ReportProgress,
+    [string]$ProgressStage = "transcribing",
+    [int]$ProgressCurrent = 0,
+    [int]$ProgressTotal = 0
   )
   $nativeTempDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-native-" + [guid]::NewGuid().ToString("N"))
   $stdoutPath = Join-Path $nativeTempDir "stdout.log"
@@ -1081,10 +1096,17 @@ function Invoke-NativeProcess {
       -FilePath $FilePath `
       -ArgumentList $Arguments `
       -NoNewWindow `
-      -Wait `
       -PassThru `
       -RedirectStandardOutput $stdoutPath `
       -RedirectStandardError $stderrPath
+    while (-not $process.HasExited) {
+      if ($ReportProgress) {
+        Write-ProgressLog -Stage $ProgressStage -Current $ProgressCurrent -Total $ProgressTotal -ProcessId $process.Id
+      }
+      $null = $process.WaitForExit(5000)
+      $process.Refresh()
+    }
+    $process.WaitForExit()
     $exitCode = $process.ExitCode
     $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
     $stderrText = if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
@@ -1122,8 +1144,14 @@ function Write-ProgressLog {
   param(
     [Parameter(Mandatory = $true)][string]$Stage,
     [Parameter(Mandatory = $true)][int]$Current,
-    [Parameter(Mandatory = $true)][int]$Total
+    [Parameter(Mandatory = $true)][int]$Total,
+    [int]$ProcessId = 0
   )
+  $now = (Get-Date).ToUniversalTime().ToString("o")
+  if ($script:ProgressStageName -ne $Stage -or -not $script:ProgressStageStartedAt) {
+    $script:ProgressStageName = $Stage
+    $script:ProgressStageStartedAt = $now
+  }
   $percent = 0
   if ($Total -gt 0) {
     $percent = [Math]::Floor(($Current * 100) / $Total)
@@ -1133,6 +1161,9 @@ function Write-ProgressLog {
     "progressCurrent=$Current"
     "progressTotal=$Total"
     "progressPercent=$percent"
+    "progressStartedAt=$script:ProgressStageStartedAt"
+    "progressHeartbeatAt=$now"
+    "progressPid=$ProcessId"
   )
 }
 
@@ -1190,7 +1221,9 @@ function Invoke-WhisperChunk {
     [Parameter(Mandatory = $true)][string]$ChunkPath,
     [Parameter(Mandatory = $true)][string]$ChunkBase,
     [Parameter(Mandatory = $true)][scriptblock]$PathForNative,
-    [string[]]$ExtraArguments = @()
+    [string[]]$ExtraArguments = @(),
+    [int]$ProgressCurrent = 0,
+    [int]$ProgressTotal = 0
   )
   $arguments = @(
     "-m", (& $PathForNative $attemptModelPath),
@@ -1200,7 +1233,7 @@ function Invoke-WhisperChunk {
     "-otxt",
     "-of", (& $PathForNative $ChunkBase)
   )
-  return Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments $arguments
+  return Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments $arguments -ReportProgress -ProgressStage "transcribing" -ProgressCurrent $ProgressCurrent -ProgressTotal $ProgressTotal
 }
 
 function Split-AudioToChunks {
@@ -1222,7 +1255,7 @@ function Split-AudioToChunks {
     "-segment_time", [string]$SegmentSeconds,
     "-reset_timestamps", "1",
     $pattern
-  )
+  ) -ReportProgress -ProgressStage "segmenting"
   $chunks = @(Get-ChildItem -LiteralPath $OutputDir -Filter "chunk-*.wav" | Sort-Object Name)
   return [PSCustomObject]@{
     FfmpegResult = $result
@@ -1322,6 +1355,7 @@ function Invoke-TranscribeAttempt {
 
   try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
+  Write-ProgressLog -Stage "segmenting" -Current 0 -Total 0
   $split = Split-AudioToChunks -AudioPath $attemptInputPath -OutputDir $tempWorkDir -SegmentSeconds $ChunkSeconds -PathForNative $pathForNative
   $ffmpegOutput = $split.FfmpegResult.Output
   $ffmpegExit = $split.FfmpegResult.ExitCode
@@ -1341,7 +1375,7 @@ function Invoke-TranscribeAttempt {
   foreach ($chunk in $chunkFiles) {
     $chunkBase = [System.IO.Path]::Combine($tempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))
     $chunkTxt = "$chunkBase.txt"
-    $chunkResult = Invoke-WhisperChunk -ChunkPath $chunk.FullName -ChunkBase $chunkBase -PathForNative $pathForNative
+    $chunkResult = Invoke-WhisperChunk -ChunkPath $chunk.FullName -ChunkBase $chunkBase -PathForNative $pathForNative -ProgressCurrent $chunkIndex -ProgressTotal $chunkFiles.Count
     $chunkOutput = $chunkResult.Output
     $currentExit = $chunkResult.ExitCode
     $whisperLogs.Add("--- $($chunk.Name) exit=$currentExit ---")
