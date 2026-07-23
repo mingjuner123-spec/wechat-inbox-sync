@@ -1202,6 +1202,92 @@ test('CloudBase JSON commands keep stderr separate and pass exact hosting-list a
   );
 });
 
+test('CloudBase exact-list probes retry a transient CLI failure before reporting absence', {
+  skip: requiresWindowsPowerShell,
+}, (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-tcb-transient-list-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const fakeTcbPath = path.join(directory, 'fake-tcb.cmd');
+  const counterPath = path.join(directory, 'attempted.txt');
+  fs.writeFileSync(fakeTcbPath, [
+    '@echo off',
+    `if exist "${counterPath}" goto success`,
+    `> "${counterPath}" echo first-attempt`,
+    '>&2 echo request timed out',
+    'exit /b 1',
+    ':success',
+    'echo {"data":[],"meta":{"requestId":"fixture"}}',
+    'exit /b 0',
+    '',
+  ].join('\r\n'), 'utf8');
+  const encodedTcb = Buffer.from(fakeTcbPath, 'utf16le').toString('base64');
+  const result = runDeployerPowerShellProbe([
+    `$fakeTcb=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedTcb}'))`,
+    "$state=Get-RemoteObjectState -ResolvedTcbPath $fakeTcb -RemotePath 'target/object'",
+    'if($state.Exists){throw "empty list reported an object"}',
+  ].join(';'));
+  assertNormalExit(result, 'fake tcb transient-list probe');
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(fs.existsSync(counterPath), true, 'fixture must prove the first CLI call failed');
+});
+
+test('CloudBase exact-list probes classify transient errors emitted on CLI stdout', {
+  skip: requiresWindowsPowerShell,
+}, (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-tcb-stdout-timeout-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const fakeTcbPath = path.join(directory, 'fake-tcb.cmd');
+  const counterPath = path.join(directory, 'attempted.txt');
+  fs.writeFileSync(fakeTcbPath, [
+    '@echo off',
+    `if exist "${counterPath}" goto success`,
+    `> "${counterPath}" echo first-attempt`,
+    'echo {"error":{"message":"request timed out"}}',
+    'exit /b 1',
+    ':success',
+    'echo {"data":[],"meta":{"requestId":"fixture"}}',
+    'exit /b 0',
+    '',
+  ].join('\r\n'), 'utf8');
+  const encodedTcb = Buffer.from(fakeTcbPath, 'utf16le').toString('base64');
+  const result = runDeployerPowerShellProbe([
+    `$fakeTcb=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedTcb}'))`,
+    "$state=Get-RemoteObjectState -ResolvedTcbPath $fakeTcb -RemotePath 'target/object'",
+    'if($state.Exists){throw "empty list reported an object"}',
+  ].join(';'));
+  assertNormalExit(result, 'fake tcb stdout-timeout probe');
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.equal(fs.existsSync(counterPath), true, 'fixture must prove the first CLI call failed');
+});
+
+test('CloudBase exact-list probes do not retry a permanent CLI failure', {
+  skip: requiresWindowsPowerShell,
+}, (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-tcb-permanent-list-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const fakeTcbPath = path.join(directory, 'fake-tcb.cmd');
+  const markerPath = path.join(directory, 'first-attempt.txt');
+  fs.writeFileSync(fakeTcbPath, [
+    '@echo off',
+    `if exist "${markerPath}" goto retried`,
+    `> "${markerPath}" echo first-attempt`,
+    '>&2 echo permission denied',
+    'exit /b 1',
+    ':retried',
+    '>&2 echo permanent failure was retried',
+    'exit /b 9',
+    '',
+  ].join('\r\n'), 'utf8');
+  const encodedTcb = Buffer.from(fakeTcbPath, 'utf16le').toString('base64');
+  const result = runDeployerPowerShellProbe([
+    `$fakeTcb=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedTcb}'))`,
+    "$null=Get-RemoteObjectState -ResolvedTcbPath $fakeTcb -RemotePath 'target/object'",
+  ].join(';'));
+  assert.notEqual(result.status, 0, 'permanent CLI failure must fail the probe');
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /permanent failure was retried/i);
+  assert.equal(fs.existsSync(markerPath), true, 'fixture must prove the first CLI call ran');
+});
+
 test('successful native commands may emit progress on stderr under ErrorActionPreference Stop', {
   skip: requiresWindowsPowerShell,
 }, (t) => {

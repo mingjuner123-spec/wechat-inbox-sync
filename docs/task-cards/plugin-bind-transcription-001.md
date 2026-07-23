@@ -12,7 +12,7 @@
 - 父主线：H2-002
 - 分支：codex/plugin-bind-transcription
 - Worktree：.worktrees/plugin-bind-transcription
-- 文件所有权：docs/task-cards/plugin-bind-transcription-001.md；docs/superpowers/specs/2026-07-23-plugin-bind-transcription-design.md；docs/superpowers/plans/2026-07-23-plugin-bind-transcription.md；obsidian-plugin/wechat-inbox-sync/main.js；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh；tests/plugin-main-ai.test.js；tests/plugin-marketplace-package.test.js
+- 文件所有权：docs/task-cards/plugin-bind-transcription-001.md；docs/superpowers/specs/2026-07-23-plugin-bind-transcription-design.md；docs/superpowers/plans/2026-07-23-plugin-bind-transcription.md；obsidian-plugin/wechat-inbox-sync/main.js；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh；scripts/deploy-local-components.ps1；tests/plugin-main-ai.test.js；tests/plugin-marketplace-package.test.js；tests/release-governance.test.js
 - 环境或发布链路占用：无
 
 ## 目标
