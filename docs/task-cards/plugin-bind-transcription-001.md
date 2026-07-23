@@ -12,12 +12,12 @@
 - 父主线：H2-002
 - 分支：codex/plugin-bind-transcription
 - Worktree：.worktrees/plugin-bind-transcription
-- 文件所有权：docs/task-cards/plugin-bind-transcription-001.md；docs/superpowers/specs/2026-07-23-plugin-bind-transcription-design.md；obsidian-plugin/wechat-inbox-sync/main.js；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh；cloudfunctions/syncApi/index.js；cloudfunctions/syncApi/inbox-core.js；cloudfunctions/syncApi/redeem-code-core.js；tests/plugin-main-ai.test.js；tests/sync-api-core.test.js；tests/sync-bind-limit.test.js；tests/redeem-code-core.test.js
+- 文件所有权：docs/task-cards/plugin-bind-transcription-001.md；docs/superpowers/specs/2026-07-23-plugin-bind-transcription-design.md；obsidian-plugin/wechat-inbox-sync/main.js；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1；obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh；tests/plugin-main-ai.test.js
 - 环境或发布链路占用：无
 
 ## 目标
 
-离线实现并验证：体验 Pro 有效期内允许 3 个绑定；到期后额外绑定不可再同步；有效绑定码遇到配额限制时不再误报为无效；本地转写有阶段、心跳和可见的暂停入口。
+离线实现并验证：有效绑定码遇到服务端配额限制时不再误报为无效；本地转写有阶段、心跳和可见的暂停入口。体验 Pro 额度与到期收敛由独立私有云函数任务实现。
 
 ## 非目标
 
