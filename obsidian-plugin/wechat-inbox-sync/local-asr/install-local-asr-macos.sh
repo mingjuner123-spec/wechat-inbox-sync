@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.7"
+INSTALLER_SCRIPT_VERSION="1.3.8"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -918,7 +918,54 @@ mkdir -p "$TEMP_WORK_DIR"
   echo "progressPercent=0"
 } > "$RUN_LOG"
 
-"$FFMPEG" -hide_banner -loglevel error -y -i "$INPUT_PATH" -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time "$CHUNK_SECONDS" -reset_timestamps 1 "$TEMP_WORK_DIR/chunk-%03d.wav" 2>> "$RUN_LOG"
+write_progress() {
+  local stage="$1"
+  local current="$2"
+  local total="$3"
+  local pid="${4:-0}"
+  local now
+  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  if [ "${PROGRESS_STAGE_NAME:-}" != "$stage" ] || [ -z "${PROGRESS_STAGE_STARTED_AT:-}" ]; then
+    PROGRESS_STAGE_NAME="$stage"
+    PROGRESS_STAGE_STARTED_AT="$now"
+  fi
+  local percent=0
+  if [ "$total" -gt 0 ]; then
+    percent=$((current * 100 / total))
+  fi
+  {
+    echo "progressStage=$stage"
+    echo "progressCurrent=$current"
+    echo "progressTotal=$total"
+    echo "progressPercent=$percent"
+    echo "progressStartedAt=$PROGRESS_STAGE_STARTED_AT"
+    echo "progressHeartbeatAt=$now"
+    echo "progressPid=$pid"
+  } >> "$RUN_LOG"
+}
+
+run_with_heartbeat() {
+  local stage="$1"
+  local current="$2"
+  local total="$3"
+  shift 3
+  "$@" >> "$RUN_LOG" 2>&1 &
+  local native_pid=$!
+  local last_heartbeat=0
+  while kill -0 "$native_pid" 2>/dev/null; do
+    local now_epoch
+    now_epoch="$(date +%s)"
+    if [ "$last_heartbeat" -eq 0 ] || [ $((now_epoch - last_heartbeat)) -ge 5 ]; then
+      write_progress "$stage" "$current" "$total" "$native_pid"
+      last_heartbeat="$now_epoch"
+    fi
+    sleep 1
+  done
+  wait "$native_pid"
+}
+
+write_progress segmenting 0 0 0
+run_with_heartbeat segmenting 0 0 "$FFMPEG" -hide_banner -loglevel error -y -i "$INPUT_PATH" -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time "$CHUNK_SECONDS" -reset_timestamps 1 "$TEMP_WORK_DIR/chunk-%03d.wav"
 
 chunk_count="$(find "$TEMP_WORK_DIR" -name 'chunk-*.wav' -type f | wc -l | tr -d ' ')"
 echo "chunkCount=$chunk_count" >> "$RUN_LOG"
@@ -942,7 +989,7 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   {
     echo "--- $(basename "$chunk") ---"
   } >> "$RUN_LOG"
-  "$WHISPER" -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base" >> "$RUN_LOG" 2>&1
+  run_with_heartbeat transcribing "$chunk_index" "$chunk_count" "$WHISPER" -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base"
   if [ ! -f "$chunk_txt" ]; then
     echo "Whisper did not generate transcript: $chunk_txt" >&2
     echo "status=failed" >> "$RUN_LOG"

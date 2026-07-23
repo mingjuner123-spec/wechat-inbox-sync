@@ -484,9 +484,14 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && !source.includes('DataReceivedEventHandler')
       && !source.includes('BeginOutputReadLine')
     ) {
+      const hasHeartbeatProtocol = source.includes('progressHeartbeatAt')
+        && source.includes('progressPid')
+        && source.includes('-ProgressStage "segmenting"');
       return {
-        scriptVersion: 'adaptive-chunked-start-process-repeat-guard-v2-progress-run-log',
-        scriptOutdated: false,
+        scriptVersion: hasHeartbeatProtocol
+          ? 'adaptive-chunked-start-process-repeat-guard-v2-heartbeat-run-log'
+          : 'adaptive-chunked-start-process-repeat-guard-v2-progress-run-log',
+        scriptOutdated: !hasHeartbeatProtocol,
       };
     }
     if (
@@ -564,9 +569,14 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && !source.includes('SIMPLIFIED_PROMPT')
       && !source.includes('--prompt "$SIMPLIFIED_PROMPT"')
     ) {
+      const hasHeartbeatProtocol = source.includes('progressHeartbeatAt')
+        && source.includes('progressPid')
+        && source.includes('run_with_heartbeat segmenting');
       return {
-        scriptVersion: 'adaptive-chunked-bash-repeat-guard-v2-progress-metal-diagnostics-run-log',
-        scriptOutdated: false,
+        scriptVersion: hasHeartbeatProtocol
+          ? 'adaptive-chunked-bash-repeat-guard-v2-heartbeat-run-log'
+          : 'adaptive-chunked-bash-repeat-guard-v2-progress-metal-diagnostics-run-log',
+        scriptOutdated: !hasHeartbeatProtocol,
       };
     }
     if (
@@ -1181,7 +1191,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     return hasMinimumInstallerVersion(
       source,
       /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 3, 7],
+      [1, 3, 8],
     )
       && !source.includes('SIMPLIFIED_PROMPT')
       && !source.includes('--prompt')
@@ -1192,6 +1202,9 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('GGML_METAL_PATH_RESOURCES')
       && source.includes('metalAcceleration=failed')
       && source.includes('transcribe-last.log')
+      && source.includes('progressHeartbeatAt')
+      && source.includes('progressPid')
+      && source.includes('run_with_heartbeat segmenting')
       && source.includes('validate_local_asr_inference')
       && source.includes('TENCENT_MODEL_URL=')
       && source.includes('bootstrap_uv')
@@ -1219,10 +1232,13 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 2, 23],
+      [1, 2, 24],
   )
     && !source.includes('$SimplifiedPrompt')
     && !source.includes('--prompt')
+    && source.includes('progressHeartbeatAt')
+    && source.includes('progressPid')
+    && source.includes('-ProgressStage "segmenting"')
     && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
     && source.includes('Invoke-NativeProcess')
     && source.includes('Convert-ExitCodeToHex')
@@ -11115,7 +11131,26 @@ function parseLocalAsrProgressLog(text) {
     current: Number.isFinite(current) ? current : 0,
     total: Number.isFinite(total) ? total : 0,
     percent,
+    startedAt: String(values.progressStartedAt || '').trim(),
+    heartbeatAt: String(values.progressHeartbeatAt || '').trim(),
+    pid: Number.isFinite(Number(values.progressPid)) ? Number(values.progressPid) : 0,
   };
+}
+
+function formatProgressElapsed(startedAt, now = Date.now()) {
+  const started = new Date(startedAt || '').getTime();
+  if (!Number.isFinite(started) || started <= 0 || !Number.isFinite(now) || now < started) return '';
+  return `${Math.max(0, Math.floor((now - started) / 1000))} 秒`;
+}
+
+function isProgressHeartbeatStale(heartbeatAt, now = Date.now(), thresholdMs = 20 * 1000) {
+  const heartbeat = new Date(heartbeatAt || '').getTime();
+  return Number.isFinite(heartbeat) && heartbeat > 0 && Number.isFinite(now) && now - heartbeat > thresholdMs;
+}
+
+function buildLocalAsrProgressKey(progress = {}, now = Date.now()) {
+  const heartbeatState = isProgressHeartbeatStale(progress.heartbeatAt, now) ? 'stale' : 'fresh';
+  return `${progress.stage || ''}|${Number(progress.current) || 0}|${Number(progress.total) || 0}|${Number(progress.percent) || 0}|${progress.heartbeatAt || ''}|${heartbeatState}`;
 }
 
 function buildSyncProgressMessage({
@@ -11125,6 +11160,12 @@ function buildSyncProgressMessage({
   total = 0,
   title = '',
   percent = null,
+  localProgressStage = '',
+  localProgressCurrent = 0,
+  localProgressTotal = 0,
+  localProgressStartedAt = '',
+  localProgressHeartbeatAt = '',
+  now = Date.now(),
 } = {}) {
   const label = bindingLabel ? `${bindingLabel}：` : '';
   const countText = total ? `${current}/${total}` : '';
@@ -11135,7 +11176,23 @@ function buildSyncProgressMessage({
   if (stage === 'empty') return `${label}没有需要同步的新内容`;
   if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
   if (stage === 'downloading') return `${label}正在下载附件 ${countText}${percentText}${suffix}`;
-  if (stage === 'transcribing') return `${label}正在转写音视频 ${countText}${percentText}${suffix}`;
+  if (stage === 'transcribing') {
+    if (isProgressHeartbeatStale(localProgressHeartbeatAt, now)) {
+      return `${label}本地转写任务可能无响应，可暂停后重试${suffix}`;
+    }
+    const elapsed = formatProgressElapsed(localProgressStartedAt, now);
+    const elapsedText = elapsed ? `，已运行 ${elapsed}` : '';
+    if (localProgressStage === 'preparing' || localProgressStage === 'segmenting') {
+      return `${label}正在准备音频${elapsedText}${suffix}`;
+    }
+    if (localProgressStage === 'transcribing' && Number(localProgressTotal) > 0 && Number(localProgressCurrent) <= 0) {
+      return `${label}正在转写第 1/${localProgressTotal} 段${elapsedText}${suffix}`;
+    }
+    if (localProgressStage === 'transcribing' && Number(localProgressTotal) > 0) {
+      return `${label}正在转写第 ${Math.min(Number(localProgressCurrent) + 1, Number(localProgressTotal))}/${localProgressTotal} 段${elapsedText}${suffix}`;
+    }
+    return `${label}正在转写音视频 ${countText}${percentText}${elapsedText}${suffix}`;
+  }
   if (stage === 'writing') return `${label}正在写入 Obsidian ${countText}${suffix}`;
   if (stage === 'marking') return `${label}正在更新同步状态 ${countText}${suffix}`;
   return `${label}正在同步${countText ? ` ${countText}` : ''}${suffix}`;
@@ -11340,6 +11397,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.localOcrInstallPromise = null;
     this.currentTranscriptionAbortController = null;
     this.currentTranscriptionProcess = null;
+    this.currentTranscriptionProcessDetached = false;
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -11372,6 +11430,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
       this.syncInbox();
     });
+    this.transcriptionStopRibbon = this.addRibbonIcon('square', '暂停当前转写', () => this.stopCurrentTranscription());
+    this.setTranscriptionStopAvailable(false);
 
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
 
@@ -11383,6 +11443,11 @@ class WechatObsidianInboxPlugin extends Plugin {
   async saveSettings(nextSettings) {
     this.settings = mergeSettings(nextSettings);
     await this.saveData(this.settings);
+  }
+
+  setTranscriptionStopAvailable(available) {
+    if (!this.transcriptionStopRibbon || !this.transcriptionStopRibbon.style) return;
+    this.transcriptionStopRibbon.style.display = available ? '' : 'none';
   }
 
   async checkWechatLogin() {
@@ -11772,10 +11837,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       response = await requestUrl(requestOptions);
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
-      if (isRequestUrlTransportError(message)) {
+      const shouldReadBindErrorBody = path === '/bind'
+        && /request failed|status\s*(?:4|5)\d\d|http\s*(?:4|5)\d\d/i.test(message);
+      if (isRequestUrlTransportError(message) || shouldReadBindErrorBody) {
         try {
           response = await requestJsonViaNode(requestOptions);
         } catch (fallbackError) {
+          if (shouldReadBindErrorBody) throw error;
           const fallbackMessage = fallbackError && fallbackError.message ? fallbackError.message : String(fallbackError || '');
           throw new Error(`网络连接失败：${fallbackMessage || message}`);
         }
@@ -11799,7 +11867,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (response.status === 400 && message.includes('Missing client ID')) {
         throw new Error('本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定');
       }
-      throw new Error(message);
+      const requestError = new Error(message);
+      if (payload && payload.errCode) requestError.code = String(payload.errCode);
+      throw requestError;
     }
     if (!payload || payload.success === false) {
       const message = (payload && payload.errMsg) || '同步 API 请求失败';
@@ -12111,7 +12181,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       const message = error && error.message ? error.message : String(error || '');
       if (
-        message.includes('PLUGIN_BINDING_LIMIT_EXCEEDED')
+        (error && error.code === 'PLUGIN_BINDING_LIMIT_EXCEEDED')
+        || message.includes('PLUGIN_BINDING_LIMIT_EXCEEDED')
         || message.includes('免费版最多绑定')
         || message.includes('Pro 版最多绑定')
       ) {
@@ -12122,8 +12193,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         new Notice('绑定电脑名额已满，请在小程序绑定页新增电脑名额后再试');
         return;
       }
-      if (message.includes('403') || message.includes('Invalid bind code')) {
+      if (error && error.code === 'EXTRA_BINDING_REQUIRES_ACTIVE_PRO') {
+        new Notice('体验 Pro 已到期，额外绑定暂不可用；续期后会自动恢复。');
+        return;
+      }
+      if (/Invalid bind code/i.test(message) || (error && error.code === 'INVALID_BIND_CODE')) {
         new Notice('绑定码无效');
+        return;
+      }
+      if (/request failed|status\s*403|http\s*403/i.test(message)) {
+        new Notice('暂时无法确认绑定码状态，请重试。');
         return;
       }
       new Notice(`绑定失败：${message || '请稍后重试'}`);
@@ -12308,7 +12387,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
       try {
-        this.currentTranscriptionProcess.kill();
+        const child = this.currentTranscriptionProcess;
+        if (process.platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
+          childProcess.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+        } else if (process.platform === 'darwin' && this.currentTranscriptionProcessDetached && Number.isInteger(child.pid) && child.pid > 0) {
+          process.kill(-child.pid, 'SIGTERM');
+        }
+        child.kill();
         stopped = true;
       } catch (error) {
         // Ignore process cleanup failures.
@@ -13480,6 +13565,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           source: 'local',
         };
       } catch (error) {
+        if (isRetryableTranscriptionError(error)) {
+          throw error;
+        }
         if (!options.fileID && !options.allowCloudUrlFallback) {
           throw error;
         }
@@ -13558,6 +13646,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const progressTitle = options.title || '';
     const abortController = new AbortController();
     this.currentTranscriptionAbortController = abortController;
+    this.setTranscriptionStopAvailable(true);
     let progressTimer = null;
     let lastProgressKey = '';
     const emitLocalProgress = (fallbackPercent = null) => {
@@ -13574,7 +13663,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
       );
       if (!progress) return;
-      const key = `${progress.stage}|${progress.current}|${progress.total}|${progress.percent}`;
+      const key = buildLocalAsrProgressKey(progress);
       if (key === lastProgressKey) return;
       lastProgressKey = key;
       this.showSyncProgress({
@@ -13585,6 +13674,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         localProgressStage: progress.stage,
         localProgressCurrent: progress.current,
         localProgressTotal: progress.total,
+        localProgressStartedAt: progress.startedAt,
+        localProgressHeartbeatAt: progress.heartbeatAt,
       });
     };
     const stopProgressPolling = () => {
@@ -13637,6 +13728,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           timeout: 2 * 60 * 60 * 1000,
           maxBuffer: 50 * 1024 * 1024,
           windowsHide: true,
+          detached: process.platform === 'darwin',
         }, (error, stdout, stderr) => {
           stopProgressPolling();
           this.currentTranscriptionProcess = null;
@@ -13655,6 +13747,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           resolve({ stdout, stderr });
         });
         this.currentTranscriptionProcess = child;
+        this.currentTranscriptionProcessDetached = process.platform === 'darwin';
       });
 
       const outputText = fs.existsSync(outputPath)
@@ -13693,6 +13786,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       stopProgressPolling();
       this.currentTranscriptionAbortController = null;
       this.currentTranscriptionProcess = null;
+      this.currentTranscriptionProcessDetached = false;
+      this.setTranscriptionStopAvailable(false);
       [inputPath, outputPath].forEach((filePath) => {
         try {
           if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -16191,6 +16286,7 @@ WechatObsidianInboxPlugin.__test = {
   getRecordConversionWarning,
   buildConversionWarningsNotice,
   parseLocalAsrProgressLog,
+  buildLocalAsrProgressKey,
   getTranscriptionQualityIssue,
   createTranscriptionQualityError,
   assertUsableTranscription,
