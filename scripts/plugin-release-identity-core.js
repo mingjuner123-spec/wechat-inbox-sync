@@ -491,6 +491,17 @@ function validateZipEntryName(name) {
   }
 }
 
+function computeCrc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 function parseZipEntries(zipBytes, {
   maxCompressedBytes = MAX_ZIP_COMPRESSED_BYTES,
   maxEntryUncompressedBytes = MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
@@ -503,14 +514,22 @@ function parseZipEntries(zipBytes, {
   const eocdOffset = findEndOfCentralDirectory(zipBytes);
   const diskNumber = zipBytes.readUInt16LE(eocdOffset + 4);
   const centralDisk = zipBytes.readUInt16LE(eocdOffset + 6);
+  const entriesOnDisk = zipBytes.readUInt16LE(eocdOffset + 8);
   const entryCount = zipBytes.readUInt16LE(eocdOffset + 10);
   const centralSize = zipBytes.readUInt32LE(eocdOffset + 12);
   const centralOffset = zipBytes.readUInt32LE(eocdOffset + 16);
+  const eocdCommentLength = zipBytes.readUInt16LE(eocdOffset + 20);
   if (diskNumber !== 0 || centralDisk !== 0) {
     throw new Error('multi-disk ZIP archives are not supported');
   }
-  if (centralOffset + centralSize > eocdOffset) {
-    throw new Error('ZIP central directory is outside the archive bounds');
+  if (entriesOnDisk !== entryCount) {
+    throw new Error('ZIP entry counts on disk and in the archive differ');
+  }
+  if (eocdOffset + 22 + eocdCommentLength !== zipBytes.length) {
+    throw new Error('ZIP EOCD comment length does not match the exact archive end');
+  }
+  if (centralOffset + centralSize !== eocdOffset) {
+    throw new Error('ZIP central directory must end immediately before EOCD');
   }
   if (entryCount > maxEntries) {
     throw new Error('ZIP entry count exceeds the configured limit');
@@ -593,6 +612,9 @@ function parseZipEntries(zipBytes, {
     if (isDirectory && (compressedSize !== 0 || uncompressedSize !== 0)) {
       throw new Error(`ZIP directory entry must be empty: ${name}`);
     }
+    if (isDirectory && crc32 !== 0) {
+      throw new Error(`ZIP directory CRC32 must be zero: ${name}`);
+    }
     if (localOffset >= centralOffset || dataEnd > centralOffset || dataEnd > zipBytes.length) {
       throw new Error(`ZIP local entry overlaps the central directory or archive bounds for ${name}`);
     }
@@ -612,18 +634,32 @@ function parseZipEntries(zipBytes, {
     if (data.length !== uncompressedSize) {
       throw new Error(`ZIP uncompressed size mismatch for ${name}`);
     }
+    if (computeCrc32(data) !== crc32) {
+      throw new Error(`ZIP extracted content CRC32 mismatch for ${name}`);
+    }
     entries.set(name, data);
   }
   if (offset !== centralOffset + centralSize) {
     throw new Error('ZIP central directory size mismatch');
   }
   occupiedRanges.sort((left, right) => left.start - right.start);
+  if (occupiedRanges.length === 0) {
+    if (centralOffset !== 0) {
+      throw new Error('ZIP contains an unsupported prefix before the central directory');
+    }
+  } else if (occupiedRanges[0].start !== 0) {
+    throw new Error('ZIP contains an unsupported prefix or orphan local entry');
+  }
   for (let index = 1; index < occupiedRanges.length; index += 1) {
     const previous = occupiedRanges[index - 1];
     const current = occupiedRanges[index];
-    if (current.start < previous.end) {
-      throw new Error(`ZIP local entries overlap: ${previous.name} and ${current.name}`);
+    if (current.start !== previous.end) {
+      throw new Error(`ZIP local entry ranges are not continuous: ${previous.name} and ${current.name}`);
     }
+  }
+  if (occupiedRanges.length > 0
+      && occupiedRanges[occupiedRanges.length - 1].end !== centralOffset) {
+    throw new Error('ZIP contains an orphan local entry or gap before the central directory');
   }
   return entries;
 }

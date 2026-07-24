@@ -39,6 +39,17 @@ function writeFixtureFile(filePath, contents) {
   fs.writeFileSync(filePath, contents);
 }
 
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 function createBareFixture(t) {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-release-identity-'));
   const bare = path.join(fixtureRoot, 'remote.git');
@@ -76,12 +87,13 @@ function makeStoredZip(entries) {
   for (const [name, value] of Object.entries(entries)) {
     const nameBytes = Buffer.from(name, 'utf8');
     const data = Buffer.from(value);
+    const checksum = crc32(data);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(0, 6);
     local.writeUInt16LE(0, 8);
-    local.writeUInt32LE(0, 14);
+    local.writeUInt32LE(checksum, 14);
     local.writeUInt32LE(data.length, 18);
     local.writeUInt32LE(data.length, 22);
     local.writeUInt16LE(nameBytes.length, 26);
@@ -94,7 +106,7 @@ function makeStoredZip(entries) {
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0, 8);
     central.writeUInt16LE(0, 10);
-    central.writeUInt32LE(0, 16);
+    central.writeUInt32LE(checksum, 16);
     central.writeUInt32LE(data.length, 20);
     central.writeUInt32LE(data.length, 24);
     central.writeUInt16LE(nameBytes.length, 28);
@@ -477,9 +489,63 @@ test('ZIP parser validates exact entry names and bytes for stored and deflated m
   deflatedZip.writeUInt16LE(8, 8);
   const centralOffset = deflatedZip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
   deflatedZip.writeUInt16LE(8, centralOffset + 10);
+  const uncompressedCrc = crc32(Buffer.from('compressed'));
+  deflatedZip.writeUInt32LE(uncompressedCrc, 14);
+  deflatedZip.writeUInt32LE(uncompressedCrc, centralOffset + 16);
   deflatedZip.writeUInt32LE('compressed'.length, 22);
   deflatedZip.writeUInt32LE('compressed'.length, centralOffset + 24);
   assert.equal(core.parseZipEntries(deflatedZip).get('main.js').toString('utf8'), 'compressed');
+});
+
+test('ZIP parser computes CRC32 from extracted bytes instead of trusting forged local and central fields', () => {
+  const forged = makeStoredZip({ 'main.js': 'non-empty-content' });
+  const centralOffset = forged.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  forged.writeUInt32LE(0, 14);
+  forged.writeUInt32LE(0, centralOffset + 16);
+  assert.throws(() => core.parseZipEntries(forged), /CRC|checksum|content/i);
+});
+
+test('ZIP parser rejects orphan local headers and unsupported SFX prefixes', () => {
+  const orphanArchive = makeStoredZip({ '../evil': 'bad' });
+  const orphanCentralOffset = orphanArchive.readUInt32LE(orphanArchive.length - 6);
+  const orphanLocalBytes = orphanArchive.subarray(0, orphanCentralOffset);
+  const normal = makeStoredZip({ 'main.js': 'main' });
+  const normalEocdOffset = normal.length - 22;
+  const normalCentralOffset = normal.readUInt32LE(normalEocdOffset + 16);
+  const combined = Buffer.concat([orphanLocalBytes, normal]);
+  const combinedCentralOffset = orphanLocalBytes.length + normalCentralOffset;
+  combined.writeUInt32LE(
+    orphanLocalBytes.length + normal.readUInt32LE(normalCentralOffset + 42),
+    combinedCentralOffset + 42,
+  );
+  const combinedEocdOffset = orphanLocalBytes.length + normalEocdOffset;
+  combined.writeUInt32LE(combinedCentralOffset, combinedEocdOffset + 16);
+  assert.throws(() => core.parseZipEntries(combined), /orphan|prefix|offset|continuous|unreferenced/i);
+});
+
+test('ZIP parser requires exact EOCD counts, central adjacency, comment length, and file end', () => {
+  const countMismatch = makeStoredZip({ 'main.js': 'main' });
+  countMismatch.writeUInt16LE(0, countMismatch.length - 14);
+  assert.throws(() => core.parseZipEntries(countMismatch), /entry|count|disk|EOCD/i);
+
+  const centralGapSource = makeStoredZip({ 'main.js': 'main' });
+  const oldEocdOffset = centralGapSource.length - 22;
+  const centralGap = Buffer.concat([
+    centralGapSource.subarray(0, oldEocdOffset),
+    Buffer.from([0]),
+    centralGapSource.subarray(oldEocdOffset),
+  ]);
+  assert.throws(() => core.parseZipEntries(centralGap), /central|EOCD|gap|adjacent/i);
+
+  const trailing = Buffer.concat([
+    makeStoredZip({ 'main.js': 'main' }),
+    Buffer.from('trailing'),
+  ]);
+  assert.throws(() => core.parseZipEntries(trailing), /EOCD|comment|trailing|end/i);
+
+  const badCommentLength = makeStoredZip({ 'main.js': 'main' });
+  badCommentLength.writeUInt16LE(1, badCommentLength.length - 2);
+  assert.throws(() => core.parseZipEntries(badCommentLength), /EOCD|comment|trailing|end/i);
 });
 
 test('ZIP parser rejects central/local filename confusion and unsupported local flags', () => {
