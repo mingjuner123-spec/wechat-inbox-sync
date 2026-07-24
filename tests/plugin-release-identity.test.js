@@ -16,7 +16,7 @@ const core = fs.existsSync(corePath) ? require(corePath) : {};
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 const TAG_OBJECT = 'c'.repeat(40);
-const TAG = '1.3.56';
+const TAG = '1.3.57';
 const REQUIRED_ASSETS = [
   'main.js',
   'manifest.json',

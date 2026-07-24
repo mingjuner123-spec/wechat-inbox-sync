@@ -45,7 +45,7 @@ const macAsrInstallerSource = fs.readFileSync(
   'utf8',
 );
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.24"', '$InstallerScriptVersion = "1.2.23"')
+  .replace('$InstallerScriptVersion = "1.2.25"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const staleMacAsrInstallerSource = macAsrInstallerSource
   .replace('INSTALLER_SCRIPT_VERSION="1.3.8"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
@@ -309,6 +309,21 @@ assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
 assert.strictEqual(typeof helpers.getRecordConversionWarning, 'function');
 assert.strictEqual(typeof helpers.buildConversionWarningsNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
+assert.strictEqual(
+  helpers.getSocialRequestHeaders('http://xhslink.cn/o/demo').Referer,
+  'https://www.xiaohongshu.com/',
+  'xhslink.cn short links must enter the Xiaohongshu extraction path',
+);
+assert.strictEqual(typeof helpers.isXiaohongshuUrl, 'function');
+assert.strictEqual(helpers.isXiaohongshuUrl('https://www.xiaohongshu.com/explore/demo'), true);
+assert.strictEqual(helpers.isXiaohongshuUrl('http://xhslink.cn/o/demo'), true);
+assert.strictEqual(helpers.isXiaohongshuUrl('https://evil.example/?u=xhslink.cn'), false);
+assert.strictEqual(helpers.isXiaohongshuUrl('https://xhslink.cn.evil.example/o/demo'), false);
+assert.strictEqual(typeof helpers.isTrustedXiaohongshuCookieUrl, 'function');
+assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://www.xiaohongshu.com/explore/demo'), true);
+assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://edith.xiaohongshu.com/api/demo'), true);
+assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('http://xhslink.cn/o/demo'), false);
+assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://xiaohongshu.com.evil.example/'), false);
 assert.strictEqual(typeof helpers.hasXiaohongshuLoginCookies, 'function');
 assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.getXiaohongshuCapturedRequestBody, 'function');
@@ -1794,7 +1809,7 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
   fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(
     path.join(tempAsrRoot, 'transcribe.ps1'),
-    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\nTRANSCRIPT_HALLUCINATION\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nprogressHeartbeatAt=now\nprogressPid=1\n-ProgressStage "segmenting"\nrecoveryTriggered=1',
+    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { New-Object System.Diagnostics.ProcessStartInfo; ReadToEndAsync }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$NativeProcessRunnerVersion = "diagnostics-process-v1"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\nTRANSCRIPT_HALLUCINATION\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nprogressHeartbeatAt=now\nprogressPid=1\n-ProgressStage "segmenting"\nrecoveryTriggered=1',
     'utf8',
   );
   const recursiveStatus = helpers.getLocalAsrInstallStatus(tempAsrRoot, fs.existsSync, os.platform());
@@ -1805,6 +1820,22 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
 }
 assert.ok(pluginMainSource.includes('ffmpeg 路径：'));
 assert.ok(pluginMainSource.includes('缺失项：'));
+{
+  const templateStart = windowsAsrInstallerSource.lastIndexOf('# BEGIN_TRANSCRIBE_TEMPLATE');
+  const templateEnd = windowsAsrInstallerSource.lastIndexOf('# END_TRANSCRIBE_TEMPLATE');
+  const templateBlock = windowsAsrInstallerSource.slice(templateStart, templateEnd);
+  const currentWindowsTranscribeScript = templateBlock.split("@'")[1] || '';
+  assert.deepStrictEqual(
+    helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+      existsSync: () => true,
+      readFileSync: () => currentWindowsTranscribeScript,
+    }),
+    {
+      scriptVersion: 'adaptive-chunked-diagnostics-process-repeat-guard-v2-heartbeat-run-log',
+      scriptOutdated: false,
+    },
+  );
+}
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
     existsSync: () => true,
@@ -3846,7 +3877,16 @@ async function runAsyncHydrationTests() {
   try {
     const resolvedShortUrl = await helpers.resolveRedirectUrl('http://xhslink.com/o/demo');
     assert.strictEqual(resolvedShortUrl, 'http://xhslink.com/final');
-    assert.deepStrictEqual(redirectMethods, ['HEAD:/o/demo', 'GET:/o/demo', 'HEAD:/final']);
+    const resolvedCnShortUrl = await helpers.resolveRedirectUrl('http://xhslink.cn/o/demo');
+    assert.strictEqual(resolvedCnShortUrl, 'http://xhslink.cn/final');
+    assert.deepStrictEqual(redirectMethods, [
+      'HEAD:/o/demo',
+      'GET:/o/demo',
+      'HEAD:/final',
+      'HEAD:/o/demo',
+      'GET:/o/demo',
+      'HEAD:/final',
+    ]);
   } finally {
     http.request = originalHttpRequest;
   }

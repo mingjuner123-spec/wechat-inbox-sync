@@ -462,6 +462,45 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('$ChunkRetrySeconds')
       && source.includes('$ChunkSeconds = 120')
       && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
+      && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"')
+      && source.includes('TRANSCRIPT_HALLUCINATION')
+      && source.includes('Invoke-NativeProcess')
+      && source.includes('System.Diagnostics.ProcessStartInfo')
+      && source.includes('ReadToEndAsync')
+      && !source.includes('Start-Process')
+      && source.includes('ConvertTo-SimplifiedChinese')
+      && source.includes('SimplifiedChinese')
+      && source.includes('System.Text.UTF8Encoding')
+      && source.includes('ReadAllText')
+      && source.includes('WriteAllText')
+      && source.includes('Get-ShortPath')
+      && source.includes('Test-WhisperNativeCrashExitCode')
+      && source.includes('Convert-ExitCodeToHex')
+      && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+      && source.includes('safeModelPath')
+      && source.includes('progressPercent')
+      && source.includes('progressHeartbeatAt')
+      && source.includes('progressPid')
+      && source.includes('-ProgressStage "segmenting"')
+      && !source.includes('$SimplifiedPrompt')
+      && !source.includes('"--prompt"')
+    ) {
+      return {
+        scriptVersion: 'adaptive-chunked-diagnostics-process-repeat-guard-v2-heartbeat-run-log',
+        scriptOutdated: false,
+      };
+    }
+    if (
+      source.includes('transcribe-last.log')
+      && source.includes('recoveryTriggered=')
+      && source.includes('Split-AudioToChunks')
+      && source.includes('Test-TranscriptHasRepeatHallucination')
+      && source.includes('Invoke-RecoverRepeatedChunkText')
+      && source.includes('$ChunkRetrySeconds')
+      && source.includes('$ChunkSeconds = 120')
+      && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
       && source.includes('TRANSCRIPT_HALLUCINATION')
       && source.includes('Invoke-NativeProcess')
       && source.includes('Start-Process')
@@ -491,7 +530,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
         scriptVersion: hasHeartbeatProtocol
           ? 'adaptive-chunked-start-process-repeat-guard-v2-heartbeat-run-log'
           : 'adaptive-chunked-start-process-repeat-guard-v2-progress-run-log',
-        scriptOutdated: !hasHeartbeatProtocol,
+        scriptOutdated: true,
       };
     }
     if (
@@ -1232,7 +1271,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 2, 24],
+      [1, 2, 25],
   )
     && !source.includes('$SimplifiedPrompt')
     && !source.includes('--prompt')
@@ -1240,7 +1279,11 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('progressPid')
     && source.includes('-ProgressStage "segmenting"')
     && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
+    && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"')
     && source.includes('Invoke-NativeProcess')
+    && source.includes('System.Diagnostics.ProcessStartInfo')
+    && source.includes('ReadToEndAsync')
+    && !source.includes('Start-Process')
     && source.includes('Convert-ExitCodeToHex')
     && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
     && source.includes('[string]$InstallRoot')
@@ -4228,9 +4271,43 @@ function cleanDisplayUrl(url) {
   }
 }
 
+function getHttpUrlHostname(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    return String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+  } catch (error) {
+    return '';
+  }
+}
+
+function isHostnameWithinDomain(hostname, domain) {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  const root = String(domain || '').toLowerCase().replace(/\.$/, '');
+  return Boolean(host && root && (host === root || host.endsWith(`.${root}`)));
+}
+
 function isXiaohongshuUrl(url) {
-  const text = String(url || '').toLowerCase();
-  return text.includes('xiaohongshu.com') || text.includes('xhslink.com');
+  const hostname = getHttpUrlHostname(url);
+  return isHostnameWithinDomain(hostname, 'xiaohongshu.com')
+    || isHostnameWithinDomain(hostname, 'xhslink.com')
+    || isHostnameWithinDomain(hostname, 'xhslink.cn');
+}
+
+function isXiaohongshuShortLinkUrl(url) {
+  const hostname = getHttpUrlHostname(url);
+  return isHostnameWithinDomain(hostname, 'xhslink.com')
+    || isHostnameWithinDomain(hostname, 'xhslink.cn');
+}
+
+function isTrustedXiaohongshuCookieUrl(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    return parsed.protocol === 'https:'
+      && isHostnameWithinDomain(parsed.hostname, 'xiaohongshu.com');
+  } catch (error) {
+    return false;
+  }
 }
 
 function isDouyinUrl(url) {
@@ -4497,7 +4574,7 @@ function shouldResolvePlatformRedirect(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('b23.tv')
     || text.includes('v.douyin.com')
-    || text.includes('xhslink.com')
+    || isXiaohongshuShortLinkUrl(url)
     || /weixin\.qq\.com\/sph\//i.test(text);
 }
 
@@ -8030,8 +8107,10 @@ async function getXiaohongshuCookieHeader() {
 
 async function getXiaohongshuRequestHeaders(url) {
   const headers = getSocialRequestHeaders(url);
-  const cookieHeader = await getXiaohongshuCookieHeader();
-  if (cookieHeader) headers.Cookie = cookieHeader;
+  if (isTrustedXiaohongshuCookieUrl(url)) {
+    const cookieHeader = await getXiaohongshuCookieHeader();
+    if (cookieHeader) headers.Cookie = cookieHeader;
+  }
   return headers;
 }
 
@@ -16315,6 +16394,8 @@ WechatObsidianInboxPlugin.__test = {
   downloadTextViaNode,
   normalizeInstallerScriptText,
   getSocialRequestHeaders,
+  isXiaohongshuUrl,
+  isTrustedXiaohongshuCookieUrl,
   hasXiaohongshuLoginCookies,
   getXiaohongshuCookieHeader,
   getXiaohongshuRequestHeaders,

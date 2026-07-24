@@ -8,7 +8,8 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.24"
+$InstallerScriptVersion = "1.2.25"
+$NativeProcessRunnerVersion = "diagnostics-process-v1"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 90
 $DownloadTimeoutSeconds = 1200
@@ -281,29 +282,35 @@ function Invoke-NativeProcess {
     [int]$ProgressCurrent = 0,
     [int]$ProgressTotal = 0
   )
-  $stdoutPath = Join-Path $TempRoot ("native-stdout-" + [guid]::NewGuid().ToString("N") + ".log")
-  $stderrPath = Join-Path $TempRoot ("native-stderr-" + [guid]::NewGuid().ToString("N") + ".log")
+  $process = $null
   try {
-    $process = Start-Process `
-      -FilePath $FilePath `
-      -ArgumentList $Arguments `
-      -NoNewWindow `
-      -PassThru `
-      -RedirectStandardOutput $stdoutPath `
-      -RedirectStandardError $stderrPath
-    while (-not $process.HasExited) {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+      throw "Native process did not start: $FilePath"
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    while (-not $process.WaitForExit(5000)) {
       if ($ReportProgress) {
         Write-ProgressLog -Stage $ProgressStage -Current $ProgressCurrent -Total $ProgressTotal -ProcessId $process.Id
       }
-      $null = $process.WaitForExit(5000)
-      $process.Refresh()
     }
     $process.WaitForExit()
-    $exitCode = $process.ExitCode
-    $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
-    $stderrText = if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
+    $stdoutText = [string]$stdoutTask.GetAwaiter().GetResult()
+    $stderrText = [string]$stderrTask.GetAwaiter().GetResult()
+    $exitCode = [int]$process.ExitCode
   } finally {
-    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    if ($process) {
+      $process.Dispose()
+    }
   }
 
   $combined = @(
@@ -980,6 +987,7 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $TranscriptQualityGuardVersion = "repeat-guard-v2"
+$NativeProcessRunnerVersion = "diagnostics-process-v1"
 @(
   "time=$(Get-Date -Format o)"
   "status=pending"
@@ -1087,31 +1095,35 @@ function Invoke-NativeProcess {
     [int]$ProgressCurrent = 0,
     [int]$ProgressTotal = 0
   )
-  $nativeTempDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-native-" + [guid]::NewGuid().ToString("N"))
-  $stdoutPath = Join-Path $nativeTempDir "stdout.log"
-  $stderrPath = Join-Path $nativeTempDir "stderr.log"
+  $process = $null
   try {
-    New-Item -ItemType Directory -Force -Path $nativeTempDir | Out-Null
-    $process = Start-Process `
-      -FilePath $FilePath `
-      -ArgumentList $Arguments `
-      -NoNewWindow `
-      -PassThru `
-      -RedirectStandardOutput $stdoutPath `
-      -RedirectStandardError $stderrPath
-    while (-not $process.HasExited) {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+      throw "Native process did not start: $FilePath"
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    while (-not $process.WaitForExit(5000)) {
       if ($ReportProgress) {
         Write-ProgressLog -Stage $ProgressStage -Current $ProgressCurrent -Total $ProgressTotal -ProcessId $process.Id
       }
-      $null = $process.WaitForExit(5000)
-      $process.Refresh()
     }
     $process.WaitForExit()
-    $exitCode = $process.ExitCode
-    $stdoutText = if (Test-Path -LiteralPath $stdoutPath) { [string](Get-Content -LiteralPath $stdoutPath -Raw) } else { "" }
-    $stderrText = if (Test-Path -LiteralPath $stderrPath) { [string](Get-Content -LiteralPath $stderrPath -Raw) } else { "" }
+    $stdoutText = [string]$stdoutTask.GetAwaiter().GetResult()
+    $stderrText = [string]$stderrTask.GetAwaiter().GetResult()
+    $exitCode = [int]$process.ExitCode
   } finally {
-    Remove-Item -LiteralPath $nativeTempDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($process) {
+      $process.Dispose()
+    }
   }
 
   $combined = @(
