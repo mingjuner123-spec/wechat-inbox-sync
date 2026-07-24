@@ -12,7 +12,7 @@
 - 父主线：H2-002
 - 分支：codex/release-plugin-1.3.56
 - Worktree：.worktrees/release-plugin-1.3.56
-- 文件所有权：obsidian-plugin/wechat-inbox-sync/main.js；tests/plugin-main-ai.test.js；manifest.json；versions.json；obsidian-plugin/wechat-inbox-sync/manifest.json；obsidian-plugin/wechat-inbox-sync/versions.json；scripts/plugin-release-identity-core.js；scripts/check-plugin-release-identity.js；tests/plugin-release-identity.test.js；.github/workflows/release.yml；docs/superpowers/specs/2026-07-24-plugin-1.3.56-design.md；docs/superpowers/plans/2026-07-24-plugin-1.3.56.md；docs/task-cards/plugin-release-1-3-56-001.md
+- 文件所有权：obsidian-plugin/wechat-inbox-sync/main.js；tests/plugin-main-ai.test.js；tests/plugin-marketplace-package.test.js；manifest.json；versions.json；obsidian-plugin/wechat-inbox-sync/manifest.json；obsidian-plugin/wechat-inbox-sync/versions.json；scripts/plugin-release-identity-core.js；scripts/check-plugin-release-identity.js；tests/plugin-release-identity.test.js；.github/workflows/release.yml；docs/superpowers/specs/2026-07-24-plugin-1.3.56-design.md；docs/superpowers/plans/2026-07-24-plugin-1.3.56.md；docs/task-cards/plugin-release-1-3-56-001.md
 - 环境或发布链路占用：github-release:1.3.56；obsidian-marketplace:1.3.56
 
 ## 目标

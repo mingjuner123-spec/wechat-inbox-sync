@@ -55,14 +55,18 @@ jobs:
           node tests/release-governance.test.js
           node tests/plugin-main-ai.test.js
           node tests/plugin-marketplace-package.test.js
+          node tests/plugin-release-identity.test.js
 
       - name: Check governance and plugin JavaScript syntax
         run: |
           node --check tests/release-governance.test.js
+          node --check tests/plugin-release-identity.test.js
           node --check scripts/local-component-manifest-core.js
           node --check scripts/update-local-components-manifest.js
           node --check scripts/release-source-guard-core.js
           node --check scripts/release-source-guard.js
+          node --check scripts/plugin-release-identity-core.js
+          node --check scripts/check-plugin-release-identity.js
           node --check scripts/check-local-components-cdn.js
           node --check scripts/check-local-ocr-cdn.js
           node --check obsidian-plugin/wechat-inbox-sync/main.js
@@ -120,10 +124,14 @@ jobs:
           ZIP_NAME="wechat-inbox-sync-$TAG_NAME.zip"
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" main.js manifest.json styles.css versions.json "$ZIP_NAME" --clobber
-          else
-            gh release create "$TAG_NAME" main.js manifest.json styles.css versions.json "$ZIP_NAME" \
-              --title "$TAG_NAME" \
-              --notes "WeChat Inbox Sync $TAG_NAME" \
-              --latest
+            echo "Release $TAG_NAME already exists; refusing to overwrite immutable release assets." >&2
+            exit 1
           fi
+
+          gh release create "$TAG_NAME" main.js manifest.json styles.css versions.json "$ZIP_NAME" \
+            --title "$TAG_NAME" \
+            --notes "WeChat Inbox Sync $TAG_NAME" \
+            --latest
+          rm -f "$ZIP_NAME"
+          cd ../..
+          node scripts/check-plugin-release-identity.js --postpublish --tag "$TAG_NAME"
