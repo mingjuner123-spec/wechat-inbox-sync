@@ -5,13 +5,22 @@ const fs = require('node:fs');
 const https = require('node:https');
 const path = require('node:path');
 const {
+  MAX_API_RESPONSE_BYTES,
+  MAX_SINGLE_ASSET_BYTES,
+  MAX_ZIP_COMPRESSED_BYTES,
   assertProbeCompleted,
+  assertResponseWithinLimit,
   assertZipMatchesExpected,
+  normalizeOfficialOriginUrl,
   parseZipEntries,
-  validateLocalReleaseSnapshot,
+  sanitizeErrorMessage,
+  validateAnnotatedTagPayload,
+  validateGitHubRefPayload,
   validateReleaseLookup,
   validateReleaseMetadata,
   validateReleasePayload,
+  validateRepositoryPayload,
+  validateTrustedLocalSnapshot,
 } = require('./plugin-release-identity-core');
 const { validateVersionTag } = require('./release-source-guard-core');
 
@@ -48,7 +57,7 @@ function errorDetail(error) {
   const stdout = Buffer.isBuffer(error.stdout)
     ? error.stdout.toString('utf8').trim()
     : typeof error.stdout === 'string' ? error.stdout.trim() : '';
-  return stderr || stdout || error.message || String(error);
+  return sanitizeErrorMessage(stderr || stdout || error.message || String(error));
 }
 
 function runGit(args, label) {
@@ -87,20 +96,26 @@ function readMetadata(tag) {
   });
 }
 
-function collectLocalSnapshot(phase, tag) {
-  return validateLocalReleaseSnapshot({
-    phase,
-    tag,
+function assertOfficialOrigin() {
+  const fetchOrigin = normalizeOfficialOriginUrl(
+    runGit(['remote', 'get-url', 'origin'], 'official origin URL'),
+  );
+  const pushOrigin = normalizeOfficialOriginUrl(
+    runGit(['remote', 'get-url', '--push', 'origin'], 'official origin push URL'),
+  );
+  if (fetchOrigin !== pushOrigin) {
+    throw new Error('origin fetch and push URLs must identify the same official repository');
+  }
+  return fetchOrigin;
+}
+
+function collectLocalInputs(tag) {
+  return {
     statusOutput: runGit(['status', '--porcelain', '--untracked-files=all'], 'clean status'),
     headOutput: runGit(['rev-parse', 'HEAD'], 'local HEAD'),
-    remoteMainOutput: runGit(['ls-remote', 'origin', 'refs/heads/main'], 'remote main'),
     tagTypeOutput: runGit(['cat-file', '-t', `refs/tags/${tag}`], `annotated tag ${tag}`),
     tagCommitOutput: runGit(['rev-parse', `refs/tags/${tag}^{}`], `peeled tag ${tag}`),
-    remoteTagOutput: runGit(
-      ['ls-remote', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`],
-      `remote tag ${tag}`,
-    ),
-  });
+  };
 }
 
 function validateDownloadUrl(urlString) {
@@ -119,9 +134,27 @@ function validateDownloadUrl(urlString) {
 function httpsGetBuffer(url, {
   accept = 'application/vnd.github+json',
   redirectsRemaining = MAX_REDIRECTS,
+  maxBytes = MAX_API_RESPONSE_BYTES,
+  totalTimeoutMs = GITHUB_API_TIMEOUT_MS,
+  deadlineMs = null,
 } = {}) {
   const parsed = url instanceof URL ? url : new URL(url);
+  const effectiveDeadlineMs = deadlineMs === null
+    ? Date.now() + totalTimeoutMs
+    : deadlineMs;
+  const remainingMs = effectiveDeadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    return Promise.reject(Object.assign(new Error('GitHub request timed out'), { code: 'ETIMEDOUT' }));
+  }
   return new Promise((resolve, reject) => {
+    let completed = false;
+    let totalTimer = null;
+    const finish = (callback, value) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(totalTimer);
+      callback(value);
+    };
     const request = https.get(parsed, {
       headers: {
         Accept: accept,
@@ -131,63 +164,151 @@ function httpsGetBuffer(url, {
       },
     }, (response) => {
       const statusCode = response.statusCode || 0;
+      const contentLength = Number(response.headers['content-length']);
+      if (Number.isFinite(contentLength)) {
+        try {
+          assertResponseWithinLimit(contentLength, maxBytes, 'HTTP response');
+        } catch (error) {
+          response.resume();
+          request.destroy();
+          finish(reject, error);
+          return;
+        }
+      }
       if ([301, 302, 303, 307, 308].includes(statusCode)) {
         response.resume();
         if (redirectsRemaining <= 0 || !response.headers.location) {
-          reject(new Error('GitHub download redirect limit exceeded'));
+          finish(reject, new Error('GitHub download redirect limit exceeded'));
           return;
         }
         let next;
         try {
           next = validateDownloadUrl(new URL(response.headers.location, parsed).toString());
         } catch (error) {
-          reject(error);
+          finish(reject, error);
           return;
         }
-        httpsGetBuffer(next, { accept, redirectsRemaining: redirectsRemaining - 1 })
-          .then(resolve, reject);
+        httpsGetBuffer(next, {
+          accept,
+          redirectsRemaining: redirectsRemaining - 1,
+          maxBytes,
+          totalTimeoutMs,
+          deadlineMs: effectiveDeadlineMs,
+        }).then(
+          (value) => finish(resolve, value),
+          (error) => finish(reject, error),
+        );
         return;
       }
       const chunks = [];
-      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-      response.on('end', () => resolve({
+      let receivedBytes = 0;
+      response.on('data', (chunk) => {
+        const bytes = Buffer.from(chunk);
+        receivedBytes += bytes.length;
+        try {
+          assertResponseWithinLimit(receivedBytes, maxBytes, 'HTTP response');
+        } catch (error) {
+          response.destroy();
+          request.destroy();
+          finish(reject, error);
+          return;
+        }
+        chunks.push(bytes);
+      });
+      response.on('end', () => finish(resolve, {
         statusCode,
         body: Buffer.concat(chunks),
       }));
+      response.on('error', (error) => finish(reject, error));
     });
-    request.setTimeout(GITHUB_API_TIMEOUT_MS, () => {
+    totalTimer = setTimeout(() => {
       request.destroy(Object.assign(new Error('GitHub request timed out'), { code: 'ETIMEDOUT' }));
-    });
-    request.on('error', reject);
+    }, remainingMs);
+    request.on('error', (error) => finish(reject, error));
   });
 }
 
-async function lookupRelease(tag, sampleIndex) {
+async function lookupFixedApi(relativePath, sampleIndex) {
   const nonce = `${Date.now()}-${sampleIndex}`;
-  const url = new URL(
-    `/repos/${OWNER}/${REPOSITORY}/releases/tags/${encodeURIComponent(tag)}`,
-    API_ORIGIN,
-  );
+  const url = new URL(relativePath, API_ORIGIN);
   url.searchParams.set('release_identity_probe', nonce);
   try {
-    return await httpsGetBuffer(url);
+    return await httpsGetBuffer(url, { maxBytes: MAX_API_RESPONSE_BYTES });
   } catch (error) {
     assertProbeCompleted({
       timedOut: error && error.code === 'ETIMEDOUT',
       error: error && error.code === 'ETIMEDOUT' ? null : error,
-      label: 'GitHub release lookup',
+      label: 'fixed GitHub API lookup',
     });
     throw error;
   }
 }
 
-function resolveReleaseTargetCommit(release, snapshot, tag) {
-  if (release.target_commitish === snapshot.remoteMain
-      || release.target_commitish === 'main'
-      || release.target_commitish === tag) {
-    return snapshot.remoteMain;
+function parseApiJson(response, label, { allowExact404 = false } = {}) {
+  if (allowExact404 && response.statusCode === 404) return null;
+  if (response.statusCode !== 200) {
+    throw new Error(`${label} must return exact HTTP 200, received ${response.statusCode}`);
   }
-  return release.target_commitish;
+  try {
+    return JSON.parse(response.body.toString('utf8'));
+  } catch (error) {
+    throw new Error(`${label} JSON parse failed: ${sanitizeErrorMessage(error.message)}`);
+  }
+}
+
+async function probeTrustedRepository(sampleIndex) {
+  const repositoryResponse = await lookupFixedApi(
+    `/repos/${OWNER}/${REPOSITORY}`,
+    `${sampleIndex}-repository`,
+  );
+  const repository = validateRepositoryPayload(
+    parseApiJson(repositoryResponse, 'official GitHub repository lookup'),
+  );
+  const branchRef = `refs/heads/${repository.defaultBranch}`;
+  const branchResponse = await lookupFixedApi(
+    `/repos/${OWNER}/${REPOSITORY}/git/ref/heads/${encodeURIComponent(repository.defaultBranch)}`,
+    `${sampleIndex}-default-branch`,
+  );
+  const branch = validateGitHubRefPayload(
+    parseApiJson(branchResponse, 'official GitHub default branch lookup'),
+    { expectedRef: branchRef, expectedType: 'commit' },
+  );
+  return {
+    ...repository,
+    defaultCommit: branch.sha,
+  };
+}
+
+async function probeTrustedTag(tag, sampleIndex, { allowAbsent = false } = {}) {
+  const tagResponse = await lookupFixedApi(
+    `/repos/${OWNER}/${REPOSITORY}/git/ref/tags/${encodeURIComponent(tag)}`,
+    `${sampleIndex}-tag-ref`,
+  );
+  const tagPayload = parseApiJson(
+    tagResponse,
+    'official GitHub tag ref lookup',
+    { allowExact404: allowAbsent },
+  );
+  if (tagPayload === null) return null;
+  const tagRef = validateGitHubRefPayload(tagPayload, {
+    expectedRef: `refs/tags/${tag}`,
+    expectedType: 'tag',
+  });
+  const annotatedResponse = await lookupFixedApi(
+    `/repos/${OWNER}/${REPOSITORY}/git/tags/${tagRef.sha}`,
+    `${sampleIndex}-annotated-tag`,
+  );
+  return validateAnnotatedTagPayload(
+    parseApiJson(annotatedResponse, 'official GitHub annotated tag lookup'),
+    { tag, expectedTagObject: tagRef.sha },
+  );
+}
+
+async function lookupRelease(tag, sampleIndex) {
+  return lookupFixedApi(
+    `/repos/${OWNER}/${REPOSITORY}/releases/tags/${encodeURIComponent(tag)}`,
+    `${sampleIndex}-release`,
+  );
 }
 
 function requiredAssets(tag) {
@@ -246,7 +367,10 @@ async function verifyPublishedAssetBytes(release, tag) {
   for (const name of ['main.js', 'manifest.json', 'styles.css', 'versions.json']) {
     const asset = assets.get(name);
     const url = validateDownloadUrl(asset.browser_download_url);
-    const response = await httpsGetBuffer(url, { accept: 'application/octet-stream' });
+    const response = await httpsGetBuffer(url, {
+      accept: 'application/octet-stream',
+      maxBytes: MAX_SINGLE_ASSET_BYTES,
+    });
     if (response.statusCode !== 200) {
       throw new Error(`Release asset ${name} returned HTTP ${response.statusCode}`);
     }
@@ -257,7 +381,10 @@ async function verifyPublishedAssetBytes(release, tag) {
   }
   const zipName = `wechat-inbox-sync-${tag}.zip`;
   const zipUrl = validateDownloadUrl(assets.get(zipName).browser_download_url);
-  const zipResponse = await httpsGetBuffer(zipUrl, { accept: 'application/octet-stream' });
+  const zipResponse = await httpsGetBuffer(zipUrl, {
+    accept: 'application/octet-stream',
+    maxBytes: MAX_ZIP_COMPRESSED_BYTES,
+  });
   if (zipResponse.statusCode !== 200) {
     throw new Error(`Release asset ${zipName} returned HTTP ${zipResponse.statusCode}`);
   }
@@ -279,8 +406,18 @@ function parseArguments(args) {
 }
 
 async function runPrepublish(tag) {
+  assertOfficialOrigin();
   readMetadata(tag);
-  const snapshot = collectLocalSnapshot('prepublish', tag);
+  const localInputs = collectLocalInputs(tag);
+  const repository = await probeTrustedRepository(1);
+  const remoteTag = await probeTrustedTag(tag, 1, { allowAbsent: true });
+  const snapshot = validateTrustedLocalSnapshot({
+    phase: 'prepublish',
+    tag,
+    ...localInputs,
+    trustedDefaultCommit: repository.defaultCommit,
+    trustedTagCommit: remoteTag ? remoteTag.commit : null,
+  });
   const lookup = await lookupRelease(tag, 1);
   validateReleaseLookup({ phase: 'prepublish', ...lookup });
   process.stdout.write(
@@ -289,25 +426,37 @@ async function runPrepublish(tag) {
 }
 
 async function runPostpublish(tag) {
+  assertOfficialOrigin();
   readMetadata(tag);
   const expected = requiredAssets(tag);
   let lastRelease = null;
   let finalCommit = null;
   for (let sample = 1; sample <= 3; sample += 1) {
-    const snapshot = collectLocalSnapshot('postpublish', tag);
+    const localInputs = collectLocalInputs(tag);
+    const repository = await probeTrustedRepository(sample);
+    const remoteTag = await probeTrustedTag(tag, sample);
+    const snapshot = validateTrustedLocalSnapshot({
+      phase: 'postpublish',
+      tag,
+      ...localInputs,
+      trustedDefaultCommit: repository.defaultCommit,
+      trustedTagCommit: remoteTag.commit,
+    });
     const lookup = await lookupRelease(tag, sample);
     const release = validateReleaseLookup({ phase: 'postpublish', ...lookup });
-    const resolvedTarget = resolveReleaseTargetCommit(release, snapshot, tag);
-    lastRelease = validateReleasePayload({
-      ...release,
-      target_commitish: resolvedTarget,
-    }, {
+    lastRelease = validateReleasePayload(release, {
       tag,
-      expectedCommit: snapshot.remoteMain,
+      expectedCommit: repository.defaultCommit,
       expectedAssets: expected,
       nowMs: Date.now(),
+      trustedRefs: {
+        defaultBranch: repository.defaultBranch,
+        defaultCommit: repository.defaultCommit,
+        tag,
+        tagCommit: remoteTag.commit,
+      },
     });
-    finalCommit = snapshot.remoteMain;
+    finalCommit = snapshot.trustedDefaultCommit;
   }
   await verifyPublishedAssetBytes(lastRelease, tag);
   process.stdout.write(
@@ -330,7 +479,7 @@ async function main(args = process.argv.slice(2)) {
 
 if (require.main === module) {
   main().catch((error) => {
-    process.stderr.write(`Plugin release identity failed: ${error.message}\n`);
+    process.stderr.write(`Plugin release identity failed: ${sanitizeErrorMessage(error.message)}\n`);
     process.exitCode = 1;
   });
 }

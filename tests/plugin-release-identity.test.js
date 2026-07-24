@@ -24,6 +24,7 @@ const REQUIRED_ASSETS = [
   'versions.json',
   `wechat-inbox-sync-${TAG}.zip`,
 ];
+const OFFICIAL_ORIGIN = 'https://github.com/mingjuner123-spec/wechat-inbox-sync.git';
 
 function git(cwd, args) {
   return childProcess.execFileSync('git', args, {
@@ -54,6 +55,18 @@ function createBareFixture(t) {
   git(work, ['push', '-u', 'origin', 'main']);
   git(work, ['tag', '-a', TAG, '-m', TAG]);
   return { bare, work };
+}
+
+function copyProductionIdentityScripts(targetRoot) {
+  const targetScripts = path.join(targetRoot, 'scripts');
+  fs.mkdirSync(targetScripts, { recursive: true });
+  for (const name of [
+    'release-source-guard-core.js',
+    'plugin-release-identity-core.js',
+    'check-plugin-release-identity.js',
+  ]) {
+    fs.copyFileSync(path.join(repoRoot, 'scripts', name), path.join(targetScripts, name));
+  }
 }
 
 function makeStoredZip(entries) {
@@ -113,6 +126,106 @@ test('the public release identity core and CLI are self-contained files', () => 
   assert.equal(typeof core.validateReleasePayload, 'function');
   assert.equal(typeof core.parseZipEntries, 'function');
   assert.equal(typeof core.assertZipMatchesExpected, 'function');
+  assert.equal(typeof core.normalizeOfficialOriginUrl, 'function');
+  assert.equal(typeof core.validateRepositoryPayload, 'function');
+  assert.equal(typeof core.validateGitHubRefPayload, 'function');
+  assert.equal(typeof core.validateAnnotatedTagPayload, 'function');
+  assert.equal(typeof core.resolveTrustedReleaseTarget, 'function');
+  assert.equal(typeof core.sanitizeErrorMessage, 'function');
+});
+
+test('canonical origin accepts only credential-free official GitHub URL equivalents', () => {
+  for (const origin of [
+    OFFICIAL_ORIGIN,
+    'https://github.com/mingjuner123-spec/wechat-inbox-sync',
+    'git@github.com:mingjuner123-spec/wechat-inbox-sync.git',
+    'ssh://git@github.com/mingjuner123-spec/wechat-inbox-sync.git',
+  ]) {
+    assert.equal(core.normalizeOfficialOriginUrl(`${origin}\n`), OFFICIAL_ORIGIN);
+  }
+  for (const origin of [
+    'https://github.com/attacker/wechat-inbox-sync.git',
+    'https://user:password@github.com/mingjuner123-spec/wechat-inbox-sync.git',
+    'https://github.com/mingjuner123-spec/wechat-inbox-sync.git?token=secret',
+    'https://github.com/mingjuner123-spec/wechat-inbox-sync.git#fragment',
+    'git@evil.example:mingjuner123-spec/wechat-inbox-sync.git',
+  ]) {
+    assert.throws(
+      () => core.normalizeOfficialOriginUrl(`${origin}\n`),
+      /official|origin|repository/i,
+    );
+  }
+});
+
+test('trusted repository metadata resolves the real default branch instead of assuming main', () => {
+  const repository = core.validateRepositoryPayload({
+    full_name: 'mingjuner123-spec/wechat-inbox-sync',
+    default_branch: 'stable',
+    html_url: 'https://github.com/mingjuner123-spec/wechat-inbox-sync',
+  });
+  assert.equal(repository.defaultBranch, 'stable');
+  assert.equal(core.validateGitHubRefPayload({
+    ref: 'refs/heads/stable',
+    object: { type: 'commit', sha: SHA_A },
+  }, {
+    expectedRef: 'refs/heads/stable',
+    expectedType: 'commit',
+  }).sha, SHA_A);
+  assert.throws(() => core.validateGitHubRefPayload({
+    ref: 'refs/heads/main',
+    object: { type: 'commit', sha: SHA_A },
+  }, {
+    expectedRef: 'refs/heads/stable',
+    expectedType: 'commit',
+  }), /default|ref|stable/i);
+});
+
+test('trusted annotated tag resolution rejects lightweight tags and peeled SHA drift', () => {
+  assert.throws(() => core.validateGitHubRefPayload({
+    ref: `refs/tags/${TAG}`,
+    object: { type: 'commit', sha: SHA_A },
+  }, {
+    expectedRef: `refs/tags/${TAG}`,
+    expectedType: 'tag',
+  }), /annotated|type|tag/i);
+  const tagRef = core.validateGitHubRefPayload({
+    ref: `refs/tags/${TAG}`,
+    object: { type: 'tag', sha: TAG_OBJECT },
+  }, {
+    expectedRef: `refs/tags/${TAG}`,
+    expectedType: 'tag',
+  });
+  assert.equal(core.validateAnnotatedTagPayload({
+    tag: TAG,
+    sha: TAG_OBJECT,
+    object: { type: 'commit', sha: SHA_A },
+  }, {
+    tag: TAG,
+    expectedTagObject: tagRef.sha,
+  }).commit, SHA_A);
+  assert.throws(() => core.validateAnnotatedTagPayload({
+    tag: TAG,
+    sha: TAG_OBJECT,
+    object: { type: 'commit', sha: SHA_B },
+  }, {
+    tag: TAG,
+    expectedTagObject: tagRef.sha,
+    expectedCommit: SHA_A,
+  }), /commit|drift|SHA/i);
+});
+
+test('Release target text resolves only through trusted default-branch or tag refs', () => {
+  const trusted = {
+    defaultBranch: 'stable',
+    defaultCommit: SHA_A,
+    tag: TAG,
+    tagCommit: SHA_A,
+  };
+  assert.equal(core.resolveTrustedReleaseTarget(SHA_A, trusted), SHA_A);
+  assert.equal(core.resolveTrustedReleaseTarget('stable', trusted), SHA_A);
+  assert.equal(core.resolveTrustedReleaseTarget(TAG, trusted), SHA_A);
+  assert.throws(() => core.resolveTrustedReleaseTarget('main', trusted), /target|trusted|main/i);
+  assert.throws(() => core.resolveTrustedReleaseTarget(SHA_B, trusted), /target|commit|SHA/i);
 });
 
 test('local snapshot parsing rejects malformed Git output and dirty worktrees', () => {
@@ -265,6 +378,7 @@ test('postpublish release payload rejects SHA drift, missing assets, stale sampl
     assets: REQUIRED_ASSETS.map((name) => ({
       name,
       browser_download_url: `https://github.com/example/${encodeURIComponent(name)}`,
+      size: name.endsWith('.zip') ? 1024 : 128,
     })),
   };
   assert.equal(core.validateReleasePayload(release, {
@@ -315,6 +429,29 @@ test('timeouts and probe failures are never interpreted as an absent release', (
   );
 });
 
+test('response and Release asset size limits fail before buffering oversized data', () => {
+  assert.throws(
+    () => core.assertResponseWithinLimit(1025, 1024, 'GitHub API response'),
+    /size|limit|large/i,
+  );
+  const release = {
+    tag_name: TAG,
+    target_commitish: SHA_A,
+    published_at: '2026-07-24T11:30:00.000Z',
+    assets: REQUIRED_ASSETS.map((name) => ({
+      name,
+      browser_download_url: `https://github.com/example/${encodeURIComponent(name)}`,
+      size: name.endsWith('.zip') ? core.MAX_ZIP_COMPRESSED_BYTES + 1 : 128,
+    })),
+  };
+  assert.throws(() => core.validateReleasePayload(release, {
+    tag: TAG,
+    expectedCommit: SHA_A,
+    expectedAssets: REQUIRED_ASSETS,
+    nowMs: Date.parse('2026-07-24T12:00:00.000Z'),
+  }), /asset|ZIP|size|large/i);
+});
+
 test('ZIP parser validates exact entry names and bytes for stored and deflated members', () => {
   const stored = makeStoredZip({
     'main.js': 'main',
@@ -345,6 +482,54 @@ test('ZIP parser validates exact entry names and bytes for stored and deflated m
   assert.equal(core.parseZipEntries(deflatedZip).get('main.js').toString('utf8'), 'compressed');
 });
 
+test('ZIP parser rejects central/local filename confusion and unsupported local flags', () => {
+  const mismatch = makeStoredZip({ 'main.js': 'main' });
+  Buffer.from('../a.js', 'utf8').copy(mismatch, 30);
+  assert.throws(() => core.parseZipEntries(mismatch), /local|filename|unsafe|mismatch/i);
+
+  const descriptor = makeStoredZip({ 'main.js': 'main' });
+  descriptor.writeUInt16LE(0x8, 6);
+  const centralOffset = descriptor.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  descriptor.writeUInt16LE(0x8, centralOffset + 8);
+  assert.throws(() => core.parseZipEntries(descriptor), /descriptor|flag|unsupported/i);
+
+  const sizeMismatch = makeStoredZip({ 'main.js': 'main' });
+  sizeMismatch.writeUInt32LE(1, 18);
+  assert.throws(() => core.parseZipEntries(sizeMismatch), /local|size|central|mismatch/i);
+
+  const directoryMismatch = makeStoredZip({ 'safe/': '' });
+  Buffer.from('../x/', 'utf8').copy(directoryMismatch, 30);
+  assert.throws(() => core.parseZipEntries(directoryMismatch), /local|filename|unsafe|mismatch/i);
+});
+
+test('ZIP parser enforces compressed, per-entry, and total expanded limits before inflation', () => {
+  const zip = makeStoredZip({
+    'a.txt': '12345',
+    'b.txt': '67890',
+  });
+  assert.throws(() => core.parseZipEntries(zip, {
+    maxCompressedBytes: zip.length - 1,
+  }), /compressed|size|limit/i);
+  assert.throws(() => core.parseZipEntries(zip, {
+    maxEntryUncompressedBytes: 4,
+  }), /entry|expanded|size|limit/i);
+  assert.throws(() => core.parseZipEntries(zip, {
+    maxTotalUncompressedBytes: 9,
+  }), /total|expanded|size|limit/i);
+});
+
+test('all surfaced errors redact URL credentials, query secrets, bearer tokens, and key-value credentials', () => {
+  const sanitized = core.sanitizeErrorMessage(
+    'failed https://user:pass@github.com/repo.git?token=query-secret#frag '
+    + 'Authorization: Bearer ghp_supersecret token=abc123 api_key=xyz secret: hidden',
+  );
+  for (const secret of ['user', 'pass', 'query-secret', 'ghp_supersecret', 'abc123', 'xyz', 'hidden']) {
+    assert.equal(sanitized.includes(secret), false, `must redact ${secret}`);
+  }
+  assert.match(sanitized, /\[REDACTED\]/);
+  assert.equal(sanitized.includes('?'), false);
+});
+
 test('release workflow refuses existing releases and never overwrites assets', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   assert.doesNotMatch(workflow, /--clobber/);
@@ -365,4 +550,84 @@ test('production CLI exposes only fixed prepublish/postpublish modes and no comm
   assert.match(cli, /wechat-inbox-sync/);
   assert.doesNotMatch(cli, /--command|--git-bin|--api-url|process\.env\.GITHUB_API_URL/);
   assert.doesNotMatch(cli, /shell:\s*true/);
+  assert.match(cli, /\['remote', 'get-url', 'origin'\]/);
+  assert.match(cli, /\/repos\/\$\{OWNER\}\/\$\{REPOSITORY\}/);
+  assert.match(cli, /default_branch|defaultBranch/);
+  assert.match(cli, /effectiveDeadlineMs\s*-\s*Date\.now\(\)/);
+  assert.doesNotMatch(cli, /resolveReleaseTargetCommit/);
+});
+
+test('production CLI rejects a fork origin before any fixed GitHub Release lookup', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-release-cli-fork-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+  git(fixtureRoot, ['init', '-b', 'main']);
+  git(fixtureRoot, ['config', 'user.email', 'release-test@example.invalid']);
+  git(fixtureRoot, ['config', 'user.name', 'Release Test']);
+  git(fixtureRoot, ['remote', 'add', 'origin', 'https://github.com/attacker/wechat-inbox-sync.git']);
+  writeFixtureFile(path.join(fixtureRoot, 'manifest.json'), JSON.stringify({
+    version: TAG,
+    minAppVersion: '1.0.0',
+  }));
+  writeFixtureFile(path.join(fixtureRoot, 'versions.json'), JSON.stringify({ [TAG]: '1.0.0' }));
+  writeFixtureFile(
+    path.join(fixtureRoot, 'obsidian-plugin/wechat-inbox-sync/manifest.json'),
+    JSON.stringify({ version: TAG, minAppVersion: '1.0.0' }),
+  );
+  writeFixtureFile(
+    path.join(fixtureRoot, 'obsidian-plugin/wechat-inbox-sync/versions.json'),
+    JSON.stringify({ [TAG]: '1.0.0' }),
+  );
+  copyProductionIdentityScripts(fixtureRoot);
+  git(fixtureRoot, ['add', '.']);
+  git(fixtureRoot, ['commit', '-m', 'fixture']);
+  git(fixtureRoot, ['tag', '-a', TAG, '-m', TAG]);
+  const result = childProcess.spawnSync(
+    process.execPath,
+    ['scripts/check-plugin-release-identity.js', '--prepublish', '--tag', TAG],
+    {
+      cwd: fixtureRoot,
+      encoding: 'utf8',
+      timeout: 10000,
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /official|origin|repository/i);
+});
+
+test('production CLI rejects a fork push URL even when fetch origin is official', (t) => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-release-cli-push-fork-'));
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+  git(fixtureRoot, ['init', '-b', 'main']);
+  git(fixtureRoot, ['config', 'user.email', 'release-test@example.invalid']);
+  git(fixtureRoot, ['config', 'user.name', 'Release Test']);
+  git(fixtureRoot, ['remote', 'add', 'origin', OFFICIAL_ORIGIN]);
+  git(fixtureRoot, ['remote', 'set-url', '--push', 'origin', 'https://github.com/attacker/wechat-inbox-sync.git']);
+  writeFixtureFile(path.join(fixtureRoot, 'manifest.json'), JSON.stringify({
+    version: TAG,
+    minAppVersion: '1.0.0',
+  }));
+  writeFixtureFile(path.join(fixtureRoot, 'versions.json'), JSON.stringify({ [TAG]: '1.0.0' }));
+  writeFixtureFile(
+    path.join(fixtureRoot, 'obsidian-plugin/wechat-inbox-sync/manifest.json'),
+    JSON.stringify({ version: TAG, minAppVersion: '1.0.0' }),
+  );
+  writeFixtureFile(
+    path.join(fixtureRoot, 'obsidian-plugin/wechat-inbox-sync/versions.json'),
+    JSON.stringify({ [TAG]: '1.0.0' }),
+  );
+  copyProductionIdentityScripts(fixtureRoot);
+  git(fixtureRoot, ['add', '.']);
+  git(fixtureRoot, ['commit', '-m', 'fixture']);
+  git(fixtureRoot, ['tag', '-a', TAG, '-m', TAG]);
+  const result = childProcess.spawnSync(
+    process.execPath,
+    ['scripts/check-plugin-release-identity.js', '--prepublish', '--tag', TAG],
+    {
+      cwd: fixtureRoot,
+      encoding: 'utf8',
+      timeout: 10000,
+    },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /official|origin|repository/i);
 });

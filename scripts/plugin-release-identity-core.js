@@ -11,6 +11,16 @@ const {
 } = require('./release-source-guard-core');
 
 const MAX_RELEASE_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_SINGLE_ASSET_BYTES = 16 * 1024 * 1024;
+const MAX_ZIP_COMPRESSED_BYTES = 64 * 1024 * 1024;
+const MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
+const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
+const MAX_ZIP_ENTRIES = 4096;
+const OFFICIAL_OWNER = 'mingjuner123-spec';
+const OFFICIAL_REPOSITORY = 'wechat-inbox-sync';
+const OFFICIAL_FULL_NAME = `${OFFICIAL_OWNER}/${OFFICIAL_REPOSITORY}`;
+const OFFICIAL_ORIGIN = `https://github.com/${OFFICIAL_FULL_NAME}.git`;
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
 const ZIP_LOCAL_SIGNATURE = 0x04034b50;
@@ -31,6 +41,176 @@ function requireObject(value, label) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sanitizeErrorMessage(value) {
+  let text = typeof value === 'string' ? value : String(value);
+  text = text.replace(/\bhttps?:\/\/[^\s"'<>]+/gi, (candidate) => {
+    try {
+      const parsed = new URL(candidate);
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString();
+    } catch {
+      return '[REDACTED_URL]';
+    }
+  });
+  text = text.replace(/\bBearer\s+[A-Za-z0-9._~+/-]+/gi, 'Bearer [REDACTED]');
+  text = text.replace(
+    /\b(authorization|access[_-]?token|api[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password)\s*[:=]\s*[^\s,;]+/gi,
+    '$1=[REDACTED]',
+  );
+  text = text.replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]+\b/g, '[REDACTED]');
+  text = text.replace(/\bgithub_pat_[A-Za-z0-9_]+\b/g, '[REDACTED]');
+  return text;
+}
+
+function normalizeOfficialOriginUrl(output) {
+  if (typeof output !== 'string') {
+    throw new TypeError('origin URL output must be a string');
+  }
+  const match = output.match(/^([^\r\n]+)\r?\n?$/);
+  if (!match) {
+    throw new Error('origin URL output must contain exactly one repository URL');
+  }
+  const origin = match[1];
+  const scpMatch = origin.match(/^git@github\.com:([^/?#]+)\/([^/?#]+?)(?:\.git)?$/);
+  if (scpMatch) {
+    if (`${scpMatch[1]}/${scpMatch[2]}` !== OFFICIAL_FULL_NAME) {
+      throw new Error('origin must point to the official plugin repository');
+    }
+    return OFFICIAL_ORIGIN;
+  }
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new Error('origin must be an official GitHub HTTPS or SSH repository URL');
+  }
+  if (parsed.search || parsed.hash || parsed.password) {
+    throw new Error('origin URL must not contain credentials, query parameters, or fragments');
+  }
+  const protocol = parsed.protocol.toLowerCase();
+  const host = parsed.hostname.toLowerCase();
+  const isHttps = protocol === 'https:'
+    && parsed.username === ''
+    && parsed.port === '';
+  const isSsh = protocol === 'ssh:'
+    && parsed.username === 'git'
+    && parsed.port === '';
+  if (host !== 'github.com' || (!isHttps && !isSsh)) {
+    throw new Error('origin must use the official GitHub repository endpoint');
+  }
+  const pathname = parsed.pathname.replace(/\.git$/, '');
+  if (pathname !== `/${OFFICIAL_FULL_NAME}`) {
+    throw new Error('origin must point to the official plugin repository');
+  }
+  return OFFICIAL_ORIGIN;
+}
+
+function validateGitBranchName(branch) {
+  if (typeof branch !== 'string'
+      || !branch
+      || branch.length > 255
+      || branch.startsWith('/')
+      || branch.endsWith('/')
+      || branch.endsWith('.')
+      || branch.includes('..')
+      || branch.includes('@{')
+      || /[\x00-\x20\x7f~^:?*[\]\\]/.test(branch)) {
+    throw new Error('GitHub default_branch is not a valid Git branch name');
+  }
+  return branch;
+}
+
+function validateRepositoryPayload(payload) {
+  requireObject(payload, 'GitHub repository response');
+  if (payload.full_name !== OFFICIAL_FULL_NAME) {
+    throw new Error('GitHub repository response is not the official plugin repository');
+  }
+  if (payload.html_url !== `https://github.com/${OFFICIAL_FULL_NAME}`) {
+    throw new Error('GitHub repository html_url differs from the official plugin repository');
+  }
+  return {
+    fullName: payload.full_name,
+    defaultBranch: validateGitBranchName(payload.default_branch),
+  };
+}
+
+function validateGitHubRefPayload(payload, { expectedRef, expectedType } = {}) {
+  requireObject(payload, 'GitHub ref response');
+  if (typeof expectedRef !== 'string' || !expectedRef.startsWith('refs/')) {
+    throw new Error('expected GitHub ref must be a complete refs/* name');
+  }
+  if (payload.ref !== expectedRef) {
+    throw new Error(`GitHub ref ${payload.ref} differs from expected ref ${expectedRef}`);
+  }
+  requireObject(payload.object, 'GitHub ref object');
+  if (payload.object.type !== expectedType) {
+    throw new Error(
+      `GitHub ref ${expectedRef} type ${payload.object.type} differs from required ${expectedType}`
+      + (expectedType === 'tag' ? ' annotated tag' : ''),
+    );
+  }
+  const sha = parseCommitOutput(`${payload.object.sha}\n`, `GitHub ref ${expectedRef} SHA`);
+  return { ref: expectedRef, type: expectedType, sha };
+}
+
+function validateAnnotatedTagPayload(payload, {
+  tag,
+  expectedTagObject,
+  expectedCommit,
+} = {}) {
+  validateVersionTag(tag);
+  requireObject(payload, 'GitHub annotated tag response');
+  const tagObject = parseCommitOutput(`${payload.sha}\n`, `GitHub tag ${tag} object SHA`);
+  const expectedObject = parseCommitOutput(
+    `${expectedTagObject}\n`,
+    `expected GitHub tag ${tag} object SHA`,
+  );
+  if (tagObject !== expectedObject || payload.tag !== tag) {
+    throw new Error(`GitHub annotated tag ${tag} object identity drift`);
+  }
+  requireObject(payload.object, 'GitHub annotated tag target');
+  if (payload.object.type !== 'commit') {
+    throw new Error(`GitHub annotated tag ${tag} must target a commit`);
+  }
+  const commit = parseCommitOutput(
+    `${payload.object.sha}\n`,
+    `GitHub annotated tag ${tag} commit SHA`,
+  );
+  if (expectedCommit && commit !== expectedCommit) {
+    throw new Error(
+      `GitHub annotated tag ${tag} commit ${commit} differs from expected SHA ${expectedCommit}`,
+    );
+  }
+  return { tag, tagObject, commit };
+}
+
+function resolveTrustedReleaseTarget(targetCommitish, {
+  defaultBranch,
+  defaultCommit,
+  tag,
+  tagCommit,
+} = {}) {
+  validateGitBranchName(defaultBranch);
+  validateVersionTag(tag);
+  const trustedDefaultCommit = parseCommitOutput(
+    `${defaultCommit}\n`,
+    'trusted default branch commit',
+  );
+  const trustedTagCommit = parseCommitOutput(`${tagCommit}\n`, 'trusted tag commit');
+  if (trustedDefaultCommit !== trustedTagCommit) {
+    throw new Error('trusted default branch and annotated tag commit identities differ');
+  }
+  if (targetCommitish === trustedDefaultCommit
+      || targetCommitish === defaultBranch
+      || targetCommitish === tag) {
+    return trustedDefaultCommit;
+  }
+  throw new Error(`Release target_commitish is not a trusted default branch, tag, or commit SHA`);
 }
 
 function parseTagType(output) {
@@ -98,6 +278,58 @@ function validateLocalReleaseSnapshot({
   return { phase, tag, head, remoteMain, tagCommit, remoteTag };
 }
 
+function validateTrustedLocalSnapshot({
+  phase,
+  tag,
+  statusOutput,
+  headOutput,
+  tagTypeOutput,
+  tagCommitOutput,
+  trustedDefaultCommit,
+  trustedTagCommit = null,
+} = {}) {
+  if (phase !== 'prepublish' && phase !== 'postpublish') {
+    throw new Error('release phase must be prepublish or postpublish');
+  }
+  validateVersionTag(tag);
+  assertCleanStatus(statusOutput);
+  const head = parseCommitOutput(headOutput, 'local HEAD');
+  const localTagCommit = parseCommitOutput(
+    tagCommitOutput,
+    `local tag ${tag} peeled commit`,
+  );
+  const defaultCommit = parseCommitOutput(
+    `${trustedDefaultCommit}\n`,
+    'trusted GitHub default branch commit',
+  );
+  parseTagType(tagTypeOutput);
+  assertHeadMatchesRemote(head, defaultCommit);
+  assertTagMatchesHead(localTagCommit, head);
+  if (phase === 'prepublish') {
+    if (trustedTagCommit !== null) {
+      throw new Error(`official remote tag ${tag} already exists`);
+    }
+  } else {
+    const remoteTagCommit = parseCommitOutput(
+      `${trustedTagCommit}\n`,
+      `trusted GitHub tag ${tag} commit`,
+    );
+    if (remoteTagCommit !== localTagCommit) {
+      throw new Error(
+        `trusted GitHub tag ${tag} commit ${remoteTagCommit} differs from local tag commit ${localTagCommit}`,
+      );
+    }
+  }
+  return {
+    phase,
+    tag,
+    head,
+    tagCommit: localTagCommit,
+    trustedDefaultCommit: defaultCommit,
+    trustedTagCommit,
+  };
+}
+
 function parseJsonBuffer(bytes, label) {
   requireBuffer(bytes, label);
   let parsed;
@@ -148,7 +380,18 @@ function assertProbeCompleted({ timedOut = false, error = null, label = 'probe' 
     throw new Error(`${label} timed out`);
   }
   if (error) {
-    throw new Error(`${label} failed: ${error.message || String(error)}`);
+    throw new Error(`${label} failed: ${sanitizeErrorMessage(error.message || String(error))}`);
+  }
+  return true;
+}
+
+function assertResponseWithinLimit(receivedBytes, limitBytes, label = 'response') {
+  if (!Number.isSafeInteger(receivedBytes) || receivedBytes < 0
+      || !Number.isSafeInteger(limitBytes) || limitBytes < 0) {
+    throw new TypeError(`${label} size and limit must be non-negative safe integers`);
+  }
+  if (receivedBytes > limitBytes) {
+    throw new Error(`${label} size exceeds the configured limit`);
   }
   return true;
 }
@@ -175,6 +418,7 @@ function validateReleasePayload(release, {
   expectedCommit,
   expectedAssets,
   nowMs = Date.now(),
+  trustedRefs = null,
 } = {}) {
   requireObject(release, 'GitHub Release');
   validateVersionTag(tag);
@@ -182,7 +426,10 @@ function validateReleasePayload(release, {
   if (release.tag_name !== tag) {
     throw new Error(`Release tag ${release.tag_name} differs from expected tag ${tag}`);
   }
-  if (release.target_commitish !== expectedCommit) {
+  const resolvedTarget = trustedRefs
+    ? resolveTrustedReleaseTarget(release.target_commitish, trustedRefs)
+    : release.target_commitish;
+  if (resolvedTarget !== expectedCommit) {
     throw new Error(
       `Release target commit ${release.target_commitish} differs from expected SHA ${expectedCommit}`,
     );
@@ -201,6 +448,13 @@ function validateReleasePayload(release, {
     if (typeof asset.browser_download_url !== 'string' || !asset.browser_download_url) {
       throw new Error(`GitHub Release asset ${asset.name} is missing a download URL`);
     }
+    if (!Number.isSafeInteger(asset.size) || asset.size < 0) {
+      throw new Error(`GitHub Release asset ${asset.name} has an invalid size`);
+    }
+    const limit = asset.name.endsWith('.zip')
+      ? MAX_ZIP_COMPRESSED_BYTES
+      : MAX_SINGLE_ASSET_BYTES;
+    assertResponseWithinLimit(asset.size, limit, `GitHub Release asset ${asset.name}`);
     return asset.name;
   });
   const expectedSorted = [...expectedAssets].sort();
@@ -237,8 +491,14 @@ function validateZipEntryName(name) {
   }
 }
 
-function parseZipEntries(zipBytes) {
+function parseZipEntries(zipBytes, {
+  maxCompressedBytes = MAX_ZIP_COMPRESSED_BYTES,
+  maxEntryUncompressedBytes = MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
+  maxTotalUncompressedBytes = MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES,
+  maxEntries = MAX_ZIP_ENTRIES,
+} = {}) {
   requireBuffer(zipBytes, 'ZIP bytes');
+  assertResponseWithinLimit(zipBytes.length, maxCompressedBytes, 'ZIP compressed bytes');
   if (zipBytes.length < 22) throw new Error('ZIP is truncated');
   const eocdOffset = findEndOfCentralDirectory(zipBytes);
   const diskNumber = zipBytes.readUInt16LE(eocdOffset + 4);
@@ -252,7 +512,13 @@ function parseZipEntries(zipBytes) {
   if (centralOffset + centralSize > eocdOffset) {
     throw new Error('ZIP central directory is outside the archive bounds');
   }
+  if (entryCount > maxEntries) {
+    throw new Error('ZIP entry count exceeds the configured limit');
+  }
   const entries = new Map();
+  const seenNames = new Set();
+  const occupiedRanges = [];
+  let totalUncompressedBytes = 0;
   let offset = centralOffset;
   for (let index = 0; index < entryCount; index += 1) {
     if (offset + 46 > zipBytes.length || zipBytes.readUInt32LE(offset) !== ZIP_CENTRAL_SIGNATURE) {
@@ -260,6 +526,7 @@ function parseZipEntries(zipBytes) {
     }
     const flags = zipBytes.readUInt16LE(offset + 8);
     const method = zipBytes.readUInt16LE(offset + 10);
+    const crc32 = zipBytes.readUInt32LE(offset + 16);
     const compressedSize = zipBytes.readUInt32LE(offset + 20);
     const uncompressedSize = zipBytes.readUInt32LE(offset + 24);
     const nameLength = zipBytes.readUInt16LE(offset + 28);
@@ -273,31 +540,90 @@ function parseZipEntries(zipBytes) {
     }
     const name = zipBytes.subarray(nameStart, nameEnd).toString('utf8');
     validateZipEntryName(name);
+    if (seenNames.has(name)) throw new Error(`duplicate ZIP entry: ${name}`);
+    seenNames.add(name);
     offset = nameEnd + extraLength + commentLength;
-    if (name.endsWith('/')) continue;
+    const isDirectory = name.endsWith('/');
     if ((flags & 0x1) !== 0) throw new Error(`encrypted ZIP entry is not allowed: ${name}`);
+    if ((flags & 0x8) !== 0) throw new Error(`ZIP data descriptor flag is unsupported: ${name}`);
+    if ((flags & ~0x800) !== 0) throw new Error(`unsupported ZIP flags for ${name}`);
     if (method !== 0 && method !== 8) {
       throw new Error(`unsupported ZIP compression method ${method} for ${name}`);
+    }
+    if (uncompressedSize > maxEntryUncompressedBytes) {
+      throw new Error(`ZIP entry expanded size exceeds the configured limit for ${name}`);
+    }
+    totalUncompressedBytes += uncompressedSize;
+    if (totalUncompressedBytes > maxTotalUncompressedBytes) {
+      throw new Error('ZIP total expanded size exceeds the configured limit');
     }
     if (localOffset + 30 > zipBytes.length
         || zipBytes.readUInt32LE(localOffset) !== ZIP_LOCAL_SIGNATURE) {
       throw new Error(`ZIP local header is malformed for ${name}`);
     }
+    const localFlags = zipBytes.readUInt16LE(localOffset + 6);
+    const localMethod = zipBytes.readUInt16LE(localOffset + 8);
+    const localCrc32 = zipBytes.readUInt32LE(localOffset + 14);
+    const localCompressedSize = zipBytes.readUInt32LE(localOffset + 18);
+    const localUncompressedSize = zipBytes.readUInt32LE(localOffset + 22);
     const localNameLength = zipBytes.readUInt16LE(localOffset + 26);
     const localExtraLength = zipBytes.readUInt16LE(localOffset + 28);
-    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const localNameStart = localOffset + 30;
+    const localNameEnd = localNameStart + localNameLength;
+    const dataStart = localNameEnd + localExtraLength;
     const dataEnd = dataStart + compressedSize;
-    if (dataEnd > zipBytes.length) throw new Error(`ZIP data is truncated for ${name}`);
+    if (localNameEnd > zipBytes.length || dataStart > zipBytes.length) {
+      throw new Error(`ZIP local header name or extra field is truncated for ${name}`);
+    }
+    const localNameBytes = zipBytes.subarray(localNameStart, localNameEnd);
+    const centralNameBytes = zipBytes.subarray(nameStart, nameEnd);
+    const localName = localNameBytes.toString('utf8');
+    validateZipEntryName(localName);
+    if (!localNameBytes.equals(centralNameBytes)) {
+      throw new Error(`ZIP local filename differs from central filename for ${name}`);
+    }
+    if (localFlags !== flags || localMethod !== method) {
+      throw new Error(`ZIP local flags or compression method differs from central entry for ${name}`);
+    }
+    if (localCrc32 !== crc32
+        || localCompressedSize !== compressedSize
+        || localUncompressedSize !== uncompressedSize) {
+      throw new Error(`ZIP local CRC or size differs from central entry for ${name}`);
+    }
+    if (isDirectory && (compressedSize !== 0 || uncompressedSize !== 0)) {
+      throw new Error(`ZIP directory entry must be empty: ${name}`);
+    }
+    if (localOffset >= centralOffset || dataEnd > centralOffset || dataEnd > zipBytes.length) {
+      throw new Error(`ZIP local entry overlaps the central directory or archive bounds for ${name}`);
+    }
+    occupiedRanges.push({ start: localOffset, end: dataEnd, name });
+    if (isDirectory) continue;
     const compressed = zipBytes.subarray(dataStart, dataEnd);
-    const data = method === 0 ? Buffer.from(compressed) : zlib.inflateRawSync(compressed);
+    let data;
+    try {
+      data = method === 0
+        ? Buffer.from(compressed)
+        : zlib.inflateRawSync(compressed, {
+          maxOutputLength: maxEntryUncompressedBytes,
+        });
+    } catch (error) {
+      throw new Error(`ZIP inflation failed for ${name}: ${sanitizeErrorMessage(error.message)}`);
+    }
     if (data.length !== uncompressedSize) {
       throw new Error(`ZIP uncompressed size mismatch for ${name}`);
     }
-    if (entries.has(name)) throw new Error(`duplicate ZIP entry: ${name}`);
     entries.set(name, data);
   }
   if (offset !== centralOffset + centralSize) {
     throw new Error('ZIP central directory size mismatch');
+  }
+  occupiedRanges.sort((left, right) => left.start - right.start);
+  for (let index = 1; index < occupiedRanges.length; index += 1) {
+    const previous = occupiedRanges[index - 1];
+    const current = occupiedRanges[index];
+    if (current.start < previous.end) {
+      throw new Error(`ZIP local entries overlap: ${previous.name} and ${current.name}`);
+    }
   }
   return entries;
 }
@@ -324,13 +650,26 @@ function assertZipMatchesExpected(actualEntries, expectedEntries) {
 }
 
 module.exports = {
+  MAX_API_RESPONSE_BYTES,
   MAX_RELEASE_AGE_MS,
+  MAX_SINGLE_ASSET_BYTES,
+  MAX_ZIP_COMPRESSED_BYTES,
+  MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
+  MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES,
   assertProbeCompleted,
+  assertResponseWithinLimit,
   assertZipMatchesExpected,
+  normalizeOfficialOriginUrl,
   parseRemoteTagOutput,
   parseZipEntries,
+  resolveTrustedReleaseTarget,
+  sanitizeErrorMessage,
+  validateAnnotatedTagPayload,
+  validateGitHubRefPayload,
   validateLocalReleaseSnapshot,
+  validateTrustedLocalSnapshot,
   validateReleaseLookup,
   validateReleaseMetadata,
   validateReleasePayload,
+  validateRepositoryPayload,
 };
