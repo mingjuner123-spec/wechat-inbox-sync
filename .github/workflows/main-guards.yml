@@ -90,5 +90,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Run Windows deployer behavior regressions
-        run: node tests/release-governance.test.js
+      - name: Run Windows deployer and native process regressions
+        run: |
+          node tests/release-governance.test.js
+          node tests/plugin-marketplace-package.test.js

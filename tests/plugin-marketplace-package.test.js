@@ -1,5 +1,7 @@
 const assert = require('assert');
+const childProcess = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const pluginDir = path.resolve(__dirname, '../obsidian-plugin/wechat-inbox-sync');
@@ -30,7 +32,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.56');
+assert.strictEqual(manifest.version, '1.3.57');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
@@ -196,8 +198,9 @@ assert.ok(windowsInstaller.includes('function Invoke-NativeProcess'));
 assert.ok(windowsInstaller.includes('function ConvertTo-NativeArgument'));
 assert.ok(windowsInstaller.includes('RedirectStandardError'));
 assert.ok(windowsInstaller.includes('Invoke-NativeProcess -FilePath $Path -Arguments $Arguments'));
-assert.ok(windowsInstaller.includes('Start-Process'));
-assert.ok(windowsInstaller.includes('-RedirectStandardOutput $stdoutPath'));
+assert.ok(windowsInstaller.includes('System.Diagnostics.ProcessStartInfo'));
+assert.ok(windowsInstaller.includes('ReadToEndAsync'));
+assert.strictEqual(windowsInstaller.includes('Start-Process'), false);
 assert.strictEqual(windowsInstaller.includes('$output = & $Path @Arguments 2>&1 | Out-String'), false);
 assert.ok(windowsInstaller.includes('System.Text.UTF8Encoding'));
 assert.ok(windowsInstaller.includes('ReadAllText($chunkTxt, $Utf8NoBom)'));
@@ -228,7 +231,8 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.24"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.25"'));
+assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"'));
 assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilityUrls = @()'));
@@ -304,8 +308,71 @@ assert.ok(templateStart >= 0);
 assert.ok(templateEnd > templateStart);
 const templateBlock = windowsInstaller.slice(templateStart, templateEnd);
 const transcribeScriptTemplate = templateBlock.split("@'")[1] || '';
+function extractPowerShellFunction(source, functionName) {
+  const start = source.indexOf(`function ${functionName} {`);
+  assert.ok(start >= 0, `PowerShell function ${functionName} should exist`);
+  const nextFunction = source.indexOf('\nfunction ', start + 1);
+  return source.slice(start, nextFunction >= 0 ? nextFunction : source.length).trim();
+}
+
+function runWindowsNativeProcessProbe(source, label) {
+  const nativeProcessProbe = [
+    '$ErrorActionPreference = "Stop"',
+    'function Write-ProgressLog {}',
+    extractPowerShellFunction(source, 'ConvertTo-NativeArgument'),
+    extractPowerShellFunction(source, 'Invoke-NativeProcess'),
+    '$cmd = Join-Path $env:SystemRoot "System32\\cmd.exe"',
+    '$success = Invoke-NativeProcess -FilePath $cmd -Arguments @("/d", "/c", "exit 0")',
+    '$failure = Invoke-NativeProcess -FilePath $cmd -Arguments @("/d", "/c", "exit 7")',
+    'if ($null -eq $success.ExitCode) { throw "successful native process returned a null exit code" }',
+    'if ([int]$success.ExitCode -ne 0) { throw "successful native process returned $($success.ExitCode)" }',
+    'if ($null -eq $failure.ExitCode) { throw "failed native process returned a null exit code" }',
+    'if ([int]$failure.ExitCode -ne 7) { throw "failed native process returned $($failure.ExitCode)" }',
+    `Write-Output "${label}_SUCCESS_EXIT=$($success.ExitCode)"`,
+    `Write-Output "${label}_FAILURE_EXIT=$($failure.ExitCode)"`,
+  ].join('\r\n');
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), `wechat-inbox-native-process-${label.toLowerCase()}-`));
+  const probePath = path.join(probeDir, 'probe.ps1');
+  try {
+    fs.writeFileSync(probePath, nativeProcessProbe, 'utf8');
+    const probeResult = childProcess.spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', probePath],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+      },
+    );
+    assert.strictEqual(
+      probeResult.status,
+      0,
+      `Windows ${label} native process probe failed:\n${probeResult.stdout || ''}\n${probeResult.stderr || ''}`,
+    );
+    assert.ok((probeResult.stdout || '').includes(`${label}_SUCCESS_EXIT=0`));
+    assert.ok((probeResult.stdout || '').includes(`${label}_FAILURE_EXIT=7`));
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+if (process.platform === 'win32') {
+  runWindowsNativeProcessProbe(windowsInstaller, 'INSTALLER');
+  runWindowsNativeProcessProbe(transcribeScriptTemplate, 'TRANSCRIBE');
+}
 assert.ok(transcribeScriptTemplate.includes('function ConvertTo-NativeArgument'));
 assert.ok(transcribeScriptTemplate.includes('function Convert-ExitCodeToHex'));
+assert.ok(
+  transcribeScriptTemplate.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"'),
+  'Windows transcribe script must advertise the ProcessStartInfo exit-code fix',
+);
+assert.ok(transcribeScriptTemplate.includes('System.Diagnostics.ProcessStartInfo'));
+assert.ok(transcribeScriptTemplate.includes('ReadToEndAsync'));
+assert.strictEqual(
+  extractPowerShellFunction(transcribeScriptTemplate, 'Invoke-NativeProcess').includes('Start-Process'),
+  false,
+  'Windows transcribe runtime must not use Start-Process because it can return a null ExitCode',
+);
 assert.ok(transcribeScriptTemplate.includes('function Get-ShortPath'));
 assert.ok(transcribeScriptTemplate.includes('function Split-AudioToChunks'));
 assert.ok(transcribeScriptTemplate.includes('function Test-TranscriptHasRepeatHallucination'));
@@ -322,8 +389,9 @@ assert.ok(transcribeScriptTemplate.includes('safeModelPath'));
 assert.ok(transcribeScriptTemplate.includes('if ($Mode -eq "safe")'));
 assert.strictEqual(transcribeScriptTemplate.includes('$SafeTempRoot = New-SafeTempDirectory'), false);
 assert.ok(transcribeScriptTemplate.includes('function Invoke-NativeProcess'));
-assert.ok(transcribeScriptTemplate.includes('Start-Process'));
-assert.ok(transcribeScriptTemplate.includes('-RedirectStandardOutput $stdoutPath'));
+assert.strictEqual(transcribeScriptTemplate.includes('Start-Process'), false);
+assert.ok(transcribeScriptTemplate.includes('System.Diagnostics.ProcessStartInfo'));
+assert.ok(transcribeScriptTemplate.includes('ReadToEndAsync'));
 assert.ok(transcribeScriptTemplate.includes('ConvertTo-SimplifiedChinese'));
 assert.ok(transcribeScriptTemplate.includes('SimplifiedChinese'));
 assert.ok(transcribeScriptTemplate.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"'));
