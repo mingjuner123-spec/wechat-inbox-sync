@@ -406,6 +406,11 @@ assert.strictEqual(typeof helpers.buildLocalAsrProgressKey, 'function');
 assert.strictEqual(typeof helpers.extractSocialMediaUrlFromHtml, 'function');
 assert.strictEqual(typeof PluginClass.prototype.stopCurrentTranscription, 'function');
 assert.strictEqual(pluginMainSource.includes("setButtonText('停止当前转写')"), false);
+{
+  const ribbon = { style: { display: 'initial' } };
+  PluginClass.prototype.setTranscriptionStopAvailable.call({ transcriptionStopRibbon: ribbon }, false);
+  assert.strictEqual(ribbon.style.display, '', '停止转写入口在没有任务时也必须保持可见');
+}
 assert.ok(pluginMainSource.includes('shouldReadBindErrorBody'));
 assert.ok(pluginMainSource.includes('暂时无法确认绑定码状态，请重试。'));
 assert.ok(pluginMainSource.includes("taskkill', ['/PID'"));

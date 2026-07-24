@@ -11447,7 +11447,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   setTranscriptionStopAvailable(available) {
     if (!this.transcriptionStopRibbon || !this.transcriptionStopRibbon.style) return;
-    this.transcriptionStopRibbon.style.display = available ? '' : 'none';
+    this.transcriptionStopRibbon.style.display = '';
   }
 
   async checkWechatLogin() {
