@@ -30,7 +30,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.55');
+assert.strictEqual(manifest.version, '1.3.56');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
@@ -171,7 +171,9 @@ assert.strictEqual(localOcrScript.includes('pdf-page-ocr-v1'), false, 'local ima
 assert.strictEqual(localOcrScript.includes('import fitz'), false, 'local image OCR runtime must not render PDF pages');
 assert.strictEqual(localOcrScript.includes('from opencc import OpenCC'), false, 'local image OCR runtime must not require OpenCC');
 assert.ok(releaseWorkflow.includes('gh release create "$TAG_NAME"'));
-assert.ok(releaseWorkflow.includes('gh release upload "$TAG_NAME"'));
+assert.strictEqual(releaseWorkflow.includes('gh release upload "$TAG_NAME"'), false, 'immutable releases must never upload replacement assets');
+assert.strictEqual(releaseWorkflow.includes('--clobber'), false, 'immutable releases must never clobber assets');
+assert.ok(releaseWorkflow.includes('Release $TAG_NAME already exists; refusing to overwrite immutable release assets.'));
 assert.ok(windowsInstaller.includes('$ChunkSeconds = 120'));
 assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_NATIVE=OFF'));
 assert.ok(windowsCompatibilityBuildScript.includes('-DGGML_SSE42=OFF'));
