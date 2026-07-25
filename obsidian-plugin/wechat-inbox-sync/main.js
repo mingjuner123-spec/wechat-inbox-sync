@@ -2789,6 +2789,17 @@ function buildWebpageMarkdownBody(record, title) {
   const status = metadata.conversionStatus || 'pending';
   const errorText = metadata.conversionError || '';
 
+  if (
+    isWechatChannelsUrl(url)
+    && (status === 'failed' || status === 'wechat_captcha' || status === 'link_saved')
+  ) {
+    return [
+      '> ⚠️ 视频号内容解析功能暂未接通，当前已为你保存原始链接。',
+      '> 功能上线后，可以重新发送链接进行提取。',
+      '',
+    ].join('\n');
+  }
+
   if (snapshot) {
     if (isFeishuUrl(url)) {
       return `${snapshot}\n`;

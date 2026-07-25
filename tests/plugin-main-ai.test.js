@@ -461,6 +461,41 @@ assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
 assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
 assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/sph/A7ULN6a876'), true);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=A7ULN6a876'), true);
+const unavailableWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'wechat-channels-unavailable',
+    type: 'webpage',
+    content: 'https://weixin.qq.com/sph/A7ULN6a876',
+    createdAt: '2026-07-25T08:00:00.000Z',
+    metadata: {
+      url: 'https://weixin.qq.com/sph/A7ULN6a876',
+      conversionStatus: 'failed',
+      conversionError: 'HTML 转 Markdown 失败：网页正文太短，无法转为 Markdown',
+    },
+  },
+  title: '视频号内容',
+  syncedAt: '2026-07-25T08:01:00.000Z',
+});
+assert.ok(unavailableWechatChannelsMarkdown.includes('视频号内容解析功能暂未接通'));
+assert.ok(unavailableWechatChannelsMarkdown.includes('当前已为你保存原始链接'));
+assert.strictEqual(unavailableWechatChannelsMarkdown.includes('网页正文太短'), false);
+const failedGenericWebpageMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'generic-webpage-failed',
+    type: 'webpage',
+    content: 'https://example.com/short-page',
+    createdAt: '2026-07-25T08:00:00.000Z',
+    metadata: {
+      url: 'https://example.com/short-page',
+      conversionStatus: 'failed',
+      conversionError: 'HTML 转 Markdown 失败：网页正文太短，无法转为 Markdown',
+    },
+  },
+  title: '普通网页',
+  syncedAt: '2026-07-25T08:01:00.000Z',
+});
+assert.ok(failedGenericWebpageMarkdown.includes('这篇文章的正文未能自动提取'));
+assert.ok(failedGenericWebpageMarkdown.includes('网页正文太短'));
 assert.deepStrictEqual(
   helpers.extractWechatChannelsRequestPayload('https://weixin.qq.com/sph/A7ULN6a876'),
   { shortUri: 'A7ULN6a876' },
