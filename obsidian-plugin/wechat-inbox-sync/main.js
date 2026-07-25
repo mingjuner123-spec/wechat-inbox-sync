@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const childProcess = require('child_process');
+const dns = require('dns');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -2909,6 +2910,17 @@ function buildWebpageMarkdownBody(record, title) {
   }
   const status = metadata.conversionStatus || 'pending';
   const errorText = metadata.conversionError || '';
+  const automaticShareText = metadata.automaticWebpageExtraction
+    ? String(metadata.shareText || '').trim()
+    : '';
+  const automaticShareTextMarkdown = automaticShareText
+    ? [
+      '## 原始剪切板内容',
+      '',
+      ...automaticShareText.split(/\r?\n/).map((line) => `> ${line}`),
+      '',
+    ].join('\n')
+    : '';
   if (
     isWechatChannelsUrl(url)
     && (status === 'failed' || status === 'wechat_captcha' || status === 'link_saved')
@@ -2917,6 +2929,7 @@ function buildWebpageMarkdownBody(record, title) {
       '> ⚠️ 视频号内容解析功能暂未接通，当前已为你保存原始链接。',
       '> 功能上线后，可以重新发送链接进行提取。',
       '',
+      automaticShareTextMarkdown,
     ].join('\n');
   }
   if (metadata.transcriptOnly && snapshot && isWechatChannelsUrl(url) && metadata.conversionStatus === 'link_saved') {
@@ -2931,7 +2944,7 @@ function buildWebpageMarkdownBody(record, title) {
       transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
       transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
     });
-    return [sourceMediaMarkdown, transcriptMarkdown, snapshot]
+    return [sourceMediaMarkdown, transcriptMarkdown, snapshot, automaticShareTextMarkdown]
       .filter(Boolean)
       .join('\n\n')
       .trim() + '\n';
@@ -2939,13 +2952,14 @@ function buildWebpageMarkdownBody(record, title) {
 
   if (snapshot) {
     if (isFeishuUrl(url)) {
-      return `${snapshot}\n`;
+      return [snapshot, automaticShareTextMarkdown].filter(Boolean).join('\n\n').trim() + '\n';
     }
     return [
       '## Markdown 内容',
       '',
       snapshot,
       '',
+      automaticShareTextMarkdown,
     ].join('\n');
   }
 
@@ -2967,6 +2981,7 @@ function buildWebpageMarkdownBody(record, title) {
       `时间：${formatCreatedTime(record.createdAt)}`,
       '```',
       '',
+      automaticShareTextMarkdown,
     ].join('\n');
   }
 
@@ -2974,6 +2989,7 @@ function buildWebpageMarkdownBody(record, title) {
   return [
     '> 网页正文正在处理中，原始链接已写入笔记属性，下次同步时会自动更新。',
     '',
+    automaticShareTextMarkdown,
   ].join('\n');
 }
 
@@ -4672,11 +4688,82 @@ function isPrivateOrReservedIpv6(hostname) {
   const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (!host) return true;
   if (host === '::' || host === '::1') return true;
+  if (host.startsWith('::')) return true;
+  const compressedParts = host.split('::');
+  if (compressedParts.length <= 2) {
+    const left = compressedParts[0] ? compressedParts[0].split(':').filter(Boolean) : [];
+    const right = compressedParts.length === 2 && compressedParts[1]
+      ? compressedParts[1].split(':').filter(Boolean)
+      : [];
+    const missing = compressedParts.length === 2 ? Math.max(0, 8 - left.length - right.length) : 0;
+    const parts = [
+      ...left,
+      ...Array(missing).fill('0'),
+      ...right,
+    ].map((part) => Number.parseInt(part || '0', 16));
+    if (parts.length === 8 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 0xffff)) {
+      const [first, second, third, fourth, fifth, sixth] = parts;
+      const ipv4EmbeddedPrefix = first === 0 && second === 0 && third === 0 && fourth === 0 && fifth === 0;
+      if (ipv4EmbeddedPrefix && (sixth === 0 || sixth === 0xffff)) return true;
+      if ((first & 0xfe00) === 0xfc00) return true;
+      if ((first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0) return true;
+      if ((first & 0xff00) === 0xff00) return true;
+      if (first === 0x0064 && second === 0xff9b) return true;
+      if (first === 0x2001 && (second === 0 || second === 0x0db8)) return true;
+      if (first === 0x2002) return true;
+    }
+  }
   if (/^(?:fc|fd)/.test(host) || /^fe[89ab]/.test(host) || /^ff/.test(host) || /^2001:db8/.test(host)) {
     return true;
   }
   const mappedIpv4 = /(?:^|:)ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(host);
   return Boolean(mappedIpv4 && isPrivateOrReservedIpv4(mappedIpv4[1]));
+}
+
+function isPublicIpAddress(address) {
+  const normalizedAddress = String(address || '').trim().replace(/%.+$/, '').replace(/^\[|\]$/g, '');
+  const ipVersion = net.isIP(normalizedAddress);
+  if (ipVersion === 4) return !isPrivateOrReservedIpv4(normalizedAddress);
+  if (ipVersion === 6) return !isPrivateOrReservedIpv6(normalizedAddress);
+  return false;
+}
+
+function validatePublicDnsLookupAddresses(addresses) {
+  const normalized = (Array.isArray(addresses) ? addresses : [])
+    .map((item) => ({
+      address: String(item && item.address || '').trim(),
+      family: Number(item && item.family) || net.isIP(String(item && item.address || '').trim()),
+    }))
+    .filter((item) => item.address && (item.family === 4 || item.family === 6));
+  if (!normalized.length) {
+    throw new Error('网页域名未解析到可用公网地址');
+  }
+  if (normalized.some((item) => !isPublicIpAddress(item.address))) {
+    throw new Error('网页域名解析到了私网或保留地址，已阻止自动访问');
+  }
+  return normalized;
+}
+
+function publicOnlyDnsLookup(hostname, options, callback) {
+  const lookupOptions = options && typeof options === 'object' ? options : {};
+  dns.lookup(hostname, {
+    all: true,
+    verbatim: true,
+  }, (error, addresses) => {
+    if (error) {
+      callback(error);
+      return;
+    }
+    try {
+      const publicAddresses = validatePublicDnsLookupAddresses(addresses);
+      const requestedFamily = Number(lookupOptions.family) || 0;
+      const selected = publicAddresses.find((item) => !requestedFamily || item.family === requestedFamily)
+        || publicAddresses[0];
+      callback(null, selected.address, selected.family);
+    } catch (lookupError) {
+      callback(lookupError);
+    }
+  });
 }
 
 function isSafeAutomaticWebpageUrl(url) {
@@ -4701,6 +4788,24 @@ function isSafeAutomaticWebpageUrl(url) {
   } catch (error) {
     return false;
   }
+}
+
+function isTrustedAutomaticPlatformUrl(url) {
+  const hostname = getHttpUrlHostname(url);
+  return isHostnameWithinDomain(hostname, 'mp.weixin.qq.com')
+    || isHostnameWithinDomain(hostname, 'feishu.cn')
+    || isHostnameWithinDomain(hostname, 'feishu.net')
+    || isHostnameWithinDomain(hostname, 'larksuite.com')
+    || isHostnameWithinDomain(hostname, 'xiaohongshu.com')
+    || isHostnameWithinDomain(hostname, 'xhslink.com')
+    || isHostnameWithinDomain(hostname, 'xhslink.cn')
+    || isHostnameWithinDomain(hostname, 'douyin.com')
+    || isHostnameWithinDomain(hostname, 'iesdouyin.com')
+    || isHostnameWithinDomain(hostname, 'amemv.com')
+    || isHostnameWithinDomain(hostname, 'bilibili.com')
+    || isHostnameWithinDomain(hostname, 'b23.tv')
+    || isHostnameWithinDomain(hostname, 'xiaoyuzhoufm.com')
+    || isHostnameWithinDomain(hostname, 'xiaoyuzhou.com');
 }
 
 function extractAutomaticWebpageUrlCandidates(text) {
@@ -4730,8 +4835,103 @@ function extractAutomaticWebpageUrlCandidates(text) {
 function selectAutomaticWebpageUrlFromText(text) {
   const candidates = extractAutomaticWebpageUrlCandidates(text);
   if (candidates.length === 1) return candidates[0];
-  const supportedPlatformCandidates = candidates.filter((url) => shouldHydrateLinkAsWebpage(url));
+  const supportedPlatformCandidates = candidates.filter((url) => isTrustedAutomaticPlatformUrl(url));
   return supportedPlatformCandidates.length === 1 ? supportedPlatformCandidates[0] : '';
+}
+
+function requestPublicWebpageText(url, options = {}) {
+  const source = String(url || '').trim();
+  const redirectsRemaining = Number.isInteger(options.redirectsRemaining)
+    ? options.redirectsRemaining
+    : 5;
+  const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 8 * 1024 * 1024;
+  if (!isSafeAutomaticWebpageUrl(source)) {
+    return Promise.reject(new Error('网页地址不是可安全自动访问的公网 HTTP(S) 地址'));
+  }
+  if (redirectsRemaining < 0) {
+    return Promise.reject(new Error('网页跳转次数过多'));
+  }
+
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(source);
+    } catch (error) {
+      reject(new Error('网页地址格式无效'));
+      return;
+    }
+    const client = parsed.protocol === 'http:' ? http : https;
+    const request = client.request(parsed, {
+      method: 'GET',
+      headers: options.headers || getSocialRequestHeaders(source),
+      lookup: publicOnlyDnsLookup,
+    }, (response) => {
+      const location = response.headers && response.headers.location;
+      if (response.statusCode >= 300 && response.statusCode < 400 && location) {
+        response.resume();
+        let redirectUrl;
+        try {
+          redirectUrl = new URL(location, source).toString();
+        } catch (error) {
+          reject(new Error('网页返回了无效跳转地址'));
+          return;
+        }
+        requestPublicWebpageText(redirectUrl, {
+          ...options,
+          redirectsRemaining: redirectsRemaining - 1,
+        }).then(resolve, reject);
+        return;
+      }
+      const chunks = [];
+      let received = 0;
+      response.on('data', (chunk) => {
+        received += chunk.length;
+        if (received > maxBytes) {
+          request.destroy(new Error('网页正文超过安全大小限制'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('end', () => {
+        resolve({
+          status: Number(response.statusCode) || 0,
+          text: Buffer.concat(chunks).toString('utf8'),
+          headers: response.headers || {},
+          url: source,
+        });
+      });
+      response.on('error', reject);
+    });
+    request.setTimeout(10000, () => {
+      request.destroy(new Error('网页抓取超时'));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
+
+function isAutomaticWebpageHydrationSuccessful(record) {
+  const metadata = record && record.metadata || {};
+  const conversionStatus = String(metadata.conversionStatus || '').toLowerCase();
+  const transcriptionStatus = String(metadata.transcriptionStatus || '').toLowerCase();
+  if (['failed', 'link_saved', 'wechat_captcha'].includes(conversionStatus)) return false;
+  if (transcriptionStatus === 'failed') return false;
+  const hasStoredContent = Boolean(String(
+    metadata.markdown
+      || metadata.snapshot
+      || metadata.contentSnapshot
+      || metadata.transcription
+      || metadata.convertedMarkdown
+      || '',
+  ).trim());
+  return (conversionStatus === 'success' || transcriptionStatus === 'success') && hasStoredContent;
+}
+
+function createAutomaticWebpageExtractionError(url) {
+  const host = getSafeUrlDiagnostic(url).host || 'unknown-host';
+  const error = new Error(`剪切板链接网页提取失败，已保留待重试：${host}`);
+  error.code = 'AUTOMATIC_WEBPAGE_EXTRACTION_FAILED';
+  return error;
 }
 
 function getSocialRequestHeaders(url) {
@@ -4767,6 +4967,15 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
   if (!/^https?:\/\//i.test(source) || maxRedirects <= 0) {
     return Promise.resolve({ url: source, diagnostic });
   }
+  if (!isSafeAutomaticWebpageUrl(source)) {
+    diagnostic.attempts.push({
+      method,
+      status: 0,
+      host: getSafeUrlDiagnostic(source).host,
+      outcome: 'blocked-private-address',
+    });
+    return Promise.resolve({ url: source, diagnostic });
+  }
 
   return new Promise((resolve) => {
     let settled = false;
@@ -4788,6 +4997,7 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
     const request = client.request(parsed, {
       method,
       headers: getSocialRequestHeaders(source),
+      lookup: publicOnlyDnsLookup,
     }, (response) => {
       if (settled) {
         response.resume();
@@ -14401,7 +14611,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     for (const segment of segments) {
       currentPath = currentPath ? `${currentPath}/${segment}` : segment;
       if (!(await this.app.vault.adapter.exists(currentPath))) {
-        await this.app.vault.createFolder(currentPath);
+        try {
+          await this.app.vault.createFolder(currentPath);
+        } catch (error) {
+          if (!(await this.app.vault.adapter.exists(currentPath))) {
+            throw error;
+          }
+        }
       }
     }
   }
@@ -14422,6 +14638,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async writeVoiceAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
+    rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = record.metadata || {};
     if (!metadata.audioFileID) {
       return record;
@@ -14542,6 +14759,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async writeFileAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
+    rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = record.metadata || {};
     if (!metadata.fileID) {
       return record;
@@ -14653,6 +14871,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async saveWebpageImageAssets(markdown, assets, rootDir, dateFolder, title) {
+    rootDir = normalizeConfiguredVaultPath(rootDir);
     if (!Array.isArray(assets) || !assets.length || typeof this.app.vault.adapter.writeBinary !== 'function') {
       return markdown;
     }
@@ -14680,6 +14899,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title, options = {}) {
+    rootDir = normalizeConfiguredVaultPath(rootDir);
     if (!markdown
       || !this.app
       || !this.app.vault
@@ -14734,6 +14954,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
+    rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = (record && record.metadata) || {};
     const mediaUrl = String(metadata.mediaUrl || metadata.audioUrl || '').trim();
     if (!this.settings.saveOriginalMediaEnabled || !metadata.transcriptOnly || !mediaUrl) {
@@ -15397,7 +15618,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         const headers = isXiaohongshuUrl(resolvedUrl)
           ? await getXiaohongshuRequestHeaders(resolvedUrl)
           : getSocialRequestHeaders(resolvedUrl);
-        const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers });
+        const response = metadata.automaticWebpageExtraction
+          ? await requestPublicWebpageText(resolvedUrl, { headers })
+          : await requestUrl({ url: resolvedUrl, method: 'GET', headers });
         xiaohongshuResponseStatus = Number(response.status) || 0;
         let html = response.text || '';
         const hasProAdvancedAccess = isXiaohongshuUrl(url)
@@ -15745,9 +15968,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       let html;
       let usedFallback = false;
       try {
-        const response = await requestUrl({ url, method: 'GET' });
+        const response = metadata.automaticWebpageExtraction && !isTrustedAutomaticPlatformUrl(url)
+          ? await requestPublicWebpageText(url)
+          : await requestUrl({ url, method: 'GET' });
         html = response.text || '';
       } catch (requestError) {
+        if (metadata.automaticWebpageExtraction) {
+          throw new Error(`网页抓取失败：${requestError.message || requestError}`);
+        }
         // Obsidian requestUrl can fail on some networks; fall back to Node.js HTTP.
         try {
           html = await downloadTextViaNode(url);
@@ -15936,7 +16164,10 @@ class WechatObsidianInboxPlugin extends Plugin {
                 ? textWebpageUrl
                 : (record.metadata && record.metadata.url) || record.content || '',
               ...(textAsWebpage
-                ? { shareText: (record.metadata && record.metadata.shareText) || record.content || '' }
+                ? {
+                  shareText: (record.metadata && record.metadata.shareText) || record.content || '',
+                  automaticWebpageExtraction: true,
+                }
                 : {}),
               conversionStatus: (record.metadata && record.metadata.conversionStatus) || 'pending',
             },
@@ -15947,6 +16178,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         title,
         binding,
       );
+      if (textAsWebpage && !isAutomaticWebpageHydrationSuccessful(recordForMarkdown)) {
+        throw createAutomaticWebpageExtractionError(textWebpageUrl);
+      }
       recordForMarkdown = await this.saveSourceMediaAttachment(recordForMarkdown, rootDir, dateFolder, title);
       title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
     }
@@ -16706,6 +16940,8 @@ WechatObsidianInboxPlugin.__test = {
   isWechatMpArticleUrl,
   shouldHydrateLinkAsWebpage,
   selectAutomaticWebpageUrlFromText,
+  validatePublicDnsLookupAddresses,
+  requestPublicWebpageText,
   normalizeConfiguredVaultPath,
   shouldPersistNormalizedInboxDir,
   extractBilibiliSubtitleUrlsFromHtml,
