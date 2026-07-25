@@ -19,7 +19,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.59';
+const PLUGIN_RUNTIME_VERSION = '1.3.60';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1348,6 +1348,7 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('$PortablePython')
     && source.includes('Download-TextFile')
     && source.includes('function Install-PortablePython')
+    && source.includes('function Expand-TarGzArchiveWithPowerShell')
     && source.includes('single-dir-transaction-v1')
     && source.includes('$python = Install-PortablePython')
     && source.includes('Invoke-Python -PythonCommand $python -m venv $VenvDir');
@@ -13856,7 +13857,17 @@ class WechatObsidianInboxPlugin extends Plugin {
       return status;
     }
 
-    await this.installLocalTranscriptionComponents({ reason, readiness });
+    try {
+      await this.installLocalTranscriptionComponents({ reason, readiness });
+    } catch (error) {
+      if (reason === 'first-use') {
+        throw error;
+      }
+      return {
+        ...status,
+        localComponentInstallError: error && error.message ? error.message : String(error || ''),
+      };
+    }
     return status;
   }
 
@@ -16726,7 +16737,12 @@ class WechatInboxSettingTab extends PluginSettingTab {
               force: true,
             });
             if (status.hasAccess) {
-              new Notice(`Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`);
+              const proAccessNotice = `Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`;
+              if (status.localComponentInstallError) {
+                new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8000);
+              } else {
+                new Notice(proAccessNotice);
+              }
             } else if (status.status === 'missing_redeem_code') {
               new Notice('未识别到 Pro，请确认已绑定小程序并在小程序里开通 Pro。');
             } else {

@@ -404,6 +404,214 @@ function Test-FileSha256 {
   return $actual -eq $ExpectedSha256.ToUpperInvariant()
 }
 
+function Read-ExactStreamBytes {
+  param(
+    [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory = $true)][byte[]]$Buffer,
+    [int]$Offset = 0,
+    [int]$Count = $Buffer.Length
+  )
+  $totalRead = 0
+  while ($totalRead -lt $Count) {
+    $read = $Stream.Read($Buffer, $Offset + $totalRead, $Count - $totalRead)
+    if ($read -le 0) {
+      break
+    }
+    $totalRead += $read
+  }
+  return $totalRead
+}
+
+function Skip-StreamBytes {
+  param(
+    [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
+    [long]$Count
+  )
+  if ($Count -le 0) {
+    return
+  }
+  $buffer = New-Object byte[] 8192
+  $remaining = [long]$Count
+  while ($remaining -gt 0) {
+    $chunkSize = [int][Math]::Min($buffer.Length, $remaining)
+    $read = Read-ExactStreamBytes -Stream $Stream -Buffer $buffer -Count $chunkSize
+    if ($read -lt $chunkSize) {
+      throw "Portable Python archive ended before all bytes could be skipped."
+    }
+    $remaining -= $read
+  }
+}
+
+function Get-TarHeaderString {
+  param(
+    [Parameter(Mandatory = $true)][byte[]]$Header,
+    [Parameter(Mandatory = $true)][int]$Offset,
+    [Parameter(Mandatory = $true)][int]$Length
+  )
+  $text = [System.Text.Encoding]::ASCII.GetString($Header, $Offset, $Length)
+  $nullIndex = $text.IndexOf([char]0)
+  if ($nullIndex -ge 0) {
+    $text = $text.Substring(0, $nullIndex)
+  }
+  return $text.Trim()
+}
+
+function Get-TarHeaderOctalValue {
+  param(
+    [Parameter(Mandatory = $true)][byte[]]$Header,
+    [Parameter(Mandatory = $true)][int]$Offset,
+    [Parameter(Mandatory = $true)][int]$Length
+  )
+  $text = Get-TarHeaderString -Header $Header -Offset $Offset -Length $Length
+  if ([string]::IsNullOrWhiteSpace($text)) {
+    return [long]0
+  }
+  return [Convert]::ToInt64($text, 8)
+}
+
+function Resolve-TarDestinationPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$EntryPath
+  )
+  $normalized = ($EntryPath -replace '\\', '/').Trim()
+  if ([string]::IsNullOrWhiteSpace($normalized)) {
+    throw "Portable Python archive contains an empty path entry."
+  }
+  if ($normalized.StartsWith('/')) {
+    throw "Portable Python archive entry '$EntryPath' is absolute."
+  }
+  if ($normalized -match '^[A-Za-z]:') {
+    throw "Portable Python archive entry '$EntryPath' is drive-qualified."
+  }
+  $segments = @()
+  foreach ($segment in ($normalized -split '/')) {
+    if ([string]::IsNullOrWhiteSpace($segment) -or $segment -eq '.') {
+      continue
+    }
+    if ($segment -eq '..') {
+      throw "Portable Python archive entry '$EntryPath' escapes the install directory."
+    }
+    $segments += $segment
+  }
+  if ($segments.Count -eq 0) {
+    throw "Portable Python archive entry '$EntryPath' does not contain a usable relative path."
+  }
+  $destination = $Root
+  foreach ($segment in $segments) {
+    $destination = Join-Path $destination $segment
+  }
+  return $destination
+}
+
+function Expand-TarGzArchiveWithPowerShell {
+  param(
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $fileStream = $null
+  $gzipStream = $null
+  $fileBuffer = New-Object byte[] 65536
+  try {
+    $fileStream = [System.IO.File]::OpenRead($ArchivePath)
+    $gzipStream = New-Object System.IO.Compression.GzipStream($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+
+    while ($true) {
+      $header = New-Object byte[] 512
+      $headerBytes = Read-ExactStreamBytes -Stream $gzipStream -Buffer $header -Count 512
+      if ($headerBytes -eq 0) {
+        break
+      }
+      if ($headerBytes -lt 512) {
+        throw "Portable Python archive header is truncated."
+      }
+      if (($header | Measure-Object -Sum).Sum -eq 0) {
+        break
+      }
+
+      $name = Get-TarHeaderString -Header $header -Offset 0 -Length 100
+      $prefix = Get-TarHeaderString -Header $header -Offset 345 -Length 155
+      if ($prefix) {
+        $name = if ($name) { "$prefix/$name" } else { $prefix }
+      }
+      $size = Get-TarHeaderOctalValue -Header $header -Offset 124 -Length 12
+      $typeFlag = [char]$header[156]
+      if ($typeFlag -eq [char]0) {
+        $typeFlag = '0'
+      }
+      $destinationPath = Resolve-TarDestinationPath -Root $Destination -EntryPath $name
+
+      switch ($typeFlag) {
+        '5' {
+          New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
+        }
+        default {
+          $parent = Split-Path -Parent $destinationPath
+          if ($parent) {
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+          }
+          $outputStream = $null
+          try {
+            $outputStream = [System.IO.File]::Open($destinationPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $remaining = [long]$size
+            while ($remaining -gt 0) {
+              $chunkSize = [int][Math]::Min($fileBuffer.Length, $remaining)
+              $read = Read-ExactStreamBytes -Stream $gzipStream -Buffer $fileBuffer -Count $chunkSize
+              if ($read -lt $chunkSize) {
+                throw "Portable Python archive entry '$name' ended unexpectedly."
+              }
+              $outputStream.Write($fileBuffer, 0, $read)
+              $remaining -= $read
+            }
+          } finally {
+            if ($outputStream) {
+              $outputStream.Dispose()
+            }
+          }
+        }
+      }
+
+      $padding = (512 - ($size % 512)) % 512
+      if ($padding -gt 0) {
+        Skip-StreamBytes -Stream $gzipStream -Count $padding
+      }
+    }
+  } finally {
+    if ($gzipStream) {
+      $gzipStream.Dispose()
+    }
+    if ($fileStream) {
+      $fileStream.Dispose()
+    }
+  }
+}
+
+function Expand-TarGzArchive {
+  param(
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+  if ($tar) {
+    try {
+      $exitCode = Invoke-NativeCommand -FilePath $tar.Source -Arguments @("-xzf", $ArchivePath, "-C", $Destination)
+      if ($exitCode -eq 0) {
+        return "tar.exe"
+      }
+      Write-InstallLog "tar.exe failed with exit code $exitCode; falling back to the built-in PowerShell extractor."
+    } catch {
+      Write-InstallLog "tar.exe is unavailable or blocked; falling back to the built-in PowerShell extractor. $($_.Exception.Message)"
+    }
+  } else {
+    Write-InstallLog "tar.exe is unavailable or blocked; falling back to the built-in PowerShell extractor."
+  }
+
+  Expand-TarGzArchiveWithPowerShell -ArchivePath $ArchivePath -Destination $Destination
+  return "powershell"
+}
+
 function Install-PortablePython {
   if ((Test-Path -LiteralPath $PortablePython) -and (Test-PythonUsable -Command $PortablePython)) {
     Write-InstallLog "Pinned portable Python is already ready: $PortablePython"
@@ -420,18 +628,11 @@ function Install-PortablePython {
     throw "Pinned Python runtime SHA256 validation failed."
   }
 
-  $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
-  if (-not $tar) {
-    throw "Windows tar.exe is required to install the pinned Python runtime."
-  }
-
   $stageDir = Join-Path $InstallRoot (".python-runtime-stage-" + [guid]::NewGuid().ToString("N"))
   try {
     New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-    $exitCode = Invoke-NativeCommand -FilePath $tar.Source -Arguments @("-xzf", $archivePath, "-C", $stageDir)
-    if ($exitCode -ne 0) {
-      throw "Pinned Python runtime extraction failed with exit code $exitCode."
-    }
+    $extractor = Expand-TarGzArchive -ArchivePath $archivePath -Destination $stageDir
+    Write-InstallLog "Pinned Python runtime extracted via $extractor."
     $stagedPython = Join-Path $stageDir "python\python.exe"
     if (!(Test-Path -LiteralPath $stagedPython) -or !(Test-PythonUsable -Command $stagedPython)) {
       throw "Pinned Python runtime validation failed after extraction."

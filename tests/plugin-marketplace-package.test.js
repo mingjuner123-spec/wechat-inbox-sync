@@ -32,7 +32,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.59');
+assert.strictEqual(manifest.version, '1.3.60');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
@@ -93,6 +93,8 @@ assert.ok(windowsOcrInstaller.includes('$PythonRuntimeSha256 = "C6AF85BB83D5158C
 assert.ok(windowsOcrInstaller.includes('function Install-PortablePython'));
 assert.ok(windowsOcrInstaller.includes('Get-FileHash -Algorithm SHA256'));
 assert.ok(windowsOcrInstaller.includes('tar.exe'));
+assert.ok(windowsOcrInstaller.includes('function Expand-TarGzArchiveWithPowerShell'));
+assert.ok(windowsOcrInstaller.includes('tar.exe is unavailable or blocked; falling back to the built-in PowerShell extractor.'));
 assert.ok(windowsOcrInstaller.includes('sys.version_info >= (3, 10) and sys.version_info < (3, 13)'));
 assert.strictEqual(windowsOcrInstaller.includes('$env:UV_PYTHON_INSTALL_MIRROR'), false, 'Windows OCR must not ask uv to resolve the mirrored Python runtime');
 assert.strictEqual(windowsOcrInstaller.includes('& $UvExe python install 3.12'), false, 'Windows OCR must download the pinned Python runtime directly');
