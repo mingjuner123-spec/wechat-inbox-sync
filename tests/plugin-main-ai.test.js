@@ -479,6 +479,24 @@ const unavailableWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
 assert.ok(unavailableWechatChannelsMarkdown.includes('视频号内容解析功能暂未接通'));
 assert.ok(unavailableWechatChannelsMarkdown.includes('当前已为你保存原始链接'));
 assert.strictEqual(unavailableWechatChannelsMarkdown.includes('网页正文太短'), false);
+assert.ok(unavailableWechatChannelsMarkdown.includes('\nurl: https://weixin.qq.com/sph/A7ULN6a876\n'));
+const successfulWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'wechat-channels-success',
+    type: 'webpage',
+    content: 'https://weixin.qq.com/sph/A7ULN6a876',
+    createdAt: '2026-07-25T08:00:00.000Z',
+    metadata: {
+      url: 'https://weixin.qq.com/sph/A7ULN6a876',
+      conversionStatus: 'success',
+      markdown: '视频号已提取正文',
+    },
+  },
+  title: '视频号内容',
+  syncedAt: '2026-07-25T08:01:00.000Z',
+});
+assert.ok(successfulWechatChannelsMarkdown.includes('视频号已提取正文'));
+assert.strictEqual(successfulWechatChannelsMarkdown.includes('视频号内容解析功能暂未接通'), false);
 const failedGenericWebpageMarkdown = helpers.buildMarkdownForRecord({
   record: {
     _id: 'generic-webpage-failed',
