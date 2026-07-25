@@ -525,6 +525,45 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
 assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
+assert.strictEqual(typeof helpers.selectAutomaticWebpageUrlFromText, 'function');
+assert.strictEqual(typeof helpers.normalizeConfiguredVaultPath, 'function');
+assert.strictEqual(typeof helpers.shouldPersistNormalizedInboxDir, 'function');
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('存下口令，跳转【小红书】阅读 http://xhslink.cn/o/3twEehTqivC'),
+  'http://xhslink.cn/o/3twEehTqivC',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('普通网页 https://example.com/article?id=1'),
+  'https://example.com/article?id=1',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('两个普通链接 https://example.com/a https://example.net/b'),
+  '',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('保留唯一平台链接 https://example.com/a http://xhslink.cn/o/abc123'),
+  'http://xhslink.cn/o/abc123',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('两个平台链接 http://xhslink.cn/o/a https://v.douyin.com/b'),
+  '',
+);
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://127.0.0.1:3000/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://localhost/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('私网 http://192.168.1.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('链路本地 http://169.254.1.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 http://[::1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('凭据 https://user:pass@example.com/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('非网页 file:///C:/secret.txt'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('纯文字，不含链接'), '');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('raw\\wechatmd'), 'raw/wechatmd');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('raw//wechatmd/'), 'raw/wechatmd');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('C:\\Users\\ADMIN\\vault'), '临时收集');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('/absolute/path'), '临时收集');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('raw/../secret'), '临时收集');
+assert.strictEqual(helpers.mergeSettings({ inboxDir: 'raw\\wechatmd' }).inboxDir, 'raw/wechatmd');
+assert.strictEqual(helpers.shouldPersistNormalizedInboxDir({ inboxDir: 'raw\\wechatmd' }, { inboxDir: 'raw/wechatmd' }), true);
+assert.strictEqual(helpers.shouldPersistNormalizedInboxDir({ inboxDir: 'raw/wechatmd' }, { inboxDir: 'raw/wechatmd' }), false);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/sph/A7ULN6a876'), true);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=A7ULN6a876'), true);
 const unavailableWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
@@ -8140,7 +8179,123 @@ async function runBoundedBrowserTaskTests() {
   assert.strictEqual(await helpers.waitForBrowserTasksWithin([Promise.resolve('ok')], 2000), 'settled');
 }
 
+async function runClipboardTextWebpagePromotionTests() {
+  const writes = [];
+  const hydrated = [];
+  const originalText = '🔥有钱之后，应该多提升生活质量 http://xhslink.cn/o/3twEehTqivC 存下口令，跳转【小红书】阅读~';
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    inboxDir: 'raw\\wechatmd',
+    noteSaveMode: 'root',
+    aiProvider: 'off',
+  });
+  plugin.app = {
+    vault: {
+      adapter: {
+        async exists() {
+          return true;
+        },
+        async write(filePath, markdown) {
+          writes.push({ filePath, markdown });
+        },
+      },
+      async createFolder() {
+        throw new Error('existing canonical folder must be reused');
+      },
+    },
+  };
+  plugin.showSyncProgress = () => {};
+  plugin.nextRecordTitle = async () => '自动网页提取';
+  plugin.hydrateWebpageMarkdown = async (record) => {
+    hydrated.push(record);
+    return {
+      ...record,
+      title: '自动网页提取',
+      content: '# 自动网页提取\n\n网页正文',
+      metadata: {
+        ...(record.metadata || {}),
+        title: '自动网页提取',
+      },
+    };
+  };
+  plugin.saveSourceMediaAttachment = async (record) => record;
+  plugin.enrichRecordMetadataWithAi = async (record) => record;
+
+  const result = await plugin.writeRecord({
+    _id: 'clipboard-text-xhs-1',
+    type: 'text',
+    content: originalText,
+    createdAt: '2026-07-25T03:49:04.246Z',
+    metadata: {},
+  }, '2026-07-25T04:00:00.000Z');
+
+  assert.strictEqual(hydrated.length, 1);
+  assert.strictEqual(hydrated[0].type, 'webpage');
+  assert.strictEqual(hydrated[0].metadata.url, 'http://xhslink.cn/o/3twEehTqivC');
+  assert.strictEqual(hydrated[0].metadata.shareText, originalText);
+  assert.strictEqual(result.filePath, 'raw/wechatmd/自动网页提取.md');
+  assert.strictEqual(writes[0].filePath, 'raw/wechatmd/自动网页提取.md');
+
+  for (const content of [
+    '纯文字，不应该调用网页提取',
+    '两个普通链接 https://example.com/a https://example.net/b',
+    '危险地址 http://127.0.0.1/private',
+  ]) {
+    let hydrationCalls = 0;
+    const safePlugin = new PluginClass();
+    safePlugin.settings = helpers.mergeSettings({
+      inboxDir: 'raw/wechatmd',
+      noteSaveMode: 'root',
+      aiProvider: 'off',
+    });
+    safePlugin.app = plugin.app;
+    safePlugin.showSyncProgress = () => {};
+    safePlugin.nextRecordTitle = async () => '保持文本';
+    safePlugin.hydrateWebpageMarkdown = async () => {
+      hydrationCalls += 1;
+      throw new Error('unsafe or ambiguous text must not hydrate');
+    };
+    safePlugin.enrichRecordMetadataWithAi = async (record) => record;
+    await safePlugin.writeRecord({
+      _id: `text-${hydrationCalls}-${content.length}`,
+      type: 'text',
+      content,
+      createdAt: '2026-07-25T03:49:04.246Z',
+      metadata: {},
+    }, '2026-07-25T04:00:00.000Z');
+    assert.strictEqual(hydrationCalls, 0);
+  }
+}
+
+async function runCanonicalVaultFolderTests() {
+  const existing = new Set(['raw']);
+  const created = [];
+  const plugin = new PluginClass();
+  plugin.app = {
+    vault: {
+      adapter: {
+        async exists(folderPath) {
+          assert.strictEqual(folderPath.includes('\\'), false);
+          return existing.has(folderPath);
+        },
+      },
+      async createFolder(folderPath) {
+        assert.strictEqual(folderPath.includes('\\'), false);
+        created.push(folderPath);
+        existing.add(folderPath);
+      },
+    },
+  };
+
+  await plugin.ensureFolder('raw\\wechatmd\\2026-07-25');
+  assert.deepStrictEqual(created, ['raw/wechatmd', 'raw/wechatmd/2026-07-25']);
+  await plugin.ensureFolder('raw\\wechatmd\\2026-07-25');
+  assert.deepStrictEqual(created, ['raw/wechatmd', 'raw/wechatmd/2026-07-25']);
+}
+
 async function main() {
+  await runClipboardTextWebpagePromotionTests();
+  await runCanonicalVaultFolderTests();
   await runBoundedBrowserTaskTests();
   await runAsyncHydrationTests();
   await runLocalTranscriptionQualityFallbackTests();
