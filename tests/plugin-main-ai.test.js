@@ -306,9 +306,61 @@ assert.strictEqual(typeof helpers.parseTencentTaskStatusResponse, 'function');
 assert.strictEqual(typeof helpers.buildRecordTitleBase, 'function');
 assert.strictEqual(typeof helpers.hasRecordIdInFrontmatter, 'function');
 assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
+assert.strictEqual(typeof helpers.buildSyncDiagnosticLogText, 'function');
 assert.strictEqual(typeof helpers.getRecordConversionWarning, 'function');
 assert.strictEqual(typeof helpers.buildConversionWarningsNotice, 'function');
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
+assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.58'), {
+  manifestVersion: '1.3.58',
+  runtimeVersion: '1.3.58',
+  buildMarker: 'xhs-failure-diagnostics-v1',
+  matchesManifest: true,
+});
+assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.57').matchesManifest, false);
+assert.strictEqual(typeof helpers.buildXiaohongshuFailureDiagnostic, 'function');
+const xiaohongshuFailureDiagnostic = helpers.buildXiaohongshuFailureDiagnostic({
+  manifestVersion: '1.3.58',
+  sourceUrl: 'http://xhslink.cn/o/demo?xsec_token=source-secret',
+  resolvedUrl: 'https://www.xiaohongshu.com/explore/123?xsec_token=resolved-secret',
+  responseStatus: 200,
+  html: '<title>小红书 - 你的生活兴趣社区</title>',
+  extracted: {
+    title: '小红书 - 你的生活兴趣社区',
+    description: '存下口令，跳转【小红书】阅读',
+    markdown: '存下口令，跳转【小红书】阅读',
+    imageUrls: [],
+  },
+});
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.sourceHost, 'xhslink.cn');
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.finalHost, 'xiaohongshu.com');
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.responseStatus, 200);
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.pageType, 'xiaohongshu-generic-landing');
+assert.strictEqual(xiaohongshuFailureDiagnostic.extraction.shareBoilerplateOnly, true);
+assert.strictEqual(xiaohongshuFailureDiagnostic.extraction.imageCount, 0);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('source-secret'), false);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('resolved-secret'), false);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('存下口令'), false);
+const xiaohongshuFailureLogText = helpers.buildSyncDiagnosticLogText({
+  status: 'failed',
+  message: '单条内容同步失败',
+  diagnostic: {
+    ...xiaohongshuFailureDiagnostic,
+    request: {
+      ...xiaohongshuFailureDiagnostic.request,
+      xsec_token: 'must-not-be-copied',
+    },
+  },
+});
+assert.ok(xiaohongshuFailureLogText.includes('--- diagnostic ---'));
+assert.ok(xiaohongshuFailureLogText.includes('"pageType": "xiaohongshu-generic-landing"'));
+assert.strictEqual(xiaohongshuFailureLogText.includes('must-not-be-copied'), false);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent({
+  title: '🔥有钱之后，应该给多提升生活质量',
+  description: '🔥有钱之后，应该给多提升生活质量 http://xhslink.cn/o/demo 存下口令，跳转【小红书】阅读~',
+  markdown: '🔥有钱之后，应该给多提升生活质量 http://xhslink.cn/o/demo 存下口令，跳转【小红书】阅读~',
+  imageUrls: [],
+}, '<html><body></body></html>', 'https://www.xiaohongshu.com/explore/123'), false);
 assert.strictEqual(
   helpers.getSocialRequestHeaders('http://xhslink.cn/o/demo').Referer,
   'https://www.xiaohongshu.com/',
@@ -5056,7 +5108,9 @@ async function runAsyncHydrationTests() {
       }, '', '', '不可用图文测试'),
       (error) => error
         && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
-        && error.message.includes('插件设置中登录小红书'),
+        && error.message === '小红书内容提取失败，已记录诊断，下次同步将重试。'
+        && error.diagnostic
+        && error.diagnostic.request.pageType === 'xiaohongshu-generic-landing',
     );
   } finally {
     requestUrlMock = previousUnavailableGraphicRequestUrlMock;
@@ -6209,6 +6263,7 @@ async function runCloudProcessingRecordSkipSyncTest() {
 
 async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   const calls = [];
+  const writeCalls = [];
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
@@ -6228,13 +6283,43 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
           content: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note',
           createdAt: '2026-07-16T08:00:00.000Z',
           metadata: { url: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note' },
+        }, {
+          _id: 'plain-record-after-xhs-failure',
+          type: 'text',
+          content: '失败后仍应继续处理',
+          createdAt: '2026-07-16T08:01:00.000Z',
+          metadata: {},
         }],
       };
     }
     return { success: true, data: {} };
   };
-  plugin.writeRecord = async () => {
-    throw helpers.createRetryableXiaohongshuContentError();
+  plugin.writeRecord = async (record) => {
+    writeCalls.push(record._id);
+    if (record._id === 'xhs-content-unavailable-1') {
+      throw helpers.createRetryableXiaohongshuContentError({
+        runtime: helpers.getPluginRuntimeIdentity('1.3.58'),
+        request: {
+          sourceHost: 'xiaohongshu.com',
+          finalHost: 'xiaohongshu.com',
+          responseStatus: 200,
+          pageType: 'xiaohongshu-generic-landing',
+        },
+        extraction: {
+          hasUsableTitle: false,
+          bodyCharacterCount: 0,
+          imageCount: 0,
+          shareBoilerplateOnly: true,
+          genericLanding: true,
+          unavailablePage: false,
+        },
+      });
+    }
+    return {
+      recordId: record._id,
+      title: '失败后仍应继续处理',
+      filePath: '临时收集/失败后仍应继续处理.md',
+    };
   };
 
   const result = await plugin.syncBinding({
@@ -6242,14 +6327,51 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     label: '测试微信',
   }, false);
 
-  assert.deepStrictEqual(result.written, []);
+  assert.deepStrictEqual(result.written, [{
+    recordId: 'plain-record-after-xhs-failure',
+    title: '失败后仍应继续处理',
+    filePath: '临时收集/失败后仍应继续处理.md',
+  }]);
   assert.deepStrictEqual(result.failed, [{
     recordId: 'xhs-content-unavailable-1',
-    message: '小红书没有返回真实笔记内容，请在插件设置中登录小红书后重试',
+    message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
+    diagnostic: {
+      runtime: {
+        manifestVersion: '1.3.58',
+        runtimeVersion: '1.3.58',
+        buildMarker: 'xhs-failure-diagnostics-v1',
+        matchesManifest: true,
+      },
+      request: {
+        sourceHost: 'xiaohongshu.com',
+        finalHost: 'xiaohongshu.com',
+        responseStatus: 200,
+        pageType: 'xiaohongshu-generic-landing',
+      },
+      extraction: {
+        hasUsableTitle: false,
+        bodyCharacterCount: 0,
+        imageCount: 0,
+        shareBoilerplateOnly: true,
+        genericLanding: true,
+        unavailablePage: false,
+      },
+    },
   }]);
+  assert.deepStrictEqual(writeCalls, [
+    'xhs-content-unavailable-1',
+    'plain-record-after-xhs-failure',
+  ]);
+  assert.strictEqual(plugin.lastSyncDiagnostic.recordId, 'xhs-content-unavailable-1');
+  assert.strictEqual(plugin.lastSyncDiagnostic.diagnostic.extraction.shareBoilerplateOnly, true);
   assert.deepStrictEqual(calls, [[
     '/records?status=pending',
     'GET',
+    {},
+    'ABC-123',
+  ], [
+    '/records/plain-record-after-xhs-failure/synced',
+    'POST',
     {},
     'ABC-123',
   ]]);
@@ -7816,6 +7938,9 @@ async function runDiagnosticFailureLogFilteringTests() {
     });
 
     const diagnostic = plugin.getSyncDiagnosticText();
+    assert.ok(diagnostic.includes('插件版本：1.3.3'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.58 / xhs-failure-diagnostics-v1'));
+    assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
     assert.ok(diagnostic.includes('权限接口连接失败'));

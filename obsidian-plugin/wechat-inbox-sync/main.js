@@ -17,6 +17,8 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
+const PLUGIN_RUNTIME_VERSION = '1.3.58';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'xhs-failure-diagnostics-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -967,8 +969,9 @@ function buildSyncDiagnosticLogText({
   title = '',
   recordId = '',
   error = '',
+  diagnostic = null,
 } = {}) {
-  return [
+  const lines = [
     `time=${time}`,
     `status=${status}`,
     `message=${message}`,
@@ -980,7 +983,14 @@ function buildSyncDiagnosticLogText({
     `recordId=${recordId}`,
     '--- error ---',
     String(error || ''),
-  ].join('\n');
+  ];
+  if (diagnostic && typeof diagnostic === 'object') {
+    lines.push(
+      '--- diagnostic ---',
+      JSON.stringify(redactSensitiveObject(diagnostic), null, 2),
+    );
+  }
+  return lines.join('\n');
 }
 
 function writeSyncDiagnosticLog(payload = {}, installRoot = getLocalAsrInstallRoot()) {
@@ -1352,10 +1362,100 @@ function isRetryableTranscriptionError(error) {
   return Boolean(error && (error.retryable || error.code === 'TRANSCRIPTION_PENDING'));
 }
 
-function createRetryableXiaohongshuContentError(detail = '') {
-  const suffix = detail ? `：${detail}` : '';
-  const error = new Error(`小红书没有返回真实笔记内容，请在插件设置中登录小红书后重试${suffix}`);
+function getPluginRuntimeIdentity(manifestVersion = '') {
+  const normalizedManifestVersion = String(manifestVersion || '').trim() || 'unknown';
+  return {
+    manifestVersion: normalizedManifestVersion,
+    runtimeVersion: PLUGIN_RUNTIME_VERSION,
+    buildMarker: PLUGIN_RUNTIME_BUILD_MARKER,
+    matchesManifest: normalizedManifestVersion === PLUGIN_RUNTIME_VERSION,
+  };
+}
+
+function getSafeUrlDiagnostic(url = '') {
+  try {
+    const parsed = new URL(String(url || ''));
+    return {
+      protocol: parsed.protocol.replace(':', '').toLowerCase(),
+      host: parsed.hostname.replace(/^www\./, '').toLowerCase(),
+    };
+  } catch (error) {
+    return { protocol: '', host: '' };
+  }
+}
+
+function isXiaohongshuShareBoilerplateOnly(extracted) {
+  if (!extracted) return false;
+  const source = Array.from(new Set([
+    extracted.description,
+    extracted.markdown,
+  ].map((item) => String(item || '').trim()).filter(Boolean))).join('\n');
+  const hasShareLink = /(?:xhslink\.(?:cn|com)|xiaohongshu\.com\/(?:explore|discovery)\/)/i.test(source);
+  const hasShareInstruction = /(?:存下|复制).{0,12}(?:口令|信息)|(?:打开|跳转).{0,12}(?:小红书|RED).{0,12}(?:阅读|查看)?/is.test(source);
+  return hasShareInstruction && (hasShareLink || source.replace(/\s+/g, '').length <= 80);
+}
+
+function classifyXiaohongshuPage({ html = '', resolvedUrl = '', extracted = null } = {}) {
+  const finalHost = getSafeUrlDiagnostic(resolvedUrl).host;
+  if (finalHost && finalHost !== 'xiaohongshu.com' && !finalHost.endsWith('.xiaohongshu.com')) {
+    return 'unexpected-host';
+  }
+  if (isUnavailableXiaohongshuPage(html, resolvedUrl)) return 'xiaohongshu-unavailable';
+  if (isGenericXiaohongshuLandingExtraction(extracted) || isXiaohongshuShareBoilerplateOnly(extracted)) {
+    return 'xiaohongshu-generic-landing';
+  }
+  if (hasReadableXiaohongshuGraphicContent(extracted, html, resolvedUrl)
+    || (extracted && extracted.videoUrl)) {
+    return 'xiaohongshu-note';
+  }
+  return 'unknown';
+}
+
+function buildXiaohongshuFailureDiagnostic({
+  manifestVersion = '',
+  sourceUrl = '',
+  resolvedUrl = '',
+  responseStatus = 0,
+  html = '',
+  extracted = null,
+  renderError = null,
+} = {}) {
+  const source = getSafeUrlDiagnostic(sourceUrl);
+  const final = getSafeUrlDiagnostic(resolvedUrl);
+  const title = String(extracted && extracted.title ? extracted.title : '').trim();
+  const description = String(extracted && extracted.description ? extracted.description : '').trim();
+  const shareBoilerplateOnly = isXiaohongshuShareBoilerplateOnly(extracted);
+  const genericLanding = isGenericXiaohongshuLandingExtraction(extracted);
+  return {
+    runtime: getPluginRuntimeIdentity(manifestVersion),
+    request: {
+      sourceProtocol: source.protocol,
+      sourceHost: source.host,
+      finalProtocol: final.protocol,
+      finalHost: final.host,
+      redirected: Boolean(source.host && final.host && source.host !== final.host),
+      responseStatus: Number(responseStatus) || 0,
+      pageType: classifyXiaohongshuPage({ html, resolvedUrl, extracted }),
+      renderFailed: Boolean(renderError),
+    },
+    extraction: {
+      hasUsableTitle: Boolean(title && title !== '小红书笔记' && !isGenericXiaohongshuTitle(title)),
+      bodyCharacterCount: shareBoilerplateOnly ? 0 : description.length,
+      imageCount: extracted && Array.isArray(extracted.imageUrls) ? extracted.imageUrls.length : 0,
+      shareBoilerplateOnly,
+      genericLanding,
+      unavailablePage: isUnavailableXiaohongshuPage(html, resolvedUrl),
+    },
+  };
+}
+
+function createRetryableXiaohongshuContentError(diagnostic = {}) {
+  const error = new Error('小红书内容提取失败，已记录诊断，下次同步将重试。');
+  error.retryable = true;
   error.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
+  error.diagnostic = redactSensitiveObject(
+    diagnostic && typeof diagnostic === 'object' ? diagnostic : {},
+  );
   return error;
 }
 
@@ -5579,7 +5679,8 @@ function getPreferredXiaohongshuTitle(existingTitle, extractedTitle, fallback = 
 function hasReadableXiaohongshuGraphicContent(extracted, html, url = '') {
   if (!extracted
     || isUnavailableXiaohongshuPage(html, url)
-    || isGenericXiaohongshuLandingExtraction(extracted, html)) return false;
+    || isGenericXiaohongshuLandingExtraction(extracted, html)
+    || isXiaohongshuShareBoilerplateOnly(extracted)) return false;
   const hasImages = Array.isArray(extracted.imageUrls) && extracted.imageUrls.length > 0;
   if (hasImages) return true;
   const description = String(extracted.description || '').trim();
@@ -12862,6 +12963,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   getSyncDiagnosticText() {
     const platform = this.getConfiguredLocalAsrPlatform();
+    const runtimeIdentity = getPluginRuntimeIdentity(
+      this.manifest && this.manifest.version ? this.manifest.version : '',
+    );
     const asrRoot = this.getConfiguredLocalAsrInstallRoot();
     const ocrRoot = this.getConfiguredLocalOcrInstallRoot();
     const asrStatus = typeof this.getLocalAsrInstallStatus === 'function'
@@ -12901,7 +13005,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     );
     const lines = [
       'WeChat Inbox Sync 同步/安装失败诊断',
-      `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
+      `插件版本：${runtimeIdentity.manifestVersion}`,
+      `运行 Bundle：${runtimeIdentity.runtimeVersion} / ${runtimeIdentity.buildMarker}`,
+      `版本身份一致：${runtimeIdentity.matchesManifest ? '是' : '否（请完全退出并重新打开 Obsidian）'}`,
       `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
       `实际使用系统：${platform}`,
@@ -15250,10 +15356,15 @@ class WechatObsidianInboxPlugin extends Plugin {
             && !extractedXiaohongshu.videoUrl
             && !mediaUrl
             && !isVideoIntent) {
-            const renderDetail = renderedXiaohongshuError
-              ? renderedXiaohongshuError.message || String(renderedXiaohongshuError)
-              : '';
-            throw createRetryableXiaohongshuContentError(renderDetail);
+            throw createRetryableXiaohongshuContentError(buildXiaohongshuFailureDiagnostic({
+              manifestVersion: this.manifest && this.manifest.version,
+              sourceUrl: url,
+              resolvedUrl,
+              responseStatus: response.status,
+              html,
+              extracted: extractedXiaohongshu,
+              renderError: renderedXiaohongshuError,
+            }));
           }
           const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);
           if (hasProAdvancedAccess && !isXiaohongshuVideoNote) {
@@ -15693,6 +15804,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       } catch (error) {
         const message = error.message || String(error);
+        const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
+          ? redactSensitiveObject(error.diagnostic)
+          : null;
         let failedTitle = '';
         try {
           failedTitle = buildRecordTitleBase(record);
@@ -15707,12 +15821,14 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId: getRecordId(record),
           message: '单条内容同步失败',
           error: message,
+          ...(diagnostic ? { diagnostic } : {}),
           time: new Date().toISOString(),
         };
         writeSyncDiagnosticLog(this.lastSyncDiagnostic);
         failed.push({
           recordId: getRecordId(record),
           message,
+          ...(diagnostic ? { diagnostic } : {}),
         });
       }
     }
@@ -15775,6 +15891,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
+        ...(failed.find((item) => item.diagnostic)
+          ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic }
+          : {}),
         time: new Date().toISOString(),
       };
       writeSyncDiagnosticLog(this.lastSyncDiagnostic);
@@ -16370,6 +16489,7 @@ WechatObsidianInboxPlugin.__test = {
   buildTranscriptPropertyMetadata,
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
+  buildSyncDiagnosticLogText,
   buildSkippedSyncNotice,
   getRecordConversionWarning,
   buildConversionWarningsNotice,
@@ -16380,6 +16500,11 @@ WechatObsidianInboxPlugin.__test = {
   assertUsableTranscription,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
+  getPluginRuntimeIdentity,
+  getSafeUrlDiagnostic,
+  isXiaohongshuShareBoilerplateOnly,
+  classifyXiaohongshuPage,
+  buildXiaohongshuFailureDiagnostic,
   createRetryableXiaohongshuContentError,
   isRetryableXiaohongshuContentError,
   isRemoteAsrDownloadFailure,
