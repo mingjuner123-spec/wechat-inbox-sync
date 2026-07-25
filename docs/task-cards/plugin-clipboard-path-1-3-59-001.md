@@ -53,13 +53,15 @@
 
 第二轮安全复审发现自动小红书抓取的认证头会在跨域 302 时继续携带，并指出 IPv6 discard-only、benchmarking 与废弃 6to4 relay 地址遗漏。已增加动态重定向测试：只有 HTTPS 同源跳转保留认证头，跨域或降级跳转剥离 Cookie、Authorization、Proxy-Authorization 及同类敏感头；特殊用途 IPv4/IPv6 地址在选择和 DNS lookup 两层均拒绝。
 
+第三轮安全复审继续发现 denylist 未覆盖 `X-API-Token`、`X-Access-Token`、`X-Security-Token`、`X-Amz-Security-Token`、`X-Session-Token`、裸 `Token`、credential 与 signature 等非标准敏感头。已把跨域或 HTTPS 降级跳转改为安全请求头 allowlist，只保留 `Accept`、`Accept-Language` 和 `User-Agent`；完整敏感头矩阵已加入静态与实际重定向回归。同源 HTTPS 跳转仍按原行为保留认证头。
+
 ## 已知风险
 
 插件侧兼容能够覆盖现有和排队中的旧记录，但小程序与云端的链接类型合同仍需在干净基线上另立任务统一。若网页提取失败，既有失败关闭诊断继续生效，不能回退为伪成功笔记。
 
 ## 唯一下一步
 
-按 TDD 先提交失败测试，再做最小实现。
+完成最终独立安全复审与完整本地门禁，通过后进入受保护默认分支、不可变标签、Release 五项资产、Raw manifest 和本地 ZIP 的正式发布验证。
 
 ## 是否需要负责人决定
 

@@ -4862,8 +4862,13 @@ function getSafeRedirectRequestHeaders(sourceUrl, targetUrl, headers = {}) {
   }
   if (mayRetainSensitiveHeaders) return result;
 
+  const safeCrossOriginHeaderNames = new Set([
+    'accept',
+    'accept-language',
+    'user-agent',
+  ]);
   for (const headerName of Object.keys(result)) {
-    if (/cookie|authorization|api[-_]?key|auth[-_]?token|csrf|xsrf|secret/i.test(headerName)) {
+    if (!safeCrossOriginHeaderNames.has(String(headerName || '').trim().toLowerCase())) {
       delete result[headerName];
     }
   }

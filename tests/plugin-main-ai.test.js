@@ -601,13 +601,24 @@ assert.deepStrictEqual(
       Cookie: 'session=TOP_SECRET',
       Authorization: 'Bearer TOP_SECRET',
       'Proxy-Authorization': 'Basic TOP_SECRET',
+      'X-API-Token': 'TOP_SECRET',
+      'X-Access-Token': 'TOP_SECRET',
+      'X-Security-Token': 'TOP_SECRET',
+      'X-Amz-Security-Token': 'TOP_SECRET',
+      'X-Session-Token': 'TOP_SECRET',
+      Token: 'TOP_SECRET',
+      'X-Custom-Credential': 'TOP_SECRET',
+      'X-Custom-Signature': 'TOP_SECRET',
       Referer: 'https://www.xiaohongshu.com/',
       'User-Agent': 'test-agent',
+      Accept: 'text/html',
+      'Accept-Language': 'zh-CN',
     },
   ),
   {
-    Referer: 'https://www.xiaohongshu.com/',
     'User-Agent': 'test-agent',
+    Accept: 'text/html',
+    'Accept-Language': 'zh-CN',
   },
 );
 assert.deepStrictEqual(
@@ -8323,7 +8334,17 @@ async function runClipboardTextWebpagePromotionTests() {
         Cookie: 'session=TOP_SECRET',
         Authorization: 'Bearer TOP_SECRET',
         'Proxy-Authorization': 'Basic TOP_SECRET',
+        'X-API-Token': 'TOP_SECRET',
+        'X-Access-Token': 'TOP_SECRET',
+        'X-Security-Token': 'TOP_SECRET',
+        'X-Amz-Security-Token': 'TOP_SECRET',
+        'X-Session-Token': 'TOP_SECRET',
+        Token: 'TOP_SECRET',
+        'X-Custom-Credential': 'TOP_SECRET',
+        'X-Custom-Signature': 'TOP_SECRET',
+        Referer: 'https://www.xiaohongshu.com/',
         'User-Agent': 'test-agent',
+        Accept: 'text/html',
       },
     });
     assert.strictEqual(redirectedHeaders.length, 2);
@@ -8331,7 +8352,17 @@ async function runClipboardTextWebpagePromotionTests() {
     assert.strictEqual(redirectedHeaders[1].headers.Cookie, undefined);
     assert.strictEqual(redirectedHeaders[1].headers.Authorization, undefined);
     assert.strictEqual(redirectedHeaders[1].headers['Proxy-Authorization'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-API-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Access-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Security-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Amz-Security-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Session-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers.Token, undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Custom-Credential'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Custom-Signature'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers.Referer, undefined);
     assert.strictEqual(redirectedHeaders[1].headers['User-Agent'], 'test-agent');
+    assert.strictEqual(redirectedHeaders[1].headers.Accept, 'text/html');
   } finally {
     require('https').request = originalHttpsRequest;
   }
