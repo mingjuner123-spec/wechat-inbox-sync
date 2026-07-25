@@ -84,6 +84,13 @@ assert.strictEqual(
   helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('single-dir-transaction-v1', 'legacy-in-place-install'), false),
   false,
 );
+assert.strictEqual(
+  helpers.isLocalOcrInstallerCurrent(
+    windowsOcrInstallerSource.replaceAll('function Expand-TarGzArchiveWithPowerShell', 'function Expand-LegacyTarArchive'),
+    false,
+  ),
+  false,
+);
 assert.ok(pluginMainSource.includes('completePendingLocalOcrSwitch'));
 
 function runPendingLocalOcrSwitchTests() {
@@ -319,16 +326,16 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.59'), {
-  manifestVersion: '1.3.59',
-  runtimeVersion: '1.3.59',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.60'), {
+  manifestVersion: '1.3.60',
+  runtimeVersion: '1.3.60',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
 assert.strictEqual(typeof helpers.buildXiaohongshuFailureDiagnostic, 'function');
 const xiaohongshuFailureDiagnostic = helpers.buildXiaohongshuFailureDiagnostic({
-  manifestVersion: '1.3.59',
+  manifestVersion: '1.3.60',
   sourceUrl: 'http://xhslink.cn/o/demo?xsec_token=source-secret',
   resolvedUrl: 'https://www.xiaohongshu.com/explore/123?xsec_token=resolved-secret',
   responseStatus: 200,
@@ -902,6 +909,7 @@ const localOcrInstallerValidatorSource = pluginMainSource.slice(
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Install-PortablePython')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('$PythonBuildStandaloneBuild = \"20260623\"')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('single-dir-transaction-v1')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Expand-TarGzArchiveWithPowerShell')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('install_portable_python')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('PYTHON_BUILD_STANDALONE_BUILD=\"20260623\"')"));
 assert.strictEqual(localOcrInstallerValidatorSource.includes('Install-Uv'), false);
@@ -5318,7 +5326,7 @@ async function runAsyncHydrationTests() {
   );
 
   const requestFailurePlugin = new PluginClass();
-  requestFailurePlugin.manifest = { version: '1.3.59' };
+  requestFailurePlugin.manifest = { version: '1.3.60' };
   requestFailurePlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
   requestFailurePlugin.hasProFeatureAccess = async () => false;
   const previousRequestFailureMock = requestUrlMock;
@@ -6485,7 +6493,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.59'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.60'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6524,8 +6532,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.59',
-        runtimeVersion: '1.3.59',
+        manifestVersion: '1.3.60',
+        runtimeVersion: '1.3.60',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -6571,7 +6579,7 @@ async function runXiaohongshuFailureClosedIntegrationTest() {
   const plugin = new PluginClass();
   const privateTitle = '用户私密标题不应写入日志';
   const privateQueryValue = 'query-value-must-not-leak';
-  plugin.manifest = { version: '1.3.59' };
+  plugin.manifest = { version: '1.3.60' };
   plugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
@@ -7514,6 +7522,42 @@ async function runLocalTranscriptionEntitlementTests() {
   assert.strictEqual(confirmSetupReason, 'bind');
   assert.deepStrictEqual(installComponentCalls, ['bind']);
 
+  const refreshKeepsProStatusPlugin = new PluginClass();
+  refreshKeepsProStatusPlugin.saveData = async () => {};
+  refreshKeepsProStatusPlugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'KEEP-PRO',
+    clientId: 'keep-pro-client',
+    bindings: [{
+      token: 'KEEP-PRO',
+      label: '刷新微信',
+      enabled: true,
+      status: 'bound',
+    }],
+  });
+  refreshKeepsProStatusPlugin.getProFeatureAccessStatus = async () => ({
+    hasAccess: true,
+    plan: 'local_transcription_beta',
+    status: 'active',
+    expiresAt: '2026-08-01T00:00:00.000Z',
+  });
+  refreshKeepsProStatusPlugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: false,
+    platform: 'win32',
+    platformName: 'Windows',
+    missingComponents: ['图片文字识别 OCR'],
+  });
+  refreshKeepsProStatusPlugin.confirmLocalComponentInstall = async () => true;
+  refreshKeepsProStatusPlugin.installLocalTranscriptionComponents = async () => {
+    throw new Error('图片文字识别 OCR：tar.exe 拒绝访问');
+  };
+  const refreshKeepsProStatus = await refreshKeepsProStatusPlugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'manual-refresh',
+    force: true,
+  });
+  assert.strictEqual(refreshKeepsProStatus.hasAccess, true);
+  assert.strictEqual(refreshKeepsProStatus.localComponentInstallError, '图片文字识别 OCR：tar.exe 拒绝访问');
+
   const ocrOnlyPlugin = new PluginClass();
   ocrOnlyPlugin.settings = helpers.mergeSettings({});
   ocrOnlyPlugin.ensureProFeatureAccess = async () => ({ hasAccess: true });
@@ -8211,7 +8255,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.59 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.60 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));

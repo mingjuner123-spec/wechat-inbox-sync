@@ -3,6 +3,7 @@ const childProcess = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 
 const pluginDir = path.resolve(__dirname, '../obsidian-plugin/wechat-inbox-sync');
 const repoRoot = path.resolve(__dirname, '..');
@@ -32,7 +33,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.59');
+assert.strictEqual(manifest.version, '1.3.60');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
@@ -93,6 +94,8 @@ assert.ok(windowsOcrInstaller.includes('$PythonRuntimeSha256 = "C6AF85BB83D5158C
 assert.ok(windowsOcrInstaller.includes('function Install-PortablePython'));
 assert.ok(windowsOcrInstaller.includes('Get-FileHash -Algorithm SHA256'));
 assert.ok(windowsOcrInstaller.includes('tar.exe'));
+assert.ok(windowsOcrInstaller.includes('function Expand-TarGzArchiveWithPowerShell'));
+assert.ok(windowsOcrInstaller.includes('tar.exe is unavailable or blocked; falling back to the built-in PowerShell extractor.'));
 assert.ok(windowsOcrInstaller.includes('sys.version_info >= (3, 10) and sys.version_info < (3, 13)'));
 assert.strictEqual(windowsOcrInstaller.includes('$env:UV_PYTHON_INSTALL_MIRROR'), false, 'Windows OCR must not ask uv to resolve the mirrored Python runtime');
 assert.strictEqual(windowsOcrInstaller.includes('& $UvExe python install 3.12'), false, 'Windows OCR must download the pinned Python runtime directly');
@@ -315,6 +318,52 @@ function extractPowerShellFunction(source, functionName) {
   return source.slice(start, nextFunction >= 0 ? nextFunction : source.length).trim();
 }
 
+function createTarHeader(name, size, typeFlag) {
+  const header = Buffer.alloc(512, 0);
+  const writeString = (value, offset, length) => {
+    Buffer.from(value, 'ascii').copy(header, offset, 0, Math.min(length, Buffer.byteLength(value, 'ascii')));
+  };
+  const writeOctal = (value, offset, length) => {
+    const text = value.toString(8).padStart(length - 1, '0');
+    writeString(`${text}\0`, offset, length);
+  };
+  writeString(name, 0, 100);
+  writeOctal(typeFlag === '5' ? 0o755 : 0o644, 100, 8);
+  writeOctal(0, 108, 8);
+  writeOctal(0, 116, 8);
+  writeOctal(size, 124, 12);
+  writeOctal(0, 136, 12);
+  writeString('        ', 148, 8);
+  writeString(typeFlag, 156, 1);
+  writeString('ustar', 257, 5);
+  writeString('00', 263, 2);
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  writeOctal(checksum, 148, 8);
+  return header;
+}
+
+function createTarGzFixture(entries) {
+  const parts = [];
+  for (const entry of entries) {
+    const typeFlag = entry.typeFlag || '0';
+    const content = Buffer.isBuffer(entry.content)
+      ? entry.content
+      : Buffer.from(entry.content || '', 'utf8');
+    const size = typeFlag === '5' ? 0 : content.length;
+    parts.push(createTarHeader(entry.name, size, typeFlag));
+    if (typeFlag !== '5') {
+      parts.push(content);
+      const padding = (512 - (content.length % 512)) % 512;
+      if (padding > 0) {
+        parts.push(Buffer.alloc(padding, 0));
+      }
+    }
+  }
+  parts.push(Buffer.alloc(1024, 0));
+  return zlib.gzipSync(Buffer.concat(parts));
+}
+
 function runWindowsNativeProcessProbe(source, label) {
   const nativeProcessProbe = [
     '$ErrorActionPreference = "Stop"',
@@ -356,9 +405,73 @@ function runWindowsNativeProcessProbe(source, label) {
   }
 }
 
+function runWindowsOcrTarFallbackProbe(source) {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-tar-fallback-'));
+  const archivePath = path.join(probeDir, 'fixture-runtime.tar.gz');
+  const destinationDir = path.join(probeDir, 'expanded');
+  const probePath = path.join(probeDir, 'probe.ps1');
+  const archiveBytes = createTarGzFixture([
+    { name: 'python/', typeFlag: '5' },
+    { name: 'python/python.exe', content: 'portable python fixture\n' },
+    { name: 'python/Lib/', typeFlag: '5' },
+    { name: 'python/Lib/site.py', content: 'print("fixture")\n' },
+  ]);
+  const encodedArchivePath = Buffer.from(archivePath, 'utf16le').toString('base64');
+  const encodedDestinationDir = Buffer.from(destinationDir, 'utf16le').toString('base64');
+  const expandTarSource = extractPowerShellFunction(source, 'Expand-TarGzArchive')
+    .replace(
+      'Get-Command tar.exe -ErrorAction SilentlyContinue',
+      "[pscustomobject]@{ Source = 'C:\\\\blocked\\\\tar.exe' }",
+    );
+  const probeSource = [
+    '$ErrorActionPreference = "Stop"',
+    'function Write-InstallLog {}',
+    'function Invoke-NativeCommand { param([string]$FilePath,[object[]]$Arguments) throw "simulated access denied for tar.exe" }',
+    extractPowerShellFunction(source, 'Read-ExactStreamBytes'),
+    extractPowerShellFunction(source, 'Skip-StreamBytes'),
+    extractPowerShellFunction(source, 'Get-TarHeaderString'),
+    extractPowerShellFunction(source, 'Get-TarHeaderOctalValue'),
+    extractPowerShellFunction(source, 'Resolve-TarDestinationPath'),
+    extractPowerShellFunction(source, 'Expand-TarGzArchiveWithPowerShell'),
+    expandTarSource,
+    `$archivePath=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedArchivePath}'))`,
+    `$destination=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedDestinationDir}'))`,
+    'New-Item -ItemType Directory -Force -Path $destination | Out-Null',
+    '$extractor=Expand-TarGzArchive -ArchivePath $archivePath -Destination $destination',
+    'if($extractor -ne "powershell"){throw "expected powershell fallback but got $extractor"}',
+    '$pythonPath=Join-Path $destination "python\\python.exe"',
+    'if(!(Test-Path -LiteralPath $pythonPath)){throw "python.exe was not extracted"}',
+    '$sitePath=Join-Path $destination "python\\Lib\\site.py"',
+    'if(!(Test-Path -LiteralPath $sitePath)){throw "nested file was not extracted"}',
+    'Write-Output "OCR_TAR_FALLBACK_OK"',
+  ].join('\r\n');
+  try {
+    fs.writeFileSync(archivePath, archiveBytes);
+    fs.writeFileSync(probePath, probeSource, 'utf8');
+    const probeResult = childProcess.spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', probePath],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+      },
+    );
+    assert.strictEqual(
+      probeResult.status,
+      0,
+      `Windows OCR tar fallback probe failed:\n${probeResult.stdout || ''}\n${probeResult.stderr || ''}`,
+    );
+    assert.ok((probeResult.stdout || '').includes('OCR_TAR_FALLBACK_OK'));
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
 if (process.platform === 'win32') {
   runWindowsNativeProcessProbe(windowsInstaller, 'INSTALLER');
   runWindowsNativeProcessProbe(transcribeScriptTemplate, 'TRANSCRIBE');
+  runWindowsOcrTarFallbackProbe(windowsOcrInstaller);
 }
 assert.ok(transcribeScriptTemplate.includes('function ConvertTo-NativeArgument'));
 assert.ok(transcribeScriptTemplate.includes('function Convert-ExitCodeToHex'));
