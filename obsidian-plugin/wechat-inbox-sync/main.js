@@ -3,6 +3,7 @@ const childProcess = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
@@ -1729,7 +1730,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.proEntitlementLastErrorAt = String(merged.proEntitlementLastErrorAt || '').trim();
   merged.proSetupInstallPromptSnoozedUntil = String(merged.proSetupInstallPromptSnoozedUntil || '').trim();
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
-  merged.inboxDir = String(merged.inboxDir || '').trim() || DEFAULT_SETTINGS.inboxDir;
+  merged.inboxDir = normalizeConfiguredVaultPath(merged.inboxDir);
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
   merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = true;
@@ -2013,7 +2014,32 @@ function getRecordId(record) {
 }
 
 function normalizeVaultPath(value) {
-  return String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .replace(/^\/+|\/+$/g, '');
+}
+
+function normalizeConfiguredVaultPath(value, fallback = DEFAULT_SETTINGS.inboxDir) {
+  const raw = String(value || '').trim();
+  const safeFallback = normalizeVaultPath(fallback) || normalizeVaultPath(DEFAULT_SETTINGS.inboxDir);
+  if (!raw) return safeFallback;
+  if (/^[\\/]/.test(raw) || /^[a-z]:[\\/]/i.test(raw) || raw.includes('\0')) {
+    return safeFallback;
+  }
+  const normalized = normalizeVaultPath(raw);
+  const segments = normalized.split('/');
+  if (!normalized || segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+    return safeFallback;
+  }
+  return normalized;
+}
+
+function shouldPersistNormalizedInboxDir(savedSettings, mergedSettings) {
+  if (!savedSettings || typeof savedSettings !== 'object') return true;
+  const savedInboxDir = String(savedSettings.inboxDir || '').trim();
+  const mergedInboxDir = String(mergedSettings && mergedSettings.inboxDir || '').trim();
+  return savedInboxDir !== mergedInboxDir;
 }
 
 function normalizeYamlScalar(value) {
@@ -4620,6 +4646,92 @@ function shouldHydrateLinkAsWebpage(url) {
     || isDouyinUrl(url)
     || isBilibiliUrl(url)
     || isXiaoyuzhouUrl(url);
+}
+
+function isPrivateOrReservedIpv4(hostname) {
+  const parts = String(hostname || '').split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+  const [first, second, third] = parts;
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 0 && (third === 0 || third === 2))
+    || (first === 192 && second === 168)
+    || (first === 198 && (second === 18 || second === 19))
+    || (first === 198 && second === 51 && third === 100)
+    || (first === 203 && second === 0 && third === 113)
+    || first >= 224;
+}
+
+function isPrivateOrReservedIpv6(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (host === '::' || host === '::1') return true;
+  if (/^(?:fc|fd)/.test(host) || /^fe[89ab]/.test(host) || /^ff/.test(host) || /^2001:db8/.test(host)) {
+    return true;
+  }
+  const mappedIpv4 = /(?:^|:)ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(host);
+  return Boolean(mappedIpv4 && isPrivateOrReservedIpv4(mappedIpv4[1]));
+}
+
+function isSafeAutomaticWebpageUrl(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    if (parsed.username || parsed.password) return false;
+    const hostname = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+    if (!hostname
+      || hostname === 'localhost'
+      || hostname.endsWith('.localhost')
+      || hostname.endsWith('.local')
+      || hostname.endsWith('.internal')
+      || hostname.endsWith('.home.arpa')) {
+      return false;
+    }
+    const unwrappedHostname = hostname.replace(/^\[|\]$/g, '');
+    const ipVersion = net.isIP(unwrappedHostname);
+    if (ipVersion === 4 && isPrivateOrReservedIpv4(unwrappedHostname)) return false;
+    if (ipVersion === 6 && isPrivateOrReservedIpv6(unwrappedHostname)) return false;
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function extractAutomaticWebpageUrlCandidates(text) {
+  const matches = String(text || '').match(/https?:\/\/[a-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+/gi) || [];
+  const unique = [];
+  const seen = new Set();
+  for (const match of matches) {
+    const candidate = String(match || '').replace(/[)\]}>，。！？、；："'~.,!;]+$/g, '');
+    if (!candidate || !isSafeAutomaticWebpageUrl(candidate)) continue;
+    let normalized;
+    try {
+      normalized = new URL(candidate).toString();
+      if (!/[/?#]$/.test(candidate) && normalized.endsWith('/')) {
+        normalized = normalized.slice(0, -1);
+      }
+    } catch (error) {
+      continue;
+    }
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      unique.push(normalized);
+    }
+  }
+  return unique;
+}
+
+function selectAutomaticWebpageUrlFromText(text) {
+  const candidates = extractAutomaticWebpageUrlCandidates(text);
+  if (candidates.length === 1) return candidates[0];
+  const supportedPlatformCandidates = candidates.filter((url) => shouldHydrateLinkAsWebpage(url));
+  return supportedPlatformCandidates.length === 1 ? supportedPlatformCandidates[0] : '';
 }
 
 function getSocialRequestHeaders(url) {
@@ -11661,7 +11773,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
     this.settings = mergeSettings(savedSettings);
-    if (!savedSettings || !savedSettings.clientId) {
+    if (!savedSettings || !savedSettings.clientId || shouldPersistNormalizedInboxDir(savedSettings, this.settings)) {
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
@@ -11984,8 +12096,8 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async writeCapturedWechatChannelsRecord(record, syncedAt, binding = null) {
     const dateFolder = getDateFolderName(record.createdAt);
-    const rootDir = this.settings.inboxDir;
-    const noteDir = this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`;
+    const rootDir = normalizeConfiguredVaultPath(this.settings.inboxDir);
+    const noteDir = normalizeVaultPath(this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`);
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
     const title = await this.nextRecordTitle(noteDir, record, '');
@@ -11996,7 +12108,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       syncedAt,
       propertyFields: this.settings.notePropertyFields,
     });
-    const filePath = `${noteDir}/${title}.md`;
+    const filePath = normalizeVaultPath(`${noteDir}/${title}.md`);
     await this.app.vault.adapter.write(filePath, markdown);
     return {
       recordId: getRecordId(record),
@@ -14282,8 +14394,15 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async ensureFolder(folderPath) {
-    if (!(await this.app.vault.adapter.exists(folderPath))) {
-      await this.app.vault.createFolder(folderPath);
+    const normalizedFolderPath = normalizeVaultPath(folderPath);
+    if (!normalizedFolderPath) return;
+    const segments = normalizedFolderPath.split('/');
+    let currentPath = '';
+    for (const segment of segments) {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      if (!(await this.app.vault.adapter.exists(currentPath))) {
+        await this.app.vault.createFolder(currentPath);
+      }
     }
   }
 
@@ -14324,7 +14443,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     await this.ensureFolder(audioRootDir);
     await this.ensureFolder(audioDayDir);
-    await this.app.vault.adapter.writeBinary(audioPath, audioBuffer);
+    await this.app.vault.adapter.writeBinary(normalizeVaultPath(audioPath), audioBuffer);
 
     let nextMetadata = {
       ...metadata,
@@ -14445,7 +14564,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
       await this.ensureFolder(fileRootDir);
       await this.ensureFolder(fileDayDir);
-      await this.app.vault.adapter.writeBinary(filePath, fileBuffer);
+      await this.app.vault.adapter.writeBinary(normalizeVaultPath(filePath), fileBuffer);
       const nodeBuffer = toNodeBuffer(fileBuffer);
 
       const nextMetadata = {
@@ -14551,7 +14670,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!decoded || !asset.src) continue;
       const ext = getImageExtFromMime(decoded.mimeType);
       const imagePath = `${imageDayDir}/${title}-image-${String(index).padStart(2, '0')}.${ext}`;
-      await this.app.vault.adapter.writeBinary(imagePath, decoded.buffer);
+      await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
       const pattern = new RegExp(`!\\[[^\\]]*\\]\\(${escapeRegExp(asset.src)}\\)`, 'g');
       nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
       index += 1;
@@ -14595,7 +14714,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const ext = getImageExtFromBuffer(buffer, imageUrl);
         const imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${ext}`;
         // eslint-disable-next-line no-await-in-loop
-        await this.app.vault.adapter.writeBinary(imagePath, buffer);
+        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), buffer);
         savedByUrl.set(imageUrl, imagePath);
         index += 1;
       } catch (error) {
@@ -14669,7 +14788,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const attachmentPath = `${attachmentDayDir}/${safeTitle}-${recordShortId}.${extension}`;
       await this.ensureFolder(attachmentRootDir);
       await this.ensureFolder(attachmentDayDir);
-      await this.app.vault.adapter.writeBinary(attachmentPath, selectedBuffer);
+      await this.app.vault.adapter.writeBinary(normalizeVaultPath(attachmentPath), selectedBuffer);
       return {
         ...record,
         metadata: {
@@ -15780,8 +15899,8 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const dateFolder = getDateFolderName(record.createdAt);
-    const rootDir = this.settings.inboxDir;
-    const noteDir = this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`;
+    const rootDir = normalizeConfiguredVaultPath(this.settings.inboxDir);
+    const noteDir = normalizeVaultPath(this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`);
     const bindingLabel = shouldPrefixTitle && binding ? binding.label : '';
     const progressTitle = buildRecordTitleBase(record);
     this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
@@ -15793,20 +15912,32 @@ class WechatObsidianInboxPlugin extends Plugin {
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
     const linkAsWebpage = recordType === 'link' && shouldHydrateLinkAsWebpage((record.metadata && record.metadata.url) || record.content || '');
+    const textWebpageUrl = recordType === 'text'
+      ? selectAutomaticWebpageUrlFromText([
+        record.content || '',
+        record.metadata && record.metadata.url || '',
+      ].filter(Boolean).join('\n'))
+      : '';
+    const textAsWebpage = Boolean(textWebpageUrl);
     if (recordType === 'voice') {
       recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === 'file') {
       recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding, progress);
-    } else if (recordType === 'webpage' || linkAsWebpage) {
+    } else if (recordType === 'webpage' || linkAsWebpage || textAsWebpage) {
       this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
       recordForMarkdown = await this.hydrateWebpageMarkdown(
-        linkAsWebpage
+        linkAsWebpage || textAsWebpage
           ? {
             ...record,
             type: 'webpage',
             metadata: {
               ...(record.metadata || {}),
-              url: (record.metadata && record.metadata.url) || record.content || '',
+              url: textAsWebpage
+                ? textWebpageUrl
+                : (record.metadata && record.metadata.url) || record.content || '',
+              ...(textAsWebpage
+                ? { shareText: (record.metadata && record.metadata.shareText) || record.content || '' }
+                : {}),
               conversionStatus: (record.metadata && record.metadata.conversionStatus) || 'pending',
             },
           }
@@ -15833,7 +15964,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       syncedAt,
       propertyFields: this.settings.notePropertyFields,
     });
-    const filePath = `${noteDir}/${title}.md`;
+    const filePath = normalizeVaultPath(`${noteDir}/${title}.md`);
     this.showSyncProgress({ ...progress, stage: 'writing', title });
     await this.app.vault.adapter.write(filePath, markdown);
 
@@ -16574,6 +16705,9 @@ WechatObsidianInboxPlugin.__test = {
   cleanDisplayUrl,
   isWechatMpArticleUrl,
   shouldHydrateLinkAsWebpage,
+  selectAutomaticWebpageUrlFromText,
+  normalizeConfiguredVaultPath,
+  shouldPersistNormalizedInboxDir,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,

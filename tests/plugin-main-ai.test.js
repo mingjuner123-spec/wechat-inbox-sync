@@ -533,8 +533,16 @@ assert.strictEqual(
   'http://xhslink.cn/o/3twEehTqivC',
 );
 assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('复制口令 http://xhslink.cn/o/3twEehTqivC存下口令，跳转【小红书】阅读'),
+  'http://xhslink.cn/o/3twEehTqivC',
+);
+assert.strictEqual(
   helpers.selectAutomaticWebpageUrlFromText('普通网页 https://example.com/article?id=1'),
   'https://example.com/article?id=1',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('句末链接 https://example.com/article.'),
+  'https://example.com/article',
 );
 assert.strictEqual(
   helpers.selectAutomaticWebpageUrlFromText('两个普通链接 https://example.com/a https://example.net/b'),
@@ -552,6 +560,8 @@ assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://127.
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://localhost/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('私网 http://192.168.1.2/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('链路本地 http://169.254.1.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://198.51.100.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://203.0.113.2/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 http://[::1]/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('凭据 https://user:pass@example.com/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('非网页 file:///C:/secret.txt'), '');
