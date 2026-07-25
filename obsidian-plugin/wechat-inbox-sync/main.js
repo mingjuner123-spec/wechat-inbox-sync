@@ -17,6 +17,8 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
+const PLUGIN_RUNTIME_VERSION = '1.3.58';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'xhs-failure-diagnostics-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -967,8 +969,9 @@ function buildSyncDiagnosticLogText({
   title = '',
   recordId = '',
   error = '',
+  diagnostic = null,
 } = {}) {
-  return [
+  const lines = [
     `time=${time}`,
     `status=${status}`,
     `message=${message}`,
@@ -980,7 +983,14 @@ function buildSyncDiagnosticLogText({
     `recordId=${recordId}`,
     '--- error ---',
     String(error || ''),
-  ].join('\n');
+  ];
+  if (diagnostic && typeof diagnostic === 'object') {
+    lines.push(
+      '--- diagnostic ---',
+      JSON.stringify(redactSensitiveObject(diagnostic), null, 2),
+    );
+  }
+  return lines.join('\n');
 }
 
 function writeSyncDiagnosticLog(payload = {}, installRoot = getLocalAsrInstallRoot()) {
@@ -1352,10 +1362,113 @@ function isRetryableTranscriptionError(error) {
   return Boolean(error && (error.retryable || error.code === 'TRANSCRIPTION_PENDING'));
 }
 
-function createRetryableXiaohongshuContentError(detail = '') {
-  const suffix = detail ? `：${detail}` : '';
-  const error = new Error(`小红书没有返回真实笔记内容，请在插件设置中登录小红书后重试${suffix}`);
+function getPluginRuntimeIdentity(manifestVersion = '') {
+  const normalizedManifestVersion = String(manifestVersion || '').trim() || 'unknown';
+  return {
+    manifestVersion: normalizedManifestVersion,
+    runtimeVersion: PLUGIN_RUNTIME_VERSION,
+    buildMarker: PLUGIN_RUNTIME_BUILD_MARKER,
+    matchesManifest: normalizedManifestVersion === PLUGIN_RUNTIME_VERSION,
+  };
+}
+
+function getSafeUrlDiagnostic(url = '') {
+  try {
+    const parsed = new URL(String(url || ''));
+    return {
+      protocol: parsed.protocol.replace(':', '').toLowerCase(),
+      host: parsed.hostname.replace(/^www\./, '').toLowerCase(),
+    };
+  } catch (error) {
+    return { protocol: '', host: '' };
+  }
+}
+
+function isXiaohongshuShareBoilerplateOnly(extracted) {
+  if (!extracted) return false;
+  const source = Array.from(new Set([
+    extracted.description,
+    extracted.markdown,
+  ].map((item) => String(item || '').trim()).filter(Boolean))).join('\n');
+  const hasShareLink = /(?:xhslink\.(?:cn|com)|xiaohongshu\.com\/(?:explore|discovery)\/)/i.test(source);
+  const hasShareInstruction = /(?:存下|复制).{0,12}(?:口令|信息)|(?:打开|跳转).{0,12}(?:小红书|RED).{0,12}(?:阅读|查看)?/is.test(source);
+  return hasShareInstruction && (hasShareLink || source.replace(/\s+/g, '').length <= 80);
+}
+
+function classifyXiaohongshuPage({ html = '', resolvedUrl = '', extracted = null } = {}) {
+  const finalHost = getSafeUrlDiagnostic(resolvedUrl).host;
+  if (finalHost && finalHost !== 'xiaohongshu.com' && !finalHost.endsWith('.xiaohongshu.com')) {
+    return 'unexpected-host';
+  }
+  if (isUnavailableXiaohongshuPage(html, resolvedUrl)) return 'xiaohongshu-unavailable';
+  if (isGenericXiaohongshuLandingExtraction(extracted) || isXiaohongshuShareBoilerplateOnly(extracted)) {
+    return 'xiaohongshu-generic-landing';
+  }
+  if (hasReadableXiaohongshuGraphicContent(extracted, html, resolvedUrl)
+    || (extracted && extracted.videoUrl)) {
+    return 'xiaohongshu-note';
+  }
+  return 'unknown';
+}
+
+function buildXiaohongshuFailureDiagnostic({
+  manifestVersion = '',
+  sourceUrl = '',
+  resolvedUrl = '',
+  responseStatus = 0,
+  html = '',
+  extracted = null,
+  renderError = null,
+  requestError = null,
+  redirectDiagnostic = null,
+} = {}) {
+  const source = getSafeUrlDiagnostic(sourceUrl);
+  const final = getSafeUrlDiagnostic(resolvedUrl);
+  const title = String(extracted && extracted.title ? extracted.title : '').trim();
+  const description = String(extracted && extracted.description ? extracted.description : '').trim();
+  const shareBoilerplateOnly = isXiaohongshuShareBoilerplateOnly(extracted);
+  const genericLanding = isGenericXiaohongshuLandingExtraction(extracted);
+  return {
+    runtime: getPluginRuntimeIdentity(manifestVersion),
+    request: {
+      sourceProtocol: source.protocol,
+      sourceHost: source.host,
+      finalProtocol: final.protocol,
+      finalHost: final.host,
+      redirected: Boolean(source.host && final.host && source.host !== final.host),
+      responseStatus: Number(responseStatus) || 0,
+      pageType: classifyXiaohongshuPage({ html, resolvedUrl, extracted }),
+      renderFailed: Boolean(renderError),
+      requestFailed: Boolean(requestError),
+      redirectCount: Number(redirectDiagnostic && redirectDiagnostic.redirectCount) || 0,
+      usedGetFallback: Boolean(redirectDiagnostic && redirectDiagnostic.usedGetFallback),
+      redirectAttempts: redirectDiagnostic && Array.isArray(redirectDiagnostic.attempts)
+        ? redirectDiagnostic.attempts.map((attempt) => ({
+          method: String(attempt && attempt.method || ''),
+          status: Number(attempt && attempt.status) || 0,
+          host: String(attempt && attempt.host || ''),
+          outcome: String(attempt && attempt.outcome || ''),
+        }))
+        : [],
+    },
+    extraction: {
+      hasUsableTitle: Boolean(title && title !== '小红书笔记' && !isGenericXiaohongshuTitle(title)),
+      bodyCharacterCount: shareBoilerplateOnly ? 0 : description.length,
+      imageCount: extracted && Array.isArray(extracted.imageUrls) ? extracted.imageUrls.length : 0,
+      shareBoilerplateOnly,
+      genericLanding,
+      unavailablePage: isUnavailableXiaohongshuPage(html, resolvedUrl),
+    },
+  };
+}
+
+function createRetryableXiaohongshuContentError(diagnostic = {}) {
+  const error = new Error('小红书内容提取失败，已记录诊断，下次同步将重试。');
+  error.retryable = true;
   error.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
+  error.diagnostic = redactSensitiveObject(
+    diagnostic && typeof diagnostic === 'object' ? diagnostic : {},
+  );
   return error;
 }
 
@@ -2768,6 +2881,18 @@ function buildWebpageMarkdownBody(record, title) {
   if (snapshot && isXiaohongshuUrl(url)) {
     snapshot = sanitizeXiaohongshuMarkdownImages(snapshot);
   }
+  const status = metadata.conversionStatus || 'pending';
+  const errorText = metadata.conversionError || '';
+  if (
+    isWechatChannelsUrl(url)
+    && (status === 'failed' || status === 'wechat_captcha' || status === 'link_saved')
+  ) {
+    return [
+      '> ⚠️ 视频号内容解析功能暂未接通，当前已为你保存原始链接。',
+      '> 功能上线后，可以重新发送链接进行提取。',
+      '',
+    ].join('\n');
+  }
   if (metadata.transcriptOnly && snapshot && isWechatChannelsUrl(url) && metadata.conversionStatus === 'link_saved') {
     return `${snapshot}\n`;
   }
@@ -2785,9 +2910,6 @@ function buildWebpageMarkdownBody(record, title) {
       .join('\n\n')
       .trim() + '\n';
   }
-
-  const status = metadata.conversionStatus || 'pending';
-  const errorText = metadata.conversionError || '';
 
   if (snapshot) {
     if (isFeishuUrl(url)) {
@@ -4523,18 +4645,30 @@ function shouldRetryRedirectWithGet(url, statusCode) {
   return shouldResolvePlatformRedirect(url) && [400, 403, 404, 405, 501].includes(Number(statusCode));
 }
 
-function resolveRedirectUrl(url, maxRedirects = 5, method = 'HEAD') {
+function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD', state = null) {
   const source = String(url || '').trim();
+  const diagnostic = state || {
+    attempts: [],
+    redirectCount: 0,
+    usedGetFallback: false,
+  };
   if (!/^https?:\/\//i.test(source) || maxRedirects <= 0) {
-    return Promise.resolve(source);
+    return Promise.resolve({ url: source, diagnostic });
   }
 
   return new Promise((resolve) => {
+    let settled = false;
     let parsed;
     try {
       parsed = new URL(source);
     } catch (error) {
-      resolve(source);
+      diagnostic.attempts.push({
+        method,
+        status: 0,
+        host: '',
+        outcome: 'invalid-url',
+      });
+      resolve({ url: source, diagnostic });
       return;
     }
 
@@ -4543,31 +4677,75 @@ function resolveRedirectUrl(url, maxRedirects = 5, method = 'HEAD') {
       method,
       headers: getSocialRequestHeaders(source),
     }, (response) => {
+      if (settled) {
+        response.resume();
+        return;
+      }
+      settled = true;
       const location = response.headers && response.headers.location;
       response.resume();
+      const attempt = {
+        method,
+        status: Number(response.statusCode) || 0,
+        host: getSafeUrlDiagnostic(source).host,
+        outcome: 'response',
+      };
+      diagnostic.attempts.push(attempt);
       if (response.statusCode >= 300 && response.statusCode < 400 && location) {
+        attempt.outcome = 'redirect';
+        diagnostic.redirectCount += 1;
         try {
-          resolve(resolveRedirectUrl(new URL(location, source).toString(), maxRedirects - 1));
+          resolve(resolveRedirectUrlWithDiagnostics(
+            new URL(location, source).toString(),
+            maxRedirects - 1,
+            'HEAD',
+            diagnostic,
+          ));
           return;
         } catch (error) {
-          resolve(source);
+          attempt.outcome = 'invalid-redirect';
+          resolve({ url: source, diagnostic });
           return;
         }
       }
       if (method === 'HEAD' && shouldRetryRedirectWithGet(source, response.statusCode)) {
-        resolve(resolveRedirectUrl(source, maxRedirects, 'GET'));
+        diagnostic.usedGetFallback = true;
+        resolve(resolveRedirectUrlWithDiagnostics(source, maxRedirects, 'GET', diagnostic));
         return;
       }
-      resolve(source);
+      resolve({ url: source, diagnostic });
     });
 
     request.setTimeout(8000, () => {
+      if (settled) return;
+      settled = true;
+      diagnostic.attempts.push({
+        method,
+        status: 0,
+        host: getSafeUrlDiagnostic(source).host,
+        outcome: 'timeout',
+      });
       request.destroy();
-      resolve(source);
+      resolve({ url: source, diagnostic });
     });
-    request.on('error', () => resolve(source));
+    request.on('error', () => {
+      if (settled) return;
+      settled = true;
+      diagnostic.attempts.push({
+        method,
+        status: 0,
+        host: getSafeUrlDiagnostic(source).host,
+        outcome: 'request-error',
+      });
+      resolve({ url: source, diagnostic });
+    });
     request.end();
   });
+}
+
+async function resolveRedirectUrl(url, maxRedirects = 5, method = 'HEAD') {
+  const result = await resolveRedirectUrlWithDiagnostics(url, maxRedirects, method);
+  return result.url;
 }
 
 function shouldResolvePlatformRedirect(url) {
@@ -5573,6 +5751,7 @@ function hasReadableXiaohongshuGraphicContent(extracted, html, url = '') {
     || isGenericXiaohongshuLandingExtraction(extracted, html)) return false;
   const hasImages = Array.isArray(extracted.imageUrls) && extracted.imageUrls.length > 0;
   if (hasImages) return true;
+  if (isXiaohongshuShareBoilerplateOnly(extracted)) return false;
   const description = String(extracted.description || '').trim();
   if (!description || description.length < 20) return false;
   if (/^(?:短链落地页|当前笔记暂时无法浏览|你访问的页面不见了|页面未直接暴露正文)/.test(description)) return false;
@@ -11164,6 +11343,24 @@ function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
 }
 
+function buildSyncResultNotice(written = [], skipped = [], conversionWarnings = [], failed = []) {
+  const writtenCount = Array.isArray(written) ? written.length : 0;
+  const failedItems = Array.isArray(failed) ? failed : [];
+  let message = !writtenCount && failedItems.length
+    ? `同步失败：${failedItems.length} 条内容未同步：${failedItems[0].message}`
+    : buildSyncNotice(writtenCount);
+  if (Array.isArray(skipped) && skipped.length) {
+    message += buildSkippedSyncNotice(skipped);
+  }
+  message += buildConversionWarningsNotice(
+    Array.isArray(conversionWarnings) ? conversionWarnings : [],
+  );
+  if (writtenCount && failedItems.length) {
+    message += `，${failedItems.length} 条失败：${failedItems[0].message}`;
+  }
+  return message;
+}
+
 function buildSkippedSyncNotice(skipped = []) {
   const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
   const otherSkippedCount = skipped.filter((item) => item && item.reason !== 'already-synced-local' && item.reason !== 'cloud-transcription-processing').length;
@@ -12433,7 +12630,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       status: progress.stage === 'empty' ? 'empty' : 'running',
       time: new Date().toISOString(),
     };
-    writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+    writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
       this.syncStatusBar.setText(message);
     }
@@ -12853,6 +13050,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   getSyncDiagnosticText() {
     const platform = this.getConfiguredLocalAsrPlatform();
+    const runtimeIdentity = getPluginRuntimeIdentity(
+      this.manifest && this.manifest.version ? this.manifest.version : '',
+    );
     const asrRoot = this.getConfiguredLocalAsrInstallRoot();
     const ocrRoot = this.getConfiguredLocalOcrInstallRoot();
     const asrStatus = typeof this.getLocalAsrInstallStatus === 'function'
@@ -12892,7 +13092,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     );
     const lines = [
       'WeChat Inbox Sync 同步/安装失败诊断',
-      `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
+      `插件版本：${runtimeIdentity.manifestVersion}`,
+      `运行 Bundle：${runtimeIdentity.runtimeVersion} / ${runtimeIdentity.buildMarker}`,
+      `版本身份一致：${runtimeIdentity.matchesManifest ? '是' : '否（请完全退出并重新打开 Obsidian）'}`,
       `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || 'auto'}`,
       `实际使用系统：${platform}`,
@@ -14890,6 +15092,9 @@ class WechatObsidianInboxPlugin extends Plugin {
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
+    let xiaohongshuRedirectDiagnostic = null;
+    let xiaohongshuResolvedUrl = url || '';
+    let xiaohongshuResponseStatus = 0;
     if (!url) {
       return record;
     }
@@ -15049,7 +15254,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isXiaohongshuUrl(url) || isDouyinUrl(url)) {
-        const redirectedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+        const redirectResult = shouldResolvePlatformRedirect(url)
+          ? await resolveRedirectUrlWithDiagnostics(url)
+          : {
+            url,
+            diagnostic: {
+              attempts: [],
+              redirectCount: 0,
+              usedGetFallback: false,
+            },
+          };
+        xiaohongshuRedirectDiagnostic = redirectResult.diagnostic;
+        const redirectedUrl = redirectResult.url;
+        xiaohongshuResolvedUrl = redirectedUrl;
         const douyinTarget = isDouyinUrl(url) || isDouyinUrl(redirectedUrl)
           ? normalizeDouyinTargetUrl(url, redirectedUrl)
           : { awemeId: '', url: '' };
@@ -15062,6 +15279,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           ? await getXiaohongshuRequestHeaders(resolvedUrl)
           : getSocialRequestHeaders(resolvedUrl);
         const response = await requestUrl({ url: resolvedUrl, method: 'GET', headers });
+        xiaohongshuResponseStatus = Number(response.status) || 0;
         let html = response.text || '';
         const hasProAdvancedAccess = isXiaohongshuUrl(url)
           ? await this.hasProFeatureAccess()
@@ -15133,6 +15351,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const shouldIncludeXiaohongshuComments = hasProAdvancedAccess
           && this.settings.xiaohongshuCommentsEnabled !== false;
         let extractedXiaohongshu = null;
+        let pendingXiaohongshuFailureDiagnostic = null;
         if (isXiaohongshuUrl(url)) {
           const staticXiaohongshuComments = shouldIncludeXiaohongshuComments
             ? extractSocialCommentsFromHtml(html, XIAOHONGSHU_ROOT_COMMENT_LIMIT)
@@ -15239,12 +15458,20 @@ class WechatObsidianInboxPlugin extends Plugin {
           );
           if (!hasReadableXiaohongshuGraphic
             && !extractedXiaohongshu.videoUrl
-            && !mediaUrl
-            && !isVideoIntent) {
-            const renderDetail = renderedXiaohongshuError
-              ? renderedXiaohongshuError.message || String(renderedXiaohongshuError)
-              : '';
-            throw createRetryableXiaohongshuContentError(renderDetail);
+            && !mediaUrl) {
+            pendingXiaohongshuFailureDiagnostic = buildXiaohongshuFailureDiagnostic({
+              manifestVersion: this.manifest && this.manifest.version,
+              sourceUrl: url,
+              resolvedUrl,
+              responseStatus: response.status,
+              html,
+              extracted: extractedXiaohongshu,
+              renderError: renderedXiaohongshuError,
+              redirectDiagnostic: redirectResult.diagnostic,
+            });
+            if (!isVideoIntent) {
+              throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
+            }
           }
           const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);
           if (hasProAdvancedAccess && !isXiaohongshuVideoNote) {
@@ -15303,6 +15530,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = '';
           }
         }
+        if (pendingXiaohongshuFailureDiagnostic && !mediaUrl) {
+          throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
+        }
         if (mediaUrl) {
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
@@ -15322,26 +15552,6 @@ class WechatObsidianInboxPlugin extends Plugin {
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
           });
-        }
-        if (isVideoIntent && isXiaohongshuUrl(url)) {
-          const noMediaError = isUnavailableXhs
-            ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
-            : '未能从链接中提取到可转写的音频或视频地址';
-          return {
-            ...record,
-            metadata: {
-              ...metadata,
-              title: metadata.title || extractHtmlTitle(html) || '小红书链接',
-              url,
-              markdown: buildXiaohongshuFallbackMarkdown(url, noMediaError),
-              platform: metadata.platform || '小红书',
-              contentCategory: metadata.contentCategory || '视频',
-              transcriptionStatus: 'failed',
-              transcriptionError: noMediaError,
-              transcriptionSource: 'video',
-              conversionStatus: 'link_saved',
-            },
-          };
         }
         if (isVideoIntent && (isDouyinUrl(url) || isDouyinUrl(resolvedUrl))) {
           const noMediaError = '未能从抖音作品页获取到与目标作品一致的音频或视频地址';
@@ -15469,6 +15679,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error)) {
         throw error;
+      }
+      if (isXiaohongshuUrl(url)) {
+        throw createRetryableXiaohongshuContentError(buildXiaohongshuFailureDiagnostic({
+          manifestVersion: this.manifest && this.manifest.version,
+          sourceUrl: url,
+          resolvedUrl: xiaohongshuResolvedUrl || url,
+          responseStatus: xiaohongshuResponseStatus,
+          requestError: error,
+          redirectDiagnostic: xiaohongshuRedirectDiagnostic,
+        }));
       }
       if (isXiaoyuzhouUrl(url) || isBilibiliUrl(url) || isDouyinUrl(url)) {
         return {
@@ -15684,11 +15904,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       } catch (error) {
         const message = error.message || String(error);
-        let failedTitle = '';
-        try {
-          failedTitle = buildRecordTitleBase(record);
-        } catch (titleError) {
-          failedTitle = getRecordId(record) || String(record && record.type ? record.type : 'unknown');
+        const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
+          ? redactSensitiveObject(error.diagnostic)
+          : null;
+        let failedTitle = '小红书内容';
+        if (!isXiaohongshuUrl(getRecordUrl(record))) {
+          try {
+            failedTitle = buildRecordTitleBase(record);
+          } catch (titleError) {
+            failedTitle = getRecordId(record) || String(record && record.type ? record.type : 'unknown');
+          }
         }
         this.lastSyncDiagnostic = {
           ...progress,
@@ -15698,12 +15923,14 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId: getRecordId(record),
           message: '单条内容同步失败',
           error: message,
+          ...(diagnostic ? { diagnostic } : {}),
           time: new Date().toISOString(),
         };
-        writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+        writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
         failed.push({
           recordId: getRecordId(record),
           message,
+          ...(diagnostic ? { diagnostic } : {}),
         });
       }
     }
@@ -15748,15 +15975,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
 
-      let finalMessage = buildSyncNotice(written.length);
-      if (skipped.length) {
-        finalMessage += buildSkippedSyncNotice(skipped);
-      }
+      const finalMessage = buildSyncResultNotice(written, skipped, conversionWarnings, failed);
       if (showNotice || written.length) {
-        finalMessage += buildConversionWarningsNotice(conversionWarnings);
-        if (failed.length) {
-          finalMessage += `，${failed.length} 条失败：${failed[0].message}`;
-        }
         new Notice(finalMessage);
       }
       this.lastSyncDiagnostic = {
@@ -15766,9 +15986,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
+        ...(failed.find((item) => item.diagnostic)
+          ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic }
+          : {}),
         time: new Date().toISOString(),
       };
-      writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+      writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
     } catch (error) {
       this.lastSyncDiagnostic = {
@@ -15778,7 +16001,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         error: error.message || String(error),
         time: new Date().toISOString(),
       };
-      writeSyncDiagnosticLog(this.lastSyncDiagnostic);
+      writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
       new Notice(`同步失败：${error.message || error}`);
     }
@@ -16361,6 +16584,8 @@ WechatObsidianInboxPlugin.__test = {
   buildTranscriptPropertyMetadata,
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
+  buildSyncDiagnosticLogText,
+  buildSyncResultNotice,
   buildSkippedSyncNotice,
   getRecordConversionWarning,
   buildConversionWarningsNotice,
@@ -16371,6 +16596,11 @@ WechatObsidianInboxPlugin.__test = {
   assertUsableTranscription,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
+  getPluginRuntimeIdentity,
+  getSafeUrlDiagnostic,
+  isXiaohongshuShareBoilerplateOnly,
+  classifyXiaohongshuPage,
+  buildXiaohongshuFailureDiagnostic,
   createRetryableXiaohongshuContentError,
   isRetryableXiaohongshuContentError,
   isRemoteAsrDownloadFailure,
@@ -16419,6 +16649,7 @@ WechatObsidianInboxPlugin.__test = {
   parseGeneratedMetadataResponse,
   extractAiMetadataInputText,
   cleanMarkdownForStorage,
+  resolveRedirectUrlWithDiagnostics,
   resolveRedirectUrl,
   isRequestUrlTransportError,
   requestJsonViaNode,

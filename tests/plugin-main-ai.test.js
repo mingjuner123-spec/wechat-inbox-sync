@@ -306,9 +306,75 @@ assert.strictEqual(typeof helpers.parseTencentTaskStatusResponse, 'function');
 assert.strictEqual(typeof helpers.buildRecordTitleBase, 'function');
 assert.strictEqual(typeof helpers.hasRecordIdInFrontmatter, 'function');
 assert.strictEqual(typeof helpers.buildSkippedSyncNotice, 'function');
+assert.strictEqual(typeof helpers.buildSyncDiagnosticLogText, 'function');
 assert.strictEqual(typeof helpers.getRecordConversionWarning, 'function');
 assert.strictEqual(typeof helpers.buildConversionWarningsNotice, 'function');
+assert.strictEqual(typeof helpers.buildSyncResultNotice, 'function');
+assert.strictEqual(
+  helpers.buildSyncResultNotice([], [], [], [{
+    recordId: 'xhs-failed',
+    message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
+  }]),
+  '同步失败：1 条内容未同步：小红书内容提取失败，已记录诊断，下次同步将重试。',
+);
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
+assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.58'), {
+  manifestVersion: '1.3.58',
+  runtimeVersion: '1.3.58',
+  buildMarker: 'xhs-failure-diagnostics-v1',
+  matchesManifest: true,
+});
+assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.57').matchesManifest, false);
+assert.strictEqual(typeof helpers.buildXiaohongshuFailureDiagnostic, 'function');
+const xiaohongshuFailureDiagnostic = helpers.buildXiaohongshuFailureDiagnostic({
+  manifestVersion: '1.3.58',
+  sourceUrl: 'http://xhslink.cn/o/demo?xsec_token=source-secret',
+  resolvedUrl: 'https://www.xiaohongshu.com/explore/123?xsec_token=resolved-secret',
+  responseStatus: 200,
+  html: '<title>小红书 - 你的生活兴趣社区</title>',
+  extracted: {
+    title: '小红书 - 你的生活兴趣社区',
+    description: '存下口令，跳转【小红书】阅读',
+    markdown: '存下口令，跳转【小红书】阅读',
+    imageUrls: [],
+  },
+});
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.sourceHost, 'xhslink.cn');
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.finalHost, 'xiaohongshu.com');
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.responseStatus, 200);
+assert.strictEqual(xiaohongshuFailureDiagnostic.request.pageType, 'xiaohongshu-generic-landing');
+assert.strictEqual(xiaohongshuFailureDiagnostic.extraction.shareBoilerplateOnly, true);
+assert.strictEqual(xiaohongshuFailureDiagnostic.extraction.imageCount, 0);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('source-secret'), false);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('resolved-secret'), false);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('存下口令'), false);
+const xiaohongshuFailureLogText = helpers.buildSyncDiagnosticLogText({
+  status: 'failed',
+  message: '单条内容同步失败',
+  diagnostic: {
+    ...xiaohongshuFailureDiagnostic,
+    request: {
+      ...xiaohongshuFailureDiagnostic.request,
+      xsec_token: 'must-not-be-copied',
+    },
+  },
+});
+assert.ok(xiaohongshuFailureLogText.includes('--- diagnostic ---'));
+assert.ok(xiaohongshuFailureLogText.includes('"pageType": "xiaohongshu-generic-landing"'));
+assert.strictEqual(xiaohongshuFailureLogText.includes('must-not-be-copied'), false);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent({
+  title: '🔥有钱之后，应该给多提升生活质量',
+  description: '🔥有钱之后，应该给多提升生活质量 http://xhslink.cn/o/demo 存下口令，跳转【小红书】阅读~',
+  markdown: '🔥有钱之后，应该给多提升生活质量 http://xhslink.cn/o/demo 存下口令，跳转【小红书】阅读~',
+  imageUrls: [],
+}, '<html><body></body></html>', 'https://www.xiaohongshu.com/explore/123'), false);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent({
+  title: '真实图片笔记',
+  description: '存下口令，跳转【小红书】阅读',
+  markdown: '存下口令，跳转【小红书】阅读',
+  imageUrls: ['https://sns-webpic-qc.xhscdn.com/real-note.jpg'],
+}, '<html><body></body></html>', 'https://www.xiaohongshu.com/explore/real-image-note'), true);
 assert.strictEqual(
   helpers.getSocialRequestHeaders('http://xhslink.cn/o/demo').Referer,
   'https://www.xiaohongshu.com/',
@@ -461,6 +527,77 @@ assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
 assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
 assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/sph/A7ULN6a876'), true);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=A7ULN6a876'), true);
+const unavailableWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'wechat-channels-unavailable',
+    type: 'webpage',
+    content: 'https://weixin.qq.com/sph/A7ULN6a876',
+    createdAt: '2026-07-25T08:00:00.000Z',
+    metadata: {
+      url: 'https://weixin.qq.com/sph/A7ULN6a876',
+      conversionStatus: 'failed',
+      conversionError: 'HTML 转 Markdown 失败：网页正文太短，无法转为 Markdown',
+    },
+  },
+  title: '视频号内容',
+  syncedAt: '2026-07-25T08:01:00.000Z',
+});
+assert.ok(unavailableWechatChannelsMarkdown.includes('视频号内容解析功能暂未接通'));
+assert.ok(unavailableWechatChannelsMarkdown.includes('当前已为你保存原始链接'));
+assert.strictEqual(unavailableWechatChannelsMarkdown.includes('网页正文太短'), false);
+assert.ok(unavailableWechatChannelsMarkdown.includes('\nurl: https://weixin.qq.com/sph/A7ULN6a876\n'));
+const linkSavedWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'wechat-channels-link-saved',
+    type: 'webpage',
+    content: 'https://weixin.qq.com/sph/A7ULN6a876',
+    createdAt: '2026-07-25T08:00:00.000Z',
+    metadata: {
+      url: 'https://weixin.qq.com/sph/A7ULN6a876',
+      conversionStatus: 'link_saved',
+      transcriptOnly: true,
+      markdown: '未能提取视频号口播文案。',
+    },
+  },
+  title: '视频号内容',
+  syncedAt: '2026-07-25T08:01:00.000Z',
+});
+assert.ok(linkSavedWechatChannelsMarkdown.includes('视频号内容解析功能暂未接通'));
+assert.strictEqual(linkSavedWechatChannelsMarkdown.includes('未能提取视频号口播文案'), false);
+const successfulWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'wechat-channels-success',
+    type: 'webpage',
+    content: 'https://weixin.qq.com/sph/A7ULN6a876',
+    createdAt: '2026-07-25T08:00:00.000Z',
+    metadata: {
+      url: 'https://weixin.qq.com/sph/A7ULN6a876',
+      conversionStatus: 'success',
+      markdown: '视频号已提取正文',
+    },
+  },
+  title: '视频号内容',
+  syncedAt: '2026-07-25T08:01:00.000Z',
+});
+assert.ok(successfulWechatChannelsMarkdown.includes('视频号已提取正文'));
+assert.strictEqual(successfulWechatChannelsMarkdown.includes('视频号内容解析功能暂未接通'), false);
+const failedGenericWebpageMarkdown = helpers.buildMarkdownForRecord({
+  record: {
+    _id: 'generic-webpage-failed',
+    type: 'webpage',
+    content: 'https://example.com/short-page',
+    createdAt: '2026-07-25T08:00:00.000Z',
+    metadata: {
+      url: 'https://example.com/short-page',
+      conversionStatus: 'failed',
+      conversionError: 'HTML 转 Markdown 失败：网页正文太短，无法转为 Markdown',
+    },
+  },
+  title: '普通网页',
+  syncedAt: '2026-07-25T08:01:00.000Z',
+});
+assert.ok(failedGenericWebpageMarkdown.includes('这篇文章的正文未能自动提取'));
+assert.ok(failedGenericWebpageMarkdown.includes('网页正文太短'));
 assert.deepStrictEqual(
   helpers.extractWechatChannelsRequestPayload('https://weixin.qq.com/sph/A7ULN6a876'),
   { shortUri: 'A7ULN6a876' },
@@ -3887,6 +4024,26 @@ async function runAsyncHydrationTests() {
       'GET:/o/demo',
       'HEAD:/final',
     ]);
+    const redirectResult = await helpers.resolveRedirectUrlWithDiagnostics('http://xhslink.cn/o/demo');
+    assert.strictEqual(redirectResult.url, 'http://xhslink.cn/final');
+    assert.strictEqual(redirectResult.diagnostic.redirectCount, 1);
+    assert.strictEqual(redirectResult.diagnostic.usedGetFallback, true);
+    assert.deepStrictEqual(redirectResult.diagnostic.attempts, [{
+      method: 'HEAD',
+      status: 404,
+      host: 'xhslink.cn',
+      outcome: 'response',
+    }, {
+      method: 'GET',
+      status: 302,
+      host: 'xhslink.cn',
+      outcome: 'redirect',
+    }, {
+      method: 'HEAD',
+      status: 200,
+      host: 'xhslink.cn',
+      outcome: 'response',
+    }]);
   } finally {
     http.request = originalHttpRequest;
   }
@@ -4985,7 +5142,9 @@ async function runAsyncHydrationTests() {
       }, '', '', '不可用图文测试'),
       (error) => error
         && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
-        && error.message.includes('插件设置中登录小红书'),
+        && error.message === '小红书内容提取失败，已记录诊断，下次同步将重试。'
+        && error.diagnostic
+        && error.diagnostic.request.pageType === 'xiaohongshu-generic-landing',
     );
   } finally {
     requestUrlMock = previousUnavailableGraphicRequestUrlMock;
@@ -5022,16 +5181,45 @@ async function runAsyncHydrationTests() {
   assert.ok(mislabeledXhsImageRecord.metadata.markdown.includes('真正图文正文'));
   assert.ok(mislabeledXhsImageRecord.metadata.markdown.includes('![封面](https://img.example.com/cover.jpg)'));
 
-  const xhsUnavailableVideoRecord = await plugin.hydrateWebpageMarkdown({
-    type: 'webpage',
-    content: 'https://www.xiaohongshu.com/404?source=note&type=video',
-    metadata: { url: 'https://www.xiaohongshu.com/404?source=note&type=video' },
-  }, '', '', '小红书失效视频');
-  assert.strictEqual(xhsUnavailableVideoRecord.metadata.transcriptOnly, undefined);
-  assert.ok(xhsUnavailableVideoRecord.metadata.markdown.includes('小红书链接已保存'));
-  assert.strictEqual(xhsUnavailableVideoRecord.metadata.transcriptionStatus, 'failed');
-  assert.ok(xhsUnavailableVideoRecord.metadata.transcriptionError.includes('小红书网页端未返回可转写的视频资源'));
-  assert.ok(xhsUnavailableVideoRecord.metadata.transcriptionError.includes('从手机相册或文件导入视频'));
+  await assert.rejects(
+    () => plugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/404?source=note&type=video',
+      metadata: { url: 'https://www.xiaohongshu.com/404?source=note&type=video' },
+    }, '', '', '小红书失效视频'),
+    (error) => error
+      && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
+      && error.diagnostic
+      && error.diagnostic.extraction.unavailablePage === true,
+  );
+
+  const requestFailurePlugin = new PluginClass();
+  requestFailurePlugin.manifest = { version: '1.3.58' };
+  requestFailurePlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+  requestFailurePlugin.hasProFeatureAccess = async () => false;
+  const previousRequestFailureMock = requestUrlMock;
+  requestUrlMock = async () => {
+    throw new Error('network failed for https://www.xiaohongshu.com/explore/secret?xsec_token=never-log');
+  };
+  try {
+    await assert.rejects(
+      () => requestFailurePlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/request-failure?xsec_token=never-log',
+        metadata: {
+          url: 'https://www.xiaohongshu.com/explore/request-failure?xsec_token=never-log',
+          title: '用户私密标题不应写入日志',
+        },
+      }, '', '', '请求失败测试'),
+      (error) => error
+        && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
+        && error.diagnostic
+        && error.diagnostic.request.requestFailed === true
+        && JSON.stringify(error.diagnostic).includes('never-log') === false,
+    );
+  } finally {
+    requestUrlMock = previousRequestFailureMock;
+  }
 
   const xhsImageRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
@@ -6138,6 +6326,7 @@ async function runCloudProcessingRecordSkipSyncTest() {
 
 async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   const calls = [];
+  const writeCalls = [];
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
@@ -6157,13 +6346,43 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
           content: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note',
           createdAt: '2026-07-16T08:00:00.000Z',
           metadata: { url: 'https://www.xiaohongshu.com/explore/unavailable-graphic-note' },
+        }, {
+          _id: 'plain-record-after-xhs-failure',
+          type: 'text',
+          content: '失败后仍应继续处理',
+          createdAt: '2026-07-16T08:01:00.000Z',
+          metadata: {},
         }],
       };
     }
     return { success: true, data: {} };
   };
-  plugin.writeRecord = async () => {
-    throw helpers.createRetryableXiaohongshuContentError();
+  plugin.writeRecord = async (record) => {
+    writeCalls.push(record._id);
+    if (record._id === 'xhs-content-unavailable-1') {
+      throw helpers.createRetryableXiaohongshuContentError({
+        runtime: helpers.getPluginRuntimeIdentity('1.3.58'),
+        request: {
+          sourceHost: 'xiaohongshu.com',
+          finalHost: 'xiaohongshu.com',
+          responseStatus: 200,
+          pageType: 'xiaohongshu-generic-landing',
+        },
+        extraction: {
+          hasUsableTitle: false,
+          bodyCharacterCount: 0,
+          imageCount: 0,
+          shareBoilerplateOnly: true,
+          genericLanding: true,
+          unavailablePage: false,
+        },
+      });
+    }
+    return {
+      recordId: record._id,
+      title: '失败后仍应继续处理',
+      filePath: '临时收集/失败后仍应继续处理.md',
+    };
   };
 
   const result = await plugin.syncBinding({
@@ -6171,17 +6390,139 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     label: '测试微信',
   }, false);
 
-  assert.deepStrictEqual(result.written, []);
+  assert.deepStrictEqual(result.written, [{
+    recordId: 'plain-record-after-xhs-failure',
+    title: '失败后仍应继续处理',
+    filePath: '临时收集/失败后仍应继续处理.md',
+  }]);
   assert.deepStrictEqual(result.failed, [{
     recordId: 'xhs-content-unavailable-1',
-    message: '小红书没有返回真实笔记内容，请在插件设置中登录小红书后重试',
+    message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
+    diagnostic: {
+      runtime: {
+        manifestVersion: '1.3.58',
+        runtimeVersion: '1.3.58',
+        buildMarker: 'xhs-failure-diagnostics-v1',
+        matchesManifest: true,
+      },
+      request: {
+        sourceHost: 'xiaohongshu.com',
+        finalHost: 'xiaohongshu.com',
+        responseStatus: 200,
+        pageType: 'xiaohongshu-generic-landing',
+      },
+      extraction: {
+        hasUsableTitle: false,
+        bodyCharacterCount: 0,
+        imageCount: 0,
+        shareBoilerplateOnly: true,
+        genericLanding: true,
+        unavailablePage: false,
+      },
+    },
   }]);
+  assert.deepStrictEqual(writeCalls, [
+    'xhs-content-unavailable-1',
+    'plain-record-after-xhs-failure',
+  ]);
+  assert.strictEqual(plugin.lastSyncDiagnostic.recordId, 'xhs-content-unavailable-1');
+  assert.strictEqual(plugin.lastSyncDiagnostic.diagnostic.extraction.shareBoilerplateOnly, true);
   assert.deepStrictEqual(calls, [[
     '/records?status=pending',
     'GET',
     {},
     'ABC-123',
+  ], [
+    '/records/plain-record-after-xhs-failure/synced',
+    'POST',
+    {},
+    'ABC-123',
   ]]);
+}
+
+async function runXiaohongshuFailureClosedIntegrationTest() {
+  const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-xhs-failure-'));
+  const requestCalls = [];
+  const vaultWrites = [];
+  const plugin = new PluginClass();
+  const privateTitle = '用户私密标题不应写入日志';
+  const privateQueryValue = 'query-value-must-not-leak';
+  plugin.manifest = { version: '1.3.58' };
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    inboxDir: '临时收集',
+  });
+  plugin.getConfiguredLocalAsrInstallRoot = () => logRoot;
+  plugin.ensureFolder = async () => {};
+  plugin.nextRecordTitle = async () => privateTitle;
+  plugin.findExistingRecordNotePath = async () => '';
+  plugin.hasProFeatureAccess = async () => false;
+  plugin.renderSocialMediaUrls = async () => [];
+  plugin.renderXiaohongshuPage = async () => ({
+    html: genericXiaohongshuLandingHtml,
+    comments: [],
+  });
+  plugin.app = {
+    vault: {
+      adapter: {
+        async write(filePath, markdown) {
+          vaultWrites.push({ filePath, markdown });
+        },
+      },
+    },
+  };
+  plugin.requestJson = async (requestPath, method, body, binding) => {
+    requestCalls.push([requestPath, method, body, binding && binding.token]);
+    if (requestPath === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'xhs-full-failure-1',
+          type: 'webpage',
+          content: `https://www.xiaohongshu.com/explore/unavailable?xsec_token=${privateQueryValue}`,
+          createdAt: '2026-07-25T08:00:00.000Z',
+          metadata: {
+            url: `https://www.xiaohongshu.com/explore/unavailable?xsec_token=${privateQueryValue}`,
+            title: privateTitle,
+            shareText: `${privateTitle} http://xhslink.cn/o/demo 存下口令，跳转【小红书】阅读~`,
+          },
+        }],
+      };
+    }
+    return { success: true, data: {} };
+  };
+  const previousRequestUrlMock = requestUrlMock;
+  requestUrlMock = async () => ({
+    status: 200,
+    text: genericXiaohongshuLandingHtml,
+  });
+  try {
+    const result = await plugin.syncBinding({
+      token: 'ABC-123',
+      label: '测试微信',
+    }, false);
+    assert.deepStrictEqual(result.written, []);
+    assert.strictEqual(result.failed.length, 1);
+    assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已记录诊断，下次同步将重试。');
+    assert.deepStrictEqual(vaultWrites, []);
+    assert.deepStrictEqual(requestCalls, [[
+      '/records?status=pending',
+      'GET',
+      {},
+      'ABC-123',
+    ]]);
+    const logText = fs.readFileSync(path.join(logRoot, 'sync-last.log'), 'utf8');
+    assert.ok(logText.includes('status=failed'));
+    assert.ok(logText.includes('"pageType": "xiaohongshu-generic-landing"'));
+    assert.strictEqual(logText.includes(privateTitle), false);
+    assert.strictEqual(logText.includes(privateQueryValue), false);
+    assert.strictEqual(logText.includes('存下口令'), false);
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+    fs.rmSync(logRoot, { recursive: true, force: true });
+  }
 }
 
 async function runExistingLocalRecordDedupSyncTest() {
@@ -7745,6 +8086,9 @@ async function runDiagnosticFailureLogFilteringTests() {
     });
 
     const diagnostic = plugin.getSyncDiagnosticText();
+    assert.ok(diagnostic.includes('插件版本：1.3.3'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.58 / xhs-failure-diagnostics-v1'));
+    assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
     assert.ok(diagnostic.includes('权限接口连接失败'));
@@ -7816,6 +8160,7 @@ async function main() {
   await runTranscriptionPreferenceSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runXiaohongshuUnavailableRecordRemainsPendingTest();
+  await runXiaohongshuFailureClosedIntegrationTest();
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();
   await runMarkSyncedRecordNotFoundIsIdempotentTest();
