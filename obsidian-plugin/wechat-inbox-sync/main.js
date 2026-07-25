@@ -4678,6 +4678,7 @@ function isPrivateOrReservedIpv4(hostname) {
     || (first === 172 && second >= 16 && second <= 31)
     || (first === 192 && second === 0 && (third === 0 || third === 2))
     || (first === 192 && second === 168)
+    || (first === 192 && second === 88 && third === 99)
     || (first === 198 && (second === 18 || second === 19))
     || (first === 198 && second === 51 && third === 100)
     || (first === 203 && second === 0 && third === 113)
@@ -4708,9 +4709,17 @@ function isPrivateOrReservedIpv6(hostname) {
       if ((first & 0xfe00) === 0xfc00) return true;
       if ((first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0) return true;
       if ((first & 0xff00) === 0xff00) return true;
+      if (first === 0x0100 && second === 0 && third === 0 && fourth === 0) return true;
       if (first === 0x0064 && second === 0xff9b) return true;
-      if (first === 0x2001 && (second === 0 || second === 0x0db8)) return true;
+      if (first === 0x2001 && (
+        second === 0
+        || (second === 2 && third === 0)
+        || (second >= 0x10 && second <= 0x2f)
+        || second === 0x0db8
+      )) return true;
       if (first === 0x2002) return true;
+      if (first === 0x3fff && second < 0x1000) return true;
+      if (first === 0x5f00) return true;
     }
   }
   if (/^(?:fc|fd)/.test(host) || /^fe[89ab]/.test(host) || /^ff/.test(host) || /^2001:db8/.test(host)) {
@@ -4839,6 +4848,28 @@ function selectAutomaticWebpageUrlFromText(text) {
   return supportedPlatformCandidates.length === 1 ? supportedPlatformCandidates[0] : '';
 }
 
+function getSafeRedirectRequestHeaders(sourceUrl, targetUrl, headers = {}) {
+  const result = { ...(headers && typeof headers === 'object' ? headers : {}) };
+  let mayRetainSensitiveHeaders = false;
+  try {
+    const source = new URL(String(sourceUrl || '').trim());
+    const target = new URL(String(targetUrl || '').trim());
+    mayRetainSensitiveHeaders = source.protocol === 'https:'
+      && target.protocol === 'https:'
+      && source.origin === target.origin;
+  } catch (error) {
+    mayRetainSensitiveHeaders = false;
+  }
+  if (mayRetainSensitiveHeaders) return result;
+
+  for (const headerName of Object.keys(result)) {
+    if (/cookie|authorization|api[-_]?key|auth[-_]?token|csrf|xsrf|secret/i.test(headerName)) {
+      delete result[headerName];
+    }
+  }
+  return result;
+}
+
 function requestPublicWebpageText(url, options = {}) {
   const source = String(url || '').trim();
   const redirectsRemaining = Number.isInteger(options.redirectsRemaining)
@@ -4878,6 +4909,9 @@ function requestPublicWebpageText(url, options = {}) {
         }
         requestPublicWebpageText(redirectUrl, {
           ...options,
+          headers: options.headers
+            ? getSafeRedirectRequestHeaders(source, redirectUrl, options.headers)
+            : getSocialRequestHeaders(redirectUrl),
           redirectsRemaining: redirectsRemaining - 1,
         }).then(resolve, reject);
         return;
@@ -16942,6 +16976,7 @@ WechatObsidianInboxPlugin.__test = {
   selectAutomaticWebpageUrlFromText,
   validatePublicDnsLookupAddresses,
   requestPublicWebpageText,
+  getSafeRedirectRequestHeaders,
   normalizeConfiguredVaultPath,
   shouldPersistNormalizedInboxDir,
   extractBilibiliSubtitleUrlsFromHtml,

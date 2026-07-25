@@ -530,6 +530,7 @@ assert.strictEqual(typeof helpers.normalizeConfiguredVaultPath, 'function');
 assert.strictEqual(typeof helpers.shouldPersistNormalizedInboxDir, 'function');
 assert.strictEqual(typeof helpers.validatePublicDnsLookupAddresses, 'function');
 assert.strictEqual(typeof helpers.requestPublicWebpageText, 'function');
+assert.strictEqual(typeof helpers.getSafeRedirectRequestHeaders, 'function');
 assert.strictEqual(
   helpers.selectAutomaticWebpageUrlFromText('存下口令，跳转【小红书】阅读 http://xhslink.cn/o/3twEehTqivC'),
   'http://xhslink.cn/o/3twEehTqivC',
@@ -564,10 +565,13 @@ assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('私网 http://192.
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('链路本地 http://169.254.1.2/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://198.51.100.2/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://203.0.113.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('废弃 6to4 中继 http://192.88.99.1/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 http://[::1]/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 http://[::ffff:127.0.0.1]/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 十六进制 http://[::ffff:7f00:1]/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 完整格式 http://[0:0:0:0:0:ffff:7f00:1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 discard-only http://[100::1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 benchmarking http://[2001:2::1]/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('凭据 https://user:pass@example.com/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('非网页 file:///C:/secret.txt'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('纯文字，不含链接'), '');
@@ -588,6 +592,45 @@ assert.throws(
     { address: '192.168.1.2', family: 4 },
   ]),
   /私网|保留地址/,
+);
+assert.deepStrictEqual(
+  helpers.getSafeRedirectRequestHeaders(
+    'https://www.xiaohongshu.com/explore/demo',
+    'https://evil.example/collect',
+    {
+      Cookie: 'session=TOP_SECRET',
+      Authorization: 'Bearer TOP_SECRET',
+      'Proxy-Authorization': 'Basic TOP_SECRET',
+      Referer: 'https://www.xiaohongshu.com/',
+      'User-Agent': 'test-agent',
+    },
+  ),
+  {
+    Referer: 'https://www.xiaohongshu.com/',
+    'User-Agent': 'test-agent',
+  },
+);
+assert.deepStrictEqual(
+  helpers.getSafeRedirectRequestHeaders(
+    'https://www.xiaohongshu.com/explore/demo',
+    'https://www.xiaohongshu.com/explore/final',
+    {
+      Cookie: 'session=SAME_ORIGIN',
+      Authorization: 'Bearer SAME_ORIGIN',
+    },
+  ),
+  {
+    Cookie: 'session=SAME_ORIGIN',
+    Authorization: 'Bearer SAME_ORIGIN',
+  },
+);
+assert.deepStrictEqual(
+  helpers.getSafeRedirectRequestHeaders(
+    'https://www.xiaohongshu.com/explore/demo',
+    'http://www.xiaohongshu.com/explore/final',
+    { Cookie: 'session=HTTPS_DOWNGRADE' },
+  ),
+  {},
 );
 assert.throws(
   () => helpers.validatePublicDnsLookupAddresses([
@@ -8212,6 +8255,7 @@ async function runBoundedBrowserTaskTests() {
 
 async function runClipboardTextWebpagePromotionTests() {
   const originalHttpRequest = http.request;
+  const originalHttpsRequest = require('https').request;
   let redirectRequestCount = 0;
   http.request = (parsed, options, callback) => {
     redirectRequestCount += 1;
@@ -8239,6 +8283,57 @@ async function runClipboardTextWebpagePromotionTests() {
     assert.strictEqual(redirectRequestCount, 1);
   } finally {
     http.request = originalHttpRequest;
+  }
+
+  const redirectedHeaders = [];
+  require('https').request = (parsed, options, callback) => {
+    redirectedHeaders.push({ url: parsed.toString(), headers: { ...(options.headers || {}) } });
+    const request = {
+      setTimeout: () => request,
+      on: () => request,
+      destroy: () => {},
+      end: () => {
+        if (redirectedHeaders.length === 1) {
+          callback({
+            statusCode: 302,
+            headers: { location: 'https://evil.example/collect' },
+            resume: () => {},
+            on: () => {},
+          });
+          return;
+        }
+        const handlers = {};
+        callback({
+          statusCode: 200,
+          headers: {},
+          resume: () => {},
+          on(event, handler) {
+            handlers[event] = handler;
+          },
+        });
+        handlers.data(Buffer.from('<html><body>ok</body></html>'));
+        handlers.end();
+      },
+    };
+    return request;
+  };
+  try {
+    await helpers.requestPublicWebpageText('https://www.xiaohongshu.com/explore/demo', {
+      headers: {
+        Cookie: 'session=TOP_SECRET',
+        Authorization: 'Bearer TOP_SECRET',
+        'Proxy-Authorization': 'Basic TOP_SECRET',
+        'User-Agent': 'test-agent',
+      },
+    });
+    assert.strictEqual(redirectedHeaders.length, 2);
+    assert.strictEqual(redirectedHeaders[0].headers.Cookie, 'session=TOP_SECRET');
+    assert.strictEqual(redirectedHeaders[1].headers.Cookie, undefined);
+    assert.strictEqual(redirectedHeaders[1].headers.Authorization, undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['Proxy-Authorization'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['User-Agent'], 'test-agent');
+  } finally {
+    require('https').request = originalHttpsRequest;
   }
 
   const writes = [];
