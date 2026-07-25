@@ -319,16 +319,16 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.58'), {
-  manifestVersion: '1.3.58',
-  runtimeVersion: '1.3.58',
-  buildMarker: 'xhs-failure-diagnostics-v1',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.59'), {
+  manifestVersion: '1.3.59',
+  runtimeVersion: '1.3.59',
+  buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
-assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.57').matchesManifest, false);
+assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
 assert.strictEqual(typeof helpers.buildXiaohongshuFailureDiagnostic, 'function');
 const xiaohongshuFailureDiagnostic = helpers.buildXiaohongshuFailureDiagnostic({
-  manifestVersion: '1.3.58',
+  manifestVersion: '1.3.59',
   sourceUrl: 'http://xhslink.cn/o/demo?xsec_token=source-secret',
   resolvedUrl: 'https://www.xiaohongshu.com/explore/123?xsec_token=resolved-secret',
   responseStatus: 200,
@@ -5243,7 +5243,7 @@ async function runAsyncHydrationTests() {
   );
 
   const requestFailurePlugin = new PluginClass();
-  requestFailurePlugin.manifest = { version: '1.3.58' };
+  requestFailurePlugin.manifest = { version: '1.3.59' };
   requestFailurePlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
   requestFailurePlugin.hasProFeatureAccess = async () => false;
   const previousRequestFailureMock = requestUrlMock;
@@ -6410,7 +6410,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.58'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.59'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6449,9 +6449,9 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.58',
-        runtimeVersion: '1.3.58',
-        buildMarker: 'xhs-failure-diagnostics-v1',
+        manifestVersion: '1.3.59',
+        runtimeVersion: '1.3.59',
+        buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
       request: {
@@ -6496,7 +6496,7 @@ async function runXiaohongshuFailureClosedIntegrationTest() {
   const plugin = new PluginClass();
   const privateTitle = '用户私密标题不应写入日志';
   const privateQueryValue = 'query-value-must-not-leak';
-  plugin.manifest = { version: '1.3.58' };
+  plugin.manifest = { version: '1.3.59' };
   plugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
@@ -8136,7 +8136,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.58 / xhs-failure-diagnostics-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.59 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
