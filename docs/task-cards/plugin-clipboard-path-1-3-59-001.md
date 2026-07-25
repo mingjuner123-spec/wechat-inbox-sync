@@ -55,6 +55,8 @@
 
 第三轮安全复审继续发现 denylist 未覆盖 `X-API-Token`、`X-Access-Token`、`X-Security-Token`、`X-Amz-Security-Token`、`X-Session-Token`、裸 `Token`、credential 与 signature 等非标准敏感头。已把跨域或 HTTPS 降级跳转改为安全请求头 allowlist，只保留 `Accept`、`Accept-Language` 和 `User-Agent`；完整敏感头矩阵已加入静态与实际重定向回归。同源 HTTPS 跳转仍按原行为保留认证头。
 
+第四轮最终独立安全复审在 `04688cd` 上 PASS，P0/P1/P2 均为 0；独立动态探针同时确认多跳重定向不会恢复已剥离的敏感头，前述 SSRF、失败关闭、正文留存和目录竞态修复继续有效。独立测试审查此前已 PASS，完整本地发布门禁再次全绿。
+
 ## 已知风险
 
 插件侧兼容能够覆盖现有和排队中的旧记录，但小程序与云端的链接类型合同仍需在干净基线上另立任务统一。若网页提取失败，既有失败关闭诊断继续生效，不能回退为伪成功笔记。
