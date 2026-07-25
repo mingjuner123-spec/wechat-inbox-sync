@@ -319,16 +319,16 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.58'), {
-  manifestVersion: '1.3.58',
-  runtimeVersion: '1.3.58',
-  buildMarker: 'xhs-failure-diagnostics-v1',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.59'), {
+  manifestVersion: '1.3.59',
+  runtimeVersion: '1.3.59',
+  buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
-assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.57').matchesManifest, false);
+assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
 assert.strictEqual(typeof helpers.buildXiaohongshuFailureDiagnostic, 'function');
 const xiaohongshuFailureDiagnostic = helpers.buildXiaohongshuFailureDiagnostic({
-  manifestVersion: '1.3.58',
+  manifestVersion: '1.3.59',
   sourceUrl: 'http://xhslink.cn/o/demo?xsec_token=source-secret',
   resolvedUrl: 'https://www.xiaohongshu.com/explore/123?xsec_token=resolved-secret',
   responseStatus: 200,
@@ -525,6 +525,130 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.isWechatMpArticleUrl, 'function');
 assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
+assert.strictEqual(typeof helpers.selectAutomaticWebpageUrlFromText, 'function');
+assert.strictEqual(typeof helpers.normalizeConfiguredVaultPath, 'function');
+assert.strictEqual(typeof helpers.shouldPersistNormalizedInboxDir, 'function');
+assert.strictEqual(typeof helpers.validatePublicDnsLookupAddresses, 'function');
+assert.strictEqual(typeof helpers.requestPublicWebpageText, 'function');
+assert.strictEqual(typeof helpers.getSafeRedirectRequestHeaders, 'function');
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('存下口令，跳转【小红书】阅读 http://xhslink.cn/o/3twEehTqivC'),
+  'http://xhslink.cn/o/3twEehTqivC',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('复制口令 http://xhslink.cn/o/3twEehTqivC存下口令，跳转【小红书】阅读'),
+  'http://xhslink.cn/o/3twEehTqivC',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('普通网页 https://example.com/article?id=1'),
+  'https://example.com/article?id=1',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('句末链接 https://example.com/article.'),
+  'https://example.com/article',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('两个普通链接 https://example.com/a https://example.net/b'),
+  '',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('保留唯一平台链接 https://example.com/a http://xhslink.cn/o/abc123'),
+  'http://xhslink.cn/o/abc123',
+);
+assert.strictEqual(
+  helpers.selectAutomaticWebpageUrlFromText('两个平台链接 http://xhslink.cn/o/a https://v.douyin.com/b'),
+  '',
+);
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://127.0.0.1:3000/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://localhost/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('私网 http://192.168.1.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('链路本地 http://169.254.1.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://198.51.100.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://203.0.113.2/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('废弃 6to4 中继 http://192.88.99.1/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 http://[::1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 http://[::ffff:127.0.0.1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 十六进制 http://[::ffff:7f00:1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 完整格式 http://[0:0:0:0:0:ffff:7f00:1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 discard-only http://[100::1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 benchmarking http://[2001:2::1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('凭据 https://user:pass@example.com/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('非网页 file:///C:/secret.txt'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('纯文字，不含链接'), '');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('raw\\wechatmd'), 'raw/wechatmd');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('raw//wechatmd/'), 'raw/wechatmd');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('C:\\Users\\ADMIN\\vault'), '临时收集');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('/absolute/path'), '临时收集');
+assert.strictEqual(helpers.normalizeConfiguredVaultPath('raw/../secret'), '临时收集');
+assert.strictEqual(helpers.mergeSettings({ inboxDir: 'raw\\wechatmd' }).inboxDir, 'raw/wechatmd');
+assert.strictEqual(helpers.shouldPersistNormalizedInboxDir({ inboxDir: 'raw\\wechatmd' }, { inboxDir: 'raw/wechatmd' }), true);
+assert.strictEqual(helpers.shouldPersistNormalizedInboxDir({ inboxDir: 'raw/wechatmd' }, { inboxDir: 'raw/wechatmd' }), false);
+assert.deepStrictEqual(helpers.validatePublicDnsLookupAddresses([
+  { address: '93.184.216.34', family: 4 },
+]), [{ address: '93.184.216.34', family: 4 }]);
+assert.throws(
+  () => helpers.validatePublicDnsLookupAddresses([
+    { address: '93.184.216.34', family: 4 },
+    { address: '192.168.1.2', family: 4 },
+  ]),
+  /私网|保留地址/,
+);
+assert.deepStrictEqual(
+  helpers.getSafeRedirectRequestHeaders(
+    'https://www.xiaohongshu.com/explore/demo',
+    'https://evil.example/collect',
+    {
+      Cookie: 'session=TOP_SECRET',
+      Authorization: 'Bearer TOP_SECRET',
+      'Proxy-Authorization': 'Basic TOP_SECRET',
+      'X-API-Token': 'TOP_SECRET',
+      'X-Access-Token': 'TOP_SECRET',
+      'X-Security-Token': 'TOP_SECRET',
+      'X-Amz-Security-Token': 'TOP_SECRET',
+      'X-Session-Token': 'TOP_SECRET',
+      Token: 'TOP_SECRET',
+      'X-Custom-Credential': 'TOP_SECRET',
+      'X-Custom-Signature': 'TOP_SECRET',
+      Referer: 'https://www.xiaohongshu.com/',
+      'User-Agent': 'test-agent',
+      Accept: 'text/html',
+      'Accept-Language': 'zh-CN',
+    },
+  ),
+  {
+    'User-Agent': 'test-agent',
+    Accept: 'text/html',
+    'Accept-Language': 'zh-CN',
+  },
+);
+assert.deepStrictEqual(
+  helpers.getSafeRedirectRequestHeaders(
+    'https://www.xiaohongshu.com/explore/demo',
+    'https://www.xiaohongshu.com/explore/final',
+    {
+      Cookie: 'session=SAME_ORIGIN',
+      Authorization: 'Bearer SAME_ORIGIN',
+    },
+  ),
+  {
+    Cookie: 'session=SAME_ORIGIN',
+    Authorization: 'Bearer SAME_ORIGIN',
+  },
+);
+assert.deepStrictEqual(
+  helpers.getSafeRedirectRequestHeaders(
+    'https://www.xiaohongshu.com/explore/demo',
+    'http://www.xiaohongshu.com/explore/final',
+    { Cookie: 'session=HTTPS_DOWNGRADE' },
+  ),
+  {},
+);
+assert.throws(
+  () => helpers.validatePublicDnsLookupAddresses([
+    { address: '0:0:0:0:0:ffff:7f00:1', family: 6 },
+  ]),
+  /私网|保留地址/,
+);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/sph/A7ULN6a876'), true);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=A7ULN6a876'), true);
 const unavailableWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
@@ -5194,7 +5318,7 @@ async function runAsyncHydrationTests() {
   );
 
   const requestFailurePlugin = new PluginClass();
-  requestFailurePlugin.manifest = { version: '1.3.58' };
+  requestFailurePlugin.manifest = { version: '1.3.59' };
   requestFailurePlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
   requestFailurePlugin.hasProFeatureAccess = async () => false;
   const previousRequestFailureMock = requestUrlMock;
@@ -6361,7 +6485,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.58'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.59'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6400,9 +6524,9 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.58',
-        runtimeVersion: '1.3.58',
-        buildMarker: 'xhs-failure-diagnostics-v1',
+        manifestVersion: '1.3.59',
+        runtimeVersion: '1.3.59',
+        buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
       request: {
@@ -6447,7 +6571,7 @@ async function runXiaohongshuFailureClosedIntegrationTest() {
   const plugin = new PluginClass();
   const privateTitle = '用户私密标题不应写入日志';
   const privateQueryValue = 'query-value-must-not-leak';
-  plugin.manifest = { version: '1.3.58' };
+  plugin.manifest = { version: '1.3.59' };
   plugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
@@ -7594,7 +7718,7 @@ async function runCloudFailedVoiceLocalFallbackTests() {
       transcriptionSource: 'cloud-pretranscription',
       transcriptionError: '云端转写额度不足',
     },
-  }, '临时收集', '2026-06-13', '录音-001', {
+  }, 'raw\\wechatmd', '2026-06-13', '录音-001', {
     token: 'ABC-123',
   });
 
@@ -7605,7 +7729,7 @@ async function runCloudFailedVoiceLocalFallbackTests() {
     'cloud-pretranscription-failed',
   ]]);
   assert.deepStrictEqual(writtenBinaries, [[
-    '临时收集/语音附件/2026-06-13/录音-001.mp3',
+    'raw/wechatmd/语音附件/2026-06-13/录音-001.mp3',
     'audio-bytes',
   ]]);
   assert.strictEqual(result.metadata.transcription, '本地兜底转写成功');
@@ -7662,7 +7786,7 @@ async function runAudioVideoFileAttachmentTranscriptionTests() {
       fileExt: 'mp4',
       fileSize: 1024,
     },
-  }, '临时收集', '2026-06-30', '视频号-本地视频', {
+  }, 'raw\\wechatmd', '2026-06-30', '视频号-本地视频', {
     token: 'PRO-123',
   });
 
@@ -7673,7 +7797,7 @@ async function runAudioVideoFileAttachmentTranscriptionTests() {
     '视频号-本地视频',
   ]]);
   assert.deepStrictEqual(writtenBinaries, [[
-    '临时收集/文件附件/2026-06-30/视频号-本地视频-wechat-channels.mp4',
+    'raw/wechatmd/文件附件/2026-06-30/视频号-本地视频-wechat-channels.mp4',
     'video-bytes',
   ]]);
   assert.strictEqual(result.metadata.transcriptionStatus, 'success');
@@ -7707,7 +7831,7 @@ async function runSourceMediaAttachmentTests() {
   const folders = [];
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({
-    inboxDir: '临时收集',
+    inboxDir: 'raw\\wechatmd',
     saveOriginalMediaEnabled: true,
   });
   plugin.ensureProFeatureAccess = async () => ({
@@ -7743,13 +7867,13 @@ async function runSourceMediaAttachmentTests() {
       transcriptionSource: 'local',
     },
   };
-  const savedRecord = await plugin.saveSourceMediaAttachment(sourceRecord, '临时收集', '2026-07-14', '演示视频');
+  const savedRecord = await plugin.saveSourceMediaAttachment(sourceRecord, 'raw\\wechatmd', '2026-07-14', '演示视频');
   assert.deepStrictEqual(folders, [
-    '临时收集/音视频附件',
-    '临时收集/音视频附件/2026-07-14',
+    'raw/wechatmd/音视频附件',
+    'raw/wechatmd/音视频附件/2026-07-14',
   ]);
   assert.strictEqual(written.length, 1);
-  assert.strictEqual(written[0][0], '临时收集/音视频附件/2026-07-14/演示视频-media-record.mp4');
+  assert.strictEqual(written[0][0], 'raw/wechatmd/音视频附件/2026-07-14/演示视频-media-record.mp4');
   assert.strictEqual(savedRecord.metadata.sourceMediaAttachmentPath, written[0][0]);
   const savedMarkdown = helpers.buildMarkdownForRecord({
     record: savedRecord,
@@ -7757,7 +7881,7 @@ async function runSourceMediaAttachmentTests() {
     syncedAt: '2026-07-14T00:00:00.000Z',
   });
   assert.ok(savedMarkdown.includes('## 原始音视频'));
-  assert.ok(savedMarkdown.includes('![[临时收集/音视频附件/2026-07-14/演示视频-media-record.mp4]]'));
+  assert.ok(savedMarkdown.includes('![[raw/wechatmd/音视频附件/2026-07-14/演示视频-media-record.mp4]]'));
   assert.ok(savedMarkdown.indexOf('## 原始音视频') < savedMarkdown.indexOf('## 口播/音频文案'));
 
   const videoBytes = Buffer.alloc(640, 0);
@@ -8087,7 +8211,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.58 / xhs-failure-diagnostics-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.59 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -8140,7 +8264,366 @@ async function runBoundedBrowserTaskTests() {
   assert.strictEqual(await helpers.waitForBrowserTasksWithin([Promise.resolve('ok')], 2000), 'settled');
 }
 
+async function runClipboardTextWebpagePromotionTests() {
+  const originalHttpRequest = http.request;
+  const originalHttpsRequest = require('https').request;
+  let redirectRequestCount = 0;
+  http.request = (parsed, options, callback) => {
+    redirectRequestCount += 1;
+    assert.strictEqual(typeof options.lookup, 'function');
+    const request = {
+      setTimeout: () => request,
+      on: () => request,
+      destroy: () => {},
+      end: () => {
+        callback({
+          statusCode: 302,
+          headers: { location: 'http://127.0.0.1/private' },
+          resume: () => {},
+          on: () => {},
+        });
+      },
+    };
+    return request;
+  };
+  try {
+    await assert.rejects(
+      () => helpers.requestPublicWebpageText('http://example.com/start'),
+      /安全自动访问|公网/,
+    );
+    assert.strictEqual(redirectRequestCount, 1);
+  } finally {
+    http.request = originalHttpRequest;
+  }
+
+  const redirectedHeaders = [];
+  require('https').request = (parsed, options, callback) => {
+    redirectedHeaders.push({ url: parsed.toString(), headers: { ...(options.headers || {}) } });
+    const request = {
+      setTimeout: () => request,
+      on: () => request,
+      destroy: () => {},
+      end: () => {
+        if (redirectedHeaders.length === 1) {
+          callback({
+            statusCode: 302,
+            headers: { location: 'https://evil.example/collect' },
+            resume: () => {},
+            on: () => {},
+          });
+          return;
+        }
+        const handlers = {};
+        callback({
+          statusCode: 200,
+          headers: {},
+          resume: () => {},
+          on(event, handler) {
+            handlers[event] = handler;
+          },
+        });
+        handlers.data(Buffer.from('<html><body>ok</body></html>'));
+        handlers.end();
+      },
+    };
+    return request;
+  };
+  try {
+    await helpers.requestPublicWebpageText('https://www.xiaohongshu.com/explore/demo', {
+      headers: {
+        Cookie: 'session=TOP_SECRET',
+        Authorization: 'Bearer TOP_SECRET',
+        'Proxy-Authorization': 'Basic TOP_SECRET',
+        'X-API-Token': 'TOP_SECRET',
+        'X-Access-Token': 'TOP_SECRET',
+        'X-Security-Token': 'TOP_SECRET',
+        'X-Amz-Security-Token': 'TOP_SECRET',
+        'X-Session-Token': 'TOP_SECRET',
+        Token: 'TOP_SECRET',
+        'X-Custom-Credential': 'TOP_SECRET',
+        'X-Custom-Signature': 'TOP_SECRET',
+        Referer: 'https://www.xiaohongshu.com/',
+        'User-Agent': 'test-agent',
+        Accept: 'text/html',
+      },
+    });
+    assert.strictEqual(redirectedHeaders.length, 2);
+    assert.strictEqual(redirectedHeaders[0].headers.Cookie, 'session=TOP_SECRET');
+    assert.strictEqual(redirectedHeaders[1].headers.Cookie, undefined);
+    assert.strictEqual(redirectedHeaders[1].headers.Authorization, undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['Proxy-Authorization'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-API-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Access-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Security-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Amz-Security-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Session-Token'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers.Token, undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Custom-Credential'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['X-Custom-Signature'], undefined);
+    assert.strictEqual(redirectedHeaders[1].headers.Referer, undefined);
+    assert.strictEqual(redirectedHeaders[1].headers['User-Agent'], 'test-agent');
+    assert.strictEqual(redirectedHeaders[1].headers.Accept, 'text/html');
+  } finally {
+    require('https').request = originalHttpsRequest;
+  }
+
+  const writes = [];
+  const hydrated = [];
+  const originalText = '🔥有钱之后，应该多提升生活质量 http://xhslink.cn/o/3twEehTqivC 存下口令，跳转【小红书】阅读~';
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    inboxDir: 'raw\\wechatmd',
+    noteSaveMode: 'root',
+    aiProvider: 'off',
+  });
+  plugin.app = {
+    vault: {
+      adapter: {
+        async exists() {
+          return true;
+        },
+        async write(filePath, markdown) {
+          writes.push({ filePath, markdown });
+        },
+      },
+      async createFolder() {
+        throw new Error('existing canonical folder must be reused');
+      },
+    },
+  };
+  plugin.showSyncProgress = () => {};
+  plugin.nextRecordTitle = async () => '自动网页提取';
+  plugin.hydrateWebpageMarkdown = async (record) => {
+    hydrated.push(record);
+    return {
+      ...record,
+      title: '自动网页提取',
+      content: '# 自动网页提取\n\n网页正文',
+      metadata: {
+        ...(record.metadata || {}),
+        title: '自动网页提取',
+        markdown: '# 自动网页提取\n\n网页正文',
+        conversionStatus: 'success',
+      },
+    };
+  };
+  plugin.saveSourceMediaAttachment = async (record) => record;
+  plugin.enrichRecordMetadataWithAi = async (record) => record;
+
+  const result = await plugin.writeRecord({
+    _id: 'clipboard-text-xhs-1',
+    type: 'text',
+    content: originalText,
+    createdAt: '2026-07-25T03:49:04.246Z',
+    metadata: {},
+  }, '2026-07-25T04:00:00.000Z');
+
+  assert.strictEqual(hydrated.length, 1);
+  assert.strictEqual(hydrated[0].type, 'webpage');
+  assert.strictEqual(hydrated[0].metadata.url, 'http://xhslink.cn/o/3twEehTqivC');
+  assert.strictEqual(hydrated[0].metadata.shareText, originalText);
+  assert.strictEqual(result.filePath, 'raw/wechatmd/自动网页提取.md');
+  assert.strictEqual(writes[0].filePath, 'raw/wechatmd/自动网页提取.md');
+  assert.ok(writes[0].markdown.includes('## 原始剪切板内容'));
+  assert.ok(writes[0].markdown.includes(originalText));
+
+  const failedWrites = [];
+  const failedPlugin = new PluginClass();
+  failedPlugin.settings = helpers.mergeSettings({
+    inboxDir: 'raw/wechatmd',
+    noteSaveMode: 'root',
+    aiProvider: 'off',
+  });
+  failedPlugin.app = {
+    vault: {
+      adapter: {
+        async exists() {
+          return true;
+        },
+        async write(filePath, markdown) {
+          failedWrites.push({ filePath, markdown });
+        },
+      },
+      async createFolder() {},
+    },
+  };
+  failedPlugin.showSyncProgress = () => {};
+  failedPlugin.nextRecordTitle = async () => '失败网页';
+  failedPlugin.hydrateWebpageMarkdown = async (record) => ({
+    ...record,
+    metadata: {
+      ...(record.metadata || {}),
+      conversionStatus: 'failed',
+      conversionError: '网页抓取失败',
+    },
+  });
+  failedPlugin.saveSourceMediaAttachment = async (record) => record;
+  failedPlugin.enrichRecordMetadataWithAi = async (record) => record;
+  await assert.rejects(
+    () => failedPlugin.writeRecord({
+      _id: 'clipboard-generic-failed',
+      type: 'text',
+      content: '读取网页 https://example.com/unavailable',
+      createdAt: '2026-07-25T03:49:04.246Z',
+      metadata: {},
+    }, '2026-07-25T04:00:00.000Z'),
+    /剪切板链接网页提取失败/,
+  );
+  assert.deepStrictEqual(failedWrites, []);
+  const failedSyncCalls = [];
+  failedPlugin.findExistingRecordNotePath = async () => '';
+  failedPlugin.requestJson = async (requestPath, method) => {
+    failedSyncCalls.push([requestPath, method]);
+    if (requestPath === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'clipboard-generic-failed',
+          type: 'text',
+          content: '读取网页 https://example.com/unavailable',
+          createdAt: '2026-07-25T03:49:04.246Z',
+          metadata: {},
+        }],
+      };
+    }
+    return { success: true, data: {} };
+  };
+  const failedSyncResult = await failedPlugin.syncBinding({ token: 'ABC-123', label: '测试微信' }, false);
+  assert.strictEqual(failedSyncResult.written.length, 0);
+  assert.strictEqual(failedSyncResult.failed.length, 1);
+  assert.match(failedSyncResult.failed[0].message, /剪切板链接网页提取失败/);
+  assert.deepStrictEqual(failedSyncCalls, [['/records?status=pending', 'GET']]);
+
+  for (const content of [
+    '纯文字，不应该调用网页提取',
+    '两个普通链接 https://example.com/a https://example.net/b',
+    '危险地址 http://127.0.0.1/private',
+  ]) {
+    let hydrationCalls = 0;
+    const safePlugin = new PluginClass();
+    safePlugin.settings = helpers.mergeSettings({
+      inboxDir: 'raw/wechatmd',
+      noteSaveMode: 'root',
+      aiProvider: 'off',
+    });
+    safePlugin.app = plugin.app;
+    safePlugin.showSyncProgress = () => {};
+    safePlugin.nextRecordTitle = async () => '保持文本';
+    safePlugin.hydrateWebpageMarkdown = async () => {
+      hydrationCalls += 1;
+      throw new Error('unsafe or ambiguous text must not hydrate');
+    };
+    safePlugin.enrichRecordMetadataWithAi = async (record) => record;
+    await safePlugin.writeRecord({
+      _id: `text-${hydrationCalls}-${content.length}`,
+      type: 'text',
+      content,
+      createdAt: '2026-07-25T03:49:04.246Z',
+      metadata: {},
+    }, '2026-07-25T04:00:00.000Z');
+    assert.strictEqual(hydrationCalls, 0);
+  }
+}
+
+async function runCanonicalVaultFolderTests() {
+  const existing = new Set(['raw']);
+  const created = [];
+  const plugin = new PluginClass();
+  plugin.app = {
+    vault: {
+      adapter: {
+        async exists(folderPath) {
+          assert.strictEqual(folderPath.includes('\\'), false);
+          return existing.has(folderPath);
+        },
+      },
+      async createFolder(folderPath) {
+        assert.strictEqual(folderPath.includes('\\'), false);
+        created.push(folderPath);
+        existing.add(folderPath);
+      },
+    },
+  };
+
+  await plugin.ensureFolder('raw\\wechatmd\\2026-07-25');
+  assert.deepStrictEqual(created, ['raw/wechatmd', 'raw/wechatmd/2026-07-25']);
+  await plugin.ensureFolder('raw\\wechatmd\\2026-07-25');
+  assert.deepStrictEqual(created, ['raw/wechatmd', 'raw/wechatmd/2026-07-25']);
+
+  const concurrentExisting = new Set(['raw']);
+  const concurrentPlugin = new PluginClass();
+  concurrentPlugin.app = {
+    vault: {
+      adapter: {
+        async exists(folderPath) {
+          return concurrentExisting.has(folderPath);
+        },
+      },
+      async createFolder(folderPath) {
+        await new Promise((resolve) => setImmediate(resolve));
+        if (concurrentExisting.has(folderPath)) {
+          throw new Error(`Folder already exists: ${folderPath}`);
+        }
+        concurrentExisting.add(folderPath);
+      },
+    },
+  };
+  await Promise.all([
+    concurrentPlugin.ensureFolder('raw\\wechatmd'),
+    concurrentPlugin.ensureFolder('raw\\wechatmd'),
+  ]);
+
+  const canonicalWrites = [];
+  const pathPlugin = new PluginClass();
+  pathPlugin.settings = {
+    ...helpers.mergeSettings({ noteSaveMode: 'date', aiProvider: 'off' }),
+    inboxDir: 'raw\\wechatmd',
+  };
+  pathPlugin.app = {
+    vault: {
+      adapter: {
+        async exists() {
+          return true;
+        },
+        async write(filePath, markdown) {
+          assert.strictEqual(filePath.includes('\\'), false);
+          canonicalWrites.push({ filePath, markdown });
+        },
+      },
+      async createFolder() {},
+    },
+  };
+  pathPlugin.showSyncProgress = () => {};
+  pathPlugin.nextRecordTitle = async () => '日期笔记';
+  pathPlugin.enrichRecordMetadataWithAi = async (record) => record;
+  const datedResult = await pathPlugin.writeRecord({
+    _id: 'dated-text-1',
+    type: 'text',
+    content: '普通日期笔记',
+    createdAt: '2026-07-25T03:49:04.246Z',
+    metadata: {},
+  }, '2026-07-25T04:00:00.000Z');
+  assert.strictEqual(datedResult.filePath, 'raw/wechatmd/2026-07-25/日期笔记.md');
+
+  pathPlugin.settings.noteSaveMode = 'root';
+  pathPlugin.nextRecordTitle = async () => '视频号捕获';
+  const channelResult = await pathPlugin.writeCapturedWechatChannelsRecord({
+    _id: 'wechat-channel-capture-1',
+    type: 'webpage',
+    content: 'https://weixin.qq.com/sph/demo',
+    createdAt: '2026-07-25T03:49:04.246Z',
+    metadata: {
+      url: 'https://weixin.qq.com/sph/demo',
+      markdown: '视频号捕获正文',
+      conversionStatus: 'success',
+    },
+  }, '2026-07-25T04:00:00.000Z');
+  assert.strictEqual(channelResult.filePath, 'raw/wechatmd/视频号捕获.md');
+}
+
 async function main() {
+  await runClipboardTextWebpagePromotionTests();
+  await runCanonicalVaultFolderTests();
   await runBoundedBrowserTaskTests();
   await runAsyncHydrationTests();
   await runLocalTranscriptionQualityFallbackTests();
