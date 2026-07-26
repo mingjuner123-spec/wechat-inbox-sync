@@ -32,8 +32,8 @@
     {
       "id": "ocr-windows-installer",
       "sourcePath": "local-ocr/install-local-ocr.ps1",
-      "sha256": "23e5cb20640b838129b04fbbcaec72b56fa489dca0485c666e243910d5f84755",
-      "immutablePath": "local-components/by-sha256/23e5cb20640b838129b04fbbcaec72b56fa489dca0485c666e243910d5f84755/install-local-ocr.ps1",
+      "sha256": "68691b297ed1bcc02d036b447bed34c7b63c9ef1fef86a57426a631a0fb182b7",
+      "immutablePath": "local-components/by-sha256/68691b297ed1bcc02d036b447bed34c7b63c9ef1fef86a57426a631a0fb182b7/install-local-ocr.ps1",
       "compatibilityAlias": "local-ocr/common/install-local-ocr.ps1"
     },
     {

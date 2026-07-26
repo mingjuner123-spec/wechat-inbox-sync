@@ -19,7 +19,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.60';
+const PLUGIN_RUNTIME_VERSION = '1.3.61';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -38,10 +38,13 @@ const XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS = 10000;
 const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211AC) AppleWebKit/537.36 Chrome/119.0.0.0 Mobile Safari/537.36';
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
+const LOCAL_COMPONENT_CDN_BASE_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com';
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
-const LOCAL_OCR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1';
-const LOCAL_OCR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh';
+const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '68691b297ed1bcc02d036b447bed34c7b63c9ef1fef86a57426a631a0fb182b7';
+const LOCAL_OCR_MACOS_INSTALLER_SHA256 = 'de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074';
+const LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
+const LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
 const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
 const PRO_SETUP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const PRO_SETUP_PROMPT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
@@ -1352,6 +1355,12 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('single-dir-transaction-v1')
     && source.includes('$python = Install-PortablePython')
     && source.includes('Invoke-Python -PythonCommand $python -m venv $VenvDir');
+}
+
+function isTrustedLocalOcrInstallerSource(scriptText, expectedSha256, isMac = false) {
+  const expected = String(expectedSha256 || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(expected) || !isLocalOcrInstallerCurrent(scriptText, isMac)) return false;
+  return sha256Hex(Buffer.from(String(scriptText || ''), 'utf8')) === expected;
 }
 
 function createRetryableTranscriptionError(message) {
@@ -13256,6 +13265,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installerPath = this.getBundledLocalOcrInstallerPath();
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_OCR_MACOS_INSTALLER_URL : LOCAL_OCR_INSTALLER_URL;
+    const installerSha256 = isMac ? LOCAL_OCR_MACOS_INSTALLER_SHA256 : LOCAL_OCR_WINDOWS_INSTALLER_SHA256;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-ocr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
 
     try {
@@ -13266,7 +13276,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (error) {
         scriptText = await downloadTextViaNode(`${installerUrl}?t=${Date.now()}`);
       }
-      if (!isLocalOcrInstallerCurrent(scriptText, isMac)) {
+      if (!isTrustedLocalOcrInstallerSource(scriptText, installerSha256, isMac)) {
         throw new Error('Local OCR installer download returned outdated or invalid content');
       }
       fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(scriptText, isMac), 'utf8');
@@ -13275,7 +13285,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (downloadError) {
       if (fs.existsSync(installerPath)) {
         const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
-        if (isLocalOcrInstallerCurrent(bundledScriptText, isMac)) {
+        if (isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)) {
           if (isMac) {
             fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
             this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
@@ -16898,12 +16908,15 @@ WechatObsidianInboxPlugin.__test = {
   FEISHU_OFFICIAL_API_TUTORIAL_URL,
   MAX_PLUGIN_BINDINGS,
   LOCAL_TRANSCRIPTION_PLAN,
+  LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
+  LOCAL_OCR_MACOS_INSTALLER_SHA256,
   LOCAL_ASR_INSTALLER_URL,
   LOCAL_ASR_MACOS_INSTALLER_URL,
   LOCAL_OCR_INSTALLER_URL,
   LOCAL_OCR_MACOS_INSTALLER_URL,
   isLocalAsrInstallerCurrent,
   isLocalOcrInstallerCurrent,
+  isTrustedLocalOcrInstallerSource,
   completePendingLocalOcrSwitch,
   LOCAL_ASR_PLATFORM_NAMES,
   NOTE_PROPERTY_FIELD_KEYS,

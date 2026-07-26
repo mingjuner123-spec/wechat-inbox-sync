@@ -72,6 +72,23 @@ assert.strictEqual(helpers.isLocalAsrInstallerCurrent(futurePythonMacAsrInstalle
 assert.strictEqual(typeof helpers.isLocalOcrInstallerCurrent, 'function');
 assert.strictEqual(helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource, false), true);
 assert.strictEqual(helpers.isLocalOcrInstallerCurrent(macOcrInstallerSource, true), true);
+assert.strictEqual(typeof helpers.isTrustedLocalOcrInstallerSource, 'function');
+assert.strictEqual(
+  helpers.isTrustedLocalOcrInstallerSource(
+    windowsOcrInstallerSource,
+    helpers.LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
+    false,
+  ),
+  true,
+);
+assert.strictEqual(
+  helpers.isTrustedLocalOcrInstallerSource(
+    `${windowsOcrInstallerSource}\n# stale cached installer`,
+    helpers.LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
+    false,
+  ),
+  false,
+);
 assert.strictEqual(
   helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('Install-PortablePython', 'Install-LegacyPython'), false),
   false,
@@ -326,9 +343,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.60'), {
-  manifestVersion: '1.3.60',
-  runtimeVersion: '1.3.60',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.61'), {
+  manifestVersion: '1.3.61',
+  runtimeVersion: '1.3.61',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -874,18 +891,20 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.LOCAL_OCR_INSTALLER_URL,
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1',
+  `https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-components/by-sha256/${helpers.LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`,
 );
 assert.strictEqual(
   helpers.LOCAL_OCR_MACOS_INSTALLER_URL,
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh',
+  `https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-components/by-sha256/${helpers.LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`,
 );
 assert.ok(pluginMainSource.includes('getAvailableLocalAsrInstallerPath'));
 assert.ok(pluginMainSource.includes('getAvailableLocalOcrInstallerPath'));
 assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1'));
 assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh'));
-assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr.ps1'));
-assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common/install-local-ocr-macos.sh'));
+assert.ok(pluginMainSource.includes('LOCAL_OCR_WINDOWS_INSTALLER_SHA256'));
+assert.ok(pluginMainSource.includes('LOCAL_OCR_MACOS_INSTALLER_SHA256'));
+assert.ok(pluginMainSource.includes('isTrustedLocalOcrInstallerSource(scriptText, installerSha256, isMac)'));
+assert.ok(pluginMainSource.includes('isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)'));
 assert.ok(pluginMainSource.includes("const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';"));
 assert.ok(pluginMainSource.includes("const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';"));
 assert.ok(pluginMainSource.includes('const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;'));
@@ -6493,7 +6512,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.60'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.61'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6532,8 +6551,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.60',
-        runtimeVersion: '1.3.60',
+        manifestVersion: '1.3.61',
+        runtimeVersion: '1.3.61',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -6579,7 +6598,7 @@ async function runXiaohongshuFailureClosedIntegrationTest() {
   const plugin = new PluginClass();
   const privateTitle = '用户私密标题不应写入日志';
   const privateQueryValue = 'query-value-must-not-leak';
-  plugin.manifest = { version: '1.3.60' };
+  plugin.manifest = { version: '1.3.61' };
   plugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
@@ -8255,7 +8274,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.60 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.61 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
