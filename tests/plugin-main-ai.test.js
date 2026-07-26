@@ -344,9 +344,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.63'), {
-  manifestVersion: '1.3.63',
-  runtimeVersion: '1.3.63',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.65'), {
+  manifestVersion: '1.3.65',
+  runtimeVersion: '1.3.65',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -5335,6 +5335,65 @@ async function runAsyncHydrationTests() {
     requestUrlMock = previousGenericXhsRequestUrlMock;
   }
 
+  const transportFallbackPlugin = new PluginClass();
+  transportFallbackPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+  transportFallbackPlugin.hasProFeatureAccess = async () => false;
+  transportFallbackPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+  transportFallbackPlugin.renderSocialMediaUrls = async () => [];
+  let transportFallbackRenderCalls = 0;
+  transportFallbackPlugin.renderXiaohongshuPage = async (renderUrl) => {
+    transportFallbackRenderCalls += 1;
+    assert.strictEqual(renderUrl, 'http://xhslink.cn/o/macos-transport');
+    return {
+      html: [
+        '<html><head>',
+        '<meta property="og:title" content="Mac 浏览器网络接管成功">',
+        '<meta name="description" content="Node 三次连接失败后，隐藏浏览器成功打开短链并取得完整正文。">',
+        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/macos-transport.jpg">',
+        '</head></html>',
+      ].join(''),
+      comments: [],
+    };
+  };
+  const originalHttpRequestForTransportFallback = http.request;
+  const originalHttpsRequestForTransportFallback = https.request;
+  const previousTransportFallbackRequestUrlMock = requestUrlMock;
+  const createTransportFailureRequest = () => {
+    const request = {
+      errorHandler: null,
+      setTimeout: () => request,
+      on: (eventName, handler) => {
+        if (eventName === 'error') request.errorHandler = handler;
+        return request;
+      },
+      destroy: () => {},
+      end: () => request.errorHandler(new Error('simulated macOS Node transport failure')),
+    };
+    return request;
+  };
+  http.request = createTransportFailureRequest;
+  https.request = createTransportFailureRequest;
+  requestUrlMock = async () => {
+    throw new Error('simulated webpage request transport failure');
+  };
+  try {
+    const transportFallbackRecord = await transportFallbackPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://xhslink.cn/o/macos-transport',
+      metadata: {
+        url: 'http://xhslink.cn/o/macos-transport',
+        automaticWebpageExtraction: true,
+      },
+    }, '', '', 'Mac 短链网络接管测试');
+    assert.strictEqual(transportFallbackRenderCalls, 1);
+    assert.strictEqual(transportFallbackRecord.metadata.title, 'Mac 浏览器网络接管成功');
+    assert.ok(transportFallbackRecord.metadata.markdown.includes('隐藏浏览器成功打开短链'));
+  } finally {
+    http.request = originalHttpRequestForTransportFallback;
+    https.request = originalHttpsRequestForTransportFallback;
+    requestUrlMock = previousTransportFallbackRequestUrlMock;
+  }
+
   const renderedFallbackPlugin = new PluginClass();
   renderedFallbackPlugin.settings = helpers.mergeSettings({
     aiProvider: 'off',
@@ -6571,6 +6630,142 @@ async function runTranscriptionPreferenceSyncTest() {
   ]]);
 }
 
+async function runStopCurrentTranscriptionDeletesCurrentRecordTest() {
+  const calls = [];
+  let aborted = false;
+  const plugin = new PluginClass();
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    return { success: true, data: { id: 'record-stop-1', status: 'deleted' } };
+  };
+  plugin.currentTranscriptionAbortController = { abort() { aborted = true; } };
+  plugin.currentTranscriptionContext = {
+    recordId: 'record-stop-1',
+    binding: { token: 'ABC-123' },
+  };
+  await plugin.stopCurrentTranscription();
+  assert.strictEqual(aborted, true);
+  assert.deepStrictEqual(calls, [[
+    '/records/record-stop-1/delete', 'POST', {}, 'ABC-123',
+  ]]);
+}
+
+async function runStoppedTranscriptionDeleteUsesLongControlPlaneTest() {
+  const previousRequestUrlMock = requestUrlMock;
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://short.example.com/sync',
+    token: 'ABC-123',
+    clientId: 'client-stop-delete',
+  });
+  let requestedUrl = '';
+  requestUrlMock = async (options) => {
+    requestedUrl = options.url;
+    return {
+      status: 200,
+      json: {
+        success: true,
+        data: { id: 'record-control-plane', deleted: true },
+      },
+      text: '',
+    };
+  };
+  try {
+    const result = await plugin.deleteCurrentTranscriptionRecord({
+      recordId: 'record-control-plane',
+      binding: { token: 'ABC-123' },
+    });
+    assert.strictEqual(result.deleted, true);
+    assert.strictEqual(
+      requestedUrl,
+      'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync/records/record-control-plane/delete',
+    );
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+  }
+}
+
+async function runStopCurrentTranscriptionWithoutCurrentRecordDoesNotDeleteTest() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.requestJson = async (...args) => {
+    calls.push(args);
+    return { success: true, data: {} };
+  };
+  plugin.currentTranscriptionAbortController = { abort() {} };
+  await plugin.stopCurrentTranscription();
+  assert.deepStrictEqual(calls, []);
+}
+
+async function runStopCurrentTranscriptionWithoutActiveProcessDoesNotDeleteTest() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.requestJson = async (...args) => {
+    calls.push(args);
+    return { success: true, data: {} };
+  };
+  plugin.currentTranscriptionContext = {
+    recordId: 'record-stop-stale',
+    binding: { token: 'ABC-123' },
+  };
+  await plugin.stopCurrentTranscription();
+  assert.deepStrictEqual(calls, []);
+}
+
+async function runStoppedDeletedRecordDoesNotRemainFailedInCurrentSyncTest() {
+  const plugin = new PluginClass();
+  let resolveDeleteRequest;
+  const deleteRequest = new Promise((resolve) => {
+    resolveDeleteRequest = resolve;
+  });
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.requestJson = async (path) => {
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'record-stop-2',
+          type: 'voice',
+          content: '需要停止的录音',
+          createdAt: '2026-07-26T09:00:00.000Z',
+          metadata: { audioFileID: 'cloud://voices/stop-2.mp3' },
+        }],
+      };
+    }
+    return deleteRequest;
+  };
+  plugin.findExistingRecordNotePath = async () => '';
+  plugin.writeRecord = async (record) => {
+    plugin.currentTranscriptionAbortController = { abort() {} };
+    plugin.currentTranscriptionContext = {
+      recordId: record._id,
+      binding: { token: 'ABC-123' },
+    };
+    void plugin.stopCurrentTranscription();
+    setTimeout(() => {
+      resolveDeleteRequest({
+        success: true,
+        data: { id: 'record-stop-2', status: 'deleted' },
+      });
+    }, 0);
+    throw helpers.createRetryableTranscriptionError('用户已停止当前转写');
+  };
+  const result = await plugin.syncBinding({
+    token: 'ABC-123',
+    label: '测试微信',
+  }, false);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(result.skipped, [{
+    recordId: 'record-stop-2',
+    reason: 'deleted-current-transcription',
+  }]);
+}
+
 async function runCloudProcessingRecordSkipSyncTest() {
   const calls = [];
   const plugin = new PluginClass();
@@ -6679,7 +6874,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.63'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.65'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6718,8 +6913,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.63',
-        runtimeVersion: '1.3.63',
+        manifestVersion: '1.3.65',
+        runtimeVersion: '1.3.65',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -7968,6 +8163,61 @@ async function runCloudFailedVoiceLocalFallbackTests() {
   assert.strictEqual(result.metadata.cloudTranscriptionError, '云端转写额度不足');
 }
 
+async function runStoppedTranscriptionEscapesRealAttachmentPathsTest() {
+  const createPlugin = () => {
+    const plugin = new PluginClass();
+    plugin.settings = helpers.mergeSettings({
+      aiProvider: 'local',
+      localTranscriptionCommand: 'echo local',
+    });
+    plugin.app = {
+      vault: {
+        adapter: {
+          exists: async () => true,
+          writeBinary: async () => {},
+        },
+        createFolder: async () => {},
+      },
+    };
+    plugin.requestFileDownloadUrl = async () => 'https://temp.example.com/stopped.mp3';
+    plugin.downloadArrayBuffer = async () => Buffer.from('stopped-audio');
+    plugin.runConfiguredTranscription = async () => {
+      throw helpers.createRetryableTranscriptionError('用户已停止当前转写');
+    };
+    plugin.showSyncProgress = () => {};
+    return plugin;
+  };
+
+  await assert.rejects(
+    () => createPlugin().writeVoiceAttachment({
+      _id: 'record-stopped-voice',
+      type: 'voice',
+      content: 'stopped.mp3',
+      metadata: {
+        audioFileID: 'cloud://voices/stopped.mp3',
+        audioFileName: 'stopped.mp3',
+        transcriptionMode: 'local',
+      },
+    }, 'raw/wechatmd', '2026-07-26', '停止录音', { token: 'ABC-123' }),
+    (error) => helpers.isRetryableTranscriptionError(error),
+  );
+
+  await assert.rejects(
+    () => createPlugin().writeFileAttachment({
+      _id: 'record-stopped-file',
+      type: 'file',
+      content: 'stopped.mp4',
+      metadata: {
+        fileID: 'cloud://files/stopped.mp4',
+        fileName: 'stopped.mp4',
+        fileExt: 'mp4',
+        transcriptionMode: 'local',
+      },
+    }, 'raw/wechatmd', '2026-07-26', '停止视频', { token: 'ABC-123' }),
+    (error) => helpers.isRetryableTranscriptionError(error),
+  );
+}
+
 async function runAudioVideoFileAttachmentTranscriptionTests() {
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({
@@ -8441,7 +8691,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.63 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.65 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -8914,6 +9164,11 @@ async function main() {
   await runSuccessfulRebindPromotesNewPrimaryBindingTest();
   await runXiaohongshuRemoteImageLocalizationHeadersTest();
   await runTranscriptionPreferenceSyncTest();
+  await runStopCurrentTranscriptionDeletesCurrentRecordTest();
+  await runStoppedTranscriptionDeleteUsesLongControlPlaneTest();
+  await runStopCurrentTranscriptionWithoutCurrentRecordDoesNotDeleteTest();
+  await runStopCurrentTranscriptionWithoutActiveProcessDoesNotDeleteTest();
+  await runStoppedDeletedRecordDoesNotRemainFailedInCurrentSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runXiaohongshuUnavailableRecordRemainsPendingTest();
   await runXiaohongshuFailureClosedIntegrationTest();
@@ -8927,6 +9182,7 @@ async function main() {
   await runSyncInvalidCodePreservesLocalBindingTest();
   await runLocalTranscriptionEntitlementTests();
   await runCloudFailedVoiceLocalFallbackTests();
+  await runStoppedTranscriptionEscapesRealAttachmentPathsTest();
   await runAudioVideoFileAttachmentTranscriptionTests();
   await runSourceMediaAttachmentTests();
   await runPdfNoOcrFallbackTests();

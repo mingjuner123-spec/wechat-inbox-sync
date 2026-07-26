@@ -17,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.63';
+const PLUGIN_RUNTIME_VERSION = '1.3.65';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -25,6 +25,7 @@ const LEGACY_OFFICIAL_SYNC_API_BASES = [
 ];
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const RECORD_DELETE_SYNC_API_BASE = FEISHU_OAUTH_SYNC_API_BASE;
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
@@ -11977,6 +11978,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.currentTranscriptionAbortController = null;
     this.currentTranscriptionProcess = null;
     this.currentTranscriptionProcessDetached = false;
+    this.currentTranscriptionContext = null;
+    this.pendingStoppedTranscriptionDeletes = new Map();
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -11997,7 +12000,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.addCommand({
       id: 'stop-current-transcription',
       name: '停止当前转写',
-      callback: () => this.stopCurrentTranscription(),
+      callback: async () => this.stopCurrentTranscription(),
     });
 
     this.addCommand({
@@ -12389,9 +12392,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       return await this.requestJson(path, method, body, binding, options);
     };
     const isFeishuCloudRequest = /^\/feishu(?:\/|$)/.test(String(path || ''));
+    const isRecordDeleteRequest = /^\/records\/[^/]+\/delete$/.test(String(path || ''));
     const apiBaseForRequest = isFeishuCloudRequest
       ? FEISHU_OAUTH_SYNC_API_BASE
-      : this.settings.apiBase;
+      : (isRecordDeleteRequest ? RECORD_DELETE_SYNC_API_BASE : this.settings.apiBase);
     const requestPath = path;
     const requestBody = body || {};
     const requestOptions = {
@@ -12958,8 +12962,59 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  stopCurrentTranscription() {
+  getPendingStoppedTranscriptionDeletes() {
+    if (!(this.pendingStoppedTranscriptionDeletes instanceof Map)) {
+      this.pendingStoppedTranscriptionDeletes = new Map();
+    }
+    return this.pendingStoppedTranscriptionDeletes;
+  }
+
+  rememberPendingStoppedTranscriptionDelete(recordId, promise) {
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!normalizedRecordId || !promise || typeof promise.then !== 'function') return;
+    this.getPendingStoppedTranscriptionDeletes().set(normalizedRecordId, promise);
+  }
+
+  async consumePendingStoppedTranscriptionDelete(recordId) {
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!normalizedRecordId) return null;
+    const pendingDeletes = this.getPendingStoppedTranscriptionDeletes();
+    const pending = pendingDeletes.get(normalizedRecordId);
+    if (!pending) return null;
+    pendingDeletes.delete(normalizedRecordId);
+    return pending;
+  }
+
+  async deleteCurrentTranscriptionRecord(context = {}) {
+    const recordId = String(context.recordId || '').trim();
+    const binding = context.binding || null;
+    if (!recordId || !binding || !binding.token) {
+      return { deleted: false, recordId, reason: 'missing-context' };
+    }
+    const payload = await this.requestJson(
+      `/records/${encodeURIComponent(recordId)}/delete`,
+      'POST',
+      {},
+      binding,
+    );
+    const data = payload && payload.data ? payload.data : {};
+    return {
+      deleted: data.deleted === true || data.alreadyMissing === true || data.status === 'deleted',
+      recordId,
+      response: data,
+    };
+  }
+
+  async stopCurrentTranscription() {
     let stopped = false;
+    const context = this.currentTranscriptionContext && typeof this.currentTranscriptionContext === 'object'
+      ? {
+        ...this.currentTranscriptionContext,
+        binding: this.currentTranscriptionContext.binding
+          ? { ...this.currentTranscriptionContext.binding }
+          : null,
+      }
+      : null;
     if (this.currentTranscriptionAbortController) {
       this.currentTranscriptionAbortController.abort();
       stopped = true;
@@ -12978,8 +13033,38 @@ class WechatObsidianInboxPlugin extends Plugin {
         // Ignore process cleanup failures.
       }
     }
-    new Notice(stopped ? '已停止当前转写，会继续处理后面的同步内容。' : '当前没有正在转写的任务。');
-    return stopped;
+    if (!stopped) {
+      new Notice('当前没有正在转写的任务。');
+      return false;
+    }
+    if (!context || !context.recordId || !context.binding || !context.binding.token) {
+      new Notice('已停止当前转写，会继续处理后面的同步内容。');
+      return true;
+    }
+    const pendingDeletes = this.getPendingStoppedTranscriptionDeletes();
+    let deletePromise = pendingDeletes.get(String(context.recordId));
+    if (!deletePromise) {
+      deletePromise = this.deleteCurrentTranscriptionRecord(context)
+        .catch((error) => ({
+          deleted: false,
+          recordId: context.recordId,
+          error,
+        }));
+      this.rememberPendingStoppedTranscriptionDelete(context.recordId, deletePromise);
+    }
+    const deleteResult = await deletePromise;
+    if (deleteResult && deleteResult.deleted) {
+      const cleanupWarning = deleteResult.response && deleteResult.response.cleanupComplete === false
+        ? '；记录已删除，但部分关联文件清理失败'
+        : '';
+      new Notice(`已停止当前转写，并从云端删除这条内容；后续同步不会再出现${cleanupWarning}。`);
+      return true;
+    }
+    const message = deleteResult && deleteResult.error
+      ? (deleteResult.error.message || String(deleteResult.error))
+      : '云端未确认删除成功';
+    new Notice(`已停止当前转写，但删除云端内容失败：${message}；这条内容下次同步可能还会出现。`);
+    return true;
   }
 
   async unbindBinding(token) {
@@ -14241,6 +14326,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     const progressTitle = options.title || '';
     const abortController = new AbortController();
     this.currentTranscriptionAbortController = abortController;
+    this.currentTranscriptionContext = {
+      recordId: options.recordId || '',
+      binding: options.binding || null,
+      title: progressTitle,
+    };
     this.setTranscriptionStopAvailable(true);
     let progressTimer = null;
     let lastProgressKey = '';
@@ -14382,6 +14472,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.currentTranscriptionAbortController = null;
       this.currentTranscriptionProcess = null;
       this.currentTranscriptionProcessDetached = false;
+      this.currentTranscriptionContext = null;
       this.setTranscriptionStopAvailable(false);
       [inputPath, outputPath].forEach((filePath) => {
         try {
@@ -14675,6 +14766,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const result = await this.runConfiguredTranscription(tempFileURL, {
           binding,
           fileID: metadata.audioFileID,
+          recordId: getRecordId(record),
           title,
           forceLocal: true,
           cloudFallbackReason: 'cloud-pretranscription-failed',
@@ -14689,6 +14781,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           cloudTranscriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || 'cloud-pretranscription',
         };
       } catch (error) {
+        if (isRetryableTranscriptionError(error)) throw error;
         const message = error.message || String(error);
         nextMetadata = {
           ...nextMetadata,
@@ -14719,6 +14812,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const result = await this.runConfiguredTranscription(tempFileURL, {
           binding,
           fileID: metadata.audioFileID,
+          recordId: getRecordId(record),
           title,
           forceLocal: metadata.transcriptionMode === 'local',
         });
@@ -14733,6 +14827,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || 0,
         };
       } catch (error) {
+        if (isRetryableTranscriptionError(error)) throw error;
         const message = error.message || String(error);
         nextMetadata = {
           ...nextMetadata,
@@ -14813,6 +14908,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           const result = await this.runConfiguredTranscription(tempFileURL, {
             binding,
             fileID: metadata.fileID,
+            recordId: getRecordId(record),
             title,
             source: 'file-attachment',
             forceLocal: metadata.transcriptionMode === 'local',
@@ -14836,6 +14932,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.aiMetadataSource = nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource;
           nextMetadata.contentCategory = nextMetadata.contentCategory || (['mp4', 'mov', 'm4v'].includes(fileExt) ? '视频' : '音频');
         } catch (error) {
+          if (isRetryableTranscriptionError(error)) throw error;
           nextMetadata.transcription = '';
           nextMetadata.transcriptionStatus = 'failed';
           nextMetadata.transcriptionError = error.message || String(error);
@@ -14851,6 +14948,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         metadata: nextMetadata,
       };
     } catch (error) {
+      if (isRetryableTranscriptionError(error)) throw error;
       return {
         ...record,
         metadata: {
@@ -15128,6 +15226,8 @@ class WechatObsidianInboxPlugin extends Plugin {
               title: metadata.title || '',
               source: source || 'media-url',
               sourceUrl: url,
+              binding,
+              recordId: getRecordId(record),
               decryptKey: candidateDecryptKey,
               forceLocal: metadata.transcriptionMode === 'local',
             });
@@ -15610,9 +15710,34 @@ class WechatObsidianInboxPlugin extends Plugin {
         const headers = isXiaohongshuUrl(resolvedUrl)
           ? await getXiaohongshuRequestHeaders(resolvedUrl)
           : getSocialRequestHeaders(resolvedUrl);
-        const response = metadata.automaticWebpageExtraction
-          ? await requestPublicWebpageText(resolvedUrl, { headers })
-          : await requestUrl({ url: resolvedUrl, method: 'GET', headers });
+        const redirectAttempts = (redirectResult.diagnostic && redirectResult.diagnostic.attempts) || [];
+        const useXiaohongshuRendererForTransportFailure = isXiaohongshuUrl(url)
+          && redirectedUrl === url
+          && redirectAttempts.length > 0
+          && redirectAttempts.every((attempt) => attempt
+            && (attempt.outcome === 'request-error' || attempt.outcome === 'timeout'));
+        let renderedXiaohongshuPage = null;
+        let renderedXiaohongshuError = null;
+        let response;
+        try {
+          response = metadata.automaticWebpageExtraction
+            ? await requestPublicWebpageText(resolvedUrl, { headers })
+            : await requestUrl({ url: resolvedUrl, method: 'GET', headers });
+        } catch (requestError) {
+          if (!useXiaohongshuRendererForTransportFailure) throw requestError;
+          try {
+            renderedXiaohongshuPage = await this.renderXiaohongshuPage(url);
+            response = {
+              status: 200,
+              text: renderedXiaohongshuPage && renderedXiaohongshuPage.html
+                ? renderedXiaohongshuPage.html
+                : '',
+            };
+          } catch (renderError) {
+            renderedXiaohongshuError = renderError;
+            throw requestError;
+          }
+        }
         xiaohongshuResponseStatus = Number(response.status) || 0;
         let html = response.text || '';
         const hasProAdvancedAccess = isXiaohongshuUrl(url)
@@ -15698,10 +15823,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             html,
             resolvedUrl,
           );
-          let renderedXiaohongshuPage = null;
-          let renderedXiaohongshuError = null;
-          if ((!fastXiaohongshuReadable && !extractedXiaohongshu.videoUrl && !mediaUrl)
-            || shouldIncludeXiaohongshuComments) {
+          if (!renderedXiaohongshuPage && ((!fastXiaohongshuReadable && !extractedXiaohongshu.videoUrl && !mediaUrl)
+            || shouldIncludeXiaohongshuComments)) {
             try {
               renderedXiaohongshuPage = await this.renderXiaohongshuPage(resolvedUrl);
             } catch (error) {
@@ -16261,6 +16384,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       } catch (error) {
         const message = error.message || String(error);
+        const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
+        if (deletionResult && deletionResult.deleted) {
+          skipped.push({
+            recordId: getRecordId(record),
+            reason: 'deleted-current-transcription',
+          });
+          continue;
+        }
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
           ? redactSensitiveObject(error.diagnostic)
           : null;
