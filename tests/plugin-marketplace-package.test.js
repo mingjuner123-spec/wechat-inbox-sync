@@ -33,7 +33,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.60');
+assert.strictEqual(manifest.version, '1.3.61');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
@@ -113,6 +113,12 @@ assert.ok(windowsOcrInstaller.includes('function Test-MissingVisualCppRuntime'),
 assert.ok(windowsOcrInstaller.includes('function Install-MicrosoftVisualCppRuntime'), 'Windows OCR installer must be able to repair a missing Visual C++ runtime');
 assert.ok(windowsOcrInstaller.includes('Get-AuthenticodeSignature'), 'Downloaded Microsoft runtime installer must be signature-verified before execution');
 assert.ok(windowsOcrInstaller.includes('-Verb RunAs'), 'Visual C++ runtime repair must request Windows elevation explicitly');
+assert.ok(windowsOcrInstaller.includes('$MicrosoftVisualCppRuntimeInstaller = $null'), 'Visual C++ runtime repair must not reserve one reusable installer path');
+assert.ok(windowsOcrInstaller.includes("vc_redist.x64-$([Guid]::NewGuid().ToString('N')).exe"), 'Visual C++ runtime repair must download to a unique path when an old installer is locked');
+assert.ok(
+  windowsOcrInstaller.indexOf('Remove-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller -Force -ErrorAction SilentlyContinue') > windowsOcrInstaller.indexOf('Start-Process'),
+  'Visual C++ runtime repair may only clean up its unique installer after execution, never before downloading',
+);
 assert.ok(windowsOcrInstaller.includes('Visual C++ runtime repair finished; retrying OCR import validation.'), 'Windows OCR installer must retry validation after runtime repair');
 assert.ok(windowsOcrInstaller.includes('onnxruntime==1.27.0'), 'Windows OCR primary native stack must be reproducibly pinned');
 assert.ok(windowsOcrInstaller.includes('numpy==2.5.1'), 'Windows OCR primary NumPy version must be reproducibly pinned');
@@ -127,6 +133,15 @@ assert.ok(windowsOcrInstaller.includes('$BackupVenvDir'), 'Windows OCR repair mu
 assert.ok(windowsOcrInstaller.includes('$PendingSwitchPath'), 'Windows OCR repair must support restart-time activation when files are locked');
 assert.ok(windowsOcrInstaller.includes('function Promote-StagedOcrEnvironment'), 'Windows OCR repair must promote a validated staging environment');
 assert.ok(windowsOcrInstaller.includes('single-dir-transaction-v1'), 'Windows OCR installer must expose the single-directory transaction capability');
+assert.ok(windowsOcrInstaller.includes('function Promote-StagedPortablePythonRuntime'), 'Windows OCR portable Python must switch through a rollback-aware promotion');
+assert.ok(windowsOcrInstaller.includes('$PythonRuntimeBackupDir'), 'Windows OCR portable Python must retain the prior runtime until the new runtime is active');
+assert.strictEqual(windowsOcrInstaller.includes('Remove-Item -LiteralPath $PythonRuntimeDir -Recurse -Force -ErrorAction SilentlyContinue'), false, 'Windows OCR installer must not delete the active Python runtime before promotion succeeds');
+const portablePythonPromotionSource = windowsOcrInstaller.slice(
+  windowsOcrInstaller.indexOf('function Promote-StagedPortablePythonRuntime'),
+  windowsOcrInstaller.indexOf('function Install-PortablePython'),
+);
+assert.ok(portablePythonPromotionSource.includes('Test-PythonUsable -Command $promotedPython'), 'Windows OCR portable Python promotion must validate the new runtime before discarding rollback state');
+assert.ok(portablePythonPromotionSource.includes('Pinned portable Python runtime validation failed after promotion.'), 'Windows OCR portable Python promotion must fail before deleting the prior runtime when the new runtime is unusable');
 assert.strictEqual(
   windowsOcrInstaller.includes('Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue'),
   false,

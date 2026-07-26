@@ -17,6 +17,7 @@ $LogPath = Join-Path $InstallRoot "install.log"
 $BinDir = Join-Path $InstallRoot "bin"
 $CacheDir = Join-Path $InstallRoot "cache"
 $PythonRuntimeDir = Join-Path $InstallRoot "python-runtime"
+$PythonRuntimeBackupDir = Join-Path $InstallRoot "python-runtime-backup"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
 $TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
 $TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"
@@ -43,7 +44,7 @@ $OcrCompatibilityPackageRequirements = @(
   "opencv-python==4.10.0.84"
 )
 $MicrosoftVisualCppRuntimeUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-$MicrosoftVisualCppRuntimeInstaller = Join-Path $BinDir "vc_redist.x64.exe"
+$MicrosoftVisualCppRuntimeInstaller = $null
 $script:LastOcrImportFailureModule = ""
 $script:LastOcrImportFailureMessage = ""
 $script:LastOcrImportFailureText = ""
@@ -302,20 +303,20 @@ function Test-MissingVisualCppRuntime {
 
 function Install-MicrosoftVisualCppRuntime {
   Write-InstallLog "OCR native dependency is unavailable; downloading the official Microsoft Visual C++ x64 runtime."
-  Remove-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller -Force -ErrorAction SilentlyContinue
-  Invoke-DownloadFile -Url $MicrosoftVisualCppRuntimeUrl -OutFile $MicrosoftVisualCppRuntimeInstaller -TimeoutSec 600
-  if (!(Test-Path -LiteralPath $MicrosoftVisualCppRuntimeInstaller) -or ((Get-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller).Length -lt 1MB)) {
-    throw "Microsoft Visual C++ runtime download is incomplete."
-  }
-
-  $signature = Get-AuthenticodeSignature -FilePath $MicrosoftVisualCppRuntimeInstaller
-  $signerSubject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { "" }
-  if ($signature.Status -ne "Valid" -or $signerSubject -notmatch 'Microsoft Corporation') {
-    throw "Microsoft Visual C++ runtime signature validation failed; installation was stopped."
-  }
-
-  Write-InstallLog "Starting the Microsoft Visual C++ runtime installer. Windows may request administrator approval."
+  $MicrosoftVisualCppRuntimeInstaller = Join-Path $BinDir "vc_redist.x64-$([Guid]::NewGuid().ToString('N')).exe"
   try {
+    Invoke-DownloadFile -Url $MicrosoftVisualCppRuntimeUrl -OutFile $MicrosoftVisualCppRuntimeInstaller -TimeoutSec 600
+    if (!(Test-Path -LiteralPath $MicrosoftVisualCppRuntimeInstaller) -or ((Get-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller).Length -lt 1MB)) {
+      throw "Microsoft Visual C++ runtime download is incomplete."
+    }
+
+    $signature = Get-AuthenticodeSignature -FilePath $MicrosoftVisualCppRuntimeInstaller
+    $signerSubject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { "" }
+    if ($signature.Status -ne "Valid" -or $signerSubject -notmatch 'Microsoft Corporation') {
+      throw "Microsoft Visual C++ runtime signature validation failed; installation was stopped."
+    }
+
+    Write-InstallLog "Starting the Microsoft Visual C++ runtime installer. Windows may request administrator approval."
     $process = Start-Process `
       -FilePath $MicrosoftVisualCppRuntimeInstaller `
       -ArgumentList @("/install", "/quiet", "/norestart") `
@@ -323,18 +324,21 @@ function Install-MicrosoftVisualCppRuntime {
       -WindowStyle Hidden `
       -Wait `
       -PassThru
+    $exitCode = [int]$process.ExitCode
+    if ($exitCode -in @(3010, 1641)) {
+      $script:VisualCppRuntimeRestartRequired = $true
+    }
+    if ($exitCode -notin @(0, 1638, 3010, 1641)) {
+      throw "Microsoft Visual C++ runtime installation failed with exit code $exitCode."
+    }
+    Write-InstallLog "Microsoft Visual C++ runtime installer completed with exit code $exitCode."
   } catch {
     throw "Microsoft Visual C++ runtime installation was cancelled or could not start. $($_.Exception.Message)"
+  } finally {
+    if ($MicrosoftVisualCppRuntimeInstaller) {
+      Remove-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller -Force -ErrorAction SilentlyContinue
+    }
   }
-
-  $exitCode = [int]$process.ExitCode
-  if ($exitCode -in @(3010, 1641)) {
-    $script:VisualCppRuntimeRestartRequired = $true
-  }
-  if ($exitCode -notin @(0, 1638, 3010, 1641)) {
-    throw "Microsoft Visual C++ runtime installation failed with exit code $exitCode."
-  }
-  Write-InstallLog "Microsoft Visual C++ runtime installer completed with exit code $exitCode."
 }
 
 function Test-OcrPythonReady {
@@ -612,6 +616,44 @@ function Expand-TarGzArchive {
   return "powershell"
 }
 
+function Promote-StagedPortablePythonRuntime {
+  param([Parameter(Mandatory = $true)][string]$StageDir)
+
+  if (Test-Path -LiteralPath $PythonRuntimeBackupDir) {
+    Remove-DirectoryStrict -Path $PythonRuntimeBackupDir
+  }
+
+  $movedActiveRuntime = $false
+  try {
+    if (Test-Path -LiteralPath $PythonRuntimeDir) {
+      Move-Item -LiteralPath $PythonRuntimeDir -Destination $PythonRuntimeBackupDir -Force
+      $movedActiveRuntime = $true
+    }
+    Move-Item -LiteralPath $StageDir -Destination $PythonRuntimeDir -Force
+
+    $promotedPython = Join-Path $PythonRuntimeDir "python\python.exe"
+    if (!(Test-PythonUsable -Command $promotedPython)) {
+      try {
+        Remove-DirectoryStrict -Path $PythonRuntimeDir
+      } finally {
+        if ($movedActiveRuntime -and !(Test-Path -LiteralPath $PythonRuntimeDir) -and (Test-Path -LiteralPath $PythonRuntimeBackupDir)) {
+          Move-Item -LiteralPath $PythonRuntimeBackupDir -Destination $PythonRuntimeDir -Force
+        }
+      }
+      throw "Pinned portable Python runtime validation failed after promotion."
+    }
+  } catch {
+    if ($movedActiveRuntime -and !(Test-Path -LiteralPath $PythonRuntimeDir) -and (Test-Path -LiteralPath $PythonRuntimeBackupDir)) {
+      Move-Item -LiteralPath $PythonRuntimeBackupDir -Destination $PythonRuntimeDir -Force
+    }
+    throw
+  }
+
+  if (Test-Path -LiteralPath $PythonRuntimeBackupDir) {
+    Remove-Item -LiteralPath $PythonRuntimeBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Install-PortablePython {
   if ((Test-Path -LiteralPath $PortablePython) -and (Test-PythonUsable -Command $PortablePython)) {
     Write-InstallLog "Pinned portable Python is already ready: $PortablePython"
@@ -638,8 +680,7 @@ function Install-PortablePython {
       throw "Pinned Python runtime validation failed after extraction."
     }
 
-    Remove-Item -LiteralPath $PythonRuntimeDir -Recurse -Force -ErrorAction SilentlyContinue
-    Move-Item -LiteralPath $stageDir -Destination $PythonRuntimeDir -Force
+    Promote-StagedPortablePythonRuntime -StageDir $stageDir
   } finally {
     Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
   }
