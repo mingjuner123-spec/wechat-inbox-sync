@@ -1,5 +1,6 @@
 ﻿const assert = require('assert');
 const http = require('http');
+const https = require('https');
 const Module = require('module');
 
 let requestUrlMock = async () => ({});
@@ -343,9 +344,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.61'), {
-  manifestVersion: '1.3.61',
-  runtimeVersion: '1.3.61',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.62'), {
+  manifestVersion: '1.3.62',
+  runtimeVersion: '1.3.62',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -4139,6 +4140,7 @@ async function runAsyncHydrationTests() {
   plugin.settings = { aiProvider: 'off' };
 
   const originalHttpRequest = http.request;
+  const originalHttpsRequest = https.request;
   const redirectMethods = [];
   http.request = (parsed, options, callback) => {
     const pathname = parsed.pathname || '';
@@ -4162,11 +4164,12 @@ async function runAsyncHydrationTests() {
     };
     return request;
   };
+  https.request = http.request;
   try {
     const resolvedShortUrl = await helpers.resolveRedirectUrl('http://xhslink.com/o/demo');
-    assert.strictEqual(resolvedShortUrl, 'http://xhslink.com/final');
+    assert.strictEqual(resolvedShortUrl, 'https://xhslink.com/final');
     const resolvedCnShortUrl = await helpers.resolveRedirectUrl('http://xhslink.cn/o/demo');
-    assert.strictEqual(resolvedCnShortUrl, 'http://xhslink.cn/final');
+    assert.strictEqual(resolvedCnShortUrl, 'https://xhslink.cn/final');
     assert.deepStrictEqual(redirectMethods, [
       'HEAD:/o/demo',
       'GET:/o/demo',
@@ -4176,7 +4179,7 @@ async function runAsyncHydrationTests() {
       'HEAD:/final',
     ]);
     const redirectResult = await helpers.resolveRedirectUrlWithDiagnostics('http://xhslink.cn/o/demo');
-    assert.strictEqual(redirectResult.url, 'http://xhslink.cn/final');
+    assert.strictEqual(redirectResult.url, 'https://xhslink.cn/final');
     assert.strictEqual(redirectResult.diagnostic.redirectCount, 1);
     assert.strictEqual(redirectResult.diagnostic.usedGetFallback, true);
     assert.deepStrictEqual(redirectResult.diagnostic.attempts, [{
@@ -4197,6 +4200,186 @@ async function runAsyncHydrationTests() {
     }]);
   } finally {
     http.request = originalHttpRequest;
+    https.request = originalHttpsRequest;
+  }
+
+  const originalHttpsRequestForHeadError = https.request;
+  const headErrorFallbackAttempts = [];
+  const createRedirectRequest = (parsed, options, callback) => {
+    const method = options.method || 'GET';
+    const protocol = parsed.protocol || 'http:';
+    const request = {
+      errorHandler: null,
+      setTimeout: () => request,
+      on: (eventName, handler) => {
+        if (eventName === 'error') request.errorHandler = handler;
+        return request;
+      },
+      destroy: () => {},
+      end: () => {
+        headErrorFallbackAttempts.push(`${method}:${protocol}:${parsed.hostname}${parsed.pathname}`);
+        if (method === 'HEAD' && protocol === 'http:' && parsed.hostname === 'xhslink.cn') {
+          request.errorHandler(new Error('simulated connection reset'));
+          return;
+        }
+        if (method === 'GET' && protocol === 'https:' && parsed.hostname === 'xhslink.cn') {
+          callback({
+            statusCode: 302,
+            headers: { location: 'https://www.xiaohongshu.com/explore/demo' },
+            resume: () => {},
+          });
+          return;
+        }
+        callback({ statusCode: 200, headers: {}, resume: () => {} });
+      },
+    };
+    return request;
+  };
+  http.request = createRedirectRequest;
+  https.request = createRedirectRequest;
+  try {
+    const redirectResult = await helpers.resolveRedirectUrlWithDiagnostics('http://xhslink.cn/o/demo');
+    assert.strictEqual(redirectResult.url, 'https://www.xiaohongshu.com/explore/demo');
+    assert.strictEqual(redirectResult.diagnostic.usedGetFallback, true);
+    assert.deepStrictEqual(headErrorFallbackAttempts, [
+      'HEAD:http::xhslink.cn/o/demo',
+      'GET:https::xhslink.cn/o/demo',
+      'HEAD:https::www.xiaohongshu.com/explore/demo',
+    ]);
+    assert.deepStrictEqual(redirectResult.diagnostic.attempts, [{
+      method: 'HEAD',
+      status: 0,
+      host: 'xhslink.cn',
+      outcome: 'request-error',
+    }, {
+      method: 'GET',
+      status: 302,
+      host: 'xhslink.cn',
+      outcome: 'redirect',
+    }, {
+      method: 'HEAD',
+      status: 200,
+      host: 'xiaohongshu.com',
+      outcome: 'response',
+    }]);
+    assert.strictEqual(JSON.stringify(redirectResult.diagnostic).includes('/o/demo'), false);
+  } finally {
+    http.request = originalHttpRequest;
+    https.request = originalHttpsRequestForHeadError;
+  }
+
+  const originalHttpRequestForHttpsGetError = http.request;
+  const originalHttpsRequestForHttpsGetError = https.request;
+  const httpsGetErrorFallbackAttempts = [];
+  const createHttpsGetErrorFallbackRequest = (parsed, options, callback) => {
+    const method = options.method || 'GET';
+    const protocol = parsed.protocol || 'http:';
+    const request = {
+      errorHandler: null,
+      setTimeout: () => request,
+      on: (eventName, handler) => {
+        if (eventName === 'error') request.errorHandler = handler;
+        return request;
+      },
+      destroy: () => {},
+      end: () => {
+        httpsGetErrorFallbackAttempts.push(`${method}:${protocol}:${parsed.hostname}${parsed.pathname}`);
+        if (method === 'HEAD' && protocol === 'http:' && parsed.hostname === 'xhslink.cn') {
+          request.errorHandler(new Error('simulated initial head error'));
+          return;
+        }
+        if (method === 'GET' && protocol === 'https:' && parsed.hostname === 'xhslink.cn') {
+          request.errorHandler(new Error('simulated https get error'));
+          return;
+        }
+        if (method === 'GET' && protocol === 'http:' && parsed.hostname === 'xhslink.cn') {
+          callback({
+            statusCode: 302,
+            headers: { location: 'https://www.xiaohongshu.com/explore/http-fallback' },
+            resume: () => {},
+          });
+          return;
+        }
+        callback({ statusCode: 200, headers: {}, resume: () => {} });
+      },
+    };
+    return request;
+  };
+  http.request = createHttpsGetErrorFallbackRequest;
+  https.request = createHttpsGetErrorFallbackRequest;
+  try {
+    const redirectResult = await helpers.resolveRedirectUrlWithDiagnostics('http://xhslink.cn/o/demo');
+    assert.strictEqual(redirectResult.url, 'https://www.xiaohongshu.com/explore/http-fallback');
+    assert.deepStrictEqual(httpsGetErrorFallbackAttempts, [
+      'HEAD:http::xhslink.cn/o/demo',
+      'GET:https::xhslink.cn/o/demo',
+      'GET:http::xhslink.cn/o/demo',
+      'HEAD:https::www.xiaohongshu.com/explore/http-fallback',
+    ]);
+    assert.deepStrictEqual(redirectResult.diagnostic.attempts.map((attempt) => attempt.outcome), [
+      'request-error',
+      'request-error',
+      'redirect',
+      'response',
+    ]);
+    assert.strictEqual(JSON.stringify(redirectResult.diagnostic).includes('/o/demo'), false);
+  } finally {
+    http.request = originalHttpRequestForHttpsGetError;
+    https.request = originalHttpsRequestForHttpsGetError;
+  }
+
+  const originalHttpRequestForHeadTimeout = http.request;
+  const originalHttpsRequestForHeadTimeout = https.request;
+  const headTimeoutFallbackAttempts = [];
+  const createHeadTimeoutFallbackRequest = (parsed, options, callback) => {
+    const method = options.method || 'GET';
+    const protocol = parsed.protocol || 'http:';
+    const request = {
+      timeoutHandler: null,
+      setTimeout: (timeoutMs, handler) => {
+        request.timeoutHandler = handler;
+        return request;
+      },
+      on: () => request,
+      destroy: () => {},
+      end: () => {
+        headTimeoutFallbackAttempts.push(`${method}:${protocol}:${parsed.hostname}${parsed.pathname}`);
+        if (method === 'HEAD' && protocol === 'http:' && parsed.hostname === 'xhslink.cn') {
+          request.timeoutHandler();
+          return;
+        }
+        if (method === 'GET' && protocol === 'https:' && parsed.hostname === 'xhslink.cn') {
+          callback({
+            statusCode: 302,
+            headers: { location: 'https://www.xiaohongshu.com/explore/timeout-fallback' },
+            resume: () => {},
+          });
+          return;
+        }
+        callback({ statusCode: 200, headers: {}, resume: () => {} });
+      },
+    };
+    return request;
+  };
+  http.request = createHeadTimeoutFallbackRequest;
+  https.request = createHeadTimeoutFallbackRequest;
+  try {
+    const redirectResult = await helpers.resolveRedirectUrlWithDiagnostics('http://xhslink.cn/o/demo');
+    assert.strictEqual(redirectResult.url, 'https://www.xiaohongshu.com/explore/timeout-fallback');
+    assert.deepStrictEqual(headTimeoutFallbackAttempts, [
+      'HEAD:http::xhslink.cn/o/demo',
+      'GET:https::xhslink.cn/o/demo',
+      'HEAD:https::www.xiaohongshu.com/explore/timeout-fallback',
+    ]);
+    assert.deepStrictEqual(redirectResult.diagnostic.attempts.map((attempt) => attempt.outcome), [
+      'timeout',
+      'redirect',
+      'response',
+    ]);
+    assert.strictEqual(JSON.stringify(redirectResult.diagnostic).includes('/o/demo'), false);
+  } finally {
+    http.request = originalHttpRequestForHeadTimeout;
+    https.request = originalHttpsRequestForHeadTimeout;
   }
 
   const previousRequestUrlMock = requestUrlMock;
@@ -6512,7 +6695,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.61'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.62'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6551,8 +6734,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.61',
-        runtimeVersion: '1.3.61',
+        manifestVersion: '1.3.62',
+        runtimeVersion: '1.3.62',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -6598,7 +6781,7 @@ async function runXiaohongshuFailureClosedIntegrationTest() {
   const plugin = new PluginClass();
   const privateTitle = '用户私密标题不应写入日志';
   const privateQueryValue = 'query-value-must-not-leak';
-  plugin.manifest = { version: '1.3.61' };
+  plugin.manifest = { version: '1.3.62' };
   plugin.settings = helpers.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'ABC-123',
@@ -8274,7 +8457,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.61 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.62 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));

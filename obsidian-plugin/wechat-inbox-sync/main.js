@@ -19,7 +19,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.61';
+const PLUGIN_RUNTIME_VERSION = '1.3.62';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -5006,12 +5006,65 @@ function shouldRetryRedirectWithGet(url, statusCode) {
   return shouldResolvePlatformRedirect(url) && [400, 403, 404, 405, 501].includes(Number(statusCode));
 }
 
+function getRedirectFallbackCandidates(source, method, resolverState) {
+  if (method !== 'HEAD') return [];
+  const candidates = [];
+  try {
+    const parsed = new URL(source);
+    if (isXiaohongshuShortLinkUrl(source) && parsed.protocol === 'http:') {
+      parsed.protocol = 'https:';
+      candidates.push(parsed.toString());
+    }
+  } catch (error) {
+    // The caller already validated the source URL; keep the original GET fallback below.
+  }
+  candidates.push(source);
+
+  const attempted = resolverState.fallbackRequestKeys;
+  return candidates.filter((candidate) => {
+    const key = `GET:${candidate}`;
+    if (attempted.has(key)) return false;
+    attempted.add(key);
+    return true;
+  });
+}
+
+function resolveRedirectFallbackCandidates(candidates, index, maxRedirects, resolverState, originalSource) {
+  if (index >= candidates.length) {
+    return Promise.resolve({ url: originalSource, diagnostic: resolverState.diagnostic });
+  }
+  const candidate = candidates[index];
+  const attemptCountBefore = resolverState.diagnostic.attempts.length;
+  return resolveRedirectUrlWithDiagnostics(candidate, maxRedirects, 'GET', resolverState).then((result) => {
+    const finalAttempt = resolverState.diagnostic.attempts[resolverState.diagnostic.attempts.length - 1];
+    const requestFailed = resolverState.diagnostic.attempts.length > attemptCountBefore
+      && finalAttempt
+      && (finalAttempt.outcome === 'request-error' || finalAttempt.outcome === 'timeout');
+    if (requestFailed) {
+      return resolveRedirectFallbackCandidates(candidates, index + 1, maxRedirects, resolverState, originalSource);
+    }
+    return result;
+  });
+}
+
 function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD', state = null) {
   const source = String(url || '').trim();
-  const diagnostic = state || {
-    attempts: [],
-    redirectCount: 0,
-    usedGetFallback: false,
+  const resolverState = state && state.diagnostic
+    ? state
+    : {
+      diagnostic: state || {
+        attempts: [],
+        redirectCount: 0,
+        usedGetFallback: false,
+      },
+      fallbackRequestKeys: new Set(),
+    };
+  const diagnostic = resolverState.diagnostic;
+  const resolveGetFallback = () => {
+    const candidates = getRedirectFallbackCandidates(source, method, resolverState);
+    if (!candidates.length) return Promise.resolve({ url: source, diagnostic });
+    diagnostic.usedGetFallback = true;
+    return resolveRedirectFallbackCandidates(candidates, 0, maxRedirects, resolverState, source);
   };
   if (!/^https?:\/\//i.test(source) || maxRedirects <= 0) {
     return Promise.resolve({ url: source, diagnostic });
@@ -5070,7 +5123,7 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
             new URL(location, source).toString(),
             maxRedirects - 1,
             'HEAD',
-            diagnostic,
+            resolverState,
           ));
           return;
         } catch (error) {
@@ -5080,8 +5133,7 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
         }
       }
       if (method === 'HEAD' && shouldRetryRedirectWithGet(source, response.statusCode)) {
-        diagnostic.usedGetFallback = true;
-        resolve(resolveRedirectUrlWithDiagnostics(source, maxRedirects, 'GET', diagnostic));
+        resolve(resolveGetFallback());
         return;
       }
       resolve({ url: source, diagnostic });
@@ -5097,6 +5149,10 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
         outcome: 'timeout',
       });
       request.destroy();
+      if (method === 'HEAD' && isXiaohongshuShortLinkUrl(source)) {
+        resolve(resolveGetFallback());
+        return;
+      }
       resolve({ url: source, diagnostic });
     });
     request.on('error', () => {
@@ -5108,6 +5164,10 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
         host: getSafeUrlDiagnostic(source).host,
         outcome: 'request-error',
       });
+      if (method === 'HEAD' && isXiaohongshuShortLinkUrl(source)) {
+        resolve(resolveGetFallback());
+        return;
+      }
       resolve({ url: source, diagnostic });
     });
     request.end();
