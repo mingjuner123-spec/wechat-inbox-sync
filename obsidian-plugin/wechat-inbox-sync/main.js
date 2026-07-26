@@ -1,10 +1,8 @@
 const crypto = require('crypto');
 const childProcess = require('child_process');
-const dns = require('dns');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
-const net = require('net');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
@@ -19,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.62';
+const PLUGIN_RUNTIME_VERSION = '1.3.63';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -4674,136 +4672,12 @@ function shouldHydrateLinkAsWebpage(url) {
     || isXiaoyuzhouUrl(url);
 }
 
-function isPrivateOrReservedIpv4(hostname) {
-  const parts = String(hostname || '').split('.').map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return false;
-  }
-  const [first, second, third] = parts;
-  return first === 0
-    || first === 10
-    || first === 127
-    || (first === 100 && second >= 64 && second <= 127)
-    || (first === 169 && second === 254)
-    || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 0 && (third === 0 || third === 2))
-    || (first === 192 && second === 168)
-    || (first === 192 && second === 88 && third === 99)
-    || (first === 198 && (second === 18 || second === 19))
-    || (first === 198 && second === 51 && third === 100)
-    || (first === 203 && second === 0 && third === 113)
-    || first >= 224;
-}
-
-function isPrivateOrReservedIpv6(hostname) {
-  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!host) return true;
-  if (host === '::' || host === '::1') return true;
-  if (host.startsWith('::')) return true;
-  const compressedParts = host.split('::');
-  if (compressedParts.length <= 2) {
-    const left = compressedParts[0] ? compressedParts[0].split(':').filter(Boolean) : [];
-    const right = compressedParts.length === 2 && compressedParts[1]
-      ? compressedParts[1].split(':').filter(Boolean)
-      : [];
-    const missing = compressedParts.length === 2 ? Math.max(0, 8 - left.length - right.length) : 0;
-    const parts = [
-      ...left,
-      ...Array(missing).fill('0'),
-      ...right,
-    ].map((part) => Number.parseInt(part || '0', 16));
-    if (parts.length === 8 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 0xffff)) {
-      const [first, second, third, fourth, fifth, sixth] = parts;
-      const ipv4EmbeddedPrefix = first === 0 && second === 0 && third === 0 && fourth === 0 && fifth === 0;
-      if (ipv4EmbeddedPrefix && (sixth === 0 || sixth === 0xffff)) return true;
-      if ((first & 0xfe00) === 0xfc00) return true;
-      if ((first & 0xffc0) === 0xfe80 || (first & 0xffc0) === 0xfec0) return true;
-      if ((first & 0xff00) === 0xff00) return true;
-      if (first === 0x0100 && second === 0 && third === 0 && fourth === 0) return true;
-      if (first === 0x0064 && second === 0xff9b) return true;
-      if (first === 0x2001 && (
-        second === 0
-        || (second === 2 && third === 0)
-        || (second >= 0x10 && second <= 0x2f)
-        || second === 0x0db8
-      )) return true;
-      if (first === 0x2002) return true;
-      if (first === 0x3fff && second < 0x1000) return true;
-      if (first === 0x5f00) return true;
-    }
-  }
-  if (/^(?:fc|fd)/.test(host) || /^fe[89ab]/.test(host) || /^ff/.test(host) || /^2001:db8/.test(host)) {
-    return true;
-  }
-  const mappedIpv4 = /(?:^|:)ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(host);
-  return Boolean(mappedIpv4 && isPrivateOrReservedIpv4(mappedIpv4[1]));
-}
-
-function isPublicIpAddress(address) {
-  const normalizedAddress = String(address || '').trim().replace(/%.+$/, '').replace(/^\[|\]$/g, '');
-  const ipVersion = net.isIP(normalizedAddress);
-  if (ipVersion === 4) return !isPrivateOrReservedIpv4(normalizedAddress);
-  if (ipVersion === 6) return !isPrivateOrReservedIpv6(normalizedAddress);
-  return false;
-}
-
-function validatePublicDnsLookupAddresses(addresses) {
-  const normalized = (Array.isArray(addresses) ? addresses : [])
-    .map((item) => ({
-      address: String(item && item.address || '').trim(),
-      family: Number(item && item.family) || net.isIP(String(item && item.address || '').trim()),
-    }))
-    .filter((item) => item.address && (item.family === 4 || item.family === 6));
-  if (!normalized.length) {
-    throw new Error('网页域名未解析到可用公网地址');
-  }
-  if (normalized.some((item) => !isPublicIpAddress(item.address))) {
-    throw new Error('网页域名解析到了私网或保留地址，已阻止自动访问');
-  }
-  return normalized;
-}
-
-function publicOnlyDnsLookup(hostname, options, callback) {
-  const lookupOptions = options && typeof options === 'object' ? options : {};
-  dns.lookup(hostname, {
-    all: true,
-    verbatim: true,
-  }, (error, addresses) => {
-    if (error) {
-      callback(error);
-      return;
-    }
-    try {
-      const publicAddresses = validatePublicDnsLookupAddresses(addresses);
-      const requestedFamily = Number(lookupOptions.family) || 0;
-      const selected = publicAddresses.find((item) => !requestedFamily || item.family === requestedFamily)
-        || publicAddresses[0];
-      callback(null, selected.address, selected.family);
-    } catch (lookupError) {
-      callback(lookupError);
-    }
-  });
-}
-
 function isSafeAutomaticWebpageUrl(url) {
   try {
     const parsed = new URL(String(url || '').trim());
     if (!['http:', 'https:'].includes(parsed.protocol)) return false;
     if (parsed.username || parsed.password) return false;
-    const hostname = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
-    if (!hostname
-      || hostname === 'localhost'
-      || hostname.endsWith('.localhost')
-      || hostname.endsWith('.local')
-      || hostname.endsWith('.internal')
-      || hostname.endsWith('.home.arpa')) {
-      return false;
-    }
-    const unwrappedHostname = hostname.replace(/^\[|\]$/g, '');
-    const ipVersion = net.isIP(unwrappedHostname);
-    if (ipVersion === 4 && isPrivateOrReservedIpv4(unwrappedHostname)) return false;
-    if (ipVersion === 6 && isPrivateOrReservedIpv6(unwrappedHostname)) return false;
-    return true;
+    return Boolean(parsed.hostname);
   } catch (error) {
     return false;
   }
@@ -4892,7 +4766,7 @@ function requestPublicWebpageText(url, options = {}) {
     : 5;
   const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 8 * 1024 * 1024;
   if (!isSafeAutomaticWebpageUrl(source)) {
-    return Promise.reject(new Error('网页地址不是可安全自动访问的公网 HTTP(S) 地址'));
+    return Promise.reject(new Error('网页地址不是可自动访问的 HTTP(S) 地址'));
   }
   if (redirectsRemaining < 0) {
     return Promise.reject(new Error('网页跳转次数过多'));
@@ -4910,7 +4784,6 @@ function requestPublicWebpageText(url, options = {}) {
     const request = client.request(parsed, {
       method: 'GET',
       headers: options.headers || getSocialRequestHeaders(source),
-      lookup: publicOnlyDnsLookup,
     }, (response) => {
       const location = response.headers && response.headers.location;
       if (response.statusCode >= 300 && response.statusCode < 400 && location) {
@@ -5074,7 +4947,7 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
       method,
       status: 0,
       host: getSafeUrlDiagnostic(source).host,
-      outcome: 'blocked-private-address',
+      outcome: 'blocked-url',
     });
     return Promise.resolve({ url: source, diagnostic });
   }
@@ -5099,7 +4972,6 @@ function resolveRedirectUrlWithDiagnostics(url, maxRedirects = 5, method = 'HEAD
     const request = client.request(parsed, {
       method,
       headers: getSocialRequestHeaders(source),
-      lookup: publicOnlyDnsLookup,
     }, (response) => {
       if (settled) {
         response.resume();
@@ -17068,7 +16940,6 @@ WechatObsidianInboxPlugin.__test = {
   isWechatMpArticleUrl,
   shouldHydrateLinkAsWebpage,
   selectAutomaticWebpageUrlFromText,
-  validatePublicDnsLookupAddresses,
   requestPublicWebpageText,
   getSafeRedirectRequestHeaders,
   normalizeConfiguredVaultPath,

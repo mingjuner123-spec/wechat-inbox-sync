@@ -344,9 +344,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.62'), {
-  manifestVersion: '1.3.62',
-  runtimeVersion: '1.3.62',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.63'), {
+  manifestVersion: '1.3.63',
+  runtimeVersion: '1.3.63',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -553,7 +553,6 @@ assert.strictEqual(typeof helpers.shouldHydrateLinkAsWebpage, 'function');
 assert.strictEqual(typeof helpers.selectAutomaticWebpageUrlFromText, 'function');
 assert.strictEqual(typeof helpers.normalizeConfiguredVaultPath, 'function');
 assert.strictEqual(typeof helpers.shouldPersistNormalizedInboxDir, 'function');
-assert.strictEqual(typeof helpers.validatePublicDnsLookupAddresses, 'function');
 assert.strictEqual(typeof helpers.requestPublicWebpageText, 'function');
 assert.strictEqual(typeof helpers.getSafeRedirectRequestHeaders, 'function');
 assert.strictEqual(
@@ -584,19 +583,19 @@ assert.strictEqual(
   helpers.selectAutomaticWebpageUrlFromText('两个平台链接 http://xhslink.cn/o/a https://v.douyin.com/b'),
   '',
 );
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://127.0.0.1:3000/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://localhost/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('私网 http://192.168.1.2/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('链路本地 http://169.254.1.2/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://198.51.100.2/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://203.0.113.2/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('废弃 6to4 中继 http://192.88.99.1/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 http://[::1]/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 http://[::ffff:127.0.0.1]/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 十六进制 http://[::ffff:7f00:1]/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 完整格式 http://[0:0:0:0:0:ffff:7f00:1]/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 discard-only http://[100::1]/private'), '');
-assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 benchmarking http://[2001:2::1]/private'), '');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://127.0.0.1:3000/private'), 'http://127.0.0.1:3000/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('本机 http://localhost/private'), 'http://localhost/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('私网 http://192.168.1.2/private'), 'http://192.168.1.2/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('链路本地 http://169.254.1.2/private'), 'http://169.254.1.2/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://198.51.100.2/private'), 'http://198.51.100.2/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('文档网段 http://203.0.113.2/private'), 'http://203.0.113.2/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('废弃 6to4 中继 http://192.88.99.1/private'), 'http://192.88.99.1/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 http://[::1]/private'), 'http://[::1]/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 http://[::ffff:127.0.0.1]/private'), 'http://[::ffff:7f00:1]/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 十六进制 http://[::ffff:7f00:1]/private'), 'http://[::ffff:7f00:1]/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('映射 IPv6 完整格式 http://[0:0:0:0:0:ffff:7f00:1]/private'), 'http://[::ffff:7f00:1]/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 discard-only http://[100::1]/private'), 'http://[100::1]/private');
+assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('IPv6 benchmarking http://[2001:2::1]/private'), 'http://[2001:2::1]/private');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('凭据 https://user:pass@example.com/private'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('非网页 file:///C:/secret.txt'), '');
 assert.strictEqual(helpers.selectAutomaticWebpageUrlFromText('纯文字，不含链接'), '');
@@ -608,16 +607,6 @@ assert.strictEqual(helpers.normalizeConfiguredVaultPath('raw/../secret'), '临�
 assert.strictEqual(helpers.mergeSettings({ inboxDir: 'raw\\wechatmd' }).inboxDir, 'raw/wechatmd');
 assert.strictEqual(helpers.shouldPersistNormalizedInboxDir({ inboxDir: 'raw\\wechatmd' }, { inboxDir: 'raw/wechatmd' }), true);
 assert.strictEqual(helpers.shouldPersistNormalizedInboxDir({ inboxDir: 'raw/wechatmd' }, { inboxDir: 'raw/wechatmd' }), false);
-assert.deepStrictEqual(helpers.validatePublicDnsLookupAddresses([
-  { address: '93.184.216.34', family: 4 },
-]), [{ address: '93.184.216.34', family: 4 }]);
-assert.throws(
-  () => helpers.validatePublicDnsLookupAddresses([
-    { address: '93.184.216.34', family: 4 },
-    { address: '192.168.1.2', family: 4 },
-  ]),
-  /私网|保留地址/,
-);
 assert.deepStrictEqual(
   helpers.getSafeRedirectRequestHeaders(
     'https://www.xiaohongshu.com/explore/demo',
@@ -667,12 +656,6 @@ assert.deepStrictEqual(
     { Cookie: 'session=HTTPS_DOWNGRADE' },
   ),
   {},
-);
-assert.throws(
-  () => helpers.validatePublicDnsLookupAddresses([
-    { address: '0:0:0:0:0:ffff:7f00:1', family: 6 },
-  ]),
-  /私网|保留地址/,
 );
 assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/sph/A7ULN6a876'), true);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=A7ULN6a876'), true);
@@ -4143,6 +4126,7 @@ async function runAsyncHydrationTests() {
   const originalHttpsRequest = https.request;
   const redirectMethods = [];
   http.request = (parsed, options, callback) => {
+    assert.strictEqual(options.lookup, undefined, '短链跳转必须使用系统 DNS/代理路由，不能注入公网地址拦截器');
     const pathname = parsed.pathname || '';
     const method = options.method || 'GET';
     redirectMethods.push(`${method}:${pathname}`);
@@ -6695,7 +6679,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.62'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.63'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6734,8 +6718,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.62',
-        runtimeVersion: '1.3.62',
+        manifestVersion: '1.3.63',
+        runtimeVersion: '1.3.63',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -8457,7 +8441,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.62 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.63 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -8516,12 +8500,26 @@ async function runClipboardTextWebpagePromotionTests() {
   let redirectRequestCount = 0;
   http.request = (parsed, options, callback) => {
     redirectRequestCount += 1;
-    assert.strictEqual(typeof options.lookup, 'function');
+    assert.strictEqual(options.lookup, undefined, '自动网页请求必须使用系统 DNS/代理路由');
     const request = {
       setTimeout: () => request,
       on: () => request,
       destroy: () => {},
       end: () => {
+        if (redirectRequestCount > 1) {
+          const handlers = {};
+          callback({
+            statusCode: 200,
+            headers: {},
+            resume: () => {},
+            on(event, handler) {
+              handlers[event] = handler;
+            },
+          });
+          handlers.data(Buffer.from('<html><body>system route</body></html>'));
+          handlers.end();
+          return;
+        }
         callback({
           statusCode: 302,
           headers: { location: 'http://127.0.0.1/private' },
@@ -8533,11 +8531,10 @@ async function runClipboardTextWebpagePromotionTests() {
     return request;
   };
   try {
-    await assert.rejects(
-      () => helpers.requestPublicWebpageText('http://example.com/start'),
-      /安全自动访问|公网/,
-    );
-    assert.strictEqual(redirectRequestCount, 1);
+    const response = await helpers.requestPublicWebpageText('http://example.com/start');
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(response.text, '<html><body>system route</body></html>');
+    assert.strictEqual(redirectRequestCount, 2);
   } finally {
     http.request = originalHttpRequest;
   }
@@ -8743,7 +8740,6 @@ async function runClipboardTextWebpagePromotionTests() {
   for (const content of [
     '纯文字，不应该调用网页提取',
     '两个普通链接 https://example.com/a https://example.net/b',
-    '危险地址 http://127.0.0.1/private',
   ]) {
     let hydrationCalls = 0;
     const safePlugin = new PluginClass();
@@ -8769,6 +8765,37 @@ async function runClipboardTextWebpagePromotionTests() {
     }, '2026-07-25T04:00:00.000Z');
     assert.strictEqual(hydrationCalls, 0);
   }
+
+  let localRouteHydrationCalls = 0;
+  const localRoutePlugin = new PluginClass();
+  localRoutePlugin.settings = helpers.mergeSettings({
+    inboxDir: 'raw/wechatmd',
+    noteSaveMode: 'root',
+    aiProvider: 'off',
+  });
+  localRoutePlugin.app = plugin.app;
+  localRoutePlugin.showSyncProgress = () => {};
+  localRoutePlugin.nextRecordTitle = async () => '系统路由文本';
+  localRoutePlugin.hydrateWebpageMarkdown = async (record) => {
+    localRouteHydrationCalls += 1;
+    return {
+      ...record,
+      metadata: {
+        ...(record.metadata || {}),
+        conversionStatus: 'success',
+        markdown: 'system route content',
+      },
+    };
+  };
+  localRoutePlugin.enrichRecordMetadataWithAi = async (record) => record;
+  await localRoutePlugin.writeRecord({
+    _id: 'clipboard-system-route',
+    type: 'text',
+    content: '系统路由地址 http://127.0.0.1/private',
+    createdAt: '2026-07-25T03:49:04.246Z',
+    metadata: {},
+  }, '2026-07-25T04:00:00.000Z');
+  assert.strictEqual(localRouteHydrationCalls, 1);
 }
 
 async function runCanonicalVaultFolderTests() {
