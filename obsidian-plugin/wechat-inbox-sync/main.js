@@ -17,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.65';
+const PLUGIN_RUNTIME_VERSION = '1.3.66';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -9585,6 +9585,7 @@ async function renderXiaohongshuPageWithElectron(url) {
       sandbox: true,
     },
   });
+  installExternalAppNavigationGuards(win.webContents);
 
   const commentApiRequests = [];
   const browserSession = (win.webContents && win.webContents.session) || wechatSession;
@@ -15703,6 +15704,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           ? normalizeDouyinTargetUrl(url, redirectedUrl)
           : { awemeId: '', url: '' };
         const resolvedUrl = douyinTarget.url || redirectedUrl;
+        const xiaohongshuBrowserUrl = isXiaohongshuShortLinkUrl(url)
+          ? url
+          : resolvedUrl;
         let douyinAwemeId = douyinTarget.awemeId;
         if (shouldBlockExternalAppUrl(resolvedUrl)) {
           throw new Error(`已阻止网页尝试打开外部应用协议：${new URL(resolvedUrl).protocol}`);
@@ -15826,7 +15830,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (!renderedXiaohongshuPage && ((!fastXiaohongshuReadable && !extractedXiaohongshu.videoUrl && !mediaUrl)
             || shouldIncludeXiaohongshuComments)) {
             try {
-              renderedXiaohongshuPage = await this.renderXiaohongshuPage(resolvedUrl);
+              renderedXiaohongshuPage = await this.renderXiaohongshuPage(xiaohongshuBrowserUrl);
             } catch (error) {
               renderedXiaohongshuError = error;
             }
@@ -15854,7 +15858,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             try {
               mediaUrls = sortMediaUrlsForTranscription([
                 ...mediaUrls,
-                ...(await this.renderSocialMediaUrls(resolvedUrl)),
+                ...(await this.renderSocialMediaUrls(xiaohongshuBrowserUrl)),
               ]);
               mediaUrl = mediaUrls[0] || '';
             } catch (renderError) {
@@ -15974,14 +15978,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         if (!hasPreciseDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === 'function') {
           try {
-            mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, ...(await this.renderSocialMediaUrls(resolvedUrl))]);
+            mediaUrls = sortMediaUrlsForTranscription([
+              ...mediaUrls,
+              ...(await this.renderSocialMediaUrls(xiaohongshuBrowserUrl)),
+            ]);
             mediaUrl = mediaUrls[0] || mediaUrl;
           } catch (renderError) {
             mediaUrl = mediaUrl || '';
           }
         } else if (!hasPreciseDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === 'function') {
           try {
-            mediaUrl = await this.renderSocialMediaUrl(resolvedUrl);
+            mediaUrl = await this.renderSocialMediaUrl(xiaohongshuBrowserUrl);
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
           } catch (renderError) {
             mediaUrl = '';

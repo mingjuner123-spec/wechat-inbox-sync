@@ -261,6 +261,11 @@ assert.ok(
   socialMediaRendererSource.indexOf('await installDouyinExternalProtocolHandlers(wechatSession)')
     < socialMediaRendererSource.indexOf('new BrowserWindow'),
 );
+const xiaohongshuPageRendererSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
+  pluginMainSource.indexOf('async function renderXiaohongshuCommentsWithElectron'),
+);
+assert.ok(xiaohongshuPageRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -344,9 +349,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.65'), {
-  manifestVersion: '1.3.65',
-  runtimeVersion: '1.3.65',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.66'), {
+  manifestVersion: '1.3.66',
+  runtimeVersion: '1.3.66',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -5394,6 +5399,119 @@ async function runAsyncHydrationTests() {
     requestUrlMock = previousTransportFallbackRequestUrlMock;
   }
 
+  const genericRedirectFallbackPlugin = new PluginClass();
+  genericRedirectFallbackPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+  genericRedirectFallbackPlugin.hasProFeatureAccess = async () => false;
+  genericRedirectFallbackPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+  genericRedirectFallbackPlugin.renderSocialMediaUrls = async () => [];
+  const originalHttpRequestForGenericRedirect = http.request;
+  const originalHttpsRequestForGenericRedirect = https.request;
+  const previousGenericRedirectRequestUrlMock = requestUrlMock;
+  const genericRedirectRenderUrls = [];
+  genericRedirectFallbackPlugin.renderXiaohongshuPage = async (renderUrl) => {
+    genericRedirectRenderUrls.push(renderUrl);
+    assert.strictEqual(
+      renderUrl,
+      'http://xhslink.cn/o/original-note',
+      'Node 跳到通用首页后，隐藏浏览器必须重新打开仍包含笔记身份的原始短链',
+    );
+    return {
+      html: [
+        '<html><head>',
+        '<meta property="og:title" content="原始短链恢复成功">',
+        '<meta name="description" content="隐藏浏览器从原始短链恢复了真实笔记正文，而不是再次打开通用首页。">',
+        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/original-note.jpg">',
+        '</head></html>',
+      ].join(''),
+      comments: [],
+    };
+  };
+  const createGenericRedirectRequest = (parsed, options, callback) => {
+    const method = options.method || 'GET';
+    const request = {
+      setTimeout: () => request,
+      on: () => request,
+      destroy: () => {},
+      end: () => {
+        if (parsed.hostname === 'xhslink.cn' && method === 'HEAD') {
+          callback({ statusCode: 404, headers: {}, resume: () => {} });
+          return;
+        }
+        if (parsed.hostname === 'xhslink.cn' && method === 'GET') {
+          callback({
+            statusCode: 302,
+            headers: { location: 'https://www.xiaohongshu.com/' },
+            resume: () => {},
+          });
+          return;
+        }
+        callback({ statusCode: 404, headers: {}, resume: () => {} });
+      },
+    };
+    return request;
+  };
+  http.request = createGenericRedirectRequest;
+  https.request = createGenericRedirectRequest;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/') {
+      return {
+        status: 200,
+        text: genericXiaohongshuLandingHtml,
+      };
+    }
+    throw new Error(`unexpected generic redirect request ${url}`);
+  };
+  try {
+    const genericRedirectRecord = await genericRedirectFallbackPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://xhslink.cn/o/original-note',
+      metadata: {
+        url: 'http://xhslink.cn/o/original-note',
+        shareText: '原始短链恢复测试',
+      },
+    }, '', '', '小红书短链通用首页恢复');
+    assert.deepStrictEqual(genericRedirectRenderUrls, ['http://xhslink.cn/o/original-note']);
+    assert.strictEqual(genericRedirectRecord.metadata.title, '原始短链恢复成功');
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('隐藏浏览器从原始短链恢复了真实笔记正文'));
+
+    const genericRedirectMediaPlugin = new PluginClass();
+    genericRedirectMediaPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
+    genericRedirectMediaPlugin.hasProFeatureAccess = async () => false;
+    genericRedirectMediaPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    genericRedirectMediaPlugin.renderXiaohongshuPage = async (renderUrl) => {
+      assert.strictEqual(renderUrl, 'http://xhslink.cn/o/original-note');
+      return {
+        html: genericXiaohongshuLandingHtml,
+        comments: [],
+      };
+    };
+    const genericRedirectMediaUrls = [];
+    genericRedirectMediaPlugin.renderSocialMediaUrls = async (renderUrl) => {
+      genericRedirectMediaUrls.push(renderUrl);
+      return ['https://sns-video-v6.xhscdn.com/stream/original-note.mp4'];
+    };
+    genericRedirectMediaPlugin.runConfiguredTranscription = async () => ({
+      transcription: '原始短链恢复的视频转写正文',
+      source: 'local',
+    });
+    const genericRedirectMediaRecord = await genericRedirectMediaPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://xhslink.cn/o/original-note',
+      metadata: {
+        url: 'http://xhslink.cn/o/original-note',
+        webpageMediaType: 'audio_video',
+        transcriptionMode: 'local',
+      },
+    }, '', '', '小红书短链视频恢复');
+    assert.ok(genericRedirectMediaUrls.length >= 1);
+    assert.ok(genericRedirectMediaUrls.every((renderUrl) => renderUrl === 'http://xhslink.cn/o/original-note'));
+    assert.strictEqual(genericRedirectMediaRecord.metadata.transcription, '原始短链恢复的视频转写正文');
+  } finally {
+    http.request = originalHttpRequestForGenericRedirect;
+    https.request = originalHttpsRequestForGenericRedirect;
+    requestUrlMock = previousGenericRedirectRequestUrlMock;
+  }
+
   const renderedFallbackPlugin = new PluginClass();
   renderedFallbackPlugin.settings = helpers.mergeSettings({
     aiProvider: 'off',
@@ -6874,7 +6992,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.65'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.66'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -6913,8 +7031,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.65',
-        runtimeVersion: '1.3.65',
+        manifestVersion: '1.3.66',
+        runtimeVersion: '1.3.66',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -8691,7 +8809,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.65 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.66 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
