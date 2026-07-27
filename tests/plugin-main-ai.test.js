@@ -3,6 +3,7 @@ const http = require('http');
 const https = require('https');
 const childProcess = require('child_process');
 const Module = require('module');
+const { EventEmitter } = require('events');
 
 let requestUrlMock = async () => ({});
 const originalLoad = Module._load;
@@ -269,7 +270,228 @@ function runPendingLocalOcrSwitchTests() {
   }
 }
 
+function runXiaohongshuOcrPolicyTests() {
+  assert.strictEqual(typeof helpers.isXiaohongshuTextDominantOcrItem, 'function');
+  assert.strictEqual(typeof helpers.mergeXiaohongshuOcrText, 'function');
+  assert.deepStrictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS, {
+    trustedBoxConfidence: 0.55,
+    averageConfidence: 0.65,
+    longTextReadableChars: 80,
+    longTextLines: 5,
+    longTextVerticalSpanRatio: 0.35,
+    longTextCoveredRowRatio: 0.12,
+    largeCardReadableChars: 35,
+    largeCardLines: 3,
+    largeCardTextBoxAreaRatio: 0.12,
+    largeCardVerticalSpanRatio: 0.25,
+    geometryFallbackReadableChars: 160,
+    geometryFallbackLines: 6,
+    maxBoundaryOverlapLines: 8,
+  });
+
+  const exactLongTextMetrics = {
+    readableChars: 80,
+    lineCount: 5,
+    averageConfidence: 0.65,
+    textBoxAreaRatio: 0,
+    coveredRowRatio: 0.12,
+    verticalSpanRatio: 0.35,
+  };
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '长文阈值正文',
+    metrics: exactLongTextMetrics,
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '长文阈值正文',
+    metrics: {
+      ...exactLongTextMetrics,
+      coveredRowRatio: 0.119,
+    },
+  }), false);
+
+  const exactLargeCardMetrics = {
+    readableChars: 35,
+    lineCount: 3,
+    averageConfidence: 0.65,
+    textBoxAreaRatio: 0.12,
+    coveredRowRatio: 0,
+    verticalSpanRatio: 0.25,
+  };
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '大字卡阈值正文',
+    metrics: exactLargeCardMetrics,
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '大字卡阈值正文',
+    metrics: {
+      ...exactLargeCardMetrics,
+      textBoxAreaRatio: 0.119,
+    },
+  }), false);
+
+  const exactGeometryFallbackMetrics = {
+    readableChars: 160,
+    lineCount: 6,
+  };
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '几何缺失阈值正文',
+    metrics: exactGeometryFallbackMetrics,
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '几何缺失阈值正文',
+    metrics: {
+      ...exactGeometryFallbackMetrics,
+      lineCount: 5,
+    },
+  }), false);
+
+  const textCard = {
+    index: 3,
+    imageUrl: 'https://sns-webpic-qc.xhscdn.com/text-card.jpg',
+    text: [
+      '这是一张以正文为主体的长文字卡片',
+      '底色和小头像不会改变正文占主要版面的事实',
+      '连续内容用于验证文字主体判定',
+      '第四行正文继续解释卡片中的核心信息',
+      '第五行正文确保文字覆盖足够的纵向区域',
+      '最后一行正文用于完成测试样本',
+    ].join('\n'),
+    metrics: {
+      readableChars: 120,
+      lineCount: 8,
+      averageConfidence: 0.92,
+      textBoxAreaRatio: 0.16,
+      coveredRowRatio: 0.22,
+      verticalSpanRatio: 0.62,
+    },
+  };
+  const captionedPhoto = {
+    index: 2,
+    imageUrl: 'https://sns-webpic-qc.xhscdn.com/captioned-photo.jpg',
+    text: '照片标题\n一行字幕\n品牌水印',
+    metrics: {
+      readableChars: 18,
+      lineCount: 3,
+      averageConfidence: 0.91,
+      textBoxAreaRatio: 0.03,
+      coveredRowRatio: 0.04,
+      verticalSpanRatio: 0.12,
+    },
+  };
+
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem(textCard), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem(captionedPhoto), false);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: Array.from({ length: 6 }, () => '几何缺失时保守回退正文内容'.repeat(5)).join('\n'),
+    metrics: {},
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: Array.from({ length: 6 }, () => '非法指标不能伪装成几何缺失正文'.repeat(5)).join('\n'),
+    metrics: {
+      readableChars: 999,
+      lineCount: 99,
+      averageConfidence: Number.POSITIVE_INFINITY,
+      textBoxAreaRatio: Number.POSITIVE_INFINITY,
+      coveredRowRatio: -1,
+      verticalSpanRatio: Number.NaN,
+    },
+  }), false);
+  assert.deepStrictEqual(
+    helpers.normalizeXiaohongshuOcrItems([captionedPhoto, textCard]).map((item) => item.index),
+    [3],
+  );
+  const invalidIndexItems = helpers.normalizeXiaohongshuOcrItems([
+    { ...textCard, index: 0.5, imageUrl: 'https://example.test/fractional.jpg' },
+    { ...textCard, index: Number.NaN, imageUrl: 'https://example.test/nan.jpg' },
+    { ...textCard, index: -8, imageUrl: 'https://example.test/negative.jpg' },
+  ]);
+  assert.deepStrictEqual(invalidIndexItems.map((item) => item.index), [1, 2, 3]);
+  assert.deepStrictEqual(invalidIndexItems.map((item) => item.imageUrl), [
+    'https://example.test/fractional.jpg',
+    'https://example.test/nan.jpg',
+    'https://example.test/negative.jpg',
+  ]);
+  assert.deepStrictEqual(
+    helpers.normalizeXiaohongshuOcrItems([
+      { ...textCard, index: 4, imageUrl: 'https://example.test/stable-a.jpg' },
+      { ...textCard, index: 4, imageUrl: 'https://example.test/stable-b.jpg' },
+    ]).map((item) => item.imageUrl),
+    ['https://example.test/stable-a.jpg', 'https://example.test/stable-b.jpg'],
+  );
+
+  const page1 = {
+    ...textCard,
+    index: 1,
+    text: [
+      '第一页正文开头',
+      '同一页允许重复的合法句子',
+      '同一页允许重复的合法句子',
+      '第一页正文继续',
+      '共同边界第一行',
+      '共同边界第二行',
+    ].join('\n'),
+  };
+  const page2 = {
+    ...textCard,
+    index: 2,
+    text: [
+      '共同边界第一行',
+      '共同边界第二行',
+      '第二页正文开头',
+      '第二页正文继续',
+      '第二页正文补充',
+      '第二页正文结束',
+    ].join('\n'),
+  };
+  const mergedText = helpers.mergeXiaohongshuOcrText([page2, page1]);
+  const markdown = helpers.buildXiaohongshuOcrMarkdown([page2, page1]);
+
+  assert.ok(markdown.startsWith('## 图片文字\n\n'));
+  assert.strictEqual((markdown.match(/^## 图片文字$/gm) || []).length, 1);
+  assert.doesNotMatch(markdown, /### 图片\s*\d+/);
+  assert.strictEqual((mergedText.match(/共同边界第一行/g) || []).length, 1);
+  assert.strictEqual((mergedText.match(/共同边界第二行/g) || []).length, 1);
+  assert.strictEqual((mergedText.match(/同一页允许重复的合法句子/g) || []).length, 2);
+  assert.ok(mergedText.indexOf('第一页正文开头') < mergedText.indexOf('第二页正文开头'));
+
+  const mergeBoundaryText = (text, index) => helpers.mergeXiaohongshuOcrText([{
+    ...textCard,
+    index,
+    text,
+  }]);
+  assert.deepStrictEqual(
+    [
+      mergeBoundaryText('Hello,\nworld', 1),
+      mergeBoundaryText('This is sentence one.\nNext sentence', 2),
+      mergeBoundaryText('中文第一行\n中文第二行', 3),
+    ],
+    [
+      'Hello, world',
+      'This is sentence one. Next sentence',
+      '中文第一行中文第二行',
+    ],
+  );
+
+  const nineLineBoundary = Array(9).fill('九行边界重复句');
+  const cappedOverlapText = helpers.mergeXiaohongshuOcrText([
+    {
+      ...textCard,
+      index: 1,
+      text: ['上页正文', ...nineLineBoundary].join('\n'),
+    },
+    {
+      ...textCard,
+      index: 2,
+      text: [...nineLineBoundary, '下页正文'].join('\n'),
+    },
+  ], 8);
+  assert.strictEqual((cappedOverlapText.match(/九行边界重复句/g) || []).length, 10);
+  assert.ok(cappedOverlapText.includes('上页正文'));
+  assert.ok(cappedOverlapText.includes('下页正文'));
+}
+
 runPendingLocalOcrSwitchTests();
+runXiaohongshuOcrPolicyTests();
 assert.strictEqual(typeof helpers.enableDebuggerNetworkCapture, 'function');
 let debuggerNetworkCommand = '';
 const neverSettlingDebuggerCommand = new Promise(() => {});
@@ -344,6 +566,10 @@ const xiaohongshuPageRendererSource = pluginMainSource.slice(
 assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGuards(win.webContents)'));
 assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
 assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
+const xiaohongshuContentRendererSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async function renderXiaohongshuContentWithElectron'),
+  pluginMainSource.indexOf('let xiaohongshuBrowserSessionQueue'),
+);
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -427,9 +653,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.69'), {
-  manifestVersion: '1.3.69',
-  runtimeVersion: '1.3.69',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.70'), {
+  manifestVersion: '1.3.70',
+  runtimeVersion: '1.3.70',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -1588,7 +1814,7 @@ assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默�
 assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), false);
 assert.ok(pluginMainSource.includes('小红书图文 OCR：已默认开启'));
 assert.ok(pluginMainSource.includes('const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);'));
-assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isXiaohongshuVideoNote) {'));
+assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {'));
 assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
 assert.strictEqual(pluginMainSource.includes('图片文字识别 OCR 模块'), false);
 assert.ok(pluginMainSource.includes('getLocalOcrInstallStatus'));
@@ -3486,6 +3712,248 @@ assert.strictEqual(helpers.shouldStopWaitingForXiaohongshuContent(
   unrelatedRecommendationLandingHtml,
   'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
 ), false);
+assert.strictEqual(typeof helpers.rememberXiaohongshuObservedIdentity, 'function');
+const observedMainFrameIdentity = helpers.rememberXiaohongshuObservedIdentity('', {
+  resourceType: 'mainFrame',
+  url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+});
+assert.strictEqual(
+  observedMainFrameIdentity,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'image',
+    frameId: 0,
+    parentFrameId: -1,
+    url: 'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  }),
+  '',
+  'a subresource must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'mainFrame',
+    url: 'https://www.xiaohongshu.com/',
+  }),
+  '',
+  'a generic Xiaohongshu landing page must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'mainFrame',
+    url: 'https://attacker.example/explore/6b5ddf99000000002202e255',
+  }),
+  '',
+  'an external main-frame URL must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'mainFrame',
+    url: 'http://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  }),
+  '',
+  'an insecure Xiaohongshu URL must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity(observedMainFrameIdentity, {
+    resourceType: 'image',
+    frameId: 0,
+    parentFrameId: -1,
+    url: 'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  }),
+  observedMainFrameIdentity,
+  'a subresource in the main frame must not replace the observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity(observedMainFrameIdentity, {
+    resourceType: 'mainFrame',
+    url: 'https://www.xiaohongshu.com/',
+  }),
+  observedMainFrameIdentity,
+  'a generic Xiaohongshu landing page must not erase the observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity(observedMainFrameIdentity, {
+    resourceType: 'mainFrame',
+    url: 'https://attacker.example/explore/6b5ddf99000000002202e255',
+  }),
+  observedMainFrameIdentity,
+  'an external main-frame navigation must not replace the observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    frameId: 0,
+    parentFrameId: -1,
+    url: 'https://www.xiaohongshu.com/',
+    redirectURL: 'https://www.xiaohongshu.com/discovery/item/6b5ddf99000000002202e255',
+  }),
+  'https://www.xiaohongshu.com/discovery/item/6b5ddf99000000002202e255',
+  'main-frame redirect details must remember the official HTTPS note destination',
+);
+assert.strictEqual(typeof helpers.installXiaohongshuIdentityObserver, 'function');
+const firstIdentityWebContents = new EventEmitter();
+const secondIdentityWebContents = new EventEmitter();
+const unrelatedRedirectHandler = () => {};
+firstIdentityWebContents.on('will-redirect', unrelatedRedirectHandler);
+const firstObservedIdentities = [];
+const secondObservedIdentities = [];
+const cleanupFirstIdentityObserver = helpers.installXiaohongshuIdentityObserver(
+  firstIdentityWebContents,
+  (identityUrl) => firstObservedIdentities.push(identityUrl),
+);
+const cleanupSecondIdentityObserver = helpers.installXiaohongshuIdentityObserver(
+  secondIdentityWebContents,
+  (identityUrl) => secondObservedIdentities.push(identityUrl),
+);
+secondIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+);
+assert.deepStrictEqual(firstObservedIdentities, []);
+assert.deepStrictEqual(secondObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+]);
+firstIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+  false,
+  false,
+);
+firstIdentityWebContents.emit(
+  'will-frame-navigate',
+  {},
+  {
+    url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+    isMainFrame: false,
+  },
+);
+firstIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://attacker.example/explore/6a4ccf88000000001101d144',
+  false,
+  true,
+);
+assert.deepStrictEqual(firstObservedIdentities, []);
+firstIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+  false,
+  true,
+);
+assert.deepStrictEqual(firstObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+]);
+assert.strictEqual(firstIdentityWebContents.listenerCount('will-redirect'), 2);
+cleanupFirstIdentityObserver();
+assert.strictEqual(firstIdentityWebContents.listenerCount('will-redirect'), 1);
+assert.strictEqual(
+  firstIdentityWebContents.listeners('will-redirect')[0],
+  unrelatedRedirectHandler,
+  'cleanup must preserve unrelated listeners on the same webContents',
+);
+firstIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/6c6eefaa000000003303f366',
+);
+assert.deepStrictEqual(firstObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+]);
+secondIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6c6eefaa000000003303f366',
+  false,
+  true,
+);
+assert.deepStrictEqual(secondObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  'https://www.xiaohongshu.com/explore/6c6eefaa000000003303f366',
+]);
+cleanupSecondIdentityObserver();
+const signatureIdentityWebContents = new EventEmitter();
+const signatureObservedIdentities = [];
+const cleanupSignatureIdentityObserver = helpers.installXiaohongshuIdentityObserver(
+  signatureIdentityWebContents,
+  (identityUrl) => signatureObservedIdentities.push(identityUrl),
+);
+signatureIdentityWebContents.emit('will-redirect', {
+  url: 'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  isMainFrame: true,
+});
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+], 'current Electron details must record a main-frame redirect');
+signatureIdentityWebContents.emit('will-redirect', {
+  url: 'https://www.xiaohongshu.com/explore/6e8001cc000000005505b588',
+  isMainFrame: false,
+});
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+], 'current Electron details must ignore a subframe redirect');
+signatureIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+  false,
+  true,
+);
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+], 'deprecated positional parameters must still record a main-frame redirect');
+signatureIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/70a223ee000000007707d7aa',
+  false,
+  false,
+);
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+], 'deprecated positional parameters must ignore a subframe redirect');
+signatureIdentityWebContents.emit('will-navigate', {
+  url: 'https://www.xiaohongshu.com/explore/71b334ff000000008808e8bb',
+  isMainFrame: true,
+});
+signatureIdentityWebContents.emit('will-navigate', {
+  url: 'https://www.xiaohongshu.com/explore/72c445aa000000009909f9cc',
+  isMainFrame: false,
+});
+signatureIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/73d556bb00000000aa10a0dd',
+  false,
+  true,
+);
+signatureIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/74e667cc00000000bb11b1ee',
+  false,
+  false,
+);
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+  'https://www.xiaohongshu.com/explore/71b334ff000000008808e8bb',
+  'https://www.xiaohongshu.com/explore/73d556bb00000000aa10a0dd',
+], 'will-navigate must normalize current details and deprecated positional parameters');
+cleanupSignatureIdentityObserver();
+assert.ok(xiaohongshuContentRendererSource.includes('installXiaohongshuIdentityObserver'));
+assert.ok(xiaohongshuContentRendererSource.includes('observedIdentityUrl'));
+assert.strictEqual(
+  xiaohongshuContentRendererSource.includes('browserSession.webRequest.onBeforeRedirect'),
+  false,
+  'identity observation must not install or clear listeners on the shared persistent session',
+);
 assert.strictEqual(typeof helpers.selectXiaohongshuBrowserSnapshot, 'function');
 const longRecommendationSnapshot = helpers.selectXiaohongshuBrowserSnapshot(
   null,
@@ -6819,6 +7287,24 @@ async function runAsyncHydrationTests() {
       on: () => request,
       destroy: () => {},
       end: () => {
+        if (parsed.hostname === 'xhslink.cn'
+          && parsed.pathname === '/o/identity-continuity'
+          && method === 'HEAD') {
+          callback({
+            statusCode: 302,
+            headers: {
+              location: `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`,
+            },
+            resume: () => {},
+          });
+          return;
+        }
+        if (parsed.hostname === 'www.xiaohongshu.com'
+          && parsed.pathname === `/explore/${targetGraphicNoteId}`
+          && method === 'HEAD') {
+          callback({ statusCode: 200, headers: {}, resume: () => {} });
+          return;
+        }
         if (parsed.hostname === 'xhslink.cn' && method === 'HEAD') {
           callback({ statusCode: 404, headers: {}, resume: () => {} });
           return;
@@ -6866,6 +7352,87 @@ async function runAsyncHydrationTests() {
     assert.ok(genericRedirectRecord.metadata.markdown.includes('#效率工具'));
     assert.ok(genericRedirectRecord.metadata.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/resolved-cover.jpg)'));
     assert.ok(genericRedirectRecord.metadata.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/resolved-page-2.jpg)'));
+
+    const identityContinuityPlugin = new PluginClass();
+    identityContinuityPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+    identityContinuityPlugin.hasProFeatureAccess = async () => false;
+    identityContinuityPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    identityContinuityPlugin.renderSocialMediaUrls = async () => [];
+    identityContinuityPlugin.saveMarkdownRemoteImageAssets = async (markdown) => markdown;
+    const targetGraphicUrl = `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`;
+    const identityContinuityRenderUrls = [];
+    const identityContinuityRenderOptions = [];
+    identityContinuityPlugin.requestXiaohongshuStaticPage = async (requestUrl) => {
+      assert.strictEqual(requestUrl, targetGraphicUrl);
+      return {
+        status: 200,
+        url: 'https://www.xiaohongshu.com/',
+        text: genericXiaohongshuLandingHtml,
+      };
+    };
+    identityContinuityPlugin.renderXiaohongshuPage = async (renderUrl, renderOptions) => {
+      identityContinuityRenderUrls.push(renderUrl);
+      identityContinuityRenderOptions.push(renderOptions);
+      if (renderUrl !== targetGraphicUrl) {
+        return {
+          url: 'https://www.xiaohongshu.com/',
+          html: genericXiaohongshuLandingHtml,
+          comments: [],
+        };
+      }
+      return {
+        url: targetGraphicUrl,
+        html: [
+          '<html><head>',
+          `<link rel="canonical" href="${targetGraphicUrl}">`,
+          '<meta property="og:title" content="身份连续性恢复成功">',
+          '<meta name="description" content="目标身份没有被通用首页覆盖，这是与准确 noteId 绑定的结构化图文正文。">',
+          '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/identity-continuity.jpg">',
+          '</head><body><script>',
+          JSON.stringify({
+            noteDetailMap: {
+              [targetGraphicNoteId]: {
+                note: {
+                  noteId: targetGraphicNoteId,
+                  displayTitle: '身份连续性恢复成功',
+                  desc: '目标身份没有被通用首页覆盖，这是与准确 noteId 绑定的结构化图文正文。',
+                  imageList: [{
+                    urlDefault: 'https://sns-webpic-qc.xhscdn.com/identity-continuity.jpg',
+                  }],
+                },
+              },
+            },
+          }),
+          '</script></body></html>',
+        ].join(''),
+        comments: [],
+      };
+    };
+    let identityContinuityRecord = null;
+    let identityContinuityError = null;
+    try {
+      identityContinuityRecord = await identityContinuityPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'http://xhslink.cn/o/identity-continuity',
+        metadata: {
+          url: 'http://xhslink.cn/o/identity-continuity',
+          shareText: '小红书目标身份连续性测试',
+        },
+      }, '', '', '小红书目标身份连续性');
+    } catch (error) {
+      identityContinuityError = error;
+    }
+    assert.deepStrictEqual(identityContinuityRenderUrls, [
+      'http://xhslink.cn/o/identity-continuity',
+      targetGraphicUrl,
+      'https://www.xiaohongshu.com/',
+    ]);
+    assert.ifError(identityContinuityError);
+    assert.ok(identityContinuityRenderOptions.every(
+      (options) => options && options.expectedUrl === targetGraphicUrl,
+    ));
+    assert.strictEqual(identityContinuityRecord.metadata.title, '身份连续性恢复成功');
+    assert.ok(identityContinuityRecord.metadata.markdown.includes('目标身份没有被通用首页覆盖'));
 
     const originalPreferredPlugin = new PluginClass();
     originalPreferredPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
@@ -7378,22 +7945,81 @@ async function runAsyncHydrationTests() {
   }
 
   const forcedXhsVideoPlugin = new PluginClass();
-  forcedXhsVideoPlugin.settings = { aiProvider: 'off' };
+  forcedXhsVideoPlugin.settings = helpers.mergeSettings({
+    aiProvider: 'local',
+    xiaohongshuCommentsEnabled: false,
+  });
+  forcedXhsVideoPlugin.hasProFeatureAccess = async () => true;
+  forcedXhsVideoPlugin.checkXiaohongshuLogin = async () => false;
+  let forcedXhsVideoOcrEnrichCalls = 0;
+  let forcedXhsVideoOcrRequestCalls = 0;
+  const productionXhsOcrEnrich = PluginClass.prototype.enrichXiaohongshuExtractionWithOcr;
+  forcedXhsVideoPlugin.enrichXiaohongshuExtractionWithOcr = async (...args) => {
+    forcedXhsVideoOcrEnrichCalls += 1;
+    return productionXhsOcrEnrich.apply(forcedXhsVideoPlugin, args);
+  };
+  forcedXhsVideoPlugin.requestXiaohongshuImageOcr = async () => {
+    forcedXhsVideoOcrRequestCalls += 1;
+    return [];
+  };
+  let forcedXhsVideoMediaRenderCalls = 0;
   forcedXhsVideoPlugin.renderSocialMediaUrls = async (url) => {
     assert.strictEqual(url, 'https://www.xiaohongshu.com/explore/short-link-note');
-    return ['https://video.example.com/xhs-short-link.mp4'];
+    forcedXhsVideoMediaRenderCalls += 1;
+    return forcedXhsVideoMediaRenderCalls === 1
+      ? []
+      : ['https://video.example.com/xhs-short-link.mp4'];
   };
-  const forcedXhsVideoRecord = await forcedXhsVideoPlugin.hydrateWebpageMarkdown({
-    type: 'webpage',
-    content: 'https://www.xiaohongshu.com/explore/short-link-note',
-    metadata: {
-      url: 'https://www.xiaohongshu.com/explore/short-link-note',
-      webpageMediaType: 'audio_video',
-      transcriptionMode: 'local',
-    },
-  }, '', '', '小红书短链视频');
-  assert.strictEqual(forcedXhsVideoRecord.metadata.transcriptOnly, true);
-  assert.strictEqual(forcedXhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs-short-link.mp4');
+  forcedXhsVideoPlugin.renderXiaohongshuPage = async (url) => ({
+    html: [
+      '<html><head>',
+      '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+      '<meta name="description" content="该内容来自小红书，请打开小红书查看精彩笔记。">',
+      '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/video-intent-cover.jpg">',
+      '</head><body>小红书</body></html>',
+    ].join(''),
+    url,
+    identityUrl: url,
+    comments: [],
+  });
+  forcedXhsVideoPlugin.runConfiguredTranscription = async () => ({
+    transcription: '后续媒体解析取得的视频文案',
+    source: 'local',
+  });
+  const previousForcedXhsVideoRequestUrlMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/short-link-note') {
+      return {
+        status: 200,
+        text: [
+          '<html><head>',
+          '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+          '<meta name="description" content="该内容来自小红书，请打开小红书查看精彩笔记。">',
+          '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/video-intent-cover.jpg">',
+          '</head><body>小红书</body></html>',
+        ].join(''),
+      };
+    }
+    throw new Error(`unexpected delayed video intent request ${url}`);
+  };
+  try {
+    const forcedXhsVideoRecord = await forcedXhsVideoPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/short-link-note',
+      metadata: {
+        url: 'https://www.xiaohongshu.com/explore/short-link-note',
+        webpageMediaType: 'audio_video',
+        transcriptionMode: 'local',
+      },
+    }, '', '', '小红书短链视频');
+    assert.strictEqual(forcedXhsVideoMediaRenderCalls, 2);
+    assert.strictEqual(forcedXhsVideoOcrEnrichCalls, 0);
+    assert.strictEqual(forcedXhsVideoOcrRequestCalls, 0);
+    assert.strictEqual(forcedXhsVideoRecord.metadata.transcriptOnly, true);
+    assert.strictEqual(forcedXhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs-short-link.mp4');
+  } finally {
+    requestUrlMock = previousForcedXhsVideoRequestUrlMock;
+  }
 
   const mislabeledXhsImageRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
@@ -8726,7 +9352,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.69'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.70'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -8765,8 +9391,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.69',
-        runtimeVersion: '1.3.69',
+        manifestVersion: '1.3.70',
+        runtimeVersion: '1.3.70',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10630,7 +11256,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.69 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.70 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -11126,9 +11752,1081 @@ async function runCanonicalVaultFolderTests() {
   assert.strictEqual(channelResult.filePath, 'raw/wechatmd/视频号捕获.md');
 }
 
+async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
+  const scenarios = [
+    {
+      name: 'rate-limit',
+      contentKind: 'transcript',
+      expectedCode: 'rate-limited',
+      generate: async () => {
+        const error = new Error('Request failed with status code 429 https://private.example.test?token=TOP_SECRET');
+        error.code = 'ERR_BAD_REQUEST';
+        error.response = { status: 429 };
+        throw error;
+      },
+    },
+    {
+      name: 'upstream-5xx',
+      contentKind: 'body',
+      expectedCode: 'upstream-service-error',
+      generate: async () => {
+        const error = new Error('HTTP 502 api_key=TOP_SECRET');
+        error.code = 'ERR_BAD_RESPONSE';
+        error.response = { status: 502 };
+        throw error;
+      },
+    },
+    {
+      name: 'timeout',
+      contentKind: 'transcript',
+      expectedCode: 'request-timeout',
+      generate: async () => {
+        throw new Error('ETIMEDOUT cookie=TOP_SECRET');
+      },
+    },
+    {
+      name: 'empty-result',
+      contentKind: 'body',
+      expectedCode: 'empty-response',
+      generate: async () => ({ description: '', keywords: [] }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const writes = [];
+    const requestCalls = [];
+    let pendingReadCount = 0;
+    let aiCallCount = 0;
+    let transcriptionCallCount = 0;
+    const recordId = `ai-metadata-${scenario.name}`;
+    const coreText = scenario.contentKind === 'transcript'
+      ? '这段正文已经在本地完成转写，AI 简介失败不应让它重新转写。'
+      : '这段网页正文已经完成提取，AI 简介失败不应阻止它写入知识库。';
+    const record = {
+      _id: recordId,
+      type: 'webpage',
+      content: 'https://media.example.test/video',
+      createdAt: '2026-07-27T09:00:00.000Z',
+      metadata: {
+        title: '已经成功转写的内容',
+        url: 'https://media.example.test/video',
+        ...(scenario.contentKind === 'transcript'
+          ? {
+            transcriptOnly: true,
+            webpageMediaType: 'audio_video',
+            transcription: coreText,
+            transcriptionStatus: 'success',
+            transcriptionSource: 'local',
+          }
+          : {
+            markdown: coreText,
+          }),
+        conversionStatus: 'success',
+      },
+    };
+    const directPlugin = new PluginClass();
+    directPlugin.settings = helpers.mergeSettings({});
+    directPlugin.hasProFeatureAccess = async () => true;
+    directPlugin.generateMetadataWithDeepSeek = scenario.generate;
+    const failedEnrichment = await directPlugin.enrichRecordMetadataWithAi(record);
+    assert.strictEqual(failedEnrichment.metadata.description, undefined, scenario.name);
+    assert.strictEqual(failedEnrichment.metadata.keywords, undefined, scenario.name);
+    assert.strictEqual(failedEnrichment.metadata.aiMetadataSource, undefined, scenario.name);
+    assert.strictEqual(failedEnrichment.metadata.aiMetadataError, scenario.expectedCode, scenario.name);
+
+    const plugin = new PluginClass();
+    plugin.settings = helpers.mergeSettings({
+      inboxDir: '临时收集',
+      noteSaveMode: 'root',
+    });
+    plugin.app = {
+      vault: {
+        adapter: {
+          async exists() {
+            return true;
+          },
+          async write(filePath, markdown) {
+            writes.push({ filePath, markdown });
+          },
+        },
+        async createFolder() {},
+      },
+    };
+    plugin.showSyncProgress = () => {};
+    plugin.nextRecordTitle = async () => `AI失败不阻断-${scenario.name}`;
+    plugin.findExistingRecordNotePath = async () => '';
+    plugin.hydrateWebpageMarkdown = async (currentRecord) => currentRecord;
+    plugin.saveSourceMediaAttachment = async (currentRecord) => currentRecord;
+    plugin.hasProFeatureAccess = async () => true;
+    plugin.runConfiguredTranscription = async () => {
+      transcriptionCallCount += 1;
+      throw new Error('completed transcript must not run ASR again');
+    };
+    plugin.generateMetadataWithDeepSeek = async (...args) => {
+      aiCallCount += 1;
+      return scenario.generate(...args);
+    };
+    plugin.requestJson = async (requestPath, method) => {
+      requestCalls.push([requestPath, method]);
+      if (requestPath === '/records?status=pending') {
+        pendingReadCount += 1;
+        return {
+          success: true,
+          data: pendingReadCount === 1 ? [record] : [],
+        };
+      }
+      if (requestPath === `/records/${encodeURIComponent(recordId)}/synced`) {
+        return { success: true, data: {} };
+      }
+      throw new Error(`unexpected request: ${method} ${requestPath}`);
+    };
+
+    const firstResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+    assert.strictEqual(firstResult.written.length, 1, scenario.name);
+    assert.strictEqual(firstResult.failed.length, 0, scenario.name);
+    assert.strictEqual(firstResult.conversionWarnings.length, 1, scenario.name);
+    assert.match(
+      firstResult.conversionWarnings[0],
+      /正文已同步，但 AI 简介\/关键词未生成/,
+      scenario.name,
+    );
+    assert.strictEqual(writes.length, 1, scenario.name);
+    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(transcriptionCallCount, 0, scenario.name);
+    assert.deepStrictEqual(
+      requestCalls.filter(([requestPath]) => requestPath.includes('/synced')),
+      [[`/records/${encodeURIComponent(recordId)}/synced`, 'POST']],
+      scenario.name,
+    );
+
+    const markdown = writes[0].markdown;
+    assert.ok(markdown.includes(coreText), scenario.name);
+    assert.strictEqual(/^description:/m.test(markdown), false, scenario.name);
+    assert.strictEqual(/^keywords:/m.test(markdown), false, scenario.name);
+    assert.strictEqual(markdown.includes('aiMetadataSource'), false, scenario.name);
+    const diagnosticLines = markdown
+      .split(/\r?\n/)
+      .filter((line) => line.includes('wechat-inbox-ai-metadata-error'));
+    assert.deepStrictEqual(
+      diagnosticLines,
+      [`<!-- wechat-inbox-ai-metadata-error: ${scenario.expectedCode} -->`],
+      scenario.name,
+    );
+    assert.strictEqual(/https?:|TOP_SECRET|token|api_key|cookie/i.test(diagnosticLines[0]), false, scenario.name);
+
+    const secondResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+    assert.strictEqual(secondResult.written.length, 0, scenario.name);
+    assert.strictEqual(secondResult.failed.length, 0, scenario.name);
+    assert.strictEqual(writes.length, 1, scenario.name);
+    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(transcriptionCallCount, 0, scenario.name);
+  }
+
+  const noProRecord = {
+    _id: 'ai-metadata-no-pro',
+    type: 'webpage',
+    content: 'https://media.example.test/free-video',
+    createdAt: '2026-07-27T09:00:00.000Z',
+    metadata: {
+      title: '免费用户已保存的正文',
+      url: 'https://media.example.test/free-video',
+      markdown: '免费用户的正文仍应正常保存。',
+      conversionStatus: 'success',
+    },
+  };
+  const noProPlugin = new PluginClass();
+  noProPlugin.settings = helpers.mergeSettings({});
+  noProPlugin.hasProFeatureAccess = async () => false;
+  noProPlugin.generateMetadataWithDeepSeek = async () => {
+    throw new Error('a free user must not call the AI service');
+  };
+  const noProResult = await noProPlugin.enrichRecordMetadataWithAi(noProRecord);
+  assert.strictEqual(noProResult, noProRecord);
+  assert.strictEqual(noProResult.metadata.aiMetadataError, undefined);
+  assert.strictEqual(helpers.getRecordConversionWarning(noProResult), '');
+  assert.strictEqual(
+    helpers.buildMarkdownForRecord({
+      record: noProResult,
+      title: '免费用户已保存的正文',
+      syncedAt: '2026-07-27T09:01:00.000Z',
+    }).includes('wechat-inbox-ai-metadata-error'),
+    false,
+  );
+}
+
+async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
+  const noteWrites = [];
+  const attachmentWrites = [];
+  const requestCalls = [];
+  let pendingReadCount = 0;
+  let transcriptionCallCount = 0;
+  let aiCallCount = 0;
+  const recordId = 'ai-429-after-local-transcription';
+  const transcript = '这段音频刚刚在本轮同步中完成本地转写，AI 限流不能让它下次再转一次。';
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    inboxDir: '临时收集',
+    noteSaveMode: 'root',
+    aiProvider: 'local',
+  });
+  plugin.app = {
+    vault: {
+      adapter: {
+        async exists() {
+          return true;
+        },
+        async writeBinary(filePath, content) {
+          attachmentWrites.push({ filePath, content: Buffer.from(content).toString('utf8') });
+        },
+        async write(filePath, markdown) {
+          noteWrites.push({ filePath, markdown });
+        },
+      },
+      async createFolder() {},
+    },
+  };
+  plugin.showSyncProgress = () => {};
+  plugin.nextRecordTitle = async () => '本轮完成本地转写';
+  plugin.findExistingRecordNotePath = async () => '';
+  plugin.requestFileDownloadUrl = async () => 'https://download.example.test/audio.mp3';
+  plugin.downloadArrayBuffer = async () => Buffer.from('controlled-audio-bytes');
+  plugin.runConfiguredTranscription = async () => {
+    transcriptionCallCount += 1;
+    return {
+      transcription: transcript,
+      source: 'local',
+    };
+  };
+  plugin.hasProFeatureAccess = async () => true;
+  plugin.generateMetadataWithDeepSeek = async () => {
+    aiCallCount += 1;
+    const error = new Error(
+      'Request failed with status code 429 https://private.example.test?token=TOP_SECRET api_key=TOP_SECRET cookie=TOP_SECRET',
+    );
+    error.code = 'ERR_BAD_REQUEST';
+    error.response = { status: 429 };
+    throw error;
+  };
+  plugin.requestJson = async (requestPath, method) => {
+    requestCalls.push([requestPath, method]);
+    if (requestPath === '/records?status=pending') {
+      pendingReadCount += 1;
+      return {
+        success: true,
+        data: pendingReadCount === 1
+          ? [{
+            _id: recordId,
+            type: 'file',
+            content: 'meeting.mp3',
+            createdAt: '2026-07-27T09:30:00.000Z',
+            metadata: {
+              fileID: 'cloud://files/meeting.mp3',
+              fileName: 'meeting.mp3',
+              fileExt: 'mp3',
+              transcriptionMode: 'local',
+            },
+          }]
+          : [],
+      };
+    }
+    if (requestPath === `/records/${encodeURIComponent(recordId)}/synced`) {
+      return { success: true, data: {} };
+    }
+    throw new Error(`unexpected request: ${method} ${requestPath}`);
+  };
+
+  const firstResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+  assert.strictEqual(firstResult.written.length, 1);
+  assert.strictEqual(firstResult.failed.length, 0);
+  assert.strictEqual(transcriptionCallCount, 1);
+  assert.strictEqual(aiCallCount, 1);
+  assert.strictEqual(noteWrites.length, 1);
+  assert.strictEqual(attachmentWrites.length, 1);
+  assert.strictEqual(
+    requestCalls.filter(([requestPath]) => requestPath.includes('/synced')).length,
+    1,
+  );
+  assert.ok(noteWrites[0].markdown.includes(transcript));
+  assert.strictEqual(firstResult.conversionWarnings.length, 1);
+  assert.match(firstResult.conversionWarnings[0], /正文已同步，但 AI 简介\/关键词未生成/);
+  assert.strictEqual(
+    /https?:|TOP_SECRET|token|api_key|cookie/i.test(firstResult.conversionWarnings[0]),
+    false,
+  );
+  const finalNotice = helpers.buildSyncResultNotice(
+    firstResult.written,
+    firstResult.skipped,
+    firstResult.conversionWarnings,
+    firstResult.failed,
+  );
+  assert.match(finalNotice, /正文已同步，但 AI 简介\/关键词未生成/);
+  assert.strictEqual(/https?:|TOP_SECRET|token|api_key|cookie/i.test(finalNotice), false);
+
+  const secondResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+  assert.strictEqual(secondResult.written.length, 0);
+  assert.strictEqual(secondResult.failed.length, 0);
+  assert.strictEqual(transcriptionCallCount, 1);
+  assert.strictEqual(aiCallCount, 1);
+  assert.strictEqual(noteWrites.length, 1);
+  assert.strictEqual(attachmentWrites.length, 1);
+  assert.strictEqual(
+    requestCalls.filter(([requestPath]) => requestPath.includes('/synced')).length,
+    1,
+  );
+}
+
+async function runXiaohongshuOcrBatchTests() {
+  const dominantText = Array.from(
+    { length: 6 },
+    (_, index) => `第${index + 1}行文字卡正文${'连续内容'.repeat(12)}`,
+  ).join('\n');
+  const dominantMetrics = {
+    readableChars: 180,
+    lineCount: 6,
+    averageConfidence: 0.92,
+    textBoxAreaRatio: 0.18,
+    coveredRowRatio: 0.24,
+    verticalSpanRatio: 0.64,
+  };
+  const photoMetrics = {
+    readableChars: 18,
+    lineCount: 3,
+    averageConfidence: 0.91,
+    textBoxAreaRatio: 0.03,
+    coveredRowRatio: 0.04,
+    verticalSpanRatio: 0.12,
+  };
+  const makeImagePayload = (imageUrl, index) => ({
+    imageUrl,
+    imageBase64: Buffer.from(`controlled-image-${index}`).toString('base64'),
+    index,
+  });
+  const makeStructuredLines = (text, score = 0.92) => String(text || '')
+    .split('\n')
+    .map((line, index) => ({
+      text: line,
+      score,
+      box: [
+        [10, 20 + (index * 30)],
+        [310, 20 + (index * 30)],
+        [310, 45 + (index * 30)],
+        [10, 45 + (index * 30)],
+      ],
+    }));
+
+  const emptyPlugin = new PluginClass();
+  let emptyPermissionCalls = 0;
+  let emptyDownloadCalls = 0;
+  let emptyEnsureCalls = 0;
+  emptyPlugin.ensureProFeatureAccess = async () => {
+    emptyPermissionCalls += 1;
+  };
+  emptyPlugin.buildXiaohongshuOcrImagePayload = async () => {
+    emptyDownloadCalls += 1;
+    return [];
+  };
+  emptyPlugin.ensureLocalComponentReadyForUse = async () => {
+    emptyEnsureCalls += 1;
+  };
+  assert.deepStrictEqual(await emptyPlugin.requestXiaohongshuImageOcr([]), []);
+  assert.strictEqual(emptyPermissionCalls, 0);
+  assert.strictEqual(emptyDownloadCalls, 0);
+  assert.strictEqual(emptyEnsureCalls, 0);
+
+  const requestPlugin = new PluginClass();
+  const imageUrls = Array.from(
+    { length: 10 },
+    (_, index) => `https://sns-webpic-qc.xhscdn.com/batch-${index + 1}.jpg`,
+  );
+  const requestSequence = [];
+  let batchCalls = 0;
+  let singleCalls = 0;
+  let receivedBatchEntries = [];
+  requestPlugin.ensureProFeatureAccess = async (featureName) => {
+    assert.strictEqual(featureName, '小红书图片 OCR');
+    requestSequence.push('permission');
+  };
+  requestPlugin.buildXiaohongshuOcrImagePayload = async (receivedUrls) => {
+    requestSequence.push('download');
+    assert.deepStrictEqual(receivedUrls, imageUrls);
+    return receivedUrls.map((imageUrl, index) => makeImagePayload(imageUrl, index + 1));
+  };
+  requestPlugin.ensureLocalComponentReadyForUse = async () => {
+    requestSequence.push('ensure');
+  };
+  requestPlugin.runLocalImageOcr = async () => {
+    singleCalls += 1;
+    return dominantText;
+  };
+  requestPlugin.runLocalImageOcrBatch = async (entries) => {
+    requestSequence.push('batch');
+    batchCalls += 1;
+    receivedBatchEntries = entries;
+    assert.strictEqual(entries.every((entry) => fs.existsSync(entry.imagePath)), true);
+    return entries.map((entry) => ({
+      id: entry.id,
+      index: entry.index,
+      status: 'ok',
+      text: dominantText,
+      lines: makeStructuredLines(dominantText),
+      metrics: dominantMetrics,
+    }));
+  };
+  const requestItems = await requestPlugin.requestXiaohongshuImageOcr(imageUrls);
+  assert.deepStrictEqual(requestSequence, ['permission', 'download', 'ensure', 'batch']);
+  assert.strictEqual(batchCalls, 1);
+  assert.strictEqual(receivedBatchEntries.length, 10);
+  assert.strictEqual(receivedBatchEntries.every((entry) => path.isAbsolute(entry.imagePath)), true);
+  assert.strictEqual(singleCalls, 0);
+  assert.strictEqual(requestItems.length, 10);
+  assert.strictEqual(
+    receivedBatchEntries.every((entry) => !fs.existsSync(entry.imagePath)),
+    true,
+  );
+  assert.strictEqual(
+    [...new Set(receivedBatchEntries.map((entry) => path.dirname(entry.imagePath)))]
+      .every((directory) => !fs.existsSync(directory)),
+    true,
+  );
+
+  const resiliencePlugin = new PluginClass();
+  const resiliencePayload = [
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/original-text-card.jpg', 7),
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/original-photo.jpg', 9),
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/original-error.jpg', 11),
+  ];
+  resiliencePlugin.ensureProFeatureAccess = async () => {};
+  resiliencePlugin.buildXiaohongshuOcrImagePayload = async () => resiliencePayload;
+  resiliencePlugin.ensureLocalComponentReadyForUse = async () => {};
+  resiliencePlugin.runLocalImageOcr = async () => {
+    throw new Error('legacy single-image OCR must not run');
+  };
+  resiliencePlugin.runLocalImageOcrBatch = async (entries) => [
+    {
+      id: entries[0].id,
+      index: entries[0].index,
+      status: 'ok',
+      text: dominantText,
+      lines: makeStructuredLines(dominantText),
+      metrics: dominantMetrics,
+    },
+    {
+      id: entries[1].id,
+      index: entries[1].index,
+      status: 'ok',
+      text: '照片标题\n一行字幕\n品牌水印',
+      lines: makeStructuredLines('照片标题\n一行字幕\n品牌水印', 0.91),
+      metrics: photoMetrics,
+    },
+    {
+      id: entries[2].id,
+      index: entries[2].index,
+      status: 'error',
+      errorType: 'image_decode_error',
+    },
+  ];
+  const resilientItems = await resiliencePlugin.requestXiaohongshuImageOcr(
+    resiliencePayload.map((item) => item.imageUrl),
+  );
+  assert.strictEqual(resilientItems.length, 1);
+  assert.strictEqual(resilientItems[0].index, 7);
+  assert.strictEqual(resilientItems[0].imageUrl, resiliencePayload[0].imageUrl);
+  assert.strictEqual(resilientItems[0].text, dominantText);
+
+  const allErrorPlugin = new PluginClass();
+  allErrorPlugin.ensureProFeatureAccess = async () => {};
+  const allErrorUrls = [
+    'https://sns-webpic-qc.xhscdn.com/private-error-1.jpg?token=SECRET',
+    'https://sns-webpic-qc.xhscdn.com/private-error-2.jpg?token=SECRET',
+  ];
+  allErrorPlugin.buildXiaohongshuOcrImagePayload = async () => allErrorUrls
+    .map((imageUrl, index) => makeImagePayload(imageUrl, index + 1));
+  allErrorPlugin.ensureLocalComponentReadyForUse = async () => {};
+  allErrorPlugin.runLocalImageOcrBatch = async (entries) => [
+    {
+      id: entries[0].id,
+      index: entries[0].index,
+      status: 'error',
+      errorType: 'image_decode_error',
+      path: 'C:\\private-user\\secret-image.jpg',
+      url: allErrorUrls[0],
+      text: 'TOP_SECRET_OCR_TEXT',
+    },
+    {
+      id: entries[1].id,
+      index: entries[1].index,
+      status: 'error',
+      errorType: 'C:\\private-user\\token=TOP_SECRET',
+      token: 'TOP_SECRET',
+    },
+  ];
+  let allItemsFailedError = null;
+  await assert.rejects(
+    () => allErrorPlugin.requestXiaohongshuImageOcr(allErrorUrls),
+    (error) => {
+      allItemsFailedError = error;
+      return error
+        && error.code === 'LOCAL_OCR_BATCH_ALL_ITEMS_FAILED'
+        && error.message === '所有图片识别均失败（total=2; image_decode_error=1; ocr_item_error=1）';
+    },
+  );
+  assert.strictEqual(
+    /https?:|private-user|secret-image|TOP_SECRET|token=|OCR_TEXT/i
+      .test(allItemsFailedError.message),
+    false,
+  );
+
+  const allErrorExtraction = {
+    title: '全失败仍保留标题',
+    tags: ['原始标签'],
+    imageUrls: allErrorUrls,
+    markdown: '全失败仍保留原始正文。',
+  };
+  const allErrorEnrichment = await allErrorPlugin.enrichXiaohongshuExtractionWithOcr(
+    allErrorExtraction,
+  );
+  assert.deepStrictEqual(allErrorEnrichment, {
+    ...allErrorExtraction,
+    ocrError: '所有图片识别均失败，原始图文内容已保留。',
+  });
+  assert.strictEqual(
+    /https?:|private-user|secret-image|TOP_SECRET|token=|OCR_TEXT/i
+      .test(allErrorEnrichment.ocrError),
+    false,
+  );
+
+  const emptyBatchPlugin = new PluginClass();
+  emptyBatchPlugin.ensureProFeatureAccess = async () => {};
+  emptyBatchPlugin.buildXiaohongshuOcrImagePayload = async () => [
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/empty-batch.jpg', 1),
+  ];
+  emptyBatchPlugin.ensureLocalComponentReadyForUse = async () => {};
+  emptyBatchPlugin.runLocalImageOcrBatch = async () => [];
+  await assert.rejects(
+    () => emptyBatchPlugin.requestXiaohongshuImageOcr([
+      'https://sns-webpic-qc.xhscdn.com/empty-batch.jpg',
+    ]),
+    (error) => error
+      && error.code === 'LOCAL_OCR_BATCH_SCHEMA'
+      && !/empty-batch|https?:/i.test(error.message),
+  );
+
+  const fallbackBatchPlugin = new PluginClass();
+  fallbackBatchPlugin.ensureProFeatureAccess = async () => {};
+  fallbackBatchPlugin.buildXiaohongshuOcrImagePayload = async () => [
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/fallback-batch.jpg', 1),
+  ];
+  fallbackBatchPlugin.ensureLocalComponentReadyForUse = async () => {};
+  fallbackBatchPlugin.runLocalImageOcrBatch = async (entries) => [{
+    id: 'unexpected-runner-id',
+    index: entries[0].index,
+    status: 'ok',
+    text: dominantText,
+    lines: makeStructuredLines(dominantText),
+    metrics: dominantMetrics,
+  }];
+  await assert.rejects(
+    () => fallbackBatchPlugin.requestXiaohongshuImageOcr([
+      'https://sns-webpic-qc.xhscdn.com/fallback-batch.jpg',
+    ]),
+    (error) => error
+      && error.code === 'LOCAL_OCR_BATCH_SCHEMA'
+      && !/fallback-batch|unexpected-runner-id|https?:/i.test(error.message),
+  );
+
+  assert.strictEqual(helpers.LOCAL_OCR_BATCH_RUNNER_VERSION, 'xiaohongshu-batch-v1');
+  assert.strictEqual(typeof helpers.LOCAL_OCR_BATCH_RUNNER_SOURCE, 'string');
+  const pythonCandidates = [
+    process.env.PYTHON,
+    process.env.PYTHON3,
+    helpers.getLocalOcrPythonPath(),
+    'python3',
+    'python',
+    ...(process.platform === 'win32' ? ['py'] : []),
+  ].filter(Boolean).map((command) => ({
+    command,
+    prefixArgs: command === 'py' ? ['-3'] : [],
+  }));
+  const pythonInvocation = pythonCandidates.find(({ command, prefixArgs }) => {
+    const probe = childProcess.spawnSync(command, [...prefixArgs, '--version'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    return probe.status === 0;
+  });
+  assert.ok(
+    pythonInvocation,
+    'Python is required to compile and self-test the embedded OCR batch runner',
+  );
+  const runnerVerificationDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-runner-verify-'));
+  try {
+    const runnerVerificationPath = path.join(runnerVerificationDir, 'runner.py');
+    fs.writeFileSync(runnerVerificationPath, helpers.LOCAL_OCR_BATCH_RUNNER_SOURCE, 'utf8');
+    const compileResult = childProcess.spawnSync(
+      pythonInvocation.command,
+      [...pythonInvocation.prefixArgs, '-m', 'py_compile', runnerVerificationPath],
+      { encoding: 'utf8', windowsHide: true },
+    );
+    assert.strictEqual(
+      compileResult.status,
+      0,
+      `embedded OCR runner must compile: ${compileResult.stderr || compileResult.stdout}`,
+    );
+    const shapeResult = childProcess.spawnSync(
+      pythonInvocation.command,
+      [
+        ...pythonInvocation.prefixArgs,
+        runnerVerificationPath,
+        '--self-test-result-rows',
+      ],
+      { encoding: 'utf8', windowsHide: true },
+    );
+    assert.strictEqual(
+      shapeResult.status,
+      0,
+      `embedded OCR runner shape self-test must pass: ${shapeResult.stderr || shapeResult.stdout}`,
+    );
+    assert.deepStrictEqual(JSON.parse(shapeResult.stdout), {
+      tupleTexts: ['真实元数据第一行', '真实元数据第二行'],
+      singleTupleText: '单行元组不能误判',
+      blankTupleRows: 0,
+      emptyTupleRows: 0,
+      objectTexts: ['对象结果第一行', '对象结果第二行'],
+      oversizedErrorType: 'image_dimensions_exceeded',
+      oversizedEngineCalls: 0,
+    });
+  } finally {
+    fs.rmSync(runnerVerificationDir, { recursive: true, force: true });
+  }
+  const runnerPlugin = new PluginClass();
+  const privateImagePath = path.join(os.tmpdir(), 'private-user-folder', 'secret-image.png');
+  runnerPlugin.getLocalOcrInstallStatus = () => ({
+    ready: true,
+    pythonPath: path.join(os.tmpdir(), 'private-runtime', 'python.exe'),
+    scriptPath: path.join(os.tmpdir(), 'private-runtime', 'ocr_image.py'),
+    missingReasons: [],
+  });
+  const runnerEntries = [{ id: 'image-1', index: 1, imagePath: privateImagePath }];
+  const successPayload = {
+    schemaVersion: 1,
+    runnerVersion: 'xiaohongshu-batch-v1',
+    processed: 1,
+    items: [{
+      id: 'image-1',
+      index: 1,
+      status: 'ok',
+      width: 640,
+      height: 960,
+      text: dominantText,
+      lines: makeStructuredLines(dominantText),
+      metrics: dominantMetrics,
+    }],
+  };
+  const originalExecFile = childProcess.execFile;
+  try {
+    let execFileCalls = 0;
+    let runnerBatchTempDir = '';
+    childProcess.execFile = (file, args, options, callback) => {
+      execFileCalls += 1;
+      assert.strictEqual(file, runnerPlugin.getLocalOcrInstallStatus().pythonPath);
+      assert.strictEqual(args.includes(runnerPlugin.getLocalOcrInstallStatus().scriptPath), false);
+      const runnerPath = args[0];
+      runnerBatchTempDir = path.dirname(runnerPath);
+      const manifestPath = args[args.indexOf('--batch-manifest') + 1];
+      const outputPath = args[args.indexOf('--output') + 1];
+      const runnerSource = fs.readFileSync(runnerPath, 'utf8');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      assert.ok(runnerSource.includes('xiaohongshu-batch-v1'));
+      assert.ok(runnerSource.includes('0.55'));
+      assert.strictEqual(manifest.schemaVersion, 1);
+      assert.strictEqual(manifest.items[0].input, privateImagePath);
+      assert.strictEqual(Object.hasOwn(manifest.items[0], 'path'), false);
+      fs.writeFileSync(outputPath, JSON.stringify(successPayload), 'utf8');
+      callback(null, '', '');
+    };
+    const parsedItems = await runnerPlugin.runLocalImageOcrBatch(runnerEntries);
+    assert.strictEqual(execFileCalls, 1);
+    assert.deepStrictEqual(parsedItems, successPayload.items);
+    assert.strictEqual(fs.existsSync(runnerBatchTempDir), false);
+
+    const secondPrivateImagePath = path.join(
+      os.tmpdir(),
+      'private-user-folder',
+      'secret-image-2.png',
+    );
+    const bindingRunnerEntries = [
+      runnerEntries[0],
+      { id: 'image-2', index: 7, imagePath: secondPrivateImagePath },
+    ];
+    const makeBoundRunnerItem = ({ id, index }) => ({
+      ...successPayload.items[0],
+      id,
+      index,
+    });
+    const boundRunnerItems = bindingRunnerEntries.map(makeBoundRunnerItem);
+    const outputBindingCases = [
+      {
+        label: 'empty output',
+        payload: {
+          ...successPayload,
+          processed: 0,
+          items: [],
+        },
+      },
+      {
+        label: 'missing output item',
+        payload: {
+          ...successPayload,
+          processed: 1,
+          items: [boundRunnerItems[0]],
+        },
+      },
+      {
+        label: 'extra output item',
+        payload: {
+          ...successPayload,
+          processed: 3,
+          items: [
+            ...boundRunnerItems,
+            makeBoundRunnerItem({ id: 'image-3', index: 8 }),
+          ],
+        },
+      },
+      {
+        label: 'missing output id',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            { ...boundRunnerItems[0], id: undefined },
+            boundRunnerItems[1],
+          ],
+        },
+      },
+      {
+        label: 'missing output index',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            { ...boundRunnerItems[0], index: undefined },
+            boundRunnerItems[1],
+          ],
+        },
+      },
+      {
+        label: 'duplicate output id',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            boundRunnerItems[0],
+            { ...boundRunnerItems[1], id: boundRunnerItems[0].id },
+          ],
+        },
+      },
+      {
+        label: 'reordered output',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [boundRunnerItems[1], boundRunnerItems[0]],
+        },
+      },
+      {
+        label: 'wrong output index',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            boundRunnerItems[0],
+            { ...boundRunnerItems[1], index: 8 },
+          ],
+        },
+      },
+    ];
+    for (const outputBindingCase of outputBindingCases) {
+      execFileCalls = 0;
+      childProcess.execFile = (file, args, options, callback) => {
+        execFileCalls += 1;
+        const outputPath = args[args.indexOf('--output') + 1];
+        fs.writeFileSync(outputPath, JSON.stringify(outputBindingCase.payload), 'utf8');
+        callback(null, '', '');
+      };
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        () => runnerPlugin.runLocalImageOcrBatch(bindingRunnerEntries),
+        (error) => error
+          && error.code === 'LOCAL_OCR_BATCH_SCHEMA'
+          && !error.message.includes(privateImagePath)
+          && !error.message.includes(secondPrivateImagePath),
+        outputBindingCase.label,
+      );
+      assert.strictEqual(execFileCalls, 1, outputBindingCase.label);
+    }
+
+    const noGeometryPayloads = [
+      {
+        expectedDominant: true,
+        text: dominantText,
+        metrics: {
+          readableChars: 180,
+          lineCount: 6,
+          averageConfidence: 0.92,
+          textBoxAreaRatio: null,
+          coveredRowRatio: null,
+          verticalSpanRatio: null,
+        },
+      },
+      {
+        expectedDominant: false,
+        text: '短标题\n短字幕\n短水印',
+        metrics: {
+          readableChars: 9,
+          lineCount: 3,
+          averageConfidence: 0.92,
+          textBoxAreaRatio: null,
+          coveredRowRatio: null,
+          verticalSpanRatio: null,
+        },
+      },
+    ];
+    for (const noGeometryCase of noGeometryPayloads) {
+      const noGeometryPayload = {
+        schemaVersion: 1,
+        runnerVersion: 'xiaohongshu-batch-v1',
+        processed: 1,
+        items: [{
+          id: 'image-1',
+          index: 1,
+          status: 'ok',
+          width: 640,
+          height: 960,
+          text: noGeometryCase.text,
+          lines: makeStructuredLines(noGeometryCase.text).map((line) => ({
+            ...line,
+            box: null,
+          })),
+          metrics: noGeometryCase.metrics,
+        }],
+      };
+      childProcess.execFile = (file, args, options, callback) => {
+        const outputPath = args[args.indexOf('--output') + 1];
+        fs.writeFileSync(outputPath, JSON.stringify(noGeometryPayload), 'utf8');
+        callback(null, '', '');
+      };
+      // eslint-disable-next-line no-await-in-loop
+      const [noGeometryItem] = await runnerPlugin.runLocalImageOcrBatch(runnerEntries);
+      assert.strictEqual(
+        helpers.isXiaohongshuTextDominantOcrItem(noGeometryItem),
+        noGeometryCase.expectedDominant,
+      );
+    }
+
+    const invalidPayloads = [
+      {
+        schemaVersion: 2,
+        processed: 0,
+        items: [],
+      },
+      {
+        ...successPayload,
+        processed: 0,
+      },
+      {
+        ...successPayload,
+        runnerVersion: 'unexpected-runner',
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          text: `${dominantText}\n与结构化行不一致`,
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          lines: dominantText.split('\n'),
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          lines: successPayload.items[0].lines.map((line, index) => (
+            index === 0 ? { ...line, score: 1.01 } : line
+          )),
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          lines: successPayload.items[0].lines.map((line, index) => (
+            index === 0 ? { ...line, box: [[0, 0], ['private-path', 1]] } : line
+          )),
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          width: 0,
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          height: 1.5,
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            readableChars: 1.5,
+          },
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            lineCount: -1,
+          },
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            averageConfidence: 1.01,
+          },
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            coveredRowRatio: 1.01,
+          },
+        }],
+      },
+    ];
+    for (const invalidPayload of invalidPayloads) {
+      execFileCalls = 0;
+      childProcess.execFile = (file, args, options, callback) => {
+        execFileCalls += 1;
+        const outputPath = args[args.indexOf('--output') + 1];
+        fs.writeFileSync(outputPath, JSON.stringify(invalidPayload), 'utf8');
+        callback(null, '', '');
+      };
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        () => runnerPlugin.runLocalImageOcrBatch(runnerEntries),
+        (error) => error
+          && /OCR|批量|schema/i.test(error.message)
+          && !error.message.includes(privateImagePath),
+      );
+      assert.strictEqual(execFileCalls, 1);
+    }
+
+    execFileCalls = 0;
+    let timeoutBatchTempDir = '';
+    childProcess.execFile = (file, args, options, callback) => {
+      execFileCalls += 1;
+      timeoutBatchTempDir = path.dirname(args[0]);
+      const error = new Error(`timed out at ${privateImagePath}`);
+      error.killed = true;
+      callback(error, '', `timeout ${privateImagePath}`);
+    };
+    await assert.rejects(
+      () => runnerPlugin.runLocalImageOcrBatch(runnerEntries),
+      (error) => error
+        && error.code === 'LOCAL_OCR_BATCH_TIMEOUT'
+        && !error.message.includes(privateImagePath),
+    );
+    assert.strictEqual(execFileCalls, 1);
+    assert.strictEqual(fs.existsSync(timeoutBatchTempDir), false);
+
+    execFileCalls = 0;
+    childProcess.execFile = (file, args, options, callback) => {
+      execFileCalls += 1;
+      const error = new Error(`runner failed for ${privateImagePath}`);
+      callback(error, '', `cannot read ${privateImagePath}`);
+    };
+    await assert.rejects(
+      () => runnerPlugin.runLocalImageOcrBatch(runnerEntries),
+      (error) => error
+        && /OCR|批量|process/i.test(error.message)
+        && !error.message.includes(privateImagePath),
+    );
+    assert.strictEqual(execFileCalls, 1);
+  } finally {
+    childProcess.execFile = originalExecFile;
+  }
+
+  const originalExtraction = {
+    title: '原始标题',
+    tags: ['原始标签'],
+    imageUrls: ['https://sns-webpic-qc.xhscdn.com/failure.jpg'],
+    markdown: '原始正文必须保持不变。',
+  };
+  const originalSnapshot = JSON.parse(JSON.stringify(originalExtraction));
+  const failurePlugin = new PluginClass();
+  failurePlugin.ensureProFeatureAccess = async () => {};
+  failurePlugin.buildXiaohongshuOcrImagePayload = async () => [
+    makeImagePayload(originalExtraction.imageUrls[0], 1),
+  ];
+  failurePlugin.ensureLocalComponentReadyForUse = async () => {};
+  failurePlugin.runLocalImageOcr = async () => {
+    throw new Error(`legacy path leaked ${privateImagePath}`);
+  };
+  let failedRequestImagePath = '';
+  failurePlugin.runLocalImageOcrBatch = async (entries) => {
+    failedRequestImagePath = entries[0].imagePath;
+    throw new Error(
+      `batch failed at ${privateImagePath} https://private.example.test?token=TOP_SECRET`,
+    );
+  };
+  const failedEnrichment = await failurePlugin.enrichXiaohongshuExtractionWithOcr(
+    originalExtraction,
+  );
+  assert.deepStrictEqual(originalExtraction, originalSnapshot);
+  assert.deepStrictEqual(
+    Object.keys(failedEnrichment).sort(),
+    [...Object.keys(originalSnapshot), 'ocrError'].sort(),
+  );
+  assert.strictEqual(failedEnrichment.title, originalSnapshot.title);
+  assert.deepStrictEqual(failedEnrichment.tags, originalSnapshot.tags);
+  assert.deepStrictEqual(failedEnrichment.imageUrls, originalSnapshot.imageUrls);
+  assert.strictEqual(failedEnrichment.markdown, originalSnapshot.markdown);
+  assert.ok(failedEnrichment.ocrError);
+  assert.strictEqual(fs.existsSync(failedRequestImagePath), false);
+  assert.strictEqual(fs.existsSync(path.dirname(failedRequestImagePath)), false);
+  assert.strictEqual(
+    /private-user-folder|secret-image|https?:|TOP_SECRET|token=/i.test(failedEnrichment.ocrError),
+    false,
+  );
+}
+
 async function main() {
+  await runXiaohongshuOcrBatchTests();
   await runClipboardTextWebpagePromotionTests();
   await runCanonicalVaultFolderTests();
+  await runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest();
+  await runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest();
   await runBoundedBrowserTaskTests();
   await runAsyncHydrationTests();
   await runLocalTranscriptionQualityFallbackTests();

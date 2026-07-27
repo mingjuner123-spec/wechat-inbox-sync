@@ -1,5 +1,22 @@
 # Engineering decisions
 
+## 2026-07-27：小红书图片 OCR 以“单篇批处理 + 文字主体筛选”为固定契约
+
+决策：
+
+- Pro 小红书图文笔记的一组候选图片必须由一个 Python 进程处理，RapidOCR 在该进程中只初始化一次；不得恢复为“每张图片启动一次 Python/RapidOCR”。
+- OCR 结果只有在文字是图片主要信息时才能写入笔记。文字卡和长文截图允许小头像、小插图与底色；普通照片上的标题、字幕、水印或少量文字不得生成 OCR 段落。判定阈值使用具名常量和回归样本维护。
+- 合格图片按原图顺序合并到唯一的 `## 图片文字` 区域，不再生成 `### 图片 N`。只去除相邻分页边界最多 8 行的精确重复，不做全文全局去重；中文行间直接连接，英文单词或句子边界保留必要空格。
+- 批处理输出必须与输入 manifest 的数量、位置、ID 和索引逐项一致；空结果、缺项、多项、重复、调序或错位均按结构错误失败关闭。全部图片失败只记录白名单错误类型的聚合信息，不包含 OCR 正文、图片 URL、本地路径或令牌。
+- OCR 仍是 Pro 能力，视频意图已知时必须在媒体链接解析完成前就跳过图片 OCR；评论仍要求 Pro 且存在有效的小红书登录会话。OCR 失败不得阻断公开标题、正文、标签和原图保存。
+- 批处理 runner 由插件在运行时提供，并复用用户已安装的 OCR Python、Pillow 与 RapidOCR 环境。本次不提高本地组件版本、不要求重装，也不修改 CloudBase 或 CDN 资产。
+
+原因：
+
+- 原实现对一篇笔记的每张图片分别启动 Python 并初始化 RapidOCR，图片越多启动越频繁；同时只按文字数量输出，普通照片上的水印和字幕会被误写成多个割裂的“图片 N”段落。
+- 在读取像素前无法可靠知道图片是否以文字为主体，因此正确的成本边界是“一篇最多一次模型启动、普通照片不输出”，而不是虚假承诺普通照片完全不经过识别。
+- 严格绑定批处理输入输出、限制图片像素和进程时长，并让 OCR 作为不阻断正文的增强能力，可以同时避免静默错配、资源异常和局部识别失败拖垮整篇同步。
+
 ## 2026-07-20: PowerShell deployer behavior requires a Windows CI gate
 
 Decision:
@@ -179,12 +196,13 @@ Reason:
 - AI descriptions and keywords are generated only by the CloudBase Hunyuan route in `syncApi`.
 - The Obsidian plugin never reads, stores, or sends a DeepSeek API key for metadata generation. Legacy local DeepSeek settings are removed when plugin settings are loaded.
 - Metadata input must include, in priority order where available: transcript text for audio/video, and otherwise record text, converted document Markdown, webpage Markdown, snapshots, and extracted summaries.
-- If metadata generation fails after a record can otherwise be saved, the note contains a short redacted HTML comment beginning `wechat-inbox-ai-metadata-error`; required transcript metadata still fails the sync with the same short reason.
+- Core text and completed transcripts are still written and marked synced when optional AI enrichment fails. AI descriptions and keywords are best-effort: if generation is rate-limited, times out, returns no usable result, or the service is unavailable, the note keeps the completed content, contains a short redacted HTML comment beginning `wechat-inbox-ai-metadata-error`, and shows a non-blocking warning instead of retrying the entire record.
 
 Reason:
 
 - The mini-program Hunyuan allocation is the intended shared quota. A local or external DeepSeek key creates inconsistent user behavior, key-exposure risk, and an avoidable paid fallback.
 - Text and converted documents previously had no AI input source, which silently skipped metadata generation even for active Pro users.
+- Re-running a completed local transcription because optional AI metadata failed wastes user time and compute, while a stable redacted marker keeps the partial outcome visible and diagnosable.
 
 ## 2026-07-13: Refund eligibility follows the original 7-day trial, not the payment date
 

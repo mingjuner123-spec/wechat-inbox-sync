@@ -17,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.69';
+const PLUGIN_RUNTIME_VERSION = '1.3.70';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -186,6 +186,8 @@ const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 const LOCAL_OCR_HOME = '.wechat-inbox-local-ocr';
 const LOCAL_OCR_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const LOCAL_OCR_RUN_TIMEOUT_MS = 90 * 1000;
+const LOCAL_OCR_BATCH_RUN_TIMEOUT_MS = 6 * 60 * 1000;
+const LOCAL_OCR_BATCH_RUNNER_VERSION = 'xiaohongshu-batch-v1';
 
 function getLocalAsrPlatform(platform = os.platform()) {
   if (platform === 'win32') return 'win32';
@@ -1462,7 +1464,11 @@ function getXiaohongshuCapabilityMatrix({
   };
 }
 
-function getXiaohongshuBrowserCandidates(sourceUrl = '', resolvedUrl = '') {
+function getXiaohongshuBrowserCandidates(
+  sourceUrl = '',
+  targetIdentityUrl = '',
+  responseFinalUrl = '',
+) {
   const result = [];
   const seen = new Set();
   const add = (url, kind) => {
@@ -1472,7 +1478,8 @@ function getXiaohongshuBrowserCandidates(sourceUrl = '', resolvedUrl = '') {
     result.push({ url: value, kind });
   };
   add(sourceUrl, isXiaohongshuShortLinkUrl(sourceUrl) ? 'original-shortlink' : 'source-url');
-  add(resolvedUrl, 'resolved-url');
+  add(targetIdentityUrl, 'resolved-url');
+  add(responseFinalUrl, 'response-final-url');
   return result;
 }
 
@@ -3254,26 +3261,67 @@ function shouldGenerateAiMetadata(settings, record) {
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
   if (!extractAiMetadataInputText(record)) return false;
-  if (String(record.type || '').toLowerCase() === 'webpage' || String(record.type || '').toLowerCase() === 'link') {
-    return true;
-  }
-  return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
-}
-
-function shouldRequireAiMetadataForTranscript(record) {
-  const metadata = (record && record.metadata) || {};
-  const type = String(record && record.type || '').toLowerCase();
-  return Boolean(
-    metadata.transcriptionStatus === 'success'
+  const type = String(record.type || '').toLowerCase();
+  const hasCompletedTranscript = metadata.transcriptionStatus === 'success'
     && String(metadata.transcription || '').trim()
-    && extractAiMetadataInputText(record)
     && (
       metadata.transcriptOnly
       || metadata.webpageMediaType === 'audio_video'
       || type === 'voice'
       || (type === 'file' && metadata.transcriptionSource)
-    ),
-  );
+    );
+  if (hasCompletedTranscript) return true;
+  if (type === 'webpage' || type === 'link') {
+    return true;
+  }
+  return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
+}
+
+function classifyAiMetadataError(error) {
+  const responseStatus = Number(error && error.response && error.response.status);
+  if (responseStatus === 429) return 'rate-limited';
+  if (responseStatus >= 500 && responseStatus <= 599) return 'upstream-service-error';
+  const raw = error && typeof error === 'object'
+    ? [error.code, error.message].filter(Boolean).join(' ')
+    : String(error || '');
+  const normalized = raw.toLowerCase();
+  if ([
+    'rate-limited',
+    'upstream-service-error',
+    'request-timeout',
+    'empty-response',
+    'service-error',
+  ].includes(normalized)) {
+    return normalized;
+  }
+  if (/\b429\b|too many requests|rate[-_\s]?limit/.test(normalized)) {
+    return 'rate-limited';
+  }
+  if (/\b5\d\d\b|bad gateway|service unavailable|upstream/.test(normalized)) {
+    return 'upstream-service-error';
+  }
+  if (/timed?\s*out|timeout|etimedout|econnaborted/.test(normalized)) {
+    return 'request-timeout';
+  }
+  if (/empty|no usable|没有返回可用/.test(normalized)) {
+    return 'empty-response';
+  }
+  return 'service-error';
+}
+
+function buildAiMetadataErrorComment(error) {
+  return `<!-- wechat-inbox-ai-metadata-error: ${classifyAiMetadataError(error)} -->`;
+}
+
+function buildAiMetadataConversionWarning(error) {
+  const detail = {
+    'rate-limited': '请求过于频繁',
+    'upstream-service-error': 'AI 服务暂时异常',
+    'request-timeout': 'AI 请求超时',
+    'empty-response': 'AI 未返回可用结果',
+    'service-error': 'AI 服务暂时不可用',
+  }[classifyAiMetadataError(error)];
+  return `正文已同步，但 AI 简介/关键词未生成（${detail}）。`;
 }
 
 function buildFileMarkdownBody(record) {
@@ -6829,6 +6877,77 @@ function resolveXiaohongshuIdentityUrl(urls = [], html = '') {
   return getXiaohongshuCanonicalUrlFromHtml(html);
 }
 
+function rememberXiaohongshuObservedIdentity(previous = '', details = {}) {
+  const remembered = resolveXiaohongshuIdentityUrl([previous]);
+  if (remembered) return remembered;
+  const resourceType = String(details && details.resourceType || '')
+    .toLowerCase()
+    .replace(/[^a-z]/g, '');
+  const isMainFrame = resourceType
+    ? resourceType === 'mainframe'
+    : (
+      Number(details && details.frameId) === 0
+      && Number(details && details.parentFrameId) < 0
+    );
+  if (!isMainFrame) return '';
+  return resolveXiaohongshuIdentityUrl([
+    details && details.redirectURL,
+    details && details.url,
+  ]);
+}
+
+function installXiaohongshuIdentityObserver(webContents, onIdentity) {
+  if (!webContents
+    || typeof webContents.on !== 'function'
+    || typeof webContents.removeListener !== 'function'
+    || typeof onIdentity !== 'function') {
+    return () => {};
+  }
+  const observeNavigationDetails = (
+    event,
+    navigationUrl,
+    legacyIsMainFrame,
+    assumeLegacyMainFrame,
+  ) => {
+    const hasCurrentDetails = Boolean(
+      event
+      && typeof event.url === 'string'
+      && typeof event.isMainFrame === 'boolean',
+    );
+    const candidate = hasCurrentDetails
+      ? event.url
+      : String(navigationUrl && navigationUrl.url || navigationUrl || '');
+    const isMainFrame = hasCurrentDetails
+      ? event.isMainFrame === true
+      : (
+        typeof legacyIsMainFrame === 'boolean'
+          ? legacyIsMainFrame
+          : assumeLegacyMainFrame
+      );
+    if (!isMainFrame) return;
+    const identityUrl = rememberXiaohongshuObservedIdentity('', {
+      resourceType: 'mainFrame',
+      url: candidate,
+    });
+    if (identityUrl) onIdentity(identityUrl);
+  };
+  const observeNavigation = (event, navigationUrl, _isInPlace, isMainFrame) => {
+    observeNavigationDetails(event, navigationUrl, isMainFrame, true);
+  };
+  const observeRedirect = (event, navigationUrl, _isInPlace, isMainFrame) => {
+    observeNavigationDetails(event, navigationUrl, isMainFrame, false);
+  };
+  webContents.on('will-navigate', observeNavigation);
+  webContents.on('will-redirect', observeRedirect);
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    webContents.removeListener('will-navigate', observeNavigation);
+    webContents.removeListener('will-redirect', observeRedirect);
+  };
+}
+
 function selectXiaohongshuBrowserSnapshot(previous = null, current = null, expectedUrl = '') {
   const prior = previous && typeof previous === 'object' ? previous : {};
   const candidate = current && typeof current === 'object' ? current : {};
@@ -7342,19 +7461,11 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
 }
 
 function normalizeOcrText(text) {
-  const lines = String(text || '')
-    .replace(/\r/g, '\n')
+  return String(text || '')
+    .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-  const seen = new Set();
-  return lines
-    .filter((line) => {
-      const key = line.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
+    .filter(Boolean)
     .join('\n')
     .trim();
 }
@@ -7363,47 +7474,808 @@ function countReadableOcrChars(text) {
   return (String(text || '').replace(/\s+/g, '').match(/[\u3400-\u9fffA-Za-z0-9]/g) || []).length;
 }
 
+const XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS = Object.freeze({
+  trustedBoxConfidence: 0.55,
+  averageConfidence: 0.65,
+  longTextReadableChars: 80,
+  longTextLines: 5,
+  longTextVerticalSpanRatio: 0.35,
+  longTextCoveredRowRatio: 0.12,
+  largeCardReadableChars: 35,
+  largeCardLines: 3,
+  largeCardTextBoxAreaRatio: 0.12,
+  largeCardVerticalSpanRatio: 0.25,
+  geometryFallbackReadableChars: 160,
+  geometryFallbackLines: 6,
+  maxBoundaryOverlapLines: 8,
+});
+
+const LOCAL_OCR_BATCH_RUNNER_SOURCE = String.raw`#!/usr/bin/env python3
+import argparse
+import json
+import math
+import re
+
+SCHEMA_VERSION = 1
+RUNNER_VERSION = ${JSON.stringify(LOCAL_OCR_BATCH_RUNNER_VERSION)}
+TRUSTED_BOX_CONFIDENCE = ${XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.trustedBoxConfidence}
+MAX_IMAGE_DIMENSION = 32768
+MAX_IMAGE_PIXELS = 40000000
+READABLE_CHARACTER_PATTERN = re.compile(r"[\u3400-\u9fffA-Za-z0-9]")
+SAFE_ITEM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
+
+class ImageDimensionsExceededError(Exception):
+    pass
+
+
+def readable_character_count(value):
+    return len(READABLE_CHARACTER_PATTERN.findall(str(value or "")))
+
+
+def safe_item_id(value, fallback):
+    candidate = str(value or "").strip()
+    return candidate if SAFE_ITEM_ID_PATTERN.fullmatch(candidate) else fallback
+
+
+def safe_positive_index(value, fallback):
+    try:
+        number = float(value)
+        if not math.isfinite(number):
+            return fallback
+        integer = math.floor(number)
+        return integer if integer > 0 else fallback
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
+def validate_image_dimensions(width, height):
+    width = int(width)
+    height = int(height)
+    if (
+        width <= 0
+        or height <= 0
+        or width > MAX_IMAGE_DIMENSION
+        or height > MAX_IMAGE_DIMENSION
+        or (width * height) > MAX_IMAGE_PIXELS
+    ):
+        raise ImageDimensionsExceededError()
+    return width, height
+
+
+def to_plain_value(value):
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+def is_ocr_row(value):
+    value = to_plain_value(value)
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return False
+    try:
+        score = float(value[2])
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(score) and not isinstance(value[1], (list, tuple, dict))
+
+
+def is_ocr_row_collection(value):
+    value = to_plain_value(value)
+    return (
+        isinstance(value, (list, tuple))
+        and all(is_ocr_row(row) for row in value)
+    )
+
+
+def is_result_metadata(value):
+    return value is None or isinstance(value, (int, float, list, tuple, dict))
+
+
+def result_rows(raw_result):
+    value = raw_result
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and is_ocr_row_collection(value[0])
+        and is_result_metadata(value[1])
+    ):
+        value = value[0]
+    if value is None:
+        return []
+
+    boxes = None
+    texts = None
+    scores = None
+    if isinstance(value, dict):
+        boxes = value.get("boxes")
+        texts = value.get("txts")
+        if texts is None:
+            texts = value.get("texts")
+        scores = value.get("scores")
+    else:
+        boxes = getattr(value, "boxes", None)
+        texts = getattr(value, "txts", None)
+        if texts is None:
+            texts = getattr(value, "texts", None)
+        scores = getattr(value, "scores", None)
+
+    if boxes is not None and texts is not None and scores is not None:
+        return list(zip(list(boxes), list(texts), list(scores)))
+    if is_ocr_row(value):
+        return [value]
+    if is_ocr_row_collection(value):
+        return list(value)
+    return []
+
+
+def clipped_box_geometry(box, image_width, image_height):
+    value = to_plain_value(box)
+    if not isinstance(value, (list, tuple)):
+        return 0.0, None, []
+
+    points = []
+    if len(value) == 4 and all(isinstance(item, (int, float)) for item in value):
+        left, top, right, bottom = [float(item) for item in value]
+        points = [(left, top), (right, top), (right, bottom), (left, bottom)]
+    else:
+        for point in value:
+            point = to_plain_value(point)
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                x_value = float(point[0])
+                y_value = float(point[1])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(x_value) and math.isfinite(y_value):
+                points.append((x_value, y_value))
+
+    if len(points) < 3:
+        return 0.0, None, []
+
+    clipped = [
+        (
+            min(float(image_width), max(0.0, x_value)),
+            min(float(image_height), max(0.0, y_value)),
+        )
+        for x_value, y_value in points
+    ]
+    area_twice = 0.0
+    for point_index, (x_value, y_value) in enumerate(clipped):
+        next_x, next_y = clipped[(point_index + 1) % len(clipped)]
+        area_twice += (x_value * next_y) - (next_x * y_value)
+    area = abs(area_twice) / 2.0
+    top = min(point[1] for point in clipped)
+    bottom = max(point[1] for point in clipped)
+    return area, (top, bottom), clipped
+
+
+def merged_interval_length(intervals):
+    if not intervals:
+        return 0.0
+    ordered = sorted(intervals, key=lambda interval: (interval[0], interval[1]))
+    merged_length = 0.0
+    current_start, current_end = ordered[0]
+    for next_start, next_end in ordered[1:]:
+        if next_start <= current_end:
+            current_end = max(current_end, next_end)
+            continue
+        merged_length += max(0.0, current_end - current_start)
+        current_start, current_end = next_start, next_end
+    return merged_length + max(0.0, current_end - current_start)
+
+
+def classify_item_error(error):
+    error_name = type(error).__name__.lower()
+    if isinstance(error, ImageDimensionsExceededError):
+        return "image_dimensions_exceeded"
+    if "unidentifiedimage" in error_name or "decompression" in error_name:
+        return "image_decode_error"
+    if isinstance(error, (FileNotFoundError, IsADirectoryError, PermissionError, OSError)):
+        return "image_read_error"
+    return "ocr_item_error"
+
+
+def process_image(engine, image_module, item, source_order):
+    fallback_id = "image-" + str(source_order + 1)
+    item_id = safe_item_id(item.get("id"), fallback_id)
+    item_index = safe_positive_index(item.get("index"), source_order + 1)
+    try:
+        image_path = item.get("input")
+        if not isinstance(image_path, str) or not image_path:
+            image_path = item.get("path")
+        if not isinstance(image_path, str) or not image_path:
+            raise ValueError("image_path_missing")
+        with image_module.open(image_path) as image:
+            image_width, image_height = image.size
+        image_width, image_height = validate_image_dimensions(image_width, image_height)
+
+        structured_lines = []
+        trusted_scores = []
+        trusted_area = 0.0
+        vertical_intervals = []
+        for row in result_rows(engine(image_path)):
+            row = to_plain_value(row)
+            if not isinstance(row, (list, tuple)) or len(row) < 3:
+                continue
+            box, text, raw_score = row[0], row[1], row[2]
+            try:
+                score = float(raw_score)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            normalized_text = re.sub(r"\s+", " ", str(text or "")).strip()
+            if (
+                not math.isfinite(score)
+                or score < TRUSTED_BOX_CONFIDENCE
+                or readable_character_count(normalized_text) < 2
+            ):
+                continue
+            area, vertical_interval, clipped_box = clipped_box_geometry(
+                box,
+                image_width,
+                image_height,
+            )
+            normalized_score = min(1.0, max(0.0, score))
+            has_line_geometry = (
+                vertical_interval is not None
+                and len(clipped_box) >= 3
+                and math.isfinite(area)
+                and area > 0.0
+                and vertical_interval[1] > vertical_interval[0]
+            )
+            structured_lines.append({
+                "text": normalized_text,
+                "score": normalized_score,
+                "box": clipped_box if has_line_geometry else None,
+            })
+            trusted_scores.append(normalized_score)
+            if has_line_geometry:
+                trusted_area += max(0.0, area)
+                vertical_intervals.append(vertical_interval)
+
+        image_area = float(image_width * image_height)
+        covered_height = merged_interval_length(vertical_intervals)
+        vertical_span = (
+            max(interval[1] for interval in vertical_intervals)
+            - min(interval[0] for interval in vertical_intervals)
+            if vertical_intervals
+            else 0.0
+        )
+        line_texts = [line["text"] for line in structured_lines]
+        geometry_available = bool(vertical_intervals)
+        metrics = {
+            "readableChars": sum(readable_character_count(line) for line in line_texts),
+            "lineCount": len(structured_lines),
+            "averageConfidence": (
+                sum(trusted_scores) / len(trusted_scores) if trusted_scores else 0.0
+            ),
+            "textBoxAreaRatio": (
+                min(1.0, max(0.0, trusted_area / image_area))
+                if geometry_available else None
+            ),
+            "coveredRowRatio": (
+                min(1.0, max(0.0, covered_height / float(image_height)))
+                if geometry_available else None
+            ),
+            "verticalSpanRatio": (
+                min(1.0, max(0.0, vertical_span / float(image_height)))
+                if geometry_available else None
+            ),
+        }
+        return {
+            "id": item_id,
+            "status": "ok",
+            "index": item_index,
+            "width": image_width,
+            "height": image_height,
+            "text": "\n".join(line_texts),
+            "lines": structured_lines,
+            "metrics": metrics,
+        }
+    except Exception as error:
+        return {
+            "id": item_id,
+            "status": "error",
+            "index": item_index,
+            "errorType": classify_item_error(error),
+        }
+
+
+def read_manifest(manifest_path):
+    with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+        manifest = json.load(manifest_file)
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != SCHEMA_VERSION:
+        raise RuntimeError("batch_manifest_schema_invalid")
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("batch_manifest_items_invalid")
+    return items
+
+
+def load_ocr_runtime():
+    from PIL import Image
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError:
+        from rapidocr import RapidOCR
+    return Image, RapidOCR
+
+
+def run_result_rows_self_test():
+    box_one = [[0, 0], [100, 0], [100, 20], [0, 20]]
+    box_two = [[0, 30], [100, 30], [100, 50], [0, 50]]
+    rows = [
+        [box_one, "真实元数据第一行", 0.98],
+        [box_two, "真实元数据第二行", 0.97],
+    ]
+    parsed_rows = result_rows((rows, [["det", 0.01], ["rec", 0.02]]))
+    single_row = (box_one, "单行元组不能误判", 0.96)
+    parsed_single_row = result_rows(single_row)
+    blank_tuple_rows = result_rows((None, ["metadata"]))
+    empty_tuple_rows = result_rows(([], ["metadata"]))
+
+    class ObjectResult:
+        boxes = [box_one, box_two]
+        txts = ["对象结果第一行", "对象结果第二行"]
+        scores = [0.95, 0.94]
+
+    object_rows = result_rows(ObjectResult())
+    if (
+        parsed_rows != rows
+        or parsed_single_row != [single_row]
+        or blank_tuple_rows
+        or empty_tuple_rows
+        or [row[1] for row in object_rows] != ObjectResult.txts
+    ):
+        raise RuntimeError("result_rows_self_test_failed")
+
+    engine_calls = []
+
+    class FakeImage:
+        size = (MAX_IMAGE_DIMENSION + 1, 100)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class FakeImageModule:
+        @staticmethod
+        def open(_image_path):
+            return FakeImage()
+
+    def fake_engine(_image_path):
+        engine_calls.append(1)
+        return rows
+
+    oversized_result = process_image(
+        fake_engine,
+        FakeImageModule,
+        {"id": "image-1", "index": 1, "input": "synthetic-image"},
+        0,
+    )
+    if (
+        oversized_result.get("errorType") != "image_dimensions_exceeded"
+        or engine_calls
+    ):
+        raise RuntimeError("image_dimension_self_test_failed")
+
+    print(json.dumps({
+        "tupleTexts": [row[1] for row in parsed_rows],
+        "singleTupleText": parsed_single_row[0][1],
+        "blankTupleRows": len(blank_tuple_rows),
+        "emptyTupleRows": len(empty_tuple_rows),
+        "objectTexts": [row[1] for row in object_rows],
+        "oversizedErrorType": oversized_result.get("errorType"),
+        "oversizedEngineCalls": len(engine_calls),
+    }))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch-manifest")
+    parser.add_argument("--output")
+    parser.add_argument("--self-test-result-rows", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.self_test_result_rows:
+        run_result_rows_self_test()
+        return
+    if not arguments.batch_manifest or not arguments.output:
+        parser.error("--batch-manifest and --output are required")
+
+    manifest_items = read_manifest(arguments.batch_manifest)
+    try:
+        image_module, rapid_ocr_class = load_ocr_runtime()
+        engine = rapid_ocr_class()
+    except Exception:
+        raise RuntimeError("ocr_engine_init_failed") from None
+
+    output_items = []
+    for source_order, item in enumerate(manifest_items):
+        if not isinstance(item, dict):
+            output_items.append({
+                "id": "image-" + str(source_order + 1),
+                "status": "error",
+                "index": source_order + 1,
+                "errorType": "manifest_item_invalid",
+            })
+            continue
+        output_items.append(process_image(engine, image_module, item, source_order))
+
+    with open(arguments.output, "w", encoding="utf-8") as output_file:
+        json.dump({
+            "schemaVersion": SCHEMA_VERSION,
+            "runnerVersion": RUNNER_VERSION,
+            "processed": len(output_items),
+            "items": output_items,
+        }, output_file, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()
+`;
+
+function createLocalOcrBatchError(category = 'process') {
+  const messages = {
+    not_ready: '本地 OCR 组件未就绪，请先在插件设置中修复本地转写组件。',
+    timeout: '图片文字 OCR 批量识别超时，请稍后重试。',
+    process: '图片文字 OCR 批量识别进程失败，请稍后重试。',
+    schema: '图片文字 OCR 批量识别结果格式无效。',
+    io: '图片文字 OCR 批量识别临时文件处理失败。',
+  };
+  const normalizedCategory = Object.prototype.hasOwnProperty.call(messages, category)
+    ? category
+    : 'process';
+  const error = new Error(messages[normalizedCategory]);
+  error.code = `LOCAL_OCR_BATCH_${normalizedCategory.toUpperCase()}`;
+  return error;
+}
+
+function createLocalOcrBatchAllItemsFailedError(items = []) {
+  const allowedErrorTypes = [
+    'image_decode_error',
+    'image_read_error',
+    'image_dimensions_exceeded',
+    'manifest_item_invalid',
+    'ocr_item_error',
+  ];
+  const counts = Object.fromEntries(allowedErrorTypes.map((errorType) => [errorType, 0]));
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const errorType = String(item && item.errorType || '').trim().toLowerCase();
+    const safeErrorType = allowedErrorTypes.includes(errorType) ? errorType : 'ocr_item_error';
+    counts[safeErrorType] += 1;
+  });
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const summary = allowedErrorTypes
+    .filter((errorType) => counts[errorType] > 0)
+    .map((errorType) => `${errorType}=${counts[errorType]}`)
+    .join('; ');
+  const error = new Error(`所有图片识别均失败（total=${total}; ${summary}）`);
+  error.code = 'LOCAL_OCR_BATCH_ALL_ITEMS_FAILED';
+  error.total = total;
+  error.errorTypeCounts = Object.freeze(Object.fromEntries(
+    allowedErrorTypes
+      .filter((errorType) => counts[errorType] > 0)
+      .map((errorType) => [errorType, counts[errorType]]),
+  ));
+  return error;
+}
+
+function normalizeLocalOcrBatchResultItems(payload) {
+  if (!payload || typeof payload !== 'object'
+    || payload.schemaVersion !== 1
+    || payload.runnerVersion !== LOCAL_OCR_BATCH_RUNNER_VERSION
+    || !Array.isArray(payload.items)
+    || !Number.isInteger(payload.processed)
+    || payload.processed < 0
+    || payload.processed !== payload.items.length) {
+    throw createLocalOcrBatchError('schema');
+  }
+  return payload.items.map((item) => {
+    if (!item || typeof item !== 'object' || !['ok', 'error'].includes(item.status)) {
+      throw createLocalOcrBatchError('schema');
+    }
+    const rawId = String(item.id || '').trim();
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(rawId)
+      || !Number.isInteger(item.index)
+      || item.index <= 0) {
+      throw createLocalOcrBatchError('schema');
+    }
+    const id = rawId;
+    const index = item.index;
+    if (item.status === 'error') {
+      const rawErrorType = String(item.errorType || 'ocr_item_error').trim().toLowerCase();
+      return {
+        id,
+        index,
+        status: 'error',
+        errorType: /^[a-z0-9_-]{1,80}$/.test(rawErrorType)
+          ? rawErrorType
+          : 'ocr_item_error',
+      };
+    }
+    if (!Number.isInteger(item.width) || item.width <= 0
+      || !Number.isInteger(item.height) || item.height <= 0
+      || typeof item.text !== 'string'
+      || !Array.isArray(item.lines)
+      || !item.metrics
+      || typeof item.metrics !== 'object') {
+      throw createLocalOcrBatchError('schema');
+    }
+    const lines = item.lines.map((line) => {
+      if (!line || typeof line !== 'object'
+        || typeof line.text !== 'string'
+        || !line.text.trim()
+        || line.text !== line.text.trim()
+        || typeof line.score !== 'number'
+        || !Number.isFinite(line.score)
+        || line.score < 0
+        || line.score > 1) {
+        throw createLocalOcrBatchError('schema');
+      }
+      let box = null;
+      if (line.box !== null) {
+        if (!Array.isArray(line.box) || line.box.length < 3) {
+          throw createLocalOcrBatchError('schema');
+        }
+        box = line.box.map((point) => {
+          if (!Array.isArray(point) || point.length < 2
+            || typeof point[0] !== 'number' || !Number.isFinite(point[0])
+            || typeof point[1] !== 'number' || !Number.isFinite(point[1])
+            || point[0] < 0 || point[0] > item.width
+            || point[1] < 0 || point[1] > item.height) {
+            throw createLocalOcrBatchError('schema');
+          }
+          return [point[0], point[1]];
+        });
+      }
+      return {
+        text: line.text,
+        score: line.score,
+        box,
+      };
+    });
+    const text = lines.map((line) => line.text).join('\n');
+    if (item.text !== text) throw createLocalOcrBatchError('schema');
+
+    const readableChars = item.metrics.readableChars;
+    const lineCount = item.metrics.lineCount;
+    const averageConfidence = item.metrics.averageConfidence;
+    if (!Number.isInteger(readableChars) || readableChars < 0
+      || !Number.isInteger(lineCount) || lineCount < 0 || lineCount !== lines.length
+      || typeof averageConfidence !== 'number'
+      || !Number.isFinite(averageConfidence)
+      || averageConfidence < 0
+      || averageConfidence > 1) {
+      throw createLocalOcrBatchError('schema');
+    }
+    const geometryMetricKeys = [
+      'textBoxAreaRatio',
+      'coveredRowRatio',
+      'verticalSpanRatio',
+    ];
+    const geometryMetrics = {};
+    geometryMetricKeys.forEach((key) => {
+      const value = item.metrics[key];
+      if (value !== null && (typeof value !== 'number'
+        || !Number.isFinite(value)
+        || value < 0
+        || value > 1)) {
+        throw createLocalOcrBatchError('schema');
+      }
+      geometryMetrics[key] = value;
+    });
+    const hasLineGeometry = lines.some((line) => line.box !== null);
+    const geometryValueCount = geometryMetricKeys
+      .filter((key) => geometryMetrics[key] !== null)
+      .length;
+    if ((hasLineGeometry && geometryValueCount !== geometryMetricKeys.length)
+      || (!hasLineGeometry && geometryValueCount !== 0)) {
+      throw createLocalOcrBatchError('schema');
+    }
+    const metrics = {
+      readableChars,
+      lineCount,
+      averageConfidence,
+      ...geometryMetrics,
+    };
+    return {
+      id,
+      index,
+      status: 'ok',
+      width: item.width,
+      height: item.height,
+      text,
+      lines,
+      metrics,
+    };
+  });
+}
+
+function bindLocalOcrBatchResultItems(payload, manifestItems = []) {
+  const items = normalizeLocalOcrBatchResultItems(payload);
+  if (!Array.isArray(manifestItems) || items.length !== manifestItems.length) {
+    throw createLocalOcrBatchError('schema');
+  }
+  const manifestIds = new Set();
+  const resultIds = new Set();
+  items.forEach((item, position) => {
+    const manifestItem = manifestItems[position];
+    if (!manifestItem
+      || manifestIds.has(manifestItem.id)
+      || resultIds.has(item.id)
+      || item.id !== manifestItem.id
+      || item.index !== manifestItem.index) {
+      throw createLocalOcrBatchError('schema');
+    }
+    manifestIds.add(manifestItem.id);
+    resultIds.add(item.id);
+  });
+  return items;
+}
+
+function getSafeXiaohongshuOcrError(error) {
+  const code = String(error && error.code || '');
+  if (code === 'LOCAL_OCR_BATCH_TIMEOUT') return '图片文字 OCR 批量识别超时，请稍后重试。';
+  if (code === 'LOCAL_OCR_BATCH_NOT_READY') return '图片文字 OCR 组件未就绪，请在插件设置中修复。';
+  if (code === 'LOCAL_OCR_BATCH_ALL_ITEMS_FAILED') {
+    return '所有图片识别均失败，原始图文内容已保留。';
+  }
+  return '图片文字 OCR 批量识别失败，原始图文内容已保留。';
+}
+
+function normalizeFiniteOcrMetric(value, fallback, {
+  integer = false,
+  ratio = false,
+} = {}) {
+  const number = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' && value.trim() ? Number(value) : Number.NaN);
+  if (!Number.isFinite(number) || number < 0 || (ratio && number > 1)) return fallback;
+  return integer ? Math.floor(number) : number;
+}
+
+function splitNormalizedOcrLines(text) {
+  const normalized = normalizeOcrText(text);
+  return normalized ? normalized.split('\n') : [];
+}
+
+function normalizeOptionalOcrRatio(value) {
+  const missing = value === undefined
+    || value === null
+    || (typeof value === 'string' && !value.trim());
+  return missing ? null : normalizeFiniteOcrMetric(value, 0, { ratio: true });
+}
+
+function normalizeXiaohongshuOcrMetrics(metrics = {}, text = '') {
+  const source = metrics && typeof metrics === 'object' ? metrics : {};
+  const lines = splitNormalizedOcrLines(text);
+  return {
+    readableChars: normalizeFiniteOcrMetric(
+      source.readableChars,
+      countReadableOcrChars(text),
+      { integer: true },
+    ),
+    lineCount: normalizeFiniteOcrMetric(source.lineCount, lines.length, { integer: true }),
+    averageConfidence: normalizeOptionalOcrRatio(source.averageConfidence),
+    textBoxAreaRatio: normalizeOptionalOcrRatio(source.textBoxAreaRatio),
+    coveredRowRatio: normalizeOptionalOcrRatio(source.coveredRowRatio),
+    verticalSpanRatio: normalizeOptionalOcrRatio(source.verticalSpanRatio),
+  };
+}
+
+function isXiaohongshuTextDominantOcrItem(item = {}) {
+  if (!item || typeof item !== 'object') return false;
+  const text = normalizeOcrText(item.text || item.ocrText || item.value);
+  if (!text) return false;
+  const metrics = normalizeXiaohongshuOcrMetrics(item.metrics, text);
+  const thresholds = XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS;
+  const geometry = [
+    metrics.textBoxAreaRatio,
+    metrics.coveredRowRatio,
+    metrics.verticalSpanRatio,
+  ];
+  const hasGeometry = geometry.some((value) => Number.isFinite(value));
+  const hasTrustedAverageConfidence = Number.isFinite(metrics.averageConfidence)
+    && metrics.averageConfidence >= thresholds.averageConfidence;
+
+  if (!hasGeometry) {
+    return (metrics.averageConfidence === null || hasTrustedAverageConfidence)
+      && metrics.readableChars >= thresholds.geometryFallbackReadableChars
+      && metrics.lineCount >= thresholds.geometryFallbackLines;
+  }
+  if (!hasTrustedAverageConfidence) return false;
+
+  const isLongText = metrics.readableChars >= thresholds.longTextReadableChars
+    && metrics.lineCount >= thresholds.longTextLines
+    && metrics.verticalSpanRatio >= thresholds.longTextVerticalSpanRatio
+    && metrics.coveredRowRatio >= thresholds.longTextCoveredRowRatio;
+  const isLargeCard = metrics.readableChars >= thresholds.largeCardReadableChars
+    && metrics.lineCount >= thresholds.largeCardLines
+    && metrics.textBoxAreaRatio >= thresholds.largeCardTextBoxAreaRatio
+    && metrics.verticalSpanRatio >= thresholds.largeCardVerticalSpanRatio;
+  return isLongText || isLargeCard;
+}
+
 function normalizeXiaohongshuOcrItems(items = []) {
   return (Array.isArray(items) ? items : [])
-    .map((item, index) => {
+    .map((item, sourceOrder) => {
       const text = normalizeOcrText(item && (item.text || item.ocrText || item.value));
-      const readableChars = countReadableOcrChars(text);
+      const metrics = normalizeXiaohongshuOcrMetrics(item && item.metrics, text);
+      const rawIndex = Number(item && item.index);
+      const integerIndex = Number.isFinite(rawIndex) ? Math.floor(rawIndex) : 0;
+      const index = integerIndex > 0
+        ? integerIndex
+        : sourceOrder + 1;
       return {
         imageUrl: String(item && (item.imageUrl || item.url) || '').trim(),
         text,
-        index: Number(item && item.index) || index + 1,
-        readableChars,
-        substantial: readableChars >= 80,
+        index,
+        readableChars: metrics.readableChars,
+        substantial: metrics.readableChars >= XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.longTextReadableChars,
+        metrics,
+        sourceOrder,
       };
     })
-    .filter((item) => item.text && item.readableChars >= 15);
+    .filter((item) => isXiaohongshuTextDominantOcrItem(item))
+    .sort((left, right) => left.index - right.index || left.sourceOrder - right.sourceOrder)
+    .map(({ sourceOrder, ...item }) => item);
 }
 
 function isLikelyImageTextNote(items = []) {
+  return normalizeXiaohongshuOcrItems(items).length > 0;
+}
+
+function getNormalizedOcrLineKey(line) {
+  return String(line || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function getXiaohongshuOcrLineBoundarySeparator(previousText, nextLine) {
+  const previous = String(previousText || '');
+  const next = String(nextLine || '');
+  if (!previous || !next
+    || /\s$/.test(previous)
+    || !/^[A-Za-z0-9]/.test(next)) {
+    return '';
+  }
+  return /[A-Za-z0-9,.!?:;'"%)\]}]$/.test(previous) ? ' ' : '';
+}
+
+function mergeXiaohongshuOcrText(items = [], maxOverlapLines = 8) {
   const normalized = normalizeXiaohongshuOcrItems(items);
-  const total = normalized.reduce((sum, item) => sum + item.readableChars, 0);
-  const imageTextCount = normalized.filter((item) => item.readableChars >= 40).length;
-  return normalized.some((item) => item.readableChars >= 80)
-    || imageTextCount >= 2
-    || total >= 120;
+  const configuredLimit = normalizeFiniteOcrMetric(maxOverlapLines, 8, { integer: true });
+  const overlapLimit = Math.min(
+    configuredLimit,
+    XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.maxBoundaryOverlapLines,
+  );
+  const mergedLines = [];
+
+  normalized.forEach((item) => {
+    const pageLines = splitNormalizedOcrLines(item.text);
+    const maximumOverlap = Math.min(overlapLimit, mergedLines.length, pageLines.length);
+    let overlap = 0;
+    for (let length = maximumOverlap; length > 0; length -= 1) {
+      const previousKeys = mergedLines.slice(-length).map(getNormalizedOcrLineKey);
+      const nextKeys = pageLines.slice(0, length).map(getNormalizedOcrLineKey);
+      if (previousKeys.every((key, index) => key && key === nextKeys[index])) {
+        overlap = length;
+        break;
+      }
+    }
+    mergedLines.push(...pageLines.slice(overlap));
+  });
+
+  return mergedLines.reduce((text, line) => {
+    if (!text) return line;
+    return `${text}${getXiaohongshuOcrLineBoundarySeparator(text, line)}${line}`;
+  }, '');
 }
 
 function buildXiaohongshuOcrMarkdown(items = []) {
-  const normalized = normalizeXiaohongshuOcrItems(items);
-  if (!normalized.length) return '';
-  const lines = [
-    '## 图片文字 OCR（测试版）',
-    '',
-    isLikelyImageTextNote(normalized)
-      ? '> 检测到图片里有较多文字，下面是 OCR 识别结果；原图片仍保留在上方。'
-      : '> 下面是图片中的少量可识别文字；原图片仍保留在上方。',
-    '',
-  ];
-  normalized.forEach((item, index) => {
-    const displayIndex = Number.isFinite(item.index) && item.index > 0 ? item.index : index + 1;
-    lines.push(`### 图片 ${displayIndex}`, '', item.text, '');
-  });
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const text = mergeXiaohongshuOcrText(items);
+  return text ? `## 图片文字\n\n${text}` : '';
 }
 
 function appendXiaohongshuOcrMarkdown(markdown, items = []) {
@@ -10806,6 +11678,22 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
   installXiaohongshuNavigationGuards(win.webContents);
   const browserSession = (win.webContents && win.webContents.session) || xiaohongshuSession;
   let blocksCommentRequests = false;
+  let observedIdentityUrl = resolveXiaohongshuIdentityUrl([
+    options.expectedUrl,
+    url,
+  ]);
+  const cleanupIdentityObserver = installXiaohongshuIdentityObserver(
+    win.webContents,
+    (identityUrl) => {
+      observedIdentityUrl = rememberXiaohongshuObservedIdentity(
+        observedIdentityUrl,
+        {
+          resourceType: 'mainFrame',
+          url: identityUrl,
+        },
+      );
+    },
+  );
 
   try {
     if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === 'function') {
@@ -10838,7 +11726,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       payload = selectXiaohongshuBrowserSnapshot(
         payload,
         current,
-        options.expectedUrl || url,
+        observedIdentityUrl || options.expectedUrl || url,
       );
       if (payload.matched) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -10862,6 +11750,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         && typeof browserSession.webRequest.onBeforeRequest === 'function') {
         browserSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, null);
       }
+      cleanupIdentityObserver();
     } catch (error) {}
     if (win && typeof win.destroy === 'function') {
       win.destroy();
@@ -13107,7 +13996,11 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
 
   const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
   const recordIdMarker = buildRecordIdMarker(getRecordId(record));
-  return `${frontmatter}\n${recordIdMarker ? `${recordIdMarker}\n\n` : ''}${body}`;
+  const aiMetadataErrorMarker = metadata.aiMetadataError
+    ? buildAiMetadataErrorComment(metadata.aiMetadataError)
+    : '';
+  const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join('\n');
+  return `${frontmatter}\n${diagnosticMarkers ? `${diagnosticMarkers}\n\n` : ''}${body}`;
 }
 
 function buildSyncNotice(count) {
@@ -13248,6 +14141,9 @@ function buildSyncProgressMessage({
 function getRecordConversionWarning(record) {
   if (!record) return '';
   const metadata = record.metadata || {};
+  const aiMetadataWarning = metadata.aiMetadataError
+    ? buildAiMetadataConversionWarning(metadata.aiMetadataError)
+    : '';
   const imageLocalizationFailedCount = Number(metadata.imageLocalizationFailedCount) || 0;
   const imageTempUrlMissingCount = Number(metadata.imageTempUrlMissingCount) || 0;
   const imageFailureCount = Math.max(imageLocalizationFailedCount, imageTempUrlMissingCount);
@@ -13258,20 +14154,21 @@ function getRecordConversionWarning(record) {
     }
     const localizationError = String(metadata.imageLocalizationError || '').trim();
     if (localizationError) details.push(localizationError);
-    return `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join('；')}` : ''}`;
+    const imageWarning = `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join('；')}` : ''}`;
+    return [imageWarning, aiMetadataWarning].filter(Boolean).join('；');
   }
   const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
   const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
   if (status === 'failed') {
-    return errorMsg || '网页转写失败（未知原因）';
+    return [errorMsg || '网页转写失败（未知原因）', aiMetadataWarning].filter(Boolean).join('；');
   }
   if (status === 'wechat_captcha') {
-    return '微信安全验证拦截';
+    return ['微信安全验证拦截', aiMetadataWarning].filter(Boolean).join('；');
   }
   if (status === 'link_saved') {
-    return errorMsg || '网页抓取未成功';
+    return [errorMsg || '网页抓取未成功', aiMetadataWarning].filter(Boolean).join('；');
   }
-  return '';
+  return aiMetadataWarning;
 }
 
 function buildConversionWarningsNotice(warnings = []) {
@@ -14106,44 +15003,47 @@ class WechatObsidianInboxPlugin extends Plugin {
     return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
   }
 
-  async enrichRecordMetadataWithAi(record, binding = null, options = {}) {
-    const requireMetadata = Boolean(options.requireMetadata);
-    if (!requireMetadata && !shouldGenerateAiMetadata(this.settings, record)) return record;
+  async enrichRecordMetadataWithAi(record, binding = null) {
+    if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
-    const fail = (message) => {
-      const finalMessage = message || 'AI 简介与关键词生成失败';
-      if (requireMetadata) {
-        throw new Error(`AI 简介与关键词生成失败：${finalMessage}`);
-      }
+    delete metadata.aiMetadataError;
+    const fail = (error) => {
       return {
         ...record,
         metadata: {
           ...metadata,
-          aiMetadataError: finalMessage,
+          aiMetadataError: classifyAiMetadataError(error),
         },
       };
     };
-    const hasAccess = await this.hasProFeatureAccess();
+    let hasAccess = false;
+    try {
+      hasAccess = await this.hasProFeatureAccess();
+    } catch (error) {
+      return fail(error);
+    }
     if (!hasAccess) {
-      return fail('Pro 权限未开通，或插件还没有识别到当前绑定码的 Pro 状态。请先绑定小程序并开通 Pro，然后在插件里刷新权限。');
+      return record;
     }
     let generated;
     try {
       generated = await this.generateMetadataWithDeepSeek(record, binding);
     } catch (error) {
-      return fail(error && error.message ? error.message : String(error || ''));
+      return fail(error);
     }
-    if (generated.description) {
-      metadata.description = generated.description;
+    const description = String(generated && generated.description || '').trim();
+    const keywords = getRecordKeywords(generated || {}).map((item) => String(item || '').trim()).filter(Boolean);
+    if (!description && !keywords.length) {
+      return fail('empty-response');
     }
-    if (generated.keywords.length) {
-      metadata.keywords = generated.keywords;
+    if (description) {
+      metadata.description = description;
     }
-    if (generated.description || generated.keywords.length) {
+    if (keywords.length) {
+      metadata.keywords = keywords;
+    }
+    if (description || keywords.length) {
       metadata.aiMetadataSource = this.settings.deepseekApiKey ? 'deepseek' : 'cloud';
-    }
-    if (requireMetadata && (!metadata.description || !getRecordKeywords(metadata).length)) {
-      return fail('AI 接口没有返回可用的简介和关键词。');
     }
     return {
       ...record,
@@ -14336,28 +15236,70 @@ class WechatObsidianInboxPlugin extends Plugin {
     title = '',
     binding = null,
   } = {}) {
+    const requestedImageUrls = (Array.isArray(imageUrls) ? imageUrls : [])
+      .map((imageUrl) => String(imageUrl || '').trim())
+      .filter(Boolean);
+    if (!requestedImageUrls.length) return [];
+    await this.ensureProFeatureAccess('小红书图片 OCR');
+    const images = await this.buildXiaohongshuOcrImagePayload(requestedImageUrls);
+    if (!images.length) return [];
     await this.ensureLocalComponentReadyForUse('小红书图片 OCR', {
       reason: 'first-use',
       requireAsr: false,
       requireOcr: true,
     });
-    const images = await this.buildXiaohongshuOcrImagePayload(imageUrls);
-    if (!images.length) return [];
     const ocrTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-'));
-    const items = [];
     try {
-      for (const image of images) {
+      const entries = [];
+      const sourceById = new Map();
+      images.forEach((image, sourceOrder) => {
+        const rawIndex = Number(image && image.index);
+        const integerIndex = Number.isFinite(rawIndex) ? Math.floor(rawIndex) : 0;
+        const index = integerIndex > 0 ? integerIndex : sourceOrder + 1;
+        const id = `image-${sourceOrder + 1}`;
         const ext = getImageFileExtension(image.imageUrl);
-        const tempImagePath = path.join(ocrTempDir, `image-${image.index || items.length + 1}.${ext}`);
-        fs.writeFileSync(tempImagePath, Buffer.from(image.imageBase64 || '', 'base64'));
-        // eslint-disable-next-line no-await-in-loop
-        const text = await this.runLocalImageOcr(tempImagePath);
-        items.push({
-          imageUrl: image.imageUrl,
-          index: image.index,
-          text,
+        const imagePath = path.join(ocrTempDir, `${id}.${ext}`);
+        fs.writeFileSync(imagePath, Buffer.from(image.imageBase64 || '', 'base64'));
+        const source = {
+          id,
+          imageUrl: String(image.imageUrl || '').trim(),
+          index,
+          imagePath,
+        };
+        entries.push({
+          id,
+          index,
+          imagePath,
         });
+        sourceById.set(id, source);
+      });
+      if (!entries.length) return [];
+      const batchItems = await this.runLocalImageOcrBatch(entries);
+      if (!Array.isArray(batchItems)
+        || batchItems.length !== entries.length
+        || !batchItems.every((item, position) => item
+          && ['ok', 'error'].includes(item.status)
+          && item.id === entries[position].id
+          && item.index === entries[position].index)) {
+        throw createLocalOcrBatchError('schema');
       }
+      if (batchItems.length > 0
+        && batchItems.every((item) => item && item.status === 'error')) {
+        throw createLocalOcrBatchAllItemsFailedError(batchItems);
+      }
+      const items = batchItems.flatMap((item) => {
+        if (!item || item.status !== 'ok') return [];
+        const resultId = String(item.id || '').trim();
+        const source = sourceById.get(resultId);
+        if (!source) return [];
+        return [{
+          imageUrl: source.imageUrl,
+          index: source.index,
+          text: item.text,
+          metrics: item.metrics,
+        }];
+      });
+      return normalizeXiaohongshuOcrItems(items);
     } finally {
       try {
         fs.rmSync(ocrTempDir, { recursive: true, force: true });
@@ -14365,7 +15307,6 @@ class WechatObsidianInboxPlugin extends Plugin {
         // Best-effort cleanup only.
       }
     }
-    return normalizeXiaohongshuOcrItems(items);
   }
 
   async enrichXiaohongshuExtractionWithOcr(extracted, {
@@ -14383,7 +15324,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       return {
         ...extracted,
-        ocrError: error.message || String(error),
+        ocrError: getSafeXiaohongshuOcrError(error),
       };
     }
     if (!items.length) return extracted;
@@ -14779,6 +15720,87 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
       throw new Error(`无法下载本地转写 OCR 安装器：${downloadError.message || downloadError}`);
+    }
+  }
+
+  async runLocalImageOcrBatch(imageEntries = []) {
+    const entries = Array.isArray(imageEntries) ? imageEntries : [];
+    if (!entries.length) return [];
+    const status = this.getLocalOcrInstallStatus();
+    if (!status || !status.ready || !status.pythonPath) {
+      throw createLocalOcrBatchError('not_ready');
+    }
+
+    let batchTempDir = '';
+    try {
+      batchTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-ocr-batch-'));
+      const runnerPath = path.join(
+        batchTempDir,
+        `${LOCAL_OCR_BATCH_RUNNER_VERSION}.py`,
+      );
+      const manifestPath = path.join(batchTempDir, 'manifest.json');
+      const outputPath = path.join(batchTempDir, 'result.json');
+      const manifestItems = entries.map((entry, sourceOrder) => {
+        const rawIndex = Number(entry && entry.index);
+        const integerIndex = Number.isFinite(rawIndex) ? Math.floor(rawIndex) : 0;
+        const rawId = String(entry && entry.id || '').trim();
+        return {
+          id: /^[A-Za-z0-9_-]{1,80}$/.test(rawId) ? rawId : `image-${sourceOrder + 1}`,
+          index: integerIndex > 0 ? integerIndex : sourceOrder + 1,
+          input: String(entry && (entry.imagePath || entry.input || entry.path) || ''),
+        };
+      });
+      fs.writeFileSync(runnerPath, LOCAL_OCR_BATCH_RUNNER_SOURCE, 'utf8');
+      fs.writeFileSync(manifestPath, JSON.stringify({
+        schemaVersion: 1,
+        runnerVersion: LOCAL_OCR_BATCH_RUNNER_VERSION,
+        items: manifestItems,
+      }), 'utf8');
+
+      await new Promise((resolve, reject) => {
+        childProcess.execFile(status.pythonPath, [
+          runnerPath,
+          '--batch-manifest',
+          manifestPath,
+          '--output',
+          outputPath,
+        ], {
+          timeout: LOCAL_OCR_BATCH_RUN_TIMEOUT_MS,
+          maxBuffer: 10 * 1024 * 1024,
+          windowsHide: true,
+        }, (error) => {
+          if (error) {
+            const timedOut = Boolean(
+              error.killed
+              || error.signal === 'SIGTERM'
+              || /timed out|timeout/i.test(String(error.message || '')),
+            );
+            reject(createLocalOcrBatchError(timedOut ? 'timeout' : 'process'));
+            return;
+          }
+          resolve();
+        });
+      });
+
+      if (!fs.existsSync(outputPath)) throw createLocalOcrBatchError('schema');
+      let payload;
+      try {
+        payload = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+      } catch (error) {
+        throw createLocalOcrBatchError('schema');
+      }
+      return bindLocalOcrBatchResultItems(payload, manifestItems);
+    } catch (error) {
+      if (/^LOCAL_OCR_BATCH_/.test(String(error && error.code || ''))) throw error;
+      throw createLocalOcrBatchError('io');
+    } finally {
+      if (batchTempDir) {
+        try {
+          fs.rmSync(batchTempDir, { recursive: true, force: true });
+        } catch (error) {
+          // Best-effort cleanup only.
+        }
+      }
     }
   }
 
@@ -17187,13 +18209,16 @@ class WechatObsidianInboxPlugin extends Plugin {
           };
         xiaohongshuRedirectDiagnostic = redirectResult.diagnostic;
         const redirectedUrl = redirectResult.url;
+        const targetIdentityUrl = isXiaohongshuUrl(url)
+          ? resolveXiaohongshuIdentityUrl([redirectedUrl, url])
+          : '';
         xiaohongshuResolvedUrl = redirectedUrl;
         const douyinTarget = isDouyinUrl(url) || isDouyinUrl(redirectedUrl)
           ? normalizeDouyinTargetUrl(url, redirectedUrl)
           : { awemeId: '', url: '' };
         let resolvedUrl = douyinTarget.url || redirectedUrl;
         let xiaohongshuBrowserCandidates = isXiaohongshuUrl(url)
-          ? getXiaohongshuBrowserCandidates(url, resolvedUrl)
+          ? getXiaohongshuBrowserCandidates(url, targetIdentityUrl, resolvedUrl)
           : [];
         let primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0]
           ? xiaohongshuBrowserCandidates[0].url
@@ -17224,7 +18249,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             try {
               const candidatePage = await this.renderXiaohongshuPage(candidate.url, {
                 includeComments: false,
-                expectedUrl: resolvedUrl,
+                expectedUrl: targetIdentityUrl || resolvedUrl,
               });
               const candidateFinalUrl = String(candidatePage && candidatePage.url || '').trim();
               if (!isTrustedXiaohongshuCookieUrl(candidateFinalUrl)) {
@@ -17252,7 +18277,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           resolvedUrl = responseFinalUrl;
           xiaohongshuResolvedUrl = responseFinalUrl;
-          xiaohongshuBrowserCandidates = getXiaohongshuBrowserCandidates(url, resolvedUrl);
+          xiaohongshuBrowserCandidates = getXiaohongshuBrowserCandidates(
+            url,
+            targetIdentityUrl,
+            responseFinalUrl,
+          );
           primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0]
             ? xiaohongshuBrowserCandidates[0].url
             : resolvedUrl;
@@ -17356,6 +18385,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             html = '';
           }
           let xiaohongshuIdentityUrl = resolveXiaohongshuIdentityUrl([
+            targetIdentityUrl,
             resolvedUrl,
             url,
           ], html);
@@ -17549,7 +18579,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
           }
           const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);
-          if (xiaohongshuCapabilities.imageOcr && !isXiaohongshuVideoNote) {
+          if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {
             extractedXiaohongshu = await this.enrichXiaohongshuExtractionWithOcr(extractedXiaohongshu, {
               pageUrl: resolvedUrl,
               binding,
@@ -17945,9 +18975,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
-    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding, {
-      requireMetadata: shouldRequireAiMetadataForTranscript(recordForMarkdown),
-    });
+    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,
@@ -18618,6 +19646,8 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_MACOS_INSTALLER_URL,
   LOCAL_OCR_INSTALLER_URL,
   LOCAL_OCR_MACOS_INSTALLER_URL,
+  LOCAL_OCR_BATCH_RUNNER_VERSION,
+  LOCAL_OCR_BATCH_RUNNER_SOURCE,
   isLocalAsrInstallerCurrent,
   isLocalOcrInstallerCurrent,
   isTrustedLocalOcrInstallerSource,
@@ -18660,6 +19690,8 @@ WechatObsidianInboxPlugin.__test = {
   isGenericXiaohongshuLandingExtraction,
   hasReadableXiaohongshuGraphicContent,
   shouldStopWaitingForXiaohongshuContent,
+  rememberXiaohongshuObservedIdentity,
+  installXiaohongshuIdentityObserver,
   selectXiaohongshuBrowserSnapshot,
   extractSocialCommentsFromHtml,
   collectXiaohongshuCommentPages,
@@ -18685,8 +19717,12 @@ WechatObsidianInboxPlugin.__test = {
   collectXiaohongshuNoteImageUrls,
   appendXiaohongshuOcrMarkdown,
   buildXiaohongshuOcrMarkdown,
+  isXiaohongshuTextDominantOcrItem,
   isLikelyImageTextNote,
+  mergeXiaohongshuOcrText,
+  normalizeXiaohongshuOcrMetrics,
   normalizeXiaohongshuOcrItems,
+  XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS,
   buildMarkdownForRecord,
   enrichExtractedWebpageMetadata,
   extractSocialVideoMarkdownFromHtml,
