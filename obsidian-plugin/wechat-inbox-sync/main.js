@@ -17,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.70';
+const PLUGIN_RUNTIME_VERSION = '1.3.71';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -6997,21 +6997,12 @@ function getPreferredXiaohongshuTitle(existingTitle, extractedTitle, fallback = 
 function hasReadableXiaohongshuGraphicContent(extracted, html, url = '') {
   if (!extracted
     || !isTrustedXiaohongshuCookieUrl(url)
-    || isUnavailableXiaohongshuPage(html, url)
-    || (extracted.xiaohongshuStructuredIdentityMismatch === true
-      && extracted.xiaohongshuPrimaryNoteMatched !== true)
-    || isGenericXiaohongshuLandingExtraction(extracted, html)) return false;
-  const expectedNoteId = getXiaohongshuTargetNoteId(url);
-  if (expectedNoteId && extracted.xiaohongshuPrimaryNoteMatched !== true) {
-    const canonicalNoteId = getXiaohongshuTargetNoteId(
-      getXiaohongshuCanonicalUrlFromHtml(html),
-    );
-    if (!canonicalNoteId || canonicalNoteId !== expectedNoteId) return false;
-  }
+    || isUnavailableXiaohongshuPage(html, url)) return false;
   const hasImages = Array.isArray(extracted.imageUrls) && extracted.imageUrls.length > 0;
   if (hasImages) return true;
   if (isXiaohongshuShareBoilerplateOnly(extracted)) return false;
   const description = String(extracted.description || '').trim();
+  if (/分享口令/.test(description)) return false;
   if (!description || description.length < 20) return false;
   if (/^(?:短链落地页|当前笔记暂时无法浏览|你访问的页面不见了|页面未直接暴露正文)/.test(description)) return false;
   return true;
@@ -7408,6 +7399,21 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
     : preferred;
   const substantive = identityBound.filter((item) => !isXiaohongshuShareBoilerplateOnly(item));
   const sources = substantive.length ? substantive : identityBound;
+  if (!matchedPrimary.length) {
+    const normalizedTitles = sources.map((item) => String(item.title || '').trim());
+    const sharedNonGenericTitle = sources.length > 1
+      && normalizedTitles.every(Boolean)
+      && new Set(normalizedTitles).size === 1
+      && !isGenericXiaohongshuTitle(normalizedTitles[0]);
+    const firstImages = new Set(Array.isArray(sources[0]?.imageUrls) ? sources[0].imageUrls : []);
+    const sharedImage = sources.length > 1
+      && Array.from(firstImages).some((imageUrl) => sources.slice(1).every(
+        (item) => Array.isArray(item.imageUrls) && item.imageUrls.includes(imageUrl),
+      ));
+    if (!sharedNonGenericTitle && !sharedImage) {
+      return sources[0] || selectedPreferred || ordered[0];
+    }
+  }
 
   const isUsableTitle = (value) => {
     const text = String(value || '').trim();
@@ -18453,7 +18459,15 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (candidateScore >= 0) {
                   mergeableXiaohongshuExtractions.push(candidateExtraction);
                 }
-                if (candidateScore > bestRenderedXiaohongshuScore) {
+                const candidateHasExactIdentity = candidateExtraction.xiaohongshuPrimaryNoteMatched === true;
+                const bestHasExactIdentity = bestRenderedXiaohongshuExtraction
+                  && bestRenderedXiaohongshuExtraction.xiaohongshuPrimaryNoteMatched === true;
+                const shouldSelectCandidate = bestRenderedXiaohongshuScore < 0
+                  || (candidateHasExactIdentity && !bestHasExactIdentity)
+                  || (candidateHasExactIdentity
+                    && bestHasExactIdentity
+                    && candidateScore > bestRenderedXiaohongshuScore);
+                if (shouldSelectCandidate) {
                   bestRenderedXiaohongshuPage = candidatePage;
                   bestRenderedXiaohongshuExtraction = candidateExtraction;
                   bestRenderedXiaohongshuHtml = candidateHtml;
@@ -18585,7 +18599,14 @@ class WechatObsidianInboxPlugin extends Plugin {
               binding,
             });
           }
-          if (hasReadableXiaohongshuGraphic && !extractedXiaohongshu.videoUrl && !mediaUrl) {
+          if (hasReadableXiaohongshuGraphic
+            && (!isVideoIntent || !shouldProbeXiaohongshuMediaFromGenericLanding(
+              extractedXiaohongshu,
+              html,
+              resolvedUrl,
+            ))
+            && !extractedXiaohongshu.videoUrl
+            && !mediaUrl) {
             extractedXiaohongshu = {
               ...extractedXiaohongshu,
               markdown: await this.saveMarkdownRemoteImageAssets(
