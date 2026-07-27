@@ -11544,6 +11544,16 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
         conversionStatus: 'success',
       },
     };
+    const directPlugin = new PluginClass();
+    directPlugin.settings = helpers.mergeSettings({});
+    directPlugin.hasProFeatureAccess = async () => true;
+    directPlugin.generateMetadataWithDeepSeek = scenario.generate;
+    const failedEnrichment = await directPlugin.enrichRecordMetadataWithAi(record);
+    assert.strictEqual(failedEnrichment.metadata.description, undefined, scenario.name);
+    assert.strictEqual(failedEnrichment.metadata.keywords, undefined, scenario.name);
+    assert.strictEqual(failedEnrichment.metadata.aiMetadataSource, undefined, scenario.name);
+    assert.strictEqual(failedEnrichment.metadata.aiMetadataError, scenario.expectedCode, scenario.name);
+
     const plugin = new PluginClass();
     plugin.settings = helpers.mergeSettings({
       inboxDir: '临时收集',
@@ -11710,7 +11720,9 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   plugin.hasProFeatureAccess = async () => true;
   plugin.generateMetadataWithDeepSeek = async () => {
     aiCallCount += 1;
-    const error = new Error('Request failed with status code 429 https://private.example.test?token=TOP_SECRET');
+    const error = new Error(
+      'Request failed with status code 429 https://private.example.test?token=TOP_SECRET api_key=TOP_SECRET cookie=TOP_SECRET',
+    );
     error.code = 'ERR_BAD_REQUEST';
     error.response = { status: 429 };
     throw error;
@@ -11758,7 +11770,7 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   assert.strictEqual(firstResult.conversionWarnings.length, 1);
   assert.match(firstResult.conversionWarnings[0], /正文已同步，但 AI 简介\/关键词未生成/);
   assert.strictEqual(
-    /https?:|TOP_SECRET|token/i.test(firstResult.conversionWarnings[0]),
+    /https?:|TOP_SECRET|token|api_key|cookie/i.test(firstResult.conversionWarnings[0]),
     false,
   );
   const finalNotice = helpers.buildSyncResultNotice(
@@ -11768,7 +11780,7 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
     firstResult.failed,
   );
   assert.match(finalNotice, /正文已同步，但 AI 简介\/关键词未生成/);
-  assert.strictEqual(/https?:|TOP_SECRET|token/i.test(finalNotice), false);
+  assert.strictEqual(/https?:|TOP_SECRET|token|api_key|cookie/i.test(finalNotice), false);
 
   const secondResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
   assert.strictEqual(secondResult.written.length, 0);
