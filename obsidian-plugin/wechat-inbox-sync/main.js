@@ -1462,7 +1462,11 @@ function getXiaohongshuCapabilityMatrix({
   };
 }
 
-function getXiaohongshuBrowserCandidates(sourceUrl = '', resolvedUrl = '') {
+function getXiaohongshuBrowserCandidates(
+  sourceUrl = '',
+  targetIdentityUrl = '',
+  responseFinalUrl = '',
+) {
   const result = [];
   const seen = new Set();
   const add = (url, kind) => {
@@ -1472,7 +1476,8 @@ function getXiaohongshuBrowserCandidates(sourceUrl = '', resolvedUrl = '') {
     result.push({ url: value, kind });
   };
   add(sourceUrl, isXiaohongshuShortLinkUrl(sourceUrl) ? 'original-shortlink' : 'source-url');
-  add(resolvedUrl, 'resolved-url');
+  add(targetIdentityUrl, 'resolved-url');
+  add(responseFinalUrl, 'response-final-url');
   return result;
 }
 
@@ -17187,13 +17192,16 @@ class WechatObsidianInboxPlugin extends Plugin {
           };
         xiaohongshuRedirectDiagnostic = redirectResult.diagnostic;
         const redirectedUrl = redirectResult.url;
+        const targetIdentityUrl = isXiaohongshuUrl(url)
+          ? resolveXiaohongshuIdentityUrl([redirectedUrl, url])
+          : '';
         xiaohongshuResolvedUrl = redirectedUrl;
         const douyinTarget = isDouyinUrl(url) || isDouyinUrl(redirectedUrl)
           ? normalizeDouyinTargetUrl(url, redirectedUrl)
           : { awemeId: '', url: '' };
         let resolvedUrl = douyinTarget.url || redirectedUrl;
         let xiaohongshuBrowserCandidates = isXiaohongshuUrl(url)
-          ? getXiaohongshuBrowserCandidates(url, resolvedUrl)
+          ? getXiaohongshuBrowserCandidates(url, targetIdentityUrl, resolvedUrl)
           : [];
         let primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0]
           ? xiaohongshuBrowserCandidates[0].url
@@ -17224,7 +17232,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             try {
               const candidatePage = await this.renderXiaohongshuPage(candidate.url, {
                 includeComments: false,
-                expectedUrl: resolvedUrl,
+                expectedUrl: targetIdentityUrl || resolvedUrl,
               });
               const candidateFinalUrl = String(candidatePage && candidatePage.url || '').trim();
               if (!isTrustedXiaohongshuCookieUrl(candidateFinalUrl)) {
@@ -17252,7 +17260,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           resolvedUrl = responseFinalUrl;
           xiaohongshuResolvedUrl = responseFinalUrl;
-          xiaohongshuBrowserCandidates = getXiaohongshuBrowserCandidates(url, resolvedUrl);
+          xiaohongshuBrowserCandidates = getXiaohongshuBrowserCandidates(
+            url,
+            targetIdentityUrl,
+            responseFinalUrl,
+          );
           primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0]
             ? xiaohongshuBrowserCandidates[0].url
             : resolvedUrl;
@@ -17356,6 +17368,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             html = '';
           }
           let xiaohongshuIdentityUrl = resolveXiaohongshuIdentityUrl([
+            targetIdentityUrl,
             resolvedUrl,
             url,
           ], html);

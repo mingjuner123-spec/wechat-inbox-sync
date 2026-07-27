@@ -6819,6 +6819,24 @@ async function runAsyncHydrationTests() {
       on: () => request,
       destroy: () => {},
       end: () => {
+        if (parsed.hostname === 'xhslink.cn'
+          && parsed.pathname === '/o/identity-continuity'
+          && method === 'HEAD') {
+          callback({
+            statusCode: 302,
+            headers: {
+              location: `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`,
+            },
+            resume: () => {},
+          });
+          return;
+        }
+        if (parsed.hostname === 'www.xiaohongshu.com'
+          && parsed.pathname === `/explore/${targetGraphicNoteId}`
+          && method === 'HEAD') {
+          callback({ statusCode: 200, headers: {}, resume: () => {} });
+          return;
+        }
         if (parsed.hostname === 'xhslink.cn' && method === 'HEAD') {
           callback({ statusCode: 404, headers: {}, resume: () => {} });
           return;
@@ -6866,6 +6884,87 @@ async function runAsyncHydrationTests() {
     assert.ok(genericRedirectRecord.metadata.markdown.includes('#效率工具'));
     assert.ok(genericRedirectRecord.metadata.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/resolved-cover.jpg)'));
     assert.ok(genericRedirectRecord.metadata.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/resolved-page-2.jpg)'));
+
+    const identityContinuityPlugin = new PluginClass();
+    identityContinuityPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+    identityContinuityPlugin.hasProFeatureAccess = async () => false;
+    identityContinuityPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    identityContinuityPlugin.renderSocialMediaUrls = async () => [];
+    identityContinuityPlugin.saveMarkdownRemoteImageAssets = async (markdown) => markdown;
+    const targetGraphicUrl = `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`;
+    const identityContinuityRenderUrls = [];
+    const identityContinuityRenderOptions = [];
+    identityContinuityPlugin.requestXiaohongshuStaticPage = async (requestUrl) => {
+      assert.strictEqual(requestUrl, targetGraphicUrl);
+      return {
+        status: 200,
+        url: 'https://www.xiaohongshu.com/',
+        text: genericXiaohongshuLandingHtml,
+      };
+    };
+    identityContinuityPlugin.renderXiaohongshuPage = async (renderUrl, renderOptions) => {
+      identityContinuityRenderUrls.push(renderUrl);
+      identityContinuityRenderOptions.push(renderOptions);
+      if (renderUrl !== targetGraphicUrl) {
+        return {
+          url: 'https://www.xiaohongshu.com/',
+          html: genericXiaohongshuLandingHtml,
+          comments: [],
+        };
+      }
+      return {
+        url: targetGraphicUrl,
+        html: [
+          '<html><head>',
+          `<link rel="canonical" href="${targetGraphicUrl}">`,
+          '<meta property="og:title" content="身份连续性恢复成功">',
+          '<meta name="description" content="目标身份没有被通用首页覆盖，这是与准确 noteId 绑定的结构化图文正文。">',
+          '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/identity-continuity.jpg">',
+          '</head><body><script>',
+          JSON.stringify({
+            noteDetailMap: {
+              [targetGraphicNoteId]: {
+                note: {
+                  noteId: targetGraphicNoteId,
+                  displayTitle: '身份连续性恢复成功',
+                  desc: '目标身份没有被通用首页覆盖，这是与准确 noteId 绑定的结构化图文正文。',
+                  imageList: [{
+                    urlDefault: 'https://sns-webpic-qc.xhscdn.com/identity-continuity.jpg',
+                  }],
+                },
+              },
+            },
+          }),
+          '</script></body></html>',
+        ].join(''),
+        comments: [],
+      };
+    };
+    let identityContinuityRecord = null;
+    let identityContinuityError = null;
+    try {
+      identityContinuityRecord = await identityContinuityPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'http://xhslink.cn/o/identity-continuity',
+        metadata: {
+          url: 'http://xhslink.cn/o/identity-continuity',
+          shareText: '小红书目标身份连续性测试',
+        },
+      }, '', '', '小红书目标身份连续性');
+    } catch (error) {
+      identityContinuityError = error;
+    }
+    assert.deepStrictEqual(identityContinuityRenderUrls, [
+      'http://xhslink.cn/o/identity-continuity',
+      targetGraphicUrl,
+      'https://www.xiaohongshu.com/',
+    ]);
+    assert.ifError(identityContinuityError);
+    assert.ok(identityContinuityRenderOptions.every(
+      (options) => options && options.expectedUrl === targetGraphicUrl,
+    ));
+    assert.strictEqual(identityContinuityRecord.metadata.title, '身份连续性恢复成功');
+    assert.ok(identityContinuityRecord.metadata.markdown.includes('目标身份没有被通用首页覆盖'));
 
     const originalPreferredPlugin = new PluginClass();
     originalPreferredPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
