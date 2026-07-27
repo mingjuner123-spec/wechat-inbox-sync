@@ -273,8 +273,21 @@ function runPendingLocalOcrSwitchTests() {
 function runXiaohongshuOcrPolicyTests() {
   assert.strictEqual(typeof helpers.isXiaohongshuTextDominantOcrItem, 'function');
   assert.strictEqual(typeof helpers.mergeXiaohongshuOcrText, 'function');
-  assert.strictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.trustedBoxConfidence, 0.55);
-  assert.strictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.averageConfidence, 0.65);
+  assert.deepStrictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS, {
+    trustedBoxConfidence: 0.55,
+    averageConfidence: 0.65,
+    longTextReadableChars: 80,
+    longTextLines: 5,
+    longTextVerticalSpanRatio: 0.35,
+    longTextCoveredRowRatio: 0.12,
+    largeCardReadableChars: 35,
+    largeCardLines: 3,
+    largeCardTextBoxAreaRatio: 0.12,
+    largeCardVerticalSpanRatio: 0.25,
+    geometryFallbackReadableChars: 160,
+    geometryFallbackLines: 6,
+    maxBoundaryOverlapLines: 8,
+  });
 
   const exactLongTextMetrics = {
     readableChars: 80,
