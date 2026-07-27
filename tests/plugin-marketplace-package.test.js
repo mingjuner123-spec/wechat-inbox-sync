@@ -33,7 +33,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.67');
+assert.strictEqual(manifest.version, '1.3.68');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.ok(checklist.includes('不得仅因版本较旧就停用已安装组件'));
 assert.ok(checklist.includes('HTTP 418'));
