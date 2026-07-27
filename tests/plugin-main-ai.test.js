@@ -5738,12 +5738,15 @@ async function runAsyncHydrationTests() {
     complementaryFieldsPlugin.settings = helpers.mergeSettings({
       aiProvider: 'off',
       settingsVersion: 2,
-      xiaohongshuCommentsEnabled: false,
+      xiaohongshuCommentsEnabled: true,
     });
-    complementaryFieldsPlugin.hasProFeatureAccess = async () => false;
+    complementaryFieldsPlugin.hasProFeatureAccess = async () => true;
+    complementaryFieldsPlugin.checkXiaohongshuLogin = async () => true;
     complementaryFieldsPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
     complementaryFieldsPlugin.renderSocialMediaUrls = async () => [];
-    complementaryFieldsPlugin.renderXiaohongshuPage = async (renderUrl) => {
+    const complementaryRenderOptions = [];
+    complementaryFieldsPlugin.renderXiaohongshuPage = async (renderUrl, renderOptions) => {
+      complementaryRenderOptions.push(renderOptions);
       if (renderUrl === 'http://xhslink.cn/o/original-note') {
         return {
           url: 'https://www.xiaohongshu.com/explore/complementary-note',
@@ -5784,6 +5787,14 @@ async function runAsyncHydrationTests() {
     assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/complementary-cover.jpg)'));
     assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/complementary-page-2.jpg)'));
     assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![内页图 2](https://sns-webpic-qc.xhscdn.com/complementary-page-3.jpg)'));
+    assert.strictEqual(
+      complementaryRenderOptions.filter((options) => options && options.includeComments === false).length,
+      2,
+    );
+    assert.strictEqual(
+      complementaryRenderOptions.filter((options) => options && options.includeComments === true).length,
+      1,
+    );
 
     const genericRedirectMediaPlugin = new PluginClass();
     genericRedirectMediaPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
