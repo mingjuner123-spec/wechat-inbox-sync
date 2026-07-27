@@ -91,7 +91,7 @@ Expected: PASS。
 用假的 BrowserWindow 模拟：
 
 1. 初始短链无 noteId。
-2. `onBeforeRequest` 或 `will-redirect` 短暂出现官方 HTTPS note URL。
+2. 当前 Electron `details` 事件或旧版位置参数形式的主框架导航，短暂出现官方 HTTPS note URL。
 3. 最终 `location.href` 回到小红书首页。
 4. 页面结构里包含该 noteId 的目标正文。
 
@@ -121,7 +121,7 @@ const rememberIdentityUrl = (candidate) => {
 };
 ```
 
-从受信任的主框架 `onBeforeRequest`、`onBeforeRedirect` 和 `will-redirect` URL 中调用 `rememberIdentityUrl()`；快照选择时把 `observedIdentityUrl` 作为 expected identity。只接受 `xiaohongshu.com` 官方 HTTPS 且能提取合法 noteId 的地址。
+在每个隐藏 BrowserWindow 自己的 `webContents` 上监听 `will-navigate` 和 `will-redirect`，同时兼容当前 Electron 的 `details.url/details.isMainFrame` 与旧版位置参数签名；只从受信任的主框架导航调用 `rememberIdentityUrl()`。窗口关闭时用原 handler 引用精确移除监听器，禁止共享 Session 或其它窗口污染身份。快照选择时把 `observedIdentityUrl` 作为 expected identity，并且只接受 `xiaohongshu.com` 官方 HTTPS 且能提取合法 noteId 的地址。
 
 - [ ] **Step 4: 运行测试并确认 GREEN**
 
