@@ -6354,15 +6354,54 @@ function scoreXiaohongshuDescriptionCandidate(candidate) {
   return score;
 }
 
+function collectXiaohongshuNoteContentValues(source) {
+  const values = [];
+  const pushValue = (value) => {
+    const text = decodeHtmlEntities(String(value || '')).trim();
+    if (text && !values.includes(text)) values.push(text);
+  };
+  const visit = (value, path = []) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, path));
+      return;
+    }
+    const normalizedPath = path.map((entry) => String(entry || '').toLowerCase());
+    const insideCommentTree = normalizedPath.some((entry) => /comment|reply/.test(entry));
+    const objectKeys = Object.keys(value).map((key) => String(key || '').toLowerCase());
+    const looksLikeNote = normalizedPath.some((entry) => /note/.test(entry))
+      || objectKeys.some((key) => /^(?:note_?id|image_?list|display_?title|note_?type)$/.test(key));
+    Object.entries(value).forEach(([key, child]) => {
+      const normalizedKey = String(key || '').toLowerCase();
+      if (normalizedKey === 'content' && typeof child === 'string' && looksLikeNote && !insideCommentTree) {
+        pushValue(child);
+      }
+      if (child && typeof child === 'object') visit(child, [...normalizedPath, normalizedKey]);
+    });
+  };
+
+  collectTopLevelJsonObjectBlocks(decodeHtmlEntities(String(source || ''))).forEach((block) => {
+    try {
+      visit(JSON.parse(block), []);
+    } catch (error) {
+      // Only structurally parsed note objects may contribute a generic "content" field.
+    }
+  });
+  return values;
+}
+
 function extractXiaohongshuDescription(html, fallbackText = '') {
   const source = String(html || '');
-  const jsonCandidates = collectJsonStringValues(source, [
+  const jsonCandidates = [
+    ...collectJsonStringValues(source, [
       'desc',
       'description',
       'noteContent',
       'note_content',
       'displayTitle',
-    ]);
+    ]),
+    ...collectXiaohongshuNoteContentValues(source),
+  ];
   const candidates = [
     { text: cleanSocialDescription(fallbackText), weight: 100 },
     { text: cleanSocialDescription(extractMetaContent(source, ['description', 'og:description', 'twitter:description'])), weight: 300 },
@@ -9573,6 +9612,12 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
 }
 
 async function renderSocialMediaUrlsWithElectron(url, options = {}) {
+  if (isXiaohongshuUrl(url) && options.__xiaohongshuSessionLockHeld !== true) {
+    return await runWithXiaohongshuBrowserSessionLock(() => renderSocialMediaUrlsWithElectron(url, {
+      ...options,
+      __xiaohongshuSessionLockHeld: true,
+    }));
+  }
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');

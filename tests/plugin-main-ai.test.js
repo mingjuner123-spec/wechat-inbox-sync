@@ -317,6 +317,8 @@ const socialMediaRendererSource = pluginMainSource.slice(
 assert.ok(socialMediaRendererSource.includes('const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();'));
 assert.ok(socialMediaRendererSource.includes('shouldBlockExternalAppUrl(details && details.url)'));
 assert.ok(socialMediaRendererSource.includes('isXiaohongshuCommentApiUrl(details && details.url)'));
+assert.ok(socialMediaRendererSource.includes('runWithXiaohongshuBrowserSessionLock'));
+assert.ok(socialMediaRendererSource.includes('__xiaohongshuSessionLockHeld'));
 assert.ok(socialMediaRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
 assert.ok(socialMediaRendererSource.includes('await installDouyinExternalProtocolHandlers(wechatSession)'));
 assert.ok(
@@ -2833,6 +2835,13 @@ assert.ok(xiaohongshuNote.markdown.includes('![内页图 3](https://sns-webpic.e
 assert.ok(xiaohongshuNote.markdown.includes('## 评论区'));
 assert.ok(xiaohongshuNote.markdown.includes('**用户甲**：这个角度太有用了'));
 assert.strictEqual(xiaohongshuNote.comments.length, 1);
+
+const xiaohongshuPathAwareContentNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<script>{"note":{"content":"真实笔记正文只存在于 note.content 字段。 #正文标签"},"comments":[{"content":"评论内容绝不能冒充正文，即使它更长。 #评论标签"}]}</script>',
+].join(''), 'https://www.xiaohongshu.com/explore/path-aware-content', '', { includeComments: false });
+assert.ok(xiaohongshuPathAwareContentNote.description.includes('真实笔记正文只存在于 note.content 字段'));
+assert.strictEqual(xiaohongshuPathAwareContentNote.description.includes('评论内容绝不能冒充正文'), false);
+assert.strictEqual(xiaohongshuPathAwareContentNote.markdown.includes('评论内容绝不能冒充正文'), false);
 
 const genericXiaohongshuLandingHtml = [
   '<html><head>',
