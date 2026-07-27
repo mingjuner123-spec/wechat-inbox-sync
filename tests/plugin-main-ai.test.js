@@ -653,9 +653,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.70'), {
-  manifestVersion: '1.3.70',
-  runtimeVersion: '1.3.70',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.71'), {
+  manifestVersion: '1.3.71',
+  runtimeVersion: '1.3.71',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -845,6 +845,33 @@ assert.deepStrictEqual(mergedXiaohongshuExtraction.imageUrls, [
   'https://sns-webpic-qc.xhscdn.com/real-cover.jpg',
   'https://sns-webpic-qc.xhscdn.com/real-page-2.jpg',
 ]);
+const firstPublicPageExtraction = {
+  title: '第一次浏览器结果',
+  description: '第一份公开正文。',
+  tags: ['#第一份'],
+  imageUrls: ['https://sns-webpic-qc.xhscdn.com/notes/first-page.jpg'],
+  videoUrl: '',
+  comments: [],
+  markdown: '第一份公开正文。',
+};
+const secondPublicPageExtraction = {
+  title: '第二次浏览器结果',
+  description: '第二份公开正文不能和第一份拼接。',
+  tags: ['#第二份'],
+  imageUrls: ['https://sns-webpic-qc.xhscdn.com/notes/second-page.jpg'],
+  videoUrl: '',
+  comments: [],
+  markdown: '第二份公开正文不能和第一份拼接。',
+};
+const unboundPublicPageSelection = helpers.mergeXiaohongshuExtractions([
+  firstPublicPageExtraction,
+  secondPublicPageExtraction,
+], firstPublicPageExtraction);
+assert.deepStrictEqual(
+  unboundPublicPageSelection,
+  firstPublicPageExtraction,
+  'without an exact identity, keep one complete page result instead of stitching multiple pages together',
+);
 const matchedPrimaryExtraction = {
   title: '目标笔记标题',
   description: '目标笔记正文。',
@@ -3390,6 +3417,43 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
   'https://www.xiaohongshu.com/explore/generic-note',
 ), false);
 
+const legacyReadableXiaohongshuPageWithGenericTitleHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+  '<meta name="description" content="这是已经公开返回的完整笔记正文，包含足够多的有效文字，不应因为网页标题通用而拒绝保存。 #效率工具 #知识管理">',
+  '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/notes/note-cover.jpg">',
+  '</head><body>',
+  '<script>',
+  JSON.stringify({
+    noteDetailMap: [{
+      noteId: 'legacy-readable-note',
+      displayTitle: '公开图文笔记',
+      desc: '这是已经公开返回的完整笔记正文，包含足够多的有效文字。',
+      imageList: [
+        { urlDefault: 'https://sns-webpic-qc.xhscdn.com/notes/note-cover.jpg' },
+        { urlDefault: 'https://sns-webpic-qc.xhscdn.com/notes/note-page-2.jpg' },
+      ],
+    }],
+  }),
+  '</script>',
+  '</body></html>',
+].join('');
+const legacyReadableXiaohongshuPageWithGenericTitle = helpers.extractXiaohongshuMarkdownFromHtml(
+  legacyReadableXiaohongshuPageWithGenericTitleHtml,
+  'https://www.xiaohongshu.com/',
+);
+assert.ok(legacyReadableXiaohongshuPageWithGenericTitle.description.includes('完整笔记正文'));
+assert.strictEqual(legacyReadableXiaohongshuPageWithGenericTitle.imageUrls.length, 2);
+assert.strictEqual(
+  helpers.hasReadableXiaohongshuGraphicContent(
+    legacyReadableXiaohongshuPageWithGenericTitle,
+    legacyReadableXiaohongshuPageWithGenericTitleHtml,
+    'https://www.xiaohongshu.com/',
+  ),
+  true,
+  'restore the 1.3.30 rule: substantive public text or real note images are readable even when the document title is generic',
+);
+
 const realXiaohongshuNoteWithGenericDocumentTitleHtml = [
   '<html><head>',
   '<title>小红书 - 你的生活兴趣社区</title>',
@@ -3496,7 +3560,7 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
   mismatchedInnerNoteIdExtraction,
   mismatchedInnerNoteIdHtml,
   'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
-), false);
+), true);
 
 const nonGenericForeignRecommendationHtml = [
   '<html><head>',
@@ -3529,7 +3593,7 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
   nonGenericForeignRecommendation,
   nonGenericForeignRecommendationHtml,
   'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
-), false, 'a plausible recommendation note must not be accepted for a different target ID');
+), true, 'the 1.3.30 behavior accepts substantive public content without requiring an exact note ID match');
 
 const oversizedXiaohongshuStateHtml = [
   '<html><head><meta property="og:title" content="小红书 - 你的生活兴趣社区"></head><body><script>',
@@ -3570,8 +3634,8 @@ assert.strictEqual(
     plausibleRecommendationWithoutIdentityHtml,
     'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
   ),
-  false,
-  'plausible meta content without exact target identity must fail closed',
+  true,
+  'restore the 1.3.30 behavior: substantive public meta content is readable without exact target identity',
 );
 
 assert.strictEqual(typeof helpers.collectXiaohongshuNoteImageUrls, 'function');
@@ -3702,7 +3766,7 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
   unrelatedRecommendationLanding,
   unrelatedRecommendationLandingHtml,
   'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
-), false);
+), true);
 assert.strictEqual(typeof helpers.shouldStopWaitingForXiaohongshuContent, 'function');
 assert.strictEqual(helpers.shouldStopWaitingForXiaohongshuContent(
   realStructuredXiaohongshuNoteWithGenericMetaTitleHtml,
@@ -7457,8 +7521,23 @@ async function runAsyncHydrationTests() {
         };
       }
       return {
-        url: 'https://www.xiaohongshu.com/',
-        html: genericXiaohongshuLandingHtml,
+        url: 'https://www.xiaohongshu.com/explore/richer-recommendation',
+        html: [
+          '<html><head>',
+          '<meta property="og:title" content="更丰富但不是目标的推荐笔记">',
+          `<meta name="description" content="${'推荐流正文比目标页更长，但不能覆盖原始短链结果。'.repeat(20)}">`,
+          '</head><body><script>',
+          JSON.stringify({
+            noteDetailMap: Array.from({ length: 8 }, (_unused, index) => ({
+              displayTitle: `推荐笔记 ${index + 1}`,
+              desc: `推荐正文 ${index + 1}`,
+              imageList: [{
+                urlDefault: `https://sns-webpic-qc.xhscdn.com/notes/richer-recommendation-${index + 1}.jpg`,
+              }],
+            })),
+          }),
+          '</script></body></html>',
+        ].join(''),
         comments: [],
       };
     };
@@ -9352,7 +9431,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.70'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.71'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -9391,8 +9470,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.70',
-        runtimeVersion: '1.3.70',
+        manifestVersion: '1.3.71',
+        runtimeVersion: '1.3.71',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -9431,7 +9510,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   ]]);
 }
 
-async function runXiaohongshuFailureClosedIntegrationTest() {
+async function runXiaohongshuShareOnlyPageRemainsPendingTest() {
   const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-xhs-failure-'));
   const requestCalls = [];
   const vaultWrites = [];
@@ -11256,7 +11335,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.70 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.71 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -12851,7 +12930,7 @@ async function main() {
   await runStoppedDeletedRecordDoesNotRemainFailedInCurrentSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runXiaohongshuUnavailableRecordRemainsPendingTest();
-  await runXiaohongshuFailureClosedIntegrationTest();
+  await runXiaohongshuShareOnlyPageRemainsPendingTest();
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();
   await runMarkSyncedRecordNotFoundIsIdempotentTest();
