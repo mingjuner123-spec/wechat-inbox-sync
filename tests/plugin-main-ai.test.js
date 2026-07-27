@@ -316,6 +316,9 @@ const socialMediaRendererSource = pluginMainSource.slice(
 );
 assert.ok(socialMediaRendererSource.includes('const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();'));
 assert.ok(socialMediaRendererSource.includes('shouldBlockExternalAppUrl(details && details.url)'));
+assert.ok(socialMediaRendererSource.includes('isXiaohongshuCommentApiUrl(details && details.url)'));
+assert.ok(socialMediaRendererSource.includes('runWithXiaohongshuBrowserSessionLock'));
+assert.ok(socialMediaRendererSource.includes('__xiaohongshuSessionLockHeld'));
 assert.ok(socialMediaRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
 assert.ok(socialMediaRendererSource.includes('await installDouyinExternalProtocolHandlers(wechatSession)'));
 assert.ok(
@@ -327,6 +330,8 @@ const xiaohongshuPageRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuCommentsWithElectron'),
 );
 assert.ok(xiaohongshuPageRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
+assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
+assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -410,9 +415,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.67'), {
-  manifestVersion: '1.3.67',
-  runtimeVersion: '1.3.67',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.68'), {
+  manifestVersion: '1.3.68',
+  runtimeVersion: '1.3.68',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -430,6 +435,17 @@ const xiaohongshuFailureDiagnostic = helpers.buildXiaohongshuFailureDiagnostic({
     markdown: '存下口令，跳转【小红书】阅读',
     imageUrls: [],
   },
+  browserAttempts: [{
+    inputKind: 'original-shortlink',
+    attempted: true,
+    finalHost: 'xiaohongshu.com',
+    pageType: 'xiaohongshu-generic-landing',
+    bodyCharacterCount: 0,
+    imageCount: 1,
+    failed: false,
+    url: 'https://www.xiaohongshu.com/explore/secret?xsec_token=must-not-leak',
+    cookie: 'must-not-leak',
+  }],
 });
 assert.strictEqual(xiaohongshuFailureDiagnostic.request.sourceHost, 'xhslink.cn');
 assert.strictEqual(xiaohongshuFailureDiagnostic.request.finalHost, 'xiaohongshu.com');
@@ -440,6 +456,16 @@ assert.strictEqual(xiaohongshuFailureDiagnostic.extraction.imageCount, 0);
 assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('source-secret'), false);
 assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('resolved-secret'), false);
 assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('存下口令'), false);
+assert.deepStrictEqual(xiaohongshuFailureDiagnostic.request.browserAttempts, [{
+  inputKind: 'original-shortlink',
+  attempted: true,
+  finalHost: 'xiaohongshu.com',
+  pageType: 'xiaohongshu-generic-landing',
+  bodyCharacterCount: 0,
+  imageCount: 1,
+  failed: false,
+}]);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('must-not-leak'), false);
 const xiaohongshuFailureLogText = helpers.buildSyncDiagnosticLogText({
   status: 'failed',
   message: '单条内容同步失败',
@@ -482,6 +508,88 @@ assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://edith.xiaohong
 assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('http://xhslink.cn/o/demo'), false);
 assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://xiaohongshu.com.evil.example/'), false);
 assert.strictEqual(typeof helpers.hasXiaohongshuLoginCookies, 'function');
+assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
+  hasProAccess: false,
+  commentsEnabled: true,
+  isLoggedIn: false,
+}), {
+  publicGraphic: true,
+  mediaTranscription: false,
+  imageOcr: false,
+  comments: false,
+});
+assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
+  hasProAccess: true,
+  commentsEnabled: true,
+  isLoggedIn: false,
+}), {
+  publicGraphic: true,
+  mediaTranscription: true,
+  imageOcr: true,
+  comments: false,
+});
+assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
+  hasProAccess: true,
+  commentsEnabled: true,
+  isLoggedIn: true,
+}), {
+  publicGraphic: true,
+  mediaTranscription: true,
+  imageOcr: true,
+  comments: true,
+});
+assert.deepStrictEqual(
+  helpers.getXiaohongshuBrowserCandidates(
+    'http://xhslink.cn/o/demo',
+    'https://www.xiaohongshu.com/explore/note-1?xsec_token=redacted',
+  ).map((item) => item.kind),
+  ['original-shortlink', 'resolved-url'],
+);
+assert.strictEqual(
+  helpers.getXiaohongshuBrowserCandidates(
+    'https://www.xiaohongshu.com/explore/note-1',
+    'https://www.xiaohongshu.com/explore/note-1',
+  ).length,
+  1,
+);
+const mergedXiaohongshuExtraction = helpers.mergeXiaohongshuExtractions([
+  {
+    title: '小红书笔记',
+    description: '单纯到真诚，我走了10年！ http://xhslink.cn/o/demo 先复制这段口令，再去【小红书】打开笔记查看更多内容。',
+    tags: [],
+    imageUrls: ['https://ci.xiaohongshu.com/default-landing.png'],
+    videoUrl: '',
+    comments: [],
+    markdown: '分享口令',
+  },
+  {
+    title: '真实笔记标题',
+    description: '真实笔记正文。',
+    tags: ['#真实标签'],
+    imageUrls: [
+      'https://sns-webpic-qc.xhscdn.com/real-cover.jpg',
+      'https://sns-webpic-qc.xhscdn.com/real-page-2.jpg',
+    ],
+    videoUrl: '',
+    comments: [],
+    markdown: '真实笔记正文。',
+  },
+], {
+  title: '小红书笔记',
+  description: '单纯到真诚，我走了10年！ http://xhslink.cn/o/demo 先复制这段口令，再去【小红书】打开笔记查看更多内容。',
+  tags: [],
+  imageUrls: ['https://ci.xiaohongshu.com/default-landing.png'],
+  videoUrl: '',
+  comments: [],
+  markdown: '分享口令',
+});
+assert.strictEqual(mergedXiaohongshuExtraction.title, '真实笔记标题');
+assert.strictEqual(mergedXiaohongshuExtraction.description, '真实笔记正文。');
+assert.deepStrictEqual(mergedXiaohongshuExtraction.tags, ['#真实标签']);
+assert.deepStrictEqual(mergedXiaohongshuExtraction.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/real-cover.jpg',
+  'https://sns-webpic-qc.xhscdn.com/real-page-2.jpg',
+]);
 assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.getXiaohongshuCapturedRequestBody, 'function');
 assert.strictEqual(
@@ -1187,7 +1295,7 @@ assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默�
 assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), false);
 assert.ok(pluginMainSource.includes('小红书图文 OCR：已默认开启'));
 assert.ok(pluginMainSource.includes('const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);'));
-assert.ok(pluginMainSource.includes('if (hasProAdvancedAccess && !isXiaohongshuVideoNote) {'));
+assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isXiaohongshuVideoNote) {'));
 assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
 assert.strictEqual(pluginMainSource.includes('图片文字识别 OCR 模块'), false);
 assert.ok(pluginMainSource.includes('getLocalOcrInstallStatus'));
@@ -2728,6 +2836,19 @@ assert.ok(xiaohongshuNote.markdown.includes('## 评论区'));
 assert.ok(xiaohongshuNote.markdown.includes('**用户甲**：这个角度太有用了'));
 assert.strictEqual(xiaohongshuNote.comments.length, 1);
 
+const xiaohongshuPathAwareContentNote = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<script>{"note":{"content":"真实笔记正文只存在于 note.content 字段。 #正文标签"},"comments":[{"content":"评论内容绝不能冒充正文，即使它更长。 #评论标签"}]}</script>',
+].join(''), 'https://www.xiaohongshu.com/explore/path-aware-content', '', { includeComments: false });
+assert.ok(xiaohongshuPathAwareContentNote.description.includes('真实笔记正文只存在于 note.content 字段'));
+assert.strictEqual(xiaohongshuPathAwareContentNote.description.includes('评论内容绝不能冒充正文'), false);
+assert.strictEqual(xiaohongshuPathAwareContentNote.markdown.includes('评论内容绝不能冒充正文'), false);
+
+const xiaohongshuStandaloneCommentObject = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<script>window.__COMMENTS__=[{"note_id":"note-1","content":"独立评论对象即使带 note_id 也不能冒充正文。 #评论标签"}]</script>',
+].join(''), 'https://www.xiaohongshu.com/explore/standalone-comment', '', { includeComments: false });
+assert.strictEqual(xiaohongshuStandaloneCommentObject.description.includes('独立评论对象'), false);
+assert.strictEqual(xiaohongshuStandaloneCommentObject.markdown.includes('独立评论对象'), false);
+
 const genericXiaohongshuLandingHtml = [
   '<html><head>',
   '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
@@ -4258,6 +4379,27 @@ assert.deepStrictEqual(helpers.parseTencentTaskStatusResponse({
 });
 
 async function runAsyncHydrationTests() {
+  const xiaohongshuRenderOrder = [];
+  let releaseFirstXiaohongshuRender;
+  const firstXiaohongshuRenderGate = new Promise((resolve) => {
+    releaseFirstXiaohongshuRender = resolve;
+  });
+  const firstXiaohongshuRender = helpers.runWithXiaohongshuBrowserSessionLock(async () => {
+    xiaohongshuRenderOrder.push('first:start');
+    await firstXiaohongshuRenderGate;
+    xiaohongshuRenderOrder.push('first:end');
+  });
+  await Promise.resolve();
+  const secondXiaohongshuRender = helpers.runWithXiaohongshuBrowserSessionLock(async () => {
+    xiaohongshuRenderOrder.push('second:start');
+    xiaohongshuRenderOrder.push('second:end');
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepStrictEqual(xiaohongshuRenderOrder, ['first:start']);
+  releaseFirstXiaohongshuRender();
+  await Promise.all([firstXiaohongshuRender, secondXiaohongshuRender]);
+  assert.deepStrictEqual(xiaohongshuRenderOrder, ['first:start', 'first:end', 'second:start', 'second:end']);
+
   const plugin = new PluginClass();
   plugin.settings = { aiProvider: 'off' };
 
@@ -5396,6 +5538,7 @@ async function runAsyncHydrationTests() {
     xiaohongshuCommentsEnabled: true,
   });
   xhsVideoWithCommentsPlugin.hasProFeatureAccess = async () => true;
+  xhsVideoWithCommentsPlugin.checkXiaohongshuLogin = async () => true;
   xhsVideoWithCommentsPlugin.runConfiguredTranscription = async () => ({
     transcription: '视频口播正文',
     source: 'local',
@@ -5439,7 +5582,8 @@ async function runAsyncHydrationTests() {
 
   const genericXhsLandingVideoPlugin = new PluginClass();
   genericXhsLandingVideoPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
-  genericXhsLandingVideoPlugin.hasProFeatureAccess = async () => false;
+  genericXhsLandingVideoPlugin.hasProFeatureAccess = async () => true;
+  genericXhsLandingVideoPlugin.checkXiaohongshuLogin = async () => false;
   genericXhsLandingVideoPlugin.renderSocialMediaUrls = async () => [
     'https://sns-video-v6.xhscdn.com/stream/demo.mp4?sign=test',
   ];
@@ -5542,20 +5686,28 @@ async function runAsyncHydrationTests() {
   const originalHttpsRequestForGenericRedirect = https.request;
   const previousGenericRedirectRequestUrlMock = requestUrlMock;
   const genericRedirectRenderUrls = [];
-  genericRedirectFallbackPlugin.renderXiaohongshuPage = async (renderUrl) => {
+  const genericRedirectRenderOptions = [];
+  genericRedirectFallbackPlugin.renderXiaohongshuPage = async (renderUrl, renderOptions) => {
     genericRedirectRenderUrls.push(renderUrl);
-    assert.strictEqual(
-      renderUrl,
-      'http://xhslink.cn/o/original-note',
-      'Node 跳到通用首页后，隐藏浏览器必须重新打开仍包含笔记身份的原始短链',
-    );
+    genericRedirectRenderOptions.push(renderOptions);
+    if (renderUrl === 'http://xhslink.cn/o/original-note') {
+      return {
+        url: 'https://www.xiaohongshu.com/',
+        html: genericXiaohongshuLandingHtml,
+        comments: [],
+      };
+    }
+    assert.strictEqual(renderUrl, 'https://www.xiaohongshu.com/');
     return {
+      url: 'https://www.xiaohongshu.com/explore/recovered-note',
       html: [
         '<html><head>',
-        '<meta property="og:title" content="原始短链恢复成功">',
-        '<meta name="description" content="隐藏浏览器从原始短链恢复了真实笔记正文，而不是再次打开通用首页。">',
-        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/original-note.jpg">',
-        '</head></html>',
+        '<meta property="og:title" content="真实地址恢复成功">',
+        '<meta name="description" content="真实地址恢复出了完整正文内容。 #效率工具 #知识管理">',
+        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/resolved-cover.jpg">',
+        '</head><body>',
+        '<script>{"note":{"desc":"真实地址恢复出了完整正文内容。 #效率工具 #知识管理","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/resolved-cover.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/resolved-page-2.jpg"}]}}</script>',
+        '</body></html>',
       ].join(''),
       comments: [],
     };
@@ -5604,13 +5756,125 @@ async function runAsyncHydrationTests() {
         shareText: '原始短链恢复测试',
       },
     }, '', '', '小红书短链通用首页恢复');
-    assert.deepStrictEqual(genericRedirectRenderUrls, ['http://xhslink.cn/o/original-note']);
-    assert.strictEqual(genericRedirectRecord.metadata.title, '原始短链恢复成功');
-    assert.ok(genericRedirectRecord.metadata.markdown.includes('隐藏浏览器从原始短链恢复了真实笔记正文'));
+    assert.deepStrictEqual(genericRedirectRenderUrls, [
+      'http://xhslink.cn/o/original-note',
+      'https://www.xiaohongshu.com/',
+    ]);
+    assert.ok(genericRedirectRenderOptions.every((options) => options && options.includeComments === false));
+    assert.strictEqual(genericRedirectRecord.metadata.title, '真实地址恢复成功');
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('真实地址恢复出了完整正文内容'));
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('#效率工具'));
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/resolved-cover.jpg)'));
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/resolved-page-2.jpg)'));
+
+    const originalPreferredPlugin = new PluginClass();
+    originalPreferredPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+    originalPreferredPlugin.hasProFeatureAccess = async () => false;
+    originalPreferredPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    originalPreferredPlugin.renderSocialMediaUrls = async () => [];
+    const originalPreferredRenderUrls = [];
+    originalPreferredPlugin.renderXiaohongshuPage = async (renderUrl) => {
+      originalPreferredRenderUrls.push(renderUrl);
+      if (renderUrl === 'http://xhslink.cn/o/original-note') {
+        return {
+          url: 'https://www.xiaohongshu.com/explore/original-recovered',
+          html: [
+            '<html><head>',
+            '<meta property="og:title" content="原始短链恢复成功">',
+            '<meta name="description" content="原始短链恢复了真实正文，跳转后的地址仍然只是通用首页。">',
+            '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/original-recovered.jpg">',
+            '</head></html>',
+          ].join(''),
+          comments: [],
+        };
+      }
+      return {
+        url: 'https://www.xiaohongshu.com/',
+        html: genericXiaohongshuLandingHtml,
+        comments: [],
+      };
+    };
+    const originalPreferredRecord = await originalPreferredPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://xhslink.cn/o/original-note',
+      metadata: {
+        url: 'http://xhslink.cn/o/original-note',
+        shareText: '原始短链恢复测试',
+      },
+    }, '', '', '小红书原始短链恢复');
+    assert.deepStrictEqual(originalPreferredRenderUrls, [
+      'http://xhslink.cn/o/original-note',
+      'https://www.xiaohongshu.com/',
+    ]);
+    assert.strictEqual(originalPreferredRecord.metadata.title, '原始短链恢复成功');
+    assert.ok(originalPreferredRecord.metadata.markdown.includes('原始短链恢复了真实正文'));
+
+    const complementaryFieldsPlugin = new PluginClass();
+    complementaryFieldsPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'off',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: true,
+    });
+    complementaryFieldsPlugin.hasProFeatureAccess = async () => true;
+    complementaryFieldsPlugin.checkXiaohongshuLogin = async () => true;
+    complementaryFieldsPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    complementaryFieldsPlugin.renderSocialMediaUrls = async () => [];
+    const complementaryRenderOptions = [];
+    complementaryFieldsPlugin.renderXiaohongshuPage = async (renderUrl, renderOptions) => {
+      complementaryRenderOptions.push(renderOptions);
+      if (renderUrl === 'http://xhslink.cn/o/original-note') {
+        return {
+          url: 'https://www.xiaohongshu.com/explore/complementary-note',
+          html: [
+            '<html><head>',
+            '<meta property="og:title" content="互补字段完整标题">',
+            '<meta name="description" content="这是第一条路径取得的完整长正文内容，必须与另一条路径的全部图片合并。 #互补标签">',
+            '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/complementary-cover.jpg">',
+            '</head></html>',
+          ].join(''),
+          comments: [],
+        };
+      }
+      return {
+        url: 'https://www.xiaohongshu.com/explore/complementary-note',
+        html: [
+          '<html><head>',
+          '<meta property="og:title" content="互补字段完整标题">',
+          '<meta name="description" content="图片路径">',
+          '</head><body>',
+          '<script>{"note":{"desc":"图片路径","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/complementary-cover.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/complementary-page-2.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/complementary-page-3.jpg"}]}}</script>',
+          '</body></html>',
+        ].join(''),
+        comments: [],
+      };
+    };
+    const complementaryFieldsRecord = await complementaryFieldsPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://xhslink.cn/o/original-note',
+      metadata: {
+        url: 'http://xhslink.cn/o/original-note',
+        shareText: '互补字段测试',
+      },
+    }, '', '', '小红书互补字段测试');
+    assert.strictEqual(complementaryFieldsRecord.metadata.title, '互补字段完整标题');
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('这是第一条路径取得的完整长正文内容'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('#互补标签'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/complementary-cover.jpg)'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/complementary-page-2.jpg)'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![内页图 2](https://sns-webpic-qc.xhscdn.com/complementary-page-3.jpg)'));
+    assert.strictEqual(
+      complementaryRenderOptions.filter((options) => options && options.includeComments === false).length,
+      2,
+    );
+    assert.strictEqual(
+      complementaryRenderOptions.filter((options) => options && options.includeComments === true).length,
+      1,
+    );
 
     const genericRedirectMediaPlugin = new PluginClass();
     genericRedirectMediaPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
-    genericRedirectMediaPlugin.hasProFeatureAccess = async () => false;
+    genericRedirectMediaPlugin.hasProFeatureAccess = async () => true;
+    genericRedirectMediaPlugin.checkXiaohongshuLogin = async () => false;
     genericRedirectMediaPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
     genericRedirectMediaPlugin.renderXiaohongshuPage = async (renderUrl) => {
       assert.strictEqual(renderUrl, 'http://xhslink.cn/o/original-note');
@@ -5620,8 +5884,10 @@ async function runAsyncHydrationTests() {
       };
     };
     const genericRedirectMediaUrls = [];
-    genericRedirectMediaPlugin.renderSocialMediaUrls = async (renderUrl) => {
+    const genericRedirectMediaOptions = [];
+    genericRedirectMediaPlugin.renderSocialMediaUrls = async (renderUrl, renderOptions) => {
       genericRedirectMediaUrls.push(renderUrl);
+      genericRedirectMediaOptions.push(renderOptions);
       return ['https://sns-video-v6.xhscdn.com/stream/original-note.mp4'];
     };
     genericRedirectMediaPlugin.runConfiguredTranscription = async () => ({
@@ -5639,6 +5905,7 @@ async function runAsyncHydrationTests() {
     }, '', '', '小红书短链视频恢复');
     assert.ok(genericRedirectMediaUrls.length >= 1);
     assert.ok(genericRedirectMediaUrls.every((renderUrl) => renderUrl === 'http://xhslink.cn/o/original-note'));
+    assert.ok(genericRedirectMediaOptions.every((options) => options && options.includeComments === false));
     assert.strictEqual(genericRedirectMediaRecord.metadata.transcription, '原始短链恢复的视频转写正文');
   } finally {
     http.request = originalHttpRequestForGenericRedirect;
@@ -5653,11 +5920,14 @@ async function runAsyncHydrationTests() {
     xiaohongshuCommentsEnabled: true,
   });
   renderedFallbackPlugin.hasProFeatureAccess = async () => true;
+  renderedFallbackPlugin.checkXiaohongshuLogin = async () => true;
   renderedFallbackPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
   renderedFallbackPlugin.renderSocialMediaUrls = async () => [];
   let renderedFallbackCalls = 0;
-  renderedFallbackPlugin.renderXiaohongshuPage = async () => {
+  const renderedFallbackOptions = [];
+  renderedFallbackPlugin.renderXiaohongshuPage = async (_renderUrl, renderOptions) => {
     renderedFallbackCalls += 1;
+    renderedFallbackOptions.push(renderOptions);
     return {
       html: [
         '<html><head>',
@@ -5695,7 +5965,15 @@ async function runAsyncHydrationTests() {
         shareText: '86【超常儿童，也可能被鸡废了，家长都踩过】分享口令',
       },
     }, '', '', '小红书渲染恢复');
-    assert.strictEqual(renderedFallbackCalls, 1);
+    assert.strictEqual(renderedFallbackCalls, 2);
+    assert.strictEqual(
+      renderedFallbackOptions.filter((options) => options && options.includeComments === false).length,
+      1,
+    );
+    assert.strictEqual(
+      renderedFallbackOptions.filter((options) => options && options.includeComments === true).length,
+      1,
+    );
     assert.strictEqual(renderedFallbackRecord.metadata.title, '超常儿童，也可能被鸡废了');
     assert.ok(renderedFallbackRecord.metadata.markdown.includes('隐藏浏览器恢复出来的完整小红书正文'));
     assert.ok(renderedFallbackRecord.metadata.markdown.includes('real-cover.jpg'));
@@ -5710,7 +5988,17 @@ async function runAsyncHydrationTests() {
   let anonymousFastRenderCalls = 0;
   anonymousFastPlugin.renderXiaohongshuPage = async () => {
     anonymousFastRenderCalls += 1;
-    throw new Error('complete anonymous HTML must not need rendered content');
+    return {
+      url: 'https://www.xiaohongshu.com/explore/anonymous-fast-note',
+      html: [
+        '<html><head>',
+        '<meta property="og:title" content="匿名路径真实笔记">',
+        '<meta name="description" content="匿名路径完整正文已经直接返回，隐藏浏览器用于补齐内页图片。">',
+        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/anonymous-cover.jpg">',
+        '<script>{"note":{"desc":"匿名路径完整正文已经直接返回，隐藏浏览器用于补齐内页图片。","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/anonymous-cover.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/anonymous-inner.jpg"}]}}</script>',
+        '</head></html>',
+      ].join(''),
+    };
   };
   const previousAnonymousFastRequestUrlMock = requestUrlMock;
   requestUrlMock = async ({ url }) => {
@@ -5733,11 +6021,209 @@ async function runAsyncHydrationTests() {
       content: 'https://www.xiaohongshu.com/explore/anonymous-fast-note',
       metadata: { url: 'https://www.xiaohongshu.com/explore/anonymous-fast-note' },
     }, '', '', '匿名路径测试');
-    assert.strictEqual(anonymousFastRenderCalls, 0);
+    assert.ok(anonymousFastRenderCalls > 0);
     assert.ok(anonymousFastRecord.metadata.markdown.includes('匿名路径完整正文'));
+    assert.ok(anonymousFastRecord.metadata.markdown.includes('anonymous-inner.jpg'));
   } finally {
     requestUrlMock = previousAnonymousFastRequestUrlMock;
   }
+
+  const xiaohongshuCapabilityHtml = [
+    '<html><head>',
+    '<meta property="og:title" content="公开图文不依赖评论权限">',
+    '<meta name="description" content="所有用户都应该取得这段公开正文以及完整图片。 #公开内容">',
+    '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/public-cover.jpg">',
+    '</head><body>',
+    '<script>window.__INITIAL_STATE__={"comments":[{"content":"仅登录 Pro 可见评论，这段评论故意写得比公开正文更长，绝不能被通用 JSON 正文提取器误判成笔记正文。 #评论内容"}]}</script>',
+    '<div class="comment-item"><span class="user-name">评论用户</span><span class="comment-content">仅登录 Pro 可见评论</span></div>',
+    '</body></html>',
+  ].join('');
+
+  const runXiaohongshuCommentCapabilityCase = async ({
+    hasProAccess,
+    loginResult,
+    loginError = null,
+  }) => {
+    const capabilityPlugin = new PluginClass();
+    capabilityPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'off',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: true,
+    });
+    capabilityPlugin.hasProFeatureAccess = async () => hasProAccess;
+    capabilityPlugin.checkXiaohongshuLogin = async () => {
+      if (loginError) throw loginError;
+      return loginResult;
+    };
+    capabilityPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    capabilityPlugin.renderSocialMediaUrls = async () => [];
+    capabilityPlugin.renderXiaohongshuPage = async () => ({
+      url: 'https://www.xiaohongshu.com/explore/comment-capability',
+      html: xiaohongshuCapabilityHtml,
+      comments: [{
+        id: 'login-comment',
+        author: '评论用户',
+        content: '仅登录 Pro 可见评论',
+      }],
+    });
+    const previousCapabilityRequestUrlMock = requestUrlMock;
+    requestUrlMock = async ({ url }) => {
+      if (url === 'https://www.xiaohongshu.com/explore/comment-capability') {
+        return { status: 200, text: xiaohongshuCapabilityHtml };
+      }
+      throw new Error(`unexpected comment capability request ${url}`);
+    };
+    try {
+      return await capabilityPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/comment-capability',
+        metadata: { url: 'https://www.xiaohongshu.com/explore/comment-capability' },
+      }, '', '', '小红书评论权限测试');
+    } finally {
+      requestUrlMock = previousCapabilityRequestUrlMock;
+    }
+  };
+
+  const freeCommentCapabilityRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: false,
+    loginResult: false,
+  });
+  assert.ok(freeCommentCapabilityRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.strictEqual(freeCommentCapabilityRecord.metadata.markdown.includes('仅登录 Pro 可见评论'), false);
+
+  const proLoggedOutCommentCapabilityRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: true,
+    loginResult: false,
+  });
+  assert.ok(proLoggedOutCommentCapabilityRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.strictEqual(proLoggedOutCommentCapabilityRecord.metadata.markdown.includes('仅登录 Pro 可见评论'), false);
+
+  const proLoggedInCommentCapabilityRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: true,
+    loginResult: true,
+  });
+  assert.ok(proLoggedInCommentCapabilityRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.ok(proLoggedInCommentCapabilityRecord.metadata.markdown.includes('仅登录 Pro 可见评论'));
+
+  const proLoginProbeFailureRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: true,
+    loginResult: false,
+    loginError: new Error('simulated login probe failure'),
+  });
+  assert.ok(proLoginProbeFailureRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.strictEqual(proLoginProbeFailureRecord.metadata.markdown.includes('仅登录 Pro 可见评论'), false);
+
+  const runXiaohongshuOcrCapabilityCase = async (hasProAccess) => {
+    const ocrPlugin = new PluginClass();
+    ocrPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'off',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: false,
+    });
+    ocrPlugin.hasProFeatureAccess = async () => hasProAccess;
+    let ocrCalls = 0;
+    ocrPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => {
+      ocrCalls += 1;
+      return {
+        ...extracted,
+        ocrError: 'simulated OCR enhancement failure',
+      };
+    };
+    const previousOcrCapabilityRequestUrlMock = requestUrlMock;
+    requestUrlMock = async ({ url }) => {
+      if (url === 'https://www.xiaohongshu.com/explore/ocr-capability') {
+        return {
+          status: 200,
+          text: [
+            '<html><head>',
+            '<meta property="og:title" content="长图 OCR 权限测试">',
+            '<meta name="description" content="公开图文正文必须先成功，OCR 只是 Pro 附加能力。">',
+            '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/ocr-cover.jpg">',
+            '</head></html>',
+          ].join(''),
+        };
+      }
+      throw new Error(`unexpected OCR capability request ${url}`);
+    };
+    try {
+      const record = await ocrPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/ocr-capability',
+        metadata: { url: 'https://www.xiaohongshu.com/explore/ocr-capability' },
+      }, '', '', '小红书 OCR 权限测试');
+      return { record, ocrCalls };
+    } finally {
+      requestUrlMock = previousOcrCapabilityRequestUrlMock;
+    }
+  };
+
+  const freeOcrCapability = await runXiaohongshuOcrCapabilityCase(false);
+  assert.strictEqual(freeOcrCapability.ocrCalls, 0);
+  assert.ok(freeOcrCapability.record.metadata.markdown.includes('公开图文正文必须先成功'));
+  assert.strictEqual(freeOcrCapability.record.metadata.xiaohongshuOcrError, '');
+
+  const proOcrCapability = await runXiaohongshuOcrCapabilityCase(true);
+  assert.strictEqual(proOcrCapability.ocrCalls, 1);
+  assert.ok(proOcrCapability.record.metadata.markdown.includes('公开图文正文必须先成功'));
+  assert.strictEqual(proOcrCapability.record.metadata.xiaohongshuOcrError, 'simulated OCR enhancement failure');
+
+  const runXiaohongshuVideoCapabilityCase = async (hasProAccess) => {
+    const videoCapabilityPlugin = new PluginClass();
+    videoCapabilityPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'local',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: false,
+    });
+    videoCapabilityPlugin.hasProFeatureAccess = async () => hasProAccess;
+    let transcriptionCalls = 0;
+    videoCapabilityPlugin.runConfiguredTranscription = async () => {
+      transcriptionCalls += 1;
+      if (!hasProAccess) throw new Error('free transcription must not run');
+      return {
+        transcription: 'Pro 用户成功取得音视频文案',
+        source: 'local',
+      };
+    };
+    const previousVideoCapabilityRequestUrlMock = requestUrlMock;
+    requestUrlMock = async ({ url }) => {
+      if (url === 'https://www.xiaohongshu.com/explore/video-capability') {
+        return {
+          status: 200,
+          text: [
+            '<html><head>',
+            '<meta property="og:title" content="音视频 Pro 权限测试">',
+            '<meta property="og:video" content="https://sns-video-v6.xhscdn.com/stream/video-capability.mp4">',
+            '</head></html>',
+          ].join(''),
+        };
+      }
+      throw new Error(`unexpected video capability request ${url}`);
+    };
+    try {
+      const record = await videoCapabilityPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/video-capability',
+        metadata: {
+          url: 'https://www.xiaohongshu.com/explore/video-capability',
+          webpageMediaType: 'audio_video',
+          transcriptionMode: 'local',
+        },
+      }, '', '', '小红书音视频权限测试');
+      return { record, transcriptionCalls };
+    } finally {
+      requestUrlMock = previousVideoCapabilityRequestUrlMock;
+    }
+  };
+
+  const freeVideoCapability = await runXiaohongshuVideoCapabilityCase(false);
+  assert.strictEqual(freeVideoCapability.transcriptionCalls, 0);
+  assert.strictEqual(freeVideoCapability.record.metadata.transcriptionStatus, 'failed');
+  assert.match(freeVideoCapability.record.metadata.transcriptionError, /Pro/);
+
+  const proVideoCapability = await runXiaohongshuVideoCapabilityCase(true);
+  assert.strictEqual(proVideoCapability.transcriptionCalls, 1);
+  assert.strictEqual(proVideoCapability.record.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(proVideoCapability.record.metadata.transcription, 'Pro 用户成功取得音视频文案');
 
   const unavailableGraphicPlugin = new PluginClass();
   unavailableGraphicPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
@@ -6149,6 +6635,8 @@ async function runAsyncHydrationTests() {
       status: 'bound',
     }],
   });
+  localPlatformParsePlugin.hasProFeatureAccess = async () => true;
+  localPlatformParsePlugin.checkXiaohongshuLogin = async () => false;
   let localPrepareCalled = false;
   localPlatformParsePlugin.prepareWebpageMedia = async () => {
     localPrepareCalled = true;
@@ -7126,7 +7614,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.67'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.68'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -7165,8 +7653,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.67',
-        runtimeVersion: '1.3.67',
+        manifestVersion: '1.3.68',
+        runtimeVersion: '1.3.68',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -9030,7 +9518,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.67 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.68 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
