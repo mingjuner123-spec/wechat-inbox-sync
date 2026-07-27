@@ -6388,18 +6388,15 @@ function extractXiaohongshuAuthor(html) {
   return candidates[0] || '';
 }
 
-function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '', options = {}) {
-  url = cleanDisplayUrl(url);
-  const source = String(html || '');
-  const title = extractMetaContent(source, ['og:title', 'twitter:title'])
-    || extractHtmlTitle(source)
-    || '小红书笔记';
-  const description = extractXiaohongshuDescription(source, fallbackText);
-  const tags = extractTagsFromText(description, source);
-  const images = collectXiaohongshuNoteImageUrls(source);
-  const videoUrl = extractVideoUrlFromHtml(source);
-  const includeComments = options.includeComments !== false;
-  const comments = includeComments ? extractSocialCommentsFromHtml(source) : [];
+function buildXiaohongshuMarkdown({
+  title = '小红书笔记',
+  description = '',
+  tags = [],
+  imageUrls = [],
+  videoUrl = '',
+  comments = [],
+} = {}) {
+  const images = Array.isArray(imageUrls) ? imageUrls : [];
   const lines = [
     '## 标题',
     '',
@@ -6434,15 +6431,95 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '', option
     lines.push(commentsMarkdown, '');
   }
 
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '', options = {}) {
+  url = cleanDisplayUrl(url);
+  const source = String(html || '');
+  const title = extractMetaContent(source, ['og:title', 'twitter:title'])
+    || extractHtmlTitle(source)
+    || '小红书笔记';
+  const description = extractXiaohongshuDescription(source, fallbackText);
+  const tags = extractTagsFromText(description, source);
+  const images = collectXiaohongshuNoteImageUrls(source);
+  const videoUrl = extractVideoUrlFromHtml(source);
+  const includeComments = options.includeComments !== false;
+  const comments = includeComments ? extractSocialCommentsFromHtml(source) : [];
+
   return {
     title,
     author: extractXiaohongshuAuthor(source),
     description,
     tags,
-    markdown: lines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    markdown: buildXiaohongshuMarkdown({
+      title,
+      description,
+      tags,
+      imageUrls: images,
+      videoUrl,
+      comments,
+    }),
     imageUrls: images,
     videoUrl,
     comments,
+  };
+}
+
+function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
+  const ordered = [];
+  const addExtraction = (item) => {
+    if (!item || typeof item !== 'object' || ordered.includes(item)) return;
+    ordered.push(item);
+  };
+  addExtraction(preferred);
+  (Array.isArray(extractions) ? extractions : []).forEach(addExtraction);
+  if (!ordered.length) return preferred || null;
+
+  const isUsableTitle = (value) => {
+    const text = String(value || '').trim();
+    return text && !/^(小红书笔记|小红书|发现精彩|登录后查看更多)$/i.test(text);
+  };
+  const descriptions = ordered
+    .map((item) => String(item.description || '').trim())
+    .filter((text) => text && !isXiaohongshuShareBoilerplateOnly(text));
+  const title = String((ordered.find((item) => isUsableTitle(item.title)) || {}).title || preferred?.title || '小红书笔记').trim();
+  const author = String((ordered.find((item) => String(item.author || '').trim()) || {}).author || '').trim();
+  const description = descriptions.sort((a, b) => b.length - a.length)[0]
+    || String(preferred?.description || '').trim();
+  const tags = [];
+  const imageUrls = [];
+  const comments = [];
+  const addUniqueText = (target, value) => {
+    const text = String(value || '').trim();
+    if (text && !target.includes(text)) target.push(text);
+  };
+  ordered.forEach((item) => {
+    (Array.isArray(item.tags) ? item.tags : []).forEach((tag) => addUniqueText(tags, tag));
+    (Array.isArray(item.imageUrls) ? item.imageUrls : []).forEach((imageUrl) => addUniqueText(imageUrls, imageUrl));
+    (Array.isArray(item.comments) ? item.comments : []).forEach((comment) => {
+      const key = JSON.stringify(comment);
+      if (!comments.some((existing) => JSON.stringify(existing) === key)) comments.push(comment);
+    });
+  });
+  const videoUrl = String((ordered.find((item) => String(item.videoUrl || '').trim()) || {}).videoUrl || '').trim();
+
+  return {
+    title,
+    author,
+    description,
+    tags,
+    imageUrls,
+    videoUrl,
+    comments,
+    markdown: buildXiaohongshuMarkdown({
+      title,
+      description,
+      tags,
+      imageUrls,
+      videoUrl,
+      comments,
+    }),
   };
 }
 
@@ -9668,7 +9745,89 @@ async function renderSocialMediaUrlsWithElectron(url) {
   }
 }
 
-async function renderXiaohongshuPageWithElectron(url) {
+async function renderXiaohongshuContentWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('Current Obsidian environment does not support hidden browser rendering');
+  }
+
+  const xiaohongshuSession = getXiaohongshuSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 960,
+    show: false,
+    webPreferences: {
+      session: xiaohongshuSession || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  installExternalAppNavigationGuards(win.webContents);
+  const browserSession = (win.webContents && win.webContents.session) || xiaohongshuSession;
+  let blocksCommentRequests = false;
+
+  try {
+    if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === 'function') {
+      browserSession.webRequest.onBeforeRequest({ urls: ['*://*.xiaohongshu.com/*'] }, (details, callback) => {
+        if (typeof callback === 'function') {
+          callback(isXiaohongshuCommentApiUrl(details && details.url) ? { cancel: true } : {});
+        }
+      });
+      blocksCommentRequests = true;
+    }
+
+    const loaded = waitForWebContents(win.webContents, 18000);
+    if (!beginBestEffortBrowserLoad(win, url)) {
+      throw new Error('隐藏浏览器未能开始加载小红书页面');
+    }
+    await loaded;
+    const payload = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        let bestHtml = '';
+        for (let index = 0; index < 12; index += 1) {
+          const html = document.documentElement ? document.documentElement.outerHTML : '';
+          if (html.length > bestHtml.length) bestHtml = html;
+          const text = String(document.body ? document.body.innerText || document.body.textContent || '' : '').trim();
+          if (text.length >= 120 && document.querySelectorAll('img').length >= 1) break;
+          await sleep(500);
+        }
+        return {
+          html: bestHtml,
+          url: String(location.href || ''),
+        };
+      })()
+    `);
+    return {
+      html: String(payload && payload.html || ''),
+      url: String(payload && payload.url || (win.webContents && win.webContents.getURL && win.webContents.getURL()) || url),
+      comments: [],
+      commentDiagnosticDetails: {
+        source: 'disabled',
+        stopReason: 'comments_disabled',
+        partial: false,
+      },
+    };
+  } finally {
+    try {
+      if (blocksCommentRequests
+        && browserSession
+        && browserSession.webRequest
+        && typeof browserSession.webRequest.onBeforeRequest === 'function') {
+        browserSession.webRequest.onBeforeRequest({ urls: ['*://*.xiaohongshu.com/*'] }, null);
+      }
+    } catch (error) {}
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
+}
+
+async function renderXiaohongshuPageWithElectron(url, options = {}) {
+  if (options.includeComments === false) {
+    return await renderXiaohongshuContentWithElectron(url);
+  }
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
@@ -10303,7 +10462,7 @@ async function renderXiaohongshuPageWithElectron(url) {
 }
 
 async function renderXiaohongshuCommentsWithElectron(url) {
-  const page = await renderXiaohongshuPageWithElectron(url);
+  const page = await renderXiaohongshuPageWithElectron(url, { includeComments: true });
   return page && Array.isArray(page.comments) ? page.comments : [];
 }
 
@@ -14263,8 +14422,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderSocialMediaUrlWithElectron(url);
   }
 
-  async renderXiaohongshuPage(url) {
-    return await renderXiaohongshuPageWithElectron(url);
+  async renderXiaohongshuPage(url, options = {}) {
+    return await renderXiaohongshuPageWithElectron(url, options);
   }
 
   async fetchDouyinMediaUrlsWithSession(pageUrl, awemeId) {
@@ -15837,6 +15996,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             && (attempt.outcome === 'request-error' || attempt.outcome === 'timeout'));
         let renderedXiaohongshuPage = null;
         let renderedXiaohongshuUrl = '';
+        let renderedXiaohongshuIncludesComments = false;
         let renderedXiaohongshuError = null;
         const xiaohongshuBrowserAttempts = [];
         let response;
@@ -15847,8 +16007,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         } catch (requestError) {
           if (!useXiaohongshuRendererForTransportFailure) throw requestError;
           try {
-            renderedXiaohongshuPage = await this.renderXiaohongshuPage(url);
+            renderedXiaohongshuPage = await this.renderXiaohongshuPage(url, { includeComments: false });
             renderedXiaohongshuUrl = url;
+            renderedXiaohongshuIncludesComments = false;
             response = {
               status: 200,
               text: renderedXiaohongshuPage && renderedXiaohongshuPage.html
@@ -15962,19 +16123,27 @@ class WechatObsidianInboxPlugin extends Plugin {
           let bestRenderedXiaohongshuPage = null;
           let bestRenderedXiaohongshuExtraction = null;
           let bestRenderedXiaohongshuHtml = '';
+          let bestRenderedXiaohongshuUrl = '';
           let bestRenderedXiaohongshuScore = -1;
+          const mergeableXiaohongshuExtractions = [];
+          if (scoreXiaohongshuExtraction(extractedXiaohongshu, html, resolvedUrl) >= 0) {
+            mergeableXiaohongshuExtractions.push(extractedXiaohongshu);
+          }
           if ((!fastXiaohongshuReadable && !extractedXiaohongshu.videoUrl && !mediaUrl)
             || shouldIncludeXiaohongshuComments) {
             for (const candidate of xiaohongshuBrowserCandidates) {
               let candidatePage = null;
               try {
-                candidatePage = renderedXiaohongshuPage && renderedXiaohongshuUrl === candidate.url
+                candidatePage = renderedXiaohongshuPage
+                  && renderedXiaohongshuUrl === candidate.url
+                  && renderedXiaohongshuIncludesComments === false
                   ? renderedXiaohongshuPage
-                  : await this.renderXiaohongshuPage(candidate.url);
+                  : await this.renderXiaohongshuPage(candidate.url, { includeComments: false });
                 const candidateHtml = String(candidatePage && candidatePage.html || '');
+                const candidateFinalUrl = String(candidatePage && candidatePage.url || resolvedUrl);
                 const candidateExtraction = extractXiaohongshuMarkdownFromHtml(
                   candidateHtml,
-                  String(candidatePage && candidatePage.url || resolvedUrl),
+                  candidateFinalUrl,
                   metadata.shareText || record.content || '',
                   { includeComments: false },
                 );
@@ -15986,12 +16155,16 @@ class WechatObsidianInboxPlugin extends Plugin {
                 const candidateScore = scoreXiaohongshuExtraction(
                   candidateExtraction,
                   candidateHtml,
-                  String(candidatePage && candidatePage.url || resolvedUrl),
+                  candidateFinalUrl,
                 );
+                if (candidateScore >= 0) {
+                  mergeableXiaohongshuExtractions.push(candidateExtraction);
+                }
                 if (candidateScore > bestRenderedXiaohongshuScore) {
                   bestRenderedXiaohongshuPage = candidatePage;
                   bestRenderedXiaohongshuExtraction = candidateExtraction;
                   bestRenderedXiaohongshuHtml = candidateHtml;
+                  bestRenderedXiaohongshuUrl = candidateFinalUrl;
                   bestRenderedXiaohongshuScore = candidateScore;
                 }
               } catch (error) {
@@ -16007,11 +16180,13 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (bestRenderedXiaohongshuPage) {
             renderedXiaohongshuPage = bestRenderedXiaohongshuPage;
+            renderedXiaohongshuIncludesComments = false;
           }
-          if (!fastXiaohongshuReadable
-            && bestRenderedXiaohongshuExtraction
-            && bestRenderedXiaohongshuScore >= 0) {
-            extractedXiaohongshu = bestRenderedXiaohongshuExtraction;
+          if (bestRenderedXiaohongshuExtraction && bestRenderedXiaohongshuScore >= 0) {
+            extractedXiaohongshu = mergeXiaohongshuExtractions(
+              mergeableXiaohongshuExtractions,
+              bestRenderedXiaohongshuExtraction,
+            );
             html = bestRenderedXiaohongshuHtml;
             mediaUrls = sortMediaUrlsForTranscription([
               ...mediaUrls,
@@ -16035,16 +16210,18 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (shouldIncludeXiaohongshuComments) {
             try {
-              if (!renderedXiaohongshuPage) {
-                throw renderedXiaohongshuError || new Error('隐藏浏览器未返回小红书页面');
-              }
-              const renderedXiaohongshuComments = renderedXiaohongshuPage && Array.isArray(renderedXiaohongshuPage.comments)
-                ? renderedXiaohongshuPage.comments
+              const commentsRenderUrl = bestRenderedXiaohongshuUrl
+                || String(bestRenderedXiaohongshuPage && bestRenderedXiaohongshuPage.url || '')
+                || resolvedUrl
+                || url;
+              const commentsPage = await this.renderXiaohongshuPage(commentsRenderUrl, { includeComments: true });
+              const renderedXiaohongshuComments = commentsPage && Array.isArray(commentsPage.comments)
+                ? commentsPage.comments
                 : [];
-              const renderedDiagnosticDetails = renderedXiaohongshuPage
-                && renderedXiaohongshuPage.commentDiagnosticDetails
-                && typeof renderedXiaohongshuPage.commentDiagnosticDetails === 'object'
-                ? renderedXiaohongshuPage.commentDiagnosticDetails
+              const renderedDiagnosticDetails = commentsPage
+                && commentsPage.commentDiagnosticDetails
+                && typeof commentsPage.commentDiagnosticDetails === 'object'
+                ? commentsPage.commentDiagnosticDetails
                 : {};
               const finalizedXiaohongshuComments = finalizeXiaohongshuComments({
                 baseMarkdown: extractedXiaohongshu.markdown,
@@ -17295,6 +17472,7 @@ WechatObsidianInboxPlugin.__test = {
   getXiaohongshuCapabilityMatrix,
   getXiaohongshuBrowserCandidates,
   scoreXiaohongshuExtraction,
+  mergeXiaohongshuExtractions,
   buildXiaohongshuBrowserAttemptDiagnostic,
   isXiaohongshuShareBoilerplateOnly,
   classifyXiaohongshuPage,

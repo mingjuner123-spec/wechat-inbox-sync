@@ -327,6 +327,8 @@ const xiaohongshuPageRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuCommentsWithElectron'),
 );
 assert.ok(xiaohongshuPageRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
+assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
+assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -5609,8 +5611,10 @@ async function runAsyncHydrationTests() {
   const originalHttpsRequestForGenericRedirect = https.request;
   const previousGenericRedirectRequestUrlMock = requestUrlMock;
   const genericRedirectRenderUrls = [];
-  genericRedirectFallbackPlugin.renderXiaohongshuPage = async (renderUrl) => {
+  const genericRedirectRenderOptions = [];
+  genericRedirectFallbackPlugin.renderXiaohongshuPage = async (renderUrl, renderOptions) => {
     genericRedirectRenderUrls.push(renderUrl);
+    genericRedirectRenderOptions.push(renderOptions);
     if (renderUrl === 'http://xhslink.cn/o/original-note') {
       return {
         url: 'https://www.xiaohongshu.com/',
@@ -5681,6 +5685,7 @@ async function runAsyncHydrationTests() {
       'http://xhslink.cn/o/original-note',
       'https://www.xiaohongshu.com/',
     ]);
+    assert.ok(genericRedirectRenderOptions.every((options) => options && options.includeComments === false));
     assert.strictEqual(genericRedirectRecord.metadata.title, '真实地址恢复成功');
     assert.ok(genericRedirectRecord.metadata.markdown.includes('真实地址恢复出了完整正文内容'));
     assert.ok(genericRedirectRecord.metadata.markdown.includes('#效率工具'));
@@ -5728,6 +5733,57 @@ async function runAsyncHydrationTests() {
     ]);
     assert.strictEqual(originalPreferredRecord.metadata.title, '原始短链恢复成功');
     assert.ok(originalPreferredRecord.metadata.markdown.includes('原始短链恢复了真实正文'));
+
+    const complementaryFieldsPlugin = new PluginClass();
+    complementaryFieldsPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'off',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: false,
+    });
+    complementaryFieldsPlugin.hasProFeatureAccess = async () => false;
+    complementaryFieldsPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    complementaryFieldsPlugin.renderSocialMediaUrls = async () => [];
+    complementaryFieldsPlugin.renderXiaohongshuPage = async (renderUrl) => {
+      if (renderUrl === 'http://xhslink.cn/o/original-note') {
+        return {
+          url: 'https://www.xiaohongshu.com/explore/complementary-note',
+          html: [
+            '<html><head>',
+            '<meta property="og:title" content="互补字段完整标题">',
+            '<meta name="description" content="这是第一条路径取得的完整长正文内容，必须与另一条路径的全部图片合并。 #互补标签">',
+            '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/complementary-cover.jpg">',
+            '</head></html>',
+          ].join(''),
+          comments: [],
+        };
+      }
+      return {
+        url: 'https://www.xiaohongshu.com/explore/complementary-note',
+        html: [
+          '<html><head>',
+          '<meta property="og:title" content="互补字段完整标题">',
+          '<meta name="description" content="图片路径">',
+          '</head><body>',
+          '<script>{"note":{"desc":"图片路径","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/complementary-cover.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/complementary-page-2.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/complementary-page-3.jpg"}]}}</script>',
+          '</body></html>',
+        ].join(''),
+        comments: [],
+      };
+    };
+    const complementaryFieldsRecord = await complementaryFieldsPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://xhslink.cn/o/original-note',
+      metadata: {
+        url: 'http://xhslink.cn/o/original-note',
+        shareText: '互补字段测试',
+      },
+    }, '', '', '小红书互补字段测试');
+    assert.strictEqual(complementaryFieldsRecord.metadata.title, '互补字段完整标题');
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('这是第一条路径取得的完整长正文内容'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('#互补标签'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/complementary-cover.jpg)'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/complementary-page-2.jpg)'));
+    assert.ok(complementaryFieldsRecord.metadata.markdown.includes('![内页图 2](https://sns-webpic-qc.xhscdn.com/complementary-page-3.jpg)'));
 
     const genericRedirectMediaPlugin = new PluginClass();
     genericRedirectMediaPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
@@ -5779,8 +5835,10 @@ async function runAsyncHydrationTests() {
   renderedFallbackPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
   renderedFallbackPlugin.renderSocialMediaUrls = async () => [];
   let renderedFallbackCalls = 0;
-  renderedFallbackPlugin.renderXiaohongshuPage = async () => {
+  const renderedFallbackOptions = [];
+  renderedFallbackPlugin.renderXiaohongshuPage = async (_renderUrl, renderOptions) => {
     renderedFallbackCalls += 1;
+    renderedFallbackOptions.push(renderOptions);
     return {
       html: [
         '<html><head>',
@@ -5818,7 +5876,15 @@ async function runAsyncHydrationTests() {
         shareText: '86【超常儿童，也可能被鸡废了，家长都踩过】分享口令',
       },
     }, '', '', '小红书渲染恢复');
-    assert.strictEqual(renderedFallbackCalls, 1);
+    assert.strictEqual(renderedFallbackCalls, 2);
+    assert.strictEqual(
+      renderedFallbackOptions.filter((options) => options && options.includeComments === false).length,
+      1,
+    );
+    assert.strictEqual(
+      renderedFallbackOptions.filter((options) => options && options.includeComments === true).length,
+      1,
+    );
     assert.strictEqual(renderedFallbackRecord.metadata.title, '超常儿童，也可能被鸡废了');
     assert.ok(renderedFallbackRecord.metadata.markdown.includes('隐藏浏览器恢复出来的完整小红书正文'));
     assert.ok(renderedFallbackRecord.metadata.markdown.includes('real-cover.jpg'));
