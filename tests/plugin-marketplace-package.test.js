@@ -33,8 +33,17 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.66');
+assert.strictEqual(manifest.version, '1.3.67');
 assert.strictEqual(manifest.description, marketplacePromise);
+assert.ok(checklist.includes('不得仅因版本较旧就停用已安装组件'));
+assert.ok(checklist.includes('HTTP 418'));
+assert.ok(checklist.includes('网络失败不得触发大型组件删除或重装'));
+assert.ok(checklist.includes('完成状态写入后清理失败只能告警'));
+assert.ok(checklist.includes('--prepublish --tag <version>'));
+assert.ok(checklist.includes('--postpublish --tag <version>'));
+assert.ok(checklist.includes('GitHub Release 必须精确包含五项资产'));
+assert.strictEqual(checklist.includes('Confirm the release tag is exactly `1.0.0`'), false);
+assert.strictEqual(checklist.includes('Create a public GitHub repository'), false);
 assert.strictEqual(/\bObsidian\b/i.test(manifest.description), false, 'marketplace descriptions must not repeat the product name');
 assert.match(manifest.description, /[.!?]$/, 'marketplace descriptions must end with accepted ASCII punctuation');
 assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
@@ -59,7 +68,7 @@ assert.ok(readme.includes(marketplacePromise));
 assert.ok(license.includes('MIT License'));
 assert.ok(checklist.includes('community-plugins.json'));
 assert.ok(checklist.includes('"id": "wechat-inbox-sync"'));
-assert.ok(checklist.includes('本机已安装或已打包的候选版本也视为已占用'));
+assert.ok(checklist.includes('本机已安装或已打包候选版本重名'));
 assert.ok(releaseWorkflow.includes('tags:'));
 assert.ok(releaseWorkflow.includes('obsidian-plugin/wechat-inbox-sync'));
 assert.ok(releaseWorkflow.includes('manifest_version="$(node -p'));
@@ -242,14 +251,38 @@ assert.ok(windowsInstaller.includes('Install-VcRuntime'));
 assert.ok(windowsInstaller.includes('https://aka.ms/vs/17/release/vc_redist.x64.exe'));
 assert.ok(windowsInstaller.includes('0xC0000135'));
 assert.ok(windowsInstaller.includes('Local ASR install validation passed'));
-assert.ok(windowsInstaller.includes('Write-TranscribeScript -InstallRoot $InstallRoot'));
+assert.ok(windowsInstaller.includes('function Start-TranscribeScriptUpdate'));
+assert.ok(windowsInstaller.includes('function Assert-TranscribeScriptCandidate'));
+assert.ok(windowsInstaller.includes('function Promote-TranscribeScriptUpdate'));
+assert.ok(windowsInstaller.includes('function Restore-TranscribeScriptUpdate'));
+assert.ok(windowsInstaller.includes('function Complete-TranscribeScriptUpdate'));
+assert.ok(windowsInstaller.includes('$transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot'));
+assert.ok(windowsInstaller.includes('Promote-TranscribeScriptUpdate -State $transcribeScriptUpdate'));
+assert.ok(windowsInstaller.includes('Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate'));
+assert.ok(windowsInstaller.includes('Complete-TranscribeScriptUpdate -State $transcribeScriptUpdate'));
+assert.ok(windowsInstaller.includes('if ($State.Completed)'));
+assert.ok(windowsInstaller.includes('$State.Completed = $true'));
+assert.ok(windowsInstaller.includes('transcribe.ps1.candidate-'));
+assert.ok(windowsInstaller.includes('transcribe.ps1.backup-'));
+assert.ok(windowsInstaller.includes('[System.Management.Automation.Language.Parser]::ParseFile'));
+assert.ok(windowsInstaller.includes('Assert-TranscribeScriptCandidate -Path $candidatePath'));
+assert.ok(
+  windowsInstaller.indexOf('$transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot')
+    < windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
+  'Windows installer must retain a rollback-capable script update before heavy asset work',
+);
+assert.ok(
+  windowsInstaller.indexOf('Complete-TranscribeScriptUpdate -State $transcribeScriptUpdate')
+    > windowsInstaller.lastIndexOf('Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1")'),
+  'Windows installer must keep the previous transcribe script until final validation succeeds',
+);
 assert.ok(windowsInstaller.includes('$PSCommandPath'));
 assert.strictEqual(windowsInstaller.includes('[System.IO.File]::ReadAllText($MyInvocation.MyCommand.Path)'), false);
 assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.25"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.26"'));
 assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"'));
 assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
@@ -316,7 +349,7 @@ assert.ok(
   'Windows installer should try the Hugging Face mirror before the primary Hugging Face host',
 );
 assert.ok(
-  windowsInstaller.indexOf('Write-TranscribeScript -InstallRoot $InstallRoot') <
+  windowsInstaller.indexOf('$transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot') <
     windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
   'Windows installer should refresh transcribe.ps1 before heavy downloads or runtime validation',
 );
@@ -330,7 +363,10 @@ function extractPowerShellFunction(source, functionName) {
   const start = source.indexOf(`function ${functionName} {`);
   assert.ok(start >= 0, `PowerShell function ${functionName} should exist`);
   const nextFunction = source.indexOf('\nfunction ', start + 1);
-  return source.slice(start, nextFunction >= 0 ? nextFunction : source.length).trim();
+  const installerRuntime = source.indexOf('\n$installMutex', start + 1);
+  const boundaries = [nextFunction, installerRuntime].filter((index) => index >= 0);
+  const end = boundaries.length ? Math.min(...boundaries) : source.length;
+  return source.slice(start, end).trim();
 }
 
 function createTarHeader(name, size, typeFlag) {
@@ -483,9 +519,118 @@ function runWindowsOcrTarFallbackProbe(source) {
   }
 }
 
+function runWindowsAsrScriptUpdateRollbackProbe(source) {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-script-update-'));
+  const probePath = path.join(probeDir, 'probe.ps1');
+  const encodedProbeDir = Buffer.from(probeDir, 'utf16le').toString('base64');
+  const probeSource = [
+    '$ErrorActionPreference = "Stop"',
+    extractPowerShellFunction(source, 'Restore-TranscribeScriptUpdate'),
+    extractPowerShellFunction(source, 'Promote-TranscribeScriptUpdate'),
+    extractPowerShellFunction(source, 'Complete-TranscribeScriptUpdate'),
+    `$root=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedProbeDir}'))`,
+    '$target=Join-Path $root "transcribe.ps1"',
+    '$candidate=Join-Path $root "transcribe.ps1.candidate-probe"',
+    '$backup=Join-Path $root "transcribe.ps1.backup-probe"',
+    'Set-Content -LiteralPath $target -Value "old-script" -Encoding UTF8',
+    'Set-Content -LiteralPath $candidate -Value "new-script" -Encoding UTF8',
+    '$state=[pscustomobject]@{TargetPath=$target;CandidatePath=$candidate;BackupPath=$backup;HadOriginal=$false;Promoted=$false;Completed=$false}',
+    'Promote-TranscribeScriptUpdate -State $state',
+    'if((Get-Content -LiteralPath $target -Raw) -notmatch "new-script"){throw "candidate was not promoted"}',
+    'if((Get-Content -LiteralPath $backup -Raw) -notmatch "old-script"){throw "old script was not backed up"}',
+    'Restore-TranscribeScriptUpdate -State $state',
+    'if((Get-Content -LiteralPath $target -Raw) -notmatch "old-script"){throw "old script was not restored"}',
+    'if(Test-Path -LiteralPath $backup){throw "backup remained after restore"}',
+    'Set-Content -LiteralPath $candidate -Value "new-script" -Encoding UTF8',
+    '$state=[pscustomobject]@{TargetPath=$target;CandidatePath=$candidate;BackupPath=$backup;HadOriginal=$false;Promoted=$false;Completed=$false}',
+    'Promote-TranscribeScriptUpdate -State $state',
+    'Complete-TranscribeScriptUpdate -State $state',
+    'if((Get-Content -LiteralPath $target -Raw) -notmatch "new-script"){throw "new script was not retained after completion"}',
+    'if((Test-Path -LiteralPath $backup) -or (Test-Path -LiteralPath $candidate)){throw "transaction debris remained after completion"}',
+    '$stubbornBackup=Join-Path $root "transcribe.ps1.backup-stubborn"',
+    'New-Item -ItemType Directory -Force -Path $stubbornBackup | Out-Null',
+    'Set-Content -LiteralPath (Join-Path $stubbornBackup "keep.txt") -Value "busy" -Encoding UTF8',
+    '$cleanupState=[pscustomobject]@{TargetPath=$target;CandidatePath=$candidate;BackupPath=$stubbornBackup;HadOriginal=$true;Promoted=$true;Completed=$false}',
+    'Complete-TranscribeScriptUpdate -State $cleanupState',
+    'if(-not $cleanupState.Completed){throw "completion was not committed before cleanup"}',
+    'if((Get-Content -LiteralPath $target -Raw) -notmatch "new-script"){throw "cleanup failure removed the validated new script"}',
+    'Write-Output "ASR_SCRIPT_UPDATE_ROLLBACK_OK"',
+  ].join('\r\n');
+  try {
+    fs.writeFileSync(probePath, probeSource, 'utf8');
+    const probeResult = childProcess.spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', probePath],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+      },
+    );
+    assert.strictEqual(
+      probeResult.status,
+      0,
+      `Windows ASR script update rollback probe failed:\n${probeResult.stdout || ''}\n${probeResult.stderr || ''}`,
+    );
+    assert.ok((probeResult.stdout || '').includes('ASR_SCRIPT_UPDATE_ROLLBACK_OK'));
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
+function runWindowsAsrCandidateValidationProbe(source) {
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-script-candidate-'));
+  const probePath = path.join(probeDir, 'probe.ps1');
+  const encodedProbeDir = Buffer.from(probeDir, 'utf16le').toString('base64');
+  const probeSource = [
+    '$ErrorActionPreference = "Stop"',
+    extractPowerShellFunction(source, 'Assert-TranscribeScriptCandidate'),
+    `$root=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedProbeDir}'))`,
+    '$valid=Join-Path $root "valid.ps1"',
+    '$invalid=Join-Path $root "invalid.ps1"',
+    '$validSource=@\'',
+    '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
+    '$NativeProcessRunnerVersion = "diagnostics-process-v1"',
+    'function Invoke-NativeProcess { $info = New-Object System.Diagnostics.ProcessStartInfo; $task = $process.StandardOutput.ReadToEndAsync() }',
+    '$progressHeartbeatAt="now"',
+    '$progressPid=1',
+    'Write-ProgressLog -ProgressStage "segmenting"',
+    '\'@',
+    'Set-Content -LiteralPath $valid -Value $validSource -Encoding UTF8',
+    'Set-Content -LiteralPath $invalid -Value "function Broken-TranscribeScript {" -Encoding UTF8',
+    'Assert-TranscribeScriptCandidate -Path $valid',
+    '$invalidRejected=$false',
+    'try { Assert-TranscribeScriptCandidate -Path $invalid } catch { $invalidRejected=$true }',
+    'if(-not $invalidRejected){throw "invalid candidate was accepted"}',
+    'Write-Output "ASR_SCRIPT_CANDIDATE_VALIDATION_OK"',
+  ].join('\r\n');
+  try {
+    fs.writeFileSync(probePath, probeSource, 'utf8');
+    const probeResult = childProcess.spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', probePath],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+      },
+    );
+    assert.strictEqual(
+      probeResult.status,
+      0,
+      `Windows ASR candidate validation probe failed:\n${probeResult.stdout || ''}\n${probeResult.stderr || ''}`,
+    );
+    assert.ok((probeResult.stdout || '').includes('ASR_SCRIPT_CANDIDATE_VALIDATION_OK'));
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+}
+
 if (process.platform === 'win32') {
   runWindowsNativeProcessProbe(windowsInstaller, 'INSTALLER');
   runWindowsNativeProcessProbe(transcribeScriptTemplate, 'TRANSCRIBE');
+  runWindowsAsrCandidateValidationProbe(windowsInstaller);
+  runWindowsAsrScriptUpdateRollbackProbe(windowsInstaller);
   runWindowsOcrTarFallbackProbe(windowsOcrInstaller);
 }
 assert.ok(transcribeScriptTemplate.includes('function ConvertTo-NativeArgument'));

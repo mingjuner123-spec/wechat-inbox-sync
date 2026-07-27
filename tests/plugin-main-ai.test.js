@@ -1,6 +1,7 @@
 ﻿const assert = require('assert');
 const http = require('http');
 const https = require('https');
+const childProcess = require('child_process');
 const Module = require('module');
 
 let requestUrlMock = async () => ({});
@@ -41,13 +42,71 @@ const windowsAsrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr.ps1'),
   'utf8',
 );
+const historicalWindowsAsrInstallerSource = childProcess.execFileSync(
+  'git',
+  ['show', '1.3.56:obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1'],
+  {
+    cwd: path.join(__dirname, '..'),
+    encoding: 'utf8',
+    windowsHide: true,
+  },
+);
+const historicalTemplateStart = historicalWindowsAsrInstallerSource.lastIndexOf('# BEGIN_TRANSCRIBE_TEMPLATE');
+const historicalTemplateQuoteStart = historicalWindowsAsrInstallerSource.indexOf("@'", historicalTemplateStart);
+const historicalTemplateContentStart = historicalWindowsAsrInstallerSource.indexOf('\n', historicalTemplateQuoteStart);
+const historicalTemplateQuoteEnd = historicalWindowsAsrInstallerSource.indexOf("\n'@", historicalTemplateContentStart);
+assert.ok(historicalTemplateStart >= 0 && historicalTemplateQuoteStart >= 0 && historicalTemplateQuoteEnd > historicalTemplateContentStart);
+const historicalWindowsAsrScriptSource = historicalWindowsAsrInstallerSource.slice(
+  historicalTemplateContentStart + 1,
+  historicalTemplateQuoteEnd,
+);
+const currentTemplateStart = windowsAsrInstallerSource.lastIndexOf('# BEGIN_TRANSCRIBE_TEMPLATE');
+const currentTemplateQuoteStart = windowsAsrInstallerSource.indexOf("@'", currentTemplateStart);
+const currentTemplateContentStart = windowsAsrInstallerSource.indexOf('\n', currentTemplateQuoteStart);
+const currentTemplateQuoteEnd = windowsAsrInstallerSource.indexOf("\n'@", currentTemplateContentStart);
+const currentWindowsAsrScriptSource = windowsAsrInstallerSource.slice(
+  currentTemplateContentStart + 1,
+  currentTemplateQuoteEnd,
+);
 const macAsrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr-macos.sh'),
   'utf8',
 );
+const markerOnlyLegacyWindowsAsrScriptSource = [
+  'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }',
+  'function Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }',
+  'function Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }',
+  'function Test-TranscriptHasRepeatHallucination { param([string]$Text) }',
+  'function Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }',
+  'function Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }',
+  'Invoke-TranscribeAttempt -Mode "normal"',
+  'Invoke-TranscribeAttempt -Mode "safe"',
+  'safeModelPath',
+  'function Invoke-NativeProcess { Start-Process -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath }',
+  'function ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }',
+  '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
+  '$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)',
+  '[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)',
+  '[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)',
+  'TRANSCRIPT_HALLUCINATION',
+  '$ChunkSeconds = 120',
+  '$ChunkRetrySeconds = 30',
+  '$RunLog = Join-Path $Root "transcribe-last.log"',
+  'progressPercent=100',
+  'progressHeartbeatAt=now',
+  'progressPid=1',
+  '-ProgressStage "segmenting"',
+  'recoveryTriggered=1',
+].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.25"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.26"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
+const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
+  .replace('$InstallerScriptVersion = "1.2.26"', '$InstallerScriptVersion = "1.2.25"')
+  .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
+  .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
+  .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
+  .replaceAll('Complete-TranscribeScriptUpdate', 'Complete-LegacyTranscribeScriptUpdate');
 const staleMacAsrInstallerSource = macAsrInstallerSource
   .replace('INSTALLER_SCRIPT_VERSION="1.3.8"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
@@ -64,6 +123,7 @@ const futurePythonMacAsrInstallerSource = macAsrInstallerSource
 assert.strictEqual(typeof helpers.isLocalAsrInstallerCurrent, 'function');
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource, false), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(nonTransactionalWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(macAsrInstallerSource, true), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleMacAsrInstallerSource, true), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(promptedMacAsrInstallerSource, true), false);
@@ -349,9 +409,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.66'), {
-  manifestVersion: '1.3.66',
-  runtimeVersion: '1.3.66',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.67'), {
+  manifestVersion: '1.3.67',
+  runtimeVersion: '1.3.67',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -2086,7 +2146,7 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
   fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(
     path.join(tempAsrRoot, 'transcribe.ps1'),
-    'function Convert-ExitCodeToHex { $signed = [int64]$ExitCode; if ($signed -lt 0) { $signed = 4294967296 + $signed }; return "0x{0:X8}" -f $signed }\nfunction Get-ShortPath { New-Object -ComObject Scripting.FileSystemObject }\nfunction Split-AudioToChunks { param([string]$AudioPath, [int]$SegmentSeconds) }\nfunction Test-TranscriptHasRepeatHallucination { param([string]$Text) }\nfunction Invoke-RecoverRepeatedChunkText { param([string]$ChunkPath) }\nfunction Test-WhisperNativeCrashExitCode { $hex = Convert-ExitCodeToHex -ExitCode $ExitCode }\nInvoke-TranscribeAttempt -Mode "normal"\nInvoke-TranscribeAttempt -Mode "safe"\nsafeModelPath\nfunction Invoke-NativeProcess { New-Object System.Diagnostics.ProcessStartInfo; ReadToEndAsync }\nfunction ConvertTo-SimplifiedChinese { [Microsoft.VisualBasic.Strings]::StrConv($Text, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804) }\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$NativeProcessRunnerVersion = "diagnostics-process-v1"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n[System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)\n[System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\nTRANSCRIPT_HALLUCINATION\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$RunLog = Join-Path $Root "transcribe-last.log"\nprogressPercent=100\nprogressHeartbeatAt=now\nprogressPid=1\n-ProgressStage "segmenting"\nrecoveryTriggered=1',
+    currentWindowsAsrScriptSource,
     'utf8',
   );
   const recursiveStatus = helpers.getLocalAsrInstallStatus(tempAsrRoot, fs.existsSync, os.platform());
@@ -2097,22 +2157,16 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
 }
 assert.ok(pluginMainSource.includes('ffmpeg 路径：'));
 assert.ok(pluginMainSource.includes('缺失项：'));
-{
-  const templateStart = windowsAsrInstallerSource.lastIndexOf('# BEGIN_TRANSCRIBE_TEMPLATE');
-  const templateEnd = windowsAsrInstallerSource.lastIndexOf('# END_TRANSCRIBE_TEMPLATE');
-  const templateBlock = windowsAsrInstallerSource.slice(templateStart, templateEnd);
-  const currentWindowsTranscribeScript = templateBlock.split("@'")[1] || '';
-  assert.deepStrictEqual(
-    helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
-      existsSync: () => true,
-      readFileSync: () => currentWindowsTranscribeScript,
-    }),
-    {
-      scriptVersion: 'adaptive-chunked-diagnostics-process-repeat-guard-v2-heartbeat-run-log',
-      scriptOutdated: false,
-    },
-  );
-}
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => currentWindowsAsrScriptSource,
+  }),
+  {
+    scriptVersion: 'adaptive-chunked-diagnostics-process-repeat-guard-v2-heartbeat-run-log',
+    scriptOutdated: false,
+  },
+);
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
     existsSync: () => true,
@@ -2123,6 +2177,81 @@ assert.deepStrictEqual(
     scriptOutdated: true,
   },
 );
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => markerOnlyLegacyWindowsAsrScriptSource,
+  }),
+  {
+    scriptVersion: 'legacy-signature-mismatch',
+    scriptOutdated: true,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => historicalWindowsAsrScriptSource,
+  }),
+  {
+    scriptVersion: 'adaptive-chunked-start-process-repeat-guard-v2-heartbeat-run-log',
+    scriptOutdated: false,
+    upgradeRecommended: true,
+    compatibilityMode: 'legacy-start-process',
+  },
+);
+for (const damagedOfficialSource of [
+  `${historicalWindowsAsrScriptSource}\nfunction Broken-LegacyScript {`,
+  `${currentWindowsAsrScriptSource}\nfunction Broken-CurrentScript {`,
+]) {
+  assert.strictEqual(
+    helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+      existsSync: () => true,
+      readFileSync: () => damagedOfficialSource,
+    }).scriptOutdated,
+    true,
+  );
+}
+for (const unreadableSource of ['', 'this is not a transcription script']) {
+  assert.deepStrictEqual(
+    helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+      existsSync: () => true,
+      readFileSync: () => unreadableSource,
+    }),
+    {
+      scriptVersion: 'unknown',
+      scriptOutdated: true,
+    },
+  );
+}
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => {
+      throw new Error('permission denied');
+    },
+  }),
+  {
+    scriptVersion: 'unknown',
+    scriptOutdated: true,
+  },
+);
+{
+  const tempLegacyAsrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-legacy-ready-'));
+  fs.mkdirSync(path.join(tempLegacyAsrRoot, 'whisper'), { recursive: true });
+  fs.mkdirSync(path.join(tempLegacyAsrRoot, 'ffmpeg'), { recursive: true });
+  fs.mkdirSync(path.join(tempLegacyAsrRoot, 'models'), { recursive: true });
+  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'whisper', 'whisper-cli.exe'), '');
+  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'ffmpeg', 'ffmpeg.exe'), '');
+  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'models', 'ggml-small.bin'), '');
+  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'transcribe.ps1'), historicalWindowsAsrScriptSource, 'utf8');
+  const legacyStatus = helpers.getLocalAsrInstallStatus(tempLegacyAsrRoot, fs.existsSync, 'win32');
+  assert.strictEqual(legacyStatus.ready, true);
+  assert.strictEqual(legacyStatus.scriptOutdated, false);
+  assert.strictEqual(legacyStatus.upgradeRecommended, true);
+  assert.strictEqual(legacyStatus.compatibilityMode, 'legacy-start-process');
+  assert.deepStrictEqual(legacyStatus.missingReasons, []);
+  fs.rmSync(tempLegacyAsrRoot, { recursive: true, force: true });
+}
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
     existsSync: () => true,
@@ -6992,7 +7121,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.66'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.67'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -7031,8 +7160,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.66',
-        runtimeVersion: '1.3.66',
+        manifestVersion: '1.3.67',
+        runtimeVersion: '1.3.67',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -8679,10 +8808,6 @@ async function runLocalAsrRepairDecisionTests() {
   });
   const originalFsExistsSync = fs.existsSync;
   const originalFsReadFileSync = fs.readFileSync;
-  const currentWindowsAsrScriptSource = originalFsReadFileSync(
-    path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr.ps1'),
-    'utf8',
-  );
   fs.existsSync = (filePath) => {
     const value = String(filePath || '');
     if (value.startsWith('C:\\Users\\ADMIN\\.wechat-inbox-local-asr')) return true;
@@ -8734,6 +8859,90 @@ async function runLocalAsrRepairDecisionTests() {
   const staleResult = await stalePlugin.checkAndRepairLocalAsr();
   assert.strictEqual(staleResult.action, 'default');
   assert.deepStrictEqual(staleCalls, [{ installMode: 'default' }]);
+
+  const compatibleOfflinePlugin = new PluginClass();
+  compatibleOfflinePlugin.settings = helpers.mergeSettings({
+    localAsrPlatform: 'win32',
+    localAsrInstallMode: 'default',
+  });
+  compatibleOfflinePlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+  compatibleOfflinePlugin.getConfiguredLocalAsrInstallRoot = () => 'C:\\Users\\ADMIN\\.wechat-inbox-local-asr';
+  compatibleOfflinePlugin.getLocalAsrInstallStatus = () => ({
+    ready: true,
+    scriptOutdated: false,
+    upgradeRecommended: true,
+    compatibilityMode: 'legacy-start-process',
+  });
+  let compatibleOfflineInstallCalls = 0;
+  compatibleOfflinePlugin.installLocalAsr = async () => {
+    compatibleOfflineInstallCalls += 1;
+    throw new Error('HTTP 418');
+  };
+  const compatibleOfflineResult = await compatibleOfflinePlugin.checkAndRepairLocalAsr();
+  assert.strictEqual(compatibleOfflineResult.action, 'none');
+  assert.strictEqual(compatibleOfflineInstallCalls, 0);
+
+  const installerMatrixRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-installer-matrix-'));
+  const bundledInstallerPath = path.join(installerMatrixRoot, 'install-local-asr.ps1');
+  const installedRoot = path.join(installerMatrixRoot, 'installed');
+  fs.mkdirSync(path.join(installedRoot, 'whisper'), { recursive: true });
+  fs.mkdirSync(path.join(installedRoot, 'ffmpeg'), { recursive: true });
+  fs.mkdirSync(path.join(installedRoot, 'models'), { recursive: true });
+  fs.writeFileSync(path.join(installedRoot, 'transcribe.ps1'), historicalWindowsAsrScriptSource, 'utf8');
+  fs.writeFileSync(path.join(installedRoot, 'whisper', 'whisper-cli.exe'), 'existing-whisper', 'utf8');
+  fs.writeFileSync(path.join(installedRoot, 'ffmpeg', 'ffmpeg.exe'), 'existing-ffmpeg', 'utf8');
+  fs.writeFileSync(path.join(installedRoot, 'models', 'ggml-small.bin'), 'existing-model', 'utf8');
+  fs.writeFileSync(bundledInstallerPath, windowsAsrInstallerSource, 'utf8');
+  const installedSnapshot = [
+    'transcribe.ps1',
+    path.join('whisper', 'whisper-cli.exe'),
+    path.join('ffmpeg', 'ffmpeg.exe'),
+    path.join('models', 'ggml-small.bin'),
+  ].map((relativePath) => [relativePath, fs.readFileSync(path.join(installedRoot, relativePath), 'utf8')]);
+  const installerMatrixPlugin = new PluginClass();
+  installerMatrixPlugin.settings = helpers.mergeSettings({
+    localAsrPlatform: 'win32',
+    localAsrInstallMode: 'default',
+  });
+  installerMatrixPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+  installerMatrixPlugin.getConfiguredLocalAsrInstallRoot = () => installedRoot;
+  installerMatrixPlugin.getBundledLocalAsrInstallerPath = () => bundledInstallerPath;
+  try {
+    const downloadedInstallerPath = await installerMatrixPlugin.getAvailableLocalAsrInstallerPath({
+      fetchInstallerText: async () => windowsAsrInstallerSource,
+    });
+    assert.notStrictEqual(downloadedInstallerPath, bundledInstallerPath);
+    assert.strictEqual(
+      helpers.isLocalAsrInstallerCurrent(fs.readFileSync(downloadedInstallerPath, 'utf8'), false),
+      true,
+    );
+    fs.rmSync(downloadedInstallerPath, { force: true });
+
+    for (const networkFailure of [new Error('HTTP 418'), new Error('request timed out')]) {
+      const fallbackInstallerPath = await installerMatrixPlugin.getAvailableLocalAsrInstallerPath({
+        fetchInstallerText: async () => {
+          throw networkFailure;
+        },
+      });
+      assert.strictEqual(fallbackInstallerPath, bundledInstallerPath);
+    }
+
+    installerMatrixPlugin.getBundledLocalAsrInstallerPath = () => path.join(installerMatrixRoot, 'missing-installer.ps1');
+    await assert.rejects(
+      installerMatrixPlugin.getAvailableLocalAsrInstallerPath({
+        fetchInstallerText: async () => {
+          throw new Error('HTTP 418');
+        },
+      }),
+      /HTTP 418/,
+    );
+    assert.strictEqual(helpers.getLocalAsrInstallStatus(installedRoot, fs.existsSync, 'win32').ready, true);
+    for (const [relativePath, expectedContent] of installedSnapshot) {
+      assert.strictEqual(fs.readFileSync(path.join(installedRoot, relativePath), 'utf8'), expectedContent);
+    }
+  } finally {
+    fs.rmSync(installerMatrixRoot, { recursive: true, force: true });
+  }
 
   const crashRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-crash-log-'));
   try {
@@ -8809,7 +9018,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.66 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.67 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
