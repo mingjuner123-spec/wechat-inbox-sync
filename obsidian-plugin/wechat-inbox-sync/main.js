@@ -6475,16 +6475,18 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
   addExtraction(preferred);
   (Array.isArray(extractions) ? extractions : []).forEach(addExtraction);
   if (!ordered.length) return preferred || null;
+  const substantive = ordered.filter((item) => !isXiaohongshuShareBoilerplateOnly(item));
+  const sources = substantive.length ? substantive : ordered;
 
   const isUsableTitle = (value) => {
     const text = String(value || '').trim();
     return text && !/^(小红书笔记|小红书|发现精彩|登录后查看更多)$/i.test(text);
   };
-  const descriptions = ordered
+  const descriptions = sources
     .map((item) => String(item.description || '').trim())
-    .filter((text) => text && !isXiaohongshuShareBoilerplateOnly(text));
-  const title = String((ordered.find((item) => isUsableTitle(item.title)) || {}).title || preferred?.title || '小红书笔记').trim();
-  const author = String((ordered.find((item) => String(item.author || '').trim()) || {}).author || '').trim();
+    .filter(Boolean);
+  const title = String((sources.find((item) => isUsableTitle(item.title)) || {}).title || preferred?.title || '小红书笔记').trim();
+  const author = String((sources.find((item) => String(item.author || '').trim()) || {}).author || '').trim();
   const description = descriptions.sort((a, b) => b.length - a.length)[0]
     || String(preferred?.description || '').trim();
   const tags = [];
@@ -6494,7 +6496,7 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
     const text = String(value || '').trim();
     if (text && !target.includes(text)) target.push(text);
   };
-  ordered.forEach((item) => {
+  sources.forEach((item) => {
     (Array.isArray(item.tags) ? item.tags : []).forEach((tag) => addUniqueText(tags, tag));
     (Array.isArray(item.imageUrls) ? item.imageUrls : []).forEach((imageUrl) => addUniqueText(imageUrls, imageUrl));
     (Array.isArray(item.comments) ? item.comments : []).forEach((comment) => {
@@ -6502,7 +6504,7 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
       if (!comments.some((existing) => JSON.stringify(existing) === key)) comments.push(comment);
     });
   });
-  const videoUrl = String((ordered.find((item) => String(item.videoUrl || '').trim()) || {}).videoUrl || '').trim();
+  const videoUrl = String((sources.find((item) => String(item.videoUrl || '').trim()) || {}).videoUrl || '').trim();
 
   return {
     title,
@@ -9571,7 +9573,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
   }
 }
 
-async function renderSocialMediaUrlsWithElectron(url) {
+async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
@@ -9595,6 +9597,7 @@ async function renderSocialMediaUrlsWithElectron(url) {
 
   const capturedRequests = [];
   const targetDouyinAwemeId = isDouyinUrl(url) ? extractDouyinAwemeId(url) : '';
+  const blockXiaohongshuCommentRequests = isXiaohongshuUrl(url) && options.includeComments === false;
   const browserSession = (win.webContents && win.webContents.session) || wechatSession;
   const installedWebRequestHandlers = [];
   const debuggerApi = targetDouyinAwemeId && win.webContents && win.webContents.debugger;
@@ -9621,7 +9624,12 @@ async function renderSocialMediaUrlsWithElectron(url) {
   installWebRequestHandler('onBeforeRequest', (details, callback) => {
     captureWebRequestDetails(details);
     if (typeof callback === 'function') {
-      callback(shouldBlockExternalAppUrl(details && details.url) ? { cancel: true } : {});
+      callback(
+        (blockXiaohongshuCommentRequests && isXiaohongshuCommentApiUrl(details && details.url))
+          || shouldBlockExternalAppUrl(details && details.url)
+          ? { cancel: true }
+          : {},
+      );
     }
   });
   installWebRequestHandler('onBeforeRedirect', captureWebRequestDetails);
@@ -10466,8 +10474,8 @@ async function renderXiaohongshuCommentsWithElectron(url) {
   return page && Array.isArray(page.comments) ? page.comments : [];
 }
 
-async function renderSocialMediaUrlWithElectron(url) {
-  const urls = await renderSocialMediaUrlsWithElectron(url);
+async function renderSocialMediaUrlWithElectron(url, options = {}) {
+  const urls = await renderSocialMediaUrlsWithElectron(url, options);
   return urls[0] || '';
 }
 
@@ -14418,8 +14426,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     return { action };
   }
 
-  async renderSocialMediaUrl(url) {
-    return renderSocialMediaUrlWithElectron(url);
+  async renderSocialMediaUrl(url, options = {}) {
+    return renderSocialMediaUrlWithElectron(url, options);
   }
 
   async renderXiaohongshuPage(url, options = {}) {
@@ -14430,14 +14438,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     return fetchDouyinMediaUrlsWithSession({ pageUrl, awemeId });
   }
 
-  async renderSocialMediaUrls(url) {
+  async renderSocialMediaUrls(url, options = {}) {
     if (
       Object.prototype.hasOwnProperty.call(this, 'renderSocialMediaUrl')
       && !Object.prototype.hasOwnProperty.call(this, 'renderSocialMediaUrls')
     ) {
-      return sortMediaUrlsForTranscription([await this.renderSocialMediaUrl(url)]);
+      return sortMediaUrlsForTranscription([await this.renderSocialMediaUrl(url, options)]);
     }
-    return renderSocialMediaUrlsWithElectron(url);
+    return renderSocialMediaUrlsWithElectron(url, options);
   }
 
   async runConfiguredTranscription(audioUrl, options = {}) {
@@ -16199,7 +16207,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               try {
                 mediaUrls = sortMediaUrlsForTranscription([
                   ...mediaUrls,
-                  ...(await this.renderSocialMediaUrls(candidate.url)),
+                  ...(await this.renderSocialMediaUrls(candidate.url, { includeComments: false })),
                 ]);
                 mediaUrl = mediaUrls[0] || '';
                 if (mediaUrl) break;
@@ -16322,11 +16330,14 @@ class WechatObsidianInboxPlugin extends Plugin {
             };
           }
         }
+        const socialMediaRenderOptions = isXiaohongshuUrl(url)
+          ? { includeComments: false }
+          : {};
         if (!hasPreciseDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === 'function') {
           try {
             mediaUrls = sortMediaUrlsForTranscription([
               ...mediaUrls,
-              ...(await this.renderSocialMediaUrls(primarySocialMediaBrowserUrl)),
+              ...(await this.renderSocialMediaUrls(primarySocialMediaBrowserUrl, socialMediaRenderOptions)),
             ]);
             mediaUrl = mediaUrls[0] || mediaUrl;
           } catch (renderError) {
@@ -16334,7 +16345,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
         } else if (!hasPreciseDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === 'function') {
           try {
-            mediaUrl = await this.renderSocialMediaUrl(primarySocialMediaBrowserUrl);
+            mediaUrl = await this.renderSocialMediaUrl(primarySocialMediaBrowserUrl, socialMediaRenderOptions);
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
           } catch (renderError) {
             mediaUrl = '';

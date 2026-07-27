@@ -316,6 +316,7 @@ const socialMediaRendererSource = pluginMainSource.slice(
 );
 assert.ok(socialMediaRendererSource.includes('const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();'));
 assert.ok(socialMediaRendererSource.includes('shouldBlockExternalAppUrl(details && details.url)'));
+assert.ok(socialMediaRendererSource.includes('isXiaohongshuCommentApiUrl(details && details.url)'));
 assert.ok(socialMediaRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
 assert.ok(socialMediaRendererSource.includes('await installDouyinExternalProtocolHandlers(wechatSession)'));
 assert.ok(
@@ -549,6 +550,44 @@ assert.strictEqual(
   ).length,
   1,
 );
+const mergedXiaohongshuExtraction = helpers.mergeXiaohongshuExtractions([
+  {
+    title: '小红书笔记',
+    description: '单纯到真诚，我走了10年！ http://xhslink.cn/o/demo 先复制这段口令，再去【小红书】打开笔记查看更多内容。',
+    tags: [],
+    imageUrls: ['https://ci.xiaohongshu.com/default-landing.png'],
+    videoUrl: '',
+    comments: [],
+    markdown: '分享口令',
+  },
+  {
+    title: '真实笔记标题',
+    description: '真实笔记正文。',
+    tags: ['#真实标签'],
+    imageUrls: [
+      'https://sns-webpic-qc.xhscdn.com/real-cover.jpg',
+      'https://sns-webpic-qc.xhscdn.com/real-page-2.jpg',
+    ],
+    videoUrl: '',
+    comments: [],
+    markdown: '真实笔记正文。',
+  },
+], {
+  title: '小红书笔记',
+  description: '单纯到真诚，我走了10年！ http://xhslink.cn/o/demo 先复制这段口令，再去【小红书】打开笔记查看更多内容。',
+  tags: [],
+  imageUrls: ['https://ci.xiaohongshu.com/default-landing.png'],
+  videoUrl: '',
+  comments: [],
+  markdown: '分享口令',
+});
+assert.strictEqual(mergedXiaohongshuExtraction.title, '真实笔记标题');
+assert.strictEqual(mergedXiaohongshuExtraction.description, '真实笔记正文。');
+assert.deepStrictEqual(mergedXiaohongshuExtraction.tags, ['#真实标签']);
+assert.deepStrictEqual(mergedXiaohongshuExtraction.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/real-cover.jpg',
+  'https://sns-webpic-qc.xhscdn.com/real-page-2.jpg',
+]);
 assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.getXiaohongshuCapturedRequestBody, 'function');
 assert.strictEqual(
@@ -5809,8 +5848,10 @@ async function runAsyncHydrationTests() {
       };
     };
     const genericRedirectMediaUrls = [];
-    genericRedirectMediaPlugin.renderSocialMediaUrls = async (renderUrl) => {
+    const genericRedirectMediaOptions = [];
+    genericRedirectMediaPlugin.renderSocialMediaUrls = async (renderUrl, renderOptions) => {
       genericRedirectMediaUrls.push(renderUrl);
+      genericRedirectMediaOptions.push(renderOptions);
       return ['https://sns-video-v6.xhscdn.com/stream/original-note.mp4'];
     };
     genericRedirectMediaPlugin.runConfiguredTranscription = async () => ({
@@ -5828,6 +5869,7 @@ async function runAsyncHydrationTests() {
     }, '', '', '小红书短链视频恢复');
     assert.ok(genericRedirectMediaUrls.length >= 1);
     assert.ok(genericRedirectMediaUrls.every((renderUrl) => renderUrl === 'http://xhslink.cn/o/original-note'));
+    assert.ok(genericRedirectMediaOptions.every((options) => options && options.includeComments === false));
     assert.strictEqual(genericRedirectMediaRecord.metadata.transcription, '原始短链恢复的视频转写正文');
   } finally {
     http.request = originalHttpRequestForGenericRedirect;
