@@ -1437,6 +1437,34 @@ function getSafeUrlDiagnostic(url = '') {
   }
 }
 
+function getXiaohongshuCapabilityMatrix({
+  hasProAccess = false,
+  commentsEnabled = true,
+  isLoggedIn = false,
+} = {}) {
+  const pro = hasProAccess === true;
+  return {
+    publicGraphic: true,
+    mediaTranscription: pro,
+    imageOcr: pro,
+    comments: pro && commentsEnabled !== false && isLoggedIn === true,
+  };
+}
+
+function getXiaohongshuBrowserCandidates(sourceUrl = '', resolvedUrl = '') {
+  const result = [];
+  const seen = new Set();
+  const add = (url, kind) => {
+    const value = String(url || '').trim();
+    if (!value || seen.has(value) || !isXiaohongshuUrl(value)) return;
+    seen.add(value);
+    result.push({ url: value, kind });
+  };
+  add(sourceUrl, isXiaohongshuShortLinkUrl(sourceUrl) ? 'original-shortlink' : 'source-url');
+  add(resolvedUrl, 'resolved-url');
+  return result;
+}
+
 function isXiaohongshuShareBoilerplateOnly(extracted) {
   if (!extracted) return false;
   const source = Array.from(new Set([
@@ -17153,6 +17181,8 @@ WechatObsidianInboxPlugin.__test = {
   isRetryableTranscriptionError,
   getPluginRuntimeIdentity,
   getSafeUrlDiagnostic,
+  getXiaohongshuCapabilityMatrix,
+  getXiaohongshuBrowserCandidates,
   isXiaohongshuShareBoilerplateOnly,
   classifyXiaohongshuPage,
   buildXiaohongshuFailureDiagnostic,

@@ -482,6 +482,50 @@ assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://edith.xiaohong
 assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('http://xhslink.cn/o/demo'), false);
 assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://xiaohongshu.com.evil.example/'), false);
 assert.strictEqual(typeof helpers.hasXiaohongshuLoginCookies, 'function');
+assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
+  hasProAccess: false,
+  commentsEnabled: true,
+  isLoggedIn: false,
+}), {
+  publicGraphic: true,
+  mediaTranscription: false,
+  imageOcr: false,
+  comments: false,
+});
+assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
+  hasProAccess: true,
+  commentsEnabled: true,
+  isLoggedIn: false,
+}), {
+  publicGraphic: true,
+  mediaTranscription: true,
+  imageOcr: true,
+  comments: false,
+});
+assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
+  hasProAccess: true,
+  commentsEnabled: true,
+  isLoggedIn: true,
+}), {
+  publicGraphic: true,
+  mediaTranscription: true,
+  imageOcr: true,
+  comments: true,
+});
+assert.deepStrictEqual(
+  helpers.getXiaohongshuBrowserCandidates(
+    'http://xhslink.cn/o/demo',
+    'https://www.xiaohongshu.com/explore/note-1?xsec_token=redacted',
+  ).map((item) => item.kind),
+  ['original-shortlink', 'resolved-url'],
+);
+assert.strictEqual(
+  helpers.getXiaohongshuBrowserCandidates(
+    'https://www.xiaohongshu.com/explore/note-1',
+    'https://www.xiaohongshu.com/explore/note-1',
+  ).length,
+  1,
+);
 assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.getXiaohongshuCapturedRequestBody, 'function');
 assert.strictEqual(
