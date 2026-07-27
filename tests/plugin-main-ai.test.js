@@ -4364,6 +4364,27 @@ assert.deepStrictEqual(helpers.parseTencentTaskStatusResponse({
 });
 
 async function runAsyncHydrationTests() {
+  const xiaohongshuRenderOrder = [];
+  let releaseFirstXiaohongshuRender;
+  const firstXiaohongshuRenderGate = new Promise((resolve) => {
+    releaseFirstXiaohongshuRender = resolve;
+  });
+  const firstXiaohongshuRender = helpers.runWithXiaohongshuBrowserSessionLock(async () => {
+    xiaohongshuRenderOrder.push('first:start');
+    await firstXiaohongshuRenderGate;
+    xiaohongshuRenderOrder.push('first:end');
+  });
+  await Promise.resolve();
+  const secondXiaohongshuRender = helpers.runWithXiaohongshuBrowserSessionLock(async () => {
+    xiaohongshuRenderOrder.push('second:start');
+    xiaohongshuRenderOrder.push('second:end');
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepStrictEqual(xiaohongshuRenderOrder, ['first:start']);
+  releaseFirstXiaohongshuRender();
+  await Promise.all([firstXiaohongshuRender, secondXiaohongshuRender]);
+  assert.deepStrictEqual(xiaohongshuRenderOrder, ['first:start', 'first:end', 'second:start', 'second:end']);
+
   const plugin = new PluginClass();
   plugin.settings = { aiProvider: 'off' };
 
@@ -5952,7 +5973,17 @@ async function runAsyncHydrationTests() {
   let anonymousFastRenderCalls = 0;
   anonymousFastPlugin.renderXiaohongshuPage = async () => {
     anonymousFastRenderCalls += 1;
-    throw new Error('complete anonymous HTML must not need rendered content');
+    return {
+      url: 'https://www.xiaohongshu.com/explore/anonymous-fast-note',
+      html: [
+        '<html><head>',
+        '<meta property="og:title" content="匿名路径真实笔记">',
+        '<meta name="description" content="匿名路径完整正文已经直接返回，隐藏浏览器用于补齐内页图片。">',
+        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/anonymous-cover.jpg">',
+        '<script>{"note":{"desc":"匿名路径完整正文已经直接返回，隐藏浏览器用于补齐内页图片。","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/anonymous-cover.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/anonymous-inner.jpg"}]}}</script>',
+        '</head></html>',
+      ].join(''),
+    };
   };
   const previousAnonymousFastRequestUrlMock = requestUrlMock;
   requestUrlMock = async ({ url }) => {
@@ -5975,8 +6006,9 @@ async function runAsyncHydrationTests() {
       content: 'https://www.xiaohongshu.com/explore/anonymous-fast-note',
       metadata: { url: 'https://www.xiaohongshu.com/explore/anonymous-fast-note' },
     }, '', '', '匿名路径测试');
-    assert.strictEqual(anonymousFastRenderCalls, 0);
+    assert.ok(anonymousFastRenderCalls > 0);
     assert.ok(anonymousFastRecord.metadata.markdown.includes('匿名路径完整正文'));
+    assert.ok(anonymousFastRecord.metadata.markdown.includes('anonymous-inner.jpg'));
   } finally {
     requestUrlMock = previousAnonymousFastRequestUrlMock;
   }
@@ -5987,6 +6019,7 @@ async function runAsyncHydrationTests() {
     '<meta name="description" content="所有用户都应该取得这段公开正文以及完整图片。 #公开内容">',
     '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/public-cover.jpg">',
     '</head><body>',
+    '<script>window.__INITIAL_STATE__={"comments":[{"content":"仅登录 Pro 可见评论，这段评论故意写得比公开正文更长，绝不能被通用 JSON 正文提取器误判成笔记正文。 #评论内容"}]}</script>',
     '<div class="comment-item"><span class="user-name">评论用户</span><span class="comment-content">仅登录 Pro 可见评论</span></div>',
     '</body></html>',
   ].join('');
