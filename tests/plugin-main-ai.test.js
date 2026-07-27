@@ -68,6 +68,7 @@ const currentWindowsAsrScriptSource = windowsAsrInstallerSource.slice(
   currentTemplateContentStart + 1,
   currentTemplateQuoteEnd,
 );
+const portableWindowsLayoutPlatform = os.platform() === 'win32' ? 'win32' : 'linux';
 const macAsrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr-macos.sh'),
   'utf8',
@@ -2244,7 +2245,11 @@ assert.deepStrictEqual(
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'ffmpeg', 'ffmpeg.exe'), '');
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'transcribe.ps1'), historicalWindowsAsrScriptSource, 'utf8');
-  const legacyStatus = helpers.getLocalAsrInstallStatus(tempLegacyAsrRoot, fs.existsSync, 'win32');
+  const legacyStatus = helpers.getLocalAsrInstallStatus(
+    tempLegacyAsrRoot,
+    fs.existsSync,
+    portableWindowsLayoutPlatform,
+  );
   assert.strictEqual(legacyStatus.ready, true);
   assert.strictEqual(legacyStatus.scriptOutdated, false);
   assert.strictEqual(legacyStatus.upgradeRecommended, true);
@@ -8936,7 +8941,14 @@ async function runLocalAsrRepairDecisionTests() {
       }),
       /HTTP 418/,
     );
-    assert.strictEqual(helpers.getLocalAsrInstallStatus(installedRoot, fs.existsSync, 'win32').ready, true);
+    assert.strictEqual(
+      helpers.getLocalAsrInstallStatus(
+        installedRoot,
+        fs.existsSync,
+        portableWindowsLayoutPlatform,
+      ).ready,
+      true,
+    );
     for (const [relativePath, expectedContent] of installedSnapshot) {
       assert.strictEqual(fs.readFileSync(path.join(installedRoot, relativePath), 'utf8'), expectedContent);
     }
