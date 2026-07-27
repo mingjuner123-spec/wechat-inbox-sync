@@ -5505,7 +5505,8 @@ async function runAsyncHydrationTests() {
 
   const genericXhsLandingVideoPlugin = new PluginClass();
   genericXhsLandingVideoPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
-  genericXhsLandingVideoPlugin.hasProFeatureAccess = async () => false;
+  genericXhsLandingVideoPlugin.hasProFeatureAccess = async () => true;
+  genericXhsLandingVideoPlugin.checkXiaohongshuLogin = async () => false;
   genericXhsLandingVideoPlugin.renderSocialMediaUrls = async () => [
     'https://sns-video-v6.xhscdn.com/stream/demo.mp4?sign=test',
   ];
@@ -5730,7 +5731,8 @@ async function runAsyncHydrationTests() {
 
     const genericRedirectMediaPlugin = new PluginClass();
     genericRedirectMediaPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
-    genericRedirectMediaPlugin.hasProFeatureAccess = async () => false;
+    genericRedirectMediaPlugin.hasProFeatureAccess = async () => true;
+    genericRedirectMediaPlugin.checkXiaohongshuLogin = async () => false;
     genericRedirectMediaPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
     genericRedirectMediaPlugin.renderXiaohongshuPage = async (renderUrl) => {
       assert.strictEqual(renderUrl, 'http://xhslink.cn/o/original-note');
@@ -5943,6 +5945,118 @@ async function runAsyncHydrationTests() {
   });
   assert.ok(proLoginProbeFailureRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
   assert.strictEqual(proLoginProbeFailureRecord.metadata.markdown.includes('仅登录 Pro 可见评论'), false);
+
+  const runXiaohongshuOcrCapabilityCase = async (hasProAccess) => {
+    const ocrPlugin = new PluginClass();
+    ocrPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'off',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: false,
+    });
+    ocrPlugin.hasProFeatureAccess = async () => hasProAccess;
+    let ocrCalls = 0;
+    ocrPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => {
+      ocrCalls += 1;
+      return {
+        ...extracted,
+        ocrError: 'simulated OCR enhancement failure',
+      };
+    };
+    const previousOcrCapabilityRequestUrlMock = requestUrlMock;
+    requestUrlMock = async ({ url }) => {
+      if (url === 'https://www.xiaohongshu.com/explore/ocr-capability') {
+        return {
+          status: 200,
+          text: [
+            '<html><head>',
+            '<meta property="og:title" content="长图 OCR 权限测试">',
+            '<meta name="description" content="公开图文正文必须先成功，OCR 只是 Pro 附加能力。">',
+            '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/ocr-cover.jpg">',
+            '</head></html>',
+          ].join(''),
+        };
+      }
+      throw new Error(`unexpected OCR capability request ${url}`);
+    };
+    try {
+      const record = await ocrPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/ocr-capability',
+        metadata: { url: 'https://www.xiaohongshu.com/explore/ocr-capability' },
+      }, '', '', '小红书 OCR 权限测试');
+      return { record, ocrCalls };
+    } finally {
+      requestUrlMock = previousOcrCapabilityRequestUrlMock;
+    }
+  };
+
+  const freeOcrCapability = await runXiaohongshuOcrCapabilityCase(false);
+  assert.strictEqual(freeOcrCapability.ocrCalls, 0);
+  assert.ok(freeOcrCapability.record.metadata.markdown.includes('公开图文正文必须先成功'));
+  assert.strictEqual(freeOcrCapability.record.metadata.xiaohongshuOcrError, '');
+
+  const proOcrCapability = await runXiaohongshuOcrCapabilityCase(true);
+  assert.strictEqual(proOcrCapability.ocrCalls, 1);
+  assert.ok(proOcrCapability.record.metadata.markdown.includes('公开图文正文必须先成功'));
+  assert.strictEqual(proOcrCapability.record.metadata.xiaohongshuOcrError, 'simulated OCR enhancement failure');
+
+  const runXiaohongshuVideoCapabilityCase = async (hasProAccess) => {
+    const videoCapabilityPlugin = new PluginClass();
+    videoCapabilityPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'local',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: false,
+    });
+    videoCapabilityPlugin.hasProFeatureAccess = async () => hasProAccess;
+    let transcriptionCalls = 0;
+    videoCapabilityPlugin.runConfiguredTranscription = async () => {
+      transcriptionCalls += 1;
+      if (!hasProAccess) throw new Error('free transcription must not run');
+      return {
+        transcription: 'Pro 用户成功取得音视频文案',
+        source: 'local',
+      };
+    };
+    const previousVideoCapabilityRequestUrlMock = requestUrlMock;
+    requestUrlMock = async ({ url }) => {
+      if (url === 'https://www.xiaohongshu.com/explore/video-capability') {
+        return {
+          status: 200,
+          text: [
+            '<html><head>',
+            '<meta property="og:title" content="音视频 Pro 权限测试">',
+            '<meta property="og:video" content="https://sns-video-v6.xhscdn.com/stream/video-capability.mp4">',
+            '</head></html>',
+          ].join(''),
+        };
+      }
+      throw new Error(`unexpected video capability request ${url}`);
+    };
+    try {
+      const record = await videoCapabilityPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/video-capability',
+        metadata: {
+          url: 'https://www.xiaohongshu.com/explore/video-capability',
+          webpageMediaType: 'audio_video',
+          transcriptionMode: 'local',
+        },
+      }, '', '', '小红书音视频权限测试');
+      return { record, transcriptionCalls };
+    } finally {
+      requestUrlMock = previousVideoCapabilityRequestUrlMock;
+    }
+  };
+
+  const freeVideoCapability = await runXiaohongshuVideoCapabilityCase(false);
+  assert.strictEqual(freeVideoCapability.transcriptionCalls, 0);
+  assert.strictEqual(freeVideoCapability.record.metadata.transcriptionStatus, 'failed');
+  assert.match(freeVideoCapability.record.metadata.transcriptionError, /Pro/);
+
+  const proVideoCapability = await runXiaohongshuVideoCapabilityCase(true);
+  assert.strictEqual(proVideoCapability.transcriptionCalls, 1);
+  assert.strictEqual(proVideoCapability.record.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(proVideoCapability.record.metadata.transcription, 'Pro 用户成功取得音视频文案');
 
   const unavailableGraphicPlugin = new PluginClass();
   unavailableGraphicPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
@@ -6354,6 +6468,8 @@ async function runAsyncHydrationTests() {
       status: 'bound',
     }],
   });
+  localPlatformParsePlugin.hasProFeatureAccess = async () => true;
+  localPlatformParsePlugin.checkXiaohongshuLogin = async () => false;
   let localPrepareCalled = false;
   localPlatformParsePlugin.prepareWebpageMedia = async () => {
     localPrepareCalled = true;

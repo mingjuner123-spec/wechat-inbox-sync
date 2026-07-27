@@ -16167,6 +16167,23 @@ class WechatObsidianInboxPlugin extends Plugin {
           throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
         }
         if (mediaUrl) {
+          if (isXiaohongshuUrl(url) && !xiaohongshuCapabilities.mediaTranscription) {
+            return {
+              ...record,
+              metadata: buildTranscriptOnlyMetadata(metadata, {
+                url,
+                platform: '小红书',
+                mediaUrl,
+                mediaUrls,
+                transcription: '',
+                transcriptionStatus: 'failed',
+                transcriptionError: '小红书音视频转写需要有效 Pro。请先开通 Pro 并刷新插件权限。',
+                transcriptionSource: 'pro-required',
+                conversionStatus: 'failed',
+                markdown: '',
+              }),
+            };
+          }
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
