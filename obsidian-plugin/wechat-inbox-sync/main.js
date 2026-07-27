@@ -7459,19 +7459,11 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
 }
 
 function normalizeOcrText(text) {
-  const lines = String(text || '')
-    .replace(/\r/g, '\n')
+  return String(text || '')
+    .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-  const seen = new Set();
-  return lines
-    .filter((line) => {
-      const key = line.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
+    .filter(Boolean)
     .join('\n')
     .trim();
 }
@@ -7480,47 +7472,161 @@ function countReadableOcrChars(text) {
   return (String(text || '').replace(/\s+/g, '').match(/[\u3400-\u9fffA-Za-z0-9]/g) || []).length;
 }
 
+const XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS = Object.freeze({
+  trustedBoxConfidence: 0.55,
+  averageConfidence: 0.65,
+  longTextReadableChars: 80,
+  longTextLines: 5,
+  longTextVerticalSpanRatio: 0.35,
+  longTextCoveredRowRatio: 0.12,
+  largeCardReadableChars: 35,
+  largeCardLines: 3,
+  largeCardTextBoxAreaRatio: 0.12,
+  largeCardVerticalSpanRatio: 0.25,
+  geometryFallbackReadableChars: 160,
+  geometryFallbackLines: 6,
+  maxBoundaryOverlapLines: 8,
+});
+
+function normalizeFiniteOcrMetric(value, fallback, {
+  integer = false,
+  ratio = false,
+} = {}) {
+  const number = typeof value === 'number'
+    ? value
+    : (typeof value === 'string' && value.trim() ? Number(value) : Number.NaN);
+  if (!Number.isFinite(number) || number < 0 || (ratio && number > 1)) return fallback;
+  return integer ? Math.floor(number) : number;
+}
+
+function splitNormalizedOcrLines(text) {
+  const normalized = normalizeOcrText(text);
+  return normalized ? normalized.split('\n') : [];
+}
+
+function normalizeOptionalOcrRatio(value) {
+  const missing = value === undefined
+    || value === null
+    || (typeof value === 'string' && !value.trim());
+  return missing ? null : normalizeFiniteOcrMetric(value, 0, { ratio: true });
+}
+
+function normalizeXiaohongshuOcrMetrics(metrics = {}, text = '') {
+  const source = metrics && typeof metrics === 'object' ? metrics : {};
+  const lines = splitNormalizedOcrLines(text);
+  return {
+    readableChars: normalizeFiniteOcrMetric(
+      source.readableChars,
+      countReadableOcrChars(text),
+      { integer: true },
+    ),
+    lineCount: normalizeFiniteOcrMetric(source.lineCount, lines.length, { integer: true }),
+    averageConfidence: normalizeOptionalOcrRatio(source.averageConfidence),
+    textBoxAreaRatio: normalizeOptionalOcrRatio(source.textBoxAreaRatio),
+    coveredRowRatio: normalizeOptionalOcrRatio(source.coveredRowRatio),
+    verticalSpanRatio: normalizeOptionalOcrRatio(source.verticalSpanRatio),
+  };
+}
+
+function isXiaohongshuTextDominantOcrItem(item = {}) {
+  if (!item || typeof item !== 'object') return false;
+  const text = normalizeOcrText(item.text || item.ocrText || item.value);
+  if (!text) return false;
+  const metrics = normalizeXiaohongshuOcrMetrics(item.metrics, text);
+  const thresholds = XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS;
+  const geometry = [
+    metrics.textBoxAreaRatio,
+    metrics.coveredRowRatio,
+    metrics.verticalSpanRatio,
+  ];
+  const hasGeometry = geometry.some((value) => Number.isFinite(value));
+  const hasTrustedAverageConfidence = Number.isFinite(metrics.averageConfidence)
+    && metrics.averageConfidence >= thresholds.averageConfidence;
+
+  if (!hasGeometry) {
+    return (metrics.averageConfidence === null || hasTrustedAverageConfidence)
+      && metrics.readableChars >= thresholds.geometryFallbackReadableChars
+      && metrics.lineCount >= thresholds.geometryFallbackLines;
+  }
+  if (!hasTrustedAverageConfidence) return false;
+
+  const isLongText = metrics.readableChars >= thresholds.longTextReadableChars
+    && metrics.lineCount >= thresholds.longTextLines
+    && metrics.verticalSpanRatio >= thresholds.longTextVerticalSpanRatio
+    && metrics.coveredRowRatio >= thresholds.longTextCoveredRowRatio;
+  const isLargeCard = metrics.readableChars >= thresholds.largeCardReadableChars
+    && metrics.lineCount >= thresholds.largeCardLines
+    && metrics.textBoxAreaRatio >= thresholds.largeCardTextBoxAreaRatio
+    && metrics.verticalSpanRatio >= thresholds.largeCardVerticalSpanRatio;
+  return isLongText || isLargeCard;
+}
+
 function normalizeXiaohongshuOcrItems(items = []) {
   return (Array.isArray(items) ? items : [])
-    .map((item, index) => {
+    .map((item, sourceOrder) => {
       const text = normalizeOcrText(item && (item.text || item.ocrText || item.value));
-      const readableChars = countReadableOcrChars(text);
+      const metrics = normalizeXiaohongshuOcrMetrics(item && item.metrics, text);
+      const rawIndex = Number(item && item.index);
+      const index = Number.isFinite(rawIndex) && rawIndex > 0
+        ? Math.floor(rawIndex)
+        : sourceOrder + 1;
       return {
         imageUrl: String(item && (item.imageUrl || item.url) || '').trim(),
         text,
-        index: Number(item && item.index) || index + 1,
-        readableChars,
-        substantial: readableChars >= 80,
+        index,
+        readableChars: metrics.readableChars,
+        substantial: metrics.readableChars >= XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.longTextReadableChars,
+        metrics,
+        sourceOrder,
       };
     })
-    .filter((item) => item.text && item.readableChars >= 15);
+    .filter((item) => isXiaohongshuTextDominantOcrItem(item))
+    .sort((left, right) => left.index - right.index || left.sourceOrder - right.sourceOrder)
+    .map(({ sourceOrder, ...item }) => item);
 }
 
 function isLikelyImageTextNote(items = []) {
+  return normalizeXiaohongshuOcrItems(items).length > 0;
+}
+
+function getNormalizedOcrLineKey(line) {
+  return String(line || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function mergeXiaohongshuOcrText(items = [], maxOverlapLines = 8) {
   const normalized = normalizeXiaohongshuOcrItems(items);
-  const total = normalized.reduce((sum, item) => sum + item.readableChars, 0);
-  const imageTextCount = normalized.filter((item) => item.readableChars >= 40).length;
-  return normalized.some((item) => item.readableChars >= 80)
-    || imageTextCount >= 2
-    || total >= 120;
+  const configuredLimit = normalizeFiniteOcrMetric(maxOverlapLines, 8, { integer: true });
+  const overlapLimit = Math.min(
+    configuredLimit,
+    XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.maxBoundaryOverlapLines,
+  );
+  const mergedLines = [];
+
+  normalized.forEach((item) => {
+    const pageLines = splitNormalizedOcrLines(item.text);
+    const maximumOverlap = Math.min(overlapLimit, mergedLines.length, pageLines.length);
+    let overlap = 0;
+    for (let length = maximumOverlap; length > 0; length -= 1) {
+      const previousKeys = mergedLines.slice(-length).map(getNormalizedOcrLineKey);
+      const nextKeys = pageLines.slice(0, length).map(getNormalizedOcrLineKey);
+      if (previousKeys.every((key, index) => key && key === nextKeys[index])) {
+        overlap = length;
+        break;
+      }
+    }
+    mergedLines.push(...pageLines.slice(overlap));
+  });
+
+  return mergedLines.reduce((text, line) => {
+    if (!text) return line;
+    const needsSpace = /[A-Za-z0-9]$/.test(text) && /^[A-Za-z0-9]/.test(line);
+    return `${text}${needsSpace ? ' ' : ''}${line}`;
+  }, '');
 }
 
 function buildXiaohongshuOcrMarkdown(items = []) {
-  const normalized = normalizeXiaohongshuOcrItems(items);
-  if (!normalized.length) return '';
-  const lines = [
-    '## 图片文字 OCR（测试版）',
-    '',
-    isLikelyImageTextNote(normalized)
-      ? '> 检测到图片里有较多文字，下面是 OCR 识别结果；原图片仍保留在上方。'
-      : '> 下面是图片中的少量可识别文字；原图片仍保留在上方。',
-    '',
-  ];
-  normalized.forEach((item, index) => {
-    const displayIndex = Number.isFinite(item.index) && item.index > 0 ? item.index : index + 1;
-    lines.push(`### 图片 ${displayIndex}`, '', item.text, '');
-  });
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const text = mergeXiaohongshuOcrText(items);
+  return text ? `## 图片文字\n\n${text}` : '';
 }
 
 function appendXiaohongshuOcrMarkdown(markdown, items = []) {
@@ -18838,8 +18944,12 @@ WechatObsidianInboxPlugin.__test = {
   collectXiaohongshuNoteImageUrls,
   appendXiaohongshuOcrMarkdown,
   buildXiaohongshuOcrMarkdown,
+  isXiaohongshuTextDominantOcrItem,
   isLikelyImageTextNote,
+  mergeXiaohongshuOcrText,
+  normalizeXiaohongshuOcrMetrics,
   normalizeXiaohongshuOcrItems,
+  XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS,
   buildMarkdownForRecord,
   enrichExtractedWebpageMetadata,
   extractSocialVideoMarkdownFromHtml,

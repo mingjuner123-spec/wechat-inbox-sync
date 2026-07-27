@@ -270,7 +270,106 @@ function runPendingLocalOcrSwitchTests() {
   }
 }
 
+function runXiaohongshuOcrPolicyTests() {
+  assert.strictEqual(typeof helpers.isXiaohongshuTextDominantOcrItem, 'function');
+  assert.strictEqual(typeof helpers.mergeXiaohongshuOcrText, 'function');
+  assert.strictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.trustedBoxConfidence, 0.55);
+  assert.strictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.averageConfidence, 0.65);
+
+  const textCard = {
+    index: 3,
+    imageUrl: 'https://sns-webpic-qc.xhscdn.com/text-card.jpg',
+    text: [
+      '这是一张以正文为主体的长文字卡片',
+      '底色和小头像不会改变正文占主要版面的事实',
+      '连续内容用于验证文字主体判定',
+      '第四行正文继续解释卡片中的核心信息',
+      '第五行正文确保文字覆盖足够的纵向区域',
+      '最后一行正文用于完成测试样本',
+    ].join('\n'),
+    metrics: {
+      readableChars: 120,
+      lineCount: 8,
+      averageConfidence: 0.92,
+      textBoxAreaRatio: 0.16,
+      coveredRowRatio: 0.22,
+      verticalSpanRatio: 0.62,
+    },
+  };
+  const captionedPhoto = {
+    index: 2,
+    imageUrl: 'https://sns-webpic-qc.xhscdn.com/captioned-photo.jpg',
+    text: '照片标题\n一行字幕\n品牌水印',
+    metrics: {
+      readableChars: 18,
+      lineCount: 3,
+      averageConfidence: 0.91,
+      textBoxAreaRatio: 0.03,
+      coveredRowRatio: 0.04,
+      verticalSpanRatio: 0.12,
+    },
+  };
+
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem(textCard), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem(captionedPhoto), false);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: Array.from({ length: 6 }, () => '几何缺失时保守回退正文内容'.repeat(5)).join('\n'),
+    metrics: {},
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: Array.from({ length: 6 }, () => '非法指标不能伪装成几何缺失正文'.repeat(5)).join('\n'),
+    metrics: {
+      readableChars: 999,
+      lineCount: 99,
+      averageConfidence: Number.POSITIVE_INFINITY,
+      textBoxAreaRatio: Number.POSITIVE_INFINITY,
+      coveredRowRatio: -1,
+      verticalSpanRatio: Number.NaN,
+    },
+  }), false);
+  assert.deepStrictEqual(
+    helpers.normalizeXiaohongshuOcrItems([captionedPhoto, textCard]).map((item) => item.index),
+    [3],
+  );
+
+  const page1 = {
+    ...textCard,
+    index: 1,
+    text: [
+      '第一页正文开头',
+      '同一页允许重复的合法句子',
+      '同一页允许重复的合法句子',
+      '第一页正文继续',
+      '共同边界第一行',
+      '共同边界第二行',
+    ].join('\n'),
+  };
+  const page2 = {
+    ...textCard,
+    index: 2,
+    text: [
+      '共同边界第一行',
+      '共同边界第二行',
+      '第二页正文开头',
+      '第二页正文继续',
+      '第二页正文补充',
+      '第二页正文结束',
+    ].join('\n'),
+  };
+  const mergedText = helpers.mergeXiaohongshuOcrText([page2, page1]);
+  const markdown = helpers.buildXiaohongshuOcrMarkdown([page2, page1]);
+
+  assert.ok(markdown.startsWith('## 图片文字\n\n'));
+  assert.strictEqual((markdown.match(/^## 图片文字$/gm) || []).length, 1);
+  assert.doesNotMatch(markdown, /### 图片\s*\d+/);
+  assert.strictEqual((mergedText.match(/共同边界第一行/g) || []).length, 1);
+  assert.strictEqual((mergedText.match(/共同边界第二行/g) || []).length, 1);
+  assert.strictEqual((mergedText.match(/同一页允许重复的合法句子/g) || []).length, 2);
+  assert.ok(mergedText.indexOf('第一页正文开头') < mergedText.indexOf('第二页正文开头'));
+}
+
 runPendingLocalOcrSwitchTests();
+runXiaohongshuOcrPolicyTests();
 assert.strictEqual(typeof helpers.enableDebuggerNetworkCapture, 'function');
 let debuggerNetworkCommand = '';
 const neverSettlingDebuggerCommand = new Promise(() => {});
