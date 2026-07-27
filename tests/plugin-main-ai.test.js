@@ -430,6 +430,17 @@ const xiaohongshuFailureDiagnostic = helpers.buildXiaohongshuFailureDiagnostic({
     markdown: '存下口令，跳转【小红书】阅读',
     imageUrls: [],
   },
+  browserAttempts: [{
+    inputKind: 'original-shortlink',
+    attempted: true,
+    finalHost: 'xiaohongshu.com',
+    pageType: 'xiaohongshu-generic-landing',
+    bodyCharacterCount: 0,
+    imageCount: 1,
+    failed: false,
+    url: 'https://www.xiaohongshu.com/explore/secret?xsec_token=must-not-leak',
+    cookie: 'must-not-leak',
+  }],
 });
 assert.strictEqual(xiaohongshuFailureDiagnostic.request.sourceHost, 'xhslink.cn');
 assert.strictEqual(xiaohongshuFailureDiagnostic.request.finalHost, 'xiaohongshu.com');
@@ -440,6 +451,16 @@ assert.strictEqual(xiaohongshuFailureDiagnostic.extraction.imageCount, 0);
 assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('source-secret'), false);
 assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('resolved-secret'), false);
 assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('存下口令'), false);
+assert.deepStrictEqual(xiaohongshuFailureDiagnostic.request.browserAttempts, [{
+  inputKind: 'original-shortlink',
+  attempted: true,
+  finalHost: 'xiaohongshu.com',
+  pageType: 'xiaohongshu-generic-landing',
+  bodyCharacterCount: 0,
+  imageCount: 1,
+  failed: false,
+}]);
+assert.strictEqual(JSON.stringify(xiaohongshuFailureDiagnostic).includes('must-not-leak'), false);
 const xiaohongshuFailureLogText = helpers.buildSyncDiagnosticLogText({
   status: 'failed',
   message: '单条内容同步失败',
@@ -5588,18 +5609,24 @@ async function runAsyncHydrationTests() {
   const genericRedirectRenderUrls = [];
   genericRedirectFallbackPlugin.renderXiaohongshuPage = async (renderUrl) => {
     genericRedirectRenderUrls.push(renderUrl);
-    assert.strictEqual(
-      renderUrl,
-      'http://xhslink.cn/o/original-note',
-      'Node 跳到通用首页后，隐藏浏览器必须重新打开仍包含笔记身份的原始短链',
-    );
+    if (renderUrl === 'http://xhslink.cn/o/original-note') {
+      return {
+        url: 'https://www.xiaohongshu.com/',
+        html: genericXiaohongshuLandingHtml,
+        comments: [],
+      };
+    }
+    assert.strictEqual(renderUrl, 'https://www.xiaohongshu.com/');
     return {
+      url: 'https://www.xiaohongshu.com/explore/recovered-note',
       html: [
         '<html><head>',
-        '<meta property="og:title" content="原始短链恢复成功">',
-        '<meta name="description" content="隐藏浏览器从原始短链恢复了真实笔记正文，而不是再次打开通用首页。">',
-        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/original-note.jpg">',
-        '</head></html>',
+        '<meta property="og:title" content="真实地址恢复成功">',
+        '<meta name="description" content="真实地址恢复出了完整正文内容。 #效率工具 #知识管理">',
+        '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/resolved-cover.jpg">',
+        '</head><body>',
+        '<script>{"note":{"desc":"真实地址恢复出了完整正文内容。 #效率工具 #知识管理","imageList":[{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/resolved-cover.jpg"},{"urlDefault":"https:\\/\\/sns-webpic-qc.xhscdn.com\\/resolved-page-2.jpg"}]}}</script>',
+        '</body></html>',
       ].join(''),
       comments: [],
     };
@@ -5648,9 +5675,57 @@ async function runAsyncHydrationTests() {
         shareText: '原始短链恢复测试',
       },
     }, '', '', '小红书短链通用首页恢复');
-    assert.deepStrictEqual(genericRedirectRenderUrls, ['http://xhslink.cn/o/original-note']);
-    assert.strictEqual(genericRedirectRecord.metadata.title, '原始短链恢复成功');
-    assert.ok(genericRedirectRecord.metadata.markdown.includes('隐藏浏览器从原始短链恢复了真实笔记正文'));
+    assert.deepStrictEqual(genericRedirectRenderUrls, [
+      'http://xhslink.cn/o/original-note',
+      'https://www.xiaohongshu.com/',
+    ]);
+    assert.strictEqual(genericRedirectRecord.metadata.title, '真实地址恢复成功');
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('真实地址恢复出了完整正文内容'));
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('#效率工具'));
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('![封面](https://sns-webpic-qc.xhscdn.com/resolved-cover.jpg)'));
+    assert.ok(genericRedirectRecord.metadata.markdown.includes('![内页图 1](https://sns-webpic-qc.xhscdn.com/resolved-page-2.jpg)'));
+
+    const originalPreferredPlugin = new PluginClass();
+    originalPreferredPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+    originalPreferredPlugin.hasProFeatureAccess = async () => false;
+    originalPreferredPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    originalPreferredPlugin.renderSocialMediaUrls = async () => [];
+    const originalPreferredRenderUrls = [];
+    originalPreferredPlugin.renderXiaohongshuPage = async (renderUrl) => {
+      originalPreferredRenderUrls.push(renderUrl);
+      if (renderUrl === 'http://xhslink.cn/o/original-note') {
+        return {
+          url: 'https://www.xiaohongshu.com/explore/original-recovered',
+          html: [
+            '<html><head>',
+            '<meta property="og:title" content="原始短链恢复成功">',
+            '<meta name="description" content="原始短链恢复了真实正文，跳转后的地址仍然只是通用首页。">',
+            '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/original-recovered.jpg">',
+            '</head></html>',
+          ].join(''),
+          comments: [],
+        };
+      }
+      return {
+        url: 'https://www.xiaohongshu.com/',
+        html: genericXiaohongshuLandingHtml,
+        comments: [],
+      };
+    };
+    const originalPreferredRecord = await originalPreferredPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'http://xhslink.cn/o/original-note',
+      metadata: {
+        url: 'http://xhslink.cn/o/original-note',
+        shareText: '原始短链恢复测试',
+      },
+    }, '', '', '小红书原始短链恢复');
+    assert.deepStrictEqual(originalPreferredRenderUrls, [
+      'http://xhslink.cn/o/original-note',
+      'https://www.xiaohongshu.com/',
+    ]);
+    assert.strictEqual(originalPreferredRecord.metadata.title, '原始短链恢复成功');
+    assert.ok(originalPreferredRecord.metadata.markdown.includes('原始短链恢复了真实正文'));
 
     const genericRedirectMediaPlugin = new PluginClass();
     genericRedirectMediaPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
