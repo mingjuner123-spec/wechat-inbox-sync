@@ -3,6 +3,7 @@ const http = require('http');
 const https = require('https');
 const childProcess = require('child_process');
 const Module = require('module');
+const { EventEmitter } = require('events');
 
 let requestUrlMock = async () => ({});
 const originalLoad = Module._load;
@@ -348,9 +349,6 @@ const xiaohongshuContentRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuContentWithElectron'),
   pluginMainSource.indexOf('let xiaohongshuBrowserSessionQueue'),
 );
-assert.ok(xiaohongshuContentRendererSource.includes('rememberXiaohongshuObservedIdentity'));
-assert.ok(xiaohongshuContentRendererSource.includes("onBeforeRedirect"));
-assert.ok(xiaohongshuContentRendererSource.includes('observedIdentityUrl'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -3571,6 +3569,98 @@ assert.strictEqual(
   }),
   'https://www.xiaohongshu.com/discovery/item/6b5ddf99000000002202e255',
   'main-frame redirect details must remember the official HTTPS note destination',
+);
+assert.strictEqual(typeof helpers.installXiaohongshuIdentityObserver, 'function');
+const firstIdentityWebContents = new EventEmitter();
+const secondIdentityWebContents = new EventEmitter();
+const unrelatedRedirectHandler = () => {};
+firstIdentityWebContents.on('will-redirect', unrelatedRedirectHandler);
+const firstObservedIdentities = [];
+const secondObservedIdentities = [];
+const cleanupFirstIdentityObserver = helpers.installXiaohongshuIdentityObserver(
+  firstIdentityWebContents,
+  (identityUrl) => firstObservedIdentities.push(identityUrl),
+);
+const cleanupSecondIdentityObserver = helpers.installXiaohongshuIdentityObserver(
+  secondIdentityWebContents,
+  (identityUrl) => secondObservedIdentities.push(identityUrl),
+);
+secondIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+);
+assert.deepStrictEqual(firstObservedIdentities, []);
+assert.deepStrictEqual(secondObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+]);
+firstIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+  false,
+  false,
+);
+firstIdentityWebContents.emit(
+  'will-frame-navigate',
+  {},
+  {
+    url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+    isMainFrame: false,
+  },
+);
+firstIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://attacker.example/explore/6a4ccf88000000001101d144',
+  false,
+  true,
+);
+assert.deepStrictEqual(firstObservedIdentities, []);
+firstIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+  false,
+  true,
+);
+assert.deepStrictEqual(firstObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+]);
+assert.strictEqual(firstIdentityWebContents.listenerCount('will-redirect'), 2);
+cleanupFirstIdentityObserver();
+assert.strictEqual(firstIdentityWebContents.listenerCount('will-redirect'), 1);
+assert.strictEqual(
+  firstIdentityWebContents.listeners('will-redirect')[0],
+  unrelatedRedirectHandler,
+  'cleanup must preserve unrelated listeners on the same webContents',
+);
+firstIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/6c6eefaa000000003303f366',
+);
+assert.deepStrictEqual(firstObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+]);
+secondIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6c6eefaa000000003303f366',
+  false,
+  true,
+);
+assert.deepStrictEqual(secondObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  'https://www.xiaohongshu.com/explore/6c6eefaa000000003303f366',
+]);
+cleanupSecondIdentityObserver();
+assert.ok(xiaohongshuContentRendererSource.includes('installXiaohongshuIdentityObserver'));
+assert.ok(xiaohongshuContentRendererSource.includes('observedIdentityUrl'));
+assert.strictEqual(
+  xiaohongshuContentRendererSource.includes('browserSession.webRequest.onBeforeRedirect'),
+  false,
+  'identity observation must not install or clear listeners on the shared persistent session',
 );
 assert.strictEqual(typeof helpers.selectXiaohongshuBrowserSnapshot, 'function');
 const longRecommendationSnapshot = helpers.selectXiaohongshuBrowserSnapshot(

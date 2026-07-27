@@ -6853,6 +6853,41 @@ function rememberXiaohongshuObservedIdentity(previous = '', details = {}) {
   ]);
 }
 
+function installXiaohongshuIdentityObserver(webContents, onIdentity) {
+  if (!webContents
+    || typeof webContents.on !== 'function'
+    || typeof webContents.removeListener !== 'function'
+    || typeof onIdentity !== 'function') {
+    return () => {};
+  }
+  const observeUrl = (event, navigationUrl) => {
+    const candidate = typeof navigationUrl === 'string'
+      ? navigationUrl
+      : String(navigationUrl && navigationUrl.url || event && event.url || '');
+    const identityUrl = rememberXiaohongshuObservedIdentity('', {
+      resourceType: 'mainFrame',
+      url: candidate,
+    });
+    if (identityUrl) onIdentity(identityUrl);
+  };
+  const observeNavigation = (event, navigationUrl) => {
+    observeUrl(event, navigationUrl);
+  };
+  const observeRedirect = (event, navigationUrl, _isInPlace, isMainFrame) => {
+    if (isMainFrame !== true) return;
+    observeUrl(event, navigationUrl);
+  };
+  webContents.on('will-navigate', observeNavigation);
+  webContents.on('will-redirect', observeRedirect);
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    webContents.removeListener('will-navigate', observeNavigation);
+    webContents.removeListener('will-redirect', observeRedirect);
+  };
+}
+
 function selectXiaohongshuBrowserSnapshot(previous = null, current = null, expectedUrl = '') {
   const prior = previous && typeof previous === 'object' ? previous : {};
   const candidate = current && typeof current === 'object' ? current : {};
@@ -10830,22 +10865,26 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
   installXiaohongshuNavigationGuards(win.webContents);
   const browserSession = (win.webContents && win.webContents.session) || xiaohongshuSession;
   let blocksCommentRequests = false;
-  let observesRedirectRequests = false;
   let observedIdentityUrl = resolveXiaohongshuIdentityUrl([
     options.expectedUrl,
     url,
   ]);
-  const rememberObservedIdentity = (details) => {
-    observedIdentityUrl = rememberXiaohongshuObservedIdentity(
-      observedIdentityUrl,
-      details,
-    );
-  };
+  const cleanupIdentityObserver = installXiaohongshuIdentityObserver(
+    win.webContents,
+    (identityUrl) => {
+      observedIdentityUrl = rememberXiaohongshuObservedIdentity(
+        observedIdentityUrl,
+        {
+          resourceType: 'mainFrame',
+          url: identityUrl,
+        },
+      );
+    },
+  );
 
   try {
     if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === 'function') {
       browserSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
-        rememberObservedIdentity(details);
         if (typeof callback === 'function') {
           callback(
             shouldBlockXiaohongshuBrowserNavigationRequest(details)
@@ -10856,15 +10895,6 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         }
       });
       blocksCommentRequests = true;
-    }
-    if (browserSession
-      && browserSession.webRequest
-      && typeof browserSession.webRequest.onBeforeRedirect === 'function') {
-      browserSession.webRequest.onBeforeRedirect(
-        { urls: ['<all_urls>'] },
-        rememberObservedIdentity,
-      );
-      observesRedirectRequests = true;
     }
 
     const loaded = waitForWebContents(win.webContents, 18000);
@@ -10907,12 +10937,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         && typeof browserSession.webRequest.onBeforeRequest === 'function') {
         browserSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, null);
       }
-      if (observesRedirectRequests
-        && browserSession
-        && browserSession.webRequest
-        && typeof browserSession.webRequest.onBeforeRedirect === 'function') {
-        browserSession.webRequest.onBeforeRedirect({ urls: ['<all_urls>'] }, null);
-      }
+      cleanupIdentityObserver();
     } catch (error) {}
     if (win && typeof win.destroy === 'function') {
       win.destroy();
@@ -18720,6 +18745,7 @@ WechatObsidianInboxPlugin.__test = {
   hasReadableXiaohongshuGraphicContent,
   shouldStopWaitingForXiaohongshuContent,
   rememberXiaohongshuObservedIdentity,
+  installXiaohongshuIdentityObserver,
   selectXiaohongshuBrowserSnapshot,
   extractSocialCommentsFromHtml,
   collectXiaohongshuCommentPages,
