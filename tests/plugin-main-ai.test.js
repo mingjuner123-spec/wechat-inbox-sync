@@ -24,6 +24,18 @@ const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
 Module._load = originalLoad;
 
 const helpers = PluginClass.__test;
+const productionRequestXiaohongshuStaticPage = PluginClass.prototype.requestXiaohongshuStaticPage;
+PluginClass.prototype.requestXiaohongshuStaticPage = async function requestXiaohongshuStaticPageFixture(url) {
+  const response = await requestUrlMock({
+    url,
+    method: 'GET',
+    headers: helpers.getSocialRequestHeaders(url),
+  });
+  return {
+    ...(response && typeof response === 'object' ? response : {}),
+    url: String(response && response.url || url),
+  };
+};
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -329,7 +341,7 @@ const xiaohongshuPageRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
   pluginMainSource.indexOf('async function renderXiaohongshuCommentsWithElectron'),
 );
-assert.ok(xiaohongshuPageRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
+assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGuards(win.webContents)'));
 assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
 assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
 
@@ -415,9 +427,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.68'), {
-  manifestVersion: '1.3.68',
-  runtimeVersion: '1.3.68',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.69'), {
+  manifestVersion: '1.3.69',
+  runtimeVersion: '1.3.69',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -491,7 +503,11 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent({
   description: '存下口令，跳转【小红书】阅读',
   markdown: '存下口令，跳转【小红书】阅读',
   imageUrls: ['https://sns-webpic-qc.xhscdn.com/real-note.jpg'],
-}, '<html><body></body></html>', 'https://www.xiaohongshu.com/explore/real-image-note'), true);
+}, [
+  '<html><head>',
+  '<link rel="canonical" href="https://www.xiaohongshu.com/explore/real-image-note">',
+  '</head><body></body></html>',
+].join(''), 'https://www.xiaohongshu.com/explore/real-image-note'), true);
 assert.strictEqual(
   helpers.getSocialRequestHeaders('http://xhslink.cn/o/demo').Referer,
   'https://www.xiaohongshu.com/',
@@ -502,6 +518,19 @@ assert.strictEqual(helpers.isXiaohongshuUrl('https://www.xiaohongshu.com/explore
 assert.strictEqual(helpers.isXiaohongshuUrl('http://xhslink.cn/o/demo'), true);
 assert.strictEqual(helpers.isXiaohongshuUrl('https://evil.example/?u=xhslink.cn'), false);
 assert.strictEqual(helpers.isXiaohongshuUrl('https://xhslink.cn.evil.example/o/demo'), false);
+assert.strictEqual(typeof helpers.getXiaohongshuTargetNoteId, 'function');
+assert.strictEqual(
+  helpers.getXiaohongshuTargetNoteId('https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144'),
+  '6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  helpers.getXiaohongshuTargetNoteId('https://attacker.example/explore/6a4ccf88000000001101d144'),
+  '',
+);
+assert.strictEqual(
+  helpers.getXiaohongshuTargetNoteId('http://www.xiaohongshu.com/explore/6a4ccf88000000001101d144'),
+  '',
+);
 assert.strictEqual(typeof helpers.isTrustedXiaohongshuCookieUrl, 'function');
 assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://www.xiaohongshu.com/explore/demo'), true);
 assert.strictEqual(helpers.isTrustedXiaohongshuCookieUrl('https://edith.xiaohongshu.com/api/demo'), true);
@@ -590,6 +619,43 @@ assert.deepStrictEqual(mergedXiaohongshuExtraction.imageUrls, [
   'https://sns-webpic-qc.xhscdn.com/real-cover.jpg',
   'https://sns-webpic-qc.xhscdn.com/real-page-2.jpg',
 ]);
+const matchedPrimaryExtraction = {
+  title: '目标笔记标题',
+  description: '目标笔记正文。',
+  tags: ['#目标标签'],
+  imageUrls: ['https://sns-webpic-qc.xhscdn.com/target-only.jpg'],
+  videoUrl: '',
+  author: '目标作者',
+  comments: [],
+  markdown: '目标笔记正文。',
+  xiaohongshuTargetNoteIdPresent: true,
+  xiaohongshuPrimaryNoteMatched: true,
+};
+const unmatchedRecommendationExtraction = {
+  title: '另一篇推荐笔记',
+  description: '另一篇推荐笔记的正文非常长，绝对不能因为更长就覆盖已经精确匹配的目标正文。'.repeat(8),
+  tags: ['#推荐标签'],
+  imageUrls: ['https://sns-webpic-qc.xhscdn.com/unrelated-recommendation.jpg'],
+  videoUrl: 'https://sns-video.xhscdn.com/unrelated-recommendation.mp4',
+  author: '推荐作者',
+  comments: [{ text: '推荐笔记评论' }],
+  markdown: '另一篇推荐笔记正文。',
+  xiaohongshuTargetNoteIdPresent: true,
+  xiaohongshuPrimaryNoteMatched: false,
+};
+const identityBoundMergedXiaohongshuExtraction = helpers.mergeXiaohongshuExtractions([
+  matchedPrimaryExtraction,
+  unmatchedRecommendationExtraction,
+], matchedPrimaryExtraction);
+assert.strictEqual(identityBoundMergedXiaohongshuExtraction.title, '目标笔记标题');
+assert.strictEqual(identityBoundMergedXiaohongshuExtraction.description, '目标笔记正文。');
+assert.deepStrictEqual(identityBoundMergedXiaohongshuExtraction.tags, ['#目标标签']);
+assert.deepStrictEqual(identityBoundMergedXiaohongshuExtraction.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/target-only.jpg',
+]);
+assert.strictEqual(identityBoundMergedXiaohongshuExtraction.videoUrl, '');
+assert.strictEqual(identityBoundMergedXiaohongshuExtraction.author, '目标作者');
+assert.deepStrictEqual(identityBoundMergedXiaohongshuExtraction.comments, []);
 assert.strictEqual(typeof helpers.extractSocialCommentsFromHtml, 'function');
 assert.strictEqual(typeof helpers.getXiaohongshuCapturedRequestBody, 'function');
 assert.strictEqual(
@@ -598,6 +664,142 @@ assert.strictEqual(
   }),
   'cursor=next-comment-page',
 );
+const oversizedXiaohongshuCommentBody = helpers.getXiaohongshuCapturedRequestBody({
+  uploadData: [{ bytes: Buffer.alloc((1024 * 1024) + 1, 97) }],
+});
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+    body: oversizedXiaohongshuCommentBody,
+  }, '6a4ccf88000000001101d144'),
+  'mismatched',
+);
+assert.strictEqual(typeof helpers.getXiaohongshuCapturedResponseText, 'function');
+assert.strictEqual(
+  helpers.getXiaohongshuCapturedResponseText({
+    body: Buffer.from('{"code":0}', 'utf8').toString('base64'),
+    base64Encoded: true,
+  }),
+  '{"code":0}',
+);
+assert.strictEqual(
+  helpers.getXiaohongshuCapturedResponseText({
+    body: 'A'.repeat((Math.ceil((4 * 1024 * 1024) / 3) * 4) + 16),
+    base64Encoded: true,
+  }),
+  '',
+);
+assert.strictEqual(typeof helpers.classifyXiaohongshuCommentRequestIdentity, 'function');
+assert.strictEqual(typeof helpers.isXiaohongshuCommentApiUrl, 'function');
+assert.strictEqual(typeof helpers.isXiaohongshuSubCommentApiUrl, 'function');
+assert.strictEqual(
+  helpers.isXiaohongshuCommentApiUrl(
+    'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+  ),
+  true,
+);
+assert.strictEqual(
+  helpers.isXiaohongshuSubCommentApiUrl(
+    'https://www.xiaohongshu.com/api/sns/web/v2/comment/sub/page?root_comment_id=root-1',
+  ),
+  true,
+);
+[
+  'http://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+  'https://xiaohongshu.com.evil.example/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+  'https://evil.example/xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+  'https://user@edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+  'https://edith.xiaohongshu.com:444/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+  'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page/other?note_id=6a4ccf88000000001101d144',
+].forEach((unsafeUrl) => {
+  assert.strictEqual(
+    helpers.isXiaohongshuCommentApiUrl(unsafeUrl),
+    false,
+    `comment endpoint must reject an untrusted URL: ${unsafeUrl}`,
+  );
+});
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+  }, '6a4ccf88000000001101d144'),
+  'matched',
+);
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=000000000000000000000099',
+  }, '6a4ccf88000000001101d144'),
+  'mismatched',
+);
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page',
+    body: JSON.stringify({ note_id: '6a4ccf88000000001101d144' }),
+  }, '6a4ccf88000000001101d144'),
+  'matched',
+);
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/sub/page?root_comment_id=root-1',
+  }, '6a4ccf88000000001101d144'),
+  'unidentified',
+);
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+    payload: { data: { note_id: '000000000000000000000099', comments: [] } },
+  }, '6a4ccf88000000001101d144'),
+  'mismatched',
+);
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page',
+    payload: { data: { note_id: '6a4ccf88000000001101d144', comments: [] } },
+  }, '6a4ccf88000000001101d144'),
+  'unidentified',
+  'a matching response payload must not rescue a request that lacked target identity',
+);
+assert.strictEqual(
+  helpers.classifyXiaohongshuCommentRequestIdentity({
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+    payload: {
+      padding: Array.from({ length: 2100 }, () => ({})),
+      data: {
+        note_id: '000000000000000000000099',
+        comments: [{ content: 'OTHER NOTE COMMENT' }],
+      },
+    },
+  }, '6a4ccf88000000001101d144'),
+  'mismatched',
+  'an identity scan that reaches its traversal budget must fail closed',
+);
+[
+  {
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144&note_id=000000000000000000000099',
+  },
+  {
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page',
+    body: 'note_id=6a4ccf88000000001101d144&note_id=000000000000000000000099',
+  },
+  {
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+    payload: { data: { comments: Array.from({ length: 5000 }, () => null) } },
+  },
+  {
+    url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=6a4ccf88000000001101d144',
+    payload: { data: { nested: { deeper: { level4: { level5: { level6: { level7: { level8: { level9: {
+      note_id: '000000000000000000000099',
+    } } } } } } } } } },
+  },
+].forEach((request) => {
+  assert.notStrictEqual(
+    helpers.classifyXiaohongshuCommentRequestIdentity(
+      request,
+      '6a4ccf88000000001101d144',
+    ),
+    'matched',
+    'ambiguous or incompletely inspected comment identity must fail closed',
+  );
+});
 assert.strictEqual(typeof helpers.enrichExtractedWebpageMetadata, 'function');
 assert.strictEqual(typeof helpers.extractSocialVideoMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
@@ -677,6 +879,81 @@ assert.strictEqual(preventedSafeNavigation, false);
 assert.deepStrictEqual(externalWindowOpenHandler({ url: 'snssdk1128://aweme/detail/123' }), { action: 'deny' });
 assert.deepStrictEqual(externalWindowOpenHandler({ url: 'bytedance://aweme/detail/123' }), { action: 'deny' });
 assert.deepStrictEqual(externalWindowOpenHandler({ url: 'https://www.douyin.com/video/123' }), { action: 'allow' });
+assert.strictEqual(typeof helpers.installXiaohongshuNavigationGuards, 'function');
+assert.strictEqual(typeof helpers.shouldBlockXiaohongshuBrowserNavigationRequest, 'function');
+assert.strictEqual(
+  helpers.shouldBlockXiaohongshuBrowserNavigationRequest({
+    url: 'https://attacker.example/forged-note',
+    resourceType: 'mainFrame',
+  }),
+  true,
+);
+assert.strictEqual(
+  helpers.shouldBlockXiaohongshuBrowserNavigationRequest({
+    url: 'https://sns-webpic-qc.xhscdn.com/note-image.jpg',
+    resourceType: 'image',
+    frameId: 0,
+    parentFrameId: -1,
+  }),
+  false,
+  '主框架发起的图片子资源不能被误判为顶层导航',
+);
+assert.strictEqual(
+  helpers.shouldBlockXiaohongshuBrowserNavigationRequest({
+    url: 'https://fe-static.xhscdn.com/runtime.js',
+    resourceType: 'script',
+    frameId: 0,
+    parentFrameId: -1,
+  }),
+  false,
+  '主框架发起的脚本子资源不能被误判为顶层导航',
+);
+assert.strictEqual(
+  helpers.shouldBlockXiaohongshuBrowserNavigationRequest({
+    url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+    resourceType: 'mainFrame',
+  }),
+  false,
+);
+assert.strictEqual(
+  helpers.shouldBlockXiaohongshuBrowserNavigationRequest({
+    url: 'http://xhslink.cn/o/demo',
+    resourceType: 'mainFrame',
+  }),
+  false,
+);
+const xiaohongshuNavigationHandlers = {};
+let xiaohongshuWindowOpenHandler = null;
+helpers.installXiaohongshuNavigationGuards({
+  on(eventName, handler) {
+    xiaohongshuNavigationHandlers[eventName] = handler;
+  },
+  setWindowOpenHandler(handler) {
+    xiaohongshuWindowOpenHandler = handler;
+  },
+});
+let preventedExternalXiaohongshuRedirect = false;
+xiaohongshuNavigationHandlers['will-redirect']({
+  preventDefault() {
+    preventedExternalXiaohongshuRedirect = true;
+  },
+}, 'https://attacker.example/forged-note');
+assert.strictEqual(preventedExternalXiaohongshuRedirect, true);
+let preventedOfficialXiaohongshuRedirect = false;
+xiaohongshuNavigationHandlers['will-redirect']({
+  preventDefault() {
+    preventedOfficialXiaohongshuRedirect = true;
+  },
+}, 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144');
+assert.strictEqual(preventedOfficialXiaohongshuRedirect, false);
+assert.deepStrictEqual(
+  xiaohongshuWindowOpenHandler({ url: 'https://attacker.example/forged-note' }),
+  { action: 'deny' },
+);
+assert.deepStrictEqual(
+  xiaohongshuWindowOpenHandler({ url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144' }),
+  { action: 'allow' },
+);
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');
@@ -1004,6 +1281,22 @@ assert.deepStrictEqual(
     'https://finder.video.qq.com/251/20304/stodownload?m=demo&filekey=video.mp4',
     'https://mpvideo.qpic.cn/0b2eiaaaakiaaaaabcdef/0?dis_k=demo',
   ],
+);
+const browserMediaFloodStartedAt = Date.now();
+const boundedBrowserMediaFlood = helpers.normalizeBrowserCapturedMediaUrls(
+  Array.from({ length: 20000 }, (_item, index) => ({
+    url: `https://media.example.com/video-${index}.mp4`,
+    resourceType: 'media',
+  })),
+);
+assert.ok(boundedBrowserMediaFlood.length > 0);
+assert.ok(
+  boundedBrowserMediaFlood.length <= 256,
+  `browser media capture must stay bounded, got ${boundedBrowserMediaFlood.length}`,
+);
+assert.ok(
+  Date.now() - browserMediaFloodStartedAt < 2000,
+  'browser media capture flood should be processed within the bounded traversal budget',
 );
 assert.deepStrictEqual(
   helpers.extractSocialMediaUrlsFromHtml(`
@@ -2874,6 +3167,7 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
 const realXiaohongshuNoteWithGenericDocumentTitleHtml = [
   '<html><head>',
   '<title>小红书 - 你的生活兴趣社区</title>',
+  '<link rel="canonical" href="https://www.xiaohongshu.com/explore/real-note-generic-document-title">',
   '<meta property="og:title" content="真实笔记标题">',
   '<meta name="description" content="这里是已经匿名返回的真实笔记正文，不能因为文档标题通用就拒绝。">',
   '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/real-note-cover.jpg">',
@@ -2892,6 +3186,519 @@ assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
   realXiaohongshuNoteWithGenericDocumentTitleHtml,
   'https://www.xiaohongshu.com/explore/real-note-generic-document-title',
 ), true);
+
+const realStructuredXiaohongshuNoteWithGenericMetaTitleHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+  '<meta name="description" content="该内容来自小红书，请打开小红书查看">',
+  '</head><body>',
+  '<script>',
+  'window.__INITIAL_STATE__={"opPrompt":undefined,"noteDetailMap":{"6a4ccf88000000001101d144":{"note":{',
+  '"noteId":"6a4ccf88000000001101d144",',
+  '"displayTitle":"真实结构化笔记标题",',
+  '"desc":"这是目标笔记的完整正文，不应被小红书通用网页标题误杀。 #真实标签",',
+  '"tagList":[{"name":"结构标签"}],',
+  '"imageList":[',
+  '{"urlDefault":"https://sns-webpic-qc.xhscdn.com/target-note-cover.jpg"},',
+  '{"urlDefault":"https://sns-webpic-qc.xhscdn.com/target-note-inner.jpg"}',
+  ']}}}};',
+  '</script>',
+  '</body></html>',
+].join('');
+const realStructuredXiaohongshuNoteWithGenericMetaTitle = helpers.extractXiaohongshuMarkdownFromHtml(
+  realStructuredXiaohongshuNoteWithGenericMetaTitleHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  realStructuredXiaohongshuNoteWithGenericMetaTitle.title,
+  '真实结构化笔记标题',
+);
+assert.ok(realStructuredXiaohongshuNoteWithGenericMetaTitle.description.includes('目标笔记的完整正文'));
+assert.ok(realStructuredXiaohongshuNoteWithGenericMetaTitle.tags.includes('#真实标签'));
+assert.ok(realStructuredXiaohongshuNoteWithGenericMetaTitle.tags.includes('#结构标签'));
+assert.strictEqual(realStructuredXiaohongshuNoteWithGenericMetaTitle.imageUrls.length, 2);
+assert.ok(realStructuredXiaohongshuNoteWithGenericMetaTitle.markdown.includes(
+  '![封面](https://sns-webpic-qc.xhscdn.com/target-note-cover.jpg)',
+));
+assert.ok(realStructuredXiaohongshuNoteWithGenericMetaTitle.markdown.includes(
+  '![内页图 1](https://sns-webpic-qc.xhscdn.com/target-note-inner.jpg)',
+));
+assert.ok(
+  realStructuredXiaohongshuNoteWithGenericMetaTitle.markdown.indexOf('target-note-cover.jpg')
+    < realStructuredXiaohongshuNoteWithGenericMetaTitle.markdown.indexOf('target-note-inner.jpg'),
+);
+assert.strictEqual(helpers.isGenericXiaohongshuLandingExtraction(
+  realStructuredXiaohongshuNoteWithGenericMetaTitle,
+  realStructuredXiaohongshuNoteWithGenericMetaTitleHtml,
+), false);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
+  realStructuredXiaohongshuNoteWithGenericMetaTitle,
+  realStructuredXiaohongshuNoteWithGenericMetaTitleHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+), true);
+
+const mismatchedInnerNoteIdHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+  '</head><body><script>',
+  JSON.stringify({
+    noteDetailMap: {
+      '6a4ccf88000000001101d144': {
+        note: {
+          noteId: '000000000000000000000099',
+          displayTitle: '不能冒充目标笔记的另一篇内容',
+          desc: '路径键虽然等于目标 ID，但对象自己的 noteId 明确属于另一篇笔记。',
+          imageList: [{
+            urlDefault: 'https://sns-webpic-qc.xhscdn.com/cards/mismatched-note.jpg',
+          }],
+        },
+      },
+    },
+  }),
+  '</script></body></html>',
+].join('');
+const mismatchedInnerNoteIdExtraction = helpers.extractXiaohongshuMarkdownFromHtml(
+  mismatchedInnerNoteIdHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  mismatchedInnerNoteIdExtraction.xiaohongshuPrimaryNoteMatched,
+  false,
+  'an explicit mismatched noteId must override a matching noteDetailMap path key',
+);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
+  mismatchedInnerNoteIdExtraction,
+  mismatchedInnerNoteIdHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+), false);
+
+const nonGenericForeignRecommendationHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="另一篇看起来正常的推荐笔记">',
+  '<meta name="description" content="这是另一篇笔记的完整推荐正文，长度和图片都不能让它冒充目标内容。">',
+  '</head><body><script>',
+  JSON.stringify({
+    noteDetailMap: {
+      '000000000000000000000099': {
+        note: {
+          noteId: '000000000000000000000099',
+          displayTitle: '另一篇看起来正常的推荐笔记',
+          desc: '这是另一篇笔记的完整推荐正文，长度和图片都不能让它冒充目标内容。',
+          imageList: [{
+            urlDefault: 'https://sns-webpic-qc.xhscdn.com/cards/foreign-but-plausible.jpg',
+          }],
+        },
+      },
+    },
+  }),
+  '</script></body></html>',
+].join('');
+const nonGenericForeignRecommendation = helpers.extractXiaohongshuMarkdownFromHtml(
+  nonGenericForeignRecommendationHtml,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+);
+assert.strictEqual(nonGenericForeignRecommendation.xiaohongshuTargetNoteIdPresent, true);
+assert.strictEqual(nonGenericForeignRecommendation.xiaohongshuPrimaryNoteMatched, false);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
+  nonGenericForeignRecommendation,
+  nonGenericForeignRecommendationHtml,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+), false, 'a plausible recommendation note must not be accepted for a different target ID');
+
+const oversizedXiaohongshuStateHtml = [
+  '<html><head><meta property="og:title" content="小红书 - 你的生活兴趣社区"></head><body><script>',
+  JSON.stringify({
+    noteDetailMap: {
+      '6a4ccf88000000001101d144': {
+        note: {
+          noteId: '6a4ccf88000000001101d144',
+          displayTitle: '超出结构化状态预算的笔记',
+          desc: '超大状态必须失败关闭，不能无限占用 Obsidian 主线程。',
+          padding: 'x'.repeat((2 * 1024 * 1024) + 2048),
+        },
+      },
+    },
+  }),
+  '</script></body></html>',
+].join('');
+const oversizedXiaohongshuStateExtraction = helpers.extractXiaohongshuMarkdownFromHtml(
+  oversizedXiaohongshuStateHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.strictEqual(oversizedXiaohongshuStateExtraction.xiaohongshuPrimaryNoteMatched, false);
+
+const plausibleRecommendationWithoutIdentityHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="看起来完整但无法证明身份的推荐笔记">',
+  '<meta name="description" content="这是一段长度足够、看起来完全正常的推荐正文，但页面里没有目标笔记身份。">',
+  '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/recommendation-without-id.jpg">',
+  '</head><body></body></html>',
+].join('');
+const plausibleRecommendationWithoutIdentity = helpers.extractXiaohongshuMarkdownFromHtml(
+  plausibleRecommendationWithoutIdentityHtml,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  helpers.hasReadableXiaohongshuGraphicContent(
+    plausibleRecommendationWithoutIdentity,
+    plausibleRecommendationWithoutIdentityHtml,
+    'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+  ),
+  false,
+  'plausible meta content without exact target identity must fail closed',
+);
+
+assert.strictEqual(typeof helpers.collectXiaohongshuNoteImageUrls, 'function');
+const xiaohongshuImageFloodHtml = JSON.stringify({
+  imageList: Array.from({ length: 5000 }, (_unused, index) => ({
+    urlDefault: `https://sns-webpic-qc.xhscdn.com/flood/image-${index}.jpg`,
+  })),
+});
+const xiaohongshuImageFloodStartedAt = Date.now();
+const xiaohongshuImageFloodResult = helpers.collectXiaohongshuNoteImageUrls(
+  xiaohongshuImageFloodHtml,
+);
+assert.ok(
+  xiaohongshuImageFloodResult.length <= 100,
+  'Xiaohongshu fallback image extraction must never schedule more than 100 downloads',
+);
+assert.ok(
+  Date.now() - xiaohongshuImageFloodStartedAt < 2000,
+  'Xiaohongshu fallback image extraction must stay within a bounded runtime',
+);
+const xiaohongshuImageTagFloodHtml = Array.from(
+  { length: 20000 },
+  (_unused, index) => `<img src="https://sns-webpic-qc.xhscdn.com/tag-flood/${index}.jpg">`,
+).join('');
+const xiaohongshuImageTagFloodStartedAt = Date.now();
+const xiaohongshuImageTagFloodResult = helpers.collectXiaohongshuNoteImageUrls(
+  xiaohongshuImageTagFloodHtml,
+);
+assert.ok(xiaohongshuImageTagFloodResult.length <= 100);
+assert.ok(
+  Date.now() - xiaohongshuImageTagFloodStartedAt < 2000,
+  'Xiaohongshu img-tag fallback must stop scanning after its image budget',
+);
+const xiaohongshuNoisyImagesBeforeRealHtml = [
+  ...Array.from(
+    { length: 150 },
+    (_unused, index) => `<img src="https://sns-avatar-qc.xhscdn.com/avatar-${index}.jpg">`,
+  ),
+  '<img src="https://sns-webpic-qc.xhscdn.com/notes_pre_post/real-note.jpg">',
+].join('');
+assert.deepStrictEqual(
+  helpers.collectXiaohongshuNoteImageUrls(xiaohongshuNoisyImagesBeforeRealHtml),
+  ['https://sns-webpic-qc.xhscdn.com/notes_pre_post/real-note.jpg'],
+  'noisy avatars must not consume the image budget before the real note image',
+);
+const xiaohongshuJsonUrlFloodHtml = Array.from(
+  { length: 20000 },
+  (_unused, index) => `"url":"https://sns-webpic-qc.xhscdn.com/json-flood/${index}.jpg"`,
+).join(',');
+const xiaohongshuJsonUrlFloodStartedAt = Date.now();
+const xiaohongshuJsonUrlFloodResult = helpers.collectXiaohongshuNoteImageUrls(
+  xiaohongshuJsonUrlFloodHtml,
+);
+assert.ok(xiaohongshuJsonUrlFloodResult.length <= 100);
+assert.ok(
+  Date.now() - xiaohongshuJsonUrlFloodStartedAt < 2000,
+  'Xiaohongshu JSON image fallback must stop scanning after its image budget',
+);
+const xiaohongshuWideUnrelatedStateHtml = `<script>${Array.from(
+  { length: 12000 },
+  (_unused, index) => JSON.stringify({
+    desc: `unrelated recommendation ${index}`,
+    image: `https://sns-webpic-qc.xhscdn.com/wide/${index}.jpg`,
+  }),
+).join('')}</script>`;
+const xiaohongshuWideUnrelatedStateStartedAt = Date.now();
+const xiaohongshuWideUnrelatedState = helpers.extractXiaohongshuMarkdownFromHtml(
+  xiaohongshuWideUnrelatedStateHtml,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+);
+assert.strictEqual(xiaohongshuWideUnrelatedState.xiaohongshuPrimaryNoteMatched, false);
+assert.ok(
+  Date.now() - xiaohongshuWideUnrelatedStateStartedAt < 2000,
+  'wide unrelated structured state must not trigger quadratic target scans',
+);
+const malformedXiaohongshuImageArrays = Array.from(
+  { length: 20000 },
+  () => '"imageList":[',
+).join('');
+const malformedXiaohongshuImageArraysStartedAt = Date.now();
+assert.deepStrictEqual(
+  helpers.collectXiaohongshuNoteImageUrls(malformedXiaohongshuImageArrays),
+  [],
+);
+assert.ok(
+  Date.now() - malformedXiaohongshuImageArraysStartedAt < 2000,
+  'malformed image arrays must fail closed without rescanning every suffix',
+);
+
+const unrelatedRecommendationCards = Object.fromEntries(Array.from({ length: 24 }, (_, index) => {
+  const noteId = (index + 1).toString(16).padStart(24, '0');
+  return [noteId, {
+    note: {
+      noteId,
+      displayTitle: `推荐流里的第 ${index + 1} 篇笔记`,
+      desc: `这是推荐流里的第 ${index + 1} 篇正文，内容再完整也不能冒充目标笔记。`,
+      imageList: [{
+        urlDefault: `https://sns-webpic-qc.xhscdn.com/cards/card-${index + 1}.jpg`,
+      }],
+    },
+  }];
+}));
+const unrelatedRecommendationLandingHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+  '</head><body>',
+  `<main>${'推荐流导航和卡片文字。'.repeat(80)}</main>`,
+  '<script>',
+  JSON.stringify({ noteDetailMap: unrelatedRecommendationCards }),
+  '</script>',
+  '</body></html>',
+].join('');
+const unrelatedRecommendationLanding = helpers.extractXiaohongshuMarkdownFromHtml(
+  unrelatedRecommendationLandingHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.ok(unrelatedRecommendationLanding.description.length > 500);
+assert.strictEqual(
+  unrelatedRecommendationLanding.imageUrls.length,
+  16,
+  'the image block budget should stay bounded while the recommendation page remains obviously substantial',
+);
+assert.strictEqual(helpers.isGenericXiaohongshuLandingExtraction(
+  unrelatedRecommendationLanding,
+  unrelatedRecommendationLandingHtml,
+), true);
+assert.strictEqual(helpers.hasReadableXiaohongshuGraphicContent(
+  unrelatedRecommendationLanding,
+  unrelatedRecommendationLandingHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+), false);
+assert.strictEqual(typeof helpers.shouldStopWaitingForXiaohongshuContent, 'function');
+assert.strictEqual(helpers.shouldStopWaitingForXiaohongshuContent(
+  realStructuredXiaohongshuNoteWithGenericMetaTitleHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+), true);
+assert.strictEqual(helpers.shouldStopWaitingForXiaohongshuContent(
+  unrelatedRecommendationLandingHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+), false);
+assert.strictEqual(typeof helpers.selectXiaohongshuBrowserSnapshot, 'function');
+const longRecommendationSnapshot = helpers.selectXiaohongshuBrowserSnapshot(
+  null,
+  {
+    html: `<html><body>${'推荐流内容。'.repeat(1200)}</body></html>`,
+    url: 'https://www.xiaohongshu.com/',
+  },
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+const shorterMatchedTargetSnapshot = helpers.selectXiaohongshuBrowserSnapshot(
+  longRecommendationSnapshot,
+  {
+    html: realStructuredXiaohongshuNoteWithGenericMetaTitleHtml,
+    url: 'https://www.xiaohongshu.com/',
+  },
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.strictEqual(shorterMatchedTargetSnapshot.matched, true);
+assert.strictEqual(
+  shorterMatchedTargetSnapshot.html,
+  realStructuredXiaohongshuNoteWithGenericMetaTitleHtml,
+  'a shorter exact-target snapshot must replace a longer recommendation snapshot',
+);
+assert.strictEqual(
+  shorterMatchedTargetSnapshot.identityUrl,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+const canonicalTargetHtml = realStructuredXiaohongshuNoteWithGenericMetaTitleHtml.replace(
+  '<head>',
+  '<head><link rel="canonical" href="https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144">',
+);
+const canonicalTargetSnapshot = helpers.selectXiaohongshuBrowserSnapshot(
+  null,
+  {
+    html: canonicalTargetHtml,
+    url: 'https://www.xiaohongshu.com/',
+  },
+  'http://xhslink.cn/o/no-note-id',
+);
+assert.strictEqual(canonicalTargetSnapshot.matched, true);
+assert.strictEqual(
+  canonicalTargetSnapshot.identityUrl,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+  'a root landing URL must retain the canonical target identity found in the HTML',
+);
+const externalOriginSnapshot = helpers.selectXiaohongshuBrowserSnapshot(
+  null,
+  {
+    html: realStructuredXiaohongshuNoteWithGenericMetaTitleHtml.replace(
+      'https://sns-webpic-qc.xhscdn.com/target-note-cover.jpg',
+      'http://127.0.0.1:4567/internal.jpg',
+    ),
+    url: 'https://attacker.example/explore/6a4ccf88000000001101d144',
+  },
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  externalOriginSnapshot.matched,
+  false,
+  'a hidden browser page on an external origin must never satisfy Xiaohongshu identity',
+);
+
+const textOnlyTargetWithUnrelatedFeedHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+  '</head><body><script>',
+  JSON.stringify({
+    noteDetailMap: {
+      '6a4ccf88000000001101d144': {
+        note: {
+          noteId: '6a4ccf88000000001101d144',
+          desc: '目标笔记只有正文，没有标题、图片或视频，不能混入推荐流素材。',
+        },
+      },
+    },
+    feed: {
+      items: [{
+        noteId: '000000000000000000000099',
+        displayTitle: '推荐流标题',
+        desc: '推荐流正文',
+        user: { nickname: '推荐流作者' },
+        imageList: [{
+          urlDefault: 'https://sns-webpic-qc.xhscdn.com/cards/unrelated-feed.jpg',
+        }],
+        video: {
+          media: {
+            stream: {
+              h264: [{ masterUrl: 'https://sns-video.xhscdn.com/unrelated-feed.mp4' }],
+            },
+          },
+        },
+      }],
+    },
+  }),
+  '</script></body></html>',
+].join('');
+const textOnlyTargetWithUnrelatedFeed = helpers.extractXiaohongshuMarkdownFromHtml(
+  textOnlyTargetWithUnrelatedFeedHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.strictEqual(textOnlyTargetWithUnrelatedFeed.title, '小红书笔记');
+assert.ok(textOnlyTargetWithUnrelatedFeed.description.includes('目标笔记只有正文'));
+assert.deepStrictEqual(textOnlyTargetWithUnrelatedFeed.imageUrls, []);
+assert.strictEqual(textOnlyTargetWithUnrelatedFeed.videoUrl, '');
+assert.strictEqual(textOnlyTargetWithUnrelatedFeed.author, '');
+
+const targetNoteWithNestedRelatedVideoHtml = [
+  '<html><head>',
+  '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+  '</head><body><script>',
+  JSON.stringify({
+    noteDetailMap: {
+      '6a4ccf88000000001101d144': {
+        note: {
+          noteId: '6a4ccf88000000001101d144',
+          displayTitle: '目标图文笔记',
+          desc: '目标笔记本身是图文，关联推荐视频不能冒充它的视频。',
+          imageList: [{
+            urlDefault: 'https://sns-webpic-qc.xhscdn.com/target-graphic.jpg',
+          }],
+          related: {
+            video: {
+              media: {
+                stream: {
+                  h264: [{
+                    masterUrl: 'https://sns-video.xhscdn.com/unrelated-nested-video.mp4',
+                  }],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  }),
+  '</script></body></html>',
+].join('');
+const targetNoteWithNestedRelatedVideo = helpers.extractXiaohongshuMarkdownFromHtml(
+  targetNoteWithNestedRelatedVideoHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  targetNoteWithNestedRelatedVideo.videoUrl,
+  '',
+  'a related recommendation video nested inside the target object must not become the target video',
+);
+
+const targetNoteWithNestedRelatedCardHtml = [
+  '<html><head><meta property="og:title" content="小红书 - 你的生活兴趣社区"></head><body><script>',
+  JSON.stringify({
+    noteDetailMap: {
+      '6a4ccf88000000001101d144': {
+        note: {
+          noteId: '6a4ccf88000000001101d144',
+          displayTitle: 'TARGET TITLE',
+          desc: 'TARGET BODY',
+          imageList: [{
+            urlDefault: 'https://sns-webpic-qc.xhscdn.com/target-card.jpg',
+          }],
+          related: {
+            displayTitle: 'RELATED TITLE',
+            desc: 'RELATED BODY '.repeat(80),
+            imageList: Array.from({ length: 10 }, (_, index) => ({
+              urlDefault: `https://sns-webpic-qc.xhscdn.com/related-${index}.jpg`,
+            })),
+          },
+        },
+      },
+    },
+  }),
+  '</script></body></html>',
+].join('');
+const targetNoteWithNestedRelatedCard = helpers.extractXiaohongshuMarkdownFromHtml(
+  targetNoteWithNestedRelatedCardHtml,
+  'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
+);
+assert.strictEqual(targetNoteWithNestedRelatedCard.title, 'TARGET TITLE');
+assert.strictEqual(targetNoteWithNestedRelatedCard.description, 'TARGET BODY');
+assert.deepStrictEqual(targetNoteWithNestedRelatedCard.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/target-card.jpg',
+]);
+
+const targetImageWithForeignPageMetaHtml = [
+  '<html><head>',
+  '<link rel="canonical" href="https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144">',
+  '<meta property="og:title" content="FOREIGN_RECOMMENDATION_TITLE">',
+  '<meta name="description" content="FOREIGN_RECOMMENDATION_BODY">',
+  '</head><body><script>',
+  JSON.stringify({
+    noteDetailMap: {
+      '6a4ccf88000000001101d144': {
+        note: {
+          noteId: '6a4ccf88000000001101d144',
+          imageList: [{
+            urlDefault: 'https://sns-webpic-qc.xhscdn.com/identity-bound-only.jpg',
+          }],
+        },
+      },
+    },
+  }),
+  '</script></body></html>',
+].join('');
+const targetImageWithForeignPageMeta = helpers.extractXiaohongshuMarkdownFromHtml(
+  targetImageWithForeignPageMetaHtml,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+);
+assert.strictEqual(targetImageWithForeignPageMeta.xiaohongshuPrimaryNoteMatched, true);
+assert.strictEqual(targetImageWithForeignPageMeta.title, '小红书笔记');
+assert.strictEqual(targetImageWithForeignPageMeta.description, '');
+assert.strictEqual(targetImageWithForeignPageMeta.markdown.includes('FOREIGN_RECOMMENDATION'), false);
+assert.deepStrictEqual(targetImageWithForeignPageMeta.imageUrls, [
+  'https://sns-webpic-qc.xhscdn.com/identity-bound-only.jpg',
+]);
 
 const xiaohongshuJsonCommentNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><body>',
@@ -3039,6 +3846,35 @@ assert.strictEqual(capturedXiaohongshuCommentResult.replyPayloadCount, 1);
 assert.strictEqual(capturedXiaohongshuCommentResult.rootPageCount, 1);
 assert.strictEqual(capturedXiaohongshuCommentResult.replyPageCount, 1);
 assert.strictEqual(capturedXiaohongshuCommentResult.stopReason, 'exhausted');
+const identityFilteredCapturedComments = helpers.mergeXiaohongshuCapturedCommentPayloads([
+  {
+    sequence: 1,
+    url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=foreign-note',
+    payload: {
+      data: {
+        note_id: 'foreign-note',
+        comments: [{ id: 'foreign-root', content: 'FOREIGN_COMMENT' }],
+        has_more: false,
+      },
+    },
+  },
+  {
+    sequence: 2,
+    url: 'https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=target-note',
+    payload: {
+      data: {
+        note_id: 'target-note',
+        comments: [{ id: 'target-root', content: 'TARGET_COMMENT' }],
+        has_more: false,
+      },
+    },
+  },
+], 200, { expectedNoteId: 'target-note' });
+assert.deepStrictEqual(
+  identityFilteredCapturedComments.comments.map((comment) => comment.content),
+  ['TARGET_COMMENT'],
+);
+assert.strictEqual(identityFilteredCapturedComments.rootPayloadCount, 1);
 assert.strictEqual(typeof helpers.mergeXiaohongshuCommentSources, 'function');
 const canonicalXiaohongshuComments = helpers.mergeXiaohongshuCommentSources({
   networkComments: [{
@@ -5189,20 +6025,22 @@ async function runAsyncHydrationTests() {
         ].join(''),
       };
     }
-    if (url === 'https://www.xiaohongshu.com/explore/video') {
+    if (url === 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145') {
       return {
         text: [
           '<html><head>',
-          '<meta property="og:title" content="XHS Video">',
-          '<meta property="og:video" content="https://video.example.com/xhs.mp4">',
-          '</head><body>#tag 页面正文</body></html>',
+          '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+          '</head><body><script>',
+          '{"noteDetailMap":{"6a4ccf88000000001101d145":{"note":{"noteId":"6a4ccf88000000001101d145","displayTitle":"XHS Video","desc":"目标视频笔记正文","video":{"media":{"stream":{"h264":[{"masterUrl":"https://video.example.com/xhs.mp4"}]}}}}}}}',
+          '</script></body></html>',
         ].join(''),
       };
     }
-    if (url === 'https://www.xiaohongshu.com/explore/image') {
+    if (url === 'https://www.xiaohongshu.com/explore/image-note') {
       return {
         text: [
           '<html><head>',
+          '<link rel="canonical" href="https://www.xiaohongshu.com/explore/image-note">',
           '<meta property="og:title" content="XHS Image">',
           '<meta name="description" content="真正图文正文 #图文">',
           '<meta property="og:image" content="https://img.example.com/cover.jpg">',
@@ -5429,20 +6267,22 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(unavailableDouyinRecord.metadata.markdown.includes('小红书'), false);
 
   requestUrlMock = async ({ url }) => {
-    if (url === 'https://www.xiaohongshu.com/explore/video') {
+    if (url === 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145') {
       return {
         text: [
           '<html><head>',
-          '<meta property="og:title" content="XHS Video">',
-          '<meta property="og:video" content="https://video.example.com/xhs.mp4">',
-          '</head><body>#tag 页面正文</body></html>',
+          '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+          '</head><body><script>',
+          '{"noteDetailMap":{"6a4ccf88000000001101d145":{"note":{"noteId":"6a4ccf88000000001101d145","displayTitle":"XHS Video","desc":"目标视频笔记正文","video":{"media":{"stream":{"h264":[{"masterUrl":"https://video.example.com/xhs.mp4"}]}}}}}}}',
+          '</script></body></html>',
         ].join(''),
       };
     }
-    if (url === 'https://www.xiaohongshu.com/explore/image') {
+    if (url === 'https://www.xiaohongshu.com/explore/image-note') {
       return {
         text: [
           '<html><head>',
+          '<link rel="canonical" href="https://www.xiaohongshu.com/explore/image-note">',
           '<meta property="og:title" content="XHS Image">',
           '<meta name="description" content="真正图文正文 #图文">',
           '<meta property="og:image" content="https://img.example.com/cover.jpg">',
@@ -5524,12 +6364,66 @@ async function runAsyncHydrationTests() {
 
   const xhsVideoRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
-    content: 'https://www.xiaohongshu.com/explore/video',
-    metadata: { url: 'https://www.xiaohongshu.com/explore/video' },
+    content: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145',
+    metadata: { url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145' },
   }, '', '', '小红书视频');
   assert.strictEqual(xhsVideoRecord.metadata.transcriptOnly, true);
   assert.strictEqual(xhsVideoRecord.metadata.markdown, undefined);
   assert.strictEqual(xhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs.mp4');
+
+  const targetGraphicNoteId = '6a4ccf88000000001101d144';
+  const targetGraphicWithForeignMetaVideoHtml = [
+    '<html><head><meta property="og:title" content="目标图文">',
+    '<meta property="og:video" content="https://sns-video.xhscdn.com/unrelated-recommendation.mp4">',
+    '</head><body><script>',
+    JSON.stringify({
+      noteDetailMap: {
+        [targetGraphicNoteId]: {
+          note: {
+            noteId: targetGraphicNoteId,
+            displayTitle: '目标图文',
+            desc: '目标图文正文',
+            imageList: [{
+              urlDefault: 'https://sns-webpic-qc.xhscdn.com/target.jpg',
+            }],
+          },
+        },
+      },
+    }),
+    '</script></body></html>',
+  ].join('');
+  const targetGraphicPlugin = new PluginClass();
+  targetGraphicPlugin.settings = helpers.mergeSettings({
+    aiProvider: 'off',
+    settingsVersion: 2,
+    xiaohongshuCommentsEnabled: false,
+  });
+  targetGraphicPlugin.hasProFeatureAccess = async () => true;
+  let targetGraphicTranscriptionCalls = 0;
+  targetGraphicPlugin.runConfiguredTranscription = async () => {
+    targetGraphicTranscriptionCalls += 1;
+    return { transcription: '不应发生', source: 'local' };
+  };
+  targetGraphicPlugin.saveMarkdownRemoteImageAssets = async (markdown) => markdown;
+  const previousTargetGraphicRequestUrlMock = requestUrlMock;
+  requestUrlMock = async () => ({
+    status: 200,
+    text: targetGraphicWithForeignMetaVideoHtml,
+  });
+  try {
+    const targetGraphicRecord = await targetGraphicPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`,
+      metadata: { url: `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}` },
+    }, '', '', '目标图文');
+    assert.strictEqual(targetGraphicTranscriptionCalls, 0);
+    assert.strictEqual(targetGraphicRecord.metadata.contentCategory, '图文');
+    assert.ok(targetGraphicRecord.metadata.markdown.includes('目标图文正文'));
+    assert.strictEqual(targetGraphicRecord.metadata.mediaUrl, undefined);
+    assert.strictEqual(targetGraphicRecord.metadata.markdown.includes('unrelated-recommendation.mp4'), false);
+  } finally {
+    requestUrlMock = previousTargetGraphicRequestUrlMock;
+  }
 
   const xhsVideoWithCommentsPlugin = new PluginClass();
   xhsVideoWithCommentsPlugin.settings = helpers.mergeSettings({
@@ -5543,18 +6437,66 @@ async function runAsyncHydrationTests() {
     transcription: '视频口播正文',
     source: 'local',
   });
+  const xhsVideoWithCommentsHtml = [
+    '<html><head>',
+    '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+    '</head><body><script>',
+    JSON.stringify({
+      noteDetailMap: {
+        'video-comments': {
+          note: {
+            noteId: 'video-comments',
+            displayTitle: 'XHS Video Comments',
+            desc: '目标视频笔记正文。',
+            video: {
+              media: {
+                stream: {
+                  h264: [{
+                    masterUrl: 'https://video.example.com/xhs-comments.mp4',
+                  }],
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    '</script>',
+    '<div class="comment-item"><span class="user-name">推荐用户</span><span class="comment-content">不应写入的推荐评论</span></div>',
+    '</body></html>',
+  ].join('');
+  xhsVideoWithCommentsPlugin.renderXiaohongshuPage = async (url, options = {}) => {
+    assert.strictEqual(url, 'https://www.xiaohongshu.com/explore/video-comments');
+    if (options.includeComments === true) {
+      assert.strictEqual(options.expectedUrl, 'https://www.xiaohongshu.com/explore/video-comments');
+      return {
+        html: '<html></html>',
+        url,
+        identityUrl: url,
+        comments: [{
+          author: '真实用户',
+          content: '真实评论内容',
+          likes: '6',
+        }],
+        commentDiagnosticDetails: {
+          source: 'page-api',
+          stopReason: 'exhausted',
+          partial: false,
+        },
+      };
+    }
+    return {
+      html: xhsVideoWithCommentsHtml,
+      url,
+      identityUrl: url,
+      comments: [],
+    };
+  };
   const previousXhsCommentRequestUrlMock = requestUrlMock;
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.xiaohongshu.com/explore/video-comments') {
       return {
-        text: [
-          '<html><head>',
-          '<meta property="og:title" content="XHS Video Comments">',
-          '<meta property="og:video" content="https://video.example.com/xhs-comments.mp4">',
-          '</head><body>',
-          '<div class="comment-item"><span class="user-name">真实用户</span><span class="comment-content">真实评论内容</span><span class="like-count">6</span></div>',
-          '</body></html>',
-        ].join(''),
+        text: xhsVideoWithCommentsHtml,
       };
     }
     throw new Error(`unexpected xhs comment video request ${url}`);
@@ -5568,6 +6510,7 @@ async function runAsyncHydrationTests() {
     assert.strictEqual(xhsVideoWithCommentsRecord.metadata.transcriptOnly, true);
     assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('## 评论区'));
     assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('**真实用户**：真实评论内容'));
+    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.markdown.includes('不应写入的推荐评论'), false);
     const xhsVideoWithCommentsMarkdown = helpers.buildMarkdownForRecord({
       record: xhsVideoWithCommentsRecord,
       title: '小红书视频评论区',
@@ -5630,11 +6573,14 @@ async function runAsyncHydrationTests() {
     return {
       html: [
         '<html><head>',
+        '<link rel="canonical" href="https://www.xiaohongshu.com/explore/macos-transport">',
         '<meta property="og:title" content="Mac 浏览器网络接管成功">',
         '<meta name="description" content="Node 三次连接失败后，隐藏浏览器成功打开短链并取得完整正文。">',
         '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/macos-transport.jpg">',
         '</head></html>',
       ].join(''),
+      url: 'https://www.xiaohongshu.com/explore/macos-transport',
+      identityUrl: 'https://www.xiaohongshu.com/explore/macos-transport',
       comments: [],
     };
   };
@@ -5668,13 +6614,166 @@ async function runAsyncHydrationTests() {
         automaticWebpageExtraction: true,
       },
     }, '', '', 'Mac 短链网络接管测试');
-    assert.strictEqual(transportFallbackRenderCalls, 1);
+    assert.ok(transportFallbackRenderCalls >= 1);
     assert.strictEqual(transportFallbackRecord.metadata.title, 'Mac 浏览器网络接管成功');
     assert.ok(transportFallbackRecord.metadata.markdown.includes('隐藏浏览器成功打开短链'));
   } finally {
     http.request = originalHttpRequestForTransportFallback;
     https.request = originalHttpsRequestForTransportFallback;
     requestUrlMock = previousTransportFallbackRequestUrlMock;
+  }
+
+  const externalRedirectPlugin = new PluginClass();
+  externalRedirectPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+  externalRedirectPlugin.hasProFeatureAccess = async () => false;
+  let externalRedirectPageFetches = 0;
+  let externalRedirectBrowserRenders = 0;
+  let externalRedirectImageSaves = 0;
+  let externalRedirectTargetProbes = 0;
+  externalRedirectPlugin.renderXiaohongshuPage = async () => {
+    externalRedirectBrowserRenders += 1;
+    return {
+      url: 'https://attacker.example/explore/6a4ccf88000000001101d144',
+      html: canonicalTargetHtml.replace(
+        'https://sns-webpic-qc.xhscdn.com/target-note-cover.jpg',
+        'http://127.0.0.1:4567/internal.jpg',
+      ),
+      comments: [],
+    };
+  };
+  externalRedirectPlugin.saveMarkdownRemoteImageAssets = async (markdown) => {
+    externalRedirectImageSaves += 1;
+    return markdown;
+  };
+  const originalHttpRequestForExternalRedirect = http.request;
+  const originalHttpsRequestForExternalRedirect = https.request;
+  const previousExternalRedirectRequestUrlMock = requestUrlMock;
+  const createExternalRedirectRequest = (parsed, options, callback) => {
+    const method = options.method || 'GET';
+    const request = {
+      setTimeout: () => request,
+      on: () => request,
+      destroy: () => {},
+      end: () => {
+        if (parsed.hostname === 'attacker.example') {
+          externalRedirectTargetProbes += 1;
+          callback({ statusCode: 200, headers: {}, resume: () => {} });
+          return;
+        }
+        if (parsed.hostname === 'xhslink.cn' && method === 'HEAD') {
+          callback({ statusCode: 404, headers: {}, resume: () => {} });
+          return;
+        }
+        if (parsed.hostname === 'xhslink.cn' && method === 'GET') {
+          callback({
+            statusCode: 302,
+            headers: { location: 'https://attacker.example/fake-note' },
+            resume: () => {},
+          });
+          return;
+        }
+        callback({ statusCode: 404, headers: {}, resume: () => {} });
+      },
+    };
+    return request;
+  };
+  http.request = createExternalRedirectRequest;
+  https.request = createExternalRedirectRequest;
+  requestUrlMock = async () => {
+    externalRedirectPageFetches += 1;
+    return {
+      status: 200,
+      text: canonicalTargetHtml,
+    };
+  };
+  try {
+    await assert.rejects(
+      () => externalRedirectPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'http://xhslink.cn/o/external-redirect',
+        metadata: { url: 'http://xhslink.cn/o/external-redirect' },
+      }, '', '', '外站伪造小红书页面'),
+      (error) => error && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE',
+    );
+    assert.strictEqual(externalRedirectTargetProbes, 0);
+    assert.strictEqual(externalRedirectPageFetches, 0);
+    assert.strictEqual(externalRedirectBrowserRenders, 0);
+    assert.strictEqual(externalRedirectImageSaves, 0);
+  } finally {
+    http.request = originalHttpRequestForExternalRedirect;
+    https.request = originalHttpsRequestForExternalRedirect;
+    requestUrlMock = previousExternalRedirectRequestUrlMock;
+  }
+
+  for (const automaticWebpageExtraction of [false, true]) {
+    const bodyRedirectPlugin = new PluginClass();
+    bodyRedirectPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
+    bodyRedirectPlugin.hasProFeatureAccess = async () => false;
+    bodyRedirectPlugin.requestXiaohongshuStaticPage = productionRequestXiaohongshuStaticPage.bind(bodyRedirectPlugin);
+    let bodyRedirectRequestUrlCalls = 0;
+    let bodyRedirectBrowserCalls = 0;
+    let bodyRedirectImageSaves = 0;
+    const bodyRedirectRequests = [];
+    bodyRedirectPlugin.renderXiaohongshuPage = async () => {
+      bodyRedirectBrowserCalls += 1;
+      throw new Error('browser fallback intentionally unavailable');
+    };
+    bodyRedirectPlugin.saveMarkdownRemoteImageAssets = async (markdown) => {
+      bodyRedirectImageSaves += 1;
+      return markdown;
+    };
+    const originalHttpsRequestForBodyRedirect = https.request;
+    const previousBodyRedirectRequestUrlMock = requestUrlMock;
+    https.request = (parsed, options, callback) => {
+      bodyRedirectRequests.push(parsed.toString());
+      const request = {
+        setTimeout: () => request,
+        on: () => request,
+        destroy: () => {},
+        end: () => {
+          if (parsed.hostname === 'www.xiaohongshu.com') {
+            callback({
+              statusCode: 302,
+              headers: { location: 'https://attacker.example/forged-target' },
+              resume: () => {},
+            });
+            return;
+          }
+          throw new Error(`untrusted redirect target must never be requested: ${parsed.toString()}`);
+        },
+      };
+      return request;
+    };
+    requestUrlMock = async () => {
+      bodyRedirectRequestUrlCalls += 1;
+      return {
+        status: 200,
+        url: 'https://attacker.example/forged-target',
+        text: canonicalTargetHtml,
+      };
+    };
+    try {
+      await assert.rejects(
+        () => bodyRedirectPlugin.hydrateWebpageMarkdown({
+          type: 'webpage',
+          content: `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`,
+          metadata: {
+            url: `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`,
+            automaticWebpageExtraction,
+          },
+        }, '', '', '正文二次跳转防护'),
+        (error) => error && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE',
+      );
+      assert.deepStrictEqual(bodyRedirectRequests, [
+        `https://www.xiaohongshu.com/explore/${targetGraphicNoteId}`,
+      ]);
+      assert.strictEqual(bodyRedirectRequestUrlCalls, 0);
+      assert.ok(bodyRedirectBrowserCalls >= 1);
+      assert.strictEqual(bodyRedirectImageSaves, 0);
+    } finally {
+      https.request = originalHttpsRequestForBodyRedirect;
+      requestUrlMock = previousBodyRedirectRequestUrlMock;
+    }
   }
 
   const genericRedirectFallbackPlugin = new PluginClass();
@@ -5702,6 +6801,7 @@ async function runAsyncHydrationTests() {
       url: 'https://www.xiaohongshu.com/explore/recovered-note',
       html: [
         '<html><head>',
+        '<link rel="canonical" href="https://www.xiaohongshu.com/explore/recovered-note">',
         '<meta property="og:title" content="真实地址恢复成功">',
         '<meta name="description" content="真实地址恢复出了完整正文内容。 #效率工具 #知识管理">',
         '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/resolved-cover.jpg">',
@@ -5780,6 +6880,7 @@ async function runAsyncHydrationTests() {
           url: 'https://www.xiaohongshu.com/explore/original-recovered',
           html: [
             '<html><head>',
+            '<link rel="canonical" href="https://www.xiaohongshu.com/explore/original-recovered">',
             '<meta property="og:title" content="原始短链恢复成功">',
             '<meta name="description" content="原始短链恢复了真实正文，跳转后的地址仍然只是通用首页。">',
             '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/original-recovered.jpg">',
@@ -5827,6 +6928,7 @@ async function runAsyncHydrationTests() {
           url: 'https://www.xiaohongshu.com/explore/complementary-note',
           html: [
             '<html><head>',
+            '<link rel="canonical" href="https://www.xiaohongshu.com/explore/complementary-note">',
             '<meta property="og:title" content="互补字段完整标题">',
             '<meta name="description" content="这是第一条路径取得的完整长正文内容，必须与另一条路径的全部图片合并。 #互补标签">',
             '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/complementary-cover.jpg">',
@@ -5839,6 +6941,7 @@ async function runAsyncHydrationTests() {
         url: 'https://www.xiaohongshu.com/explore/complementary-note',
         html: [
           '<html><head>',
+          '<link rel="canonical" href="https://www.xiaohongshu.com/explore/complementary-note">',
           '<meta property="og:title" content="互补字段完整标题">',
           '<meta name="description" content="图片路径">',
           '</head><body>',
@@ -5931,11 +7034,14 @@ async function runAsyncHydrationTests() {
     return {
       html: [
         '<html><head>',
+        '<link rel="canonical" href="https://www.xiaohongshu.com/explore/rendered-fallback">',
         '<meta property="og:title" content="超常儿童，也可能被鸡废了">',
         '<meta name="description" content="这是隐藏浏览器恢复出来的完整小红书正文，长度足够通过真实内容判断。">',
         '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/real-cover.jpg">',
         '</head></html>',
       ].join(''),
+      url: 'https://www.xiaohongshu.com/explore/rendered-fallback',
+      identityUrl: 'https://www.xiaohongshu.com/explore/rendered-fallback',
       comments: [{
         id: 'rendered-fallback-comment',
         author: '恢复用户',
@@ -5992,6 +7098,7 @@ async function runAsyncHydrationTests() {
       url: 'https://www.xiaohongshu.com/explore/anonymous-fast-note',
       html: [
         '<html><head>',
+        '<link rel="canonical" href="https://www.xiaohongshu.com/explore/anonymous-fast-note">',
         '<meta property="og:title" content="匿名路径真实笔记">',
         '<meta name="description" content="匿名路径完整正文已经直接返回，隐藏浏览器用于补齐内页图片。">',
         '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/anonymous-cover.jpg">',
@@ -6006,6 +7113,7 @@ async function runAsyncHydrationTests() {
       return {
         text: [
           '<html><head>',
+          '<link rel="canonical" href="https://www.xiaohongshu.com/explore/anonymous-fast-note">',
           '<meta property="og:title" content="匿名路径真实笔记">',
           '<meta name="description" content="匿名路径完整正文已经直接返回，不应该再启动隐藏浏览器浪费时间。">',
           '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/anonymous-cover.jpg">',
@@ -6030,6 +7138,7 @@ async function runAsyncHydrationTests() {
 
   const xiaohongshuCapabilityHtml = [
     '<html><head>',
+    '<link rel="canonical" href="https://www.xiaohongshu.com/explore/comment-capability">',
     '<meta property="og:title" content="公开图文不依赖评论权限">',
     '<meta name="description" content="所有用户都应该取得这段公开正文以及完整图片。 #公开内容">',
     '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/public-cover.jpg">',
@@ -6059,6 +7168,7 @@ async function runAsyncHydrationTests() {
     capabilityPlugin.renderSocialMediaUrls = async () => [];
     capabilityPlugin.renderXiaohongshuPage = async () => ({
       url: 'https://www.xiaohongshu.com/explore/comment-capability',
+      identityUrl: 'https://www.xiaohongshu.com/explore/comment-capability',
       html: xiaohongshuCapabilityHtml,
       comments: [{
         id: 'login-comment',
@@ -6136,6 +7246,7 @@ async function runAsyncHydrationTests() {
           status: 200,
           text: [
             '<html><head>',
+            '<link rel="canonical" href="https://www.xiaohongshu.com/explore/ocr-capability">',
             '<meta property="og:title" content="长图 OCR 权限测试">',
             '<meta name="description" content="公开图文正文必须先成功，OCR 只是 Pro 附加能力。">',
             '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/ocr-cover.jpg">',
@@ -6191,9 +7302,10 @@ async function runAsyncHydrationTests() {
           status: 200,
           text: [
             '<html><head>',
-            '<meta property="og:title" content="音视频 Pro 权限测试">',
-            '<meta property="og:video" content="https://sns-video-v6.xhscdn.com/stream/video-capability.mp4">',
-            '</head></html>',
+            '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+            '</head><body><script>',
+            '{"noteDetailMap":{"video-capability":{"note":{"noteId":"video-capability","displayTitle":"音视频 Pro 权限测试","desc":"目标视频笔记正文","video":{"media":{"stream":{"h264":[{"masterUrl":"https://sns-video-v6.xhscdn.com/stream/video-capability.mp4"}]}}}}}}}',
+            '</script></body></html>',
           ].join(''),
         };
       }
@@ -6285,9 +7397,9 @@ async function runAsyncHydrationTests() {
 
   const mislabeledXhsImageRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
-    content: 'https://www.xiaohongshu.com/explore/image',
+    content: 'https://www.xiaohongshu.com/explore/image-note',
     metadata: {
-      url: 'https://www.xiaohongshu.com/explore/image',
+      url: 'https://www.xiaohongshu.com/explore/image-note',
       webpageMediaType: 'audio_video',
     },
   }, '', '', '误标小红书图文');
@@ -6338,8 +7450,8 @@ async function runAsyncHydrationTests() {
 
   const xhsImageRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
-    content: 'https://www.xiaohongshu.com/explore/image',
-    metadata: { url: 'https://www.xiaohongshu.com/explore/image' },
+    content: 'https://www.xiaohongshu.com/explore/image-note',
+    metadata: { url: 'https://www.xiaohongshu.com/explore/image-note' },
   }, '', '', '小红书图文');
   assert.strictEqual(xhsImageRecord.metadata.transcriptOnly, undefined);
   assert.ok(xhsImageRecord.metadata.markdown.includes('真正图文正文'));
@@ -6649,7 +7761,7 @@ async function runAsyncHydrationTests() {
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.xiaohongshu.com/explore/local-parse') {
       return {
-        text: '<html><script>{"video":{"url":"https:\\/\\/media.example.com\\/local-xhs.mp4"}}</script></html>',
+        text: '<html><script>{"noteDetailMap":{"local-parse":{"note":{"noteId":"local-parse","displayTitle":"小红书本地解析","desc":"目标视频笔记正文","video":{"media":{"stream":{"h264":[{"masterUrl":"https:\\/\\/media.example.com\\/local-xhs.mp4"}]}}}}}}}</script></html>',
       };
     }
     throw new Error(`unexpected local platform parse request ${url}`);
@@ -7614,7 +8726,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.68'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.69'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -7653,8 +8765,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.68',
-        runtimeVersion: '1.3.68',
+        manifestVersion: '1.3.69',
+        runtimeVersion: '1.3.69',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -9518,7 +10630,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.68 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.69 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -9574,6 +10686,49 @@ async function runBoundedBrowserTaskTests() {
 async function runClipboardTextWebpagePromotionTests() {
   const originalHttpRequest = http.request;
   const originalHttpsRequest = require('https').request;
+  http.request = (parsed, options, callback) => {
+    const requestHandlers = {};
+    const request = {
+      setTimeout: () => request,
+      on(event, handler) {
+        requestHandlers[event] = handler;
+        return request;
+      },
+      write: () => {},
+      destroy(error) {
+        if (requestHandlers.error) requestHandlers.error(error);
+      },
+      end() {
+        const responseHandlers = {};
+        const response = {
+          statusCode: 200,
+          headers: {},
+          on(event, handler) {
+            responseHandlers[event] = handler;
+            return response;
+          },
+          destroy: () => {},
+        };
+        callback(response);
+        responseHandlers.data(Buffer.alloc(9, 1));
+        if (responseHandlers.end) responseHandlers.end();
+      },
+    };
+    return request;
+  };
+  try {
+    await assert.rejects(
+      () => helpers.requestJsonViaNode({
+        url: 'http://example.com/oversized-json',
+        maxBytes: 8,
+      }),
+      /configured size limit/,
+      'Node JSON 请求必须在拼接响应体前拒绝超限内容',
+    );
+  } finally {
+    http.request = originalHttpRequest;
+  }
+
   let redirectRequestCount = 0;
   http.request = (parsed, options, callback) => {
     redirectRequestCount += 1;
