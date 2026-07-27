@@ -3259,7 +3259,17 @@ function shouldGenerateAiMetadata(settings, record) {
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
   if (!extractAiMetadataInputText(record)) return false;
-  if (String(record.type || '').toLowerCase() === 'webpage' || String(record.type || '').toLowerCase() === 'link') {
+  const type = String(record.type || '').toLowerCase();
+  const hasCompletedTranscript = metadata.transcriptionStatus === 'success'
+    && String(metadata.transcription || '').trim()
+    && (
+      metadata.transcriptOnly
+      || metadata.webpageMediaType === 'audio_video'
+      || type === 'voice'
+      || (type === 'file' && metadata.transcriptionSource)
+    );
+  if (hasCompletedTranscript) return true;
+  if (type === 'webpage' || type === 'link') {
     return true;
   }
   return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
