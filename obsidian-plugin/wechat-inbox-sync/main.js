@@ -6860,22 +6860,39 @@ function installXiaohongshuIdentityObserver(webContents, onIdentity) {
     || typeof onIdentity !== 'function') {
     return () => {};
   }
-  const observeUrl = (event, navigationUrl) => {
-    const candidate = typeof navigationUrl === 'string'
-      ? navigationUrl
-      : String(navigationUrl && navigationUrl.url || event && event.url || '');
+  const observeNavigationDetails = (
+    event,
+    navigationUrl,
+    legacyIsMainFrame,
+    assumeLegacyMainFrame,
+  ) => {
+    const hasCurrentDetails = Boolean(
+      event
+      && typeof event.url === 'string'
+      && typeof event.isMainFrame === 'boolean',
+    );
+    const candidate = hasCurrentDetails
+      ? event.url
+      : String(navigationUrl && navigationUrl.url || navigationUrl || '');
+    const isMainFrame = hasCurrentDetails
+      ? event.isMainFrame === true
+      : (
+        typeof legacyIsMainFrame === 'boolean'
+          ? legacyIsMainFrame
+          : assumeLegacyMainFrame
+      );
+    if (!isMainFrame) return;
     const identityUrl = rememberXiaohongshuObservedIdentity('', {
       resourceType: 'mainFrame',
       url: candidate,
     });
     if (identityUrl) onIdentity(identityUrl);
   };
-  const observeNavigation = (event, navigationUrl) => {
-    observeUrl(event, navigationUrl);
+  const observeNavigation = (event, navigationUrl, _isInPlace, isMainFrame) => {
+    observeNavigationDetails(event, navigationUrl, isMainFrame, true);
   };
   const observeRedirect = (event, navigationUrl, _isInPlace, isMainFrame) => {
-    if (isMainFrame !== true) return;
-    observeUrl(event, navigationUrl);
+    observeNavigationDetails(event, navigationUrl, isMainFrame, false);
   };
   webContents.on('will-navigate', observeNavigation);
   webContents.on('will-redirect', observeRedirect);

@@ -3655,6 +3655,77 @@ assert.deepStrictEqual(secondObservedIdentities, [
   'https://www.xiaohongshu.com/explore/6c6eefaa000000003303f366',
 ]);
 cleanupSecondIdentityObserver();
+const signatureIdentityWebContents = new EventEmitter();
+const signatureObservedIdentities = [];
+const cleanupSignatureIdentityObserver = helpers.installXiaohongshuIdentityObserver(
+  signatureIdentityWebContents,
+  (identityUrl) => signatureObservedIdentities.push(identityUrl),
+);
+signatureIdentityWebContents.emit('will-redirect', {
+  url: 'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  isMainFrame: true,
+});
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+], 'current Electron details must record a main-frame redirect');
+signatureIdentityWebContents.emit('will-redirect', {
+  url: 'https://www.xiaohongshu.com/explore/6e8001cc000000005505b588',
+  isMainFrame: false,
+});
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+], 'current Electron details must ignore a subframe redirect');
+signatureIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+  false,
+  true,
+);
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+], 'deprecated positional parameters must still record a main-frame redirect');
+signatureIdentityWebContents.emit(
+  'will-redirect',
+  {},
+  'https://www.xiaohongshu.com/explore/70a223ee000000007707d7aa',
+  false,
+  false,
+);
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+], 'deprecated positional parameters must ignore a subframe redirect');
+signatureIdentityWebContents.emit('will-navigate', {
+  url: 'https://www.xiaohongshu.com/explore/71b334ff000000008808e8bb',
+  isMainFrame: true,
+});
+signatureIdentityWebContents.emit('will-navigate', {
+  url: 'https://www.xiaohongshu.com/explore/72c445aa000000009909f9cc',
+  isMainFrame: false,
+});
+signatureIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/73d556bb00000000aa10a0dd',
+  false,
+  true,
+);
+signatureIdentityWebContents.emit(
+  'will-navigate',
+  {},
+  'https://www.xiaohongshu.com/explore/74e667cc00000000bb11b1ee',
+  false,
+  false,
+);
+assert.deepStrictEqual(signatureObservedIdentities, [
+  'https://www.xiaohongshu.com/explore/6d7ff0bb000000004404a477',
+  'https://www.xiaohongshu.com/explore/6f9112dd000000006606c699',
+  'https://www.xiaohongshu.com/explore/71b334ff000000008808e8bb',
+  'https://www.xiaohongshu.com/explore/73d556bb00000000aa10a0dd',
+], 'will-navigate must normalize current details and deprecated positional parameters');
+cleanupSignatureIdentityObserver();
 assert.ok(xiaohongshuContentRendererSource.includes('installXiaohongshuIdentityObserver'));
 assert.ok(xiaohongshuContentRendererSource.includes('observedIdentityUrl'));
 assert.strictEqual(
