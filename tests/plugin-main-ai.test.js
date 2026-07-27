@@ -400,6 +400,24 @@ function runXiaohongshuOcrPolicyTests() {
     helpers.normalizeXiaohongshuOcrItems([captionedPhoto, textCard]).map((item) => item.index),
     [3],
   );
+  const invalidIndexItems = helpers.normalizeXiaohongshuOcrItems([
+    { ...textCard, index: 0.5, imageUrl: 'https://example.test/fractional.jpg' },
+    { ...textCard, index: Number.NaN, imageUrl: 'https://example.test/nan.jpg' },
+    { ...textCard, index: -8, imageUrl: 'https://example.test/negative.jpg' },
+  ]);
+  assert.deepStrictEqual(invalidIndexItems.map((item) => item.index), [1, 2, 3]);
+  assert.deepStrictEqual(invalidIndexItems.map((item) => item.imageUrl), [
+    'https://example.test/fractional.jpg',
+    'https://example.test/nan.jpg',
+    'https://example.test/negative.jpg',
+  ]);
+  assert.deepStrictEqual(
+    helpers.normalizeXiaohongshuOcrItems([
+      { ...textCard, index: 4, imageUrl: 'https://example.test/stable-a.jpg' },
+      { ...textCard, index: 4, imageUrl: 'https://example.test/stable-b.jpg' },
+    ]).map((item) => item.imageUrl),
+    ['https://example.test/stable-a.jpg', 'https://example.test/stable-b.jpg'],
+  );
 
   const page1 = {
     ...textCard,
@@ -435,6 +453,24 @@ function runXiaohongshuOcrPolicyTests() {
   assert.strictEqual((mergedText.match(/共同边界第二行/g) || []).length, 1);
   assert.strictEqual((mergedText.match(/同一页允许重复的合法句子/g) || []).length, 2);
   assert.ok(mergedText.indexOf('第一页正文开头') < mergedText.indexOf('第二页正文开头'));
+
+  const mergeBoundaryText = (text, index) => helpers.mergeXiaohongshuOcrText([{
+    ...textCard,
+    index,
+    text,
+  }]);
+  assert.deepStrictEqual(
+    [
+      mergeBoundaryText('Hello,\nworld', 1),
+      mergeBoundaryText('This is sentence one.\nNext sentence', 2),
+      mergeBoundaryText('中文第一行\n中文第二行', 3),
+    ],
+    [
+      'Hello, world',
+      'This is sentence one. Next sentence',
+      '中文第一行中文第二行',
+    ],
+  );
 
   const nineLineBoundary = Array(9).fill('九行边界重复句');
   const cappedOverlapText = helpers.mergeXiaohongshuOcrText([
@@ -1778,7 +1814,7 @@ assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默�
 assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), false);
 assert.ok(pluginMainSource.includes('小红书图文 OCR：已默认开启'));
 assert.ok(pluginMainSource.includes('const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);'));
-assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isXiaohongshuVideoNote) {'));
+assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {'));
 assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
 assert.strictEqual(pluginMainSource.includes('图片文字识别 OCR 模块'), false);
 assert.ok(pluginMainSource.includes('getLocalOcrInstallStatus'));
@@ -7909,22 +7945,81 @@ async function runAsyncHydrationTests() {
   }
 
   const forcedXhsVideoPlugin = new PluginClass();
-  forcedXhsVideoPlugin.settings = { aiProvider: 'off' };
+  forcedXhsVideoPlugin.settings = helpers.mergeSettings({
+    aiProvider: 'local',
+    xiaohongshuCommentsEnabled: false,
+  });
+  forcedXhsVideoPlugin.hasProFeatureAccess = async () => true;
+  forcedXhsVideoPlugin.checkXiaohongshuLogin = async () => false;
+  let forcedXhsVideoOcrEnrichCalls = 0;
+  let forcedXhsVideoOcrRequestCalls = 0;
+  const productionXhsOcrEnrich = PluginClass.prototype.enrichXiaohongshuExtractionWithOcr;
+  forcedXhsVideoPlugin.enrichXiaohongshuExtractionWithOcr = async (...args) => {
+    forcedXhsVideoOcrEnrichCalls += 1;
+    return productionXhsOcrEnrich.apply(forcedXhsVideoPlugin, args);
+  };
+  forcedXhsVideoPlugin.requestXiaohongshuImageOcr = async () => {
+    forcedXhsVideoOcrRequestCalls += 1;
+    return [];
+  };
+  let forcedXhsVideoMediaRenderCalls = 0;
   forcedXhsVideoPlugin.renderSocialMediaUrls = async (url) => {
     assert.strictEqual(url, 'https://www.xiaohongshu.com/explore/short-link-note');
-    return ['https://video.example.com/xhs-short-link.mp4'];
+    forcedXhsVideoMediaRenderCalls += 1;
+    return forcedXhsVideoMediaRenderCalls === 1
+      ? []
+      : ['https://video.example.com/xhs-short-link.mp4'];
   };
-  const forcedXhsVideoRecord = await forcedXhsVideoPlugin.hydrateWebpageMarkdown({
-    type: 'webpage',
-    content: 'https://www.xiaohongshu.com/explore/short-link-note',
-    metadata: {
-      url: 'https://www.xiaohongshu.com/explore/short-link-note',
-      webpageMediaType: 'audio_video',
-      transcriptionMode: 'local',
-    },
-  }, '', '', '小红书短链视频');
-  assert.strictEqual(forcedXhsVideoRecord.metadata.transcriptOnly, true);
-  assert.strictEqual(forcedXhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs-short-link.mp4');
+  forcedXhsVideoPlugin.renderXiaohongshuPage = async (url) => ({
+    html: [
+      '<html><head>',
+      '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+      '<meta name="description" content="该内容来自小红书，请打开小红书查看精彩笔记。">',
+      '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/video-intent-cover.jpg">',
+      '</head><body>小红书</body></html>',
+    ].join(''),
+    url,
+    identityUrl: url,
+    comments: [],
+  });
+  forcedXhsVideoPlugin.runConfiguredTranscription = async () => ({
+    transcription: '后续媒体解析取得的视频文案',
+    source: 'local',
+  });
+  const previousForcedXhsVideoRequestUrlMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    if (url === 'https://www.xiaohongshu.com/explore/short-link-note') {
+      return {
+        status: 200,
+        text: [
+          '<html><head>',
+          '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
+          '<meta name="description" content="该内容来自小红书，请打开小红书查看精彩笔记。">',
+          '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/video-intent-cover.jpg">',
+          '</head><body>小红书</body></html>',
+        ].join(''),
+      };
+    }
+    throw new Error(`unexpected delayed video intent request ${url}`);
+  };
+  try {
+    const forcedXhsVideoRecord = await forcedXhsVideoPlugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/short-link-note',
+      metadata: {
+        url: 'https://www.xiaohongshu.com/explore/short-link-note',
+        webpageMediaType: 'audio_video',
+        transcriptionMode: 'local',
+      },
+    }, '', '', '小红书短链视频');
+    assert.strictEqual(forcedXhsVideoMediaRenderCalls, 2);
+    assert.strictEqual(forcedXhsVideoOcrEnrichCalls, 0);
+    assert.strictEqual(forcedXhsVideoOcrRequestCalls, 0);
+    assert.strictEqual(forcedXhsVideoRecord.metadata.transcriptOnly, true);
+    assert.strictEqual(forcedXhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs-short-link.mp4');
+  } finally {
+    requestUrlMock = previousForcedXhsVideoRequestUrlMock;
+  }
 
   const mislabeledXhsImageRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
@@ -11980,7 +12075,754 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   );
 }
 
+async function runXiaohongshuOcrBatchTests() {
+  const dominantText = Array.from(
+    { length: 6 },
+    (_, index) => `第${index + 1}行文字卡正文${'连续内容'.repeat(12)}`,
+  ).join('\n');
+  const dominantMetrics = {
+    readableChars: 180,
+    lineCount: 6,
+    averageConfidence: 0.92,
+    textBoxAreaRatio: 0.18,
+    coveredRowRatio: 0.24,
+    verticalSpanRatio: 0.64,
+  };
+  const photoMetrics = {
+    readableChars: 18,
+    lineCount: 3,
+    averageConfidence: 0.91,
+    textBoxAreaRatio: 0.03,
+    coveredRowRatio: 0.04,
+    verticalSpanRatio: 0.12,
+  };
+  const makeImagePayload = (imageUrl, index) => ({
+    imageUrl,
+    imageBase64: Buffer.from(`controlled-image-${index}`).toString('base64'),
+    index,
+  });
+  const makeStructuredLines = (text, score = 0.92) => String(text || '')
+    .split('\n')
+    .map((line, index) => ({
+      text: line,
+      score,
+      box: [
+        [10, 20 + (index * 30)],
+        [310, 20 + (index * 30)],
+        [310, 45 + (index * 30)],
+        [10, 45 + (index * 30)],
+      ],
+    }));
+
+  const emptyPlugin = new PluginClass();
+  let emptyPermissionCalls = 0;
+  let emptyDownloadCalls = 0;
+  let emptyEnsureCalls = 0;
+  emptyPlugin.ensureProFeatureAccess = async () => {
+    emptyPermissionCalls += 1;
+  };
+  emptyPlugin.buildXiaohongshuOcrImagePayload = async () => {
+    emptyDownloadCalls += 1;
+    return [];
+  };
+  emptyPlugin.ensureLocalComponentReadyForUse = async () => {
+    emptyEnsureCalls += 1;
+  };
+  assert.deepStrictEqual(await emptyPlugin.requestXiaohongshuImageOcr([]), []);
+  assert.strictEqual(emptyPermissionCalls, 0);
+  assert.strictEqual(emptyDownloadCalls, 0);
+  assert.strictEqual(emptyEnsureCalls, 0);
+
+  const requestPlugin = new PluginClass();
+  const imageUrls = Array.from(
+    { length: 10 },
+    (_, index) => `https://sns-webpic-qc.xhscdn.com/batch-${index + 1}.jpg`,
+  );
+  const requestSequence = [];
+  let batchCalls = 0;
+  let singleCalls = 0;
+  let receivedBatchEntries = [];
+  requestPlugin.ensureProFeatureAccess = async (featureName) => {
+    assert.strictEqual(featureName, '小红书图片 OCR');
+    requestSequence.push('permission');
+  };
+  requestPlugin.buildXiaohongshuOcrImagePayload = async (receivedUrls) => {
+    requestSequence.push('download');
+    assert.deepStrictEqual(receivedUrls, imageUrls);
+    return receivedUrls.map((imageUrl, index) => makeImagePayload(imageUrl, index + 1));
+  };
+  requestPlugin.ensureLocalComponentReadyForUse = async () => {
+    requestSequence.push('ensure');
+  };
+  requestPlugin.runLocalImageOcr = async () => {
+    singleCalls += 1;
+    return dominantText;
+  };
+  requestPlugin.runLocalImageOcrBatch = async (entries) => {
+    requestSequence.push('batch');
+    batchCalls += 1;
+    receivedBatchEntries = entries;
+    assert.strictEqual(entries.every((entry) => fs.existsSync(entry.imagePath)), true);
+    return entries.map((entry) => ({
+      id: entry.id,
+      index: entry.index,
+      status: 'ok',
+      text: dominantText,
+      lines: makeStructuredLines(dominantText),
+      metrics: dominantMetrics,
+    }));
+  };
+  const requestItems = await requestPlugin.requestXiaohongshuImageOcr(imageUrls);
+  assert.deepStrictEqual(requestSequence, ['permission', 'download', 'ensure', 'batch']);
+  assert.strictEqual(batchCalls, 1);
+  assert.strictEqual(receivedBatchEntries.length, 10);
+  assert.strictEqual(receivedBatchEntries.every((entry) => path.isAbsolute(entry.imagePath)), true);
+  assert.strictEqual(singleCalls, 0);
+  assert.strictEqual(requestItems.length, 10);
+  assert.strictEqual(
+    receivedBatchEntries.every((entry) => !fs.existsSync(entry.imagePath)),
+    true,
+  );
+  assert.strictEqual(
+    [...new Set(receivedBatchEntries.map((entry) => path.dirname(entry.imagePath)))]
+      .every((directory) => !fs.existsSync(directory)),
+    true,
+  );
+
+  const resiliencePlugin = new PluginClass();
+  const resiliencePayload = [
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/original-text-card.jpg', 7),
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/original-photo.jpg', 9),
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/original-error.jpg', 11),
+  ];
+  resiliencePlugin.ensureProFeatureAccess = async () => {};
+  resiliencePlugin.buildXiaohongshuOcrImagePayload = async () => resiliencePayload;
+  resiliencePlugin.ensureLocalComponentReadyForUse = async () => {};
+  resiliencePlugin.runLocalImageOcr = async () => {
+    throw new Error('legacy single-image OCR must not run');
+  };
+  resiliencePlugin.runLocalImageOcrBatch = async (entries) => [
+    {
+      id: entries[0].id,
+      index: entries[0].index,
+      status: 'ok',
+      text: dominantText,
+      lines: makeStructuredLines(dominantText),
+      metrics: dominantMetrics,
+    },
+    {
+      id: entries[1].id,
+      index: entries[1].index,
+      status: 'ok',
+      text: '照片标题\n一行字幕\n品牌水印',
+      lines: makeStructuredLines('照片标题\n一行字幕\n品牌水印', 0.91),
+      metrics: photoMetrics,
+    },
+    {
+      id: entries[2].id,
+      index: entries[2].index,
+      status: 'error',
+      errorType: 'image_decode_error',
+    },
+  ];
+  const resilientItems = await resiliencePlugin.requestXiaohongshuImageOcr(
+    resiliencePayload.map((item) => item.imageUrl),
+  );
+  assert.strictEqual(resilientItems.length, 1);
+  assert.strictEqual(resilientItems[0].index, 7);
+  assert.strictEqual(resilientItems[0].imageUrl, resiliencePayload[0].imageUrl);
+  assert.strictEqual(resilientItems[0].text, dominantText);
+
+  const allErrorPlugin = new PluginClass();
+  allErrorPlugin.ensureProFeatureAccess = async () => {};
+  const allErrorUrls = [
+    'https://sns-webpic-qc.xhscdn.com/private-error-1.jpg?token=SECRET',
+    'https://sns-webpic-qc.xhscdn.com/private-error-2.jpg?token=SECRET',
+  ];
+  allErrorPlugin.buildXiaohongshuOcrImagePayload = async () => allErrorUrls
+    .map((imageUrl, index) => makeImagePayload(imageUrl, index + 1));
+  allErrorPlugin.ensureLocalComponentReadyForUse = async () => {};
+  allErrorPlugin.runLocalImageOcrBatch = async (entries) => [
+    {
+      id: entries[0].id,
+      index: entries[0].index,
+      status: 'error',
+      errorType: 'image_decode_error',
+      path: 'C:\\private-user\\secret-image.jpg',
+      url: allErrorUrls[0],
+      text: 'TOP_SECRET_OCR_TEXT',
+    },
+    {
+      id: entries[1].id,
+      index: entries[1].index,
+      status: 'error',
+      errorType: 'C:\\private-user\\token=TOP_SECRET',
+      token: 'TOP_SECRET',
+    },
+  ];
+  let allItemsFailedError = null;
+  await assert.rejects(
+    () => allErrorPlugin.requestXiaohongshuImageOcr(allErrorUrls),
+    (error) => {
+      allItemsFailedError = error;
+      return error
+        && error.code === 'LOCAL_OCR_BATCH_ALL_ITEMS_FAILED'
+        && error.message === '所有图片识别均失败（total=2; image_decode_error=1; ocr_item_error=1）';
+    },
+  );
+  assert.strictEqual(
+    /https?:|private-user|secret-image|TOP_SECRET|token=|OCR_TEXT/i
+      .test(allItemsFailedError.message),
+    false,
+  );
+
+  const allErrorExtraction = {
+    title: '全失败仍保留标题',
+    tags: ['原始标签'],
+    imageUrls: allErrorUrls,
+    markdown: '全失败仍保留原始正文。',
+  };
+  const allErrorEnrichment = await allErrorPlugin.enrichXiaohongshuExtractionWithOcr(
+    allErrorExtraction,
+  );
+  assert.deepStrictEqual(allErrorEnrichment, {
+    ...allErrorExtraction,
+    ocrError: '所有图片识别均失败，原始图文内容已保留。',
+  });
+  assert.strictEqual(
+    /https?:|private-user|secret-image|TOP_SECRET|token=|OCR_TEXT/i
+      .test(allErrorEnrichment.ocrError),
+    false,
+  );
+
+  const emptyBatchPlugin = new PluginClass();
+  emptyBatchPlugin.ensureProFeatureAccess = async () => {};
+  emptyBatchPlugin.buildXiaohongshuOcrImagePayload = async () => [
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/empty-batch.jpg', 1),
+  ];
+  emptyBatchPlugin.ensureLocalComponentReadyForUse = async () => {};
+  emptyBatchPlugin.runLocalImageOcrBatch = async () => [];
+  await assert.rejects(
+    () => emptyBatchPlugin.requestXiaohongshuImageOcr([
+      'https://sns-webpic-qc.xhscdn.com/empty-batch.jpg',
+    ]),
+    (error) => error
+      && error.code === 'LOCAL_OCR_BATCH_SCHEMA'
+      && !/empty-batch|https?:/i.test(error.message),
+  );
+
+  const fallbackBatchPlugin = new PluginClass();
+  fallbackBatchPlugin.ensureProFeatureAccess = async () => {};
+  fallbackBatchPlugin.buildXiaohongshuOcrImagePayload = async () => [
+    makeImagePayload('https://sns-webpic-qc.xhscdn.com/fallback-batch.jpg', 1),
+  ];
+  fallbackBatchPlugin.ensureLocalComponentReadyForUse = async () => {};
+  fallbackBatchPlugin.runLocalImageOcrBatch = async (entries) => [{
+    id: 'unexpected-runner-id',
+    index: entries[0].index,
+    status: 'ok',
+    text: dominantText,
+    lines: makeStructuredLines(dominantText),
+    metrics: dominantMetrics,
+  }];
+  await assert.rejects(
+    () => fallbackBatchPlugin.requestXiaohongshuImageOcr([
+      'https://sns-webpic-qc.xhscdn.com/fallback-batch.jpg',
+    ]),
+    (error) => error
+      && error.code === 'LOCAL_OCR_BATCH_SCHEMA'
+      && !/fallback-batch|unexpected-runner-id|https?:/i.test(error.message),
+  );
+
+  assert.strictEqual(helpers.LOCAL_OCR_BATCH_RUNNER_VERSION, 'xiaohongshu-batch-v1');
+  assert.strictEqual(typeof helpers.LOCAL_OCR_BATCH_RUNNER_SOURCE, 'string');
+  const pythonCandidates = [
+    process.env.PYTHON,
+    process.env.PYTHON3,
+    helpers.getLocalOcrPythonPath(),
+    'python3',
+    'python',
+    ...(process.platform === 'win32' ? ['py'] : []),
+  ].filter(Boolean).map((command) => ({
+    command,
+    prefixArgs: command === 'py' ? ['-3'] : [],
+  }));
+  const pythonInvocation = pythonCandidates.find(({ command, prefixArgs }) => {
+    const probe = childProcess.spawnSync(command, [...prefixArgs, '--version'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    return probe.status === 0;
+  });
+  assert.ok(
+    pythonInvocation,
+    'Python is required to compile and self-test the embedded OCR batch runner',
+  );
+  const runnerVerificationDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ocr-runner-verify-'));
+  try {
+    const runnerVerificationPath = path.join(runnerVerificationDir, 'runner.py');
+    fs.writeFileSync(runnerVerificationPath, helpers.LOCAL_OCR_BATCH_RUNNER_SOURCE, 'utf8');
+    const compileResult = childProcess.spawnSync(
+      pythonInvocation.command,
+      [...pythonInvocation.prefixArgs, '-m', 'py_compile', runnerVerificationPath],
+      { encoding: 'utf8', windowsHide: true },
+    );
+    assert.strictEqual(
+      compileResult.status,
+      0,
+      `embedded OCR runner must compile: ${compileResult.stderr || compileResult.stdout}`,
+    );
+    const shapeResult = childProcess.spawnSync(
+      pythonInvocation.command,
+      [
+        ...pythonInvocation.prefixArgs,
+        runnerVerificationPath,
+        '--self-test-result-rows',
+      ],
+      { encoding: 'utf8', windowsHide: true },
+    );
+    assert.strictEqual(
+      shapeResult.status,
+      0,
+      `embedded OCR runner shape self-test must pass: ${shapeResult.stderr || shapeResult.stdout}`,
+    );
+    assert.deepStrictEqual(JSON.parse(shapeResult.stdout), {
+      tupleTexts: ['真实元数据第一行', '真实元数据第二行'],
+      singleTupleText: '单行元组不能误判',
+      blankTupleRows: 0,
+      emptyTupleRows: 0,
+      objectTexts: ['对象结果第一行', '对象结果第二行'],
+      oversizedErrorType: 'image_dimensions_exceeded',
+      oversizedEngineCalls: 0,
+    });
+  } finally {
+    fs.rmSync(runnerVerificationDir, { recursive: true, force: true });
+  }
+  const runnerPlugin = new PluginClass();
+  const privateImagePath = path.join(os.tmpdir(), 'private-user-folder', 'secret-image.png');
+  runnerPlugin.getLocalOcrInstallStatus = () => ({
+    ready: true,
+    pythonPath: path.join(os.tmpdir(), 'private-runtime', 'python.exe'),
+    scriptPath: path.join(os.tmpdir(), 'private-runtime', 'ocr_image.py'),
+    missingReasons: [],
+  });
+  const runnerEntries = [{ id: 'image-1', index: 1, imagePath: privateImagePath }];
+  const successPayload = {
+    schemaVersion: 1,
+    runnerVersion: 'xiaohongshu-batch-v1',
+    processed: 1,
+    items: [{
+      id: 'image-1',
+      index: 1,
+      status: 'ok',
+      width: 640,
+      height: 960,
+      text: dominantText,
+      lines: makeStructuredLines(dominantText),
+      metrics: dominantMetrics,
+    }],
+  };
+  const originalExecFile = childProcess.execFile;
+  try {
+    let execFileCalls = 0;
+    let runnerBatchTempDir = '';
+    childProcess.execFile = (file, args, options, callback) => {
+      execFileCalls += 1;
+      assert.strictEqual(file, runnerPlugin.getLocalOcrInstallStatus().pythonPath);
+      assert.strictEqual(args.includes(runnerPlugin.getLocalOcrInstallStatus().scriptPath), false);
+      const runnerPath = args[0];
+      runnerBatchTempDir = path.dirname(runnerPath);
+      const manifestPath = args[args.indexOf('--batch-manifest') + 1];
+      const outputPath = args[args.indexOf('--output') + 1];
+      const runnerSource = fs.readFileSync(runnerPath, 'utf8');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      assert.ok(runnerSource.includes('xiaohongshu-batch-v1'));
+      assert.ok(runnerSource.includes('0.55'));
+      assert.strictEqual(manifest.schemaVersion, 1);
+      assert.strictEqual(manifest.items[0].input, privateImagePath);
+      assert.strictEqual(Object.hasOwn(manifest.items[0], 'path'), false);
+      fs.writeFileSync(outputPath, JSON.stringify(successPayload), 'utf8');
+      callback(null, '', '');
+    };
+    const parsedItems = await runnerPlugin.runLocalImageOcrBatch(runnerEntries);
+    assert.strictEqual(execFileCalls, 1);
+    assert.deepStrictEqual(parsedItems, successPayload.items);
+    assert.strictEqual(fs.existsSync(runnerBatchTempDir), false);
+
+    const secondPrivateImagePath = path.join(
+      os.tmpdir(),
+      'private-user-folder',
+      'secret-image-2.png',
+    );
+    const bindingRunnerEntries = [
+      runnerEntries[0],
+      { id: 'image-2', index: 7, imagePath: secondPrivateImagePath },
+    ];
+    const makeBoundRunnerItem = ({ id, index }) => ({
+      ...successPayload.items[0],
+      id,
+      index,
+    });
+    const boundRunnerItems = bindingRunnerEntries.map(makeBoundRunnerItem);
+    const outputBindingCases = [
+      {
+        label: 'empty output',
+        payload: {
+          ...successPayload,
+          processed: 0,
+          items: [],
+        },
+      },
+      {
+        label: 'missing output item',
+        payload: {
+          ...successPayload,
+          processed: 1,
+          items: [boundRunnerItems[0]],
+        },
+      },
+      {
+        label: 'extra output item',
+        payload: {
+          ...successPayload,
+          processed: 3,
+          items: [
+            ...boundRunnerItems,
+            makeBoundRunnerItem({ id: 'image-3', index: 8 }),
+          ],
+        },
+      },
+      {
+        label: 'missing output id',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            { ...boundRunnerItems[0], id: undefined },
+            boundRunnerItems[1],
+          ],
+        },
+      },
+      {
+        label: 'missing output index',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            { ...boundRunnerItems[0], index: undefined },
+            boundRunnerItems[1],
+          ],
+        },
+      },
+      {
+        label: 'duplicate output id',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            boundRunnerItems[0],
+            { ...boundRunnerItems[1], id: boundRunnerItems[0].id },
+          ],
+        },
+      },
+      {
+        label: 'reordered output',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [boundRunnerItems[1], boundRunnerItems[0]],
+        },
+      },
+      {
+        label: 'wrong output index',
+        payload: {
+          ...successPayload,
+          processed: 2,
+          items: [
+            boundRunnerItems[0],
+            { ...boundRunnerItems[1], index: 8 },
+          ],
+        },
+      },
+    ];
+    for (const outputBindingCase of outputBindingCases) {
+      execFileCalls = 0;
+      childProcess.execFile = (file, args, options, callback) => {
+        execFileCalls += 1;
+        const outputPath = args[args.indexOf('--output') + 1];
+        fs.writeFileSync(outputPath, JSON.stringify(outputBindingCase.payload), 'utf8');
+        callback(null, '', '');
+      };
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        () => runnerPlugin.runLocalImageOcrBatch(bindingRunnerEntries),
+        (error) => error
+          && error.code === 'LOCAL_OCR_BATCH_SCHEMA'
+          && !error.message.includes(privateImagePath)
+          && !error.message.includes(secondPrivateImagePath),
+        outputBindingCase.label,
+      );
+      assert.strictEqual(execFileCalls, 1, outputBindingCase.label);
+    }
+
+    const noGeometryPayloads = [
+      {
+        expectedDominant: true,
+        text: dominantText,
+        metrics: {
+          readableChars: 180,
+          lineCount: 6,
+          averageConfidence: 0.92,
+          textBoxAreaRatio: null,
+          coveredRowRatio: null,
+          verticalSpanRatio: null,
+        },
+      },
+      {
+        expectedDominant: false,
+        text: '短标题\n短字幕\n短水印',
+        metrics: {
+          readableChars: 9,
+          lineCount: 3,
+          averageConfidence: 0.92,
+          textBoxAreaRatio: null,
+          coveredRowRatio: null,
+          verticalSpanRatio: null,
+        },
+      },
+    ];
+    for (const noGeometryCase of noGeometryPayloads) {
+      const noGeometryPayload = {
+        schemaVersion: 1,
+        runnerVersion: 'xiaohongshu-batch-v1',
+        processed: 1,
+        items: [{
+          id: 'image-1',
+          index: 1,
+          status: 'ok',
+          width: 640,
+          height: 960,
+          text: noGeometryCase.text,
+          lines: makeStructuredLines(noGeometryCase.text).map((line) => ({
+            ...line,
+            box: null,
+          })),
+          metrics: noGeometryCase.metrics,
+        }],
+      };
+      childProcess.execFile = (file, args, options, callback) => {
+        const outputPath = args[args.indexOf('--output') + 1];
+        fs.writeFileSync(outputPath, JSON.stringify(noGeometryPayload), 'utf8');
+        callback(null, '', '');
+      };
+      // eslint-disable-next-line no-await-in-loop
+      const [noGeometryItem] = await runnerPlugin.runLocalImageOcrBatch(runnerEntries);
+      assert.strictEqual(
+        helpers.isXiaohongshuTextDominantOcrItem(noGeometryItem),
+        noGeometryCase.expectedDominant,
+      );
+    }
+
+    const invalidPayloads = [
+      {
+        schemaVersion: 2,
+        processed: 0,
+        items: [],
+      },
+      {
+        ...successPayload,
+        processed: 0,
+      },
+      {
+        ...successPayload,
+        runnerVersion: 'unexpected-runner',
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          text: `${dominantText}\n与结构化行不一致`,
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          lines: dominantText.split('\n'),
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          lines: successPayload.items[0].lines.map((line, index) => (
+            index === 0 ? { ...line, score: 1.01 } : line
+          )),
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          lines: successPayload.items[0].lines.map((line, index) => (
+            index === 0 ? { ...line, box: [[0, 0], ['private-path', 1]] } : line
+          )),
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          width: 0,
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          height: 1.5,
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            readableChars: 1.5,
+          },
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            lineCount: -1,
+          },
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            averageConfidence: 1.01,
+          },
+        }],
+      },
+      {
+        ...successPayload,
+        items: [{
+          ...successPayload.items[0],
+          metrics: {
+            ...dominantMetrics,
+            coveredRowRatio: 1.01,
+          },
+        }],
+      },
+    ];
+    for (const invalidPayload of invalidPayloads) {
+      execFileCalls = 0;
+      childProcess.execFile = (file, args, options, callback) => {
+        execFileCalls += 1;
+        const outputPath = args[args.indexOf('--output') + 1];
+        fs.writeFileSync(outputPath, JSON.stringify(invalidPayload), 'utf8');
+        callback(null, '', '');
+      };
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        () => runnerPlugin.runLocalImageOcrBatch(runnerEntries),
+        (error) => error
+          && /OCR|批量|schema/i.test(error.message)
+          && !error.message.includes(privateImagePath),
+      );
+      assert.strictEqual(execFileCalls, 1);
+    }
+
+    execFileCalls = 0;
+    let timeoutBatchTempDir = '';
+    childProcess.execFile = (file, args, options, callback) => {
+      execFileCalls += 1;
+      timeoutBatchTempDir = path.dirname(args[0]);
+      const error = new Error(`timed out at ${privateImagePath}`);
+      error.killed = true;
+      callback(error, '', `timeout ${privateImagePath}`);
+    };
+    await assert.rejects(
+      () => runnerPlugin.runLocalImageOcrBatch(runnerEntries),
+      (error) => error
+        && error.code === 'LOCAL_OCR_BATCH_TIMEOUT'
+        && !error.message.includes(privateImagePath),
+    );
+    assert.strictEqual(execFileCalls, 1);
+    assert.strictEqual(fs.existsSync(timeoutBatchTempDir), false);
+
+    execFileCalls = 0;
+    childProcess.execFile = (file, args, options, callback) => {
+      execFileCalls += 1;
+      const error = new Error(`runner failed for ${privateImagePath}`);
+      callback(error, '', `cannot read ${privateImagePath}`);
+    };
+    await assert.rejects(
+      () => runnerPlugin.runLocalImageOcrBatch(runnerEntries),
+      (error) => error
+        && /OCR|批量|process/i.test(error.message)
+        && !error.message.includes(privateImagePath),
+    );
+    assert.strictEqual(execFileCalls, 1);
+  } finally {
+    childProcess.execFile = originalExecFile;
+  }
+
+  const originalExtraction = {
+    title: '原始标题',
+    tags: ['原始标签'],
+    imageUrls: ['https://sns-webpic-qc.xhscdn.com/failure.jpg'],
+    markdown: '原始正文必须保持不变。',
+  };
+  const originalSnapshot = JSON.parse(JSON.stringify(originalExtraction));
+  const failurePlugin = new PluginClass();
+  failurePlugin.ensureProFeatureAccess = async () => {};
+  failurePlugin.buildXiaohongshuOcrImagePayload = async () => [
+    makeImagePayload(originalExtraction.imageUrls[0], 1),
+  ];
+  failurePlugin.ensureLocalComponentReadyForUse = async () => {};
+  failurePlugin.runLocalImageOcr = async () => {
+    throw new Error(`legacy path leaked ${privateImagePath}`);
+  };
+  let failedRequestImagePath = '';
+  failurePlugin.runLocalImageOcrBatch = async (entries) => {
+    failedRequestImagePath = entries[0].imagePath;
+    throw new Error(
+      `batch failed at ${privateImagePath} https://private.example.test?token=TOP_SECRET`,
+    );
+  };
+  const failedEnrichment = await failurePlugin.enrichXiaohongshuExtractionWithOcr(
+    originalExtraction,
+  );
+  assert.deepStrictEqual(originalExtraction, originalSnapshot);
+  assert.deepStrictEqual(
+    Object.keys(failedEnrichment).sort(),
+    [...Object.keys(originalSnapshot), 'ocrError'].sort(),
+  );
+  assert.strictEqual(failedEnrichment.title, originalSnapshot.title);
+  assert.deepStrictEqual(failedEnrichment.tags, originalSnapshot.tags);
+  assert.deepStrictEqual(failedEnrichment.imageUrls, originalSnapshot.imageUrls);
+  assert.strictEqual(failedEnrichment.markdown, originalSnapshot.markdown);
+  assert.ok(failedEnrichment.ocrError);
+  assert.strictEqual(fs.existsSync(failedRequestImagePath), false);
+  assert.strictEqual(fs.existsSync(path.dirname(failedRequestImagePath)), false);
+  assert.strictEqual(
+    /private-user-folder|secret-image|https?:|TOP_SECRET|token=/i.test(failedEnrichment.ocrError),
+    false,
+  );
+}
+
 async function main() {
+  await runXiaohongshuOcrBatchTests();
   await runClipboardTextWebpagePromotionTests();
   await runCanonicalVaultFolderTests();
   await runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest();

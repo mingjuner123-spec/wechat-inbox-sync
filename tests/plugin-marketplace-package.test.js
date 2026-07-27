@@ -23,6 +23,7 @@ const macInstaller = fs.readFileSync(path.join(pluginDir, 'local-asr/install-loc
 const windowsOcrInstaller = fs.readFileSync(path.join(pluginDir, 'local-ocr/install-local-ocr.ps1'), 'utf8');
 const macOcrInstaller = fs.readFileSync(path.join(pluginDir, 'local-ocr/install-local-ocr-macos.sh'), 'utf8');
 const localOcrScript = fs.readFileSync(path.join(pluginDir, 'local-ocr/ocr_image.py'), 'utf8');
+const pluginMainSource = fs.readFileSync(path.join(pluginDir, 'main.js'), 'utf8');
 const releaseWorkflowPath = path.resolve(__dirname, '../.github/workflows/release.yml');
 const releaseWorkflow = fs.readFileSync(releaseWorkflowPath, 'utf8');
 const gitAttributes = fs.readFileSync(path.resolve(__dirname, '../.gitattributes'), 'utf8');
@@ -59,6 +60,41 @@ assert.deepStrictEqual(JSON.parse(fs.readFileSync(rootVersionsPath, 'utf8')), ve
   assert.strictEqual(fs.existsSync(path.join(pluginDir, fileName)), true, `${fileName} should exist`);
 });
 assert.strictEqual(fs.existsSync(path.join(pluginDir, 'local-ocr/__pycache__')), false, 'local OCR package should not include Python cache files');
+
+assert.ok(
+  pluginMainSource.includes("const LOCAL_OCR_BATCH_RUNNER_VERSION = 'xiaohongshu-batch-v1';"),
+  'marketplace main.js must contain the versioned Xiaohongshu OCR batch runner',
+);
+assert.ok(
+  pluginMainSource.includes('async runLocalImageOcrBatch(imageEntries = [])'),
+  'marketplace main.js must expose the local image OCR batch entry',
+);
+const xiaohongshuOcrRequestSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async requestXiaohongshuImageOcr(imageUrls = []'),
+  pluginMainSource.indexOf('async enrichXiaohongshuExtractionWithOcr(', pluginMainSource.indexOf('async requestXiaohongshuImageOcr(imageUrls = []')),
+);
+assert.ok(
+  xiaohongshuOcrRequestSource.includes('await this.runLocalImageOcrBatch(entries)'),
+  'marketplace Xiaohongshu OCR request path must invoke the batch entry once',
+);
+const xiaohongshuOcrMarkdownSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('function buildXiaohongshuOcrMarkdown(items = [])'),
+  pluginMainSource.indexOf('function extractSocialVideoMarkdownFromHtml(', pluginMainSource.indexOf('function buildXiaohongshuOcrMarkdown(items = [])')),
+);
+assert.strictEqual(
+  (xiaohongshuOcrMarkdownSource.match(/## 图片文字/g) || []).length,
+  1,
+  'marketplace OCR markdown generation must produce exactly one 图片文字 section',
+);
+assert.strictEqual(
+  /### 图片\s+\$\{/.test(xiaohongshuOcrMarkdownSource),
+  false,
+  'marketplace OCR markdown generation must not restore per-image headings',
+);
+assert.ok(
+  pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {'),
+  'known Xiaohongshu video intent must bypass image OCR before late media resolution',
+);
 
 assert.ok(readme.includes('## Privacy'));
 assert.ok(readme.includes('## Installation'));
