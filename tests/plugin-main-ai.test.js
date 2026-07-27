@@ -276,6 +276,62 @@ function runXiaohongshuOcrPolicyTests() {
   assert.strictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.trustedBoxConfidence, 0.55);
   assert.strictEqual(helpers.XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS.averageConfidence, 0.65);
 
+  const exactLongTextMetrics = {
+    readableChars: 80,
+    lineCount: 5,
+    averageConfidence: 0.65,
+    textBoxAreaRatio: 0,
+    coveredRowRatio: 0.12,
+    verticalSpanRatio: 0.35,
+  };
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '长文阈值正文',
+    metrics: exactLongTextMetrics,
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '长文阈值正文',
+    metrics: {
+      ...exactLongTextMetrics,
+      coveredRowRatio: 0.119,
+    },
+  }), false);
+
+  const exactLargeCardMetrics = {
+    readableChars: 35,
+    lineCount: 3,
+    averageConfidence: 0.65,
+    textBoxAreaRatio: 0.12,
+    coveredRowRatio: 0,
+    verticalSpanRatio: 0.25,
+  };
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '大字卡阈值正文',
+    metrics: exactLargeCardMetrics,
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '大字卡阈值正文',
+    metrics: {
+      ...exactLargeCardMetrics,
+      textBoxAreaRatio: 0.119,
+    },
+  }), false);
+
+  const exactGeometryFallbackMetrics = {
+    readableChars: 160,
+    lineCount: 6,
+  };
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '几何缺失阈值正文',
+    metrics: exactGeometryFallbackMetrics,
+  }), true);
+  assert.strictEqual(helpers.isXiaohongshuTextDominantOcrItem({
+    text: '几何缺失阈值正文',
+    metrics: {
+      ...exactGeometryFallbackMetrics,
+      lineCount: 5,
+    },
+  }), false);
+
   const textCard = {
     index: 3,
     imageUrl: 'https://sns-webpic-qc.xhscdn.com/text-card.jpg',
@@ -366,6 +422,23 @@ function runXiaohongshuOcrPolicyTests() {
   assert.strictEqual((mergedText.match(/共同边界第二行/g) || []).length, 1);
   assert.strictEqual((mergedText.match(/同一页允许重复的合法句子/g) || []).length, 2);
   assert.ok(mergedText.indexOf('第一页正文开头') < mergedText.indexOf('第二页正文开头'));
+
+  const nineLineBoundary = Array(9).fill('九行边界重复句');
+  const cappedOverlapText = helpers.mergeXiaohongshuOcrText([
+    {
+      ...textCard,
+      index: 1,
+      text: ['上页正文', ...nineLineBoundary].join('\n'),
+    },
+    {
+      ...textCard,
+      index: 2,
+      text: [...nineLineBoundary, '下页正文'].join('\n'),
+    },
+  ], 8);
+  assert.strictEqual((cappedOverlapText.match(/九行边界重复句/g) || []).length, 10);
+  assert.ok(cappedOverlapText.includes('上页正文'));
+  assert.ok(cappedOverlapText.includes('下页正文'));
 }
 
 runPendingLocalOcrSwitchTests();
