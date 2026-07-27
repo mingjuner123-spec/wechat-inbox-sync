@@ -1,32 +1,54 @@
-# Obsidian Community Plugin Release Checklist
+# WeChat Inbox Sync 发布清单
 
-## Before Publishing
+本清单与仓库内发布治理脚本、GitHub Actions 共同构成插件公开仓库的发布门禁。
 
-- [ ] 发布只能来自干净工作区，且 `HEAD` 必须逐字等于当前 `origin/main`；旧分支、分叉 worktree、未提交文件和不在当前主线上的 tag 一律禁止发布。
-- [ ] 推送版本 tag 前执行 `node scripts/release-source-guard.js --tag <version>`，确认根目录与正式插件目录版本均等于 tag，tag 提交也等于当前远端主线。
-- [ ] 执行 `node scripts/update-local-components-manifest.js --check`；ASR/OCR 发布源有意变更时，必须先重新生成并审查正式插件目录中的 canonical manifest。
-- [ ] 本地组件只允许通过 `powershell -ExecutionPolicy Bypass -File scripts/deploy-local-components.ps1 -Execute` 发布；禁止直接运行本地组件的 `tcb hosting deploy`。
-- [ ] 部署顺序固定为：不可变 SHA-256 路径上传并双回读验证 → 再次确认主线提交未变化 → 更新兼容别名 → 上传 committed manifest → 通用公网完整性校验。
-- [ ] 紧急 CDN 热修只有在完全相同的 canonical bytes 和 manifest 回写 `main` 后才算闭环；闭环前禁止发布下一插件版本。
-- [ ] 版本号必须同时检查远端标签、默认分支、本机已安装插件和现存发布工作区；本机已安装或已打包的候选版本也视为已占用，即使它从未创建远端标签或 Release，也必须顺延新版本，禁止复用。
-- [ ] 运行 `node scripts/check-local-components-cdn.js`，确认 ASR/OCR 的不可变路径、兼容别名、公开 manifest 和固定 Python 运行时均与 committed manifest/固定哈希一致；任一失败禁止推送 tag。
-- [ ] CDN 与插件发布顺序固定为：主线提交与 CI 门禁 → 受控 CDN 部署 → 公网完整性回读 → tag/Release；禁止先发布插件、后补 CDN。
-- [ ] Create a public GitHub repository for `wechat-inbox-sync`.
-- [ ] Put `main.js`, `manifest.json`, `styles.css`, `versions.json`, `README.md`, and `LICENSE` in the repository.
-- [ ] Confirm `manifest.json` uses the final plugin id: `wechat-inbox-sync`.
-- [ ] Confirm the release tag is exactly `1.0.0`.
-- [ ] Confirm the GitHub release uploads these assets:
+## 发布源与版本身份
+
+- [ ] 正式仓库固定为 `mingjuner123-spec/wechat-inbox-sync`，插件发布源固定为 `obsidian-plugin/wechat-inbox-sync/`。
+- [ ] 只允许从干净发布工作区执行发布，且 `HEAD` 必须逐字节等于当前 `origin/main`。
+- [ ] 根目录和插件目录的 `manifest.json`、`versions.json` 必须一致，目标版本不得与远端标签、Release、本机已安装或已打包候选版本重名。
+- [ ] 当前发布目标使用动态版本号（本次为 `1.3.67`）；禁止复用、覆盖或重建已有 tag/Release。
+- [ ] 在确认合并后的 `main` 和发布工作区完全一致后，先创建本地 annotated tag（暂不推送），再依次运行：
+  - `node scripts/release-source-guard.js --tag <version>`
+  - `node scripts/check-plugin-release-identity.js --prepublish --tag <version>`
+- [ ] 上述两项通过后才允许推送 tag；Release 工作流结束后运行：
+  - `node scripts/check-plugin-release-identity.js --postpublish --tag <version>`
+- [ ] GitHub Release 必须精确包含五项资产：
   - `main.js`
   - `manifest.json`
   - `styles.css`
-- [ ] Install the release through BRAT and test in a clean vault.
-- [ ] Verify settings, binding, sync, file upload, webpage extraction, and audio transcription.
-- [ ] Remove test keys or personal tokens before publishing.
+  - `versions.json`
+  - `wechat-inbox-sync-<version>.zip`
 
-## Community Plugins PR
+## 本地组件与向后兼容
 
-Submit a pull request to `obsidianmd/obsidian-releases` and add this entry to
-`community-plugins.json` after the GitHub repository is live:
+- [ ] 运行 `node scripts/update-local-components-manifest.js --check`；ASR/OCR 发布源有意变化时，先重新生成并审查 canonical manifest。
+- [ ] 本地组件只允许由受控部署器发布；禁止直接运行 `tcb hosting deploy`：
+  - `powershell -ExecutionPolicy Bypass -File scripts/deploy-local-components.ps1 -Execute`
+- [ ] 部署顺序固定为：不可变 SHA-256 路径上传并双回读 → 再确认主线未漂移 → 更新兼容别名 → 上传 committed manifest → 公网完整性校验。
+- [ ] 运行 `node scripts/check-local-components-cdn.js`；不可变路径、兼容别名、公开 manifest 或固定 Python 运行时任一不一致，都禁止推送 tag。
+- [ ] 插件提高本地组件推荐版本或能力标记时，不得仅因版本较旧就停用已安装组件。必须区分“当前”“已知兼容、建议升级”“明确不兼容”；只有缺失、损坏或有测试证据的明确不兼容才允许阻断。
+- [ ] 上一受支持 Windows ASR 正式脚本在安装器请求成功、HTTP 418、超时和随包安装器缺失时，都必须保持原有 `ready` 状态；网络失败不得触发大型组件删除或重装。
+- [ ] 正式历史脚本必须以规范化 SHA-256 身份识别，不能只依赖能力字符串；保留标记但内容损坏、语法残缺或来源未知的脚本必须失败关闭。
+- [ ] Windows ASR 脚本更新必须使用候选文件和短期备份；最终验证通过前可回退，完成状态写入后清理失败只能告警，不得删除已验证的新脚本或重新触发回退。
+
+## CDN 回退
+
+- [ ] 部署前记录上一正式版本的 installer、canonical manifest、兼容归档哈希和远端回读结果。
+- [ ] 如果不可变对象上传失败，立即停止，不更新兼容别名、公开 manifest、tag 或 Release。
+- [ ] 如果兼容别名或公开 manifest 已切换，但发布验证失败：禁止手工覆盖。基于当前 `main` 创建回退提交，恢复上一正式版本 canonical bytes，通过 PR/CI 后再由受控部署器回切。
+- [ ] 如果 tag/Release 已发布，禁止覆盖原发布；CDN 如需回切仍走受控回退提交，插件修复必须递增到更高版本。
+
+## 回归与安全
+
+- [ ] 运行插件核心、市场包、发布治理、发布身份、语法和 CDN 校验。
+- [ ] Windows 与 macOS 分别验证安装、检测、失败恢复和已有用户升级路径。
+- [ ] 验证设置、绑定、同步、文件上传、网页提取和音视频转写。
+- [ ] 确认仓库与发布资产不包含测试密钥、个人 token、缓存、备份或临时文件。
+
+## Obsidian 社区插件登记
+
+Obsidian `community-plugins.json` 登记已经指向正式仓库，仓库迁移前不得自行修改：
 
 ```json
 {
@@ -34,8 +56,6 @@ Submit a pull request to `obsidianmd/obsidian-releases` and add this entry to
   "name": "WeChat Inbox Sync",
   "author": "Zhang Zhang",
   "description": "Sync text, webpages, audio, and files from a WeChat mini program inbox into your vault.",
-  "repo": "YOUR_GITHUB_USERNAME/wechat-inbox-sync"
+  "repo": "mingjuner123-spec/wechat-inbox-sync"
 }
 ```
-
-Replace `YOUR_GITHUB_USERNAME/wechat-inbox-sync` with the real repository path.

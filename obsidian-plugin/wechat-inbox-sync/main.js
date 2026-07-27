@@ -17,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.66';
+const PLUGIN_RUNTIME_VERSION = '1.3.67';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -444,6 +444,17 @@ function findFirstExistingPath(candidates, exists) {
   return candidates.find((candidate) => candidate && exists(candidate)) || '';
 }
 
+const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = '23c195a46d2e7b875757ead4a76080891e9343eb7563171f726b1b33a66e2709';
+const LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = '509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb';
+
+function getLocalAsrScriptIdentityHash(source) {
+  const normalizedSource = String(source || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n')
+    .trimEnd();
+  return crypto.createHash('sha256').update(normalizedSource, 'utf8').digest('hex');
+}
+
 function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
   try {
     if (!scriptPath || !fileSystem.existsSync(scriptPath)) {
@@ -453,6 +464,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       };
     }
     const source = String(fileSystem.readFileSync(scriptPath, 'utf8') || '');
+    const sourceIdentityHash = getLocalAsrScriptIdentityHash(source);
     if (source.includes('GeneratedTxt')) {
       return {
         scriptVersion: 'legacy-generated-txt',
@@ -493,6 +505,12 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && !source.includes('$SimplifiedPrompt')
       && !source.includes('"--prompt"')
     ) {
+      if (sourceIdentityHash !== CURRENT_WINDOWS_ASR_SCRIPT_SHA256) {
+        return {
+          scriptVersion: 'current-signature-mismatch',
+          scriptOutdated: true,
+        };
+      }
       return {
         scriptVersion: 'adaptive-chunked-diagnostics-process-repeat-guard-v2-heartbeat-run-log',
         scriptOutdated: false,
@@ -532,11 +550,23 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       const hasHeartbeatProtocol = source.includes('progressHeartbeatAt')
         && source.includes('progressPid')
         && source.includes('-ProgressStage "segmenting"');
+      if (hasHeartbeatProtocol && sourceIdentityHash !== LEGACY_WINDOWS_ASR_SCRIPT_SHA256) {
+        return {
+          scriptVersion: 'legacy-signature-mismatch',
+          scriptOutdated: true,
+        };
+      }
       return {
         scriptVersion: hasHeartbeatProtocol
           ? 'adaptive-chunked-start-process-repeat-guard-v2-heartbeat-run-log'
           : 'adaptive-chunked-start-process-repeat-guard-v2-progress-run-log',
-        scriptOutdated: true,
+        scriptOutdated: !hasHeartbeatProtocol,
+        ...(hasHeartbeatProtocol
+          ? {
+            upgradeRecommended: true,
+            compatibilityMode: 'legacy-start-process',
+          }
+          : {}),
       };
     }
     if (
@@ -771,12 +801,12 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     }
     return {
       scriptVersion: 'unknown',
-      scriptOutdated: false,
+      scriptOutdated: true,
     };
   } catch (error) {
     return {
       scriptVersion: 'unknown',
-      scriptOutdated: false,
+      scriptOutdated: true,
     };
   }
 }
@@ -826,6 +856,12 @@ function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists
     hasTranscribeScript,
     scriptVersion: scriptVersionStatus.scriptVersion,
     scriptOutdated: scriptVersionStatus.scriptOutdated,
+    ...(scriptVersionStatus.upgradeRecommended === undefined
+      ? {}
+      : {
+        upgradeRecommended: Boolean(scriptVersionStatus.upgradeRecommended),
+        compatibilityMode: scriptVersionStatus.compatibilityMode || 'current',
+      }),
     hasWhisper,
     hasFfmpeg,
     hasModel,
@@ -1285,8 +1321,14 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 2, 25],
+      [1, 2, 26],
   )
+    && source.includes('function Assert-TranscribeScriptCandidate')
+    && source.includes('function Start-TranscribeScriptUpdate')
+    && source.includes('function Promote-TranscribeScriptUpdate')
+    && source.includes('function Restore-TranscribeScriptUpdate')
+    && source.includes('function Complete-TranscribeScriptUpdate')
+    && source.includes('[System.Management.Automation.Language.Parser]::ParseFile')
     && !source.includes('$SimplifiedPrompt')
     && !source.includes('--prompt')
     && source.includes('progressHeartbeatAt')
@@ -13355,22 +13397,26 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async getAvailableLocalAsrInstallerPath() {
+  async getAvailableLocalAsrInstallerPath(options = {}) {
     const installerPath = this.getBundledLocalAsrInstallerPath();
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
 
     const isInstallerCurrent = (scriptText) => isLocalAsrInstallerCurrent(scriptText, isMac);
+    const fetchInstallerText = typeof options.fetchInstallerText === 'function'
+      ? options.fetchInstallerText
+      : async (url) => {
+        try {
+          const response = await requestUrl({ url, method: 'GET' });
+          return response.text || '';
+        } catch (error) {
+          return downloadTextViaNode(url);
+        }
+      };
 
     try {
-      let scriptText = '';
-      try {
-        const response = await requestUrl({ url: `${installerUrl}?t=${Date.now()}`, method: 'GET' });
-        scriptText = response.text || '';
-      } catch (error) {
-        scriptText = await downloadTextViaNode(`${installerUrl}?t=${Date.now()}`);
-      }
+      const scriptText = await fetchInstallerText(`${installerUrl}?t=${Date.now()}`);
       if (!isInstallerCurrent(scriptText)) {
         throw new Error('Local ASR installer download returned outdated or invalid content');
       }
@@ -13415,6 +13461,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       `脚本存在：${status.hasTranscribeScript ? '是' : '否'}`,
       `脚本版本：${status.scriptOutdated ? '过旧，请重新安装本地转写组件' : status.scriptVersion}`,
       `脚本过旧：${status.scriptOutdated ? '是' : '否'}`,
+      `脚本兼容状态：${status.upgradeRecommended ? '兼容可用，建议升级' : (status.scriptOutdated ? '不可用' : '当前版本')}`,
       `whisper：${status.hasWhisper ? '是' : '否'}`,
       `whisper 路径：${status.whisperPath || '未找到'}`,
       `ffmpeg：${status.hasFfmpeg ? '是' : '否'}`,

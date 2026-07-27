@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.25"
+$InstallerScriptVersion = "1.2.26"
 $NativeProcessRunnerVersion = "diagnostics-process-v1"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 90
@@ -786,7 +786,43 @@ function Get-LatestWhisperWindowsAsset {
   return $WhisperWindowsFallbackUrls[0]
 }
 
-function Write-TranscribeScript {
+function Assert-TranscribeScriptCandidate {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path) -or (Get-Item -LiteralPath $Path).Length -le 0) {
+    throw "Cannot prepare transcribe script candidate."
+  }
+
+  $tokens = $null
+  $parseErrors = $null
+  [System.Management.Automation.Language.Parser]::ParseFile(
+    $Path,
+    [ref]$tokens,
+    [ref]$parseErrors
+  ) | Out-Null
+  if ($parseErrors -and $parseErrors.Count -gt 0) {
+    $parseSummary = ($parseErrors | ForEach-Object { $_.Message }) -join "; "
+    throw ("Cannot parse transcribe script candidate: " + $parseSummary)
+  }
+
+  $candidateSource = [System.IO.File]::ReadAllText($Path)
+  $requiredMarkers = @(
+    '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
+    '$NativeProcessRunnerVersion = "diagnostics-process-v1"',
+    'System.Diagnostics.ProcessStartInfo',
+    'ReadToEndAsync',
+    'progressHeartbeatAt',
+    'progressPid',
+    '-ProgressStage "segmenting"'
+  )
+  foreach ($marker in $requiredMarkers) {
+    if (-not $candidateSource.Contains($marker)) {
+      throw ("Transcribe script candidate is missing required capability: " + $marker)
+    }
+  }
+}
+
+function Start-TranscribeScriptUpdate {
   param([Parameter(Mandatory = $true)][string]$InstallRoot)
 
   $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.ScriptName }
@@ -810,17 +846,90 @@ function Write-TranscribeScript {
   }
 
   $template = $installerSource.Substring($contentStart + 1, $quoteEnd - $contentStart - 1).TrimEnd("`r", "`n")
-  $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
-  Set-Content -LiteralPath $transcribeScript -Value $template -Encoding UTF8
-  Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null
+  $updateId = [guid]::NewGuid().ToString("N")
+  $targetPath = Join-Path $InstallRoot "transcribe.ps1"
+  $candidatePath = Join-Path $InstallRoot ("transcribe.ps1.candidate-" + $updateId)
+  $backupPath = Join-Path $InstallRoot ("transcribe.ps1.backup-" + $updateId)
+  Set-Content -LiteralPath $candidatePath -Value $template -Encoding UTF8
+  try {
+    Assert-TranscribeScriptCandidate -Path $candidatePath
+  } catch {
+    Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
+    throw
+  }
+  return [pscustomobject]@{
+    TargetPath = $targetPath
+    CandidatePath = $candidatePath
+    BackupPath = $backupPath
+    HadOriginal = $false
+    Promoted = $false
+    Completed = $false
+  }
+}
+
+function Restore-TranscribeScriptUpdate {
+  param($State)
+  if (-not $State) {
+    return
+  }
+  if ($State.Completed) {
+    return
+  }
+  if ($State.Promoted -and (Test-Path -LiteralPath $State.TargetPath)) {
+    Remove-Item -LiteralPath $State.TargetPath -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $State.BackupPath) {
+    Move-Item -LiteralPath $State.BackupPath -Destination $State.TargetPath -Force
+  }
+  if (Test-Path -LiteralPath $State.CandidatePath) {
+    Remove-Item -LiteralPath $State.CandidatePath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Promote-TranscribeScriptUpdate {
+  param([Parameter(Mandatory = $true)]$State)
+  try {
+    if (Test-Path -LiteralPath $State.TargetPath) {
+      Move-Item -LiteralPath $State.TargetPath -Destination $State.BackupPath -Force
+      $State.HadOriginal = $true
+    }
+    Move-Item -LiteralPath $State.CandidatePath -Destination $State.TargetPath -Force
+    $State.Promoted = $true
+  } catch {
+    Restore-TranscribeScriptUpdate -State $State
+    throw
+  }
+}
+
+function Complete-TranscribeScriptUpdate {
+  param($State)
+  if (-not $State) {
+    return
+  }
+  $State.Completed = $true
+  if (Test-Path -LiteralPath $State.BackupPath) {
+    try {
+      Remove-Item -LiteralPath $State.BackupPath -Force -ErrorAction Stop
+    } catch {
+      Write-Warning "Validated transcribe script is active, but the old backup could not be removed: $($_.Exception.Message)"
+    }
+  }
+  if (Test-Path -LiteralPath $State.CandidatePath) {
+    try {
+      Remove-Item -LiteralPath $State.CandidatePath -Force -ErrorAction Stop
+    } catch {
+      Write-Warning "Validated transcribe script is active, but the candidate residue could not be removed: $($_.Exception.Message)"
+    }
+  }
 }
 
 $installMutex = $null
+$transcribeScriptUpdate = $null
 try {
   $installMutex = Acquire-InstallLock
   New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
   New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
-  Write-TranscribeScript -InstallRoot $InstallRoot
+  $transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot
   New-CleanDirectory -Path $TempRoot
 
   $WhisperDir = Join-Path $InstallRoot "whisper"
@@ -943,8 +1052,7 @@ try {
   Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue
 
 # BEGIN_TRANSCRIBE_TEMPLATE
-  $transcribeScript = Join-Path $InstallRoot "transcribe.ps1"
-  @'
+  $embeddedTranscribeTemplate = @'
 param(
   [Parameter(Mandatory = $true)][string]$InputPath,
   [Parameter(Mandatory = $true)][string]$OutputPath
@@ -1527,10 +1635,14 @@ try {
   )
   throw
 }
-'@ | Set-Content -LiteralPath $transcribeScript -Encoding UTF8
+'@
+  $null = $embeddedTranscribeTemplate
 # END_TRANSCRIBE_TEMPLATE
 
+  Promote-TranscribeScriptUpdate -State $transcribeScriptUpdate
   Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null
+  Complete-TranscribeScriptUpdate -State $transcribeScriptUpdate
+  $transcribeScriptUpdate = $null
 
   Write-Host ""
   Write-Host "Local ASR install validation passed."
@@ -1541,6 +1653,7 @@ try {
   Write-Host "Use this Obsidian plugin command:"
   Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
 } catch {
+  Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate
   Write-Host ""
   Write-Host "INSTALLER FAILED"
   Write-Host ($_ | Out-String)
