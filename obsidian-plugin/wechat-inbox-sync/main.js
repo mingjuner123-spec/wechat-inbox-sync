@@ -6834,6 +6834,25 @@ function resolveXiaohongshuIdentityUrl(urls = [], html = '') {
   return getXiaohongshuCanonicalUrlFromHtml(html);
 }
 
+function rememberXiaohongshuObservedIdentity(previous = '', details = {}) {
+  const remembered = resolveXiaohongshuIdentityUrl([previous]);
+  if (remembered) return remembered;
+  const resourceType = String(details && details.resourceType || '')
+    .toLowerCase()
+    .replace(/[^a-z]/g, '');
+  const isMainFrame = resourceType
+    ? resourceType === 'mainframe'
+    : (
+      Number(details && details.frameId) === 0
+      && Number(details && details.parentFrameId) < 0
+    );
+  if (!isMainFrame) return '';
+  return resolveXiaohongshuIdentityUrl([
+    details && details.redirectURL,
+    details && details.url,
+  ]);
+}
+
 function selectXiaohongshuBrowserSnapshot(previous = null, current = null, expectedUrl = '') {
   const prior = previous && typeof previous === 'object' ? previous : {};
   const candidate = current && typeof current === 'object' ? current : {};
@@ -10811,10 +10830,22 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
   installXiaohongshuNavigationGuards(win.webContents);
   const browserSession = (win.webContents && win.webContents.session) || xiaohongshuSession;
   let blocksCommentRequests = false;
+  let observesRedirectRequests = false;
+  let observedIdentityUrl = resolveXiaohongshuIdentityUrl([
+    options.expectedUrl,
+    url,
+  ]);
+  const rememberObservedIdentity = (details) => {
+    observedIdentityUrl = rememberXiaohongshuObservedIdentity(
+      observedIdentityUrl,
+      details,
+    );
+  };
 
   try {
     if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === 'function') {
       browserSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+        rememberObservedIdentity(details);
         if (typeof callback === 'function') {
           callback(
             shouldBlockXiaohongshuBrowserNavigationRequest(details)
@@ -10825,6 +10856,15 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         }
       });
       blocksCommentRequests = true;
+    }
+    if (browserSession
+      && browserSession.webRequest
+      && typeof browserSession.webRequest.onBeforeRedirect === 'function') {
+      browserSession.webRequest.onBeforeRedirect(
+        { urls: ['<all_urls>'] },
+        rememberObservedIdentity,
+      );
+      observesRedirectRequests = true;
     }
 
     const loaded = waitForWebContents(win.webContents, 18000);
@@ -10843,7 +10883,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       payload = selectXiaohongshuBrowserSnapshot(
         payload,
         current,
-        options.expectedUrl || url,
+        observedIdentityUrl || options.expectedUrl || url,
       );
       if (payload.matched) break;
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -10866,6 +10906,12 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         && browserSession.webRequest
         && typeof browserSession.webRequest.onBeforeRequest === 'function') {
         browserSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, null);
+      }
+      if (observesRedirectRequests
+        && browserSession
+        && browserSession.webRequest
+        && typeof browserSession.webRequest.onBeforeRedirect === 'function') {
+        browserSession.webRequest.onBeforeRedirect({ urls: ['<all_urls>'] }, null);
       }
     } catch (error) {}
     if (win && typeof win.destroy === 'function') {
@@ -18673,6 +18719,7 @@ WechatObsidianInboxPlugin.__test = {
   isGenericXiaohongshuLandingExtraction,
   hasReadableXiaohongshuGraphicContent,
   shouldStopWaitingForXiaohongshuContent,
+  rememberXiaohongshuObservedIdentity,
   selectXiaohongshuBrowserSnapshot,
   extractSocialCommentsFromHtml,
   collectXiaohongshuCommentPages,

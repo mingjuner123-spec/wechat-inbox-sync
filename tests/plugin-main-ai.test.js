@@ -344,6 +344,13 @@ const xiaohongshuPageRendererSource = pluginMainSource.slice(
 assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGuards(win.webContents)'));
 assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
 assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
+const xiaohongshuContentRendererSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async function renderXiaohongshuContentWithElectron'),
+  pluginMainSource.indexOf('let xiaohongshuBrowserSessionQueue'),
+);
+assert.ok(xiaohongshuContentRendererSource.includes('rememberXiaohongshuObservedIdentity'));
+assert.ok(xiaohongshuContentRendererSource.includes("onBeforeRedirect"));
+assert.ok(xiaohongshuContentRendererSource.includes('observedIdentityUrl'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -3486,6 +3493,85 @@ assert.strictEqual(helpers.shouldStopWaitingForXiaohongshuContent(
   unrelatedRecommendationLandingHtml,
   'https://www.xiaohongshu.com/discovery/item/6a4ccf88000000001101d144',
 ), false);
+assert.strictEqual(typeof helpers.rememberXiaohongshuObservedIdentity, 'function');
+const observedMainFrameIdentity = helpers.rememberXiaohongshuObservedIdentity('', {
+  resourceType: 'mainFrame',
+  url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+});
+assert.strictEqual(
+  observedMainFrameIdentity,
+  'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'image',
+    frameId: 0,
+    parentFrameId: -1,
+    url: 'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  }),
+  '',
+  'a subresource must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'mainFrame',
+    url: 'https://www.xiaohongshu.com/',
+  }),
+  '',
+  'a generic Xiaohongshu landing page must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'mainFrame',
+    url: 'https://attacker.example/explore/6b5ddf99000000002202e255',
+  }),
+  '',
+  'an external main-frame URL must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    resourceType: 'mainFrame',
+    url: 'http://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  }),
+  '',
+  'an insecure Xiaohongshu URL must not establish an observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity(observedMainFrameIdentity, {
+    resourceType: 'image',
+    frameId: 0,
+    parentFrameId: -1,
+    url: 'https://www.xiaohongshu.com/explore/6b5ddf99000000002202e255',
+  }),
+  observedMainFrameIdentity,
+  'a subresource in the main frame must not replace the observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity(observedMainFrameIdentity, {
+    resourceType: 'mainFrame',
+    url: 'https://www.xiaohongshu.com/',
+  }),
+  observedMainFrameIdentity,
+  'a generic Xiaohongshu landing page must not erase the observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity(observedMainFrameIdentity, {
+    resourceType: 'mainFrame',
+    url: 'https://attacker.example/explore/6b5ddf99000000002202e255',
+  }),
+  observedMainFrameIdentity,
+  'an external main-frame navigation must not replace the observed note identity',
+);
+assert.strictEqual(
+  helpers.rememberXiaohongshuObservedIdentity('', {
+    frameId: 0,
+    parentFrameId: -1,
+    url: 'https://www.xiaohongshu.com/',
+    redirectURL: 'https://www.xiaohongshu.com/discovery/item/6b5ddf99000000002202e255',
+  }),
+  'https://www.xiaohongshu.com/discovery/item/6b5ddf99000000002202e255',
+  'main-frame redirect details must remember the official HTTPS note destination',
+);
 assert.strictEqual(typeof helpers.selectXiaohongshuBrowserSnapshot, 'function');
 const longRecommendationSnapshot = helpers.selectXiaohongshuBrowserSnapshot(
   null,
