@@ -11472,9 +11472,202 @@ async function runCanonicalVaultFolderTests() {
   assert.strictEqual(channelResult.filePath, 'raw/wechatmd/视频号捕获.md');
 }
 
+async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
+  const scenarios = [
+    {
+      name: 'rate-limit',
+      contentKind: 'transcript',
+      expectedCode: 'rate-limited',
+      generate: async () => {
+        const error = new Error('Request failed with status code 429 https://private.example.test?token=TOP_SECRET');
+        error.code = 'ERR_BAD_REQUEST';
+        error.response = { status: 429 };
+        throw error;
+      },
+    },
+    {
+      name: 'upstream-5xx',
+      contentKind: 'body',
+      expectedCode: 'upstream-service-error',
+      generate: async () => {
+        const error = new Error('HTTP 502 api_key=TOP_SECRET');
+        error.code = 'ERR_BAD_RESPONSE';
+        error.response = { status: 502 };
+        throw error;
+      },
+    },
+    {
+      name: 'timeout',
+      contentKind: 'transcript',
+      expectedCode: 'request-timeout',
+      generate: async () => {
+        throw new Error('ETIMEDOUT cookie=TOP_SECRET');
+      },
+    },
+    {
+      name: 'empty-result',
+      contentKind: 'body',
+      expectedCode: 'empty-response',
+      generate: async () => ({ description: '', keywords: [] }),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const writes = [];
+    const requestCalls = [];
+    let pendingReadCount = 0;
+    let aiCallCount = 0;
+    let transcriptionCallCount = 0;
+    const recordId = `ai-metadata-${scenario.name}`;
+    const coreText = scenario.contentKind === 'transcript'
+      ? '这段正文已经在本地完成转写，AI 简介失败不应让它重新转写。'
+      : '这段网页正文已经完成提取，AI 简介失败不应阻止它写入知识库。';
+    const record = {
+      _id: recordId,
+      type: 'webpage',
+      content: 'https://media.example.test/video',
+      createdAt: '2026-07-27T09:00:00.000Z',
+      metadata: {
+        title: '已经成功转写的内容',
+        url: 'https://media.example.test/video',
+        ...(scenario.contentKind === 'transcript'
+          ? {
+            transcriptOnly: true,
+            webpageMediaType: 'audio_video',
+            transcription: coreText,
+            transcriptionStatus: 'success',
+            transcriptionSource: 'local',
+          }
+          : {
+            markdown: coreText,
+          }),
+        conversionStatus: 'success',
+      },
+    };
+    const plugin = new PluginClass();
+    plugin.settings = helpers.mergeSettings({
+      inboxDir: '临时收集',
+      noteSaveMode: 'root',
+    });
+    plugin.app = {
+      vault: {
+        adapter: {
+          async exists() {
+            return true;
+          },
+          async write(filePath, markdown) {
+            writes.push({ filePath, markdown });
+          },
+        },
+        async createFolder() {},
+      },
+    };
+    plugin.showSyncProgress = () => {};
+    plugin.nextRecordTitle = async () => `AI失败不阻断-${scenario.name}`;
+    plugin.findExistingRecordNotePath = async () => '';
+    plugin.hydrateWebpageMarkdown = async (currentRecord) => currentRecord;
+    plugin.saveSourceMediaAttachment = async (currentRecord) => currentRecord;
+    plugin.hasProFeatureAccess = async () => true;
+    plugin.runConfiguredTranscription = async () => {
+      transcriptionCallCount += 1;
+      throw new Error('completed transcript must not run ASR again');
+    };
+    plugin.generateMetadataWithDeepSeek = async (...args) => {
+      aiCallCount += 1;
+      return scenario.generate(...args);
+    };
+    plugin.requestJson = async (requestPath, method) => {
+      requestCalls.push([requestPath, method]);
+      if (requestPath === '/records?status=pending') {
+        pendingReadCount += 1;
+        return {
+          success: true,
+          data: pendingReadCount === 1 ? [record] : [],
+        };
+      }
+      if (requestPath === `/records/${encodeURIComponent(recordId)}/synced`) {
+        return { success: true, data: {} };
+      }
+      throw new Error(`unexpected request: ${method} ${requestPath}`);
+    };
+
+    const firstResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+    assert.strictEqual(firstResult.written.length, 1, scenario.name);
+    assert.strictEqual(firstResult.failed.length, 0, scenario.name);
+    assert.strictEqual(firstResult.conversionWarnings.length, 1, scenario.name);
+    assert.match(
+      firstResult.conversionWarnings[0],
+      /正文已同步，但 AI 简介\/关键词未生成/,
+      scenario.name,
+    );
+    assert.strictEqual(writes.length, 1, scenario.name);
+    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(transcriptionCallCount, 0, scenario.name);
+    assert.deepStrictEqual(
+      requestCalls.filter(([requestPath]) => requestPath.includes('/synced')),
+      [[`/records/${encodeURIComponent(recordId)}/synced`, 'POST']],
+      scenario.name,
+    );
+
+    const markdown = writes[0].markdown;
+    assert.ok(markdown.includes(coreText), scenario.name);
+    assert.strictEqual(/^description:/m.test(markdown), false, scenario.name);
+    assert.strictEqual(/^keywords:/m.test(markdown), false, scenario.name);
+    assert.strictEqual(markdown.includes('aiMetadataSource'), false, scenario.name);
+    const diagnosticLines = markdown
+      .split(/\r?\n/)
+      .filter((line) => line.includes('wechat-inbox-ai-metadata-error'));
+    assert.deepStrictEqual(
+      diagnosticLines,
+      [`<!-- wechat-inbox-ai-metadata-error: ${scenario.expectedCode} -->`],
+      scenario.name,
+    );
+    assert.strictEqual(/https?:|TOP_SECRET|token|api_key|cookie/i.test(diagnosticLines[0]), false, scenario.name);
+
+    const secondResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+    assert.strictEqual(secondResult.written.length, 0, scenario.name);
+    assert.strictEqual(secondResult.failed.length, 0, scenario.name);
+    assert.strictEqual(writes.length, 1, scenario.name);
+    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(transcriptionCallCount, 0, scenario.name);
+  }
+
+  const noProRecord = {
+    _id: 'ai-metadata-no-pro',
+    type: 'webpage',
+    content: 'https://media.example.test/free-video',
+    createdAt: '2026-07-27T09:00:00.000Z',
+    metadata: {
+      title: '免费用户已保存的正文',
+      url: 'https://media.example.test/free-video',
+      markdown: '免费用户的正文仍应正常保存。',
+      conversionStatus: 'success',
+    },
+  };
+  const noProPlugin = new PluginClass();
+  noProPlugin.settings = helpers.mergeSettings({});
+  noProPlugin.hasProFeatureAccess = async () => false;
+  noProPlugin.generateMetadataWithDeepSeek = async () => {
+    throw new Error('a free user must not call the AI service');
+  };
+  const noProResult = await noProPlugin.enrichRecordMetadataWithAi(noProRecord);
+  assert.strictEqual(noProResult, noProRecord);
+  assert.strictEqual(noProResult.metadata.aiMetadataError, undefined);
+  assert.strictEqual(helpers.getRecordConversionWarning(noProResult), '');
+  assert.strictEqual(
+    helpers.buildMarkdownForRecord({
+      record: noProResult,
+      title: '免费用户已保存的正文',
+      syncedAt: '2026-07-27T09:01:00.000Z',
+    }).includes('wechat-inbox-ai-metadata-error'),
+    false,
+  );
+}
+
 async function main() {
   await runClipboardTextWebpagePromotionTests();
   await runCanonicalVaultFolderTests();
+  await runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest();
   await runBoundedBrowserTaskTests();
   await runAsyncHydrationTests();
   await runLocalTranscriptionQualityFallbackTests();

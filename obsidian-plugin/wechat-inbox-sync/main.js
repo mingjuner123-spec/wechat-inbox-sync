@@ -3265,20 +3265,51 @@ function shouldGenerateAiMetadata(settings, record) {
   return !getRecordDescription(metadata) || !getRecordKeywords(metadata).length;
 }
 
-function shouldRequireAiMetadataForTranscript(record) {
-  const metadata = (record && record.metadata) || {};
-  const type = String(record && record.type || '').toLowerCase();
-  return Boolean(
-    metadata.transcriptionStatus === 'success'
-    && String(metadata.transcription || '').trim()
-    && extractAiMetadataInputText(record)
-    && (
-      metadata.transcriptOnly
-      || metadata.webpageMediaType === 'audio_video'
-      || type === 'voice'
-      || (type === 'file' && metadata.transcriptionSource)
-    ),
-  );
+function classifyAiMetadataError(error) {
+  const responseStatus = Number(error && error.response && error.response.status);
+  if (responseStatus === 429) return 'rate-limited';
+  if (responseStatus >= 500 && responseStatus <= 599) return 'upstream-service-error';
+  const raw = error && typeof error === 'object'
+    ? [error.code, error.message].filter(Boolean).join(' ')
+    : String(error || '');
+  const normalized = raw.toLowerCase();
+  if ([
+    'rate-limited',
+    'upstream-service-error',
+    'request-timeout',
+    'empty-response',
+    'service-error',
+  ].includes(normalized)) {
+    return normalized;
+  }
+  if (/\b429\b|too many requests|rate[-_\s]?limit/.test(normalized)) {
+    return 'rate-limited';
+  }
+  if (/\b5\d\d\b|bad gateway|service unavailable|upstream/.test(normalized)) {
+    return 'upstream-service-error';
+  }
+  if (/timed?\s*out|timeout|etimedout|econnaborted/.test(normalized)) {
+    return 'request-timeout';
+  }
+  if (/empty|no usable|没有返回可用/.test(normalized)) {
+    return 'empty-response';
+  }
+  return 'service-error';
+}
+
+function buildAiMetadataErrorComment(error) {
+  return `<!-- wechat-inbox-ai-metadata-error: ${classifyAiMetadataError(error)} -->`;
+}
+
+function buildAiMetadataConversionWarning(error) {
+  const detail = {
+    'rate-limited': '请求过于频繁',
+    'upstream-service-error': 'AI 服务暂时异常',
+    'request-timeout': 'AI 请求超时',
+    'empty-response': 'AI 未返回可用结果',
+    'service-error': 'AI 服务暂时不可用',
+  }[classifyAiMetadataError(error)];
+  return `正文已同步，但 AI 简介/关键词未生成（${detail}）。`;
 }
 
 function buildFileMarkdownBody(record) {
@@ -13200,7 +13231,11 @@ function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFA
 
   const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
   const recordIdMarker = buildRecordIdMarker(getRecordId(record));
-  return `${frontmatter}\n${recordIdMarker ? `${recordIdMarker}\n\n` : ''}${body}`;
+  const aiMetadataErrorMarker = metadata.aiMetadataError
+    ? buildAiMetadataErrorComment(metadata.aiMetadataError)
+    : '';
+  const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join('\n');
+  return `${frontmatter}\n${diagnosticMarkers ? `${diagnosticMarkers}\n\n` : ''}${body}`;
 }
 
 function buildSyncNotice(count) {
@@ -13341,6 +13376,9 @@ function buildSyncProgressMessage({
 function getRecordConversionWarning(record) {
   if (!record) return '';
   const metadata = record.metadata || {};
+  const aiMetadataWarning = metadata.aiMetadataError
+    ? buildAiMetadataConversionWarning(metadata.aiMetadataError)
+    : '';
   const imageLocalizationFailedCount = Number(metadata.imageLocalizationFailedCount) || 0;
   const imageTempUrlMissingCount = Number(metadata.imageTempUrlMissingCount) || 0;
   const imageFailureCount = Math.max(imageLocalizationFailedCount, imageTempUrlMissingCount);
@@ -13351,20 +13389,21 @@ function getRecordConversionWarning(record) {
     }
     const localizationError = String(metadata.imageLocalizationError || '').trim();
     if (localizationError) details.push(localizationError);
-    return `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join('；')}` : ''}`;
+    const imageWarning = `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join('；')}` : ''}`;
+    return [imageWarning, aiMetadataWarning].filter(Boolean).join('；');
   }
   const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
   const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
   if (status === 'failed') {
-    return errorMsg || '网页转写失败（未知原因）';
+    return [errorMsg || '网页转写失败（未知原因）', aiMetadataWarning].filter(Boolean).join('；');
   }
   if (status === 'wechat_captcha') {
-    return '微信安全验证拦截';
+    return ['微信安全验证拦截', aiMetadataWarning].filter(Boolean).join('；');
   }
   if (status === 'link_saved') {
-    return errorMsg || '网页抓取未成功';
+    return [errorMsg || '网页抓取未成功', aiMetadataWarning].filter(Boolean).join('；');
   }
-  return '';
+  return aiMetadataWarning;
 }
 
 function buildConversionWarningsNotice(warnings = []) {
@@ -14199,44 +14238,47 @@ class WechatObsidianInboxPlugin extends Plugin {
     return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
   }
 
-  async enrichRecordMetadataWithAi(record, binding = null, options = {}) {
-    const requireMetadata = Boolean(options.requireMetadata);
-    if (!requireMetadata && !shouldGenerateAiMetadata(this.settings, record)) return record;
+  async enrichRecordMetadataWithAi(record, binding = null) {
+    if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
-    const fail = (message) => {
-      const finalMessage = message || 'AI 简介与关键词生成失败';
-      if (requireMetadata) {
-        throw new Error(`AI 简介与关键词生成失败：${finalMessage}`);
-      }
+    delete metadata.aiMetadataError;
+    const fail = (error) => {
       return {
         ...record,
         metadata: {
           ...metadata,
-          aiMetadataError: finalMessage,
+          aiMetadataError: classifyAiMetadataError(error),
         },
       };
     };
-    const hasAccess = await this.hasProFeatureAccess();
+    let hasAccess = false;
+    try {
+      hasAccess = await this.hasProFeatureAccess();
+    } catch (error) {
+      return fail(error);
+    }
     if (!hasAccess) {
-      return fail('Pro 权限未开通，或插件还没有识别到当前绑定码的 Pro 状态。请先绑定小程序并开通 Pro，然后在插件里刷新权限。');
+      return record;
     }
     let generated;
     try {
       generated = await this.generateMetadataWithDeepSeek(record, binding);
     } catch (error) {
-      return fail(error && error.message ? error.message : String(error || ''));
+      return fail(error);
     }
-    if (generated.description) {
-      metadata.description = generated.description;
+    const description = String(generated && generated.description || '').trim();
+    const keywords = getRecordKeywords(generated || {}).map((item) => String(item || '').trim()).filter(Boolean);
+    if (!description && !keywords.length) {
+      return fail('empty-response');
     }
-    if (generated.keywords.length) {
-      metadata.keywords = generated.keywords;
+    if (description) {
+      metadata.description = description;
     }
-    if (generated.description || generated.keywords.length) {
+    if (keywords.length) {
+      metadata.keywords = keywords;
+    }
+    if (description || keywords.length) {
       metadata.aiMetadataSource = this.settings.deepseekApiKey ? 'deepseek' : 'cloud';
-    }
-    if (requireMetadata && (!metadata.description || !getRecordKeywords(metadata).length)) {
-      return fail('AI 接口没有返回可用的简介和关键词。');
     }
     return {
       ...record,
@@ -18046,9 +18088,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
-    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding, {
-      requireMetadata: shouldRequireAiMetadataForTranscript(recordForMarkdown),
-    });
+    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title,

@@ -179,12 +179,13 @@ Reason:
 - AI descriptions and keywords are generated only by the CloudBase Hunyuan route in `syncApi`.
 - The Obsidian plugin never reads, stores, or sends a DeepSeek API key for metadata generation. Legacy local DeepSeek settings are removed when plugin settings are loaded.
 - Metadata input must include, in priority order where available: transcript text for audio/video, and otherwise record text, converted document Markdown, webpage Markdown, snapshots, and extracted summaries.
-- If metadata generation fails after a record can otherwise be saved, the note contains a short redacted HTML comment beginning `wechat-inbox-ai-metadata-error`; required transcript metadata still fails the sync with the same short reason.
+- Core text and completed transcripts are still written and marked synced when optional AI enrichment fails. AI descriptions and keywords are best-effort: if generation is rate-limited, times out, returns no usable result, or the service is unavailable, the note keeps the completed content, contains a short redacted HTML comment beginning `wechat-inbox-ai-metadata-error`, and shows a non-blocking warning instead of retrying the entire record.
 
 Reason:
 
 - The mini-program Hunyuan allocation is the intended shared quota. A local or external DeepSeek key creates inconsistent user behavior, key-exposure risk, and an avoidable paid fallback.
 - Text and converted documents previously had no AI input source, which silently skipped metadata generation even for active Pro users.
+- Re-running a completed local transcription because optional AI metadata failed wastes user time and compute, while a stable redacted marker keeps the partial outcome visible and diagnosable.
 
 ## 2026-07-13: Refund eligibility follows the original 7-day trial, not the payment date
 
