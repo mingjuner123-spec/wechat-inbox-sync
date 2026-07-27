@@ -6370,7 +6370,7 @@ function collectXiaohongshuNoteContentValues(source) {
     const insideCommentTree = normalizedPath.some((entry) => /comment|reply/.test(entry));
     const objectKeys = Object.keys(value).map((key) => String(key || '').toLowerCase());
     const looksLikeNote = normalizedPath.some((entry) => /note/.test(entry))
-      || objectKeys.some((key) => /^(?:note_?id|image_?list|display_?title|note_?type)$/.test(key));
+      || objectKeys.some((key) => /^(?:image_?list|display_?title|note_?type)$/.test(key));
     Object.entries(value).forEach(([key, child]) => {
       const normalizedKey = String(key || '').toLowerCase();
       if (normalizedKey === 'content' && typeof child === 'string' && looksLikeNote && !insideCommentTree) {

@@ -2843,6 +2843,12 @@ assert.ok(xiaohongshuPathAwareContentNote.description.includes('真实笔记正�
 assert.strictEqual(xiaohongshuPathAwareContentNote.description.includes('评论内容绝不能冒充正文'), false);
 assert.strictEqual(xiaohongshuPathAwareContentNote.markdown.includes('评论内容绝不能冒充正文'), false);
 
+const xiaohongshuStandaloneCommentObject = helpers.extractXiaohongshuMarkdownFromHtml([
+  '<script>window.__COMMENTS__=[{"note_id":"note-1","content":"独立评论对象即使带 note_id 也不能冒充正文。 #评论标签"}]</script>',
+].join(''), 'https://www.xiaohongshu.com/explore/standalone-comment', '', { includeComments: false });
+assert.strictEqual(xiaohongshuStandaloneCommentObject.description.includes('独立评论对象'), false);
+assert.strictEqual(xiaohongshuStandaloneCommentObject.markdown.includes('独立评论对象'), false);
+
 const genericXiaohongshuLandingHtml = [
   '<html><head>',
   '<meta property="og:title" content="小红书 - 你的生活兴趣社区">',
