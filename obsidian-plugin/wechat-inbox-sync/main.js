@@ -15865,6 +15865,21 @@ class WechatObsidianInboxPlugin extends Plugin {
         const hasProAdvancedAccess = isXiaohongshuUrl(url)
           ? await this.hasProFeatureAccess()
           : false;
+        let xiaohongshuLoggedIn = false;
+        if (isXiaohongshuUrl(url)
+          && hasProAdvancedAccess
+          && this.settings.xiaohongshuCommentsEnabled !== false) {
+          try {
+            xiaohongshuLoggedIn = await this.checkXiaohongshuLogin();
+          } catch (error) {
+            xiaohongshuLoggedIn = false;
+          }
+        }
+        const xiaohongshuCapabilities = getXiaohongshuCapabilityMatrix({
+          hasProAccess: hasProAdvancedAccess,
+          commentsEnabled: this.settings.xiaohongshuCommentsEnabled !== false,
+          isLoggedIn: xiaohongshuLoggedIn,
+        });
         let mediaUrls = extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
@@ -15929,8 +15944,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           || isDouyinUrl(resolvedUrl)
           || /[?&]type=video\b/i.test(resolvedUrl)
           || /\/video\//i.test(resolvedUrl);
-        const shouldIncludeXiaohongshuComments = hasProAdvancedAccess
-          && this.settings.xiaohongshuCommentsEnabled !== false;
+        const shouldIncludeXiaohongshuComments = xiaohongshuCapabilities.comments;
         let extractedXiaohongshu = null;
         let pendingXiaohongshuFailureDiagnostic = null;
         if (isXiaohongshuUrl(url)) {
@@ -16090,7 +16104,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
           }
           const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);
-          if (hasProAdvancedAccess && !isXiaohongshuVideoNote) {
+          if (xiaohongshuCapabilities.imageOcr && !isXiaohongshuVideoNote) {
             extractedXiaohongshu = await this.enrichXiaohongshuExtractionWithOcr(extractedXiaohongshu, {
               pageUrl: resolvedUrl,
               binding,

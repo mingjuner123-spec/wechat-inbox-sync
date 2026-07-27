@@ -1252,7 +1252,7 @@ assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默�
 assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), false);
 assert.ok(pluginMainSource.includes('小红书图文 OCR：已默认开启'));
 assert.ok(pluginMainSource.includes('const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);'));
-assert.ok(pluginMainSource.includes('if (hasProAdvancedAccess && !isXiaohongshuVideoNote) {'));
+assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isXiaohongshuVideoNote) {'));
 assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
 assert.strictEqual(pluginMainSource.includes('图片文字识别 OCR 模块'), false);
 assert.ok(pluginMainSource.includes('getLocalOcrInstallStatus'));
@@ -5461,6 +5461,7 @@ async function runAsyncHydrationTests() {
     xiaohongshuCommentsEnabled: true,
   });
   xhsVideoWithCommentsPlugin.hasProFeatureAccess = async () => true;
+  xhsVideoWithCommentsPlugin.checkXiaohongshuLogin = async () => true;
   xhsVideoWithCommentsPlugin.runConfiguredTranscription = async () => ({
     transcription: '视频口播正文',
     source: 'local',
@@ -5772,6 +5773,7 @@ async function runAsyncHydrationTests() {
     xiaohongshuCommentsEnabled: true,
   });
   renderedFallbackPlugin.hasProFeatureAccess = async () => true;
+  renderedFallbackPlugin.checkXiaohongshuLogin = async () => true;
   renderedFallbackPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
   renderedFallbackPlugin.renderSocialMediaUrls = async () => [];
   let renderedFallbackCalls = 0;
@@ -5857,6 +5859,90 @@ async function runAsyncHydrationTests() {
   } finally {
     requestUrlMock = previousAnonymousFastRequestUrlMock;
   }
+
+  const xiaohongshuCapabilityHtml = [
+    '<html><head>',
+    '<meta property="og:title" content="公开图文不依赖评论权限">',
+    '<meta name="description" content="所有用户都应该取得这段公开正文以及完整图片。 #公开内容">',
+    '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/public-cover.jpg">',
+    '</head><body>',
+    '<div class="comment-item"><span class="user-name">评论用户</span><span class="comment-content">仅登录 Pro 可见评论</span></div>',
+    '</body></html>',
+  ].join('');
+
+  const runXiaohongshuCommentCapabilityCase = async ({
+    hasProAccess,
+    loginResult,
+    loginError = null,
+  }) => {
+    const capabilityPlugin = new PluginClass();
+    capabilityPlugin.settings = helpers.mergeSettings({
+      aiProvider: 'off',
+      settingsVersion: 2,
+      xiaohongshuCommentsEnabled: true,
+    });
+    capabilityPlugin.hasProFeatureAccess = async () => hasProAccess;
+    capabilityPlugin.checkXiaohongshuLogin = async () => {
+      if (loginError) throw loginError;
+      return loginResult;
+    };
+    capabilityPlugin.enrichXiaohongshuExtractionWithOcr = async (extracted) => extracted;
+    capabilityPlugin.renderSocialMediaUrls = async () => [];
+    capabilityPlugin.renderXiaohongshuPage = async () => ({
+      url: 'https://www.xiaohongshu.com/explore/comment-capability',
+      html: xiaohongshuCapabilityHtml,
+      comments: [{
+        id: 'login-comment',
+        author: '评论用户',
+        content: '仅登录 Pro 可见评论',
+      }],
+    });
+    const previousCapabilityRequestUrlMock = requestUrlMock;
+    requestUrlMock = async ({ url }) => {
+      if (url === 'https://www.xiaohongshu.com/explore/comment-capability') {
+        return { status: 200, text: xiaohongshuCapabilityHtml };
+      }
+      throw new Error(`unexpected comment capability request ${url}`);
+    };
+    try {
+      return await capabilityPlugin.hydrateWebpageMarkdown({
+        type: 'webpage',
+        content: 'https://www.xiaohongshu.com/explore/comment-capability',
+        metadata: { url: 'https://www.xiaohongshu.com/explore/comment-capability' },
+      }, '', '', '小红书评论权限测试');
+    } finally {
+      requestUrlMock = previousCapabilityRequestUrlMock;
+    }
+  };
+
+  const freeCommentCapabilityRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: false,
+    loginResult: false,
+  });
+  assert.ok(freeCommentCapabilityRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.strictEqual(freeCommentCapabilityRecord.metadata.markdown.includes('仅登录 Pro 可见评论'), false);
+
+  const proLoggedOutCommentCapabilityRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: true,
+    loginResult: false,
+  });
+  assert.ok(proLoggedOutCommentCapabilityRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.strictEqual(proLoggedOutCommentCapabilityRecord.metadata.markdown.includes('仅登录 Pro 可见评论'), false);
+
+  const proLoggedInCommentCapabilityRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: true,
+    loginResult: true,
+  });
+  assert.ok(proLoggedInCommentCapabilityRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.ok(proLoggedInCommentCapabilityRecord.metadata.markdown.includes('仅登录 Pro 可见评论'));
+
+  const proLoginProbeFailureRecord = await runXiaohongshuCommentCapabilityCase({
+    hasProAccess: true,
+    loginResult: false,
+    loginError: new Error('simulated login probe failure'),
+  });
+  assert.ok(proLoginProbeFailureRecord.metadata.markdown.includes('所有用户都应该取得这段公开正文'));
+  assert.strictEqual(proLoginProbeFailureRecord.metadata.markdown.includes('仅登录 Pro 可见评论'), false);
 
   const unavailableGraphicPlugin = new PluginClass();
   unavailableGraphicPlugin.settings = helpers.mergeSettings({ aiProvider: 'off' });
