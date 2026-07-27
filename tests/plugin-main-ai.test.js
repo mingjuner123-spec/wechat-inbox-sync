@@ -11664,10 +11664,130 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
   );
 }
 
+async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
+  const noteWrites = [];
+  const attachmentWrites = [];
+  const requestCalls = [];
+  let pendingReadCount = 0;
+  let transcriptionCallCount = 0;
+  let aiCallCount = 0;
+  const recordId = 'ai-429-after-local-transcription';
+  const transcript = '这段音频刚刚在本轮同步中完成本地转写，AI 限流不能让它下次再转一次。';
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    inboxDir: '临时收集',
+    noteSaveMode: 'root',
+    aiProvider: 'local',
+  });
+  plugin.app = {
+    vault: {
+      adapter: {
+        async exists() {
+          return true;
+        },
+        async writeBinary(filePath, content) {
+          attachmentWrites.push({ filePath, content: Buffer.from(content).toString('utf8') });
+        },
+        async write(filePath, markdown) {
+          noteWrites.push({ filePath, markdown });
+        },
+      },
+      async createFolder() {},
+    },
+  };
+  plugin.showSyncProgress = () => {};
+  plugin.nextRecordTitle = async () => '本轮完成本地转写';
+  plugin.findExistingRecordNotePath = async () => '';
+  plugin.requestFileDownloadUrl = async () => 'https://download.example.test/audio.mp3';
+  plugin.downloadArrayBuffer = async () => Buffer.from('controlled-audio-bytes');
+  plugin.runConfiguredTranscription = async () => {
+    transcriptionCallCount += 1;
+    return {
+      transcription: transcript,
+      source: 'local',
+    };
+  };
+  plugin.hasProFeatureAccess = async () => true;
+  plugin.generateMetadataWithDeepSeek = async () => {
+    aiCallCount += 1;
+    const error = new Error('Request failed with status code 429 https://private.example.test?token=TOP_SECRET');
+    error.code = 'ERR_BAD_REQUEST';
+    error.response = { status: 429 };
+    throw error;
+  };
+  plugin.requestJson = async (requestPath, method) => {
+    requestCalls.push([requestPath, method]);
+    if (requestPath === '/records?status=pending') {
+      pendingReadCount += 1;
+      return {
+        success: true,
+        data: pendingReadCount === 1
+          ? [{
+            _id: recordId,
+            type: 'file',
+            content: 'meeting.mp3',
+            createdAt: '2026-07-27T09:30:00.000Z',
+            metadata: {
+              fileID: 'cloud://files/meeting.mp3',
+              fileName: 'meeting.mp3',
+              fileExt: 'mp3',
+              transcriptionMode: 'local',
+            },
+          }]
+          : [],
+      };
+    }
+    if (requestPath === `/records/${encodeURIComponent(recordId)}/synced`) {
+      return { success: true, data: {} };
+    }
+    throw new Error(`unexpected request: ${method} ${requestPath}`);
+  };
+
+  const firstResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+  assert.strictEqual(firstResult.written.length, 1);
+  assert.strictEqual(firstResult.failed.length, 0);
+  assert.strictEqual(transcriptionCallCount, 1);
+  assert.strictEqual(aiCallCount, 1);
+  assert.strictEqual(noteWrites.length, 1);
+  assert.strictEqual(attachmentWrites.length, 1);
+  assert.strictEqual(
+    requestCalls.filter(([requestPath]) => requestPath.includes('/synced')).length,
+    1,
+  );
+  assert.ok(noteWrites[0].markdown.includes(transcript));
+  assert.strictEqual(firstResult.conversionWarnings.length, 1);
+  assert.match(firstResult.conversionWarnings[0], /正文已同步，但 AI 简介\/关键词未生成/);
+  assert.strictEqual(
+    /https?:|TOP_SECRET|token/i.test(firstResult.conversionWarnings[0]),
+    false,
+  );
+  const finalNotice = helpers.buildSyncResultNotice(
+    firstResult.written,
+    firstResult.skipped,
+    firstResult.conversionWarnings,
+    firstResult.failed,
+  );
+  assert.match(finalNotice, /正文已同步，但 AI 简介\/关键词未生成/);
+  assert.strictEqual(/https?:|TOP_SECRET|token/i.test(finalNotice), false);
+
+  const secondResult = await plugin.syncBinding({ token: 'TEST-BINDING', label: '测试绑定' }, false);
+  assert.strictEqual(secondResult.written.length, 0);
+  assert.strictEqual(secondResult.failed.length, 0);
+  assert.strictEqual(transcriptionCallCount, 1);
+  assert.strictEqual(aiCallCount, 1);
+  assert.strictEqual(noteWrites.length, 1);
+  assert.strictEqual(attachmentWrites.length, 1);
+  assert.strictEqual(
+    requestCalls.filter(([requestPath]) => requestPath.includes('/synced')).length,
+    1,
+  );
+}
+
 async function main() {
   await runClipboardTextWebpagePromotionTests();
   await runCanonicalVaultFolderTests();
   await runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest();
+  await runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest();
   await runBoundedBrowserTaskTests();
   await runAsyncHydrationTests();
   await runLocalTranscriptionQualityFallbackTests();
