@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.8"
+INSTALLER_SCRIPT_VERSION="1.3.9"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -319,8 +319,9 @@ WHISPER_CPP_BIN="$whisper_target"
 GGML_METAL_RESOURCES_DIR="$metal_resources_dir"
 if [ -n "\$GGML_METAL_RESOURCES_DIR" ] && [ -f "\$GGML_METAL_RESOURCES_DIR/ggml-metal.metal" ]; then
   export GGML_METAL_PATH_RESOURCES="\$GGML_METAL_RESOURCES_DIR"
+  exec "\$WHISPER_CPP_BIN" "\$@"
 fi
-exec "\$WHISPER_CPP_BIN" "\$@"
+exec "\$WHISPER_CPP_BIN" --no-gpu "\$@"
 SCRIPT
   chmod +x "$INSTALL_ROOT/bin/whisper-cli"
 }
@@ -692,8 +693,8 @@ mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/models" "$CACHE_ROOT"
 
 # Primary path: uv → Python → pip packages.
 # Returns 2 if uv pip install failed but Homebrew is available as fallback.
-setup_python_and_packages
-setup_rc=$?
+setup_rc=0
+setup_python_and_packages || setup_rc=$?
 
 if [ $setup_rc -eq 2 ]; then
   # uv pip install failed, but Homebrew is available.
@@ -736,16 +737,6 @@ FFMPEG_BIN="$(find_command ffmpeg || true)"
 if [ -z "$FFMPEG_BIN" ]; then
   echo "ffmpeg was not found after installation." >&2
   exit 1
-fi
-
-WHISPER_METAL_RESOURCES="$(find_metal_resources_dir "$WHISPER_BIN" || true)"
-if [ -z "$WHISPER_METAL_RESOURCES" ] && command -v brew >/dev/null 2>&1; then
-  echo "Metal resources not found for current whisper; trying Homebrew whisper-cpp fallback."
-  brew_install_formula whisper-cpp
-  BREW_WHISPER_BIN="$(find_homebrew_whisper_command || true)"
-  if [ -n "$BREW_WHISPER_BIN" ]; then
-    WHISPER_BIN="$BREW_WHISPER_BIN"
-  fi
 fi
 
 # Refresh the whisper wrapper so existing installs pick up Metal resource discovery.
