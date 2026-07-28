@@ -749,7 +749,7 @@ assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/lo
 assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.8"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.9"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=180'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));
@@ -786,6 +786,13 @@ assert.ok(
 );
 assert.ok(macInstaller.includes('brew_install_formula whisper-cpp'));
 assert.strictEqual(macInstaller.includes('brew reinstall whisper-cpp'), false);
+assert.ok(macInstaller.includes('exec "\\$WHISPER_CPP_BIN" --no-gpu "\\$@"'));
+assert.strictEqual(
+  macInstaller.includes(
+    'Metal resources not found for current whisper; trying Homebrew whisper-cpp fallback.',
+  ),
+  false,
+);
 assert.ok(macInstaller.includes('hf-mirror.com/ggerganov/whisper.cpp'));
 assert.ok(
   macInstaller.indexOf('TENCENT_MODEL_URL=') <

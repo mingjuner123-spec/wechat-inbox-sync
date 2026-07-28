@@ -122,7 +122,7 @@ const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
   .replaceAll('Complete-TranscribeScriptUpdate', 'Complete-LegacyTranscribeScriptUpdate');
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.8"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.9"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
