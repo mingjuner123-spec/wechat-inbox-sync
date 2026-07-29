@@ -17,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.71';
+const PLUGIN_RUNTIME_VERSION = '1.3.72';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -5814,11 +5814,32 @@ function isLikelyImageUrl(value) {
 
 function getImageVariantKey(value) {
   const url = normalizeExtractedUrl(value);
+  const getNormalizedAssetName = (pathname = '') => {
+    const lastSegment = String(pathname || '').split('/').filter(Boolean).pop() || '';
+    return lastSegment
+      .replace(/!.+$/i, '')
+      .replace(/\.(?:jpe?g|png|webp|bmp)$/i, '')
+      .toLowerCase();
+  };
+  let xiaohongshuAssetName = '';
+  try {
+    const parsed = new URL(url);
+    if (/(?:^|\.)xhscdn\.com$/i.test(parsed.hostname)
+      || /(?:^|\.)xiaohongshu\.com$/i.test(parsed.hostname)) {
+      xiaohongshuAssetName = getNormalizedAssetName(parsed.pathname);
+    }
+  } catch (error) {
+    xiaohongshuAssetName = '';
+  }
+  if (xiaohongshuAssetName.length >= 20 && /^[a-z0-9_-]+$/i.test(xiaohongshuAssetName)) {
+    return `xiaohongshu-asset:${xiaohongshuAssetName}`;
+  }
+
   const noteImageMatch = url.match(/\/notes_pre_post\/([^"'\\\s<>?#]+)/i);
-  if (noteImageMatch) return `notes_pre_post:${noteImageMatch[1].replace(/!.+$/i, '')}`;
+  if (noteImageMatch) return `notes_pre_post:${getNormalizedAssetName(noteImageMatch[1])}`;
 
   const spectrumImageMatch = url.match(/\/spectrum\/([^"'\\\s<>?#]+)/i);
-  if (spectrumImageMatch) return `spectrum:${spectrumImageMatch[1].replace(/!.+$/i, '')}`;
+  if (spectrumImageMatch) return `spectrum:${getNormalizedAssetName(spectrumImageMatch[1])}`;
 
   return url
     .replace(/^http:\/\//i, 'https://')
@@ -15213,8 +15234,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async buildXiaohongshuOcrImagePayload(imageUrls = []) {
     const items = [];
-    const selected = (Array.isArray(imageUrls) ? imageUrls : [])
-      .filter(Boolean)
+    const selected = dedupeImageVariants(
+      (Array.isArray(imageUrls) ? imageUrls : []).filter(Boolean),
+    )
       .slice(0, XIAOHONGSHU_OCR_MAX_IMAGES);
     for (let index = 0; index < selected.length; index += 1) {
       const imageUrl = selected[index];
@@ -15242,9 +15264,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     title = '',
     binding = null,
   } = {}) {
-    const requestedImageUrls = (Array.isArray(imageUrls) ? imageUrls : [])
-      .map((imageUrl) => String(imageUrl || '').trim())
-      .filter(Boolean);
+    const requestedImageUrls = dedupeImageVariants(
+      (Array.isArray(imageUrls) ? imageUrls : [])
+        .map((imageUrl) => String(imageUrl || '').trim())
+        .filter(Boolean),
+    );
     if (!requestedImageUrls.length) return [];
     await this.ensureProFeatureAccess('小红书图片 OCR');
     const images = await this.buildXiaohongshuOcrImagePayload(requestedImageUrls);
@@ -17514,14 +17538,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       || typeof this.app.vault.adapter.writeBinary !== 'function') {
       return markdown;
     }
-    const imageMatches = Array.from(String(markdown).matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
+    const isXiaohongshuSource = isXiaohongshuUrl(options.sourceUrl);
+    let nextMarkdown = isXiaohongshuSource
+      ? sanitizeXiaohongshuMarkdownImages(String(markdown))
+      : String(markdown);
+    const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return markdown;
 
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
-    let nextMarkdown = String(markdown || '');
     let index = 1;
     const savedByUrl = new Map();
+    const savedByVariantKey = new Map();
     const safeTitle = sanitizeAttachmentName(title, '网页图片');
 
     await this.ensureFolder(imageRootDir);
@@ -17530,8 +17558,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     for (const match of imageMatches) {
       const imageUrl = String(match[2] || '').trim();
       if (!imageUrl || savedByUrl.has(imageUrl)) continue;
+      const variantKey = isXiaohongshuSource ? getImageVariantKey(imageUrl) : imageUrl;
+      const existingImagePath = savedByVariantKey.get(variantKey);
+      if (existingImagePath) {
+        savedByUrl.set(imageUrl, existingImagePath);
+        continue;
+      }
       try {
-        const imageHeaders = isXiaohongshuUrl(options.sourceUrl)
+        const imageHeaders = isXiaohongshuSource
           ? await getXiaohongshuRequestHeaders(options.sourceUrl)
           : {};
         // eslint-disable-next-line no-await-in-loop
@@ -17543,6 +17577,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         // eslint-disable-next-line no-await-in-loop
         await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), buffer);
         savedByUrl.set(imageUrl, imagePath);
+        savedByVariantKey.set(variantKey, imagePath);
         index += 1;
       } catch (error) {
         // Remote image localization is best-effort. Keep the original URL if download fails.
