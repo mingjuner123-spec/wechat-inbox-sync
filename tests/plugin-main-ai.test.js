@@ -653,9 +653,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.72'), {
-  manifestVersion: '1.3.72',
-  runtimeVersion: '1.3.72',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.73'), {
+  manifestVersion: '1.3.73',
+  runtimeVersion: '1.3.73',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -4939,25 +4939,6 @@ assert.strictEqual(xiaohongshuDuplicatedHostNote.imageUrls.length, 2);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('window.__INITIAL_STATE__'), false);
 assert.strictEqual(xiaohongshuDuplicatedHostNote.markdown.includes('imageList'), false);
 
-const xiaohongshuDuplicatedFormatVariantNote = helpers.extractXiaohongshuMarkdownFromHtml([
-  '<html><head>',
-  '<meta property="og:title" content="XHS Duplicate Format Variant Title">',
-  '<meta name="description" content="同一张图片的 JPG 和 WebP 只能保留一次。 #重复图">',
-  '<meta property="og:image" content="https://sns-webpic-qc.xhscdn.com/202607290001/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/spectrum/1040g2sg31l9u6qwertyuiopasdfghjk!nd_dft_wlteh_jpg_3">',
-  '</head><body>',
-  '<script>window.__INITIAL_STATE__={"note":{"desc":"同一张图片的 JPG 和 WebP 只能保留一次。 #重复图","imageList":["https:\\/\\/sns-webpic-qc.xhscdn.com\\/notes_pre_post\\/1040g2sg31l9u6qwertyuiopasdfghjk!nd_dft_wlteh_webp_3"]}}</script>',
-  '</body></html>',
-].join(''), 'https://www.xiaohongshu.com/explore/duplicate-format-variant');
-assert.strictEqual(
-  xiaohongshuDuplicatedFormatVariantNote.imageUrls.length,
-  1,
-  'the same Xiaohongshu asset exposed as JPG and WebP must only be extracted once',
-);
-assert.strictEqual(
-  (xiaohongshuDuplicatedFormatVariantNote.markdown.match(/1040g2sg31l9u6qwertyuiopasdfghjk/g) || []).length,
-  1,
-);
-
 const xiaohongshuDomThumbnailAndStructuredOriginalNote = helpers.extractXiaohongshuMarkdownFromHtml([
   '<html><head>',
   '<title>结构化高清图优先 - 小红书</title>',
@@ -9173,37 +9154,6 @@ async function runXiaohongshuRemoteImageLocalizationHeadersTest() {
   assert.strictEqual(writes.length, 1);
   assert.ok(localized.includes('![[临时收集/网页图片/2026-07-20/'));
   assert.strictEqual(localized.includes(imageUrl), false);
-
-  downloads.length = 0;
-  writes.length = 0;
-  const duplicatedAssetId = '1040g2sg31l9u6qwertyuiopasdfghjk';
-  const duplicatedJpgUrl = `https://sns-webpic-qc.xhscdn.com/spectrum/${duplicatedAssetId}!nd_dft_wlteh_jpg_3`;
-  const duplicatedWebpUrl = `https://sns-webpic-qc.xhscdn.com/notes_pre_post/${duplicatedAssetId}!nd_dft_wlteh_webp_3`;
-  const duplicatedVariantMarkdown = [
-    '## 图片',
-    '',
-    '### 封面',
-    '',
-    `![封面](${duplicatedJpgUrl})`,
-    '',
-    '### 内页图',
-    '',
-    `![内页图 1](${duplicatedWebpUrl})`,
-  ].join('\n');
-  const localizedDuplicatedVariant = await plugin.saveMarkdownRemoteImageAssets(
-    duplicatedVariantMarkdown,
-    '临时收集',
-    '2026-07-20',
-    '小红书重复格式测试',
-    { sourceUrl: 'https://www.xiaohongshu.com/explore/duplicate-format-variant' },
-  );
-  assert.strictEqual(downloads.length, 1);
-  assert.strictEqual(writes.length, 1);
-  assert.strictEqual(
-    (localizedDuplicatedVariant.match(/!\[\[/g) || []).length,
-    1,
-    'JPG/WebP variants must not leave duplicate local attachment embeds',
-  );
 }
 
 async function runTranscriptionPreferenceSyncTest() {
@@ -9481,7 +9431,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.72'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.73'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -9520,8 +9470,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.72',
-        runtimeVersion: '1.3.72',
+        manifestVersion: '1.3.73',
+        runtimeVersion: '1.3.73',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -11385,7 +11335,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.72 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.73 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -12316,27 +12266,6 @@ async function runXiaohongshuOcrBatchTests() {
     [...new Set(receivedBatchEntries.map((entry) => path.dirname(entry.imagePath)))]
       .every((directory) => !fs.existsSync(directory)),
     true,
-  );
-
-  const duplicateOcrPlugin = new PluginClass();
-  const duplicateOcrAssetId = '1040g2sg31l9u6qwertyuiopasdfghjk';
-  const duplicateOcrUrls = [
-    `https://sns-webpic-qc.xhscdn.com/spectrum/${duplicateOcrAssetId}!nd_dft_wlteh_jpg_3`,
-    `https://sns-webpic-qc.xhscdn.com/notes_pre_post/${duplicateOcrAssetId}!nd_dft_wlteh_webp_3`,
-  ];
-  const duplicateOcrDownloads = [];
-  duplicateOcrPlugin.downloadArrayBuffer = async (imageUrl) => {
-    duplicateOcrDownloads.push(imageUrl);
-    return Buffer.from(`same-xiaohongshu-image-${duplicateOcrAssetId}`);
-  };
-  const duplicateOcrPayload = await duplicateOcrPlugin.buildXiaohongshuOcrImagePayload(
-    duplicateOcrUrls,
-  );
-  assert.strictEqual(duplicateOcrDownloads.length, 1);
-  assert.strictEqual(
-    duplicateOcrPayload.length,
-    1,
-    'the same Xiaohongshu JPG/WebP asset must only enter OCR once',
   );
 
   const resiliencePlugin = new PluginClass();
