@@ -9510,6 +9510,87 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   ]]);
 }
 
+async function runLocallyQuarantinedXiaohongshuRecordDoesNotRetryTest() {
+  const calls = [];
+  const writeCalls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'ABC-123',
+    clientId: 'test-client',
+    locallyQuarantinedRecordIds: [
+      'stale-xhs-record',
+      ' stale-xhs-record ',
+      '',
+    ],
+  });
+  plugin.showSyncProgress = () => {};
+  plugin.findExistingRecordNotePath = async () => '';
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'stale-xhs-record',
+          type: 'webpage',
+          content: 'http://xhslink.cn/o/expired',
+          createdAt: '2026-07-16T08:00:00.000Z',
+          metadata: { url: 'http://xhslink.cn/o/expired' },
+        }, {
+          _id: 'new-record-after-stale-xhs',
+          type: 'text',
+          content: '新记录仍应正常同步',
+          createdAt: '2026-07-29T08:01:00.000Z',
+          metadata: {},
+        }],
+      };
+    }
+    return { success: true, data: {} };
+  };
+  plugin.writeRecord = async (record) => {
+    writeCalls.push(record._id);
+    return {
+      recordId: record._id,
+      title: '新记录仍应正常同步',
+      filePath: '临时收集/新记录仍应正常同步.md',
+    };
+  };
+
+  const result = await plugin.syncBinding({
+    token: 'ABC-123',
+    label: '测试微信',
+  }, false);
+
+  assert.deepStrictEqual(plugin.settings.locallyQuarantinedRecordIds, ['stale-xhs-record']);
+  assert.deepStrictEqual(result.written, [{
+    recordId: 'new-record-after-stale-xhs',
+    title: '新记录仍应正常同步',
+    filePath: '临时收集/新记录仍应正常同步.md',
+  }]);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(result.skipped, [{
+    recordId: 'stale-xhs-record',
+    reason: 'locally-quarantined-unrecoverable',
+  }]);
+  assert.deepStrictEqual(writeCalls, ['new-record-after-stale-xhs']);
+  assert.deepStrictEqual(calls, [[
+    '/records?status=pending',
+    'GET',
+    {},
+    'ABC-123',
+  ], [
+    '/records/new-record-after-stale-xhs/synced',
+    'POST',
+    {},
+    'ABC-123',
+  ]]);
+  assert.strictEqual(
+    helpers.buildSkippedSyncNotice(result.skipped),
+    '，1 条历史失效内容已在本机忽略',
+  );
+}
+
 async function runXiaohongshuShareOnlyPageRemainsPendingTest() {
   const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-xhs-failure-'));
   const requestCalls = [];
@@ -12930,6 +13011,7 @@ async function main() {
   await runStoppedDeletedRecordDoesNotRemainFailedInCurrentSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runXiaohongshuUnavailableRecordRemainsPendingTest();
+  await runLocallyQuarantinedXiaohongshuRecordDoesNotRetryTest();
   await runXiaohongshuShareOnlyPageRemainsPendingTest();
   await runExistingLocalRecordDedupSyncTest();
   await runExistingLocalRecordUrlDedupSyncTest();

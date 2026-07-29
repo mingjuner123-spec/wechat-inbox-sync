@@ -122,6 +122,7 @@ const DEFAULT_SETTINGS = {
   tencentEngineModelType: '16k_zh',
   tencentPollAttempts: 60,
   tencentPollIntervalMs: 5000,
+  locallyQuarantinedRecordIds: [],
 };
 
 const XIAOHONGSHU_OCR_MAX_IMAGES = 18;
@@ -1801,6 +1802,14 @@ function normalizeApiBase(apiBase) {
     : normalized;
 }
 
+function normalizeLocallyQuarantinedRecordIds(value) {
+  return [...new Set(
+    (Array.isArray(value) ? value : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean),
+  )].slice(0, 200);
+}
+
 function mergeSettings(savedSettings, platform = os.platform()) {
   const sourceSettings = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
   const savedSettingsVersion = Number(sourceSettings.settingsVersion) || 0;
@@ -1918,6 +1927,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   const pollIntervalMs = Number(merged.tencentPollIntervalMs);
   merged.tencentPollAttempts = Math.max(1, Number.isFinite(pollAttempts) ? pollAttempts : DEFAULT_SETTINGS.tencentPollAttempts);
   merged.tencentPollIntervalMs = Math.max(1000, Number.isFinite(pollIntervalMs) ? pollIntervalMs : DEFAULT_SETTINGS.tencentPollIntervalMs);
+  merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
+    merged.locallyQuarantinedRecordIds,
+  );
 
   return merged;
 }
@@ -14033,10 +14045,17 @@ function buildSyncResultNotice(written = [], skipped = [], conversionWarnings = 
 
 function buildSkippedSyncNotice(skipped = []) {
   const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
-  const otherSkippedCount = skipped.filter((item) => item && item.reason !== 'already-synced-local' && item.reason !== 'cloud-transcription-processing').length;
+  const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === 'locally-quarantined-unrecoverable').length;
+  const otherSkippedCount = skipped.filter((item) => item
+    && item.reason !== 'already-synced-local'
+    && item.reason !== 'cloud-transcription-processing'
+    && item.reason !== 'locally-quarantined-unrecoverable').length;
   const parts = [];
   if (cloudProcessingCount) {
     parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
+  }
+  if (locallyQuarantinedCount) {
+    parts.push(`${locallyQuarantinedCount} 条历史失效内容已在本机忽略`);
   }
   if (otherSkippedCount) {
     parts.push(`${otherSkippedCount} 条已跳过`);
@@ -14377,6 +14396,25 @@ class WechatObsidianInboxPlugin extends Plugin {
       id: 'login-xiaohongshu-web',
       name: '登录小红书（用于提取小红书评论区）',
       callback: () => this.loginXiaohongshu(),
+    });
+
+    this.addCommand({
+      id: 'restore-locally-quarantined-records',
+      name: '恢复本机忽略的历史失败内容',
+      callback: async () => {
+        const count = normalizeLocallyQuarantinedRecordIds(
+          this.settings.locallyQuarantinedRecordIds,
+        ).length;
+        if (!count) {
+          new Notice('当前没有在本机忽略的历史失败内容。');
+          return;
+        }
+        await this.saveSettings({
+          ...this.settings,
+          locallyQuarantinedRecordIds: [],
+        });
+        new Notice(`已恢复 ${count} 条历史失败内容，下次同步会重新尝试。`);
+      },
     });
 
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
@@ -19031,21 +19069,28 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
+      const recordId = getRecordId(record);
       const progress = {
         bindingLabel,
         current: index + 1,
         total: records.length,
       };
+      if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
+        skipped.push({
+          recordId,
+          reason: 'locally-quarantined-unrecoverable',
+        });
+        continue;
+      }
       if (isCloudTranscriptionWaitingRecord(record)) {
         skipped.push({
-          recordId: getRecordId(record),
+          recordId,
           reason: 'cloud-transcription-processing',
         });
         this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
         continue;
       }
       try {
-        const recordId = getRecordId(record);
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
@@ -19874,6 +19919,7 @@ WechatObsidianInboxPlugin.__test = {
   validateSettings,
   mergeSettings,
   normalizeBindings,
+  normalizeLocallyQuarantinedRecordIds,
   normalizeApiBase,
   normalizeBindCodeInput,
 };
