@@ -20,6 +20,7 @@
 - `.github/workflows/main-guards.yml`
 - `.github/workflows/release.yml`
 - `release-candidate.json`
+- `docs/DECISIONS.md`
 - `docs/WORKLOG.md`
 - `docs/superpowers/specs/2026-07-30-plugin-release-pipeline-v2-design.md`
 - `docs/superpowers/plans/2026-07-30-plugin-release-pipeline-v2.md`
