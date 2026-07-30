@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "wechat-inbox-sync",
+  "pluginVersion": "1.3.74",
+  "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
+  "candidateId": "1.3.74-3b2e96b51110bb77",
+  "aggregateSha256": "3b2e96b51110bb77ead1d855f51148d0f8e330459e8d09fe9730e5b481235532",
+  "looseAssets": [
+    "main.js",
+    "manifest.json",
+    "styles.css",
+    "versions.json"
+  ],
+  "entries": [
+    {
+      "path": "LICENSE",
+      "bytes": 1068,
+      "sha256": "3b46bec098fcbce3c7d4976a62989d29541258a348d784c65543969477c1fea8"
+    },
+    {
+      "path": "README.md",
+      "bytes": 6289,
+      "sha256": "c181c00ec2a1c925fd4a3d7e98bc0d2f2111475d10adc1d7a7cf5d4fe5c6e8ea"
+    },
+    {
+      "path": "local-asr/README.md",
+      "bytes": 1626,
+      "sha256": "ab3734ecfdd6ccf3ed08027707c50a88780db994650bc4ce07ff4f1462248a7b"
+    },
+    {
+      "path": "local-asr/install-local-asr-macos.sh",
+      "bytes": 33595,
+      "sha256": "364c329fd4f07aea1c18d8d4f6d0abd2a49b1e77c8f461268d9bd5d041526bcc"
+    },
+    {
+      "path": "local-asr/install-local-asr.ps1",
+      "bytes": 58566,
+      "sha256": "afcd66ff0d4e0d73bb4072e89353f4e4d8b54e055ca5d6a65e2887efa30b349f"
+    },
+    {
+      "path": "local-asr/windows/whisper-bin-x64-compat.json",
+      "bytes": 304,
+      "sha256": "e52bca2bc10f0f647ae50b4ff47425fbc2a3347c5c1fc26132346ee20b767888"
+    },
+    {
+      "path": "local-ocr/README.md",
+      "bytes": 845,
+      "sha256": "fd7a49d2310246d373b4f5b914e238977c9f5cf7131ab581894b416e280bbdfd"
+    },
+    {
+      "path": "local-ocr/install-local-ocr-macos.sh",
+      "bytes": 12786,
+      "sha256": "de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074"
+    },
+    {
+      "path": "local-ocr/install-local-ocr.ps1",
+      "bytes": 30205,
+      "sha256": "68691b297ed1bcc02d036b447bed34c7b63c9ef1fef86a57426a631a0fb182b7"
+    },
+    {
+      "path": "local-ocr/ocr_image.py",
+      "bytes": 2247,
+      "sha256": "52d32bfb9384ec5be1dbfb25938d6316a46a51d7b56a43a9c40552bd1f2de291"
+    },
+    {
+      "path": "main.js",
+      "bytes": 778440,
+      "sha256": "682a34073db117498116c16fe985b514788d111adebb303a30d5010c53ec7daf"
+    },
+    {
+      "path": "manifest.json",
+      "bytes": 397,
+      "sha256": "db74ccb83c50e6f2db7611a33023a08f6fe3cd4569e8f0b7d5586cffc3b6964e"
+    },
+    {
+      "path": "styles.css",
+      "bytes": 718,
+      "sha256": "de6e0fa59dc62993248bee2b9d9702a4c07751bbe687b922aa9a16875fe26d3e"
+    },
+    {
+      "path": "versions.json",
+      "bytes": 4449,
+      "sha256": "836fab900305be781222c137d77b35816dc5ebc12c846ac0db6d91645648c487"
+    }
+  ]
+}

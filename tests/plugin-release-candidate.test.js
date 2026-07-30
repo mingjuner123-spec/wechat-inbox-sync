@@ -394,6 +394,43 @@ test('candidate provenance does not participate in deterministic identity', (t) 
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+test('prepare can require an existing promotion receipt to match the candidate', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const artifactsRoot = path.join(fixture.tempRoot, '.artifacts', 'plugin');
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', artifactsRoot,
+  ]));
+  const candidateReceipt = JSON.parse(fs.readFileSync(
+    path.join(prepared.candidateDirectory, 'candidate.json'),
+    'utf8',
+  ));
+  const promotionPath = path.join(fixture.tempRoot, 'release-candidate.json');
+  fs.writeFileSync(
+    promotionPath,
+    `${JSON.stringify(candidateReceipt.identity, null, 2)}\n`,
+    'utf8',
+  );
+
+  const verified = runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', artifactsRoot,
+    '--verify-promotion', promotionPath,
+  ]);
+  assert.equal(verified.status, 0, verified.stderr || verified.stdout);
+
+  const drifted = { ...candidateReceipt.identity, candidateId: '9.9.9-deadbeefdeadbeef' };
+  fs.writeFileSync(promotionPath, JSON.stringify(drifted), 'utf8');
+  const rejected = runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', artifactsRoot,
+    '--verify-promotion', promotionPath,
+  ]);
+  assert.notEqual(rejected.status, 0);
+  assert.match(`${rejected.stderr}\n${rejected.stdout}`, /promotion|candidate|identity/i);
+});
+
 test('candidate installer is declared for PowerShell parser and Windows behavior gates', () => {
   const installerRelativePath = 'scripts/install-plugin-release-candidate.ps1';
   const installerPath = path.join(repoRoot, ...installerRelativePath.split('/'));
@@ -414,6 +451,35 @@ test('candidate installer is declared for PowerShell parser and Windows behavior
   assert.ok(mainWorkflow.includes(installerRelativePath));
   assert.ok(releaseWorkflow.includes(installerRelativePath));
   assert.match(mainWorkflow, /windows-deployer:[\s\S]*plugin-release-candidate\.test\.js/);
+});
+
+test('main guards and release checklist enforce the committed tested candidate', () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'main-guards.yml'),
+    'utf8',
+  );
+  for (const required of [
+    'tests/plugin-release-candidate.test.js',
+    'prepare-plugin-release-candidate.js',
+    '--verify-promotion release-candidate.json',
+    'sync-plugin-release-mirror.js --check',
+  ]) {
+    assert.ok(workflow.includes(required), `main guard misses ${required}`);
+  }
+  const checklist = fs.readFileSync(
+    path.join(repoRoot, 'obsidian-plugin', 'wechat-inbox-sync', 'RELEASE_CHECKLIST.md'),
+    'utf8',
+  );
+  for (const required of [
+    'prepare-plugin-release-candidate.js',
+    'install-plugin-release-candidate.ps1',
+    'verify-plugin-release-candidate.js',
+    'sync-plugin-release-mirror.js --write',
+    'promote-plugin-release-candidate.js',
+    'release-candidate.json',
+  ]) {
+    assert.ok(checklist.includes(required), `release checklist misses ${required}`);
+  }
 });
 
 test('Windows target junction cannot alias the canonical source', {

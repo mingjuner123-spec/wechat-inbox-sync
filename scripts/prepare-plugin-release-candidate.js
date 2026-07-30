@@ -13,12 +13,17 @@ const {
 
 function parseArgs(argv) {
   const result = {};
-  const allowed = new Set(['--source', '--artifacts-root', '--json-out']);
+  const allowed = new Set([
+    '--source',
+    '--artifacts-root',
+    '--json-out',
+    '--verify-promotion',
+  ]);
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
     const value = argv[index + 1];
     if (!allowed.has(name) || !value || value.startsWith('--')) {
-      throw new Error('Usage: prepare-plugin-release-candidate.js --source <dir> --artifacts-root <dir> [--json-out <file>]');
+      throw new Error('Usage: prepare-plugin-release-candidate.js --source <dir> --artifacts-root <dir> [--verify-promotion <release-candidate.json>] [--json-out <file>]');
     }
     result[name.slice(2)] = value;
   }
@@ -167,12 +172,28 @@ function prepareCandidate({ source, artifactsRoot }) {
   };
 }
 
+function verifyPromotion(candidateDirectory, promotionPath) {
+  const candidateReceipt = readJson(
+    path.join(candidateDirectory, 'candidate.json'),
+    'candidate receipt',
+  );
+  const promotion = readJson(path.resolve(promotionPath), 'promotion receipt');
+  validateCandidateIdentity(promotion);
+  if (publicIdentity(promotion) !== publicIdentity(candidateReceipt.identity)) {
+    throw new Error('promotion receipt does not match the prepared candidate identity');
+  }
+  return true;
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const result = prepareCandidate({
     source: args.source,
     artifactsRoot: args['artifacts-root'],
   });
+  if (args['verify-promotion']) {
+    verifyPromotion(result.candidateDirectory, args['verify-promotion']);
+  }
   if (args['json-out']) {
     writeJsonAtomic(path.resolve(args['json-out']), result);
   }
@@ -192,6 +213,7 @@ module.exports = {
   parseArgs,
   prepareCandidate,
   readPluginMetadata,
+  verifyPromotion,
   verifyExistingCandidate,
   writeJsonAtomic,
 };
