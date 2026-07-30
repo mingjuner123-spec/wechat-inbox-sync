@@ -6,6 +6,16 @@ const Module = require('module');
 const { EventEmitter } = require('events');
 
 let requestUrlMock = async () => ({});
+async function withFixedNow(iso, callback) {
+  const originalNow = Date.now;
+  Date.now = () => new Date(iso).getTime();
+  try {
+    return await callback();
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
 const originalLoad = Module._load;
 Module._load = function mockObsidian(request, parent, isMain) {
   if (request === 'obsidian') {
@@ -43,6 +53,12 @@ const os = require('os');
 const pluginMainSource = fs
   .readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8')
   .replace(/\r\n/g, '\n');
+const pluginMainTestSource = fs.readFileSync(__filename, 'utf8').replace(/\r\n/g, '\n');
+assert.match(
+  pluginMainTestSource,
+  /async function runLocalTranscriptionEntitlementTests\(\) \{\s*return withFixedNow\(/,
+  'entitlement behavior tests must run under a fixed clock',
+);
 const macOcrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-ocr', 'install-local-ocr-macos.sh'),
   'utf8',
@@ -10635,6 +10651,7 @@ async function runConcurrentSyncInboxUsesSingleFlightTest() {
 }
 
 async function runLocalTranscriptionEntitlementTests() {
+  return withFixedNow('2026-07-01T00:00:00.000Z', async () => {
   const previousRequestUrlMock = requestUrlMock;
   const plugin = new PluginClass();
   plugin.saveData = async () => {};
@@ -11252,6 +11269,7 @@ async function runLocalTranscriptionEntitlementTests() {
     () => expiredPlugin.ensureProFeatureAccess('音视频转写'),
     /Pro/,
   );
+  });
 }
 
 async function runCloudFailedVoiceLocalFallbackTests() {
