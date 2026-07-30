@@ -34,7 +34,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.73');
+assert.strictEqual(manifest.version, '1.3.74');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.ok(checklist.includes('不得仅因版本较旧就停用已安装组件'));
 assert.ok(checklist.includes('HTTP 418'));
@@ -51,6 +51,10 @@ assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.strictEqual(manifest.minAppVersion, '1.0.0');
 assert.strictEqual(manifest.isDesktopOnly, true);
 assert.strictEqual(versions[manifest.version], manifest.minAppVersion);
+assert.ok(
+  pluginMainSource.includes("const PLUGIN_RUNTIME_VERSION = '1.3.74';"),
+  'marketplace main.js runtime identity must match manifest version 1.3.74',
+);
 assert.strictEqual(fs.existsSync(rootManifestPath), true, 'root manifest.json should exist for Obsidian marketplace version indexing');
 assert.strictEqual(fs.existsSync(rootVersionsPath), true, 'root versions.json should exist for Obsidian marketplace version indexing');
 assert.deepStrictEqual(JSON.parse(fs.readFileSync(rootManifestPath, 'utf8')), manifest);
