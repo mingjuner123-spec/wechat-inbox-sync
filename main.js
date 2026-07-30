@@ -57,6 +57,98 @@ var require_date_utils = __commonJS({
   }
 });
 
+// src/transcription-quality-utils.js
+var require_transcription_quality_utils = __commonJS({
+  "src/transcription-quality-utils.js"(exports2, module2) {
+    "use strict";
+    function dedupeRepeatedTranscriptionLines2(text) {
+      const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (!lines.length) return "";
+      const deduped = [];
+      let previousLine = "";
+      for (const line of lines) {
+        if (line === previousLine) {
+          continue;
+        } else {
+          previousLine = line;
+        }
+        deduped.push(line);
+      }
+      return deduped.join("\n").trim();
+    }
+    __name(dedupeRepeatedTranscriptionLines2, "dedupeRepeatedTranscriptionLines");
+    function normalizeTranscriptionQualityUnit2(value) {
+      return String(value || "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "").trim();
+    }
+    __name(normalizeTranscriptionQualityUnit2, "normalizeTranscriptionQualityUnit");
+    function getTranscriptionQualityUnits2(text) {
+      const source = String(text || "").trim();
+      if (!source) return [];
+      const lines = source.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      const rawUnits = lines.length >= 3 ? lines : source.match(/[^。！？!?；;\r\n]+[。！？!?；;]?/g) || lines;
+      return rawUnits.map(normalizeTranscriptionQualityUnit2).filter((unit) => unit.length >= 4);
+    }
+    __name(getTranscriptionQualityUnits2, "getTranscriptionQualityUnits");
+    function getTranscriptionQualityIssue2(text) {
+      const units = getTranscriptionQualityUnits2(text);
+      if (!units.length) return "";
+      const promptLeakPattern = /^(?:请|請)(?:输入|輸入|输出|輸出)(?:简体|簡體)中文$/;
+      const promptLeakCount = units.filter((unit) => promptLeakPattern.test(unit)).length;
+      if (promptLeakCount >= 2 || promptLeakCount === 1 && units.length === 1) {
+        return "prompt-leak";
+      }
+      const counts = /* @__PURE__ */ new Map();
+      let longestConsecutiveRun = 1;
+      let currentRun = 1;
+      let previousUnit = "";
+      units.forEach((unit) => {
+        counts.set(unit, (counts.get(unit) || 0) + 1);
+        if (unit === previousUnit) {
+          currentRun += 1;
+          longestConsecutiveRun = Math.max(longestConsecutiveRun, currentRun);
+        } else {
+          currentRun = 1;
+          previousUnit = unit;
+        }
+      });
+      const maxCount = Math.max(...counts.values());
+      if (longestConsecutiveRun >= 3 || maxCount >= 6 || units.length >= 8 && maxCount >= 5 && maxCount / units.length >= 0.6) {
+        return "repeated-lines";
+      }
+      return "";
+    }
+    __name(getTranscriptionQualityIssue2, "getTranscriptionQualityIssue");
+    function createTranscriptionQualityError2(text, source = "转写") {
+      const issue = getTranscriptionQualityIssue2(text);
+      if (!issue) return null;
+      const reason = issue === "prompt-leak" ? "检测到提示词泄漏" : "检测到重复句循环";
+      const error = new Error(`${source}结果质量异常：${reason}，已放弃该媒体地址并尝试备用地址。`);
+      error.code = "TRANSCRIPTION_LOW_QUALITY";
+      error.qualityIssue = issue;
+      return error;
+    }
+    __name(createTranscriptionQualityError2, "createTranscriptionQualityError");
+    function assertUsableTranscription2(text, source = "转写") {
+      const transcription = String(text || "").trim();
+      if (!transcription) {
+        throw new Error(`${source}命令没有返回文本`);
+      }
+      const qualityError = createTranscriptionQualityError2(transcription, source);
+      if (qualityError) throw qualityError;
+      return transcription;
+    }
+    __name(assertUsableTranscription2, "assertUsableTranscription");
+    module2.exports = {
+      assertUsableTranscription: assertUsableTranscription2,
+      createTranscriptionQualityError: createTranscriptionQualityError2,
+      dedupeRepeatedTranscriptionLines: dedupeRepeatedTranscriptionLines2,
+      getTranscriptionQualityIssue: getTranscriptionQualityIssue2,
+      getTranscriptionQualityUnits: getTranscriptionQualityUnits2,
+      normalizeTranscriptionQualityUnit: normalizeTranscriptionQualityUnit2
+    };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -81,6 +173,14 @@ var {
   getTitleTimePart,
   pad2
 } = require_date_utils();
+var {
+  assertUsableTranscription,
+  createTranscriptionQualityError,
+  dedupeRepeatedTranscriptionLines,
+  getTranscriptionQualityIssue,
+  getTranscriptionQualityUnits,
+  normalizeTranscriptionQualityUnit
+} = require_transcription_quality_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.74";
@@ -2463,83 +2563,6 @@ function normalizeDoubaoSpeakerText(result) {
   }).filter(Boolean).join("\n").trim());
 }
 __name(normalizeDoubaoSpeakerText, "normalizeDoubaoSpeakerText");
-function dedupeRepeatedTranscriptionLines(text) {
-  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (!lines.length) return "";
-  const deduped = [];
-  let previousLine = "";
-  for (const line of lines) {
-    if (line === previousLine) {
-      continue;
-    } else {
-      previousLine = line;
-    }
-    deduped.push(line);
-  }
-  return deduped.join("\n").trim();
-}
-__name(dedupeRepeatedTranscriptionLines, "dedupeRepeatedTranscriptionLines");
-function normalizeTranscriptionQualityUnit(value) {
-  return String(value || "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "").trim();
-}
-__name(normalizeTranscriptionQualityUnit, "normalizeTranscriptionQualityUnit");
-function getTranscriptionQualityUnits(text) {
-  const source = String(text || "").trim();
-  if (!source) return [];
-  const lines = source.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const rawUnits = lines.length >= 3 ? lines : source.match(/[^。！？!?；;\r\n]+[。！？!?；;]?/g) || lines;
-  return rawUnits.map(normalizeTranscriptionQualityUnit).filter((unit) => unit.length >= 4);
-}
-__name(getTranscriptionQualityUnits, "getTranscriptionQualityUnits");
-function getTranscriptionQualityIssue(text) {
-  const units = getTranscriptionQualityUnits(text);
-  if (!units.length) return "";
-  const promptLeakPattern = /^(?:请|請)(?:输入|輸入|输出|輸出)(?:简体|簡體)中文$/;
-  const promptLeakCount = units.filter((unit) => promptLeakPattern.test(unit)).length;
-  if (promptLeakCount >= 2 || promptLeakCount === 1 && units.length === 1) {
-    return "prompt-leak";
-  }
-  const counts = /* @__PURE__ */ new Map();
-  let longestConsecutiveRun = 1;
-  let currentRun = 1;
-  let previousUnit = "";
-  units.forEach((unit) => {
-    counts.set(unit, (counts.get(unit) || 0) + 1);
-    if (unit === previousUnit) {
-      currentRun += 1;
-      longestConsecutiveRun = Math.max(longestConsecutiveRun, currentRun);
-    } else {
-      currentRun = 1;
-      previousUnit = unit;
-    }
-  });
-  const maxCount = Math.max(...counts.values());
-  if (longestConsecutiveRun >= 3 || maxCount >= 6 || units.length >= 8 && maxCount >= 5 && maxCount / units.length >= 0.6) {
-    return "repeated-lines";
-  }
-  return "";
-}
-__name(getTranscriptionQualityIssue, "getTranscriptionQualityIssue");
-function createTranscriptionQualityError(text, source = "转写") {
-  const issue = getTranscriptionQualityIssue(text);
-  if (!issue) return null;
-  const reason = issue === "prompt-leak" ? "检测到提示词泄漏" : "检测到重复句循环";
-  const error = new Error(`${source}结果质量异常：${reason}，已放弃该媒体地址并尝试备用地址。`);
-  error.code = "TRANSCRIPTION_LOW_QUALITY";
-  error.qualityIssue = issue;
-  return error;
-}
-__name(createTranscriptionQualityError, "createTranscriptionQualityError");
-function assertUsableTranscription(text, source = "转写") {
-  const transcription = String(text || "").trim();
-  if (!transcription) {
-    throw new Error(`${source}命令没有返回文本`);
-  }
-  const qualityError = createTranscriptionQualityError(transcription, source);
-  if (qualityError) throw qualityError;
-  return transcription;
-}
-__name(assertUsableTranscription, "assertUsableTranscription");
 function parseDoubaoAsrResult(payload) {
   const data = typeof payload === "string" ? tryParseJson(payload) : payload;
   const result = data && data.result;
