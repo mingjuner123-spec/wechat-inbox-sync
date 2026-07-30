@@ -82,7 +82,7 @@ function assertRootMirror(rootMirror, candidatePackage, identity) {
     if (!fs.existsSync(actualPath)) {
       throw new Error(`root mirror is missing ${relativePath}`);
     }
-    const actual = normalizePackageBytes(relativePath, fs.readFileSync(actualPath));
+    const actual = fs.readFileSync(actualPath);
     if (actual.length !== expected.length || sha256(actual) !== sha256(expected)) {
       throw new Error(`root mirror drift: ${relativePath}`);
     }
@@ -137,6 +137,7 @@ function verifyCandidate({
     candidateId: receipt.identity.candidateId,
     aggregateSha256: receipt.identity.aggregateSha256,
     packageDirectory,
+    identity: receipt.identity,
   };
 }
 

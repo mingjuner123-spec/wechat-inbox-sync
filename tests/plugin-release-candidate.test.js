@@ -525,3 +525,211 @@ test('Windows candidate installer rejects an ordinary same-name target', {
   assert.notEqual(result.status, 0);
   assert.match(`${result.stderr}\n${result.stdout}`, /\.obsidian|plugins|target/i);
 });
+
+test('root mirror check fails on drift and write copies only loose assets', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const rootMirror = path.join(fixture.tempRoot, 'public-root');
+  fs.mkdirSync(rootMirror, { recursive: true });
+  for (const fileName of ['main.js', 'manifest.json', 'styles.css', 'versions.json']) {
+    fs.copyFileSync(path.join(fixture.pluginRoot, fileName), path.join(rootMirror, fileName));
+  }
+  fs.writeFileSync(path.join(rootMirror, 'main.js'), 'drift', 'utf8');
+
+  const failedCheck = runNode('scripts/sync-plugin-release-mirror.js', [
+    '--check',
+    '--source', fixture.pluginRoot,
+    '--root', rootMirror,
+  ]);
+  assert.notEqual(failedCheck.status, 0);
+  assert.match(`${failedCheck.stderr}\n${failedCheck.stdout}`, /main\.js|mirror|drift/i);
+
+  const written = runNode('scripts/sync-plugin-release-mirror.js', [
+    '--write',
+    '--source', fixture.pluginRoot,
+    '--root', rootMirror,
+  ]);
+  assert.equal(written.status, 0, written.stderr || written.stdout);
+  const passingCheck = runNode('scripts/sync-plugin-release-mirror.js', [
+    '--check',
+    '--source', fixture.pluginRoot,
+    '--root', rootMirror,
+  ]);
+  assert.equal(passingCheck.status, 0, passingCheck.stderr || passingCheck.stdout);
+  assert.equal(fs.existsSync(path.join(rootMirror, 'README.md')), false);
+  assert.equal(fs.existsSync(path.join(rootMirror, 'local-asr')), false);
+
+  const normalizedStyles = fs.readFileSync(path.join(rootMirror, 'styles.css'), 'utf8');
+  fs.writeFileSync(
+    path.join(rootMirror, 'styles.css'),
+    normalizedStyles.replace(/\n/g, '\r\n'),
+    'utf8',
+  );
+  const newlineDrift = runNode('scripts/sync-plugin-release-mirror.js', [
+    '--check',
+    '--source', fixture.pluginRoot,
+    '--root', rootMirror,
+  ]);
+  assert.notEqual(newlineDrift.status, 0);
+  assert.match(`${newlineDrift.stderr}\n${newlineDrift.stdout}`, /styles\.css|mirror|drift/i);
+});
+
+test('root mirror write rolls back the complete loose-asset set on interruption', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const rootMirror = path.join(fixture.tempRoot, 'transactional-root');
+  fs.mkdirSync(rootMirror, { recursive: true });
+  const original = {};
+  for (const fileName of ['main.js', 'manifest.json', 'styles.css', 'versions.json']) {
+    const content = Buffer.from(`old-${fileName}`, 'utf8');
+    fs.writeFileSync(path.join(rootMirror, fileName), content);
+    original[fileName] = content;
+  }
+  const { writeMirror } = require('../scripts/sync-plugin-release-mirror');
+  const previousTestMode = process.env.WECHAT_INBOX_CANDIDATE_TEST;
+  process.env.WECHAT_INBOX_CANDIDATE_TEST = '1';
+  try {
+    assert.throws(
+      () => writeMirror({
+        source: fixture.pluginRoot,
+        root: rootMirror,
+        testFailAfterEntry: 2,
+      }),
+      /injected|test/i,
+    );
+  } finally {
+    if (previousTestMode === undefined) {
+      delete process.env.WECHAT_INBOX_CANDIDATE_TEST;
+    } else {
+      process.env.WECHAT_INBOX_CANDIDATE_TEST = previousTestMode;
+    }
+  }
+  for (const [fileName, content] of Object.entries(original)) {
+    assert.deepEqual(fs.readFileSync(path.join(rootMirror, fileName)), content);
+  }
+});
+
+test('root mirror preserves its backup when rollback itself is incomplete', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const rootMirror = path.join(fixture.tempRoot, 'rollback-failure-root');
+  fs.mkdirSync(rootMirror, { recursive: true });
+  for (const fileName of ['main.js', 'manifest.json', 'styles.css', 'versions.json']) {
+    fs.writeFileSync(path.join(rootMirror, fileName), `old-${fileName}`, 'utf8');
+  }
+  const { writeMirror } = require('../scripts/sync-plugin-release-mirror');
+  const previousTestMode = process.env.WECHAT_INBOX_CANDIDATE_TEST;
+  process.env.WECHAT_INBOX_CANDIDATE_TEST = '1';
+  let failure;
+  try {
+    assert.throws(
+      () => writeMirror({
+        source: fixture.pluginRoot,
+        root: rootMirror,
+        testFailAfterEntry: 2,
+        testFailRollbackEntry: 'main.js',
+      }),
+      (error) => {
+        failure = error;
+        return /rollback incomplete/i.test(error.message);
+      },
+    );
+  } finally {
+    if (previousTestMode === undefined) {
+      delete process.env.WECHAT_INBOX_CANDIDATE_TEST;
+    } else {
+      process.env.WECHAT_INBOX_CANDIDATE_TEST = previousTestMode;
+    }
+  }
+  const backupMatch = failure.message.match(/backup preserved at (.+)$/i);
+  assert.ok(backupMatch, failure.message);
+  const backupRoot = backupMatch[1];
+  assert.equal(fs.existsSync(backupRoot), true);
+  assert.equal(fs.readFileSync(path.join(backupRoot, 'main.js'), 'utf8'), 'old-main.js');
+  fs.rmSync(backupRoot, { recursive: true, force: true });
+});
+
+test('mirror and promotion reject aliased or out-of-bound write targets', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const realMirror = path.join(fixture.tempRoot, 'real-root');
+  const aliasedMirror = path.join(fixture.tempRoot, 'junction-root');
+  fs.mkdirSync(realMirror, { recursive: true });
+  fs.symlinkSync(realMirror, aliasedMirror, 'junction');
+
+  const mirrorResult = runNode('scripts/sync-plugin-release-mirror.js', [
+    '--write',
+    '--source', fixture.pluginRoot,
+    '--root', aliasedMirror,
+  ]);
+  assert.notEqual(mirrorResult.status, 0);
+  assert.match(`${mirrorResult.stderr}\n${mirrorResult.stdout}`, /junction|reparse|symbolic|alias/i);
+});
+
+test('promotion refuses drift and writes only deterministic candidate identity', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const installedRoot = path.join(
+    fixture.tempRoot,
+    'vault',
+    '.obsidian',
+    'plugins',
+    'wechat-inbox-sync',
+  );
+  fs.cpSync(path.join(prepared.candidateDirectory, 'package'), installedRoot, { recursive: true });
+  fs.writeFileSync(path.join(installedRoot, 'data.json'), '{"opaque":"keep"}', 'utf8');
+  const rootMirror = path.join(fixture.tempRoot, 'public-root');
+  fs.mkdirSync(rootMirror, { recursive: true });
+  const mirrorWrite = runNode('scripts/sync-plugin-release-mirror.js', [
+    '--write',
+    '--source', fixture.pluginRoot,
+    '--root', rootMirror,
+  ]);
+  assert.equal(mirrorWrite.status, 0, mirrorWrite.stderr || mirrorWrite.stdout);
+  const promotionPath = path.join(rootMirror, 'release-candidate.json');
+  const promoteArgs = [
+    '--candidate', prepared.candidateDirectory,
+    '--source', fixture.pluginRoot,
+    '--root-mirror', rootMirror,
+    '--installed', installedRoot,
+    '--output', promotionPath,
+  ];
+
+  const promoted = runNode('scripts/promote-plugin-release-candidate.js', promoteArgs);
+  assert.equal(promoted.status, 0, promoted.stderr || promoted.stdout);
+  const receipt = JSON.parse(fs.readFileSync(promotionPath, 'utf8'));
+  const candidate = JSON.parse(fs.readFileSync(
+    path.join(prepared.candidateDirectory, 'candidate.json'),
+    'utf8',
+  ));
+  assert.deepEqual(receipt, candidate.identity);
+  assert.equal(JSON.stringify(receipt).includes('provenance'), false);
+  assert.equal(JSON.stringify(receipt).includes(fixture.tempRoot), false);
+
+  const stableReceipt = fs.readFileSync(promotionPath);
+  const outOfBounds = runNode('scripts/promote-plugin-release-candidate.js', [
+    ...promoteArgs.slice(0, -2),
+    '--output', path.join(fixture.tempRoot, 'outside-release-candidate.json'),
+  ]);
+  assert.notEqual(outOfBounds.status, 0);
+  assert.match(`${outOfBounds.stderr}\n${outOfBounds.stdout}`, /output|root|release-candidate/i);
+  assert.equal(fs.existsSync(path.join(fixture.tempRoot, 'outside-release-candidate.json')), false);
+
+  fs.writeFileSync(path.join(installedRoot, 'styles.css'), 'drift', 'utf8');
+  const rejected = runNode('scripts/promote-plugin-release-candidate.js', promoteArgs);
+  assert.notEqual(rejected.status, 0);
+  assert.deepEqual(fs.readFileSync(promotionPath), stableReceipt);
+
+  const promotionSource = fs.readFileSync(
+    path.join(repoRoot, 'scripts', 'promote-plugin-release-candidate.js'),
+    'utf8',
+  );
+  assert.match(promotionSource, /verification\.identity/);
+  assert.doesNotMatch(promotionSource, /readCandidateIdentity/);
+});
