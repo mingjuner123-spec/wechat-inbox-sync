@@ -551,6 +551,37 @@ var require_record_metadata_utils = __commonJS({
   }
 });
 
+// src/record-state-utils.js
+var require_record_state_utils = __commonJS({
+  "src/record-state-utils.js"(exports2, module2) {
+    "use strict";
+    function isCloudTranscriptionWaitingRecord2(record) {
+      const metadata = record && record.metadata || {};
+      const status = String(metadata.transcriptionStatus || "").toLowerCase();
+      const source = String(metadata.transcriptionSource || metadata.transcriptionProvider || "").toLowerCase();
+      const isCloudRecord = metadata.transcriptionMode === "cloud" || metadata.cloudTranscriptionRequested === true || source.includes("cloud-pretranscription") || source.includes("cloud");
+      const hasTranscription = String(metadata.transcription || "").trim().length > 0;
+      return isCloudRecord && !hasTranscription && ["pending", "queued", "processing"].includes(status);
+    }
+    __name(isCloudTranscriptionWaitingRecord2, "isCloudTranscriptionWaitingRecord");
+    function isAudioVideoTranscriptionIncompleteRecord2(record) {
+      const metadata = record && record.metadata || {};
+      const status = String(metadata.transcriptionStatus || "").toLowerCase();
+      const hasTranscription = String(metadata.transcription || "").trim().length > 0;
+      const hasPersistableMarkdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || "").trim().length > 0;
+      if (hasPersistableMarkdown) return false;
+      const isAudioVideoRecord = String(record && record.type || "").toLowerCase() === "voice" || metadata.webpageMediaType === "audio_video" || Boolean(metadata.audioFileID) || metadata.transcriptOnly === true;
+      if (!isAudioVideoRecord || hasTranscription) return false;
+      return ["pending", "queued", "processing", "failed"].includes(status);
+    }
+    __name(isAudioVideoTranscriptionIncompleteRecord2, "isAudioVideoTranscriptionIncompleteRecord");
+    module2.exports = {
+      isAudioVideoTranscriptionIncompleteRecord: isAudioVideoTranscriptionIncompleteRecord2,
+      isCloudTranscriptionWaitingRecord: isCloudTranscriptionWaitingRecord2
+    };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -622,6 +653,10 @@ var {
   getRecordKeywords,
   stripMarkdownForDescription
 } = require_record_metadata_utils();
+var {
+  isAudioVideoTranscriptionIncompleteRecord,
+  isCloudTranscriptionWaitingRecord
+} = require_record_state_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.74";
@@ -12745,26 +12780,6 @@ function getRecordConversionWarning(record) {
   return aiMetadataWarning;
 }
 __name(getRecordConversionWarning, "getRecordConversionWarning");
-function isCloudTranscriptionWaitingRecord(record) {
-  const metadata = record && record.metadata || {};
-  const status = String(metadata.transcriptionStatus || "").toLowerCase();
-  const source = String(metadata.transcriptionSource || metadata.transcriptionProvider || "").toLowerCase();
-  const isCloudRecord = metadata.transcriptionMode === "cloud" || metadata.cloudTranscriptionRequested === true || source.includes("cloud-pretranscription") || source.includes("cloud");
-  const hasTranscription = String(metadata.transcription || "").trim().length > 0;
-  return isCloudRecord && !hasTranscription && ["pending", "queued", "processing"].includes(status);
-}
-__name(isCloudTranscriptionWaitingRecord, "isCloudTranscriptionWaitingRecord");
-function isAudioVideoTranscriptionIncompleteRecord(record) {
-  const metadata = record && record.metadata || {};
-  const status = String(metadata.transcriptionStatus || "").toLowerCase();
-  const hasTranscription = String(metadata.transcription || "").trim().length > 0;
-  const hasPersistableMarkdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || "").trim().length > 0;
-  if (hasPersistableMarkdown) return false;
-  const isAudioVideoRecord = String(record && record.type || "").toLowerCase() === "voice" || metadata.webpageMediaType === "audio_video" || Boolean(metadata.audioFileID) || metadata.transcriptOnly === true;
-  if (!isAudioVideoRecord || hasTranscription) return false;
-  return ["pending", "queued", "processing", "failed"].includes(status);
-}
-__name(isAudioVideoTranscriptionIncompleteRecord, "isAudioVideoTranscriptionIncompleteRecord");
 var LocalComponentInstallConfirmModalBase = Modal || class {
 };
 var _LocalComponentInstallConfirmModal = class _LocalComponentInstallConfirmModal extends LocalComponentInstallConfirmModalBase {
