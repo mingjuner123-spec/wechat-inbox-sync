@@ -582,6 +582,96 @@ var require_record_state_utils = __commonJS({
   }
 });
 
+// src/record-identity-utils.js
+var require_record_identity_utils = __commonJS({
+  "src/record-identity-utils.js"(exports2, module2) {
+    "use strict";
+    var RECORD_ID_MARKER_NAME = "wechat-inbox-record-id";
+    function normalizeYamlScalar2(value) {
+      const text = String(value || "").trim();
+      if (text.startsWith('"') && text.endsWith('"') || text.startsWith("'") && text.endsWith("'")) {
+        return text.slice(1, -1).trim();
+      }
+      return text;
+    }
+    __name(normalizeYamlScalar2, "normalizeYamlScalar");
+    function getFrontmatterBlock2(markdown) {
+      const source = String(markdown || "").replace(/^\uFEFF/, "");
+      const match = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
+      return match ? match[1] : "";
+    }
+    __name(getFrontmatterBlock2, "getFrontmatterBlock");
+    function getFrontmatterScalar2(markdown, fieldName) {
+      const block = getFrontmatterBlock2(markdown);
+      if (!block || !fieldName) return "";
+      const escapedField = String(fieldName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const lines = block.split(/\r?\n/);
+      for (const line of lines) {
+        const fieldMatch = new RegExp(`^\\s*${escapedField}\\s*:\\s*(.*?)\\s*$`, "i").exec(line);
+        if (fieldMatch) return normalizeYamlScalar2(fieldMatch[1]);
+      }
+      return "";
+    }
+    __name(getFrontmatterScalar2, "getFrontmatterScalar");
+    function getRecordIdFromFrontmatter2(markdown) {
+      return getFrontmatterScalar2(markdown, "id");
+    }
+    __name(getRecordIdFromFrontmatter2, "getRecordIdFromFrontmatter");
+    function getRecordIdFromHiddenMarker2(markdown) {
+      const match = new RegExp(`<!--\\s*${RECORD_ID_MARKER_NAME}\\s*:\\s*([\\s\\S]*?)\\s*-->`, "i").exec(String(markdown || ""));
+      return match ? normalizeYamlScalar2(match[1]).replace(/-->/g, "").trim() : "";
+    }
+    __name(getRecordIdFromHiddenMarker2, "getRecordIdFromHiddenMarker");
+    function getRecordIdFromMarkdown2(markdown) {
+      return getRecordIdFromFrontmatter2(markdown) || getRecordIdFromHiddenMarker2(markdown);
+    }
+    __name(getRecordIdFromMarkdown2, "getRecordIdFromMarkdown");
+    function hasRecordIdInFrontmatter2(markdown, recordId) {
+      const expected = String(recordId || "").trim();
+      return Boolean(expected && getRecordIdFromMarkdown2(markdown) === expected);
+    }
+    __name(hasRecordIdInFrontmatter2, "hasRecordIdInFrontmatter");
+    function buildRecordIdMarker2(recordId) {
+      const id = String(recordId || "").replace(/-->/g, "").trim();
+      return id ? `<!-- ${RECORD_ID_MARKER_NAME}: ${id} -->` : "";
+    }
+    __name(buildRecordIdMarker2, "buildRecordIdMarker");
+    function normalizeRecordUrlForCompare2(url) {
+      const raw = String(url || "").trim();
+      if (!raw) return "";
+      try {
+        const parsed = new URL(raw);
+        parsed.hash = "";
+        parsed.protocol = parsed.protocol.toLowerCase();
+        parsed.hostname = parsed.hostname.toLowerCase();
+        return parsed.toString().replace(/\/$/, "");
+      } catch (error) {
+        return raw.replace(/#.*$/, "").replace(/\/$/, "");
+      }
+    }
+    __name(normalizeRecordUrlForCompare2, "normalizeRecordUrlForCompare");
+    function hasRecordUrlInFrontmatter2(markdown, recordUrl) {
+      const expected = normalizeRecordUrlForCompare2(recordUrl);
+      if (!expected) return false;
+      const actual = normalizeRecordUrlForCompare2(getFrontmatterScalar2(markdown, "url"));
+      return Boolean(actual && actual === expected);
+    }
+    __name(hasRecordUrlInFrontmatter2, "hasRecordUrlInFrontmatter");
+    module2.exports = {
+      buildRecordIdMarker: buildRecordIdMarker2,
+      getFrontmatterBlock: getFrontmatterBlock2,
+      getFrontmatterScalar: getFrontmatterScalar2,
+      getRecordIdFromFrontmatter: getRecordIdFromFrontmatter2,
+      getRecordIdFromHiddenMarker: getRecordIdFromHiddenMarker2,
+      getRecordIdFromMarkdown: getRecordIdFromMarkdown2,
+      hasRecordIdInFrontmatter: hasRecordIdInFrontmatter2,
+      hasRecordUrlInFrontmatter: hasRecordUrlInFrontmatter2,
+      normalizeRecordUrlForCompare: normalizeRecordUrlForCompare2,
+      normalizeYamlScalar: normalizeYamlScalar2
+    };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -657,6 +747,18 @@ var {
   isAudioVideoTranscriptionIncompleteRecord,
   isCloudTranscriptionWaitingRecord
 } = require_record_state_utils();
+var {
+  buildRecordIdMarker,
+  getFrontmatterBlock,
+  getFrontmatterScalar,
+  getRecordIdFromFrontmatter,
+  getRecordIdFromHiddenMarker,
+  getRecordIdFromMarkdown,
+  hasRecordIdInFrontmatter,
+  hasRecordUrlInFrontmatter,
+  normalizeRecordUrlForCompare,
+  normalizeYamlScalar
+} = require_record_identity_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.74";
@@ -703,7 +805,6 @@ var normalizeNotePropertyFields = /* @__PURE__ */ __name((value) => normalizeNot
   NOTE_PROPERTY_FIELD_KEYS
 ), "normalizeNotePropertyFields");
 var DEFAULT_NOTE_PROPERTY_FIELDS = "title,author,url,synced_at,source,description,keywords";
-var RECORD_ID_MARKER_NAME = "wechat-inbox-record-id";
 var NOTE_PROPERTY_FIELD_KEYS = [
   "id",
   "type",
@@ -2367,76 +2468,6 @@ function getRecordId(record) {
   return record._id || record.id || "";
 }
 __name(getRecordId, "getRecordId");
-function normalizeYamlScalar(value) {
-  const text = String(value || "").trim();
-  if (text.startsWith('"') && text.endsWith('"') || text.startsWith("'") && text.endsWith("'")) {
-    return text.slice(1, -1).trim();
-  }
-  return text;
-}
-__name(normalizeYamlScalar, "normalizeYamlScalar");
-function getFrontmatterBlock(markdown) {
-  const source = String(markdown || "").replace(/^\uFEFF/, "");
-  const match = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
-  return match ? match[1] : "";
-}
-__name(getFrontmatterBlock, "getFrontmatterBlock");
-function getFrontmatterScalar(markdown, fieldName) {
-  const block = getFrontmatterBlock(markdown);
-  if (!block || !fieldName) return "";
-  const escapedField = String(fieldName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const lines = block.split(/\r?\n/);
-  for (const line of lines) {
-    const fieldMatch = new RegExp(`^\\s*${escapedField}\\s*:\\s*(.*?)\\s*$`, "i").exec(line);
-    if (fieldMatch) return normalizeYamlScalar(fieldMatch[1]);
-  }
-  return "";
-}
-__name(getFrontmatterScalar, "getFrontmatterScalar");
-function getRecordIdFromFrontmatter(markdown) {
-  return getFrontmatterScalar(markdown, "id");
-}
-__name(getRecordIdFromFrontmatter, "getRecordIdFromFrontmatter");
-function getRecordIdFromHiddenMarker(markdown) {
-  const match = new RegExp(`<!--\\s*${RECORD_ID_MARKER_NAME}\\s*:\\s*([\\s\\S]*?)\\s*-->`, "i").exec(String(markdown || ""));
-  return match ? normalizeYamlScalar(match[1]).replace(/-->/g, "").trim() : "";
-}
-__name(getRecordIdFromHiddenMarker, "getRecordIdFromHiddenMarker");
-function getRecordIdFromMarkdown(markdown) {
-  return getRecordIdFromFrontmatter(markdown) || getRecordIdFromHiddenMarker(markdown);
-}
-__name(getRecordIdFromMarkdown, "getRecordIdFromMarkdown");
-function hasRecordIdInFrontmatter(markdown, recordId) {
-  const expected = String(recordId || "").trim();
-  return Boolean(expected && getRecordIdFromMarkdown(markdown) === expected);
-}
-__name(hasRecordIdInFrontmatter, "hasRecordIdInFrontmatter");
-function buildRecordIdMarker(recordId) {
-  const id = String(recordId || "").replace(/-->/g, "").trim();
-  return id ? `<!-- ${RECORD_ID_MARKER_NAME}: ${id} -->` : "";
-}
-__name(buildRecordIdMarker, "buildRecordIdMarker");
-function normalizeRecordUrlForCompare(url) {
-  const raw = String(url || "").trim();
-  if (!raw) return "";
-  try {
-    const parsed = new URL(raw);
-    parsed.hash = "";
-    parsed.protocol = parsed.protocol.toLowerCase();
-    parsed.hostname = parsed.hostname.toLowerCase();
-    return parsed.toString().replace(/\/$/, "");
-  } catch (error) {
-    return raw.replace(/#.*$/, "").replace(/\/$/, "");
-  }
-}
-__name(normalizeRecordUrlForCompare, "normalizeRecordUrlForCompare");
-function hasRecordUrlInFrontmatter(markdown, recordUrl) {
-  const expected = normalizeRecordUrlForCompare(recordUrl);
-  if (!expected) return false;
-  const actual = normalizeRecordUrlForCompare(getFrontmatterScalar(markdown, "url"));
-  return Boolean(actual && actual === expected);
-}
-__name(hasRecordUrlInFrontmatter, "hasRecordUrlInFrontmatter");
 function getTypeDisplayName(type) {
   const normalized = String(type || "").toLowerCase();
   if (!TYPE_DISPLAY_NAMES[normalized]) {
