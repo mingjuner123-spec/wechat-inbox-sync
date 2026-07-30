@@ -367,6 +367,46 @@ var require_ai_metadata_error_utils = __commonJS({
   }
 });
 
+// src/diagnostic-redaction-utils.js
+var require_diagnostic_redaction_utils = __commonJS({
+  "src/diagnostic-redaction-utils.js"(exports2, module2) {
+    "use strict";
+    function redactSensitiveObject2(value, key = "") {
+      if (/token|code|secret|authorization|cookie/i.test(String(key || ""))) return "[REDACTED]";
+      if (Array.isArray(value)) return value.map((item) => redactSensitiveObject2(item));
+      if (value && typeof value === "object") {
+        return Object.fromEntries(
+          Object.entries(value).map(([entryKey, entryValue]) => [
+            entryKey,
+            redactSensitiveObject2(entryValue, entryKey)
+          ])
+        );
+      }
+      return value;
+    }
+    __name(redactSensitiveObject2, "redactSensitiveObject");
+    function redactKnownCredentials2(text, settings = {}) {
+      const entitlement = settings.localTranscriptionEntitlementStatus || {};
+      const credentials = [
+        settings.token,
+        settings.pendingRedeemCode,
+        entitlement.code,
+        entitlement.bindingToken,
+        ...Array.isArray(settings.bindings) ? settings.bindings.map((item) => item && item.token) : []
+      ].map((item) => String(item || "").trim()).filter(Boolean).sort((a, b) => b.length - a.length);
+      return credentials.reduce(
+        (result, credential) => result.split(credential).join("[REDACTED]"),
+        String(text || "")
+      );
+    }
+    __name(redactKnownCredentials2, "redactKnownCredentials");
+    module2.exports = {
+      redactKnownCredentials: redactKnownCredentials2,
+      redactSensitiveObject: redactSensitiveObject2
+    };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -416,6 +456,10 @@ var {
   buildAiMetadataErrorComment,
   classifyAiMetadataError
 } = require_ai_metadata_error_utils();
+var {
+  redactKnownCredentials,
+  redactSensitiveObject
+} = require_diagnostic_redaction_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.74";
@@ -1768,35 +1812,6 @@ function normalizeBindCodeInput(code) {
   return String(code || "").trim().toUpperCase().replace(/[‐-‒–—―]/g, "-").replace(/\s+/g, "");
 }
 __name(normalizeBindCodeInput, "normalizeBindCodeInput");
-function redactSensitiveObject(value, key = "") {
-  if (/token|code|secret|authorization|cookie/i.test(String(key || ""))) return "[REDACTED]";
-  if (Array.isArray(value)) return value.map((item) => redactSensitiveObject(item));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([entryKey, entryValue]) => [
-        entryKey,
-        redactSensitiveObject(entryValue, entryKey)
-      ])
-    );
-  }
-  return value;
-}
-__name(redactSensitiveObject, "redactSensitiveObject");
-function redactKnownCredentials(text, settings = {}) {
-  const entitlement = settings.localTranscriptionEntitlementStatus || {};
-  const credentials = [
-    settings.token,
-    settings.pendingRedeemCode,
-    entitlement.code,
-    entitlement.bindingToken,
-    ...Array.isArray(settings.bindings) ? settings.bindings.map((item) => item && item.token) : []
-  ].map((item) => String(item || "").trim()).filter(Boolean).sort((a, b) => b.length - a.length);
-  return credentials.reduce(
-    (result, credential) => result.split(credential).join("[REDACTED]"),
-    String(text || "")
-  );
-}
-__name(redactKnownCredentials, "redactKnownCredentials");
 function normalizeBindings(settings) {
   const sourceBindings = Array.isArray(settings && settings.bindings) ? settings.bindings : [];
   const legacyToken = normalizeBindCodeInput(settings && settings.token);

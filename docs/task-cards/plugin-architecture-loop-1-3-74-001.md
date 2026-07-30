@@ -155,5 +155,7 @@
 - `progress-notice-utils`：实现、完整回归与独立复审完成，P0=0、P1=0、P2=0。
 - 进度提示本地检查点：`ff87abd6`。
 - `ai-metadata-error-utils`：实现、完整回归与独立复审完成，P0=0、P1=0、P2=0。
-- 插件仍为 1.3.74；业务源码只移动日期、转写质量、进度提示和 AI 错误纯函数，根 `main.js` 仅跟随权威生成物。
-- 下一步：创建 AI 元数据错误模块检查点，然后进入 `diagnostic-redaction-utils` 单模块 Loop。
+- AI 元数据错误本地检查点：`8bd49b70`。
+- `diagnostic-redaction-utils`：实现、完整回归与独立复审完成，P0=0、P1=0、P2=0。
+- 插件仍为 1.3.74；业务源码只移动日期、转写质量、进度提示、AI 错误和诊断脱敏纯函数，根 `main.js` 仅跟随权威生成物。
+- 下一步：创建诊断脱敏模块检查点，然后进入 `vault-path-utils` 单模块 Loop。
