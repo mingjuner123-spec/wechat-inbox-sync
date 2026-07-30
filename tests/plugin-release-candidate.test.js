@@ -618,6 +618,92 @@ test('Windows candidate install is transactional and preserves opaque user files
   assert.deepEqual(snapshotManagedTree(target), beforeFailure);
 });
 
+test('Windows candidate keeps the verified new install when backup cleanup is interrupted', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const target = path.join(
+    fixture.tempRoot,
+    'cleanup-vault',
+    '.obsidian',
+    'plugins',
+    'wechat-inbox-sync',
+  );
+  fs.cpSync(path.join(prepared.candidateDirectory, 'package'), target, { recursive: true });
+  fs.writeFileSync(path.join(target, 'main.js'), 'old-main', 'utf8');
+
+  const result = runPowerShell(
+    path.join(repoRoot, 'scripts', 'install-plugin-release-candidate.ps1'),
+    [
+      '-CandidateDirectory', prepared.candidateDirectory,
+      '-TargetDirectory', target,
+      '-RepositoryRoot', repoRoot,
+      '-SkipObsidianProcessCheckForTest',
+      '-TestFailBackupCleanup',
+    ],
+    { env: { WECHAT_INBOX_CANDIDATE_TEST: '1' } },
+  );
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(`${result.stderr}\n${result.stdout}`, /backup|preserved|cleanup/i);
+  const verify = runNode('scripts/verify-plugin-release-candidate.js', [
+    '--candidate', prepared.candidateDirectory,
+    '--installed', target,
+  ]);
+  assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+  const backupMatch = `${result.stderr}\n${result.stdout}`.match(
+    /BACKUP_PRESERVED=([^\r\n]+)/,
+  );
+  assert.ok(backupMatch, result.stderr || result.stdout);
+  assert.equal(fs.existsSync(backupMatch[1].trim()), true);
+});
+
+test('Windows candidate rollback aggregates failures and preserves remaining backup', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const target = path.join(
+    fixture.tempRoot,
+    'rollback-failure-vault',
+    '.obsidian',
+    'plugins',
+    'wechat-inbox-sync',
+  );
+  fs.cpSync(path.join(prepared.candidateDirectory, 'package'), target, { recursive: true });
+  fs.writeFileSync(path.join(target, 'main.js'), 'old-main', 'utf8');
+
+  const result = runPowerShell(
+    path.join(repoRoot, 'scripts', 'install-plugin-release-candidate.ps1'),
+    [
+      '-CandidateDirectory', prepared.candidateDirectory,
+      '-TargetDirectory', target,
+      '-RepositoryRoot', repoRoot,
+      '-SkipObsidianProcessCheckForTest',
+      '-TestFailAfterSecondEntry',
+      '-TestFailRollbackForName', 'main.js',
+    ],
+    { env: { WECHAT_INBOX_CANDIDATE_TEST: '1' } },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}\n${result.stdout}`, /rollback incomplete/i);
+  const backupMatch = `${result.stderr}\n${result.stdout}`.match(
+    /BACKUP_PRESERVED=([^\r\n]+)/,
+  );
+  assert.ok(backupMatch, result.stderr || result.stdout);
+  const backupDirectory = backupMatch[1].trim();
+  assert.equal(fs.existsSync(backupDirectory), true);
+  assert.equal(fs.readFileSync(path.join(backupDirectory, 'main.js'), 'utf8'), 'old-main');
+});
+
 test('Windows candidate installer rejects an ordinary same-name target', {
   skip: process.platform !== 'win32',
 }, (t) => {

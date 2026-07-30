@@ -4,6 +4,7 @@ const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
 const path = require('node:path');
+const { isDeepStrictEqual, TextDecoder } = require('node:util');
 const {
   MAX_API_RESPONSE_BYTES,
   MAX_SINGLE_ASSET_BYTES,
@@ -23,6 +24,15 @@ const {
   validateStableRemoteTagEvidence,
   validateTrustedLocalSnapshot,
 } = require('./plugin-release-identity-core');
+const {
+  PACKAGE_DIRECTORIES,
+  PACKAGE_ROOT_FILES,
+  buildCandidateIdentity,
+  compareUtf8,
+  normalizePackageBytes,
+  sha256,
+  validateCandidateIdentity,
+} = require('./plugin-release-candidate-core');
 const { validateVersionTag } = require('./release-source-guard-core');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -392,6 +402,86 @@ function expectedZipEntries(trustedCommit) {
   return new Map(names.map((name) => [name, gitShowBytes(trustedCommit, name)]));
 }
 
+function validatePromotionReceipt({ tag, packageEntries, receiptBytes }) {
+  validateVersionTag(tag);
+  if (!(packageEntries instanceof Map)) {
+    throw new TypeError('candidate package entries must be a Map');
+  }
+  if (!Buffer.isBuffer(receiptBytes)) {
+    throw new Error('release-candidate receipt is missing from the trusted commit');
+  }
+  const names = [...packageEntries.keys()].sort(compareUtf8);
+  for (const requiredName of PACKAGE_ROOT_FILES) {
+    if (!packageEntries.has(requiredName)) {
+      throw new Error(`release candidate package is missing required entry: ${requiredName}`);
+    }
+  }
+  for (const requiredDirectory of PACKAGE_DIRECTORIES) {
+    if (!names.some((name) => name.startsWith(`${requiredDirectory}/`))) {
+      throw new Error(
+        `release candidate package is missing required directory: ${requiredDirectory}`,
+      );
+    }
+  }
+  const entries = names.map((name) => {
+    const normalized = normalizePackageBytes(name, packageEntries.get(name));
+    return {
+      path: name,
+      bytes: normalized.length,
+      sha256: sha256(normalized),
+    };
+  });
+  const expectedIdentity = buildCandidateIdentity({
+    pluginId: 'wechat-inbox-sync',
+    pluginVersion: tag,
+    sourceRoot: PLUGIN_PREFIX.slice(0, -1),
+    entries,
+  });
+  let receipt;
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(receiptBytes);
+    receipt = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`release-candidate receipt is invalid: ${errorDetail(error)}`);
+  }
+  validateCandidateIdentity(receipt);
+  if (!isDeepStrictEqual(receipt, expectedIdentity)) {
+    throw new Error('release-candidate receipt differs from the trusted commit package identity');
+  }
+  return true;
+}
+
+function verifyPromotionReceiptAtCommit(tag, trustedCommit) {
+  let receiptBytes;
+  try {
+    receiptBytes = childProcess.execFileSync(
+      'git',
+      ['show', `${trustedCommit}:release-candidate.json`],
+      {
+        cwd: REPO_ROOT,
+        encoding: null,
+        env: {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: '0',
+          GCM_INTERACTIVE: 'Never',
+        },
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: GIT_TIMEOUT_MS,
+      },
+    );
+  } catch (error) {
+    throw new Error(
+      `cannot read release-candidate receipt from trusted commit ${trustedCommit}: ${errorDetail(error)}`,
+    );
+  }
+  return validatePromotionReceipt({
+    tag,
+    packageEntries: expectedZipEntries(trustedCommit),
+    receiptBytes,
+  });
+}
+
 async function verifyPublishedAssetBytes(release, tag, trustedCommit) {
   const assets = new Map(release.assets.map((asset) => [asset.name, asset]));
   for (const name of ['main.js', 'manifest.json', 'styles.css', 'versions.json']) {
@@ -451,6 +541,7 @@ async function runPrepublish(tag) {
     trustedDefaultCommit: repository.defaultCommit,
     trustedTagCommit: remoteTag ? remoteTag.commit : null,
   });
+  verifyPromotionReceiptAtCommit(tag, snapshot.head);
   const lookup = await lookupRelease(tag, 1);
   validateReleaseLookup({ phase: 'prepublish', ...lookup });
   process.stdout.write(
@@ -477,6 +568,7 @@ async function runPostpublish(tag) {
       trustedDefaultCommit: repository.defaultCommit,
       trustedTagCommit: remoteTag.commit,
     });
+    verifyPromotionReceiptAtCommit(tag, snapshot.trustedDefaultCommit);
     const lookup = await lookupRelease(tag, sample);
     const release = validateReleaseLookup({ phase: 'postpublish', ...lookup });
     lastRelease = validateReleasePayload(release, {
@@ -496,13 +588,14 @@ async function runPostpublish(tag) {
   await verifyPublishedAssetBytes(lastRelease, tag, finalCommit);
   const finalLocalInputs = collectLocalInputs(tag, { requireLocalAnnotatedTag: false });
   const finalRemote = await probeStableRemoteTag(tag, 4, stableRemoteEvidence);
-  validateTrustedLocalSnapshot({
+  const finalSnapshot = validateTrustedLocalSnapshot({
     phase: 'postpublish',
     tag,
     ...finalLocalInputs,
     trustedDefaultCommit: finalRemote.repository.defaultCommit,
     trustedTagCommit: finalRemote.remoteTag.commit,
   });
+  verifyPromotionReceiptAtCommit(tag, finalSnapshot.trustedDefaultCommit);
   process.stdout.write(
     `Plugin postpublish identity passed: ${tag}, main, peeled tag, Release, assets, and ZIP all match ${finalCommit}.\n`,
   );
@@ -533,4 +626,6 @@ module.exports = {
   parseArguments,
   runPostpublish,
   runPrepublish,
+  validatePromotionReceipt,
+  verifyPromotionReceiptAtCommit,
 };

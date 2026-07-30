@@ -4,7 +4,7 @@
 - 标题：插件候选快照、镜像同步、时间稳定测试与发布后身份校验
 - 创建日期：2026-07-30
 - 类型：基础设施 / 发布契约
-- 状态：准备中
+- 状态：本地实现与独立审查完成，待负责人决定如何集成
 - 风险等级：L2
 - 所属阶段：主线重构前置地基
 - 是否当前主线：否
@@ -35,6 +35,7 @@
 - `scripts/verify-plugin-release-candidate.js`
 - `scripts/sync-plugin-release-mirror.js`
 - `tests/plugin-main-ai.test.js`
+- `tests/plugin-marketplace-package.test.js`
 - `tests/plugin-release-candidate.test.js`
 - `tests/plugin-release-identity.test.js`
 - `tests/release-governance.test.js`
@@ -93,10 +94,28 @@
 - 本任务只建立本地与 CI 管线；在其变更进入远端默认分支前，旧发布流程仍然存在。
 - 用户本地 Obsidian 目录在仓库外，安装脚本必须显式接收目标路径并拒绝宽泛目录。
 
+## 完成结果（2026-07-30）
+
+- 在稳定锚点 `4405dcef28f4dea0d5a650f57e874c81175a3872` 上建立隔离分支 `codex/plugin-release-pipeline-v2`，未推送、未合并、未打标签、未创建 Release、未部署。
+- 生成不可变候选 `1.3.74-3b2e96b51110bb77`，完整包聚合 SHA-256 为 `3b2e96b51110bb77ead1d855f51148d0f8e330459e8d09fe9730e5b481235532`，共 14 个受控文件。
+- 本地安装改为完整包事务替换：验证成功是明确提交点；提交前失败逐项回滚并在回滚不完整时保留备份，提交后清理备份失败不再删除已验证的新版本；同时保留 `data.json` 等非发布用户文件，并拒绝目录联接、路径别名和错误目标。
+- 根目录四个市场兼容文件改为脚本单向同步，CI 校验它们与权威插件源逐字节一致；发布工作流只消费已验证候选，不再临时从可变工作区重新组包。
+- prepublish 继续严格校验本地 annotated tag；prepublish 和 postpublish 都会从受信 commit 重算完整候选并比对 `release-candidate.json`；postpublish 通过 GitHub Ref/Tag API 与 `git ls-remote` 多次回读远端 annotated tag，避免 Release 已成功后因 Runner 本地标签形态误报。
+- 权益测试冻结测试时钟，不再因墙上日期经过而失效。
+- 插件版本保持 `1.3.74`；权威插件 `main.js`、`local-asr/`、`local-ocr/` 相对稳定锚点无差异，根目录四镜像在 Git 内容层也无差异。
+
+## 验证与审查
+
+- 最终失败即停止验证通过：候选管线 24 通过、0 失败、1 个普通 symlink 用例因 Windows `EPERM` 跳过；等价的 Windows junction 防护已实际通过。
+- 发布身份 26/26、发布治理 126/126、插件核心测试、市场包测试、相关脚本语法、镜像精确校验、候选晋升凭据校验和 `git diff --check` 均通过。
+- 当前独立插件仓库不包含 `scripts/check-harness-control-plane.js` 与 `scripts/check-harness-parallel.js`，因此未伪报这两项 Harness 命令已执行；任务隔离、路径边界和审查证据由本任务卡、专属 Worktree 与独立复审闭环。
+- 多轮独立审查覆盖候选身份、事务安装/回滚、CI 绑定、时间稳定测试、远端 tag 身份和 Release 资产来源；发现的 P1/P2 已修复并重新审查。
+- 最终整分支独立总审结论记录在本任务完成回执中；只有 P0/P1/P2 均为 0 才允许进入集成选择。
+
 ## 唯一下一步
 
-完成设计文档书面复核并获得负责人确认后，编写逐步实施计划。
+负责人选择本地合并、推送并创建 PR、保留隔离分支或明确丢弃。未进入默认分支前，线上仍运行旧发布流程。
 
 ## 是否需要负责人决定
 
-当前设计已经由负责人同意；开始编码前仍需负责人确认书面规格没有遗漏。
+需要。该 L2 共享发布契约已在本地完成，但尚未进入远端默认分支；任何推送、PR 或合并都必须由负责人明确选择。

@@ -9,6 +9,10 @@ param(
 
   [switch]$TestFailAfterSecondEntry,
 
+  [switch]$TestFailBackupCleanup,
+
+  [string]$TestFailRollbackForName = '',
+
   [switch]$SkipObsidianProcessCheckForTest
 )
 
@@ -63,7 +67,10 @@ function Assert-NoReparsePoint {
 }
 
 function Assert-TestSwitchAllowed {
-  if (($TestFailAfterSecondEntry -or $SkipObsidianProcessCheckForTest) `
+  if (($TestFailAfterSecondEntry `
+      -or $TestFailBackupCleanup `
+      -or $TestFailRollbackForName `
+      -or $SkipObsidianProcessCheckForTest) `
       -and $env:WECHAT_INBOX_CANDIDATE_TEST -ne '1') {
     throw 'Candidate installer test switches require WECHAT_INBOX_CANDIDATE_TEST=1.'
   }
@@ -170,6 +177,7 @@ $stagingDirectory = Join-Path $targetParent ".wechat-inbox-sync.stage-$transacti
 $backupDirectory = Join-Path $targetParent ".wechat-inbox-sync.backup-$transactionId"
 $promotedNames = New-Object System.Collections.Generic.List[string]
 $backedUpNames = New-Object System.Collections.Generic.List[string]
+$committed = $false
 
 try {
   New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
@@ -208,28 +216,78 @@ try {
     -ResolvedCandidate $resolvedCandidate `
     -InstalledDirectory $resolvedTarget
 
-  Remove-Item -LiteralPath $backupDirectory -Recurse -Force
-  Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
-  Write-Output 'Plugin release candidate installed and verified.'
+  $committed = $true
 } catch {
   $failure = $_
+  $rollbackErrors = New-Object System.Collections.Generic.List[string]
   foreach ($name in $promotedNames) {
     $promotedPath = Join-Path $resolvedTarget $name
     if (Test-Path -LiteralPath $promotedPath) {
-      Remove-Item -LiteralPath $promotedPath -Recurse -Force
+      try {
+        Remove-Item -LiteralPath $promotedPath -Recurse -Force
+      } catch {
+        $rollbackErrors.Add("remove promoted ${name}: $($_.Exception.Message)")
+      }
     }
   }
   foreach ($name in $backedUpNames) {
     $backupPath = Join-Path $backupDirectory $name
     if (Test-Path -LiteralPath $backupPath) {
-      Move-Item -LiteralPath $backupPath -Destination (Join-Path $resolvedTarget $name)
+      try {
+        if ($TestFailRollbackForName -and $name -eq $TestFailRollbackForName) {
+          throw "Injected rollback failure for $name."
+        }
+        Move-Item -LiteralPath $backupPath -Destination (Join-Path $resolvedTarget $name)
+      } catch {
+        $rollbackErrors.Add("restore backup ${name}: $($_.Exception.Message)")
+      }
     }
   }
-  if (Test-Path -LiteralPath $stagingDirectory) {
-    Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
+  if ($rollbackErrors.Count -gt 0) {
+    $details = $rollbackErrors -join '; '
+    Write-Output "BACKUP_PRESERVED=$backupDirectory"
+    throw "Candidate install failed and rollback incomplete. Original failure: $($failure.Exception.Message). Rollback errors: $details. Backup preserved at $backupDirectory"
   }
-  if (Test-Path -LiteralPath $backupDirectory) {
-    Remove-Item -LiteralPath $backupDirectory -Recurse -Force
+  try {
+    if (Test-Path -LiteralPath $stagingDirectory) {
+      Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $backupDirectory) {
+      Remove-Item -LiteralPath $backupDirectory -Recurse -Force
+    }
+  } catch {
+    Write-Output "BACKUP_PRESERVED=$backupDirectory"
+    Write-Warning "Rollback restored the previous plugin, but temporary cleanup failed. Backup preserved at $backupDirectory. Details: $($_.Exception.Message)"
   }
   throw $failure
 }
+
+if (-not $committed) {
+  throw 'Candidate install did not reach its verified commit point.'
+}
+
+if (Test-Path -LiteralPath $stagingDirectory) {
+  try {
+    Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
+  } catch {
+    Write-Warning "Verified install is active, but staging cleanup failed at $stagingDirectory. Details: $($_.Exception.Message)"
+  }
+}
+
+if (Test-Path -LiteralPath $backupDirectory) {
+  try {
+    if ($TestFailBackupCleanup) {
+      $firstBackupEntry = Get-ChildItem -LiteralPath $backupDirectory | Select-Object -First 1
+      if ($null -ne $firstBackupEntry) {
+        Remove-Item -LiteralPath $firstBackupEntry.FullName -Recurse -Force
+      }
+      throw 'Injected backup cleanup failure after partial cleanup.'
+    }
+    Remove-Item -LiteralPath $backupDirectory -Recurse -Force
+  } catch {
+    Write-Output "BACKUP_PRESERVED=$backupDirectory"
+    Write-Warning "Verified install remains active; backup cleanup failed. Backup preserved at $backupDirectory. Details: $($_.Exception.Message)"
+  }
+}
+
+Write-Output 'Plugin release candidate installed and verified.'
