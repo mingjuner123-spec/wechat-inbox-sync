@@ -4,6 +4,8 @@
 
 ## 已测试候选包晋升
 
+- [ ] 在仓库根目录运行 `npm ci --prefix obsidian-plugin/wechat-inbox-sync`，使用 lockfile 固定的构建工具链。
+- [ ] 运行 `node tests/plugin-build-foundation.test.js`，确认 `src/*` 与正式单文件 `main.js` 没有构建漂移。
 - [ ] 从唯一发布源执行 `node scripts/prepare-plugin-release-candidate.js --source obsidian-plugin/wechat-inbox-sync --artifacts-root .artifacts/plugin --json-out .artifacts/candidate-result.json`。
 - [ ] 使用 `scripts/install-plugin-release-candidate.ps1` 将完整候选包事务式安装到本地测试库；不得只替换 `main.js`，不得覆盖用户的 `data.json`。
 - [ ] 用户本地验收后，运行 `node scripts/verify-plugin-release-candidate.js`，同时核对候选包、权威源码、已安装插件和根目录镜像。

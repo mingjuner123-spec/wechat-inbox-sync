@@ -43,6 +43,8 @@
 - `docs/superpowers/specs/2026-07-31-plugin-architecture-loop-1-3-74-design.md`
 - `docs/superpowers/plans/2026-07-31-plugin-architecture-loop-1-3-74.md`
 - `docs/task-cards/plugin-architecture-loop-1-3-74-001.md`
+- `.gitattributes`
+- `.gitignore`
 - `obsidian-plugin/wechat-inbox-sync/build-plugin.js`
 - `obsidian-plugin/wechat-inbox-sync/package.json`
 - `obsidian-plugin/wechat-inbox-sync/package-lock.json`
@@ -139,3 +141,10 @@
 - `git diff --check`：通过。
 
 该快照是所有模块迁移的比较基准。后续任何红灯都必须归因到当前小步或明确记录为环境差异。
+
+## 当前进度
+
+- 阶段 0（冻结与基线）：完成。
+- 阶段 1（确定性构建地基）：实现与独立复审完成，P0=0、P1=0、P2=0。
+- 业务 `main.js` 相对基线无内容差异，插件仍为 1.3.74。
+- 下一步：创建构建地基本地检查点，然后进入 `date-utils` 单模块 Loop。

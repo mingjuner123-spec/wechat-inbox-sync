@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install pinned plugin build toolchain
+        run: npm ci --prefix obsidian-plugin/wechat-inbox-sync
+
       - name: Fetch current remote main
         run: git fetch --no-tags origin main:refs/remotes/origin/main
 
@@ -50,6 +53,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify deterministic plugin source bundle
+        run: node tests/plugin-build-foundation.test.js
+
       - name: Prepare verified release candidate
         run: |
           set -euo pipefail
@@ -70,9 +76,11 @@ jobs:
 
       - name: Check governance and plugin JavaScript syntax
         run: |
+          node --check tests/plugin-build-foundation.test.js
           node --check tests/release-governance.test.js
           node --check tests/plugin-release-candidate.test.js
           node --check tests/plugin-release-identity.test.js
+          node --check obsidian-plugin/wechat-inbox-sync/build-plugin.js
           node --check scripts/plugin-release-candidate-core.js
           node --check scripts/prepare-plugin-release-candidate.js
           node --check scripts/verify-plugin-release-candidate.js
