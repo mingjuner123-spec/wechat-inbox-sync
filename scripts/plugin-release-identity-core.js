@@ -241,6 +241,46 @@ function parseRemoteTagOutput(output, tag, { allowAbsent = false } = {}) {
   return { tagObject: match[1], tagCommit: match[2] };
 }
 
+function validateStableRemoteTagEvidence({
+  tag,
+  defaultCommit,
+  apiTagObject,
+  apiTagCommit,
+  lsRemoteOutput,
+  previousEvidence = null,
+} = {}) {
+  validateVersionTag(tag);
+  const trustedDefaultCommit = parseCommitOutput(
+    `${defaultCommit}\n`,
+    'trusted default branch commit',
+  );
+  const trustedTagObject = parseCommitOutput(
+    `${apiTagObject}\n`,
+    `GitHub API tag ${tag} object`,
+  );
+  const trustedTagCommit = parseCommitOutput(
+    `${apiTagCommit}\n`,
+    `GitHub API tag ${tag} commit`,
+  );
+  if (trustedTagCommit !== trustedDefaultCommit) {
+    throw new Error(`trusted tag ${tag} commit differs from the default branch commit`);
+  }
+  const remote = parseRemoteTagOutput(lsRemoteOutput, tag);
+  if (remote.tagObject !== trustedTagObject || remote.tagCommit !== trustedTagCommit) {
+    throw new Error(`GitHub API and ls-remote disagree for annotated tag ${tag}`);
+  }
+  const evidence = {
+    defaultCommit: trustedDefaultCommit,
+    tagObject: trustedTagObject,
+    tagCommit: trustedTagCommit,
+  };
+  if (previousEvidence !== null
+    && JSON.stringify(previousEvidence) !== JSON.stringify(evidence)) {
+    throw new Error(`remote release identity moved between samples for ${tag}`);
+  }
+  return evidence;
+}
+
 function validateLocalReleaseSnapshot({
   phase,
   tag,
@@ -294,40 +334,48 @@ function validateTrustedLocalSnapshot({
   validateVersionTag(tag);
   assertCleanStatus(statusOutput);
   const head = parseCommitOutput(headOutput, 'local HEAD');
-  const localTagCommit = parseCommitOutput(
-    tagCommitOutput,
-    `local tag ${tag} peeled commit`,
-  );
   const defaultCommit = parseCommitOutput(
     `${trustedDefaultCommit}\n`,
     'trusted GitHub default branch commit',
   );
-  parseTagType(tagTypeOutput);
   assertHeadMatchesRemote(head, defaultCommit);
-  assertTagMatchesHead(localTagCommit, head);
   if (phase === 'prepublish') {
+    parseTagType(tagTypeOutput);
+    const localTagCommit = parseCommitOutput(
+      tagCommitOutput,
+      `local tag ${tag} peeled commit`,
+    );
+    assertTagMatchesHead(localTagCommit, head);
     if (trustedTagCommit !== null) {
       throw new Error(`official remote tag ${tag} already exists`);
     }
+    return {
+      phase,
+      tag,
+      head,
+      tagCommit: localTagCommit,
+      trustedDefaultCommit: defaultCommit,
+      trustedTagCommit,
+    };
   } else {
     const remoteTagCommit = parseCommitOutput(
       `${trustedTagCommit}\n`,
       `trusted GitHub tag ${tag} commit`,
     );
-    if (remoteTagCommit !== localTagCommit) {
+    if (remoteTagCommit !== defaultCommit) {
       throw new Error(
-        `trusted GitHub tag ${tag} commit ${remoteTagCommit} differs from local tag commit ${localTagCommit}`,
+        `trusted GitHub tag ${tag} commit ${remoteTagCommit} differs from trusted default commit ${defaultCommit}`,
       );
     }
+    return {
+      phase,
+      tag,
+      head,
+      tagCommit: remoteTagCommit,
+      trustedDefaultCommit: defaultCommit,
+      trustedTagCommit: remoteTagCommit,
+    };
   }
-  return {
-    phase,
-    tag,
-    head,
-    tagCommit: localTagCommit,
-    trustedDefaultCommit: defaultCommit,
-    trustedTagCommit,
-  };
 }
 
 function parseJsonBuffer(bytes, label) {
@@ -708,4 +756,5 @@ module.exports = {
   validateReleaseMetadata,
   validateReleasePayload,
   validateRepositoryPayload,
+  validateStableRemoteTagEvidence,
 };

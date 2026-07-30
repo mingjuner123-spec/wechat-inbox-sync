@@ -269,6 +269,60 @@ test('local snapshot parsing rejects malformed Git output and dirty worktrees', 
   );
 });
 
+test('postpublish trusts remote annotated tag evidence without requiring a local tag', () => {
+  assert.doesNotThrow(() => core.validateTrustedLocalSnapshot({
+    phase: 'postpublish',
+    tag: TAG,
+    statusOutput: '',
+    headOutput: `${SHA_A}\n`,
+    trustedDefaultCommit: SHA_A,
+    trustedTagCommit: SHA_A,
+  }));
+  assert.throws(() => core.validateTrustedLocalSnapshot({
+    phase: 'postpublish',
+    tag: TAG,
+    statusOutput: '',
+    headOutput: `${SHA_A}\n`,
+    trustedDefaultCommit: SHA_A,
+    trustedTagCommit: SHA_B,
+  }), /tag|commit|default|main/i);
+  assert.throws(() => core.validateTrustedLocalSnapshot({
+    phase: 'prepublish',
+    tag: TAG,
+    statusOutput: '',
+    headOutput: `${SHA_A}\n`,
+    trustedDefaultCommit: SHA_A,
+    trustedTagCommit: null,
+  }), /tag|annotated|commit/i);
+});
+
+test('remote tag evidence rejects API disagreement and movement between samples', () => {
+  const lsRemote = `${TAG_OBJECT}\trefs/tags/${TAG}\n${SHA_A}\trefs/tags/${TAG}^{}\n`;
+  const first = core.validateStableRemoteTagEvidence({
+    tag: TAG,
+    defaultCommit: SHA_A,
+    apiTagObject: TAG_OBJECT,
+    apiTagCommit: SHA_A,
+    lsRemoteOutput: lsRemote,
+  });
+  assert.equal(first.tagObject, TAG_OBJECT);
+  assert.throws(() => core.validateStableRemoteTagEvidence({
+    tag: TAG,
+    defaultCommit: SHA_A,
+    apiTagObject: SHA_B,
+    apiTagCommit: SHA_A,
+    lsRemoteOutput: lsRemote,
+  }), /API|ls-remote|tag object|disagree/i);
+  assert.throws(() => core.validateStableRemoteTagEvidence({
+    tag: TAG,
+    defaultCommit: SHA_B,
+    apiTagObject: TAG_OBJECT,
+    apiTagCommit: SHA_B,
+    lsRemoteOutput: `${TAG_OBJECT}\trefs/tags/${TAG}\n${SHA_B}\trefs/tags/${TAG}^{}\n`,
+    previousEvidence: first,
+  }), /moved|sample|stable|identity/i);
+});
+
 test('temporary bare Git fixture covers clean, dirty, moved main, annotated tag peeling, and pre/post states', (t) => {
   const { bare, work } = createBareFixture(t);
   const headOutput = git(work, ['rev-parse', 'HEAD']);
@@ -621,6 +675,10 @@ test('production CLI exposes only fixed prepublish/postpublish modes and no comm
   assert.match(cli, /default_branch|defaultBranch/);
   assert.match(cli, /effectiveDeadlineMs\s*-\s*Date\.now\(\)/);
   assert.doesNotMatch(cli, /resolveReleaseTargetCommit/);
+  assert.match(cli, /collectLocalInputs\(tag,\s*\{\s*requireLocalAnnotatedTag:\s*false\s*\}\)/);
+  assert.match(cli, /verifyPublishedAssetBytes\(lastRelease,\s*tag,\s*finalCommit\)/);
+  assert.match(cli, /\['show',\s*`\$\{trustedCommit\}:/);
+  assert.match(cli, /verifyPublishedAssetBytes[\s\S]*probeStableRemoteTag\(tag,\s*4,/);
 });
 
 test('production CLI rejects a fork origin before any fixed GitHub Release lookup', (t) => {
