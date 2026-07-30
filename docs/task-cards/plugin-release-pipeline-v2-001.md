@@ -16,16 +16,21 @@
 
 ## 允许修改路径（allowedPaths）
 
+- `.gitignore`
 - `.github/workflows/main-guards.yml`
 - `.github/workflows/release.yml`
+- `release-candidate.json`
+- `docs/WORKLOG.md`
 - `docs/superpowers/specs/2026-07-30-plugin-release-pipeline-v2-design.md`
 - `docs/superpowers/plans/2026-07-30-plugin-release-pipeline-v2.md`
 - `docs/task-cards/plugin-release-pipeline-v2-001.md`
+- `obsidian-plugin/wechat-inbox-sync/RELEASE_CHECKLIST.md`
 - `scripts/check-plugin-release-identity.js`
 - `scripts/plugin-release-identity-core.js`
 - `scripts/plugin-release-candidate-core.js`
 - `scripts/prepare-plugin-release-candidate.js`
 - `scripts/install-plugin-release-candidate.ps1`
+- `scripts/promote-plugin-release-candidate.js`
 - `scripts/verify-plugin-release-candidate.js`
 - `scripts/sync-plugin-release-mirror.js`
 - `tests/plugin-main-ai.test.js`
@@ -52,6 +57,8 @@
 - 当前正式稳定锚点为 `main@4405dcef28f4dea0d5a650f57e874c81175a3872`、插件 `1.3.74`。
 - 权威插件源码为 `obsidian-plugin/wechat-inbox-sync/`，根目录四个发布文件是市场兼容镜像。
 - 现有本地测试依赖人工复制与比较，没有不可变候选身份证。
+- 当前 Release ZIP 除四个 loose assets 外还包含 `README.md`、`LICENSE`、`local-asr/` 和 `local-ocr/`；候选必须覆盖这套完整 ZIP 文件集。
+- 当前公开仓库没有 `.gitignore`，实施时必须先精确忽略根 `/.artifacts/`。
 - `tests/plugin-main-ai.test.js` 存在按墙上时间过期的固定日期样本。
 - 发布工作流曾在 Release 与资产正确创建后，因 Runner 本地标签对象不是 annotated tag 而末尾误报失败；远端 GitHub tag API 已证实标签正确。
 
@@ -71,9 +78,10 @@
 ## 验收
 
 - 候选准备、安装、漂移拒绝、镜像生成、镜像漂移拒绝均有自动回归测试。
-- 候选包只含正式发布文件，不含 `data.json`、缓存、日志或本机路径。
-- 同一候选的源码、根镜像、候选包和本地安装目标哈希一致。
+- 候选身份证覆盖四个 loose assets 与 Release ZIP 完整文件集，不含 `data.json`、缓存、日志或本机路径。
+- 同一候选的源码、根镜像、候选包、本地安装目标、提交内 `release-candidate.json` 和 tag commit 哈希一致。
 - 修改任一候选文件后，验证和晋升失败关闭。
+- Windows CI 实际覆盖候选安装、整体回滚、错误目标拒绝和 `data.json` 原样保留。
 - 时间测试在任意系统日期运行均稳定。
 - postpublish 测试复现“本地轻量/缺失标签、远端 annotated tag 正确”的 GitHub Runner 场景并通过。
 - prepublish 仍必须拒绝本地 lightweight tag。
