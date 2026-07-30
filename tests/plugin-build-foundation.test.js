@@ -196,4 +196,23 @@ for (const workflowPath of [mainWorkflowPath, releaseWorkflowPath]) {
   const candidateIndex = workflow.indexOf('node scripts/prepare-plugin-release-candidate.js');
   assert.ok(buildGateIndex >= 0 && candidateIndex >= 0 && buildGateIndex < candidateIndex,
     `${path.basename(workflowPath)} must verify the committed bundle before candidate preparation`);
+
+  for (const moduleTestName of [
+    'plugin-ai-metadata-error-utils.test.js',
+    'plugin-date-utils.test.js',
+    'plugin-diagnostic-redaction-utils.test.js',
+    'plugin-input-normalization-utils.test.js',
+    'plugin-progress-notice-utils.test.js',
+    'plugin-record-identity-utils.test.js',
+    'plugin-record-metadata-utils.test.js',
+    'plugin-record-state-utils.test.js',
+    'plugin-transcription-quality-utils.test.js',
+    'plugin-vault-path-utils.test.js',
+  ]) {
+    assert.match(
+      workflow,
+      new RegExp(`node\\s+tests/${moduleTestName.replace(/\./g, '\\.')}`),
+      `${path.basename(workflowPath)} must run ${moduleTestName}`,
+    );
+  }
 }

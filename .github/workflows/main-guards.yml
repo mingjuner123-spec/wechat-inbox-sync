@@ -35,6 +35,16 @@ jobs:
       - name: Run release governance and plugin regressions
         run: |
           node tests/plugin-build-foundation.test.js
+          node tests/plugin-ai-metadata-error-utils.test.js
+          node tests/plugin-date-utils.test.js
+          node tests/plugin-diagnostic-redaction-utils.test.js
+          node tests/plugin-input-normalization-utils.test.js
+          node tests/plugin-progress-notice-utils.test.js
+          node tests/plugin-record-identity-utils.test.js
+          node tests/plugin-record-metadata-utils.test.js
+          node tests/plugin-record-state-utils.test.js
+          node tests/plugin-transcription-quality-utils.test.js
+          node tests/plugin-vault-path-utils.test.js
           node tests/release-governance.test.js
           node tests/plugin-release-candidate.test.js
           node tests/plugin-main-ai.test.js
