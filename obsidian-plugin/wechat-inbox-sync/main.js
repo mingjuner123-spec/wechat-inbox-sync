@@ -17,7 +17,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.73';
+const PLUGIN_RUNTIME_VERSION = '1.3.74';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -25,7 +25,6 @@ const LEGACY_OFFICIAL_SYNC_API_BASES = [
 ];
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
-const RECORD_DELETE_SYNC_API_BASE = FEISHU_OAUTH_SYNC_API_BASE;
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
@@ -34,6 +33,8 @@ const XIAOHONGSHU_ROOT_COMMENT_LIMIT = XIAOHONGSHU_TOTAL_COMMENT_LIMIT;
 const XIAOHONGSHU_REPLY_COMMENT_LIMIT = 100;
 const XIAOHONGSHU_COMMENT_TIMEOUT_MS = 90000;
 const XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS = 10000;
+const XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS = 10000;
+const XIAOHONGSHU_CONTENT_DEADLINE_MS = 40000;
 const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211AC) AppleWebKit/537.36 Chrome/119.0.0.0 Mobile Safari/537.36';
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
@@ -122,6 +123,7 @@ const DEFAULT_SETTINGS = {
   tencentEngineModelType: '16k_zh',
   tencentPollAttempts: 60,
   tencentPollIntervalMs: 5000,
+  locallyQuarantinedRecordIds: [],
 };
 
 const XIAOHONGSHU_OCR_MAX_IMAGES = 18;
@@ -1534,6 +1536,7 @@ function buildXiaohongshuBrowserAttemptDiagnostic(candidate = {}, page = null, e
     bodyCharacterCount: String(extracted && (extracted.description || extracted.markdown) || '').trim().length,
     imageCount: Array.isArray(extracted && extracted.imageUrls) ? extracted.imageUrls.length : 0,
     failed: Boolean(error),
+    ...(error && error.code === 'BROWSER_TASK_TIMEOUT' ? { timedOut: true } : {}),
   };
 }
 
@@ -1567,6 +1570,12 @@ function buildXiaohongshuFailureDiagnostic({
       pageType: classifyXiaohongshuPage({ html, resolvedUrl, extracted }),
       renderFailed: Boolean(renderError),
       requestFailed: Boolean(requestError),
+      browserTimedOut: Boolean(
+        (renderError && renderError.code === 'BROWSER_TASK_TIMEOUT')
+        || (requestError && requestError.code === 'BROWSER_TASK_TIMEOUT')
+        || (Array.isArray(browserAttempts)
+          && browserAttempts.some((attempt) => attempt && attempt.timedOut === true)),
+      ),
       redirectCount: Number(redirectDiagnostic && redirectDiagnostic.redirectCount) || 0,
       usedGetFallback: Boolean(redirectDiagnostic && redirectDiagnostic.usedGetFallback),
       redirectAttempts: redirectDiagnostic && Array.isArray(redirectDiagnostic.attempts)
@@ -1585,6 +1594,7 @@ function buildXiaohongshuFailureDiagnostic({
         bodyCharacterCount: Number(attempt && attempt.bodyCharacterCount) || 0,
         imageCount: Number(attempt && attempt.imageCount) || 0,
         failed: Boolean(attempt && attempt.failed),
+        ...(attempt && attempt.timedOut === true ? { timedOut: true } : {}),
       })),
     },
     extraction: {
@@ -1610,6 +1620,86 @@ function createRetryableXiaohongshuContentError(diagnostic = {}) {
 
 function isRetryableXiaohongshuContentError(error) {
   return Boolean(error && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE');
+}
+
+function getRecordXiaohongshuIdentityCandidates(record = {}) {
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  return [
+    record && record.content,
+    metadata.url,
+    metadata.originalUrl,
+    metadata.resolvedUrl,
+    metadata.canonicalUrl,
+    metadata.sourceUrl,
+    metadata.noteUrl,
+    metadata.shareUrl,
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+}
+
+function hasRecoverableXiaohongshuRecordIdentity(record = {}) {
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  const explicitNoteId = [
+    metadata.noteId,
+    metadata.note_id,
+    metadata.xiaohongshuNoteId,
+    metadata.xhsNoteId,
+  ].map((value) => String(value || '').trim()).find(Boolean);
+  if (explicitNoteId) return true;
+  return getRecordXiaohongshuIdentityCandidates(record)
+    .some((candidate) => Boolean(getXiaohongshuTargetNoteId(candidate)));
+}
+
+function isPermanentlyExpiredXiaohongshuShortlinkRecord(record = {}, error = null) {
+  if (!isRetryableXiaohongshuContentError(error)) return false;
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  if ([
+    metadata.fileID,
+    metadata.fileId,
+    metadata.audioFileID,
+    metadata.audioFileId,
+  ].some((value) => String(value || '').trim())) return false;
+  const candidates = getRecordXiaohongshuIdentityCandidates(record);
+  if (!candidates.some((candidate) => isXiaohongshuShortLinkUrl(candidate))) return false;
+  if (hasRecoverableXiaohongshuRecordIdentity(record)) return false;
+
+  const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
+    ? error.diagnostic
+    : {};
+  const request = diagnostic.request && typeof diagnostic.request === 'object'
+    ? diagnostic.request
+    : {};
+  const extraction = diagnostic.extraction && typeof diagnostic.extraction === 'object'
+    ? diagnostic.extraction
+    : {};
+  const responseStatus = Number(request.responseStatus) || 0;
+  const pageType = String(request.pageType || '');
+  const finalHost = String(request.finalHost || '').toLowerCase();
+  const browserAttempts = Array.isArray(request.browserAttempts)
+    ? request.browserAttempts.filter((attempt) => attempt && attempt.attempted === true)
+    : [];
+  const browserFallbacksOnlyConfirmedFailure = browserAttempts.length > 0
+    && browserAttempts.every((attempt) => (
+      attempt.failed !== true
+      && ['xiaohongshu-generic-landing', 'xiaohongshu-unavailable'].includes(
+        String(attempt.pageType || ''),
+      )
+    ));
+
+  return request.requestFailed !== true
+    && request.renderFailed !== true
+    && request.browserTimedOut !== true
+    && responseStatus >= 200
+    && responseStatus < 400
+    && isHostnameWithinDomain(finalHost, 'xiaohongshu.com')
+    && ['xiaohongshu-generic-landing', 'xiaohongshu-unavailable'].includes(pageType)
+    && browserFallbacksOnlyConfirmedFailure
+    && extraction.hasUsableTitle !== true;
 }
 
 function isRemoteAsrDownloadFailure(error) {
@@ -1801,6 +1891,14 @@ function normalizeApiBase(apiBase) {
     : normalized;
 }
 
+function normalizeLocallyQuarantinedRecordIds(value) {
+  return [...new Set(
+    (Array.isArray(value) ? value : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean),
+  )].slice(0, 200);
+}
+
 function mergeSettings(savedSettings, platform = os.platform()) {
   const sourceSettings = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
   const savedSettingsVersion = Number(sourceSettings.settingsVersion) || 0;
@@ -1918,6 +2016,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   const pollIntervalMs = Number(merged.tencentPollIntervalMs);
   merged.tencentPollAttempts = Math.max(1, Number.isFinite(pollAttempts) ? pollAttempts : DEFAULT_SETTINGS.tencentPollAttempts);
   merged.tencentPollIntervalMs = Math.max(1000, Number.isFinite(pollIntervalMs) ? pollIntervalMs : DEFAULT_SETTINGS.tencentPollIntervalMs);
+  merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
+    merged.locallyQuarantinedRecordIds,
+  );
 
   return merged;
 }
@@ -5801,6 +5902,30 @@ async function waitForBrowserTasksWithin(tasks, timeoutMs = 2500, timeoutTaskFac
   }
 }
 
+function createBrowserTaskTimeoutError(label, timeoutMs) {
+  const error = new Error(`${label} timed out after ${timeoutMs}ms`);
+  error.code = 'BROWSER_TASK_TIMEOUT';
+  return error;
+}
+
+async function runBrowserTaskWithTimeout(task, timeoutMs, label = 'browser task') {
+  const boundedTimeoutMs = Math.max(1, Number(timeoutMs) || 1);
+  let timer = null;
+  try {
+    return await Promise.race([
+      Promise.resolve(task),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(createBrowserTaskTimeoutError(label, boundedTimeoutMs)),
+          boundedTimeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function isLikelyImageUrl(value) {
   const url = normalizeExtractedUrl(value);
   if (!url) return false;
@@ -5814,11 +5939,32 @@ function isLikelyImageUrl(value) {
 
 function getImageVariantKey(value) {
   const url = normalizeExtractedUrl(value);
+  const getNormalizedAssetName = (pathname = '') => {
+    const lastSegment = String(pathname || '').split('/').filter(Boolean).pop() || '';
+    return lastSegment
+      .replace(/!.+$/i, '')
+      .replace(/\.(?:jpe?g|png|webp|bmp)$/i, '')
+      .toLowerCase();
+  };
+  let xiaohongshuAssetName = '';
+  try {
+    const parsed = new URL(url);
+    if (isHostnameWithinDomain(parsed.hostname, 'xhscdn.com')
+      || isHostnameWithinDomain(parsed.hostname, 'xiaohongshu.com')) {
+      xiaohongshuAssetName = getNormalizedAssetName(parsed.pathname);
+    }
+  } catch (error) {
+    xiaohongshuAssetName = '';
+  }
+  if (xiaohongshuAssetName.length >= 20 && /^[a-z0-9_-]+$/i.test(xiaohongshuAssetName)) {
+    return `xiaohongshu-asset:${xiaohongshuAssetName}`;
+  }
+
   const noteImageMatch = url.match(/\/notes_pre_post\/([^"'\\\s<>?#]+)/i);
-  if (noteImageMatch) return `notes_pre_post:${noteImageMatch[1].replace(/!.+$/i, '')}`;
+  if (noteImageMatch) return `notes_pre_post:${getNormalizedAssetName(noteImageMatch[1])}`;
 
   const spectrumImageMatch = url.match(/\/spectrum\/([^"'\\\s<>?#]+)/i);
-  if (spectrumImageMatch) return `spectrum:${spectrumImageMatch[1].replace(/!.+$/i, '')}`;
+  if (spectrumImageMatch) return `spectrum:${getNormalizedAssetName(spectrumImageMatch[1])}`;
 
   return url
     .replace(/^http:\/\//i, 'https://')
@@ -7427,7 +7573,6 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
   const description = descriptions.sort((a, b) => b.length - a.length)[0]
     || String(selectedPreferred?.description || '').trim();
   const tags = [];
-  const imageUrls = [];
   const comments = [];
   const addUniqueText = (target, value) => {
     const text = String(value || '').trim();
@@ -7435,11 +7580,31 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
   };
   sources.forEach((item) => {
     (Array.isArray(item.tags) ? item.tags : []).forEach((tag) => addUniqueText(tags, tag));
-    (Array.isArray(item.imageUrls) ? item.imageUrls : []).forEach((imageUrl) => addUniqueText(imageUrls, imageUrl));
     (Array.isArray(item.comments) ? item.comments : []).forEach((comment) => {
       const key = JSON.stringify(comment);
       if (!comments.some((existing) => JSON.stringify(existing) === key)) comments.push(comment);
     });
+  });
+  const preferredImageUrls = sources.includes(selectedPreferred)
+    ? dedupeImageVariants(selectedPreferred.imageUrls || [])
+    : [];
+  let mergedImageUrls = preferredImageUrls;
+  sources.forEach((item) => {
+    const candidate = dedupeImageVariants(item.imageUrls || []);
+    if (!candidate.length || candidate === mergedImageUrls) return;
+    if (!mergedImageUrls.length) {
+      mergedImageUrls = candidate;
+      return;
+    }
+    const currentKeys = new Set(mergedImageUrls.map((imageUrl) => getImageVariantKey(imageUrl)));
+    const sharesKnownImage = candidate.some(
+      (imageUrl) => currentKeys.has(getImageVariantKey(imageUrl)),
+    );
+    if (sharesKnownImage) {
+      mergedImageUrls = dedupeImageVariants([...mergedImageUrls, ...candidate]);
+    } else if (candidate.length > mergedImageUrls.length) {
+      mergedImageUrls = candidate;
+    }
   });
   const videoUrl = String((sources.find((item) => String(item.videoUrl || '').trim()) || {}).videoUrl || '').trim();
 
@@ -7448,7 +7613,7 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
     author,
     description,
     tags,
-    imageUrls,
+    imageUrls: mergedImageUrls,
     videoUrl,
     comments,
     xiaohongshuTargetNoteIdPresent: sources.some((item) => item.xiaohongshuTargetNoteIdPresent === true),
@@ -7459,7 +7624,7 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
       title,
       description,
       tags,
-      imageUrls,
+      imageUrls: mergedImageUrls,
       videoUrl,
       comments,
     }),
@@ -10620,10 +10785,11 @@ async function probeXiaohongshuLoginStatus(targetUrl = '') {
   try {
     const url = targetUrl || 'https://www.xiaohongshu.com/';
     const loaded = waitForWebContents(win.webContents, 15000);
-    await win.loadURL(url);
+    if (!beginBestEffortBrowserLoad(win, url)) return false;
     await loaded;
     await new Promise((resolve) => setTimeout(resolve, 1200));
-    const state = await win.webContents.executeJavaScript(`
+    const state = await runBrowserTaskWithTimeout(
+      win.webContents.executeJavaScript(`
       (async () => {
         const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\\s+/g, ' ').trim();
         const hasLoginWall = /登录后|请登录|登录小红书|手机号登录|验证码登录|扫码登录|未登录/.test(text);
@@ -10640,7 +10806,10 @@ async function probeXiaohongshuLoginStatus(targetUrl = '') {
         } catch (error) {}
         return { hasLoginWall, hasUserSignal, hasAccountApiSignal, text: text.slice(0, 500) };
       })()
-    `);
+      `),
+      XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS,
+      'xiaohongshu-login-probe',
+    );
     if (state && state.hasLoginWall) return false;
     const hasCookie = await checkXiaohongshuLoginStatus();
     return Boolean(hasCookie && state && (state.hasAccountApiSignal || state.hasUserSignal));
@@ -11688,6 +11857,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     options.expectedUrl,
     url,
   ]);
+  const deadlineAt = Date.now() + XIAOHONGSHU_CONTENT_DEADLINE_MS;
   const cleanupIdentityObserver = installXiaohongshuIdentityObserver(
     win.webContents,
     (identityUrl) => {
@@ -11723,19 +11893,37 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     await loaded;
     let payload = null;
     for (let index = 0; index < 12; index += 1) {
-      const current = await win.webContents.executeJavaScript(`
-        (() => ({
-          html: document.documentElement ? document.documentElement.outerHTML : '',
-          url: String(location.href || ''),
-        }))()
-      `);
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        throw createBrowserTaskTimeoutError(
+          'xiaohongshu-content-render',
+          XIAOHONGSHU_CONTENT_DEADLINE_MS,
+        );
+      }
+      const current = await runBrowserTaskWithTimeout(
+        win.webContents.executeJavaScript(`
+          (() => ({
+            html: document.documentElement ? document.documentElement.outerHTML : '',
+            url: String(location.href || ''),
+          }))()
+        `),
+        Math.min(XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS, remainingMs),
+        'xiaohongshu-content-snapshot',
+      );
       payload = selectXiaohongshuBrowserSnapshot(
         payload,
         current,
         observedIdentityUrl || options.expectedUrl || url,
       );
       if (payload.matched) break;
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const remainingAfterSnapshotMs = deadlineAt - Date.now();
+      if (remainingAfterSnapshotMs <= 0) {
+        throw createBrowserTaskTimeoutError(
+          'xiaohongshu-content-render',
+          XIAOHONGSHU_CONTENT_DEADLINE_MS,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500, remainingAfterSnapshotMs)));
     }
     return {
       html: String(payload && payload.html || ''),
@@ -11999,12 +12187,16 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     for (let index = 0; index < 12; index += 1) {
       const identityBudget = getCommentBudget(0);
       if (identityBudget.shouldStop) break;
-      const current = await win.webContents.executeJavaScript(`
-        (() => ({
-          html: document.documentElement ? document.documentElement.outerHTML : '',
-          url: String(location.href || ''),
-        }))()
-      `);
+      const current = await runBrowserTaskWithTimeout(
+        win.webContents.executeJavaScript(`
+          (() => ({
+            html: document.documentElement ? document.documentElement.outerHTML : '',
+            url: String(location.href || ''),
+          }))()
+        `),
+        Math.min(XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS, identityBudget.remainingMs),
+        'xiaohongshu-comment-identity-snapshot',
+      );
       identitySnapshot = selectXiaohongshuBrowserSnapshot(
         identitySnapshot,
         current,
@@ -14033,10 +14225,22 @@ function buildSyncResultNotice(written = [], skipped = [], conversionWarnings = 
 
 function buildSkippedSyncNotice(skipped = []) {
   const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
-  const otherSkippedCount = skipped.filter((item) => item && item.reason !== 'already-synced-local' && item.reason !== 'cloud-transcription-processing').length;
+  const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === 'locally-quarantined-unrecoverable').length;
+  const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === 'deleted-expired-xhs-shortlink').length;
+  const otherSkippedCount = skipped.filter((item) => item
+    && item.reason !== 'already-synced-local'
+    && item.reason !== 'cloud-transcription-processing'
+    && item.reason !== 'locally-quarantined-unrecoverable'
+    && item.reason !== 'deleted-expired-xhs-shortlink').length;
   const parts = [];
   if (cloudProcessingCount) {
     parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
+  }
+  if (locallyQuarantinedCount) {
+    parts.push(`${locallyQuarantinedCount} 条历史失效内容已在本机忽略`);
+  }
+  if (deletedExpiredXiaohongshuCount) {
+    parts.push(`${deletedExpiredXiaohongshuCount} 条原小红书临时链接已失效，已生成失效说明文件并删除云端旧记录；请重新复制原笔记链接后再保存`);
   }
   if (otherSkippedCount) {
     parts.push(`${otherSkippedCount} 条已跳过`);
@@ -14350,6 +14554,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.currentTranscriptionProcessDetached = false;
     this.currentTranscriptionContext = null;
     this.pendingStoppedTranscriptionDeletes = new Map();
+    this.syncInboxPromise = null;
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -14377,6 +14582,25 @@ class WechatObsidianInboxPlugin extends Plugin {
       id: 'login-xiaohongshu-web',
       name: '登录小红书（用于提取小红书评论区）',
       callback: () => this.loginXiaohongshu(),
+    });
+
+    this.addCommand({
+      id: 'restore-locally-quarantined-records',
+      name: '恢复本机忽略的历史失败内容',
+      callback: async () => {
+        const count = normalizeLocallyQuarantinedRecordIds(
+          this.settings.locallyQuarantinedRecordIds,
+        ).length;
+        if (!count) {
+          new Notice('当前没有在本机忽略的历史失败内容。');
+          return;
+        }
+        await this.saveSettings({
+          ...this.settings,
+          locallyQuarantinedRecordIds: [],
+        });
+        new Notice(`已恢复 ${count} 条历史失败内容，下次同步会重新尝试。`);
+      },
     });
 
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
@@ -14762,10 +14986,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       return await this.requestJson(path, method, body, binding, options);
     };
     const isFeishuCloudRequest = /^\/feishu(?:\/|$)/.test(String(path || ''));
-    const isRecordDeleteRequest = /^\/records\/[^/]+\/delete$/.test(String(path || ''));
     const apiBaseForRequest = isFeishuCloudRequest
       ? FEISHU_OAUTH_SYNC_API_BASE
-      : (isRecordDeleteRequest ? RECORD_DELETE_SYNC_API_BASE : this.settings.apiBase);
+      : this.settings.apiBase;
     const requestPath = path;
     const requestBody = body || {};
     const requestOptions = {
@@ -15213,8 +15436,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async buildXiaohongshuOcrImagePayload(imageUrls = []) {
     const items = [];
-    const selected = (Array.isArray(imageUrls) ? imageUrls : [])
-      .filter(Boolean)
+    const selected = dedupeImageVariants(
+      (Array.isArray(imageUrls) ? imageUrls : []).filter(Boolean),
+    )
       .slice(0, XIAOHONGSHU_OCR_MAX_IMAGES);
     for (let index = 0; index < selected.length; index += 1) {
       const imageUrl = selected[index];
@@ -15242,9 +15466,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     title = '',
     binding = null,
   } = {}) {
-    const requestedImageUrls = (Array.isArray(imageUrls) ? imageUrls : [])
-      .map((imageUrl) => String(imageUrl || '').trim())
-      .filter(Boolean);
+    const requestedImageUrls = dedupeImageVariants(
+      (Array.isArray(imageUrls) ? imageUrls : [])
+        .map((imageUrl) => String(imageUrl || '').trim())
+        .filter(Boolean),
+    );
     if (!requestedImageUrls.length) return [];
     await this.ensureProFeatureAccess('小红书图片 OCR');
     const images = await this.buildXiaohongshuOcrImagePayload(requestedImageUrls);
@@ -15406,17 +15632,66 @@ class WechatObsidianInboxPlugin extends Plugin {
       return { deleted: false, recordId, reason: 'missing-context' };
     }
     const payload = await this.requestJson(
-      `/records/${encodeURIComponent(recordId)}/delete`,
+      `/records/${encodeURIComponent(recordId)}/synced`,
       'POST',
       {},
       binding,
     );
     const data = payload && payload.data ? payload.data : {};
+    const responseRecordId = String(data.id || data.recordId || '').trim();
     return {
-      deleted: data.deleted === true || data.alreadyMissing === true || data.status === 'deleted',
+      deleted: responseRecordId === recordId
+        && (data.deleted === true || data.alreadyMissing === true || data.status === 'deleted'),
       recordId,
       response: data,
     };
+  }
+
+  async writeExpiredXiaohongshuLinkReceipt(record = {}) {
+    const originalUrl = getRecordXiaohongshuIdentityCandidates(record)
+      .find((candidate) => isXiaohongshuShortLinkUrl(candidate))
+      || getRecordUrl(record);
+    const recordId = String(getRecordId(record) || '').trim();
+    let shortCode = 'shortlink';
+    try {
+      shortCode = new URL(originalUrl).pathname.split('/').filter(Boolean).pop() || shortCode;
+    } catch (error) {
+      shortCode = 'shortlink';
+    }
+    const safeShortCode = sanitizeNoteTitlePart(shortCode, 'shortlink');
+    const safeRecordSuffix = sanitizeNoteTitlePart(recordId, 'record').slice(-8);
+    const rootDir = normalizeConfiguredVaultPath(this.settings.inboxDir);
+    const dateFolder = getDateFolderName(record.createdAt);
+    const noteDir = normalizeVaultPath(
+      this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`,
+    );
+    const filePath = normalizeVaultPath(
+      `${noteDir}/小红书临时链接已失效-${safeShortCode}-${safeRecordSuffix}.md`,
+    );
+    if (!this.app
+      || !this.app.vault
+      || !this.app.vault.adapter
+      || typeof this.app.vault.adapter.write !== 'function') {
+      throw new Error('无法写入小红书失效链接说明文件');
+    }
+    await this.ensureFolder(rootDir);
+    await this.ensureFolder(noteDir);
+    const markdown = [
+      '# 小红书临时链接已失效',
+      '',
+      '这条内容保存时使用的是小红书临时短链。同步时该短链已经失效，无法再定位原笔记。',
+      '',
+      `原始临时链接：${originalUrl}`,
+      '',
+      `原保存时间：${formatCreatedTime(record.createdAt)}`,
+      '',
+      '请回到原笔记，重新复制当前有效的分享链接，再发送到小程序保存。',
+      '',
+      '> 插件会尝试清理云端旧记录；只有清理成功后，这条内容才不会在后续同步中反复出现。',
+      '',
+    ].join('\n');
+    await this.app.vault.adapter.write(filePath, markdown);
+    return filePath;
   }
 
   async stopCurrentTranscription() {
@@ -17514,12 +17789,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       || typeof this.app.vault.adapter.writeBinary !== 'function') {
       return markdown;
     }
-    const imageMatches = Array.from(String(markdown).matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
-    if (!imageMatches.length) return markdown;
+    const isXiaohongshuSource = isXiaohongshuUrl(options.sourceUrl);
+    let nextMarkdown = isXiaohongshuSource
+      ? sanitizeXiaohongshuMarkdownImages(String(markdown))
+      : String(markdown);
+    const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
+    if (!imageMatches.length) return nextMarkdown;
 
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
-    let nextMarkdown = String(markdown || '');
     let index = 1;
     const savedByUrl = new Map();
     const safeTitle = sanitizeAttachmentName(title, '网页图片');
@@ -17531,7 +17809,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const imageUrl = String(match[2] || '').trim();
       if (!imageUrl || savedByUrl.has(imageUrl)) continue;
       try {
-        const imageHeaders = isXiaohongshuUrl(options.sourceUrl)
+        const imageHeaders = isXiaohongshuSource
           ? await getXiaohongshuRequestHeaders(options.sourceUrl)
           : {};
         // eslint-disable-next-line no-await-in-loop
@@ -18274,7 +18552,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               renderedXiaohongshuError = renderError;
             }
           }
-          if (!response) throw requestError;
+          if (!response) throw renderedXiaohongshuError || requestError;
         }
         if (isXiaohongshuUrl(url)) {
           const responseFinalUrl = String(response && response.url || '').trim();
@@ -19031,21 +19309,28 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
+      const recordId = getRecordId(record);
       const progress = {
         bindingLabel,
         current: index + 1,
         total: records.length,
       };
+      if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
+        skipped.push({
+          recordId,
+          reason: 'locally-quarantined-unrecoverable',
+        });
+        continue;
+      }
       if (isCloudTranscriptionWaitingRecord(record)) {
         skipped.push({
-          recordId: getRecordId(record),
+          recordId,
           reason: 'cloud-transcription-processing',
         });
         this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
         continue;
       }
       try {
-        const recordId = getRecordId(record);
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
@@ -19082,6 +19367,25 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
           continue;
         }
+        if (isPermanentlyExpiredXiaohongshuShortlinkRecord(record, error)) {
+          try {
+            const receiptPath = await this.writeExpiredXiaohongshuLinkReceipt(record);
+            const expiredDeleteResult = await this.deleteCurrentTranscriptionRecord({
+              recordId,
+              binding,
+            });
+            if (expiredDeleteResult && expiredDeleteResult.deleted) {
+              skipped.push({
+                recordId,
+                reason: 'deleted-expired-xhs-shortlink',
+                receiptPath,
+              });
+              continue;
+            }
+          } catch (deleteError) {
+            // Keep the original extraction failure retryable if cloud cleanup fails.
+          }
+        }
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
           ? redactSensitiveObject(error.diagnostic)
           : null;
@@ -19117,6 +19421,24 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async syncInbox(showNotice = true) {
+    if (this.syncInboxPromise) {
+      if (showNotice) {
+        new Notice('同步正在进行中，请等待当前任务完成。', 2500);
+      }
+      return await this.syncInboxPromise;
+    }
+    const syncTask = this.runSyncInboxOnce(showNotice);
+    this.syncInboxPromise = syncTask;
+    try {
+      return await syncTask;
+    } finally {
+      if (this.syncInboxPromise === syncTask) {
+        this.syncInboxPromise = null;
+      }
+    }
+  }
+
+  async runSyncInboxOnce(showNotice = true) {
     const errors = validateSettings(this.settings);
     if (errors.length) {
       new Notice(errors[0]);
@@ -19775,6 +20097,7 @@ WechatObsidianInboxPlugin.__test = {
   enableDebuggerNetworkCapture,
   beginBestEffortBrowserLoad,
   waitForBrowserTasksWithin,
+  runBrowserTaskWithTimeout,
   sortMediaUrlsForTranscription,
   cleanDisplayUrl,
   isWechatMpArticleUrl,
@@ -19819,6 +20142,7 @@ WechatObsidianInboxPlugin.__test = {
   buildXiaohongshuFailureDiagnostic,
   createRetryableXiaohongshuContentError,
   isRetryableXiaohongshuContentError,
+  isPermanentlyExpiredXiaohongshuShortlinkRecord,
   isRemoteAsrDownloadFailure,
   getDoubaoTaskKey,
   getDefaultLocalTranscriptionCommand,
@@ -19874,6 +20198,7 @@ WechatObsidianInboxPlugin.__test = {
   validateSettings,
   mergeSettings,
   normalizeBindings,
+  normalizeLocallyQuarantinedRecordIds,
   normalizeApiBase,
   normalizeBindCodeInput,
 };
