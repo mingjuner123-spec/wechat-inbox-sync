@@ -51,6 +51,7 @@
 - `obsidian-plugin/wechat-inbox-sync/src/**`
 - `obsidian-plugin/wechat-inbox-sync/main.js`
 - `obsidian-plugin/wechat-inbox-sync/RELEASE_CHECKLIST.md`
+- `main.js`（仅允许由 `sync-plugin-release-mirror.js` 从权威插件生成）
 - `.github/workflows/main-guards.yml`
 - `.github/workflows/release.yml`
 - `scripts/prepare-plugin-release-candidate.js`
@@ -63,7 +64,7 @@
 - `tests/plugin-release-identity.test.js`
 - `tests/release-governance.test.js`
 
-以上路径只允许为模块化、构建和相应测试做最小修改。业务版本、运行标记、manifest、versions、ASR/OCR 资源和根目录市场镜像内容不得改变。
+以上路径只允许为模块化、构建和相应测试做最小修改。业务版本、运行标记、manifest、versions、ASR/OCR 资源不得改变。根 `main.js` 只能随权威生成物单向同步，禁止手改。
 
 ## 冻结区
 
@@ -74,7 +75,7 @@
 - 暂停当前转写、云端删除、同步 single-flight、失败/重试/跳过编排。
 - 双环境 API、绑定、Pro 权益、飞书 OAuth 编排。
 - 设置 UI。
-- 版本、发布身份、根镜像、候选包和 Release 契约。
+- 版本、发布身份、候选包和 Release 契约；根镜像只允许由权威生成物机械同步。
 - 未被当前入口引用且已经漂移的 `plugin-core.js`、`sync-core.js`、`cloud-client.js`。
 
 ## Loop 状态机
@@ -146,5 +147,7 @@
 
 - 阶段 0（冻结与基线）：完成。
 - 阶段 1（确定性构建地基）：实现与独立复审完成，P0=0、P1=0、P2=0。
-- 业务 `main.js` 相对基线无内容差异，插件仍为 1.3.74。
-- 下一步：创建构建地基本地检查点，然后进入 `date-utils` 单模块 Loop。
+- 构建地基本地检查点：`55696663`。
+- `date-utils`：实现、完整回归与独立复审完成，P0=0、P1=0、P2=0。
+- 插件仍为 1.3.74；业务源码只移动日期纯函数，根 `main.js` 仅跟随权威生成物。
+- 下一步：创建日期模块检查点，然后进入 `transcription-quality-utils` 单模块 Loop。
