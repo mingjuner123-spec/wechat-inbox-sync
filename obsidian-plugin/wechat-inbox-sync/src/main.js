@@ -55,6 +55,11 @@ const {
   normalizeVaultPath,
   shouldPersistNormalizedInboxDir,
 } = require('./vault-path-utils');
+const {
+  normalizeBindCodeInput,
+  normalizeNotePropertyFields: normalizeNotePropertyFieldsWithKeys,
+  normalizeNoteSaveMode: normalizeNoteSaveModeWithDefaults,
+} = require('./input-normalization-utils');
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
@@ -93,6 +98,15 @@ const NOTE_SAVE_MODES = {
   date: '按日期创建子目录',
   root: '直接保存到根目录',
 };
+const normalizeNoteSaveMode = (value) => normalizeNoteSaveModeWithDefaults(
+  value,
+  NOTE_SAVE_MODES,
+  DEFAULT_SETTINGS.noteSaveMode,
+);
+const normalizeNotePropertyFields = (value) => normalizeNotePropertyFieldsWithKeys(
+  value,
+  NOTE_PROPERTY_FIELD_KEYS,
+);
 const DEFAULT_NOTE_PROPERTY_FIELDS = 'title,author,url,synced_at,source,description,keywords';
 const RECORD_ID_MARKER_NAME = 'wechat-inbox-record-id';
 const NOTE_PROPERTY_FIELD_KEYS = [
@@ -1801,42 +1815,6 @@ function extractLocalAsrInstallRootFromCommand(command, platform = os.platform()
   return localPlatform === 'win32'
     ? path.win32.dirname(normalizedScriptPath)
     : path.posix.dirname(normalizedScriptPath);
-}
-
-function normalizeNoteSaveMode(value) {
-  const normalized = String(value || '').trim();
-  return Object.prototype.hasOwnProperty.call(NOTE_SAVE_MODES, normalized)
-    ? normalized
-    : DEFAULT_SETTINGS.noteSaveMode;
-}
-
-function normalizeNotePropertyFields(value) {
-  const seen = new Set();
-  return String(value || '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter((item) => {
-      if (!NOTE_PROPERTY_FIELD_KEYS.includes(item) || seen.has(item)) return false;
-      seen.add(item);
-      return true;
-    })
-    .join(',');
-}
-
-function normalizeBindCodeInput(code) {
-  const compact = String(code || '')
-    .trim()
-    .toUpperCase()
-    .replace(/[‐-‒–—―]/g, '-')
-    .replace(/[^A-Z0-9]/g, '');
-  if (compact.length === 6) {
-    return `${compact.slice(0, 3)}-${compact.slice(3)}`;
-  }
-  return String(code || '')
-    .trim()
-    .toUpperCase()
-    .replace(/[‐-‒–—―]/g, '-')
-    .replace(/\s+/g, '');
 }
 
 function normalizeBindings(settings) {

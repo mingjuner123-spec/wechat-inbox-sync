@@ -447,6 +447,41 @@ var require_vault_path_utils = __commonJS({
   }
 });
 
+// src/input-normalization-utils.js
+var require_input_normalization_utils = __commonJS({
+  "src/input-normalization-utils.js"(exports2, module2) {
+    "use strict";
+    function normalizeNoteSaveMode2(value, noteSaveModes, defaultMode) {
+      const normalized = String(value || "").trim();
+      return Object.prototype.hasOwnProperty.call(noteSaveModes || {}, normalized) ? normalized : defaultMode;
+    }
+    __name(normalizeNoteSaveMode2, "normalizeNoteSaveMode");
+    function normalizeNotePropertyFields2(value, notePropertyFieldKeys) {
+      const allowedFields = Array.isArray(notePropertyFieldKeys) ? notePropertyFieldKeys : [];
+      const seen = /* @__PURE__ */ new Set();
+      return String(value || "").split(",").map((item) => item.trim()).filter((item) => {
+        if (!allowedFields.includes(item) || seen.has(item)) return false;
+        seen.add(item);
+        return true;
+      }).join(",");
+    }
+    __name(normalizeNotePropertyFields2, "normalizeNotePropertyFields");
+    function normalizeBindCodeInput2(code) {
+      const compact = String(code || "").trim().toUpperCase().replace(/[-\u2010-\u2015]/g, "-").replace(/[^A-Z0-9]/g, "");
+      if (compact.length === 6) {
+        return `${compact.slice(0, 3)}-${compact.slice(3)}`;
+      }
+      return String(code || "").trim().toUpperCase().replace(/[-\u2010-\u2015]/g, "-").replace(/\s+/g, "");
+    }
+    __name(normalizeBindCodeInput2, "normalizeBindCodeInput");
+    module2.exports = {
+      normalizeBindCodeInput: normalizeBindCodeInput2,
+      normalizeNotePropertyFields: normalizeNotePropertyFields2,
+      normalizeNoteSaveMode: normalizeNoteSaveMode2
+    };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -505,6 +540,11 @@ var {
   normalizeVaultPath,
   shouldPersistNormalizedInboxDir
 } = require_vault_path_utils();
+var {
+  normalizeBindCodeInput,
+  normalizeNotePropertyFields: normalizeNotePropertyFieldsWithKeys,
+  normalizeNoteSaveMode: normalizeNoteSaveModeWithDefaults
+} = require_input_normalization_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.74";
@@ -541,6 +581,15 @@ var NOTE_SAVE_MODES = {
   date: "按日期创建子目录",
   root: "直接保存到根目录"
 };
+var normalizeNoteSaveMode = /* @__PURE__ */ __name((value) => normalizeNoteSaveModeWithDefaults(
+  value,
+  NOTE_SAVE_MODES,
+  DEFAULT_SETTINGS.noteSaveMode
+), "normalizeNoteSaveMode");
+var normalizeNotePropertyFields = /* @__PURE__ */ __name((value) => normalizeNotePropertyFieldsWithKeys(
+  value,
+  NOTE_PROPERTY_FIELD_KEYS
+), "normalizeNotePropertyFields");
 var DEFAULT_NOTE_PROPERTY_FIELDS = "title,author,url,synced_at,source,description,keywords";
 var RECORD_ID_MARKER_NAME = "wechat-inbox-record-id";
 var NOTE_PROPERTY_FIELD_KEYS = [
@@ -1835,28 +1884,6 @@ function extractLocalAsrInstallRootFromCommand(command, platform = os.platform()
   return localPlatform === "win32" ? path.win32.dirname(normalizedScriptPath) : path.posix.dirname(normalizedScriptPath);
 }
 __name(extractLocalAsrInstallRootFromCommand, "extractLocalAsrInstallRootFromCommand");
-function normalizeNoteSaveMode(value) {
-  const normalized = String(value || "").trim();
-  return Object.prototype.hasOwnProperty.call(NOTE_SAVE_MODES, normalized) ? normalized : DEFAULT_SETTINGS.noteSaveMode;
-}
-__name(normalizeNoteSaveMode, "normalizeNoteSaveMode");
-function normalizeNotePropertyFields(value) {
-  const seen = /* @__PURE__ */ new Set();
-  return String(value || "").split(",").map((item) => item.trim()).filter((item) => {
-    if (!NOTE_PROPERTY_FIELD_KEYS.includes(item) || seen.has(item)) return false;
-    seen.add(item);
-    return true;
-  }).join(",");
-}
-__name(normalizeNotePropertyFields, "normalizeNotePropertyFields");
-function normalizeBindCodeInput(code) {
-  const compact = String(code || "").trim().toUpperCase().replace(/[‐-‒–—―]/g, "-").replace(/[^A-Z0-9]/g, "");
-  if (compact.length === 6) {
-    return `${compact.slice(0, 3)}-${compact.slice(3)}`;
-  }
-  return String(code || "").trim().toUpperCase().replace(/[‐-‒–—―]/g, "-").replace(/\s+/g, "");
-}
-__name(normalizeBindCodeInput, "normalizeBindCodeInput");
 function normalizeBindings(settings) {
   const sourceBindings = Array.isArray(settings && settings.bindings) ? settings.bindings : [];
   const legacyToken = normalizeBindCodeInput(settings && settings.token);
