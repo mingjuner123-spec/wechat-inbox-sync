@@ -10768,7 +10768,7 @@ async function runLocalTranscriptionEntitlementTests() {
           hasAccess: true,
           plan: 'local_transcription_beta',
           status: 'active',
-          expiresAt: '2026-07-30T08:00:00.000Z',
+          expiresAt: '2038-09-05T00:00:00.000Z',
           code: 'OBPROT93C6',
         },
       }),
@@ -10880,7 +10880,7 @@ async function runLocalTranscriptionEntitlementTests() {
       hasAccess: true,
       plan: 'local_transcription_beta',
       status: 'active',
-      expiresAt: '2026-07-30T08:00:00.000Z',
+      expiresAt: '2038-09-05T00:00:00.000Z',
       code: 'OBPROT93C6',
     },
     bindings: [{
