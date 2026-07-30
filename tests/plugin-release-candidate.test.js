@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -48,6 +49,26 @@ function createPackageFixture() {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     },
   };
+}
+
+function runNode(scriptRelativePath, args, options = {}) {
+  return childProcess.spawnSync(
+    process.execPath,
+    [path.join(repoRoot, ...scriptRelativePath.split('/')), ...args],
+    {
+      cwd: options.cwd || repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...(options.env || {}),
+      },
+    },
+  );
+}
+
+function parseJsonOutput(result) {
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
 }
 
 test('root artifacts directory is ignored without hiding unrelated directories', () => {
@@ -236,4 +257,107 @@ test('package enumeration rejects symbolic links and non-regular entries', (t) =
     return;
   }
   assert.throws(() => enumeratePackageEntries(fixture.pluginRoot), /symbolic|link|regular|reparse/i);
+});
+
+test('prepare creates an immutable full-package candidate and reuses identical identity', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const artifactsRoot = path.join(fixture.tempRoot, '.artifacts', 'plugin');
+  const args = [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', artifactsRoot,
+  ];
+
+  const first = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', args));
+  assert.match(first.candidateId, /^9\.9\.9-[a-f0-9]{16}$/);
+  assert.ok(fs.existsSync(path.join(first.candidateDirectory, 'candidate.json')));
+  assert.ok(fs.existsSync(path.join(
+    first.candidateDirectory,
+    'package',
+    'local-asr',
+    'install-local-asr.ps1',
+  )));
+  assert.equal(
+    fs.readFileSync(path.join(first.candidateDirectory, 'package', 'main.js'), 'utf8').includes('\r'),
+    false,
+  );
+
+  const second = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', args));
+  assert.equal(second.candidateId, first.candidateId);
+  assert.equal(second.candidateDirectory, first.candidateDirectory);
+});
+
+test('prepare refuses a conflicting pre-existing candidate directory', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const artifactsRoot = path.join(fixture.tempRoot, '.artifacts', 'plugin');
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', artifactsRoot,
+  ]));
+  fs.writeFileSync(path.join(prepared.candidateDirectory, 'package', 'main.js'), 'corrupt', 'utf8');
+
+  const repeated = runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', artifactsRoot,
+  ]);
+  assert.notEqual(repeated.status, 0);
+  assert.match(`${repeated.stderr}\n${repeated.stdout}`, /existing|candidate|drift|different/i);
+});
+
+test('verify detects controlled drift but ignores opaque install-only user files', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const artifactsRoot = path.join(fixture.tempRoot, '.artifacts', 'plugin');
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', artifactsRoot,
+  ]));
+  const installedRoot = path.join(
+    fixture.tempRoot,
+    'vault',
+    '.obsidian',
+    'plugins',
+    'wechat-inbox-sync',
+  );
+  fs.cpSync(path.join(prepared.candidateDirectory, 'package'), installedRoot, { recursive: true });
+  fs.writeFileSync(path.join(installedRoot, 'data.json'), '{"opaque":"keep"}', 'utf8');
+  fs.writeFileSync(path.join(installedRoot, 'local-user-note.txt'), 'keep', 'utf8');
+
+  const valid = runNode('scripts/verify-plugin-release-candidate.js', [
+    '--candidate', prepared.candidateDirectory,
+    '--source', fixture.pluginRoot,
+    '--installed', installedRoot,
+  ]);
+  assert.equal(valid.status, 0, valid.stderr || valid.stdout);
+
+  fs.writeFileSync(path.join(installedRoot, 'main.js'), 'drift', 'utf8');
+  const invalid = runNode('scripts/verify-plugin-release-candidate.js', [
+    '--candidate', prepared.candidateDirectory,
+    '--source', fixture.pluginRoot,
+    '--installed', installedRoot,
+  ]);
+  assert.notEqual(invalid.status, 0);
+  assert.match(`${invalid.stderr}\n${invalid.stdout}`, /main\.js|drift|mismatch/i);
+});
+
+test('candidate provenance does not participate in deterministic identity', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const receiptPath = path.join(prepared.candidateDirectory, 'candidate.json');
+  const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+  receipt.provenance = {
+    createdAt: '2099-01-01T00:00:00.000Z',
+    sourceHead: 'f'.repeat(40),
+  };
+  fs.writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+
+  const result = runNode('scripts/verify-plugin-release-candidate.js', [
+    '--candidate', prepared.candidateDirectory,
+  ]);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
