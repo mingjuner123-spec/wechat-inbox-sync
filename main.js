@@ -482,6 +482,75 @@ var require_input_normalization_utils = __commonJS({
   }
 });
 
+// src/record-metadata-utils.js
+var require_record_metadata_utils = __commonJS({
+  "src/record-metadata-utils.js"(exports2, module2) {
+    "use strict";
+    function getRecordAuthor2(metadata = {}) {
+      return metadata.author || metadata.accountName || metadata.nickname || metadata.nickName || metadata.sourceName || "";
+    }
+    __name(getRecordAuthor2, "getRecordAuthor");
+    function getRecordDescription2(metadata = {}) {
+      return metadata.description || metadata.summary || metadata.excerpt || metadata.abstract || "";
+    }
+    __name(getRecordDescription2, "getRecordDescription");
+    function getRecordKeywords2(metadata = {}) {
+      const value = metadata.keywords || metadata.tags || metadata.hashtags || [];
+      if (Array.isArray(value)) return value;
+      return String(value || "").split(/[,，、\s]+/).map((item) => item.trim()).filter(Boolean);
+    }
+    __name(getRecordKeywords2, "getRecordKeywords");
+    function stripMarkdownForDescription2(markdown) {
+      return String(markdown || "").split(/\r?\n/).filter((line) => !/^#{1,6}\s+/.test(String(line || "").trim())).join("\n").replace(/!\[[^\]]*]\([^)]+\)/g, "").replace(/\[\[([^\]]+)]]/g, "").replace(/^[-*]\s+/gm, "").replace(/^\|.*\|$/gm, "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+    }
+    __name(stripMarkdownForDescription2, "stripMarkdownForDescription");
+    function extractKeywordsFromText2(text, title = "") {
+      const source = `${title || ""} ${text || ""}`;
+      const keywords = [];
+      const candidates = [
+        "风口",
+        "小红书",
+        "AI",
+        "知识库",
+        "飞书",
+        "复盘",
+        "电商",
+        "公众号",
+        "流量",
+        "创新",
+        "创业"
+      ];
+      candidates.forEach((candidate) => {
+        if (source.includes(candidate) && !keywords.includes(candidate)) keywords.push(candidate);
+      });
+      if (keywords.length) return keywords.slice(0, 8);
+      return Array.from(new Set(String(source || "").match(/[\p{L}\p{N}]{2,12}/gu) || [])).slice(0, 6);
+    }
+    __name(extractKeywordsFromText2, "extractKeywordsFromText");
+    function enrichExtractedWebpageMetadata2(metadata = {}) {
+      const next = { ...metadata };
+      const text = stripMarkdownForDescription2(next.markdown || next.content || "");
+      if (!next.description && text) {
+        const sentences = text.split(/[。！？!?]\s*/).map((item) => item.trim()).filter((item) => item.length >= 8);
+        next.description = (sentences[0] || text).slice(0, 120);
+      }
+      if (!getRecordKeywords2(next).length) {
+        next.keywords = extractKeywordsFromText2(`${next.description || ""} ${text}`, next.title || "");
+      }
+      return next;
+    }
+    __name(enrichExtractedWebpageMetadata2, "enrichExtractedWebpageMetadata");
+    module2.exports = {
+      enrichExtractedWebpageMetadata: enrichExtractedWebpageMetadata2,
+      extractKeywordsFromText: extractKeywordsFromText2,
+      getRecordAuthor: getRecordAuthor2,
+      getRecordDescription: getRecordDescription2,
+      getRecordKeywords: getRecordKeywords2,
+      stripMarkdownForDescription: stripMarkdownForDescription2
+    };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -545,6 +614,14 @@ var {
   normalizeNotePropertyFields: normalizeNotePropertyFieldsWithKeys,
   normalizeNoteSaveMode: normalizeNoteSaveModeWithDefaults
 } = require_input_normalization_utils();
+var {
+  enrichExtractedWebpageMetadata,
+  extractKeywordsFromText,
+  getRecordAuthor,
+  getRecordDescription,
+  getRecordKeywords,
+  stripMarkdownForDescription
+} = require_record_metadata_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.74";
@@ -12477,14 +12554,6 @@ function getRecordUrl(record, metadata = record && record.metadata || {}) {
   return cleanDisplayUrl(metadata.url || metadata.originalUrl || record.content || "");
 }
 __name(getRecordUrl, "getRecordUrl");
-function getRecordAuthor(metadata = {}) {
-  return metadata.author || metadata.accountName || metadata.nickname || metadata.nickName || metadata.sourceName || "";
-}
-__name(getRecordAuthor, "getRecordAuthor");
-function getRecordDescription(metadata = {}) {
-  return metadata.description || metadata.summary || metadata.excerpt || metadata.abstract || "";
-}
-__name(getRecordDescription, "getRecordDescription");
 function cleanFeishuPropertyText(value) {
   return String(value || "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f\s*\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, " ").replace(/\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, " ").replace(/\bheader-v2\b/gi, " ").replace(/\b\u5206\u4eab\b/g, " ").replace(/-\s+/g, "-").replace(/\s+/g, " ").trim();
 }
@@ -12507,52 +12576,6 @@ function cleanRecordFrontmatterField(record, key, value) {
   return value;
 }
 __name(cleanRecordFrontmatterField, "cleanRecordFrontmatterField");
-function getRecordKeywords(metadata = {}) {
-  const value = metadata.keywords || metadata.tags || metadata.hashtags || [];
-  if (Array.isArray(value)) return value;
-  return String(value || "").split(/[,，、\s]+/).map((item) => item.trim()).filter(Boolean);
-}
-__name(getRecordKeywords, "getRecordKeywords");
-function stripMarkdownForDescription(markdown) {
-  return String(markdown || "").split(/\r?\n/).filter((line) => !/^#{1,6}\s+/.test(String(line || "").trim())).join("\n").replace(/!\[[^\]]*]\([^)]+\)/g, "").replace(/\[\[([^\]]+)]]/g, "").replace(/^[-*]\s+/gm, "").replace(/^\|.*\|$/gm, "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
-}
-__name(stripMarkdownForDescription, "stripMarkdownForDescription");
-function extractKeywordsFromText(text, title = "") {
-  const source = `${title || ""} ${text || ""}`;
-  const keywords = [];
-  const candidates = [
-    "风口",
-    "小红书",
-    "AI",
-    "知识库",
-    "飞书",
-    "复盘",
-    "电商",
-    "公众号",
-    "流量",
-    "创新",
-    "创业"
-  ];
-  candidates.forEach((candidate) => {
-    if (source.includes(candidate) && !keywords.includes(candidate)) keywords.push(candidate);
-  });
-  if (keywords.length) return keywords.slice(0, 8);
-  return Array.from(new Set(String(source || "").match(/[\p{L}\p{N}]{2,12}/gu) || [])).slice(0, 6);
-}
-__name(extractKeywordsFromText, "extractKeywordsFromText");
-function enrichExtractedWebpageMetadata(metadata = {}) {
-  const next = { ...metadata };
-  const text = stripMarkdownForDescription(next.markdown || next.content || "");
-  if (!next.description && text) {
-    const sentences = text.split(/[。！？!?]\s*/).map((item) => item.trim()).filter((item) => item.length >= 8);
-    next.description = (sentences[0] || text).slice(0, 120);
-  }
-  if (!getRecordKeywords(next).length) {
-    next.keywords = extractKeywordsFromText(`${next.description || ""} ${text}`, next.title || "");
-  }
-  return next;
-}
-__name(enrichExtractedWebpageMetadata, "enrichExtractedWebpageMetadata");
 function getRecordSourceLabel(record, metadata = {}) {
   const type = String(record && record.type || "").toLowerCase();
   const url = getRecordUrl(record, metadata);

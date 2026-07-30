@@ -161,5 +161,7 @@
 - `vault-path-utils`：实现、完整回归与独立复审完成，P0=0、P1=0、P2=0。
 - Vault 路径本地检查点：`af0b058e`。
 - `input-normalization-utils`：实现、完整回归与独立复审完成，P0=0、P1=0、P2=0。
+- 输入规范化本地检查点：`c95b982b`。
+- `record-metadata-utils`：实现、完整回归与独立复审完成，P0=0、P1=0、P2=0。
 - 插件仍为 1.3.74；业务源码只移动低耦合纯函数，根 `main.js` 仅跟随权威生成物。
-- 下一步：创建输入规范化模块检查点，然后进入 `record-metadata-utils` 单模块 Loop。
+- 下一步：创建记录元数据模块检查点，然后进入 `record-state-utils` 高风险单模块 Loop。
