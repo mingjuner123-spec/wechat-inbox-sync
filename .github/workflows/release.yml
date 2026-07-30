@@ -86,6 +86,7 @@ jobs:
             'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1'
             'obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1'
             'scripts/deploy-local-components.ps1'
+            'scripts/install-plugin-release-candidate.ps1'
           )
           foreach ($installerPath in $installerPaths) {
             $tokens = $null

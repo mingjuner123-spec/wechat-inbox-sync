@@ -71,6 +71,38 @@ function parseJsonOutput(result) {
   return JSON.parse(result.stdout);
 }
 
+function runPowerShell(scriptPath, args, options = {}) {
+  return childProcess.spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args],
+    {
+      cwd: options.cwd || repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...(options.env || {}),
+      },
+    },
+  );
+}
+
+function snapshotManagedTree(root) {
+  const output = {};
+  const visit = (directory, prefix = '') => {
+    for (const item of fs.readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = prefix ? `${prefix}/${item.name}` : item.name;
+      const absolutePath = path.join(directory, item.name);
+      if (item.isDirectory()) {
+        visit(absolutePath, relativePath);
+      } else {
+        output[relativePath] = fs.readFileSync(absolutePath).toString('hex');
+      }
+    }
+  };
+  visit(root);
+  return output;
+}
+
 test('root artifacts directory is ignored without hiding unrelated directories', () => {
   const gitignore = fs.readFileSync(path.join(repoRoot, '.gitignore'), 'utf8');
   assert.match(gitignore, /^\/\.artifacts\/$/m);
@@ -360,4 +392,136 @@ test('candidate provenance does not participate in deterministic identity', (t) 
     '--candidate', prepared.candidateDirectory,
   ]);
   assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('candidate installer is declared for PowerShell parser and Windows behavior gates', () => {
+  const installerRelativePath = 'scripts/install-plugin-release-candidate.ps1';
+  const installerPath = path.join(repoRoot, ...installerRelativePath.split('/'));
+  assert.ok(fs.existsSync(installerPath), 'candidate installer must exist');
+  const installer = fs.readFileSync(installerPath, 'utf8');
+  assert.match(installer, /CandidateDirectory/);
+  assert.match(installer, /TargetDirectory/);
+  assert.match(installer, /TestFailAfterSecondEntry/);
+
+  const mainWorkflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'main-guards.yml'),
+    'utf8',
+  );
+  const releaseWorkflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'release.yml'),
+    'utf8',
+  );
+  assert.ok(mainWorkflow.includes(installerRelativePath));
+  assert.ok(releaseWorkflow.includes(installerRelativePath));
+  assert.match(mainWorkflow, /windows-deployer:[\s\S]*plugin-release-candidate\.test\.js/);
+});
+
+test('Windows target junction cannot alias the canonical source', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const target = path.join(
+    fixture.tempRoot,
+    'junction-vault',
+    '.obsidian',
+    'plugins',
+    'wechat-inbox-sync',
+  );
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.symlinkSync(fixture.pluginRoot, target, 'junction');
+
+  const result = runPowerShell(
+    path.join(repoRoot, 'scripts', 'install-plugin-release-candidate.ps1'),
+    [
+      '-CandidateDirectory', prepared.candidateDirectory,
+      '-TargetDirectory', target,
+      '-RepositoryRoot', repoRoot,
+      '-SkipObsidianProcessCheckForTest',
+    ],
+    { env: { WECHAT_INBOX_CANDIDATE_TEST: '1' } },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}\n${result.stdout}`, /junction|reparse|symlink/i);
+});
+
+test('Windows candidate install is transactional and preserves opaque user files', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const target = path.join(
+    fixture.tempRoot,
+    'vault',
+    '.obsidian',
+    'plugins',
+    'wechat-inbox-sync',
+  );
+  fs.cpSync(path.join(prepared.candidateDirectory, 'package'), target, { recursive: true });
+  fs.writeFileSync(path.join(target, 'main.js'), 'old-main', 'utf8');
+  fs.writeFileSync(path.join(target, 'data.json'), '{"opaque":"preserve-exactly"}', 'utf8');
+  fs.writeFileSync(path.join(target, 'local-user-note.txt'), 'local-only', 'utf8');
+  const dataBefore = fs.readFileSync(path.join(target, 'data.json'));
+  const localBefore = fs.readFileSync(path.join(target, 'local-user-note.txt'));
+  const installerPath = path.join(repoRoot, 'scripts', 'install-plugin-release-candidate.ps1');
+  const commonArgs = [
+    '-CandidateDirectory', prepared.candidateDirectory,
+    '-TargetDirectory', target,
+    '-RepositoryRoot', repoRoot,
+    '-SkipObsidianProcessCheckForTest',
+  ];
+
+  const installed = runPowerShell(installerPath, commonArgs, {
+    env: { WECHAT_INBOX_CANDIDATE_TEST: '1' },
+  });
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+  assert.deepEqual(fs.readFileSync(path.join(target, 'data.json')), dataBefore);
+  assert.deepEqual(fs.readFileSync(path.join(target, 'local-user-note.txt')), localBefore);
+  const verify = runNode('scripts/verify-plugin-release-candidate.js', [
+    '--candidate', prepared.candidateDirectory,
+    '--installed', target,
+  ]);
+  assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+
+  fs.writeFileSync(path.join(target, 'main.js'), 'rollback-main', 'utf8');
+  fs.writeFileSync(path.join(target, 'styles.css'), 'rollback-styles', 'utf8');
+  const beforeFailure = snapshotManagedTree(target);
+  const failed = runPowerShell(installerPath, [...commonArgs, '-TestFailAfterSecondEntry'], {
+    env: { WECHAT_INBOX_CANDIDATE_TEST: '1' },
+  });
+  assert.notEqual(failed.status, 0);
+  assert.deepEqual(snapshotManagedTree(target), beforeFailure);
+});
+
+test('Windows candidate installer rejects an ordinary same-name target', {
+  skip: process.platform !== 'win32',
+}, (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const wrongTarget = path.join(fixture.tempRoot, 'wechat-inbox-sync');
+  fs.mkdirSync(wrongTarget, { recursive: true });
+  const result = runPowerShell(
+    path.join(repoRoot, 'scripts', 'install-plugin-release-candidate.ps1'),
+    [
+      '-CandidateDirectory', prepared.candidateDirectory,
+      '-TargetDirectory', wrongTarget,
+      '-RepositoryRoot', repoRoot,
+      '-SkipObsidianProcessCheckForTest',
+    ],
+    { env: { WECHAT_INBOX_CANDIDATE_TEST: '1' } },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stderr}\n${result.stdout}`, /\.obsidian|plugins|target/i);
 });
