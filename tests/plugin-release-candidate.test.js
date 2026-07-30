@@ -482,6 +482,57 @@ test('main guards and release checklist enforce the committed tested candidate',
   }
 });
 
+test('release workflow packages and publishes only the verified candidate package', () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, '.github', 'workflows', 'release.yml'),
+    'utf8',
+  );
+  const orderedMarkers = [
+    'Prepare verified release candidate',
+    '--verify-promotion release-candidate.json',
+    'Package plugin release assets',
+    'PACKAGE_DIR=',
+    'Publish GitHub release',
+    'check-plugin-release-identity.js --postpublish',
+  ];
+  let previousIndex = -1;
+  for (const marker of orderedMarkers) {
+    const index = workflow.indexOf(marker);
+    assert.ok(index > previousIndex, `release workflow ordering misses ${marker}`);
+    previousIndex = index;
+  }
+  assert.match(workflow, /zip -r "\$ZIP_PATH"[\s\S]*main\.js manifest\.json styles\.css versions\.json README\.md LICENSE local-asr local-ocr/);
+  assert.match(workflow, /gh release create "\$TAG_NAME" "\$PACKAGE_DIR\/main\.js"/);
+  const packageDirectoryAssignment = 'PACKAGE_DIR="$(node -p "JSON.parse(require(\'fs\').readFileSync(\'.artifacts/release-candidate-result.json\', \'utf8\')).packageDirectory")"';
+  assert.equal(
+    workflow.split(packageDirectoryAssignment).length - 1,
+    2,
+    'both package and publish steps must resolve PACKAGE_DIR from the verified candidate result',
+  );
+  const normalizedWorkflow = workflow
+    .replace(/\\\r?\n\s*/g, ' ')
+    .replace(/\s+/g, ' ');
+  assert.ok(
+    normalizedWorkflow.includes(
+      'gh release create "$TAG_NAME" "$PACKAGE_DIR/main.js" "$PACKAGE_DIR/manifest.json" '
+      + '"$PACKAGE_DIR/styles.css" "$PACKAGE_DIR/versions.json" "$ZIP_PATH" --title',
+    ),
+    'gh release create must receive exactly the four candidate loose assets and candidate ZIP',
+  );
+  assert.equal(
+    workflow.trim().endsWith(
+      'node scripts/check-plugin-release-identity.js --postpublish --tag "$TAG_NAME"',
+    ),
+    true,
+    'postpublish identity verification must remain the final non-empty workflow command',
+  );
+  assert.doesNotMatch(
+    workflow,
+    /cd obsidian-plugin\/wechat-inbox-sync[\s\S]*zip -r/,
+    'release ZIP must not be created from the mutable source working directory',
+  );
+});
+
 test('Windows target junction cannot alias the canonical source', {
   skip: process.platform !== 'win32',
 }, (t) => {

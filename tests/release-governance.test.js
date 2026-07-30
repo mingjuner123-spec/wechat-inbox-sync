@@ -1726,7 +1726,7 @@ test('tag releases enforce all governance gates before publication', () => {
   ));
   const packageIndex = runs.findIndex((run) => (
     executableCommandPattern(
-      'zip -r "$ZIP_NAME" main.js manifest.json styles.css versions.json README.md LICENSE local-asr local-ocr',
+      'zip -r "$ZIP_PATH" main.js manifest.json styles.css versions.json README.md LICENSE local-asr local-ocr',
     ).test(run)
   ));
   const publishIndex = runs.findIndex((run) => /\bgh release (?:create|upload)\b/.test(run));
