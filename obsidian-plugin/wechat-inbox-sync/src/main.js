@@ -50,6 +50,11 @@ const {
   redactKnownCredentials,
   redactSensitiveObject,
 } = require('./diagnostic-redaction-utils');
+const {
+  normalizeConfiguredVaultPath,
+  normalizeVaultPath,
+  shouldPersistNormalizedInboxDir,
+} = require('./vault-path-utils');
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
@@ -2270,35 +2275,6 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
 
 function getRecordId(record) {
   return record._id || record.id || '';
-}
-
-function normalizeVaultPath(value) {
-  return String(value || '')
-    .replace(/\\/g, '/')
-    .replace(/\/+/g, '/')
-    .replace(/^\/+|\/+$/g, '');
-}
-
-function normalizeConfiguredVaultPath(value, fallback = DEFAULT_SETTINGS.inboxDir) {
-  const raw = String(value || '').trim();
-  const safeFallback = normalizeVaultPath(fallback) || normalizeVaultPath(DEFAULT_SETTINGS.inboxDir);
-  if (!raw) return safeFallback;
-  if (/^[\\/]/.test(raw) || /^[a-z]:[\\/]/i.test(raw) || raw.includes('\0')) {
-    return safeFallback;
-  }
-  const normalized = normalizeVaultPath(raw);
-  const segments = normalized.split('/');
-  if (!normalized || segments.some((segment) => !segment || segment === '.' || segment === '..')) {
-    return safeFallback;
-  }
-  return normalized;
-}
-
-function shouldPersistNormalizedInboxDir(savedSettings, mergedSettings) {
-  if (!savedSettings || typeof savedSettings !== 'object') return true;
-  const savedInboxDir = String(savedSettings.inboxDir || '').trim();
-  const mergedInboxDir = String(mergedSettings && mergedSettings.inboxDir || '').trim();
-  return savedInboxDir !== mergedInboxDir;
 }
 
 function normalizeYamlScalar(value) {

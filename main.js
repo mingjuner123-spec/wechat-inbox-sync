@@ -407,6 +407,46 @@ var require_diagnostic_redaction_utils = __commonJS({
   }
 });
 
+// src/vault-path-utils.js
+var require_vault_path_utils = __commonJS({
+  "src/vault-path-utils.js"(exports2, module2) {
+    "use strict";
+    var DEFAULT_VAULT_INBOX_DIR = "临时收集";
+    function normalizeVaultPath2(value) {
+      return String(value || "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
+    }
+    __name(normalizeVaultPath2, "normalizeVaultPath");
+    function normalizeConfiguredVaultPath2(value, fallback = DEFAULT_VAULT_INBOX_DIR) {
+      const raw = String(value || "").trim();
+      const safeFallback = normalizeVaultPath2(fallback) || DEFAULT_VAULT_INBOX_DIR;
+      if (!raw) return safeFallback;
+      if (/^[\\/]/.test(raw) || /^[a-z]:[\\/]/i.test(raw) || raw.includes("\0")) {
+        return safeFallback;
+      }
+      const normalized = normalizeVaultPath2(raw);
+      const segments = normalized.split("/");
+      if (!normalized || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+        return safeFallback;
+      }
+      return normalized;
+    }
+    __name(normalizeConfiguredVaultPath2, "normalizeConfiguredVaultPath");
+    function shouldPersistNormalizedInboxDir2(savedSettings, mergedSettings) {
+      if (!savedSettings || typeof savedSettings !== "object") return true;
+      const savedInboxDir = String(savedSettings.inboxDir || "").trim();
+      const mergedInboxDir = String(mergedSettings && mergedSettings.inboxDir || "").trim();
+      return savedInboxDir !== mergedInboxDir;
+    }
+    __name(shouldPersistNormalizedInboxDir2, "shouldPersistNormalizedInboxDir");
+    module2.exports = {
+      DEFAULT_VAULT_INBOX_DIR,
+      normalizeConfiguredVaultPath: normalizeConfiguredVaultPath2,
+      normalizeVaultPath: normalizeVaultPath2,
+      shouldPersistNormalizedInboxDir: shouldPersistNormalizedInboxDir2
+    };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -460,6 +500,11 @@ var {
   redactKnownCredentials,
   redactSensitiveObject
 } = require_diagnostic_redaction_utils();
+var {
+  normalizeConfiguredVaultPath,
+  normalizeVaultPath,
+  shouldPersistNormalizedInboxDir
+} = require_vault_path_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.74";
@@ -2183,32 +2228,6 @@ function getRecordId(record) {
   return record._id || record.id || "";
 }
 __name(getRecordId, "getRecordId");
-function normalizeVaultPath(value) {
-  return String(value || "").replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/+|\/+$/g, "");
-}
-__name(normalizeVaultPath, "normalizeVaultPath");
-function normalizeConfiguredVaultPath(value, fallback = DEFAULT_SETTINGS.inboxDir) {
-  const raw = String(value || "").trim();
-  const safeFallback = normalizeVaultPath(fallback) || normalizeVaultPath(DEFAULT_SETTINGS.inboxDir);
-  if (!raw) return safeFallback;
-  if (/^[\\/]/.test(raw) || /^[a-z]:[\\/]/i.test(raw) || raw.includes("\0")) {
-    return safeFallback;
-  }
-  const normalized = normalizeVaultPath(raw);
-  const segments = normalized.split("/");
-  if (!normalized || segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    return safeFallback;
-  }
-  return normalized;
-}
-__name(normalizeConfiguredVaultPath, "normalizeConfiguredVaultPath");
-function shouldPersistNormalizedInboxDir(savedSettings, mergedSettings) {
-  if (!savedSettings || typeof savedSettings !== "object") return true;
-  const savedInboxDir = String(savedSettings.inboxDir || "").trim();
-  const mergedInboxDir = String(mergedSettings && mergedSettings.inboxDir || "").trim();
-  return savedInboxDir !== mergedInboxDir;
-}
-__name(shouldPersistNormalizedInboxDir, "shouldPersistNormalizedInboxDir");
 function normalizeYamlScalar(value) {
   const text = String(value || "").trim();
   if (text.startsWith('"') && text.endsWith('"') || text.startsWith("'") && text.endsWith("'")) {
