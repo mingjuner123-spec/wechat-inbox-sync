@@ -4,6 +4,7 @@ const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
 const path = require('node:path');
+const { isDeepStrictEqual, TextDecoder } = require('node:util');
 const {
   MAX_API_RESPONSE_BYTES,
   MAX_SINGLE_ASSET_BYTES,
@@ -20,8 +21,18 @@ const {
   validateReleaseMetadata,
   validateReleasePayload,
   validateRepositoryPayload,
+  validateStableRemoteTagEvidence,
   validateTrustedLocalSnapshot,
 } = require('./plugin-release-identity-core');
+const {
+  PACKAGE_DIRECTORIES,
+  PACKAGE_ROOT_FILES,
+  buildCandidateIdentity,
+  compareUtf8,
+  normalizePackageBytes,
+  sha256,
+  validateCandidateIdentity,
+} = require('./plugin-release-candidate-core');
 const { validateVersionTag } = require('./release-source-guard-core');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -109,13 +120,22 @@ function assertOfficialOrigin() {
   return fetchOrigin;
 }
 
-function collectLocalInputs(tag) {
-  return {
+function collectLocalInputs(tag, { requireLocalAnnotatedTag = true } = {}) {
+  const inputs = {
     statusOutput: runGit(['status', '--porcelain', '--untracked-files=all'], 'clean status'),
     headOutput: runGit(['rev-parse', 'HEAD'], 'local HEAD'),
-    tagTypeOutput: runGit(['cat-file', '-t', `refs/tags/${tag}`], `annotated tag ${tag}`),
-    tagCommitOutput: runGit(['rev-parse', `refs/tags/${tag}^{}`], `peeled tag ${tag}`),
   };
+  if (requireLocalAnnotatedTag) {
+    inputs.tagTypeOutput = runGit(
+      ['cat-file', '-t', `refs/tags/${tag}`],
+      `annotated tag ${tag}`,
+    );
+    inputs.tagCommitOutput = runGit(
+      ['rev-parse', `refs/tags/${tag}^{}`],
+      `peeled tag ${tag}`,
+    );
+  }
+  return inputs;
 }
 
 function validateDownloadUrl(urlString) {
@@ -321,11 +341,11 @@ function requiredAssets(tag) {
   ];
 }
 
-function gitShowBytes(tag, relativePath) {
+function gitShowBytes(trustedCommit, relativePath) {
   try {
     return childProcess.execFileSync(
       'git',
-      ['show', `refs/tags/${tag}:${PLUGIN_PREFIX}${relativePath}`],
+      ['show', `${trustedCommit}:${PLUGIN_PREFIX}${relativePath}`],
       {
         cwd: REPO_ROOT,
         encoding: null,
@@ -340,14 +360,34 @@ function gitShowBytes(tag, relativePath) {
       },
     );
   } catch (error) {
-    throw new Error(`cannot read ${relativePath} from tag ${tag}: ${errorDetail(error)}`);
+    throw new Error(
+      `cannot read ${relativePath} from trusted commit ${trustedCommit}: ${errorDetail(error)}`,
+    );
   }
 }
 
-function expectedZipEntries(tag) {
+async function probeStableRemoteTag(tag, sampleIndex, previousEvidence = null) {
+  const repository = await probeTrustedRepository(sampleIndex);
+  const remoteTag = await probeTrustedTag(tag, sampleIndex);
+  const lsRemoteOutput = runGit(
+    ['ls-remote', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`],
+    `remote annotated tag ${tag}`,
+  );
+  const evidence = validateStableRemoteTagEvidence({
+    tag,
+    defaultCommit: repository.defaultCommit,
+    apiTagObject: remoteTag.tagObject,
+    apiTagCommit: remoteTag.commit,
+    lsRemoteOutput,
+    previousEvidence,
+  });
+  return { repository, remoteTag, evidence };
+}
+
+function expectedZipEntries(trustedCommit) {
   const listing = runGit(
-    ['ls-tree', '-r', '--name-only', `refs/tags/${tag}`, '--', PLUGIN_PREFIX],
-    `tag ${tag} plugin tree`,
+    ['ls-tree', '-r', '--name-only', trustedCommit, '--', PLUGIN_PREFIX],
+    `trusted commit ${trustedCommit} plugin tree`,
   );
   const names = listing.split(/\r?\n/).filter(Boolean)
     .filter((name) => name.startsWith(PLUGIN_PREFIX))
@@ -357,12 +397,92 @@ function expectedZipEntries(tag) {
       || name.startsWith('local-ocr/'))
     .sort();
   if (names.length === 0) {
-    throw new Error(`tag ${tag} contains no expected plugin ZIP entries`);
+    throw new Error(`trusted commit ${trustedCommit} contains no expected plugin ZIP entries`);
   }
-  return new Map(names.map((name) => [name, gitShowBytes(tag, name)]));
+  return new Map(names.map((name) => [name, gitShowBytes(trustedCommit, name)]));
 }
 
-async function verifyPublishedAssetBytes(release, tag) {
+function validatePromotionReceipt({ tag, packageEntries, receiptBytes }) {
+  validateVersionTag(tag);
+  if (!(packageEntries instanceof Map)) {
+    throw new TypeError('candidate package entries must be a Map');
+  }
+  if (!Buffer.isBuffer(receiptBytes)) {
+    throw new Error('release-candidate receipt is missing from the trusted commit');
+  }
+  const names = [...packageEntries.keys()].sort(compareUtf8);
+  for (const requiredName of PACKAGE_ROOT_FILES) {
+    if (!packageEntries.has(requiredName)) {
+      throw new Error(`release candidate package is missing required entry: ${requiredName}`);
+    }
+  }
+  for (const requiredDirectory of PACKAGE_DIRECTORIES) {
+    if (!names.some((name) => name.startsWith(`${requiredDirectory}/`))) {
+      throw new Error(
+        `release candidate package is missing required directory: ${requiredDirectory}`,
+      );
+    }
+  }
+  const entries = names.map((name) => {
+    const normalized = normalizePackageBytes(name, packageEntries.get(name));
+    return {
+      path: name,
+      bytes: normalized.length,
+      sha256: sha256(normalized),
+    };
+  });
+  const expectedIdentity = buildCandidateIdentity({
+    pluginId: 'wechat-inbox-sync',
+    pluginVersion: tag,
+    sourceRoot: PLUGIN_PREFIX.slice(0, -1),
+    entries,
+  });
+  let receipt;
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(receiptBytes);
+    receipt = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`release-candidate receipt is invalid: ${errorDetail(error)}`);
+  }
+  validateCandidateIdentity(receipt);
+  if (!isDeepStrictEqual(receipt, expectedIdentity)) {
+    throw new Error('release-candidate receipt differs from the trusted commit package identity');
+  }
+  return true;
+}
+
+function verifyPromotionReceiptAtCommit(tag, trustedCommit) {
+  let receiptBytes;
+  try {
+    receiptBytes = childProcess.execFileSync(
+      'git',
+      ['show', `${trustedCommit}:release-candidate.json`],
+      {
+        cwd: REPO_ROOT,
+        encoding: null,
+        env: {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: '0',
+          GCM_INTERACTIVE: 'Never',
+        },
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: GIT_TIMEOUT_MS,
+      },
+    );
+  } catch (error) {
+    throw new Error(
+      `cannot read release-candidate receipt from trusted commit ${trustedCommit}: ${errorDetail(error)}`,
+    );
+  }
+  return validatePromotionReceipt({
+    tag,
+    packageEntries: expectedZipEntries(trustedCommit),
+    receiptBytes,
+  });
+}
+
+async function verifyPublishedAssetBytes(release, tag, trustedCommit) {
   const assets = new Map(release.assets.map((asset) => [asset.name, asset]));
   for (const name of ['main.js', 'manifest.json', 'styles.css', 'versions.json']) {
     const asset = assets.get(name);
@@ -374,7 +494,7 @@ async function verifyPublishedAssetBytes(release, tag) {
     if (response.statusCode !== 200) {
       throw new Error(`Release asset ${name} returned HTTP ${response.statusCode}`);
     }
-    const expected = gitShowBytes(tag, name);
+    const expected = gitShowBytes(trustedCommit, name);
     if (!response.body.equals(expected)) {
       throw new Error(`Release asset byte mismatch for ${name}`);
     }
@@ -388,7 +508,10 @@ async function verifyPublishedAssetBytes(release, tag) {
   if (zipResponse.statusCode !== 200) {
     throw new Error(`Release asset ${zipName} returned HTTP ${zipResponse.statusCode}`);
   }
-  assertZipMatchesExpected(parseZipEntries(zipResponse.body), expectedZipEntries(tag));
+  assertZipMatchesExpected(
+    parseZipEntries(zipResponse.body),
+    expectedZipEntries(trustedCommit),
+  );
 }
 
 function parseArguments(args) {
@@ -408,7 +531,7 @@ function parseArguments(args) {
 async function runPrepublish(tag) {
   assertOfficialOrigin();
   readMetadata(tag);
-  const localInputs = collectLocalInputs(tag);
+  const localInputs = collectLocalInputs(tag, { requireLocalAnnotatedTag: true });
   const repository = await probeTrustedRepository(1);
   const remoteTag = await probeTrustedTag(tag, 1, { allowAbsent: true });
   const snapshot = validateTrustedLocalSnapshot({
@@ -418,6 +541,7 @@ async function runPrepublish(tag) {
     trustedDefaultCommit: repository.defaultCommit,
     trustedTagCommit: remoteTag ? remoteTag.commit : null,
   });
+  verifyPromotionReceiptAtCommit(tag, snapshot.head);
   const lookup = await lookupRelease(tag, 1);
   validateReleaseLookup({ phase: 'prepublish', ...lookup });
   process.stdout.write(
@@ -431,10 +555,12 @@ async function runPostpublish(tag) {
   const expected = requiredAssets(tag);
   let lastRelease = null;
   let finalCommit = null;
+  let stableRemoteEvidence = null;
   for (let sample = 1; sample <= 3; sample += 1) {
-    const localInputs = collectLocalInputs(tag);
-    const repository = await probeTrustedRepository(sample);
-    const remoteTag = await probeTrustedTag(tag, sample);
+    const localInputs = collectLocalInputs(tag, { requireLocalAnnotatedTag: false });
+    const remote = await probeStableRemoteTag(tag, sample, stableRemoteEvidence);
+    const { repository, remoteTag } = remote;
+    stableRemoteEvidence = remote.evidence;
     const snapshot = validateTrustedLocalSnapshot({
       phase: 'postpublish',
       tag,
@@ -442,6 +568,7 @@ async function runPostpublish(tag) {
       trustedDefaultCommit: repository.defaultCommit,
       trustedTagCommit: remoteTag.commit,
     });
+    verifyPromotionReceiptAtCommit(tag, snapshot.trustedDefaultCommit);
     const lookup = await lookupRelease(tag, sample);
     const release = validateReleaseLookup({ phase: 'postpublish', ...lookup });
     lastRelease = validateReleasePayload(release, {
@@ -458,7 +585,17 @@ async function runPostpublish(tag) {
     });
     finalCommit = snapshot.trustedDefaultCommit;
   }
-  await verifyPublishedAssetBytes(lastRelease, tag);
+  await verifyPublishedAssetBytes(lastRelease, tag, finalCommit);
+  const finalLocalInputs = collectLocalInputs(tag, { requireLocalAnnotatedTag: false });
+  const finalRemote = await probeStableRemoteTag(tag, 4, stableRemoteEvidence);
+  const finalSnapshot = validateTrustedLocalSnapshot({
+    phase: 'postpublish',
+    tag,
+    ...finalLocalInputs,
+    trustedDefaultCommit: finalRemote.repository.defaultCommit,
+    trustedTagCommit: finalRemote.remoteTag.commit,
+  });
+  verifyPromotionReceiptAtCommit(tag, finalSnapshot.trustedDefaultCommit);
   process.stdout.write(
     `Plugin postpublish identity passed: ${tag}, main, peeled tag, Release, assets, and ZIP all match ${finalCommit}.\n`,
   );
@@ -489,4 +626,6 @@ module.exports = {
   parseArguments,
   runPostpublish,
   runPrepublish,
+  validatePromotionReceipt,
+  verifyPromotionReceiptAtCommit,
 };

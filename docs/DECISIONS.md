@@ -1,5 +1,13 @@
 # Engineering decisions
 
+## 2026-07-30：本地实测插件候选必须携带可提交的晋升身份证
+
+- `obsidian-plugin/wechat-inbox-sync/` 仍是唯一允许人工维护的插件源码。
+- 本地测试只安装根 `/.artifacts/` 下的不可变候选；该目录被 Git 精确忽略。
+- 候选只有在晋升命令写出确定性的 `release-candidate.json` 后，才允许进入 PR、tag 或 GitHub Release。
+- main、prepublish 和 postpublish 都必须从受信提交重新计算完整发布包身份，并与晋升身份证一致。
+- 根目录 loose assets 只是自动生成的市场兼容镜像，不是第二套源码。
+
 ## 2026-07-27：核心提取链路不得在无事故证据时新增阻断规则
 
 决策：

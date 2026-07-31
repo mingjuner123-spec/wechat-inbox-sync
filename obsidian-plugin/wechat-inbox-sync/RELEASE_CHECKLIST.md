@@ -2,6 +2,15 @@
 
 本清单与仓库内发布治理脚本、GitHub Actions 共同构成插件公开仓库的发布门禁。
 
+## 已测试候选包晋升
+
+- [ ] 从唯一发布源执行 `node scripts/prepare-plugin-release-candidate.js --source obsidian-plugin/wechat-inbox-sync --artifacts-root .artifacts/plugin --json-out .artifacts/candidate-result.json`。
+- [ ] 使用 `scripts/install-plugin-release-candidate.ps1` 将完整候选包事务式安装到本地测试库；不得只替换 `main.js`，不得覆盖用户的 `data.json`。
+- [ ] 用户本地验收后，运行 `node scripts/verify-plugin-release-candidate.js`，同时核对候选包、权威源码、已安装插件和根目录镜像。
+- [ ] 运行 `node scripts/sync-plugin-release-mirror.js --write --source obsidian-plugin/wechat-inbox-sync --root .`；根目录四文件只是自动生成镜像，不允许手改。
+- [ ] 运行 `node scripts/promote-plugin-release-candidate.js` 生成 `release-candidate.json`。只有这个已测试身份允许进入提交、PR、tag 和 Release。
+- [ ] CI 必须重新准备候选包并用 `--verify-promotion release-candidate.json` 验证；任何字节漂移都停止发布。
+
 ## 发布源与版本身份
 
 - [ ] 正式仓库固定为 `mingjuner123-spec/wechat-inbox-sync`，插件发布源固定为 `obsidian-plugin/wechat-inbox-sync/`。

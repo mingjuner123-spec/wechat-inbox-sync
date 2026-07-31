@@ -32,12 +32,23 @@ jobs:
       - name: Run release governance and plugin regressions
         run: |
           node tests/release-governance.test.js
+          node tests/plugin-release-candidate.test.js
           node tests/plugin-main-ai.test.js
           node tests/plugin-marketplace-package.test.js
+
+      - name: Reject tested plugin candidate or root mirror drift
+        run: |
+          node scripts/sync-plugin-release-mirror.js --check --source obsidian-plugin/wechat-inbox-sync --root .
+          node scripts/prepare-plugin-release-candidate.js --source obsidian-plugin/wechat-inbox-sync --artifacts-root .artifacts/plugin --verify-promotion release-candidate.json --json-out .artifacts/main-guard-candidate.json
 
       - name: Check governance and plugin JavaScript syntax
         run: |
           node --check tests/release-governance.test.js
+          node --check scripts/plugin-release-candidate-core.js
+          node --check scripts/prepare-plugin-release-candidate.js
+          node --check scripts/verify-plugin-release-candidate.js
+          node --check scripts/sync-plugin-release-mirror.js
+          node --check scripts/promote-plugin-release-candidate.js
           node --check scripts/local-component-manifest-core.js
           node --check scripts/update-local-components-manifest.js
           node --check scripts/release-source-guard-core.js
@@ -61,6 +72,7 @@ jobs:
             'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr.ps1'
             'obsidian-plugin/wechat-inbox-sync/local-ocr/install-local-ocr.ps1'
             'scripts/deploy-local-components.ps1'
+            'scripts/install-plugin-release-candidate.ps1'
           )
           foreach ($installerPath in $installerPaths) {
             $tokens = $null
@@ -94,3 +106,4 @@ jobs:
         run: |
           node tests/release-governance.test.js
           node tests/plugin-marketplace-package.test.js
+          node tests/plugin-release-candidate.test.js

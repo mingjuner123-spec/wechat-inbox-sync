@@ -11,8 +11,11 @@ const zlib = require('node:zlib');
 const repoRoot = path.resolve(__dirname, '..');
 const corePath = path.join(repoRoot, 'scripts', 'plugin-release-identity-core.js');
 const cliPath = path.join(repoRoot, 'scripts', 'check-plugin-release-identity.js');
+const candidateCorePath = path.join(repoRoot, 'scripts', 'plugin-release-candidate-core.js');
 const workflowPath = path.join(repoRoot, '.github', 'workflows', 'release.yml');
 const core = fs.existsSync(corePath) ? require(corePath) : {};
+const cli = fs.existsSync(cliPath) ? require(cliPath) : {};
+const candidateCore = fs.existsSync(candidateCorePath) ? require(candidateCorePath) : {};
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 const TAG_OBJECT = 'c'.repeat(40);
@@ -73,6 +76,7 @@ function copyProductionIdentityScripts(targetRoot) {
   fs.mkdirSync(targetScripts, { recursive: true });
   for (const name of [
     'release-source-guard-core.js',
+    'plugin-release-candidate-core.js',
     'plugin-release-identity-core.js',
     'check-plugin-release-identity.js',
   ]) {
@@ -144,6 +148,77 @@ test('the public release identity core and CLI are self-contained files', () => 
   assert.equal(typeof core.validateAnnotatedTagPayload, 'function');
   assert.equal(typeof core.resolveTrustedReleaseTarget, 'function');
   assert.equal(typeof core.sanitizeErrorMessage, 'function');
+});
+
+test('promotion receipt validation rejects missing, stale, and forged candidate identities', () => {
+  const packageEntries = new Map([
+    ['LICENSE', Buffer.from('license\n')],
+    ['README.md', Buffer.from('# fixture\n')],
+    ['local-asr/common/install-local-asr.ps1', Buffer.from('Write-Output asr\r\n')],
+    ['local-ocr/common/ocr_image.py', Buffer.from('print(\"ocr\")\r\n')],
+    ['main.js', Buffer.from('module.exports = {};\r\n')],
+    ['manifest.json', Buffer.from(JSON.stringify({
+      id: 'wechat-inbox-sync',
+      version: TAG,
+      minAppVersion: '1.0.0',
+    }))],
+    ['styles.css', Buffer.from('.fixture {}\r\n')],
+    ['versions.json', Buffer.from(JSON.stringify({ [TAG]: '1.0.0' }))],
+  ]);
+  const entries = [...packageEntries]
+    .map(([entryPath, bytes]) => {
+      const normalized = candidateCore.normalizePackageBytes(entryPath, bytes);
+      return {
+        path: entryPath,
+        bytes: normalized.length,
+        sha256: candidateCore.sha256(normalized),
+      };
+    })
+    .sort((left, right) => candidateCore.compareUtf8(left.path, right.path));
+  const receipt = candidateCore.buildCandidateIdentity({
+    pluginId: 'wechat-inbox-sync',
+    pluginVersion: TAG,
+    sourceRoot: 'obsidian-plugin/wechat-inbox-sync',
+    entries,
+  });
+
+  assert.equal(
+    cli.validatePromotionReceipt({
+      tag: TAG,
+      packageEntries,
+      receiptBytes: Buffer.from(`${JSON.stringify(receipt)}\n`),
+    }),
+    true,
+  );
+  assert.throws(
+    () => cli.validatePromotionReceipt({
+      tag: TAG,
+      packageEntries,
+      receiptBytes: null,
+    }),
+    /release-candidate|receipt|missing/i,
+  );
+  assert.throws(
+    () => cli.validatePromotionReceipt({
+      tag: TAG,
+      packageEntries,
+      receiptBytes: Buffer.from(JSON.stringify({
+        ...receipt,
+        candidateId: `${TAG}-deadbeefdeadbeef`,
+      })),
+    }),
+    /candidate|receipt|identity|drift/i,
+  );
+  const forgedEntries = new Map(packageEntries);
+  forgedEntries.set('main.js', Buffer.from('forged\n'));
+  assert.throws(
+    () => cli.validatePromotionReceipt({
+      tag: TAG,
+      packageEntries: forgedEntries,
+      receiptBytes: Buffer.from(JSON.stringify(receipt)),
+    }),
+    /candidate|receipt|identity|drift/i,
+  );
 });
 
 test('canonical origin accepts only credential-free official GitHub URL equivalents', () => {
@@ -267,6 +342,60 @@ test('local snapshot parsing rejects malformed Git output and dirty worktrees', 
     }),
     /exactly|commit/i,
   );
+});
+
+test('postpublish trusts remote annotated tag evidence without requiring a local tag', () => {
+  assert.doesNotThrow(() => core.validateTrustedLocalSnapshot({
+    phase: 'postpublish',
+    tag: TAG,
+    statusOutput: '',
+    headOutput: `${SHA_A}\n`,
+    trustedDefaultCommit: SHA_A,
+    trustedTagCommit: SHA_A,
+  }));
+  assert.throws(() => core.validateTrustedLocalSnapshot({
+    phase: 'postpublish',
+    tag: TAG,
+    statusOutput: '',
+    headOutput: `${SHA_A}\n`,
+    trustedDefaultCommit: SHA_A,
+    trustedTagCommit: SHA_B,
+  }), /tag|commit|default|main/i);
+  assert.throws(() => core.validateTrustedLocalSnapshot({
+    phase: 'prepublish',
+    tag: TAG,
+    statusOutput: '',
+    headOutput: `${SHA_A}\n`,
+    trustedDefaultCommit: SHA_A,
+    trustedTagCommit: null,
+  }), /tag|annotated|commit/i);
+});
+
+test('remote tag evidence rejects API disagreement and movement between samples', () => {
+  const lsRemote = `${TAG_OBJECT}\trefs/tags/${TAG}\n${SHA_A}\trefs/tags/${TAG}^{}\n`;
+  const first = core.validateStableRemoteTagEvidence({
+    tag: TAG,
+    defaultCommit: SHA_A,
+    apiTagObject: TAG_OBJECT,
+    apiTagCommit: SHA_A,
+    lsRemoteOutput: lsRemote,
+  });
+  assert.equal(first.tagObject, TAG_OBJECT);
+  assert.throws(() => core.validateStableRemoteTagEvidence({
+    tag: TAG,
+    defaultCommit: SHA_A,
+    apiTagObject: SHA_B,
+    apiTagCommit: SHA_A,
+    lsRemoteOutput: lsRemote,
+  }), /API|ls-remote|tag object|disagree/i);
+  assert.throws(() => core.validateStableRemoteTagEvidence({
+    tag: TAG,
+    defaultCommit: SHA_B,
+    apiTagObject: TAG_OBJECT,
+    apiTagCommit: SHA_B,
+    lsRemoteOutput: `${TAG_OBJECT}\trefs/tags/${TAG}\n${SHA_B}\trefs/tags/${TAG}^{}\n`,
+    previousEvidence: first,
+  }), /moved|sample|stable|identity/i);
 });
 
 test('temporary bare Git fixture covers clean, dirty, moved main, annotated tag peeling, and pre/post states', (t) => {
@@ -621,6 +750,10 @@ test('production CLI exposes only fixed prepublish/postpublish modes and no comm
   assert.match(cli, /default_branch|defaultBranch/);
   assert.match(cli, /effectiveDeadlineMs\s*-\s*Date\.now\(\)/);
   assert.doesNotMatch(cli, /resolveReleaseTargetCommit/);
+  assert.match(cli, /collectLocalInputs\(tag,\s*\{\s*requireLocalAnnotatedTag:\s*false\s*\}\)/);
+  assert.match(cli, /verifyPublishedAssetBytes\(lastRelease,\s*tag,\s*finalCommit\)/);
+  assert.match(cli, /\['show',\s*`\$\{trustedCommit\}:/);
+  assert.match(cli, /verifyPublishedAssetBytes[\s\S]*probeStableRemoteTag\(tag,\s*4,/);
 });
 
 test('production CLI rejects a fork origin before any fixed GitHub Release lookup', (t) => {
