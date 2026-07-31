@@ -69,4 +69,3 @@
 - Release 非 draft、非 prerelease，ZIP 内容与 loose assets 一致。
 - Obsidian Marketplace 能读取 1.3.75；发布后监控不出现活动目录移除或版本身份异常。
 - 独立审查 P0/P1/P2 均为 0。
-
