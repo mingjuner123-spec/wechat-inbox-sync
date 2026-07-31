@@ -183,6 +183,14 @@ const DOUBAO_ASR_SUBMIT_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmo
 const DOUBAO_ASR_QUERY_URL = 'https://openspeech.bytedance.com/api/v3/auc/bigmodel/query';
 const DOUBAO_ASR_RESOURCE_ID = 'volc.seedasr.auc';
 const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转写文本，不要摘要，不要解释，不要使用 Markdown。';
+const EXTERNAL_API_MIN_INTERVAL_MS = 1000;
+const _externalApiLastCall = {};
+async function throttleExternalApi(key) {
+  const now = Date.now();
+  const wait = EXTERNAL_API_MIN_INTERVAL_MS - (now - (_externalApiLastCall[key] || 0));
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  _externalApiLastCall[key] = Date.now();
+}
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 const LOCAL_OCR_HOME = '.wechat-inbox-local-ocr';
