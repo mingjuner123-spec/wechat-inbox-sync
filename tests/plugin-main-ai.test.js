@@ -51,6 +51,9 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const pluginMainSource = fs
+  .readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'src', 'main.js'), 'utf8')
+  .replace(/\r\n/g, '\n');
+const generatedPluginMainSource = fs
   .readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'), 'utf8')
   .replace(/\r\n/g, '\n');
 const pluginMainTestSource = fs.readFileSync(__filename, 'utf8').replace(/\r\n/g, '\n');
@@ -1369,8 +1372,8 @@ assert.strictEqual(pluginMainSource.includes("setButtonText('停止当前转写'
 }
 assert.ok(pluginMainSource.includes('shouldReadBindErrorBody'));
 assert.ok(pluginMainSource.includes('暂时无法确认绑定码状态，请重试。'));
-assert.ok(pluginMainSource.includes("taskkill', ['/PID'"));
-assert.ok(pluginMainSource.includes("'/T', '/F'"));
+assert.match(pluginMainSource, /spawnSync\(["']taskkill["'],\s*\[["']\/PID["']/);
+assert.match(pluginMainSource, /["']\/T["'],\s*["']\/F["']/);
 assert.strictEqual(
   helpers.extractSocialMediaUrlFromHtml(`
     <script>
@@ -2113,8 +2116,8 @@ assert.strictEqual(pluginMainSource.includes("setName('阿里百炼 API Key')"),
 assert.strictEqual(pluginMainSource.includes("setName('腾讯云 SecretId')"), false);
 assert.strictEqual(pluginMainSource.includes("setName('长音视频云端预转写')"), false);
 assert.strictEqual(pluginMainSource.includes("setName('云端预转写阈值')"), false);
-assert.ok(pluginMainSource.includes('正在同步'));
-assert.ok(pluginMainSource.includes('正在处理'));
+assert.ok(generatedPluginMainSource.includes('正在同步'));
+assert.ok(generatedPluginMainSource.includes('正在处理'));
 assert.strictEqual(helpers.getSocialRequestHeaders('https://v3-dy-o.zjcdn.com/tos-cn-ve-15/demo-video?mime_type=video_mp4').Referer, 'https://www.douyin.com/');
 assert.strictEqual(helpers.getSocialRequestHeaders('https://mpvideo.qpic.cn/0b2eiaaaakiaaaaabcdef/0?dis_k=demo').Referer, 'https://channels.weixin.qq.com/');
 assert.strictEqual(helpers.shouldResolveMediaDownloadUrl('https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000demo'), true);

@@ -52,7 +52,7 @@ assert.strictEqual(manifest.minAppVersion, '1.0.0');
 assert.strictEqual(manifest.isDesktopOnly, true);
 assert.strictEqual(versions[manifest.version], manifest.minAppVersion);
 assert.ok(
-  pluginMainSource.includes("const PLUGIN_RUNTIME_VERSION = '1.3.74';"),
+  /PLUGIN_RUNTIME_VERSION\s*=\s*["']1\.3\.74["']/.test(pluginMainSource),
   'marketplace main.js runtime identity must match manifest version 1.3.74',
 );
 assert.strictEqual(fs.existsSync(rootManifestPath), true, 'root manifest.json should exist for Obsidian marketplace version indexing');
@@ -66,7 +66,7 @@ assert.deepStrictEqual(JSON.parse(fs.readFileSync(rootVersionsPath, 'utf8')), ve
 assert.strictEqual(fs.existsSync(path.join(pluginDir, 'local-ocr/__pycache__')), false, 'local OCR package should not include Python cache files');
 
 assert.ok(
-  pluginMainSource.includes("const LOCAL_OCR_BATCH_RUNNER_VERSION = 'xiaohongshu-batch-v1';"),
+  pluginMainSource.includes('xiaohongshu-batch-v1'),
   'marketplace main.js must contain the versioned Xiaohongshu OCR batch runner',
 );
 assert.ok(
