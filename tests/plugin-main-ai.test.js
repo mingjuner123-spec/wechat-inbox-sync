@@ -6,6 +6,7 @@ const Module = require('module');
 const { EventEmitter } = require('events');
 const { createNoteOutputPlanHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/record-body-markdown-utils');
+const { createAiMetadataHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/ai-metadata-utils');
 
 let requestUrlMock = async () => ({});
 async function withFixedNow(iso, callback) {
@@ -168,6 +169,87 @@ function runRecordBodyMarkdownModuleTests() {
   assert.strictEqual(JSON.stringify(transcriptOnlyRecord), transcriptOnlySnapshot, '转写元数据不得改写输入');
 }
 
+function runAiMetadataFormattingModuleTests() {
+  assert.strictEqual(typeof createAiMetadataHelpers, 'function');
+
+  const output = createAiMetadataHelpers({
+    tryParseJson: legacyAiMetadataHelpers.tryParseJson,
+    cleanMarkdownForStorage: legacyAiMetadataHelpers.cleanMarkdownForStorage,
+    stripMarkdownCodeBlocks: legacyAiMetadataHelpers.stripMarkdownCodeBlocks,
+  });
+  const keywordInputs = [
+    ['效率', '专注', '效率'],
+    '效率，专注 #效率\n行动',
+    '',
+  ];
+  for (const input of keywordInputs) {
+    assert.deepStrictEqual(
+      output.normalizeGeneratedKeywords(input),
+      legacyAiMetadataHelpers.normalizeGeneratedKeywords(input),
+      `关键词规范化：${JSON.stringify(input)}`,
+    );
+  }
+
+  const responseInputs = [
+    '{"description":"JSON 简介","keywords":["效率","专注"]}',
+    '```json\n{"summary":"围栏简介","tags":["阅读","思考"]}\n```',
+    '简介：标签式简介\n关键词：效率，专注 #效率',
+    '',
+  ];
+  for (const input of responseInputs) {
+    assert.deepStrictEqual(
+      output.parseGeneratedMetadataResponse(input),
+      legacyAiMetadataHelpers.parseGeneratedMetadataResponse(input),
+      `模型返回解析：${JSON.stringify(input)}`,
+    );
+  }
+
+  const oversizedResult = {
+    description: '长'.repeat(360),
+    keywords: ['效率', '效率', '专注'],
+  };
+  assert.deepStrictEqual(
+    output.normalizeGeneratedMetadataResult(oversizedResult),
+    legacyAiMetadataHelpers.normalizeGeneratedMetadataResult(oversizedResult),
+  );
+
+  const records = [
+    {
+      name: '网页记录的 AI 输入',
+      record: {
+        type: 'webpage',
+        metadata: {
+          title: '网页标题',
+          markdown: '# 标题\n正文 [链接](https://example.com)\n```js\nconst ignored = true;\n```',
+          description: '历史简介',
+        },
+      },
+    },
+    {
+      name: '转写记录的 AI 输入',
+      record: {
+        type: 'voice',
+        metadata: {
+          title: '录音标题',
+          transcriptOnly: true,
+          transcriptionStatus: 'success',
+          transcription: '这是本地转写内容。',
+          markdown: '不得参与转写摘要',
+        },
+      },
+    },
+  ];
+  for (const fixture of records) {
+    const snapshot = JSON.stringify(fixture.record);
+    assert.strictEqual(
+      output.extractAiMetadataInputText(fixture.record),
+      legacyAiMetadataHelpers.extractAiMetadataInputText(fixture.record),
+      fixture.name,
+    );
+    assert.strictEqual(JSON.stringify(fixture.record), snapshot, `${fixture.name} 不得改写输入`);
+  }
+}
+
 function runConfiguredNoteOutputPlanParityTests() {
   assert.strictEqual(typeof helpers.buildNoteOutputPlan, 'function');
   const syncedAt = '2026-08-01T00:00:00.000Z';
@@ -264,6 +346,45 @@ PluginClass.prototype.requestXiaohongshuStaticPage = async function requestXiaoh
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const legacyAiMetadataExports = [
+  'tryParseJson',
+  'cleanMarkdownForStorage',
+  'stripMarkdownCodeBlocks',
+  'normalizeGeneratedKeywords',
+  'parseGeneratedMetadataResponse',
+  'normalizeGeneratedMetadataResult',
+  'extractAiMetadataInputText',
+];
+const legacyAiMetadataMainSource = childProcess.execFileSync(
+  'git',
+  ['show', '1a9c8d6e:obsidian-plugin/wechat-inbox-sync/main.js'],
+  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true },
+);
+const instrumentedLegacyAiMetadataMainSource = legacyAiMetadataMainSource.replace(
+  'module.exports = WechatObsidianInboxPlugin;',
+  `Object.assign(WechatObsidianInboxPlugin.__test, { ${legacyAiMetadataExports.join(', ')} });\nmodule.exports = WechatObsidianInboxPlugin;`,
+);
+assert.notStrictEqual(instrumentedLegacyAiMetadataMainSource, legacyAiMetadataMainSource, '历史 AI 元数据基线必须成功注入测试出口');
+const legacyAiMetadataModule = { exports: {} };
+const legacyAiMetadataObsidian = {
+  Modal: class Modal {},
+  Notice: class Notice {},
+  Plugin: class Plugin {},
+  PluginSettingTab: class PluginSettingTab {},
+  Setting: class Setting {},
+  requestUrl: (...args) => requestUrlMock(...args),
+};
+new Function('require', 'module', 'exports', '__filename', '__dirname', instrumentedLegacyAiMetadataMainSource)(
+  (request) => request === 'obsidian' ? legacyAiMetadataObsidian : require(request),
+  legacyAiMetadataModule,
+  legacyAiMetadataModule.exports,
+  path.join(__dirname, '..', 'legacy-ai-metadata-main.js'),
+  path.join(__dirname, '..'),
+);
+const legacyAiMetadataHelpers = legacyAiMetadataModule.exports.__test;
+for (const helperName of legacyAiMetadataExports) {
+  assert.strictEqual(typeof legacyAiMetadataHelpers[helperName], 'function', `历史 AI 元数据基线缺少 ${helperName}`);
+}
 const legacyRecordBodyExports = [
   'buildWebpageMarkdownBody',
   'buildAudioTranscriptMarkdown',
@@ -13850,6 +13971,7 @@ async function runXiaohongshuOcrBatchTests() {
 async function main() {
   runNoteOutputPlanModuleTests();
   runRecordBodyMarkdownModuleTests();
+  runAiMetadataFormattingModuleTests();
   runConfiguredNoteOutputPlanParityTests();
   await runXiaohongshuOcrBatchTests();
   await runClipboardTextWebpagePromotionTests();
