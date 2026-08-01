@@ -78,53 +78,53 @@ function runRecordBodyMarkdownModuleTests() {
   assert.strictEqual(typeof createRecordBodyMarkdownHelpers, 'function');
 
   const output = createRecordBodyMarkdownHelpers({
-    cleanDisplayUrl: (value) => String(value || '').trim(),
-    cleanMarkdownForStorage: (value) => String(value || '').trim(),
-    extractKeywordsFromText: (value, title) => [String(title || ''), String(value || '').slice(0, 8)].filter(Boolean),
-    formatCreatedTime: () => '2026-08-01 08:00',
-    getWebpageSourcePrefix: () => '网页',
-    isFeishuUrl: (url) => /feishu\.cn/i.test(String(url || '')),
-    isWechatChannelsUrl: (url) => /channels\.weixin\.qq\.com/i.test(String(url || '')),
-    isXiaohongshuUrl: (url) => /xiaohongshu\.com/i.test(String(url || '')),
-    normalizeExtractedUrl: (value) => String(value || '').trim(),
-    sanitizeXiaohongshuMarkdownImages: (value) => String(value || ''),
-    stripMarkdownCodeBlocks: (value) => String(value || '').replace(/```[\s\S]*?```/g, ''),
+    cleanDisplayUrl: legacyRecordBodyHelpers.cleanDisplayUrl,
+    cleanMarkdownForStorage: legacyRecordBodyHelpers.cleanMarkdownForStorage,
+    extractKeywordsFromText: legacyRecordBodyHelpers.extractKeywordsFromText,
+    formatCreatedTime: legacyRecordBodyHelpers.formatCreatedTime,
+    getWebpageSourcePrefix: legacyRecordBodyHelpers.getWebpageSourcePrefix,
+    isFeishuUrl: legacyRecordBodyHelpers.isFeishuUrl,
+    isWechatChannelsUrl: legacyRecordBodyHelpers.isWechatChannelsUrl,
+    isXiaohongshuUrl: legacyRecordBodyHelpers.isXiaohongshuUrl,
+    normalizeExtractedUrl: legacyRecordBodyHelpers.normalizeExtractedUrl,
+    sanitizeXiaohongshuMarkdownImages: legacyRecordBodyHelpers.sanitizeXiaohongshuMarkdownImages,
+    stripMarkdownCodeBlocks: legacyRecordBodyHelpers.stripMarkdownCodeBlocks,
   });
   const fixtures = [
     {
       name: '网页正文',
       record: { type: 'webpage', content: 'https://example.com', metadata: { markdown: '网页正文', conversionStatus: 'success' } },
-      actual: () => helpers.buildWebpageMarkdownBody(fixtures[0].record, '网页标题'),
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[0].record, '网页标题'),
       candidate: () => output.buildWebpageMarkdownBody(fixtures[0].record, '网页标题'),
     },
     {
       name: '飞书网页正文',
       record: { type: 'webpage', content: 'https://example.feishu.cn/wiki/doc', metadata: { markdown: '飞书正文', conversionStatus: 'success' } },
-      actual: () => helpers.buildWebpageMarkdownBody(fixtures[1].record, '飞书标题'),
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[1].record, '飞书标题'),
       candidate: () => output.buildWebpageMarkdownBody(fixtures[1].record, '飞书标题'),
     },
     {
       name: '视频号未接通提示',
       record: { type: 'webpage', content: 'https://channels.weixin.qq.com/feed/abc', metadata: { conversionStatus: 'link_saved' } },
-      actual: () => helpers.buildWebpageMarkdownBody(fixtures[2].record, '视频号标题'),
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[2].record, '视频号标题'),
       candidate: () => output.buildWebpageMarkdownBody(fixtures[2].record, '视频号标题'),
     },
     {
       name: '转写网页正文',
       record: { type: 'webpage', content: 'https://example.com/audio', metadata: { transcriptOnly: true, sourceMediaAttachmentPath: '附件/音频.mp3', transcription: '转写正文', transcriptionStatus: 'success' } },
-      actual: () => helpers.buildWebpageMarkdownBody(fixtures[3].record, '转写网页'),
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[3].record, '转写网页'),
       candidate: () => output.buildWebpageMarkdownBody(fixtures[3].record, '转写网页'),
     },
     {
       name: '转写文件正文',
       record: { type: 'file', content: '录音.mp3', metadata: { fileName: '录音.mp3', filePath: '附件/录音.mp3', transcription: '文件转写正文', transcriptionStatus: 'success', transcriptionSource: 'local' } },
-      actual: () => helpers.buildFileMarkdownBody(fixtures[4].record),
+      actual: () => legacyRecordBodyHelpers.buildFileMarkdownBody(fixtures[4].record),
       candidate: () => output.buildFileMarkdownBody(fixtures[4].record),
     },
     {
       name: '普通文件正文',
       record: { type: 'file', content: '文档.pdf', metadata: { fileName: '文档.pdf', filePath: '附件/文档.pdf', markdown: '文件正文', conversionStatus: 'success' } },
-      actual: () => helpers.buildFileMarkdownBody(fixtures[5].record),
+      actual: () => legacyRecordBodyHelpers.buildFileMarkdownBody(fixtures[5].record),
       candidate: () => output.buildFileMarkdownBody(fixtures[5].record),
     },
   ];
@@ -135,14 +135,37 @@ function runRecordBodyMarkdownModuleTests() {
     assert.strictEqual(JSON.stringify(fixture.record), snapshot, `${fixture.name} 不得改写输入`);
   }
 
+  const transcriptMetadata = { transcription: '一段足够长的转写内容，用来生成简介。', title: '转写标题' };
   assert.deepStrictEqual(
-    output.buildTranscriptPropertyMetadata({ transcription: '一段足够长的转写内容，用来生成简介。', title: '转写标题' }),
-    {
-      description: '一段足够长的转写内容，用来生成简介',
-      keywords: ['转写标题', '一段足够长的转写'],
-      aiMetadataSource: 'transcription',
-    },
+    output.buildTranscriptPropertyMetadata(transcriptMetadata),
+    legacyRecordBodyHelpers.buildTranscriptPropertyMetadata(transcriptMetadata),
   );
+
+  const transcriptOnlyRecord = {
+    markdown: '历史网页正文',
+    snapshot: '历史快照',
+    contentSnapshot: '历史内容快照',
+    imageUrls: ['https://example.com/ignored.jpg'],
+    images: [{ url: 'https://example.com/ignored-2.jpg' }],
+    url: 'https://example.com/original',
+    retainedField: '不得丢失',
+  };
+  const transcriptOnlyOptions = {
+    url: 'https://example.com/audio',
+    mediaUrl: 'https://media.example.com/audio.mp3',
+    mediaUrls: [' https://media.example.com/audio.mp3 ', { url: 'https://media.example.com/other.mp3' }],
+    subtitleUrl: 'https://media.example.com/audio.vtt',
+    transcription: '转写正文',
+    transcriptionStatus: 'success',
+    transcriptionSource: 'local',
+    markdown: '补充正文',
+  };
+  const transcriptOnlySnapshot = JSON.stringify(transcriptOnlyRecord);
+  assert.deepStrictEqual(
+    output.buildTranscriptOnlyMetadata(transcriptOnlyRecord, transcriptOnlyOptions),
+    legacyRecordBodyHelpers.buildTranscriptOnlyMetadata(transcriptOnlyRecord, transcriptOnlyOptions),
+  );
+  assert.strictEqual(JSON.stringify(transcriptOnlyRecord), transcriptOnlySnapshot, '转写元数据不得改写输入');
 }
 
 function runConfiguredNoteOutputPlanParityTests() {
@@ -241,6 +264,55 @@ PluginClass.prototype.requestXiaohongshuStaticPage = async function requestXiaoh
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const legacyRecordBodyExports = [
+  'buildWebpageMarkdownBody',
+  'buildAudioTranscriptMarkdown',
+  'buildSourceMediaAttachmentMarkdown',
+  'buildTranscriptPropertyMetadata',
+  'buildTranscriptOnlyMetadata',
+  'buildFileMarkdownBody',
+  'cleanDisplayUrl',
+  'cleanMarkdownForStorage',
+  'extractKeywordsFromText',
+  'formatCreatedTime',
+  'getWebpageSourcePrefix',
+  'isFeishuUrl',
+  'isWechatChannelsUrl',
+  'isXiaohongshuUrl',
+  'normalizeExtractedUrl',
+  'sanitizeXiaohongshuMarkdownImages',
+  'stripMarkdownCodeBlocks',
+];
+const legacyRecordBodyMainSource = childProcess.execFileSync(
+  'git',
+  ['show', '5d0fcbfd:obsidian-plugin/wechat-inbox-sync/main.js'],
+  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true },
+);
+const instrumentedLegacyRecordBodyMainSource = legacyRecordBodyMainSource.replace(
+  'module.exports = WechatObsidianInboxPlugin;',
+  `Object.assign(WechatObsidianInboxPlugin.__test, { ${legacyRecordBodyExports.join(', ')} });\nmodule.exports = WechatObsidianInboxPlugin;`,
+);
+assert.notStrictEqual(instrumentedLegacyRecordBodyMainSource, legacyRecordBodyMainSource, '历史正文基线必须成功注入测试出口');
+const legacyRecordBodyModule = { exports: {} };
+const legacyRecordBodyObsidian = {
+  Modal: class Modal {},
+  Notice: class Notice {},
+  Plugin: class Plugin {},
+  PluginSettingTab: class PluginSettingTab {},
+  Setting: class Setting {},
+  requestUrl: (...args) => requestUrlMock(...args),
+};
+new Function('require', 'module', 'exports', '__filename', '__dirname', instrumentedLegacyRecordBodyMainSource)(
+  (request) => request === 'obsidian' ? legacyRecordBodyObsidian : require(request),
+  legacyRecordBodyModule,
+  legacyRecordBodyModule.exports,
+  path.join(__dirname, '..', 'legacy-record-body-main.js'),
+  path.join(__dirname, '..'),
+);
+const legacyRecordBodyHelpers = legacyRecordBodyModule.exports.__test;
+for (const helperName of legacyRecordBodyExports) {
+  assert.strictEqual(typeof legacyRecordBodyHelpers[helperName], 'function', `历史正文基线缺少 ${helperName}`);
+}
 const pluginMainSource = fs
   .readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'src', 'main.js'), 'utf8')
   .replace(/\r\n/g, '\n');
