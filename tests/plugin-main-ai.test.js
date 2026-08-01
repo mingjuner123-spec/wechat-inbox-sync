@@ -5,6 +5,7 @@ const childProcess = require('child_process');
 const Module = require('module');
 const { EventEmitter } = require('events');
 const { createNoteOutputPlanHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/note-output-plan-utils');
+const { createRecordBodyMarkdownHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/record-body-markdown-utils');
 
 let requestUrlMock = async () => ({});
 async function withFixedNow(iso, callback) {
@@ -70,6 +71,77 @@ function runNoteOutputPlanModuleTests() {
       noteDir: '临时收集',
     }),
     /Unsupported record type: unknown/,
+  );
+}
+
+function runRecordBodyMarkdownModuleTests() {
+  assert.strictEqual(typeof createRecordBodyMarkdownHelpers, 'function');
+
+  const output = createRecordBodyMarkdownHelpers({
+    cleanDisplayUrl: (value) => String(value || '').trim(),
+    cleanMarkdownForStorage: (value) => String(value || '').trim(),
+    extractKeywordsFromText: (value, title) => [String(title || ''), String(value || '').slice(0, 8)].filter(Boolean),
+    formatCreatedTime: () => '2026-08-01 08:00',
+    getWebpageSourcePrefix: () => '网页',
+    isFeishuUrl: (url) => /feishu\.cn/i.test(String(url || '')),
+    isWechatChannelsUrl: (url) => /channels\.weixin\.qq\.com/i.test(String(url || '')),
+    isXiaohongshuUrl: (url) => /xiaohongshu\.com/i.test(String(url || '')),
+    normalizeExtractedUrl: (value) => String(value || '').trim(),
+    sanitizeXiaohongshuMarkdownImages: (value) => String(value || ''),
+    stripMarkdownCodeBlocks: (value) => String(value || '').replace(/```[\s\S]*?```/g, ''),
+  });
+  const fixtures = [
+    {
+      name: '网页正文',
+      record: { type: 'webpage', content: 'https://example.com', metadata: { markdown: '网页正文', conversionStatus: 'success' } },
+      actual: () => helpers.buildWebpageMarkdownBody(fixtures[0].record, '网页标题'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[0].record, '网页标题'),
+    },
+    {
+      name: '飞书网页正文',
+      record: { type: 'webpage', content: 'https://example.feishu.cn/wiki/doc', metadata: { markdown: '飞书正文', conversionStatus: 'success' } },
+      actual: () => helpers.buildWebpageMarkdownBody(fixtures[1].record, '飞书标题'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[1].record, '飞书标题'),
+    },
+    {
+      name: '视频号未接通提示',
+      record: { type: 'webpage', content: 'https://channels.weixin.qq.com/feed/abc', metadata: { conversionStatus: 'link_saved' } },
+      actual: () => helpers.buildWebpageMarkdownBody(fixtures[2].record, '视频号标题'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[2].record, '视频号标题'),
+    },
+    {
+      name: '转写网页正文',
+      record: { type: 'webpage', content: 'https://example.com/audio', metadata: { transcriptOnly: true, sourceMediaAttachmentPath: '附件/音频.mp3', transcription: '转写正文', transcriptionStatus: 'success' } },
+      actual: () => helpers.buildWebpageMarkdownBody(fixtures[3].record, '转写网页'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[3].record, '转写网页'),
+    },
+    {
+      name: '转写文件正文',
+      record: { type: 'file', content: '录音.mp3', metadata: { fileName: '录音.mp3', filePath: '附件/录音.mp3', transcription: '文件转写正文', transcriptionStatus: 'success', transcriptionSource: 'local' } },
+      actual: () => helpers.buildFileMarkdownBody(fixtures[4].record),
+      candidate: () => output.buildFileMarkdownBody(fixtures[4].record),
+    },
+    {
+      name: '普通文件正文',
+      record: { type: 'file', content: '文档.pdf', metadata: { fileName: '文档.pdf', filePath: '附件/文档.pdf', markdown: '文件正文', conversionStatus: 'success' } },
+      actual: () => helpers.buildFileMarkdownBody(fixtures[5].record),
+      candidate: () => output.buildFileMarkdownBody(fixtures[5].record),
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const snapshot = JSON.stringify(fixture.record);
+    assert.strictEqual(fixture.candidate(), fixture.actual(), fixture.name);
+    assert.strictEqual(JSON.stringify(fixture.record), snapshot, `${fixture.name} 不得改写输入`);
+  }
+
+  assert.deepStrictEqual(
+    output.buildTranscriptPropertyMetadata({ transcription: '一段足够长的转写内容，用来生成简介。', title: '转写标题' }),
+    {
+      description: '一段足够长的转写内容，用来生成简介',
+      keywords: ['转写标题', '一段足够长的转写'],
+      aiMetadataSource: 'transcription',
+    },
   );
 }
 
@@ -13705,6 +13777,7 @@ async function runXiaohongshuOcrBatchTests() {
 
 async function main() {
   runNoteOutputPlanModuleTests();
+  runRecordBodyMarkdownModuleTests();
   runConfiguredNoteOutputPlanParityTests();
   await runXiaohongshuOcrBatchTests();
   await runClipboardTextWebpagePromotionTests();
