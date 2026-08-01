@@ -6,7 +6,7 @@
 - 标题：插件笔记输出边界拆分（第二阶段）
 - 创建日期：2026-08-01
 - 类型：重构
-- 状态：进行中
+- 状态：审核中
 - 风险等级：L2
 - 所属阶段：插件本地架构整理第二阶段
 - 是否当前主线：否
@@ -14,7 +14,7 @@
 - 父主线：H2-002
 - 分支：codex/plugin-note-output-boundary
 - Worktree：.worktrees/plugin-note-output-boundary
-- 允许修改路径（allowedPaths）：obsidian-plugin/wechat-inbox-sync/src/main.js；obsidian-plugin/wechat-inbox-sync/src/note-output-plan-utils.js；tests/plugin-main-ai.test.js；docs/PLUGIN_CODE_MAP_1.3.75.md；docs/superpowers/specs/2026-08-01-plugin-note-output-boundary-design.md；docs/superpowers/plans/2026-08-01-plugin-note-output-boundary.md
+- 允许修改路径（allowedPaths）：obsidian-plugin/wechat-inbox-sync/src/main.js；obsidian-plugin/wechat-inbox-sync/src/note-output-plan-utils.js；tests/plugin-main-ai.test.js；docs/PLUGIN_CODE_MAP_1.3.74.md；docs/superpowers/specs/2026-08-01-plugin-note-output-boundary-design.md；docs/superpowers/plans/2026-08-01-plugin-note-output-boundary.md
 - 环境或发布链路占用：无
 - 紧急事实：不适用
 - 事故授权范围：不适用
@@ -49,7 +49,7 @@ L2：作者完成定向 TDD、构建与回归；一名未参与实现的独立 A
 
 ## 纠偏记录
 
-暂无。
+已在独立 Worktree 完成：先观察模块缺失和主入口未接线两次预期红灯；随后新增纯输出模块、将 writeRecord 最后的 Markdown/路径组装接到该模块，并删除主入口重复的输出实现。完整本地回归、市场包、构建、语法和 diff 检查通过，待独立审查。
 
 ## 已知风险
 
@@ -57,7 +57,7 @@ L2：作者完成定向 TDD、构建与回归；一名未参与实现的独立 A
 
 ## 唯一下一步
 
-在专属 Worktree 写入实施计划，并以失败测试先行实现纯笔记输出计划。
+由独立 Agent 审查候选的边界、输出等价与完整本地验证；通过后再交付负责人本地测试。
 
 ## 是否需要负责人决定
 

@@ -84,6 +84,7 @@ const {
   normalizeRecordUrlForCompare,
   normalizeYamlScalar,
 } = require('./record-identity-utils');
+const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
@@ -13636,67 +13637,8 @@ function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl, tokenUrlM
   return result;
 }
 
-function yamlValue(value, options = {}) {
-  if (value === undefined || value === null) return '';
-  const normalize = (input) => String(input || '')
-    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
-    .replace(/\r?\n/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (Array.isArray(value)) {
-    value = value
-      .map((item) => normalize(item))
-      .filter(Boolean)
-      .join(', ');
-  }
-  const text = normalize(value);
-  if (!text) return '';
-  if (options.quote || /[\r\n]/.test(text) || /^(?:true|false|null|yes|no|on|off)$/i.test(text)) {
-    return `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-  }
-  return text;
-}
-
-function buildFrontmatter(lines) {
-  return ['---', ...lines, '---', ''].join('\n');
-}
-
-function parseNotePropertyFields(propertyFields) {
-  return normalizeNotePropertyFields(propertyFields).split(',').filter(Boolean);
-}
-
 function getRecordUrl(record, metadata = record && record.metadata || {}) {
   return cleanDisplayUrl(metadata.url || metadata.originalUrl || record.content || '');
-}
-
-function cleanFeishuPropertyText(value) {
-  return String(value || '')
-    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
-    .replace(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f\s*\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, ' ')
-    .replace(/\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, ' ')
-    .replace(/\bheader-v2\b/gi, ' ')
-    .replace(/\b\u5206\u4eab\b/g, ' ')
-    .replace(/-\s+/g, '-')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function cleanFeishuDescriptionForFrontmatter(value) {
-  const beforeShell = String(value || '').split(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f|\u6700\u8fd1\u4fee\u6539|header-v2/i)[0] || value;
-  const cleaned = cleanFeishuPropertyText(beforeShell);
-  const firstSentence = cleaned.split(/[\u3002\uff01\uff1f!?]\s*/).map((item) => item.trim()).filter(Boolean)[0] || cleaned;
-  return firstSentence.slice(0, 160).trim();
-}
-
-function cleanRecordFrontmatterField(record, key, value) {
-  const metadata = (record && record.metadata) || {};
-  const url = getRecordUrl(record || {}, metadata);
-  if (!isFeishuUrl(url)) return value;
-  if (key === 'title' || key === 'author' || key === 'source') return cleanFeishuPropertyText(value);
-  if (key === 'description') return cleanFeishuDescriptionForFrontmatter(value);
-  if (key === 'keywords' && Array.isArray(value)) return value.map((item) => cleanFeishuPropertyText(item)).filter(Boolean);
-  if (key === 'keywords') return cleanFeishuPropertyText(value);
-  return value;
 }
 
 function getRecordSourceLabel(record, metadata = {}) {
@@ -13725,132 +13667,29 @@ function getRecordSourceLabel(record, metadata = {}) {
   return normalizedPlatform || normalizedCategory || '';
 }
 
-function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
-  const type = String(record.type || '').toLowerCase();
-  const metadata = record.metadata || {};
-  const aiMetadataSource = String(metadata.aiMetadataSource || '').trim();
-  const fields = {
-    id: getRecordId(record),
-    type,
-    title,
-    author: getRecordAuthor(metadata),
-    url: getRecordUrl(record, metadata),
-    created_at: record.createdAt,
-    synced_at: syncedAt,
-    source: getRecordSourceLabel(record, metadata),
-    description: aiMetadataSource ? getRecordDescription(metadata) : '',
-    keywords: aiMetadataSource ? getRecordKeywords(metadata) : [],
-    status: 'synced',
-  };
-
-  if (type === 'link') {
-    fields.fetch_status = metadata.fetchStatus || 'pending';
-  }
-
-  if (type === 'webpage') {
-    fields.conversion_status = metadata.conversionStatus || 'pending';
-  }
-
-  if (type === 'voice') {
-    fields.audio_file = audioFileName;
-    fields.audio_file_id = metadata.audioFileID || '';
-    fields.transcription_status = metadata.transcriptionStatus || 'pending';
-  }
-
-  if (type === 'file') {
-    fields.file_name = metadata.fileName || record.content || '';
-    fields.file_id = metadata.fileID || '';
-    fields.file_ext = metadata.fileExt || '';
-    fields.conversion_status = metadata.conversionStatus || 'pending';
-  }
-
-  const defaultFieldOrder = parseNotePropertyFields(DEFAULT_NOTE_PROPERTY_FIELDS);
-  const legacyFieldOrder = [
-    'id',
-    'type',
-    'title',
-    'author',
-    'url',
-    'created_at',
-    'synced_at',
-    'source',
-    'description',
-    'keywords',
-    'status',
-    'fetch_status',
-    'conversion_status',
-    'audio_file',
-    'audio_file_id',
-    'transcription_status',
-    'file_name',
-    'file_id',
-    'file_ext',
-  ];
-  const selectedFields = parseNotePropertyFields(propertyFields);
-  const fieldOrder = selectedFields.length ? selectedFields : (defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder);
-  const shouldQuoteFrontmatterValue = isFeishuUrl(getRecordUrl(record, metadata));
-  const lines = fieldOrder
-    .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
-    .map((key) => [key, cleanRecordFrontmatterField(record, key, fields[key])])
-    .filter(([, value]) => yamlValue(value, { quote: shouldQuoteFrontmatterValue }))
-    .map(([key, value]) => `${key}: ${yamlValue(value, { quote: shouldQuoteFrontmatterValue })}`);
-
-  return buildFrontmatter(lines);
-}
-
-function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS }) {
-  const type = String(record.type || '').toLowerCase();
-  const metadata = record.metadata || {};
-  const audioFileName = metadata.audioFileName || `${title}.mp3`;
-
-  let body = '';
-  if (type === 'text') {
-    body = `${record.content || ''}\n`;
-  } else if (type === 'link') {
-    const pageTitle = metadata.title || title;
-    const url = cleanDisplayUrl(metadata.url || record.content || '');
-    const snapshot = metadata.snapshot || metadata.contentSnapshot || '';
-    const fallback = metadata.fetchStatus === 'failed'
-      ? '正文抓取失败，已保存标题和原始链接。'
-      : '正文快照处理中，已先保存标题和原始链接。';
-    body = [
-      pageTitle,
-      '',
-      '## 正文快照',
-      '',
-      snapshot || fallback,
-      '',
-    ].join('\n');
-  } else if (type === 'webpage') {
-    body = buildWebpageMarkdownBody(record, title);
-  } else if (type === 'voice') {
-    const errorText = metadata.transcriptionError || metadata.aiError || '';
-    const transcription = metadata.transcription
-      || (metadata.transcriptionStatus === 'failed' ? `语音转写失败。${errorText}` : '未开启语音转写。');
-    body = [
-      '## 转写全文',
-      '',
-      transcription,
-      '',
-      '## 录音文件',
-      '',
-      `![[${audioFileName}]]`,
-      '',
-    ].join('\n');
-  } else if (type === 'file') {
-    body = buildFileMarkdownBody(record);
-  } else {
-    throw new Error(`Unsupported record type: ${record.type}`);
-  }
-
-  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
-  const recordIdMarker = buildRecordIdMarker(getRecordId(record));
-  const aiMetadataErrorMarker = metadata.aiMetadataError
-    ? buildAiMetadataErrorComment(metadata.aiMetadataError)
-    : '';
-  const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join('\n');
-  return `${frontmatter}\n${diagnosticMarkers ? `${diagnosticMarkers}\n\n` : ''}${body}`;
-}
+const noteOutputPlanHelpers = createNoteOutputPlanHelpers({
+  buildAiMetadataErrorComment,
+  buildFileMarkdownBody,
+  buildRecordIdMarker,
+  buildWebpageMarkdownBody,
+  cleanDisplayUrl,
+  defaultNotePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
+  getRecordAuthor,
+  getRecordDescription,
+  getRecordId,
+  getRecordKeywords,
+  getRecordSourceLabel,
+  getRecordUrl,
+  getWebpageSourcePrefix,
+  isFeishuUrl,
+  normalizeNotePropertyFields,
+  normalizeVaultPath,
+});
+const {
+  buildRecordFrontmatter,
+  buildMarkdownForRecord,
+  buildNoteOutputPlan,
+} = noteOutputPlanHelpers;
 
 function getRecordConversionWarning(record) {
   if (!record) return '';
@@ -14360,13 +14199,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.ensureFolder(noteDir);
     const title = await this.nextRecordTitle(noteDir, record, '');
     const recordForMarkdown = await this.enrichRecordMetadataWithAi(record, binding);
-    const markdown = buildMarkdownForRecord({
+    const outputPlan = buildNoteOutputPlan({
       record: recordForMarkdown,
       title,
       syncedAt,
+      noteDir,
       propertyFields: this.settings.notePropertyFields,
     });
-    const filePath = normalizeVaultPath(`${noteDir}/${title}.md`);
+    const { markdown, filePath } = outputPlan;
     await this.app.vault.adapter.write(filePath, markdown);
     return {
       recordId: getRecordId(record),
@@ -19537,6 +19377,7 @@ WechatObsidianInboxPlugin.__test = {
   normalizeXiaohongshuOcrItems,
   XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS,
   buildMarkdownForRecord,
+  buildNoteOutputPlan,
   enrichExtractedWebpageMetadata,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,

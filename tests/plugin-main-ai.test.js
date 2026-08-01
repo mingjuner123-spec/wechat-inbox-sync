@@ -4,6 +4,7 @@ const https = require('https');
 const childProcess = require('child_process');
 const Module = require('module');
 const { EventEmitter } = require('events');
+const { createNoteOutputPlanHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/note-output-plan-utils');
 
 let requestUrlMock = async () => ({});
 async function withFixedNow(iso, callback) {
@@ -14,6 +15,124 @@ async function withFixedNow(iso, callback) {
   } finally {
     Date.now = originalNow;
   }
+}
+
+function runNoteOutputPlanModuleTests() {
+  const output = createNoteOutputPlanHelpers({
+    buildRecordIdMarker: (id) => `<!-- wechat-inbox-record-id: ${id} -->`,
+    buildAiMetadataErrorComment: (error) => `<!-- ai-error: ${error.code} -->`,
+    cleanDisplayUrl: (url) => String(url || '').trim(),
+    defaultNotePropertyFields: 'title,author,url,synced_at,source,description,keywords',
+    getRecordAuthor: (metadata) => metadata.author || '',
+    getRecordDescription: (metadata) => metadata.description || '',
+    getRecordKeywords: (metadata) => metadata.keywords || [],
+    getRecordId: (record) => record._id || record.id || '',
+    getRecordSourceLabel: () => '文本',
+    getRecordUrl: (record, metadata = record.metadata || {}) => metadata.url || record.content || '',
+    getWebpageSourcePrefix: () => '网页',
+    isFeishuUrl: () => false,
+    normalizeNotePropertyFields: (value) => String(value || ''),
+    normalizeVaultPath: (value) => String(value || '').replaceAll('\\', '/'),
+    buildWebpageMarkdownBody: (record) => record.metadata.markdown,
+    buildFileMarkdownBody: (record) => record.metadata.markdown,
+  });
+  const plan = output.buildNoteOutputPlan({
+    record: { _id: 'output-plan-text-1', type: 'text', content: '正文', metadata: {} },
+    title: '文本标题',
+    syncedAt: '2026-08-01T00:00:00.000Z',
+    noteDir: '临时收集\\2026-08-01',
+    propertyFields: 'title,url,synced_at',
+  });
+  assert.strictEqual(plan.filePath, '临时收集/2026-08-01/文本标题.md');
+  assert.ok(plan.markdown.includes('title: 文本标题'));
+  assert.ok(plan.markdown.includes('<!-- wechat-inbox-record-id: output-plan-text-1 -->'));
+  assert.ok(plan.markdown.endsWith('正文\n'));
+
+  const webpageRecord = {
+    _id: 'output-plan-webpage-1',
+    type: 'webpage',
+    content: 'https://example.com/page',
+    metadata: { markdown: '网页正文', conversionStatus: 'success' },
+  };
+  const webpageSnapshot = JSON.stringify(webpageRecord);
+  output.buildNoteOutputPlan({
+    record: webpageRecord,
+    title: '网页标题',
+    syncedAt: '2026-08-01T00:00:00.000Z',
+    noteDir: '临时收集',
+  });
+  assert.strictEqual(JSON.stringify(webpageRecord), webpageSnapshot);
+  assert.throws(
+    () => output.buildNoteOutputPlan({
+      record: { type: 'unknown', metadata: {} },
+      title: '未知类型',
+      syncedAt: '2026-08-01T00:00:00.000Z',
+      noteDir: '临时收集',
+    }),
+    /Unsupported record type: unknown/,
+  );
+}
+
+function runConfiguredNoteOutputPlanParityTests() {
+  assert.strictEqual(typeof helpers.buildNoteOutputPlan, 'function');
+  const syncedAt = '2026-08-01T00:00:00.000Z';
+  const fixtures = [
+    {
+      title: '文本输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-text', type: 'text', content: '文本正文', metadata: {} },
+    },
+    {
+      title: '链接输出',
+      noteDir: '临时收集',
+      record: { _id: 'plan-link', type: 'link', content: 'https://example.com/link', metadata: { title: '链接页面', snapshot: '链接正文' } },
+    },
+    {
+      title: '网页输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-webpage', type: 'webpage', content: 'https://example.com/page', metadata: { title: '网页页面', markdown: '网页正文', conversionStatus: 'success' } },
+    },
+    {
+      title: '录音输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-voice', type: 'voice', content: '录音', metadata: { audioFileName: '录音输出.mp3', transcription: '录音正文', transcriptionStatus: 'success' } },
+    },
+    {
+      title: '文件输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-file', type: 'file', content: '文件.pdf', metadata: { fileName: '文件.pdf', fileExt: 'pdf', markdown: '文件正文', conversionStatus: 'success' } },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const plan = helpers.buildNoteOutputPlan({ ...fixture, syncedAt });
+    assert.strictEqual(
+      plan.markdown,
+      helpers.buildMarkdownForRecord({ record: fixture.record, title: fixture.title, syncedAt }),
+    );
+    assert.strictEqual(plan.filePath, `${fixture.noteDir}/${fixture.title}.md`);
+  }
+
+  const markedRecord = {
+    _id: 'plan-markers',
+    type: 'text',
+    content: '带标记正文',
+    metadata: {
+      aiMetadataError: { code: 'rate-limited' },
+    },
+  };
+  const markedPlan = helpers.buildNoteOutputPlan({
+    record: markedRecord,
+    title: '标记输出',
+    syncedAt,
+    noteDir: '临时收集',
+    propertyFields: 'title,url,synced_at',
+  });
+  assert.strictEqual((markedPlan.markdown.match(/wechat-inbox-record-id/g) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/wechat-inbox-ai-metadata-error/g) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/^title:/gm) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/^url:/gm) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/^synced_at:/gm) || []).length, 1);
 }
 
 const originalLoad = Module._load;
@@ -13585,6 +13704,8 @@ async function runXiaohongshuOcrBatchTests() {
 }
 
 async function main() {
+  runNoteOutputPlanModuleTests();
+  runConfiguredNoteOutputPlanParityTests();
   await runXiaohongshuOcrBatchTests();
   await runClipboardTextWebpagePromotionTests();
   await runCanonicalVaultFolderTests();

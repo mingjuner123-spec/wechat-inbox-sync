@@ -15,7 +15,7 @@
 - `obsidian-plugin/wechat-inbox-sync/src/note-output-plan-utils.js`: new pure Markdown/frontmatter/path planning factory. It must not import Obsidian, access the filesystem, make requests, or mutate a record.
 - `obsidian-plugin/wechat-inbox-sync/src/main.js`: supplies existing helper dependencies, exposes the configured plan helper to the test surface, and replaces only the final Markdown/path assembly in `writeRecord`.
 - `tests/plugin-main-ai.test.js`: direct pure-module and integration regression coverage for all five record types and both save locations.
-- `docs/PLUGIN_CODE_MAP_1.3.75.md`: records the new boundary and keeps the remaining side-effect hotspots explicit.
+- `docs/PLUGIN_CODE_MAP_1.3.74.md`: records the new boundary and keeps the remaining side-effect hotspots explicit.
 
 ### Task 1: Lock the pure output contract with failing tests
 
@@ -254,7 +254,7 @@ git commit -m "refactor: route note writes through output plan"
 ### Task 4: Record the boundary and final local verification
 
 **Files:**
-- Modify: `docs/PLUGIN_CODE_MAP_1.3.75.md`
+- Modify: `docs/PLUGIN_CODE_MAP_1.3.74.md`
 - Modify: `docs/task-cards/plugin-note-output-boundary-001.md`
 - Test: `tests/plugin-main-ai.test.js`
 
@@ -284,7 +284,7 @@ Change its state to `审核中`, record the exact local verification commands an
 - [ ] **Step 4: Commit documentation and hand off for independent review**
 
 ```powershell
-git add docs/PLUGIN_CODE_MAP_1.3.75.md docs/task-cards/plugin-note-output-boundary-001.md docs/superpowers/plans/2026-08-01-plugin-note-output-boundary.md
+git add docs/PLUGIN_CODE_MAP_1.3.74.md docs/task-cards/plugin-note-output-boundary-001.md docs/superpowers/plans/2026-08-01-plugin-note-output-boundary.md
 git commit -m "docs: record note output refactor candidate"
 ```
 

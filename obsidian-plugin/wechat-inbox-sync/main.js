@@ -672,6 +672,187 @@ var require_record_identity_utils = __commonJS({
   }
 });
 
+// src/note-output-plan-utils.js
+var require_note_output_plan_utils = __commonJS({
+  "src/note-output-plan-utils.js"(exports2, module2) {
+    "use strict";
+    function requireFunction(value, name) {
+      if (typeof value !== "function") {
+        throw new TypeError(`note output dependency is required: ${name}`);
+      }
+      return value;
+    }
+    __name(requireFunction, "requireFunction");
+    function createNoteOutputPlanHelpers2(dependencies = {}) {
+      const {
+        buildAiMetadataErrorComment: buildAiMetadataErrorComment2,
+        buildFileMarkdownBody: buildFileMarkdownBody2,
+        buildRecordIdMarker: buildRecordIdMarker2,
+        buildWebpageMarkdownBody: buildWebpageMarkdownBody2,
+        cleanDisplayUrl: cleanDisplayUrl2,
+        defaultNotePropertyFields,
+        getRecordAuthor: getRecordAuthor2,
+        getRecordDescription: getRecordDescription2,
+        getRecordId: getRecordId2,
+        getRecordKeywords: getRecordKeywords2,
+        getRecordSourceLabel: getRecordSourceLabel2,
+        getRecordUrl: getRecordUrl2,
+        getWebpageSourcePrefix: getWebpageSourcePrefix2,
+        isFeishuUrl: isFeishuUrl2,
+        normalizeNotePropertyFields: normalizeNotePropertyFields2,
+        normalizeVaultPath: normalizeVaultPath2
+      } = dependencies;
+      if (typeof defaultNotePropertyFields !== "string") {
+        throw new TypeError("defaultNotePropertyFields is required");
+      }
+      const helpers = {
+        buildAiMetadataErrorComment: requireFunction(buildAiMetadataErrorComment2, "buildAiMetadataErrorComment"),
+        buildFileMarkdownBody: requireFunction(buildFileMarkdownBody2, "buildFileMarkdownBody"),
+        buildRecordIdMarker: requireFunction(buildRecordIdMarker2, "buildRecordIdMarker"),
+        buildWebpageMarkdownBody: requireFunction(buildWebpageMarkdownBody2, "buildWebpageMarkdownBody"),
+        cleanDisplayUrl: requireFunction(cleanDisplayUrl2, "cleanDisplayUrl"),
+        getRecordAuthor: requireFunction(getRecordAuthor2, "getRecordAuthor"),
+        getRecordDescription: requireFunction(getRecordDescription2, "getRecordDescription"),
+        getRecordId: requireFunction(getRecordId2, "getRecordId"),
+        getRecordKeywords: requireFunction(getRecordKeywords2, "getRecordKeywords"),
+        getRecordSourceLabel: requireFunction(getRecordSourceLabel2, "getRecordSourceLabel"),
+        getRecordUrl: requireFunction(getRecordUrl2, "getRecordUrl"),
+        getWebpageSourcePrefix: requireFunction(getWebpageSourcePrefix2, "getWebpageSourcePrefix"),
+        isFeishuUrl: requireFunction(isFeishuUrl2, "isFeishuUrl"),
+        normalizeNotePropertyFields: requireFunction(normalizeNotePropertyFields2, "normalizeNotePropertyFields"),
+        normalizeVaultPath: requireFunction(normalizeVaultPath2, "normalizeVaultPath")
+      };
+      function yamlValue(value, options = {}) {
+        if (value === void 0 || value === null) return "";
+        const normalize = /* @__PURE__ */ __name((input) => String(input || "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim(), "normalize");
+        if (Array.isArray(value)) {
+          value = value.map((item) => normalize(item)).filter(Boolean).join(", ");
+        }
+        const text = normalize(value);
+        if (!text) return "";
+        if (options.quote || /[\r\n]/.test(text) || /^(?:true|false|null|yes|no|on|off)$/i.test(text)) {
+          return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+        }
+        return text;
+      }
+      __name(yamlValue, "yamlValue");
+      function buildFrontmatter(lines) {
+        return ["---", ...lines, "---", ""].join("\n");
+      }
+      __name(buildFrontmatter, "buildFrontmatter");
+      function parseNotePropertyFields(propertyFields) {
+        return helpers.normalizeNotePropertyFields(propertyFields).split(",").filter(Boolean);
+      }
+      __name(parseNotePropertyFields, "parseNotePropertyFields");
+      function cleanFeishuPropertyText(value) {
+        return String(value || "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f\s*\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, " ").replace(/\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, " ").replace(/\bheader-v2\b/gi, " ").replace(/\b\u5206\u4eab\b/g, " ").replace(/-\s+/g, "-").replace(/\s+/g, " ").trim();
+      }
+      __name(cleanFeishuPropertyText, "cleanFeishuPropertyText");
+      function cleanFeishuDescriptionForFrontmatter(value) {
+        const beforeShell = String(value || "").split(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f|\u6700\u8fd1\u4fee\u6539|header-v2/i)[0] || value;
+        const cleaned = cleanFeishuPropertyText(beforeShell);
+        const firstSentence = cleaned.split(/[\u3002\uff01\uff1f!?]\s*/).map((item) => item.trim()).filter(Boolean)[0] || cleaned;
+        return firstSentence.slice(0, 160).trim();
+      }
+      __name(cleanFeishuDescriptionForFrontmatter, "cleanFeishuDescriptionForFrontmatter");
+      function cleanRecordFrontmatterField(record, key, value) {
+        const metadata = record && record.metadata || {};
+        const url = helpers.getRecordUrl(record || {}, metadata);
+        if (!helpers.isFeishuUrl(url)) return value;
+        if (key === "title" || key === "author" || key === "source") return cleanFeishuPropertyText(value);
+        if (key === "description") return cleanFeishuDescriptionForFrontmatter(value);
+        if (key === "keywords" && Array.isArray(value)) return value.map((item) => cleanFeishuPropertyText(item)).filter(Boolean);
+        if (key === "keywords") return cleanFeishuPropertyText(value);
+        return value;
+      }
+      __name(cleanRecordFrontmatterField, "cleanRecordFrontmatterField");
+      function buildRecordFrontmatter2(record, title, syncedAt, audioFileName, propertyFields = defaultNotePropertyFields) {
+        const type = String(record.type || "").toLowerCase();
+        const metadata = record.metadata || {};
+        const aiMetadataSource = String(metadata.aiMetadataSource || "").trim();
+        const fields = {
+          id: helpers.getRecordId(record),
+          type,
+          title,
+          author: helpers.getRecordAuthor(metadata),
+          url: helpers.getRecordUrl(record, metadata),
+          created_at: record.createdAt,
+          synced_at: syncedAt,
+          source: helpers.getRecordSourceLabel(record, metadata),
+          description: aiMetadataSource ? helpers.getRecordDescription(metadata) : "",
+          keywords: aiMetadataSource ? helpers.getRecordKeywords(metadata) : [],
+          status: "synced"
+        };
+        if (type === "link") fields.fetch_status = metadata.fetchStatus || "pending";
+        if (type === "webpage") fields.conversion_status = metadata.conversionStatus || "pending";
+        if (type === "voice") {
+          fields.audio_file = audioFileName;
+          fields.audio_file_id = metadata.audioFileID || "";
+          fields.transcription_status = metadata.transcriptionStatus || "pending";
+        }
+        if (type === "file") {
+          fields.file_name = metadata.fileName || record.content || "";
+          fields.file_id = metadata.fileID || "";
+          fields.file_ext = metadata.fileExt || "";
+          fields.conversion_status = metadata.conversionStatus || "pending";
+        }
+        const defaultFieldOrder = parseNotePropertyFields(defaultNotePropertyFields);
+        const legacyFieldOrder = ["id", "type", "title", "author", "url", "created_at", "synced_at", "source", "description", "keywords", "status", "fetch_status", "conversion_status", "audio_file", "audio_file_id", "transcription_status", "file_name", "file_id", "file_ext"];
+        const selectedFields = parseNotePropertyFields(propertyFields);
+        const fieldOrder = selectedFields.length ? selectedFields : defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder;
+        const shouldQuoteFrontmatterValue = helpers.isFeishuUrl(helpers.getRecordUrl(record, metadata));
+        const lines = fieldOrder.filter((key) => Object.prototype.hasOwnProperty.call(fields, key)).map((key) => [key, cleanRecordFrontmatterField(record, key, fields[key])]).filter(([, value]) => yamlValue(value, { quote: shouldQuoteFrontmatterValue })).map(([key, value]) => `${key}: ${yamlValue(value, { quote: shouldQuoteFrontmatterValue })}`);
+        return buildFrontmatter(lines);
+      }
+      __name(buildRecordFrontmatter2, "buildRecordFrontmatter");
+      function buildMarkdownForRecord2({ record, title, syncedAt, propertyFields = defaultNotePropertyFields }) {
+        const type = String(record.type || "").toLowerCase();
+        const metadata = record.metadata || {};
+        const audioFileName = metadata.audioFileName || `${title}.mp3`;
+        let body = "";
+        if (type === "text") {
+          body = `${record.content || ""}
+`;
+        } else if (type === "link") {
+          const pageTitle = metadata.title || title;
+          const snapshot = metadata.snapshot || metadata.contentSnapshot || "";
+          const fallback = metadata.fetchStatus === "failed" ? "正文抓取失败，已保存标题和原始链接。" : "正文快照处理中，已先保存标题和原始链接。";
+          body = [pageTitle, "", "## 正文快照", "", snapshot || fallback, ""].join("\n");
+        } else if (type === "webpage") {
+          body = helpers.buildWebpageMarkdownBody(record, title);
+        } else if (type === "voice") {
+          const errorText = metadata.transcriptionError || metadata.aiError || "";
+          const transcription = metadata.transcription || (metadata.transcriptionStatus === "failed" ? `语音转写失败。${errorText}` : "未开启语音转写。");
+          body = ["## 转写全文", "", transcription, "", "## 录音文件", "", `![[${audioFileName}]]`, ""].join("\n");
+        } else if (type === "file") {
+          body = helpers.buildFileMarkdownBody(record);
+        } else {
+          throw new Error(`Unsupported record type: ${record.type}`);
+        }
+        const frontmatter = buildRecordFrontmatter2(record, title, syncedAt, audioFileName, propertyFields);
+        const recordIdMarker = helpers.buildRecordIdMarker(helpers.getRecordId(record));
+        const aiMetadataErrorMarker = metadata.aiMetadataError ? helpers.buildAiMetadataErrorComment(metadata.aiMetadataError) : "";
+        const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join("\n");
+        return `${frontmatter}
+${diagnosticMarkers ? `${diagnosticMarkers}
+
+` : ""}${body}`;
+      }
+      __name(buildMarkdownForRecord2, "buildMarkdownForRecord");
+      function buildNoteOutputPlan2({ record, title, syncedAt, noteDir, propertyFields = defaultNotePropertyFields }) {
+        return {
+          markdown: buildMarkdownForRecord2({ record, title, syncedAt, propertyFields }),
+          filePath: helpers.normalizeVaultPath(`${noteDir}/${title}.md`)
+        };
+      }
+      __name(buildNoteOutputPlan2, "buildNoteOutputPlan");
+      return { buildRecordFrontmatter: buildRecordFrontmatter2, buildMarkdownForRecord: buildMarkdownForRecord2, buildNoteOutputPlan: buildNoteOutputPlan2 };
+    }
+    __name(createNoteOutputPlanHelpers2, "createNoteOutputPlanHelpers");
+    module2.exports = { createNoteOutputPlanHelpers: createNoteOutputPlanHelpers2 };
+  }
+});
+
 // src/main.js
 var crypto = require("crypto");
 var childProcess = require("child_process");
@@ -759,6 +940,7 @@ var {
   normalizeRecordUrlForCompare,
   normalizeYamlScalar
 } = require_record_identity_utils();
+var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.75";
@@ -12594,54 +12776,10 @@ function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl, tokenUrlM
   return result;
 }
 __name(replaceFeishuImageTokenPlaceholders, "replaceFeishuImageTokenPlaceholders");
-function yamlValue(value, options = {}) {
-  if (value === void 0 || value === null) return "";
-  const normalize = /* @__PURE__ */ __name((input) => String(input || "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim(), "normalize");
-  if (Array.isArray(value)) {
-    value = value.map((item) => normalize(item)).filter(Boolean).join(", ");
-  }
-  const text = normalize(value);
-  if (!text) return "";
-  if (options.quote || /[\r\n]/.test(text) || /^(?:true|false|null|yes|no|on|off)$/i.test(text)) {
-    return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  }
-  return text;
-}
-__name(yamlValue, "yamlValue");
-function buildFrontmatter(lines) {
-  return ["---", ...lines, "---", ""].join("\n");
-}
-__name(buildFrontmatter, "buildFrontmatter");
-function parseNotePropertyFields(propertyFields) {
-  return normalizeNotePropertyFields(propertyFields).split(",").filter(Boolean);
-}
-__name(parseNotePropertyFields, "parseNotePropertyFields");
 function getRecordUrl(record, metadata = record && record.metadata || {}) {
   return cleanDisplayUrl(metadata.url || metadata.originalUrl || record.content || "");
 }
 __name(getRecordUrl, "getRecordUrl");
-function cleanFeishuPropertyText(value) {
-  return String(value || "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f\s*\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, " ").replace(/\u6700\u8fd1\u4fee\u6539\s*[:\uff1a]?\s*[^,\uff0c\u3002\uff01\uff1f!?]{0,30}/g, " ").replace(/\bheader-v2\b/gi, " ").replace(/\b\u5206\u4eab\b/g, " ").replace(/-\s+/g, "-").replace(/\s+/g, " ").trim();
-}
-__name(cleanFeishuPropertyText, "cleanFeishuPropertyText");
-function cleanFeishuDescriptionForFrontmatter(value) {
-  const beforeShell = String(value || "").split(/\u6dfb\u52a0\u5feb\u6377\u65b9\u5f0f|\u6700\u8fd1\u4fee\u6539|header-v2/i)[0] || value;
-  const cleaned = cleanFeishuPropertyText(beforeShell);
-  const firstSentence = cleaned.split(/[\u3002\uff01\uff1f!?]\s*/).map((item) => item.trim()).filter(Boolean)[0] || cleaned;
-  return firstSentence.slice(0, 160).trim();
-}
-__name(cleanFeishuDescriptionForFrontmatter, "cleanFeishuDescriptionForFrontmatter");
-function cleanRecordFrontmatterField(record, key, value) {
-  const metadata = record && record.metadata || {};
-  const url = getRecordUrl(record || {}, metadata);
-  if (!isFeishuUrl(url)) return value;
-  if (key === "title" || key === "author" || key === "source") return cleanFeishuPropertyText(value);
-  if (key === "description") return cleanFeishuDescriptionForFrontmatter(value);
-  if (key === "keywords" && Array.isArray(value)) return value.map((item) => cleanFeishuPropertyText(item)).filter(Boolean);
-  if (key === "keywords") return cleanFeishuPropertyText(value);
-  return value;
-}
-__name(cleanRecordFrontmatterField, "cleanRecordFrontmatterField");
 function getRecordSourceLabel(record, metadata = {}) {
   const type = String(record && record.type || "").toLowerCase();
   const url = getRecordUrl(record, metadata);
@@ -12666,120 +12804,29 @@ function getRecordSourceLabel(record, metadata = {}) {
   return normalizedPlatform || normalizedCategory || "";
 }
 __name(getRecordSourceLabel, "getRecordSourceLabel");
-function buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS) {
-  const type = String(record.type || "").toLowerCase();
-  const metadata = record.metadata || {};
-  const aiMetadataSource = String(metadata.aiMetadataSource || "").trim();
-  const fields = {
-    id: getRecordId(record),
-    type,
-    title,
-    author: getRecordAuthor(metadata),
-    url: getRecordUrl(record, metadata),
-    created_at: record.createdAt,
-    synced_at: syncedAt,
-    source: getRecordSourceLabel(record, metadata),
-    description: aiMetadataSource ? getRecordDescription(metadata) : "",
-    keywords: aiMetadataSource ? getRecordKeywords(metadata) : [],
-    status: "synced"
-  };
-  if (type === "link") {
-    fields.fetch_status = metadata.fetchStatus || "pending";
-  }
-  if (type === "webpage") {
-    fields.conversion_status = metadata.conversionStatus || "pending";
-  }
-  if (type === "voice") {
-    fields.audio_file = audioFileName;
-    fields.audio_file_id = metadata.audioFileID || "";
-    fields.transcription_status = metadata.transcriptionStatus || "pending";
-  }
-  if (type === "file") {
-    fields.file_name = metadata.fileName || record.content || "";
-    fields.file_id = metadata.fileID || "";
-    fields.file_ext = metadata.fileExt || "";
-    fields.conversion_status = metadata.conversionStatus || "pending";
-  }
-  const defaultFieldOrder = parseNotePropertyFields(DEFAULT_NOTE_PROPERTY_FIELDS);
-  const legacyFieldOrder = [
-    "id",
-    "type",
-    "title",
-    "author",
-    "url",
-    "created_at",
-    "synced_at",
-    "source",
-    "description",
-    "keywords",
-    "status",
-    "fetch_status",
-    "conversion_status",
-    "audio_file",
-    "audio_file_id",
-    "transcription_status",
-    "file_name",
-    "file_id",
-    "file_ext"
-  ];
-  const selectedFields = parseNotePropertyFields(propertyFields);
-  const fieldOrder = selectedFields.length ? selectedFields : defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder;
-  const shouldQuoteFrontmatterValue = isFeishuUrl(getRecordUrl(record, metadata));
-  const lines = fieldOrder.filter((key) => Object.prototype.hasOwnProperty.call(fields, key)).map((key) => [key, cleanRecordFrontmatterField(record, key, fields[key])]).filter(([, value]) => yamlValue(value, { quote: shouldQuoteFrontmatterValue })).map(([key, value]) => `${key}: ${yamlValue(value, { quote: shouldQuoteFrontmatterValue })}`);
-  return buildFrontmatter(lines);
-}
-__name(buildRecordFrontmatter, "buildRecordFrontmatter");
-function buildMarkdownForRecord({ record, title, syncedAt, propertyFields = DEFAULT_NOTE_PROPERTY_FIELDS }) {
-  const type = String(record.type || "").toLowerCase();
-  const metadata = record.metadata || {};
-  const audioFileName = metadata.audioFileName || `${title}.mp3`;
-  let body = "";
-  if (type === "text") {
-    body = `${record.content || ""}
-`;
-  } else if (type === "link") {
-    const pageTitle = metadata.title || title;
-    const url = cleanDisplayUrl(metadata.url || record.content || "");
-    const snapshot = metadata.snapshot || metadata.contentSnapshot || "";
-    const fallback = metadata.fetchStatus === "failed" ? "正文抓取失败，已保存标题和原始链接。" : "正文快照处理中，已先保存标题和原始链接。";
-    body = [
-      pageTitle,
-      "",
-      "## 正文快照",
-      "",
-      snapshot || fallback,
-      ""
-    ].join("\n");
-  } else if (type === "webpage") {
-    body = buildWebpageMarkdownBody(record, title);
-  } else if (type === "voice") {
-    const errorText = metadata.transcriptionError || metadata.aiError || "";
-    const transcription = metadata.transcription || (metadata.transcriptionStatus === "failed" ? `语音转写失败。${errorText}` : "未开启语音转写。");
-    body = [
-      "## 转写全文",
-      "",
-      transcription,
-      "",
-      "## 录音文件",
-      "",
-      `![[${audioFileName}]]`,
-      ""
-    ].join("\n");
-  } else if (type === "file") {
-    body = buildFileMarkdownBody(record);
-  } else {
-    throw new Error(`Unsupported record type: ${record.type}`);
-  }
-  const frontmatter = buildRecordFrontmatter(record, title, syncedAt, audioFileName, propertyFields);
-  const recordIdMarker = buildRecordIdMarker(getRecordId(record));
-  const aiMetadataErrorMarker = metadata.aiMetadataError ? buildAiMetadataErrorComment(metadata.aiMetadataError) : "";
-  const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join("\n");
-  return `${frontmatter}
-${diagnosticMarkers ? `${diagnosticMarkers}
-
-` : ""}${body}`;
-}
-__name(buildMarkdownForRecord, "buildMarkdownForRecord");
+var noteOutputPlanHelpers = createNoteOutputPlanHelpers({
+  buildAiMetadataErrorComment,
+  buildFileMarkdownBody,
+  buildRecordIdMarker,
+  buildWebpageMarkdownBody,
+  cleanDisplayUrl,
+  defaultNotePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
+  getRecordAuthor,
+  getRecordDescription,
+  getRecordId,
+  getRecordKeywords,
+  getRecordSourceLabel,
+  getRecordUrl,
+  getWebpageSourcePrefix,
+  isFeishuUrl,
+  normalizeNotePropertyFields,
+  normalizeVaultPath
+});
+var {
+  buildRecordFrontmatter,
+  buildMarkdownForRecord,
+  buildNoteOutputPlan
+} = noteOutputPlanHelpers;
 function getRecordConversionWarning(record) {
   if (!record) return "";
   const metadata = record.metadata || {};
@@ -13238,13 +13285,14 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     await this.ensureFolder(noteDir);
     const title = await this.nextRecordTitle(noteDir, record, "");
     const recordForMarkdown = await this.enrichRecordMetadataWithAi(record, binding);
-    const markdown = buildMarkdownForRecord({
+    const outputPlan = buildNoteOutputPlan({
       record: recordForMarkdown,
       title,
       syncedAt,
+      noteDir,
       propertyFields: this.settings.notePropertyFields
     });
-    const filePath = normalizeVaultPath(`${noteDir}/${title}.md`);
+    const { markdown, filePath } = outputPlan;
     await this.app.vault.adapter.write(filePath, markdown);
     return {
       recordId: getRecordId(record),
@@ -17745,6 +17793,7 @@ WechatObsidianInboxPlugin.__test = {
   normalizeXiaohongshuOcrItems,
   XIAOHONGSHU_OCR_TEXT_DOMINANCE_THRESHOLDS,
   buildMarkdownForRecord,
+  buildNoteOutputPlan,
   enrichExtractedWebpageMetadata,
   extractSocialVideoMarkdownFromHtml,
   extractPodcastAudioUrlFromHtml,
