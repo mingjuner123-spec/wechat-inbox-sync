@@ -98,6 +98,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     transcriptionError = '',
     conversionStatus = '',
     markdown: supplementalMarkdown = '',
+    sourceTitle = '',
   } = {}) {
     const {
       markdown,
@@ -116,7 +117,10 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     if (mediaUrl && !normalizedMediaUrls.includes(mediaUrl)) normalizedMediaUrls.unshift(mediaUrl);
     return {
       ...rest,
-      title: `${sourceName}口播文案`,
+      title: String(sourceTitle || rest.sourceTitle || rest.title || `${sourceName}口播文案`).trim(),
+      ...(String(sourceTitle || rest.sourceTitle || '').trim()
+        ? { sourceTitle: String(sourceTitle || rest.sourceTitle).trim() }
+        : {}),
       url: url || rest.url || '',
       transcriptOnly: true,
       ...(cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {}),
@@ -183,7 +187,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
         transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
         transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
       });
-      return [sourceMediaMarkdown, transcriptMarkdown, snapshot, automaticShareTextMarkdown]
+      return [sourceMediaMarkdown, snapshot, transcriptMarkdown, automaticShareTextMarkdown]
         .filter(Boolean)
         .join('\n\n')
         .trim() + '\n';

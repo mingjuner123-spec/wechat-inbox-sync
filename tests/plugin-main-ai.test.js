@@ -33,6 +33,7 @@ function runNoteOutputPlanModuleTests() {
     getRecordUrl: (record, metadata = record.metadata || {}) => metadata.url || record.content || '',
     getWebpageSourcePrefix: () => '网页',
     isFeishuUrl: () => false,
+    isSuccessfulTranscriptionRecord: () => false,
     normalizeNotePropertyFields: (value) => String(value || ''),
     normalizeVaultPath: (value) => String(value || '').replaceAll('\\', '/'),
     buildWebpageMarkdownBody: (record) => record.metadata.markdown,
@@ -1021,6 +1022,19 @@ assert.strictEqual(
   'repeated-lines',
 );
 assert.strictEqual(
+  helpers.getTranscriptionQualityIssue(Array(3).fill('短文本也在不断重复同一句话。').join('\n')),
+  'repeated-lines',
+);
+assert.strictEqual(
+  helpers.getTranscriptionQualityIssue([
+    '短文本也在不断重复同一句话。',
+    '短文本也在不断重复同一句话。',
+    '短文本也在不断重复同一句话。',
+    '最后只多出一句无关内容。',
+  ].join('\n')),
+  'repeated-lines',
+);
+assert.strictEqual(
   helpers.getTranscriptionQualityIssue([
     ...Array(8).fill('我们选择的问题就是'),
     ...Array(3).fill('请输入简体中文'),
@@ -1029,6 +1043,24 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.getTranscriptionQualityIssue('这是第一段正常内容。\n这里为了强调重复一次。\n这里为了强调重复一次。\n最后继续讲新的内容。'),
+  '',
+);
+assert.strictEqual(
+  helpers.getTranscriptionQualityIssue([
+    '今天我们先建立一个完整的学习框架。',
+    '先把课程拆成输入、练习和复盘三个步骤。',
+    '这里为了强调重复一次。',
+    '接着用一个具体例子说明怎么安排每天的练习。',
+    '这里为了强调重复一次。',
+    '练习结束后需要记录自己没有听懂的部分。',
+    '这里为了强调重复一次。',
+    '第二天先复习昨天记录的难点再继续学习。',
+    '这里为了强调重复一次。',
+    '不要只追求时长，理解质量更重要。',
+    '这里为了强调重复一次。',
+    '最后每周回看一次自己的进步和薄弱环节。',
+    '这里为了强调重复一次。',
+  ].join('\n')),
   '',
 );
 assert.throws(
@@ -1313,12 +1345,13 @@ assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
 }), {
   publicGraphic: true,
   mediaTranscription: true,
-  imageOcr: true,
+  imageOcr: false,
   comments: false,
 });
 assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
   hasProAccess: true,
   commentsEnabled: true,
+  imageOcrEnabled: true,
   isLoggedIn: true,
 }), {
   publicGraphic: true,
@@ -2235,8 +2268,14 @@ assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, aiMetadataEnabled
 assert.strictEqual(helpers.mergeSettings({}).xiaohongshuCommentsEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
-assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, true);
-assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
+assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, false);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, false);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: true }).xiaohongshuImageOcrEnabled, false);
+assert.strictEqual(helpers.mergeSettings({
+  settingsVersion: 2,
+  xiaohongshuImageOcrEnabled: true,
+  xiaohongshuImageOcrConsentVersion: 1,
+}).xiaohongshuImageOcrEnabled, true);
 assert.strictEqual(
   helpers.hasXiaohongshuLoginCookies([
     { name: 'a1', value: 'browser-device-cookie' },
@@ -2315,7 +2354,7 @@ assert.strictEqual(helpers.mergeSettings({
 }
 assert.strictEqual(helpers.mergeSettings({}).deepseekApiKey, '');
 assert.strictEqual(helpers.mergeSettings({}).deepseekModel, 'deepseek-chat');
-assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
+assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords,views,likes,collects,comments,shares,coins,metrics_captured_at');
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 30 }).cloudPreTranscriptionThresholdMinutes, 30);
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 999 }).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
@@ -2371,8 +2410,8 @@ assert.ok(pluginMainSource.includes("createEl('details'"));
 assert.strictEqual(pluginMainSource.includes("text: 'AI 简介与关键词'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('启用 AI 简介与关键词')"), false);
 assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默认开启'));
-assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), false);
-assert.ok(pluginMainSource.includes('小红书图文 OCR：已默认开启'));
+assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), true);
+assert.ok(pluginMainSource.includes('小红书图片 OCR 默认关闭，按需手动开启'));
 assert.ok(pluginMainSource.includes('const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);'));
 assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {'));
 assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
@@ -6164,7 +6203,8 @@ const transcriptOnlyMetadata = helpers.buildTranscriptOnlyMetadata({
 assert.strictEqual(transcriptOnlyMetadata.transcriptOnly, true);
 assert.strictEqual(transcriptOnlyMetadata.markdown, undefined);
 assert.strictEqual(transcriptOnlyMetadata.imageUrls, undefined);
-assert.strictEqual(transcriptOnlyMetadata.title, 'B站口播文案');
+// 转写笔记应保留已提取到的原始平台标题，不能退回到通用“B站口播文案”。
+assert.strictEqual(transcriptOnlyMetadata.title, '旧标题');
 assert.strictEqual(transcriptOnlyMetadata.transcription, '字幕里的口播内容');
 assert.strictEqual(transcriptOnlyMetadata.audioUrl, 'https://audio.example.com/a.m4s');
 
@@ -7273,7 +7313,10 @@ async function runAsyncHydrationTests() {
     metadata: { url: 'https://www.douyin.com/video/123' },
   }, '', '', '抖音');
   assert.strictEqual(douyinRecord.metadata.transcriptOnly, true);
-  assert.strictEqual(douyinRecord.metadata.markdown, undefined);
+  assert.ok(douyinRecord.metadata.markdown.includes('## 标题'));
+  assert.ok(douyinRecord.metadata.markdown.includes('Douyin Page'));
+  assert.ok(douyinRecord.metadata.markdown.includes('## 原文正文'));
+  assert.ok(douyinRecord.metadata.markdown.includes('页面正文不是口播'));
   assert.strictEqual(douyinRecord.metadata.transcriptionStatus, 'failed');
   assert.strictEqual(douyinRecord.metadata.mediaUrl, 'https://video.example.com/douyin.mp4');
 
@@ -7375,8 +7418,26 @@ async function runAsyncHydrationTests() {
     content: 'https://www.douyin.com/video/7644566503081119019',
     metadata: { url: 'https://www.douyin.com/video/7644566503081119019' },
   }, '', '', 'Session 失败回退');
-  assert.strictEqual(sessionFallbackRecord.metadata.mediaUrl.includes('sessionfallback'), true);
-  assert.strictEqual(sessionFallbackRenderCalls, 1);
+  assert.strictEqual(sessionFallbackRecord.metadata.transcriptionStatus, 'failed');
+  assert.strictEqual(sessionFallbackRecord.metadata.conversionStatus, 'link_saved');
+  assert.strictEqual(sessionFallbackRenderCalls, 0);
+
+  const refreshIdentityPlugin = new PluginClass();
+  let refreshIdentityRenderCalls = 0;
+  refreshIdentityPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
+    assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
+    assert.strictEqual(awemeId, '7644566503081119019');
+    return [];
+  };
+  refreshIdentityPlugin.renderSocialMediaUrls = async () => {
+    refreshIdentityRenderCalls += 1;
+    return ['https://v11-weba.douyinvod.com/refreshed-recommendation/?mime_type=video_mp4'];
+  };
+  assert.deepStrictEqual(
+    await refreshIdentityPlugin.refreshDouyinMediaUrls('https://www.douyin.com/video/7644566503081119019'),
+    [],
+  );
+  assert.strictEqual(refreshIdentityRenderCalls, 0);
 
   const renderedDouyinPlugin = new PluginClass();
   renderedDouyinPlugin.settings = { aiProvider: 'off' };
@@ -7397,8 +7458,9 @@ async function runAsyncHydrationTests() {
     content: 'https://www.douyin.com/video/7644566503081119019',
     metadata: { url: 'https://www.douyin.com/video/7644566503081119019' },
   }, '', '', '抖音真实页');
-  assert.strictEqual(renderedDouyinRecord.metadata.transcriptOnly, true);
-  assert.strictEqual(renderedDouyinRecord.metadata.mediaUrl, 'https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000rendered&ratio=720p&line=0');
+  assert.strictEqual(renderedDouyinRecord.metadata.transcriptionStatus, 'failed');
+  assert.strictEqual(renderedDouyinRecord.metadata.conversionStatus, 'link_saved');
+  assert.strictEqual(renderedDouyinRecord.metadata.mediaUrl, undefined);
 
   const unavailableDouyinPlugin = new PluginClass();
   unavailableDouyinPlugin.settings = { aiProvider: 'off' };
@@ -8500,6 +8562,8 @@ async function runAsyncHydrationTests() {
       aiProvider: 'off',
       settingsVersion: 2,
       xiaohongshuCommentsEnabled: false,
+      xiaohongshuImageOcrEnabled: hasProAccess,
+      xiaohongshuImageOcrConsentVersion: hasProAccess ? 1 : 0,
     });
     ocrPlugin.hasProFeatureAccess = async () => hasProAccess;
     let ocrCalls = 0;
@@ -10978,9 +11042,11 @@ async function runSyncInvalidCodePreservesLocalBindingTest() {
 
   await plugin.syncInbox(false);
 
-  assert.strictEqual(plugin.settings.token, 'OLD-123');
+  assert.strictEqual(plugin.settings.token, '');
   assert.deepStrictEqual(plugin.settings.bindings.map((item) => item.token), ['OLD-123']);
-  assert.strictEqual(savedSettings, null);
+  assert.strictEqual(plugin.settings.bindings[0].enabled, false);
+  assert.strictEqual(plugin.settings.bindings[0].status, 'needs_rebind');
+  assert.ok(savedSettings, '明确失效的绑定必须持久化为待重新绑定');
 }
 
 async function runConcurrentSyncInboxUsesSingleFlightTest() {
@@ -12888,6 +12954,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'rate-limit',
       contentKind: 'transcript',
       expectedCode: 'rate-limited',
+      expectedAiCalls: 3,
       generate: async () => {
         const error = new Error('Request failed with status code 429 https://private.example.test?token=TOP_SECRET');
         error.code = 'ERR_BAD_REQUEST';
@@ -12899,6 +12966,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'upstream-5xx',
       contentKind: 'body',
       expectedCode: 'upstream-service-error',
+      expectedAiCalls: 1,
       generate: async () => {
         const error = new Error('HTTP 502 api_key=TOP_SECRET');
         error.code = 'ERR_BAD_RESPONSE';
@@ -12910,6 +12978,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'timeout',
       contentKind: 'transcript',
       expectedCode: 'request-timeout',
+      expectedAiCalls: 1,
       generate: async () => {
         throw new Error('ETIMEDOUT cookie=TOP_SECRET');
       },
@@ -12918,6 +12987,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'empty-result',
       contentKind: 'body',
       expectedCode: 'empty-response',
+      expectedAiCalls: 1,
       generate: async () => ({ description: '', keywords: [] }),
     },
   ];
@@ -12984,6 +13054,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
     };
     plugin.showSyncProgress = () => {};
     plugin.nextRecordTitle = async () => `AI失败不阻断-${scenario.name}`;
+    plugin.nextTitle = async (_dayDir, baseTitle) => baseTitle;
     plugin.findExistingRecordNotePath = async () => '';
     plugin.hydrateWebpageMarkdown = async (currentRecord) => currentRecord;
     plugin.saveSourceMediaAttachment = async (currentRecord) => currentRecord;
@@ -13021,7 +13092,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       scenario.name,
     );
     assert.strictEqual(writes.length, 1, scenario.name);
-    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(aiCallCount, scenario.expectedAiCalls, scenario.name);
     assert.strictEqual(transcriptionCallCount, 0, scenario.name);
     assert.deepStrictEqual(
       requestCalls.filter(([requestPath]) => requestPath.includes('/synced')),
@@ -13048,7 +13119,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
     assert.strictEqual(secondResult.written.length, 0, scenario.name);
     assert.strictEqual(secondResult.failed.length, 0, scenario.name);
     assert.strictEqual(writes.length, 1, scenario.name);
-    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(aiCallCount, scenario.expectedAiCalls, scenario.name);
     assert.strictEqual(transcriptionCallCount, 0, scenario.name);
   }
 
@@ -13117,6 +13188,7 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   };
   plugin.showSyncProgress = () => {};
   plugin.nextRecordTitle = async () => '本轮完成本地转写';
+  plugin.nextTitle = async (_dayDir, baseTitle) => baseTitle;
   plugin.findExistingRecordNotePath = async () => '';
   plugin.requestFileDownloadUrl = async () => 'https://download.example.test/audio.mp3';
   plugin.downloadArrayBuffer = async () => Buffer.from('controlled-audio-bytes');
@@ -13169,7 +13241,8 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   assert.strictEqual(firstResult.written.length, 1);
   assert.strictEqual(firstResult.failed.length, 0);
   assert.strictEqual(transcriptionCallCount, 1);
-  assert.strictEqual(aiCallCount, 1);
+  // AI 限流可重试，但已经完成的本地 ASR 绝不能因此重复执行。
+  assert.strictEqual(aiCallCount, 3);
   assert.strictEqual(noteWrites.length, 1);
   assert.strictEqual(attachmentWrites.length, 1);
   assert.strictEqual(
@@ -13196,7 +13269,7 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   assert.strictEqual(secondResult.written.length, 0);
   assert.strictEqual(secondResult.failed.length, 0);
   assert.strictEqual(transcriptionCallCount, 1);
-  assert.strictEqual(aiCallCount, 1);
+  assert.strictEqual(aiCallCount, 3);
   assert.strictEqual(noteWrites.length, 1);
   assert.strictEqual(attachmentWrites.length, 1);
   assert.strictEqual(

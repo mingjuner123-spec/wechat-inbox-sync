@@ -23,6 +23,7 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
     getRecordUrl,
     getWebpageSourcePrefix,
     isFeishuUrl,
+    isSuccessfulTranscriptionRecord,
     normalizeNotePropertyFields,
     normalizeVaultPath,
   } = dependencies;
@@ -45,13 +46,14 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
     getRecordUrl: requireFunction(getRecordUrl, 'getRecordUrl'),
     getWebpageSourcePrefix: requireFunction(getWebpageSourcePrefix, 'getWebpageSourcePrefix'),
     isFeishuUrl: requireFunction(isFeishuUrl, 'isFeishuUrl'),
+    isSuccessfulTranscriptionRecord: requireFunction(isSuccessfulTranscriptionRecord, 'isSuccessfulTranscriptionRecord'),
     normalizeNotePropertyFields: requireFunction(normalizeNotePropertyFields, 'normalizeNotePropertyFields'),
     normalizeVaultPath: requireFunction(normalizeVaultPath, 'normalizeVaultPath'),
   };
 
   function yamlValue(value, options = {}) {
     if (value === undefined || value === null) return '';
-    const normalize = (input) => String(input || '')
+    const normalize = (input) => String(input ?? '')
       .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
       .replace(/\r?\n/g, ' ')
       .replace(/\s+/g, ' ')
@@ -112,6 +114,9 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
     const type = String(record.type || '').toLowerCase();
     const metadata = record.metadata || {};
     const aiMetadataSource = String(metadata.aiMetadataSource || '').trim();
+    const socialMetrics = metadata.socialMetrics && typeof metadata.socialMetrics === 'object'
+      ? metadata.socialMetrics
+      : {};
     const fields = {
       id: helpers.getRecordId(record),
       type,
@@ -123,6 +128,13 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
       source: helpers.getRecordSourceLabel(record, metadata),
       description: aiMetadataSource ? helpers.getRecordDescription(metadata) : '',
       keywords: aiMetadataSource ? helpers.getRecordKeywords(metadata) : [],
+      views: socialMetrics.views,
+      likes: socialMetrics.likes,
+      collects: socialMetrics.collects,
+      comments: socialMetrics.comments,
+      shares: socialMetrics.shares,
+      coins: socialMetrics.coins,
+      metrics_captured_at: socialMetrics.capturedAt,
       status: 'synced',
     };
 
@@ -141,7 +153,7 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
     }
 
     const defaultFieldOrder = parseNotePropertyFields(defaultNotePropertyFields);
-    const legacyFieldOrder = ['id', 'type', 'title', 'author', 'url', 'created_at', 'synced_at', 'source', 'description', 'keywords', 'status', 'fetch_status', 'conversion_status', 'audio_file', 'audio_file_id', 'transcription_status', 'file_name', 'file_id', 'file_ext'];
+    const legacyFieldOrder = ['id', 'type', 'title', 'author', 'url', 'created_at', 'synced_at', 'source', 'description', 'keywords', 'views', 'likes', 'collects', 'comments', 'shares', 'coins', 'metrics_captured_at', 'status', 'fetch_status', 'conversion_status', 'audio_file', 'audio_file_id', 'transcription_status', 'file_name', 'file_id', 'file_ext'];
     const selectedFields = parseNotePropertyFields(propertyFields);
     const fieldOrder = selectedFields.length ? selectedFields : (defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder);
     const shouldQuoteFrontmatterValue = helpers.isFeishuUrl(helpers.getRecordUrl(record, metadata));
@@ -186,13 +198,14 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
       ? helpers.buildAiMetadataErrorComment(metadata.aiMetadataError)
       : '';
     const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join('\n');
-    return `${frontmatter}\n${diagnosticMarkers ? `${diagnosticMarkers}\n\n` : ''}${body}`;
+    const titleHeading = helpers.isSuccessfulTranscriptionRecord(record) ? `# ${title}\n\n` : '';
+    return `${frontmatter}\n${diagnosticMarkers ? `${diagnosticMarkers}\n\n` : ''}${titleHeading}${body}`;
   }
 
-  function buildNoteOutputPlan({ record, title, syncedAt, noteDir, propertyFields = defaultNotePropertyFields }) {
+  function buildNoteOutputPlan({ record, title, fileTitle = title, syncedAt, noteDir, propertyFields = defaultNotePropertyFields }) {
     return {
       markdown: buildMarkdownForRecord({ record, title, syncedAt, propertyFields }),
-      filePath: helpers.normalizeVaultPath(`${noteDir}/${title}.md`),
+      filePath: helpers.normalizeVaultPath(`${noteDir}/${fileTitle}.md`),
     };
   }
 

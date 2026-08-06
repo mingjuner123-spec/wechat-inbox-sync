@@ -17,7 +17,8 @@ Module._load = function mockObsidian(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 
-const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
+const pluginMainPath = process.env.PLUGIN_MAIN_PATH || '../obsidian-plugin/wechat-inbox-sync/main';
+const PluginClass = require(pluginMainPath);
 Module._load = originalLoad;
 const helpers = PluginClass.__test;
 

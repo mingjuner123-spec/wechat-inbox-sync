@@ -112,7 +112,13 @@ var require_transcription_quality_utils = __commonJS({
         }
       });
       const maxCount = Math.max(...counts.values());
-      if (longestConsecutiveRun >= 3 || maxCount >= 6 || units.length >= 8 && maxCount >= 5 && maxCount / units.length >= 0.6) {
+      const repeatedShare = maxCount / units.length;
+      const consecutiveShare = longestConsecutiveRun / units.length;
+      if (
+        // A normal course can repeat an important sentence across chunks. Only
+        // reject a repeat when it dominates the recognised transcription.
+        units.length <= 5 && longestConsecutiveRun >= 3 && consecutiveShare >= 0.6 || longestConsecutiveRun >= 4 && consecutiveShare >= 0.5 || maxCount >= 6 && repeatedShare >= 0.6
+      ) {
         return "repeated-lines";
       }
       return "";
@@ -699,6 +705,7 @@ var require_note_output_plan_utils = __commonJS({
         getRecordUrl: getRecordUrl2,
         getWebpageSourcePrefix: getWebpageSourcePrefix2,
         isFeishuUrl: isFeishuUrl2,
+        isSuccessfulTranscriptionRecord: isSuccessfulTranscriptionRecord2,
         normalizeNotePropertyFields: normalizeNotePropertyFields2,
         normalizeVaultPath: normalizeVaultPath2
       } = dependencies;
@@ -719,12 +726,13 @@ var require_note_output_plan_utils = __commonJS({
         getRecordUrl: requireFunction(getRecordUrl2, "getRecordUrl"),
         getWebpageSourcePrefix: requireFunction(getWebpageSourcePrefix2, "getWebpageSourcePrefix"),
         isFeishuUrl: requireFunction(isFeishuUrl2, "isFeishuUrl"),
+        isSuccessfulTranscriptionRecord: requireFunction(isSuccessfulTranscriptionRecord2, "isSuccessfulTranscriptionRecord"),
         normalizeNotePropertyFields: requireFunction(normalizeNotePropertyFields2, "normalizeNotePropertyFields"),
         normalizeVaultPath: requireFunction(normalizeVaultPath2, "normalizeVaultPath")
       };
       function yamlValue(value, options = {}) {
         if (value === void 0 || value === null) return "";
-        const normalize = /* @__PURE__ */ __name((input) => String(input || "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim(), "normalize");
+        const normalize = /* @__PURE__ */ __name((input) => String(input ?? "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim(), "normalize");
         if (Array.isArray(value)) {
           value = value.map((item) => normalize(item)).filter(Boolean).join(", ");
         }
@@ -770,6 +778,7 @@ var require_note_output_plan_utils = __commonJS({
         const type = String(record.type || "").toLowerCase();
         const metadata = record.metadata || {};
         const aiMetadataSource = String(metadata.aiMetadataSource || "").trim();
+        const socialMetrics = metadata.socialMetrics && typeof metadata.socialMetrics === "object" ? metadata.socialMetrics : {};
         const fields = {
           id: helpers.getRecordId(record),
           type,
@@ -781,6 +790,13 @@ var require_note_output_plan_utils = __commonJS({
           source: helpers.getRecordSourceLabel(record, metadata),
           description: aiMetadataSource ? helpers.getRecordDescription(metadata) : "",
           keywords: aiMetadataSource ? helpers.getRecordKeywords(metadata) : [],
+          views: socialMetrics.views,
+          likes: socialMetrics.likes,
+          collects: socialMetrics.collects,
+          comments: socialMetrics.comments,
+          shares: socialMetrics.shares,
+          coins: socialMetrics.coins,
+          metrics_captured_at: socialMetrics.capturedAt,
           status: "synced"
         };
         if (type === "link") fields.fetch_status = metadata.fetchStatus || "pending";
@@ -797,7 +813,7 @@ var require_note_output_plan_utils = __commonJS({
           fields.conversion_status = metadata.conversionStatus || "pending";
         }
         const defaultFieldOrder = parseNotePropertyFields(defaultNotePropertyFields);
-        const legacyFieldOrder = ["id", "type", "title", "author", "url", "created_at", "synced_at", "source", "description", "keywords", "status", "fetch_status", "conversion_status", "audio_file", "audio_file_id", "transcription_status", "file_name", "file_id", "file_ext"];
+        const legacyFieldOrder = ["id", "type", "title", "author", "url", "created_at", "synced_at", "source", "description", "keywords", "views", "likes", "collects", "comments", "shares", "coins", "metrics_captured_at", "status", "fetch_status", "conversion_status", "audio_file", "audio_file_id", "transcription_status", "file_name", "file_id", "file_ext"];
         const selectedFields = parseNotePropertyFields(propertyFields);
         const fieldOrder = selectedFields.length ? selectedFields : defaultFieldOrder.length ? defaultFieldOrder : legacyFieldOrder;
         const shouldQuoteFrontmatterValue = helpers.isFeishuUrl(helpers.getRecordUrl(record, metadata));
@@ -833,16 +849,19 @@ var require_note_output_plan_utils = __commonJS({
         const recordIdMarker = helpers.buildRecordIdMarker(helpers.getRecordId(record));
         const aiMetadataErrorMarker = metadata.aiMetadataError ? helpers.buildAiMetadataErrorComment(metadata.aiMetadataError) : "";
         const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join("\n");
+        const titleHeading = helpers.isSuccessfulTranscriptionRecord(record) ? `# ${title}
+
+` : "";
         return `${frontmatter}
 ${diagnosticMarkers ? `${diagnosticMarkers}
 
-` : ""}${body}`;
+` : ""}${titleHeading}${body}`;
       }
       __name(buildMarkdownForRecord2, "buildMarkdownForRecord");
-      function buildNoteOutputPlan2({ record, title, syncedAt, noteDir, propertyFields = defaultNotePropertyFields }) {
+      function buildNoteOutputPlan2({ record, title, fileTitle = title, syncedAt, noteDir, propertyFields = defaultNotePropertyFields }) {
         return {
           markdown: buildMarkdownForRecord2({ record, title, syncedAt, propertyFields }),
-          filePath: helpers.normalizeVaultPath(`${noteDir}/${title}.md`)
+          filePath: helpers.normalizeVaultPath(`${noteDir}/${fileTitle}.md`)
         };
       }
       __name(buildNoteOutputPlan2, "buildNoteOutputPlan");
@@ -945,7 +964,8 @@ var require_record_body_markdown_utils = __commonJS({
         transcriptionSource = "",
         transcriptionError = "",
         conversionStatus = "",
-        markdown: supplementalMarkdown = ""
+        markdown: supplementalMarkdown = "",
+        sourceTitle = ""
       } = {}) {
         const {
           markdown,
@@ -961,7 +981,8 @@ var require_record_body_markdown_utils = __commonJS({
         if (mediaUrl && !normalizedMediaUrls.includes(mediaUrl)) normalizedMediaUrls.unshift(mediaUrl);
         return {
           ...rest,
-          title: `${sourceName}口播文案`,
+          title: String(sourceTitle || rest.sourceTitle || rest.title || `${sourceName}口播文案`).trim(),
+          ...String(sourceTitle || rest.sourceTitle || "").trim() ? { sourceTitle: String(sourceTitle || rest.sourceTitle).trim() } : {},
           url: url || rest.url || "",
           transcriptOnly: true,
           ...cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {},
@@ -1022,7 +1043,7 @@ var require_record_body_markdown_utils = __commonJS({
             transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || "",
             transcriptionError: metadata.transcriptionError || metadata.conversionError || ""
           });
-          return [sourceMediaMarkdown, transcriptMarkdown, snapshot, automaticShareTextMarkdown].filter(Boolean).join("\n\n").trim() + "\n";
+          return [sourceMediaMarkdown, snapshot, transcriptMarkdown, automaticShareTextMarkdown].filter(Boolean).join("\n\n").trim() + "\n";
         }
         if (snapshot) {
           if (helpers.isFeishuUrl(url)) {
@@ -1124,6 +1145,31 @@ var require_record_body_markdown_utils = __commonJS({
 var require_ai_metadata_utils = __commonJS({
   "src/ai-metadata-utils.js"(exports2, module2) {
     "use strict";
+    function isRetryableAiMetadataError(error) {
+      const status = Number(error && (error.status || error.statusCode || error.response && error.response.status));
+      if (status === 429) return true;
+      const message = String(error && (error.message || error) || "").toLowerCase();
+      return /(?:status\s*code\s*)?429\b|rate[\s-]?limit|too many requests|请求过于频繁|限流/.test(message);
+    }
+    __name(isRetryableAiMetadataError, "isRetryableAiMetadataError");
+    async function retryAiMetadataGeneration2(generate, options = {}) {
+      if (typeof generate !== "function") throw new TypeError("AI metadata generator is required");
+      const maxAttempts = Math.max(1, Math.min(Number(options.maxAttempts) || 3, 3));
+      const wait = typeof options.wait === "function" ? options.wait : async () => {
+      };
+      let lastError = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          return await generate();
+        } catch (error) {
+          lastError = error;
+          if (!isRetryableAiMetadataError(error) || attempt >= maxAttempts) throw error;
+          await wait(800 * 2 ** (attempt - 1));
+        }
+      }
+      throw lastError || new Error("AI metadata generation failed");
+    }
+    __name(retryAiMetadataGeneration2, "retryAiMetadataGeneration");
     function requireFunction(value, name) {
       if (typeof value !== "function") {
         throw new TypeError(`AI metadata dependency is required: ${name}`);
@@ -1155,21 +1201,27 @@ var require_ai_metadata_utils = __commonJS({
         const jsonSource = fencedJsonMatch ? fencedJsonMatch[1].trim() : source;
         const jsonPayload = helpers.tryParseJson(jsonSource);
         if (jsonPayload && typeof jsonPayload === "object") {
+          const title = String(jsonPayload.title || jsonPayload.semanticTitle || jsonPayload.headline || "").trim();
           return {
+            ...title ? { title } : {},
             description: String(jsonPayload.description || jsonPayload.summary || jsonPayload.excerpt || "").trim(),
             keywords: normalizeGeneratedKeywords2(jsonPayload.keywords || jsonPayload.tags || jsonPayload.hashtags || [])
           };
         }
+        const titleMatch = source.match(/title\s*[:：]\s*([^\n]+)/i) || source.match(/标题\s*[:：]\s*([^\n]+)/i);
         const descriptionMatch = source.match(/description\s*[:：]\s*([^\n]+)/i) || source.match(/简介\s*[:：]\s*([^\n]+)/i) || source.match(/总结\s*[:：]\s*([^\n]+)/i);
         const keywordsMatch = source.match(/keywords?\s*[:：]\s*([^\n]+)/i) || source.match(/标签\s*[:：]\s*([^\n]+)/i) || source.match(/关键词\s*[:：]\s*([^\n]+)/i);
         return {
+          ...titleMatch ? { title: String(titleMatch[1] || "").trim() } : {},
           description: String(descriptionMatch ? descriptionMatch[1] : "").trim(),
           keywords: normalizeGeneratedKeywords2(keywordsMatch ? keywordsMatch[1] : "")
         };
       }
       __name(parseGeneratedMetadataResponse2, "parseGeneratedMetadataResponse");
       function normalizeGeneratedMetadataResult2(result) {
+        const title = String(result && (result.title || result.semanticTitle || result.headline) || "").trim().slice(0, 80);
         return {
+          ...title ? { title } : {},
           description: String(result && result.description || "").trim().slice(0, 300),
           keywords: normalizeGeneratedKeywords2(result && result.keywords)
         };
@@ -1203,7 +1255,325 @@ var require_ai_metadata_utils = __commonJS({
       };
     }
     __name(createAiMetadataHelpers2, "createAiMetadataHelpers");
-    module2.exports = { createAiMetadataHelpers: createAiMetadataHelpers2 };
+    module2.exports = {
+      createAiMetadataHelpers: createAiMetadataHelpers2,
+      isRetryableAiMetadataError,
+      retryAiMetadataGeneration: retryAiMetadataGeneration2
+    };
+  }
+});
+
+// src/social-engagement-utils.js
+var require_social_engagement_utils = __commonJS({
+  "src/social-engagement-utils.js"(exports2, module2) {
+    "use strict";
+    var METRIC_KEYS = ["views", "likes", "collects", "comments", "shares", "coins"];
+    function normalizeMetricCount(value) {
+      if (value === void 0 || value === null || value === "") return null;
+      if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+      const text = String(value).trim().replace(/,/g, "").toLowerCase();
+      const match = text.match(/^(\d+(?:\.\d+)?)\s*(万|w|k)?$/i);
+      if (!match) return null;
+      const amount = Number(match[1]);
+      if (!Number.isFinite(amount) || amount < 0) return null;
+      const unit = match[2];
+      const multiplier = unit === "万" || unit === "w" ? 1e4 : unit === "k" ? 1e3 : 1;
+      return Math.round(amount * multiplier);
+    }
+    __name(normalizeMetricCount, "normalizeMetricCount");
+    function getMetricContainerCandidates(source) {
+      if (!source || typeof source !== "object" || Array.isArray(source)) return [];
+      const nestedKeys = ["statistics", "stats", "interactInfo", "interact_info", "engagement", "data", "stat", "episode", "item", "aweme_detail"];
+      const result = [];
+      const seen = /* @__PURE__ */ new Set();
+      const visit = /* @__PURE__ */ __name((value, depth = 0) => {
+        if (!value || typeof value !== "object" || seen.has(value) || depth > 4 || result.length >= 80) return;
+        seen.add(value);
+        result.push(value);
+        nestedKeys.forEach((key) => visit(value[key], depth + 1));
+      }, "visit");
+      visit(source);
+      return result;
+    }
+    __name(getMetricContainerCandidates, "getMetricContainerCandidates");
+    function readMetric(containers, aliases) {
+      for (const container of containers) {
+        for (const key of aliases) {
+          if (!Object.prototype.hasOwnProperty.call(container, key)) continue;
+          const normalized = normalizeMetricCount(container[key]);
+          if (normalized !== null) return normalized;
+        }
+      }
+      return null;
+    }
+    __name(readMetric, "readMetric");
+    function buildSocialMetrics2(source = {}) {
+      const containers = getMetricContainerCandidates(source);
+      const metrics = {
+        views: readMetric(containers, ["viewCount", "view_count", "playCount", "play_count", "play", "view"]),
+        likes: readMetric(containers, ["likedCount", "liked_count", "likeCount", "like_count", "diggCount", "digg_count", "likes", "like"]),
+        collects: readMetric(containers, ["collectedCount", "collected_count", "collectCount", "collect_count", "favoriteCount", "favorite_count", "collects", "favorite"]),
+        comments: readMetric(containers, ["commentCount", "comment_count", "comments", "reply"]),
+        shares: readMetric(containers, ["shareCount", "share_count", "sharedCount", "shared_count", "shares", "share"]),
+        coins: readMetric(containers, ["coinCount", "coin_count", "coins", "coin"])
+      };
+      return Object.fromEntries(Object.entries(metrics).filter(([, value]) => value !== null));
+    }
+    __name(buildSocialMetrics2, "buildSocialMetrics");
+    function buildSocialMetricsFromText2(value = "") {
+      const source = String(value || "").replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/\s+/g, " ");
+      const definitions = {
+        views: ["(?:视频)?播放(?:量|数|次数)?"],
+        likes: ["(?:点赞|获赞)(?:量|数|次数)?"],
+        collects: ["收藏(?:量|数|人数|次数)?"],
+        comments: ["(?:评论|回复)(?:量|数|次数)?"],
+        shares: ["(?:转发|分享)(?:量|数|人数|次数)?"],
+        coins: ["(?:投硬币|硬币)(?:枚数|数|量|次数)?"]
+      };
+      const metrics = {};
+      Object.entries(definitions).forEach(([key, labels]) => {
+        for (const label of labels) {
+          const match = source.match(new RegExp(`${label}\\s*[:：]?\\s*(\\d+(?:\\.\\d+)?\\s*(?:万|w|k)?)`, "i"));
+          if (!match) continue;
+          const normalized = normalizeMetricCount(match[1]);
+          if (normalized !== null) metrics[key] = normalized;
+          break;
+        }
+      });
+      return metrics;
+    }
+    __name(buildSocialMetricsFromText2, "buildSocialMetricsFromText");
+    function hasSocialMetrics2(metrics = {}) {
+      return METRIC_KEYS.some((key) => Number.isFinite(metrics && metrics[key]));
+    }
+    __name(hasSocialMetrics2, "hasSocialMetrics");
+    function withCapturedSocialMetrics2(metrics = {}, capturedAt = "") {
+      if (!hasSocialMetrics2(metrics)) return {};
+      const normalized = Object.fromEntries(METRIC_KEYS.filter((key) => Number.isFinite(metrics[key])).map((key) => [key, Math.round(metrics[key])]));
+      const timestamp = String(capturedAt || "").trim();
+      return timestamp ? { ...normalized, capturedAt: timestamp } : normalized;
+    }
+    __name(withCapturedSocialMetrics2, "withCapturedSocialMetrics");
+    module2.exports = {
+      buildSocialMetrics: buildSocialMetrics2,
+      buildSocialMetricsFromText: buildSocialMetricsFromText2,
+      hasSocialMetrics: hasSocialMetrics2,
+      normalizeMetricCount,
+      withCapturedSocialMetrics: withCapturedSocialMetrics2
+    };
+  }
+});
+
+// src/transcription-note-title-utils.js
+var require_transcription_note_title_utils = __commonJS({
+  "src/transcription-note-title-utils.js"(exports2, module2) {
+    "use strict";
+    var MAX_SEMANTIC_TITLE_LENGTH = 36;
+    var GENERIC_TRANSCRIPTION_TITLE = /^(?:抖音|视频号|B站|哔哩哔哩|小宇宙|网页|音频|视频|录音|文件)?[-\s]*(?:口播文案|音频文案|视频文案|转写文案|转写内容)$/i;
+    var SHORT_GREETING = /^(?:大家好|你好|您好|哈喽|hello|嗨|嗯+|啊+|呃+)$/i;
+    function getMetadata(record) {
+      return record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+    }
+    __name(getMetadata, "getMetadata");
+    function isSuccessfulTranscriptionRecord2(record) {
+      const metadata = getMetadata(record);
+      return String(metadata.transcriptionStatus || "").toLowerCase() === "success" && Boolean(String(metadata.transcription || "").trim());
+    }
+    __name(isSuccessfulTranscriptionRecord2, "isSuccessfulTranscriptionRecord");
+    function inferPlatformFromUrl(value) {
+      const url = String(value || "").toLowerCase();
+      if (/xiaohongshu\.com|xhslink\.cn|xhslink\.com/.test(url)) return "小红书";
+      if (/douyin\.com|iesdouyin\.com/.test(url)) return "抖音";
+      if (/channels\.weixin\.qq\.com|finder\.video\.qq\.com/.test(url)) return "视频号";
+      if (/bilibili\.com|b23\.tv/.test(url)) return "B站";
+      if (/xiaoyuzhoufm\.com|xiaoeknow\.com/.test(url)) return "小宇宙";
+      return "";
+    }
+    __name(inferPlatformFromUrl, "inferPlatformFromUrl");
+    function cleanTitlePart(value, maxLength = MAX_SEMANTIC_TITLE_LENGTH) {
+      const normalized = String(value || "").replace(/```[\s\S]*?```/g, " ").replace(/^#{1,6}\s*/gm, "").replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "").replace(/[\\/:*?"<>|]+/g, "-").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").replace(/^[\s\-—–_，。！？!?：:；;、“”‘’'"【】\[\]（）()]+/, "").replace(/[\s\-—–_，。！？!?：:；;、“”‘’'"【】\[\]（）()]+$/, "").trim();
+      return Array.from(normalized).slice(0, maxLength).join("").trim();
+    }
+    __name(cleanTitlePart, "cleanTitlePart");
+    function stripSourcePrefix(value, source) {
+      const title = cleanTitlePart(value);
+      const normalizedSource = cleanTitlePart(source, 16);
+      if (!title || !normalizedSource) return title;
+      const prefixes = [
+        `${normalizedSource}-`,
+        `${normalizedSource}：`,
+        `${normalizedSource}:`,
+        `${normalizedSource} `
+      ];
+      for (const prefix of prefixes) {
+        if (title.toLowerCase().startsWith(prefix.toLowerCase())) {
+          return cleanTitlePart(title.slice(prefix.length));
+        }
+      }
+      return title;
+    }
+    __name(stripSourcePrefix, "stripSourcePrefix");
+    function getTranscriptionSourcePrefix2(record) {
+      const metadata = getMetadata(record);
+      const explicitPlatform = cleanTitlePart(metadata.platform || metadata.platformName, 16);
+      if (explicitPlatform) return explicitPlatform;
+      const inferredPlatform = inferPlatformFromUrl(metadata.url || metadata.originalUrl || record && record.content);
+      if (inferredPlatform) return inferredPlatform;
+      const type = String(record && record.type || "").toLowerCase();
+      if (type === "voice") return "录音";
+      if (type === "file") {
+        const category = cleanTitlePart(metadata.contentCategory, 8);
+        if (/视频/.test(category)) return "视频";
+        if (/音频|录音/.test(category)) return "音频";
+        const ext = String(metadata.fileExt || metadata.fileName || "").toLowerCase();
+        if (/\.(?:mp4|mov|m4v|mkv|webm)$|^(?:mp4|mov|m4v|mkv|webm)$/.test(ext)) return "视频";
+        if (/\.(?:mp3|wav|m4a|aac|flac|ogg|opus)$|^(?:mp3|wav|m4a|aac|flac|ogg|opus)$/.test(ext)) return "音频";
+      }
+      return "音视频";
+    }
+    __name(getTranscriptionSourcePrefix2, "getTranscriptionSourcePrefix");
+    function getMeaningfulTranscriptSentence(transcription) {
+      const sentences = String(transcription || "").replace(/\s+/g, " ").split(/[。！？!?；;\n]+/).map((item) => cleanTitlePart(item)).filter(Boolean);
+      return sentences.find((item) => item.length >= 8 && !SHORT_GREETING.test(item)) || sentences.find((item) => item.length >= 5 && !SHORT_GREETING.test(item)) || "";
+    }
+    __name(getMeaningfulTranscriptSentence, "getMeaningfulTranscriptSentence");
+    function buildTitleFromGeneratedDescription(description) {
+      const source = String(description || "").replace(/\s+/g, " ").trim();
+      if (!source) return "";
+      const topicMatch = source.match(/(?:详细)?(?:介绍|讲解|分享|说明|总结|讨论|分析)(?:了|的是)?\s*([^，。！？；;]+)/);
+      if (topicMatch && topicMatch[1]) {
+        return cleanTitlePart(topicMatch[1]);
+      }
+      const withoutReportPrefix = source.replace(/^(?:这是一(?:份|段|篇)|本文|本视频|这段视频|该视频|这段音频|本期(?:视频|节目)?)[^，。！？；;]{0,24}[，,:：]\s*/, "").replace(/^(?:主要|重点)(?:介绍|讲解|分享|说明|讨论|分析)(?:了|的是)?\s*/, "");
+      const firstTopicClause = withoutReportPrefix.split(/[，。！？；;]/)[0] || "";
+      return cleanTitlePart(firstTopicClause);
+    }
+    __name(buildTitleFromGeneratedDescription, "buildTitleFromGeneratedDescription");
+    function getFileNameStem(fileName) {
+      return String(fileName || "").replace(/\.[A-Za-z0-9]{1,8}$/, "");
+    }
+    __name(getFileNameStem, "getFileNameStem");
+    function buildTitleFromKeywords(keywords) {
+      const values = (Array.isArray(keywords) ? keywords : String(keywords || "").split(/[,，、\s]+/)).map((item) => cleanTitlePart(item, 18)).filter(Boolean).filter((item, index, list) => list.indexOf(item) === index).slice(0, 2);
+      return values.join("-");
+    }
+    __name(buildTitleFromKeywords, "buildTitleFromKeywords");
+    function extractSourceTitleFromMarkdown(markdown = "") {
+      const match = String(markdown || "").match(/(?:^|\n)##\s*标题\s*\n+([^\n]+)/i);
+      return cleanTitlePart(match && match[1] || "");
+    }
+    __name(extractSourceTitleFromMarkdown, "extractSourceTitleFromMarkdown");
+    function getCanonicalSourceTitleCandidate(record) {
+      const metadata = getMetadata(record);
+      const source = getTranscriptionSourcePrefix2(record);
+      const sourceTitle = cleanTitlePart(metadata.sourceTitle || metadata.platformTitle || "");
+      if (!["抖音", "小红书", "B站", "小宇宙", "视频号"].includes(source)) {
+        return { title: "", titleSource: "" };
+      }
+      if (sourceTitle && sourceTitle.toLowerCase() !== source.toLowerCase() && !GENERIC_TRANSCRIPTION_TITLE.test(sourceTitle)) {
+        return { title: sourceTitle, titleSource: "source-title" };
+      }
+      const markdownTitle = extractSourceTitleFromMarkdown(metadata.markdown);
+      if (markdownTitle && markdownTitle.toLowerCase() !== source.toLowerCase() && !GENERIC_TRANSCRIPTION_TITLE.test(markdownTitle)) {
+        return { title: markdownTitle, titleSource: "source-markdown-title" };
+      }
+      return { title: "", titleSource: "" };
+    }
+    __name(getCanonicalSourceTitleCandidate, "getCanonicalSourceTitleCandidate");
+    function buildSemanticTitleCandidate(record, fallbackTitle = "") {
+      const metadata = getMetadata(record);
+      const source = getTranscriptionSourcePrefix2(record);
+      const sourceTitleCandidate = getCanonicalSourceTitleCandidate(record);
+      if (sourceTitleCandidate.title) return sourceTitleCandidate;
+      const keywordTitle = buildTitleFromKeywords(metadata.keywords);
+      const shouldPreferKeywordTitle = source === "录音" || source === "音频";
+      if (shouldPreferKeywordTitle && keywordTitle && !GENERIC_TRANSCRIPTION_TITLE.test(keywordTitle)) {
+        return { title: keywordTitle, titleSource: "keywords" };
+      }
+      const semanticTitle = cleanTitlePart(metadata.semanticTitle || metadata.aiTitle);
+      if (semanticTitle && !GENERIC_TRANSCRIPTION_TITLE.test(semanticTitle)) {
+        return { title: semanticTitle, titleSource: "ai-title" };
+      }
+      if (keywordTitle && !GENERIC_TRANSCRIPTION_TITLE.test(keywordTitle)) {
+        return { title: keywordTitle, titleSource: "keywords" };
+      }
+      const transcriptSentence = getMeaningfulTranscriptSentence(metadata.transcription);
+      if (transcriptSentence) return { title: transcriptSentence, titleSource: "transcription" };
+      const fileName = cleanTitlePart(getFileNameStem(metadata.fileName || ""));
+      if (fileName && !GENERIC_TRANSCRIPTION_TITLE.test(fileName)) {
+        return { title: fileName, titleSource: "file-name" };
+      }
+      const originalTitle = cleanTitlePart(metadata.title || record && record.title || "");
+      if (originalTitle && !GENERIC_TRANSCRIPTION_TITLE.test(originalTitle)) {
+        return { title: originalTitle, titleSource: "original-title" };
+      }
+      const fallback = cleanTitlePart(fallbackTitle);
+      if (fallback && !GENERIC_TRANSCRIPTION_TITLE.test(fallback)) {
+        return { title: fallback, titleSource: "fallback" };
+      }
+      return { title: "转写内容", titleSource: "fallback" };
+    }
+    __name(buildSemanticTitleCandidate, "buildSemanticTitleCandidate");
+    function buildSemanticTranscriptionTitle2(record, fallbackTitle = "") {
+      const source = getTranscriptionSourcePrefix2(record);
+      const candidate = buildSemanticTitleCandidate(record, fallbackTitle);
+      return stripSourcePrefix(candidate.title, source) || "转写内容";
+    }
+    __name(buildSemanticTranscriptionTitle2, "buildSemanticTranscriptionTitle");
+    function buildTranscriptionNoteIdentity2(record, options = {}) {
+      if (!isSuccessfulTranscriptionRecord2(record)) return null;
+      const source = getTranscriptionSourcePrefix2(record);
+      const fallbackWithoutBinding = stripSourcePrefix(options.fallbackTitle || "", options.bindingLabel || "");
+      const semanticFallbackTitle = stripSourcePrefix(fallbackWithoutBinding, source);
+      const candidate = buildSemanticTitleCandidate(record, semanticFallbackTitle);
+      const displayTitle = stripSourcePrefix(candidate.title, source) || "转写内容";
+      const bindingLabel = cleanTitlePart(options.bindingLabel || "", 24);
+      const fileTitle = [bindingLabel, source, displayTitle].filter(Boolean).join("-");
+      return {
+        displayTitle,
+        fileTitle,
+        source,
+        titleSource: candidate.titleSource
+      };
+    }
+    __name(buildTranscriptionNoteIdentity2, "buildTranscriptionNoteIdentity");
+    function applyTranscriptionNoteIdentity2(record, options = {}) {
+      const identity = buildTranscriptionNoteIdentity2(record, options);
+      if (!identity) {
+        return {
+          record,
+          displayTitle: options.fallbackTitle || "",
+          fileTitle: options.fallbackTitle || "",
+          source: "",
+          titleSource: ""
+        };
+      }
+      const metadata = getMetadata(record);
+      const originalTitle = String(metadata.originalTitle || metadata.title || "").trim();
+      return {
+        ...identity,
+        record: {
+          ...record,
+          metadata: {
+            ...metadata,
+            ...originalTitle && originalTitle !== identity.displayTitle ? { originalTitle } : {},
+            title: identity.displayTitle,
+            semanticTitleSource: identity.titleSource
+          }
+        }
+      };
+    }
+    __name(applyTranscriptionNoteIdentity2, "applyTranscriptionNoteIdentity");
+    module2.exports = {
+      MAX_SEMANTIC_TITLE_LENGTH,
+      applyTranscriptionNoteIdentity: applyTranscriptionNoteIdentity2,
+      buildSemanticTranscriptionTitle: buildSemanticTranscriptionTitle2,
+      buildTitleFromKeywords,
+      buildTitleFromGeneratedDescription,
+      buildTranscriptionNoteIdentity: buildTranscriptionNoteIdentity2,
+      getTranscriptionSourcePrefix: getTranscriptionSourcePrefix2,
+      isSuccessfulTranscriptionRecord: isSuccessfulTranscriptionRecord2
+    };
   }
 });
 
@@ -1296,7 +1666,23 @@ var {
 } = require_record_identity_utils();
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
 var { createRecordBodyMarkdownHelpers } = require_record_body_markdown_utils();
-var { createAiMetadataHelpers } = require_ai_metadata_utils();
+var {
+  createAiMetadataHelpers,
+  retryAiMetadataGeneration
+} = require_ai_metadata_utils();
+var {
+  buildSocialMetrics,
+  buildSocialMetricsFromText,
+  hasSocialMetrics,
+  withCapturedSocialMetrics
+} = require_social_engagement_utils();
+var {
+  applyTranscriptionNoteIdentity,
+  buildSemanticTranscriptionTitle,
+  buildTranscriptionNoteIdentity,
+  getTranscriptionSourcePrefix,
+  isSuccessfulTranscriptionRecord
+} = require_transcription_note_title_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var PLUGIN_RUNTIME_VERSION = "1.3.76";
@@ -1342,7 +1728,7 @@ var normalizeNotePropertyFields = /* @__PURE__ */ __name((value) => normalizeNot
   value,
   NOTE_PROPERTY_FIELD_KEYS
 ), "normalizeNotePropertyFields");
-var DEFAULT_NOTE_PROPERTY_FIELDS = "title,author,url,synced_at,source,description,keywords";
+var DEFAULT_NOTE_PROPERTY_FIELDS = "title,author,url,synced_at,source,description,keywords,views,likes,collects,comments,shares,coins,metrics_captured_at";
 var NOTE_PROPERTY_FIELD_KEYS = [
   "id",
   "type",
@@ -1354,6 +1740,13 @@ var NOTE_PROPERTY_FIELD_KEYS = [
   "source",
   "description",
   "keywords",
+  "views",
+  "likes",
+  "collects",
+  "comments",
+  "shares",
+  "coins",
+  "metrics_captured_at",
   "status",
   "fetch_status",
   "conversion_status",
@@ -1384,7 +1777,8 @@ var DEFAULT_SETTINGS = {
   aiProvider: "off",
   aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
-  xiaohongshuImageOcrEnabled: true,
+  xiaohongshuImageOcrEnabled: false,
+  xiaohongshuImageOcrConsentVersion: 0,
   saveOriginalMediaEnabled: false,
   wechatChannelsExperimentUrl: "",
   feishuOAuthStatus: null,
@@ -2388,13 +2782,14 @@ __name(getSafeUrlDiagnostic, "getSafeUrlDiagnostic");
 function getXiaohongshuCapabilityMatrix({
   hasProAccess = false,
   commentsEnabled = true,
-  isLoggedIn = false
+  isLoggedIn = false,
+  imageOcrEnabled = false
 } = {}) {
   const pro = hasProAccess === true;
   return {
     publicGraphic: true,
     mediaTranscription: pro,
-    imageOcr: pro,
+    imageOcr: pro && imageOcrEnabled === true,
     comments: pro && commentsEnabled !== false && isLoggedIn === true
   };
 }
@@ -2598,11 +2993,6 @@ function isRecordNotFoundError(error) {
   return /Record not found/i.test(message);
 }
 __name(isRecordNotFoundError, "isRecordNotFoundError");
-function getDefaultLocalTranscriptionScriptPath(platform = os.platform(), installRoot = "") {
-  const root = installRoot || getLocalAsrInstallRoot(os.homedir(), "default", platform);
-  return path.join(root, getLocalAsrPlatform(platform) === "darwin" ? "transcribe.sh" : "transcribe.ps1");
-}
-__name(getDefaultLocalTranscriptionScriptPath, "getDefaultLocalTranscriptionScriptPath");
 function getDoubaoTaskKey(audioUrl) {
   return crypto.createHash("sha256").update(String(audioUrl || "")).digest("hex");
 }
@@ -2681,7 +3071,7 @@ function canAddPluginBinding(settings, candidateToken) {
   if (!token) return false;
   const bindings = normalizeBindings(settings);
   if (bindings.some((item) => item && item.token === token)) return true;
-  return bindings.length < MAX_PLUGIN_BINDINGS;
+  return bindings.filter((item) => item.status !== "needs_rebind").length < MAX_PLUGIN_BINDINGS;
 }
 __name(canAddPluginBinding, "canAddPluginBinding");
 function getPrimaryBindingToken(bindings) {
@@ -2733,7 +3123,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     }];
   }
   merged.bindings = normalizeBindings(merged);
-  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.status !== "unbound");
+  const tokenBinding = merged.bindings.find((item) => item.token === normalizedToken && item.enabled !== false && item.status !== "unbound" && item.status !== "needs_rebind");
   merged.token = tokenBinding ? normalizedToken : getPrimaryBindingToken(merged.bindings);
   merged.pendingBindCode = merged.token === pendingBindToken ? "" : pendingBindToken;
   merged.pendingRedeemCode = normalizeBindCodeInput(merged.pendingRedeemCode);
@@ -2764,7 +3154,8 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
   merged.aiMetadataEnabled = true;
   merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2 ? true : merged.xiaohongshuCommentsEnabled !== false;
-  merged.xiaohongshuImageOcrEnabled = true;
+  merged.xiaohongshuImageOcrConsentVersion = Number(merged.xiaohongshuImageOcrConsentVersion) === 1 ? 1 : 0;
+  merged.xiaohongshuImageOcrEnabled = merged.xiaohongshuImageOcrConsentVersion === 1 && merged.xiaohongshuImageOcrEnabled === true;
   merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
   merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || "").trim();
   merged.feishuOAuthStatus = merged.feishuOAuthStatus && typeof merged.feishuOAuthStatus === "object" && !Array.isArray(merged.feishuOAuthStatus) ? merged.feishuOAuthStatus : null;
@@ -3600,7 +3991,8 @@ function parseTencentTaskStatusResponse(payload) {
 }
 __name(parseTencentTaskStatusResponse, "parseTencentTaskStatusResponse");
 function sleep(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+  const schedule = typeof globalThis !== "undefined" && typeof globalThis.setTimeout === "function" ? globalThis.setTimeout.bind(globalThis) : window.setTimeout.bind(window);
+  return new Promise((resolve) => schedule(resolve, ms));
 }
 __name(sleep, "sleep");
 function shouldGenerateAiMetadata(settings, record) {
@@ -4814,6 +5206,46 @@ function extractDouyinMediaUrlsFromShareHtml(html, awemeId) {
   return extractDouyinMediaUrlsForAweme(parseJsonObjectAssignedTo(source, "window._ROUTER_DATA"), awemeId);
 }
 __name(extractDouyinMediaUrlsFromShareHtml, "extractDouyinMediaUrlsFromShareHtml");
+function findDouyinDetailForAweme(payload, awemeId) {
+  const targetId = String(awemeId || "").trim();
+  if (!targetId || !payload || typeof payload !== "object") return null;
+  const seen = /* @__PURE__ */ new Set();
+  let matched = null;
+  const visit = /* @__PURE__ */ __name((value, depth = 0) => {
+    if (matched || !value || typeof value !== "object" || depth > 16 || seen.size > 1e4 || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    const candidateId = String(value.aweme_id || value.awemeId || "").trim();
+    if (candidateId === targetId) {
+      matched = value;
+      return;
+    }
+    Object.values(value).forEach((item) => visit(item, depth + 1));
+  }, "visit");
+  visit(payload);
+  return matched;
+}
+__name(findDouyinDetailForAweme, "findDouyinDetailForAweme");
+function extractDouyinDetailFromShareHtml(html, awemeId) {
+  const source = String(html || "");
+  const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+  while (match = scriptPattern.exec(source)) {
+    const detail = findDouyinDetailForAweme(
+      parseJsonObjectAssignedTo(match[1], "window._ROUTER_DATA"),
+      awemeId
+    );
+    if (detail) return detail;
+  }
+  return findDouyinDetailForAweme(
+    parseJsonObjectAssignedTo(source, "window._ROUTER_DATA"),
+    awemeId
+  );
+}
+__name(extractDouyinDetailFromShareHtml, "extractDouyinDetailFromShareHtml");
 function shouldResolveMediaDownloadUrl(url) {
   const text = String(url || "").toLowerCase();
   return text.includes("/aweme/v1/play") || text.includes("v.douyin.com") || text.includes("iesdouyin.com/share/video") || text.includes("amemv.com");
@@ -5357,6 +5789,34 @@ function extractKeywordList(value) {
   return String(value || "").split(/[,，、\s]+/).map((item) => item.trim()).filter(Boolean);
 }
 __name(extractKeywordList, "extractKeywordList");
+function normalizePendingReviewSummary(summary = {}) {
+  return {
+    total: Math.max(0, Number(summary && summary.total) || 0),
+    audioVideoCount: Math.max(0, Number(summary && summary.audioVideoCount) || 0)
+  };
+}
+__name(normalizePendingReviewSummary, "normalizePendingReviewSummary");
+function mergePendingReviewSummaries(summaries = []) {
+  return (Array.isArray(summaries) ? summaries : []).reduce((merged, summary) => {
+    const normalized = normalizePendingReviewSummary(summary);
+    return {
+      total: merged.total + normalized.total,
+      audioVideoCount: merged.audioVideoCount + normalized.audioVideoCount
+    };
+  }, { total: 0, audioVideoCount: 0 });
+}
+__name(mergePendingReviewSummaries, "mergePendingReviewSummaries");
+function buildPendingReviewNotice(summary = {}) {
+  const normalized = normalizePendingReviewSummary(summary);
+  if (normalized.audioVideoCount > 0) {
+    return `有 ${normalized.audioVideoCount} 条音频/音视频正在微信安全审核，通过后会自动进入转写`;
+  }
+  if (normalized.total > 0) {
+    return `有 ${normalized.total} 条内容正在微信安全审核，通过后会自动进入同步`;
+  }
+  return "";
+}
+__name(buildPendingReviewNotice, "buildPendingReviewNotice");
 function extractWebpageMetadataFromHtml(html, url = "") {
   const source = String(html || "");
   const description = cleanSocialDescription(extractMetaContent(source, [
@@ -5380,6 +5840,69 @@ function extractWebpageMetadataFromHtml(html, url = "") {
   };
 }
 __name(extractWebpageMetadataFromHtml, "extractWebpageMetadataFromHtml");
+function buildSocialMediaSupplementalMarkdown({
+  title = "",
+  description = "",
+  tags = [],
+  imageUrls = []
+} = {}) {
+  const cleanedTitle = String(title || "").trim();
+  const cleanedDescription = String(description || "").trim();
+  const normalizedTags = (Array.isArray(tags) ? tags : extractKeywordList(tags)).map((tag) => String(tag || "").trim()).filter(Boolean).map((tag) => tag.startsWith("#") ? tag : `#${tag}`);
+  const normalizedImages = (Array.isArray(imageUrls) ? imageUrls : []).map((url) => normalizeExtractedUrl(url)).filter((url) => /^https?:\/\//i.test(url));
+  const lines = [];
+  if (cleanedTitle) lines.push("## 标题", "", cleanedTitle, "");
+  if (cleanedDescription) lines.push("## 原文正文", "", cleanedDescription, "");
+  if (normalizedTags.length) {
+    lines.push("## 标签", "", Array.from(new Set(normalizedTags)).join(" "), "");
+  }
+  if (normalizedImages.length) {
+    lines.push("## 封面图", "", `![封面](${normalizedImages[0]})`, "");
+  }
+  return cleanMarkdownForStorage(lines.join("\n").trim());
+}
+__name(buildSocialMediaSupplementalMarkdown, "buildSocialMediaSupplementalMarkdown");
+function buildSocialMediaSupplementalMarkdownFromHtml(html, url = "") {
+  const metadata = extractWebpageMetadataFromHtml(html, url);
+  const descriptionTags = extractTagsFromText(metadata.description, html);
+  const preferredCover = normalizeExtractedUrl(extractMetaContent(html, ["og:image", "twitter:image"]));
+  const isBilibiliPlaceholder = /* @__PURE__ */ __name((imageUrl) => isBilibiliUrl(url) && /\/bfs\/static\/jinkela\/|\/long\/images\/512\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(String(imageUrl || "")), "isBilibiliPlaceholder");
+  return buildSocialMediaSupplementalMarkdown({
+    title: metadata.title,
+    description: metadata.description,
+    tags: descriptionTags.length ? descriptionTags : metadata.keywords,
+    imageUrls: [preferredCover, ...collectImageUrlsFromHtml(html)].filter(Boolean).filter((imageUrl) => !isBilibiliPlaceholder(imageUrl))
+  });
+}
+__name(buildSocialMediaSupplementalMarkdownFromHtml, "buildSocialMediaSupplementalMarkdownFromHtml");
+function extractSocialMetricsFromLabeledHtml(html = "") {
+  const source = String(html || "");
+  const labels = "(?:视频)?播放(?:量|数|次数)?|(?:点赞|获赞)(?:量|数|次数)?|收藏(?:量|数|人数|次数)?|(?:评论|回复)(?:量|数|次数)?|(?:转发|分享)(?:量|数|人数|次数)?|(?:投硬币|硬币)(?:枚数|数|量|次数)?";
+  const count = "\\d+(?:\\.\\d+)?\\s*(?:万|w|k)?";
+  const pairPattern = new RegExp(
+    `<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(${labels})\\s*<\\/(?:span|div|li|em|strong|button)>\\s*<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(${count})\\s*<\\/(?:span|div|li|em|strong|button)>`,
+    "gi"
+  );
+  const pairs = [];
+  let match;
+  while (match = pairPattern.exec(source)) pairs.push(`${match[1]} ${match[2]}`);
+  return buildSocialMetricsFromText(pairs.join(" "));
+}
+__name(extractSocialMetricsFromLabeledHtml, "extractSocialMetricsFromLabeledHtml");
+function extractSocialMetricsFromHtml(html = "") {
+  const blocks = collectTopLevelJsonObjectBlocks(html, {
+    maxBlocks: 20,
+    maxBlockCharacters: 1024 * 1024,
+    maxTotalCharacters: 2 * 1024 * 1024,
+    requiredTexts: ['"stat"', '"statistics"', '"playCount"', '"viewCount"']
+  });
+  for (const block of blocks) {
+    const metrics = buildSocialMetrics(tryParseJson(block));
+    if (hasSocialMetrics(metrics)) return metrics;
+  }
+  return extractSocialMetricsFromLabeledHtml(html);
+}
+__name(extractSocialMetricsFromHtml, "extractSocialMetricsFromHtml");
 function normalizeExtractedUrl(url) {
   const normalized = decodeHtmlEntities(String(url || "")).replace(/\\u002F/g, "/").replace(/\\\//g, "/").trim();
   return normalized.startsWith("//") ? `https:${normalized}` : normalized;
@@ -6500,6 +7023,15 @@ function extractXiaohongshuStructuredVideoUrl(note) {
   return urls[0] || "";
 }
 __name(extractXiaohongshuStructuredVideoUrl, "extractXiaohongshuStructuredVideoUrl");
+function isXiaohongshuStructuredVideoNote(note) {
+  if (!note || typeof note !== "object") return false;
+  const declaredType = String(
+    note.noteType || note.note_type || note.type || note.contentType || note.content_type || ""
+  ).trim().toLowerCase();
+  if (/(?:video|视频)/i.test(declaredType)) return true;
+  return Boolean(note.video || note.videoInfo || note.video_info || note.videoUrl || note.video_url);
+}
+__name(isXiaohongshuStructuredVideoNote, "isXiaohongshuStructuredVideoNote");
 function extractXiaohongshuPrimaryNotePayload(html, url = "") {
   const targetNoteId = getXiaohongshuTargetNoteId(url);
   const empty = {
@@ -6511,7 +7043,9 @@ function extractXiaohongshuPrimaryNotePayload(html, url = "") {
     tags: [],
     imageUrls: [],
     videoUrl: "",
-    author: ""
+    isVideoNote: false,
+    author: "",
+    socialMetrics: {}
   };
   if (!targetNoteId) return empty;
   const rawSource = String(html || "");
@@ -6567,6 +7101,7 @@ function extractXiaohongshuPrimaryNotePayload(html, url = "") {
       ).slice(0, 1e5);
       const imageUrls = collectXiaohongshuStructuredImages(value);
       const videoUrl = extractXiaohongshuStructuredVideoUrl(value);
+      const isVideoNote = isXiaohongshuStructuredVideoNote(value);
       const author = cleanSocialDescription(
         value.user && (value.user.nickname || value.user.nickName || value.user.userName) || value.userInfo && (value.userInfo.nickname || value.userInfo.nickName || value.userInfo.userName) || ""
       );
@@ -6584,7 +7119,9 @@ function extractXiaohongshuPrimaryNotePayload(html, url = "") {
           tags: collectXiaohongshuStructuredTags(value, description),
           imageUrls,
           videoUrl,
-          author
+          isVideoNote,
+          author,
+          socialMetrics: buildSocialMetrics(value)
         });
       }
     }
@@ -7056,7 +7593,9 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = "", option
     }),
     imageUrls: images,
     videoUrl,
+    isVideoNote: primaryNote.matched ? primaryNote.isVideoNote === true : false,
     comments,
+    socialMetrics: primaryNote.matched ? primaryNote.socialMetrics || {} : {},
     xiaohongshuTargetNoteIdPresent: primaryNote.targetNoteIdPresent,
     xiaohongshuPrimaryNoteMatched: primaryNote.matched,
     xiaohongshuStructuredIdentityMismatch: primaryNote.structuredIdentityMismatch
@@ -7130,6 +7669,8 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
     }
   });
   const videoUrl = String((sources.find((item) => String(item.videoUrl || "").trim()) || {}).videoUrl || "").trim();
+  const isVideoNote = sources.some((item) => item.isVideoNote === true);
+  const socialMetrics = (sources.find((item) => hasSocialMetrics(item.socialMetrics)) || {}).socialMetrics || {};
   return {
     title,
     author,
@@ -7137,7 +7678,9 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
     tags,
     imageUrls: mergedImageUrls,
     videoUrl,
+    isVideoNote,
     comments,
+    socialMetrics,
     xiaohongshuTargetNoteIdPresent: sources.some((item) => item.xiaohongshuTargetNoteIdPresent === true),
     xiaohongshuPrimaryNoteMatched: matchedPrimary.length > 0,
     xiaohongshuStructuredIdentityMismatch: matchedPrimary.length === 0 && sources.some((item) => item.xiaohongshuStructuredIdentityMismatch === true),
@@ -9853,6 +10396,56 @@ async function readSessionFetchText(session, url, headers, timeoutMs = 12e3) {
   }
 }
 __name(readSessionFetchText, "readSessionFetchText");
+async function downloadArrayBufferViaElectronSession(url, headers = {}, options = {}, session = getWechatSession()) {
+  if (!session || typeof session.fetch !== "function") {
+    throw new Error("当前环境无法使用浏览器会话下载媒体");
+  }
+  throwIfAborted(options.signal);
+  const timeoutMs = Math.max(100, Number(options.timeout) || 3e4);
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const abortSessionRequest = /* @__PURE__ */ __name(() => {
+    if (controller) controller.abort();
+  }, "abortSessionRequest");
+  if (options.signal && typeof options.signal.addEventListener === "function") {
+    options.signal.addEventListener("abort", abortSessionRequest, { once: true });
+  }
+  let timer = null;
+  const requestTask = (async () => {
+    const response = await session.fetch(url, {
+      method: "GET",
+      headers,
+      credentials: "include",
+      redirect: "follow",
+      ...controller ? { signal: controller.signal } : {}
+    });
+    if (!response || !response.ok) {
+      throw new Error(`媒体下载失败：HTTP ${response ? response.status : 0}`);
+    }
+    return response.arrayBuffer();
+  })();
+  const timeoutTask = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      abortSessionRequest();
+      reject(new Error(`浏览器会话媒体下载超时（${timeoutMs}ms）`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([requestTask, timeoutTask]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (options.signal && typeof options.signal.removeEventListener === "function") {
+      options.signal.removeEventListener("abort", abortSessionRequest);
+    }
+    throwIfAborted(options.signal);
+  }
+}
+__name(downloadArrayBufferViaElectronSession, "downloadArrayBufferViaElectronSession");
+function isMediaAuthorizationError(error) {
+  return /媒体下载失败：HTTP\s*(?:401|403)\b|\bHTTP\s*(?:401|403)\b/i.test(
+    String(error && error.message || error || "")
+  );
+}
+__name(isMediaAuthorizationError, "isMediaAuthorizationError");
 async function fetchDouyinMediaUrlsWithSession({
   pageUrl,
   awemeId,
@@ -10126,6 +10719,20 @@ async function loginFeishuWeb(targetUrl) {
   });
 }
 __name(loginFeishuWeb, "loginFeishuWeb");
+function buildXiaohongshuLoginPageConfig(targetUrl = "") {
+  const loginUrl = String(targetUrl || "https://www.xiaohongshu.com/").trim();
+  const userAgent = String(getSocialRequestHeaders(loginUrl)["User-Agent"] || "").trim();
+  return { loginUrl, userAgent };
+}
+__name(buildXiaohongshuLoginPageConfig, "buildXiaohongshuLoginPageConfig");
+function isAbortedBrowserNavigationError(error) {
+  const code = error && error.code;
+  const errno = error && error.errno;
+  if (Number(code) === -3 || Number(errno) === -3) return true;
+  const message = String(error && (error.message || error) || "");
+  return /ERR_ABORTED/i.test(`${String(code || "")} ${message}`);
+}
+__name(isAbortedBrowserNavigationError, "isAbortedBrowserNavigationError");
 async function loginXiaohongshuWeb(targetUrl) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -10135,7 +10742,7 @@ async function loginXiaohongshuWeb(targetUrl) {
   if (!session) {
     throw new Error("无法创建小红书登录会话");
   }
-  const loginUrl = targetUrl || "https://www.xiaohongshu.com/";
+  const { loginUrl, userAgent } = buildXiaohongshuLoginPageConfig(targetUrl);
   return new Promise((resolve, reject) => {
     let settled = false;
     const win = new BrowserWindow({
@@ -10166,11 +10773,19 @@ async function loginXiaohongshuWeb(targetUrl) {
       }
       resolve(await probeXiaohongshuLoginStatus(loginUrl));
     }, "finish");
+    if (win.webContents && typeof win.webContents.setUserAgent === "function" && userAgent) {
+      win.webContents.setUserAgent(userAgent);
+    }
     win.on("closed", async () => {
       finish();
     });
-    win.loadURL(loginUrl).catch((error) => {
-      finish(error);
+    win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
+      if (isMainFrame === false || isAbortedBrowserNavigationError({ code: errorCode, message: errorDescription })) return;
+      finish(new Error(`打开小红书登录页面失败（${errorCode}）：${errorDescription || "未知错误"}`));
+    });
+    win.loadURL(loginUrl, { userAgent }).catch((error) => {
+      if (isAbortedBrowserNavigationError(error)) return;
+      finish(new Error(`打开小红书登录页面失败：${error.message || error}`));
     });
   });
 }
@@ -12928,6 +13543,7 @@ var noteOutputPlanHelpers = createNoteOutputPlanHelpers({
   getRecordUrl,
   getWebpageSourcePrefix,
   isFeishuUrl,
+  isSuccessfulTranscriptionRecord,
   normalizeNotePropertyFields,
   normalizeVaultPath
 });
@@ -13392,11 +14008,16 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const noteDir = normalizeVaultPath(this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`);
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
-    const title = await this.nextRecordTitle(noteDir, record, "");
-    const recordForMarkdown = await this.enrichRecordMetadataWithAi(record, binding);
+    const fallbackTitle = await this.nextRecordTitle(noteDir, record, "");
+    let recordForMarkdown = await this.enrichRecordMetadataWithAi(record, binding);
+    const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, { fallbackTitle });
+    recordForMarkdown = noteIdentity.record;
+    const title = noteIdentity.displayTitle || fallbackTitle;
+    const fileTitle = noteIdentity.titleSource ? await this.nextTitle(noteDir, noteIdentity.fileTitle) : fallbackTitle;
     const outputPlan = buildNoteOutputPlan({
       record: recordForMarkdown,
       title,
+      fileTitle,
       syncedAt,
       noteDir,
       propertyFields: this.settings.notePropertyFields
@@ -13503,7 +14124,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       response = await requestUrl(requestOptions);
     } catch (error) {
       const message = error && error.message ? error.message : String(error || "");
-      const shouldReadBindErrorBody = path2 === "/bind" && /request failed|status\s*(?:4|5)\d\d|http\s*(?:4|5)\d\d/i.test(message);
+      const shouldReadBindErrorBody = path2 !== "/unbind-self" && /request failed|status\s*(?:4|5)\d\d|http\s*(?:4|5)\d\d/i.test(message);
       if (isRequestUrlTransportError(message) || shouldReadBindErrorBody) {
         try {
           response = await requestJsonViaNode(requestOptions);
@@ -13530,6 +14151,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (officialRetryPayload) return officialRetryPayload;
       if (response.status === 400 && message.includes("Missing client ID")) {
         throw new Error("本地设备标识缺失，请更新到最新版插件并重启 Obsidian 后再绑定");
+      }
+      if (isBindingInvalidMessage(message)) {
+        throw new Error("绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」");
       }
       const requestError = new Error(message);
       if (payload && payload.errCode) requestError.code = String(payload.errCode);
@@ -13566,7 +14190,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     const payload = response.json || (response.text ? tryParseJson(response.text) : null);
     if (response.status && (response.status < 200 || response.status >= 300)) {
-      throw new Error(payload && (payload.error && payload.error.message || payload.errMsg) || `HTTP ${response.status}`);
+      const error = new Error(payload && (payload.error && payload.error.message || payload.errMsg) || `HTTP ${response.status}`);
+      error.status = Number(response.status) || 0;
+      error.statusCode = error.status;
+      error.response = { status: error.status };
+      throw error;
     }
     return payload || {};
   }
@@ -13667,7 +14295,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   }
   async generateMetadataWithCloud(record, binding = null) {
     const inputText = extractAiMetadataInputText(record);
-    if (!inputText) return { description: "", keywords: [] };
+    if (!inputText) return { title: "", description: "", keywords: [] };
     const metadata = record && record.metadata || {};
     const payload = await this.requestJson("/metadata/generate", "POST", {
       title: metadata.title || record.title || "",
@@ -13681,7 +14309,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       return await this.generateMetadataWithCloud(record, binding);
     }
     const inputText = extractAiMetadataInputText(record);
-    if (!inputText) return { description: "", keywords: [] };
+    if (!inputText) return { title: "", description: "", keywords: [] };
     const payload = await this.requestExternalJson(this.settings.deepseekBaseUrl, {
       method: "POST",
       headers: {
@@ -13695,7 +14323,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         messages: [
           {
             role: "system",
-            content: '你是内容整理助手。请基于用户提供的文案生成简介和关键词。只输出 JSON：{"description":"一句话简介","keywords":["关键词1","关键词2"]}。description 控制在 1 句话，keywords 返回 3 到 8 个简洁中文或英文关键词。'
+            content: '你是内容整理助手。请基于用户提供的文案生成独立标题、简介和关键词。只输出 JSON：{"title":"主题式短标题","description":"一句话简介","keywords":["关键词1","关键词2"]}。title 用 8 到 24 个中文字符概括核心主题，不带平台名，不使用“这是一份”“本文介绍”“本视频讲述”等报告式开头；description 控制在 1 句话；keywords 返回 3 到 8 个简洁中文或英文关键词。'
           },
           {
             role: "user",
@@ -13730,22 +14358,27 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     let generated;
     try {
-      generated = await this.generateMetadataWithDeepSeek(record, binding);
+      generated = await retryAiMetadataGeneration(
+        () => this.generateMetadataWithDeepSeek(record, binding),
+        { wait: sleep, maxAttempts: 3 }
+      );
     } catch (error) {
       return fail(error);
     }
+    const semanticTitle = String(generated && generated.title || "").trim();
     const description = String(generated && generated.description || "").trim();
     const keywords = getRecordKeywords(generated || {}).map((item) => String(item || "").trim()).filter(Boolean);
-    if (!description && !keywords.length) {
+    if (!semanticTitle && !description && !keywords.length) {
       return fail("empty-response");
     }
+    if (semanticTitle) metadata.semanticTitle = semanticTitle;
     if (description) {
       metadata.description = description;
     }
     if (keywords.length) {
       metadata.keywords = keywords;
     }
-    if (description || keywords.length) {
+    if (semanticTitle || description || keywords.length) {
       metadata.aiMetadataSource = this.settings.deepseekApiKey ? "deepseek" : "cloud";
     }
     return {
@@ -13784,6 +14417,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     const currentBindings = normalizeBindings(this.settings);
     const existing = currentBindings.find((item) => item.token === tokenToBind);
+    const replacement = !existing && currentBindings.length >= MAX_PLUGIN_BINDINGS ? currentBindings.find((item) => item.status === "needs_rebind") : null;
     if (!canAddPluginBinding(this.settings, tokenToBind)) {
       new Notice(`最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码`);
       return;
@@ -13811,7 +14445,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       };
       const nextBindings = [
         boundBinding,
-        ...currentBindings.filter((item) => item.token !== token)
+        ...currentBindings.filter((item) => item.token !== token && (!replacement || item.token !== replacement.token))
       ];
       await this.saveSettings({
         ...this.settings,
@@ -13869,6 +14503,19 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       };
     }
     await this.saveSettings(nextSettings);
+  }
+  async markBindingNeedsRebind(binding, reason = "") {
+    const normalizedToken = normalizeBindCodeInput(binding && binding.token);
+    if (!normalizedToken) return "";
+    const label = String(binding && binding.label || "").trim() || "该微信";
+    const actionMessage = `${label} 的绑定码已失效，已暂停该绑定；请在小程序重新生成绑定码后，在插件设置中重新绑定。`;
+    const nextBindings = normalizeBindings(this.settings).map((item) => item.token === normalizedToken ? { ...item, enabled: false, status: "needs_rebind", lastError: actionMessage } : item);
+    await this.saveSettings({
+      ...this.settings,
+      token: getPrimaryBoundToken(nextBindings),
+      bindings: nextBindings
+    });
+    return actionMessage;
   }
   async downloadArrayBuffer(url, headers = {}, options = {}) {
     if (options.signal || typeof options.onProgress === "function") {
@@ -14226,10 +14873,31 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   }
   getEffectiveLocalTranscriptionCommand() {
     const configured = String(this.settings.localTranscriptionCommand || "").trim();
-    if (configured) return configured;
     const platform = this.getConfiguredLocalAsrPlatform();
+    if (configured) {
+      const configuredRoot = extractLocalAsrInstallRootFromCommand(configured, platform);
+      if (!configuredRoot) return configured;
+      const configuredStatus = getLocalAsrInstallStatus(configuredRoot, fs.existsSync, platform);
+      if (configuredStatus.ready) return configured;
+    }
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
-    return fs.existsSync(getDefaultLocalTranscriptionScriptPath(platform, installRoot)) ? getDefaultLocalTranscriptionCommand(platform, installRoot) : "";
+    const installStatus = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
+    return installStatus.ready ? getDefaultLocalTranscriptionCommand(platform, installRoot) : configured;
+  }
+  async recoverStaleLocalTranscriptionCommand() {
+    const configured = String(this.settings.localTranscriptionCommand || "").trim();
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const configuredRoot = extractLocalAsrInstallRootFromCommand(configured, platform);
+    if (!configured || !configuredRoot) return "";
+    const configuredStatus = getLocalAsrInstallStatus(configuredRoot, fs.existsSync, platform);
+    if (configuredStatus.ready) return "";
+    const recoveredCommand = this.getEffectiveLocalTranscriptionCommand();
+    if (!recoveredCommand || recoveredCommand === configured) return "";
+    await this.saveSettings({
+      ...this.settings,
+      localTranscriptionCommand: recoveredCommand
+    });
+    return recoveredCommand;
   }
   canRunLocalTranscription() {
     return Boolean(this.getEffectiveLocalTranscriptionCommand());
@@ -15236,6 +15904,46 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async fetchDouyinMediaUrlsWithSession(pageUrl, awemeId) {
     return fetchDouyinMediaUrlsWithSession({ pageUrl, awemeId });
   }
+  async downloadMediaArrayBufferWithSession(url, headers = {}, options = {}) {
+    return downloadArrayBufferViaElectronSession(url, headers, options);
+  }
+  async refreshDouyinMediaUrls(sourceUrl) {
+    const originalUrl = String(sourceUrl || "").trim();
+    if (!isDouyinUrl(originalUrl)) return [];
+    const directTarget = normalizeDouyinTargetUrl(originalUrl, originalUrl);
+    if (directTarget.awemeId) {
+      try {
+        return sortMediaUrlsForTranscription(
+          await this.fetchDouyinMediaUrlsWithSession(directTarget.url, directTarget.awemeId)
+        );
+      } catch (error) {
+        return [];
+      }
+    }
+    let resolvedUrl = originalUrl;
+    try {
+      resolvedUrl = await resolveRedirectUrl(originalUrl, 5, "GET");
+    } catch (error) {
+      resolvedUrl = originalUrl;
+    }
+    const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
+    const candidates = [];
+    if (target.awemeId) {
+      try {
+        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(target.url, target.awemeId));
+      } catch (error) {
+        return [];
+      }
+      return sortMediaUrlsForTranscription(candidates);
+    }
+    try {
+      candidates.push(...await this.renderSocialMediaUrls(target.url || resolvedUrl || originalUrl, {
+        timeoutMs: 18e3
+      }));
+    } catch (error) {
+    }
+    return sortMediaUrlsForTranscription(candidates);
+  }
   async renderSocialMediaUrls(url, options = {}) {
     if (Object.prototype.hasOwnProperty.call(this, "renderSocialMediaUrl") && !Object.prototype.hasOwnProperty.call(this, "renderSocialMediaUrls")) {
       return sortMediaUrlsForTranscription([await this.renderSocialMediaUrl(url, options)]);
@@ -15377,6 +16085,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       requireAsr: true,
       requireOcr: false
     });
+    await this.recoverStaleLocalTranscriptionCommand();
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
     if (installStatus.scriptOutdated) {
@@ -15536,21 +16245,59 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async downloadMediaToTempFile(audioUrl, options = {}) {
     const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl) ? await resolveRedirectUrl(audioUrl, 5, "GET") : audioUrl;
     throwIfAborted(options.signal);
-    const downloadedBuffer = Buffer.from(await this.downloadArrayBuffer(
-      resolvedUrl,
-      getSocialRequestHeaders(options.sourceUrl || resolvedUrl),
-      {
-        signal: options.signal,
-        onProgress: options.onProgress
+    const requestOptions = { signal: options.signal, onProgress: options.onProgress };
+    const sourceUrl = String(options.sourceUrl || "").trim();
+    const requestHeaders = getSocialRequestHeaders(sourceUrl || resolvedUrl);
+    const canRecoverDouyin = isDouyinUrl(sourceUrl) || isDouyinUrl(audioUrl) || isDouyinMediaUrl(resolvedUrl);
+    let downloadedUrl = resolvedUrl;
+    let downloadedArrayBuffer;
+    try {
+      downloadedArrayBuffer = await this.downloadArrayBuffer(resolvedUrl, requestHeaders, requestOptions);
+    } catch (error) {
+      if (!canRecoverDouyin || !isMediaAuthorizationError(error)) throw error;
+      let lastError = error;
+      try {
+        downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(resolvedUrl, requestHeaders, requestOptions);
+      } catch (sessionError) {
+        lastError = sessionError;
+        const refreshedUrls = sourceUrl ? await this.refreshDouyinMediaUrls(sourceUrl) : [];
+        for (const refreshedUrl of refreshedUrls) {
+          if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
+          try {
+            downloadedArrayBuffer = await this.downloadArrayBuffer(
+              refreshedUrl,
+              getSocialRequestHeaders(sourceUrl || refreshedUrl),
+              requestOptions
+            );
+            downloadedUrl = refreshedUrl;
+            break;
+          } catch (refreshedError) {
+            lastError = refreshedError;
+            if (!isMediaAuthorizationError(refreshedError)) continue;
+            try {
+              downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(
+                refreshedUrl,
+                getSocialRequestHeaders(sourceUrl || refreshedUrl),
+                requestOptions
+              );
+              downloadedUrl = refreshedUrl;
+              break;
+            } catch (refreshedSessionError) {
+              lastError = refreshedSessionError;
+            }
+          }
+        }
+        if (!downloadedArrayBuffer) throw lastError;
       }
-    ));
+    }
+    const downloadedBuffer = Buffer.from(downloadedArrayBuffer);
     throwIfAborted(options.signal);
     const buffer = options.decryptKey ? decryptWechatChannelsMediaBuffer(downloadedBuffer, options.decryptKey) : downloadedBuffer;
     const invalidReason = getInvalidDownloadedMediaReason(buffer);
     if (invalidReason) {
-      throw new Error(`${invalidReason}：${cleanDisplayUrl(resolvedUrl || audioUrl)}`);
+      throw new Error(`${invalidReason}：${cleanDisplayUrl(downloadedUrl || audioUrl)}`);
     }
-    const ext = getAudioFormatFromUrl(resolvedUrl || audioUrl);
+    const ext = getAudioFormatFromUrl(downloadedUrl || audioUrl);
     const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.${ext}`);
     fs.writeFileSync(filePath, buffer);
     return filePath;
@@ -16094,13 +16841,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     noMediaError = "",
     markdown = "",
     binding = null,
-    title = ""
+    title = "",
+    socialMetrics = {},
+    sourceTitle = ""
   }) {
     const metadata = record.metadata || {};
+    const normalizedSourceTitle = String(sourceTitle || metadata.sourceTitle || "").trim();
+    const metadataWithSocialMetrics = {
+      ...metadata,
+      contentCategory: metadata.contentCategory || "音视频",
+      ...hasSocialMetrics(socialMetrics) ? { socialMetrics: withCapturedSocialMetrics(socialMetrics, (/* @__PURE__ */ new Date()).toISOString()) } : {},
+      ...normalizedSourceTitle ? { sourceTitle: normalizedSourceTitle } : {}
+    };
     if (subtitleText) {
       return {
         ...record,
-        metadata: buildTranscriptOnlyMetadata(metadata, {
+        metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
           url,
           platform,
           mediaUrl,
@@ -16110,7 +16866,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionStatus: "success",
           transcriptionSource: source || "subtitle",
           conversionStatus: "success",
-          markdown
+          markdown,
+          sourceTitle: normalizedSourceTitle
         })
       };
     }
@@ -16145,7 +16902,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (!candidates.length) {
       return {
         ...record,
-        metadata: buildTranscriptOnlyMetadata(metadata, {
+        metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
           url,
           platform,
           mediaUrl,
@@ -16155,7 +16912,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionError: noMediaError || "未能从链接中提取到可转写的音频或视频地址",
           transcriptionSource: source || "media-url",
           conversionStatus: "failed",
-          markdown
+          markdown,
+          sourceTitle: normalizedSourceTitle
         })
       };
     }
@@ -16182,7 +16940,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             decryptKey: candidateDecryptKey,
             forceLocal: metadata.transcriptionMode === "local"
           });
-          const nextMetadata = buildTranscriptOnlyMetadata(metadata, {
+          const nextMetadata = buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
             url,
             platform,
             mediaUrl: candidateUrl,
@@ -16192,7 +16950,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             transcriptionStatus: "success",
             transcriptionSource: result.source,
             conversionStatus: "success",
-            markdown
+            markdown,
+            sourceTitle: normalizedSourceTitle
           });
           return {
             ...record,
@@ -16217,7 +16976,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
       return {
         ...record,
-        metadata: buildTranscriptOnlyMetadata(metadata, {
+        metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
           url,
           platform,
           mediaUrl,
@@ -16227,7 +16986,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionError: error.message || String(error),
           transcriptionSource: source || this.settings.aiProvider || "unknown",
           conversionStatus: "failed",
-          markdown
+          markdown,
+          sourceTitle: normalizedSourceTitle
         })
       };
     }
@@ -16235,6 +16995,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = "") {
     const response = await requestUrl({ url, method: "GET", headers: getSocialRequestHeaders(url) });
     const html = response.text || "";
+    const markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, url);
+    const pageMetadata = extractWebpageMetadataFromHtml(html, url);
     const mediaUrl = extractPodcastAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html);
     return this.buildTranscriptRecordFromMedia(record, {
       url,
@@ -16242,8 +17004,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       mediaUrl,
       mediaUrls: extractSocialMediaUrlsFromHtml(html),
       source: "audio",
+      markdown,
       binding,
-      title
+      title,
+      sourceTitle: pageMetadata.title,
+      socialMetrics: extractSocialMetricsFromHtml(html)
     });
   }
   async fetchBilibiliSubtitleTextFromUrls(subtitleUrls) {
@@ -16269,6 +17034,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
     const response = await requestUrl({ url: resolvedUrl, method: "GET", headers: getSocialRequestHeaders(resolvedUrl) });
     const html = response.text || "";
+    let markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, resolvedUrl);
+    const pageMetadata = extractWebpageMetadataFromHtml(html, resolvedUrl);
+    let sourceTitle = pageMetadata.title;
+    let bilibiliSocialMetrics = extractSocialMetricsFromHtml(html);
     let subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(html);
     let bvid = extractBilibiliBvid(resolvedUrl) || extractBilibiliBvid(url) || extractBilibiliBvid(html);
     let cid = "";
@@ -16281,7 +17050,25 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           method: "GET",
           headers: getSocialRequestHeaders(resolvedUrl)
         });
-        cid = extractBilibiliCidFromPayload(viewResponse.json || viewResponse.text);
+        const viewPayload = viewResponse.json || tryParseJson(viewResponse.text) || {};
+        const viewData = viewPayload && viewPayload.data && typeof viewPayload.data === "object" ? viewPayload.data : {};
+        const apiTitle = cleanSocialDescription(viewData.title || "");
+        const apiDescription = cleanSocialDescription(viewData.desc || viewData.description || "");
+        const apiCoverUrl = normalizeExtractedUrl(viewData.pic || viewData.cover || viewData.coverUrl || "");
+        sourceTitle = apiTitle || sourceTitle;
+        if (apiTitle || apiDescription || apiCoverUrl) {
+          markdown = buildSocialMediaSupplementalMarkdown({
+            title: sourceTitle,
+            description: apiDescription || pageMetadata.description,
+            tags: pageMetadata.keywords,
+            imageUrls: [
+              apiCoverUrl,
+              extractMetaContent(html, ["og:image", "twitter:image"])
+            ].filter(Boolean)
+          });
+        }
+        cid = extractBilibiliCidFromPayload(viewPayload);
+        bilibiliSocialMetrics = hasSocialMetrics(buildSocialMetrics(viewPayload)) ? buildSocialMetrics(viewPayload) : bilibiliSocialMetrics;
         if (cid && !subtitleUrls.length) {
           const playerResponse = await requestUrl({
             url: `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
@@ -16320,8 +17107,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         subtitleText: subtitle.transcription,
         subtitleUrl: subtitle.subtitleUrl,
         source: "bilibili-subtitle",
+        markdown,
         binding,
-        title
+        title,
+        sourceTitle,
+        socialMetrics: bilibiliSocialMetrics
       });
     }
     return this.buildTranscriptRecordFromMedia(record, {
@@ -16330,8 +17120,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       mediaUrl: playurlAudioUrl || extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
       mediaUrls: [progressiveVideoUrl, playurlAudioUrl].filter(Boolean),
       source: "audio",
+      markdown,
       binding,
-      title
+      title,
+      sourceTitle,
+      socialMetrics: bilibiliSocialMetrics
     });
   }
   async fetchWechatChannelsFeedInfo(url) {
@@ -16679,6 +17472,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         xiaohongshuResponseStatus = Number(response.status) || 0;
         let html2 = response.text || "";
+        let socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdownFromHtml(html2, resolvedUrl);
         const hasProAdvancedAccess = isXiaohongshuUrl(url) ? await this.hasProFeatureAccess() : false;
         let xiaohongshuLoggedIn = false;
         if (isXiaohongshuUrl(url) && hasProAdvancedAccess && this.settings.xiaohongshuCommentsEnabled !== false) {
@@ -16691,11 +17485,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         const xiaohongshuCapabilities = getXiaohongshuCapabilityMatrix({
           hasProAccess: hasProAdvancedAccess,
           commentsEnabled: this.settings.xiaohongshuCommentsEnabled !== false,
+          imageOcrEnabled: this.settings.xiaohongshuImageOcrEnabled === true,
           isLoggedIn: xiaohongshuLoggedIn
         });
-        let mediaUrls = isXiaohongshuUrl(url) ? [] : extractSocialMediaUrlsFromHtml(html2);
+        let mediaUrls = isXiaohongshuUrl(url) || Boolean(douyinAwemeId) ? [] : extractSocialMediaUrlsFromHtml(html2);
         let mediaUrl = mediaUrls[0] || "";
         let hasPreciseDouyinMedia = false;
+        let douyinSocialMetrics = {};
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
           for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
@@ -16709,6 +17505,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               const shareUrls = extractDouyinMediaUrlsFromShareHtml(shareHtml, douyinAwemeId);
               if (shareUrls.length) {
                 html2 = shareHtml;
+                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdownFromHtml(shareHtml, resolvedUrl);
+                const shareDetail = extractDouyinDetailFromShareHtml(shareHtml, douyinAwemeId);
+                const structuredShareMetrics = buildSocialMetrics(shareDetail);
+                const shareMetrics = hasSocialMetrics(structuredShareMetrics) ? structuredShareMetrics : extractSocialMetricsFromHtml(shareHtml);
+                if (hasSocialMetrics(shareMetrics)) douyinSocialMetrics = shareMetrics;
                 mediaUrls = sortMediaUrlsForTranscription([...shareUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
@@ -16717,12 +17518,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             } catch (shareError) {
             }
           }
-          if (!hasPreciseDouyinMedia) {
+          if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics)) {
             for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
               try {
                 const detailResponse = await requestUrl({ url: detailUrl, method: "GET", headers: getSocialRequestHeaders(detailUrl) });
                 const detailPayload = detailResponse.json || JSON.parse(detailResponse.text || "{}");
                 if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
+                const detail = detailPayload.aweme_detail || detailPayload.awemeDetail || (Array.isArray(detailPayload.item_list) ? detailPayload.item_list[0] : null);
+                douyinSocialMetrics = buildSocialMetrics(detail);
                 const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailPayload);
                 if (detailUrls.length) {
                   mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
@@ -16747,7 +17550,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
         }
         const isUnavailableXhs = isXiaohongshuUrl(url) && isUnavailableXiaohongshuPage(html2, resolvedUrl);
-        const isVideoIntent = metadata.webpageMediaType === "audio_video" || isDouyinUrl(url) || isDouyinUrl(resolvedUrl) || /[?&]type=video\b/i.test(resolvedUrl) || /\/video\//i.test(resolvedUrl);
+        let isVideoIntent = metadata.webpageMediaType === "audio_video" || isDouyinUrl(url) || isDouyinUrl(resolvedUrl) || /[?&]type=video\b/i.test(resolvedUrl) || /\/video\//i.test(resolvedUrl);
         const shouldIncludeXiaohongshuComments = xiaohongshuCapabilities.comments;
         let extractedXiaohongshu = null;
         let pendingXiaohongshuFailureDiagnostic = null;
@@ -16766,6 +17569,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html2, xiaohongshuIdentityUrl, metadata.shareText || record.content || "", {
             includeComments: false
           });
+          isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true;
           if (extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true) {
             mediaUrls = extractedXiaohongshu.videoUrl ? [extractedXiaohongshu.videoUrl] : [];
             mediaUrl = mediaUrls[0] || "";
@@ -16848,12 +17652,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               mergeableXiaohongshuExtractions,
               bestRenderedXiaohongshuExtraction
             );
+            isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true;
             html2 = bestRenderedXiaohongshuHtml;
             xiaohongshuIdentityUrl = bestRenderedXiaohongshuUrl || xiaohongshuIdentityUrl;
             mediaUrls = extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true ? extractedXiaohongshu.videoUrl ? [extractedXiaohongshu.videoUrl] : [] : mediaUrls;
             mediaUrl = extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true ? mediaUrls[0] || "" : mediaUrls[0] || mediaUrl;
           }
-          if (!mediaUrl && shouldProbeXiaohongshuMediaFromGenericLanding(extractedXiaohongshu, html2, resolvedUrl)) {
+          const shouldProbeConfirmedXiaohongshuVideo = extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true && extractedXiaohongshu.isVideoNote === true;
+          if (!mediaUrl && (shouldProbeConfirmedXiaohongshuVideo || shouldProbeXiaohongshuMediaFromGenericLanding(extractedXiaohongshu, html2, resolvedUrl))) {
             for (const candidate of xiaohongshuBrowserCandidates) {
               try {
                 mediaUrls = sortMediaUrlsForTranscription([
@@ -16937,7 +17743,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               binding
             });
           }
-          if (hasReadableXiaohongshuGraphic && (!isVideoIntent || !shouldProbeXiaohongshuMediaFromGenericLanding(
+          if (hasReadableXiaohongshuGraphic && extractedXiaohongshu.isVideoNote !== true && (!isVideoIntent || !shouldProbeXiaohongshuMediaFromGenericLanding(
             extractedXiaohongshu,
             html2,
             resolvedUrl
@@ -16970,6 +17776,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 imageUrls: extractedXiaohongshu.imageUrls || [],
                 xiaohongshuOcrTextHeavy: Boolean(extractedXiaohongshu.ocrTextHeavy),
                 xiaohongshuOcrError: extractedXiaohongshu.ocrError || "",
+                socialMetrics: withCapturedSocialMetrics(
+                  extractedXiaohongshu.socialMetrics,
+                  (/* @__PURE__ */ new Date()).toISOString()
+                ),
                 videoUrl: "",
                 conversionStatus: "success"
               }
@@ -16977,7 +17787,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
         }
         const socialMediaRenderOptions = isXiaohongshuUrl(url) ? { includeComments: false } : {};
-        if (!hasPreciseDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === "function") {
+        const allowGenericSocialMediaRender = !(douyinAwemeId && (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)));
+        if (!hasPreciseDouyinMedia && allowGenericSocialMediaRender && isVideoIntent && typeof this.renderSocialMediaUrls === "function") {
           try {
             mediaUrls = sortMediaUrlsForTranscription([
               ...mediaUrls,
@@ -16987,7 +17798,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           } catch (renderError) {
             mediaUrl = mediaUrl || "";
           }
-        } else if (!hasPreciseDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === "function") {
+        } else if (!hasPreciseDouyinMedia && allowGenericSocialMediaRender && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === "function") {
           try {
             mediaUrl = await this.renderSocialMediaUrl(primarySocialMediaBrowserUrl, socialMediaRenderOptions);
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
@@ -17022,9 +17833,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             mediaUrl,
             mediaUrls,
             source: "video",
-            markdown: isXiaohongshuUrl(url) && extractedXiaohongshu && Array.isArray(extractedXiaohongshu.comments) && extractedXiaohongshu.comments.length ? extractedXiaohongshu.markdown : "",
+            markdown: isXiaohongshuUrl(url) && extractedXiaohongshu && String(extractedXiaohongshu.description || "").trim() ? extractedXiaohongshu.markdown : socialMediaSupplementalMarkdown,
             binding,
             title,
+            socialMetrics: isXiaohongshuUrl(url) ? extractedXiaohongshu && extractedXiaohongshu.socialMetrics : hasSocialMetrics(douyinSocialMetrics) ? douyinSocialMetrics : extractSocialMetricsFromHtml(html2),
+            sourceTitle: isXiaohongshuUrl(url) ? getPreferredXiaohongshuTitle(metadata.title, extractedXiaohongshu && extractedXiaohongshu.title, "小红书") : extractWebpageMetadataFromHtml(html2, resolvedUrl).title,
             noMediaError: isUnavailableXhs ? "小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。" : ""
           });
         }
@@ -17061,6 +17874,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             contentCategory: metadata.contentCategory || (extracted.videoUrl || metadata.webpageMediaType === "audio_video" ? "视频" : "图文"),
             markdown: extracted.markdown,
             imageUrls: extracted.imageUrls || [],
+            socialMetrics: withCapturedSocialMetrics(extracted.socialMetrics, (/* @__PURE__ */ new Date()).toISOString()),
             videoUrl: extracted.videoUrl || "",
             conversionStatus: "success"
           }
@@ -17300,19 +18114,26 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
+    const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
+      fallbackTitle: title,
+      bindingLabel
+    });
+    recordForMarkdown = noteIdentity.record;
+    const displayTitle = noteIdentity.displayTitle || title;
+    const fileTitle = noteIdentity.titleSource ? await this.nextTitle(noteDir, noteIdentity.fileTitle) : title;
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
-      title,
+      title: displayTitle,
       syncedAt,
       propertyFields: this.settings.notePropertyFields
     });
-    const filePath = normalizeVaultPath(`${noteDir}/${title}.md`);
-    this.showSyncProgress({ ...progress, stage: "writing", title });
+    const filePath = normalizeVaultPath(`${noteDir}/${fileTitle}.md`);
+    this.showSyncProgress({ ...progress, stage: "writing", title: fileTitle });
     await this.app.vault.adapter.write(filePath, markdown);
     return {
       recordId: getRecordId(record),
       filePath,
-      title,
+      title: fileTitle,
       conversionWarning: getRecordConversionWarning(recordForMarkdown)
     };
   }
@@ -17321,6 +18142,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     this.showSyncProgress({ bindingLabel, stage: "fetching" });
     const payload = await this.requestJson("/records?status=pending", "GET", {}, binding);
     const records = payload.data || [];
+    const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
     const written = [];
     const failed = [];
     const skipped = [];
@@ -17435,7 +18257,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         });
       }
     }
-    return { written, failed, skipped, conversionWarnings };
+    return { written, failed, skipped, conversionWarnings, pendingReview };
   }
   async syncInbox(showNotice = true) {
     if (this.syncInboxPromise) {
@@ -17467,6 +18289,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const failed = [];
       const skipped = [];
       const conversionWarnings = [];
+      const pendingReviews = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: "fetching" });
       for (const binding of bindings) {
@@ -17480,15 +18303,29 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           if (result.conversionWarnings && result.conversionWarnings.length) {
             conversionWarnings.push(...result.conversionWarnings);
           }
+          if (result.pendingReview && (result.pendingReview.total || result.pendingReview.audioVideoCount)) {
+            pendingReviews.push(result.pendingReview);
+          }
         } catch (error) {
           const message = error.message || String(error);
+          if (isBindingInvalidMessage(message)) {
+            const actionMessage = await this.markBindingNeedsRebind(binding, message);
+            if (actionMessage) conversionWarnings.push(actionMessage);
+            continue;
+          }
           failed.push({
             recordId: binding.label || binding.token,
             message: `${binding.label || binding.token}：${message}`
           });
         }
       }
-      const finalMessage = buildSyncResultNotice(written, skipped, conversionWarnings, failed);
+      let finalMessage = buildSyncResultNotice(written, skipped, conversionWarnings, failed);
+      const pendingReviewNotice = buildPendingReviewNotice(mergePendingReviewSummaries(pendingReviews));
+      if (!written.length && !failed.length && pendingReviewNotice) {
+        finalMessage = pendingReviewNotice;
+      } else if (pendingReviewNotice) {
+        finalMessage += `；${pendingReviewNotice}`;
+      }
       if (showNotice || written.length) {
         new Notice(finalMessage);
       }
@@ -17605,20 +18442,26 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       cls: "wechat-inbox-sync-section-heading"
     });
     const bindings = normalizeBindings(this.plugin.settings);
-    const primaryBinding = bindings[0] || null;
-    const extraBindings = bindings.slice(1);
+    const primaryBinding = bindings.find((item) => item.enabled !== false && item.status !== "unbound" && item.status !== "needs_rebind") || null;
+    const nonPrimaryBindings = bindings.filter((item) => !primaryBinding || item.token !== primaryBinding.token);
+    const needsRebindBindings = nonPrimaryBindings.filter((item) => item.status === "needs_rebind");
+    const extraBindings = nonPrimaryBindings.filter((item) => item.status !== "needs_rebind");
     const renderBindingSetting = /* @__PURE__ */ __name((parentEl, binding, indexLabel) => {
       const isUnbound = binding.status === "unbound";
-      const statusDesc = isUnbound ? `已解除/已失效${binding.lastError ? `：${binding.lastError}` : ""}` : binding.enabled === false ? "已暂停同步" : "同步时会拉取这个微信里的收集内容";
+      const needsRebind = binding.status === "needs_rebind";
+      const statusDesc = needsRebind ? binding.lastError || "绑定码已失效，请重新生成绑定码后重新绑定。" : isUnbound ? `已解除/已失效${binding.lastError ? `：${binding.lastError}` : ""}` : binding.enabled === false ? "已暂停同步" : "同步时会拉取这个微信里的收集内容";
       new Setting(parentEl).setName(`${binding.label || indexLabel}：${binding.token}`).setDesc(statusDesc).addText((text) => text.setPlaceholder(indexLabel).setValue(binding.label || "").onChange(async (value) => {
         const nextBindings = normalizeBindings(this.plugin.settings).map((item) => item.token === binding.token ? { ...item, label: value } : item);
         await this.plugin.saveSettings({ ...this.plugin.settings, bindings: nextBindings });
-      })).addToggle((toggle) => toggle.setValue(binding.enabled !== false).onChange(async (value) => {
-        if (isUnbound) return;
-        const nextBindings = normalizeBindings(this.plugin.settings).map((item) => item.token === binding.token ? { ...item, enabled: value, status: value ? "bound" : "paused" } : item);
-        await this.plugin.saveSettings({ ...this.plugin.settings, bindings: nextBindings });
-        this.display();
-      })).addButton((button) => {
+      })).addToggle((toggle) => {
+        toggle.setValue(binding.enabled !== false).onChange(async (value) => {
+          if (isUnbound || needsRebind) return;
+          const nextBindings = normalizeBindings(this.plugin.settings).map((item) => item.token === binding.token ? { ...item, enabled: value, status: value ? "bound" : "paused" } : item);
+          await this.plugin.saveSettings({ ...this.plugin.settings, bindings: nextBindings });
+          this.display();
+        });
+        if (isUnbound || needsRebind) toggle.setDisabled(true);
+      }).addButton((button) => {
         button.setButtonText(isUnbound ? "已解除" : "解除本机").onClick(async () => {
           if (isUnbound) return;
           await this.plugin.unbindBinding(binding.token);
@@ -17739,8 +18582,34 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         this.display();
       }
     }));
+    new Setting(proPanel).setName("启用小红书图片 OCR").setDesc("Pro 功能，默认关闭。开启后，后续同步的小红书图文会识别图片中的文字；关闭时仍会保存正文和图片，不会启动 OCR。").addToggle((toggle) => toggle.setValue(this.plugin.settings.xiaohongshuImageOcrEnabled === true).onChange(async (value) => {
+      if (!value) {
+        await this.plugin.saveSettings({
+          ...this.plugin.settings,
+          xiaohongshuImageOcrEnabled: false,
+          xiaohongshuImageOcrConsentVersion: 1
+        });
+        return;
+      }
+      try {
+        await this.plugin.ensureProFeatureAccess("小红书图片 OCR", { forceRefresh: true });
+        await this.plugin.saveSettings({
+          ...this.plugin.settings,
+          xiaohongshuImageOcrEnabled: true,
+          xiaohongshuImageOcrConsentVersion: 1
+        });
+      } catch (error) {
+        await this.plugin.saveSettings({
+          ...this.plugin.settings,
+          xiaohongshuImageOcrEnabled: false,
+          xiaohongshuImageOcrConsentVersion: 1
+        });
+        new Notice(error.message || String(error));
+        this.display();
+      }
+    }));
     proPanel.createDiv({
-      text: "AI 简介与关键词自动生成：已默认开启；小红书图文 OCR：已默认开启。以上能力会在 Pro 权限有效时自动执行，不需要额外打开开关。",
+      text: "AI 简介与关键词自动生成：已默认开启。小红书图片 OCR 默认关闭，按需手动开启。",
       cls: "wechat-inbox-sync-muted"
     });
     const proComponentReadiness = this.plugin.getLocalTranscriptionComponentReadiness();
@@ -17758,7 +18627,11 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     extraBindings.forEach((binding, index) => {
       renderBindingSetting(extraBindingsPanel, binding, `额外绑定微信 ${index + 2}`);
     });
-    new Setting(extraBindingsPanel).setName("绑定额外设备").setDesc(bindings.length >= MAX_PLUGIN_BINDINGS ? `已达到上限：最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码。` : "先确认 Pro 仍在有效期内，再把新的小程序绑定码绑定到当前插件。").addText((text) => text.setPlaceholder("例如 ABC-123").setValue(this.plugin.settings.pendingBindCode || "").setDisabled(bindings.length >= MAX_PLUGIN_BINDINGS).onChange(async (value) => {
+    needsRebindBindings.forEach((binding, index) => {
+      renderBindingSetting(extraBindingsPanel, binding, `需重新绑定微信 ${index + 1}`);
+    });
+    const canAcceptExtraBinding = bindings.length < MAX_PLUGIN_BINDINGS || bindings.some((item) => item.status === "needs_rebind");
+    new Setting(extraBindingsPanel).setName("绑定额外设备").setDesc(!canAcceptExtraBinding ? `已达到上限：最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码。` : "先确认 Pro 仍在有效期内，再把新的小程序绑定码绑定到当前插件。").addText((text) => text.setPlaceholder("例如 ABC-123").setValue(this.plugin.settings.pendingBindCode || "").setDisabled(!canAcceptExtraBinding).onChange(async (value) => {
       await this.plugin.saveSettings({ ...this.plugin.settings, pendingBindCode: value });
     })).addButton((button) => {
       button.setButtonText("绑定额外设备").onClick(async () => {
@@ -18008,6 +18881,8 @@ WechatObsidianInboxPlugin.__test = {
   downloadTextViaNode,
   normalizeInstallerScriptText,
   getSocialRequestHeaders,
+  buildXiaohongshuLoginPageConfig,
+  isAbortedBrowserNavigationError,
   isXiaohongshuUrl,
   isTrustedXiaohongshuCookieUrl,
   isTrustedXiaohongshuTransportUrl,
