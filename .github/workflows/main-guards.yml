@@ -48,6 +48,7 @@ jobs:
           node tests/release-governance.test.js
           node tests/plugin-release-candidate.test.js
           node tests/plugin-main-ai.test.js
+          node tests/plugin-audio-repeat-local-dedupe.test.js
           node tests/plugin-marketplace-package.test.js
 
       - name: Reject tested plugin candidate or root mirror drift
@@ -125,5 +126,6 @@ jobs:
         run: |
           node tests/plugin-build-foundation.test.js
           node tests/release-governance.test.js
+          node tests/plugin-audio-repeat-local-dedupe.test.js
           node tests/plugin-marketplace-package.test.js
           node tests/plugin-release-candidate.test.js

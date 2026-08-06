@@ -87,7 +87,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.75';
+const PLUGIN_RUNTIME_VERSION = '1.3.76';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1505,6 +1505,14 @@ function createRetryableTranscriptionError(message) {
 
 function isRetryableTranscriptionError(error) {
   return Boolean(error && (error.retryable || error.code === 'TRANSCRIPTION_PENDING'));
+}
+
+function shouldBypassExistingLocalNoteDedupe(record) {
+  const metadata = (record && record.metadata) || {};
+  return String((record && record.type) || '').toLowerCase() === 'voice'
+    || metadata.webpageMediaType === 'audio_video'
+    || Boolean(metadata.audioFileID)
+    || metadata.transcriptOnly === true;
 }
 
 function getPluginRuntimeIdentity(manifestVersion = '') {
@@ -18664,11 +18672,13 @@ class WechatObsidianInboxPlugin extends Plugin {
         } else if (this.app.vault.adapter && typeof this.app.vault.adapter.read === 'function') {
           markdown = await this.app.vault.adapter.read(file.path);
         }
-        if (
-          (normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId))
-          || (normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl))
-        ) {
+        const matchesRecordId = Boolean(normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId));
+        const matchesRecordUrl = Boolean(normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl));
+        if (matchesRecordId || matchesRecordUrl) {
           if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
+            continue;
+          }
+          if (shouldBypassExistingLocalNoteDedupe(record) && !matchesRecordId && matchesRecordUrl) {
             continue;
           }
           return file.path || filePath;
