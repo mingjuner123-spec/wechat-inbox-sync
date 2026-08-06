@@ -761,7 +761,7 @@ var {
 } = require_record_identity_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.75";
+var PLUGIN_RUNTIME_VERSION = "1.3.76";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -1820,6 +1820,11 @@ function isRetryableTranscriptionError(error) {
   return Boolean(error && (error.retryable || error.code === "TRANSCRIPTION_PENDING"));
 }
 __name(isRetryableTranscriptionError, "isRetryableTranscriptionError");
+function shouldBypassExistingLocalNoteDedupe(record) {
+  const metadata = record && record.metadata || {};
+  return String(record && record.type || "").toLowerCase() === "voice" || metadata.webpageMediaType === "audio_video" || Boolean(metadata.audioFileID) || metadata.transcriptOnly === true;
+}
+__name(shouldBypassExistingLocalNoteDedupe, "shouldBypassExistingLocalNoteDedupe");
 function getPluginRuntimeIdentity(manifestVersion = "") {
   const normalizedManifestVersion = String(manifestVersion || "").trim() || "unknown";
   return {
@@ -17072,8 +17077,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         } else if (this.app.vault.adapter && typeof this.app.vault.adapter.read === "function") {
           markdown = await this.app.vault.adapter.read(file.path);
         }
-        if (normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId) || normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl)) {
+        const matchesRecordId = Boolean(normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId));
+        const matchesRecordUrl = Boolean(normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl));
+        if (matchesRecordId || matchesRecordUrl) {
           if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
+            continue;
+          }
+          if (shouldBypassExistingLocalNoteDedupe(record) && !matchesRecordId && matchesRecordUrl) {
             continue;
           }
           return file.path || filePath;
