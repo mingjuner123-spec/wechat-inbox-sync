@@ -81,6 +81,7 @@ jobs:
           node tests/release-governance.test.js
           node tests/plugin-release-candidate.test.js
           node tests/plugin-main-ai.test.js
+          node tests/plugin-audio-repeat-local-dedupe.test.js
           node tests/plugin-marketplace-package.test.js
           node tests/plugin-release-identity.test.js
 
@@ -89,6 +90,7 @@ jobs:
           node --check tests/plugin-build-foundation.test.js
           node --check tests/release-governance.test.js
           node --check tests/plugin-release-candidate.test.js
+          node --check tests/plugin-audio-repeat-local-dedupe.test.js
           node --check tests/plugin-release-identity.test.js
           node --check obsidian-plugin/wechat-inbox-sync/build-plugin.js
           node --check scripts/plugin-release-candidate-core.js
