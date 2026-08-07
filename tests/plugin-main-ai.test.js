@@ -577,7 +577,7 @@ assert.strictEqual(
   false,
 );
 assert.strictEqual(
-  helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('single-dir-transaction-v1', 'legacy-in-place-install'), false),
+  helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('unique-staging-transaction-v2', 'single-dir-transaction-v1'), false),
   false,
 );
 assert.strictEqual(
@@ -602,6 +602,59 @@ function runPendingLocalOcrSwitchTests() {
     assert.deepStrictEqual(helpers.completePendingLocalOcrSwitch(noMarkerRoot), { status: 'none' });
   } finally {
     fs.rmSync(noMarkerRoot, { recursive: true, force: true });
+  }
+
+  const uniqueActivationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-unique-switch-'));
+  try {
+    const marker = path.join(uniqueActivationRoot, 'pending-venv-switch.json');
+    const oldVenv = path.join(uniqueActivationRoot, 'venv');
+    const stagingVenv = path.join(uniqueActivationRoot, 'venv-staging-0123456789abcdef0123456789abcdef');
+    const backupVenv = path.join(uniqueActivationRoot, 'venv-backup');
+    fs.mkdirSync(path.join(oldVenv, 'Scripts'), { recursive: true });
+    fs.mkdirSync(path.join(stagingVenv, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(oldVenv, 'Scripts', 'python.exe'), 'old');
+    fs.writeFileSync(path.join(stagingVenv, 'Scripts', 'python.exe'), 'new');
+    fs.writeFileSync(marker, JSON.stringify({
+      capability: 'unique-staging-transaction-v2',
+      staging: stagingVenv,
+      target: oldVenv,
+      backup: backupVenv,
+    }), 'utf8');
+
+    const result = helpers.completePendingLocalOcrSwitch(uniqueActivationRoot, {
+      validatePython(pythonPath) {
+        return fs.readFileSync(pythonPath, 'utf8') === 'new';
+      },
+    });
+    assert.strictEqual(result.status, 'activated');
+    assert.strictEqual(fs.readFileSync(path.join(oldVenv, 'Scripts', 'python.exe'), 'utf8'), 'new');
+    assert.strictEqual(fs.existsSync(stagingVenv), false);
+    assert.strictEqual(fs.existsSync(backupVenv), false);
+    assert.strictEqual(fs.existsSync(marker), false);
+  } finally {
+    fs.rmSync(uniqueActivationRoot, { recursive: true, force: true });
+  }
+
+  const unsafeMarkerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-unsafe-switch-'));
+  const outsideStagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-outside-switch-'));
+  try {
+    const outsideStaging = path.join(outsideStagingRoot, 'venv-staging-abcdefabcdefabcdefabcdefabcdefab');
+    fs.mkdirSync(path.join(outsideStaging, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(outsideStaging, 'Scripts', 'python.exe'), 'outside');
+    const marker = path.join(unsafeMarkerRoot, 'pending-venv-switch.json');
+    fs.writeFileSync(marker, JSON.stringify({
+      capability: 'unique-staging-transaction-v2',
+      staging: outsideStaging,
+      target: path.join(unsafeMarkerRoot, 'venv'),
+      backup: path.join(unsafeMarkerRoot, 'venv-backup'),
+    }), 'utf8');
+
+    assert.deepStrictEqual(helpers.completePendingLocalOcrSwitch(unsafeMarkerRoot), { status: 'invalid' });
+    assert.strictEqual(fs.existsSync(marker), false);
+    assert.strictEqual(fs.existsSync(outsideStaging), true);
+  } finally {
+    fs.rmSync(unsafeMarkerRoot, { recursive: true, force: true });
+    fs.rmSync(outsideStagingRoot, { recursive: true, force: true });
   }
 
   const activation = createFixture();
@@ -2197,7 +2250,7 @@ const localOcrInstallerValidatorSource = pluginMainSource.slice(
 );
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Install-PortablePython')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('$PythonBuildStandaloneBuild = \"20260623\"')"));
-assert.ok(localOcrInstallerValidatorSource.includes("source.includes('single-dir-transaction-v1')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('unique-staging-transaction-v2')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Expand-TarGzArchiveWithPowerShell')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('install_portable_python')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('PYTHON_BUILD_STANDALONE_BUILD=\"20260623\"')"));

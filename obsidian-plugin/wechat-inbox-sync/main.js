@@ -1719,7 +1719,7 @@ var LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ["local_transcription_trial"];
 var LOCAL_COMPONENT_CDN_BASE_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com";
 var LOCAL_ASR_INSTALLER_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1";
 var LOCAL_ASR_MACOS_INSTALLER_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh";
-var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "68691b297ed1bcc02d036b447bed34c7b63c9ef1fef86a57426a631a0fb182b7";
+var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "65ff6ec5aa844c780a4ebf4f83c9ea2f206de1b33e145dd2f1b9e1129f4e2337";
 var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074";
 var LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
 var LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
@@ -2015,7 +2015,7 @@ function completePendingLocalOcrSwitch(installRoot, dependencies = {}) {
   });
   const root = path.resolve(String(installRoot || ""));
   const markerPath = path.join(root, "pending-venv-switch.json");
-  const stagingPath = path.join(root, "venv-staging");
+  const legacyStagingPath = path.join(root, "venv-staging");
   const targetPath = path.join(root, "venv");
   const backupPath = path.join(root, "venv-backup");
   if (!exists(markerPath)) return { status: "none" };
@@ -2026,9 +2026,24 @@ function completePendingLocalOcrSwitch(installRoot, dependencies = {}) {
     remove(markerPath);
     return { status: "invalid" };
   }
-  if (!marker || marker.capability !== "single-dir-transaction-v1") {
+  if (!marker || !["single-dir-transaction-v1", "unique-staging-transaction-v2"].includes(marker.capability)) {
     remove(markerPath);
     return { status: "invalid" };
+  }
+  let stagingPath = legacyStagingPath;
+  if (marker.capability === "unique-staging-transaction-v2") {
+    const markerStagingPath = path.resolve(String(marker.staging || ""));
+    const markerTargetPath = path.resolve(String(marker.target || ""));
+    const markerBackupPath = path.resolve(String(marker.backup || ""));
+    const stagingName = path.basename(markerStagingPath);
+    const hasSafeStagingName = /^venv-staging-[a-f0-9]{32}$/i.test(stagingName);
+    const isDirectInstallChild = path.dirname(markerStagingPath) === root;
+    const hasExpectedTransactionTargets = markerTargetPath === targetPath && markerBackupPath === backupPath;
+    if (!hasSafeStagingName || !isDirectInstallChild || !hasExpectedTransactionTargets) {
+      remove(markerPath);
+      return { status: "invalid" };
+    }
+    stagingPath = markerStagingPath;
   }
   const stagingPython = path.join(stagingPath, "Scripts", "python.exe");
   if (!exists(stagingPath) || !validatePython(stagingPython)) {
@@ -2743,7 +2758,7 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
   if (isMac) {
     return source.includes("TENCENT_OCR_ASSET_BASE_URL") && source.includes("TENCENT_PIP_INDEX_URL") && source.includes("TENCENT_PYTHON_INSTALL_MIRROR") && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"') && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"') && source.includes("PORTABLE_PYTHON=") && source.includes("download_with_retry") && source.includes("find_existing_python") && source.includes("install_portable_python") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes(".wechat-inbox-local-asr/python-venv/bin/python");
   }
-  return source.includes("$TencentOcrAssetBaseUrl") && source.includes("$TencentPipIndexUrl") && source.includes("$TencentPythonInstallMirror") && source.includes('$PythonBuildStandaloneBuild = "20260623"') && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"') && source.includes("$PortablePython") && source.includes("Download-TextFile") && source.includes("function Install-PortablePython") && source.includes("function Expand-TarGzArchiveWithPowerShell") && source.includes("single-dir-transaction-v1") && source.includes("$python = Install-PortablePython") && source.includes("Invoke-Python -PythonCommand $python -m venv $VenvDir");
+  return source.includes("$TencentOcrAssetBaseUrl") && source.includes("$TencentPipIndexUrl") && source.includes("$TencentPythonInstallMirror") && source.includes('$PythonBuildStandaloneBuild = "20260623"') && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"') && source.includes("$PortablePython") && source.includes("Download-TextFile") && source.includes("function Install-PortablePython") && source.includes("function Expand-TarGzArchiveWithPowerShell") && source.includes("unique-staging-transaction-v2") && source.includes("$python = Install-PortablePython") && source.includes("Invoke-Python -PythonCommand $python -m venv $VenvDir");
 }
 __name(isLocalOcrInstallerCurrent, "isLocalOcrInstallerCurrent");
 function isTrustedLocalOcrInstallerSource(scriptText, expectedSha256, isMac = false) {
