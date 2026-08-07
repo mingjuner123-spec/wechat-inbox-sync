@@ -423,6 +423,60 @@ async function run() {
   assert.match(realShapeDouyinMarkdown, /comments:\s*9/);
   assert.match(realShapeDouyinMarkdown, /shares:\s*3/);
 
+  const sessionFallbackAwemeId = '7659778280362429711';
+  const sessionFallbackDouyinDetail = {
+    aweme_id: sessionFallbackAwemeId,
+    desc: '全平台内容，一键进 Obsidian #Obsidian #知识管理',
+    statistics: {
+      play_count: 0,
+      digg_count: 113,
+      collect_count: 157,
+      comment_count: 25,
+      share_count: 39,
+    },
+    text_extra: [{ hashtag_name: 'Obsidian' }, { hashtag_name: '知识管理' }],
+    video: {
+      play_addr: { url_list: ['https://v.douyinvod.com/session-video.mp4'] },
+      cover: { url_list: ['https://p3-sign.douyinpic.com/session-cover.jpeg'] },
+    },
+  };
+  requestUrlMock = async (request) => {
+    const url = typeof request === 'string' ? request : request && request.url;
+    if (url === `https://www.douyin.com/video/${sessionFallbackAwemeId}`) {
+      return {
+        text: '<html><head><title>抖音</title><meta property="og:description" content="记录美好生活"></head></html>',
+      };
+    }
+    if (url.includes('/share/video/') || url.includes('/aweme/v1/web/aweme/detail/')) {
+      throw new Error('anonymous request unavailable');
+    }
+    throw new Error(`unexpected request ${url}`);
+  };
+  plugin.fetchDouyinMediaUrlsWithSession = async () => [
+    'https://v.douyinvod.com/session-video.mp4',
+  ];
+  plugin.fetchDouyinMediaResolutionWithSession = async () => ({
+    mediaUrls: ['https://v.douyinvod.com/session-video.mp4'],
+    detail: sessionFallbackDouyinDetail,
+  });
+  const sessionFallbackDouyinRecord = await plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: `https://www.douyin.com/video/${sessionFallbackAwemeId}`,
+    metadata: { url: `https://www.douyin.com/video/${sessionFallbackAwemeId}` },
+  }, '', '', '抖音视频');
+  assert.match(sessionFallbackDouyinRecord.metadata.sourceTitle, /^全平台内容，一键进 Obsidian/);
+  assert.match(sessionFallbackDouyinRecord.metadata.markdown, /全平台内容，一键进 Obsidian/);
+  assert.match(sessionFallbackDouyinRecord.metadata.markdown, /#知识管理/);
+  assert.match(sessionFallbackDouyinRecord.metadata.markdown, /session-cover\.jpeg/);
+  assert.deepStrictEqual({ ...sessionFallbackDouyinRecord.metadata.socialMetrics, capturedAt: undefined }, {
+    views: 0,
+    likes: 113,
+    collects: 157,
+    comments: 25,
+    shares: 39,
+    capturedAt: undefined,
+  });
+
   const xhsTrailingRecord = {
     type: 'webpage',
     content: 'https://www.xiaohongshu.com/explore/trailing-comments',

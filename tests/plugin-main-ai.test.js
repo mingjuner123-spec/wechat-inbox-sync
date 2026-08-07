@@ -6755,7 +6755,65 @@ async function runAsyncHydrationTests() {
     'https://v11-weba.douyinvod.com/session-target/?mime_type=video_mp4',
   ]);
   assert.strictEqual(sessionFetchCalls[0].options.credentials, 'include');
-  assert.strictEqual(sessionFetchCalls.length, 2);
+  assert.strictEqual(sessionFetchCalls.length, 3);
+
+  const sessionResolutionFetchCalls = [];
+  const sessionResolution = await helpers.fetchDouyinMediaResolutionWithSession({
+    pageUrl: 'https://www.douyin.com/video/7644238277092174409',
+    awemeId: '7644238277092174409',
+    session: {
+      fetch: async (url) => {
+        sessionResolutionFetchCalls.push(url);
+        return {
+          text: async () => {
+            if (!url.includes('/aweme/v1/web/aweme/detail/')) {
+              return '<html><body>cookie warmup</body></html>';
+            }
+            if (url.includes('aid=6383')) {
+              return JSON.stringify({
+                aweme_detail: {
+                  aweme_id: '7644238277092174409',
+                  desc: '第一路正文 #第一标签',
+                  text_extra: [{ hashtag_name: '第一标签' }],
+                  statistics: { digg_count: 12 },
+                  video: {
+                    play_addr: {
+                      url_list: ['https://v11-weba.douyinvod.com/session-detail-target/?mime_type=video_mp4'],
+                    },
+                    cover: {
+                      url_list: ['https://p3-sign.douyinpic.com/session-detail-cover.jpeg'],
+                    },
+                  },
+                },
+              });
+            }
+            return JSON.stringify({
+              aweme_detail: {
+                aweme_id: '7644238277092174409',
+                title: '第二路补齐的正式标题',
+                desc: '浏览器会话返回的目标作品正文 #目标作品',
+                text_extra: [{ hashtag_name: '目标作品' }],
+                statistics: { collect_count: 5 },
+              },
+            });
+          },
+        };
+      },
+    },
+  });
+  assert.deepStrictEqual(sessionResolution.mediaUrls, [
+    'https://v11-weba.douyinvod.com/session-detail-target/?mime_type=video_mp4',
+  ]);
+  assert.strictEqual(sessionResolution.detail.aweme_id, '7644238277092174409');
+  assert.strictEqual(sessionResolution.detail.title, '第二路补齐的正式标题');
+  assert.match(sessionResolution.detail.desc, /目标作品正文/);
+  assert.deepStrictEqual(
+    sessionResolution.detail.text_extra.map((item) => item.hashtag_name),
+    ['第一标签', '目标作品'],
+  );
+  assert.strictEqual(sessionResolution.detail.statistics.digg_count, 12);
+  assert.strictEqual(sessionResolution.detail.statistics.collect_count, 5);
+  assert.strictEqual(sessionResolutionFetchCalls.length, 3);
 
   const mismatchedSessionMedia = await helpers.fetchDouyinMediaUrlsWithSession({
     pageUrl: 'https://www.douyin.com/video/7644238277092174409',
@@ -10769,8 +10827,13 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
       data: {},
     };
   };
-  plugin.writeRecord = async () => {
-    throw new Error('本地已有同 url 笔记时不应重复写入');
+  plugin.writeRecord = async (record) => {
+    assert.strictEqual(record._id, 'new-cloud-id-for-same-url');
+    return {
+      recordId: record._id,
+      title: '小红书-重复保存图文',
+      filePath: '临时收集/2026-06-24/小红书-重复保存图文-002.md',
+    };
   };
 
   const result = await plugin.syncBinding({
@@ -10778,13 +10841,13 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
     label: '测试微信',
   }, false);
 
-  assert.deepStrictEqual(result.written, []);
-  assert.deepStrictEqual(result.failed, []);
-  assert.deepStrictEqual(result.skipped, [{
+  assert.deepStrictEqual(result.written, [{
     recordId: 'new-cloud-id-for-same-url',
-    reason: 'already-synced-local',
-    filePath: '临时收集/2026-06-24/小红书-旧图文.md',
+    title: '小红书-重复保存图文',
+    filePath: '临时收集/2026-06-24/小红书-重复保存图文-002.md',
   }]);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(result.skipped, []);
   assert.deepStrictEqual(calls, [[
     '/records?status=pending',
     'GET',

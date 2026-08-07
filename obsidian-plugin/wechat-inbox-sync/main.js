@@ -2765,7 +2765,8 @@ function isRetryableTranscriptionError(error) {
 __name(isRetryableTranscriptionError, "isRetryableTranscriptionError");
 function shouldBypassExistingLocalNoteDedupe(record) {
   const metadata = record && record.metadata || {};
-  return String(record && record.type || "").toLowerCase() === "voice" || metadata.webpageMediaType === "audio_video" || Boolean(metadata.audioFileID) || metadata.transcriptOnly === true;
+  const sourceUrl = String(metadata.url || record && record.content || "").trim();
+  return String(record && record.type || "").toLowerCase() === "voice" || metadata.webpageMediaType === "audio_video" || Boolean(metadata.audioFileID) || metadata.transcriptOnly === true || isXiaohongshuUrl(sourceUrl);
 }
 __name(shouldBypassExistingLocalNoteDedupe, "shouldBypassExistingLocalNoteDedupe");
 function getPluginRuntimeIdentity(manifestVersion = "") {
@@ -10533,7 +10534,44 @@ function isMediaAuthorizationError(error) {
   );
 }
 __name(isMediaAuthorizationError, "isMediaAuthorizationError");
-async function fetchDouyinMediaUrlsWithSession({
+function mergeDouyinDetailCandidates(current, incoming) {
+  const previous = current && typeof current === "object" ? current : null;
+  const next = incoming && typeof incoming === "object" ? incoming : null;
+  if (!previous) return next;
+  if (!next) return previous;
+  const merged = { ...previous, ...next };
+  const preferText = /* @__PURE__ */ __name((left, right) => {
+    const first = String(left || "").trim();
+    const second = String(right || "").trim();
+    return second.length >= first.length ? second : first;
+  }, "preferText");
+  merged.desc = preferText(previous.desc || previous.description, next.desc || next.description);
+  merged.title = preferText(previous.title, next.title);
+  merged.video = {
+    ...previous.video && typeof previous.video === "object" ? previous.video : {},
+    ...next.video && typeof next.video === "object" ? next.video : {}
+  };
+  merged.statistics = {
+    ...previous.statistics && typeof previous.statistics === "object" ? previous.statistics : {},
+    ...next.statistics && typeof next.statistics === "object" ? next.statistics : {}
+  };
+  for (const key of ["text_extra", "cha_list"]) {
+    const previousList = Array.isArray(previous[key]) ? previous[key] : [];
+    const nextList = Array.isArray(next[key]) ? next[key] : [];
+    const seen = /* @__PURE__ */ new Set();
+    merged[key] = [...previousList, ...nextList].filter((item) => {
+      const identity = String(
+        item && (item.hashtag_name || item.hashtagName || item.cha_name || item.chaName || item.cid || item.id) || ""
+      ).trim().toLowerCase() || JSON.stringify(item);
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    });
+  }
+  return merged;
+}
+__name(mergeDouyinDetailCandidates, "mergeDouyinDetailCandidates");
+async function fetchDouyinMediaResolutionWithSession({
   pageUrl,
   awemeId,
   session = getWechatSession(),
@@ -10541,22 +10579,33 @@ async function fetchDouyinMediaUrlsWithSession({
 }) {
   const target = normalizeDouyinTargetUrl(pageUrl, pageUrl);
   const id = String(awemeId || target.awemeId || "").trim();
-  if (!session || typeof session.fetch !== "function" || !id || !target.url) return [];
+  if (!session || typeof session.fetch !== "function" || !id || !target.url) {
+    return { mediaUrls: [], detail: null };
+  }
   try {
     await readSessionFetchText(session, target.url, getSocialRequestHeaders(target.url), requestTimeoutMs);
   } catch (error) {
   }
+  let mediaUrls = [];
+  let detail = null;
   for (const detailUrl of getDouyinAwemeDetailUrls(id)) {
     try {
       const text = await readSessionFetchText(session, detailUrl, getSocialRequestHeaders(detailUrl), requestTimeoutMs);
       const payload = JSON.parse(text || "{}");
       if (getDouyinDetailAwemeId(payload) !== id) continue;
       const urls = extractDouyinMediaUrlsFromDetailPayload(payload).filter((url) => /^https?:\/\//i.test(url));
-      if (urls.length) return sortMediaUrlsForTranscription(urls);
+      const nextDetail = findDouyinDetailForAweme(payload, id) || payload.aweme_detail || payload.awemeDetail || (Array.isArray(payload.item_list) ? payload.item_list[0] : null);
+      mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, ...urls]);
+      detail = mergeDouyinDetailCandidates(detail, nextDetail);
     } catch (error) {
     }
   }
-  return [];
+  return { mediaUrls, detail };
+}
+__name(fetchDouyinMediaResolutionWithSession, "fetchDouyinMediaResolutionWithSession");
+async function fetchDouyinMediaUrlsWithSession(options = {}) {
+  const resolution = await fetchDouyinMediaResolutionWithSession(options);
+  return resolution.mediaUrls;
 }
 __name(fetchDouyinMediaUrlsWithSession, "fetchDouyinMediaUrlsWithSession");
 function getXiaohongshuSession() {
@@ -15991,6 +16040,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async fetchDouyinMediaUrlsWithSession(pageUrl, awemeId) {
     return fetchDouyinMediaUrlsWithSession({ pageUrl, awemeId });
   }
+  async fetchDouyinMediaResolutionWithSession(pageUrl, awemeId) {
+    return fetchDouyinMediaResolutionWithSession({ pageUrl, awemeId });
+  }
   async downloadMediaArrayBufferWithSession(url, headers = {}, options = {}) {
     return downloadArrayBufferViaElectronSession(url, headers, options);
   }
@@ -17664,9 +17716,34 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               }
             }
           }
-          if (!hasPreciseDouyinMedia && douyinAwemeId && typeof this.fetchDouyinMediaUrlsWithSession === "function") {
+          if (douyinAwemeId && (!hasPreciseDouyinMedia || !douyinStructuredContent || !hasSocialMetrics(douyinSocialMetrics))) {
             try {
-              const sessionUrls = await this.fetchDouyinMediaUrlsWithSession(resolvedUrl, douyinAwemeId);
+              const hasLegacyInstanceResolver = Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaUrlsWithSession") && !Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaResolutionWithSession");
+              const sessionResolution = !hasLegacyInstanceResolver && typeof this.fetchDouyinMediaResolutionWithSession === "function" ? await this.fetchDouyinMediaResolutionWithSession(resolvedUrl, douyinAwemeId) : {
+                mediaUrls: typeof this.fetchDouyinMediaUrlsWithSession === "function" ? await this.fetchDouyinMediaUrlsWithSession(resolvedUrl, douyinAwemeId) : [],
+                detail: null
+              };
+              const sessionUrls = Array.isArray(sessionResolution && sessionResolution.mediaUrls) ? sessionResolution.mediaUrls : [];
+              const sessionDetail = sessionResolution && sessionResolution.detail;
+              if (sessionDetail) {
+                const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
+                douyinStructuredContent = buildDouyinStructuredContent(sessionDetail, {
+                  title: douyinStructuredContent && douyinStructuredContent.title || detailPageMetadata.title,
+                  description: douyinStructuredContent && douyinStructuredContent.description || detailPageMetadata.description,
+                  tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(detailPageMetadata.description, html2),
+                  coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(html2, ["og:image", "twitter:image"])),
+                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
+                });
+                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+                  title: douyinStructuredContent.title,
+                  description: douyinStructuredContent.description,
+                  tags: douyinStructuredContent.tags,
+                  imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean)
+                });
+                if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+                  douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+                }
+              }
               if (sessionUrls.length) {
                 mediaUrls = sortMediaUrlsForTranscription([...sessionUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
@@ -18932,6 +19009,7 @@ WechatObsidianInboxPlugin.__test = {
   extractDouyinMediaUrlsFromShareHtml,
   extractDouyinMediaUrlsFromDetailPayload,
   extractDouyinMediaUrlsForAweme,
+  fetchDouyinMediaResolutionWithSession,
   fetchDouyinMediaUrlsWithSession,
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,
