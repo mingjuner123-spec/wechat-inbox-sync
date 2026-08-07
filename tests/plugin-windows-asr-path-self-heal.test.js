@@ -31,7 +31,26 @@ plugin.settings = PluginClass.__test.mergeSettings({
 });
 plugin.getConfiguredLocalAsrPlatform = () => 'win32';
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-self-heal-'));
-plugin.getConfiguredLocalAsrInstallRoot = () => tempRoot;
+const virtualInstallRoot = 'C:\\Users\\Current\\.wechat-inbox-local-asr';
+plugin.getConfiguredLocalAsrInstallRoot = () => virtualInstallRoot;
+const originalExistsSync = fs.existsSync;
+const originalReadFileSync = fs.readFileSync;
+function mapVirtualWindowsPath(candidatePath) {
+  const source = String(candidatePath || '');
+  if (!path.win32.isAbsolute(source)) return '';
+  const relative = path.win32.relative(virtualInstallRoot, source);
+  if (relative.startsWith('..') || path.win32.isAbsolute(relative)) return '';
+  return path.join(tempRoot, ...relative.split('\\'));
+}
+fs.existsSync = (candidatePath) => {
+  const mappedPath = mapVirtualWindowsPath(candidatePath);
+  if (mappedPath) return originalExistsSync(mappedPath);
+  return path.win32.isAbsolute(String(candidatePath || '')) ? false : originalExistsSync(candidatePath);
+};
+fs.readFileSync = (candidatePath, ...args) => {
+  const mappedPath = mapVirtualWindowsPath(candidatePath);
+  return originalReadFileSync(mappedPath || candidatePath, ...args);
+};
 
 const installerText = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr.ps1'),
@@ -53,7 +72,7 @@ async function run() {
   fs.writeFileSync(path.join(tempRoot, 'models', 'ggml-small.bin'), 'model');
   fs.writeFileSync(path.join(tempRoot, 'bin', 'whisper-cli.exe'), 'whisper');
   fs.writeFileSync(path.join(tempRoot, 'bin', 'ffmpeg.exe'), 'ffmpeg');
-  const expectedCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "${tempRoot}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
+  const expectedCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "${virtualInstallRoot}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
   assert.strictEqual(
     plugin.getEffectiveLocalTranscriptionCommand(),
     expectedCommand,
@@ -67,6 +86,8 @@ async function run() {
     assert.strictEqual(recoveredCommand, expectedCommand);
     assert.strictEqual(savedSettings.localTranscriptionCommand, recoveredCommand);
   } finally {
+    fs.existsSync = originalExistsSync;
+    fs.readFileSync = originalReadFileSync;
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 }
