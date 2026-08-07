@@ -5339,6 +5339,11 @@ assert.strictEqual(
 assert.strictEqual(finalizedXiaohongshuCommentBudget.diagnosticDetails.partial, true);
 assert.strictEqual(helpers.XIAOHONGSHU_COMMENT_TIMEOUT_MS, 90000);
 assert.strictEqual(typeof helpers.getXiaohongshuCommentBudgetState, 'function');
+assert.strictEqual(
+  helpers.didXiaohongshuRootCollectionProgress.toString().includes('__name'),
+  false,
+  '打包后的评论滚动脚本不能依赖只存在于插件 bundle 的 __name 辅助函数',
+);
 assert.deepStrictEqual(
   helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 999 }),
   { shouldStop: false, stopReason: '', remainingMs: 1 },

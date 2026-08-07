@@ -9795,8 +9795,15 @@ function finalizeXiaohongshuComments({
 }
 __name(finalizeXiaohongshuComments, "finalizeXiaohongshuComments");
 function didXiaohongshuRootCollectionProgress(previous = {}, current = {}) {
-  const value = /* @__PURE__ */ __name((object, key) => Number(object && object[key]) || 0, "value");
-  return value(current, "rootCommentCount") > value(previous, "rootCommentCount") || value(current, "rootRequestCount") > value(previous, "rootRequestCount") || value(current, "scrollTop") > value(previous, "scrollTop") + 1 || value(current, "scrollHeight") > value(previous, "scrollHeight") + 1;
+  const previousRootCommentCount = Number(previous && previous.rootCommentCount) || 0;
+  const previousRootRequestCount = Number(previous && previous.rootRequestCount) || 0;
+  const previousScrollTop = Number(previous && previous.scrollTop) || 0;
+  const previousScrollHeight = Number(previous && previous.scrollHeight) || 0;
+  const currentRootCommentCount = Number(current && current.rootCommentCount) || 0;
+  const currentRootRequestCount = Number(current && current.rootRequestCount) || 0;
+  const currentScrollTop = Number(current && current.scrollTop) || 0;
+  const currentScrollHeight = Number(current && current.scrollHeight) || 0;
+  return currentRootCommentCount > previousRootCommentCount || currentRootRequestCount > previousRootRequestCount || currentScrollTop > previousScrollTop + 1 || currentScrollHeight > previousScrollHeight + 1;
 }
 __name(didXiaohongshuRootCollectionProgress, "didXiaohongshuRootCollectionProgress");
 function getXiaohongshuCommentBudgetState({
