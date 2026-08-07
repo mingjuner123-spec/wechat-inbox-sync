@@ -69,10 +69,14 @@ function getTranscriptionQualityIssue(text) {
   });
 
   const maxCount = Math.max(...counts.values());
+  const repeatedShare = maxCount / units.length;
+  const consecutiveShare = longestConsecutiveRun / units.length;
   if (
-    longestConsecutiveRun >= 3
-    || maxCount >= 6
-    || (units.length >= 8 && maxCount >= 5 && maxCount / units.length >= 0.6)
+    // A normal course can repeat an important sentence across chunks. Only
+    // reject a repeat when it dominates the recognised transcription.
+    (units.length <= 5 && longestConsecutiveRun >= 3 && consecutiveShare >= 0.6)
+    || (longestConsecutiveRun >= 4 && consecutiveShare >= 0.5)
+    || (maxCount >= 6 && repeatedShare >= 0.6)
   ) {
     return 'repeated-lines';
   }

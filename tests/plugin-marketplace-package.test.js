@@ -34,7 +34,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.76');
+assert.strictEqual(manifest.version, '1.3.77');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.ok(checklist.includes('不得仅因版本较旧就停用已安装组件'));
 assert.ok(checklist.includes('HTTP 418'));
@@ -52,8 +52,8 @@ assert.strictEqual(manifest.minAppVersion, '1.0.0');
 assert.strictEqual(manifest.isDesktopOnly, true);
 assert.strictEqual(versions[manifest.version], manifest.minAppVersion);
 assert.ok(
-  /PLUGIN_RUNTIME_VERSION\s*=\s*["']1\.3\.76["']/.test(pluginMainSource),
-  'marketplace main.js runtime identity must match manifest version 1.3.76',
+  /PLUGIN_RUNTIME_VERSION\s*=\s*["']1\.3\.77["']/.test(pluginMainSource),
+  'marketplace main.js runtime identity must match manifest version 1.3.77',
 );
 assert.strictEqual(fs.existsSync(rootManifestPath), true, 'root manifest.json should exist for Obsidian marketplace version indexing');
 assert.strictEqual(fs.existsSync(rootVersionsPath), true, 'root versions.json should exist for Obsidian marketplace version indexing');
@@ -180,10 +180,20 @@ assert.ok(windowsOcrInstaller.includes('opencv-python==4.10.0.84'), 'Windows OCR
 assert.ok(windowsOcrInstaller.includes('function Install-OcrCompatibilityPackages'), 'Windows OCR installer must automatically retry DLL failures with the compatible native stack');
 assert.ok(windowsOcrInstaller.includes('--force-reinstall'), 'Windows OCR compatibility repair must replace the failed native packages completely');
 assert.ok(windowsOcrInstaller.includes('$StagingVenvDir'), 'Windows OCR repair must build in a staging venv');
+assert.ok(
+  windowsOcrInstaller.includes('$StagingVenvDir = Join-Path $InstallRoot ("venv-staging-" + [guid]::NewGuid().ToString("N"))'),
+  'Windows OCR repair must use a unique staging venv so a locked stale repair cannot block every later install',
+);
+assert.ok(windowsOcrInstaller.includes('unique-staging-transaction-v2'), 'Windows OCR repair must expose the unique staging transaction capability');
+assert.strictEqual(
+  windowsOcrInstaller.includes('$StagingVenvDir = Join-Path $InstallRoot "venv-staging"'),
+  false,
+  'Windows OCR repair must not reuse the lock-prone legacy staging directory',
+);
 assert.ok(windowsOcrInstaller.includes('$BackupVenvDir'), 'Windows OCR repair must keep only a short-lived rollback venv');
 assert.ok(windowsOcrInstaller.includes('$PendingSwitchPath'), 'Windows OCR repair must support restart-time activation when files are locked');
 assert.ok(windowsOcrInstaller.includes('function Promote-StagedOcrEnvironment'), 'Windows OCR repair must promote a validated staging environment');
-assert.ok(windowsOcrInstaller.includes('single-dir-transaction-v1'), 'Windows OCR installer must expose the single-directory transaction capability');
+assert.ok(windowsOcrInstaller.includes('unique-staging-transaction-v2'), 'Windows OCR installer must expose the unique-staging transaction capability');
 assert.ok(windowsOcrInstaller.includes('function Promote-StagedPortablePythonRuntime'), 'Windows OCR portable Python must switch through a rollback-aware promotion');
 assert.ok(windowsOcrInstaller.includes('$PythonRuntimeBackupDir'), 'Windows OCR portable Python must retain the prior runtime until the new runtime is active');
 assert.strictEqual(windowsOcrInstaller.includes('Remove-Item -LiteralPath $PythonRuntimeDir -Recurse -Force -ErrorAction SilentlyContinue'), false, 'Windows OCR installer must not delete the active Python runtime before promotion succeeds');

@@ -4,6 +4,9 @@ const https = require('https');
 const childProcess = require('child_process');
 const Module = require('module');
 const { EventEmitter } = require('events');
+const { createNoteOutputPlanHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/note-output-plan-utils');
+const { createRecordBodyMarkdownHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/record-body-markdown-utils');
+const { createAiMetadataHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/ai-metadata-utils');
 
 let requestUrlMock = async () => ({});
 async function withFixedNow(iso, callback) {
@@ -14,6 +17,300 @@ async function withFixedNow(iso, callback) {
   } finally {
     Date.now = originalNow;
   }
+}
+
+function runNoteOutputPlanModuleTests() {
+  const output = createNoteOutputPlanHelpers({
+    buildRecordIdMarker: (id) => `<!-- wechat-inbox-record-id: ${id} -->`,
+    buildAiMetadataErrorComment: (error) => `<!-- ai-error: ${error.code} -->`,
+    cleanDisplayUrl: (url) => String(url || '').trim(),
+    defaultNotePropertyFields: 'title,author,url,synced_at,source,description,keywords',
+    getRecordAuthor: (metadata) => metadata.author || '',
+    getRecordDescription: (metadata) => metadata.description || '',
+    getRecordKeywords: (metadata) => metadata.keywords || [],
+    getRecordId: (record) => record._id || record.id || '',
+    getRecordSourceLabel: () => '文本',
+    getRecordUrl: (record, metadata = record.metadata || {}) => metadata.url || record.content || '',
+    getWebpageSourcePrefix: () => '网页',
+    isFeishuUrl: () => false,
+    isSuccessfulTranscriptionRecord: () => false,
+    normalizeNotePropertyFields: (value) => String(value || ''),
+    normalizeVaultPath: (value) => String(value || '').replaceAll('\\', '/'),
+    buildWebpageMarkdownBody: (record) => record.metadata.markdown,
+    buildFileMarkdownBody: (record) => record.metadata.markdown,
+  });
+  const plan = output.buildNoteOutputPlan({
+    record: { _id: 'output-plan-text-1', type: 'text', content: '正文', metadata: {} },
+    title: '文本标题',
+    syncedAt: '2026-08-01T00:00:00.000Z',
+    noteDir: '临时收集\\2026-08-01',
+    propertyFields: 'title,url,synced_at',
+  });
+  assert.strictEqual(plan.filePath, '临时收集/2026-08-01/文本标题.md');
+  assert.ok(plan.markdown.includes('title: 文本标题'));
+  assert.ok(plan.markdown.includes('<!-- wechat-inbox-record-id: output-plan-text-1 -->'));
+  assert.ok(plan.markdown.endsWith('正文\n'));
+
+  const webpageRecord = {
+    _id: 'output-plan-webpage-1',
+    type: 'webpage',
+    content: 'https://example.com/page',
+    metadata: { markdown: '网页正文', conversionStatus: 'success' },
+  };
+  const webpageSnapshot = JSON.stringify(webpageRecord);
+  output.buildNoteOutputPlan({
+    record: webpageRecord,
+    title: '网页标题',
+    syncedAt: '2026-08-01T00:00:00.000Z',
+    noteDir: '临时收集',
+  });
+  assert.strictEqual(JSON.stringify(webpageRecord), webpageSnapshot);
+  assert.throws(
+    () => output.buildNoteOutputPlan({
+      record: { type: 'unknown', metadata: {} },
+      title: '未知类型',
+      syncedAt: '2026-08-01T00:00:00.000Z',
+      noteDir: '临时收集',
+    }),
+    /Unsupported record type: unknown/,
+  );
+}
+
+function runRecordBodyMarkdownModuleTests() {
+  assert.strictEqual(typeof createRecordBodyMarkdownHelpers, 'function');
+
+  const output = createRecordBodyMarkdownHelpers({
+    cleanDisplayUrl: legacyRecordBodyHelpers.cleanDisplayUrl,
+    cleanMarkdownForStorage: legacyRecordBodyHelpers.cleanMarkdownForStorage,
+    extractKeywordsFromText: legacyRecordBodyHelpers.extractKeywordsFromText,
+    formatCreatedTime: legacyRecordBodyHelpers.formatCreatedTime,
+    getWebpageSourcePrefix: legacyRecordBodyHelpers.getWebpageSourcePrefix,
+    isFeishuUrl: legacyRecordBodyHelpers.isFeishuUrl,
+    isWechatChannelsUrl: legacyRecordBodyHelpers.isWechatChannelsUrl,
+    isXiaohongshuUrl: legacyRecordBodyHelpers.isXiaohongshuUrl,
+    normalizeExtractedUrl: legacyRecordBodyHelpers.normalizeExtractedUrl,
+    sanitizeXiaohongshuMarkdownImages: legacyRecordBodyHelpers.sanitizeXiaohongshuMarkdownImages,
+    stripMarkdownCodeBlocks: legacyRecordBodyHelpers.stripMarkdownCodeBlocks,
+  });
+  const fixtures = [
+    {
+      name: '网页正文',
+      record: { type: 'webpage', content: 'https://example.com', metadata: { markdown: '网页正文', conversionStatus: 'success' } },
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[0].record, '网页标题'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[0].record, '网页标题'),
+    },
+    {
+      name: '飞书网页正文',
+      record: { type: 'webpage', content: 'https://example.feishu.cn/wiki/doc', metadata: { markdown: '飞书正文', conversionStatus: 'success' } },
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[1].record, '飞书标题'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[1].record, '飞书标题'),
+    },
+    {
+      name: '视频号未接通提示',
+      record: { type: 'webpage', content: 'https://channels.weixin.qq.com/feed/abc', metadata: { conversionStatus: 'link_saved' } },
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[2].record, '视频号标题'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[2].record, '视频号标题'),
+    },
+    {
+      name: '转写网页正文',
+      record: { type: 'webpage', content: 'https://example.com/audio', metadata: { transcriptOnly: true, sourceMediaAttachmentPath: '附件/音频.mp3', transcription: '转写正文', transcriptionStatus: 'success' } },
+      actual: () => legacyRecordBodyHelpers.buildWebpageMarkdownBody(fixtures[3].record, '转写网页'),
+      candidate: () => output.buildWebpageMarkdownBody(fixtures[3].record, '转写网页'),
+    },
+    {
+      name: '转写文件正文',
+      record: { type: 'file', content: '录音.mp3', metadata: { fileName: '录音.mp3', filePath: '附件/录音.mp3', transcription: '文件转写正文', transcriptionStatus: 'success', transcriptionSource: 'local' } },
+      actual: () => legacyRecordBodyHelpers.buildFileMarkdownBody(fixtures[4].record),
+      candidate: () => output.buildFileMarkdownBody(fixtures[4].record),
+    },
+    {
+      name: '普通文件正文',
+      record: { type: 'file', content: '文档.pdf', metadata: { fileName: '文档.pdf', filePath: '附件/文档.pdf', markdown: '文件正文', conversionStatus: 'success' } },
+      actual: () => legacyRecordBodyHelpers.buildFileMarkdownBody(fixtures[5].record),
+      candidate: () => output.buildFileMarkdownBody(fixtures[5].record),
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const snapshot = JSON.stringify(fixture.record);
+    assert.strictEqual(fixture.candidate(), fixture.actual(), fixture.name);
+    assert.strictEqual(JSON.stringify(fixture.record), snapshot, `${fixture.name} 不得改写输入`);
+  }
+
+  const transcriptMetadata = { transcription: '一段足够长的转写内容，用来生成简介。', title: '转写标题' };
+  assert.deepStrictEqual(
+    output.buildTranscriptPropertyMetadata(transcriptMetadata),
+    legacyRecordBodyHelpers.buildTranscriptPropertyMetadata(transcriptMetadata),
+  );
+
+  const transcriptOnlyRecord = {
+    markdown: '历史网页正文',
+    snapshot: '历史快照',
+    contentSnapshot: '历史内容快照',
+    imageUrls: ['https://example.com/ignored.jpg'],
+    images: [{ url: 'https://example.com/ignored-2.jpg' }],
+    url: 'https://example.com/original',
+    retainedField: '不得丢失',
+  };
+  const transcriptOnlyOptions = {
+    url: 'https://example.com/audio',
+    mediaUrl: 'https://media.example.com/audio.mp3',
+    mediaUrls: [' https://media.example.com/audio.mp3 ', { url: 'https://media.example.com/other.mp3' }],
+    subtitleUrl: 'https://media.example.com/audio.vtt',
+    transcription: '转写正文',
+    transcriptionStatus: 'success',
+    transcriptionSource: 'local',
+    markdown: '补充正文',
+  };
+  const transcriptOnlySnapshot = JSON.stringify(transcriptOnlyRecord);
+  assert.deepStrictEqual(
+    output.buildTranscriptOnlyMetadata(transcriptOnlyRecord, transcriptOnlyOptions),
+    legacyRecordBodyHelpers.buildTranscriptOnlyMetadata(transcriptOnlyRecord, transcriptOnlyOptions),
+  );
+  assert.strictEqual(JSON.stringify(transcriptOnlyRecord), transcriptOnlySnapshot, '转写元数据不得改写输入');
+}
+
+function runAiMetadataFormattingModuleTests() {
+  assert.strictEqual(typeof createAiMetadataHelpers, 'function');
+
+  const output = createAiMetadataHelpers({
+    tryParseJson: legacyAiMetadataHelpers.tryParseJson,
+    cleanMarkdownForStorage: legacyAiMetadataHelpers.cleanMarkdownForStorage,
+    stripMarkdownCodeBlocks: legacyAiMetadataHelpers.stripMarkdownCodeBlocks,
+  });
+  const keywordInputs = [
+    ['效率', '专注', '效率'],
+    '效率，专注 #效率\n行动',
+    '',
+  ];
+  for (const input of keywordInputs) {
+    assert.deepStrictEqual(
+      output.normalizeGeneratedKeywords(input),
+      legacyAiMetadataHelpers.normalizeGeneratedKeywords(input),
+      `关键词规范化：${JSON.stringify(input)}`,
+    );
+  }
+
+  const responseInputs = [
+    '{"description":"JSON 简介","keywords":["效率","专注"]}',
+    '```json\n{"summary":"围栏简介","tags":["阅读","思考"]}\n```',
+    '简介：标签式简介\n关键词：效率，专注 #效率',
+    '',
+  ];
+  for (const input of responseInputs) {
+    assert.deepStrictEqual(
+      output.parseGeneratedMetadataResponse(input),
+      legacyAiMetadataHelpers.parseGeneratedMetadataResponse(input),
+      `模型返回解析：${JSON.stringify(input)}`,
+    );
+  }
+
+  const oversizedResult = {
+    description: '长'.repeat(360),
+    keywords: ['效率', '效率', '专注'],
+  };
+  assert.deepStrictEqual(
+    output.normalizeGeneratedMetadataResult(oversizedResult),
+    legacyAiMetadataHelpers.normalizeGeneratedMetadataResult(oversizedResult),
+  );
+
+  const records = [
+    {
+      name: '网页记录的 AI 输入',
+      record: {
+        type: 'webpage',
+        metadata: {
+          title: '网页标题',
+          markdown: '# 标题\n正文 [链接](https://example.com)\n```js\nconst ignored = true;\n```',
+          description: '历史简介',
+        },
+      },
+    },
+    {
+      name: '转写记录的 AI 输入',
+      record: {
+        type: 'voice',
+        metadata: {
+          title: '录音标题',
+          transcriptOnly: true,
+          transcriptionStatus: 'success',
+          transcription: '这是本地转写内容。',
+          markdown: '不得参与转写摘要',
+        },
+      },
+    },
+  ];
+  for (const fixture of records) {
+    const snapshot = JSON.stringify(fixture.record);
+    assert.strictEqual(
+      output.extractAiMetadataInputText(fixture.record),
+      legacyAiMetadataHelpers.extractAiMetadataInputText(fixture.record),
+      fixture.name,
+    );
+    assert.strictEqual(JSON.stringify(fixture.record), snapshot, `${fixture.name} 不得改写输入`);
+  }
+}
+
+function runConfiguredNoteOutputPlanParityTests() {
+  assert.strictEqual(typeof helpers.buildNoteOutputPlan, 'function');
+  const syncedAt = '2026-08-01T00:00:00.000Z';
+  const fixtures = [
+    {
+      title: '文本输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-text', type: 'text', content: '文本正文', metadata: {} },
+    },
+    {
+      title: '链接输出',
+      noteDir: '临时收集',
+      record: { _id: 'plan-link', type: 'link', content: 'https://example.com/link', metadata: { title: '链接页面', snapshot: '链接正文' } },
+    },
+    {
+      title: '网页输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-webpage', type: 'webpage', content: 'https://example.com/page', metadata: { title: '网页页面', markdown: '网页正文', conversionStatus: 'success' } },
+    },
+    {
+      title: '录音输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-voice', type: 'voice', content: '录音', metadata: { audioFileName: '录音输出.mp3', transcription: '录音正文', transcriptionStatus: 'success' } },
+    },
+    {
+      title: '文件输出',
+      noteDir: '临时收集/2026-08-01',
+      record: { _id: 'plan-file', type: 'file', content: '文件.pdf', metadata: { fileName: '文件.pdf', fileExt: 'pdf', markdown: '文件正文', conversionStatus: 'success' } },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const plan = helpers.buildNoteOutputPlan({ ...fixture, syncedAt });
+    assert.strictEqual(
+      plan.markdown,
+      helpers.buildMarkdownForRecord({ record: fixture.record, title: fixture.title, syncedAt }),
+    );
+    assert.strictEqual(plan.filePath, `${fixture.noteDir}/${fixture.title}.md`);
+  }
+
+  const markedRecord = {
+    _id: 'plan-markers',
+    type: 'text',
+    content: '带标记正文',
+    metadata: {
+      aiMetadataError: { code: 'rate-limited' },
+    },
+  };
+  const markedPlan = helpers.buildNoteOutputPlan({
+    record: markedRecord,
+    title: '标记输出',
+    syncedAt,
+    noteDir: '临时收集',
+    propertyFields: 'title,url,synced_at',
+  });
+  assert.strictEqual((markedPlan.markdown.match(/wechat-inbox-record-id/g) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/wechat-inbox-ai-metadata-error/g) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/^title:/gm) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/^url:/gm) || []).length, 1);
+  assert.strictEqual((markedPlan.markdown.match(/^synced_at:/gm) || []).length, 1);
 }
 
 const originalLoad = Module._load;
@@ -50,6 +347,94 @@ PluginClass.prototype.requestXiaohongshuStaticPage = async function requestXiaoh
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const legacyAiMetadataExports = [
+  'tryParseJson',
+  'cleanMarkdownForStorage',
+  'stripMarkdownCodeBlocks',
+  'normalizeGeneratedKeywords',
+  'parseGeneratedMetadataResponse',
+  'normalizeGeneratedMetadataResult',
+  'extractAiMetadataInputText',
+];
+const legacyAiMetadataMainSource = childProcess.execFileSync(
+  'git',
+  ['show', '1a9c8d6e:obsidian-plugin/wechat-inbox-sync/main.js'],
+  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true },
+);
+const instrumentedLegacyAiMetadataMainSource = legacyAiMetadataMainSource.replace(
+  'module.exports = WechatObsidianInboxPlugin;',
+  `Object.assign(WechatObsidianInboxPlugin.__test, { ${legacyAiMetadataExports.join(', ')} });\nmodule.exports = WechatObsidianInboxPlugin;`,
+);
+assert.notStrictEqual(instrumentedLegacyAiMetadataMainSource, legacyAiMetadataMainSource, '历史 AI 元数据基线必须成功注入测试出口');
+const legacyAiMetadataModule = { exports: {} };
+const legacyAiMetadataObsidian = {
+  Modal: class Modal {},
+  Notice: class Notice {},
+  Plugin: class Plugin {},
+  PluginSettingTab: class PluginSettingTab {},
+  Setting: class Setting {},
+  requestUrl: (...args) => requestUrlMock(...args),
+};
+new Function('require', 'module', 'exports', '__filename', '__dirname', instrumentedLegacyAiMetadataMainSource)(
+  (request) => request === 'obsidian' ? legacyAiMetadataObsidian : require(request),
+  legacyAiMetadataModule,
+  legacyAiMetadataModule.exports,
+  path.join(__dirname, '..', 'legacy-ai-metadata-main.js'),
+  path.join(__dirname, '..'),
+);
+const legacyAiMetadataHelpers = legacyAiMetadataModule.exports.__test;
+for (const helperName of legacyAiMetadataExports) {
+  assert.strictEqual(typeof legacyAiMetadataHelpers[helperName], 'function', `历史 AI 元数据基线缺少 ${helperName}`);
+}
+const legacyRecordBodyExports = [
+  'buildWebpageMarkdownBody',
+  'buildAudioTranscriptMarkdown',
+  'buildSourceMediaAttachmentMarkdown',
+  'buildTranscriptPropertyMetadata',
+  'buildTranscriptOnlyMetadata',
+  'buildFileMarkdownBody',
+  'cleanDisplayUrl',
+  'cleanMarkdownForStorage',
+  'extractKeywordsFromText',
+  'formatCreatedTime',
+  'getWebpageSourcePrefix',
+  'isFeishuUrl',
+  'isWechatChannelsUrl',
+  'isXiaohongshuUrl',
+  'normalizeExtractedUrl',
+  'sanitizeXiaohongshuMarkdownImages',
+  'stripMarkdownCodeBlocks',
+];
+const legacyRecordBodyMainSource = childProcess.execFileSync(
+  'git',
+  ['show', '5d0fcbfd:obsidian-plugin/wechat-inbox-sync/main.js'],
+  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true },
+);
+const instrumentedLegacyRecordBodyMainSource = legacyRecordBodyMainSource.replace(
+  'module.exports = WechatObsidianInboxPlugin;',
+  `Object.assign(WechatObsidianInboxPlugin.__test, { ${legacyRecordBodyExports.join(', ')} });\nmodule.exports = WechatObsidianInboxPlugin;`,
+);
+assert.notStrictEqual(instrumentedLegacyRecordBodyMainSource, legacyRecordBodyMainSource, '历史正文基线必须成功注入测试出口');
+const legacyRecordBodyModule = { exports: {} };
+const legacyRecordBodyObsidian = {
+  Modal: class Modal {},
+  Notice: class Notice {},
+  Plugin: class Plugin {},
+  PluginSettingTab: class PluginSettingTab {},
+  Setting: class Setting {},
+  requestUrl: (...args) => requestUrlMock(...args),
+};
+new Function('require', 'module', 'exports', '__filename', '__dirname', instrumentedLegacyRecordBodyMainSource)(
+  (request) => request === 'obsidian' ? legacyRecordBodyObsidian : require(request),
+  legacyRecordBodyModule,
+  legacyRecordBodyModule.exports,
+  path.join(__dirname, '..', 'legacy-record-body-main.js'),
+  path.join(__dirname, '..'),
+);
+const legacyRecordBodyHelpers = legacyRecordBodyModule.exports.__test;
+for (const helperName of legacyRecordBodyExports) {
+  assert.strictEqual(typeof legacyRecordBodyHelpers[helperName], 'function', `历史正文基线缺少 ${helperName}`);
+}
 const pluginMainSource = fs
   .readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'src', 'main.js'), 'utf8')
   .replace(/\r\n/g, '\n');
@@ -192,7 +577,7 @@ assert.strictEqual(
   false,
 );
 assert.strictEqual(
-  helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('single-dir-transaction-v1', 'legacy-in-place-install'), false),
+  helpers.isLocalOcrInstallerCurrent(windowsOcrInstallerSource.replaceAll('unique-staging-transaction-v2', 'single-dir-transaction-v1'), false),
   false,
 );
 assert.strictEqual(
@@ -217,6 +602,59 @@ function runPendingLocalOcrSwitchTests() {
     assert.deepStrictEqual(helpers.completePendingLocalOcrSwitch(noMarkerRoot), { status: 'none' });
   } finally {
     fs.rmSync(noMarkerRoot, { recursive: true, force: true });
+  }
+
+  const uniqueActivationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-unique-switch-'));
+  try {
+    const marker = path.join(uniqueActivationRoot, 'pending-venv-switch.json');
+    const oldVenv = path.join(uniqueActivationRoot, 'venv');
+    const stagingVenv = path.join(uniqueActivationRoot, 'venv-staging-0123456789abcdef0123456789abcdef');
+    const backupVenv = path.join(uniqueActivationRoot, 'venv-backup');
+    fs.mkdirSync(path.join(oldVenv, 'Scripts'), { recursive: true });
+    fs.mkdirSync(path.join(stagingVenv, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(oldVenv, 'Scripts', 'python.exe'), 'old');
+    fs.writeFileSync(path.join(stagingVenv, 'Scripts', 'python.exe'), 'new');
+    fs.writeFileSync(marker, JSON.stringify({
+      capability: 'unique-staging-transaction-v2',
+      staging: stagingVenv,
+      target: oldVenv,
+      backup: backupVenv,
+    }), 'utf8');
+
+    const result = helpers.completePendingLocalOcrSwitch(uniqueActivationRoot, {
+      validatePython(pythonPath) {
+        return fs.readFileSync(pythonPath, 'utf8') === 'new';
+      },
+    });
+    assert.strictEqual(result.status, 'activated');
+    assert.strictEqual(fs.readFileSync(path.join(oldVenv, 'Scripts', 'python.exe'), 'utf8'), 'new');
+    assert.strictEqual(fs.existsSync(stagingVenv), false);
+    assert.strictEqual(fs.existsSync(backupVenv), false);
+    assert.strictEqual(fs.existsSync(marker), false);
+  } finally {
+    fs.rmSync(uniqueActivationRoot, { recursive: true, force: true });
+  }
+
+  const unsafeMarkerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-unsafe-switch-'));
+  const outsideStagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-ocr-outside-switch-'));
+  try {
+    const outsideStaging = path.join(outsideStagingRoot, 'venv-staging-abcdefabcdefabcdefabcdefabcdefab');
+    fs.mkdirSync(path.join(outsideStaging, 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(outsideStaging, 'Scripts', 'python.exe'), 'outside');
+    const marker = path.join(unsafeMarkerRoot, 'pending-venv-switch.json');
+    fs.writeFileSync(marker, JSON.stringify({
+      capability: 'unique-staging-transaction-v2',
+      staging: outsideStaging,
+      target: path.join(unsafeMarkerRoot, 'venv'),
+      backup: path.join(unsafeMarkerRoot, 'venv-backup'),
+    }), 'utf8');
+
+    assert.deepStrictEqual(helpers.completePendingLocalOcrSwitch(unsafeMarkerRoot), { status: 'invalid' });
+    assert.strictEqual(fs.existsSync(marker), false);
+    assert.strictEqual(fs.existsSync(outsideStaging), true);
+  } finally {
+    fs.rmSync(unsafeMarkerRoot, { recursive: true, force: true });
+    fs.rmSync(outsideStagingRoot, { recursive: true, force: true });
   }
 
   const activation = createFixture();
@@ -637,6 +1075,19 @@ assert.strictEqual(
   'repeated-lines',
 );
 assert.strictEqual(
+  helpers.getTranscriptionQualityIssue(Array(3).fill('短文本也在不断重复同一句话。').join('\n')),
+  'repeated-lines',
+);
+assert.strictEqual(
+  helpers.getTranscriptionQualityIssue([
+    '短文本也在不断重复同一句话。',
+    '短文本也在不断重复同一句话。',
+    '短文本也在不断重复同一句话。',
+    '最后只多出一句无关内容。',
+  ].join('\n')),
+  'repeated-lines',
+);
+assert.strictEqual(
   helpers.getTranscriptionQualityIssue([
     ...Array(8).fill('我们选择的问题就是'),
     ...Array(3).fill('请输入简体中文'),
@@ -645,6 +1096,24 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.getTranscriptionQualityIssue('这是第一段正常内容。\n这里为了强调重复一次。\n这里为了强调重复一次。\n最后继续讲新的内容。'),
+  '',
+);
+assert.strictEqual(
+  helpers.getTranscriptionQualityIssue([
+    '今天我们先建立一个完整的学习框架。',
+    '先把课程拆成输入、练习和复盘三个步骤。',
+    '这里为了强调重复一次。',
+    '接着用一个具体例子说明怎么安排每天的练习。',
+    '这里为了强调重复一次。',
+    '练习结束后需要记录自己没有听懂的部分。',
+    '这里为了强调重复一次。',
+    '第二天先复习昨天记录的难点再继续学习。',
+    '这里为了强调重复一次。',
+    '不要只追求时长，理解质量更重要。',
+    '这里为了强调重复一次。',
+    '最后每周回看一次自己的进步和薄弱环节。',
+    '这里为了强调重复一次。',
+  ].join('\n')),
   '',
 );
 assert.throws(
@@ -672,9 +1141,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.76'), {
-  manifestVersion: '1.3.76',
-  runtimeVersion: '1.3.76',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.77'), {
+  manifestVersion: '1.3.77',
+  runtimeVersion: '1.3.77',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -929,12 +1398,13 @@ assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
 }), {
   publicGraphic: true,
   mediaTranscription: true,
-  imageOcr: true,
+  imageOcr: false,
   comments: false,
 });
 assert.deepStrictEqual(helpers.getXiaohongshuCapabilityMatrix({
   hasProAccess: true,
   commentsEnabled: true,
+  imageOcrEnabled: true,
   isLoggedIn: true,
 }), {
   publicGraphic: true,
@@ -1780,7 +2250,7 @@ const localOcrInstallerValidatorSource = pluginMainSource.slice(
 );
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Install-PortablePython')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('$PythonBuildStandaloneBuild = \"20260623\"')"));
-assert.ok(localOcrInstallerValidatorSource.includes("source.includes('single-dir-transaction-v1')"));
+assert.ok(localOcrInstallerValidatorSource.includes("source.includes('unique-staging-transaction-v2')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('function Expand-TarGzArchiveWithPowerShell')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('install_portable_python')"));
 assert.ok(localOcrInstallerValidatorSource.includes("source.includes('PYTHON_BUILD_STANDALONE_BUILD=\"20260623\"')"));
@@ -1851,8 +2321,14 @@ assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, aiMetadataEnabled
 assert.strictEqual(helpers.mergeSettings({}).xiaohongshuCommentsEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, true);
 assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuCommentsEnabled: false }).xiaohongshuCommentsEnabled, false);
-assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, true);
-assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, true);
+assert.strictEqual(helpers.mergeSettings({}).xiaohongshuImageOcrEnabled, false);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: false }).xiaohongshuImageOcrEnabled, false);
+assert.strictEqual(helpers.mergeSettings({ settingsVersion: 2, xiaohongshuImageOcrEnabled: true }).xiaohongshuImageOcrEnabled, false);
+assert.strictEqual(helpers.mergeSettings({
+  settingsVersion: 2,
+  xiaohongshuImageOcrEnabled: true,
+  xiaohongshuImageOcrConsentVersion: 1,
+}).xiaohongshuImageOcrEnabled, true);
 assert.strictEqual(
   helpers.hasXiaohongshuLoginCookies([
     { name: 'a1', value: 'browser-device-cookie' },
@@ -1931,7 +2407,7 @@ assert.strictEqual(helpers.mergeSettings({
 }
 assert.strictEqual(helpers.mergeSettings({}).deepseekApiKey, '');
 assert.strictEqual(helpers.mergeSettings({}).deepseekModel, 'deepseek-chat');
-assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords');
+assert.strictEqual(helpers.mergeSettings({ notePropertyFields: 'id,url' }).notePropertyFields, 'title,author,url,synced_at,source,description,keywords,views,likes,collects,comments,shares,coins,metrics_captured_at');
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 30 }).cloudPreTranscriptionThresholdMinutes, 30);
 assert.strictEqual(helpers.mergeSettings({ cloudPreTranscriptionThresholdMinutes: 999 }).cloudPreTranscriptionThresholdMinutes, 10);
 assert.strictEqual(helpers.mergeSettings({ autoSyncOnLoad: false }).autoSyncOnLoad, true);
@@ -1987,8 +2463,8 @@ assert.ok(pluginMainSource.includes("createEl('details'"));
 assert.strictEqual(pluginMainSource.includes("text: 'AI 简介与关键词'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('启用 AI 简介与关键词')"), false);
 assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默认开启'));
-assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), false);
-assert.ok(pluginMainSource.includes('小红书图文 OCR：已默认开启'));
+assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), true);
+assert.ok(pluginMainSource.includes('小红书图片 OCR 默认关闭，按需手动开启'));
 assert.ok(pluginMainSource.includes('const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);'));
 assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {'));
 assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
@@ -4878,13 +5354,13 @@ assert.strictEqual(
   }], 'root-many-replies', [])[0].replies.length,
   25,
 );
-assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 300);
+assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 1000);
 assert.strictEqual(typeof helpers.limitSocialCommentTreeTotal, 'function');
-const oversizedXiaohongshuCommentTree = Array.from({ length: 3 }, (_unused, rootIndex) => ({
+const oversizedXiaohongshuCommentTree = Array.from({ length: 400 }, (_unused, rootIndex) => ({
   id: `budget-root-${rootIndex}`,
   author: `一级评论用户${rootIndex}`,
   content: `一级评论正文${rootIndex}`,
-  replies: Array.from({ length: 150 }, (_replyUnused, replyIndex) => ({
+  replies: Array.from({ length: 2 }, (_replyUnused, replyIndex) => ({
     id: `budget-reply-${rootIndex}-${replyIndex}`,
     author: `回复用户${rootIndex}-${replyIndex}`,
     content: `回复正文${rootIndex}-${replyIndex}`,
@@ -4895,39 +5371,42 @@ const limitedXiaohongshuCommentTree = helpers.limitSocialCommentTreeTotal(
   helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
 );
 const limitedXiaohongshuCommentStats = helpers.getSocialCommentTreeStats(limitedXiaohongshuCommentTree);
-assert.strictEqual(limitedXiaohongshuCommentStats.rootCount + limitedXiaohongshuCommentStats.replyCount, 300);
-assert.deepStrictEqual(
-  limitedXiaohongshuCommentTree.map((comment) => comment.id),
-  ['budget-root-0', 'budget-root-1', 'budget-root-2'],
-);
-assert.strictEqual(oversizedXiaohongshuCommentTree[1].replies.length, 150);
+assert.strictEqual(limitedXiaohongshuCommentStats.rootCount + limitedXiaohongshuCommentStats.replyCount, 1000);
+assert.strictEqual(limitedXiaohongshuCommentTree[0].id, 'budget-root-0');
+assert.strictEqual(limitedXiaohongshuCommentTree.at(-1).id, 'budget-root-333');
+assert.strictEqual(oversizedXiaohongshuCommentTree[1].replies.length, 2);
 const finalizedXiaohongshuCommentBudget = helpers.finalizeXiaohongshuComments({
   baseMarkdown: '# 正文',
   renderedComments: oversizedXiaohongshuCommentTree,
   diagnosticDetails: { stopReason: 'total_limit_reached' },
-  limit: 300,
+  limit: 1000,
 });
 assert.strictEqual(
   finalizedXiaohongshuCommentBudget.stats.rootCount + finalizedXiaohongshuCommentBudget.stats.replyCount,
-  300,
+  1000,
 );
 assert.strictEqual(
   finalizedXiaohongshuCommentBudget.markdownStats.rootCount + finalizedXiaohongshuCommentBudget.markdownStats.replyCount,
-  300,
+  1000,
 );
 assert.strictEqual(finalizedXiaohongshuCommentBudget.diagnosticDetails.partial, true);
 assert.strictEqual(helpers.XIAOHONGSHU_COMMENT_TIMEOUT_MS, 90000);
 assert.strictEqual(typeof helpers.getXiaohongshuCommentBudgetState, 'function');
+assert.strictEqual(
+  helpers.didXiaohongshuRootCollectionProgress.toString().includes('__name'),
+  false,
+  '打包后的评论滚动脚本不能依赖只存在于插件 bundle 的 __name 辅助函数',
+);
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 299 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 999 }),
   { shouldStop: false, stopReason: '', remainingMs: 1 },
 );
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 100000, totalCount: 299 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 100000, totalCount: 999 }),
   { shouldStop: true, stopReason: 'time_budget_exceeded', remainingMs: 0 },
 );
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 90000, totalCount: 300 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 90000, totalCount: 1000 }),
   { shouldStop: true, stopReason: 'total_limit_reached', remainingMs: 10000 },
 );
 const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
@@ -4965,10 +5444,12 @@ assert.strictEqual(
 );
 const xiaohongshuCommentPaginationScript = helpers.getXiaohongshuCommentPaginationScript(
   'https://www.xiaohongshu.com/explore/demo-note?xsec_token=demo-token',
-  { deadlineAt: 123456, totalLimit: 300 },
+  { deadlineAt: 123456, totalLimit: 1000 },
 );
 assert.match(xiaohongshuCommentPaginationScript, /credentials:\s*'include'/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/page/);
+assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = 100/);
+assert.match(xiaohongshuCommentPaginationScript, /page < XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/sub\/page/);
 assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_LIMIT/);
 assert.match(xiaohongshuCommentPaginationScript, /const deadlineAt = 123456/);
@@ -5780,7 +6261,8 @@ const transcriptOnlyMetadata = helpers.buildTranscriptOnlyMetadata({
 assert.strictEqual(transcriptOnlyMetadata.transcriptOnly, true);
 assert.strictEqual(transcriptOnlyMetadata.markdown, undefined);
 assert.strictEqual(transcriptOnlyMetadata.imageUrls, undefined);
-assert.strictEqual(transcriptOnlyMetadata.title, 'B站口播文案');
+// 转写笔记应保留已提取到的原始平台标题，不能退回到通用“B站口播文案”。
+assert.strictEqual(transcriptOnlyMetadata.title, '旧标题');
 assert.strictEqual(transcriptOnlyMetadata.transcription, '字幕里的口播内容');
 assert.strictEqual(transcriptOnlyMetadata.audioUrl, 'https://audio.example.com/a.m4s');
 
@@ -6331,7 +6813,65 @@ async function runAsyncHydrationTests() {
     'https://v11-weba.douyinvod.com/session-target/?mime_type=video_mp4',
   ]);
   assert.strictEqual(sessionFetchCalls[0].options.credentials, 'include');
-  assert.strictEqual(sessionFetchCalls.length, 2);
+  assert.strictEqual(sessionFetchCalls.length, 3);
+
+  const sessionResolutionFetchCalls = [];
+  const sessionResolution = await helpers.fetchDouyinMediaResolutionWithSession({
+    pageUrl: 'https://www.douyin.com/video/7644238277092174409',
+    awemeId: '7644238277092174409',
+    session: {
+      fetch: async (url) => {
+        sessionResolutionFetchCalls.push(url);
+        return {
+          text: async () => {
+            if (!url.includes('/aweme/v1/web/aweme/detail/')) {
+              return '<html><body>cookie warmup</body></html>';
+            }
+            if (url.includes('aid=6383')) {
+              return JSON.stringify({
+                aweme_detail: {
+                  aweme_id: '7644238277092174409',
+                  desc: '第一路正文 #第一标签',
+                  text_extra: [{ hashtag_name: '第一标签' }],
+                  statistics: { digg_count: 12 },
+                  video: {
+                    play_addr: {
+                      url_list: ['https://v11-weba.douyinvod.com/session-detail-target/?mime_type=video_mp4'],
+                    },
+                    cover: {
+                      url_list: ['https://p3-sign.douyinpic.com/session-detail-cover.jpeg'],
+                    },
+                  },
+                },
+              });
+            }
+            return JSON.stringify({
+              aweme_detail: {
+                aweme_id: '7644238277092174409',
+                title: '第二路补齐的正式标题',
+                desc: '浏览器会话返回的目标作品正文 #目标作品',
+                text_extra: [{ hashtag_name: '目标作品' }],
+                statistics: { collect_count: 5 },
+              },
+            });
+          },
+        };
+      },
+    },
+  });
+  assert.deepStrictEqual(sessionResolution.mediaUrls, [
+    'https://v11-weba.douyinvod.com/session-detail-target/?mime_type=video_mp4',
+  ]);
+  assert.strictEqual(sessionResolution.detail.aweme_id, '7644238277092174409');
+  assert.strictEqual(sessionResolution.detail.title, '第二路补齐的正式标题');
+  assert.match(sessionResolution.detail.desc, /目标作品正文/);
+  assert.deepStrictEqual(
+    sessionResolution.detail.text_extra.map((item) => item.hashtag_name),
+    ['第一标签', '目标作品'],
+  );
+  assert.strictEqual(sessionResolution.detail.statistics.digg_count, 12);
+  assert.strictEqual(sessionResolution.detail.statistics.collect_count, 5);
+  assert.strictEqual(sessionResolutionFetchCalls.length, 3);
 
   const mismatchedSessionMedia = await helpers.fetchDouyinMediaUrlsWithSession({
     pageUrl: 'https://www.douyin.com/video/7644238277092174409',
@@ -6889,7 +7429,10 @@ async function runAsyncHydrationTests() {
     metadata: { url: 'https://www.douyin.com/video/123' },
   }, '', '', '抖音');
   assert.strictEqual(douyinRecord.metadata.transcriptOnly, true);
-  assert.strictEqual(douyinRecord.metadata.markdown, undefined);
+  assert.ok(douyinRecord.metadata.markdown.includes('## 标题'));
+  assert.ok(douyinRecord.metadata.markdown.includes('Douyin Page'));
+  assert.ok(douyinRecord.metadata.markdown.includes('## 原文正文'));
+  assert.ok(douyinRecord.metadata.markdown.includes('页面正文不是口播'));
   assert.strictEqual(douyinRecord.metadata.transcriptionStatus, 'failed');
   assert.strictEqual(douyinRecord.metadata.mediaUrl, 'https://video.example.com/douyin.mp4');
 
@@ -6932,7 +7475,12 @@ async function runAsyncHydrationTests() {
   }, '', '', '抖音精确作品');
   assert.strictEqual(preciseDouyinRecord.metadata.transcriptOnly, true);
   assert.strictEqual(preciseDouyinRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4');
-  assert.strictEqual(preciseDouyinRecord.metadata.title, '抖音口播文案');
+  assert.strictEqual(
+    preciseDouyinRecord.metadata.title,
+    '先生 我出不了神山 你带一支格桑花走吧\n#萨普神山\n#西藏',
+  );
+  assert.match(preciseDouyinRecord.metadata.markdown, /先生 我出不了神山 你带一支格桑花走吧/);
+  assert.match(preciseDouyinRecord.metadata.markdown, /#萨普神山/);
   assert.strictEqual(preciseDouyinRenderCalled, false);
 
   const sessionFirstPlugin = new PluginClass();
@@ -6991,8 +7539,26 @@ async function runAsyncHydrationTests() {
     content: 'https://www.douyin.com/video/7644566503081119019',
     metadata: { url: 'https://www.douyin.com/video/7644566503081119019' },
   }, '', '', 'Session 失败回退');
-  assert.strictEqual(sessionFallbackRecord.metadata.mediaUrl.includes('sessionfallback'), true);
-  assert.strictEqual(sessionFallbackRenderCalls, 1);
+  assert.strictEqual(sessionFallbackRecord.metadata.transcriptionStatus, 'failed');
+  assert.strictEqual(sessionFallbackRecord.metadata.conversionStatus, 'link_saved');
+  assert.strictEqual(sessionFallbackRenderCalls, 0);
+
+  const refreshIdentityPlugin = new PluginClass();
+  let refreshIdentityRenderCalls = 0;
+  refreshIdentityPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
+    assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
+    assert.strictEqual(awemeId, '7644566503081119019');
+    return [];
+  };
+  refreshIdentityPlugin.renderSocialMediaUrls = async () => {
+    refreshIdentityRenderCalls += 1;
+    return ['https://v11-weba.douyinvod.com/refreshed-recommendation/?mime_type=video_mp4'];
+  };
+  assert.deepStrictEqual(
+    await refreshIdentityPlugin.refreshDouyinMediaUrls('https://www.douyin.com/video/7644566503081119019'),
+    [],
+  );
+  assert.strictEqual(refreshIdentityRenderCalls, 0);
 
   const renderedDouyinPlugin = new PluginClass();
   renderedDouyinPlugin.settings = { aiProvider: 'off' };
@@ -7013,8 +7579,9 @@ async function runAsyncHydrationTests() {
     content: 'https://www.douyin.com/video/7644566503081119019',
     metadata: { url: 'https://www.douyin.com/video/7644566503081119019' },
   }, '', '', '抖音真实页');
-  assert.strictEqual(renderedDouyinRecord.metadata.transcriptOnly, true);
-  assert.strictEqual(renderedDouyinRecord.metadata.mediaUrl, 'https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000rendered&ratio=720p&line=0');
+  assert.strictEqual(renderedDouyinRecord.metadata.transcriptionStatus, 'failed');
+  assert.strictEqual(renderedDouyinRecord.metadata.conversionStatus, 'link_saved');
+  assert.strictEqual(renderedDouyinRecord.metadata.mediaUrl, undefined);
 
   const unavailableDouyinPlugin = new PluginClass();
   unavailableDouyinPlugin.settings = { aiProvider: 'off' };
@@ -7281,9 +7848,10 @@ async function runAsyncHydrationTests() {
       metadata: { url: 'https://www.xiaohongshu.com/explore/video-comments' },
     }, '', '', '小红书视频评论区');
     assert.strictEqual(xhsVideoWithCommentsRecord.metadata.transcriptOnly, true);
-    assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('## 评论区'));
-    assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('**真实用户**：真实评论内容'));
-    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.markdown.includes('不应写入的推荐评论'), false);
+    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.markdown.includes('## 评论区'), false);
+    assert.ok(xhsVideoWithCommentsRecord.metadata.trailingMarkdown.includes('## 评论区'));
+    assert.ok(xhsVideoWithCommentsRecord.metadata.trailingMarkdown.includes('**真实用户**：真实评论内容'));
+    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.trailingMarkdown.includes('不应写入的推荐评论'), false);
     const xhsVideoWithCommentsMarkdown = helpers.buildMarkdownForRecord({
       record: xhsVideoWithCommentsRecord,
       title: '小红书视频评论区',
@@ -7292,6 +7860,7 @@ async function runAsyncHydrationTests() {
     assert.ok(xhsVideoWithCommentsMarkdown.includes('视频口播正文'));
     assert.ok(xhsVideoWithCommentsMarkdown.includes('## 评论区'));
     assert.ok(xhsVideoWithCommentsMarkdown.includes('真实评论内容'));
+    assert.ok(xhsVideoWithCommentsMarkdown.indexOf('视频口播正文') < xhsVideoWithCommentsMarkdown.indexOf('## 评论区'));
   } finally {
     requestUrlMock = previousXhsCommentRequestUrlMock;
   }
@@ -8116,6 +8685,8 @@ async function runAsyncHydrationTests() {
       aiProvider: 'off',
       settingsVersion: 2,
       xiaohongshuCommentsEnabled: false,
+      xiaohongshuImageOcrEnabled: hasProAccess,
+      xiaohongshuImageOcrConsentVersion: hasProAccess ? 1 : 0,
     });
     ocrPlugin.hasProFeatureAccess = async () => hasProAccess;
     let ocrCalls = 0;
@@ -9743,7 +10314,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.76'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.77'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -9782,8 +10353,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.76',
-        runtimeVersion: '1.3.76',
+        manifestVersion: '1.3.77',
+        runtimeVersion: '1.3.77',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -9868,7 +10439,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   };
   plugin.writeRecord = async () => {
     throw helpers.createRetryableXiaohongshuContentError({
-      runtime: helpers.getPluginRuntimeIdentity('1.3.76'),
+      runtime: helpers.getPluginRuntimeIdentity('1.3.77'),
       request: {
         sourceHost: 'xhslink.cn',
         finalHost: 'xiaohongshu.com',
@@ -10314,8 +10885,13 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
       data: {},
     };
   };
-  plugin.writeRecord = async () => {
-    throw new Error('本地已有同 url 笔记时不应重复写入');
+  plugin.writeRecord = async (record) => {
+    assert.strictEqual(record._id, 'new-cloud-id-for-same-url');
+    return {
+      recordId: record._id,
+      title: '小红书-重复保存图文',
+      filePath: '临时收集/2026-06-24/小红书-重复保存图文-002.md',
+    };
   };
 
   const result = await plugin.syncBinding({
@@ -10323,13 +10899,13 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
     label: '测试微信',
   }, false);
 
-  assert.deepStrictEqual(result.written, []);
-  assert.deepStrictEqual(result.failed, []);
-  assert.deepStrictEqual(result.skipped, [{
+  assert.deepStrictEqual(result.written, [{
     recordId: 'new-cloud-id-for-same-url',
-    reason: 'already-synced-local',
-    filePath: '临时收集/2026-06-24/小红书-旧图文.md',
+    title: '小红书-重复保存图文',
+    filePath: '临时收集/2026-06-24/小红书-重复保存图文-002.md',
   }]);
+  assert.deepStrictEqual(result.failed, []);
+  assert.deepStrictEqual(result.skipped, []);
   assert.deepStrictEqual(calls, [[
     '/records?status=pending',
     'GET',
@@ -10594,9 +11170,11 @@ async function runSyncInvalidCodePreservesLocalBindingTest() {
 
   await plugin.syncInbox(false);
 
-  assert.strictEqual(plugin.settings.token, 'OLD-123');
+  assert.strictEqual(plugin.settings.token, '');
   assert.deepStrictEqual(plugin.settings.bindings.map((item) => item.token), ['OLD-123']);
-  assert.strictEqual(savedSettings, null);
+  assert.strictEqual(plugin.settings.bindings[0].enabled, false);
+  assert.strictEqual(plugin.settings.bindings[0].status, 'needs_rebind');
+  assert.ok(savedSettings, '明确失效的绑定必须持久化为待重新绑定');
 }
 
 async function runConcurrentSyncInboxUsesSingleFlightTest() {
@@ -11958,7 +12536,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.76 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.77 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -12504,6 +13082,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'rate-limit',
       contentKind: 'transcript',
       expectedCode: 'rate-limited',
+      expectedAiCalls: 3,
       generate: async () => {
         const error = new Error('Request failed with status code 429 https://private.example.test?token=TOP_SECRET');
         error.code = 'ERR_BAD_REQUEST';
@@ -12515,6 +13094,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'upstream-5xx',
       contentKind: 'body',
       expectedCode: 'upstream-service-error',
+      expectedAiCalls: 1,
       generate: async () => {
         const error = new Error('HTTP 502 api_key=TOP_SECRET');
         error.code = 'ERR_BAD_RESPONSE';
@@ -12526,6 +13106,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'timeout',
       contentKind: 'transcript',
       expectedCode: 'request-timeout',
+      expectedAiCalls: 1,
       generate: async () => {
         throw new Error('ETIMEDOUT cookie=TOP_SECRET');
       },
@@ -12534,6 +13115,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       name: 'empty-result',
       contentKind: 'body',
       expectedCode: 'empty-response',
+      expectedAiCalls: 1,
       generate: async () => ({ description: '', keywords: [] }),
     },
   ];
@@ -12600,6 +13182,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
     };
     plugin.showSyncProgress = () => {};
     plugin.nextRecordTitle = async () => `AI失败不阻断-${scenario.name}`;
+    plugin.nextTitle = async (_dayDir, baseTitle) => baseTitle;
     plugin.findExistingRecordNotePath = async () => '';
     plugin.hydrateWebpageMarkdown = async (currentRecord) => currentRecord;
     plugin.saveSourceMediaAttachment = async (currentRecord) => currentRecord;
@@ -12637,7 +13220,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
       scenario.name,
     );
     assert.strictEqual(writes.length, 1, scenario.name);
-    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(aiCallCount, scenario.expectedAiCalls, scenario.name);
     assert.strictEqual(transcriptionCallCount, 0, scenario.name);
     assert.deepStrictEqual(
       requestCalls.filter(([requestPath]) => requestPath.includes('/synced')),
@@ -12664,7 +13247,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
     assert.strictEqual(secondResult.written.length, 0, scenario.name);
     assert.strictEqual(secondResult.failed.length, 0, scenario.name);
     assert.strictEqual(writes.length, 1, scenario.name);
-    assert.strictEqual(aiCallCount, 1, scenario.name);
+    assert.strictEqual(aiCallCount, scenario.expectedAiCalls, scenario.name);
     assert.strictEqual(transcriptionCallCount, 0, scenario.name);
   }
 
@@ -12733,6 +13316,7 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   };
   plugin.showSyncProgress = () => {};
   plugin.nextRecordTitle = async () => '本轮完成本地转写';
+  plugin.nextTitle = async (_dayDir, baseTitle) => baseTitle;
   plugin.findExistingRecordNotePath = async () => '';
   plugin.requestFileDownloadUrl = async () => 'https://download.example.test/audio.mp3';
   plugin.downloadArrayBuffer = async () => Buffer.from('controlled-audio-bytes');
@@ -12785,7 +13369,8 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   assert.strictEqual(firstResult.written.length, 1);
   assert.strictEqual(firstResult.failed.length, 0);
   assert.strictEqual(transcriptionCallCount, 1);
-  assert.strictEqual(aiCallCount, 1);
+  // AI 限流可重试，但已经完成的本地 ASR 绝不能因此重复执行。
+  assert.strictEqual(aiCallCount, 3);
   assert.strictEqual(noteWrites.length, 1);
   assert.strictEqual(attachmentWrites.length, 1);
   assert.strictEqual(
@@ -12812,7 +13397,7 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   assert.strictEqual(secondResult.written.length, 0);
   assert.strictEqual(secondResult.failed.length, 0);
   assert.strictEqual(transcriptionCallCount, 1);
-  assert.strictEqual(aiCallCount, 1);
+  assert.strictEqual(aiCallCount, 3);
   assert.strictEqual(noteWrites.length, 1);
   assert.strictEqual(attachmentWrites.length, 1);
   assert.strictEqual(
@@ -13585,6 +14170,10 @@ async function runXiaohongshuOcrBatchTests() {
 }
 
 async function main() {
+  runNoteOutputPlanModuleTests();
+  runRecordBodyMarkdownModuleTests();
+  runAiMetadataFormattingModuleTests();
+  runConfiguredNoteOutputPlanParityTests();
   await runXiaohongshuOcrBatchTests();
   await runClipboardTextWebpagePromotionTests();
   await runCanonicalVaultFolderTests();
