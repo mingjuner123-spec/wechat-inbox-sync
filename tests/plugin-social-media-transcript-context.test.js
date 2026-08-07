@@ -356,6 +356,16 @@ async function run() {
       cover: { url_list: ['https://p3-sign.douyinpic.com/real-cover.jpeg'] },
     },
   };
+  const unrelatedDouyinDetail = {
+    aweme_id: '7530000000000000999',
+    desc: '推荐流里的其他作品 #不要串用',
+    statistics: { play_count: 999999, digg_count: 99999 },
+    text_extra: [{ hashtag_name: '不要串用' }],
+    video: {
+      play_addr: { url_list: ['https://v.douyinvod.com/unrelated-video.mp4'] },
+      cover: { url_list: ['https://p3-sign.douyinpic.com/unrelated-cover.jpeg'] },
+    },
+  };
   requestUrlMock = async (request) => {
     const url = typeof request === 'string' ? request : request && request.url;
     if (url === `https://www.douyin.com/video/${douyinAwemeId}`) {
@@ -366,11 +376,13 @@ async function run() {
     if (url.includes(`/share/video/${douyinAwemeId}/`)) {
       return {
         text: [
-          '<html><head>',
-          '<meta property="og:description" content="欢迎收看我的 Vlog，我们即将拍婚纱照，今天生意也特别好。 #婚纱照 #日常Vlog">',
-          '<meta property="og:image" content="https://p3-sign.douyinpic.com/real-cover.jpeg">',
-          '</head><body><script>',
-          `window._ROUTER_DATA=${JSON.stringify({ loaderData: { video: { aweme_detail: douyinDetail } } })}`,
+          '<html><head><title>抖音</title></head><body><script>',
+          `window._ROUTER_DATA=${JSON.stringify({
+            loaderData: {
+              video: { aweme_detail: douyinDetail },
+              recommendation: { aweme_detail: unrelatedDouyinDetail },
+            },
+          })}`,
           '</script></body></html>',
         ].join(''),
       };
@@ -383,9 +395,11 @@ async function run() {
     content: `https://www.douyin.com/video/${douyinAwemeId}`,
     metadata: { url: `https://www.douyin.com/video/${douyinAwemeId}` },
   }, '', '', '抖音视频');
+  assert.strictEqual(realShapeDouyinRecord.metadata.sourceTitle, douyinDetail.desc);
   assert.match(realShapeDouyinRecord.metadata.markdown, /欢迎收看我的 Vlog/);
   assert.match(realShapeDouyinRecord.metadata.markdown, /#婚纱照/);
   assert.match(realShapeDouyinRecord.metadata.markdown, /https:\/\/p3-sign\.douyinpic\.com\/real-cover\.jpeg/);
+  assert.doesNotMatch(realShapeDouyinRecord.metadata.markdown, /推荐流里的其他作品|不要串用|unrelated-cover/);
   assert.deepStrictEqual({ ...realShapeDouyinRecord.metadata.socialMetrics, capturedAt: undefined }, {
     views: 3210,
     likes: 88,
@@ -394,6 +408,43 @@ async function run() {
     shares: 3,
     capturedAt: undefined,
   });
+  const realShapeDouyinMarkdown = helpers.buildMarkdownForRecord({
+    record: realShapeDouyinRecord,
+    title: realShapeDouyinRecord.metadata.sourceTitle,
+    syncedAt: '2026-08-07T00:00:00.000Z',
+  });
+  assert.ok(realShapeDouyinMarkdown.indexOf('## 标题') < realShapeDouyinMarkdown.indexOf('## 原文正文'));
+  assert.ok(realShapeDouyinMarkdown.indexOf('## 原文正文') < realShapeDouyinMarkdown.indexOf('## 标签'));
+  assert.ok(realShapeDouyinMarkdown.indexOf('## 标签') < realShapeDouyinMarkdown.indexOf('## 封面图'));
+  assert.ok(realShapeDouyinMarkdown.indexOf('## 封面图') < realShapeDouyinMarkdown.indexOf('## 口播/音频文案'));
+  assert.match(realShapeDouyinMarkdown, /views:\s*3210/);
+  assert.match(realShapeDouyinMarkdown, /likes:\s*88/);
+  assert.match(realShapeDouyinMarkdown, /collects:\s*17/);
+  assert.match(realShapeDouyinMarkdown, /comments:\s*9/);
+  assert.match(realShapeDouyinMarkdown, /shares:\s*3/);
+
+  const xhsTrailingRecord = {
+    type: 'webpage',
+    content: 'https://www.xiaohongshu.com/explore/trailing-comments',
+    metadata: helpers.buildTranscriptOnlyMetadata({
+      title: '小红书评论顺序测试',
+    }, {
+      url: 'https://www.xiaohongshu.com/explore/trailing-comments',
+      platform: '小红书',
+      transcription: '视频转写结果应当位于评论区之前',
+      transcriptionStatus: 'success',
+      conversionStatus: 'success',
+      markdown: '## 标题\n\n小红书评论顺序测试\n\n## 原文正文\n\n原文正文',
+      trailingMarkdown: '## 评论区\n\n- 测试评论用户：测试评论',
+    }),
+  };
+  const xhsTrailingMarkdown = helpers.buildMarkdownForRecord({
+    record: xhsTrailingRecord,
+    title: '小红书评论顺序测试',
+    syncedAt: '2026-08-07T00:00:00.000Z',
+  });
+  assert.ok(xhsTrailingMarkdown.indexOf('视频转写结果应当位于评论区之前') < xhsTrailingMarkdown.indexOf('## 评论区'));
+  assert.ok(xhsTrailingMarkdown.indexOf('## 评论区') < xhsTrailingMarkdown.indexOf('测试评论'));
 
   const xhsVideoId = '6a72a881000000002403f099';
   requestUrlMock = async (request) => {

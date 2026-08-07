@@ -98,6 +98,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     transcriptionError = '',
     conversionStatus = '',
     markdown: supplementalMarkdown = '',
+    trailingMarkdown = '',
     sourceTitle = '',
   } = {}) {
     const {
@@ -106,11 +107,13 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       contentSnapshot,
       imageUrls,
       images,
+      trailingMarkdown: existingTrailingMarkdown,
       ...rest
     } = metadata || {};
 
     const sourceName = platform || helpers.getWebpageSourcePrefix(url) || '网页';
     const cleanedSupplementalMarkdown = String(supplementalMarkdown || '').trim();
+    const cleanedTrailingMarkdown = String(trailingMarkdown || existingTrailingMarkdown || '').trim();
     const normalizedMediaUrls = Array.from(new Set((Array.isArray(mediaUrls) ? mediaUrls : [])
       .map((item) => helpers.normalizeExtractedUrl(typeof item === 'string' ? item : (item && item.url)))
       .filter((item) => /^https?:\/\//i.test(item))));
@@ -124,6 +127,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       url: url || rest.url || '',
       transcriptOnly: true,
       ...(cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {}),
+      ...(cleanedTrailingMarkdown ? { trailingMarkdown: cleanedTrailingMarkdown } : {}),
       mediaUrl,
       audioUrl: mediaUrl,
       mediaUrls: normalizedMediaUrls,
@@ -180,6 +184,9 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     }
     if (metadata.transcriptOnly) {
       const sourceMediaMarkdown = buildSourceMediaAttachmentMarkdown(metadata);
+      const trailingMarkdown = helpers.cleanMarkdownForStorage(metadata.trailingMarkdown || '', {
+        preserveListIndent: helpers.isXiaohongshuUrl(url),
+      });
       const transcriptMarkdown = buildAudioTranscriptMarkdown({
         url,
         transcription: metadata.transcription || '',
@@ -187,7 +194,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
         transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
         transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
       });
-      return [sourceMediaMarkdown, snapshot, transcriptMarkdown, automaticShareTextMarkdown]
+      return [sourceMediaMarkdown, snapshot, transcriptMarkdown, trailingMarkdown, automaticShareTextMarkdown]
         .filter(Boolean)
         .join('\n\n')
         .trim() + '\n';

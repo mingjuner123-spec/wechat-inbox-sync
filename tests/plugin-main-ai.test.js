@@ -5301,13 +5301,13 @@ assert.strictEqual(
   }], 'root-many-replies', [])[0].replies.length,
   25,
 );
-assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 300);
+assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 1000);
 assert.strictEqual(typeof helpers.limitSocialCommentTreeTotal, 'function');
-const oversizedXiaohongshuCommentTree = Array.from({ length: 3 }, (_unused, rootIndex) => ({
+const oversizedXiaohongshuCommentTree = Array.from({ length: 400 }, (_unused, rootIndex) => ({
   id: `budget-root-${rootIndex}`,
   author: `一级评论用户${rootIndex}`,
   content: `一级评论正文${rootIndex}`,
-  replies: Array.from({ length: 150 }, (_replyUnused, replyIndex) => ({
+  replies: Array.from({ length: 2 }, (_replyUnused, replyIndex) => ({
     id: `budget-reply-${rootIndex}-${replyIndex}`,
     author: `回复用户${rootIndex}-${replyIndex}`,
     content: `回复正文${rootIndex}-${replyIndex}`,
@@ -5318,39 +5318,37 @@ const limitedXiaohongshuCommentTree = helpers.limitSocialCommentTreeTotal(
   helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
 );
 const limitedXiaohongshuCommentStats = helpers.getSocialCommentTreeStats(limitedXiaohongshuCommentTree);
-assert.strictEqual(limitedXiaohongshuCommentStats.rootCount + limitedXiaohongshuCommentStats.replyCount, 300);
-assert.deepStrictEqual(
-  limitedXiaohongshuCommentTree.map((comment) => comment.id),
-  ['budget-root-0', 'budget-root-1', 'budget-root-2'],
-);
-assert.strictEqual(oversizedXiaohongshuCommentTree[1].replies.length, 150);
+assert.strictEqual(limitedXiaohongshuCommentStats.rootCount + limitedXiaohongshuCommentStats.replyCount, 1000);
+assert.strictEqual(limitedXiaohongshuCommentTree[0].id, 'budget-root-0');
+assert.strictEqual(limitedXiaohongshuCommentTree.at(-1).id, 'budget-root-333');
+assert.strictEqual(oversizedXiaohongshuCommentTree[1].replies.length, 2);
 const finalizedXiaohongshuCommentBudget = helpers.finalizeXiaohongshuComments({
   baseMarkdown: '# 正文',
   renderedComments: oversizedXiaohongshuCommentTree,
   diagnosticDetails: { stopReason: 'total_limit_reached' },
-  limit: 300,
+  limit: 1000,
 });
 assert.strictEqual(
   finalizedXiaohongshuCommentBudget.stats.rootCount + finalizedXiaohongshuCommentBudget.stats.replyCount,
-  300,
+  1000,
 );
 assert.strictEqual(
   finalizedXiaohongshuCommentBudget.markdownStats.rootCount + finalizedXiaohongshuCommentBudget.markdownStats.replyCount,
-  300,
+  1000,
 );
 assert.strictEqual(finalizedXiaohongshuCommentBudget.diagnosticDetails.partial, true);
 assert.strictEqual(helpers.XIAOHONGSHU_COMMENT_TIMEOUT_MS, 90000);
 assert.strictEqual(typeof helpers.getXiaohongshuCommentBudgetState, 'function');
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 299 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 999 }),
   { shouldStop: false, stopReason: '', remainingMs: 1 },
 );
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 100000, totalCount: 299 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 100000, totalCount: 999 }),
   { shouldStop: true, stopReason: 'time_budget_exceeded', remainingMs: 0 },
 );
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 90000, totalCount: 300 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 90000, totalCount: 1000 }),
   { shouldStop: true, stopReason: 'total_limit_reached', remainingMs: 10000 },
 );
 const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
@@ -5388,10 +5386,12 @@ assert.strictEqual(
 );
 const xiaohongshuCommentPaginationScript = helpers.getXiaohongshuCommentPaginationScript(
   'https://www.xiaohongshu.com/explore/demo-note?xsec_token=demo-token',
-  { deadlineAt: 123456, totalLimit: 300 },
+  { deadlineAt: 123456, totalLimit: 1000 },
 );
 assert.match(xiaohongshuCommentPaginationScript, /credentials:\s*'include'/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/page/);
+assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = 100/);
+assert.match(xiaohongshuCommentPaginationScript, /page < XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/sub\/page/);
 assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_LIMIT/);
 assert.match(xiaohongshuCommentPaginationScript, /const deadlineAt = 123456/);
@@ -7359,7 +7359,12 @@ async function runAsyncHydrationTests() {
   }, '', '', '抖音精确作品');
   assert.strictEqual(preciseDouyinRecord.metadata.transcriptOnly, true);
   assert.strictEqual(preciseDouyinRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4');
-  assert.strictEqual(preciseDouyinRecord.metadata.title, '抖音口播文案');
+  assert.strictEqual(
+    preciseDouyinRecord.metadata.title,
+    '先生 我出不了神山 你带一支格桑花走吧\n#萨普神山\n#西藏',
+  );
+  assert.match(preciseDouyinRecord.metadata.markdown, /先生 我出不了神山 你带一支格桑花走吧/);
+  assert.match(preciseDouyinRecord.metadata.markdown, /#萨普神山/);
   assert.strictEqual(preciseDouyinRenderCalled, false);
 
   const sessionFirstPlugin = new PluginClass();
@@ -7727,9 +7732,10 @@ async function runAsyncHydrationTests() {
       metadata: { url: 'https://www.xiaohongshu.com/explore/video-comments' },
     }, '', '', '小红书视频评论区');
     assert.strictEqual(xhsVideoWithCommentsRecord.metadata.transcriptOnly, true);
-    assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('## 评论区'));
-    assert.ok(xhsVideoWithCommentsRecord.metadata.markdown.includes('**真实用户**：真实评论内容'));
-    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.markdown.includes('不应写入的推荐评论'), false);
+    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.markdown.includes('## 评论区'), false);
+    assert.ok(xhsVideoWithCommentsRecord.metadata.trailingMarkdown.includes('## 评论区'));
+    assert.ok(xhsVideoWithCommentsRecord.metadata.trailingMarkdown.includes('**真实用户**：真实评论内容'));
+    assert.strictEqual(xhsVideoWithCommentsRecord.metadata.trailingMarkdown.includes('不应写入的推荐评论'), false);
     const xhsVideoWithCommentsMarkdown = helpers.buildMarkdownForRecord({
       record: xhsVideoWithCommentsRecord,
       title: '小红书视频评论区',
@@ -7738,6 +7744,7 @@ async function runAsyncHydrationTests() {
     assert.ok(xhsVideoWithCommentsMarkdown.includes('视频口播正文'));
     assert.ok(xhsVideoWithCommentsMarkdown.includes('## 评论区'));
     assert.ok(xhsVideoWithCommentsMarkdown.includes('真实评论内容'));
+    assert.ok(xhsVideoWithCommentsMarkdown.indexOf('视频口播正文') < xhsVideoWithCommentsMarkdown.indexOf('## 评论区'));
   } finally {
     requestUrlMock = previousXhsCommentRequestUrlMock;
   }

@@ -965,6 +965,7 @@ var require_record_body_markdown_utils = __commonJS({
         transcriptionError = "",
         conversionStatus = "",
         markdown: supplementalMarkdown = "",
+        trailingMarkdown = "",
         sourceTitle = ""
       } = {}) {
         const {
@@ -973,10 +974,12 @@ var require_record_body_markdown_utils = __commonJS({
           contentSnapshot,
           imageUrls,
           images,
+          trailingMarkdown: existingTrailingMarkdown,
           ...rest
         } = metadata || {};
         const sourceName = platform || helpers.getWebpageSourcePrefix(url) || "网页";
         const cleanedSupplementalMarkdown = String(supplementalMarkdown || "").trim();
+        const cleanedTrailingMarkdown = String(trailingMarkdown || existingTrailingMarkdown || "").trim();
         const normalizedMediaUrls = Array.from(new Set((Array.isArray(mediaUrls) ? mediaUrls : []).map((item) => helpers.normalizeExtractedUrl(typeof item === "string" ? item : item && item.url)).filter((item) => /^https?:\/\//i.test(item))));
         if (mediaUrl && !normalizedMediaUrls.includes(mediaUrl)) normalizedMediaUrls.unshift(mediaUrl);
         return {
@@ -986,6 +989,7 @@ var require_record_body_markdown_utils = __commonJS({
           url: url || rest.url || "",
           transcriptOnly: true,
           ...cleanedSupplementalMarkdown ? { markdown: cleanedSupplementalMarkdown } : {},
+          ...cleanedTrailingMarkdown ? { trailingMarkdown: cleanedTrailingMarkdown } : {},
           mediaUrl,
           audioUrl: mediaUrl,
           mediaUrls: normalizedMediaUrls,
@@ -1036,6 +1040,9 @@ var require_record_body_markdown_utils = __commonJS({
         }
         if (metadata.transcriptOnly) {
           const sourceMediaMarkdown = buildSourceMediaAttachmentMarkdown2(metadata);
+          const trailingMarkdown = helpers.cleanMarkdownForStorage(metadata.trailingMarkdown || "", {
+            preserveListIndent: helpers.isXiaohongshuUrl(url)
+          });
           const transcriptMarkdown = buildAudioTranscriptMarkdown2({
             url,
             transcription: metadata.transcription || "",
@@ -1043,7 +1050,7 @@ var require_record_body_markdown_utils = __commonJS({
             transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || "",
             transcriptionError: metadata.transcriptionError || metadata.conversionError || ""
           });
-          return [sourceMediaMarkdown, snapshot, transcriptMarkdown, automaticShareTextMarkdown].filter(Boolean).join("\n\n").trim() + "\n";
+          return [sourceMediaMarkdown, snapshot, transcriptMarkdown, trailingMarkdown, automaticShareTextMarkdown].filter(Boolean).join("\n\n").trim() + "\n";
         }
         if (snapshot) {
           if (helpers.isFeishuUrl(url)) {
@@ -1695,9 +1702,13 @@ var FEISHU_OAUTH_SYNC_API_BASE = "https://he02-d8gebzv050ed6c4ef-d350b93bf-13574
 var FEISHU_TUTORIAL_URL = "https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink";
 var FEISHU_OFFICIAL_API_TUTORIAL_URL = "https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink";
 var MAX_PLUGIN_BINDINGS = 3;
-var XIAOHONGSHU_TOTAL_COMMENT_LIMIT = 300;
+var XIAOHONGSHU_TOTAL_COMMENT_LIMIT = 1e3;
 var XIAOHONGSHU_ROOT_COMMENT_LIMIT = XIAOHONGSHU_TOTAL_COMMENT_LIMIT;
 var XIAOHONGSHU_REPLY_COMMENT_LIMIT = 100;
+var XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = Math.min(
+  120,
+  Math.max(30, Math.ceil(XIAOHONGSHU_TOTAL_COMMENT_LIMIT / 10))
+);
 var XIAOHONGSHU_COMMENT_TIMEOUT_MS = 9e4;
 var XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS = 1e4;
 var XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS = 1e4;
@@ -5246,6 +5257,69 @@ function extractDouyinDetailFromShareHtml(html, awemeId) {
   );
 }
 __name(extractDouyinDetailFromShareHtml, "extractDouyinDetailFromShareHtml");
+function collectDouyinImageUrlList(value, urls) {
+  if (!value) return;
+  if (typeof value === "string") {
+    pushUniqueUrl(urls, value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectDouyinImageUrlList(item, urls));
+    return;
+  }
+  if (typeof value === "object") {
+    collectDouyinImageUrlList(value.url_list, urls);
+    collectDouyinImageUrlList(value.urlList, urls);
+    collectDouyinImageUrlList(value.url, urls);
+    collectDouyinImageUrlList(value.uri, urls);
+  }
+}
+__name(collectDouyinImageUrlList, "collectDouyinImageUrlList");
+function buildDouyinStructuredContent(detail = {}, fallback = {}) {
+  const source = detail && typeof detail === "object" ? detail : {};
+  const fallbackSource = fallback && typeof fallback === "object" ? fallback : {};
+  const description = cleanSocialDescription(
+    source.desc || source.description || fallbackSource.description || ""
+  );
+  const title = cleanSocialDescription(
+    source.title || source.preview_title || source.previewTitle || description || fallbackSource.title || ""
+  );
+  const structuredTags = [];
+  const rememberTag = /* @__PURE__ */ __name((value) => {
+    const tag = String(value || "").replace(/^#+/, "").trim();
+    if (tag && !structuredTags.includes(tag)) structuredTags.push(tag);
+  }, "rememberTag");
+  (Array.isArray(source.text_extra) ? source.text_extra : []).forEach((item) => {
+    rememberTag(item && (item.hashtag_name || item.hashtagName));
+  });
+  (Array.isArray(source.cha_list) ? source.cha_list : []).forEach((item) => {
+    rememberTag(item && (item.cha_name || item.chaName));
+  });
+  extractTagsFromText(description).forEach(rememberTag);
+  if (!structuredTags.length) {
+    (Array.isArray(fallbackSource.tags) ? fallbackSource.tags : []).forEach(rememberTag);
+  }
+  const video = source.video && typeof source.video === "object" ? source.video : {};
+  const coverUrls = [];
+  [
+    video.cover,
+    video.origin_cover,
+    video.originCover,
+    video.dynamic_cover,
+    video.dynamicCover,
+    video.animated_cover,
+    video.animatedCover
+  ].forEach((value) => collectDouyinImageUrlList(value, coverUrls));
+  const socialMetrics = buildSocialMetrics(source);
+  return {
+    title,
+    description,
+    tags: structuredTags,
+    coverUrl: coverUrls[0] || String(fallbackSource.coverUrl || "").trim(),
+    socialMetrics: hasSocialMetrics(socialMetrics) ? socialMetrics : fallbackSource.socialMetrics || {}
+  };
+}
+__name(buildDouyinStructuredContent, "buildDouyinStructuredContent");
 function shouldResolveMediaDownloadUrl(url) {
   const text = String(url || "").toLowerCase();
   return text.includes("/aweme/v1/play") || text.includes("v.douyin.com") || text.includes("iesdouyin.com/share/video") || text.includes("amemv.com");
@@ -9301,6 +9375,18 @@ function appendSocialCommentsToMarkdown(markdown, comments = []) {
 ${commentMarkdown}` : source;
 }
 __name(appendSocialCommentsToMarkdown, "appendSocialCommentsToMarkdown");
+function splitSocialCommentsMarkdown(markdown = "") {
+  const source = String(markdown || "").trim();
+  if (!source) return { markdown: "", trailingMarkdown: "" };
+  const match = /(^|\n)##\s+评论区\s*(?:\n|$)/u.exec(source);
+  if (!match) return { markdown: source, trailingMarkdown: "" };
+  const sectionStart = match.index + (match[1] ? match[1].length : 0);
+  return {
+    markdown: source.slice(0, sectionStart).trim(),
+    trailingMarkdown: source.slice(sectionStart).trim()
+  };
+}
+__name(splitSocialCommentsMarkdown, "splitSocialCommentsMarkdown");
 function isXiaohongshuCommentApiUrl(url) {
   try {
     const parsed = new URL(String(url || "").trim());
@@ -9747,6 +9833,7 @@ function getXiaohongshuCommentPaginationScript(url = "", options = {}) {
       const XIAOHONGSHU_ROOT_COMMENT_LIMIT = ${XIAOHONGSHU_ROOT_COMMENT_LIMIT};
       const XIAOHONGSHU_REPLY_COMMENT_LIMIT = ${XIAOHONGSHU_REPLY_COMMENT_LIMIT};
       const XIAOHONGSHU_TOTAL_COMMENT_LIMIT = ${totalLimit};
+      const XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = ${XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT};
       const deadlineAt = ${deadlineAt};
       const requestTimeoutMs = ${XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS};
       const inputUrl = ${JSON.stringify(cleanDisplayUrl(url))};
@@ -9826,7 +9913,7 @@ function getXiaohongshuCommentPaginationScript(url = "", options = {}) {
       const baseParams = { note_id: noteId, xsec_token: xsecToken, image_scenes: 'FD_WM_WEBP,CRD_WM_WEBP', image_formats: 'jpg,webp,avif' };
       const roots = [];
       let cursor = '';
-      for (let page = 0; page < 30 && roots.length < XIAOHONGSHU_ROOT_COMMENT_LIMIT; page += 1) {
+      for (let page = 0; page < XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT && roots.length < XIAOHONGSHU_ROOT_COMMENT_LIMIT; page += 1) {
         const budgetStopReason = getBudgetStopReason(roots.length + diagnostic.replyCount);
         if (budgetStopReason) {
           diagnostic.stopReason = budgetStopReason;
@@ -16840,6 +16927,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     source = "",
     noMediaError = "",
     markdown = "",
+    trailingMarkdown = "",
     binding = null,
     title = "",
     socialMetrics = {},
@@ -16867,6 +16955,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionSource: source || "subtitle",
           conversionStatus: "success",
           markdown,
+          trailingMarkdown,
           sourceTitle: normalizedSourceTitle
         })
       };
@@ -16913,6 +17002,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionSource: source || "media-url",
           conversionStatus: "failed",
           markdown,
+          trailingMarkdown,
           sourceTitle: normalizedSourceTitle
         })
       };
@@ -16951,6 +17041,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             transcriptionSource: result.source,
             conversionStatus: "success",
             markdown,
+            trailingMarkdown,
             sourceTitle: normalizedSourceTitle
           });
           return {
@@ -16987,6 +17078,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionSource: source || this.settings.aiProvider || "unknown",
           conversionStatus: "failed",
           markdown,
+          trailingMarkdown,
           sourceTitle: normalizedSourceTitle
         })
       };
@@ -17492,6 +17584,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         let mediaUrl = mediaUrls[0] || "";
         let hasPreciseDouyinMedia = false;
         let douyinSocialMetrics = {};
+        let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
           for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
@@ -17503,10 +17596,28 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               });
               const shareHtml = shareResponse.text || "";
               const shareUrls = extractDouyinMediaUrlsFromShareHtml(shareHtml, douyinAwemeId);
+              const shareDetail = extractDouyinDetailFromShareHtml(shareHtml, douyinAwemeId);
+              if (shareDetail) {
+                const sharePageMetadata = extractWebpageMetadataFromHtml(shareHtml, resolvedUrl);
+                douyinStructuredContent = buildDouyinStructuredContent(shareDetail, {
+                  title: douyinStructuredContent && douyinStructuredContent.title || sharePageMetadata.title,
+                  description: douyinStructuredContent && douyinStructuredContent.description || sharePageMetadata.description,
+                  tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(sharePageMetadata.description, shareHtml),
+                  coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(shareHtml, ["og:image", "twitter:image"])),
+                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
+                });
+                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+                  title: douyinStructuredContent.title,
+                  description: douyinStructuredContent.description,
+                  tags: douyinStructuredContent.tags,
+                  imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean)
+                });
+                if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+                  douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+                }
+              }
               if (shareUrls.length) {
                 html2 = shareHtml;
-                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdownFromHtml(shareHtml, resolvedUrl);
-                const shareDetail = extractDouyinDetailFromShareHtml(shareHtml, douyinAwemeId);
                 const structuredShareMetrics = buildSocialMetrics(shareDetail);
                 const shareMetrics = hasSocialMetrics(structuredShareMetrics) ? structuredShareMetrics : extractSocialMetricsFromHtml(shareHtml);
                 if (hasSocialMetrics(shareMetrics)) douyinSocialMetrics = shareMetrics;
@@ -17518,14 +17629,30 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             } catch (shareError) {
             }
           }
-          if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics)) {
+          if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics) || !douyinStructuredContent) {
             for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
               try {
                 const detailResponse = await requestUrl({ url: detailUrl, method: "GET", headers: getSocialRequestHeaders(detailUrl) });
                 const detailPayload = detailResponse.json || JSON.parse(detailResponse.text || "{}");
                 if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
                 const detail = detailPayload.aweme_detail || detailPayload.awemeDetail || (Array.isArray(detailPayload.item_list) ? detailPayload.item_list[0] : null);
-                douyinSocialMetrics = buildSocialMetrics(detail);
+                const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
+                douyinStructuredContent = buildDouyinStructuredContent(detail, {
+                  title: douyinStructuredContent && douyinStructuredContent.title || detailPageMetadata.title,
+                  description: douyinStructuredContent && douyinStructuredContent.description || detailPageMetadata.description,
+                  tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(detailPageMetadata.description, html2),
+                  coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(html2, ["og:image", "twitter:image"])),
+                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
+                });
+                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+                  title: douyinStructuredContent.title,
+                  description: douyinStructuredContent.description,
+                  tags: douyinStructuredContent.tags,
+                  imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean)
+                });
+                if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+                  douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+                }
                 const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailPayload);
                 if (detailUrls.length) {
                   mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
@@ -17827,17 +17954,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               })
             };
           }
+          const selectedSupplementalMarkdown = isXiaohongshuUrl(url) && extractedXiaohongshu && String(extractedXiaohongshu.markdown || "").trim() ? extractedXiaohongshu.markdown : socialMediaSupplementalMarkdown;
+          const supplementalMarkdownParts = isXiaohongshuUrl(url) ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown) : { markdown: selectedSupplementalMarkdown, trailingMarkdown: "" };
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? "抖音" : "小红书",
             mediaUrl,
             mediaUrls,
             source: "video",
-            markdown: isXiaohongshuUrl(url) && extractedXiaohongshu && String(extractedXiaohongshu.description || "").trim() ? extractedXiaohongshu.markdown : socialMediaSupplementalMarkdown,
+            markdown: supplementalMarkdownParts.markdown,
+            trailingMarkdown: supplementalMarkdownParts.trailingMarkdown,
             binding,
             title,
-            socialMetrics: isXiaohongshuUrl(url) ? extractedXiaohongshu && extractedXiaohongshu.socialMetrics : hasSocialMetrics(douyinSocialMetrics) ? douyinSocialMetrics : extractSocialMetricsFromHtml(html2),
-            sourceTitle: isXiaohongshuUrl(url) ? getPreferredXiaohongshuTitle(metadata.title, extractedXiaohongshu && extractedXiaohongshu.title, "小红书") : extractWebpageMetadataFromHtml(html2, resolvedUrl).title,
+            socialMetrics: isXiaohongshuUrl(url) ? extractedXiaohongshu && extractedXiaohongshu.socialMetrics : douyinStructuredContent && hasSocialMetrics(douyinStructuredContent.socialMetrics) ? douyinStructuredContent.socialMetrics : hasSocialMetrics(douyinSocialMetrics) ? douyinSocialMetrics : extractSocialMetricsFromHtml(html2),
+            sourceTitle: isXiaohongshuUrl(url) ? getPreferredXiaohongshuTitle(metadata.title, extractedXiaohongshu && extractedXiaohongshu.title, "小红书") : douyinStructuredContent && douyinStructuredContent.title || extractWebpageMetadataFromHtml(html2, resolvedUrl).title,
             noMediaError: isUnavailableXhs ? "小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。" : ""
           });
         }

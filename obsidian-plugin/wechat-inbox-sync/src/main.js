@@ -117,9 +117,13 @@ const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-135
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
-const XIAOHONGSHU_TOTAL_COMMENT_LIMIT = 300;
+const XIAOHONGSHU_TOTAL_COMMENT_LIMIT = 1000;
 const XIAOHONGSHU_ROOT_COMMENT_LIMIT = XIAOHONGSHU_TOTAL_COMMENT_LIMIT;
 const XIAOHONGSHU_REPLY_COMMENT_LIMIT = 100;
+const XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = Math.min(
+  120,
+  Math.max(30, Math.ceil(XIAOHONGSHU_TOTAL_COMMENT_LIMIT / 10)),
+);
 const XIAOHONGSHU_COMMENT_TIMEOUT_MS = 90000;
 const XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS = 10000;
 const XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS = 10000;
@@ -4384,6 +4388,80 @@ function extractDouyinDetailFromShareHtml(html, awemeId) {
     parseJsonObjectAssignedTo(source, 'window._ROUTER_DATA'),
     awemeId,
   );
+}
+
+function collectDouyinImageUrlList(value, urls) {
+  if (!value) return;
+  if (typeof value === 'string') {
+    pushUniqueUrl(urls, value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectDouyinImageUrlList(item, urls));
+    return;
+  }
+  if (typeof value === 'object') {
+    collectDouyinImageUrlList(value.url_list, urls);
+    collectDouyinImageUrlList(value.urlList, urls);
+    collectDouyinImageUrlList(value.url, urls);
+    collectDouyinImageUrlList(value.uri, urls);
+  }
+}
+
+function buildDouyinStructuredContent(detail = {}, fallback = {}) {
+  const source = detail && typeof detail === 'object' ? detail : {};
+  const fallbackSource = fallback && typeof fallback === 'object' ? fallback : {};
+  const description = cleanSocialDescription(
+    source.desc
+    || source.description
+    || fallbackSource.description
+    || '',
+  );
+  const title = cleanSocialDescription(
+    source.title
+    || source.preview_title
+    || source.previewTitle
+    || description
+    || fallbackSource.title
+    || '',
+  );
+  const structuredTags = [];
+  const rememberTag = (value) => {
+    const tag = String(value || '').replace(/^#+/, '').trim();
+    if (tag && !structuredTags.includes(tag)) structuredTags.push(tag);
+  };
+  (Array.isArray(source.text_extra) ? source.text_extra : []).forEach((item) => {
+    rememberTag(item && (item.hashtag_name || item.hashtagName));
+  });
+  (Array.isArray(source.cha_list) ? source.cha_list : []).forEach((item) => {
+    rememberTag(item && (item.cha_name || item.chaName));
+  });
+  extractTagsFromText(description).forEach(rememberTag);
+  if (!structuredTags.length) {
+    (Array.isArray(fallbackSource.tags) ? fallbackSource.tags : []).forEach(rememberTag);
+  }
+
+  const video = source.video && typeof source.video === 'object' ? source.video : {};
+  const coverUrls = [];
+  [
+    video.cover,
+    video.origin_cover,
+    video.originCover,
+    video.dynamic_cover,
+    video.dynamicCover,
+    video.animated_cover,
+    video.animatedCover,
+  ].forEach((value) => collectDouyinImageUrlList(value, coverUrls));
+  const socialMetrics = buildSocialMetrics(source);
+  return {
+    title,
+    description,
+    tags: structuredTags,
+    coverUrl: coverUrls[0] || String(fallbackSource.coverUrl || '').trim(),
+    socialMetrics: hasSocialMetrics(socialMetrics)
+      ? socialMetrics
+      : (fallbackSource.socialMetrics || {}),
+  };
 }
 
 function shouldResolveMediaDownloadUrl(url) {
@@ -9073,6 +9151,18 @@ function appendSocialCommentsToMarkdown(markdown, comments = []) {
   return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
 }
 
+function splitSocialCommentsMarkdown(markdown = '') {
+  const source = String(markdown || '').trim();
+  if (!source) return { markdown: '', trailingMarkdown: '' };
+  const match = /(^|\n)##\s+评论区\s*(?:\n|$)/u.exec(source);
+  if (!match) return { markdown: source, trailingMarkdown: '' };
+  const sectionStart = match.index + (match[1] ? match[1].length : 0);
+  return {
+    markdown: source.slice(0, sectionStart).trim(),
+    trailingMarkdown: source.slice(sectionStart).trim(),
+  };
+}
+
 function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
   const source = String(markdown || '').trim();
   if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
@@ -9575,6 +9665,7 @@ function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
       const XIAOHONGSHU_ROOT_COMMENT_LIMIT = ${XIAOHONGSHU_ROOT_COMMENT_LIMIT};
       const XIAOHONGSHU_REPLY_COMMENT_LIMIT = ${XIAOHONGSHU_REPLY_COMMENT_LIMIT};
       const XIAOHONGSHU_TOTAL_COMMENT_LIMIT = ${totalLimit};
+      const XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = ${XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT};
       const deadlineAt = ${deadlineAt};
       const requestTimeoutMs = ${XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS};
       const inputUrl = ${JSON.stringify(cleanDisplayUrl(url))};
@@ -9654,7 +9745,7 @@ function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
       const baseParams = { note_id: noteId, xsec_token: xsecToken, image_scenes: 'FD_WM_WEBP,CRD_WM_WEBP', image_formats: 'jpg,webp,avif' };
       const roots = [];
       let cursor = '';
-      for (let page = 0; page < 30 && roots.length < XIAOHONGSHU_ROOT_COMMENT_LIMIT; page += 1) {
+      for (let page = 0; page < XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT && roots.length < XIAOHONGSHU_ROOT_COMMENT_LIMIT; page += 1) {
         const budgetStopReason = getBudgetStopReason(roots.length + diagnostic.replyCount);
         if (budgetStopReason) {
           diagnostic.stopReason = budgetStopReason;
@@ -17359,6 +17450,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     source = '',
     noMediaError = '',
     markdown = '',
+    trailingMarkdown = '',
     binding = null,
     title = '',
     socialMetrics = {},
@@ -17389,6 +17481,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionSource: source || 'subtitle',
           conversionStatus: 'success',
           markdown,
+          trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
         }),
       };
@@ -17446,6 +17539,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionSource: source || 'media-url',
           conversionStatus: 'failed',
           markdown,
+          trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
         }),
       };
@@ -17490,6 +17584,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             transcriptionSource: result.source,
             conversionStatus: 'success',
             markdown,
+            trailingMarkdown,
             sourceTitle: normalizedSourceTitle,
           });
           return {
@@ -17526,6 +17621,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionSource: source || this.settings.aiProvider || 'unknown',
           conversionStatus: 'failed',
           markdown,
+          trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
         }),
       };
@@ -18093,6 +18189,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
         let douyinSocialMetrics = {};
+        let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
           for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
@@ -18104,10 +18201,32 @@ class WechatObsidianInboxPlugin extends Plugin {
               });
               const shareHtml = shareResponse.text || '';
               const shareUrls = extractDouyinMediaUrlsFromShareHtml(shareHtml, douyinAwemeId);
+              const shareDetail = extractDouyinDetailFromShareHtml(shareHtml, douyinAwemeId);
+              if (shareDetail) {
+                const sharePageMetadata = extractWebpageMetadataFromHtml(shareHtml, resolvedUrl);
+                douyinStructuredContent = buildDouyinStructuredContent(shareDetail, {
+                  title: douyinStructuredContent && douyinStructuredContent.title || sharePageMetadata.title,
+                  description: douyinStructuredContent && douyinStructuredContent.description || sharePageMetadata.description,
+                  tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length
+                    ? douyinStructuredContent.tags
+                    : extractTagsFromText(sharePageMetadata.description, shareHtml),
+                  coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl
+                    || normalizeExtractedUrl(extractMetaContent(shareHtml, ['og:image', 'twitter:image'])),
+                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics
+                    || douyinSocialMetrics,
+                });
+                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+                  title: douyinStructuredContent.title,
+                  description: douyinStructuredContent.description,
+                  tags: douyinStructuredContent.tags,
+                  imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean),
+                });
+                if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+                  douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+                }
+              }
               if (shareUrls.length) {
                 html = shareHtml;
-                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdownFromHtml(shareHtml, resolvedUrl);
-                const shareDetail = extractDouyinDetailFromShareHtml(shareHtml, douyinAwemeId);
                 const structuredShareMetrics = buildSocialMetrics(shareDetail);
                 const shareMetrics = hasSocialMetrics(structuredShareMetrics)
                   ? structuredShareMetrics
@@ -18122,7 +18241,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               // The share page is an anonymous, cookie-free fast path. Continue with other resolvers.
             }
           }
-          if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics)) {
+          if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics) || !douyinStructuredContent) {
             for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
               try {
                 // Douyin's rendered page can load recommendation videos; the detail API is pinned to one aweme id.
@@ -18131,7 +18250,27 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
                 const detail = detailPayload.aweme_detail || detailPayload.awemeDetail
                   || (Array.isArray(detailPayload.item_list) ? detailPayload.item_list[0] : null);
-                douyinSocialMetrics = buildSocialMetrics(detail);
+                const detailPageMetadata = extractWebpageMetadataFromHtml(html, resolvedUrl);
+                douyinStructuredContent = buildDouyinStructuredContent(detail, {
+                  title: douyinStructuredContent && douyinStructuredContent.title || detailPageMetadata.title,
+                  description: douyinStructuredContent && douyinStructuredContent.description || detailPageMetadata.description,
+                  tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length
+                    ? douyinStructuredContent.tags
+                    : extractTagsFromText(detailPageMetadata.description, html),
+                  coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl
+                    || normalizeExtractedUrl(extractMetaContent(html, ['og:image', 'twitter:image'])),
+                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics
+                    || douyinSocialMetrics,
+                });
+                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+                  title: douyinStructuredContent.title,
+                  description: douyinStructuredContent.description,
+                  tags: douyinStructuredContent.tags,
+                  imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean),
+                });
+                if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+                  douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+                }
                 const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailPayload);
                 if (detailUrls.length) {
                   mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
@@ -18488,27 +18627,35 @@ class WechatObsidianInboxPlugin extends Plugin {
               }),
             };
           }
+          const selectedSupplementalMarkdown = isXiaohongshuUrl(url)
+            && extractedXiaohongshu
+            && String(extractedXiaohongshu.markdown || '').trim()
+            ? extractedXiaohongshu.markdown
+            : socialMediaSupplementalMarkdown;
+          const supplementalMarkdownParts = isXiaohongshuUrl(url)
+            ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown)
+            : { markdown: selectedSupplementalMarkdown, trailingMarkdown: '' };
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
             mediaUrl,
             mediaUrls,
             source: 'video',
-            markdown: isXiaohongshuUrl(url)
-              && extractedXiaohongshu
-              && String(extractedXiaohongshu.description || '').trim()
-              ? extractedXiaohongshu.markdown
-              : socialMediaSupplementalMarkdown,
+            markdown: supplementalMarkdownParts.markdown,
+            trailingMarkdown: supplementalMarkdownParts.trailingMarkdown,
             binding,
             title,
             socialMetrics: isXiaohongshuUrl(url)
               ? (extractedXiaohongshu && extractedXiaohongshu.socialMetrics)
-              : (hasSocialMetrics(douyinSocialMetrics)
-                ? douyinSocialMetrics
-                : extractSocialMetricsFromHtml(html)),
+              : (douyinStructuredContent && hasSocialMetrics(douyinStructuredContent.socialMetrics)
+                ? douyinStructuredContent.socialMetrics
+                : (hasSocialMetrics(douyinSocialMetrics)
+                  ? douyinSocialMetrics
+                  : extractSocialMetricsFromHtml(html))),
             sourceTitle: isXiaohongshuUrl(url)
               ? getPreferredXiaohongshuTitle(metadata.title, extractedXiaohongshu && extractedXiaohongshu.title, '小红书')
-              : extractWebpageMetadataFromHtml(html, resolvedUrl).title,
+              : (douyinStructuredContent && douyinStructuredContent.title
+                || extractWebpageMetadataFromHtml(html, resolvedUrl).title),
             noMediaError: isUnavailableXhs
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
