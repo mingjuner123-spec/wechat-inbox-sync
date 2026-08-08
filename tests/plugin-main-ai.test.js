@@ -1141,9 +1141,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.77'), {
-  manifestVersion: '1.3.77',
-  runtimeVersion: '1.3.77',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.78'), {
+  manifestVersion: '1.3.78',
+  runtimeVersion: '1.3.78',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -5354,7 +5354,7 @@ assert.strictEqual(
   }], 'root-many-replies', [])[0].replies.length,
   25,
 );
-assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 1000);
+assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 300);
 assert.strictEqual(typeof helpers.limitSocialCommentTreeTotal, 'function');
 const oversizedXiaohongshuCommentTree = Array.from({ length: 400 }, (_unused, rootIndex) => ({
   id: `budget-root-${rootIndex}`,
@@ -5371,23 +5371,23 @@ const limitedXiaohongshuCommentTree = helpers.limitSocialCommentTreeTotal(
   helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
 );
 const limitedXiaohongshuCommentStats = helpers.getSocialCommentTreeStats(limitedXiaohongshuCommentTree);
-assert.strictEqual(limitedXiaohongshuCommentStats.rootCount + limitedXiaohongshuCommentStats.replyCount, 1000);
+assert.strictEqual(limitedXiaohongshuCommentStats.rootCount + limitedXiaohongshuCommentStats.replyCount, 300);
 assert.strictEqual(limitedXiaohongshuCommentTree[0].id, 'budget-root-0');
-assert.strictEqual(limitedXiaohongshuCommentTree.at(-1).id, 'budget-root-333');
+assert.strictEqual(limitedXiaohongshuCommentTree.at(-1).id, 'budget-root-99');
 assert.strictEqual(oversizedXiaohongshuCommentTree[1].replies.length, 2);
 const finalizedXiaohongshuCommentBudget = helpers.finalizeXiaohongshuComments({
   baseMarkdown: '# 正文',
   renderedComments: oversizedXiaohongshuCommentTree,
   diagnosticDetails: { stopReason: 'total_limit_reached' },
-  limit: 1000,
+  limit: 300,
 });
 assert.strictEqual(
   finalizedXiaohongshuCommentBudget.stats.rootCount + finalizedXiaohongshuCommentBudget.stats.replyCount,
-  1000,
+  300,
 );
 assert.strictEqual(
   finalizedXiaohongshuCommentBudget.markdownStats.rootCount + finalizedXiaohongshuCommentBudget.markdownStats.replyCount,
-  1000,
+  300,
 );
 assert.strictEqual(finalizedXiaohongshuCommentBudget.diagnosticDetails.partial, true);
 assert.strictEqual(helpers.XIAOHONGSHU_COMMENT_TIMEOUT_MS, 90000);
@@ -5398,15 +5398,15 @@ assert.strictEqual(
   '打包后的评论滚动脚本不能依赖只存在于插件 bundle 的 __name 辅助函数',
 );
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 999 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 99999, totalCount: 299 }),
   { shouldStop: false, stopReason: '', remainingMs: 1 },
 );
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 100000, totalCount: 999 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 100000, totalCount: 299 }),
   { shouldStop: true, stopReason: 'time_budget_exceeded', remainingMs: 0 },
 );
 assert.deepStrictEqual(
-  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 90000, totalCount: 1000 }),
+  helpers.getXiaohongshuCommentBudgetState({ deadlineAt: 100000, now: 90000, totalCount: 300 }),
   { shouldStop: true, stopReason: 'total_limit_reached', remainingMs: 10000 },
 );
 const xiaohongshuCommentDiagnostic = helpers.buildXiaohongshuCommentDiagnostic({
@@ -5444,11 +5444,11 @@ assert.strictEqual(
 );
 const xiaohongshuCommentPaginationScript = helpers.getXiaohongshuCommentPaginationScript(
   'https://www.xiaohongshu.com/explore/demo-note?xsec_token=demo-token',
-  { deadlineAt: 123456, totalLimit: 1000 },
+  { deadlineAt: 123456, totalLimit: 300 },
 );
 assert.match(xiaohongshuCommentPaginationScript, /credentials:\s*'include'/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/page/);
-assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = 100/);
+assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = 30/);
 assert.match(xiaohongshuCommentPaginationScript, /page < XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT/);
 assert.match(xiaohongshuCommentPaginationScript, /\/api\/sns\/web\/v2\/comment\/sub\/page/);
 assert.match(xiaohongshuCommentPaginationScript, /XIAOHONGSHU_ROOT_COMMENT_LIMIT/);
@@ -7477,7 +7477,7 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(preciseDouyinRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4');
   assert.strictEqual(
     preciseDouyinRecord.metadata.title,
-    '先生 我出不了神山 你带一支格桑花走吧\n#萨普神山\n#西藏',
+    '先生 我出不了神山 你带一支格桑花走吧',
   );
   assert.match(preciseDouyinRecord.metadata.markdown, /先生 我出不了神山 你带一支格桑花走吧/);
   assert.match(preciseDouyinRecord.metadata.markdown, /#萨普神山/);
@@ -10314,7 +10314,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.77'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.78'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10353,8 +10353,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.77',
-        runtimeVersion: '1.3.77',
+        manifestVersion: '1.3.78',
+        runtimeVersion: '1.3.78',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10439,7 +10439,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   };
   plugin.writeRecord = async () => {
     throw helpers.createRetryableXiaohongshuContentError({
-      runtime: helpers.getPluginRuntimeIdentity('1.3.77'),
+      runtime: helpers.getPluginRuntimeIdentity('1.3.78'),
       request: {
         sourceHost: 'xhslink.cn',
         finalHost: 'xiaohongshu.com',
@@ -12536,7 +12536,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.77 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.78 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));

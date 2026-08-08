@@ -79,6 +79,31 @@ function assertHasContextBeforeTranscript(record, {
 }
 
 async function run() {
+  assert.strictEqual(helpers.XIAOHONGSHU_TOTAL_COMMENT_LIMIT, 300);
+  assert.strictEqual(helpers.XIAOHONGSHU_COMMENT_TIMEOUT_MS, 90000);
+  const douyinStructuredContent = helpers.buildDouyinStructuredContent({
+    desc: [
+      '全平台内容，一键进 Obsidian',
+      '#Obsidian #Obsidian教程 #知识管理',
+      '这个工具把手机端看到的内容，一键同步到电脑本地 Obsidian 知识库。',
+    ].join('\n'),
+  });
+  assert.strictEqual(douyinStructuredContent.title, '全平台内容，一键进 Obsidian');
+  assert.ok(douyinStructuredContent.description.includes('这个工具把手机端看到的内容'));
+  assert.notStrictEqual(douyinStructuredContent.title, douyinStructuredContent.description);
+  const douyinPreviewTitleWins = helpers.buildDouyinStructuredContent({
+    title: '抖音',
+    preview_title: '真正的抖音作品标题',
+    desc: '完整正文内容，不应同时成为标题。',
+  });
+  assert.strictEqual(douyinPreviewTitleWins.title, '真正的抖音作品标题');
+  const douyinDescriptionTitleDoesNotShadowPreview = helpers.buildDouyinStructuredContent({
+    title: '完整正文内容，不应同时成为标题。',
+    preview_title: '独立预览标题',
+    desc: '完整正文内容，不应同时成为标题。',
+  });
+  assert.strictEqual(douyinDescriptionTitleDoesNotShadowPreview.title, '独立预览标题');
+
   const plugin = createPlugin('小红书视频口播正文');
   requestUrlMock = async (request) => {
     const url = typeof request === 'string' ? request : request && request.url;
