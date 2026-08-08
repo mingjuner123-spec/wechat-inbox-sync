@@ -1692,7 +1692,7 @@ var {
 } = require_transcription_note_title_utils();
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.77";
+var PLUGIN_RUNTIME_VERSION = "1.3.78";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -1702,7 +1702,7 @@ var FEISHU_OAUTH_SYNC_API_BASE = "https://he02-d8gebzv050ed6c4ef-d350b93bf-13574
 var FEISHU_TUTORIAL_URL = "https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink";
 var FEISHU_OFFICIAL_API_TUTORIAL_URL = "https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink";
 var MAX_PLUGIN_BINDINGS = 3;
-var XIAOHONGSHU_TOTAL_COMMENT_LIMIT = 1e3;
+var XIAOHONGSHU_TOTAL_COMMENT_LIMIT = 300;
 var XIAOHONGSHU_ROOT_COMMENT_LIMIT = XIAOHONGSHU_TOTAL_COMMENT_LIMIT;
 var XIAOHONGSHU_REPLY_COMMENT_LIMIT = 100;
 var XIAOHONGSHU_ROOT_COMMENT_PAGE_LIMIT = Math.min(
@@ -5291,15 +5291,35 @@ function collectDouyinImageUrlList(value, urls) {
   }
 }
 __name(collectDouyinImageUrlList, "collectDouyinImageUrlList");
+function deriveDouyinTitleFromDescription(description = "") {
+  const cleanedDescription = cleanSocialDescription(description);
+  if (!cleanedDescription) return "";
+  const firstContentLine = cleanedDescription.split(/\r?\n/).map((line) => line.trim()).find((line) => line && !line.startsWith("#")) || "";
+  const withoutInlineTags = firstContentLine.replace(/\s*#[\p{L}\p{N}_-].*$/u, "").trim();
+  const candidate = withoutInlineTags || firstContentLine;
+  if (candidate.length <= 80) return candidate;
+  const firstSentence = candidate.split(/[。！？!?；;]/, 1)[0].trim();
+  if (firstSentence && firstSentence.length <= 80) return firstSentence;
+  return `${candidate.slice(0, 77).trim()}...`;
+}
+__name(deriveDouyinTitleFromDescription, "deriveDouyinTitleFromDescription");
+function isGenericDouyinTitle(title = "") {
+  const compact = String(title || "").toLowerCase().replace(/[\s\-_|·•]+/g, "");
+  return !compact || compact === "抖音" || compact === "douyin" || compact === "抖音短视频" || compact === "记录美好生活" || compact === "抖音记录美好生活";
+}
+__name(isGenericDouyinTitle, "isGenericDouyinTitle");
 function buildDouyinStructuredContent(detail = {}, fallback = {}) {
   const source = detail && typeof detail === "object" ? detail : {};
   const fallbackSource = fallback && typeof fallback === "object" ? fallback : {};
   const description = cleanSocialDescription(
     source.desc || source.description || fallbackSource.description || ""
   );
-  const title = cleanSocialDescription(
-    source.title || source.preview_title || source.previewTitle || description || fallbackSource.title || ""
-  );
+  const title = [
+    source.title,
+    source.preview_title,
+    source.previewTitle,
+    fallbackSource.title
+  ].map((candidate) => cleanSocialDescription(candidate || "")).find((candidate) => candidate && candidate !== description && candidate.length <= 80 && !candidate.includes("\n") && !isGenericDouyinTitle(candidate)) || deriveDouyinTitleFromDescription(description);
   const structuredTags = [];
   const rememberTag = /* @__PURE__ */ __name((value) => {
     const tag = String(value || "").replace(/^#+/, "").trim();
@@ -19033,6 +19053,7 @@ WechatObsidianInboxPlugin.__test = {
   extractDouyinMediaUrlsForAweme,
   fetchDouyinMediaResolutionWithSession,
   fetchDouyinMediaUrlsWithSession,
+  buildDouyinStructuredContent,
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,
   shouldBlockExternalAppUrl,
