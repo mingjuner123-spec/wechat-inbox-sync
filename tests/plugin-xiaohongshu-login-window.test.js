@@ -25,6 +25,7 @@ const helpers = Plugin.__test;
 
 assert.strictEqual(typeof helpers.buildXiaohongshuLoginPageConfig, 'function');
 assert.strictEqual(typeof helpers.isAbortedBrowserNavigationError, 'function');
+assert.strictEqual(typeof helpers.installXiaohongshuLoginWindowGuards, 'function');
 
 const config = helpers.buildXiaohongshuLoginPageConfig();
 assert.strictEqual(config.loginUrl, 'https://www.xiaohongshu.com/');
@@ -41,5 +42,24 @@ assert.strictEqual(helpers.isAbortedBrowserNavigationError({ code: 'ERR_ABORTED'
 assert.strictEqual(helpers.isAbortedBrowserNavigationError({ code: 'UNKNOWN', errno: -3, message: '' }), true);
 assert.strictEqual(helpers.isAbortedBrowserNavigationError(new Error('net::ERR_ABORTED')), true);
 assert.strictEqual(helpers.isAbortedBrowserNavigationError({ code: -105, message: 'ERR_NAME_NOT_RESOLVED' }), false);
+
+let windowOpenHandler = null;
+helpers.installXiaohongshuLoginWindowGuards({
+  on() {},
+  setWindowOpenHandler(handler) {
+    windowOpenHandler = handler;
+  },
+});
+assert.strictEqual(typeof windowOpenHandler, 'function');
+assert.deepStrictEqual(
+  windowOpenHandler({ url: 'https://www.xiaohongshu.com/explore/another-note' }),
+  { action: 'deny' },
+  'the visible login window must not let the page spawn more Xiaohongshu windows',
+);
+assert.deepStrictEqual(
+  windowOpenHandler({ url: 'https://example.com/' }),
+  { action: 'deny' },
+  'the visible login window must not let the page spawn external windows',
+);
 
 console.log('plugin Xiaohongshu login window tests passed');

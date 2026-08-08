@@ -10061,8 +10061,8 @@ async function runStopCurrentTranscriptionDeletesCurrentRecordTest() {
     calls.push([path, method, body, binding && binding.token]);
     return { success: true, data: { id: 'record-stop-1', status: 'deleted' } };
   };
-  plugin.currentTranscriptionAbortController = { abort() { aborted = true; } };
-  plugin.currentTranscriptionContext = {
+  plugin.currentProcessingAbortController = { abort() { aborted = true; } };
+  plugin.currentProcessingContext = {
     recordId: 'record-stop-1',
     binding: { token: 'ABC-123' },
   };

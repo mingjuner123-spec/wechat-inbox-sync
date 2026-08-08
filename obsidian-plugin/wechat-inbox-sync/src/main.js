@@ -5561,6 +5561,46 @@ function installXiaohongshuNavigationGuards(webContents) {
   }
 }
 
+const activeXiaohongshuBrowserWindows = new Set();
+let activeXiaohongshuLoginPromise = null;
+
+function trackXiaohongshuBrowserWindow(browserWindow) {
+  if (!browserWindow) return browserWindow;
+  activeXiaohongshuBrowserWindows.add(browserWindow);
+  if (typeof browserWindow.on === 'function') {
+    browserWindow.on('closed', () => {
+      activeXiaohongshuBrowserWindows.delete(browserWindow);
+    });
+  }
+  return browserWindow;
+}
+
+function closeActiveXiaohongshuBrowserWindows() {
+  let closedCount = 0;
+  for (const browserWindow of [...activeXiaohongshuBrowserWindows]) {
+    activeXiaohongshuBrowserWindows.delete(browserWindow);
+    try {
+      const destroyed = typeof browserWindow.isDestroyed === 'function'
+        ? browserWindow.isDestroyed()
+        : false;
+      if (!destroyed && typeof browserWindow.destroy === 'function') {
+        browserWindow.destroy();
+        closedCount += 1;
+      }
+    } catch (error) {
+      // The window may have closed between the state check and destroy call.
+    }
+  }
+  return closedCount;
+}
+
+function installXiaohongshuLoginWindowGuards(webContents) {
+  installXiaohongshuNavigationGuards(webContents);
+  if (webContents && typeof webContents.setWindowOpenHandler === 'function') {
+    webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  }
+}
+
 function enableDebuggerNetworkCapture(debuggerApi) {
   if (!debuggerApi || typeof debuggerApi.sendCommand !== 'function') return false;
   try {
@@ -10844,6 +10884,9 @@ function isAbortedBrowserNavigationError(error) {
 }
 
 async function loginXiaohongshuWeb(targetUrl) {
+  if (activeXiaohongshuLoginPromise) {
+    return await activeXiaohongshuLoginPromise;
+  }
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('当前 Obsidian 环境不支持浏览器窗口');
@@ -10856,7 +10899,7 @@ async function loginXiaohongshuWeb(targetUrl) {
 
   const { loginUrl, userAgent } = buildXiaohongshuLoginPageConfig(targetUrl);
 
-  return new Promise((resolve, reject) => {
+  const loginPromise = new Promise((resolve, reject) => {
     let settled = false;
     const win = new BrowserWindow({
       width: 1040,
@@ -10870,6 +10913,8 @@ async function loginXiaohongshuWeb(targetUrl) {
         sandbox: true,
       },
     });
+    trackXiaohongshuBrowserWindow(win);
+    installXiaohongshuLoginWindowGuards(win.webContents);
 
     const finish = async (error) => {
       if (settled) return;
@@ -10902,6 +10947,14 @@ async function loginXiaohongshuWeb(targetUrl) {
       finish(new Error(`打开小红书登录页面失败：${error.message || error}`));
     });
   });
+  activeXiaohongshuLoginPromise = loginPromise;
+  try {
+    return await loginPromise;
+  } finally {
+    if (activeXiaohongshuLoginPromise === loginPromise) {
+      activeXiaohongshuLoginPromise = null;
+    }
+  }
 }
 
 function getElectronShell() {
@@ -11025,6 +11078,9 @@ async function renderUrlToMarkdownWithElectron(url) {
       sandbox: true,
     },
   });
+  if (isXiaohongshuUrl(url)) {
+    trackXiaohongshuBrowserWindow(win);
+  }
 
   try {
     const loaded = waitForWebContents(win.webContents);
@@ -11538,6 +11594,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       sandbox: true,
     },
   });
+  if (isXiaohongshuUrl(url)) {
+    trackXiaohongshuBrowserWindow(win);
+  }
 
   const capturedRequests = [];
   const targetDouyinAwemeId = isDouyinUrl(url) ? extractDouyinAwemeId(url) : '';
@@ -11732,6 +11791,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       sandbox: true,
     },
   });
+  trackXiaohongshuBrowserWindow(win);
   installXiaohongshuNavigationGuards(win.webContents);
   const browserSession = (win.webContents && win.webContents.session) || xiaohongshuSession;
   let blocksCommentRequests = false;
@@ -11895,6 +11955,7 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       sandbox: true,
     },
   });
+  trackXiaohongshuBrowserWindow(win);
   installXiaohongshuNavigationGuards(win.webContents);
 
   const commentApiRequests = [];
@@ -14051,6 +14112,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.currentTranscriptionProcess = null;
     this.currentTranscriptionProcessDetached = false;
     this.currentTranscriptionContext = null;
+    this.currentProcessingAbortController = null;
+    this.currentProcessingContext = null;
     this.pendingStoppedTranscriptionDeletes = new Map();
     this.syncInboxPromise = null;
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
@@ -15235,14 +15298,21 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async stopCurrentTranscription() {
     let stopped = false;
-    const context = this.currentTranscriptionContext && typeof this.currentTranscriptionContext === 'object'
+    const activeContext = this.currentTranscriptionContext && typeof this.currentTranscriptionContext === 'object'
+      ? this.currentTranscriptionContext
+      : this.currentProcessingContext;
+    const context = activeContext && typeof activeContext === 'object'
       ? {
-        ...this.currentTranscriptionContext,
-        binding: this.currentTranscriptionContext.binding
-          ? { ...this.currentTranscriptionContext.binding }
+        ...activeContext,
+        binding: activeContext.binding
+          ? { ...activeContext.binding }
           : null,
       }
       : null;
+    if (this.currentProcessingAbortController) {
+      this.currentProcessingAbortController.abort();
+      stopped = true;
+    }
     if (this.currentTranscriptionAbortController) {
       this.currentTranscriptionAbortController.abort();
       stopped = true;
@@ -15260,6 +15330,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (error) {
         // Ignore process cleanup failures.
       }
+    }
+    if (context && closeActiveXiaohongshuBrowserWindows() > 0) {
+      stopped = true;
     }
     if (!stopped) {
       new Notice('当前没有正在转写的任务。');
@@ -19179,7 +19252,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
         continue;
       }
+      const processingAbortController = new AbortController();
+      this.currentProcessingAbortController = processingAbortController;
+      this.currentProcessingContext = {
+        recordId,
+        binding: binding ? { ...binding } : null,
+        title: buildRecordTitleBase(record),
+      };
+      this.setTranscriptionStopAvailable(true);
       try {
+        throwIfAborted(processingAbortController.signal);
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
@@ -19196,6 +19278,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, progress);
+        throwIfAborted(processingAbortController.signal);
         written.push(item);
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
@@ -19263,6 +19346,17 @@ class WechatObsidianInboxPlugin extends Plugin {
           message,
           ...(diagnostic ? { diagnostic } : {}),
         });
+      } finally {
+        if (this.currentProcessingAbortController === processingAbortController) {
+          this.currentProcessingAbortController = null;
+        }
+        if (this.currentProcessingContext
+          && this.currentProcessingContext.recordId === recordId) {
+          this.currentProcessingContext = null;
+        }
+        if (!this.currentTranscriptionAbortController && !this.currentTranscriptionProcess) {
+          this.setTranscriptionStopAvailable(false);
+        }
       }
     }
 
@@ -20016,6 +20110,9 @@ WechatObsidianInboxPlugin.__test = {
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
+  installXiaohongshuLoginWindowGuards,
+  trackXiaohongshuBrowserWindow,
+  closeActiveXiaohongshuBrowserWindows,
   enableDebuggerNetworkCapture,
   beginBestEffortBrowserLoad,
   waitForBrowserTasksWithin,
