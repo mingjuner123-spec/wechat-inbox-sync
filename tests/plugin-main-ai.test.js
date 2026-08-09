@@ -12793,6 +12793,7 @@ async function runClipboardTextWebpagePromotionTests() {
   }
 
   const writes = [];
+  const stagedWrites = new Map();
   const hydrated = [];
   const originalText = '🔥有钱之后，应该多提升生活质量 http://xhslink.cn/o/3twEehTqivC 存下口令，跳转【小红书】阅读~';
   const plugin = new PluginClass();
@@ -12804,11 +12805,18 @@ async function runClipboardTextWebpagePromotionTests() {
   plugin.app = {
     vault: {
       adapter: {
-        async exists() {
-          return true;
+        async exists(filePath) {
+          return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
         },
         async write(filePath, markdown) {
-          writes.push({ filePath, markdown });
+          stagedWrites.set(filePath, markdown);
+        },
+        async remove(filePath) {
+          stagedWrites.delete(filePath);
+        },
+        async rename(fromPath, toPath) {
+          writes.push({ filePath: toPath, markdown: stagedWrites.get(fromPath) });
+          stagedWrites.delete(fromPath);
         },
       },
       async createFolder() {
@@ -13029,6 +13037,7 @@ async function runCanonicalVaultFolderTests() {
   ]);
 
   const canonicalWrites = [];
+  const canonicalStagedWrites = new Map();
   const pathPlugin = new PluginClass();
   pathPlugin.settings = {
     ...helpers.mergeSettings({ noteSaveMode: 'date', aiProvider: 'off' }),
@@ -13037,12 +13046,19 @@ async function runCanonicalVaultFolderTests() {
   pathPlugin.app = {
     vault: {
       adapter: {
-        async exists() {
-          return true;
+        async exists(filePath) {
+          return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
         },
         async write(filePath, markdown) {
           assert.strictEqual(filePath.includes('\\'), false);
-          canonicalWrites.push({ filePath, markdown });
+          canonicalStagedWrites.set(filePath, markdown);
+        },
+        async remove(filePath) {
+          canonicalStagedWrites.delete(filePath);
+        },
+        async rename(fromPath, toPath) {
+          canonicalWrites.push({ filePath: toPath, markdown: canonicalStagedWrites.get(fromPath) });
+          canonicalStagedWrites.delete(fromPath);
         },
       },
       async createFolder() {},
@@ -13122,6 +13138,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
 
   for (const scenario of scenarios) {
     const writes = [];
+    const stagedWrites = new Map();
     const requestCalls = [];
     let pendingReadCount = 0;
     let aiCallCount = 0;
@@ -13170,11 +13187,18 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
     plugin.app = {
       vault: {
         adapter: {
-          async exists() {
-            return true;
+          async exists(filePath) {
+            return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
           },
           async write(filePath, markdown) {
-            writes.push({ filePath, markdown });
+            stagedWrites.set(filePath, markdown);
+          },
+          async remove(filePath) {
+            stagedWrites.delete(filePath);
+          },
+          async rename(fromPath, toPath) {
+            writes.push({ filePath: toPath, markdown: stagedWrites.get(fromPath) });
+            stagedWrites.delete(fromPath);
           },
         },
         async createFolder() {},
@@ -13285,6 +13309,7 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
 
 async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   const noteWrites = [];
+  const stagedNoteWrites = new Map();
   const attachmentWrites = [];
   const requestCalls = [];
   let pendingReadCount = 0;
@@ -13301,14 +13326,21 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   plugin.app = {
     vault: {
       adapter: {
-        async exists() {
-          return true;
+        async exists(filePath) {
+          return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
         },
         async writeBinary(filePath, content) {
           attachmentWrites.push({ filePath, content: Buffer.from(content).toString('utf8') });
         },
         async write(filePath, markdown) {
-          noteWrites.push({ filePath, markdown });
+          stagedNoteWrites.set(filePath, markdown);
+        },
+        async remove(filePath) {
+          stagedNoteWrites.delete(filePath);
+        },
+        async rename(fromPath, toPath) {
+          noteWrites.push({ filePath: toPath, markdown: stagedNoteWrites.get(fromPath) });
+          stagedNoteWrites.delete(fromPath);
         },
       },
       async createFolder() {},

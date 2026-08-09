@@ -2162,11 +2162,34 @@ function formatSyncApiErrorMessage(payload, fallback = '') {
 
 function requestJsonViaNode(options) {
   return new Promise((resolve, reject) => {
+    const signal = options && options.signal;
+    if (signal && signal.aborted) {
+      reject(createAbortError());
+      return;
+    }
+    let settled = false;
+    let request = null;
+    const cleanupAbort = () => {
+      if (signal && typeof signal.removeEventListener === 'function') {
+        signal.removeEventListener('abort', onAbort);
+      }
+    };
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanupAbort();
+      callback(value);
+    };
+    const onAbort = () => {
+      const error = createAbortError();
+      if (request && typeof request.destroy === 'function') request.destroy(error);
+      settle(reject, error);
+    };
     let parsedUrl;
     try {
       parsedUrl = new URL(options.url);
     } catch (error) {
-      reject(error);
+      settle(reject, error);
       return;
     }
 
@@ -2183,7 +2206,7 @@ function requestJsonViaNode(options) {
       headers['Content-Length'] = Buffer.byteLength(body);
     }
 
-    const request = transport.request(parsedUrl, {
+    request = transport.request(parsedUrl, {
       method: options.method || 'GET',
       headers,
       timeout: options.timeout || 20000,
@@ -2194,14 +2217,14 @@ function requestJsonViaNode(options) {
       response.on('data', (chunk) => {
         if (rejectedForSize) return;
         const buffer = Buffer.from(chunk);
-        receivedBytes += buffer.length;
-        if (receivedBytes > maxBytes) {
-          rejectedForSize = true;
-          const error = new Error('Node HTTP response exceeded the configured size limit');
-          reject(error);
-          if (typeof response.destroy === 'function') response.destroy(error);
-          if (typeof request.destroy === 'function') request.destroy(error);
-          return;
+          receivedBytes += buffer.length;
+          if (receivedBytes > maxBytes) {
+            rejectedForSize = true;
+            const error = new Error('Node HTTP response exceeded the configured size limit');
+            settle(reject, error);
+            if (typeof response.destroy === 'function') response.destroy(error);
+            if (typeof request.destroy === 'function') request.destroy(error);
+            return;
         }
         chunks.push(buffer);
       });
@@ -2215,7 +2238,7 @@ function requestJsonViaNode(options) {
         } catch (error) {
           json = null;
         }
-        resolve({
+        settle(resolve, {
           status: response.statusCode,
           headers: response.headers,
           text,
@@ -2223,13 +2246,20 @@ function requestJsonViaNode(options) {
           arrayBuffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
         });
       });
-      response.on('error', reject);
+      response.on('error', (error) => settle(reject, error));
     });
 
     request.on('timeout', () => {
       request.destroy(new Error('Node HTTP request timeout'));
     });
-    request.on('error', reject);
+    request.on('error', (error) => settle(reject, error));
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+    }
     if (body) request.write(body);
     request.end();
   });
@@ -10165,6 +10195,7 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
   limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT,
   options = {},
 ) {
+  throwIfAborted(options.signal);
   const comments = [];
   const seen = new Set();
   const deadlineAt = Number(options && options.deadlineAt) || (Date.now() + XIAOHONGSHU_COMMENT_TIMEOUT_MS);
@@ -10175,6 +10206,7 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
   const expectedNoteId = String(options && options.expectedNoteId || '').trim();
   if (!expectedNoteId) return [];
   const cookieHeader = await getXiaohongshuCookieHeader();
+  throwIfAborted(options.signal);
   const uniqueRequests = [];
   const seenRequests = new Set();
   (commentApiRequests || []).forEach((request) => {
@@ -10189,6 +10221,7 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
     uniqueRequests.push(request);
   });
   for (const request of uniqueRequests.slice(-8)) {
+    throwIfAborted(options.signal);
     const budget = getXiaohongshuCommentBudgetState({
       deadlineAt,
       totalCount: comments.length,
@@ -10203,7 +10236,9 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
         headers: sanitizeXiaohongshuCapturedHeaders(request.requestHeaders || {}, cookieHeader),
         timeout: Math.max(1, Math.min(XIAOHONGSHU_COMMENT_REQUEST_TIMEOUT_MS, budget.remainingMs)),
         maxBytes: XIAOHONGSHU_COMMENT_RESPONSE_MAX_BODY_CHARACTERS,
+        signal: options.signal,
       });
+      throwIfAborted(options.signal);
       if (!response || response.status < 200 || response.status >= 300) continue;
       if (response.json) {
         if (classifyXiaohongshuCommentRequestIdentity({
@@ -10224,8 +10259,13 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
           }
         });
       }
-    } catch (error) {}
+    } catch (error) {
+      if (isAbortError(error) || (options.signal && options.signal.aborted)) {
+        throw createAbortError();
+      }
+    }
   }
+  throwIfAborted(options.signal);
   return comments.slice(0, limit);
 }
 
@@ -12108,12 +12148,17 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     let settledCount = 0;
     let idlePasses = 0;
     for (let pass = 0; pass < 20 && idlePasses < 2; pass += 1) {
+      throwIfAborted(options.signal);
       const budget = getCommentBudget(debuggerComments.length);
       if (budget.shouldStop) return budget.stopReason;
       const pending = debuggerBodyTasks.slice(settledCount);
       if (pending.length) {
         const remainingMs = budget.remainingMs;
-        const waitStatus = await waitForBrowserTasksWithin(pending, remainingMs);
+        const waitStatus = await waitForPromiseWithAbort(
+          waitForBrowserTasksWithin(pending, remainingMs),
+          options.signal,
+        );
+        throwIfAborted(options.signal);
         if (waitStatus === 'timeout') return 'time_budget_exceeded';
         settledCount += pending.length;
         idlePasses = 0;
@@ -12123,7 +12168,10 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       if (idlePasses < 2) {
         const remainingMs = getCommentBudget(debuggerComments.length).remainingMs;
         if (remainingMs <= 0) return 'time_budget_exceeded';
-        await new Promise((resolve) => setTimeout(resolve, Math.min(120, remainingMs)));
+        await waitForPromiseWithAbort(
+          new Promise((resolve) => setTimeout(resolve, Math.min(120, remainingMs))),
+          options.signal,
+        );
       }
     }
     return '';
@@ -12222,9 +12270,11 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     const loadBudget = getCommentBudget(0);
     const loaded = waitForWebContents(win.webContents, Math.min(20000, loadBudget.remainingMs));
     beginBestEffortBrowserLoad(win, url);
-    await loaded;
+    await waitForPromiseWithAbort(loaded, options.signal);
+    throwIfAborted(options.signal);
     let identitySnapshot = null;
     for (let index = 0; index < 12; index += 1) {
+      throwIfAborted(options.signal);
       const identityBudget = getCommentBudget(0);
       if (identityBudget.shouldStop) break;
       const current = await runBrowserTaskWithTimeout(
@@ -12242,8 +12292,12 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         current,
         expectedIdentityUrl,
       );
+      throwIfAborted(options.signal);
       if (identitySnapshot.matched) break;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(500, identityBudget.remainingMs)));
+      await waitForPromiseWithAbort(
+        new Promise((resolve) => setTimeout(resolve, Math.min(500, identityBudget.remainingMs))),
+        options.signal,
+      );
     }
     if (!identitySnapshot || !identitySnapshot.matched) {
       return {
@@ -12269,14 +12323,21 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         totalLimit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
       }))).then((value) => {
         pageApiPayload = value;
-      }).catch(() => {
+      }).catch((error) => {
+        if (isAbortError(error) || (options.signal && options.signal.aborted)) {
+          throw createAbortError();
+        }
         pageApiPayload = {
           rootPayloads: [],
           replyPayloadGroups: [],
           diagnostic: { source: 'page-api', stopReason: 'page_script_failed' },
         };
       });
-      const pageApiWaitStatus = await waitForBrowserTasksWithin([pageApiTask], pageApiBudget.remainingMs);
+      const pageApiWaitStatus = await waitForPromiseWithAbort(
+        waitForBrowserTasksWithin([pageApiTask], pageApiBudget.remainingMs),
+        options.signal,
+      );
+      throwIfAborted(options.signal);
       if (pageApiWaitStatus === 'timeout') {
         pageApiPayload = {
           rootPayloads: [],
@@ -12623,14 +12684,21 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       })()
     `)).then((value) => {
         renderedPayload = value;
-      }).catch(() => {
+      }).catch((error) => {
+        if (isAbortError(error) || (options.signal && options.signal.aborted)) {
+          throw createAbortError();
+        }
         renderedPayload = {
           html: '',
           comments: [],
           collectionStopReason: getCommentBudget(0).shouldStop ? 'time_budget_exceeded' : 'page_render_failed',
         };
       });
-      const renderedWaitStatus = await waitForBrowserTasksWithin([renderedTask], renderedBudget.remainingMs);
+      const renderedWaitStatus = await waitForPromiseWithAbort(
+        waitForBrowserTasksWithin([renderedTask], renderedBudget.remainingMs),
+        options.signal,
+      );
+      throwIfAborted(options.signal);
       if (renderedWaitStatus === 'timeout') {
         renderedPayload = {
           html: '',
@@ -12641,7 +12709,9 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     } else {
       renderedPayload.collectionStopReason = renderedBudget.stopReason;
     }
+    throwIfAborted(options.signal);
     const debuggerDrainStopReason = await drainDebuggerBodyTasks();
+    throwIfAborted(options.signal);
     const renderedHtml = renderedPayload && typeof renderedPayload === 'object'
       ? String(renderedPayload.html || '')
       : String(renderedPayload || '');
@@ -12676,8 +12746,10 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
           deadlineAt,
           totalLimit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
           expectedNoteId,
+          signal: options.signal,
         },
       );
+      throwIfAborted(options.signal);
     }
     const browserNetworkResult = mergeXiaohongshuCapturedCommentPayloads(
       debuggerCommentPayloads,
@@ -12757,6 +12829,7 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     };
     commentDiagnosticDetails.partial = isPartialXiaohongshuCommentResult(commentDiagnosticDetails);
     const commentDiagnostic = buildXiaohongshuCommentDiagnostic(commentDiagnosticDetails);
+    throwIfAborted(options.signal);
     return {
       html: renderedHtml,
       identityUrl: expectedIdentityUrl,
@@ -14630,6 +14703,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async requestJson(path, method = 'GET', body = {}, binding = null, options = {}) {
+    const signal = options.signal || null;
+    throwIfAborted(signal);
     const fallbackToken = getPrimaryBoundToken(normalizeBindings(this.settings));
     const token = normalizeBindCodeInput(
       typeof binding === 'string'
@@ -14674,12 +14749,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         } : {}),
       },
       body: method === 'POST' ? JSON.stringify(requestBody || {}) : undefined,
+      signal,
     };
 
     let response;
     try {
-      response = await requestUrl(requestOptions);
+      response = signal
+        ? await requestJsonViaNode(requestOptions)
+        : await requestUrl(requestOptions);
     } catch (error) {
+      if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
       const message = error && error.message ? error.message : String(error || '');
       const shouldReadBindErrorBody = path !== '/unbind-self'
         && /request failed|status\s*(?:4|5)\d\d|http\s*(?:4|5)\d\d/i.test(message);
@@ -14687,6 +14766,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         try {
           response = await requestJsonViaNode(requestOptions);
         } catch (fallbackError) {
+          if (isAbortError(fallbackError) || (signal && signal.aborted)) throw createAbortError();
           if (shouldReadBindErrorBody) throw error;
           const fallbackMessage = fallbackError && fallbackError.message ? fallbackError.message : String(fallbackError || '');
           throw new Error(`网络连接失败：${fallbackMessage || message}`);
@@ -14695,6 +14775,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw error;
       }
     }
+    throwIfAborted(signal);
 
     let payload = response.json || null;
     if (!payload && response.text) {
@@ -16859,7 +16940,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       } else {
         requestBody.audioUrl = audioUrl;
       }
-      const payload = await this.requestJson('/transcriptions/cloud', 'POST', requestBody, binding);
+      const payload = await this.requestJson('/transcriptions/cloud', 'POST', requestBody, binding, {
+        signal: options.signal || null,
+      });
+      throwIfAborted(options.signal || null);
       const data = payload && payload.data ? payload.data : {};
       const transcription = String(data.transcription || '').trim();
       if (!transcription) {
@@ -16874,6 +16958,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         cloudRemainingSeconds: Number(data.remainingSeconds) || 0,
       };
     } catch (cloudError) {
+      if (isAbortError(cloudError) || (options.signal && options.signal.aborted)) {
+        throw createAbortError();
+      }
       const cloudMessage = cloudError && cloudError.message ? cloudError.message : String(cloudError || '');
       throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：${cloudMessage}`);
     }
@@ -17851,13 +17938,14 @@ class WechatObsidianInboxPlugin extends Plugin {
             || metadata.cloudTranscriptionRequested === true
           );
           const result = useCloudForWebpage
-            ? await this.runCloudFallbackTranscription(candidateUrl, {
+             ? await this.runCloudFallbackTranscription(candidateUrl, {
               binding,
               title: title || metadata.title || '',
               source: source || 'media-url',
               localError: 'user selected cloud transcription',
-              allowCloudUrlFallback: true,
-            })
+               allowCloudUrlFallback: true,
+               signal,
+             })
             : await this.runConfiguredTranscription(candidateUrl, {
               allowCloudUrlFallback: true,
               title: metadata.title || '',
@@ -18402,7 +18490,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           throw new Error(`已阻止网页尝试打开外部应用协议：${new URL(resolvedUrl).protocol}`);
         }
         if (isXiaohongshuUrl(url) && !isXiaohongshuUrl(resolvedUrl)) {
-          throw new Error('小红书短链接跳转到了非官方网站，已停止请求');
+          const externalRedirectError = new Error('小红书短链接跳转到了非官方网站，已停止请求');
+          externalRedirectError.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
+          throw externalRedirectError;
         }
         const headers = getSocialRequestHeaders(resolvedUrl);
         let renderedXiaohongshuPage = null;
@@ -19334,13 +19424,51 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
     const filePath = normalizeVaultPath(`${noteDir}/${fileTitle}.md`);
     this.showSyncProgress({ ...progress, stage: 'writing', title: fileTitle });
-    throwIfAborted(signal);
-    await this.app.vault.adapter.write(filePath, markdown);
+    const adapter = this.app.vault.adapter;
+    const temporaryFilePath = normalizeVaultPath(
+      `${noteDir}/.wechat-inbox-sync-${crypto.randomBytes(12).toString('hex')}.tmp`,
+    );
+    let temporaryFileExists = false;
+    try {
+      throwIfAborted(signal);
+      await adapter.write(temporaryFilePath, markdown);
+      temporaryFileExists = true;
+      throwIfAborted(signal);
+      if (typeof adapter.exists === 'function' && await adapter.exists(filePath)) {
+        throw new Error(`笔记目标路径已存在，已停止写入以避免覆盖：${filePath}`);
+      }
+      if (typeof adapter.getFullPath === 'function') {
+        await fs.promises.copyFile(
+          adapter.getFullPath(temporaryFilePath),
+          adapter.getFullPath(filePath),
+          fs.constants.COPYFILE_EXCL,
+        );
+      } else if (this.app.vault && typeof this.app.vault.create === 'function') {
+        await this.app.vault.create(filePath, markdown);
+      } else if (typeof adapter.rename === 'function') {
+        if (typeof adapter.exists === 'function' && await adapter.exists(filePath)) {
+          throw new Error(`笔记目标路径已存在，已停止写入以避免覆盖：${filePath}`);
+        }
+        await adapter.rename(temporaryFilePath, filePath);
+        temporaryFileExists = false;
+      } else {
+        throw new Error('当前 Obsidian 存储适配器不支持安全提交笔记');
+      }
+    } finally {
+      if (temporaryFileExists && typeof adapter.remove === 'function') {
+        try {
+          await adapter.remove(temporaryFilePath);
+        } catch (cleanupError) {
+          // The unique temporary file is owned by this write and can be cleaned on the next run.
+        }
+      }
+    }
 
     return {
       recordId: getRecordId(record),
       filePath,
       title: fileTitle,
+      committed: true,
       conversionWarning: getRecordConversionWarning(recordForMarkdown),
     };
   }
@@ -19413,7 +19541,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
-        throwIfAborted(processingAbortController.signal);
+        if (processingAbortController.signal.aborted && !item.committed) {
+          throw createAbortError();
+        }
         written.push(item);
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);

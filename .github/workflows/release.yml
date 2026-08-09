@@ -81,6 +81,7 @@ jobs:
           node tests/release-governance.test.js
           node tests/plugin-release-candidate.test.js
           node tests/plugin-main-ai.test.js
+          node tests/plugin-processing-cancellation.test.js
           node tests/plugin-audio-repeat-local-dedupe.test.js
           node tests/plugin-local-candidate-regressions.test.js
           node tests/plugin-review-pending-notice.test.js
@@ -98,6 +99,7 @@ jobs:
           node --check tests/plugin-release-candidate.test.js
           node --check tests/plugin-audio-repeat-local-dedupe.test.js
           node --check tests/plugin-release-identity.test.js
+          node --check tests/plugin-processing-cancellation.test.js
           node --check obsidian-plugin/wechat-inbox-sync/build-plugin.js
           node --check scripts/plugin-release-candidate-core.js
           node --check scripts/prepare-plugin-release-candidate.js
