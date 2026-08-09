@@ -1148,6 +1148,130 @@ var require_record_body_markdown_utils = __commonJS({
   }
 });
 
+// src/media-file-utils.js
+var require_media_file_utils = __commonJS({
+  "src/media-file-utils.js"(exports2, module2) {
+    function getImageFileExtension2(url = "") {
+      const match = String(url || "").split("?")[0].match(/\.([a-z0-9]{2,5})$/i);
+      const ext = match ? match[1].toLowerCase() : "jpg";
+      return ["jpg", "jpeg", "png", "webp", "bmp"].includes(ext) ? ext : "jpg";
+    }
+    __name(getImageFileExtension2, "getImageFileExtension");
+    function getAudioFormatFromUrl2(audioUrl) {
+      const match = String(audioUrl || "").toLowerCase().match(/\.([a-z0-9]{2,5})(?:[?#]|$)/);
+      if (!match && /finder\.video\.qq\.com|mpvideo/i.test(String(audioUrl || ""))) return "mp4";
+      const ext = match ? match[1] : "mp3";
+      if (["mp3", "m4a", "wav", "aac", "flac", "ogg", "mp4"].includes(ext)) return ext;
+      if (ext === "m4s") return "mp4";
+      return "mp3";
+    }
+    __name(getAudioFormatFromUrl2, "getAudioFormatFromUrl");
+    function hasVideoTrackInMediaBuffer2(value) {
+      const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value || []);
+      if (!buffer.length) return false;
+      return buffer.includes(Buffer.from("vide")) || buffer.includes(Buffer.from("vp09"));
+    }
+    __name(hasVideoTrackInMediaBuffer2, "hasVideoTrackInMediaBuffer");
+    function bufferStartsWith(buffer, bytes) {
+      if (!buffer || buffer.length < bytes.length) return false;
+      return bytes.every((byte, index) => buffer[index] === byte);
+    }
+    __name(bufferStartsWith, "bufferStartsWith");
+    function getInvalidDownloadedMediaReason2(buffer) {
+      if (!buffer || buffer.length < 512) {
+        return "下载到的媒体文件过小，可能不是有效音视频文件";
+      }
+      const headBuffer = buffer.subarray(0, Math.min(buffer.length, 256));
+      const headText = headBuffer.toString("utf8").trim().toLowerCase();
+      if (headText.startsWith("<!doctype") || headText.startsWith("<html") || headText.includes("<body")) {
+        return "下载到的是网页内容，不是有效音视频文件";
+      }
+      if (headText.startsWith("{") || headText.startsWith("[")) {
+        return "下载到的是接口返回数据，不是有效音视频文件";
+      }
+      if (bufferStartsWith(buffer, [255, 216, 255]) || bufferStartsWith(buffer, [137, 80, 78, 71]) || bufferStartsWith(buffer, [71, 73, 70, 56]) || bufferStartsWith(buffer, [82, 73, 70, 70]) && buffer.subarray(8, 12).toString("ascii") === "WEBP") {
+        return "下载到的是封面图片，不是有效音视频文件";
+      }
+      return "";
+    }
+    __name(getInvalidDownloadedMediaReason2, "getInvalidDownloadedMediaReason");
+    function sanitizeAttachmentName2(fileName, fallbackName) {
+      const text = String(fileName || fallbackName || "upload-file").trim();
+      return (text || "upload-file").replace(/[\\/:*?"<>|]/g, "-");
+    }
+    __name(sanitizeAttachmentName2, "sanitizeAttachmentName");
+    function decodeDataUrl2(dataUrl) {
+      const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/);
+      if (!match) return null;
+      const mimeType = match[1] || "application/octet-stream";
+      const body = match[3] || "";
+      const buffer = match[2] ? Buffer.from(body, "base64") : Buffer.from(decodeURIComponent(body), "utf8");
+      return { mimeType, buffer };
+    }
+    __name(decodeDataUrl2, "decodeDataUrl");
+    function getImageExtFromMime2(mimeType) {
+      const type = String(mimeType || "").toLowerCase();
+      if (type.includes("jpeg") || type.includes("jpg")) return "jpg";
+      if (type.includes("webp")) return "webp";
+      if (type.includes("gif")) return "gif";
+      if (type.includes("svg")) return "svg";
+      return "png";
+    }
+    __name(getImageExtFromMime2, "getImageExtFromMime");
+    function getImageExtFromBuffer2(buffer, fallbackUrl = "") {
+      const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+      if (data.length >= 8 && data[0] === 137 && data[1] === 80 && data[2] === 78 && data[3] === 71) return "png";
+      if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255) return "jpg";
+      if (data.length >= 6 && data.slice(0, 6).toString("ascii").startsWith("GIF")) return "gif";
+      if (data.length >= 12 && data.slice(0, 4).toString("ascii") === "RIFF" && data.slice(8, 12).toString("ascii") === "WEBP") return "webp";
+      return getImageFileExtension2(fallbackUrl) || "png";
+    }
+    __name(getImageExtFromBuffer2, "getImageExtFromBuffer");
+    function getAttachmentExt2(fileName, fallbackExt) {
+      const fromName = String(fileName || "").split(".").pop();
+      const ext = String(fallbackExt || fromName || "").toLowerCase().replace(/^\./, "");
+      return ext === String(fileName || "").toLowerCase() ? "" : ext;
+    }
+    __name(getAttachmentExt2, "getAttachmentExt");
+    function isMarkdownConvertibleExt2(ext) {
+      return ["md", "markdown", "txt"].includes(String(ext || "").toLowerCase());
+    }
+    __name(isMarkdownConvertibleExt2, "isMarkdownConvertibleExt");
+    function isAudioVideoAttachmentExt2(ext) {
+      return ["mp3", "m4a", "wav", "aac", "amr", "silk", "ogg", "flac", "mp4", "mov", "m4v"].includes(String(ext || "").toLowerCase());
+    }
+    __name(isAudioVideoAttachmentExt2, "isAudioVideoAttachmentExt");
+    function decodeUtf8ArrayBuffer2(buffer) {
+      return toNodeBuffer2(buffer).toString("utf8");
+    }
+    __name(decodeUtf8ArrayBuffer2, "decodeUtf8ArrayBuffer");
+    function toNodeBuffer2(data) {
+      if (Buffer.isBuffer(data)) return data;
+      if (ArrayBuffer.isView(data)) {
+        return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+      }
+      return Buffer.from(data || []);
+    }
+    __name(toNodeBuffer2, "toNodeBuffer");
+    module2.exports = {
+      bufferStartsWith,
+      decodeDataUrl: decodeDataUrl2,
+      decodeUtf8ArrayBuffer: decodeUtf8ArrayBuffer2,
+      getAttachmentExt: getAttachmentExt2,
+      getAudioFormatFromUrl: getAudioFormatFromUrl2,
+      getImageExtFromBuffer: getImageExtFromBuffer2,
+      getImageExtFromMime: getImageExtFromMime2,
+      getImageFileExtension: getImageFileExtension2,
+      getInvalidDownloadedMediaReason: getInvalidDownloadedMediaReason2,
+      hasVideoTrackInMediaBuffer: hasVideoTrackInMediaBuffer2,
+      isAudioVideoAttachmentExt: isAudioVideoAttachmentExt2,
+      isMarkdownConvertibleExt: isMarkdownConvertibleExt2,
+      sanitizeAttachmentName: sanitizeAttachmentName2,
+      toNodeBuffer: toNodeBuffer2
+    };
+  }
+});
+
 // src/document-text-extraction-utils.js
 var require_document_text_extraction_utils = __commonJS({
   "src/document-text-extraction-utils.js"(exports2, module2) {
@@ -2158,6 +2282,21 @@ var {
 } = require_record_identity_utils();
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
 var { createRecordBodyMarkdownHelpers } = require_record_body_markdown_utils();
+var {
+  decodeDataUrl,
+  decodeUtf8ArrayBuffer,
+  getAttachmentExt,
+  getAudioFormatFromUrl,
+  getImageExtFromBuffer,
+  getImageExtFromMime,
+  getImageFileExtension,
+  getInvalidDownloadedMediaReason,
+  hasVideoTrackInMediaBuffer,
+  isAudioVideoAttachmentExt,
+  isMarkdownConvertibleExt,
+  sanitizeAttachmentName,
+  toNodeBuffer
+} = require_media_file_utils();
 var { createDocumentTextExtractionHelpers } = require_document_text_extraction_utils();
 var {
   createAiMetadataHelpers,
@@ -2325,12 +2464,6 @@ var BROWSER_MEDIA_CAPTURE_MAX_REQUESTS = 512;
 var BROWSER_MEDIA_CAPTURE_MAX_URLS = 256;
 var BROWSER_MEDIA_CAPTURE_MAX_NODES = 2048;
 var BROWSER_MEDIA_CAPTURE_MAX_STRING_CHARACTERS = 256 * 1024;
-function getImageFileExtension(url = "") {
-  const match = String(url || "").split("?")[0].match(/\.([a-z0-9]{2,5})$/i);
-  const ext = match ? match[1].toLowerCase() : "jpg";
-  return ["jpg", "jpeg", "png", "webp", "bmp"].includes(ext) ? ext : "jpg";
-}
-__name(getImageFileExtension, "getImageFileExtension");
 var AI_PROVIDER_NAMES = {
   off: "关闭转写",
   local: "本地转写",
@@ -4116,21 +4249,6 @@ function parseAliyunTranscriptionResult(responseText) {
   return text;
 }
 __name(parseAliyunTranscriptionResult, "parseAliyunTranscriptionResult");
-function getAudioFormatFromUrl(audioUrl) {
-  const match = String(audioUrl || "").toLowerCase().match(/\.([a-z0-9]{2,5})(?:[?#]|$)/);
-  if (!match && /finder\.video\.qq\.com|mpvideo/i.test(String(audioUrl || ""))) return "mp4";
-  const ext = match ? match[1] : "mp3";
-  if (["mp3", "m4a", "wav", "aac", "flac", "ogg", "mp4"].includes(ext)) return ext;
-  if (ext === "m4s") return "mp4";
-  return "mp3";
-}
-__name(getAudioFormatFromUrl, "getAudioFormatFromUrl");
-function hasVideoTrackInMediaBuffer(value) {
-  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value || []);
-  if (!buffer.length) return false;
-  return buffer.includes(Buffer.from("vide")) || buffer.includes(Buffer.from("vp09"));
-}
-__name(hasVideoTrackInMediaBuffer, "hasVideoTrackInMediaBuffer");
 function isVideoPlatform(platform, url = "") {
   const source = `${String(platform || "")} ${String(url || "")}`.toLowerCase();
   return /抖音|小红书|b站|bilibili|douyin|xiaohongshu/.test(source);
@@ -4190,29 +4308,6 @@ function cleanTrailingTranscriptionHallucinations(text) {
   return lines.slice(0, cutoff).join("\n").trim();
 }
 __name(cleanTrailingTranscriptionHallucinations, "cleanTrailingTranscriptionHallucinations");
-function bufferStartsWith(buffer, bytes) {
-  if (!buffer || buffer.length < bytes.length) return false;
-  return bytes.every((byte, index) => buffer[index] === byte);
-}
-__name(bufferStartsWith, "bufferStartsWith");
-function getInvalidDownloadedMediaReason(buffer) {
-  if (!buffer || buffer.length < 512) {
-    return "下载到的媒体文件过小，可能不是有效音视频文件";
-  }
-  const headBuffer = buffer.subarray(0, Math.min(buffer.length, 256));
-  const headText = headBuffer.toString("utf8").trim().toLowerCase();
-  if (headText.startsWith("<!doctype") || headText.startsWith("<html") || headText.includes("<body")) {
-    return "下载到的是网页内容，不是有效音视频文件";
-  }
-  if (headText.startsWith("{") || headText.startsWith("[")) {
-    return "下载到的是接口返回数据，不是有效音视频文件";
-  }
-  if (bufferStartsWith(buffer, [255, 216, 255]) || bufferStartsWith(buffer, [137, 80, 78, 71]) || bufferStartsWith(buffer, [71, 73, 70, 56]) || bufferStartsWith(buffer, [82, 73, 70, 70]) && buffer.subarray(8, 12).toString("ascii") === "WEBP") {
-    return "下载到的是封面图片，不是有效音视频文件";
-  }
-  return "";
-}
-__name(getInvalidDownloadedMediaReason, "getInvalidDownloadedMediaReason");
 var WECHAT_CHANNELS_ENCRYPTED_HEAD_BYTES = 131072;
 function u64(value) {
   return BigInt.asUintN(64, value);
@@ -5036,68 +5131,10 @@ function postProcessFeishuMarkdown(markdown, title = "") {
   return formatFeishuCodeBlocks(removeFeishuResidualTableLines(repairFeishuMarkdownTables(lines.join("\n")))).replace(/\n{3,}/g, "\n\n").trim();
 }
 __name(postProcessFeishuMarkdown, "postProcessFeishuMarkdown");
-function sanitizeAttachmentName(fileName, fallbackName) {
-  const text = String(fileName || fallbackName || "upload-file").trim();
-  return (text || "upload-file").replace(/[\\/:*?"<>|]/g, "-");
-}
-__name(sanitizeAttachmentName, "sanitizeAttachmentName");
 function escapeRegExp(text) {
   return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 __name(escapeRegExp, "escapeRegExp");
-function decodeDataUrl(dataUrl) {
-  const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/);
-  if (!match) return null;
-  const mimeType = match[1] || "application/octet-stream";
-  const body = match[3] || "";
-  const buffer = match[2] ? Buffer.from(body, "base64") : Buffer.from(decodeURIComponent(body), "utf8");
-  return { mimeType, buffer };
-}
-__name(decodeDataUrl, "decodeDataUrl");
-function getImageExtFromMime(mimeType) {
-  const type = String(mimeType || "").toLowerCase();
-  if (type.includes("jpeg") || type.includes("jpg")) return "jpg";
-  if (type.includes("webp")) return "webp";
-  if (type.includes("gif")) return "gif";
-  if (type.includes("svg")) return "svg";
-  return "png";
-}
-__name(getImageExtFromMime, "getImageExtFromMime");
-function getImageExtFromBuffer(buffer, fallbackUrl = "") {
-  const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
-  if (data.length >= 8 && data[0] === 137 && data[1] === 80 && data[2] === 78 && data[3] === 71) return "png";
-  if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255) return "jpg";
-  if (data.length >= 6 && data.slice(0, 6).toString("ascii").startsWith("GIF")) return "gif";
-  if (data.length >= 12 && data.slice(0, 4).toString("ascii") === "RIFF" && data.slice(8, 12).toString("ascii") === "WEBP") return "webp";
-  return getImageFileExtension(fallbackUrl) || "png";
-}
-__name(getImageExtFromBuffer, "getImageExtFromBuffer");
-function getAttachmentExt(fileName, fallbackExt) {
-  const fromName = String(fileName || "").split(".").pop();
-  const ext = String(fallbackExt || fromName || "").toLowerCase().replace(/^\./, "");
-  return ext === String(fileName || "").toLowerCase() ? "" : ext;
-}
-__name(getAttachmentExt, "getAttachmentExt");
-function isMarkdownConvertibleExt(ext) {
-  return ["md", "markdown", "txt"].includes(String(ext || "").toLowerCase());
-}
-__name(isMarkdownConvertibleExt, "isMarkdownConvertibleExt");
-function isAudioVideoAttachmentExt(ext) {
-  return ["mp3", "m4a", "wav", "aac", "amr", "silk", "ogg", "flac", "mp4", "mov", "m4v"].includes(String(ext || "").toLowerCase());
-}
-__name(isAudioVideoAttachmentExt, "isAudioVideoAttachmentExt");
-function decodeUtf8ArrayBuffer(buffer) {
-  return toNodeBuffer(buffer).toString("utf8");
-}
-__name(decodeUtf8ArrayBuffer, "decodeUtf8ArrayBuffer");
-function toNodeBuffer(data) {
-  if (Buffer.isBuffer(data)) return data;
-  if (ArrayBuffer.isView(data)) {
-    return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-  }
-  return Buffer.from(data || []);
-}
-__name(toNodeBuffer, "toNodeBuffer");
 function isFeishuUrl(url) {
   const text = String(url || "").toLowerCase();
   return text.includes("feishu.cn") || text.includes("larksuite.com") || text.includes("feishu.net") || text.includes("feishu");
