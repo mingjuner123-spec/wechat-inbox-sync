@@ -1824,7 +1824,7 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   xiaohongshuWindowOpenHandler({ url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144' }),
-  { action: 'allow' },
+  { action: 'deny' },
 );
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
@@ -2520,7 +2520,7 @@ assert.ok(pluginMainSource.includes('const XIAOHONGSHU_SESSION_PARTITION'));
 assert.ok(pluginMainSource.includes('function getXiaohongshuSession'));
 assert.ok(pluginMainSource.includes('async function probeXiaohongshuLoginStatus'));
 assert.ok(pluginMainSource.includes('resolve(await probeXiaohongshuLoginStatus(loginUrl));'));
-assert.ok(pluginMainSource.includes('return await probeXiaohongshuLoginStatus();'));
+assert.ok(pluginMainSource.includes("return await probeXiaohongshuLoginStatus('', options);"));
 const xiaohongshuLoginProbeSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function probeXiaohongshuLoginStatus'),
   pluginMainSource.indexOf('async function getXiaohongshuCookieHeader'),
