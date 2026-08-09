@@ -61,7 +61,7 @@ var require_date_utils = __commonJS({
 var require_transcription_quality_utils = __commonJS({
   "src/transcription-quality-utils.js"(exports2, module2) {
     "use strict";
-    function dedupeRepeatedTranscriptionLines2(text) {
+    function dedupeRepeatedTranscriptionLines(text) {
       const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       if (!lines.length) return "";
       const deduped = [];
@@ -76,7 +76,7 @@ var require_transcription_quality_utils = __commonJS({
       }
       return deduped.join("\n").trim();
     }
-    __name(dedupeRepeatedTranscriptionLines2, "dedupeRepeatedTranscriptionLines");
+    __name(dedupeRepeatedTranscriptionLines, "dedupeRepeatedTranscriptionLines");
     function normalizeTranscriptionQualityUnit2(value) {
       return String(value || "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "").trim();
     }
@@ -147,10 +147,165 @@ var require_transcription_quality_utils = __commonJS({
     module2.exports = {
       assertUsableTranscription: assertUsableTranscription2,
       createTranscriptionQualityError: createTranscriptionQualityError2,
-      dedupeRepeatedTranscriptionLines: dedupeRepeatedTranscriptionLines2,
+      dedupeRepeatedTranscriptionLines,
       getTranscriptionQualityIssue: getTranscriptionQualityIssue2,
       getTranscriptionQualityUnits: getTranscriptionQualityUnits2,
       normalizeTranscriptionQualityUnit: normalizeTranscriptionQualityUnit2
+    };
+  }
+});
+
+// src/cloud-transcription-response-utils.js
+var require_cloud_transcription_response_utils = __commonJS({
+  "src/cloud-transcription-response-utils.js"(exports2, module2) {
+    "use strict";
+    var { dedupeRepeatedTranscriptionLines } = require_transcription_quality_utils();
+    function parseTencentCreateTaskResponse2(payload) {
+      const data = payload && payload.Response && payload.Response.Data;
+      const taskId = data && (data.TaskId || data.TaskID || data.Taskid);
+      if (!taskId) {
+        const error = payload && payload.Response && payload.Response.Error;
+        throw new Error(error ? `${error.Code}: ${error.Message}` : "腾讯云未返回转写任务 ID");
+      }
+      return taskId;
+    }
+    __name(parseTencentCreateTaskResponse2, "parseTencentCreateTaskResponse");
+    function cleanTencentResultText(text) {
+      return String(text || "").replace(/^\[[^\]]+\]\s*/gm, "").replace(/\n{3,}/g, "\n\n").trim();
+    }
+    __name(cleanTencentResultText, "cleanTencentResultText");
+    function tryParseJson2(text) {
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        return null;
+      }
+    }
+    __name(tryParseJson2, "tryParseJson");
+    function extractOpenAICompatibleText2(payload) {
+      const choice = payload && payload.choices && payload.choices[0];
+      const content = choice && (choice.delta && choice.delta.content || choice.message && choice.message.content || choice.text);
+      if (Array.isArray(content)) {
+        return content.map((part) => part.text || part.content || "").join("");
+      }
+      return typeof content === "string" ? content : "";
+    }
+    __name(extractOpenAICompatibleText2, "extractOpenAICompatibleText");
+    function parseAliyunTranscriptionResult2(responseText) {
+      const text = String(responseText || "").trim();
+      const dataLines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith("data:"));
+      if (dataLines.length) {
+        return dataLines.map((line) => line.replace(/^data:\s*/, "").trim()).filter((line) => line && line !== "[DONE]").map((line) => extractOpenAICompatibleText2(tryParseJson2(line))).join("").trim();
+      }
+      const payload = tryParseJson2(text);
+      if (payload) {
+        return extractOpenAICompatibleText2(payload).trim();
+      }
+      return text;
+    }
+    __name(parseAliyunTranscriptionResult2, "parseAliyunTranscriptionResult");
+    function getHeader(headers, name) {
+      if (!headers) return "";
+      if (headers[name]) return headers[name];
+      const lowerName = name.toLowerCase();
+      const key = Object.keys(headers).find((item) => item.toLowerCase() === lowerName);
+      return key ? headers[key] : "";
+    }
+    __name(getHeader, "getHeader");
+    function formatHttpError2(provider, response) {
+      const parts = [`${provider}请求失败：HTTP ${response && response.status}`];
+      ["X-Api-Status-Code", "X-Api-Message", "X-Api-Request-Id"].forEach((name) => {
+        const value = getHeader(response && response.headers, name);
+        if (value) {
+          parts.push(`${name}=${value}`);
+        }
+      });
+      const body = String(response && (response.text || JSON.stringify(response.json || "")) || "").trim();
+      if (body) {
+        parts.push(body.slice(0, 500));
+      }
+      return parts.join("；");
+    }
+    __name(formatHttpError2, "formatHttpError");
+    function normalizeDoubaoSpeakerText(result) {
+      if (!result || typeof result !== "object") return "";
+      const utterances = Array.isArray(result.utterances) ? result.utterances : [];
+      if (!utterances.length) return "";
+      return dedupeRepeatedTranscriptionLines(utterances.map((item) => {
+        const text = String(item && (item.text || item.result_text || item.utterance_text) || "").trim();
+        if (!text) return "";
+        const additions = item && item.additions && typeof item.additions === "object" ? item.additions : {};
+        const speaker = item && (item.speaker || item.speaker_id || item.spk || item.speakerId || additions.speaker || additions.speaker_id || additions.spk || additions.speakerId);
+        return speaker === void 0 || speaker === null || speaker === "" ? text : `说话人${speaker}：${text}`;
+      }).filter(Boolean).join("\n").trim());
+    }
+    __name(normalizeDoubaoSpeakerText, "normalizeDoubaoSpeakerText");
+    function parseDoubaoAsrResult2(payload) {
+      const data = typeof payload === "string" ? tryParseJson2(payload) : payload;
+      const result = data && data.result;
+      if (Array.isArray(result)) {
+        return dedupeRepeatedTranscriptionLines(result.map((item) => normalizeDoubaoSpeakerText(item) || String(item && (item.text || item.result_text || item.utterance_text) || "").trim()).filter(Boolean).join("\n").trim());
+      }
+      const speakerText = normalizeDoubaoSpeakerText(result);
+      if (speakerText) return speakerText;
+      const text = result && (result.text || result.result_text) || data && (data.text || data.transcription) || "";
+      return dedupeRepeatedTranscriptionLines(String(text || "").trim());
+    }
+    __name(parseDoubaoAsrResult2, "parseDoubaoAsrResult");
+    function parseDoubaoAsrTaskState2(response) {
+      if (response.status && (response.status < 200 || response.status >= 300)) {
+        throw new Error(formatHttpError2("豆包语音识别", response));
+      }
+      const statusCode = getHeader(response.headers, "X-Api-Status-Code");
+      if (statusCode && statusCode !== "20000000") {
+        if (statusCode === "20000001" || statusCode === "20000002") {
+          return {
+            status: "processing",
+            transcription: ""
+          };
+        }
+        throw new Error(formatHttpError2("豆包语音识别", response));
+      }
+      const transcription = parseDoubaoAsrResult2(response.json || response.text);
+      return {
+        status: transcription ? "success" : "empty",
+        transcription
+      };
+    }
+    __name(parseDoubaoAsrTaskState2, "parseDoubaoAsrTaskState");
+    function parseTencentTaskStatusResponse2(payload) {
+      const data = payload && payload.Response && payload.Response.Data;
+      const error = payload && payload.Response && payload.Response.Error;
+      if (error) {
+        return {
+          status: 3,
+          statusStr: "failed",
+          transcription: "",
+          errorMsg: `${error.Code}: ${error.Message}`
+        };
+      }
+      const status = Number(data && data.Status);
+      const statusStr = String(data && data.StatusStr || "").toLowerCase();
+      return {
+        status,
+        statusStr,
+        transcription: cleanTencentResultText(data && data.Result),
+        errorMsg: data && (data.ErrorMsg || data.ErrorMessage) || ""
+      };
+    }
+    __name(parseTencentTaskStatusResponse2, "parseTencentTaskStatusResponse");
+    module2.exports = {
+      parseTencentCreateTaskResponse: parseTencentCreateTaskResponse2,
+      cleanTencentResultText,
+      tryParseJson: tryParseJson2,
+      extractOpenAICompatibleText: extractOpenAICompatibleText2,
+      parseAliyunTranscriptionResult: parseAliyunTranscriptionResult2,
+      getHeader,
+      formatHttpError: formatHttpError2,
+      normalizeDoubaoSpeakerText,
+      parseDoubaoAsrResult: parseDoubaoAsrResult2,
+      parseDoubaoAsrTaskState: parseDoubaoAsrTaskState2,
+      parseTencentTaskStatusResponse: parseTencentTaskStatusResponse2
     };
   }
 });
@@ -2220,11 +2375,20 @@ var {
 var {
   assertUsableTranscription,
   createTranscriptionQualityError,
-  dedupeRepeatedTranscriptionLines,
   getTranscriptionQualityIssue,
   getTranscriptionQualityUnits,
   normalizeTranscriptionQualityUnit
 } = require_transcription_quality_utils();
+var {
+  extractOpenAICompatibleText,
+  formatHttpError,
+  parseAliyunTranscriptionResult,
+  parseDoubaoAsrResult,
+  parseDoubaoAsrTaskState,
+  parseTencentCreateTaskResponse,
+  parseTencentTaskStatusResponse,
+  tryParseJson
+} = require_cloud_transcription_response_utils();
 var {
   buildConversionWarningsNotice,
   buildLocalAsrProgressKey,
@@ -4205,50 +4369,6 @@ function buildTencentRequest({
   };
 }
 __name(buildTencentRequest, "buildTencentRequest");
-function parseTencentCreateTaskResponse(payload) {
-  const data = payload && payload.Response && payload.Response.Data;
-  const taskId = data && (data.TaskId || data.TaskID || data.Taskid);
-  if (!taskId) {
-    const error = payload && payload.Response && payload.Response.Error;
-    throw new Error(error ? `${error.Code}: ${error.Message}` : "腾讯云未返回转写任务 ID");
-  }
-  return taskId;
-}
-__name(parseTencentCreateTaskResponse, "parseTencentCreateTaskResponse");
-function cleanTencentResultText(text) {
-  return String(text || "").replace(/^\[[^\]]+\]\s*/gm, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-__name(cleanTencentResultText, "cleanTencentResultText");
-function tryParseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    return null;
-  }
-}
-__name(tryParseJson, "tryParseJson");
-function extractOpenAICompatibleText(payload) {
-  const choice = payload && payload.choices && payload.choices[0];
-  const content = choice && (choice.delta && choice.delta.content || choice.message && choice.message.content || choice.text);
-  if (Array.isArray(content)) {
-    return content.map((part) => part.text || part.content || "").join("");
-  }
-  return typeof content === "string" ? content : "";
-}
-__name(extractOpenAICompatibleText, "extractOpenAICompatibleText");
-function parseAliyunTranscriptionResult(responseText) {
-  const text = String(responseText || "").trim();
-  const dataLines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.startsWith("data:"));
-  if (dataLines.length) {
-    return dataLines.map((line) => line.replace(/^data:\s*/, "").trim()).filter((line) => line && line !== "[DONE]").map((line) => extractOpenAICompatibleText(tryParseJson(line))).join("").trim();
-  }
-  const payload = tryParseJson(text);
-  if (payload) {
-    return extractOpenAICompatibleText(payload).trim();
-  }
-  return text;
-}
-__name(parseAliyunTranscriptionResult, "parseAliyunTranscriptionResult");
 function isVideoPlatform(platform, url = "") {
   const source = `${String(platform || "")} ${String(url || "")}`.toLowerCase();
   return /抖音|小红书|b站|bilibili|douyin|xiaohongshu/.test(source);
@@ -4577,96 +4697,6 @@ function buildDoubaoAsrQueryRequest({ apiKey, requestId }) {
   };
 }
 __name(buildDoubaoAsrQueryRequest, "buildDoubaoAsrQueryRequest");
-function getHeader(headers, name) {
-  if (!headers) return "";
-  if (headers[name]) return headers[name];
-  const lowerName = name.toLowerCase();
-  const key = Object.keys(headers).find((item) => item.toLowerCase() === lowerName);
-  return key ? headers[key] : "";
-}
-__name(getHeader, "getHeader");
-function formatHttpError(provider, response) {
-  const parts = [`${provider}请求失败：HTTP ${response && response.status}`];
-  ["X-Api-Status-Code", "X-Api-Message", "X-Api-Request-Id"].forEach((name) => {
-    const value = getHeader(response && response.headers, name);
-    if (value) {
-      parts.push(`${name}=${value}`);
-    }
-  });
-  const body = String(response && (response.text || JSON.stringify(response.json || "")) || "").trim();
-  if (body) {
-    parts.push(body.slice(0, 500));
-  }
-  return parts.join("；");
-}
-__name(formatHttpError, "formatHttpError");
-function normalizeDoubaoSpeakerText(result) {
-  if (!result || typeof result !== "object") return "";
-  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
-  if (!utterances.length) return "";
-  return dedupeRepeatedTranscriptionLines(utterances.map((item) => {
-    const text = String(item && (item.text || item.result_text || item.utterance_text) || "").trim();
-    if (!text) return "";
-    const additions = item && item.additions && typeof item.additions === "object" ? item.additions : {};
-    const speaker = item && (item.speaker || item.speaker_id || item.spk || item.speakerId || additions.speaker || additions.speaker_id || additions.spk || additions.speakerId);
-    return speaker === void 0 || speaker === null || speaker === "" ? text : `说话人${speaker}：${text}`;
-  }).filter(Boolean).join("\n").trim());
-}
-__name(normalizeDoubaoSpeakerText, "normalizeDoubaoSpeakerText");
-function parseDoubaoAsrResult(payload) {
-  const data = typeof payload === "string" ? tryParseJson(payload) : payload;
-  const result = data && data.result;
-  if (Array.isArray(result)) {
-    return dedupeRepeatedTranscriptionLines(result.map((item) => normalizeDoubaoSpeakerText(item) || String(item && (item.text || item.result_text || item.utterance_text) || "").trim()).filter(Boolean).join("\n").trim());
-  }
-  const speakerText = normalizeDoubaoSpeakerText(result);
-  if (speakerText) return speakerText;
-  const text = result && (result.text || result.result_text) || data && (data.text || data.transcription) || "";
-  return dedupeRepeatedTranscriptionLines(String(text || "").trim());
-}
-__name(parseDoubaoAsrResult, "parseDoubaoAsrResult");
-function parseDoubaoAsrTaskState(response) {
-  if (response.status && (response.status < 200 || response.status >= 300)) {
-    throw new Error(formatHttpError("豆包语音识别", response));
-  }
-  const statusCode = getHeader(response.headers, "X-Api-Status-Code");
-  if (statusCode && statusCode !== "20000000") {
-    if (statusCode === "20000001" || statusCode === "20000002") {
-      return {
-        status: "processing",
-        transcription: ""
-      };
-    }
-    throw new Error(formatHttpError("豆包语音识别", response));
-  }
-  const transcription = parseDoubaoAsrResult(response.json || response.text);
-  return {
-    status: transcription ? "success" : "empty",
-    transcription
-  };
-}
-__name(parseDoubaoAsrTaskState, "parseDoubaoAsrTaskState");
-function parseTencentTaskStatusResponse(payload) {
-  const data = payload && payload.Response && payload.Response.Data;
-  const error = payload && payload.Response && payload.Response.Error;
-  if (error) {
-    return {
-      status: 3,
-      statusStr: "failed",
-      transcription: "",
-      errorMsg: `${error.Code}: ${error.Message}`
-    };
-  }
-  const status = Number(data && data.Status);
-  const statusStr = String(data && data.StatusStr || "").toLowerCase();
-  return {
-    status,
-    statusStr,
-    transcription: cleanTencentResultText(data && data.Result),
-    errorMsg: data && (data.ErrorMsg || data.ErrorMessage) || ""
-  };
-}
-__name(parseTencentTaskStatusResponse, "parseTencentTaskStatusResponse");
 function sleep(ms) {
   const schedule = typeof globalThis !== "undefined" && typeof globalThis.setTimeout === "function" ? globalThis.setTimeout.bind(globalThis) : window.setTimeout.bind(window);
   return new Promise((resolve) => schedule(resolve, ms));
