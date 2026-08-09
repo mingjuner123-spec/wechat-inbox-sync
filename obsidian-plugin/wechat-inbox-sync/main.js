@@ -18664,8 +18664,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let temporaryFileExists = false;
     try {
       throwIfAborted(signal);
-      await adapter.write(temporaryFilePath, markdown);
       temporaryFileExists = true;
+      await adapter.write(temporaryFilePath, markdown);
       throwIfAborted(signal);
       if (typeof adapter.exists === "function" && await adapter.exists(filePath)) {
         throw new Error(`笔记目标路径已存在，已停止写入以避免覆盖：${filePath}`);
@@ -18678,14 +18678,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         );
       } else if (this.app.vault && typeof this.app.vault.create === "function") {
         await this.app.vault.create(filePath, markdown);
-      } else if (typeof adapter.rename === "function") {
-        if (typeof adapter.exists === "function" && await adapter.exists(filePath)) {
-          throw new Error(`笔记目标路径已存在，已停止写入以避免覆盖：${filePath}`);
-        }
-        await adapter.rename(temporaryFilePath, filePath);
-        temporaryFileExists = false;
       } else {
-        throw new Error("当前 Obsidian 存储适配器不支持安全提交笔记");
+        throw new Error("当前 Obsidian 存储适配器不支持原子安全提交笔记");
       }
     } finally {
       if (temporaryFileExists && typeof adapter.remove === "function") {

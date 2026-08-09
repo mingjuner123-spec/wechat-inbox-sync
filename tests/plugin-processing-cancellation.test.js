@@ -258,6 +258,10 @@ async function runAbortAfterNoteWriteRemovesNewlyCreatedNoteTest() {
   plugin.enrichRecordMetadataWithAi = async (record) => record;
   plugin.app = {
     vault: {
+      async create(filePath, markdown) {
+        if (files.has(filePath)) throw new Error('target exists');
+        files.set(filePath, markdown);
+      },
       adapter: {
         async exists(filePath) {
           return files.has(filePath);
@@ -324,6 +328,10 @@ async function runAbortNeverTouchesConcurrentlyCreatedFinalNoteTest() {
   plugin.enrichRecordMetadataWithAi = async (record) => record;
   plugin.app = {
     vault: {
+      async create(filePath, markdown) {
+        if (files.has(filePath)) throw new Error('target exists');
+        files.set(filePath, markdown);
+      },
       adapter: {
         async exists(filePath) {
           return files.has(filePath);

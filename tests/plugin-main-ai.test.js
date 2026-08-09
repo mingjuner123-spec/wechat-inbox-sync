@@ -12804,6 +12804,9 @@ async function runClipboardTextWebpagePromotionTests() {
   });
   plugin.app = {
     vault: {
+      async create(filePath, markdown) {
+        writes.push({ filePath, markdown });
+      },
       adapter: {
         async exists(filePath) {
           return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
@@ -13045,6 +13048,9 @@ async function runCanonicalVaultFolderTests() {
   };
   pathPlugin.app = {
     vault: {
+      async create(filePath, markdown) {
+        canonicalWrites.push({ filePath, markdown });
+      },
       adapter: {
         async exists(filePath) {
           return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
@@ -13186,6 +13192,9 @@ async function runAiMetadataFailureDoesNotBlockCompletedTranscriptSyncTest() {
     });
     plugin.app = {
       vault: {
+        async create(filePath, markdown) {
+          writes.push({ filePath, markdown });
+        },
         adapter: {
           async exists(filePath) {
             return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
@@ -13325,6 +13334,9 @@ async function runAiMetadata429AfterLocalTranscriptionDoesNotRepeatWorkTest() {
   });
   plugin.app = {
     vault: {
+      async create(filePath, markdown) {
+        noteWrites.push({ filePath, markdown });
+      },
       adapter: {
         async exists(filePath) {
           return !/\.(?:md|tmp)$/i.test(String(filePath || ''));
