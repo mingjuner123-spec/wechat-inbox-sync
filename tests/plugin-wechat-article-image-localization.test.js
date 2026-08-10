@@ -91,6 +91,17 @@ async function run() {
   assert.ok(fallback.metadata.imageLocalizationError.includes('HTTP 403'));
   assert.ok(fallback.metadata.conversionNote.includes('image-localize-failed=1'));
 
+  const folderFailureCase = createPlugin();
+  folderFailureCase.plugin.ensureFolder = async () => {
+    throw new Error('无法创建附件目录');
+  };
+  const folderFallback = await hydrate(folderFailureCase.plugin);
+  assert.strictEqual(folderFallback.metadata.conversionStatus, 'success');
+  assert.ok(folderFallback.metadata.markdown.includes(imageUrl));
+  assert.strictEqual(folderFallback.metadata.imageLocalizationFailedCount, 1);
+  assert.ok(folderFallback.metadata.imageLocalizationError.includes('无法创建附件目录'));
+  assert.ok(folderFallback.metadata.conversionNote.includes('image-localize-failed=1'));
+
   const genericCase = createPlugin();
   requestUrlMock = async () => ({
     text: articleHtml.replace(articleUrl, 'https://example.com/article'),

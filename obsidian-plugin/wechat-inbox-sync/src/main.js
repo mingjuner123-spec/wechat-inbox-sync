@@ -16367,8 +16367,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     const savedByUrl = new Map();
     const safeTitle = sanitizeAttachmentName(title, '网页图片');
 
-    await this.ensureFolder(imageRootDir);
-    await this.ensureFolder(imageDayDir);
+    try {
+      await this.ensureFolder(imageRootDir);
+      await this.ensureFolder(imageDayDir);
+    } catch (error) {
+      if (typeof options.onError === 'function') {
+        options.onError({ imageUrl: '', error });
+      }
+      return nextMarkdown;
+    }
 
     for (const match of imageMatches) {
       const imageUrl = String(match[2] || '').trim();
