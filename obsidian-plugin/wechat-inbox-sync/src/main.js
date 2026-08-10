@@ -16352,7 +16352,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       || typeof this.app.vault.adapter.writeBinary !== 'function') {
       return markdown;
     }
-    const isXiaohongshuSource = isXiaohongshuUrl(options.sourceUrl);
+    const sourceUrl = String(options.sourceUrl || '').trim();
+    const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
+    const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     let nextMarkdown = isXiaohongshuSource
       ? sanitizeXiaohongshuMarkdownImages(String(markdown))
       : String(markdown);
@@ -16373,8 +16375,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!imageUrl || savedByUrl.has(imageUrl)) continue;
       try {
         const imageHeaders = isXiaohongshuSource
-          ? await getXiaohongshuRequestHeaders(options.sourceUrl)
-          : {};
+          ? await getXiaohongshuRequestHeaders(sourceUrl)
+          : isWechatArticleSource
+            ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl }
+            : {};
         // eslint-disable-next-line no-await-in-loop
         const arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
         const buffer = Buffer.from(arrayBuffer || []);
@@ -17869,6 +17873,27 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       const pageMeta = extractWebpageMetadataFromHtml(html, url);
+      const imageLocalizationErrors = [];
+      if (isWechatArticleUrl(url)) {
+        markdown = await this.saveMarkdownRemoteImageAssets(
+          markdown,
+          rootDir,
+          dateFolder,
+          pageTitle || title || '公众号文章',
+          {
+            sourceUrl: url,
+            onError: ({ error }) => {
+              imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+            },
+          },
+        );
+      }
+      const conversionNote = [
+        usedFallback ? '已通过备用通道抓取' : '',
+        imageLocalizationErrors.length
+          ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(' | ')}`
+          : '',
+      ].filter(Boolean).join('; ');
       return {
         ...record,
         metadata: {
@@ -17881,7 +17906,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           contentCategory: metadata.contentCategory || pageMeta.contentCategory || '',
           markdown,
           conversionStatus: 'success',
-          conversionNote: usedFallback ? '已通过备用通道抓取' : '',
+          conversionNote,
+          ...(isWechatArticleUrl(url) ? {
+            imageLocalizationFailedCount: imageLocalizationErrors.length,
+            imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
+          } : {}),
         },
       };
     } catch (error) {

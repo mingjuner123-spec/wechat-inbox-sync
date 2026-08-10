@@ -17299,7 +17299,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (!markdown || !this.app || !this.app.vault || !this.app.vault.adapter || typeof this.app.vault.adapter.writeBinary !== "function") {
       return markdown;
     }
-    const isXiaohongshuSource = isXiaohongshuUrl(options.sourceUrl);
+    const sourceUrl = String(options.sourceUrl || "").trim();
+    const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
+    const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     let nextMarkdown = isXiaohongshuSource ? sanitizeXiaohongshuMarkdownImages(String(markdown)) : String(markdown);
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return nextMarkdown;
@@ -17314,7 +17316,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const imageUrl = String(match[2] || "").trim();
       if (!imageUrl || savedByUrl.has(imageUrl)) continue;
       try {
-        const imageHeaders = isXiaohongshuSource ? await getXiaohongshuRequestHeaders(options.sourceUrl) : {};
+        const imageHeaders = isXiaohongshuSource ? await getXiaohongshuRequestHeaders(sourceUrl) : isWechatArticleSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : {};
         const arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
         const buffer = Buffer.from(arrayBuffer || []);
         if (!buffer.length) throw new Error("图片下载结果为空");
@@ -17860,7 +17862,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
             const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {}).filter((value) => /^https?:\/\//i.test(String(value || "").trim())).length;
             const missingImageTempUrlCount = Math.max(0, imageTokenCount - imageTempUrlCount);
-            const imageLocalizationErrors = [];
+            const imageLocalizationErrors2 = [];
             cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
               cleanedCloudOpenApiMarkdown,
               rootDir,
@@ -17868,7 +17870,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               feishuTitle,
               {
                 onError: /* @__PURE__ */ __name(({ error }) => {
-                  imageLocalizationErrors.push(String(error && (error.message || error) || "unknown error"));
+                  imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
                 }, "onError")
               }
             );
@@ -17881,14 +17883,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 conversionStatus: "success",
                 conversionSource: "feishu-cloud-oauth",
                 imageTempUrlMissingCount: missingImageTempUrlCount,
-                imageLocalizationFailedCount: imageLocalizationErrors.length,
-                imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(" | "),
+                imageLocalizationFailedCount: imageLocalizationErrors2.length,
+                imageLocalizationError: imageLocalizationErrors2.slice(0, 3).join(" | "),
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
-                  imageLocalizationErrors.length ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(" | ")}` : ""
+                  imageLocalizationErrors2.length ? `image-localize-failed=${imageLocalizationErrors2.length}: ${imageLocalizationErrors2.slice(0, 3).join(" | ")}` : ""
                 ].filter(Boolean).join("; ")
               })
             };
@@ -18609,6 +18611,25 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       const pageMeta = extractWebpageMetadataFromHtml(html, url);
+      const imageLocalizationErrors = [];
+      if (isWechatArticleUrl(url)) {
+        markdown = await this.saveMarkdownRemoteImageAssets(
+          markdown,
+          rootDir,
+          dateFolder,
+          pageTitle || title || "公众号文章",
+          {
+            sourceUrl: url,
+            onError: /* @__PURE__ */ __name(({ error }) => {
+              imageLocalizationErrors.push(String(error && (error.message || error) || "unknown error"));
+            }, "onError")
+          }
+        );
+      }
+      const conversionNote = [
+        usedFallback ? "已通过备用通道抓取" : "",
+        imageLocalizationErrors.length ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(" | ")}` : ""
+      ].filter(Boolean).join("; ");
       return {
         ...record,
         metadata: {
@@ -18621,7 +18642,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           contentCategory: metadata.contentCategory || pageMeta.contentCategory || "",
           markdown,
           conversionStatus: "success",
-          conversionNote: usedFallback ? "已通过备用通道抓取" : ""
+          conversionNote,
+          ...isWechatArticleUrl(url) ? {
+            imageLocalizationFailedCount: imageLocalizationErrors.length,
+            imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(" | ")
+          } : {}
         }
       };
     } catch (error) {
