@@ -106,6 +106,13 @@ const {
   normalizeRecordUrlForCompare,
   normalizeYamlScalar,
 } = require('./record-identity-utils');
+const {
+  categorizeSyncFailure,
+  getSyncNoteTitleFromPath,
+  isLegacySyncLifecycleError,
+  isSyncRecordBusyError,
+  sanitizeSyncNoteTitle,
+} = require('./sync-lifecycle-utils');
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
 const {
@@ -13449,6 +13456,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
       }
       const requestError = new Error(message);
+      requestError.status = response.status;
+      requestError.statusCode = response.status;
       if (payload && payload.errCode) requestError.code = String(payload.errCode);
       throw requestError;
     }
@@ -18120,16 +18129,92 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
+  async reportSyncLifecycleStatus(recordId, body, binding) {
+    return await this.requestJson(
+      `/records/${encodeURIComponent(recordId)}/status`,
+      'POST',
+      body,
+      binding,
+    );
+  }
+
+  async claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised) {
+    if (!lifecycleAdvertised) return { enabled: false };
+    try {
+      const payload = await this.reportSyncLifecycleStatus(recordId, { status: 'processing' }, binding);
+      const data = payload && payload.data && typeof payload.data === 'object'
+        ? payload.data
+        : (payload && typeof payload === 'object' ? payload : {});
+      const attemptId = String(data.attemptId || data.syncAttemptId || '').trim();
+      if (!attemptId) throw new Error('sync processing claim is missing an attempt id');
+      return { enabled: true, attemptId };
+    } catch (error) {
+      if (isLegacySyncLifecycleError(error)) return { enabled: false, legacyFallback: true };
+      if (isSyncRecordBusyError(error)) return { enabled: true, conflict: true };
+      throw error;
+    }
+  }
+
+  async reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle = {}) {
+    const safeNoteTitle = sanitizeSyncNoteTitle(noteTitle);
+    const body = lifecycle.enabled && lifecycle.attemptId
+      ? {
+        attemptId: lifecycle.attemptId,
+        ...(safeNoteTitle ? { noteTitle: safeNoteTitle } : {}),
+      }
+      : (lifecycle.legacyFallback && safeNoteTitle ? { noteTitle: safeNoteTitle } : {});
+    try {
+      return await this.requestJson(
+        `/records/${encodeURIComponent(recordId)}/synced`,
+        'POST',
+        body,
+        binding,
+      );
+    } catch (error) {
+      if (!lifecycle.enabled || !isLegacySyncLifecycleError(error)) throw error;
+      return await this.requestJson(
+        `/records/${encodeURIComponent(recordId)}/synced`,
+        'POST',
+        safeNoteTitle ? { noteTitle: safeNoteTitle } : {},
+        binding,
+      );
+    }
+  }
+
+  async reportSyncRecordCompletionBestEffort(recordId, noteTitle, binding, lifecycle = {}) {
+    try {
+      await this.reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle);
+      return null;
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      return {
+        code: 'COMPLETION_REPORT_FAILED',
+        message: 'sync completion report failed; local note is preserved',
+      };
+    }
+  }
+
+  async reportSyncRecordFailure(recordId, attemptId, error, binding) {
+    const code = categorizeSyncFailure(error);
+    return await this.reportSyncLifecycleStatus(recordId, {
+      status: 'failed',
+      attemptId,
+      code,
+    }, binding);
+  }
+
   async syncBinding(binding, shouldPrefixTitle) {
     const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
     this.showSyncProgress({ bindingLabel, stage: 'fetching' });
     const payload = await this.requestJson('/records?status=pending', 'GET', {}, binding);
     const records = payload.data || [];
     const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
+    const lifecycleAdvertised = Boolean(payload && payload.meta && payload.meta.syncLifecycleStatus === true);
     const written = [];
     const failed = [];
     const skipped = [];
     const conversionWarnings = [];
+    const completionWarnings = [];
     const syncedAt = new Date().toISOString();
     if (!records.length) {
       this.showSyncProgress({ bindingLabel, stage: 'empty' });
@@ -18143,6 +18228,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         current: index + 1,
         total: records.length,
       };
+      let lifecycle = { enabled: false };
       if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
         skipped.push({
           recordId,
@@ -18172,6 +18258,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
+        lifecycle = await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        if (lifecycle.conflict) {
+          skipped.push({ recordId, reason: 'record-busy' });
+          continue;
+        }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
@@ -18180,11 +18271,13 @@ class WechatObsidianInboxPlugin extends Plugin {
             filePath: existingFilePath,
           });
           this.showSyncProgress({ ...progress, stage: 'marking', title: buildRecordTitleBase(record) });
-          try {
-            await this.requestJson(`/records/${encodeURIComponent(recordId)}/synced`, 'POST', {}, binding);
-          } catch (markError) {
-            if (!isRecordNotFoundError(markError)) throw markError;
-          }
+          const completionWarning = await this.reportSyncRecordCompletionBestEffort(
+            recordId,
+            getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record),
+            binding,
+            lifecycle,
+          );
+          if (completionWarning) completionWarnings.push({ recordId, ...completionWarning });
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -18196,11 +18289,13 @@ class WechatObsidianInboxPlugin extends Plugin {
           conversionWarnings.push(item.conversionWarning);
         }
         this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
-        try {
-          await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
-        } catch (markError) {
-          if (!isRecordNotFoundError(markError)) throw markError;
-        }
+        const completionWarning = await this.reportSyncRecordCompletionBestEffort(
+          item.recordId,
+          item.title,
+          binding,
+          lifecycle,
+        );
+        if (completionWarning) completionWarnings.push({ recordId: item.recordId, ...completionWarning });
       } catch (error) {
         const message = error.message || String(error);
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
@@ -18230,6 +18325,18 @@ class WechatObsidianInboxPlugin extends Plugin {
             // Keep the original extraction failure retryable if cloud cleanup fails.
           }
         }
+        let lifecycleReportError = null;
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          try {
+            await this.reportSyncRecordFailure(recordId, lifecycle.attemptId, error, binding);
+          } catch (reportError) {
+            lifecycleReportError = {
+              code: 'STATUS_REPORT_FAILED',
+              message: 'status report failed; original error remains local',
+            };
+          }
+        }
+
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
           ? redactSensitiveObject(error.diagnostic)
           : null;
@@ -18250,6 +18357,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           message: '单条内容同步失败',
           error: message,
           ...(diagnostic ? { diagnostic } : {}),
+          ...(lifecycleReportError ? { lifecycleReportError } : {}),
           time: new Date().toISOString(),
         };
         writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
@@ -18257,6 +18365,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId: getRecordId(record),
           message,
           ...(diagnostic ? { diagnostic } : {}),
+          ...(lifecycleReportError ? { lifecycleReportError } : {}),
         });
       } finally {
         if (this.currentProcessingAbortController === processingAbortController) {
@@ -18272,7 +18381,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed, skipped, conversionWarnings, pendingReview };
+    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview };
   }
 
   async syncInbox(showNotice = true) {
@@ -18307,6 +18416,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const failed = [];
       const skipped = [];
       const conversionWarnings = [];
+      const completionWarnings = [];
       const pendingReviews = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: 'fetching' });
@@ -18321,6 +18431,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (result.conversionWarnings && result.conversionWarnings.length) {
             conversionWarnings.push(...result.conversionWarnings);
+          }
+          if (result.completionWarnings && result.completionWarnings.length) {
+            completionWarnings.push(...result.completionWarnings);
           }
           if (result.pendingReview && (result.pendingReview.total || result.pendingReview.audioVideoCount)) {
             pendingReviews.push(result.pendingReview);
@@ -18347,16 +18460,22 @@ class WechatObsidianInboxPlugin extends Plugin {
       } else if (pendingReviewNotice) {
         finalMessage += `；${pendingReviewNotice}`;
       }
+      if (completionWarnings.length) {
+        finalMessage += `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
+      }
+
       if (showNotice || written.length) {
         new Notice(finalMessage);
       }
       this.lastSyncDiagnostic = {
-        status: failed.length ? 'failed' : 'success',
+        status: failed.length ? 'failed' : (completionWarnings.length ? 'warning' : 'success'),
         stage: 'finished',
         current: written.length,
         total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
+        completionWarningCount: completionWarnings.length,
+        completionWarningCode: completionWarnings.length ? 'COMPLETION_REPORT_FAILED' : '',
         ...(failed.find((item) => item.diagnostic)
           ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic }
           : {}),
@@ -18899,6 +19018,8 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  categorizeSyncFailure,
+  sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,
   FEISHU_TUTORIAL_URL,
