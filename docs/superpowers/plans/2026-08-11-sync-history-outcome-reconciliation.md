@@ -61,4 +61,4 @@
 - [ ] Prepare and verify a new immutable candidate and update the L3 task card identity.
 - [ ] With Obsidian fully exited, run the protected installer against only `张张的内容创作知识库`.
 - [ ] Verify four asset hashes and `data.json` SHA/binding/fingerprint invariants, then preserve the branch and worktree for rollback.
-
+<!-- end of implementation checklist -->
