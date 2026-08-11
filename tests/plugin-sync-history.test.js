@@ -115,6 +115,27 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
 }).code, 'UNSUPPORTED_PLATFORM');
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
+  metadata: {
+    url: 'https://example.com/empty-success',
+    conversionStatus: 'success',
+    markdown: '',
+  },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: {
+    url: 'https://www.toutiao.com/article/app-only',
+    conversionStatus: 'success',
+    markdown: '请在今日头条客户端内查看完整内容',
+  },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'text',
+  content: '收到',
+  metadata: {},
+}), null);
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
   metadata: { conversionStatus: 'success', markdown: '一篇正常且可交付的正文' },
 }), null);
 

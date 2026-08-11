@@ -1467,6 +1467,7 @@ var require_sync_lifecycle_utils = __commonJS({
         /请(?:先)?登录.{0,16}(?:查看|继续|访问|阅读)/,
         /登录后.{0,16}(?:查看|继续|访问|阅读)/,
         /打开.{0,20}(?:APP|客户端|今日头条|抖音|小红书|微信).{0,20}(?:查看|阅读|继续|更多)/i,
+        /(?:请)?在.{0,20}(?:APP|客户端).{0,12}(?:查看|阅读).{0,8}(?:完整)?内容/i,
         /访问(?:受限|异常|过于频繁)/,
         /完成验证后.{0,12}(?:继续|访问)/,
         /内容(?:不存在|已删除|暂时无法查看|加载失败)/,
@@ -1506,6 +1507,11 @@ var require_sync_lifecycle_utils = __commonJS({
       }
       if (isLikelyWebpageShell(url, markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：仅获取到打开或登录引导页");
+      }
+      const recordType = String(source.type || "").trim().toLowerCase();
+      const isWebpageRecord = ["webpage", "link"].includes(recordType) || /^https?:\/\//i.test(url);
+      if (isWebpageRecord && conversionStatus === "success" && !transcription && meaningfulLength === 0) {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：没有获得可写入的正文");
       }
       if (fileExt === "pdf" && conversionStatus === "attachment_saved") {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "PDF 内容提取失败");
