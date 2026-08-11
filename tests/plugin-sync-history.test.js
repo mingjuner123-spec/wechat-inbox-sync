@@ -99,6 +99,22 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
 }), null);
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
+  metadata: {
+    url: 'https://example.com/normal-technical-article',
+    conversionStatus: 'success',
+    markdown: '这是一篇讨论正文提取失败诊断方法的正常技术长文。'.repeat(20),
+  },
+}), null);
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: {
+    conversionStatus: 'success',
+    markdown: '',
+    conversionError: '暂不支持此平台',
+  },
+}).code, 'UNSUPPORTED_PLATFORM');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
   metadata: { conversionStatus: 'success', markdown: '一篇正常且可交付的正文' },
 }), null);
 

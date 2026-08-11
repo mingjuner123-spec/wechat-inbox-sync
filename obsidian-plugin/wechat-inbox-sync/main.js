@@ -1460,7 +1460,7 @@ var require_sync_lifecycle_utils = __commonJS({
     function isLikelyWebpageShell(url, markdown) {
       if (!/^https?:\/\//i.test(String(url || ""))) return false;
       const text = String(markdown || "");
-      if (/微信扫一扫可打开此内容|当前已为你保存原始链接|仅保存原始链接|正文提取失败|内容解析失败/.test(text)) {
+      if (/微信扫一扫可打开此内容|当前已为你保存原始链接|仅保存原始链接/.test(text)) {
         return true;
       }
       const shellPatterns = [
@@ -1469,7 +1469,8 @@ var require_sync_lifecycle_utils = __commonJS({
         /打开.{0,20}(?:APP|客户端|今日头条|抖音|小红书|微信).{0,20}(?:查看|阅读|继续|更多)/i,
         /访问(?:受限|异常|过于频繁)/,
         /完成验证后.{0,12}(?:继续|访问)/,
-        /内容(?:不存在|已删除|暂时无法查看|加载失败)/
+        /内容(?:不存在|已删除|暂时无法查看|加载失败)/,
+        /(?:正文提取失败|内容解析失败)(?:[：:，,。]|$)/
       ];
       const signalCount = shellPatterns.filter((pattern) => pattern.test(text)).length;
       const meaningfulLength = getMeaningfulMarkdownLength(text);
@@ -1494,7 +1495,7 @@ var require_sync_lifecycle_utils = __commonJS({
       const meaningfulLength = getMeaningfulMarkdownLength(markdown);
       const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20;
       const hasDeclaredFailureState = ["failed", "link_saved", "wechat_captcha"].includes(conversionStatus) || transcriptionStatus === "failed";
-      if (/weixin\.qq\.com\/sph\//.test(url) && (["failed", "link_saved"].includes(conversionStatus) || transcriptionStatus === "failed") || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError) && (hasDeclaredFailureState || conversionStatus !== "success" && !hasUsableOutput)) {
+      if (/weixin\.qq\.com\/sph\//.test(url) && (["failed", "link_saved"].includes(conversionStatus) || transcriptionStatus === "failed") || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError) && (hasDeclaredFailureState || !hasUsableOutput)) {
         return createSyncLifecycleOutcomeError("UNSUPPORTED_PLATFORM", "暂不支持此平台");
       }
       if (conversionStatus === "wechat_captcha") {
