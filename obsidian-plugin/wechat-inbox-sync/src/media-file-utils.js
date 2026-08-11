@@ -83,7 +83,48 @@ function getImageExtFromBuffer(buffer, fallbackUrl = '') {
   if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'jpg';
   if (data.length >= 6 && data.slice(0, 6).toString('ascii').startsWith('GIF')) return 'gif';
   if (data.length >= 12 && data.slice(0, 4).toString('ascii') === 'RIFF' && data.slice(8, 12).toString('ascii') === 'WEBP') return 'webp';
+  if (getSvgTextFromBuffer(data)) return 'svg';
   return getImageFileExtension(fallbackUrl) || 'png';
+}
+
+function getSvgTextFromBuffer(buffer) {
+  const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  if (!data.length) return '';
+  const text = data.slice(0, Math.min(data.length, 8192)).toString('utf8').replace(/^\uFEFF/, '').trimStart();
+  return /^(?:<\?xml[^>]*>\s*)?<svg\b/i.test(text) ? text : '';
+}
+
+function getImageDimensionsFromBuffer(buffer) {
+  const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  if (data.length >= 24
+    && data[0] === 0x89
+    && data[1] === 0x50
+    && data[2] === 0x4e
+    && data[3] === 0x47) {
+    return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+  }
+  if (data.length >= 10 && data.slice(0, 6).toString('ascii').startsWith('GIF')) {
+    return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) };
+  }
+  const svgText = getSvgTextFromBuffer(data);
+  if (svgText) {
+    const svgTag = (svgText.match(/<svg\b[^>]*>/i) || [])[0] || '';
+    const readDimension = (name) => {
+      const match = svgTag.match(new RegExp(`\\b${name}=["']\\s*([0-9]+(?:\\.[0-9]+)?)`, 'i'));
+      return match ? Number(match[1]) : 0;
+    };
+    let width = readDimension('width');
+    let height = readDimension('height');
+    if (!(width > 0 && height > 0)) {
+      const viewBox = svgTag.match(/\bviewBox=["']\s*[-+0-9.e]+[\s,]+[-+0-9.e]+[\s,]+([-+0-9.e]+)[\s,]+([-+0-9.e]+)/i);
+      if (viewBox) {
+        width = width || Number(viewBox[1]);
+        height = height || Number(viewBox[2]);
+      }
+    }
+    return width > 0 && height > 0 ? { width, height } : null;
+  }
+  return null;
 }
 
 function getAttachmentExt(fileName, fallbackExt) {
@@ -118,6 +159,7 @@ module.exports = {
   decodeUtf8ArrayBuffer,
   getAttachmentExt,
   getAudioFormatFromUrl,
+  getImageDimensionsFromBuffer,
   getImageExtFromBuffer,
   getImageExtFromMime,
   getImageFileExtension,

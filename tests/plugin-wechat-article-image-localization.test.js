@@ -57,15 +57,37 @@ function createPlugin() {
 }
 
 async function hydrate(plugin) {
+  return hydrateWithHtml(plugin, articleHtml);
+}
+
+async function hydrateWithHtml(plugin, html) {
   requestUrlMock = async ({ url }) => {
     assert.strictEqual(url, articleUrl);
-    return { text: articleHtml };
+    return { text: html };
   };
   return plugin.hydrateWebpageMarkdown({
     type: 'webpage',
     content: articleUrl,
     metadata: { url: articleUrl },
   }, '临时收集', '2026-08-11', '公众号图片本地化测试');
+}
+
+function createPngHeader(width, height) {
+  const buffer = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer, 0);
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+  return buffer;
+}
+
+function createArticleHtml(imageTags) {
+  return [
+    '<html><head><title>公众号图片本地化测试</title></head><body>',
+    '<div id="js_content">',
+    '<p>这是一篇足够长的公众号正文内容，用于验证复杂公众号排版图片的筛选和本地保存。</p>',
+    imageTags,
+    '</div></body></html>',
+  ].join('');
 }
 
 async function run() {
@@ -101,6 +123,56 @@ async function run() {
   assert.strictEqual(folderFallback.metadata.imageLocalizationFailedCount, 1);
   assert.ok(folderFallback.metadata.imageLocalizationError.includes('无法创建附件目录'));
   assert.ok(folderFallback.metadata.conversionNote.includes('image-localize-failed=1'));
+
+  const smallSvgUrl = 'https://mmbiz.qpic.cn/mmbiz_svg/decorative-dot/640?wx_fmt=jpeg';
+  const smallSvgCase = createPlugin();
+  smallSvgCase.plugin.downloadArrayBuffer = async () => Buffer.from(
+    '<svg width="7" height="7" xmlns="http://www.w3.org/2000/svg"><circle cx="3" cy="3" r="3"/></svg>',
+  );
+  const smallSvgResult = await hydrateWithHtml(
+    smallSvgCase.plugin,
+    createArticleHtml(`<img src="${smallSvgUrl}">`),
+  );
+  assert.strictEqual(smallSvgCase.writes.length, 0);
+  assert.strictEqual(smallSvgResult.metadata.markdown.includes(smallSvgUrl), false);
+  assert.strictEqual(smallSvgResult.metadata.markdown.includes('![[临时收集/网页图片/'), false);
+
+  const largeSvgUrl = 'https://mmbiz.qpic.cn/mmbiz_svg/meaningful-diagram/640?wx_fmt=jpeg';
+  const largeSvgCase = createPlugin();
+  largeSvgCase.plugin.downloadArrayBuffer = async () => Buffer.from(
+    '<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg"><rect width="800" height="600"/></svg>',
+  );
+  const largeSvgResult = await hydrateWithHtml(
+    largeSvgCase.plugin,
+    createArticleHtml(`<img alt="实验室数据结构图" src="${largeSvgUrl}">`),
+  );
+  assert.strictEqual(largeSvgCase.writes.length, 1);
+  assert.ok(largeSvgCase.writes[0].filePath.endsWith('.svg'));
+  assert.strictEqual(largeSvgResult.metadata.markdown.includes(largeSvgUrl), false);
+
+  const repeatedPngUrls = [1, 2, 3].map((index) => `https://mmbiz.qpic.cn/mmbiz_png/repeated-diamond-${index}/640`);
+  const repeatedPngCase = createPlugin();
+  repeatedPngCase.plugin.downloadArrayBuffer = async () => createPngHeader(141, 141);
+  const repeatedPngResult = await hydrateWithHtml(
+    repeatedPngCase.plugin,
+    createArticleHtml(repeatedPngUrls.map((url) => `<img src="${url}">`).join('')),
+  );
+  assert.strictEqual(repeatedPngCase.writes.length, 0);
+  repeatedPngUrls.forEach((url) => assert.strictEqual(repeatedPngResult.metadata.markdown.includes(url), false));
+
+  const duplicateContentUrls = [
+    'https://mmbiz.qpic.cn/mmbiz_jpg/content-copy-a/640',
+    'https://mmbiz.qpic.cn/mmbiz_jpg/content-copy-b/640',
+  ];
+  const duplicateContentCase = createPlugin();
+  duplicateContentCase.plugin.downloadArrayBuffer = async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  const duplicateContentResult = await hydrateWithHtml(
+    duplicateContentCase.plugin,
+    createArticleHtml(duplicateContentUrls.map((url) => `<img alt="正文配图" src="${url}">`).join('')),
+  );
+  assert.strictEqual(duplicateContentCase.writes.length, 1);
+  duplicateContentUrls.forEach((url) => assert.strictEqual(duplicateContentResult.metadata.markdown.includes(url), false));
+  assert.strictEqual((duplicateContentResult.metadata.markdown.match(/!\[\[/g) || []).length, 2);
 
   const genericCase = createPlugin();
   requestUrlMock = async () => ({

@@ -2180,9 +2180,46 @@ var require_media_file_utils = __commonJS({
       if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255) return "jpg";
       if (data.length >= 6 && data.slice(0, 6).toString("ascii").startsWith("GIF")) return "gif";
       if (data.length >= 12 && data.slice(0, 4).toString("ascii") === "RIFF" && data.slice(8, 12).toString("ascii") === "WEBP") return "webp";
+      if (getSvgTextFromBuffer(data)) return "svg";
       return getImageFileExtension2(fallbackUrl) || "png";
     }
     __name(getImageExtFromBuffer2, "getImageExtFromBuffer");
+    function getSvgTextFromBuffer(buffer) {
+      const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+      if (!data.length) return "";
+      const text = data.slice(0, Math.min(data.length, 8192)).toString("utf8").replace(/^\uFEFF/, "").trimStart();
+      return /^(?:<\?xml[^>]*>\s*)?<svg\b/i.test(text) ? text : "";
+    }
+    __name(getSvgTextFromBuffer, "getSvgTextFromBuffer");
+    function getImageDimensionsFromBuffer2(buffer) {
+      const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+      if (data.length >= 24 && data[0] === 137 && data[1] === 80 && data[2] === 78 && data[3] === 71) {
+        return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+      }
+      if (data.length >= 10 && data.slice(0, 6).toString("ascii").startsWith("GIF")) {
+        return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) };
+      }
+      const svgText = getSvgTextFromBuffer(data);
+      if (svgText) {
+        const svgTag = (svgText.match(/<svg\b[^>]*>/i) || [])[0] || "";
+        const readDimension = /* @__PURE__ */ __name((name) => {
+          const match = svgTag.match(new RegExp(`\\b${name}=["']\\s*([0-9]+(?:\\.[0-9]+)?)`, "i"));
+          return match ? Number(match[1]) : 0;
+        }, "readDimension");
+        let width = readDimension("width");
+        let height = readDimension("height");
+        if (!(width > 0 && height > 0)) {
+          const viewBox = svgTag.match(/\bviewBox=["']\s*[-+0-9.e]+[\s,]+[-+0-9.e]+[\s,]+([-+0-9.e]+)[\s,]+([-+0-9.e]+)/i);
+          if (viewBox) {
+            width = width || Number(viewBox[1]);
+            height = height || Number(viewBox[2]);
+          }
+        }
+        return width > 0 && height > 0 ? { width, height } : null;
+      }
+      return null;
+    }
+    __name(getImageDimensionsFromBuffer2, "getImageDimensionsFromBuffer");
     function getAttachmentExt2(fileName, fallbackExt) {
       const fromName = String(fileName || "").split(".").pop();
       const ext = String(fallbackExt || fromName || "").toLowerCase().replace(/^\./, "");
@@ -2215,6 +2252,7 @@ var require_media_file_utils = __commonJS({
       decodeUtf8ArrayBuffer: decodeUtf8ArrayBuffer2,
       getAttachmentExt: getAttachmentExt2,
       getAudioFormatFromUrl: getAudioFormatFromUrl2,
+      getImageDimensionsFromBuffer: getImageDimensionsFromBuffer2,
       getImageExtFromBuffer: getImageExtFromBuffer2,
       getImageExtFromMime: getImageExtFromMime2,
       getImageFileExtension: getImageFileExtension2,
@@ -3277,6 +3315,7 @@ var {
   decodeUtf8ArrayBuffer,
   getAttachmentExt,
   getAudioFormatFromUrl,
+  getImageDimensionsFromBuffer,
   getImageExtFromBuffer,
   getImageExtFromMime,
   getImageFileExtension,
@@ -5462,6 +5501,19 @@ function isWechatArticleUrl(url) {
   return text.includes("mp.weixin.qq.com") || text.includes("weixin.qq.com");
 }
 __name(isWechatArticleUrl, "isWechatArticleUrl");
+function isWechatDecorativeImageAsset(asset, identicalCopyCount = 1) {
+  if (!asset) return false;
+  const alt = String(asset.alt || "").trim();
+  if (alt && !/^(?:图片|image|img)$/i.test(alt)) return false;
+  const dimensions = asset.dimensions;
+  if (!dimensions) return false;
+  const width = Number(dimensions.width) || 0;
+  const height = Number(dimensions.height) || 0;
+  if (!(width > 0 && height > 0)) return false;
+  if (Math.min(width, height) <= 32) return true;
+  return identicalCopyCount >= 3 && Math.max(width, height) <= 256;
+}
+__name(isWechatDecorativeImageAsset, "isWechatDecorativeImageAsset");
 function isWechatMpArticleUrl(url) {
   const source = String(url || "").trim();
   if (!source) return false;
@@ -17568,7 +17620,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
     let index = 1;
-    const savedByUrl = /* @__PURE__ */ new Map();
+    const downloadedByUrl = /* @__PURE__ */ new Map();
     const safeTitle = sanitizeAttachmentName(title, "网页图片");
     try {
       await this.ensureFolder(imageRootDir);
@@ -17581,28 +17633,53 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     for (const match of imageMatches) {
       const imageUrl = String(match[2] || "").trim();
-      if (!imageUrl || savedByUrl.has(imageUrl)) continue;
+      if (!imageUrl || downloadedByUrl.has(imageUrl)) continue;
       try {
         const imageHeaders = isXiaohongshuSource ? await getXiaohongshuRequestHeaders(sourceUrl) : isWechatArticleSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : {};
         const arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
         const buffer = Buffer.from(arrayBuffer || []);
         if (!buffer.length) throw new Error("图片下载结果为空");
         const ext = getImageExtFromBuffer(buffer, imageUrl);
-        const imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, "0")}.${ext}`;
-        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), buffer);
-        savedByUrl.set(imageUrl, imagePath);
-        index += 1;
+        downloadedByUrl.set(imageUrl, {
+          imageUrl,
+          alt: String(match[1] || "").trim(),
+          buffer,
+          ext,
+          dimensions: getImageDimensionsFromBuffer(buffer),
+          hash: crypto.createHash("sha256").update(buffer).digest("hex")
+        });
       } catch (error) {
         if (typeof options.onError === "function") {
           options.onError({ imageUrl, error });
         }
       }
     }
-    savedByUrl.forEach((imagePath, imageUrl) => {
-      const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, "g");
-      nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
+    const identicalCopyCounts = /* @__PURE__ */ new Map();
+    downloadedByUrl.forEach((asset) => {
+      identicalCopyCounts.set(asset.hash, (identicalCopyCounts.get(asset.hash) || 0) + 1);
     });
-    return nextMarkdown;
+    const imagePathByAssetKey = /* @__PURE__ */ new Map();
+    const replacementByUrl = /* @__PURE__ */ new Map();
+    for (const asset of downloadedByUrl.values()) {
+      if (isWechatArticleSource && isWechatDecorativeImageAsset(asset, identicalCopyCounts.get(asset.hash) || 1)) {
+        replacementByUrl.set(asset.imageUrl, "");
+        continue;
+      }
+      const assetKey = isWechatArticleSource ? asset.hash : asset.imageUrl;
+      let imagePath = imagePathByAssetKey.get(assetKey) || "";
+      if (!imagePath) {
+        imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, "0")}.${asset.ext}`;
+        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), asset.buffer);
+        imagePathByAssetKey.set(assetKey, imagePath);
+        index += 1;
+      }
+      replacementByUrl.set(asset.imageUrl, imagePath);
+    }
+    replacementByUrl.forEach((imagePath, imageUrl) => {
+      const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, "g");
+      nextMarkdown = nextMarkdown.replace(pattern, imagePath ? `![[${imagePath}]]` : "");
+    });
+    return isWechatArticleSource ? nextMarkdown.replace(/\n{3,}/g, "\n\n") : nextMarkdown;
   }
   async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
     rootDir = normalizeConfiguredVaultPath(rootDir);

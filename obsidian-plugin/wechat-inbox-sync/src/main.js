@@ -124,6 +124,7 @@ const {
   decodeUtf8ArrayBuffer,
   getAttachmentExt,
   getAudioFormatFromUrl,
+  getImageDimensionsFromBuffer,
   getImageExtFromBuffer,
   getImageExtFromMime,
   getImageFileExtension,
@@ -2854,6 +2855,19 @@ function isFeishuUrl(url) {
 function isWechatArticleUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('mp.weixin.qq.com') || text.includes('weixin.qq.com');
+}
+
+function isWechatDecorativeImageAsset(asset, identicalCopyCount = 1) {
+  if (!asset) return false;
+  const alt = String(asset.alt || '').trim();
+  if (alt && !/^(?:图片|image|img)$/i.test(alt)) return false;
+  const dimensions = asset.dimensions;
+  if (!dimensions) return false;
+  const width = Number(dimensions.width) || 0;
+  const height = Number(dimensions.height) || 0;
+  if (!(width > 0 && height > 0)) return false;
+  if (Math.min(width, height) <= 32) return true;
+  return identicalCopyCount >= 3 && Math.max(width, height) <= 256;
 }
 
 function isWechatMpArticleUrl(url) {
@@ -16381,7 +16395,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
     let index = 1;
-    const savedByUrl = new Map();
+    const downloadedByUrl = new Map();
     const safeTitle = sanitizeAttachmentName(title, '网页图片');
 
     try {
@@ -16396,7 +16410,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     for (const match of imageMatches) {
       const imageUrl = String(match[2] || '').trim();
-      if (!imageUrl || savedByUrl.has(imageUrl)) continue;
+      if (!imageUrl || downloadedByUrl.has(imageUrl)) continue;
       try {
         const imageHeaders = isXiaohongshuSource
           ? await getXiaohongshuRequestHeaders(sourceUrl)
@@ -16408,11 +16422,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         const buffer = Buffer.from(arrayBuffer || []);
         if (!buffer.length) throw new Error('图片下载结果为空');
         const ext = getImageExtFromBuffer(buffer, imageUrl);
-        const imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${ext}`;
-        // eslint-disable-next-line no-await-in-loop
-        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), buffer);
-        savedByUrl.set(imageUrl, imagePath);
-        index += 1;
+        downloadedByUrl.set(imageUrl, {
+          imageUrl,
+          alt: String(match[1] || '').trim(),
+          buffer,
+          ext,
+          dimensions: getImageDimensionsFromBuffer(buffer),
+          hash: crypto.createHash('sha256').update(buffer).digest('hex'),
+        });
       } catch (error) {
         // Remote image localization is best-effort. Keep the original URL if download fails.
         if (typeof options.onError === 'function') {
@@ -16421,12 +16438,36 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    savedByUrl.forEach((imagePath, imageUrl) => {
+    const identicalCopyCounts = new Map();
+    downloadedByUrl.forEach((asset) => {
+      identicalCopyCounts.set(asset.hash, (identicalCopyCounts.get(asset.hash) || 0) + 1);
+    });
+    const imagePathByAssetKey = new Map();
+    const replacementByUrl = new Map();
+    for (const asset of downloadedByUrl.values()) {
+      if (isWechatArticleSource
+        && isWechatDecorativeImageAsset(asset, identicalCopyCounts.get(asset.hash) || 1)) {
+        replacementByUrl.set(asset.imageUrl, '');
+        continue;
+      }
+      const assetKey = isWechatArticleSource ? asset.hash : asset.imageUrl;
+      let imagePath = imagePathByAssetKey.get(assetKey) || '';
+      if (!imagePath) {
+        imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${asset.ext}`;
+        // eslint-disable-next-line no-await-in-loop
+        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), asset.buffer);
+        imagePathByAssetKey.set(assetKey, imagePath);
+        index += 1;
+      }
+      replacementByUrl.set(asset.imageUrl, imagePath);
+    }
+
+    replacementByUrl.forEach((imagePath, imageUrl) => {
       const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, 'g');
-      nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
+      nextMarkdown = nextMarkdown.replace(pattern, imagePath ? `![[${imagePath}]]` : '');
     });
 
-    return nextMarkdown;
+    return isWechatArticleSource ? nextMarkdown.replace(/\n{3,}/g, '\n\n') : nextMarkdown;
   }
 
   async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
