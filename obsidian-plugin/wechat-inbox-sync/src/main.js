@@ -18243,6 +18243,33 @@ class WechatObsidianInboxPlugin extends Plugin {
     return true;
   }
 
+  async persistCommittedSyncLifecycleAttemptBestEffort(binding, value = {}) {
+    try {
+      await this.upsertPendingSyncLifecycleAttempt(binding, {
+        ...value,
+        stage: 'committed',
+      });
+      return null;
+    } catch (error) {
+      return {
+        code: 'RECOVERY_MARKER_SAVE_FAILED',
+        message: 'local note is saved; recovery marker could not be persisted',
+      };
+    }
+  }
+
+  async clearPendingSyncLifecycleAttemptBestEffort(binding, recordId) {
+    try {
+      await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+      return null;
+    } catch (error) {
+      return {
+        code: 'RECOVERY_MARKER_CLEAR_FAILED',
+        message: 'sync completion is confirmed; stale recovery marker may be replayed safely',
+      };
+    }
+  }
+
   async replayPendingSyncLifecycleAttempts(binding) {
     const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
     if (!bindingFingerprint) return { replayed: 0, retained: 0 };
@@ -18374,6 +18401,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         total: records.length,
       };
       let lifecycle = { enabled: false };
+      let localCommitFact = null;
       if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
         skipped.push({
           recordId,
@@ -18417,6 +18445,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
+          localCommitFact = { recordId, filePath: existingFilePath };
           skipped.push({
             recordId,
             reason: 'already-synced-local',
@@ -18424,11 +18453,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
           this.showSyncProgress({ ...progress, stage: 'marking', title: buildRecordTitleBase(record) });
           const existingNoteTitle = getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record);
+          let markerWarning = null;
           if (lifecycle.enabled && lifecycle.attemptId) {
-            await this.upsertPendingSyncLifecycleAttempt(binding, {
+            markerWarning = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
               recordId,
               attemptId: lifecycle.attemptId,
-              stage: 'committed',
               noteTitle: existingNoteTitle,
             });
           }
@@ -18438,9 +18467,13 @@ class WechatObsidianInboxPlugin extends Plugin {
             binding,
             lifecycle,
           );
-          if (completionWarning) completionWarnings.push({ recordId, ...completionWarning });
+          if (completionWarning) {
+            completionWarnings.push({ recordId, ...completionWarning });
+            if (markerWarning) completionWarnings.push({ recordId, ...markerWarning });
+          }
           else if (lifecycle.enabled && lifecycle.attemptId) {
-            await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+            const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
+            if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
           }
           continue;
         }
@@ -18448,15 +18481,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (processingAbortController.signal.aborted && !item.committed) {
           throw createAbortError();
         }
+        localCommitFact = item;
         written.push(item);
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
+        let markerWarning = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
-          await this.upsertPendingSyncLifecycleAttempt(binding, {
+          markerWarning = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
             recordId: item.recordId,
             attemptId: lifecycle.attemptId,
-            stage: 'committed',
             noteTitle: item.title,
           });
         }
@@ -18467,11 +18501,23 @@ class WechatObsidianInboxPlugin extends Plugin {
           binding,
           lifecycle,
         );
-        if (completionWarning) completionWarnings.push({ recordId: item.recordId, ...completionWarning });
+        if (completionWarning) {
+          completionWarnings.push({ recordId: item.recordId, ...completionWarning });
+          if (markerWarning) completionWarnings.push({ recordId: item.recordId, ...markerWarning });
+        }
         else if (lifecycle.enabled && lifecycle.attemptId) {
-          await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+          const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, item.recordId);
+          if (clearWarning) completionWarnings.push({ recordId: item.recordId, ...clearWarning });
         }
       } catch (error) {
+        if (localCommitFact) {
+          completionWarnings.push({
+            recordId: String(localCommitFact.recordId || recordId || '').trim(),
+            code: 'POST_COMMIT_RECOVERY_FAILED',
+            message: 'local note is saved; post-commit recovery will retry without marking sync failed',
+          });
+          continue;
+        }
         const message = error.message || String(error);
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
         if (deletionResult && deletionResult.deleted) {
@@ -19209,6 +19255,9 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  buildDouyinFallbackMarkdown,
+  buildXiaohongshuFallbackMarkdown,
+  buildWechatChannelsUnavailableMarkdown,
   categorizeSyncFailure,
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,

@@ -138,6 +138,14 @@ function getMarkdownBody(markdown) {
     .trim();
 }
 
+function isKnownFailureReceiptMarkdown(markdown) {
+  const body = getMarkdownBody(markdown);
+  if (!body) return false;
+  const startsWithSavedPlatformLink = /^(?:小红书|抖音|飞书)链接已保存[。.!！]?/i.test(body);
+  if (startsWithSavedPlatformLink) return true;
+  return /^原始链接[：:]\s*https?:\/\/\S+[\s\S]*?##\s*视频号口播文案[\s\S]*?未能提取视频号口播文案[。.!！]?/i.test(body);
+}
+
 function isExistingLocalNoteDeliverable(record, markdown) {
   const source = record && typeof record === 'object' ? record : {};
   const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
@@ -145,6 +153,7 @@ function isExistingLocalNoteDeliverable(record, markdown) {
   const fileExt = String(metadata.fileExt || '').trim().toLowerCase().replace(/^\./, '');
   const url = String(metadata.url || source.content || '').trim();
   const body = getMarkdownBody(markdown);
+  if (isKnownFailureReceiptMarkdown(body)) return false;
   const hasEmbeddedAttachment = /!\[\[[^\]]+\]\]/.test(body);
   const contentOnlyBody = body
     .replace(/^\s*(?:原始链接|来源链接|source\s*url)\s*[：:]\s*https?:\/\/\S+\s*$/gim, '')
@@ -255,6 +264,7 @@ module.exports = {
   getSyncLifecycleBindingFingerprint,
   getSyncNoteTitleFromPath,
   isExistingLocalNoteDeliverable,
+  isKnownFailureReceiptMarkdown,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
   normalizePendingSyncLifecycleAttempts,

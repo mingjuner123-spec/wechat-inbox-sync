@@ -169,6 +169,41 @@ assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
   type: 'file',
   metadata: { fileExt: 'zip' },
 }, '---\nid: file-1\n---\n![[附件.zip]]'), true);
+const douyinFailureReceipt = helpers.buildDouyinFallbackMarkdown(
+  'https://v.douyin.com/example',
+  '未找到可转写的视频资源',
+);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'webpage',
+  content: 'https://v.douyin.com/example',
+}, douyinFailureReceipt), false);
+const xiaohongshuFailureReceipt = helpers.buildXiaohongshuFallbackMarkdown(
+  'https://www.xiaohongshu.com/explore/example',
+);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'webpage',
+  content: 'https://www.xiaohongshu.com/explore/example',
+}, xiaohongshuFailureReceipt), false);
+const wechatChannelsFailureReceipt = helpers.buildWechatChannelsUnavailableMarkdown(
+  'https://weixin.qq.com/sph/example',
+  { description: '这只是发布简介，不是可交付的转写正文。' },
+  '视频号网页端没有返回真实视频地址',
+);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'webpage',
+  content: 'https://weixin.qq.com/sph/example',
+}, wechatChannelsFailureReceipt), false);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'webpage',
+  content: 'https://example.feishu.cn/docx/example',
+}, [
+  '飞书链接已保存。',
+  '',
+  '原始链接：https://example.feishu.cn/docx/example',
+  '',
+  '> 飞书正文提取失败：需要登录',
+  '> 如果该链接在浏览器能无登录打开，可以后续接入浏览器剪藏助手把页面 DOM 直接转成 Markdown。',
+].join('\n')), false);
 
 const normalizedLifecycleAttempts = helpers.normalizePendingSyncLifecycleAttempts([
   {
@@ -561,6 +596,114 @@ async function runFailedReceiptDoesNotTriggerLocalDedupeTest() {
   assert.strictEqual(found, '');
 }
 
+async function runDeliverableExistingNoteTriggersLocalDedupeTest() {
+  const plugin = createPlugin();
+  delete plugin.findExistingRecordNotePath;
+  plugin.settings.inboxDir = '临时收集';
+  const expectedPath = '临时收集/2026-08-11/公众号-正常文章.md';
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => [{ path: expectedPath }],
+      cachedRead: async () => [
+        '---',
+        'id: valid-local-note-1',
+        'url: https://mp.weixin.qq.com/s/example',
+        '---',
+        '这是一篇已经完整提取并成功写入知识库的公众号文章正文。'.repeat(8),
+      ].join('\n'),
+    },
+  };
+
+  const found = await plugin.findExistingRecordNotePath({
+    _id: 'valid-local-note-1',
+    type: 'webpage',
+    content: 'https://mp.weixin.qq.com/s/example',
+    metadata: { url: 'https://mp.weixin.qq.com/s/example' },
+  });
+  assert.strictEqual(found, expectedPath);
+}
+
+async function runCommittedPersistenceFailureDoesNotReverseSuccessTest() {
+  const calls = [];
+  const plugin = createPlugin();
+  plugin.requestJson = async (path, method, body) => {
+    calls.push({ path, method, body });
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{ _id: 'history-committed-persist-failure', type: 'text', content: '正文', metadata: {} }],
+        meta: { syncLifecycleStatus: true },
+      };
+    }
+    if (path === '/records/history-committed-persist-failure/status' && body.status === 'processing') {
+      return { success: true, data: { attemptId: 'attempt-committed-persist-failure' } };
+    }
+    if (path === '/records/history-committed-persist-failure/synced') {
+      return { success: true, data: {} };
+    }
+    throw new Error(`unexpected request ${method} ${path}`);
+  };
+  plugin.writeRecord = async () => ({
+    recordId: 'history-committed-persist-failure',
+    title: '已经写入的正文',
+    filePath: '临时收集/已经写入的正文.md',
+    committed: true,
+  });
+  const originalUpsert = plugin.upsertPendingSyncLifecycleAttempt.bind(plugin);
+  plugin.upsertPendingSyncLifecycleAttempt = async (binding, value) => {
+    if (value.stage === 'committed') throw new Error('saveData unavailable after commit');
+    return await originalUpsert(binding, value);
+  };
+
+  const result = await plugin.syncBinding({ token: 'ABC-123' }, false);
+  assert.strictEqual(result.written.length, 1);
+  assert.strictEqual(result.failed.length, 0);
+  assert.deepStrictEqual(result.completionWarnings, []);
+  assert.strictEqual(calls.some((item) => item.body && item.body.status === 'failed'), false);
+  assert.strictEqual(calls.some((item) => item.path.endsWith('/synced')), true);
+}
+
+async function runCompletionClearFailureDoesNotReverseSuccessTest() {
+  const calls = [];
+  const plugin = createPlugin();
+  plugin.requestJson = async (path, method, body) => {
+    calls.push({ path, method, body });
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{ _id: 'history-completion-clear-failure', type: 'text', content: '正文', metadata: {} }],
+        meta: { syncLifecycleStatus: true },
+      };
+    }
+    if (path === '/records/history-completion-clear-failure/status' && body.status === 'processing') {
+      return { success: true, data: { attemptId: 'attempt-completion-clear-failure' } };
+    }
+    if (path === '/records/history-completion-clear-failure/synced') {
+      return { success: true, data: {} };
+    }
+    throw new Error(`unexpected request ${method} ${path}`);
+  };
+  plugin.writeRecord = async () => ({
+    recordId: 'history-completion-clear-failure',
+    title: '清理失败但已完成',
+    filePath: '临时收集/清理失败但已完成.md',
+    committed: true,
+  });
+  plugin.clearPendingSyncLifecycleAttempt = async () => {
+    throw new Error('saveData unavailable while clearing');
+  };
+
+  const result = await plugin.syncBinding({ token: 'ABC-123' }, false);
+  assert.strictEqual(result.written.length, 1);
+  assert.strictEqual(result.failed.length, 0);
+  assert.deepStrictEqual(result.completionWarnings, [{
+    recordId: 'history-completion-clear-failure',
+    code: 'RECOVERY_MARKER_CLEAR_FAILED',
+    message: 'sync completion is confirmed; stale recovery marker may be replayed safely',
+  }]);
+  assert.strictEqual(calls.some((item) => item.body && item.body.status === 'failed'), false);
+}
+
 async function runPendingLifecycleReplayTest() {
   const plugin = createPlugin();
   const binding = { token: 'ABC-123', label: '测试微信' };
@@ -629,6 +772,30 @@ async function runPendingLifecycleReplayNetworkRetentionTest() {
   assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].recordId, 'replay-network');
 }
 
+async function runPendingLifecycleReplayTerminalCleanupTest() {
+  for (const status of [404, 405, 409]) {
+    const plugin = createPlugin();
+    const binding = { token: 'ABC-123' };
+    plugin.settings.pendingSyncLifecycleAttempts = [{
+      recordId: `replay-terminal-${status}`,
+      attemptId: `attempt-terminal-${status}`,
+      bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint(binding.token),
+      stage: 'committed',
+      noteTitle: '已经写入的笔记',
+    }];
+    plugin.requestJson = async () => {
+      const error = new Error(`terminal status ${status}`);
+      error.status = status;
+      if (status === 409) error.code = 'RECORD_BUSY';
+      throw error;
+    };
+
+    await plugin.replayPendingSyncLifecycleAttempts(binding);
+
+    assert.deepStrictEqual(plugin.settings.pendingSyncLifecycleAttempts, []);
+  }
+}
+
 Promise.resolve()
   .then(runSupportedLifecycleSuccessTest)
   .then(runFailureLifecycleReportingTest)
@@ -638,8 +805,12 @@ Promise.resolve()
   .then(runCompletionWarningIsVisibleTest)
   .then(runRequestJsonPreservesHttpStatusTest)
   .then(runFailedReceiptDoesNotTriggerLocalDedupeTest)
+  .then(runDeliverableExistingNoteTriggersLocalDedupeTest)
+  .then(runCommittedPersistenceFailureDoesNotReverseSuccessTest)
+  .then(runCompletionClearFailureDoesNotReverseSuccessTest)
   .then(runPendingLifecycleReplayTest)
   .then(runPendingLifecycleReplayNetworkRetentionTest)
+  .then(runPendingLifecycleReplayTerminalCleanupTest)
   .then(() => console.log('plugin-sync-history tests passed'))
   .catch((error) => {
     console.error(error);

@@ -1523,6 +1523,14 @@ var require_sync_lifecycle_utils = __commonJS({
       return String(markdown || "").replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").replace(/<!--\s*wechat-inbox-record-id\s*:[\s\S]*?-->/gi, "").trim();
     }
     __name(getMarkdownBody, "getMarkdownBody");
+    function isKnownFailureReceiptMarkdown(markdown) {
+      const body = getMarkdownBody(markdown);
+      if (!body) return false;
+      const startsWithSavedPlatformLink = /^(?:小红书|抖音|飞书)链接已保存[。.!！]?/i.test(body);
+      if (startsWithSavedPlatformLink) return true;
+      return /^原始链接[：:]\s*https?:\/\/\S+[\s\S]*?##\s*视频号口播文案[\s\S]*?未能提取视频号口播文案[。.!！]?/i.test(body);
+    }
+    __name(isKnownFailureReceiptMarkdown, "isKnownFailureReceiptMarkdown");
     function isExistingLocalNoteDeliverable2(record, markdown) {
       const source = record && typeof record === "object" ? record : {};
       const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
@@ -1530,6 +1538,7 @@ var require_sync_lifecycle_utils = __commonJS({
       const fileExt = String(metadata.fileExt || "").trim().toLowerCase().replace(/^\./, "");
       const url = String(metadata.url || source.content || "").trim();
       const body = getMarkdownBody(markdown);
+      if (isKnownFailureReceiptMarkdown(body)) return false;
       const hasEmbeddedAttachment = /!\[\[[^\]]+\]\]/.test(body);
       const contentOnlyBody = body.replace(/^\s*(?:原始链接|来源链接|source\s*url)\s*[：:]\s*https?:\/\/\S+\s*$/gim, "").replace(/^\s*>?\s*⚠️.*$/gim, "").trim();
       const meaningfulLength = getMeaningfulMarkdownLength(contentOnlyBody);
@@ -1616,6 +1625,7 @@ var require_sync_lifecycle_utils = __commonJS({
       getSyncLifecycleBindingFingerprint: getSyncLifecycleBindingFingerprint2,
       getSyncNoteTitleFromPath: getSyncNoteTitleFromPath2,
       isExistingLocalNoteDeliverable: isExistingLocalNoteDeliverable2,
+      isKnownFailureReceiptMarkdown,
       isLegacySyncLifecycleError: isLegacySyncLifecycleError2,
       isSyncRecordBusyError: isSyncRecordBusyError2,
       normalizePendingSyncLifecycleAttempts: normalizePendingSyncLifecycleAttempts2,
@@ -10839,6 +10849,17 @@ function buildWechatCaptchaMarkdown(url, html = "") {
   return lines.join("\n").trim();
 }
 __name(buildWechatCaptchaMarkdown, "buildWechatCaptchaMarkdown");
+function buildXiaohongshuFallbackMarkdown(url, reason = "") {
+  return [
+    "小红书链接已保存。",
+    "",
+    `原始链接：${url || ""}`,
+    "",
+    reason ? `> 小红书视频转写失败：${reason}` : "",
+    "> 如果这是视频笔记且需要口播/音频文案，请从手机相册或文件导入视频；如果只是图文笔记，正文会在页面公开内容可访问时自动保存。"
+  ].filter((line) => line !== "").join("\n");
+}
+__name(buildXiaohongshuFallbackMarkdown, "buildXiaohongshuFallbackMarkdown");
 function buildDouyinFallbackMarkdown(url, reason = "") {
   return [
     "抖音链接已保存。",
@@ -19169,6 +19190,31 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     await this.persistPendingSyncLifecycleAttempts(next);
     return true;
   }
+  async persistCommittedSyncLifecycleAttemptBestEffort(binding, value = {}) {
+    try {
+      await this.upsertPendingSyncLifecycleAttempt(binding, {
+        ...value,
+        stage: "committed"
+      });
+      return null;
+    } catch (error) {
+      return {
+        code: "RECOVERY_MARKER_SAVE_FAILED",
+        message: "local note is saved; recovery marker could not be persisted"
+      };
+    }
+  }
+  async clearPendingSyncLifecycleAttemptBestEffort(binding, recordId) {
+    try {
+      await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+      return null;
+    } catch (error) {
+      return {
+        code: "RECOVERY_MARKER_CLEAR_FAILED",
+        message: "sync completion is confirmed; stale recovery marker may be replayed safely"
+      };
+    }
+  }
   async replayPendingSyncLifecycleAttempts(binding) {
     const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
     if (!bindingFingerprint) return { replayed: 0, retained: 0 };
@@ -19285,6 +19331,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         total: records.length
       };
       let lifecycle = { enabled: false };
+      let localCommitFact = null;
       if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
         skipped.push({
           recordId,
@@ -19328,6 +19375,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
+          localCommitFact = { recordId, filePath: existingFilePath };
           skipped.push({
             recordId,
             reason: "already-synced-local",
@@ -19335,11 +19383,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           });
           this.showSyncProgress({ ...progress, stage: "marking", title: buildRecordTitleBase(record) });
           const existingNoteTitle = getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record);
+          let markerWarning2 = null;
           if (lifecycle.enabled && lifecycle.attemptId) {
-            await this.upsertPendingSyncLifecycleAttempt(binding, {
+            markerWarning2 = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
               recordId,
               attemptId: lifecycle.attemptId,
-              stage: "committed",
               noteTitle: existingNoteTitle
             });
           }
@@ -19349,9 +19397,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             binding,
             lifecycle
           );
-          if (completionWarning2) completionWarnings.push({ recordId, ...completionWarning2 });
-          else if (lifecycle.enabled && lifecycle.attemptId) {
-            await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+          if (completionWarning2) {
+            completionWarnings.push({ recordId, ...completionWarning2 });
+            if (markerWarning2) completionWarnings.push({ recordId, ...markerWarning2 });
+          } else if (lifecycle.enabled && lifecycle.attemptId) {
+            const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
+            if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
           }
           continue;
         }
@@ -19359,15 +19410,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (processingAbortController.signal.aborted && !item.committed) {
           throw createAbortError();
         }
+        localCommitFact = item;
         written.push(item);
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
+        let markerWarning = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
-          await this.upsertPendingSyncLifecycleAttempt(binding, {
+          markerWarning = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
             recordId: item.recordId,
             attemptId: lifecycle.attemptId,
-            stage: "committed",
             noteTitle: item.title
           });
         }
@@ -19378,11 +19430,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           binding,
           lifecycle
         );
-        if (completionWarning) completionWarnings.push({ recordId: item.recordId, ...completionWarning });
-        else if (lifecycle.enabled && lifecycle.attemptId) {
-          await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+        if (completionWarning) {
+          completionWarnings.push({ recordId: item.recordId, ...completionWarning });
+          if (markerWarning) completionWarnings.push({ recordId: item.recordId, ...markerWarning });
+        } else if (lifecycle.enabled && lifecycle.attemptId) {
+          const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, item.recordId);
+          if (clearWarning) completionWarnings.push({ recordId: item.recordId, ...clearWarning });
         }
       } catch (error) {
+        if (localCommitFact) {
+          completionWarnings.push({
+            recordId: String(localCommitFact.recordId || recordId || "").trim(),
+            code: "POST_COMMIT_RECOVERY_FAILED",
+            message: "local note is saved; post-commit recovery will retry without marking sync failed"
+          });
+          continue;
+        }
         const message = error.message || String(error);
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
         if (deletionResult && deletionResult.deleted) {
@@ -19917,6 +19980,9 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
 __name(_WechatInboxSettingTab, "WechatInboxSettingTab");
 var WechatInboxSettingTab = _WechatInboxSettingTab;
 WechatObsidianInboxPlugin.__test = {
+  buildDouyinFallbackMarkdown,
+  buildXiaohongshuFallbackMarkdown,
+  buildWechatChannelsUnavailableMarkdown,
   categorizeSyncFailure,
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
