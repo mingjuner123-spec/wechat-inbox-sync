@@ -58,6 +58,47 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
 }).code, 'EXTRACTION_FAILED');
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
+  metadata: {
+    url: 'https://www.toutiao.com/article/example',
+    conversionStatus: 'success',
+    markdown: '请先登录后查看完整内容\n打开今日头条查看更多',
+  },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: { conversionStatus: 'link_saved', markdown: '原始链接已保存' },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: { conversionStatus: 'wechat_captcha', markdown: '完成验证后继续访问' },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: { conversionStatus: 'failed', transcriptionStatus: 'failed', transcription: '' },
+}).code, 'TRANSCRIPTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'file',
+  metadata: { fileExt: 'zip', conversionStatus: 'attachment_saved' },
+}), null);
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: {
+    conversionStatus: 'success',
+    markdown: '正文完整保存，只是其中一张图片暂时无法本地化。',
+    imageLocalizationFailedCount: 1,
+    imageLocalizationError: 'one remote image unavailable',
+  },
+}), null);
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: {
+    conversionStatus: 'success',
+    markdown: '这是已经成功提取的长正文。'.repeat(30),
+    conversionError: '旧错误：暂不支持此平台',
+  },
+}), null);
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
   metadata: { conversionStatus: 'success', markdown: '一篇正常且可交付的正文' },
 }), null);
 
