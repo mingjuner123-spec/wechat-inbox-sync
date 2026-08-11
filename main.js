@@ -5501,19 +5501,20 @@ function isWechatArticleUrl(url) {
   return text.includes("mp.weixin.qq.com") || text.includes("weixin.qq.com");
 }
 __name(isWechatArticleUrl, "isWechatArticleUrl");
-function isWechatDecorativeImageAsset(asset, identicalCopyCount = 1) {
+function isWechatExplicitDecorativeImageAsset(asset) {
   if (!asset) return false;
   const alt = String(asset.alt || "").trim();
   if (alt && !/^(?:图片|image|img)$/i.test(alt)) return false;
+  const sourceUrl = String(asset.imageUrl || "").toLowerCase();
+  const hasExplicitDecorativeSignal = /(?:^|[\/_.?-])(?:decorative|spacer|separator|divider|loading|placeholder|tracking-pixel|tracker)(?:[\/_.?=&-]|$)/i.test(sourceUrl);
+  if (!hasExplicitDecorativeSignal) return false;
   const dimensions = asset.dimensions;
   if (!dimensions) return false;
   const width = Number(dimensions.width) || 0;
   const height = Number(dimensions.height) || 0;
-  if (!(width > 0 && height > 0)) return false;
-  if (Math.min(width, height) <= 32) return true;
-  return identicalCopyCount >= 3 && Math.max(width, height) <= 256;
+  return width > 0 && height > 0 && Math.max(width, height) <= 256;
 }
-__name(isWechatDecorativeImageAsset, "isWechatDecorativeImageAsset");
+__name(isWechatExplicitDecorativeImageAsset, "isWechatExplicitDecorativeImageAsset");
 function isWechatMpArticleUrl(url) {
   const source = String(url || "").trim();
   if (!source) return false;
@@ -17654,16 +17655,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
       }
     }
-    const identicalCopyCounts = /* @__PURE__ */ new Map();
-    downloadedByUrl.forEach((asset) => {
-      identicalCopyCounts.set(asset.hash, (identicalCopyCounts.get(asset.hash) || 0) + 1);
-    });
     const imagePathByAssetKey = /* @__PURE__ */ new Map();
     const replacementByUrl = /* @__PURE__ */ new Map();
+    const seenWechatAssetHashes = /* @__PURE__ */ new Set();
     for (const asset of downloadedByUrl.values()) {
-      if (isWechatArticleSource && isWechatDecorativeImageAsset(asset, identicalCopyCounts.get(asset.hash) || 1)) {
+      if (isWechatArticleSource && isWechatExplicitDecorativeImageAsset(asset)) {
         replacementByUrl.set(asset.imageUrl, "");
         continue;
+      }
+      if (isWechatArticleSource && seenWechatAssetHashes.has(asset.hash)) {
+        replacementByUrl.set(asset.imageUrl, "");
+        continue;
+      }
+      if (isWechatArticleSource) {
+        seenWechatAssetHashes.add(asset.hash);
       }
       const assetKey = isWechatArticleSource ? asset.hash : asset.imageUrl;
       let imagePath = imagePathByAssetKey.get(assetKey) || "";
@@ -17679,7 +17684,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, "g");
       nextMarkdown = nextMarkdown.replace(pattern, imagePath ? `![[${imagePath}]]` : "");
     });
-    return isWechatArticleSource ? nextMarkdown.replace(/\n{3,}/g, "\n\n") : nextMarkdown;
+    if (isWechatArticleSource) {
+      const seenLocalizedImagePaths = /* @__PURE__ */ new Set();
+      nextMarkdown = nextMarkdown.replace(/!\[\[([^\]]+)\]\]/g, (match, imagePath) => {
+        if (seenLocalizedImagePaths.has(imagePath)) return "";
+        seenLocalizedImagePaths.add(imagePath);
+        return match;
+      });
+      return nextMarkdown.replace(/\n{3,}/g, "\n\n");
+    }
+    return nextMarkdown;
   }
   async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
     rootDir = normalizeConfiguredVaultPath(rootDir);

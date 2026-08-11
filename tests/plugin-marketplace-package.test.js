@@ -37,6 +37,7 @@ assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
 assert.strictEqual(manifest.version, '1.3.80');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.ok(checklist.includes('不得仅因版本较旧就停用已安装组件'));
+assert.ok(checklist.includes(`本次为 \`${manifest.version}\``), 'release checklist target must match manifest version');
 assert.ok(checklist.includes('HTTP 418'));
 assert.ok(checklist.includes('网络失败不得触发大型组件删除或重装'));
 assert.ok(checklist.includes('完成状态写入后清理失败只能告警'));

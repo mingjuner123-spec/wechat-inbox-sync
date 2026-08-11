@@ -157,8 +157,20 @@ async function run() {
     repeatedPngCase.plugin,
     createArticleHtml(repeatedPngUrls.map((url) => `<img src="${url}">`).join('')),
   );
-  assert.strictEqual(repeatedPngCase.writes.length, 0);
+  assert.strictEqual(repeatedPngCase.writes.length, 1);
   repeatedPngUrls.forEach((url) => assert.strictEqual(repeatedPngResult.metadata.markdown.includes(url), false));
+  assert.strictEqual((repeatedPngResult.metadata.markdown.match(/!\[\[/g) || []).length, 1);
+
+  const qrCodeUrl = 'https://mmbiz.qpic.cn/mmbiz_png/article-qrcode/640?wx_fmt=png';
+  const qrCodeCase = createPlugin();
+  qrCodeCase.plugin.downloadArrayBuffer = async () => createPngHeader(128, 128);
+  const qrCodeResult = await hydrateWithHtml(
+    qrCodeCase.plugin,
+    createArticleHtml(`<img alt="图片" src="${qrCodeUrl}">`),
+  );
+  assert.strictEqual(qrCodeCase.writes.length, 1);
+  assert.strictEqual(qrCodeResult.metadata.markdown.includes(qrCodeUrl), false);
+  assert.strictEqual((qrCodeResult.metadata.markdown.match(/!\[\[/g) || []).length, 1);
 
   const duplicateContentUrls = [
     'https://mmbiz.qpic.cn/mmbiz_jpg/content-copy-a/640',
@@ -172,7 +184,7 @@ async function run() {
   );
   assert.strictEqual(duplicateContentCase.writes.length, 1);
   duplicateContentUrls.forEach((url) => assert.strictEqual(duplicateContentResult.metadata.markdown.includes(url), false));
-  assert.strictEqual((duplicateContentResult.metadata.markdown.match(/!\[\[/g) || []).length, 2);
+  assert.strictEqual((duplicateContentResult.metadata.markdown.match(/!\[\[/g) || []).length, 1);
 
   const genericCase = createPlugin();
   requestUrlMock = async () => ({
