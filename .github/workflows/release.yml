@@ -69,6 +69,14 @@ jobs:
       - name: Run release governance and plugin regressions
         run: |
           node tests/plugin-ai-metadata-error-utils.test.js
+          node tests/plugin-architecture-integration.test.js
+          node tests/plugin-cloud-transcription-response-utils.test.js
+          node tests/plugin-document-text-extraction.test.js
+          node tests/plugin-feishu-markdown-utils.test.js
+          node tests/plugin-media-file-utils.test.js
+          node tests/plugin-sync-history.test.js
+          node tests/plugin-wechat-article-image-localization.test.js
+          node tests/plugin-wechat-channels-decrypt-utils.test.js
           node tests/plugin-date-utils.test.js
           node tests/plugin-diagnostic-redaction-utils.test.js
           node tests/plugin-input-normalization-utils.test.js

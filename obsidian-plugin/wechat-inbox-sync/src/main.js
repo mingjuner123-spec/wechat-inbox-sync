@@ -5,7 +5,6 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const path = require('path');
-const zlib = require('zlib');
 const {
   Modal,
   Notice,
@@ -24,11 +23,34 @@ const {
 const {
   assertUsableTranscription,
   createTranscriptionQualityError,
-  dedupeRepeatedTranscriptionLines,
   getTranscriptionQualityIssue,
   getTranscriptionQualityUnits,
   normalizeTranscriptionQualityUnit,
 } = require('./transcription-quality-utils');
+const {
+  extractOpenAICompatibleText,
+  formatHttpError,
+  parseAliyunTranscriptionResult,
+  parseDoubaoAsrResult,
+  parseDoubaoAsrTaskState,
+  parseTencentCreateTaskResponse,
+  parseTencentTaskStatusResponse,
+  tryParseJson,
+} = require('./cloud-transcription-response-utils');
+const {
+  generateWechatChannelsDecryptorBytes,
+  decryptWechatChannelsMediaBuffer,
+} = require('./wechat-channels-decrypt-utils');
+const {
+  stripMarkdownCodeBlocks,
+  normalizeTitleForCompare,
+  normalizeFeishuMarkdownLine,
+  shouldDropFeishuLine,
+  formatFeishuHeadingLine,
+  isFeishuCodeLanguageLine,
+  postProcessFeishuMarkdown,
+  isFeishuMarkdownLikelyTruncated,
+} = require('./feishu-markdown-utils');
 const {
   buildConversionWarningsNotice,
   buildLocalAsrProgressKey,
@@ -84,8 +106,36 @@ const {
   normalizeRecordUrlForCompare,
   normalizeYamlScalar,
 } = require('./record-identity-utils');
+const {
+  categorizeSyncFailure,
+  getSyncLifecycleBindingFingerprint,
+  getSyncLifecycleOutcomeError,
+  getSyncNoteTitleFromPath,
+  isExistingLocalNoteDeliverable,
+  isLegacySyncLifecycleError,
+  isSyncRecordBusyError,
+  normalizePendingSyncLifecycleAttempts,
+  sanitizeSyncNoteTitle,
+} = require('./sync-lifecycle-utils');
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
+const {
+  decodeDataUrl,
+  decodeUtf8ArrayBuffer,
+  getAttachmentExt,
+  getAudioFormatFromUrl,
+  getImageDimensionsFromBuffer,
+  getImageExtFromBuffer,
+  getImageExtFromMime,
+  getImageFileExtension,
+  getInvalidDownloadedMediaReason,
+  hasVideoTrackInMediaBuffer,
+  isAudioVideoAttachmentExt,
+  isMarkdownConvertibleExt,
+  sanitizeAttachmentName,
+  toNodeBuffer,
+} = require('./media-file-utils');
+const { createDocumentTextExtractionHelpers } = require('./document-text-extraction-utils');
 const {
   createAiMetadataHelpers,
   retryAiMetadataGeneration,
@@ -103,10 +153,18 @@ const {
   getTranscriptionSourcePrefix,
   isSuccessfulTranscriptionRecord,
 } = require('./transcription-note-title-utils');
+const {
+  cleanPdfExtractedText,
+  extractDocxMarkdown,
+  extractPdfMarkdown,
+} = createDocumentTextExtractionHelpers({
+  toNodeBuffer,
+  cleanMarkdownForStorage,
+});
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.79';
+const PLUGIN_RUNTIME_VERSION = '1.3.80';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -233,6 +291,7 @@ const DEFAULT_SETTINGS = {
   tencentPollAttempts: 60,
   tencentPollIntervalMs: 5000,
   locallyQuarantinedRecordIds: [],
+  pendingSyncLifecycleAttempts: [],
 };
 
 const XIAOHONGSHU_OCR_MAX_IMAGES = 18;
@@ -248,12 +307,6 @@ const BROWSER_MEDIA_CAPTURE_MAX_REQUESTS = 512;
 const BROWSER_MEDIA_CAPTURE_MAX_URLS = 256;
 const BROWSER_MEDIA_CAPTURE_MAX_NODES = 2048;
 const BROWSER_MEDIA_CAPTURE_MAX_STRING_CHARACTERS = 256 * 1024;
-
-function getImageFileExtension(url = '') {
-  const match = String(url || '').split('?')[0].match(/\.([a-z0-9]{2,5})$/i);
-  const ext = match ? match[1].toLowerCase() : 'jpg';
-  return ['jpg', 'jpeg', 'png', 'webp', 'bmp'].includes(ext) ? ext : 'jpg';
-}
 
 const AI_PROVIDER_NAMES = {
   off: '关闭转写',
@@ -2093,6 +2146,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
     merged.locallyQuarantinedRecordIds,
   );
+  merged.pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(
+    merged.pendingSyncLifecycleAttempts,
+  );
 
   return merged;
 }
@@ -2495,82 +2551,6 @@ function buildTencentRequest({
   };
 }
 
-function parseTencentCreateTaskResponse(payload) {
-  const data = payload && payload.Response && payload.Response.Data;
-  const taskId = data && (data.TaskId || data.TaskID || data.Taskid);
-  if (!taskId) {
-    const error = payload && payload.Response && payload.Response.Error;
-    throw new Error(error ? `${error.Code}: ${error.Message}` : '腾讯云未返回转写任务 ID');
-  }
-  return taskId;
-}
-
-function cleanTencentResultText(text) {
-  return String(text || '')
-    .replace(/^\[[^\]]+\]\s*/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function tryParseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    return null;
-  }
-}
-
-function extractOpenAICompatibleText(payload) {
-  const choice = payload && payload.choices && payload.choices[0];
-  const content = choice && (
-    (choice.delta && choice.delta.content)
-    || (choice.message && choice.message.content)
-    || choice.text
-  );
-  if (Array.isArray(content)) {
-    return content.map((part) => part.text || part.content || '').join('');
-  }
-  return typeof content === 'string' ? content : '';
-}
-
-function parseAliyunTranscriptionResult(responseText) {
-  const text = String(responseText || '').trim();
-  const dataLines = text.split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('data:'));
-
-  if (dataLines.length) {
-    return dataLines
-      .map((line) => line.replace(/^data:\s*/, '').trim())
-      .filter((line) => line && line !== '[DONE]')
-      .map((line) => extractOpenAICompatibleText(tryParseJson(line)))
-      .join('')
-      .trim();
-  }
-
-  const payload = tryParseJson(text);
-  if (payload) {
-    return extractOpenAICompatibleText(payload).trim();
-  }
-  return text;
-}
-
-function getAudioFormatFromUrl(audioUrl) {
-  const match = String(audioUrl || '').toLowerCase().match(/\.([a-z0-9]{2,5})(?:[?#]|$)/);
-  if (!match && /finder\.video\.qq\.com|mpvideo/i.test(String(audioUrl || ''))) return 'mp4';
-  const ext = match ? match[1] : 'mp3';
-  if (['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg', 'mp4'].includes(ext)) return ext;
-  if (ext === 'm4s') return 'mp4';
-  return 'mp3';
-}
-
-function hasVideoTrackInMediaBuffer(value) {
-  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value || []);
-  if (!buffer.length) return false;
-  return buffer.includes(Buffer.from('vide'))
-    || buffer.includes(Buffer.from('vp09'));
-}
-
 function isVideoPlatform(platform, url = '') {
   const source = `${String(platform || '')} ${String(url || '')}`.toLowerCase();
   return /抖音|小红书|b站|bilibili|douyin|xiaohongshu/.test(source);
@@ -2637,209 +2617,6 @@ function cleanTrailingTranscriptionHallucinations(text) {
     }
   }
   return lines.slice(0, cutoff).join('\n').trim();
-}
-
-function bufferStartsWith(buffer, bytes) {
-  if (!buffer || buffer.length < bytes.length) return false;
-  return bytes.every((byte, index) => buffer[index] === byte);
-}
-
-function getInvalidDownloadedMediaReason(buffer) {
-  if (!buffer || buffer.length < 512) {
-    return '下载到的媒体文件过小，可能不是有效音视频文件';
-  }
-  const headBuffer = buffer.subarray(0, Math.min(buffer.length, 256));
-  const headText = headBuffer.toString('utf8').trim().toLowerCase();
-  if (headText.startsWith('<!doctype') || headText.startsWith('<html') || headText.includes('<body')) {
-    return '下载到的是网页内容，不是有效音视频文件';
-  }
-  if (headText.startsWith('{') || headText.startsWith('[')) {
-    return '下载到的是接口返回数据，不是有效音视频文件';
-  }
-  if (
-    bufferStartsWith(buffer, [0xff, 0xd8, 0xff])
-    || bufferStartsWith(buffer, [0x89, 0x50, 0x4e, 0x47])
-    || bufferStartsWith(buffer, [0x47, 0x49, 0x46, 0x38])
-    || (bufferStartsWith(buffer, [0x52, 0x49, 0x46, 0x46]) && buffer.subarray(8, 12).toString('ascii') === 'WEBP')
-  ) {
-    return '下载到的是封面图片，不是有效音视频文件';
-  }
-  return '';
-}
-
-const WECHAT_CHANNELS_ENCRYPTED_HEAD_BYTES = 131072;
-
-function u64(value) {
-  return BigInt.asUintN(64, value);
-}
-
-class Isaac64 {
-  constructor(seed) {
-    this.randrsl = new Array(256).fill(0n);
-    this.mm = new Array(256).fill(0n);
-    this.randcnt = 0;
-    this.aa = 0n;
-    this.bb = 0n;
-    this.cc = 0n;
-    this.randrsl[0] = u64(seed);
-    this.randinit(true);
-  }
-
-  mix(a, b, c, d, e, f, g, h) {
-    a = u64(a - e); f = u64(f ^ (h >> 9n)); h = u64(h + a);
-    b = u64(b - f); g = u64(g ^ u64(a << 9n)); a = u64(a + b);
-    c = u64(c - g); h = u64(h ^ (b >> 23n)); b = u64(b + c);
-    d = u64(d - h); a = u64(a ^ u64(c << 15n)); c = u64(c + d);
-    e = u64(e - a); b = u64(b ^ (d >> 14n)); d = u64(d + e);
-    f = u64(f - b); c = u64(c ^ u64(e << 20n)); e = u64(e + f);
-    g = u64(g - c); d = u64(d ^ (f >> 17n)); f = u64(f + g);
-    h = u64(h - d); e = u64(e ^ u64(g << 14n)); g = u64(g + h);
-    return [a, b, c, d, e, f, g, h];
-  }
-
-  randinit(flag) {
-    let a = 0x9e3779b97f4a7c13n;
-    let b = a;
-    let c = a;
-    let d = a;
-    let e = a;
-    let f = a;
-    let g = a;
-    let h = a;
-
-    for (let index = 0; index < 4; index += 1) {
-      [a, b, c, d, e, f, g, h] = this.mix(a, b, c, d, e, f, g, h);
-    }
-
-    for (let index = 0; index < 256; index += 8) {
-      if (flag) {
-        a = u64(a + this.randrsl[index]);
-        b = u64(b + this.randrsl[index + 1]);
-        c = u64(c + this.randrsl[index + 2]);
-        d = u64(d + this.randrsl[index + 3]);
-        e = u64(e + this.randrsl[index + 4]);
-        f = u64(f + this.randrsl[index + 5]);
-        g = u64(g + this.randrsl[index + 6]);
-        h = u64(h + this.randrsl[index + 7]);
-      }
-      [a, b, c, d, e, f, g, h] = this.mix(a, b, c, d, e, f, g, h);
-      this.mm[index] = a;
-      this.mm[index + 1] = b;
-      this.mm[index + 2] = c;
-      this.mm[index + 3] = d;
-      this.mm[index + 4] = e;
-      this.mm[index + 5] = f;
-      this.mm[index + 6] = g;
-      this.mm[index + 7] = h;
-    }
-
-    if (flag) {
-      for (let index = 0; index < 256; index += 8) {
-        a = u64(a + this.mm[index]);
-        b = u64(b + this.mm[index + 1]);
-        c = u64(c + this.mm[index + 2]);
-        d = u64(d + this.mm[index + 3]);
-        e = u64(e + this.mm[index + 4]);
-        f = u64(f + this.mm[index + 5]);
-        g = u64(g + this.mm[index + 6]);
-        h = u64(h + this.mm[index + 7]);
-        [a, b, c, d, e, f, g, h] = this.mix(a, b, c, d, e, f, g, h);
-        this.mm[index] = a;
-        this.mm[index + 1] = b;
-        this.mm[index + 2] = c;
-        this.mm[index + 3] = d;
-        this.mm[index + 4] = e;
-        this.mm[index + 5] = f;
-        this.mm[index + 6] = g;
-        this.mm[index + 7] = h;
-      }
-    }
-
-    this.isaac64();
-    this.randcnt = 256;
-  }
-
-  isaac64() {
-    this.cc = u64(this.cc + 1n);
-    this.bb = u64(this.bb + this.cc);
-
-    for (let index = 0; index < 256; index += 1) {
-      const x = this.mm[index];
-      switch (index % 4) {
-        case 0:
-          this.aa = u64(~u64(this.aa ^ u64(this.aa << 21n)));
-          break;
-        case 1:
-          this.aa = u64(this.aa ^ (this.aa >> 5n));
-          break;
-        case 2:
-          this.aa = u64(this.aa ^ u64(this.aa << 12n));
-          break;
-        default:
-          this.aa = u64(this.aa ^ (this.aa >> 33n));
-          break;
-      }
-      this.aa = u64(this.aa + this.mm[(index + 128) % 256]);
-      const y = u64(this.mm[Number((x >> 3n) & 255n)] + this.aa + this.bb);
-      this.mm[index] = y;
-      this.bb = u64(this.mm[Number((y >> 11n) & 255n)] + x);
-      this.randrsl[index] = this.bb;
-    }
-  }
-
-  next() {
-    if (this.randcnt === 0) {
-      this.isaac64();
-      this.randcnt = 256;
-    }
-    this.randcnt -= 1;
-    return this.randrsl[this.randcnt];
-  }
-
-  generate(length) {
-    const result = Buffer.alloc(Math.max(0, Number(length) || 0));
-    let position = 0;
-    while (position < result.length) {
-      const value = this.next();
-      for (let shift = 56; shift >= 0 && position < result.length; shift -= 8) {
-        result[position] = Number((value >> BigInt(shift)) & 0xffn);
-        position += 1;
-      }
-    }
-    return result;
-  }
-}
-
-function parseWechatChannelsDecryptKey(decryptKey) {
-  const value = String(decryptKey || '').trim();
-  if (!value) return null;
-  try {
-    if (/^0x[0-9a-f]+$/i.test(value) || /^\d+$/.test(value)) {
-      return u64(BigInt(value));
-    }
-  } catch (error) {
-    return null;
-  }
-  return null;
-}
-
-function generateWechatChannelsDecryptorBytes(decryptKey, length) {
-  const seed = parseWechatChannelsDecryptKey(decryptKey);
-  if (seed === null) return Buffer.alloc(0);
-  return new Isaac64(seed).generate(length);
-}
-
-function decryptWechatChannelsMediaBuffer(buffer, decryptKey, limit = WECHAT_CHANNELS_ENCRYPTED_HEAD_BYTES) {
-  const input = Buffer.from(buffer || []);
-  const seed = parseWechatChannelsDecryptKey(decryptKey);
-  if (seed === null || !input.length) return input;
-  const result = Buffer.from(input);
-  const decryptLength = Math.min(result.length, Math.max(0, Number(limit) || 0));
-  const keyBytes = new Isaac64(seed).generate(decryptLength);
-  for (let index = 0; index < decryptLength; index += 1) {
-    result[index] ^= keyBytes[index];
-  }
-  return result;
 }
 
 function buildAliyunVoiceRequest({ settings, audioUrl }) {
@@ -2927,120 +2704,6 @@ function buildDoubaoAsrQueryRequest({ apiKey, requestId }) {
       'X-Api-Request-Id': requestId,
     },
     body: {},
-  };
-}
-
-function getHeader(headers, name) {
-  if (!headers) return '';
-  if (headers[name]) return headers[name];
-  const lowerName = name.toLowerCase();
-  const key = Object.keys(headers).find((item) => item.toLowerCase() === lowerName);
-  return key ? headers[key] : '';
-}
-
-function formatHttpError(provider, response) {
-  const parts = [`${provider}请求失败：HTTP ${response && response.status}`];
-  ['X-Api-Status-Code', 'X-Api-Message', 'X-Api-Request-Id'].forEach((name) => {
-    const value = getHeader(response && response.headers, name);
-    if (value) {
-      parts.push(`${name}=${value}`);
-    }
-  });
-  const body = String((response && (response.text || JSON.stringify(response.json || ''))) || '').trim();
-  if (body) {
-    parts.push(body.slice(0, 500));
-  }
-  return parts.join('；');
-}
-
-function normalizeDoubaoSpeakerText(result) {
-  if (!result || typeof result !== 'object') return '';
-  const utterances = Array.isArray(result.utterances) ? result.utterances : [];
-  if (!utterances.length) return '';
-  return dedupeRepeatedTranscriptionLines(utterances
-    .map((item) => {
-      const text = String((item && (item.text || item.result_text || item.utterance_text)) || '').trim();
-      if (!text) return '';
-      const additions = item && item.additions && typeof item.additions === 'object' ? item.additions : {};
-      const speaker = item && (
-        item.speaker
-        || item.speaker_id
-        || item.spk
-        || item.speakerId
-        || additions.speaker
-        || additions.speaker_id
-        || additions.spk
-        || additions.speakerId
-      );
-      return speaker === undefined || speaker === null || speaker === ''
-        ? text
-        : `说话人${speaker}：${text}`;
-    })
-    .filter(Boolean)
-    .join('\n')
-    .trim());
-}
-
-function parseDoubaoAsrResult(payload) {
-  const data = typeof payload === 'string' ? tryParseJson(payload) : payload;
-  const result = data && data.result;
-  if (Array.isArray(result)) {
-    return dedupeRepeatedTranscriptionLines(result
-      .map((item) => normalizeDoubaoSpeakerText(item) || String((item && (item.text || item.result_text || item.utterance_text)) || '').trim())
-      .filter(Boolean)
-      .join('\n')
-      .trim());
-  }
-  const speakerText = normalizeDoubaoSpeakerText(result);
-  if (speakerText) return speakerText;
-  const text = (result && (result.text || result.result_text))
-    || (data && (data.text || data.transcription))
-    || '';
-  return dedupeRepeatedTranscriptionLines(String(text || '').trim());
-}
-
-function parseDoubaoAsrTaskState(response) {
-  if (response.status && (response.status < 200 || response.status >= 300)) {
-    throw new Error(formatHttpError('豆包语音识别', response));
-  }
-
-  const statusCode = getHeader(response.headers, 'X-Api-Status-Code');
-  if (statusCode && statusCode !== '20000000') {
-    if (statusCode === '20000001' || statusCode === '20000002') {
-      return {
-        status: 'processing',
-        transcription: '',
-      };
-    }
-    throw new Error(formatHttpError('豆包语音识别', response));
-  }
-
-  const transcription = parseDoubaoAsrResult(response.json || response.text);
-  return {
-    status: transcription ? 'success' : 'empty',
-    transcription,
-  };
-}
-
-function parseTencentTaskStatusResponse(payload) {
-  const data = payload && payload.Response && payload.Response.Data;
-  const error = payload && payload.Response && payload.Response.Error;
-  if (error) {
-    return {
-      status: 3,
-      statusStr: 'failed',
-      transcription: '',
-      errorMsg: `${error.Code}: ${error.Message}`,
-    };
-  }
-
-  const status = Number(data && data.Status);
-  const statusStr = String((data && data.StatusStr) || '').toLowerCase();
-  return {
-    status,
-    statusStr,
-    transcription: cleanTencentResultText(data && data.Result),
-    errorMsg: (data && (data.ErrorMsg || data.ErrorMessage)) || '',
   };
 }
 
@@ -3177,1002 +2840,8 @@ function cleanMarkdownForStorage(markdown, options = {}) {
   return cleaned;
 }
 
-function stripMarkdownCodeBlocks(markdown) {
-  return String(markdown || '')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/`[^`\n]+`/g, ' ');
-}
-
-
-function normalizeTitleForCompare(text) {
-  return String(text || '')
-    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
-    .replace(/[-–—]\s*飞书云文档\s*$/i, '')
-    .replace(/^#+\s*/, '')
-    .replace(/\*\*/g, '')
-    .replace(/\s+/g, '')
-    .trim();
-}
-
-function normalizeFeishuMarkdownLine(line) {
-  return String(line || '')
-    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '')
-    .replace(/^-\s*$/, '')
-    .replace(/^-\s+/, '- ')
-    .replace(/^Plain Text复制$/i, '')
-    .replace(/^代码块$/i, '')
-    .trim();
-}
-
-function shouldDropFeishuLine(line, title) {
-  const text = String(line || '').trim();
-  if (!text) return true;
-  const plainText = text.replace(/^#{1,6}\s+/, '').replace(/^[-*]\s+/, '').trim();
-  const normalized = normalizeTitleForCompare(text);
-  const normalizedTitle = normalizeTitleForCompare(title);
-  const noise = new Set([
-    '飞书云文档',
-    '与我分享',
-    '登录/注册',
-    '帮助中心',
-    '效率指南',
-    '添加快捷方式',
-    '最近修改',
-    '搜索',
-    '墨度',
-    '莞尔',
-    '分享',
-    '回复...',
-    '附件不支持打印',
-    '上传日志',
-    '联系客服',
-    '功能更新',
-    'header-v2',
-    '评论（0）',
-    '跳转至首条评论',
-    'Plain Text',
-    'Plain Text复制',
-    '复制',
-    'Bash',
-    '重播',
-    '播放',
-    '直播',
-    '进入全屏',
-    '画中画',
-    '原画',
-    '点击按住可拖动视频',
-    '星辰大海',
-    '蟹',
-    '蟹老板-老王1',
-    '正在以画中画形式播放',
-    '语句划分',
-    '音频时长核定',
-    '画面规划',
-    '画面代码审查',
-    '多AIAGENT优化',
-    '人点赞',
-  ]);
-  if (noise.has(text) || noise.has(plainText)) return true;
-  if (/^\d{1,3}%$/.test(plainText)) return true;
-  if (/^\d+(?:\.\d+)?\s*(?:KB|MB|GB)$/i.test(plainText)) return true;
-  if (/^(?:-\s*)?\d{3,4}p$/i.test(plainText)) return true;
-  if (/^(?:-\s*)?\d+(?:\.\d+)?x$/i.test(plainText)) return true;
-  if (/^\d{1,2}月\d{1,2}日修改$/.test(plainText)) return true;
-  if (/^(?:\d{1,2}:\d{2}|\/|[0-9]+(?:\.[0-9]+)?x)$/.test(plainText)) return true;
-  if (/^\S{1,30}的云文档$/.test(plainText)) return true;
-  if (/^[\u{1F300}-\u{1FAFF}\u2600-\u27BF]+$/u.test(plainText)) return true;
-  if (normalizedTitle && normalized.includes(normalizedTitle) && normalized !== normalizedTitle && normalized.length <= normalizedTitle.length + 24) return true;
-  if (/添加快捷方式\s*最近修改\s*[:：]?/.test(text)) return true;
-  if (/^最近修改\s*[:：]?/.test(text)) return true;
-  if (/^你可能还想问/.test(text)) return true;
-  if (/^查询.*更多相关内容$/.test(text)) return true;
-  if (/^推荐内容由\s*AI\s*生成$/i.test(text)) return true;
-  if (/^加载中/.test(text)) return true;
-  if (/^本文暂未(?:引用|被).*文档/.test(text)) return true;
-  if (/^取消发送$/.test(text)) return true;
-  if (/^\d+\s*人点赞$/.test(text)) return true;
-  if (/^-\s+.+\s-\s+.+/.test(text) && text.length > 40) return true;
-  if (/^-\s*(?:上传日志|联系客服|功能更新|帮助中心|效率指南)$/.test(text)) return true;
-  if (/^-\s*(?:第[一二三四五六七八九十\d]+(?:次|个)?风口|规律：|什么是|举个例子|知识付费|最后|第[一二三四五六七八九十\d]+[步层：])/.test(text)) return true;
-  if (/^图\s*\d+$/i.test(text)) return true;
-  if (/^\d{1,2}$/.test(text)) return true;
-  if (/^\+\d+$/.test(text)) return true;
-  if (/^共有\s*\d+\s*个协作者$/.test(text)) return true;
-  if (/^最近修改\s*[:：]?\s*/.test(text)) return true;
-  if (/^昨天\s*\d{1,2}:\d{2}$/.test(text)) return true;
-  if (/^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(text)) return true;
-  if (/^最新修改时间为/.test(text)) return true;
-  if (/^\d+\s*字$/.test(text)) return true;
-  if (/^评论/.test(text)) return true;
-  if (/^[春壹始]$/.test(text)) return true;
-  if (/^[\u4e00-\u9fa5]{1,4}$/.test(text) && /(?:斤|斧|淇|钖|作者|头像)/.test(text)) return true;
-  if (/成长笔记(?:昨天\s*\d{1,2}:\d{2})?$/.test(text)) return true;
-  if (/^春树.*云文档$/.test(text)) return true;
-  if (normalizedTitle && normalized === normalizedTitle) return true;
-  return false;
-}
-
-function formatFeishuHeadingLine(line) {
-  const text = String(line || '').trim();
-  if (/^#\s+(?:创建项目|或者克隆|应输出)/.test(text)) return `\\${text}`;
-  if (/^#{1,6}\s+/.test(text) || /^!\[/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text)) {
-    return text;
-  }
-  const numericSection = text.match(/^(\d+)\.(\d{1,3})(.+)$/);
-  if (numericSection && Number(numericSection[1]) <= 6 && !/^(?:[+]|MB|GB|KB|（推荐|推荐)/i.test(numericSection[3].trim())) {
-    return numericSection[2].length >= 2 ? `### ${text}` : `## ${text}`;
-  }
-  const length = Array.from(text).length;
-  if (length >= 4 && length <= 34) {
-    if (/^[一二三四五六七八九十]+[、.．]\s*.+/.test(text)) return `# ${text}`;
-    if (/^[（(]\d+[）)]\s*.+/.test(text)) return `### ${text}`;
-    if (/^\d{4}年之前，我没有任何目标$/.test(text)) return `## ${text}`;
-    if (/^(第[一二三四五六七八九十\d]+[、.．]?\s*)?[^，。！？!?]{0,16}风口[：:]/.test(text)) return `## ${text}`;
-    if (/^(什么是.+原理|举个例子|最后|知识付费的下一个形态)$/.test(text)) return `## ${text}`;
-    if (/^第[一二三四五六七八九十\d]+[步层：:]/.test(text)) return `### ${text}`;
-  }
-  return text;
-}
-
-function isFeishuTocBulletLine(line) {
-  const text = String(line || '').trim().replace(/^[-*]\s+/, '');
-  return /^[一二三四五六七八九十]+[、.．]/.test(text)
-    || /^\d+\.\d/.test(text)
-    || /^[（(]\d+[）)]/.test(text)
-    || /^第[一二三四五六七八九十\d]+[步层：:]/.test(text)
-    || /^.+(?:成果|经验|收获|流程|配置|安装|教学|优化|什么|想法|视频|画面|审查|制作|下一步).*$/.test(text);
-}
-
-function removeFeishuTocBlocks(lines) {
-  const output = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = String(lines[index] || '');
-    if (!/^[-*]\s+/.test(line.trim())) {
-      output.push(line);
-      continue;
-    }
-    const block = [];
-    let cursor = index;
-    while (cursor < lines.length && /^[-*]\s+/.test(String(lines[cursor] || '').trim())) {
-      block.push(String(lines[cursor] || ''));
-      cursor += 1;
-    }
-    const tocCount = block.filter(isFeishuTocBulletLine).length;
-    if (block.length >= 4 && tocCount >= Math.ceil(block.length * 0.65)) {
-      index = cursor - 1;
-      continue;
-    }
-    output.push(...block);
-    index = cursor - 1;
-  }
-  return output;
-}
-
-function repairFeishuMarkdownTables(markdown) {
-  const lines = String(markdown || '').split(/\r?\n/);
-  const output = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const current = String(lines[index] || '').trim();
-    if (current === '|') continue;
-    const nextNonBlank = [];
-    let scan = index;
-    while (scan < lines.length && nextNonBlank.length < 8) {
-      const value = String(lines[scan] || '').trim();
-      if (value && value !== '|') nextNonBlank.push({ value, index: scan });
-      scan += 1;
-    }
-    let headers = null;
-    let separatorPattern = null;
-    if (
-      current === '组件'
-      && nextNonBlank.some((item) => item.value === '要求')
-      && nextNonBlank.some((item) => item.value === '说明')
-    ) {
-      headers = ['组件', '要求', '说明'];
-      separatorPattern = /^\|\s*---\s*\|\s*---\s*\|\s*---\s*\|$/;
-    } else if (
-      current === '序号'
-      && nextNonBlank.some((item) => item.value === '版本')
-      && nextNonBlank.some((item) => item.value === '用途')
-      && nextNonBlank.some((item) => item.value === '是否必须')
-    ) {
-      headers = ['序号', '版本', '用途', '是否必须'];
-      separatorPattern = /^\|\s*---\s*\|\s*---\s*\|\s*---\s*\|\s*---\s*(?:\|\s*---\s*)?\|$/;
-    }
-    if (!headers || !nextNonBlank.some((item) => separatorPattern.test(item.value))) {
-      output.push(lines[index]);
-      continue;
-    }
-
-    const separator = nextNonBlank.find((item) => separatorPattern.test(item.value));
-    const cells = [];
-    let cursor = separator.index + 1;
-    while (cursor < lines.length) {
-      const value = String(lines[cursor] || '').trim();
-      if (!value) {
-        cursor += 1;
-        continue;
-      }
-      if (value === '|' || /^#{1,6}\s+/.test(value) || /^!\[/.test(value) || /^\[[^\]]+]\(/.test(value)) break;
-      if (headers.includes(value) && cells.length) break;
-      if (shouldDropFeishuLine(value, '')) {
-        cursor += 1;
-        continue;
-      }
-      cells.push(value.replace(/\|/g, '\\|'));
-      cursor += 1;
-      if (cells.length >= 30) break;
-    }
-    const rows = [];
-    for (let cellIndex = 0; cellIndex + headers.length - 1 < cells.length; cellIndex += headers.length) {
-      rows.push(cells.slice(cellIndex, cellIndex + headers.length));
-    }
-    if (rows.length) {
-      output.push(`| ${headers.join(' | ')} |`);
-      output.push(`| ${headers.map(() => '---').join(' | ')} |`);
-      rows.forEach((row) => output.push(`| ${row.join(' | ')} |`));
-      index = Math.max(index, cursor - 1);
-      continue;
-    }
-    output.push(lines[index]);
-  }
-  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-function removeFeishuResidualTableLines(markdown) {
-  const residue = new Set(['组件', '要求', '说明', 'CPU', '内存', '硬盘', '序号', '版本', '用途', '是否必须']);
-  const lines = String(markdown || '').split(/\r?\n/);
-  const output = [];
-  let recentlySawTable = 0;
-  lines.forEach((line) => {
-    const text = String(line || '').trim();
-    if (/^\|.+\|$/.test(text)) {
-      recentlySawTable = 8;
-      output.push(line);
-      return;
-    }
-    if (recentlySawTable > 0 && residue.has(text)) {
-      recentlySawTable -= 1;
-      return;
-    }
-    if (recentlySawTable > 0) recentlySawTable -= 1;
-    output.push(line);
-  });
-  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-function isFeishuCodeLanguageLine(line) {
-  return /^(?:Bash|Shell|PowerShell|JavaScript|TypeScript|Python|JSON|YAML|HTML|CSS)$/i.test(String(line || '').trim());
-}
-
-function isFeishuCommandLikeLine(line) {
-  const text = String(line || '').trim();
-  if (!text) return false;
-  if (/^#\s+/.test(text)) return true;
-  if (/^\\#\s+/.test(text)) return true;
-  if (/^(?:npx|npm|pnpm|yarn|node|python|pip|conda|ffmpeg|git|cd|mkdir|curl|brew|uv|powershell|pwsh|setx|export)\b/i.test(text)) return true;
-  if (/^(?:[A-Za-z]:\\|\.\/|\.\.\/|~\/)/.test(text)) return true;
-  if (/^[A-Z_][A-Z0-9_]*=/.test(text)) return true;
-  return false;
-}
-
-function isFeishuNarrativeAfterCode(line) {
-  const text = String(line || '').trim();
-  if (!text) return true;
-  if (/^#{1,6}\s+/.test(text) || /^[-*]\s+/.test(text) || /^\d+\.\s+/.test(text) || /^\|.+\|$/.test(text)) return true;
-  return /[。！？；：]$/.test(text) || /^[\u4e00-\u9fa5].{4,}$/.test(text);
-}
-
-function formatFeishuCodeBlocks(markdown) {
-  const lines = String(markdown || '').split(/\r?\n/);
-  const output = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const current = String(lines[index] || '').trim();
-    if (!isFeishuCodeLanguageLine(current)) {
-      output.push(lines[index]);
-      continue;
-    }
-    const language = current.toLowerCase() === 'bash' || current.toLowerCase() === 'shell' ? 'bash' : current.toLowerCase();
-    const codeLines = [];
-    let cursor = index + 1;
-    while (cursor < lines.length) {
-      const value = String(lines[cursor] || '').trim();
-      if (!value) {
-        cursor += 1;
-        continue;
-      }
-      if (isFeishuCodeLanguageLine(value) || /^```/.test(value) || /^#{1,6}\s+/.test(value) || /^\|.+\|$/.test(value)) break;
-      if (isFeishuCommandLikeLine(value)) {
-        codeLines.push(value.replace(/^\\#/, '#'));
-        cursor += 1;
-        continue;
-      }
-      if (codeLines.length && isFeishuNarrativeAfterCode(value)) break;
-      if (!codeLines.length) break;
-      codeLines.push(value.replace(/^\\#/, '#'));
-      cursor += 1;
-    }
-    if (!codeLines.length) {
-      output.push(lines[index]);
-      continue;
-    }
-    if (output.length && String(output[output.length - 1] || '').trim()) output.push('');
-    output.push(`\`\`\`${language}`);
-    output.push(...codeLines);
-    output.push('```');
-    output.push('');
-    index = cursor - 1;
-  }
-  return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-}
-
-function isFeishuRecommendationTitleLine(line) {
-  const text = String(line || '').trim();
-  if (!text || /^#{1,6}\s+/.test(text) || /^[-*]\s+/.test(text) || /^\|.+\|$/.test(text) || /^!\[/.test(text) || /^\[[^\]]+]\(/.test(text)) return false;
-  if (text.length < 8 || text.length > 80) return false;
-  if (/[。！？；：]$/.test(text)) return false;
-  return /(?:REMOTION|Remotion|AI|Agent|Hermes|Qwen|TTS|部署|教程|经验|分享|方法|踩坑|实操|策略|指南)/i.test(text);
-}
-
-function trimFeishuTrailingRecommendations(lines) {
-  const source = Array.isArray(lines) ? lines.slice() : [];
-  let lastContentIndex = source.length - 1;
-  while (lastContentIndex >= 0 && !String(source[lastContentIndex] || '').trim()) lastContentIndex -= 1;
-  if (lastContentIndex < 0) return source;
-  let start = lastContentIndex;
-  while (start >= 0 && isFeishuRecommendationTitleLine(source[start])) start -= 1;
-  const count = lastContentIndex - start;
-  if (count >= 3) return source.slice(0, start + 1);
-  return source;
-}
-
-function hasFeishuDanglingTableTail(lines) {
-  const source = (Array.isArray(lines) ? lines : [])
-    .map((line) => String(line || '').trim())
-    .filter(Boolean);
-  if (source.length < 10) return false;
-  const joined = source.join('\n');
-  if (!/(?:安装清单总览|逐步安装指南|配置要求|以下是所有需要安装的软件和工具)/.test(joined)) return false;
-  const tail = source.slice(-18);
-  const shortFragmentCount = tail.filter((line) => {
-    if (/^#{1,6}\s+/.test(line) || /^[-*]\s+/.test(line) || /^!\[/.test(line)) return false;
-    if (/[。！？；：]$/.test(line)) return false;
-    return line.length <= 28;
-  }).length;
-  const toolFragmentCount = tail.filter((line) => /^(?:Node\.js|npm|FFmpeg|Python|Conda|CUDA Toolkit|Remotion|v?\d|必须|推荐|用途|版本|序号|是否必须)/i.test(line)).length;
-  return shortFragmentCount >= 8 && toolFragmentCount >= 4;
-}
-
-function isFeishuMarkdownLikelyTruncated(markdown) {
-  const lines = String(markdown || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const trimmed = trimFeishuTrailingRecommendations(lines);
-  if (trimmed.length <= lines.length - 3) return true;
-  if (hasFeishuDanglingTableTail(lines)) return true;
-  if (lines.length < 20) return false;
-  const lastHeadingIndex = lines.map((line, index) => (/^#{1,6}\s+/.test(line) ? index : -1)).filter((index) => index >= 0).pop() ?? -1;
-  const tail = lines.slice(Math.max(0, lines.length - 12));
-  return lastHeadingIndex >= 0
-    && lines.length - lastHeadingIndex < 12
-    && tail.filter(isFeishuRecommendationTitleLine).length >= 3;
-}
-
-function postProcessFeishuMarkdown(markdown, title = '') {
-  let lines = String(markdown || '').split(/\r?\n/)
-    .map((line) => String(line || '').trim())
-    .filter((line) => line && (!shouldDropFeishuLine(line, title) || isFeishuCodeLanguageLine(line)));
-  const commentsIndex = lines.findIndex((line) => /^(?:真诚点赞，手留余香|全文评论)$/.test(line));
-  if (commentsIndex >= 0) {
-    lines = lines.slice(0, commentsIndex);
-  }
-  lines = removeFeishuTocBlocks(lines);
-  lines = lines.map((line) => {
-    if (/^[-*]\s+读完这篇/.test(line)) return line.replace(/^[-*]\s+/, '# ');
-    if (/^[-*]\s+/.test(line) && isFeishuTocBulletLine(line)) return '';
-    return formatFeishuHeadingLine(line);
-  }).filter(Boolean);
-  lines = trimFeishuTrailingRecommendations(lines);
-  return formatFeishuCodeBlocks(removeFeishuResidualTableLines(repairFeishuMarkdownTables(lines.join('\n')))).replace(/\n{3,}/g, '\n\n').trim();
-}
-
-function sanitizeAttachmentName(fileName, fallbackName) {
-  const text = String(fileName || fallbackName || 'upload-file').trim();
-  return (text || 'upload-file').replace(/[\\/:*?"<>|]/g, '-');
-}
-
 function escapeRegExp(text) {
   return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function decodeDataUrl(dataUrl) {
-  const match = String(dataUrl || '').match(/^data:([^;,]+)?(;base64)?,(.*)$/);
-  if (!match) return null;
-  const mimeType = match[1] || 'application/octet-stream';
-  const body = match[3] || '';
-  const buffer = match[2]
-    ? Buffer.from(body, 'base64')
-    : Buffer.from(decodeURIComponent(body), 'utf8');
-  return { mimeType, buffer };
-}
-
-function getImageExtFromMime(mimeType) {
-  const type = String(mimeType || '').toLowerCase();
-  if (type.includes('jpeg') || type.includes('jpg')) return 'jpg';
-  if (type.includes('webp')) return 'webp';
-  if (type.includes('gif')) return 'gif';
-  if (type.includes('svg')) return 'svg';
-  return 'png';
-}
-
-function getImageExtFromBuffer(buffer, fallbackUrl = '') {
-  const data = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
-  if (data.length >= 8
-    && data[0] === 0x89
-    && data[1] === 0x50
-    && data[2] === 0x4e
-    && data[3] === 0x47) return 'png';
-  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'jpg';
-  if (data.length >= 6 && data.slice(0, 6).toString('ascii').startsWith('GIF')) return 'gif';
-  if (data.length >= 12 && data.slice(0, 4).toString('ascii') === 'RIFF' && data.slice(8, 12).toString('ascii') === 'WEBP') return 'webp';
-  return getImageFileExtension(fallbackUrl) || 'png';
-}
-
-function getAttachmentExt(fileName, fallbackExt) {
-  const fromName = String(fileName || '').split('.').pop();
-  const ext = String(fallbackExt || fromName || '').toLowerCase().replace(/^\./, '');
-  return ext === String(fileName || '').toLowerCase() ? '' : ext;
-}
-
-function isMarkdownConvertibleExt(ext) {
-  return ['md', 'markdown', 'txt'].includes(String(ext || '').toLowerCase());
-}
-
-function isAudioVideoAttachmentExt(ext) {
-  return ['mp3', 'm4a', 'wav', 'aac', 'amr', 'silk', 'ogg', 'flac', 'mp4', 'mov', 'm4v'].includes(String(ext || '').toLowerCase());
-}
-
-function decodeUtf8ArrayBuffer(buffer) {
-  return toNodeBuffer(buffer).toString('utf8');
-}
-
-function toNodeBuffer(data) {
-  if (Buffer.isBuffer(data)) return data;
-  if (ArrayBuffer.isView(data)) {
-    return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-  }
-  return Buffer.from(data || []);
-}
-
-function decodeUtf16Be(buffer) {
-  const chunks = [];
-  for (let index = 0; index + 1 < buffer.length; index += 2) {
-    chunks.push(String.fromCharCode(buffer.readUInt16BE(index)));
-  }
-  return chunks.join('');
-}
-
-function decodeXmlEntities(text) {
-  return String(text || '')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
-}
-
-function inflateZipEntry(buffer, method) {
-  if (method === 0) return buffer;
-  if (method === 8) return zlib.inflateRawSync(buffer);
-  throw new Error(`暂不支持的 docx 压缩方式：${method}`);
-}
-
-function readZipEntries(bufferLike) {
-  const buffer = toNodeBuffer(bufferLike);
-  let eocdOffset = -1;
-  const minOffset = Math.max(0, buffer.length - 65558);
-  for (let index = buffer.length - 22; index >= minOffset; index -= 1) {
-    if (buffer.readUInt32LE(index) === 0x06054b50) {
-      eocdOffset = index;
-      break;
-    }
-  }
-
-  if (eocdOffset < 0) {
-    throw new Error('未找到 docx 压缩包目录');
-  }
-
-  const entryCount = buffer.readUInt16LE(eocdOffset + 10);
-  let offset = buffer.readUInt32LE(eocdOffset + 16);
-  const entries = new Map();
-
-  for (let index = 0; index < entryCount; index += 1) {
-    if (buffer.readUInt32LE(offset) !== 0x02014b50) {
-      throw new Error('docx 压缩包目录格式异常');
-    }
-
-    const method = buffer.readUInt16LE(offset + 10);
-    const compressedSize = buffer.readUInt32LE(offset + 20);
-    const fileNameLength = buffer.readUInt16LE(offset + 28);
-    const extraLength = buffer.readUInt16LE(offset + 30);
-    const commentLength = buffer.readUInt16LE(offset + 32);
-    const localHeaderOffset = buffer.readUInt32LE(offset + 42);
-    const fileName = buffer.slice(offset + 46, offset + 46 + fileNameLength).toString('utf8');
-
-    const localNameLength = buffer.readUInt16LE(localHeaderOffset + 26);
-    const localExtraLength = buffer.readUInt16LE(localHeaderOffset + 28);
-    const dataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength;
-    const compressed = buffer.slice(dataOffset, dataOffset + compressedSize);
-    entries.set(fileName, inflateZipEntry(compressed, method));
-
-    offset += 46 + fileNameLength + extraLength + commentLength;
-  }
-
-  return entries;
-}
-
-function extractDocxMarkdown(bufferLike) {
-  const entries = readZipEntries(bufferLike);
-  const documentXml = entries.get('word/document.xml');
-  if (!documentXml) {
-    throw new Error('docx 中没有找到 word/document.xml');
-  }
-
-  const xml = documentXml.toString('utf8');
-  const paragraphs = xml.match(/<w:p[\s\S]*?<\/w:p>/g) || [];
-  const lines = paragraphs.map((paragraph) => {
-    const isHeading = /<w:pStyle[^>]+w:val=["']Heading([1-6])["']/i.exec(paragraph);
-    const text = decodeXmlEntities(paragraph
-      .replace(/<w:tab\s*\/>/g, '\t')
-      .replace(/<w:br\s*\/>/g, '\n')
-      .replace(/<w:t[^>]*>/g, '')
-      .replace(/<\/w:t>/g, '')
-      .replace(/<[^>]+>/g, ''))
-      .replace(/[ \t]+\n/g, '\n')
-      .trim();
-
-    if (!text) return '';
-    if (isHeading) {
-      return `${'#'.repeat(Math.min(Number(isHeading[1]), 6))} ${text}`;
-    }
-    return text;
-  }).filter(Boolean);
-
-  if (!lines.length) {
-    throw new Error('docx 正文为空，未提取到文本');
-  }
-
-  return lines.join('\n\n');
-}
-
-function decodePdfBytes(buffer) {
-  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
-    return decodeUtf16Be(buffer.slice(2));
-  }
-
-  let zeroEven = 0;
-  for (let index = 0; index < Math.min(buffer.length, 80); index += 2) {
-    if (buffer[index] === 0) zeroEven += 1;
-  }
-  if (zeroEven > 4) {
-    return decodeUtf16Be(buffer);
-  }
-
-  return buffer.toString('utf8');
-}
-
-function decodePdfLiteralString(value) {
-  const bytes = [];
-  for (let index = 0; index < value.length; index += 1) {
-    const char = value[index];
-    if (char !== '\\') {
-      bytes.push(char.charCodeAt(0) & 0xff);
-      continue;
-    }
-
-    const next = value[index + 1];
-    if (!next) break;
-    index += 1;
-    if (next === 'n') bytes.push(10);
-    else if (next === 'r') bytes.push(13);
-    else if (next === 't') bytes.push(9);
-    else if (next === 'b') bytes.push(8);
-    else if (next === 'f') bytes.push(12);
-    else if (/[0-7]/.test(next)) {
-      let octal = next;
-      for (let count = 0; count < 2 && /[0-7]/.test(value[index + 1]); count += 1) {
-        index += 1;
-        octal += value[index];
-      }
-      bytes.push(parseInt(octal, 8));
-    } else {
-      bytes.push(next.charCodeAt(0) & 0xff);
-    }
-  }
-  return decodePdfBytes(Buffer.from(bytes));
-}
-
-function decodePdfHexString(value, cmap) {
-  const hex = String(value || '').replace(/[^0-9a-f]/gi, '');
-  if (!hex) return '';
-  if (cmap && cmap.size) {
-    const mapped = applyPdfCMap(hex, cmap);
-    if (mapped) return mapped;
-  }
-  const normalized = hex.length % 2 ? `${hex}0` : hex;
-  return decodePdfBytes(Buffer.from(normalized, 'hex'));
-}
-
-function unicodeFromPdfHex(hex) {
-  const buffer = Buffer.from(String(hex || '').replace(/[^0-9a-f]/gi, ''), 'hex');
-  if (!buffer.length) return '';
-  if (buffer.length >= 2) return decodeUtf16Be(buffer);
-  return buffer.toString('utf8');
-}
-
-function parsePdfCMap(content, cmap) {
-  const source = String(content || '');
-  let section;
-  const bfcharPattern = /beginbfchar([\s\S]*?)endbfchar/g;
-  while ((section = bfcharPattern.exec(source))) {
-    const pairPattern = /<([0-9a-fA-F]+)>\s+<([0-9a-fA-F]+)>/g;
-    let pair;
-    while ((pair = pairPattern.exec(section[1]))) {
-      cmap.set(pair[1].toUpperCase(), unicodeFromPdfHex(pair[2]));
-    }
-  }
-
-  const bfrangePattern = /beginbfrange([\s\S]*?)endbfrange/g;
-  while ((section = bfrangePattern.exec(source))) {
-    const rangePattern = /<([0-9a-fA-F]+)>\s+<([0-9a-fA-F]+)>\s+(<([0-9a-fA-F]+)>|\[([\s\S]*?)\])/g;
-    let range;
-    while ((range = rangePattern.exec(section[1]))) {
-      const start = parseInt(range[1], 16);
-      const end = parseInt(range[2], 16);
-      const width = range[1].length;
-      if (range[4]) {
-        let target = parseInt(range[4], 16);
-        for (let code = start; code <= end; code += 1) {
-          cmap.set(code.toString(16).toUpperCase().padStart(width, '0'), unicodeFromPdfHex(target.toString(16).padStart(range[4].length, '0')));
-          target += 1;
-        }
-      } else if (range[5]) {
-        const values = [...range[5].matchAll(/<([0-9a-fA-F]+)>/g)].map((item) => item[1]);
-        values.forEach((value, index) => {
-          cmap.set((start + index).toString(16).toUpperCase().padStart(width, '0'), unicodeFromPdfHex(value));
-        });
-      }
-    }
-  }
-}
-
-function buildPdfCMap(streams) {
-  const cmap = new Map();
-  streams.forEach((stream) => {
-    if (String(stream || '').includes('beginbfchar') || String(stream || '').includes('beginbfrange')) {
-      parsePdfCMap(stream, cmap);
-    }
-  });
-  return cmap;
-}
-
-function applyPdfCMap(hex, cmap) {
-  const source = String(hex || '').toUpperCase();
-  const keyLengths = [...new Set([...cmap.keys()].map((key) => key.length))].sort((a, b) => b - a);
-  const out = [];
-  let index = 0;
-
-  while (index < source.length) {
-    let matched = false;
-    for (const length of keyLengths) {
-      const part = source.slice(index, index + length);
-      if (cmap.has(part)) {
-        out.push(cmap.get(part));
-        index += length;
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) {
-      out.push(decodePdfBytes(Buffer.from(source.slice(index, index + 2), 'hex')));
-      index += 2;
-    }
-  }
-
-  return out.join('').replace(/\0/g, '').trim();
-}
-
-function extractPdfTextFromContent(content, cmap) {
-  const chunks = [];
-  const literalPattern = /\((?:\\.|[^\\()])*\)\s*Tj/g;
-  const hexPattern = /<([0-9a-fA-F\s]+)>\s*Tj/g;
-  const arrayPattern = /\[(.*?)\]\s*TJ/gs;
-
-  let match;
-  while ((match = literalPattern.exec(content))) {
-    chunks.push(decodePdfLiteralString(match[0].replace(/\s*Tj$/, '').slice(1, -1)));
-  }
-  while ((match = hexPattern.exec(content))) {
-    chunks.push(decodePdfHexString(match[1], cmap));
-  }
-  while ((match = arrayPattern.exec(content))) {
-    const arrayBody = match[1];
-    const parts = arrayBody.match(/\((?:\\.|[^\\()])*\)|<([0-9a-fA-F\s]+)>/g) || [];
-    parts.forEach((part) => {
-      if (part.startsWith('(')) chunks.push(decodePdfLiteralString(part.slice(1, -1)));
-      else chunks.push(decodePdfHexString(part.slice(1, -1), cmap));
-    });
-  }
-
-  return chunks
-    .map((text) => text.replace(/\0/g, '').trim())
-    .filter((text) => text && /[\p{L}\p{N}\u4e00-\u9fff]/u.test(text))
-    .join('\n');
-}
-
-function isPdfMicroLine(line) {
-  const text = String(line || '').trim();
-  if (!text) return false;
-  if (/^[-*+]\s+/.test(text)) return false;
-  const compact = text.replace(/\s+/g, '');
-  return Array.from(compact).length <= 2;
-}
-
-function shouldJoinPdfLines(previous, next) {
-  const left = String(previous || '').trim();
-  const right = String(next || '').trim();
-  if (!left || !right) return false;
-  if (/^#{1,6}\s+/.test(left) || /^#{1,6}\s+/.test(right)) return false;
-  if (/^[-*+]\s+/.test(left) || /^[-*+]\s+/.test(right)) return false;
-  if (/^\d{1,3}[.)、]\s*/.test(right)) return false;
-  if (/[。！？!?；;：:]$/.test(left)) return false;
-  if (/^[,，.。!?！？;；:：)]/.test(right)) return true;
-  return /[\p{L}\p{N}\u4e00-\u9fff]$/u.test(left) && /^[\p{L}\p{N}\u4e00-\u9fff]/u.test(right);
-}
-
-function getPdfLineJoiner(previous, next) {
-  const left = String(previous || '').trim();
-  const right = String(next || '').trim();
-  if (!left || !right) return '';
-  if (/^[,，.。!?！？;；:：)]/.test(right)) return '';
-  if (/[\u4e00-\u9fff]$/u.test(left) && /^[\u4e00-\u9fff]/u.test(right)) return '';
-  if (/\b[A-Z]{1,8}$/u.test(left) && /^[A-Z]\b/u.test(right)) return '';
-  return ' ';
-}
-
-function mergePdfWrappedLines(lines) {
-  const merged = [];
-  (lines || []).forEach((line) => {
-    const current = String(line || '').trim();
-    if (!current) {
-      if (merged.length && merged[merged.length - 1] !== '') merged.push('');
-      return;
-    }
-
-    const previous = merged[merged.length - 1];
-    if (previous && shouldJoinPdfLines(previous, current)) {
-      merged[merged.length - 1] = `${previous}${getPdfLineJoiner(previous, current)}${current}`;
-      return;
-    }
-
-    merged.push(current);
-  });
-  return merged;
-}
-
-function isLowQualityPdfExtraction(text) {
-  const source = String(text || '');
-  const compact = source.replace(/\s+/g, '');
-  if (!compact) return true;
-  const controlCount = (source.match(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g) || []).length;
-  if (controlCount > 3) return true;
-  if (/[锟�]/.test(source)) return true;
-
-  const cjkCount = (compact.match(/[\u4e00-\u9fff]/g) || []).length;
-  if (cjkCount >= 2) return false;
-  const latinWordCount = (source.match(/[A-Za-z]{2,}/g) || []).length;
-  const readableCount = cjkCount + latinWordCount * 2;
-  return readableCount < 4;
-}
-
-function isSuspectPdfGlyphEncoding(text) {
-  const source = String(text || '');
-  const latinWords = source.match(/[A-Za-z]{12,}/g) || [];
-  const longLatinWords = latinWords.filter((word) => word.length >= 18);
-  const knownGlyphNoise = source.match(/\b(?:Rhe|Nlaybook|Buildine|Natite|Cncwfe|Copteptu|CHCRVER|Staee|chaneine|Aeentic|aeent|Nroeram|RESOWRCES)\b/gi) || [];
-  const compact = source.replace(/\s+/g, '');
-  const compactCjk = source.replace(/[^\u4e00-\u9fff]/g, '');
-  const oddCjkTokens = source.match(/(?:学么|人未|改取|周朋|练么|可维)/g) || [];
-  const cjkRatio = compact ? compactCjk.length / Array.from(compact).length : 0;
-  const hasReadableCjkText = compactCjk.length >= 80 && cjkRatio >= 0.25;
-
-  const cjkCharacters = Array.from(compactCjk);
-  const uniqueCjkRatio = cjkCharacters.length
-    ? new Set(cjkCharacters).size / cjkCharacters.length
-    : 1;
-  const sentencePunctuationCount = (source.match(/[。！？!?；;]/g) || []).length;
-  const sentencePunctuationRatio = cjkCharacters.length
-    ? sentencePunctuationCount / cjkCharacters.length
-    : 0;
-  const longestLineLength = String(source)
-    .split(/\r?\n/)
-    .reduce((max, line) => Math.max(max, Array.from(line.replace(/\s+/g, '')).length), 0);
-  const trigramCounts = new Map();
-  let maxTrigramCount = 0;
-  for (let index = 0; index <= cjkCharacters.length - 3; index += 1) {
-    const trigram = cjkCharacters.slice(index, index + 3).join('');
-    const count = (trigramCounts.get(trigram) || 0) + 1;
-    trigramCounts.set(trigram, count);
-    if (count > maxTrigramCount) maxTrigramCount = count;
-  }
-  const hasCorruptedCjkRun = cjkCharacters.length >= 200
-    && longestLineLength >= 180
-    && sentencePunctuationRatio < 0.004
-    && (uniqueCjkRatio < 0.28 || maxTrigramCount >= 6);
-
-  if (knownGlyphNoise.length >= 4) return true;
-  if (hasCorruptedCjkRun) return true;
-  if (!hasReadableCjkText && longLatinWords.length >= 6 && latinWords.length >= 12) return true;
-  return compactCjk.length >= 1000 && oddCjkTokens.length >= 8 && longLatinWords.length >= 3;
-}
-
-function cleanPdfExtractedText(text) {
-  const lines = String(text || '')
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-    .replace(/\r\n/g, '\n')
-    .split('\n');
-  const out = [];
-  let microRun = [];
-  let pendingBlankAfterMicroRun = 0;
-
-  const flushMicroRun = () => {
-    if (!microRun.length) {
-      return;
-    }
-
-    const compact = microRun.join('').replace(/\s+/g, '');
-    const compactLength = Array.from(compact).length;
-    if (/^[A-Za-z]{2,8}$/.test(compact)) {
-      out.push(compact);
-    } else if (microRun.length < 4 && compactLength < 4) {
-      out.push(...microRun);
-    } else if (compactLength >= 4 && /[\p{L}\p{N}\u4e00-\u9fff]/u.test(compact)) {
-      out.push(compact);
-    }
-    microRun = [];
-    pendingBlankAfterMicroRun = 0;
-  };
-
-  lines.forEach((line) => {
-    const trimmed = String(line || '').trim();
-    if (!trimmed) {
-      if (microRun.length && pendingBlankAfterMicroRun < 2) {
-        pendingBlankAfterMicroRun += 1;
-        return;
-      }
-      flushMicroRun();
-      if (out.length && out[out.length - 1] !== '') out.push('');
-      return;
-    }
-
-    if (/^\d{1,4}$/.test(trimmed)) {
-      flushMicroRun();
-      return;
-    }
-
-    if (isPdfMicroLine(trimmed)) {
-      microRun.push(trimmed);
-      pendingBlankAfterMicroRun = 0;
-      return;
-    }
-
-    flushMicroRun();
-    out.push(trimmed);
-  });
-
-  flushMicroRun();
-  return cleanMarkdownForStorage(mergePdfWrappedLines(out).join('\n'));
-}
-
-function decodePdfStream(raw, dictionary) {
-  if (/\/Subtype\s*\/Image\b/.test(dictionary)) {
-    return '';
-  }
-  if (/\/FlateDecode\b/.test(dictionary)) {
-    try {
-      return zlib.inflateSync(raw).toString('latin1');
-    } catch (error) {
-      try {
-        return zlib.inflateRawSync(raw).toString('latin1');
-      } catch (fallbackError) {
-        return '';
-      }
-    }
-  }
-  return raw.toString('latin1');
-}
-
-function extractPdfStreamLength(dictionary) {
-  const match = String(dictionary || '').match(/\/Length\s+(\d+)/);
-  return match ? Number(match[1]) : null;
-}
-
-function getPdfStreamData({ buffer, source, dictionary, streamKeywordEnd }) {
-  let dataStart = streamKeywordEnd;
-  if (source[dataStart] === '\r' && source[dataStart + 1] === '\n') {
-    dataStart += 2;
-  } else if (source[dataStart] === '\n' || source[dataStart] === '\r') {
-    dataStart += 1;
-  }
-
-  const directLength = extractPdfStreamLength(dictionary);
-  if (Number.isFinite(directLength) && directLength >= 0 && dataStart + directLength <= buffer.length) {
-    const endstreamOffset = source.indexOf('endstream', dataStart + directLength);
-    return {
-      raw: buffer.slice(dataStart, dataStart + directLength),
-      nextOffset: endstreamOffset > -1 ? endstreamOffset + 9 : dataStart + directLength,
-    };
-  }
-
-  const streamEnd = source.indexOf('endstream', dataStart);
-  if (streamEnd < 0) {
-    return null;
-  }
-
-  let dataEnd = streamEnd;
-  if (source[dataEnd - 2] === '\r' && source[dataEnd - 1] === '\n') {
-    dataEnd -= 2;
-  } else if (source[dataEnd - 1] === '\n' || source[dataEnd - 1] === '\r') {
-    dataEnd -= 1;
-  }
-
-  return {
-    raw: buffer.slice(dataStart, dataEnd),
-    nextOffset: streamEnd + 9,
-  };
-}
-
-function extractPdfMarkdown(bufferLike) {
-  const buffer = toNodeBuffer(bufferLike);
-  const source = buffer.toString('latin1');
-  const streams = [];
-  const streamPattern = /(<<[\s\S]{0,5000}?>>)\s*stream/g;
-  let match;
-
-  while ((match = streamPattern.exec(source))) {
-    const streamData = getPdfStreamData({
-      buffer,
-      source,
-      dictionary: match[1],
-      streamKeywordEnd: streamPattern.lastIndex,
-    });
-    if (!streamData) break;
-    streams.push(decodePdfStream(streamData.raw, match[1]));
-    streamPattern.lastIndex = streamData.nextOffset;
-  }
-
-  const cmap = buildPdfCMap(streams);
-  const rawText = streams
-    .map((stream) => extractPdfTextFromContent(stream, cmap))
-    .filter(Boolean)
-    .join('\n\n')
-    .replace(/\n{3,}/g, '\n\n');
-
-  if (isLowQualityPdfExtraction(rawText)) {
-    throw new Error('PDF 文本提取质量过低，已保留原始 PDF 附件。');
-  }
-
-  const text = cleanPdfExtractedText(rawText);
-
-  if (isSuspectPdfGlyphEncoding(text)) {
-    throw new Error('PDF 文本层编码异常，已保留原始 PDF 附件。');
-  }
-
-  if (!text) {
-    throw new Error('PDF 未提取到文本，已保留原始 PDF 附件。');
-  }
-
-  return text;
 }
 
 function isFeishuUrl(url) {
@@ -4186,6 +2855,20 @@ function isFeishuUrl(url) {
 function isWechatArticleUrl(url) {
   const text = String(url || '').toLowerCase();
   return text.includes('mp.weixin.qq.com') || text.includes('weixin.qq.com');
+}
+
+function isWechatExplicitDecorativeImageAsset(asset) {
+  if (!asset) return false;
+  const alt = String(asset.alt || '').trim();
+  if (alt && !/^(?:图片|image|img)$/i.test(alt)) return false;
+  const sourceUrl = String(asset.imageUrl || '').toLowerCase();
+  const hasExplicitDecorativeSignal = /(?:^|[\/_.?-])(?:decorative|spacer|separator|divider|loading|placeholder|tracking-pixel|tracker)(?:[\/_.?=&-]|$)/i.test(sourceUrl);
+  if (!hasExplicitDecorativeSignal) return false;
+  const dimensions = asset.dimensions;
+  if (!dimensions) return false;
+  const width = Number(dimensions.width) || 0;
+  const height = Number(dimensions.height) || 0;
+  return width > 0 && height > 0 && Math.max(width, height) <= 256;
 }
 
 function isWechatMpArticleUrl(url) {
@@ -14796,6 +13479,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
       }
       const requestError = new Error(message);
+      requestError.status = response.status;
+      requestError.statusCode = response.status;
       if (payload && payload.errCode) requestError.code = String(payload.errCode);
       throw requestError;
     }
@@ -17699,7 +16384,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       || typeof this.app.vault.adapter.writeBinary !== 'function') {
       return markdown;
     }
-    const isXiaohongshuSource = isXiaohongshuUrl(options.sourceUrl);
+    const sourceUrl = String(options.sourceUrl || '').trim();
+    const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
+    const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     let nextMarkdown = isXiaohongshuSource
       ? sanitizeXiaohongshuMarkdownImages(String(markdown))
       : String(markdown);
@@ -17709,29 +16396,41 @@ class WechatObsidianInboxPlugin extends Plugin {
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
     let index = 1;
-    const savedByUrl = new Map();
+    const downloadedByUrl = new Map();
     const safeTitle = sanitizeAttachmentName(title, '网页图片');
 
-    await this.ensureFolder(imageRootDir);
-    await this.ensureFolder(imageDayDir);
+    try {
+      await this.ensureFolder(imageRootDir);
+      await this.ensureFolder(imageDayDir);
+    } catch (error) {
+      if (typeof options.onError === 'function') {
+        options.onError({ imageUrl: '', error });
+      }
+      return nextMarkdown;
+    }
 
     for (const match of imageMatches) {
       const imageUrl = String(match[2] || '').trim();
-      if (!imageUrl || savedByUrl.has(imageUrl)) continue;
+      if (!imageUrl || downloadedByUrl.has(imageUrl)) continue;
       try {
         const imageHeaders = isXiaohongshuSource
-          ? await getXiaohongshuRequestHeaders(options.sourceUrl)
-          : {};
+          ? await getXiaohongshuRequestHeaders(sourceUrl)
+          : isWechatArticleSource
+            ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl }
+            : {};
         // eslint-disable-next-line no-await-in-loop
         const arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
         const buffer = Buffer.from(arrayBuffer || []);
         if (!buffer.length) throw new Error('图片下载结果为空');
         const ext = getImageExtFromBuffer(buffer, imageUrl);
-        const imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${ext}`;
-        // eslint-disable-next-line no-await-in-loop
-        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), buffer);
-        savedByUrl.set(imageUrl, imagePath);
-        index += 1;
+        downloadedByUrl.set(imageUrl, {
+          imageUrl,
+          alt: String(match[1] || '').trim(),
+          buffer,
+          ext,
+          dimensions: getImageDimensionsFromBuffer(buffer),
+          hash: crypto.createHash('sha256').update(buffer).digest('hex'),
+        });
       } catch (error) {
         // Remote image localization is best-effort. Keep the original URL if download fails.
         if (typeof options.onError === 'function') {
@@ -17740,11 +16439,47 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    savedByUrl.forEach((imagePath, imageUrl) => {
+    const imagePathByAssetKey = new Map();
+    const replacementByUrl = new Map();
+    const seenWechatAssetHashes = new Set();
+    for (const asset of downloadedByUrl.values()) {
+      if (isWechatArticleSource && isWechatExplicitDecorativeImageAsset(asset)) {
+        replacementByUrl.set(asset.imageUrl, '');
+        continue;
+      }
+      if (isWechatArticleSource && seenWechatAssetHashes.has(asset.hash)) {
+        replacementByUrl.set(asset.imageUrl, '');
+        continue;
+      }
+      if (isWechatArticleSource) {
+        seenWechatAssetHashes.add(asset.hash);
+      }
+      const assetKey = isWechatArticleSource ? asset.hash : asset.imageUrl;
+      let imagePath = imagePathByAssetKey.get(assetKey) || '';
+      if (!imagePath) {
+        imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, '0')}.${asset.ext}`;
+        // eslint-disable-next-line no-await-in-loop
+        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), asset.buffer);
+        imagePathByAssetKey.set(assetKey, imagePath);
+        index += 1;
+      }
+      replacementByUrl.set(asset.imageUrl, imagePath);
+    }
+
+    replacementByUrl.forEach((imagePath, imageUrl) => {
       const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, 'g');
-      nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
+      nextMarkdown = nextMarkdown.replace(pattern, imagePath ? `![[${imagePath}]]` : '');
     });
 
+    if (isWechatArticleSource) {
+      const seenLocalizedImagePaths = new Set();
+      nextMarkdown = nextMarkdown.replace(/!\[\[([^\]]+)\]\]/g, (match, imagePath) => {
+        if (seenLocalizedImagePaths.has(imagePath)) return '';
+        seenLocalizedImagePaths.add(imagePath);
+        return match;
+      });
+      return nextMarkdown.replace(/\n{3,}/g, '\n\n');
+    }
     return nextMarkdown;
   }
 
@@ -19216,6 +17951,27 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       const pageTitle = metadata.title || extractHtmlTitle(html);
       const pageMeta = extractWebpageMetadataFromHtml(html, url);
+      const imageLocalizationErrors = [];
+      if (isWechatArticleUrl(url)) {
+        markdown = await this.saveMarkdownRemoteImageAssets(
+          markdown,
+          rootDir,
+          dateFolder,
+          pageTitle || title || '公众号文章',
+          {
+            sourceUrl: url,
+            onError: ({ error }) => {
+              imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+            },
+          },
+        );
+      }
+      const conversionNote = [
+        usedFallback ? '已通过备用通道抓取' : '',
+        imageLocalizationErrors.length
+          ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(' | ')}`
+          : '',
+      ].filter(Boolean).join('; ');
       return {
         ...record,
         metadata: {
@@ -19228,7 +17984,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           contentCategory: metadata.contentCategory || pageMeta.contentCategory || '',
           markdown,
           conversionStatus: 'success',
-          conversionNote: usedFallback ? '已通过备用通道抓取' : '',
+          conversionNote,
+          ...(isWechatArticleUrl(url) ? {
+            imageLocalizationFailedCount: imageLocalizationErrors.length,
+            imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
+          } : {}),
         },
       };
     } catch (error) {
@@ -19321,6 +18081,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         const matchesRecordId = Boolean(normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId));
         const matchesRecordUrl = Boolean(normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl));
         if (matchesRecordId || matchesRecordUrl) {
+          if (!isExistingLocalNoteDeliverable(record, markdown)) {
+            continue;
+          }
           if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
             continue;
           }
@@ -19405,6 +18168,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
+    const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
+    if (lifecycleOutcomeError) throw lifecycleOutcomeError;
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
@@ -19467,16 +18232,215 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
+  async reportSyncLifecycleStatus(recordId, body, binding) {
+    return await this.requestJson(
+      `/records/${encodeURIComponent(recordId)}/status`,
+      'POST',
+      body,
+      binding,
+    );
+  }
+
+  async persistPendingSyncLifecycleAttempts(value) {
+    const pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(value);
+    this.settings = {
+      ...this.settings,
+      pendingSyncLifecycleAttempts,
+    };
+    if (typeof this.saveData === 'function') {
+      await this.saveData(this.settings);
+    }
+    return pendingSyncLifecycleAttempts;
+  }
+
+  async upsertPendingSyncLifecycleAttempt(binding, value = {}) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const recordId = String(value.recordId || '').trim();
+    const attemptId = String(value.attemptId || '').trim();
+    if (!bindingFingerprint || !recordId || !attemptId) return null;
+    const current = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts);
+    const previous = current.find((item) => (
+      item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+    ));
+    const now = new Date().toISOString();
+    const next = normalizePendingSyncLifecycleAttempts([
+      ...current.filter((item) => !(
+        item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+      )),
+      {
+        recordId,
+        attemptId,
+        bindingFingerprint,
+        stage: value.stage || 'processing',
+        code: value.code,
+        noteTitle: value.noteTitle,
+        createdAt: previous && previous.createdAt ? previous.createdAt : now,
+        updatedAt: now,
+      },
+    ]);
+    await this.persistPendingSyncLifecycleAttempts(next);
+    return next.find((item) => (
+      item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+    )) || null;
+  }
+
+  async clearPendingSyncLifecycleAttempt(binding, recordId) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!bindingFingerprint || !normalizedRecordId) return false;
+    const current = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts);
+    const next = current.filter((item) => !(
+      item.bindingFingerprint === bindingFingerprint && item.recordId === normalizedRecordId
+    ));
+    if (next.length === current.length) return false;
+    await this.persistPendingSyncLifecycleAttempts(next);
+    return true;
+  }
+
+  async persistCommittedSyncLifecycleAttemptBestEffort(binding, value = {}) {
+    try {
+      await this.upsertPendingSyncLifecycleAttempt(binding, {
+        ...value,
+        stage: 'committed',
+      });
+      return null;
+    } catch (error) {
+      return {
+        code: 'RECOVERY_MARKER_SAVE_FAILED',
+        message: 'local note is saved; recovery marker could not be persisted',
+      };
+    }
+  }
+
+  async clearPendingSyncLifecycleAttemptBestEffort(binding, recordId) {
+    try {
+      await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+      return null;
+    } catch (error) {
+      return {
+        code: 'RECOVERY_MARKER_CLEAR_FAILED',
+        message: 'sync completion is confirmed; stale recovery marker may be replayed safely',
+      };
+    }
+  }
+
+  async replayPendingSyncLifecycleAttempts(binding) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    if (!bindingFingerprint) return { replayed: 0, retained: 0 };
+    const attempts = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts)
+      .filter((item) => item.bindingFingerprint === bindingFingerprint);
+    let replayed = 0;
+    for (const item of attempts) {
+      try {
+        if (item.stage === 'committed') {
+          await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || '', binding, {
+            enabled: true,
+            attemptId: item.attemptId,
+          });
+        } else {
+          await this.reportSyncLifecycleStatus(item.recordId, {
+            status: 'failed',
+            attemptId: item.attemptId,
+            code: item.stage === 'failed' ? (item.code || 'SYNC_FAILED') : 'SYNC_INTERRUPTED',
+          }, binding);
+        }
+        await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+        replayed += 1;
+      } catch (error) {
+        if (isRecordNotFoundError(error)
+          || isLegacySyncLifecycleError(error)
+          || isSyncRecordBusyError(error)) {
+          try {
+            await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+          } catch (clearError) {
+            // Preserve the marker when local persistence is temporarily unavailable.
+          }
+        }
+      }
+    }
+    const retained = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts)
+      .filter((item) => item.bindingFingerprint === bindingFingerprint).length;
+    return { replayed, retained };
+  }
+
+  async claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised) {
+    if (!lifecycleAdvertised) return { enabled: false };
+    try {
+      const payload = await this.reportSyncLifecycleStatus(recordId, { status: 'processing' }, binding);
+      const data = payload && payload.data && typeof payload.data === 'object'
+        ? payload.data
+        : (payload && typeof payload === 'object' ? payload : {});
+      const attemptId = String(data.attemptId || data.syncAttemptId || '').trim();
+      if (!attemptId) throw new Error('sync processing claim is missing an attempt id');
+      return { enabled: true, attemptId };
+    } catch (error) {
+      if (isLegacySyncLifecycleError(error)) return { enabled: false, legacyFallback: true };
+      if (isSyncRecordBusyError(error)) return { enabled: true, conflict: true };
+      throw error;
+    }
+  }
+
+  async reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle = {}) {
+    const safeNoteTitle = sanitizeSyncNoteTitle(noteTitle);
+    const body = lifecycle.enabled && lifecycle.attemptId
+      ? {
+        attemptId: lifecycle.attemptId,
+        ...(safeNoteTitle ? { noteTitle: safeNoteTitle } : {}),
+      }
+      : (lifecycle.legacyFallback && safeNoteTitle ? { noteTitle: safeNoteTitle } : {});
+    try {
+      return await this.requestJson(
+        `/records/${encodeURIComponent(recordId)}/synced`,
+        'POST',
+        body,
+        binding,
+      );
+    } catch (error) {
+      if (!lifecycle.enabled || !isLegacySyncLifecycleError(error)) throw error;
+      return await this.requestJson(
+        `/records/${encodeURIComponent(recordId)}/synced`,
+        'POST',
+        safeNoteTitle ? { noteTitle: safeNoteTitle } : {},
+        binding,
+      );
+    }
+  }
+
+  async reportSyncRecordCompletionBestEffort(recordId, noteTitle, binding, lifecycle = {}) {
+    try {
+      await this.reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle);
+      return null;
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      return {
+        code: 'COMPLETION_REPORT_FAILED',
+        message: 'sync completion report failed; local note is preserved',
+      };
+    }
+  }
+
+  async reportSyncRecordFailure(recordId, attemptId, error, binding) {
+    const code = categorizeSyncFailure(error);
+    return await this.reportSyncLifecycleStatus(recordId, {
+      status: 'failed',
+      attemptId,
+      code,
+    }, binding);
+  }
+
   async syncBinding(binding, shouldPrefixTitle) {
     const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
+    await this.replayPendingSyncLifecycleAttempts(binding);
     this.showSyncProgress({ bindingLabel, stage: 'fetching' });
     const payload = await this.requestJson('/records?status=pending', 'GET', {}, binding);
     const records = payload.data || [];
     const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
+    const lifecycleAdvertised = Boolean(payload && payload.meta && payload.meta.syncLifecycleStatus === true);
     const written = [];
     const failed = [];
     const skipped = [];
     const conversionWarnings = [];
+    const completionWarnings = [];
     const syncedAt = new Date().toISOString();
     if (!records.length) {
       this.showSyncProgress({ bindingLabel, stage: 'empty' });
@@ -19490,6 +18454,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         current: index + 1,
         total: records.length,
       };
+      let lifecycle = { enabled: false };
+      let localCommitFact = null;
       if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
         skipped.push({
           recordId,
@@ -19519,18 +18485,49 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
+        lifecycle = await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        if (lifecycle.conflict) {
+          skipped.push({ recordId, reason: 'record-busy' });
+          continue;
+        }
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          await this.upsertPendingSyncLifecycleAttempt(binding, {
+            recordId,
+            attemptId: lifecycle.attemptId,
+            stage: 'processing',
+          });
+        }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
+          localCommitFact = { recordId, filePath: existingFilePath };
           skipped.push({
             recordId,
             reason: 'already-synced-local',
             filePath: existingFilePath,
           });
           this.showSyncProgress({ ...progress, stage: 'marking', title: buildRecordTitleBase(record) });
-          try {
-            await this.requestJson(`/records/${encodeURIComponent(recordId)}/synced`, 'POST', {}, binding);
-          } catch (markError) {
-            if (!isRecordNotFoundError(markError)) throw markError;
+          const existingNoteTitle = getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record);
+          let markerWarning = null;
+          if (lifecycle.enabled && lifecycle.attemptId) {
+            markerWarning = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              noteTitle: existingNoteTitle,
+            });
+          }
+          const completionWarning = await this.reportSyncRecordCompletionBestEffort(
+            recordId,
+            existingNoteTitle,
+            binding,
+            lifecycle,
+          );
+          if (completionWarning) {
+            completionWarnings.push({ recordId, ...completionWarning });
+            if (markerWarning) completionWarnings.push({ recordId, ...markerWarning });
+          }
+          else if (lifecycle.enabled && lifecycle.attemptId) {
+            const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
+            if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
           }
           continue;
         }
@@ -19538,17 +18535,43 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (processingAbortController.signal.aborted && !item.committed) {
           throw createAbortError();
         }
+        localCommitFact = item;
         written.push(item);
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
+        let markerWarning = null;
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          markerWarning = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
+            recordId: item.recordId,
+            attemptId: lifecycle.attemptId,
+            noteTitle: item.title,
+          });
+        }
         this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
-        try {
-          await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, 'POST', {}, binding);
-        } catch (markError) {
-          if (!isRecordNotFoundError(markError)) throw markError;
+        const completionWarning = await this.reportSyncRecordCompletionBestEffort(
+          item.recordId,
+          item.title,
+          binding,
+          lifecycle,
+        );
+        if (completionWarning) {
+          completionWarnings.push({ recordId: item.recordId, ...completionWarning });
+          if (markerWarning) completionWarnings.push({ recordId: item.recordId, ...markerWarning });
+        }
+        else if (lifecycle.enabled && lifecycle.attemptId) {
+          const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, item.recordId);
+          if (clearWarning) completionWarnings.push({ recordId: item.recordId, ...clearWarning });
         }
       } catch (error) {
+        if (localCommitFact) {
+          completionWarnings.push({
+            recordId: String(localCommitFact.recordId || recordId || '').trim(),
+            code: 'POST_COMMIT_RECOVERY_FAILED',
+            message: 'local note is saved; post-commit recovery will retry without marking sync failed',
+          });
+          continue;
+        }
         const message = error.message || String(error);
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
         if (deletionResult && deletionResult.deleted) {
@@ -19577,6 +18600,34 @@ class WechatObsidianInboxPlugin extends Plugin {
             // Keep the original extraction failure retryable if cloud cleanup fails.
           }
         }
+        let lifecycleReportError = null;
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          const failureCode = categorizeSyncFailure(error);
+          try {
+            await this.upsertPendingSyncLifecycleAttempt(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              stage: 'failed',
+              code: failureCode,
+            });
+          } catch (persistError) {
+            // The in-memory attempt remains available for the immediate report below.
+          }
+          try {
+            await this.reportSyncRecordFailure(recordId, lifecycle.attemptId, error, binding);
+            try {
+              await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+            } catch (clearError) {
+              // A retained marker is safe: replay is idempotent and stale attempts are discarded.
+            }
+          } catch (reportError) {
+            lifecycleReportError = {
+              code: 'STATUS_REPORT_FAILED',
+              message: 'status report failed; original error remains local',
+            };
+          }
+        }
+
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
           ? redactSensitiveObject(error.diagnostic)
           : null;
@@ -19597,6 +18648,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           message: '单条内容同步失败',
           error: message,
           ...(diagnostic ? { diagnostic } : {}),
+          ...(lifecycleReportError ? { lifecycleReportError } : {}),
           time: new Date().toISOString(),
         };
         writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
@@ -19604,6 +18656,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId: getRecordId(record),
           message,
           ...(diagnostic ? { diagnostic } : {}),
+          ...(lifecycleReportError ? { lifecycleReportError } : {}),
         });
       } finally {
         if (this.currentProcessingAbortController === processingAbortController) {
@@ -19619,7 +18672,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed, skipped, conversionWarnings, pendingReview };
+    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview };
   }
 
   async syncInbox(showNotice = true) {
@@ -19654,6 +18707,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const failed = [];
       const skipped = [];
       const conversionWarnings = [];
+      const completionWarnings = [];
       const pendingReviews = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: 'fetching' });
@@ -19668,6 +18722,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (result.conversionWarnings && result.conversionWarnings.length) {
             conversionWarnings.push(...result.conversionWarnings);
+          }
+          if (result.completionWarnings && result.completionWarnings.length) {
+            completionWarnings.push(...result.completionWarnings);
           }
           if (result.pendingReview && (result.pendingReview.total || result.pendingReview.audioVideoCount)) {
             pendingReviews.push(result.pendingReview);
@@ -19694,16 +18751,22 @@ class WechatObsidianInboxPlugin extends Plugin {
       } else if (pendingReviewNotice) {
         finalMessage += `；${pendingReviewNotice}`;
       }
+      if (completionWarnings.length) {
+        finalMessage += `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
+      }
+
       if (showNotice || written.length) {
         new Notice(finalMessage);
       }
       this.lastSyncDiagnostic = {
-        status: failed.length ? 'failed' : 'success',
+        status: failed.length ? 'failed' : (completionWarnings.length ? 'warning' : 'success'),
         stage: 'finished',
         current: written.length,
         total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
+        completionWarningCount: completionWarnings.length,
+        completionWarningCode: completionWarnings.length ? 'COMPLETION_REPORT_FAILED' : '',
         ...(failed.find((item) => item.diagnostic)
           ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic }
           : {}),
@@ -20246,6 +19309,15 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  buildDouyinFallbackMarkdown,
+  buildXiaohongshuFallbackMarkdown,
+  buildWechatChannelsUnavailableMarkdown,
+  categorizeSyncFailure,
+  getSyncLifecycleBindingFingerprint,
+  getSyncLifecycleOutcomeError,
+  isExistingLocalNoteDeliverable,
+  normalizePendingSyncLifecycleAttempts,
+  sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,
   FEISHU_TUTORIAL_URL,
