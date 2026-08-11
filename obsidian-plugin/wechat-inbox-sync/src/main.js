@@ -108,6 +108,7 @@ const {
 } = require('./record-identity-utils');
 const {
   categorizeSyncFailure,
+  getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
@@ -18103,6 +18104,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       const status = metadata.transcriptionStatus || 'pending';
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
+    const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
+    if (lifecycleOutcomeError) throw lifecycleOutcomeError;
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
@@ -19055,6 +19058,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
 WechatObsidianInboxPlugin.__test = {
   categorizeSyncFailure,
+  getSyncLifecycleOutcomeError,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,

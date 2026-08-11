@@ -1447,6 +1447,48 @@ var require_sync_lifecycle_utils = __commonJS({
       return "SYNC_FAILED";
     }
     __name(categorizeSyncFailure2, "categorizeSyncFailure");
+    function createSyncLifecycleOutcomeError(code, message) {
+      const error = new Error(String(message || "同步处理失败"));
+      error.code = String(code || "SYNC_FAILED").trim().toUpperCase() || "SYNC_FAILED";
+      return error;
+    }
+    __name(createSyncLifecycleOutcomeError, "createSyncLifecycleOutcomeError");
+    function getSyncLifecycleOutcomeError2(record) {
+      const source = record && typeof record === "object" ? record : {};
+      const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
+      const conversionStatus = String(metadata.conversionStatus || "").trim().toLowerCase();
+      const transcriptionStatus = String(metadata.transcriptionStatus || "").trim().toLowerCase();
+      const transcription = String(metadata.transcription || "").trim();
+      const url = String(metadata.url || source.content || "").trim().toLowerCase();
+      const fileExt = String(metadata.fileExt || "").trim().toLowerCase().replace(/^\./, "");
+      const markdown = [
+        metadata.convertedMarkdown,
+        metadata.markdown,
+        metadata.snapshot,
+        metadata.contentSnapshot
+      ].map((value) => String(value || "").trim()).filter(Boolean).join("\n");
+      const declaredError = `${metadata.conversionError || ""} ${metadata.transcriptionError || ""}`.trim();
+      if (/weixin\.qq\.com\/sph\//.test(url) && (["failed", "link_saved"].includes(conversionStatus) || transcriptionStatus === "failed") || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError)) {
+        return createSyncLifecycleOutcomeError("UNSUPPORTED_PLATFORM", "暂不支持此平台");
+      }
+      if (conversionStatus === "wechat_captcha") {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信安全验证拦截");
+      }
+      if (/mp\.weixin\.qq\.com\//.test(url) && /微信扫一扫可打开此内容/.test(markdown) && /使用完整服务|使用小程序/.test(markdown)) {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信仅返回打开引导页");
+      }
+      if (fileExt === "pdf" && conversionStatus === "attachment_saved") {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "PDF 内容提取失败");
+      }
+      if (transcriptionStatus === "failed" && !transcription) {
+        return createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", "音视频转写失败");
+      }
+      if (["failed", "link_saved"].includes(conversionStatus)) {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败");
+      }
+      return null;
+    }
+    __name(getSyncLifecycleOutcomeError2, "getSyncLifecycleOutcomeError");
     function getHttpStatusFromError(error) {
       return Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
     }
@@ -1463,6 +1505,7 @@ var require_sync_lifecycle_utils = __commonJS({
     module2.exports = {
       SYNC_LIFECYCLE_FAILURE_MESSAGES,
       categorizeSyncFailure: categorizeSyncFailure2,
+      getSyncLifecycleOutcomeError: getSyncLifecycleOutcomeError2,
       getSyncNoteTitleFromPath: getSyncNoteTitleFromPath2,
       isLegacySyncLifecycleError: isLegacySyncLifecycleError2,
       isSyncRecordBusyError: isSyncRecordBusyError2,
@@ -3098,6 +3141,7 @@ var {
 } = require_record_identity_utils();
 var {
   categorizeSyncFailure,
+  getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
@@ -18893,6 +18937,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const status = metadata.transcriptionStatus || "pending";
       throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
     }
+    const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
+    if (lifecycleOutcomeError) throw lifecycleOutcomeError;
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
@@ -19629,6 +19675,7 @@ __name(_WechatInboxSettingTab, "WechatInboxSettingTab");
 var WechatInboxSettingTab = _WechatInboxSettingTab;
 WechatObsidianInboxPlugin.__test = {
   categorizeSyncFailure,
+  getSyncLifecycleOutcomeError,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,

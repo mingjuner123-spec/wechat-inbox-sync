@@ -1,5 +1,7 @@
 const assert = require('assert');
+const fs = require('fs');
 const Module = require('module');
+const path = require('path');
 
 const notices = [];
 let requestUrlMock = async () => ({});
@@ -33,6 +35,42 @@ assert.strictEqual(helpers.categorizeSyncFailure({ code: 'UNSUPPORTED_PLATFORM' 
 assert.strictEqual(helpers.categorizeSyncFailure(new Error('Unsupported record type: link')), 'UNSUPPORTED_PLATFORM');
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'UNKNOWN' }), 'SYNC_FAILED');
 assert.strictEqual(helpers.sanitizeSyncNoteTitle('private\\vault\\safe-title.md'), 'safe-title');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  content: 'https://weixin.qq.com/sph/At8GEKn0cY',
+  metadata: { conversionStatus: 'link_saved', transcriptionStatus: 'failed' },
+}).code, 'UNSUPPORTED_PLATFORM');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: {
+    url: 'https://mp.weixin.qq.com/s/example',
+    conversionStatus: 'success',
+    markdown: '微信扫一扫可打开此内容，使用完整服务',
+  },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'file',
+  metadata: {
+    fileExt: 'pdf',
+    conversionStatus: 'attachment_saved',
+    conversionError: 'PDF text missing',
+  },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: { conversionStatus: 'success', markdown: '一篇正常且可交付的正文' },
+}), null);
+
+const builtPluginSource = fs.readFileSync(path.join(
+  __dirname,
+  '../obsidian-plugin/wechat-inbox-sync/main.js',
+), 'utf8');
+const outcomeGateOffset = builtPluginSource.indexOf('getSyncLifecycleOutcomeError(recordForMarkdown)');
+const aiEnrichmentOffset = builtPluginSource.indexOf('enrichRecordMetadataWithAi(recordForMarkdown');
+const noteWriteOffset = builtPluginSource.indexOf('adapter.write(temporaryFilePath, markdown)');
+assert.ok(outcomeGateOffset > 0, 'writeRecord must classify lifecycle outcome before writing a note');
+assert.ok(outcomeGateOffset < aiEnrichmentOffset, 'outcome classification must run before AI enrichment');
+assert.ok(outcomeGateOffset < noteWriteOffset, 'outcome classification must run before Markdown write');
 
 function createPlugin() {
   const plugin = new PluginClass();
