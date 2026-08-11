@@ -1402,6 +1402,75 @@ var require_record_identity_utils = __commonJS({
   }
 });
 
+// src/sync-lifecycle-utils.js
+var require_sync_lifecycle_utils = __commonJS({
+  "src/sync-lifecycle-utils.js"(exports2, module2) {
+    "use strict";
+    var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
+      UNSUPPORTED_PLATFORM: "暂不支持此平台",
+      NETWORK_FAILED: "网络连接失败，请稍后重新同步",
+      EXTRACTION_FAILED: "内容解析失败，请重新同步",
+      TRANSCRIPTION_FAILED: "音视频转写失败，请重新同步",
+      OCR_FAILED: "图片文字识别失败，请重新同步",
+      LOCAL_COMPONENT_UNAVAILABLE: "本地转写组件不可用，请检查后重新同步",
+      WRITE_FAILED: "写入 Obsidian 失败，请重新同步",
+      SYNC_FAILED: "同步处理失败，请重新同步"
+    });
+    function sanitizeSyncNoteTitle2(value) {
+      const source = String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+      const basename = source.split(/[\\/]/).pop() || "";
+      return basename.replace(/\.md$/i, "").trim().slice(0, 200);
+    }
+    __name(sanitizeSyncNoteTitle2, "sanitizeSyncNoteTitle");
+    function getSyncNoteTitleFromPath2(filePath) {
+      return sanitizeSyncNoteTitle2(String(filePath || "").split(/[\\/]/).pop() || "");
+    }
+    __name(getSyncNoteTitleFromPath2, "getSyncNoteTitleFromPath");
+    function categorizeSyncFailure2(error) {
+      const code = String(error && error.code || "").trim().toUpperCase();
+      const message = String(error && error.message || error || "").trim().toUpperCase();
+      if (code === "UNSUPPORTED_PLATFORM" || /UNSUPPORTED_(?:PLATFORM|RECORD_TYPE|SITE)/.test(code) || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)/.test(message) || /\u6682\u4e0d\u652f\u6301\u6b64\u5e73\u53f0|\u4e0d\u652f\u6301(?:\u6b64|\u8be5)?\u5e73\u53f0/.test(message)) {
+        return "UNSUPPORTED_PLATFORM";
+      }
+      if (/NETWORK|TIMEOUT|ECONN|ENOTFOUND|FETCH/.test(code) || /NETWORK|TIMEOUT|ECONN|ENOTFOUND|FETCH/.test(message)) return "NETWORK_FAILED";
+      if (/LOCAL_COMPONENT|COMPONENT_UNAVAILABLE/.test(code)) return "LOCAL_COMPONENT_UNAVAILABLE";
+      if (/OCR/.test(code) || /OCR|\u6587\u5b57\u8bc6\u522b/.test(message)) return "OCR_FAILED";
+      if (/TRANSCR|ASR|AUDIO|VOICE/.test(code) || /TRANSCR|ASR|\u8f6c\u5199|\u97f3\u9891|\u8bed\u97f3/.test(message)) {
+        return "TRANSCRIPTION_FAILED";
+      }
+      if (/WRITE|VAULT|NOTE|FILE_SAVE/.test(code) || /WRITE|VAULT|NOTE|\u5199\u5165|\u7b14\u8bb0/.test(message)) {
+        return "WRITE_FAILED";
+      }
+      if (/EXTRACT|XIAOHONGSHU|WEBPAGE|HTML|LINK/.test(code) || /EXTRACT|\u63d0\u53d6|\u7f51\u9875|\u5c0f\u7ea2\u4e66/.test(message)) {
+        return "EXTRACTION_FAILED";
+      }
+      return "SYNC_FAILED";
+    }
+    __name(categorizeSyncFailure2, "categorizeSyncFailure");
+    function getHttpStatusFromError(error) {
+      return Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
+    }
+    __name(getHttpStatusFromError, "getHttpStatusFromError");
+    function isLegacySyncLifecycleError2(error) {
+      return [404, 405].includes(getHttpStatusFromError(error));
+    }
+    __name(isLegacySyncLifecycleError2, "isLegacySyncLifecycleError");
+    function isSyncRecordBusyError2(error) {
+      const code = String(error && error.code || "").toUpperCase();
+      return getHttpStatusFromError(error) === 409 || ["RECORD_BUSY", "ATTEMPT_CONFLICT"].includes(code);
+    }
+    __name(isSyncRecordBusyError2, "isSyncRecordBusyError");
+    module2.exports = {
+      SYNC_LIFECYCLE_FAILURE_MESSAGES,
+      categorizeSyncFailure: categorizeSyncFailure2,
+      getSyncNoteTitleFromPath: getSyncNoteTitleFromPath2,
+      isLegacySyncLifecycleError: isLegacySyncLifecycleError2,
+      isSyncRecordBusyError: isSyncRecordBusyError2,
+      sanitizeSyncNoteTitle: sanitizeSyncNoteTitle2
+    };
+  }
+});
+
 // src/note-output-plan-utils.js
 var require_note_output_plan_utils = __commonJS({
   "src/note-output-plan-utils.js"(exports2, module2) {
@@ -3027,6 +3096,13 @@ var {
   normalizeRecordUrlForCompare,
   normalizeYamlScalar
 } = require_record_identity_utils();
+var {
+  categorizeSyncFailure,
+  getSyncNoteTitleFromPath,
+  isLegacySyncLifecycleError,
+  isSyncRecordBusyError,
+  sanitizeSyncNoteTitle
+} = require_sync_lifecycle_utils();
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
 var { createRecordBodyMarkdownHelpers } = require_record_body_markdown_utils();
 var {
@@ -14708,6 +14784,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         throw new Error("绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」");
       }
       const requestError = new Error(message);
+      requestError.status = response.status;
+      requestError.statusCode = response.status;
       if (payload && payload.errCode) requestError.code = String(payload.errCode);
       throw requestError;
     }
@@ -18872,16 +18950,83 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       conversionWarning: getRecordConversionWarning(recordForMarkdown)
     };
   }
+  async reportSyncLifecycleStatus(recordId, body, binding) {
+    return await this.requestJson(
+      `/records/${encodeURIComponent(recordId)}/status`,
+      "POST",
+      body,
+      binding
+    );
+  }
+  async claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised) {
+    if (!lifecycleAdvertised) return { enabled: false };
+    try {
+      const payload = await this.reportSyncLifecycleStatus(recordId, { status: "processing" }, binding);
+      const data = payload && payload.data && typeof payload.data === "object" ? payload.data : payload && typeof payload === "object" ? payload : {};
+      const attemptId = String(data.attemptId || data.syncAttemptId || "").trim();
+      if (!attemptId) throw new Error("sync processing claim is missing an attempt id");
+      return { enabled: true, attemptId };
+    } catch (error) {
+      if (isLegacySyncLifecycleError(error)) return { enabled: false, legacyFallback: true };
+      if (isSyncRecordBusyError(error)) return { enabled: true, conflict: true };
+      throw error;
+    }
+  }
+  async reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle = {}) {
+    const safeNoteTitle = sanitizeSyncNoteTitle(noteTitle);
+    const body = lifecycle.enabled && lifecycle.attemptId ? {
+      attemptId: lifecycle.attemptId,
+      ...safeNoteTitle ? { noteTitle: safeNoteTitle } : {}
+    } : lifecycle.legacyFallback && safeNoteTitle ? { noteTitle: safeNoteTitle } : {};
+    try {
+      return await this.requestJson(
+        `/records/${encodeURIComponent(recordId)}/synced`,
+        "POST",
+        body,
+        binding
+      );
+    } catch (error) {
+      if (!lifecycle.enabled || !isLegacySyncLifecycleError(error)) throw error;
+      return await this.requestJson(
+        `/records/${encodeURIComponent(recordId)}/synced`,
+        "POST",
+        safeNoteTitle ? { noteTitle: safeNoteTitle } : {},
+        binding
+      );
+    }
+  }
+  async reportSyncRecordCompletionBestEffort(recordId, noteTitle, binding, lifecycle = {}) {
+    try {
+      await this.reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle);
+      return null;
+    } catch (error) {
+      if (isRecordNotFoundError(error)) return null;
+      return {
+        code: "COMPLETION_REPORT_FAILED",
+        message: "sync completion report failed; local note is preserved"
+      };
+    }
+  }
+  async reportSyncRecordFailure(recordId, attemptId, error, binding) {
+    const code = categorizeSyncFailure(error);
+    return await this.reportSyncLifecycleStatus(recordId, {
+      status: "failed",
+      attemptId,
+      code
+    }, binding);
+  }
   async syncBinding(binding, shouldPrefixTitle) {
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
     this.showSyncProgress({ bindingLabel, stage: "fetching" });
     const payload = await this.requestJson("/records?status=pending", "GET", {}, binding);
     const records = payload.data || [];
     const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
+    const lifecycleAdvertised = Boolean(payload && payload.meta && payload.meta.syncLifecycleStatus === true);
     const written = [];
     const failed = [];
     const skipped = [];
     const conversionWarnings = [];
+    const completionWarnings = [];
     const syncedAt = (/* @__PURE__ */ new Date()).toISOString();
     if (!records.length) {
       this.showSyncProgress({ bindingLabel, stage: "empty" });
@@ -18894,6 +19039,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         current: index + 1,
         total: records.length
       };
+      let lifecycle = { enabled: false };
       if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
         skipped.push({
           recordId,
@@ -18923,6 +19069,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
+        lifecycle = await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        if (lifecycle.conflict) {
+          skipped.push({ recordId, reason: "record-busy" });
+          continue;
+        }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
@@ -18931,11 +19082,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             filePath: existingFilePath
           });
           this.showSyncProgress({ ...progress, stage: "marking", title: buildRecordTitleBase(record) });
-          try {
-            await this.requestJson(`/records/${encodeURIComponent(recordId)}/synced`, "POST", {}, binding);
-          } catch (markError) {
-            if (!isRecordNotFoundError(markError)) throw markError;
-          }
+          const completionWarning2 = await this.reportSyncRecordCompletionBestEffort(
+            recordId,
+            getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record),
+            binding,
+            lifecycle
+          );
+          if (completionWarning2) completionWarnings.push({ recordId, ...completionWarning2 });
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -18947,11 +19100,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           conversionWarnings.push(item.conversionWarning);
         }
         this.showSyncProgress({ ...progress, stage: "marking", title: item.title });
-        try {
-          await this.requestJson(`/records/${encodeURIComponent(item.recordId)}/synced`, "POST", {}, binding);
-        } catch (markError) {
-          if (!isRecordNotFoundError(markError)) throw markError;
-        }
+        const completionWarning = await this.reportSyncRecordCompletionBestEffort(
+          item.recordId,
+          item.title,
+          binding,
+          lifecycle
+        );
+        if (completionWarning) completionWarnings.push({ recordId: item.recordId, ...completionWarning });
       } catch (error) {
         const message = error.message || String(error);
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
@@ -18980,6 +19135,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           } catch (deleteError) {
           }
         }
+        let lifecycleReportError = null;
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          try {
+            await this.reportSyncRecordFailure(recordId, lifecycle.attemptId, error, binding);
+          } catch (reportError) {
+            lifecycleReportError = {
+              code: "STATUS_REPORT_FAILED",
+              message: "status report failed; original error remains local"
+            };
+          }
+        }
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? redactSensitiveObject(error.diagnostic) : null;
         let failedTitle = "小红书内容";
         if (!isXiaohongshuUrl(getRecordUrl(record))) {
@@ -18998,13 +19164,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           message: "单条内容同步失败",
           error: message,
           ...diagnostic ? { diagnostic } : {},
+          ...lifecycleReportError ? { lifecycleReportError } : {},
           time: (/* @__PURE__ */ new Date()).toISOString()
         };
         writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
         failed.push({
           recordId: getRecordId(record),
           message,
-          ...diagnostic ? { diagnostic } : {}
+          ...diagnostic ? { diagnostic } : {},
+          ...lifecycleReportError ? { lifecycleReportError } : {}
         });
       } finally {
         if (this.currentProcessingAbortController === processingAbortController) {
@@ -19018,7 +19186,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
       }
     }
-    return { written, failed, skipped, conversionWarnings, pendingReview };
+    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview };
   }
   async syncInbox(showNotice = true) {
     if (this.syncInboxPromise) {
@@ -19050,6 +19218,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const failed = [];
       const skipped = [];
       const conversionWarnings = [];
+      const completionWarnings = [];
       const pendingReviews = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: "fetching" });
@@ -19063,6 +19232,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
           if (result.conversionWarnings && result.conversionWarnings.length) {
             conversionWarnings.push(...result.conversionWarnings);
+          }
+          if (result.completionWarnings && result.completionWarnings.length) {
+            completionWarnings.push(...result.completionWarnings);
           }
           if (result.pendingReview && (result.pendingReview.total || result.pendingReview.audioVideoCount)) {
             pendingReviews.push(result.pendingReview);
@@ -19087,16 +19259,21 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       } else if (pendingReviewNotice) {
         finalMessage += `；${pendingReviewNotice}`;
       }
+      if (completionWarnings.length) {
+        finalMessage += `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
+      }
       if (showNotice || written.length) {
         new Notice(finalMessage);
       }
       this.lastSyncDiagnostic = {
-        status: failed.length ? "failed" : "success",
+        status: failed.length ? "failed" : completionWarnings.length ? "warning" : "success",
         stage: "finished",
         current: written.length,
         total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join("\n") : "",
+        completionWarningCount: completionWarnings.length,
+        completionWarningCode: completionWarnings.length ? "COMPLETION_REPORT_FAILED" : "",
         ...failed.find((item) => item.diagnostic) ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic } : {},
         time: (/* @__PURE__ */ new Date()).toISOString()
       };
@@ -19451,6 +19628,8 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
 __name(_WechatInboxSettingTab, "WechatInboxSettingTab");
 var WechatInboxSettingTab = _WechatInboxSettingTab;
 WechatObsidianInboxPlugin.__test = {
+  categorizeSyncFailure,
+  sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,
   FEISHU_TUTORIAL_URL,

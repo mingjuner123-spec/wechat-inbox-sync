@@ -29,6 +29,7 @@ const expectedModules = [
   'record-metadata-utils',
   'record-state-utils',
   'social-engagement-utils',
+  'sync-lifecycle-utils',
   'transcription-note-title-utils',
   'transcription-quality-utils',
   'vault-path-utils',
