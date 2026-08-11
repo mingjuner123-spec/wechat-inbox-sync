@@ -138,6 +138,37 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
   metadata: { conversionStatus: 'success', markdown: '一篇正常且可交付的正文' },
 }), null);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'webpage',
+  content: 'https://weixin.qq.com/sph/example',
+}, [
+  '---',
+  'id: failed-receipt-1',
+  'url: https://weixin.qq.com/sph/example',
+  '---',
+  '> ⚠️ 视频号内容解析功能暂未接通，当前已为你保存原始链接。',
+].join('\n')), false);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'webpage',
+  content: 'https://example.com/link-only',
+}, [
+  '---',
+  'id: link-only-1',
+  'url: https://example.com/link-only',
+  '---',
+  '原始链接：https://example.com/link-only',
+].join('\n')), false);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'webpage',
+  content: 'https://example.com/article',
+}, '---\nid: article-1\n---\n这是一段已经成功提取并可保存到知识库的正文。'), true);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'text',
+}, '---\nid: text-1\n---\n收到'), true);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'file',
+  metadata: { fileExt: 'zip' },
+}, '---\nid: file-1\n---\n![[附件.zip]]'), true);
 
 const builtPluginSource = fs.readFileSync(path.join(
   __dirname,
@@ -444,6 +475,32 @@ async function runRequestJsonPreservesHttpStatusTest() {
   );
 }
 
+async function runFailedReceiptDoesNotTriggerLocalDedupeTest() {
+  const plugin = createPlugin();
+  delete plugin.findExistingRecordNotePath;
+  plugin.settings.inboxDir = '临时收集';
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => [{ path: '临时收集/2026-08-11/视频号-失败占位.md' }],
+      cachedRead: async () => [
+        '---',
+        'id: failed-local-note-1',
+        'url: https://weixin.qq.com/sph/example',
+        '---',
+        '> ⚠️ 视频号内容解析功能暂未接通，当前已为你保存原始链接。',
+      ].join('\n'),
+    },
+  };
+
+  const found = await plugin.findExistingRecordNotePath({
+    _id: 'failed-local-note-1',
+    type: 'webpage',
+    content: 'https://weixin.qq.com/sph/example',
+    metadata: { url: 'https://weixin.qq.com/sph/example' },
+  });
+  assert.strictEqual(found, '');
+}
+
 Promise.resolve()
   .then(runSupportedLifecycleSuccessTest)
   .then(runFailureLifecycleReportingTest)
@@ -452,6 +509,7 @@ Promise.resolve()
   .then(runCompletionReportFailurePreservesLocalWriteTest)
   .then(runCompletionWarningIsVisibleTest)
   .then(runRequestJsonPreservesHttpStatusTest)
+  .then(runFailedReceiptDoesNotTriggerLocalDedupeTest)
   .then(() => console.log('plugin-sync-history tests passed'))
   .catch((error) => {
     console.error(error);

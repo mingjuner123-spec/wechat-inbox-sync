@@ -1478,6 +1478,35 @@ var require_sync_lifecycle_utils = __commonJS({
       return signalCount >= 2 || signalCount >= 1 && meaningfulLength < 160;
     }
     __name(isLikelyWebpageShell, "isLikelyWebpageShell");
+    function getMarkdownBody(markdown) {
+      return String(markdown || "").replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").replace(/<!--\s*wechat-inbox-record-id\s*:[\s\S]*?-->/gi, "").trim();
+    }
+    __name(getMarkdownBody, "getMarkdownBody");
+    function isExistingLocalNoteDeliverable2(record, markdown) {
+      const source = record && typeof record === "object" ? record : {};
+      const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
+      const recordType = String(source.type || "").trim().toLowerCase();
+      const fileExt = String(metadata.fileExt || "").trim().toLowerCase().replace(/^\./, "");
+      const url = String(metadata.url || source.content || "").trim();
+      const body = getMarkdownBody(markdown);
+      const hasEmbeddedAttachment = /!\[\[[^\]]+\]\]/.test(body);
+      const contentOnlyBody = body.replace(/^\s*(?:原始链接|来源链接|source\s*url)\s*[：:]\s*https?:\/\/\S+\s*$/gim, "").replace(/^\s*>?\s*⚠️.*$/gim, "").trim();
+      const meaningfulLength = getMeaningfulMarkdownLength(contentOnlyBody);
+      if (recordType === "text") return meaningfulLength > 0;
+      if (recordType === "file") {
+        if (fileExt && fileExt !== "pdf" && hasEmbeddedAttachment) return true;
+        return meaningfulLength >= 8;
+      }
+      if (recordType === "voice" || metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly === true) {
+        return meaningfulLength >= 8;
+      }
+      if (["webpage", "link"].includes(recordType) || /^https?:\/\//i.test(url)) {
+        if (isLikelyWebpageShell(url, body)) return false;
+        return meaningfulLength >= 8;
+      }
+      return meaningfulLength > 0 || hasEmbeddedAttachment;
+    }
+    __name(isExistingLocalNoteDeliverable2, "isExistingLocalNoteDeliverable");
     function getSyncLifecycleOutcomeError2(record) {
       const source = record && typeof record === "object" ? record : {};
       const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
@@ -1543,6 +1572,7 @@ var require_sync_lifecycle_utils = __commonJS({
       categorizeSyncFailure: categorizeSyncFailure2,
       getSyncLifecycleOutcomeError: getSyncLifecycleOutcomeError2,
       getSyncNoteTitleFromPath: getSyncNoteTitleFromPath2,
+      isExistingLocalNoteDeliverable: isExistingLocalNoteDeliverable2,
       isLegacySyncLifecycleError: isLegacySyncLifecycleError2,
       isSyncRecordBusyError: isSyncRecordBusyError2,
       sanitizeSyncNoteTitle: sanitizeSyncNoteTitle2
@@ -3179,6 +3209,7 @@ var {
   categorizeSyncFailure,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
+  isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
   sanitizeSyncNoteTitle
@@ -18901,6 +18932,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         const matchesRecordId = Boolean(normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId));
         const matchesRecordUrl = Boolean(normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl));
         if (matchesRecordId || matchesRecordUrl) {
+          if (!isExistingLocalNoteDeliverable(record, markdown)) {
+            continue;
+          }
           if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
             continue;
           }
@@ -19712,6 +19746,7 @@ var WechatInboxSettingTab = _WechatInboxSettingTab;
 WechatObsidianInboxPlugin.__test = {
   categorizeSyncFailure,
   getSyncLifecycleOutcomeError,
+  isExistingLocalNoteDeliverable,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,

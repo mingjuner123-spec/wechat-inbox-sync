@@ -110,6 +110,7 @@ const {
   categorizeSyncFailure,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
+  isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
   sanitizeSyncNoteTitle,
@@ -18020,6 +18021,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         const matchesRecordId = Boolean(normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId));
         const matchesRecordUrl = Boolean(normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl));
         if (matchesRecordId || matchesRecordUrl) {
+          if (!isExistingLocalNoteDeliverable(record, markdown)) {
+            continue;
+          }
           if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
             continue;
           }
@@ -19059,6 +19063,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 WechatObsidianInboxPlugin.__test = {
   categorizeSyncFailure,
   getSyncLifecycleOutcomeError,
+  isExistingLocalNoteDeliverable,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,

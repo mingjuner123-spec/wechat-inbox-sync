@@ -83,6 +83,44 @@ function isLikelyWebpageShell(url, markdown) {
   return signalCount >= 2 || (signalCount >= 1 && meaningfulLength < 160);
 }
 
+function getMarkdownBody(markdown) {
+  return String(markdown || '')
+    .replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')
+    .replace(/<!--\s*wechat-inbox-record-id\s*:[\s\S]*?-->/gi, '')
+    .trim();
+}
+
+function isExistingLocalNoteDeliverable(record, markdown) {
+  const source = record && typeof record === 'object' ? record : {};
+  const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
+  const recordType = String(source.type || '').trim().toLowerCase();
+  const fileExt = String(metadata.fileExt || '').trim().toLowerCase().replace(/^\./, '');
+  const url = String(metadata.url || source.content || '').trim();
+  const body = getMarkdownBody(markdown);
+  const hasEmbeddedAttachment = /!\[\[[^\]]+\]\]/.test(body);
+  const contentOnlyBody = body
+    .replace(/^\s*(?:原始链接|来源链接|source\s*url)\s*[：:]\s*https?:\/\/\S+\s*$/gim, '')
+    .replace(/^\s*>?\s*⚠️.*$/gim, '')
+    .trim();
+  const meaningfulLength = getMeaningfulMarkdownLength(contentOnlyBody);
+
+  if (recordType === 'text') return meaningfulLength > 0;
+  if (recordType === 'file') {
+    if (fileExt && fileExt !== 'pdf' && hasEmbeddedAttachment) return true;
+    return meaningfulLength >= 8;
+  }
+  if (recordType === 'voice'
+    || metadata.webpageMediaType === 'audio_video'
+    || metadata.transcriptOnly === true) {
+    return meaningfulLength >= 8;
+  }
+  if (['webpage', 'link'].includes(recordType) || /^https?:\/\//i.test(url)) {
+    if (isLikelyWebpageShell(url, body)) return false;
+    return meaningfulLength >= 8;
+  }
+  return meaningfulLength > 0 || hasEmbeddedAttachment;
+}
+
 function getSyncLifecycleOutcomeError(record) {
   const source = record && typeof record === 'object' ? record : {};
   const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
@@ -166,6 +204,7 @@ module.exports = {
   categorizeSyncFailure,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
+  isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
   sanitizeSyncNoteTitle,
