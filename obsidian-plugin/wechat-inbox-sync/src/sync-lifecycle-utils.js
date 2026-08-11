@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
   UNSUPPORTED_PLATFORM: '\u6682\u4e0d\u652f\u6301\u6b64\u5e73\u53f0',
   NETWORK_FAILED: '\u7f51\u7edc\u8fde\u63a5\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u65b0\u540c\u6b65',
@@ -10,6 +12,8 @@ const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
   WRITE_FAILED: '\u5199\u5165 Obsidian \u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u540c\u6b65',
   SYNC_FAILED: '\u540c\u6b65\u5904\u7406\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u540c\u6b65',
 });
+
+const MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS = 100;
 
 function sanitizeSyncNoteTitle(value) {
   const source = String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
@@ -44,6 +48,50 @@ function categorizeSyncFailure(error) {
     return 'EXTRACTION_FAILED';
   }
   return 'SYNC_FAILED';
+}
+
+function normalizeLifecycleTimestamp(value) {
+  const source = String(value || '').trim();
+  if (!source) return '';
+  const timestamp = new Date(source);
+  return Number.isNaN(timestamp.getTime()) ? '' : timestamp.toISOString();
+}
+
+function normalizePendingSyncLifecycleAttempts(value) {
+  const byIdentity = new Map();
+  for (const source of Array.isArray(value) ? value : []) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+    const recordId = String(source.recordId || '').trim().slice(0, 128);
+    const attemptId = String(source.attemptId || '').trim();
+    const bindingFingerprint = String(source.bindingFingerprint || '').trim().toLowerCase();
+    const stage = String(source.stage || '').trim().toLowerCase();
+    if (!recordId
+      || !/^[A-Za-z0-9_-]{8,128}$/.test(attemptId)
+      || !/^[a-f0-9]{16,64}$/.test(bindingFingerprint)
+      || !['processing', 'failed', 'committed'].includes(stage)) continue;
+    const normalized = {
+      recordId,
+      attemptId,
+      bindingFingerprint,
+      stage,
+      code: stage === 'failed'
+        ? String(source.code || 'SYNC_FAILED').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 64) || 'SYNC_FAILED'
+        : '',
+      noteTitle: stage === 'committed' ? sanitizeSyncNoteTitle(source.noteTitle) : '',
+      createdAt: normalizeLifecycleTimestamp(source.createdAt),
+      updatedAt: normalizeLifecycleTimestamp(source.updatedAt),
+    };
+    if (!normalized.code) delete normalized.code;
+    if (!normalized.noteTitle) delete normalized.noteTitle;
+    byIdentity.set(`${bindingFingerprint}:${recordId}`, normalized);
+  }
+  return [...byIdentity.values()].slice(-MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS);
+}
+
+function getSyncLifecycleBindingFingerprint(value) {
+  const token = String(value || '').trim();
+  if (!token) return '';
+  return crypto.createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 32);
 }
 
 function createSyncLifecycleOutcomeError(code, message) {
@@ -200,12 +248,15 @@ function isSyncRecordBusyError(error) {
 }
 
 module.exports = {
+  MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS,
   SYNC_LIFECYCLE_FAILURE_MESSAGES,
   categorizeSyncFailure,
   getSyncLifecycleOutcomeError,
+  getSyncLifecycleBindingFingerprint,
   getSyncNoteTitleFromPath,
   isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
+  normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
 };

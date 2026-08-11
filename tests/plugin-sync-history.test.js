@@ -170,6 +170,51 @@ assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
   metadata: { fileExt: 'zip' },
 }, '---\nid: file-1\n---\n![[附件.zip]]'), true);
 
+const normalizedLifecycleAttempts = helpers.normalizePendingSyncLifecycleAttempts([
+  {
+    recordId: 'record-queue-1',
+    attemptId: 'attempt-queue-old',
+    bindingFingerprint: '0123456789abcdef',
+    stage: 'processing',
+    createdAt: '2026-08-11T01:00:00.000Z',
+    token: 'SECRET-TOKEN',
+    url: 'https://private.example/path',
+    content: 'private body',
+  },
+  {
+    recordId: 'record-queue-1',
+    attemptId: 'attempt-queue-new',
+    bindingFingerprint: '0123456789abcdef',
+    stage: 'failed',
+    code: 'WRITE_FAILED',
+    updatedAt: '2026-08-11T02:00:00.000Z',
+  },
+  {
+    recordId: '',
+    attemptId: 'invalid-record',
+    bindingFingerprint: '0123456789abcdef',
+    stage: 'processing',
+  },
+]);
+assert.deepStrictEqual(normalizedLifecycleAttempts, [{
+  recordId: 'record-queue-1',
+  attemptId: 'attempt-queue-new',
+  bindingFingerprint: '0123456789abcdef',
+  stage: 'failed',
+  code: 'WRITE_FAILED',
+  createdAt: '',
+  updatedAt: '2026-08-11T02:00:00.000Z',
+}]);
+assert.doesNotMatch(JSON.stringify(normalizedLifecycleAttempts), /SECRET|private|url|content|token/i);
+assert.strictEqual(helpers.normalizePendingSyncLifecycleAttempts(
+  Array.from({ length: 120 }, (_, index) => ({
+    recordId: `record-${index}`,
+    attemptId: `attempt-${index}-valid`,
+    bindingFingerprint: 'fedcba9876543210',
+    stage: 'processing',
+  })),
+).length, 100);
+
 const builtPluginSource = fs.readFileSync(path.join(
   __dirname,
   '../obsidian-plugin/wechat-inbox-sync/main.js',
@@ -190,6 +235,10 @@ function createPlugin() {
   });
   plugin.showSyncProgress = () => {};
   plugin.findExistingRecordNotePath = async () => '';
+  plugin.savedSettingsSnapshots = [];
+  plugin.saveData = async (settings) => {
+    plugin.savedSettingsSnapshots.push(JSON.parse(JSON.stringify(settings)));
+  };
   return plugin;
 }
 
@@ -241,6 +290,11 @@ async function runSupportedLifecycleSuccessTest() {
   assert.strictEqual(JSON.stringify(calls).includes('私密知识库'), false);
   assert.strictEqual(JSON.stringify(calls).includes('正文不得上传'), false);
   assert.strictEqual(JSON.stringify(calls).includes('metadata'), false);
+  assert.ok(plugin.savedSettingsSnapshots.some((settings) => (
+    Array.isArray(settings.pendingSyncLifecycleAttempts)
+      && settings.pendingSyncLifecycleAttempts.some((item) => item.stage === 'processing')
+  )));
+  assert.deepStrictEqual(plugin.settings.pendingSyncLifecycleAttempts, []);
 }
 
 async function runFailureLifecycleReportingTest() {
@@ -391,6 +445,9 @@ async function runFailureReportFailurePreservesOriginalErrorTest() {
     code: 'STATUS_REPORT_FAILED',
     message: 'status report failed; original error remains local',
   });
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts.length, 1);
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].stage, 'failed');
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].code, 'WRITE_FAILED');
 }
 
 async function runCompletionReportFailurePreservesLocalWriteTest() {
@@ -431,6 +488,9 @@ async function runCompletionReportFailurePreservesLocalWriteTest() {
     message: 'sync completion report failed; local note is preserved',
   }]);
   assert.strictEqual(calls.some((item) => item.body && item.body.status === 'failed'), false);
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts.length, 1);
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].stage, 'committed');
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].noteTitle, 'safe title');
 }
 
 async function runCompletionWarningIsVisibleTest() {
@@ -501,6 +561,74 @@ async function runFailedReceiptDoesNotTriggerLocalDedupeTest() {
   assert.strictEqual(found, '');
 }
 
+async function runPendingLifecycleReplayTest() {
+  const plugin = createPlugin();
+  const binding = { token: 'ABC-123', label: '测试微信' };
+  const bindingFingerprint = helpers.getSyncLifecycleBindingFingerprint(binding.token);
+  plugin.settings.pendingSyncLifecycleAttempts = [{
+    recordId: 'replay-processing',
+    attemptId: 'attempt-processing-1',
+    bindingFingerprint,
+    stage: 'processing',
+  }, {
+    recordId: 'replay-failed',
+    attemptId: 'attempt-failed-1',
+    bindingFingerprint,
+    stage: 'failed',
+    code: 'EXTRACTION_FAILED',
+  }, {
+    recordId: 'replay-committed',
+    attemptId: 'attempt-committed-1',
+    bindingFingerprint,
+    stage: 'committed',
+    noteTitle: '已写入笔记',
+  }];
+  const calls = [];
+  plugin.requestJson = async (path, method, body) => {
+    calls.push({ path, method, body });
+    return { success: true, data: {} };
+  };
+
+  await plugin.replayPendingSyncLifecycleAttempts(binding);
+
+  assert.deepStrictEqual(calls, [{
+    path: '/records/replay-processing/status',
+    method: 'POST',
+    body: { status: 'failed', attemptId: 'attempt-processing-1', code: 'SYNC_INTERRUPTED' },
+  }, {
+    path: '/records/replay-failed/status',
+    method: 'POST',
+    body: { status: 'failed', attemptId: 'attempt-failed-1', code: 'EXTRACTION_FAILED' },
+  }, {
+    path: '/records/replay-committed/synced',
+    method: 'POST',
+    body: { attemptId: 'attempt-committed-1', noteTitle: '已写入笔记' },
+  }]);
+  assert.deepStrictEqual(plugin.settings.pendingSyncLifecycleAttempts, []);
+}
+
+async function runPendingLifecycleReplayNetworkRetentionTest() {
+  const plugin = createPlugin();
+  const binding = { token: 'ABC-123' };
+  plugin.settings.pendingSyncLifecycleAttempts = [{
+    recordId: 'replay-network',
+    attemptId: 'attempt-network-1',
+    bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint(binding.token),
+    stage: 'failed',
+    code: 'NETWORK_FAILED',
+  }];
+  plugin.requestJson = async () => {
+    const error = new Error('network unavailable');
+    error.status = 503;
+    throw error;
+  };
+
+  await plugin.replayPendingSyncLifecycleAttempts(binding);
+
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts.length, 1);
+  assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].recordId, 'replay-network');
+}
+
 Promise.resolve()
   .then(runSupportedLifecycleSuccessTest)
   .then(runFailureLifecycleReportingTest)
@@ -510,6 +638,8 @@ Promise.resolve()
   .then(runCompletionWarningIsVisibleTest)
   .then(runRequestJsonPreservesHttpStatusTest)
   .then(runFailedReceiptDoesNotTriggerLocalDedupeTest)
+  .then(runPendingLifecycleReplayTest)
+  .then(runPendingLifecycleReplayNetworkRetentionTest)
   .then(() => console.log('plugin-sync-history tests passed'))
   .catch((error) => {
     console.error(error);

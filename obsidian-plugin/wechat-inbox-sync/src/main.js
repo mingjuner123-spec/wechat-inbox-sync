@@ -108,11 +108,13 @@ const {
 } = require('./record-identity-utils');
 const {
   categorizeSyncFailure,
+  getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
   isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
+  normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
 } = require('./sync-lifecycle-utils');
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
@@ -288,6 +290,7 @@ const DEFAULT_SETTINGS = {
   tencentPollAttempts: 60,
   tencentPollIntervalMs: 5000,
   locallyQuarantinedRecordIds: [],
+  pendingSyncLifecycleAttempts: [],
 };
 
 const XIAOHONGSHU_OCR_MAX_IMAGES = 18;
@@ -2141,6 +2144,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.tencentPollIntervalMs = Math.max(1000, Number.isFinite(pollIntervalMs) ? pollIntervalMs : DEFAULT_SETTINGS.tencentPollIntervalMs);
   merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
     merged.locallyQuarantinedRecordIds,
+  );
+  merged.pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(
+    merged.pendingSyncLifecycleAttempts,
   );
 
   return merged;
@@ -18181,6 +18187,101 @@ class WechatObsidianInboxPlugin extends Plugin {
     );
   }
 
+  async persistPendingSyncLifecycleAttempts(value) {
+    const pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(value);
+    this.settings = {
+      ...this.settings,
+      pendingSyncLifecycleAttempts,
+    };
+    if (typeof this.saveData === 'function') {
+      await this.saveData(this.settings);
+    }
+    return pendingSyncLifecycleAttempts;
+  }
+
+  async upsertPendingSyncLifecycleAttempt(binding, value = {}) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const recordId = String(value.recordId || '').trim();
+    const attemptId = String(value.attemptId || '').trim();
+    if (!bindingFingerprint || !recordId || !attemptId) return null;
+    const current = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts);
+    const previous = current.find((item) => (
+      item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+    ));
+    const now = new Date().toISOString();
+    const next = normalizePendingSyncLifecycleAttempts([
+      ...current.filter((item) => !(
+        item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+      )),
+      {
+        recordId,
+        attemptId,
+        bindingFingerprint,
+        stage: value.stage || 'processing',
+        code: value.code,
+        noteTitle: value.noteTitle,
+        createdAt: previous && previous.createdAt ? previous.createdAt : now,
+        updatedAt: now,
+      },
+    ]);
+    await this.persistPendingSyncLifecycleAttempts(next);
+    return next.find((item) => (
+      item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+    )) || null;
+  }
+
+  async clearPendingSyncLifecycleAttempt(binding, recordId) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!bindingFingerprint || !normalizedRecordId) return false;
+    const current = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts);
+    const next = current.filter((item) => !(
+      item.bindingFingerprint === bindingFingerprint && item.recordId === normalizedRecordId
+    ));
+    if (next.length === current.length) return false;
+    await this.persistPendingSyncLifecycleAttempts(next);
+    return true;
+  }
+
+  async replayPendingSyncLifecycleAttempts(binding) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    if (!bindingFingerprint) return { replayed: 0, retained: 0 };
+    const attempts = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts)
+      .filter((item) => item.bindingFingerprint === bindingFingerprint);
+    let replayed = 0;
+    for (const item of attempts) {
+      try {
+        if (item.stage === 'committed') {
+          await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || '', binding, {
+            enabled: true,
+            attemptId: item.attemptId,
+          });
+        } else {
+          await this.reportSyncLifecycleStatus(item.recordId, {
+            status: 'failed',
+            attemptId: item.attemptId,
+            code: item.stage === 'failed' ? (item.code || 'SYNC_FAILED') : 'SYNC_INTERRUPTED',
+          }, binding);
+        }
+        await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+        replayed += 1;
+      } catch (error) {
+        if (isRecordNotFoundError(error)
+          || isLegacySyncLifecycleError(error)
+          || isSyncRecordBusyError(error)) {
+          try {
+            await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+          } catch (clearError) {
+            // Preserve the marker when local persistence is temporarily unavailable.
+          }
+        }
+      }
+    }
+    const retained = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts)
+      .filter((item) => item.bindingFingerprint === bindingFingerprint).length;
+    return { replayed, retained };
+  }
+
   async claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised) {
     if (!lifecycleAdvertised) return { enabled: false };
     try {
@@ -18248,6 +18349,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async syncBinding(binding, shouldPrefixTitle) {
     const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
+    await this.replayPendingSyncLifecycleAttempts(binding);
     this.showSyncProgress({ bindingLabel, stage: 'fetching' });
     const payload = await this.requestJson('/records?status=pending', 'GET', {}, binding);
     const records = payload.data || [];
@@ -18306,6 +18408,13 @@ class WechatObsidianInboxPlugin extends Plugin {
           skipped.push({ recordId, reason: 'record-busy' });
           continue;
         }
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          await this.upsertPendingSyncLifecycleAttempt(binding, {
+            recordId,
+            attemptId: lifecycle.attemptId,
+            stage: 'processing',
+          });
+        }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
@@ -18314,13 +18423,25 @@ class WechatObsidianInboxPlugin extends Plugin {
             filePath: existingFilePath,
           });
           this.showSyncProgress({ ...progress, stage: 'marking', title: buildRecordTitleBase(record) });
+          const existingNoteTitle = getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record);
+          if (lifecycle.enabled && lifecycle.attemptId) {
+            await this.upsertPendingSyncLifecycleAttempt(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              stage: 'committed',
+              noteTitle: existingNoteTitle,
+            });
+          }
           const completionWarning = await this.reportSyncRecordCompletionBestEffort(
             recordId,
-            getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record),
+            existingNoteTitle,
             binding,
             lifecycle,
           );
           if (completionWarning) completionWarnings.push({ recordId, ...completionWarning });
+          else if (lifecycle.enabled && lifecycle.attemptId) {
+            await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+          }
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -18331,6 +18452,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          await this.upsertPendingSyncLifecycleAttempt(binding, {
+            recordId: item.recordId,
+            attemptId: lifecycle.attemptId,
+            stage: 'committed',
+            noteTitle: item.title,
+          });
+        }
         this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
         const completionWarning = await this.reportSyncRecordCompletionBestEffort(
           item.recordId,
@@ -18339,6 +18468,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           lifecycle,
         );
         if (completionWarning) completionWarnings.push({ recordId: item.recordId, ...completionWarning });
+        else if (lifecycle.enabled && lifecycle.attemptId) {
+          await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+        }
       } catch (error) {
         const message = error.message || String(error);
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
@@ -18370,8 +18502,24 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         let lifecycleReportError = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
+          const failureCode = categorizeSyncFailure(error);
+          try {
+            await this.upsertPendingSyncLifecycleAttempt(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              stage: 'failed',
+              code: failureCode,
+            });
+          } catch (persistError) {
+            // The in-memory attempt remains available for the immediate report below.
+          }
           try {
             await this.reportSyncRecordFailure(recordId, lifecycle.attemptId, error, binding);
+            try {
+              await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+            } catch (clearError) {
+              // A retained marker is safe: replay is idempotent and stale attempts are discarded.
+            }
           } catch (reportError) {
             lifecycleReportError = {
               code: 'STATUS_REPORT_FAILED',
@@ -19062,8 +19210,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
 WechatObsidianInboxPlugin.__test = {
   categorizeSyncFailure,
+  getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   isExistingLocalNoteDeliverable,
+  normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,

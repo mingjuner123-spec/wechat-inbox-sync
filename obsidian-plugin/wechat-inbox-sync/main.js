@@ -1406,6 +1406,7 @@ var require_record_identity_utils = __commonJS({
 var require_sync_lifecycle_utils = __commonJS({
   "src/sync-lifecycle-utils.js"(exports2, module2) {
     "use strict";
+    var crypto2 = require("node:crypto");
     var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
       UNSUPPORTED_PLATFORM: "暂不支持此平台",
       NETWORK_FAILED: "网络连接失败，请稍后重新同步",
@@ -1416,6 +1417,7 @@ var require_sync_lifecycle_utils = __commonJS({
       WRITE_FAILED: "写入 Obsidian 失败，请重新同步",
       SYNC_FAILED: "同步处理失败，请重新同步"
     });
+    var MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS = 100;
     function sanitizeSyncNoteTitle2(value) {
       const source = String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
       const basename = source.split(/[\\/]/).pop() || "";
@@ -1447,6 +1449,45 @@ var require_sync_lifecycle_utils = __commonJS({
       return "SYNC_FAILED";
     }
     __name(categorizeSyncFailure2, "categorizeSyncFailure");
+    function normalizeLifecycleTimestamp(value) {
+      const source = String(value || "").trim();
+      if (!source) return "";
+      const timestamp = new Date(source);
+      return Number.isNaN(timestamp.getTime()) ? "" : timestamp.toISOString();
+    }
+    __name(normalizeLifecycleTimestamp, "normalizeLifecycleTimestamp");
+    function normalizePendingSyncLifecycleAttempts2(value) {
+      const byIdentity = /* @__PURE__ */ new Map();
+      for (const source of Array.isArray(value) ? value : []) {
+        if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+        const recordId = String(source.recordId || "").trim().slice(0, 128);
+        const attemptId = String(source.attemptId || "").trim();
+        const bindingFingerprint = String(source.bindingFingerprint || "").trim().toLowerCase();
+        const stage = String(source.stage || "").trim().toLowerCase();
+        if (!recordId || !/^[A-Za-z0-9_-]{8,128}$/.test(attemptId) || !/^[a-f0-9]{16,64}$/.test(bindingFingerprint) || !["processing", "failed", "committed"].includes(stage)) continue;
+        const normalized = {
+          recordId,
+          attemptId,
+          bindingFingerprint,
+          stage,
+          code: stage === "failed" ? String(source.code || "SYNC_FAILED").trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 64) || "SYNC_FAILED" : "",
+          noteTitle: stage === "committed" ? sanitizeSyncNoteTitle2(source.noteTitle) : "",
+          createdAt: normalizeLifecycleTimestamp(source.createdAt),
+          updatedAt: normalizeLifecycleTimestamp(source.updatedAt)
+        };
+        if (!normalized.code) delete normalized.code;
+        if (!normalized.noteTitle) delete normalized.noteTitle;
+        byIdentity.set(`${bindingFingerprint}:${recordId}`, normalized);
+      }
+      return [...byIdentity.values()].slice(-MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS);
+    }
+    __name(normalizePendingSyncLifecycleAttempts2, "normalizePendingSyncLifecycleAttempts");
+    function getSyncLifecycleBindingFingerprint2(value) {
+      const token = String(value || "").trim();
+      if (!token) return "";
+      return crypto2.createHash("sha256").update(token, "utf8").digest("hex").slice(0, 32);
+    }
+    __name(getSyncLifecycleBindingFingerprint2, "getSyncLifecycleBindingFingerprint");
     function createSyncLifecycleOutcomeError(code, message) {
       const error = new Error(String(message || "同步处理失败"));
       error.code = String(code || "SYNC_FAILED").trim().toUpperCase() || "SYNC_FAILED";
@@ -1568,13 +1609,16 @@ var require_sync_lifecycle_utils = __commonJS({
     }
     __name(isSyncRecordBusyError2, "isSyncRecordBusyError");
     module2.exports = {
+      MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS,
       SYNC_LIFECYCLE_FAILURE_MESSAGES,
       categorizeSyncFailure: categorizeSyncFailure2,
       getSyncLifecycleOutcomeError: getSyncLifecycleOutcomeError2,
+      getSyncLifecycleBindingFingerprint: getSyncLifecycleBindingFingerprint2,
       getSyncNoteTitleFromPath: getSyncNoteTitleFromPath2,
       isExistingLocalNoteDeliverable: isExistingLocalNoteDeliverable2,
       isLegacySyncLifecycleError: isLegacySyncLifecycleError2,
       isSyncRecordBusyError: isSyncRecordBusyError2,
+      normalizePendingSyncLifecycleAttempts: normalizePendingSyncLifecycleAttempts2,
       sanitizeSyncNoteTitle: sanitizeSyncNoteTitle2
     };
   }
@@ -3207,11 +3251,13 @@ var {
 } = require_record_identity_utils();
 var {
   categorizeSyncFailure,
+  getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
   isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
+  normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle
 } = require_sync_lifecycle_utils();
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
@@ -3383,7 +3429,8 @@ var DEFAULT_SETTINGS = {
   tencentEngineModelType: "16k_zh",
   tencentPollAttempts: 60,
   tencentPollIntervalMs: 5e3,
-  locallyQuarantinedRecordIds: []
+  locallyQuarantinedRecordIds: [],
+  pendingSyncLifecycleAttempts: []
 };
 var XIAOHONGSHU_OCR_MAX_IMAGES = 18;
 var XIAOHONGSHU_OCR_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -4781,6 +4828,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.tencentPollIntervalMs = Math.max(1e3, Number.isFinite(pollIntervalMs) ? pollIntervalMs : DEFAULT_SETTINGS.tencentPollIntervalMs);
   merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
     merged.locallyQuarantinedRecordIds
+  );
+  merged.pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(
+    merged.pendingSyncLifecycleAttempts
   );
   return merged;
 }
@@ -19074,6 +19124,84 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       binding
     );
   }
+  async persistPendingSyncLifecycleAttempts(value) {
+    const pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(value);
+    this.settings = {
+      ...this.settings,
+      pendingSyncLifecycleAttempts
+    };
+    if (typeof this.saveData === "function") {
+      await this.saveData(this.settings);
+    }
+    return pendingSyncLifecycleAttempts;
+  }
+  async upsertPendingSyncLifecycleAttempt(binding, value = {}) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const recordId = String(value.recordId || "").trim();
+    const attemptId = String(value.attemptId || "").trim();
+    if (!bindingFingerprint || !recordId || !attemptId) return null;
+    const current = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts);
+    const previous = current.find((item) => item.bindingFingerprint === bindingFingerprint && item.recordId === recordId);
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const next = normalizePendingSyncLifecycleAttempts([
+      ...current.filter((item) => !(item.bindingFingerprint === bindingFingerprint && item.recordId === recordId)),
+      {
+        recordId,
+        attemptId,
+        bindingFingerprint,
+        stage: value.stage || "processing",
+        code: value.code,
+        noteTitle: value.noteTitle,
+        createdAt: previous && previous.createdAt ? previous.createdAt : now,
+        updatedAt: now
+      }
+    ]);
+    await this.persistPendingSyncLifecycleAttempts(next);
+    return next.find((item) => item.bindingFingerprint === bindingFingerprint && item.recordId === recordId) || null;
+  }
+  async clearPendingSyncLifecycleAttempt(binding, recordId) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const normalizedRecordId = String(recordId || "").trim();
+    if (!bindingFingerprint || !normalizedRecordId) return false;
+    const current = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts);
+    const next = current.filter((item) => !(item.bindingFingerprint === bindingFingerprint && item.recordId === normalizedRecordId));
+    if (next.length === current.length) return false;
+    await this.persistPendingSyncLifecycleAttempts(next);
+    return true;
+  }
+  async replayPendingSyncLifecycleAttempts(binding) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    if (!bindingFingerprint) return { replayed: 0, retained: 0 };
+    const attempts = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts).filter((item) => item.bindingFingerprint === bindingFingerprint);
+    let replayed = 0;
+    for (const item of attempts) {
+      try {
+        if (item.stage === "committed") {
+          await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || "", binding, {
+            enabled: true,
+            attemptId: item.attemptId
+          });
+        } else {
+          await this.reportSyncLifecycleStatus(item.recordId, {
+            status: "failed",
+            attemptId: item.attemptId,
+            code: item.stage === "failed" ? item.code || "SYNC_FAILED" : "SYNC_INTERRUPTED"
+          }, binding);
+        }
+        await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+        replayed += 1;
+      } catch (error) {
+        if (isRecordNotFoundError(error) || isLegacySyncLifecycleError(error) || isSyncRecordBusyError(error)) {
+          try {
+            await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+          } catch (clearError) {
+          }
+        }
+      }
+    }
+    const retained = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts).filter((item) => item.bindingFingerprint === bindingFingerprint).length;
+    return { replayed, retained };
+  }
   async claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised) {
     if (!lifecycleAdvertised) return { enabled: false };
     try {
@@ -19133,6 +19261,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   }
   async syncBinding(binding, shouldPrefixTitle) {
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
+    await this.replayPendingSyncLifecycleAttempts(binding);
     this.showSyncProgress({ bindingLabel, stage: "fetching" });
     const payload = await this.requestJson("/records?status=pending", "GET", {}, binding);
     const records = payload.data || [];
@@ -19190,6 +19319,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           skipped.push({ recordId, reason: "record-busy" });
           continue;
         }
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          await this.upsertPendingSyncLifecycleAttempt(binding, {
+            recordId,
+            attemptId: lifecycle.attemptId,
+            stage: "processing"
+          });
+        }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           skipped.push({
@@ -19198,13 +19334,25 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             filePath: existingFilePath
           });
           this.showSyncProgress({ ...progress, stage: "marking", title: buildRecordTitleBase(record) });
+          const existingNoteTitle = getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record);
+          if (lifecycle.enabled && lifecycle.attemptId) {
+            await this.upsertPendingSyncLifecycleAttempt(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              stage: "committed",
+              noteTitle: existingNoteTitle
+            });
+          }
           const completionWarning2 = await this.reportSyncRecordCompletionBestEffort(
             recordId,
-            getSyncNoteTitleFromPath(existingFilePath) || buildRecordTitleBase(record),
+            existingNoteTitle,
             binding,
             lifecycle
           );
           if (completionWarning2) completionWarnings.push({ recordId, ...completionWarning2 });
+          else if (lifecycle.enabled && lifecycle.attemptId) {
+            await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+          }
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -19215,6 +19363,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
+        if (lifecycle.enabled && lifecycle.attemptId) {
+          await this.upsertPendingSyncLifecycleAttempt(binding, {
+            recordId: item.recordId,
+            attemptId: lifecycle.attemptId,
+            stage: "committed",
+            noteTitle: item.title
+          });
+        }
         this.showSyncProgress({ ...progress, stage: "marking", title: item.title });
         const completionWarning = await this.reportSyncRecordCompletionBestEffort(
           item.recordId,
@@ -19223,6 +19379,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           lifecycle
         );
         if (completionWarning) completionWarnings.push({ recordId: item.recordId, ...completionWarning });
+        else if (lifecycle.enabled && lifecycle.attemptId) {
+          await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+        }
       } catch (error) {
         const message = error.message || String(error);
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
@@ -19253,8 +19412,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         let lifecycleReportError = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
+          const failureCode = categorizeSyncFailure(error);
+          try {
+            await this.upsertPendingSyncLifecycleAttempt(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              stage: "failed",
+              code: failureCode
+            });
+          } catch (persistError) {
+          }
           try {
             await this.reportSyncRecordFailure(recordId, lifecycle.attemptId, error, binding);
+            try {
+              await this.clearPendingSyncLifecycleAttempt(binding, recordId);
+            } catch (clearError) {
+            }
           } catch (reportError) {
             lifecycleReportError = {
               code: "STATUS_REPORT_FAILED",
@@ -19745,8 +19918,10 @@ __name(_WechatInboxSettingTab, "WechatInboxSettingTab");
 var WechatInboxSettingTab = _WechatInboxSettingTab;
 WechatObsidianInboxPlugin.__test = {
   categorizeSyncFailure,
+  getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   isExistingLocalNoteDeliverable,
+  normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   XIAOHONGSHU_COMMENT_TIMEOUT_MS,
