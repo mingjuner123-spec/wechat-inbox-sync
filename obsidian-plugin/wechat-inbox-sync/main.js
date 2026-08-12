@@ -3354,7 +3354,7 @@ var {
 });
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.80";
+var PLUGIN_RUNTIME_VERSION = "1.3.81";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -15096,7 +15096,29 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       blockCount: Number(data && data.blockCount || blocks.length) || blocks.length,
       imageTmpDownloadUrls: data && data.imageTmpDownloadUrls && typeof data.imageTmpDownloadUrls === "object" ? data.imageTmpDownloadUrls : {},
       imageTokenCount: Number(data && data.imageTokenCount || 0) || 0,
+      imageTokens: Array.isArray(data && data.imageTokens) ? data.imageTokens.map((item) => String(item || "").trim()).filter(Boolean) : [],
       imageDownloadError: String(data && data.imageDownloadError || "").trim()
+    };
+  }
+  async fetchFeishuCloudMediaDataUrl(fileToken, binding = null) {
+    const token = String(fileToken || "").trim();
+    if (!token) throw new Error("飞书图片标识为空");
+    const payload = await this.requestJson(
+      "/feishu/media",
+      "POST",
+      this.withFeishuCustomAppConfig({ fileToken: token }),
+      binding || void 0
+    );
+    const data = payload && payload.data ? payload.data : payload;
+    const dataUrl = String(data && data.dataUrl || "").trim();
+    if (!/^data:image\//i.test(dataUrl)) {
+      throw new Error("飞书图片下载未返回有效图片数据");
+    }
+    return {
+      fileToken: token,
+      dataUrl,
+      contentType: String(data && data.contentType || "").trim(),
+      bytes: Number(data && data.bytes || 0) || 0
     };
   }
   async requestFeishuJsonWithBindingFallback(path2, method = "GET", body = {}, binding = null) {
@@ -18208,6 +18230,23 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || "飞书文档";
+            const imageTokens = Array.from(new Set((cloudOpenApiResult.imageTokens || []).map((item) => String(item || "").trim()).filter(Boolean)));
+            const imageDataAssets = [];
+            const imageDataErrors = [];
+            for (const imageToken of imageTokens) {
+              try {
+                const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
+                imageDataAssets.push({
+                  token: imageToken,
+                  src: String(
+                    cloudOpenApiResult.imageTmpDownloadUrls[imageToken] || buildFeishuImageFallbackUrl(imageToken, url) || `https://feishu.local/media/${encodeURIComponent(imageToken)}`
+                  ),
+                  dataUrl: downloaded.dataUrl
+                });
+              } catch (error) {
+                imageDataErrors.push(String(error && (error.message || error) || "unknown error"));
+              }
+            }
             let cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
                 dedupe: true,
@@ -18217,16 +18256,37 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               url,
               cloudOpenApiResult.imageTmpDownloadUrls || {}
             );
+            const tokenUrlMap = Object.fromEntries(imageDataAssets.map((asset) => [
+              asset.token,
+              asset.src
+            ]));
+            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanedCloudOpenApiMarkdown,
+              imageDataAssets,
+              url,
+              tokenUrlMap
+            );
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
             const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {}).filter((value) => /^https?:\/\//i.test(String(value || "").trim())).length;
-            const missingImageTempUrlCount = Math.max(0, imageTokenCount - imageTempUrlCount);
+            const missingImageTempUrlCount = Math.max(
+              0,
+              imageTokenCount - imageTempUrlCount - imageDataAssets.length
+            );
             const imageLocalizationErrors2 = [];
+            cleanedCloudOpenApiMarkdown = await this.saveWebpageImageAssets(
+              cleanedCloudOpenApiMarkdown,
+              imageDataAssets,
+              rootDir,
+              dateFolder,
+              feishuTitle
+            );
             cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
               cleanedCloudOpenApiMarkdown,
               rootDir,
               dateFolder,
               feishuTitle,
               {
+                sourceUrl: url,
                 onError: /* @__PURE__ */ __name(({ error }) => {
                   imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
                 }, "onError")
@@ -18241,14 +18301,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 conversionStatus: "success",
                 conversionSource: "feishu-cloud-oauth",
                 imageTempUrlMissingCount: missingImageTempUrlCount,
-                imageLocalizationFailedCount: imageLocalizationErrors2.length,
-                imageLocalizationError: imageLocalizationErrors2.slice(0, 3).join(" | "),
+                imageLocalizationFailedCount: imageDataErrors.length + imageLocalizationErrors2.length,
+                imageLocalizationError: [...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | "),
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
-                  imageLocalizationErrors2.length ? `image-localize-failed=${imageLocalizationErrors2.length}: ${imageLocalizationErrors2.slice(0, 3).join(" | ")}` : ""
+                  imageDataErrors.length + imageLocalizationErrors2.length ? `image-localize-failed=${imageDataErrors.length + imageLocalizationErrors2.length}: ${[...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | ")}` : ""
                 ].filter(Boolean).join("; ")
               })
             };

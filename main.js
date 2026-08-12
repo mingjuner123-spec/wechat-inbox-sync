@@ -9,6 +9,187 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/platform-url-utils.js
+var require_platform_url_utils = __commonJS({
+  "src/platform-url-utils.js"(exports2, module2) {
+    "use strict";
+    function isFeishuUrl2(url) {
+      const text = String(url || "").toLowerCase();
+      return text.includes("feishu.cn") || text.includes("larksuite.com") || text.includes("feishu.net") || text.includes("feishu");
+    }
+    __name(isFeishuUrl2, "isFeishuUrl");
+    function isWechatArticleUrl2(url) {
+      const text = String(url || "").toLowerCase();
+      return text.includes("mp.weixin.qq.com") || text.includes("weixin.qq.com");
+    }
+    __name(isWechatArticleUrl2, "isWechatArticleUrl");
+    function isWechatMpArticleUrl2(url) {
+      const source = String(url || "").trim();
+      if (!source) return false;
+      try {
+        const parsed = new URL(source);
+        return /(^|\.)mp\.weixin\.qq\.com$/i.test(parsed.hostname);
+      } catch (error) {
+        return source.toLowerCase().includes("mp.weixin.qq.com");
+      }
+    }
+    __name(isWechatMpArticleUrl2, "isWechatMpArticleUrl");
+    function isWechatCaptchaUrl2(url) {
+      return /\/mp\/wappoc_appmsgcaptcha\b/i.test(String(url || ""));
+    }
+    __name(isWechatCaptchaUrl2, "isWechatCaptchaUrl");
+    function getHttpUrlHostname2(url) {
+      try {
+        const parsed = new URL(String(url || "").trim());
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+        return String(parsed.hostname || "").toLowerCase().replace(/\.$/, "");
+      } catch (error) {
+        return "";
+      }
+    }
+    __name(getHttpUrlHostname2, "getHttpUrlHostname");
+    function isHostnameWithinDomain2(hostname, domain) {
+      const host = String(hostname || "").toLowerCase().replace(/\.$/, "");
+      const root = String(domain || "").toLowerCase().replace(/\.$/, "");
+      return Boolean(host && root && (host === root || host.endsWith(`.${root}`)));
+    }
+    __name(isHostnameWithinDomain2, "isHostnameWithinDomain");
+    function isXiaohongshuUrl2(url) {
+      const hostname = getHttpUrlHostname2(url);
+      return isHostnameWithinDomain2(hostname, "xiaohongshu.com") || isHostnameWithinDomain2(hostname, "xhslink.com") || isHostnameWithinDomain2(hostname, "xhslink.cn");
+    }
+    __name(isXiaohongshuUrl2, "isXiaohongshuUrl");
+    function isXiaohongshuShortLinkUrl2(url) {
+      const hostname = getHttpUrlHostname2(url);
+      return isHostnameWithinDomain2(hostname, "xhslink.com") || isHostnameWithinDomain2(hostname, "xhslink.cn");
+    }
+    __name(isXiaohongshuShortLinkUrl2, "isXiaohongshuShortLinkUrl");
+    function isTrustedXiaohongshuCookieUrl2(url) {
+      try {
+        const parsed = new URL(String(url || "").trim());
+        return parsed.protocol === "https:" && !parsed.username && !parsed.password && (!parsed.port || parsed.port === "443") && isHostnameWithinDomain2(parsed.hostname, "xiaohongshu.com");
+      } catch (error) {
+        return false;
+      }
+    }
+    __name(isTrustedXiaohongshuCookieUrl2, "isTrustedXiaohongshuCookieUrl");
+    function isTrustedXiaohongshuTransportUrl2(url) {
+      try {
+        const parsed = new URL(String(url || "").trim());
+        return parsed.protocol === "https:" && !parsed.username && !parsed.password && (!parsed.port || parsed.port === "443") && (isHostnameWithinDomain2(parsed.hostname, "xiaohongshu.com") || isHostnameWithinDomain2(parsed.hostname, "xhslink.com") || isHostnameWithinDomain2(parsed.hostname, "xhslink.cn"));
+      } catch (error) {
+        return false;
+      }
+    }
+    __name(isTrustedXiaohongshuTransportUrl2, "isTrustedXiaohongshuTransportUrl");
+    function isDouyinUrl2(url) {
+      const text = String(url || "").toLowerCase();
+      return text.includes("douyin.com") || text.includes("iesdouyin.com") || text.includes("amemv.com");
+    }
+    __name(isDouyinUrl2, "isDouyinUrl");
+    function isDouyinMediaUrl2(url) {
+      return /douyinvod\.com|zjcdn\.com\/tos-|snssdk\.com\/aweme\/v1\/play|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ""));
+    }
+    __name(isDouyinMediaUrl2, "isDouyinMediaUrl");
+    function isBilibiliUrl2(url) {
+      const text = String(url || "").toLowerCase();
+      return text.includes("bilibili.com") || text.includes("b23.tv");
+    }
+    __name(isBilibiliUrl2, "isBilibiliUrl");
+    function isXiaoyuzhouUrl2(url) {
+      const text = String(url || "").toLowerCase();
+      return text.includes("xiaoyuzhoufm.com") || text.includes("xiaoyuzhou.com");
+    }
+    __name(isXiaoyuzhouUrl2, "isXiaoyuzhouUrl");
+    function isWechatChannelsUrl2(url) {
+      const text = String(url || "").toLowerCase();
+      return text.includes("channels.weixin.qq.com") || /(^|\/\/)weixin\.qq\.com\/sph\//i.test(text);
+    }
+    __name(isWechatChannelsUrl2, "isWechatChannelsUrl");
+    function isWechatChannelsMediaUrl2(url) {
+      return /finder\.video\.qq\.com|mpvideo\.qpic\.cn|(^|[./-])mpvideo/i.test(String(url || ""));
+    }
+    __name(isWechatChannelsMediaUrl2, "isWechatChannelsMediaUrl");
+    function shouldHydrateLinkAsWebpage2(url) {
+      return isWechatMpArticleUrl2(url) || isFeishuUrl2(url) || isXiaohongshuUrl2(url) || isDouyinUrl2(url) || isBilibiliUrl2(url) || isXiaoyuzhouUrl2(url);
+    }
+    __name(shouldHydrateLinkAsWebpage2, "shouldHydrateLinkAsWebpage");
+    function isSafeAutomaticWebpageUrl2(url) {
+      try {
+        const parsed = new URL(String(url || "").trim());
+        if (!["http:", "https:"].includes(parsed.protocol)) return false;
+        if (parsed.username || parsed.password) return false;
+        return Boolean(parsed.hostname);
+      } catch (error) {
+        return false;
+      }
+    }
+    __name(isSafeAutomaticWebpageUrl2, "isSafeAutomaticWebpageUrl");
+    function isTrustedAutomaticPlatformUrl2(url) {
+      const hostname = getHttpUrlHostname2(url);
+      return isHostnameWithinDomain2(hostname, "mp.weixin.qq.com") || isHostnameWithinDomain2(hostname, "feishu.cn") || isHostnameWithinDomain2(hostname, "feishu.net") || isHostnameWithinDomain2(hostname, "larksuite.com") || isHostnameWithinDomain2(hostname, "xiaohongshu.com") || isHostnameWithinDomain2(hostname, "xhslink.com") || isHostnameWithinDomain2(hostname, "xhslink.cn") || isHostnameWithinDomain2(hostname, "douyin.com") || isHostnameWithinDomain2(hostname, "iesdouyin.com") || isHostnameWithinDomain2(hostname, "amemv.com") || isHostnameWithinDomain2(hostname, "bilibili.com") || isHostnameWithinDomain2(hostname, "b23.tv") || isHostnameWithinDomain2(hostname, "xiaoyuzhoufm.com") || isHostnameWithinDomain2(hostname, "xiaoyuzhou.com");
+    }
+    __name(isTrustedAutomaticPlatformUrl2, "isTrustedAutomaticPlatformUrl");
+    module2.exports = {
+      getHttpUrlHostname: getHttpUrlHostname2,
+      isBilibiliUrl: isBilibiliUrl2,
+      isDouyinMediaUrl: isDouyinMediaUrl2,
+      isDouyinUrl: isDouyinUrl2,
+      isFeishuUrl: isFeishuUrl2,
+      isHostnameWithinDomain: isHostnameWithinDomain2,
+      isSafeAutomaticWebpageUrl: isSafeAutomaticWebpageUrl2,
+      isTrustedAutomaticPlatformUrl: isTrustedAutomaticPlatformUrl2,
+      isTrustedXiaohongshuCookieUrl: isTrustedXiaohongshuCookieUrl2,
+      isTrustedXiaohongshuTransportUrl: isTrustedXiaohongshuTransportUrl2,
+      isWechatArticleUrl: isWechatArticleUrl2,
+      isWechatCaptchaUrl: isWechatCaptchaUrl2,
+      isWechatChannelsMediaUrl: isWechatChannelsMediaUrl2,
+      isWechatChannelsUrl: isWechatChannelsUrl2,
+      isWechatMpArticleUrl: isWechatMpArticleUrl2,
+      isXiaohongshuShortLinkUrl: isXiaohongshuShortLinkUrl2,
+      isXiaohongshuUrl: isXiaohongshuUrl2,
+      isXiaoyuzhouUrl: isXiaoyuzhouUrl2,
+      shouldHydrateLinkAsWebpage: shouldHydrateLinkAsWebpage2
+    };
+  }
+});
+
+// src/platform-transcript-contract-utils.js
+var require_platform_transcript_contract_utils = __commonJS({
+  "src/platform-transcript-contract-utils.js"(exports2, module2) {
+    "use strict";
+    var PLATFORM_TRANSCRIPT_RESULT_KEYS = Object.freeze([
+      "url",
+      "platform",
+      "mediaUrl",
+      "mediaUrls",
+      "subtitleText",
+      "subtitleUrl",
+      "source",
+      "markdown",
+      "binding",
+      "title",
+      "sourceTitle",
+      "socialMetrics"
+    ]);
+    function buildPlatformTranscriptResult2(value) {
+      const source = value && typeof value === "object" ? value : {};
+      const result = {};
+      for (const key of PLATFORM_TRANSCRIPT_RESULT_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(source, key)) {
+          result[key] = source[key];
+        }
+      }
+      return result;
+    }
+    __name(buildPlatformTranscriptResult2, "buildPlatformTranscriptResult");
+    module2.exports = {
+      PLATFORM_TRANSCRIPT_RESULT_KEYS,
+      buildPlatformTranscriptResult: buildPlatformTranscriptResult2
+    };
+  }
+});
+
 // src/date-utils.js
 var require_date_utils = __commonJS({
   "src/date-utils.js"(exports2, module2) {
@@ -2266,6 +2447,91 @@ var require_media_file_utils = __commonJS({
   }
 });
 
+// src/attachment-localization-utils.js
+var require_attachment_localization_utils = __commonJS({
+  "src/attachment-localization-utils.js"(exports2, module2) {
+    "use strict";
+    function escapeRegExp2(value) {
+      return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+    __name(escapeRegExp2, "escapeRegExp");
+    function normalizeImageAsset(asset = {}) {
+      return {
+        ...asset,
+        imageUrl: String(asset.imageUrl || "").trim(),
+        alt: String(asset.alt || "").trim(),
+        ext: String(asset.ext || "jpg").replace(/^\./, "").toLowerCase() || "jpg",
+        hash: String(asset.hash || "").trim()
+      };
+    }
+    __name(normalizeImageAsset, "normalizeImageAsset");
+    function buildImageLocalizationPlan2({
+      downloadedAssets = [],
+      imageDayDir = "",
+      safeTitle = "网页图片",
+      isWechatArticleSource = false,
+      isDecorativeAsset = /* @__PURE__ */ __name(() => false, "isDecorativeAsset")
+    } = {}) {
+      const imagePathByAssetKey = /* @__PURE__ */ new Map();
+      const replacementByUrl = /* @__PURE__ */ new Map();
+      const assetsToWrite = [];
+      const seenWechatAssetHashes = /* @__PURE__ */ new Set();
+      let index = 1;
+      for (const rawAsset of Array.isArray(downloadedAssets) ? downloadedAssets : []) {
+        const asset = normalizeImageAsset(rawAsset);
+        if (!asset.imageUrl) continue;
+        if (isWechatArticleSource && isDecorativeAsset(asset)) {
+          replacementByUrl.set(asset.imageUrl, "");
+          continue;
+        }
+        const assetKey = isWechatArticleSource ? asset.hash : asset.imageUrl;
+        if (isWechatArticleSource && seenWechatAssetHashes.has(asset.hash)) {
+          replacementByUrl.set(asset.imageUrl, "");
+          continue;
+        }
+        if (isWechatArticleSource) seenWechatAssetHashes.add(asset.hash);
+        let imagePath = imagePathByAssetKey.get(assetKey) || "";
+        if (!imagePath) {
+          imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, "0")}.${asset.ext}`;
+          imagePathByAssetKey.set(assetKey, imagePath);
+          assetsToWrite.push({ ...asset, path: imagePath });
+          index += 1;
+        }
+        replacementByUrl.set(asset.imageUrl, imagePath);
+      }
+      return {
+        assetsToWrite,
+        replacementByUrl: Array.from(replacementByUrl.entries()),
+        isWechatArticleSource: Boolean(isWechatArticleSource)
+      };
+    }
+    __name(buildImageLocalizationPlan2, "buildImageLocalizationPlan");
+    function applyImageLocalizationPlan2(markdown, plan = {}) {
+      let nextMarkdown = String(markdown || "");
+      for (const [imageUrl, imagePath] of Array.isArray(plan.replacementByUrl) ? plan.replacementByUrl : []) {
+        const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp2(imageUrl)}\\)`, "g");
+        nextMarkdown = nextMarkdown.replace(pattern, imagePath ? `![[${imagePath}]]` : "");
+      }
+      if (plan.isWechatArticleSource) {
+        const seenLocalizedImagePaths = /* @__PURE__ */ new Set();
+        nextMarkdown = nextMarkdown.replace(/!\[\[([^\]]+)\]\]/g, (match, imagePath) => {
+          if (seenLocalizedImagePaths.has(imagePath)) return "";
+          seenLocalizedImagePaths.add(imagePath);
+          return match;
+        });
+        return nextMarkdown.replace(/\n{3,}/g, "\n\n");
+      }
+      return nextMarkdown;
+    }
+    __name(applyImageLocalizationPlan2, "applyImageLocalizationPlan");
+    module2.exports = {
+      applyImageLocalizationPlan: applyImageLocalizationPlan2,
+      buildImageLocalizationPlan: buildImageLocalizationPlan2,
+      normalizeImageAsset
+    };
+  }
+});
+
 // src/document-text-extraction-utils.js
 var require_document_text_extraction_utils = __commonJS({
   "src/document-text-extraction-utils.js"(exports2, module2) {
@@ -3205,6 +3471,30 @@ var {
   requestUrl
 } = require("obsidian");
 var {
+  getHttpUrlHostname,
+  isBilibiliUrl,
+  isDouyinMediaUrl,
+  isDouyinUrl,
+  isFeishuUrl,
+  isHostnameWithinDomain,
+  isSafeAutomaticWebpageUrl,
+  isTrustedAutomaticPlatformUrl,
+  isTrustedXiaohongshuCookieUrl,
+  isTrustedXiaohongshuTransportUrl,
+  isWechatArticleUrl,
+  isWechatCaptchaUrl,
+  isWechatChannelsMediaUrl,
+  isWechatChannelsUrl,
+  isWechatMpArticleUrl,
+  isXiaohongshuShortLinkUrl,
+  isXiaohongshuUrl,
+  isXiaoyuzhouUrl,
+  shouldHydrateLinkAsWebpage
+} = require_platform_url_utils();
+var {
+  buildPlatformTranscriptResult
+} = require_platform_transcript_contract_utils();
+var {
   formatCreatedTime,
   getChinaTimeParts,
   getDateFolderName,
@@ -3326,6 +3616,10 @@ var {
   sanitizeAttachmentName,
   toNodeBuffer
 } = require_media_file_utils();
+var {
+  applyImageLocalizationPlan,
+  buildImageLocalizationPlan
+} = require_attachment_localization_utils();
 var { createDocumentTextExtractionHelpers } = require_document_text_extraction_utils();
 var {
   createAiMetadataHelpers,
@@ -3354,7 +3648,7 @@ var {
 });
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.80";
+var PLUGIN_RUNTIME_VERSION = "1.3.81";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -5491,16 +5785,6 @@ function escapeRegExp(text) {
   return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 __name(escapeRegExp, "escapeRegExp");
-function isFeishuUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("feishu.cn") || text.includes("larksuite.com") || text.includes("feishu.net") || text.includes("feishu");
-}
-__name(isFeishuUrl, "isFeishuUrl");
-function isWechatArticleUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("mp.weixin.qq.com") || text.includes("weixin.qq.com");
-}
-__name(isWechatArticleUrl, "isWechatArticleUrl");
 function isWechatExplicitDecorativeImageAsset(asset) {
   if (!asset) return false;
   const alt = String(asset.alt || "").trim();
@@ -5515,21 +5799,6 @@ function isWechatExplicitDecorativeImageAsset(asset) {
   return width > 0 && height > 0 && Math.max(width, height) <= 256;
 }
 __name(isWechatExplicitDecorativeImageAsset, "isWechatExplicitDecorativeImageAsset");
-function isWechatMpArticleUrl(url) {
-  const source = String(url || "").trim();
-  if (!source) return false;
-  try {
-    const parsed = new URL(source);
-    return /(^|\.)mp\.weixin\.qq\.com$/i.test(parsed.hostname);
-  } catch (error) {
-    return source.toLowerCase().includes("mp.weixin.qq.com");
-  }
-}
-__name(isWechatMpArticleUrl, "isWechatMpArticleUrl");
-function isWechatCaptchaUrl(url) {
-  return /\/mp\/wappoc_appmsgcaptcha\b/i.test(String(url || ""));
-}
-__name(isWechatCaptchaUrl, "isWechatCaptchaUrl");
 function decodeUrlComponentSafely(value) {
   let text = decodeHtmlEntities(String(value || "")).trim();
   for (let index = 0; index < 2; index += 1) {
@@ -5575,59 +5844,6 @@ function cleanDisplayUrl(url) {
   }
 }
 __name(cleanDisplayUrl, "cleanDisplayUrl");
-function getHttpUrlHostname(url) {
-  try {
-    const parsed = new URL(String(url || "").trim());
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    return String(parsed.hostname || "").toLowerCase().replace(/\.$/, "");
-  } catch (error) {
-    return "";
-  }
-}
-__name(getHttpUrlHostname, "getHttpUrlHostname");
-function isHostnameWithinDomain(hostname, domain) {
-  const host = String(hostname || "").toLowerCase().replace(/\.$/, "");
-  const root = String(domain || "").toLowerCase().replace(/\.$/, "");
-  return Boolean(host && root && (host === root || host.endsWith(`.${root}`)));
-}
-__name(isHostnameWithinDomain, "isHostnameWithinDomain");
-function isXiaohongshuUrl(url) {
-  const hostname = getHttpUrlHostname(url);
-  return isHostnameWithinDomain(hostname, "xiaohongshu.com") || isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn");
-}
-__name(isXiaohongshuUrl, "isXiaohongshuUrl");
-function isXiaohongshuShortLinkUrl(url) {
-  const hostname = getHttpUrlHostname(url);
-  return isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn");
-}
-__name(isXiaohongshuShortLinkUrl, "isXiaohongshuShortLinkUrl");
-function isTrustedXiaohongshuCookieUrl(url) {
-  try {
-    const parsed = new URL(String(url || "").trim());
-    return parsed.protocol === "https:" && !parsed.username && !parsed.password && (!parsed.port || parsed.port === "443") && isHostnameWithinDomain(parsed.hostname, "xiaohongshu.com");
-  } catch (error) {
-    return false;
-  }
-}
-__name(isTrustedXiaohongshuCookieUrl, "isTrustedXiaohongshuCookieUrl");
-function isTrustedXiaohongshuTransportUrl(url) {
-  try {
-    const parsed = new URL(String(url || "").trim());
-    return parsed.protocol === "https:" && !parsed.username && !parsed.password && (!parsed.port || parsed.port === "443") && (isHostnameWithinDomain(parsed.hostname, "xiaohongshu.com") || isHostnameWithinDomain(parsed.hostname, "xhslink.com") || isHostnameWithinDomain(parsed.hostname, "xhslink.cn"));
-  } catch (error) {
-    return false;
-  }
-}
-__name(isTrustedXiaohongshuTransportUrl, "isTrustedXiaohongshuTransportUrl");
-function isDouyinUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("douyin.com") || text.includes("iesdouyin.com") || text.includes("amemv.com");
-}
-__name(isDouyinUrl, "isDouyinUrl");
-function isDouyinMediaUrl(url) {
-  return /douyinvod\.com|zjcdn\.com\/tos-|snssdk\.com\/aweme\/v1\/play|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ""));
-}
-__name(isDouyinMediaUrl, "isDouyinMediaUrl");
 function extractDouyinAwemeId(url) {
   const text = String(url || "");
   const patterns = [
@@ -5865,26 +6081,7 @@ function shouldResolveMediaDownloadUrl(url) {
   return text.includes("/aweme/v1/play") || text.includes("v.douyin.com") || text.includes("iesdouyin.com/share/video") || text.includes("amemv.com");
 }
 __name(shouldResolveMediaDownloadUrl, "shouldResolveMediaDownloadUrl");
-function isBilibiliUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("bilibili.com") || text.includes("b23.tv");
-}
-__name(isBilibiliUrl, "isBilibiliUrl");
-function isXiaoyuzhouUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("xiaoyuzhoufm.com") || text.includes("xiaoyuzhou.com");
-}
-__name(isXiaoyuzhouUrl, "isXiaoyuzhouUrl");
 var WECHAT_CHANNELS_FEED_INFO_URL = "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info";
-function isWechatChannelsUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("channels.weixin.qq.com") || /(^|\/\/)weixin\.qq\.com\/sph\//i.test(text);
-}
-__name(isWechatChannelsUrl, "isWechatChannelsUrl");
-function isWechatChannelsMediaUrl(url) {
-  return /finder\.video\.qq\.com|mpvideo\.qpic\.cn|(^|[./-])mpvideo/i.test(String(url || ""));
-}
-__name(isWechatChannelsMediaUrl, "isWechatChannelsMediaUrl");
 function extractWechatChannelsRequestPayload(url) {
   const source = String(url || "").trim();
   try {
@@ -5914,26 +6111,6 @@ function extractWechatChannelsRequestPayload(url) {
   return {};
 }
 __name(extractWechatChannelsRequestPayload, "extractWechatChannelsRequestPayload");
-function shouldHydrateLinkAsWebpage(url) {
-  return isWechatMpArticleUrl(url) || isFeishuUrl(url) || isXiaohongshuUrl(url) || isDouyinUrl(url) || isBilibiliUrl(url) || isXiaoyuzhouUrl(url);
-}
-__name(shouldHydrateLinkAsWebpage, "shouldHydrateLinkAsWebpage");
-function isSafeAutomaticWebpageUrl(url) {
-  try {
-    const parsed = new URL(String(url || "").trim());
-    if (!["http:", "https:"].includes(parsed.protocol)) return false;
-    if (parsed.username || parsed.password) return false;
-    return Boolean(parsed.hostname);
-  } catch (error) {
-    return false;
-  }
-}
-__name(isSafeAutomaticWebpageUrl, "isSafeAutomaticWebpageUrl");
-function isTrustedAutomaticPlatformUrl(url) {
-  const hostname = getHttpUrlHostname(url);
-  return isHostnameWithinDomain(hostname, "mp.weixin.qq.com") || isHostnameWithinDomain(hostname, "feishu.cn") || isHostnameWithinDomain(hostname, "feishu.net") || isHostnameWithinDomain(hostname, "larksuite.com") || isHostnameWithinDomain(hostname, "xiaohongshu.com") || isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn") || isHostnameWithinDomain(hostname, "douyin.com") || isHostnameWithinDomain(hostname, "iesdouyin.com") || isHostnameWithinDomain(hostname, "amemv.com") || isHostnameWithinDomain(hostname, "bilibili.com") || isHostnameWithinDomain(hostname, "b23.tv") || isHostnameWithinDomain(hostname, "xiaoyuzhoufm.com") || isHostnameWithinDomain(hostname, "xiaoyuzhou.com");
-}
-__name(isTrustedAutomaticPlatformUrl, "isTrustedAutomaticPlatformUrl");
 function extractAutomaticWebpageUrlCandidates(text) {
   const matches = String(text || "").match(/https?:\/\/[a-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+/gi) || [];
   const unique = [];
@@ -15096,7 +15273,29 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       blockCount: Number(data && data.blockCount || blocks.length) || blocks.length,
       imageTmpDownloadUrls: data && data.imageTmpDownloadUrls && typeof data.imageTmpDownloadUrls === "object" ? data.imageTmpDownloadUrls : {},
       imageTokenCount: Number(data && data.imageTokenCount || 0) || 0,
+      imageTokens: Array.isArray(data && data.imageTokens) ? data.imageTokens.map((item) => String(item || "").trim()).filter(Boolean) : [],
       imageDownloadError: String(data && data.imageDownloadError || "").trim()
+    };
+  }
+  async fetchFeishuCloudMediaDataUrl(fileToken, binding = null) {
+    const token = String(fileToken || "").trim();
+    if (!token) throw new Error("飞书图片标识为空");
+    const payload = await this.requestJson(
+      "/feishu/media",
+      "POST",
+      this.withFeishuCustomAppConfig({ fileToken: token }),
+      binding || void 0
+    );
+    const data = payload && payload.data ? payload.data : payload;
+    const dataUrl = String(data && data.dataUrl || "").trim();
+    if (!/^data:image\//i.test(dataUrl)) {
+      throw new Error("飞书图片下载未返回有效图片数据");
+    }
+    return {
+      fileToken: token,
+      dataUrl,
+      contentType: String(data && data.contentType || "").trim(),
+      bytes: Number(data && data.bytes || 0) || 0
     };
   }
   async requestFeishuJsonWithBindingFallback(path2, method = "GET", body = {}, binding = null) {
@@ -17620,7 +17819,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (!imageMatches.length) return nextMarkdown;
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
-    let index = 1;
     const downloadedByUrl = /* @__PURE__ */ new Map();
     const safeTitle = sanitizeAttachmentName(title, "网页图片");
     try {
@@ -17655,45 +17853,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
       }
     }
-    const imagePathByAssetKey = /* @__PURE__ */ new Map();
-    const replacementByUrl = /* @__PURE__ */ new Map();
-    const seenWechatAssetHashes = /* @__PURE__ */ new Set();
-    for (const asset of downloadedByUrl.values()) {
-      if (isWechatArticleSource && isWechatExplicitDecorativeImageAsset(asset)) {
-        replacementByUrl.set(asset.imageUrl, "");
-        continue;
-      }
-      if (isWechatArticleSource && seenWechatAssetHashes.has(asset.hash)) {
-        replacementByUrl.set(asset.imageUrl, "");
-        continue;
-      }
-      if (isWechatArticleSource) {
-        seenWechatAssetHashes.add(asset.hash);
-      }
-      const assetKey = isWechatArticleSource ? asset.hash : asset.imageUrl;
-      let imagePath = imagePathByAssetKey.get(assetKey) || "";
-      if (!imagePath) {
-        imagePath = `${imageDayDir}/${safeTitle}-image-${String(index).padStart(2, "0")}.${asset.ext}`;
-        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), asset.buffer);
-        imagePathByAssetKey.set(assetKey, imagePath);
-        index += 1;
-      }
-      replacementByUrl.set(asset.imageUrl, imagePath);
-    }
-    replacementByUrl.forEach((imagePath, imageUrl) => {
-      const pattern = new RegExp(`!\\[([^\\]]*)\\]\\(${escapeRegExp(imageUrl)}\\)`, "g");
-      nextMarkdown = nextMarkdown.replace(pattern, imagePath ? `![[${imagePath}]]` : "");
+    const localizationPlan = buildImageLocalizationPlan({
+      downloadedAssets: Array.from(downloadedByUrl.values()),
+      imageDayDir,
+      safeTitle,
+      isWechatArticleSource,
+      isDecorativeAsset: /* @__PURE__ */ __name((asset) => isWechatExplicitDecorativeImageAsset(asset), "isDecorativeAsset")
     });
-    if (isWechatArticleSource) {
-      const seenLocalizedImagePaths = /* @__PURE__ */ new Set();
-      nextMarkdown = nextMarkdown.replace(/!\[\[([^\]]+)\]\]/g, (match, imagePath) => {
-        if (seenLocalizedImagePaths.has(imagePath)) return "";
-        seenLocalizedImagePaths.add(imagePath);
-        return match;
-      });
-      return nextMarkdown.replace(/\n{3,}/g, "\n\n");
+    for (const asset of localizationPlan.assetsToWrite) {
+      await this.app.vault.adapter.writeBinary(normalizeVaultPath(asset.path), asset.buffer);
     }
-    return nextMarkdown;
+    return applyImageLocalizationPlan(nextMarkdown, localizationPlan);
   }
   async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
     rootDir = normalizeConfiguredVaultPath(rootDir);
@@ -17939,7 +18109,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, url);
     const pageMetadata = extractWebpageMetadataFromHtml(html, url);
     const mediaUrl = extractPodcastAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html);
-    return this.buildTranscriptRecordFromMedia(record, {
+    return this.buildTranscriptRecordFromMedia(record, buildPlatformTranscriptResult({
       url,
       platform: "小宇宙",
       mediaUrl,
@@ -17950,7 +18120,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       title,
       sourceTitle: pageMetadata.title,
       socialMetrics: extractSocialMetricsFromHtml(html)
-    });
+    }));
   }
   async fetchBilibiliSubtitleTextFromUrls(subtitleUrls) {
     for (const subtitleUrl of subtitleUrls || []) {
@@ -18040,7 +18210,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const subtitle = await this.fetchBilibiliSubtitleTextFromUrls(subtitleUrls);
     if (subtitle.transcription) {
-      return this.buildTranscriptRecordFromMedia(record, {
+      return this.buildTranscriptRecordFromMedia(record, buildPlatformTranscriptResult({
         url,
         platform: "B站",
         mediaUrl: progressiveVideoUrl,
@@ -18053,9 +18223,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         title,
         sourceTitle,
         socialMetrics: bilibiliSocialMetrics
-      });
+      }));
     }
-    return this.buildTranscriptRecordFromMedia(record, {
+    return this.buildTranscriptRecordFromMedia(record, buildPlatformTranscriptResult({
       url,
       platform: "B站",
       mediaUrl: playurlAudioUrl || extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
@@ -18066,7 +18236,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       title,
       sourceTitle,
       socialMetrics: bilibiliSocialMetrics
-    });
+    }));
   }
   async fetchWechatChannelsFeedInfo(url) {
     const payload = extractWechatChannelsRequestPayload(url);
@@ -18208,6 +18378,23 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || "飞书文档";
+            const imageTokens = Array.from(new Set((cloudOpenApiResult.imageTokens || []).map((item) => String(item || "").trim()).filter(Boolean)));
+            const imageDataAssets = [];
+            const imageDataErrors = [];
+            for (const imageToken of imageTokens) {
+              try {
+                const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
+                imageDataAssets.push({
+                  token: imageToken,
+                  src: String(
+                    cloudOpenApiResult.imageTmpDownloadUrls[imageToken] || buildFeishuImageFallbackUrl(imageToken, url) || `https://feishu.local/media/${encodeURIComponent(imageToken)}`
+                  ),
+                  dataUrl: downloaded.dataUrl
+                });
+              } catch (error) {
+                imageDataErrors.push(String(error && (error.message || error) || "unknown error"));
+              }
+            }
             let cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
                 dedupe: true,
@@ -18217,16 +18404,37 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               url,
               cloudOpenApiResult.imageTmpDownloadUrls || {}
             );
+            const tokenUrlMap = Object.fromEntries(imageDataAssets.map((asset) => [
+              asset.token,
+              asset.src
+            ]));
+            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanedCloudOpenApiMarkdown,
+              imageDataAssets,
+              url,
+              tokenUrlMap
+            );
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
             const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {}).filter((value) => /^https?:\/\//i.test(String(value || "").trim())).length;
-            const missingImageTempUrlCount = Math.max(0, imageTokenCount - imageTempUrlCount);
+            const missingImageTempUrlCount = Math.max(
+              0,
+              imageTokenCount - imageTempUrlCount - imageDataAssets.length
+            );
             const imageLocalizationErrors2 = [];
+            cleanedCloudOpenApiMarkdown = await this.saveWebpageImageAssets(
+              cleanedCloudOpenApiMarkdown,
+              imageDataAssets,
+              rootDir,
+              dateFolder,
+              feishuTitle
+            );
             cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
               cleanedCloudOpenApiMarkdown,
               rootDir,
               dateFolder,
               feishuTitle,
               {
+                sourceUrl: url,
                 onError: /* @__PURE__ */ __name(({ error }) => {
                   imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
                 }, "onError")
@@ -18241,14 +18449,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 conversionStatus: "success",
                 conversionSource: "feishu-cloud-oauth",
                 imageTempUrlMissingCount: missingImageTempUrlCount,
-                imageLocalizationFailedCount: imageLocalizationErrors2.length,
-                imageLocalizationError: imageLocalizationErrors2.slice(0, 3).join(" | "),
+                imageLocalizationFailedCount: imageDataErrors.length + imageLocalizationErrors2.length,
+                imageLocalizationError: [...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | "),
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
-                  imageLocalizationErrors2.length ? `image-localize-failed=${imageLocalizationErrors2.length}: ${imageLocalizationErrors2.slice(0, 3).join(" | ")}` : ""
+                  imageDataErrors.length + imageLocalizationErrors2.length ? `image-localize-failed=${imageDataErrors.length + imageLocalizationErrors2.length}: ${[...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | ")}` : ""
                 ].filter(Boolean).join("; ")
               })
             };
