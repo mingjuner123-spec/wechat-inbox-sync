@@ -12338,6 +12338,7 @@ async function runLocalAsrRepairDecisionTests() {
     localAsrInstallMode: 'default',
     localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\ADMIN\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
   }, 'win32');
+  commandRootPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
   const originalFsExistsSync = fs.existsSync;
   const originalFsReadFileSync = fs.readFileSync;
   fs.existsSync = (filePath) => {
