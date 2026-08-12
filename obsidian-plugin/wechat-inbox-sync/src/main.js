@@ -164,7 +164,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.80';
+const PLUGIN_RUNTIME_VERSION = '1.3.82';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -13562,7 +13562,32 @@ class WechatObsidianInboxPlugin extends Plugin {
         ? data.imageTmpDownloadUrls
         : {},
       imageTokenCount: Number(data && data.imageTokenCount || 0) || 0,
+      imageTokens: Array.isArray(data && data.imageTokens)
+        ? data.imageTokens.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
       imageDownloadError: String(data && data.imageDownloadError || '').trim(),
+    };
+  }
+
+  async fetchFeishuCloudMediaDataUrl(fileToken, binding = null) {
+    const token = String(fileToken || '').trim();
+    if (!token) throw new Error('飞书图片标识为空');
+    const payload = await this.requestJson(
+      '/feishu/media',
+      'POST',
+      this.withFeishuCustomAppConfig({ fileToken: token }),
+      binding || undefined,
+    );
+    const data = payload && payload.data ? payload.data : payload;
+    const dataUrl = String(data && data.dataUrl || '').trim();
+    if (!/^data:image\//i.test(dataUrl)) {
+      throw new Error('飞书图片下载未返回有效图片数据');
+    }
+    return {
+      fileToken: token,
+      dataUrl,
+      contentType: String(data && data.contentType || '').trim(),
+      bytes: Number(data && data.bytes || 0) || 0,
     };
   }
 
@@ -17054,6 +17079,28 @@ class WechatObsidianInboxPlugin extends Plugin {
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
+            const imageTokens = Array.from(new Set((cloudOpenApiResult.imageTokens || [])
+              .map((item) => String(item || '').trim())
+              .filter(Boolean)));
+            const imageDataAssets = [];
+            const imageDataErrors = [];
+            for (const imageToken of imageTokens) {
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
+                imageDataAssets.push({
+                  token: imageToken,
+                  src: String(
+                    cloudOpenApiResult.imageTmpDownloadUrls[imageToken]
+                    || buildFeishuImageFallbackUrl(imageToken, url)
+                    || `https://feishu.local/media/${encodeURIComponent(imageToken)}`,
+                  ),
+                  dataUrl: downloaded.dataUrl,
+                });
+              } catch (error) {
+                imageDataErrors.push(String(error && (error.message || error) || 'unknown error'));
+              }
+            }
             let cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
                 dedupe: true,
@@ -17063,18 +17110,40 @@ class WechatObsidianInboxPlugin extends Plugin {
               url,
               cloudOpenApiResult.imageTmpDownloadUrls || {},
             );
+            const tokenUrlMap = Object.fromEntries(imageDataAssets.map((asset) => [
+              asset.token, asset.src,
+            ]));
+            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanedCloudOpenApiMarkdown,
+              imageDataAssets,
+              url,
+              tokenUrlMap,
+            );
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
             const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {})
               .filter((value) => /^https?:\/\//i.test(String(value || '').trim()))
               .length;
-            const missingImageTempUrlCount = Math.max(0, imageTokenCount - imageTempUrlCount);
+            // 云端临时 URL 缺失不再等于图片缺失：成功通过 OAuth 媒体接口下载的
+            // token 已经能落成本地附件，因此只报告真正仍未解决的数量。
+            const missingImageTempUrlCount = Math.max(
+              0,
+              imageTokenCount - imageTempUrlCount - imageDataAssets.length,
+            );
             const imageLocalizationErrors = [];
+            cleanedCloudOpenApiMarkdown = await this.saveWebpageImageAssets(
+              cleanedCloudOpenApiMarkdown,
+              imageDataAssets,
+              rootDir,
+              dateFolder,
+              feishuTitle,
+            );
             cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
               cleanedCloudOpenApiMarkdown,
               rootDir,
               dateFolder,
               feishuTitle,
               {
+                sourceUrl: url,
                 onError: ({ error }) => {
                   imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
                 },
@@ -17089,15 +17158,15 @@ class WechatObsidianInboxPlugin extends Plugin {
                 conversionStatus: 'success',
                 conversionSource: 'feishu-cloud-oauth',
                 imageTempUrlMissingCount: missingImageTempUrlCount,
-                imageLocalizationFailedCount: imageLocalizationErrors.length,
-                imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
+                imageLocalizationFailedCount: imageDataErrors.length + imageLocalizationErrors.length,
+                imageLocalizationError: [...imageDataErrors, ...imageLocalizationErrors].slice(0, 3).join(' | '),
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : '',
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : '',
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
-                  imageLocalizationErrors.length
-                    ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(' | ')}`
+                  (imageDataErrors.length + imageLocalizationErrors.length)
+                    ? `image-localize-failed=${imageDataErrors.length + imageLocalizationErrors.length}: ${[...imageDataErrors, ...imageLocalizationErrors].slice(0, 3).join(' | ')}`
                     : '',
                 ].filter(Boolean).join('; '),
               }),

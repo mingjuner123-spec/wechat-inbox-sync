@@ -1141,9 +1141,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.80'), {
-  manifestVersion: '1.3.80',
-  runtimeVersion: '1.3.80',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.82'), {
+  manifestVersion: '1.3.82',
+  runtimeVersion: '1.3.82',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -7116,7 +7116,7 @@ async function runAsyncHydrationTests() {
     return {};
   };
   cloudFeishuPlugin.requestJson = async (path, method, body, binding) => {
-    cloudFeishuCalls.push([path, method, body.url, binding && binding.token]);
+    cloudFeishuCalls.push([path, method, body && body.url, binding && binding.token, body && body.fileToken]);
     if (path === '/feishu/extract') {
       return {
         success: true,
@@ -7129,10 +7129,22 @@ async function runAsyncHydrationTests() {
             { block_id: 'p1', block_type: 2, text: { elements: [{ text_run: { content: '云端授权正文内容。' } }] } },
             { block_id: 'img1', block_type: 27, image: { token: 'boxcnCloudImageToken' } },
           ],
+          imageTokens: ['boxcnCloudImageToken'],
           imageTokenCount: 1,
-          imageTmpDownloadUrls: {
-            boxcnCloudImageToken: 'https://internal-api-drive-stream.feishu.cn/cloud-image-1',
-          },
+          // 模拟飞书未返回临时下载 URL：媒体接口仍应凭 OAuth token 正常补回图片。
+          imageTmpDownloadUrls: {},
+        },
+      };
+    }
+    if (path === '/feishu/media') {
+      assert.strictEqual(body.fileToken, 'boxcnCloudImageToken');
+      return {
+        success: true,
+        data: {
+          fileToken: body.fileToken,
+          contentType: 'image/png',
+          bytes: 11,
+          dataUrl: 'data:image/png;base64,iVBORw0KGgoBAgM=',
         },
       };
     }
@@ -7150,11 +7162,20 @@ async function runAsyncHydrationTests() {
   assert.ok(cloudHydrated.metadata.markdown.includes('云端授权正文内容。'));
   assert.ok(cloudHydrated.metadata.markdown.includes('![[临时收集/网页图片/2026-07-04/云端授权标题-image-01.png]]'));
   assert.ok(Buffer.isBuffer(cloudFeishuFiles['临时收集/网页图片/2026-07-04/云端授权标题-image-01.png']));
+  assert.strictEqual(cloudHydrated.metadata.imageTempUrlMissingCount, 0);
+  assert.strictEqual(cloudHydrated.metadata.imageLocalizationFailedCount, 0);
   assert.deepStrictEqual(cloudFeishuCalls, [[
     '/feishu/extract',
     'POST',
     'https://my.feishu.cn/docx/cloudDocxToken',
     undefined,
+    undefined,
+  ], [
+    '/feishu/media',
+    'POST',
+    undefined,
+    undefined,
+    'boxcnCloudImageToken',
   ]]);
 
   const fallbackImageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 4, 5, 6]);
@@ -10314,7 +10335,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.80'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.82'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10353,8 +10374,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.80',
-        runtimeVersion: '1.3.80',
+        manifestVersion: '1.3.82',
+        runtimeVersion: '1.3.82',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10439,7 +10460,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   };
   plugin.writeRecord = async () => {
     throw helpers.createRetryableXiaohongshuContentError({
-      runtime: helpers.getPluginRuntimeIdentity('1.3.80'),
+      runtime: helpers.getPluginRuntimeIdentity('1.3.82'),
       request: {
         sourceHost: 'xhslink.cn',
         finalHost: 'xiaohongshu.com',
@@ -12536,7 +12557,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.80 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.82 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
