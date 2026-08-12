@@ -164,7 +164,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.82';
+const PLUGIN_RUNTIME_VERSION = '1.3.83';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -362,6 +362,10 @@ function normalizeLocalAsrPlatform(value) {
   return Object.prototype.hasOwnProperty.call(LOCAL_ASR_PLATFORM_NAMES, String(value || '').trim())
     ? String(value || '').trim()
     : 'auto';
+}
+
+function shouldPersistAutoLocalAsrPlatform(savedSettings) {
+  return normalizeLocalAsrPlatform(savedSettings && savedSettings.localAsrPlatform) !== 'auto';
 }
 
 function resolveLocalAsrPlatform(value, runtimePlatform = os.platform()) {
@@ -2117,7 +2121,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
-  merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
+  // Platform selection is no longer user-configurable. Old settings may still
+  // contain a Windows/macOS override copied from a different computer.
+  merged.localAsrPlatform = 'auto';
   merged.localAsrInstallMode = normalizeLocalAsrInstallMode(merged.localAsrInstallMode);
   merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
     merged.localTranscriptionCommand,
@@ -12952,7 +12958,10 @@ class WechatObsidianInboxPlugin extends Plugin {
   async onload() {
     const savedSettings = await this.loadData();
     this.settings = mergeSettings(savedSettings);
-    if (!savedSettings || !savedSettings.clientId || shouldPersistNormalizedInboxDir(savedSettings, this.settings)) {
+    if (!savedSettings
+      || !savedSettings.clientId
+      || shouldPersistNormalizedInboxDir(savedSettings, this.settings)
+      || shouldPersistAutoLocalAsrPlatform(savedSettings)) {
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
@@ -19527,6 +19536,7 @@ WechatObsidianInboxPlugin.__test = {
   getSafeRedirectRequestHeaders,
   normalizeConfiguredVaultPath,
   shouldPersistNormalizedInboxDir,
+  shouldPersistAutoLocalAsrPlatform,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,

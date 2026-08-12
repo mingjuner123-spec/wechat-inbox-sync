@@ -3354,7 +3354,7 @@ var {
 });
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.82";
+var PLUGIN_RUNTIME_VERSION = "1.3.83";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -3544,6 +3544,10 @@ function normalizeLocalAsrPlatform(value) {
   return Object.prototype.hasOwnProperty.call(LOCAL_ASR_PLATFORM_NAMES, String(value || "").trim()) ? String(value || "").trim() : "auto";
 }
 __name(normalizeLocalAsrPlatform, "normalizeLocalAsrPlatform");
+function shouldPersistAutoLocalAsrPlatform(savedSettings) {
+  return normalizeLocalAsrPlatform(savedSettings && savedSettings.localAsrPlatform) !== "auto";
+}
+__name(shouldPersistAutoLocalAsrPlatform, "shouldPersistAutoLocalAsrPlatform");
 function resolveLocalAsrPlatform(value, runtimePlatform = os.platform()) {
   const normalized = normalizeLocalAsrPlatform(value);
   return normalized === "auto" ? getLocalAsrPlatform(runtimePlatform) : normalized;
@@ -4852,7 +4856,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || "").trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
-  merged.localAsrPlatform = normalizeLocalAsrPlatform(merged.localAsrPlatform);
+  merged.localAsrPlatform = "auto";
   merged.localAsrInstallMode = normalizeLocalAsrInstallMode(merged.localAsrInstallMode);
   merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
     merged.localTranscriptionCommand,
@@ -14540,7 +14544,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   async onload() {
     const savedSettings = await this.loadData();
     this.settings = mergeSettings(savedSettings);
-    if (!savedSettings || !savedSettings.clientId || shouldPersistNormalizedInboxDir(savedSettings, this.settings)) {
+    if (!savedSettings || !savedSettings.clientId || shouldPersistNormalizedInboxDir(savedSettings, this.settings) || shouldPersistAutoLocalAsrPlatform(savedSettings)) {
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
@@ -20280,6 +20284,7 @@ WechatObsidianInboxPlugin.__test = {
   getSafeRedirectRequestHeaders,
   normalizeConfiguredVaultPath,
   shouldPersistNormalizedInboxDir,
+  shouldPersistAutoLocalAsrPlatform,
   extractBilibiliSubtitleUrlsFromHtml,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
