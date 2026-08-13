@@ -3956,6 +3956,94 @@ function buildPendingReviewNotice(summary = {}) {
   return '';
 }
 
+const SYNC_RECORD_DIAGNOSTIC_ENUMS = {
+  type: new Set(['text', 'webpage', 'file', 'image', 'voice', 'audio', 'video', 'link', 'unknown']),
+  status: new Set(['pending', 'security_pending', 'security_submitting', 'processing', 'failed', 'synced', 'unknown']),
+  sourcePlatform: new Set([
+    'wechat',
+    'wechat-public-account',
+    'feishu',
+    'xiaohongshu',
+    'douyin',
+    'bilibili',
+    'xiaoyuzhou',
+    'web',
+    'file',
+    'voice',
+    'manual',
+    'unknown',
+  ]),
+  mediaType: new Set(['audio_video', 'audio', 'video', 'image', 'document', 'webpage', 'text', 'unknown']),
+  transcriptionStatus: new Set([
+    'pending',
+    'queued',
+    'processing',
+    'completed',
+    'failed',
+    'skipped',
+    'not_required',
+    'unavailable',
+    'unknown',
+  ]),
+  filterReason: new Set(['security-review', 'processing', 'failed', 'already-synced', 'deduplicated', 'other']),
+};
+
+function normalizeSyncRecordDiagnosticEnum(value, allowedValues) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return allowedValues.has(normalized) ? normalized : 'unknown';
+}
+
+function normalizeSyncRecordDiagnosticTimestamp(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+function normalizeSyncRecordDiagnosticRecordId(value) {
+  const recordId = String(value || '').trim();
+  return /^[a-zA-Z0-9_-]{1,128}$/.test(recordId) ? recordId : '';
+}
+
+function normalizeSyncRecordDiagnosticSnapshot(snapshot = {}) {
+  if (!snapshot || typeof snapshot !== 'object' || Number(snapshot.schemaVersion) !== 1) return null;
+  const sourceRecords = Array.isArray(snapshot.records) ? snapshot.records : [];
+  const sourceCounts = snapshot.counts && typeof snapshot.counts === 'object' ? snapshot.counts : {};
+  return {
+    schemaVersion: 1,
+    examinedCount: Math.max(0, Number(snapshot.examinedCount) || 0),
+    returnedCount: Math.max(0, Number(snapshot.returnedCount) || 0),
+    truncated: snapshot.truncated === true,
+    counts: {
+      securityReview: Math.max(0, Number(sourceCounts.securityReview) || 0),
+      processing: Math.max(0, Number(sourceCounts.processing) || 0),
+      failed: Math.max(0, Number(sourceCounts.failed) || 0),
+      alreadySynced: Math.max(0, Number(sourceCounts.alreadySynced) || 0),
+      deduplicated: Math.max(0, Number(sourceCounts.deduplicated) || 0),
+      other: Math.max(0, Number(sourceCounts.other) || 0),
+    },
+    records: sourceRecords.slice(0, 10).map((record) => ({
+      recordId: normalizeSyncRecordDiagnosticRecordId(record && record.recordId),
+      type: normalizeSyncRecordDiagnosticEnum(record && record.type, SYNC_RECORD_DIAGNOSTIC_ENUMS.type),
+      status: normalizeSyncRecordDiagnosticEnum(record && record.status, SYNC_RECORD_DIAGNOSTIC_ENUMS.status),
+      sourcePlatform: normalizeSyncRecordDiagnosticEnum(
+        record && record.sourcePlatform,
+        SYNC_RECORD_DIAGNOSTIC_ENUMS.sourcePlatform,
+      ),
+      mediaType: normalizeSyncRecordDiagnosticEnum(record && record.mediaType, SYNC_RECORD_DIAGNOSTIC_ENUMS.mediaType),
+      transcriptionStatus: normalizeSyncRecordDiagnosticEnum(
+        record && record.transcriptionStatus,
+        SYNC_RECORD_DIAGNOSTIC_ENUMS.transcriptionStatus,
+      ),
+      filterReason: normalizeSyncRecordDiagnosticEnum(
+        record && record.filterReason,
+        SYNC_RECORD_DIAGNOSTIC_ENUMS.filterReason,
+      ),
+      createdAt: normalizeSyncRecordDiagnosticTimestamp(record && record.createdAt),
+      updatedAt: normalizeSyncRecordDiagnosticTimestamp(record && record.updatedAt),
+    })),
+  };
+}
+
 function extractWebpageMetadataFromHtml(html, url = '') {
   const source = String(html || '');
   const description = cleanSocialDescription(extractMetaContent(source, [
@@ -18858,6 +18946,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const payload = await this.requestJson('/records?status=pending', 'GET', {}, binding);
     const records = payload.data || [];
     const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
+    const syncSnapshot = normalizeSyncRecordDiagnosticSnapshot(payload && payload.meta && payload.meta.syncSnapshot);
     const lifecycleAdvertised = Boolean(payload && payload.meta && payload.meta.syncLifecycleStatus === true);
     const written = [];
     const failed = [];
@@ -19095,7 +19184,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview };
+    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview, syncSnapshot };
   }
 
   async syncInbox(showNotice = true) {
@@ -19132,6 +19221,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const conversionWarnings = [];
       const completionWarnings = [];
       const pendingReviews = [];
+      const syncSnapshots = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: 'fetching' });
 
@@ -19151,6 +19241,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (result.pendingReview && (result.pendingReview.total || result.pendingReview.audioVideoCount)) {
             pendingReviews.push(result.pendingReview);
+          }
+          if (result.syncSnapshot) {
+            syncSnapshots.push(result.syncSnapshot);
           }
         } catch (error) {
           const message = error.message || String(error);
@@ -19193,6 +19286,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...(failed.find((item) => item.diagnostic)
           ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic }
           : {}),
+        ...(syncSnapshots.length ? { syncSnapshots } : {}),
         time: new Date().toISOString(),
       };
       writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
@@ -19957,6 +20051,7 @@ WechatObsidianInboxPlugin.__test = {
   cleanPdfExtractedText,
   htmlToMarkdown,
   extractWebpageMetadataFromHtml,
+  normalizeSyncRecordDiagnosticSnapshot,
   extractFeishuMarkdownFromHtml,
   extractFeishuMarkdownFromClientVars,
   mergeFeishuRenderedAndClientVarsMarkdown,
