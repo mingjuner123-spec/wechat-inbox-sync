@@ -57,8 +57,8 @@ for (const moduleName of expectedModules) {
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
-assert.strictEqual(manifest.version, '1.3.84');
-assert.ok(Object.prototype.hasOwnProperty.call(versions, '1.3.84'));
+assert.strictEqual(manifest.version, '1.3.85');
+assert.ok(Object.prototype.hasOwnProperty.call(versions, '1.3.85'));
 
 const builder = require(path.join(pluginRoot, 'build-plugin.js'));
 assert.strictEqual(builder.checkPluginBuild(), true, 'committed bundle must match the integrated source');
