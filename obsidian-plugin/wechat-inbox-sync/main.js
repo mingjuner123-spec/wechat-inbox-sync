@@ -3373,7 +3373,7 @@ var {
 });
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.84";
+var PLUGIN_RUNTIME_VERSION = "1.3.85";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -6510,6 +6510,93 @@ function buildPendingReviewNotice(summary = {}) {
   return "";
 }
 __name(buildPendingReviewNotice, "buildPendingReviewNotice");
+var SYNC_RECORD_DIAGNOSTIC_ENUMS = {
+  type: /* @__PURE__ */ new Set(["text", "webpage", "file", "image", "voice", "audio", "video", "link", "unknown"]),
+  status: /* @__PURE__ */ new Set(["pending", "security_pending", "security_submitting", "processing", "failed", "synced", "unknown"]),
+  sourcePlatform: /* @__PURE__ */ new Set([
+    "wechat",
+    "wechat-public-account",
+    "feishu",
+    "xiaohongshu",
+    "douyin",
+    "bilibili",
+    "xiaoyuzhou",
+    "web",
+    "file",
+    "voice",
+    "manual",
+    "unknown"
+  ]),
+  mediaType: /* @__PURE__ */ new Set(["audio_video", "audio", "video", "image", "document", "webpage", "text", "unknown"]),
+  transcriptionStatus: /* @__PURE__ */ new Set([
+    "pending",
+    "queued",
+    "processing",
+    "completed",
+    "failed",
+    "skipped",
+    "not_required",
+    "unavailable",
+    "unknown"
+  ]),
+  filterReason: /* @__PURE__ */ new Set(["security-review", "processing", "failed", "already-synced", "deduplicated", "other"])
+};
+function normalizeSyncRecordDiagnosticEnum(value, allowedValues) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return allowedValues.has(normalized) ? normalized : "unknown";
+}
+__name(normalizeSyncRecordDiagnosticEnum, "normalizeSyncRecordDiagnosticEnum");
+function normalizeSyncRecordDiagnosticTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+__name(normalizeSyncRecordDiagnosticTimestamp, "normalizeSyncRecordDiagnosticTimestamp");
+function normalizeSyncRecordDiagnosticRecordId(value) {
+  const recordId = String(value || "").trim();
+  return /^[a-zA-Z0-9_-]{1,128}$/.test(recordId) ? recordId : "";
+}
+__name(normalizeSyncRecordDiagnosticRecordId, "normalizeSyncRecordDiagnosticRecordId");
+function normalizeSyncRecordDiagnosticSnapshot(snapshot = {}) {
+  if (!snapshot || typeof snapshot !== "object" || Number(snapshot.schemaVersion) !== 1) return null;
+  const sourceRecords = Array.isArray(snapshot.records) ? snapshot.records : [];
+  const sourceCounts = snapshot.counts && typeof snapshot.counts === "object" ? snapshot.counts : {};
+  return {
+    schemaVersion: 1,
+    examinedCount: Math.max(0, Number(snapshot.examinedCount) || 0),
+    returnedCount: Math.max(0, Number(snapshot.returnedCount) || 0),
+    truncated: snapshot.truncated === true,
+    counts: {
+      securityReview: Math.max(0, Number(sourceCounts.securityReview) || 0),
+      processing: Math.max(0, Number(sourceCounts.processing) || 0),
+      failed: Math.max(0, Number(sourceCounts.failed) || 0),
+      alreadySynced: Math.max(0, Number(sourceCounts.alreadySynced) || 0),
+      deduplicated: Math.max(0, Number(sourceCounts.deduplicated) || 0),
+      other: Math.max(0, Number(sourceCounts.other) || 0)
+    },
+    records: sourceRecords.slice(0, 10).map((record) => ({
+      recordId: normalizeSyncRecordDiagnosticRecordId(record && record.recordId),
+      type: normalizeSyncRecordDiagnosticEnum(record && record.type, SYNC_RECORD_DIAGNOSTIC_ENUMS.type),
+      status: normalizeSyncRecordDiagnosticEnum(record && record.status, SYNC_RECORD_DIAGNOSTIC_ENUMS.status),
+      sourcePlatform: normalizeSyncRecordDiagnosticEnum(
+        record && record.sourcePlatform,
+        SYNC_RECORD_DIAGNOSTIC_ENUMS.sourcePlatform
+      ),
+      mediaType: normalizeSyncRecordDiagnosticEnum(record && record.mediaType, SYNC_RECORD_DIAGNOSTIC_ENUMS.mediaType),
+      transcriptionStatus: normalizeSyncRecordDiagnosticEnum(
+        record && record.transcriptionStatus,
+        SYNC_RECORD_DIAGNOSTIC_ENUMS.transcriptionStatus
+      ),
+      filterReason: normalizeSyncRecordDiagnosticEnum(
+        record && record.filterReason,
+        SYNC_RECORD_DIAGNOSTIC_ENUMS.filterReason
+      ),
+      createdAt: normalizeSyncRecordDiagnosticTimestamp(record && record.createdAt),
+      updatedAt: normalizeSyncRecordDiagnosticTimestamp(record && record.updatedAt)
+    }))
+  };
+}
+__name(normalizeSyncRecordDiagnosticSnapshot, "normalizeSyncRecordDiagnosticSnapshot");
 function extractWebpageMetadataFromHtml(html, url = "") {
   const source = String(html || "");
   const description = cleanSocialDescription(extractMetaContent(source, [
@@ -19783,6 +19870,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const payload = await this.requestJson("/records?status=pending", "GET", {}, binding);
     const records = payload.data || [];
     const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
+    const syncSnapshot = normalizeSyncRecordDiagnosticSnapshot(payload && payload.meta && payload.meta.syncSnapshot);
     const lifecycleAdvertised = Boolean(payload && payload.meta && payload.meta.syncLifecycleStatus === true);
     const written = [];
     const failed = [];
@@ -20009,7 +20097,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
       }
     }
-    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview };
+    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview, syncSnapshot };
   }
   async syncInbox(showNotice = true) {
     if (this.syncInboxPromise) {
@@ -20043,6 +20131,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const conversionWarnings = [];
       const completionWarnings = [];
       const pendingReviews = [];
+      const syncSnapshots = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: "fetching" });
       for (const binding of bindings) {
@@ -20061,6 +20150,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
           if (result.pendingReview && (result.pendingReview.total || result.pendingReview.audioVideoCount)) {
             pendingReviews.push(result.pendingReview);
+          }
+          if (result.syncSnapshot) {
+            syncSnapshots.push(result.syncSnapshot);
           }
         } catch (error) {
           const message = error.message || String(error);
@@ -20098,6 +20190,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? "COMPLETION_REPORT_FAILED" : "",
         ...failed.find((item) => item.diagnostic) ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic } : {},
+        ...syncSnapshots.length ? { syncSnapshots } : {},
         time: (/* @__PURE__ */ new Date()).toISOString()
       };
       writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
@@ -20676,6 +20769,7 @@ WechatObsidianInboxPlugin.__test = {
   cleanPdfExtractedText,
   htmlToMarkdown,
   extractWebpageMetadataFromHtml,
+  normalizeSyncRecordDiagnosticSnapshot,
   extractFeishuMarkdownFromHtml,
   extractFeishuMarkdownFromClientVars,
   mergeFeishuRenderedAndClientVarsMarkdown,
