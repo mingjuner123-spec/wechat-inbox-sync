@@ -1922,7 +1922,8 @@ var require_record_body_markdown_utils = __commonJS({
         conversionStatus = "",
         markdown: supplementalMarkdown = "",
         trailingMarkdown = "",
-        sourceTitle = ""
+        sourceTitle = "",
+        mediaResolutionDiagnostic = null
       } = {}) {
         const {
           markdown,
@@ -1954,7 +1955,8 @@ var require_record_body_markdown_utils = __commonJS({
           transcriptionStatus,
           transcriptionSource,
           transcriptionError,
-          conversionStatus: conversionStatus || transcriptionStatus
+          conversionStatus: conversionStatus || transcriptionStatus,
+          ...mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object" ? { mediaResolutionDiagnostic } : {}
         };
       }
       __name(buildTranscriptOnlyMetadata2, "buildTranscriptOnlyMetadata");
@@ -1975,6 +1977,22 @@ var require_record_body_markdown_utils = __commonJS({
         }
         const status = metadata.conversionStatus || "pending";
         const errorText = metadata.conversionError || "";
+        const diagnosticLines = [];
+        const transportDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === "object" ? metadata.conversionDiagnostic : null;
+        if (transportDiagnostic && Array.isArray(transportDiagnostic.attempts)) {
+          const attempts = transportDiagnostic.attempts.map((attempt) => {
+            const error = attempt && attempt.error && typeof attempt.error === "object" ? attempt.error : {};
+            const detail = String(error.code || "").trim() || (Number(error.status) ? `HTTP ${Number(error.status)}` : String(error.message || "").trim());
+            return `${String(attempt.transport || "unknown")}${detail ? `=${detail}` : ""}`;
+          }).filter(Boolean).slice(0, 4);
+          if (attempts.length) diagnosticLines.push(`网页通道：${attempts.join("；")}`);
+        }
+        const mediaDiagnostic = metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === "object" ? metadata.mediaResolutionDiagnostic : null;
+        if (mediaDiagnostic && (Number(mediaDiagnostic.mediaCandidateCount) === 0 || Array.isArray(mediaDiagnostic.stages))) {
+          const failedStages = (Array.isArray(mediaDiagnostic.stages) ? mediaDiagnostic.stages : []).filter((stage) => stage && stage.ok === false).map((stage) => String(stage.stage || "media")).slice(0, 4);
+          diagnosticLines.push(`媒体解析：候选 ${Number(mediaDiagnostic.mediaCandidateCount) || 0} 个${failedStages.length ? `；失败阶段：${failedStages.join("、")}` : ""}`);
+        }
+        const diagnosticMarkdown = diagnosticLines.length ? `> 诊断：${diagnosticLines.join("；")}` : "";
         const automaticShareText = metadata.automaticWebpageExtraction ? String(metadata.shareText || "").trim() : "";
         const automaticShareTextMarkdown = automaticShareText ? [
           "## 原始剪切板内容",
@@ -2025,6 +2043,7 @@ var require_record_body_markdown_utils = __commonJS({
           return [
             "> ⚠️ 这篇文章的正文未能自动提取，原始链接已写入笔记属性。",
             `> ${reasonLine}`,
+            diagnosticMarkdown,
             "",
             "---",
             "",
@@ -3354,7 +3373,7 @@ var {
 });
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.83";
+var PLUGIN_RUNTIME_VERSION = "1.3.84";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -4372,6 +4391,62 @@ function downloadTextViaNode(url) {
   });
 }
 __name(downloadTextViaNode, "downloadTextViaNode");
+function getTransportErrorDiagnostic(error) {
+  const source = error && typeof error === "object" ? error : {};
+  const status = Number(source.status || source.statusCode || source.response && source.response.status || 0);
+  const message = String(source.message || source || "unknown error").replace(/[\r\n]+/g, " ").trim().slice(0, 240);
+  return {
+    name: String(source.name || "").slice(0, 80),
+    code: String(source.code || "").slice(0, 80),
+    status: Number.isFinite(status) ? status : 0,
+    message
+  };
+}
+__name(getTransportErrorDiagnostic, "getTransportErrorDiagnostic");
+function buildWebpageTransportDiagnostic({
+  sourceUrl = "",
+  requestError = null,
+  nodeError = null,
+  browserError = null,
+  selectedTransport = ""
+} = {}) {
+  const attempts = [];
+  if (requestError) attempts.push({ transport: "obsidian-requestUrl", error: getTransportErrorDiagnostic(requestError) });
+  if (nodeError) attempts.push({ transport: "node-http", error: getTransportErrorDiagnostic(nodeError) });
+  if (browserError) attempts.push({ transport: "hidden-browser", error: getTransportErrorDiagnostic(browserError) });
+  return {
+    source: getSafeUrlDiagnostic(sourceUrl),
+    selectedTransport: String(selectedTransport || "").trim(),
+    attempts
+  };
+}
+__name(buildWebpageTransportDiagnostic, "buildWebpageTransportDiagnostic");
+function buildDouyinMediaResolutionDiagnostic({
+  sourceUrl = "",
+  resolvedUrl = "",
+  awemeId = "",
+  stages = [],
+  mediaCandidateCount = 0,
+  preciseMediaFound = false,
+  saveOriginalMediaEnabled = false
+} = {}) {
+  return {
+    source: getSafeUrlDiagnostic(sourceUrl),
+    resolved: getSafeUrlDiagnostic(resolvedUrl),
+    awemeId: String(awemeId || "").slice(0, 64),
+    mediaCandidateCount: Number(mediaCandidateCount) || 0,
+    preciseMediaFound: preciseMediaFound === true,
+    saveOriginalMediaEnabled: saveOriginalMediaEnabled === true,
+    stages: (Array.isArray(stages) ? stages : []).slice(-12).map((stage) => ({
+      stage: String(stage && stage.stage || "").slice(0, 64),
+      ok: stage && stage.ok !== false,
+      mediaCount: Number(stage && stage.mediaCount) || 0,
+      detailFound: stage && stage.detailFound === true,
+      error: stage && stage.error ? getTransportErrorDiagnostic(stage.error) : void 0
+    }))
+  };
+}
+__name(buildDouyinMediaResolutionDiagnostic, "buildDouyinMediaResolutionDiagnostic");
 function normalizeInstallerScriptText(scriptText, isMac = false) {
   const source = String(scriptText || "");
   if (!isMac) return source;
@@ -14417,6 +14492,30 @@ function getRecordConversionWarning(record) {
   const imageLocalizationFailedCount = Number(metadata.imageLocalizationFailedCount) || 0;
   const imageTempUrlMissingCount = Number(metadata.imageTempUrlMissingCount) || 0;
   const imageFailureCount = Math.max(imageLocalizationFailedCount, imageTempUrlMissingCount);
+  const diagnosticParts = [];
+  const transportDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === "object" ? metadata.conversionDiagnostic : null;
+  if (transportDiagnostic) {
+    const attempts = Array.isArray(transportDiagnostic.attempts) ? transportDiagnostic.attempts : [];
+    const attemptSummary = attempts.map((attempt) => {
+      const error = attempt && attempt.error && typeof attempt.error === "object" ? attempt.error : {};
+      const code = String(error.code || "").trim();
+      const status2 = Number(error.status) || 0;
+      const detail = code || (status2 ? `HTTP ${status2}` : String(error.message || "").trim());
+      return `${String(attempt.transport || "unknown")}${detail ? `=${detail}` : ""}`;
+    }).filter(Boolean).slice(0, 4);
+    if (attemptSummary.length) diagnosticParts.push(`网页通道：${attemptSummary.join("；")}`);
+  }
+  const mediaDiagnostic = metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === "object" ? metadata.mediaResolutionDiagnostic : null;
+  if (mediaDiagnostic) {
+    const failedStages = (Array.isArray(mediaDiagnostic.stages) ? mediaDiagnostic.stages : []).filter((stage) => stage && stage.ok === false).map((stage) => {
+      const error = stage.error && typeof stage.error === "object" ? stage.error : {};
+      return `${String(stage.stage || "media")}${error.code ? `=${error.code}` : error.status ? `=HTTP ${error.status}` : ""}`;
+    }).filter(Boolean).slice(0, 4);
+    if (failedStages.length || Number(mediaDiagnostic.mediaCandidateCount) === 0) {
+      diagnosticParts.push(`媒体解析：候选 ${Number(mediaDiagnostic.mediaCandidateCount) || 0} 个${failedStages.length ? `；${failedStages.join("；")}` : ""}`);
+    }
+  }
+  const diagnosticNotice = diagnosticParts.join("；");
   if (imageFailureCount > 0) {
     const details = [];
     if (imageTempUrlMissingCount > 0) {
@@ -14425,18 +14524,18 @@ function getRecordConversionWarning(record) {
     const localizationError = String(metadata.imageLocalizationError || "").trim();
     if (localizationError) details.push(localizationError);
     const imageWarning = `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join("；")}` : ""}`;
-    return [imageWarning, aiMetadataWarning].filter(Boolean).join("；");
+    return [imageWarning, diagnosticNotice, aiMetadataWarning].filter(Boolean).join("；");
   }
   const status = metadata.conversionStatus || metadata.transcriptionStatus || "";
   const errorMsg = metadata.conversionError || metadata.transcriptionError || "";
   if (status === "failed") {
-    return [errorMsg || "网页转写失败（未知原因）", aiMetadataWarning].filter(Boolean).join("；");
+    return [errorMsg || "网页转写失败（未知原因）", diagnosticNotice, aiMetadataWarning].filter(Boolean).join("；");
   }
   if (status === "wechat_captcha") {
     return ["微信安全验证拦截", aiMetadataWarning].filter(Boolean).join("；");
   }
   if (status === "link_saved") {
-    return [errorMsg || "网页抓取未成功", aiMetadataWarning].filter(Boolean).join("；");
+    return [errorMsg || "网页抓取未成功", diagnosticNotice, aiMetadataWarning].filter(Boolean).join("；");
   }
   return aiMetadataWarning;
 }
@@ -16809,6 +16908,46 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async downloadMediaArrayBufferWithSession(url, headers = {}, options = {}) {
     return downloadArrayBufferViaElectronSession(url, headers, options);
   }
+  async renderWebpageWithElectron(url) {
+    return renderUrlToMarkdownWithElectron(url);
+  }
+  async renderFeishuDocumentWithElectron(url) {
+    return renderFeishuUrlToSimpleMarkdownWithElectron(url);
+  }
+  async downloadWebpageHtmlViaNode(url) {
+    return downloadTextViaNode(url);
+  }
+  async renderWechatArticleFallback(record, url, rootDir, dateFolder, title, requestError, nodeError = null) {
+    const rendered = await this.renderWebpageWithElectron(url);
+    const renderedMarkdown = String(rendered && rendered.markdown || "").trim();
+    if (!renderedMarkdown) throw new Error("hidden browser returned empty article content");
+    const markdown = await this.saveWebpageImageAssets(
+      renderedMarkdown,
+      rendered.assets,
+      rootDir,
+      dateFolder,
+      title,
+      { sourceUrl: url }
+    );
+    const diagnostic = buildWebpageTransportDiagnostic({
+      sourceUrl: url,
+      requestError,
+      nodeError,
+      selectedTransport: "hidden-browser"
+    });
+    return {
+      ...record,
+      metadata: {
+        ...record.metadata || {},
+        title: record.metadata && record.metadata.title || rendered.title || "",
+        markdown,
+        conversionStatus: "success",
+        conversionSource: "electron-fallback",
+        conversionDiagnostic: diagnostic,
+        conversionNote: "Obsidian requestUrl 与 Node.js 均失败，已使用隐藏浏览器通道恢复正文"
+      }
+    };
+  }
   async refreshDouyinMediaUrls(sourceUrl) {
     const originalUrl = String(sourceUrl || "").trim();
     if (!isDouyinUrl(originalUrl)) return [];
@@ -17610,10 +17749,29 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       };
     }
   }
-  async saveWebpageImageAssets(markdown, assets, rootDir, dateFolder, title) {
+  async saveWebpageImageAssets(markdown, assets, rootDir, dateFolder, title, options = {}) {
     rootDir = normalizeConfiguredVaultPath(rootDir);
     if (!Array.isArray(assets) || !assets.length || typeof this.app.vault.adapter.writeBinary !== "function") {
       return markdown;
+    }
+    const sourceUrl = String(options.sourceUrl || "").trim();
+    const isFeishuSource = isFeishuUrl(sourceUrl);
+    const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl);
+    const stats = options.stats && typeof options.stats === "object" ? options.stats : null;
+    const reportError = /* @__PURE__ */ __name((asset, error) => {
+      if (stats) {
+        stats.failedCount = (Number(stats.failedCount) || 0) + 1;
+        if (!asset || !String(asset.src || "").trim()) {
+          stats.missingSourceCount = (Number(stats.missingSourceCount) || 0) + 1;
+        }
+      }
+      if (typeof options.onError === "function") options.onError({ asset, error });
+    }, "reportError");
+    if (stats) {
+      stats.assetCount = assets.length;
+      stats.localizedCount = 0;
+      stats.failedCount = 0;
+      stats.missingSourceCount = 0;
     }
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
@@ -17622,13 +17780,48 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     await this.ensureFolder(imageRootDir);
     await this.ensureFolder(imageDayDir);
     for (const asset of assets) {
-      const decoded = decodeDataUrl(asset.dataUrl);
-      if (!decoded || !asset.src) continue;
-      const ext = getImageExtFromMime(decoded.mimeType);
+      const assetSource = String(asset && asset.src || "").trim();
+      let decoded = decodeDataUrl(asset && asset.dataUrl);
+      if (!decoded && assetSource && /^https?:\/\//i.test(assetSource)) {
+        const imageHeaders = isSessionBackedSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : {};
+        let downloadError = null;
+        try {
+          const arrayBuffer = await this.downloadArrayBuffer(assetSource, imageHeaders);
+          const buffer = Buffer.from(arrayBuffer || []);
+          if (!buffer.length) throw new Error("image download returned an empty response");
+          decoded = { buffer, mimeType: String(asset.mimeType || "") };
+        } catch (error) {
+          downloadError = error;
+          if (isSessionBackedSource && typeof this.downloadMediaArrayBufferWithSession === "function") {
+            try {
+              const arrayBuffer = await this.downloadMediaArrayBufferWithSession(assetSource, imageHeaders);
+              const buffer = Buffer.from(arrayBuffer || []);
+              if (!buffer.length) throw new Error("browser-session image download returned an empty response");
+              decoded = { buffer, mimeType: String(asset.mimeType || "") };
+            } catch (sessionError) {
+              const firstMessage = downloadError && downloadError.message ? downloadError.message : String(downloadError || "");
+              const sessionMessage = sessionError && sessionError.message ? sessionError.message : String(sessionError || "");
+              downloadError = new Error(
+                [firstMessage, sessionMessage ? `browser-session: ${sessionMessage}` : ""].filter(Boolean).join("; ")
+              );
+            }
+          }
+        }
+        if (!decoded && downloadError) {
+          reportError(asset, downloadError);
+          continue;
+        }
+      }
+      if (!decoded || !assetSource) {
+        reportError(asset, new Error(!assetSource ? "image asset has no source URL" : "image asset has no usable data"));
+        continue;
+      }
+      const ext = decoded.mimeType && decoded.mimeType !== "application/octet-stream" ? getImageExtFromMime(decoded.mimeType) : getImageExtFromBuffer(decoded.buffer, assetSource);
       const imagePath = `${imageDayDir}/${title}-image-${String(index).padStart(2, "0")}.${ext}`;
       await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
-      const pattern = new RegExp(`!\\[[^\\]]*\\]\\(${escapeRegExp(asset.src)}\\)`, "g");
+      const pattern = new RegExp(`!\\[[^\\]]*\\]\\(${escapeRegExp(assetSource)}\\)`, "g");
       nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
+      if (stats) stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
       index += 1;
     }
     return nextMarkdown;
@@ -17641,6 +17834,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const sourceUrl = String(options.sourceUrl || "").trim();
     const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
+    const isFeishuSource = isFeishuUrl(sourceUrl);
+    const isSessionBackedSource = isFeishuSource || isWechatArticleSource;
     let nextMarkdown = isXiaohongshuSource ? sanitizeXiaohongshuMarkdownImages(String(markdown)) : String(markdown);
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return nextMarkdown;
@@ -17662,8 +17857,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const imageUrl = String(match[2] || "").trim();
       if (!imageUrl || downloadedByUrl.has(imageUrl)) continue;
       try {
-        const imageHeaders = isXiaohongshuSource ? await getXiaohongshuRequestHeaders(sourceUrl) : isWechatArticleSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : {};
-        const arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
+        const imageHeaders = isXiaohongshuSource ? await getXiaohongshuRequestHeaders(sourceUrl) : isWechatArticleSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : isFeishuSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : {};
+        let arrayBuffer;
+        try {
+          arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
+        } catch (downloadError) {
+          if (!isSessionBackedSource || typeof this.downloadMediaArrayBufferWithSession !== "function") throw downloadError;
+          try {
+            arrayBuffer = await this.downloadMediaArrayBufferWithSession(imageUrl, imageHeaders);
+          } catch (sessionError) {
+            const firstMessage = downloadError && downloadError.message ? downloadError.message : String(downloadError || "");
+            const sessionMessage = sessionError && sessionError.message ? sessionError.message : String(sessionError || "");
+            throw new Error(
+              [firstMessage, sessionMessage ? `browser-session: ${sessionMessage}` : ""].filter(Boolean).join("; ")
+            );
+          }
+        }
         const buffer = Buffer.from(arrayBuffer || []);
         if (!buffer.length) throw new Error("图片下载结果为空");
         const ext = getImageExtFromBuffer(buffer, imageUrl);
@@ -17800,6 +18009,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     title = "",
     socialMetrics = {},
     sourceTitle = "",
+    mediaResolutionDiagnostic = null,
     signal = null
   }) {
     throwIfAborted(signal);
@@ -17826,7 +18036,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           conversionStatus: "success",
           markdown,
           trailingMarkdown,
-          sourceTitle: normalizedSourceTitle
+          sourceTitle: normalizedSourceTitle,
+          mediaResolutionDiagnostic
         })
       };
     }
@@ -17873,7 +18084,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           conversionStatus: "failed",
           markdown,
           trailingMarkdown,
-          sourceTitle: normalizedSourceTitle
+          sourceTitle: normalizedSourceTitle,
+          mediaResolutionDiagnostic
         })
       };
     }
@@ -17916,7 +18128,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             conversionStatus: "success",
             markdown,
             trailingMarkdown,
-            sourceTitle: normalizedSourceTitle
+            sourceTitle: normalizedSourceTitle,
+            mediaResolutionDiagnostic
           });
           return {
             ...record,
@@ -17954,7 +18167,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           conversionStatus: "failed",
           markdown,
           trailingMarkdown,
-          sourceTitle: normalizedSourceTitle
+          sourceTitle: normalizedSourceTitle,
+          mediaResolutionDiagnostic
         })
       };
     }
@@ -18218,6 +18432,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let xiaohongshuRedirectDiagnostic = null;
     let xiaohongshuResolvedUrl = url || "";
     let xiaohongshuResponseStatus = 0;
+    let webpageTransportDiagnostic = null;
+    let douyinResolutionStages = [];
+    let douyinResolutionDiagnostic = null;
     if (!url) {
       return record;
     }
@@ -18296,6 +18513,32 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 }, "onError")
               }
             );
+            let feishuImageFallbackNote = "";
+            if (imageTokenCount > 0 && (missingImageTempUrlCount > 0 || imageLocalizationErrors2.length > 0)) {
+              try {
+                const renderedFallback = await this.renderFeishuDocumentWithElectron(url);
+                const fallbackStats = {};
+                const fallbackMarkdown = await this.saveWebpageImageAssets(
+                  cleanMarkdownForStorage(renderedFallback.markdown, {
+                    dedupe: true,
+                    feishuTitle
+                  }),
+                  renderedFallback.assets,
+                  rootDir,
+                  dateFolder,
+                  feishuTitle,
+                  { sourceUrl: url, stats: fallbackStats }
+                );
+                if (fallbackStats.localizedCount > 0) {
+                  cleanedCloudOpenApiMarkdown = fallbackMarkdown;
+                  feishuImageFallbackNote = `browser-image-fallback=${fallbackStats.localizedCount}/${fallbackStats.assetCount || 0}`;
+                } else {
+                  feishuImageFallbackNote = `browser-image-fallback=0/${fallbackStats.assetCount || 0}`;
+                }
+              } catch (fallbackError) {
+                feishuImageFallbackNote = `browser-image-fallback-failed=${getTransportErrorDiagnostic(fallbackError).message}`;
+              }
+            }
             return {
               ...record,
               metadata: enrichExtractedWebpageMetadata({
@@ -18312,7 +18555,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   imageTokenCount ? `images=${imageTokenCount}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
-                  imageDataErrors.length + imageLocalizationErrors2.length ? `image-localize-failed=${imageDataErrors.length + imageLocalizationErrors2.length}: ${[...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | ")}` : ""
+                  imageDataErrors.length + imageLocalizationErrors2.length ? `image-localize-failed=${imageDataErrors.length + imageLocalizationErrors2.length}: ${[...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | ")}` : "",
+                  feishuImageFallbackNote
                 ].filter(Boolean).join("; ")
               })
             };
@@ -18321,19 +18565,24 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
         }
         try {
-          const rendered = await renderFeishuUrlToSimpleMarkdownWithElectron(url);
+          const rendered = await this.renderFeishuDocumentWithElectron(url);
           const feishuTitle = metadata.title || rendered.title || "飞书链接";
           let cleanedRenderedMarkdown = cleanMarkdownForStorage(rendered.markdown, {
             dedupe: true,
             feishuTitle
           });
           cleanedRenderedMarkdown = replaceFeishuImageTokenPlaceholders(cleanedRenderedMarkdown, rendered.assets, url);
+          const renderedImageStats = {};
           const markdown2 = await this.saveWebpageImageAssets(
             cleanedRenderedMarkdown,
             rendered.assets,
             rootDir,
             dateFolder,
-            title
+            title,
+            {
+              sourceUrl: url,
+              stats: renderedImageStats
+            }
           );
           const openApiDiag = openApiError ? `
 
@@ -18348,7 +18597,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               title: feishuTitle,
               markdown: markdown2 + openApiDiag + diagComment,
               conversionStatus: "success",
-              conversionNote: openApiError ? `feishu-open-api: ${openApiError.message || openApiError}` : metadata.conversionNote
+              imageLocalizationFailedCount: renderedImageStats.failedCount || 0,
+              imageLocalizationError: renderedImageStats.failedCount ? `${renderedImageStats.failedCount} image assets could not be localized` : "",
+              conversionNote: [
+                openApiError ? `feishu-open-api: ${openApiError.message || openApiError}` : "",
+                renderedImageStats.assetCount ? `images=${renderedImageStats.assetCount}` : "",
+                renderedImageStats.localizedCount ? `images-localized=${renderedImageStats.localizedCount}` : "",
+                renderedImageStats.failedCount ? `image-localize-failed=${renderedImageStats.failedCount}` : ""
+              ].filter(Boolean).join("; ") || metadata.conversionNote
             })
           };
         } catch (renderError) {
@@ -18511,6 +18767,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
           for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
+            const shareStage = { stage: "mobile-share", ok: false, mediaCount: 0, detailFound: false };
             try {
               const shareResponse = await requestUrl({
                 url: shareUrl,
@@ -18520,6 +18777,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               const shareHtml = shareResponse.text || "";
               const shareUrls = extractDouyinMediaUrlsFromShareHtml(shareHtml, douyinAwemeId);
               const shareDetail = extractDouyinDetailFromShareHtml(shareHtml, douyinAwemeId);
+              shareStage.mediaCount = shareUrls.length;
+              shareStage.detailFound = Boolean(shareDetail);
               if (shareDetail) {
                 const sharePageMetadata = extractWebpageMetadataFromHtml(shareHtml, resolvedUrl);
                 douyinStructuredContent = buildDouyinStructuredContent(shareDetail, {
@@ -18547,18 +18806,24 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 mediaUrls = sortMediaUrlsForTranscription([...shareUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
+                shareStage.ok = true;
                 break;
               }
             } catch (shareError) {
+              shareStage.error = shareError;
+            } finally {
+              douyinResolutionStages.push(shareStage);
             }
           }
           if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics) || !douyinStructuredContent) {
             for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
+              const detailStage = { stage: "aweme-detail", ok: false, mediaCount: 0, detailFound: false };
               try {
                 const detailResponse = await requestUrl({ url: detailUrl, method: "GET", headers: getSocialRequestHeaders(detailUrl) });
                 const detailPayload = detailResponse.json || JSON.parse(detailResponse.text || "{}");
                 if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
                 const detail = detailPayload.aweme_detail || detailPayload.awemeDetail || (Array.isArray(detailPayload.item_list) ? detailPayload.item_list[0] : null);
+                detailStage.detailFound = Boolean(detail);
                 const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
                 douyinStructuredContent = buildDouyinStructuredContent(detail, {
                   title: douyinStructuredContent && douyinStructuredContent.title || detailPageMetadata.title,
@@ -18577,17 +18842,23 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   douyinSocialMetrics = douyinStructuredContent.socialMetrics;
                 }
                 const detailUrls = extractDouyinMediaUrlsFromDetailPayload(detailPayload);
+                detailStage.mediaCount = detailUrls.length;
                 if (detailUrls.length) {
                   mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
                   mediaUrl = mediaUrls[0] || mediaUrl;
                   hasPreciseDouyinMedia = true;
+                  detailStage.ok = true;
                   break;
                 }
               } catch (detailError) {
+                detailStage.error = detailError;
+              } finally {
+                douyinResolutionStages.push(detailStage);
               }
             }
           }
           if (douyinAwemeId && (!hasPreciseDouyinMedia || !douyinStructuredContent || !hasSocialMetrics(douyinSocialMetrics))) {
+            const sessionStage = { stage: "authenticated-session", ok: false, mediaCount: 0, detailFound: false };
             try {
               const hasLegacyInstanceResolver = Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaUrlsWithSession") && !Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaResolutionWithSession");
               const sessionResolution = !hasLegacyInstanceResolver && typeof this.fetchDouyinMediaResolutionWithSession === "function" ? await this.fetchDouyinMediaResolutionWithSession(resolvedUrl, douyinAwemeId) : {
@@ -18596,6 +18867,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               };
               const sessionUrls = Array.isArray(sessionResolution && sessionResolution.mediaUrls) ? sessionResolution.mediaUrls : [];
               const sessionDetail = sessionResolution && sessionResolution.detail;
+              sessionStage.mediaCount = sessionUrls.length;
+              sessionStage.detailFound = Boolean(sessionDetail);
               if (sessionDetail) {
                 const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
                 douyinStructuredContent = buildDouyinStructuredContent(sessionDetail, {
@@ -18619,10 +18892,25 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 mediaUrls = sortMediaUrlsForTranscription([...sessionUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
+                sessionStage.ok = true;
               }
             } catch (sessionError) {
+              sessionStage.error = sessionError;
+            } finally {
+              douyinResolutionStages.push(sessionStage);
             }
           }
+        }
+        if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
+          douyinResolutionDiagnostic = buildDouyinMediaResolutionDiagnostic({
+            sourceUrl: url,
+            resolvedUrl,
+            awemeId: douyinAwemeId,
+            stages: douyinResolutionStages,
+            mediaCandidateCount: mediaUrls.length,
+            preciseMediaFound: hasPreciseDouyinMedia,
+            saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true
+          });
         }
         const isUnavailableXhs = isXiaohongshuUrl(url) && isUnavailableXiaohongshuPage(html2, resolvedUrl);
         let isVideoIntent = metadata.webpageMediaType === "audio_video" || isDouyinUrl(url) || isDouyinUrl(resolvedUrl) || /[?&]type=video\b/i.test(resolvedUrl) || /\/video\//i.test(resolvedUrl);
@@ -18926,6 +19214,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             socialMetrics: isXiaohongshuUrl(url) ? extractedXiaohongshu && extractedXiaohongshu.socialMetrics : douyinStructuredContent && hasSocialMetrics(douyinStructuredContent.socialMetrics) ? douyinStructuredContent.socialMetrics : hasSocialMetrics(douyinSocialMetrics) ? douyinSocialMetrics : extractSocialMetricsFromHtml(html2),
             sourceTitle: isXiaohongshuUrl(url) ? getPreferredXiaohongshuTitle(metadata.title, extractedXiaohongshu && extractedXiaohongshu.title, "小红书") : douyinStructuredContent && douyinStructuredContent.title || extractWebpageMetadataFromHtml(html2, resolvedUrl).title,
             noMediaError: isUnavailableXhs ? "小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。" : "",
+            mediaResolutionDiagnostic: douyinResolutionDiagnostic,
             signal
           });
         }
@@ -18943,7 +19232,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               transcriptionStatus: "failed",
               transcriptionError: noMediaError,
               transcriptionSource: "video",
-              conversionStatus: "link_saved"
+              conversionStatus: "link_saved",
+              mediaResolutionDiagnostic: douyinResolutionDiagnostic
             }
           };
         }
@@ -18972,13 +19262,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         const wechatLoggedIn = await checkWechatLoginStatus();
         if (wechatLoggedIn) {
           try {
-            const rendered = await renderUrlToMarkdownWithElectron(url);
+            const rendered = await this.renderWebpageWithElectron(url);
+            const renderedImageStats = {};
             const markdown2 = await this.saveWebpageImageAssets(
               rendered.markdown,
               rendered.assets,
               rootDir,
               dateFolder,
-              title
+              title,
+              { sourceUrl: url, stats: renderedImageStats }
             );
             return {
               ...record,
@@ -18986,7 +19278,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 ...metadata,
                 title: metadata.title || rendered.title || "",
                 markdown: markdown2,
-                conversionStatus: "success"
+                conversionStatus: "success",
+                imageLocalizationFailedCount: renderedImageStats.failedCount || 0,
+                imageLocalizationError: renderedImageStats.failedCount ? `${renderedImageStats.failedCount} image assets could not be localized` : "",
+                conversionNote: renderedImageStats.failedCount ? `image-localize-failed=${renderedImageStats.failedCount}` : metadata.conversionNote
               }
             };
           } catch (electronError) {
@@ -18999,13 +19294,32 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         const response = metadata.automaticWebpageExtraction && !isTrustedAutomaticPlatformUrl(url) ? await requestPublicWebpageText(url) : await requestUrl({ url, method: "GET" });
         html = response.text || "";
       } catch (requestError) {
-        if (metadata.automaticWebpageExtraction) {
-          throw new Error(`网页抓取失败：${requestError.message || requestError}`);
-        }
         try {
-          html = await downloadTextViaNode(url);
+          html = await this.downloadWebpageHtmlViaNode(url);
           usedFallback = true;
         } catch (fallbackError) {
+          webpageTransportDiagnostic = buildWebpageTransportDiagnostic({
+            sourceUrl: url,
+            requestError,
+            nodeError: fallbackError
+          });
+          if (isWechatArticleUrl(url)) {
+            try {
+              return await this.renderWechatArticleFallback(record, url, rootDir, dateFolder, title, requestError, fallbackError);
+            } catch (browserError) {
+              webpageTransportDiagnostic = buildWebpageTransportDiagnostic({
+                sourceUrl: url,
+                requestError,
+                nodeError: fallbackError,
+                browserError
+              });
+            }
+          }
+          if (metadata.automaticWebpageExtraction) {
+            const automaticError = new Error(`网页抓取失败：${requestError.message || requestError}`);
+            automaticError.diagnostic = webpageTransportDiagnostic;
+            throw automaticError;
+          }
           throw new Error(`网页抓取失败（Obsidian 请求 + Node.js 降级均失败）：${requestError.message || requestError}；降级错误：${fallbackError.message || fallbackError}`);
         }
       }
@@ -19115,7 +19429,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               "> 如果该链接在浏览器能无登录打开，可以后续接入浏览器剪藏助手把页面 DOM 直接转成 Markdown。"
             ].join("\n"),
             conversionStatus: "link_saved",
-            conversionError: error.message || String(error)
+            conversionError: error.message || String(error),
+            ...webpageTransportDiagnostic ? { conversionDiagnostic: webpageTransportDiagnostic } : {}
           }
         };
       }
@@ -19124,7 +19439,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         metadata: {
           ...metadata,
           conversionStatus: "failed",
-          conversionError: error.message || String(error)
+          conversionError: error.message || String(error),
+          ...webpageTransportDiagnostic ? { conversionDiagnostic: webpageTransportDiagnostic } : {}
         }
       };
     }
@@ -20309,6 +20625,9 @@ WechatObsidianInboxPlugin.__test = {
   isRetryableTranscriptionError,
   getPluginRuntimeIdentity,
   getSafeUrlDiagnostic,
+  getTransportErrorDiagnostic,
+  buildWebpageTransportDiagnostic,
+  buildDouyinMediaResolutionDiagnostic,
   getXiaohongshuCapabilityMatrix,
   runWithXiaohongshuBrowserSessionLock,
   getXiaohongshuBrowserCandidates,

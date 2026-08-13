@@ -100,6 +100,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     markdown: supplementalMarkdown = '',
     trailingMarkdown = '',
     sourceTitle = '',
+    mediaResolutionDiagnostic = null,
   } = {}) {
     const {
       markdown,
@@ -137,6 +138,9 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       transcriptionSource,
       transcriptionError,
       conversionStatus: conversionStatus || transcriptionStatus,
+      ...(mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object'
+        ? { mediaResolutionDiagnostic }
+        : {}),
     };
   }
 
@@ -157,6 +161,30 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     }
     const status = metadata.conversionStatus || 'pending';
     const errorText = metadata.conversionError || '';
+    const diagnosticLines = [];
+    const transportDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === 'object'
+      ? metadata.conversionDiagnostic
+      : null;
+    if (transportDiagnostic && Array.isArray(transportDiagnostic.attempts)) {
+      const attempts = transportDiagnostic.attempts.map((attempt) => {
+        const error = attempt && attempt.error && typeof attempt.error === 'object' ? attempt.error : {};
+        const detail = String(error.code || '').trim()
+          || (Number(error.status) ? `HTTP ${Number(error.status)}` : String(error.message || '').trim());
+        return `${String(attempt.transport || 'unknown')}${detail ? `=${detail}` : ''}`;
+      }).filter(Boolean).slice(0, 4);
+      if (attempts.length) diagnosticLines.push(`网页通道：${attempts.join('；')}`);
+    }
+    const mediaDiagnostic = metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === 'object'
+      ? metadata.mediaResolutionDiagnostic
+      : null;
+    if (mediaDiagnostic && (Number(mediaDiagnostic.mediaCandidateCount) === 0 || Array.isArray(mediaDiagnostic.stages))) {
+      const failedStages = (Array.isArray(mediaDiagnostic.stages) ? mediaDiagnostic.stages : [])
+        .filter((stage) => stage && stage.ok === false)
+        .map((stage) => String(stage.stage || 'media'))
+        .slice(0, 4);
+      diagnosticLines.push(`媒体解析：候选 ${Number(mediaDiagnostic.mediaCandidateCount) || 0} 个${failedStages.length ? `；失败阶段：${failedStages.join('、')}` : ''}`);
+    }
+    const diagnosticMarkdown = diagnosticLines.length ? `> 诊断：${diagnosticLines.join('；')}` : '';
     const automaticShareText = metadata.automaticWebpageExtraction
       ? String(metadata.shareText || '').trim()
       : '';
@@ -220,6 +248,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       return [
         '> ⚠️ 这篇文章的正文未能自动提取，原始链接已写入笔记属性。',
         `> ${reasonLine}`,
+        diagnosticMarkdown,
         '',
         '---',
         '',
