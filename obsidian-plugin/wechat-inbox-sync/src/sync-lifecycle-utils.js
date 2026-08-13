@@ -233,7 +233,10 @@ function getSyncLifecycleOutcomeError(record) {
   }
 
   if (transcriptionStatus === 'failed' && !transcription) {
-    return createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', '音视频转写失败');
+    return createSyncLifecycleOutcomeError(
+      'TRANSCRIPTION_FAILED',
+      declaredError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED,
+    );
   }
 
   if (['failed', 'link_saved'].includes(conversionStatus)) {

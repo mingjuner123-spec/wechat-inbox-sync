@@ -76,6 +76,20 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
   metadata: { conversionStatus: 'failed', transcriptionStatus: 'failed', transcription: '' },
 }).code, 'TRANSCRIPTION_FAILED');
+const detailedTranscriptionFailure = helpers.getSyncLifecycleOutcomeError({
+  type: 'voice',
+  metadata: {
+    transcriptionStatus: 'failed',
+    transcription: '',
+    transcriptionError: 'HTTP 403: media URL expired',
+  },
+});
+assert.strictEqual(detailedTranscriptionFailure.code, 'TRANSCRIPTION_FAILED');
+assert.strictEqual(
+  detailedTranscriptionFailure.message,
+  'HTTP 403: media URL expired',
+  'a concrete transcription error must not be replaced by a generic failure label',
+);
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'file',
   metadata: { fileExt: 'zip', conversionStatus: 'attachment_saved' },
