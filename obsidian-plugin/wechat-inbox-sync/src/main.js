@@ -151,6 +151,7 @@ const {
   createSocialMediaContextHtmlBuilder,
 } = require('./social-media-context-utils');
 const { createDouyinStructuredContentBuilder } = require('./social-platform-content-utils');
+const { createXiaohongshuMarkdownBuilder } = require('./xiaohongshu-markdown-utils');
 const {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -6027,51 +6028,9 @@ function extractXiaohongshuAuthor(html) {
   return candidates[0] || '';
 }
 
-function buildXiaohongshuMarkdown({
-  title = '小红书笔记',
-  description = '',
-  tags = [],
-  imageUrls = [],
-  videoUrl = '',
-  comments = [],
-} = {}) {
-  const images = Array.isArray(imageUrls) ? imageUrls : [];
-  const lines = [
-    '## 标题',
-    '',
-    title,
-    '',
-    '## 正文',
-    '',
-    description || '页面未直接暴露正文，原始链接已写入笔记属性。',
-    '',
-  ];
-
-  if (tags.length) {
-    lines.push('## 标签', '', tags.join(' '), '');
-  }
-
-  if (images.length) {
-    lines.push('## 图片', '', '### 封面', '', `![封面](${images[0]})`, '');
-    if (images.length > 1) {
-      lines.push('### 内页图', '');
-      images.slice(1).forEach((image, index) => {
-        lines.push(`![内页图 ${index + 1}](${image})`, '');
-      });
-    }
-  }
-
-  if (videoUrl) {
-    lines.push('## 视频源', '', `[视频文件](${videoUrl})`, '');
-  }
-
-  const commentsMarkdown = buildSocialCommentsMarkdown(comments);
-  if (commentsMarkdown) {
-    lines.push(commentsMarkdown, '');
-  }
-
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-}
+const buildXiaohongshuMarkdown = createXiaohongshuMarkdownBuilder({
+  buildCommentsMarkdown: buildSocialCommentsMarkdown,
+});
 
 function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '', options = {}) {
   url = cleanDisplayUrl(url);

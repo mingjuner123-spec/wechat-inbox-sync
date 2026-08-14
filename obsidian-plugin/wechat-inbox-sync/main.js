@@ -3151,6 +3151,65 @@ var require_social_platform_content_utils = __commonJS({
   }
 });
 
+// src/xiaohongshu-markdown-utils.js
+var require_xiaohongshu_markdown_utils = __commonJS({
+  "src/xiaohongshu-markdown-utils.js"(exports2, module2) {
+    "use strict";
+    var DEFAULT_TITLE = "小红书笔记";
+    var DEFAULT_DESCRIPTION = "页面未直接暴露正文，原始链接已写入笔记属性。";
+    function createXiaohongshuMarkdownBuilder2(dependencies = {}) {
+      const { buildCommentsMarkdown = /* @__PURE__ */ __name(() => "", "buildCommentsMarkdown") } = dependencies;
+      return ({
+        title = DEFAULT_TITLE,
+        description = "",
+        tags = [],
+        imageUrls = [],
+        videoUrl = "",
+        comments = []
+      } = {}) => {
+        const images = Array.isArray(imageUrls) ? imageUrls : [];
+        const normalizedTags = Array.isArray(tags) ? tags : [];
+        const lines = [
+          "## 标题",
+          "",
+          title,
+          "",
+          "## 正文",
+          "",
+          description || DEFAULT_DESCRIPTION,
+          ""
+        ];
+        if (normalizedTags.length) {
+          lines.push("## 标签", "", normalizedTags.join(" "), "");
+        }
+        if (images.length) {
+          lines.push("## 图片", "", "### 封面", "", "![封面](" + images[0] + ")", "");
+          if (images.length > 1) {
+            lines.push("### 内页图", "");
+            images.slice(1).forEach((image, index) => {
+              lines.push("![内页图 " + (index + 1) + "](" + image + ")", "");
+            });
+          }
+        }
+        if (videoUrl) {
+          lines.push("## 视频源", "", "[视频文件](" + videoUrl + ")", "");
+        }
+        const commentsMarkdown = buildCommentsMarkdown(comments);
+        if (commentsMarkdown) {
+          lines.push(commentsMarkdown, "");
+        }
+        return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+      };
+    }
+    __name(createXiaohongshuMarkdownBuilder2, "createXiaohongshuMarkdownBuilder");
+    module2.exports = {
+      DEFAULT_DESCRIPTION,
+      DEFAULT_TITLE,
+      createXiaohongshuMarkdownBuilder: createXiaohongshuMarkdownBuilder2
+    };
+  }
+});
+
 // src/transcription-note-title-utils.js
 var require_transcription_note_title_utils = __commonJS({
   "src/transcription-note-title-utils.js"(exports2, module2) {
@@ -3518,6 +3577,7 @@ var {
   createSocialMediaContextHtmlBuilder
 } = require_social_media_context_utils();
 var { createDouyinStructuredContentBuilder } = require_social_platform_content_utils();
+var { createXiaohongshuMarkdownBuilder } = require_xiaohongshu_markdown_utils();
 var {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -8449,47 +8509,9 @@ function extractXiaohongshuAuthor(html) {
   return candidates[0] || "";
 }
 __name(extractXiaohongshuAuthor, "extractXiaohongshuAuthor");
-function buildXiaohongshuMarkdown({
-  title = "小红书笔记",
-  description = "",
-  tags = [],
-  imageUrls = [],
-  videoUrl = "",
-  comments = []
-} = {}) {
-  const images = Array.isArray(imageUrls) ? imageUrls : [];
-  const lines = [
-    "## 标题",
-    "",
-    title,
-    "",
-    "## 正文",
-    "",
-    description || "页面未直接暴露正文，原始链接已写入笔记属性。",
-    ""
-  ];
-  if (tags.length) {
-    lines.push("## 标签", "", tags.join(" "), "");
-  }
-  if (images.length) {
-    lines.push("## 图片", "", "### 封面", "", `![封面](${images[0]})`, "");
-    if (images.length > 1) {
-      lines.push("### 内页图", "");
-      images.slice(1).forEach((image, index) => {
-        lines.push(`![内页图 ${index + 1}](${image})`, "");
-      });
-    }
-  }
-  if (videoUrl) {
-    lines.push("## 视频源", "", `[视频文件](${videoUrl})`, "");
-  }
-  const commentsMarkdown = buildSocialCommentsMarkdown(comments);
-  if (commentsMarkdown) {
-    lines.push(commentsMarkdown, "");
-  }
-  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-}
-__name(buildXiaohongshuMarkdown, "buildXiaohongshuMarkdown");
+var buildXiaohongshuMarkdown = createXiaohongshuMarkdownBuilder({
+  buildCommentsMarkdown: buildSocialCommentsMarkdown
+});
 function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = "", options = {}) {
   url = cleanDisplayUrl(url);
   const source = String(html || "");
