@@ -146,7 +146,10 @@ const {
   hasSocialMetrics,
   withCapturedSocialMetrics,
 } = require('./social-engagement-utils');
-const { buildSocialMediaSupplementalMarkdown } = require('./social-media-context-utils');
+const {
+  buildSocialMediaSupplementalMarkdown,
+  createSocialMediaContextHtmlBuilder,
+} = require('./social-media-context-utils');
 const {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -4068,21 +4071,14 @@ function extractWebpageMetadataFromHtml(html, url = '') {
   };
 }
 
-function buildSocialMediaSupplementalMarkdownFromHtml(html, url = '') {
-  const metadata = extractWebpageMetadataFromHtml(html, url);
-  const descriptionTags = extractTagsFromText(metadata.description, html);
-  const preferredCover = normalizeExtractedUrl(extractMetaContent(html, ['og:image', 'twitter:image']));
-  const isBilibiliPlaceholder = (imageUrl) => isBilibiliUrl(url)
-    && /\/bfs\/static\/jinkela\/|\/long\/images\/512\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(String(imageUrl || ''));
-  return buildSocialMediaSupplementalMarkdown({
-    title: metadata.title,
-    description: metadata.description,
-    tags: descriptionTags.length ? descriptionTags : metadata.keywords,
-    imageUrls: [preferredCover, ...collectImageUrlsFromHtml(html)]
-      .filter(Boolean)
-      .filter((imageUrl) => !isBilibiliPlaceholder(imageUrl)),
-  });
-}
+const buildSocialMediaSupplementalMarkdownFromHtml = createSocialMediaContextHtmlBuilder({
+  extractPageMetadata: extractWebpageMetadataFromHtml,
+  extractTagsFromText,
+  extractMetaContent,
+  collectImageUrls: collectImageUrlsFromHtml,
+  normalizeUrl: normalizeExtractedUrl,
+  isBilibiliUrl,
+});
 
 function extractSocialMetricsFromLabeledHtml(html = '') {
   const source = String(html || '');

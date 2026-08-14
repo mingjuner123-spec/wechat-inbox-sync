@@ -39,7 +39,39 @@ function buildSocialMediaSupplementalMarkdown({
   return lines.join('\n').trim();
 }
 
+function createSocialMediaContextHtmlBuilder(dependencies = {}) {
+  const {
+    extractPageMetadata,
+    extractTagsFromText,
+    extractMetaContent,
+    collectImageUrls,
+    normalizeUrl,
+    isBilibiliUrl,
+  } = dependencies;
+  return (html, url = '') => {
+    const metadata = typeof extractPageMetadata === 'function' ? extractPageMetadata(html, url) || {} : {};
+    const tags = typeof extractTagsFromText === 'function'
+      ? extractTagsFromText(metadata.description, html)
+      : [];
+    const cover = typeof extractMetaContent === 'function' && typeof normalizeUrl === 'function'
+      ? normalizeUrl(extractMetaContent(html, ['og:image', 'twitter:image']))
+      : '';
+    const isPlaceholder = (imageUrl) => typeof isBilibiliUrl === 'function'
+      && isBilibiliUrl(url)
+      && /\/bfs\/static\/jinkela\/|\/long\/images\/512\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(String(imageUrl || ''));
+    return buildSocialMediaSupplementalMarkdown({
+      title: metadata.title,
+      description: metadata.description,
+      tags: Array.isArray(tags) && tags.length ? tags : metadata.keywords,
+      imageUrls: [cover, ...(typeof collectImageUrls === 'function' ? collectImageUrls(html) : [])]
+        .filter(Boolean)
+        .filter((imageUrl) => !isPlaceholder(imageUrl)),
+    });
+  };
+}
+
 module.exports = {
   buildSocialMediaSupplementalMarkdown,
+  createSocialMediaContextHtmlBuilder,
   normalizeSocialMediaImageUrl,
 };

@@ -3031,8 +3031,32 @@ var require_social_media_context_utils = __commonJS({
       return lines.join("\n").trim();
     }
     __name(buildSocialMediaSupplementalMarkdown2, "buildSocialMediaSupplementalMarkdown");
+    function createSocialMediaContextHtmlBuilder2(dependencies = {}) {
+      const {
+        extractPageMetadata,
+        extractTagsFromText: extractTagsFromText2,
+        extractMetaContent: extractMetaContent2,
+        collectImageUrls,
+        normalizeUrl,
+        isBilibiliUrl: isBilibiliUrl2
+      } = dependencies;
+      return (html, url = "") => {
+        const metadata = typeof extractPageMetadata === "function" ? extractPageMetadata(html, url) || {} : {};
+        const tags = typeof extractTagsFromText2 === "function" ? extractTagsFromText2(metadata.description, html) : [];
+        const cover = typeof extractMetaContent2 === "function" && typeof normalizeUrl === "function" ? normalizeUrl(extractMetaContent2(html, ["og:image", "twitter:image"])) : "";
+        const isPlaceholder = /* @__PURE__ */ __name((imageUrl) => typeof isBilibiliUrl2 === "function" && isBilibiliUrl2(url) && /\/bfs\/static\/jinkela\/|\/long\/images\/512\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(String(imageUrl || "")), "isPlaceholder");
+        return buildSocialMediaSupplementalMarkdown2({
+          title: metadata.title,
+          description: metadata.description,
+          tags: Array.isArray(tags) && tags.length ? tags : metadata.keywords,
+          imageUrls: [cover, ...typeof collectImageUrls === "function" ? collectImageUrls(html) : []].filter(Boolean).filter((imageUrl) => !isPlaceholder(imageUrl))
+        });
+      };
+    }
+    __name(createSocialMediaContextHtmlBuilder2, "createSocialMediaContextHtmlBuilder");
     module2.exports = {
       buildSocialMediaSupplementalMarkdown: buildSocialMediaSupplementalMarkdown2,
+      createSocialMediaContextHtmlBuilder: createSocialMediaContextHtmlBuilder2,
       normalizeSocialMediaImageUrl
     };
   }
@@ -3400,7 +3424,10 @@ var {
   hasSocialMetrics,
   withCapturedSocialMetrics
 } = require_social_engagement_utils();
-var { buildSocialMediaSupplementalMarkdown } = require_social_media_context_utils();
+var {
+  buildSocialMediaSupplementalMarkdown,
+  createSocialMediaContextHtmlBuilder
+} = require_social_media_context_utils();
 var {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -6665,19 +6692,14 @@ function extractWebpageMetadataFromHtml(html, url = "") {
   };
 }
 __name(extractWebpageMetadataFromHtml, "extractWebpageMetadataFromHtml");
-function buildSocialMediaSupplementalMarkdownFromHtml(html, url = "") {
-  const metadata = extractWebpageMetadataFromHtml(html, url);
-  const descriptionTags = extractTagsFromText(metadata.description, html);
-  const preferredCover = normalizeExtractedUrl(extractMetaContent(html, ["og:image", "twitter:image"]));
-  const isBilibiliPlaceholder = /* @__PURE__ */ __name((imageUrl) => isBilibiliUrl(url) && /\/bfs\/static\/jinkela\/|\/long\/images\/512\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(String(imageUrl || "")), "isBilibiliPlaceholder");
-  return buildSocialMediaSupplementalMarkdown({
-    title: metadata.title,
-    description: metadata.description,
-    tags: descriptionTags.length ? descriptionTags : metadata.keywords,
-    imageUrls: [preferredCover, ...collectImageUrlsFromHtml(html)].filter(Boolean).filter((imageUrl) => !isBilibiliPlaceholder(imageUrl))
-  });
-}
-__name(buildSocialMediaSupplementalMarkdownFromHtml, "buildSocialMediaSupplementalMarkdownFromHtml");
+var buildSocialMediaSupplementalMarkdownFromHtml = createSocialMediaContextHtmlBuilder({
+  extractPageMetadata: extractWebpageMetadataFromHtml,
+  extractTagsFromText,
+  extractMetaContent,
+  collectImageUrls: collectImageUrlsFromHtml,
+  normalizeUrl: normalizeExtractedUrl,
+  isBilibiliUrl
+});
 function extractSocialMetricsFromLabeledHtml(html = "") {
   const source = String(html || "");
   const labels = "(?:视频)?播放(?:量|数|次数)?|(?:点赞|获赞)(?:量|数|次数)?|收藏(?:量|数|人数|次数)?|(?:评论|回复)(?:量|数|次数)?|(?:转发|分享)(?:量|数|人数|次数)?|(?:投硬币|硬币)(?:枚数|数|量|次数)?";
