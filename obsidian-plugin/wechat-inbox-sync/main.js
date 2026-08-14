@@ -3210,6 +3210,41 @@ var require_xiaohongshu_markdown_utils = __commonJS({
   }
 });
 
+// src/social-comments-markdown-utils.js
+var require_social_comments_markdown_utils = __commonJS({
+  "src/social-comments-markdown-utils.js"(exports2, module2) {
+    "use strict";
+    function createSocialCommentsMarkdownBuilder2(dependencies = {}) {
+      const {
+        normalizeComment = /* @__PURE__ */ __name((comment) => comment, "normalizeComment"),
+        formatTime = /* @__PURE__ */ __name((value) => String(value || "").trim(), "formatTime"),
+        formatLikes = /* @__PURE__ */ __name((value) => String(value || "").trim(), "formatLikes")
+      } = dependencies;
+      return (comments = []) => {
+        const items = (comments || []).map((comment) => normalizeComment(comment)).filter(Boolean);
+        if (!items.length) return "";
+        const lines = ["## 评论区", ""];
+        const appendComment = /* @__PURE__ */ __name((comment, indent = "", reply = false) => {
+          const meta = [formatTime(comment.time), formatLikes(comment.likes)].filter(Boolean).join(" · ");
+          const prefix = comment.author ? "**" + comment.author + "**：" : "";
+          lines.push(
+            indent + "- " + (reply ? "↳ " : "") + prefix + comment.content + (meta ? "（" + meta + "）" : "")
+          );
+          (Array.isArray(comment.replies) ? comment.replies : []).forEach((child) => {
+            appendComment(child, indent + "  ", true);
+          });
+        }, "appendComment");
+        items.forEach((comment) => appendComment(comment));
+        return lines.join("\n").trim();
+      };
+    }
+    __name(createSocialCommentsMarkdownBuilder2, "createSocialCommentsMarkdownBuilder");
+    module2.exports = {
+      createSocialCommentsMarkdownBuilder: createSocialCommentsMarkdownBuilder2
+    };
+  }
+});
+
 // src/transcription-note-title-utils.js
 var require_transcription_note_title_utils = __commonJS({
   "src/transcription-note-title-utils.js"(exports2, module2) {
@@ -3578,6 +3613,7 @@ var {
 } = require_social_media_context_utils();
 var { createDouyinStructuredContentBuilder } = require_social_platform_content_utils();
 var { createXiaohongshuMarkdownBuilder } = require_xiaohongshu_markdown_utils();
+var { createSocialCommentsMarkdownBuilder } = require_social_comments_markdown_utils();
 var {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -10183,22 +10219,11 @@ function extractSocialCommentsFromHtml(html, limit = 20) {
   return comments.slice(0, limit);
 }
 __name(extractSocialCommentsFromHtml, "extractSocialCommentsFromHtml");
-function buildSocialCommentsMarkdown(comments = []) {
-  const items = (comments || []).map((comment) => normalizeSocialComment(comment)).filter(Boolean);
-  if (!items.length) return "";
-  const lines = ["## 评论区", ""];
-  const appendComment = /* @__PURE__ */ __name((comment, indent = "", reply = false) => {
-    const meta = [formatSocialCommentTime(comment.time), formatSocialCommentLikes(comment.likes)].filter(Boolean).join(" · ");
-    const prefix = comment.author ? `**${comment.author}**：` : "";
-    lines.push(`${indent}- ${reply ? "↳ " : ""}${prefix}${comment.content}${meta ? `（${meta}）` : ""}`);
-    (Array.isArray(comment.replies) ? comment.replies : []).forEach((child) => appendComment(child, `${indent}  `, true));
-  }, "appendComment");
-  items.forEach((comment) => {
-    appendComment(comment);
-  });
-  return lines.join("\n").trim();
-}
-__name(buildSocialCommentsMarkdown, "buildSocialCommentsMarkdown");
+var buildSocialCommentsMarkdown = createSocialCommentsMarkdownBuilder({
+  normalizeComment: normalizeSocialComment,
+  formatTime: formatSocialCommentTime,
+  formatLikes: formatSocialCommentLikes
+});
 function formatSocialCommentTime(value) {
   const text = String(value || "").trim();
   if (!/^\d{10,13}$/.test(text)) return text;

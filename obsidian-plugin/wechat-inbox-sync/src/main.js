@@ -152,6 +152,7 @@ const {
 } = require('./social-media-context-utils');
 const { createDouyinStructuredContentBuilder } = require('./social-platform-content-utils');
 const { createXiaohongshuMarkdownBuilder } = require('./xiaohongshu-markdown-utils');
+const { createSocialCommentsMarkdownBuilder } = require('./social-comments-markdown-utils');
 const {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -7964,21 +7965,11 @@ function extractSocialCommentsFromHtml(html, limit = 20) {
   return comments.slice(0, limit);
 }
 
-function buildSocialCommentsMarkdown(comments = []) {
-  const items = (comments || []).map((comment) => normalizeSocialComment(comment)).filter(Boolean);
-  if (!items.length) return '';
-  const lines = ['## 评论区', ''];
-  const appendComment = (comment, indent = '', reply = false) => {
-    const meta = [formatSocialCommentTime(comment.time), formatSocialCommentLikes(comment.likes)].filter(Boolean).join(' · ');
-    const prefix = comment.author ? `**${comment.author}**：` : '';
-    lines.push(`${indent}- ${reply ? '↳ ' : ''}${prefix}${comment.content}${meta ? `（${meta}）` : ''}`);
-    (Array.isArray(comment.replies) ? comment.replies : []).forEach((child) => appendComment(child, `${indent}  `, true));
-  };
-  items.forEach((comment) => {
-    appendComment(comment);
-  });
-  return lines.join('\n').trim();
-}
+const buildSocialCommentsMarkdown = createSocialCommentsMarkdownBuilder({
+  normalizeComment: normalizeSocialComment,
+  formatTime: formatSocialCommentTime,
+  formatLikes: formatSocialCommentLikes,
+});
 
 function formatSocialCommentTime(value) {
   const text = String(value || '').trim();
