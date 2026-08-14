@@ -178,7 +178,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.86';
+const PLUGIN_RUNTIME_VERSION = '1.3.87';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3123,13 +3123,116 @@ function extractDouyinAwemeId(url) {
     /\/video\/(\d{8,})/i,
     /\/share\/video\/(\d{8,})/i,
     /\/aweme\/detail\/(\d{8,})/i,
-    /[?&](?:aweme_id|item_id|item_ids)=(\d{8,})/i,
+    /[?&](?:aweme_id|item_id|item_ids|modal_id)=(\d{8,})/i,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match && match[1]) return match[1];
   }
   return '';
+}
+
+function buildDouyinDomIdentityExtractorScript() {
+  return String.raw`
+    const collectIdentityIds = (node) => {
+      const ids = [];
+      const seenIds = new Set();
+      const addIdentityText = (value) => {
+        const text = String(value || '');
+        const patterns = [
+          /(?:\/video\/|\/share\/video\/|\/aweme\/detail\/)(\d{8,})/ig,
+          /(?:aweme_id|item_id|item_ids|modal_id)[=:]+(\d{8,})/ig,
+        ];
+        patterns.forEach((pattern) => {
+          let match;
+          while ((match = pattern.exec(text))) {
+            if (!seenIds.has(match[1])) {
+              seenIds.add(match[1]);
+              ids.push(match[1]);
+            }
+          }
+        });
+        if (/^\d{8,}$/.test(text) && !seenIds.has(text)) {
+          seenIds.add(text);
+          ids.push(text);
+        }
+      };
+      let current = node;
+      for (let depth = 0; current && depth < 7; depth += 1) {
+        ['id', 'href', 'src', 'data-aweme-id', 'data-item-id', 'data-id'].forEach((name) => {
+          try { addIdentityText(current.getAttribute && current.getAttribute(name)); } catch (error) {}
+        });
+        current = current.parentElement;
+      }
+      return ids;
+    };
+  `;
+}
+
+function selectPrimaryDouyinDomMediaUrls(candidates = [], targetAwemeId = '') {
+  const targetId = String(targetAwemeId || '').trim();
+  const ranked = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate, fallbackIndex) => {
+      const urls = normalizeBrowserCapturedMediaUrls([candidate && candidate.urls]);
+      const identityIds = Array.from(new Set(
+        (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ));
+      if (!urls.length || (targetId && identityIds.some((identityId) => identityId !== targetId))) {
+        return null;
+      }
+      return {
+        urls,
+        exactIdentity: Boolean(targetId && identityIds.includes(targetId)),
+        isPlaying: candidate && candidate.isPlaying === true,
+        visibleInViewport: Boolean(candidate && candidate.visible && candidate.intersectsViewport),
+        area: Math.max(0, Number(candidate && candidate.area) || 0),
+        index: Number.isFinite(Number(candidate && candidate.index))
+          ? Number(candidate.index)
+          : fallbackIndex,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => (
+      Number(right.exactIdentity) - Number(left.exactIdentity)
+      || Number(right.isPlaying) - Number(left.isPlaying)
+      || Number(right.visibleInViewport) - Number(left.visibleInViewport)
+      || right.area - left.area
+      || left.index - right.index
+    ));
+  return ranked.length ? ranked[0].urls : [];
+}
+
+function selectIdentityBoundDouyinBrowserMedia({
+  targetAwemeId = '',
+  finalUrl = '',
+  canonicalUrl = '',
+  debuggerMediaUrls = [],
+  domMediaCandidates = [],
+  primaryDomMediaUrls = [],
+} = {}) {
+  const targetId = String(targetAwemeId || '').trim();
+  if (!targetId) return [];
+
+  // Debugger response bodies are parsed together with the requested aweme id,
+  // so these candidates are already bound to the target work.
+  const exactPayloadMedia = normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
+  if (exactPayloadMedia.length) return exactPayloadMedia;
+
+  // Douyin can withhold play_addr while its target page still has a playable
+  // main video. Accept that DOM media only after the loaded page or canonical
+  // URL proves that it is the requested work. Recommendation/preload resources
+  // are deliberately excluded from this fallback.
+  const loadedIds = [finalUrl, canonicalUrl]
+    .map((value) => extractDouyinAwemeId(value))
+    .filter(Boolean);
+  if (!loadedIds.length || loadedIds.some((loadedId) => loadedId !== targetId)) return [];
+  if (!loadedIds.includes(targetId)) return [];
+  if (Array.isArray(domMediaCandidates) && domMediaCandidates.length) {
+    return selectPrimaryDouyinDomMediaUrls(domMediaCandidates, targetId);
+  }
+  return normalizeBrowserCapturedMediaUrls([primaryDomMediaUrls]);
 }
 
 function normalizeDouyinTargetUrl(originalUrl, resolvedUrl = '') {
@@ -10500,12 +10603,6 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         const collect = () => {
           document.querySelectorAll('video, audio, source').forEach((node) => {
             if (urls.length >= maxUrls) return;
-            try {
-              if (node.tagName && node.tagName.toLowerCase() === 'video' && typeof node.play === 'function') {
-                node.muted = true;
-                node.play().catch(() => {});
-              }
-            } catch (error) {}
             add(node.currentSrc, 'media');
             add(node.src, 'media');
             add(node.getAttribute('src'), 'media');
@@ -10525,7 +10622,60 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
           await sleep(500);
         }
         collect();
-        return urls;
+        ${buildDouyinDomIdentityExtractorScript()}
+        const mediaElements = Array.from(document.querySelectorAll('video, audio'));
+        const domMediaCandidates = mediaElements.map((node, index) => {
+          let rect = { width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 };
+          try {
+            rect = node.getBoundingClientRect();
+          } catch (error) {}
+          const style = (() => {
+            try { return window.getComputedStyle(node); } catch (error) { return null; }
+          })();
+          const visible = !style || (style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0);
+          const intersectsViewport = rect.bottom > 0
+            && rect.right > 0
+            && rect.top < window.innerHeight
+            && rect.left < window.innerWidth;
+          const area = Math.max(0, Number(rect.width || 0)) * Math.max(0, Number(rect.height || 0));
+          const mediaUrls = [];
+          const seenMediaUrls = new Set();
+          const addMediaUrl = (value) => {
+            const mediaUrl = String(value || '').trim();
+            if (!mediaUrl || seenMediaUrls.has(mediaUrl)) return;
+            seenMediaUrls.add(mediaUrl);
+            mediaUrls.push(mediaUrl);
+          };
+          addMediaUrl(node.currentSrc);
+          addMediaUrl(node.src);
+          addMediaUrl(node.getAttribute && node.getAttribute('src'));
+          node.querySelectorAll('source').forEach((source) => {
+            addMediaUrl(source.currentSrc);
+            addMediaUrl(source.src);
+            addMediaUrl(source.getAttribute('src'));
+          });
+          return {
+            index,
+            urls: mediaUrls,
+            identityIds: collectIdentityIds(node),
+            isPlaying: Boolean(!node.paused && !node.ended && Number(node.readyState || 0) >= 2),
+            visible,
+            intersectsViewport,
+            area,
+          };
+        }).filter((candidate) => candidate.urls.length);
+        const canonicalNode = document.querySelector('link[rel=canonical]');
+        const ogUrlNode = document.querySelector('meta[property=og:url]');
+        return {
+          urls,
+          pageUrl: String(location.href || ''),
+          canonicalUrl: String(
+            (canonicalNode && canonicalNode.href)
+            || (ogUrlNode && ogUrlNode.content)
+            || '',
+          ),
+          domMediaCandidates,
+        };
       })()
     `);
 
@@ -10533,11 +10683,19 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
     if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
-      // The debugger payload is parsed against the requested aweme id. Do not
-      // fall back to DOM/resource capture: it may contain recommendation videos.
-      return normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
+      return selectIdentityBoundDouyinBrowserMedia({
+        targetAwemeId: targetDouyinAwemeId,
+        finalUrl: payload && payload.pageUrl,
+        canonicalUrl: payload && payload.canonicalUrl,
+        debuggerMediaUrls,
+        domMediaCandidates: payload && payload.domMediaCandidates,
+      });
     }
-    return normalizeBrowserCapturedMediaUrls([capturedRequests, payload, debuggerMediaUrls]);
+    return normalizeBrowserCapturedMediaUrls([
+      capturedRequests,
+      payload && Array.isArray(payload.urls) ? payload.urls : payload,
+      debuggerMediaUrls,
+    ]);
   } finally {
     cleanupAbort();
     installedWebRequestHandlers.forEach((method) => {
@@ -15553,13 +15711,18 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!isDouyinUrl(originalUrl)) return [];
     const directTarget = normalizeDouyinTargetUrl(originalUrl, originalUrl);
     if (directTarget.awemeId) {
+      const candidates = [];
       try {
-        return sortMediaUrlsForTranscription(
-          await this.fetchDouyinMediaUrlsWithSession(directTarget.url, directTarget.awemeId),
-        );
-      } catch (error) {
-        return [];
-      }
+        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(directTarget.url, directTarget.awemeId));
+      } catch (error) {}
+      if (candidates.length) return sortMediaUrlsForTranscription(candidates);
+      try {
+        candidates.push(...await this.renderSocialMediaUrls(directTarget.url, {
+          timeoutMs: 18000,
+          strictDouyinTarget: true,
+        }));
+      } catch (error) {}
+      return sortMediaUrlsForTranscription(candidates);
     }
     let resolvedUrl = originalUrl;
     try {
@@ -15572,19 +15735,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (target.awemeId) {
       try {
         candidates.push(...await this.fetchDouyinMediaUrlsWithSession(target.url, target.awemeId));
-      } catch (error) {
-        return [];
+      } catch (error) {}
+      if (!candidates.length) {
+        try {
+          candidates.push(...await this.renderSocialMediaUrls(target.url, {
+            timeoutMs: 18000,
+            strictDouyinTarget: true,
+          }));
+        } catch (error) {}
       }
       return sortMediaUrlsForTranscription(candidates);
     }
-    try {
-      candidates.push(...await this.renderSocialMediaUrls(target.url || resolvedUrl || originalUrl, {
-        timeoutMs: 18000,
-      }));
-    } catch (error) {
-      // Keep the original download error if refreshing also fails.
-    }
-    return sortMediaUrlsForTranscription(candidates);
+    // Without a stable aweme id, a Douyin page can expose only recommendation
+    // videos. Fail closed instead of silently transcribing a different work.
+    return [];
   }
 
   async renderSocialMediaUrls(url, options = {}) {
@@ -19840,6 +20004,9 @@ WechatObsidianInboxPlugin.__test = {
   generateWechatChannelsDecryptorBytes,
   decryptWechatChannelsMediaBuffer,
   extractDouyinAwemeId,
+  buildDouyinDomIdentityExtractorScript,
+  selectPrimaryDouyinDomMediaUrls,
+  selectIdentityBoundDouyinBrowserMedia,
   normalizeDouyinTargetUrl,
   getDouyinMobileSharePageUrls,
   extractDouyinMediaUrlsFromShareHtml,

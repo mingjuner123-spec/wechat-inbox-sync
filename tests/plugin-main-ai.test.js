@@ -1141,9 +1141,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.86'), {
-  manifestVersion: '1.3.86',
-  runtimeVersion: '1.3.86',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.87'), {
+  manifestVersion: '1.3.87',
+  runtimeVersion: '1.3.87',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -6010,6 +6010,132 @@ assert.strictEqual(
   helpers.extractDouyinAwemeId('bytedance://aweme/detail/7644566503081119019'),
   '7644566503081119019',
 );
+assert.strictEqual(
+  helpers.extractDouyinAwemeId('https://www.douyin.com/?modal_id=7644566503081119019'),
+  '7644566503081119019',
+);
+assert.strictEqual(typeof helpers.selectIdentityBoundDouyinBrowserMedia, 'function');
+assert.deepStrictEqual(
+  helpers.selectIdentityBoundDouyinBrowserMedia({
+    targetAwemeId: '7644566503081119019',
+    finalUrl: 'https://www.douyin.com/video/7644566503081119019',
+    primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/target-main-video/?mime_type=video_mp4'],
+  }),
+  ['https://v11-weba.douyinvod.com/target-main-video/?mime_type=video_mp4'],
+);
+assert.deepStrictEqual(
+  helpers.selectIdentityBoundDouyinBrowserMedia({
+    targetAwemeId: '7644566503081119019',
+    finalUrl: 'https://www.douyin.com/video/9999999999999999999',
+    primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/recommendation-video/?mime_type=video_mp4'],
+  }),
+  [],
+);
+assert.deepStrictEqual(
+  helpers.selectIdentityBoundDouyinBrowserMedia({
+    targetAwemeId: '7644566503081119019',
+    finalUrl: 'https://www.douyin.com/video/9999999999999999999',
+    canonicalUrl: 'https://www.douyin.com/video/7644566503081119019',
+    primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/conflicting-page-video/?mime_type=video_mp4'],
+  }),
+  [],
+);
+assert.deepStrictEqual(
+  helpers.selectIdentityBoundDouyinBrowserMedia({
+    targetAwemeId: '7644566503081119019',
+    finalUrl: 'https://www.douyin.com/video/7644566503081119019',
+    canonicalUrl: 'https://www.douyin.com/video/9999999999999999999',
+    primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/conflicting-canonical-video/?mime_type=video_mp4'],
+  }),
+  [],
+);
+assert.deepStrictEqual(
+  helpers.selectIdentityBoundDouyinBrowserMedia({
+    targetAwemeId: '7644566503081119019',
+    finalUrl: 'https://www.douyin.com/',
+    canonicalUrl: 'https://www.douyin.com/video/7644566503081119019',
+    primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/canonical-target-video/?mime_type=video_mp4'],
+  }),
+  ['https://v11-weba.douyinvod.com/canonical-target-video/?mime_type=video_mp4'],
+);
+assert.deepStrictEqual(
+  helpers.selectIdentityBoundDouyinBrowserMedia({
+    targetAwemeId: '7644566503081119019',
+    finalUrl: 'https://www.douyin.com/',
+    primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/unbound-video/?mime_type=video_mp4'],
+  }),
+  [],
+);
+assert.deepStrictEqual(
+  helpers.selectIdentityBoundDouyinBrowserMedia({
+    targetAwemeId: '7644566503081119019',
+    debuggerMediaUrls: ['https://v11-weba.douyinvod.com/debugger-target/?mime_type=video_mp4'],
+    finalUrl: 'https://www.douyin.com/',
+    primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/unbound-video/?mime_type=video_mp4'],
+  }),
+  ['https://v11-weba.douyinvod.com/debugger-target/?mime_type=video_mp4'],
+);
+assert.strictEqual(typeof helpers.selectPrimaryDouyinDomMediaUrls, 'function');
+assert.strictEqual(typeof helpers.buildDouyinDomIdentityExtractorScript, 'function');
+const douyinDomIdentityExtractor = new Function(
+  helpers.buildDouyinDomIdentityExtractorScript() + '\nreturn collectIdentityIds;',
+)();
+assert.deepStrictEqual(
+  douyinDomIdentityExtractor({
+    getAttribute(name) {
+      if (name === 'href') return 'https://www.douyin.com/video/7644566503081119019';
+      return '';
+    },
+    parentElement: null,
+  }),
+  ['7644566503081119019'],
+);
+assert.deepStrictEqual(
+  helpers.selectPrimaryDouyinDomMediaUrls([
+    {
+      index: 0,
+      urls: ['https://v11-weba.douyinvod.com/target-dom-video/?mime_type=video_mp4'],
+      identityIds: ['7644566503081119019'],
+      isPlaying: true,
+      visible: true,
+      intersectsViewport: true,
+      area: 320000,
+    },
+    {
+      index: 1,
+      urls: ['https://v11-weba.douyinvod.com/larger-recommendation/?mime_type=video_mp4'],
+      identityIds: ['9999999999999999999'],
+      isPlaying: false,
+      visible: true,
+      intersectsViewport: true,
+      area: 900000,
+    },
+  ], '7644566503081119019'),
+  ['https://v11-weba.douyinvod.com/target-dom-video/?mime_type=video_mp4'],
+);
+assert.deepStrictEqual(
+  helpers.selectPrimaryDouyinDomMediaUrls([
+    {
+      index: 0,
+      urls: ['https://v11-weba.douyinvod.com/playing-target-without-id/?mime_type=video_mp4'],
+      identityIds: [],
+      isPlaying: true,
+      visible: true,
+      intersectsViewport: true,
+      area: 320000,
+    },
+    {
+      index: 1,
+      urls: ['https://v11-weba.douyinvod.com/larger-preload-without-id/?mime_type=video_mp4'],
+      identityIds: [],
+      isPlaying: false,
+      visible: true,
+      intersectsViewport: true,
+      area: 900000,
+    },
+  ], '7644566503081119019'),
+  ['https://v11-weba.douyinvod.com/playing-target-without-id/?mime_type=video_mp4'],
+);
 assert.deepStrictEqual(
   helpers.normalizeDouyinTargetUrl(
     'https://v.douyin.com/demo/',
@@ -7570,20 +7696,36 @@ async function runAsyncHydrationTests() {
 
   const refreshIdentityPlugin = new PluginClass();
   let refreshIdentityRenderCalls = 0;
+  let refreshIdentityRenderOptions = null;
   refreshIdentityPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
     assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
     assert.strictEqual(awemeId, '7644566503081119019');
     return [];
   };
-  refreshIdentityPlugin.renderSocialMediaUrls = async () => {
+  refreshIdentityPlugin.renderSocialMediaUrls = async (pageUrl, options) => {
+    assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
     refreshIdentityRenderCalls += 1;
-    return ['https://v11-weba.douyinvod.com/refreshed-recommendation/?mime_type=video_mp4'];
+    refreshIdentityRenderOptions = options;
+    return ['https://v11-weba.douyinvod.com/refreshed-target/?mime_type=video_mp4'];
   };
   assert.deepStrictEqual(
     await refreshIdentityPlugin.refreshDouyinMediaUrls('https://www.douyin.com/video/7644566503081119019'),
+    ['https://v11-weba.douyinvod.com/refreshed-target/?mime_type=video_mp4'],
+  );
+  assert.strictEqual(refreshIdentityRenderCalls, 1);
+  assert.strictEqual(refreshIdentityRenderOptions.strictDouyinTarget, true);
+
+  const refreshWithoutIdentityPlugin = new PluginClass();
+  let refreshWithoutIdentityRenderCalls = 0;
+  refreshWithoutIdentityPlugin.renderSocialMediaUrls = async () => {
+    refreshWithoutIdentityRenderCalls += 1;
+    return ['https://v11-weba.douyinvod.com/recommendation-only/?mime_type=video_mp4'];
+  };
+  assert.deepStrictEqual(
+    await refreshWithoutIdentityPlugin.refreshDouyinMediaUrls('douyin.com'),
     [],
   );
-  assert.strictEqual(refreshIdentityRenderCalls, 0);
+  assert.strictEqual(refreshWithoutIdentityRenderCalls, 0);
 
   const renderedDouyinPlugin = new PluginClass();
   renderedDouyinPlugin.settings = { aiProvider: 'off' };
@@ -10342,7 +10484,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.86'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.87'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10381,8 +10523,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.86',
-        runtimeVersion: '1.3.86',
+        manifestVersion: '1.3.87',
+        runtimeVersion: '1.3.87',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10467,7 +10609,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   };
   plugin.writeRecord = async () => {
     throw helpers.createRetryableXiaohongshuContentError({
-      runtime: helpers.getPluginRuntimeIdentity('1.3.86'),
+      runtime: helpers.getPluginRuntimeIdentity('1.3.87'),
       request: {
         sourceHost: 'xhslink.cn',
         finalHost: 'xiaohongshu.com',
@@ -12565,7 +12707,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.86 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.87 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
