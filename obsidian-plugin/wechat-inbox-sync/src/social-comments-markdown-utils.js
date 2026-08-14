@@ -42,6 +42,8 @@ function createSocialCommentSectionHelpers(dependencies = {}) {
   const hasCommentsSection = (markdown = '') => sectionStartPattern.test(String(markdown || ''));
 
   return {
+    hasCommentsSection,
+
     getStats(markdown = '') {
       let rootCount = 0;
       let replyCount = 0;

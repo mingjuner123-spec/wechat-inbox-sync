@@ -151,7 +151,10 @@ const {
   createSocialMediaContextHtmlBuilder,
 } = require('./social-media-context-utils');
 const { createDouyinStructuredContentBuilder } = require('./social-platform-content-utils');
-const { createXiaohongshuMarkdownBuilder } = require('./xiaohongshu-markdown-utils');
+const {
+  createXiaohongshuCommentMarkdownHelpers,
+  createXiaohongshuMarkdownBuilder,
+} = require('./xiaohongshu-markdown-utils');
 const {
   createSocialCommentSectionHelpers,
   createSocialCommentsMarkdownBuilder,
@@ -7976,6 +7979,9 @@ const buildSocialCommentsMarkdown = createSocialCommentsMarkdownBuilder({
 const socialCommentSectionHelpers = createSocialCommentSectionHelpers({
   buildCommentsMarkdown: buildSocialCommentsMarkdown,
 });
+const xiaohongshuCommentMarkdownHelpers = createXiaohongshuCommentMarkdownHelpers({
+  buildCommentsMarkdown: buildSocialCommentsMarkdown,
+});
 
 function formatSocialCommentTime(value) {
   const text = String(value || '').trim();
@@ -8011,6 +8017,8 @@ function splitSocialCommentsMarkdown(markdown = '') {
 }
 
 function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
+  const source = String(markdown || '').trim();
+  if (!source || socialCommentSectionHelpers.hasCommentsSection(source)) return source;
   const comments = Array.isArray(htmlOrComments)
     ? htmlOrComments
     : extractWechatCommentsFromHtml(htmlOrComments);
@@ -8342,49 +8350,19 @@ function mergeXiaohongshuCapturedCommentPayloads(
 }
 
 function buildXiaohongshuCommentDiagnostic(details = {}) {
-  const source = String(details.source || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'unknown';
-  const toCount = (value) => Math.max(0, Math.floor(Number(value) || 0));
-  const toLabel = (value, fallback = 'unknown') => String(value || fallback).replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || fallback;
-  const scrollMode = toLabel(details.scrollMode);
-  const pageApiStopReason = toLabel(details.pageApiStopReason);
-  const stopReason = String(details.stopReason || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'unknown';
-  return `<!-- xhs-comment-diag: source=${source}; root=${toCount(details.rootCount)}; replies=${toCount(details.replyCount)}; pages=${toCount(details.pageCount)}; root_pages=${toCount(details.rootPageCount)}; reply_pages=${toCount(details.replyPageCount)}; root_requests=${toCount(details.rootRequestCount)}; reply_requests=${toCount(details.replyRequestCount)}; merged_root=${toCount(details.mergedRootCount)}; merged_replies=${toCount(details.mergedReplyCount)}; restored_root=${toCount(details.restoredRootCount)}; restored_replies=${toCount(details.restoredReplyCount)}; final_root=${toCount(details.finalRootCount)}; final_replies=${toCount(details.finalReplyCount)}; lost_root=${toCount(details.lostRootCount)}; lost_replies=${toCount(details.lostReplyCount)}; fallback=${toCount(details.fallbackAddedCount)}; deduped=${toCount(details.dedupedFallbackCount)}; dropped=${toCount(details.droppedFallbackCount)}; unmatched=${toCount(details.unmatchedReplyCount)}; invalid=${toCount(details.invalidPayloadCount)}; partial=${details.partial ? 1 : 0}; scroll=${scrollMode}; api_stop=${pageApiStopReason}; stop=${stopReason} -->`;
+  return xiaohongshuCommentMarkdownHelpers.buildCommentDiagnostic(details);
 }
 
 function appendXiaohongshuCommentDiagnostic(markdown, details = {}) {
-  const source = String(markdown || '').trim().replace(/\n*<!-- xhs-comment-diag:[\s\S]*?-->\s*$/u, '').trim();
-  if (!source) return source;
-  const diagnostic = typeof details === 'string' && /^<!-- xhs-comment-diag: [\s\S]* -->$/.test(details)
-    ? details
-    : buildXiaohongshuCommentDiagnostic(details);
-  return `${source}\n\n${diagnostic}`;
+  return xiaohongshuCommentMarkdownHelpers.appendCommentDiagnostic(markdown, details);
 }
 
 function stripSocialCommentsFromMarkdown(markdown = '') {
-  const source = String(markdown || '')
-    .replace(/\n*<!-- xhs-comment-diag:[\s\S]*?-->\s*$/u, '')
-    .trim();
-  if (!source) return '';
-  const lines = source.split(/\r?\n/);
-  const kept = [];
-  let skippingComments = false;
-  lines.forEach((line) => {
-    if (/^##\s+评论区\s*$/u.test(line.trim())) {
-      skippingComments = true;
-      return;
-    }
-    if (skippingComments && /^##\s+\S/u.test(line.trim())) {
-      skippingComments = false;
-    }
-    if (!skippingComments) kept.push(line);
-  });
-  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return xiaohongshuCommentMarkdownHelpers.stripComments(markdown);
 }
 
 function replaceSocialCommentsInMarkdown(markdown, comments = []) {
-  const source = stripSocialCommentsFromMarkdown(markdown);
-  const commentMarkdown = buildSocialCommentsMarkdown(comments);
-  return [source, commentMarkdown].filter(Boolean).join('\n\n').trim();
+  return xiaohongshuCommentMarkdownHelpers.replaceComments(markdown, comments);
 }
 
 function isPartialXiaohongshuCommentResult(details = {}) {

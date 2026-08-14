@@ -53,8 +53,91 @@ function createXiaohongshuMarkdownBuilder(dependencies = {}) {
   };
 }
 
+function createXiaohongshuCommentMarkdownHelpers(dependencies = {}) {
+  const { buildCommentsMarkdown = () => '' } = dependencies;
+  const commentHeadingPattern = /^##\s+\u8bc4\u8bba\u533a\s*$/u;
+  const nextHeadingPattern = /^##\s+\S/u;
+  const diagnosticPattern = /\n*<!-- xhs-comment-diag:[\s\S]*?-->\s*$/u;
+  const diagnosticLiteralPattern = /^<!-- xhs-comment-diag: [\s\S]* -->$/u;
+
+  const buildCommentDiagnostic = (details = {}) => {
+    const source = String(details.source || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'unknown';
+    const toCount = (value) => Math.max(0, Math.floor(Number(value) || 0));
+    const toLabel = (value, fallback = 'unknown') => String(value || fallback).replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || fallback;
+    const scrollMode = toLabel(details.scrollMode);
+    const pageApiStopReason = toLabel(details.pageApiStopReason);
+    const stopReason = String(details.stopReason || 'unknown').replace(/[^a-z0-9_-]/gi, '').slice(0, 60) || 'unknown';
+    return '<!-- xhs-comment-diag: source=' + source
+      + '; root=' + toCount(details.rootCount)
+      + '; replies=' + toCount(details.replyCount)
+      + '; pages=' + toCount(details.pageCount)
+      + '; root_pages=' + toCount(details.rootPageCount)
+      + '; reply_pages=' + toCount(details.replyPageCount)
+      + '; root_requests=' + toCount(details.rootRequestCount)
+      + '; reply_requests=' + toCount(details.replyRequestCount)
+      + '; merged_root=' + toCount(details.mergedRootCount)
+      + '; merged_replies=' + toCount(details.mergedReplyCount)
+      + '; restored_root=' + toCount(details.restoredRootCount)
+      + '; restored_replies=' + toCount(details.restoredReplyCount)
+      + '; final_root=' + toCount(details.finalRootCount)
+      + '; final_replies=' + toCount(details.finalReplyCount)
+      + '; lost_root=' + toCount(details.lostRootCount)
+      + '; lost_replies=' + toCount(details.lostReplyCount)
+      + '; fallback=' + toCount(details.fallbackAddedCount)
+      + '; deduped=' + toCount(details.dedupedFallbackCount)
+      + '; dropped=' + toCount(details.droppedFallbackCount)
+      + '; unmatched=' + toCount(details.unmatchedReplyCount)
+      + '; invalid=' + toCount(details.invalidPayloadCount)
+      + '; partial=' + (details.partial ? 1 : 0)
+      + '; scroll=' + scrollMode
+      + '; api_stop=' + pageApiStopReason
+      + '; stop=' + stopReason
+      + ' -->';
+  };
+
+  const stripComments = (markdown = '') => {
+    const source = String(markdown || '').replace(diagnosticPattern, '').trim();
+    if (!source) return '';
+    const kept = [];
+    let skippingComments = false;
+    source.split(/\r?\n/).forEach((line) => {
+      if (commentHeadingPattern.test(line.trim())) {
+        skippingComments = true;
+        return;
+      }
+      if (skippingComments && nextHeadingPattern.test(line.trim())) {
+        skippingComments = false;
+      }
+      if (!skippingComments) kept.push(line);
+    });
+    return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  };
+
+  return {
+    buildCommentDiagnostic,
+
+    appendCommentDiagnostic(markdown, details = {}) {
+      const source = String(markdown || '').trim().replace(diagnosticPattern, '').trim();
+      if (!source) return source;
+      const diagnostic = typeof details === 'string' && diagnosticLiteralPattern.test(details)
+        ? details
+        : buildCommentDiagnostic(details);
+      return source + '\n\n' + diagnostic;
+    },
+
+    stripComments,
+
+    replaceComments(markdown, comments = []) {
+      const source = stripComments(markdown);
+      const commentMarkdown = buildCommentsMarkdown(comments);
+      return [source, commentMarkdown].filter(Boolean).join('\n\n').trim();
+    },
+  };
+}
+
 module.exports = {
   DEFAULT_DESCRIPTION,
   DEFAULT_TITLE,
+  createXiaohongshuCommentMarkdownHelpers,
   createXiaohongshuMarkdownBuilder,
 };

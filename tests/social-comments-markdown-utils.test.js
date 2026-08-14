@@ -36,6 +36,8 @@ function run() {
   const section = createSocialCommentSectionHelpers({
     buildCommentsMarkdown: buildSocialCommentsMarkdown,
   });
+  assert.strictEqual(section.hasCommentsSection('## 原文\n\n## 评论区\n\nExisting comment'), true);
+  assert.strictEqual(section.hasCommentsSection('## 原文\n\n### 评论区\n\nNot a top-level section'), false);
   const appended = section.appendComments('## Original\n\nBody', [{ content: 'Appended comment' }]);
   assert.match(appended, /Appended comment/);
   assert.strictEqual(section.appendComments(appended, [{ content: 'Ignored duplicate section' }]), appended);
