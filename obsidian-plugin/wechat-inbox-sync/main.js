@@ -3185,6 +3185,46 @@ var require_social_platform_content_utils = __commonJS({
   }
 });
 
+// src/social-media-diagnostic-utils.js
+var require_social_media_diagnostic_utils = __commonJS({
+  "src/social-media-diagnostic-utils.js"(exports2, module2) {
+    "use strict";
+    function createDouyinMediaResolutionDiagnosticBuilder2(dependencies = {}) {
+      const {
+        getSafeUrlDiagnostic: getSafeUrlDiagnostic2 = /* @__PURE__ */ __name(() => ({ protocol: "", host: "" }), "getSafeUrlDiagnostic"),
+        getTransportErrorDiagnostic: getTransportErrorDiagnostic2 = /* @__PURE__ */ __name(() => ({}), "getTransportErrorDiagnostic")
+      } = dependencies;
+      return ({
+        sourceUrl = "",
+        resolvedUrl = "",
+        awemeId = "",
+        stages = [],
+        mediaCandidateCount = 0,
+        preciseMediaFound = false,
+        saveOriginalMediaEnabled = false
+      } = {}) => ({
+        source: getSafeUrlDiagnostic2(sourceUrl),
+        resolved: getSafeUrlDiagnostic2(resolvedUrl),
+        awemeId: String(awemeId || "").slice(0, 64),
+        mediaCandidateCount: Number(mediaCandidateCount) || 0,
+        preciseMediaFound: preciseMediaFound === true,
+        saveOriginalMediaEnabled: saveOriginalMediaEnabled === true,
+        stages: (Array.isArray(stages) ? stages : []).slice(-12).map((stage) => ({
+          stage: String(stage && stage.stage || "").slice(0, 64),
+          ok: stage && stage.ok !== false,
+          mediaCount: Number(stage && stage.mediaCount) || 0,
+          detailFound: stage && stage.detailFound === true,
+          error: stage && stage.error ? getTransportErrorDiagnostic2(stage.error) : void 0
+        }))
+      });
+    }
+    __name(createDouyinMediaResolutionDiagnosticBuilder2, "createDouyinMediaResolutionDiagnosticBuilder");
+    module2.exports = {
+      createDouyinMediaResolutionDiagnosticBuilder: createDouyinMediaResolutionDiagnosticBuilder2
+    };
+  }
+});
+
 // src/xiaohongshu-markdown-utils.js
 var require_xiaohongshu_markdown_utils = __commonJS({
   "src/xiaohongshu-markdown-utils.js"(exports2, module2) {
@@ -3749,6 +3789,7 @@ var {
   createSocialMediaContextHtmlBuilder
 } = require_social_media_context_utils();
 var { createDouyinStructuredContentBuilder } = require_social_platform_content_utils();
+var { createDouyinMediaResolutionDiagnosticBuilder } = require_social_media_diagnostic_utils();
 var {
   createXiaohongshuCommentMarkdownHelpers,
   createXiaohongshuMarkdownBuilder
@@ -4822,32 +4863,10 @@ function buildWebpageTransportDiagnostic({
   };
 }
 __name(buildWebpageTransportDiagnostic, "buildWebpageTransportDiagnostic");
-function buildDouyinMediaResolutionDiagnostic({
-  sourceUrl = "",
-  resolvedUrl = "",
-  awemeId = "",
-  stages = [],
-  mediaCandidateCount = 0,
-  preciseMediaFound = false,
-  saveOriginalMediaEnabled = false
-} = {}) {
-  return {
-    source: getSafeUrlDiagnostic(sourceUrl),
-    resolved: getSafeUrlDiagnostic(resolvedUrl),
-    awemeId: String(awemeId || "").slice(0, 64),
-    mediaCandidateCount: Number(mediaCandidateCount) || 0,
-    preciseMediaFound: preciseMediaFound === true,
-    saveOriginalMediaEnabled: saveOriginalMediaEnabled === true,
-    stages: (Array.isArray(stages) ? stages : []).slice(-12).map((stage) => ({
-      stage: String(stage && stage.stage || "").slice(0, 64),
-      ok: stage && stage.ok !== false,
-      mediaCount: Number(stage && stage.mediaCount) || 0,
-      detailFound: stage && stage.detailFound === true,
-      error: stage && stage.error ? getTransportErrorDiagnostic(stage.error) : void 0
-    }))
-  };
-}
-__name(buildDouyinMediaResolutionDiagnostic, "buildDouyinMediaResolutionDiagnostic");
+var buildDouyinMediaResolutionDiagnostic = createDouyinMediaResolutionDiagnosticBuilder({
+  getSafeUrlDiagnostic,
+  getTransportErrorDiagnostic
+});
 function normalizeInstallerScriptText(scriptText, isMac = false) {
   const source = String(scriptText || "");
   if (!isMac) return source;
