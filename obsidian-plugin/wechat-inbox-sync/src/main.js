@@ -152,7 +152,10 @@ const {
 } = require('./social-media-context-utils');
 const { createDouyinStructuredContentBuilder } = require('./social-platform-content-utils');
 const { createXiaohongshuMarkdownBuilder } = require('./xiaohongshu-markdown-utils');
-const { createSocialCommentsMarkdownBuilder } = require('./social-comments-markdown-utils');
+const {
+  createSocialCommentSectionHelpers,
+  createSocialCommentsMarkdownBuilder,
+} = require('./social-comments-markdown-utils');
 const {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -7970,6 +7973,9 @@ const buildSocialCommentsMarkdown = createSocialCommentsMarkdownBuilder({
   formatTime: formatSocialCommentTime,
   formatLikes: formatSocialCommentLikes,
 });
+const socialCommentSectionHelpers = createSocialCommentSectionHelpers({
+  buildCommentsMarkdown: buildSocialCommentsMarkdown,
+});
 
 function formatSocialCommentTime(value) {
   const text = String(value || '').trim();
@@ -7989,25 +7995,7 @@ function formatSocialCommentLikes(value) {
 }
 
 function getSocialCommentMarkdownStats(markdown = '') {
-  let rootCount = 0;
-  let replyCount = 0;
-  let inComments = false;
-  String(markdown || '').split(/\r?\n/).forEach((line) => {
-    if (/^##\s+评论区\s*$/.test(line.trim())) {
-      inComments = true;
-      return;
-    }
-    if (inComments && /^##\s+/.test(line.trim())) {
-      inComments = false;
-      return;
-    }
-    if (!inComments) return;
-    const match = line.match(/^(\s*)-\s+(?:↳\s+)?/u);
-    if (!match) return;
-    if (match[1].length > 0) replyCount += 1;
-    else rootCount += 1;
-  });
-  return { rootCount, replyCount };
+  return socialCommentSectionHelpers.getStats(markdown);
 }
 
 function buildWechatCommentsMarkdown(comments = []) {
@@ -8015,27 +8003,14 @@ function buildWechatCommentsMarkdown(comments = []) {
 }
 
 function appendSocialCommentsToMarkdown(markdown, comments = []) {
-  const source = String(markdown || '').trim();
-  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
-  const commentMarkdown = buildSocialCommentsMarkdown(comments);
-  return commentMarkdown ? `${source}\n\n${commentMarkdown}` : source;
+  return socialCommentSectionHelpers.appendComments(markdown, comments);
 }
 
 function splitSocialCommentsMarkdown(markdown = '') {
-  const source = String(markdown || '').trim();
-  if (!source) return { markdown: '', trailingMarkdown: '' };
-  const match = /(^|\n)##\s+评论区\s*(?:\n|$)/u.exec(source);
-  if (!match) return { markdown: source, trailingMarkdown: '' };
-  const sectionStart = match.index + (match[1] ? match[1].length : 0);
-  return {
-    markdown: source.slice(0, sectionStart).trim(),
-    trailingMarkdown: source.slice(sectionStart).trim(),
-  };
+  return socialCommentSectionHelpers.splitComments(markdown);
 }
 
 function appendWechatCommentsToMarkdown(markdown, htmlOrComments) {
-  const source = String(markdown || '').trim();
-  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
   const comments = Array.isArray(htmlOrComments)
     ? htmlOrComments
     : extractWechatCommentsFromHtml(htmlOrComments);

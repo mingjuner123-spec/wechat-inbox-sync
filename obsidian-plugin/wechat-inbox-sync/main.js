@@ -3239,7 +3239,59 @@ var require_social_comments_markdown_utils = __commonJS({
       };
     }
     __name(createSocialCommentsMarkdownBuilder2, "createSocialCommentsMarkdownBuilder");
+    function createSocialCommentSectionHelpers2(dependencies = {}) {
+      const { buildCommentsMarkdown = /* @__PURE__ */ __name(() => "", "buildCommentsMarkdown") } = dependencies;
+      const sectionHeading = "## 评论区";
+      const sectionLinePattern = /^##\s+\u8bc4\u8bba\u533a\s*$/u;
+      const sectionStartPattern = /(^|\n)##\s+\u8bc4\u8bba\u533a(?:\s|\n|$)/u;
+      const sectionSplitPattern = /(^|\n)##\s+\u8bc4\u8bba\u533a\s*(?:\n|$)/u;
+      const commentLinePattern = /^(\s*)-\s+(?:\u21b3\s+)?/u;
+      const hasCommentsSection = /* @__PURE__ */ __name((markdown = "") => sectionStartPattern.test(String(markdown || "")), "hasCommentsSection");
+      return {
+        getStats(markdown = "") {
+          let rootCount = 0;
+          let replyCount = 0;
+          let inComments = false;
+          String(markdown || "").split(/\r?\n/).forEach((line) => {
+            if (sectionLinePattern.test(line.trim())) {
+              inComments = true;
+              return;
+            }
+            if (inComments && /^##\s+/.test(line.trim())) {
+              inComments = false;
+              return;
+            }
+            if (!inComments) return;
+            const match = line.match(commentLinePattern);
+            if (!match) return;
+            if (match[1].length > 0) replyCount += 1;
+            else rootCount += 1;
+          });
+          return { rootCount, replyCount };
+        },
+        appendComments(markdown, comments = []) {
+          const source = String(markdown || "").trim();
+          if (!source || hasCommentsSection(source)) return source;
+          const commentMarkdown = buildCommentsMarkdown(comments);
+          return commentMarkdown ? source + "\n\n" + commentMarkdown : source;
+        },
+        splitComments(markdown = "") {
+          const source = String(markdown || "").trim();
+          if (!source) return { markdown: "", trailingMarkdown: "" };
+          const match = sectionSplitPattern.exec(source);
+          if (!match) return { markdown: source, trailingMarkdown: "" };
+          const sectionStart = match.index + (match[1] ? match[1].length : 0);
+          return {
+            markdown: source.slice(0, sectionStart).trim(),
+            trailingMarkdown: source.slice(sectionStart).trim()
+          };
+        },
+        sectionHeading
+      };
+    }
+    __name(createSocialCommentSectionHelpers2, "createSocialCommentSectionHelpers");
     module2.exports = {
+      createSocialCommentSectionHelpers: createSocialCommentSectionHelpers2,
       createSocialCommentsMarkdownBuilder: createSocialCommentsMarkdownBuilder2
     };
   }
@@ -3613,7 +3665,10 @@ var {
 } = require_social_media_context_utils();
 var { createDouyinStructuredContentBuilder } = require_social_platform_content_utils();
 var { createXiaohongshuMarkdownBuilder } = require_xiaohongshu_markdown_utils();
-var { createSocialCommentsMarkdownBuilder } = require_social_comments_markdown_utils();
+var {
+  createSocialCommentSectionHelpers,
+  createSocialCommentsMarkdownBuilder
+} = require_social_comments_markdown_utils();
 var {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -10224,6 +10279,9 @@ var buildSocialCommentsMarkdown = createSocialCommentsMarkdownBuilder({
   formatTime: formatSocialCommentTime,
   formatLikes: formatSocialCommentLikes
 });
+var socialCommentSectionHelpers = createSocialCommentSectionHelpers({
+  buildCommentsMarkdown: buildSocialCommentsMarkdown
+});
 function formatSocialCommentTime(value) {
   const text = String(value || "").trim();
   if (!/^\d{10,13}$/.test(text)) return text;
@@ -10242,46 +10300,15 @@ function formatSocialCommentLikes(value) {
 }
 __name(formatSocialCommentLikes, "formatSocialCommentLikes");
 function getSocialCommentMarkdownStats(markdown = "") {
-  let rootCount = 0;
-  let replyCount = 0;
-  let inComments = false;
-  String(markdown || "").split(/\r?\n/).forEach((line) => {
-    if (/^##\s+评论区\s*$/.test(line.trim())) {
-      inComments = true;
-      return;
-    }
-    if (inComments && /^##\s+/.test(line.trim())) {
-      inComments = false;
-      return;
-    }
-    if (!inComments) return;
-    const match = line.match(/^(\s*)-\s+(?:↳\s+)?/u);
-    if (!match) return;
-    if (match[1].length > 0) replyCount += 1;
-    else rootCount += 1;
-  });
-  return { rootCount, replyCount };
+  return socialCommentSectionHelpers.getStats(markdown);
 }
 __name(getSocialCommentMarkdownStats, "getSocialCommentMarkdownStats");
 function appendSocialCommentsToMarkdown(markdown, comments = []) {
-  const source = String(markdown || "").trim();
-  if (!source || /(^|\n)##\s+评论区\b/.test(source)) return source;
-  const commentMarkdown = buildSocialCommentsMarkdown(comments);
-  return commentMarkdown ? `${source}
-
-${commentMarkdown}` : source;
+  return socialCommentSectionHelpers.appendComments(markdown, comments);
 }
 __name(appendSocialCommentsToMarkdown, "appendSocialCommentsToMarkdown");
 function splitSocialCommentsMarkdown(markdown = "") {
-  const source = String(markdown || "").trim();
-  if (!source) return { markdown: "", trailingMarkdown: "" };
-  const match = /(^|\n)##\s+评论区\s*(?:\n|$)/u.exec(source);
-  if (!match) return { markdown: source, trailingMarkdown: "" };
-  const sectionStart = match.index + (match[1] ? match[1].length : 0);
-  return {
-    markdown: source.slice(0, sectionStart).trim(),
-    trailingMarkdown: source.slice(sectionStart).trim()
-  };
+  return socialCommentSectionHelpers.splitComments(markdown);
 }
 __name(splitSocialCommentsMarkdown, "splitSocialCommentsMarkdown");
 function isXiaohongshuCommentApiUrl(url) {

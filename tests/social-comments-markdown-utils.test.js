@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const {
+  createSocialCommentSectionHelpers,
   createSocialCommentsMarkdownBuilder,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/social-comments-markdown-utils');
 
@@ -31,6 +32,17 @@ function run() {
   assert.match(markdown, /\*\*Alice\*\*/);
   assert.match(markdown, /\u21b3 .*Reply comment/);
   assert.strictEqual(buildSocialCommentsMarkdown([]), '');
+
+  const section = createSocialCommentSectionHelpers({
+    buildCommentsMarkdown: buildSocialCommentsMarkdown,
+  });
+  const appended = section.appendComments('## Original\n\nBody', [{ content: 'Appended comment' }]);
+  assert.match(appended, /Appended comment/);
+  assert.strictEqual(section.appendComments(appended, [{ content: 'Ignored duplicate section' }]), appended);
+  const split = section.splitComments(markdown + '\n\n## Later\n\nBody');
+  assert.match(split.trailingMarkdown, /First root comment/);
+  assert.match(split.trailingMarkdown, /^## \u8bc4\u8bba\u533a/m);
+  assert.deepStrictEqual(section.getStats(markdown), { rootCount: 2, replyCount: 1 });
 
   console.log('social-comments-markdown-utils tests passed');
 }
