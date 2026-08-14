@@ -10703,6 +10703,11 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     throwIfAborted(options.signal);
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
+    if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
+      // The debugger payload is parsed against the requested aweme id. Do not
+      // fall back to DOM/resource capture: it may contain recommendation videos.
+      return normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
+    }
     return normalizeBrowserCapturedMediaUrls([capturedRequests, payload, debuggerMediaUrls]);
   } finally {
     cleanupAbort();
@@ -17927,6 +17932,32 @@ class WechatObsidianInboxPlugin extends Plugin {
               // Fall back to hidden browser rendering below.
             } finally {
               douyinResolutionStages.push(sessionStage);
+            }
+          }
+          if (!hasPreciseDouyinMedia
+            && douyinAwemeId
+            && typeof this.renderSocialMediaUrls === 'function') {
+            const browserStage = { stage: 'targeted-browser', ok: false, mediaCount: 0, detailFound: false };
+            try {
+              // The renderer returns only debugger responses whose aweme id is the
+              // target when strictDouyinTarget is set. This is the safe final
+              // fallback after Douyin's server-rendered share page omits media.
+              const browserUrls = await this.renderSocialMediaUrls(resolvedUrl, {
+                signal,
+                strictDouyinTarget: true,
+              });
+              browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
+              if (browserStage.mediaCount) {
+                mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
+                mediaUrl = mediaUrls[0] || mediaUrl;
+                hasPreciseDouyinMedia = true;
+                browserStage.ok = true;
+              }
+            } catch (browserError) {
+              if (isAbortError(browserError)) throw browserError;
+              browserStage.error = browserError;
+            } finally {
+              douyinResolutionStages.push(browserStage);
             }
           }
         }

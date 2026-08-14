@@ -12486,6 +12486,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     throwIfAborted(options.signal);
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
+    if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
+      return normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
+    }
     return normalizeBrowserCapturedMediaUrls([capturedRequests, payload, debuggerMediaUrls]);
   } finally {
     cleanupAbort();
@@ -18988,6 +18991,27 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               sessionStage.error = sessionError;
             } finally {
               douyinResolutionStages.push(sessionStage);
+            }
+          }
+          if (!hasPreciseDouyinMedia && douyinAwemeId && typeof this.renderSocialMediaUrls === "function") {
+            const browserStage = { stage: "targeted-browser", ok: false, mediaCount: 0, detailFound: false };
+            try {
+              const browserUrls = await this.renderSocialMediaUrls(resolvedUrl, {
+                signal,
+                strictDouyinTarget: true
+              });
+              browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
+              if (browserStage.mediaCount) {
+                mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
+                mediaUrl = mediaUrls[0] || mediaUrl;
+                hasPreciseDouyinMedia = true;
+                browserStage.ok = true;
+              }
+            } catch (browserError) {
+              if (isAbortError(browserError)) throw browserError;
+              browserStage.error = browserError;
+            } finally {
+              douyinResolutionStages.push(browserStage);
             }
           }
         }
