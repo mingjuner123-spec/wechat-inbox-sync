@@ -36,7 +36,7 @@ assert.strictEqual(buildSocialMediaSupplementalMarkdown({
 
 - [ ] **Step 2: 运行失败测试**
 
-Run: `node tests/social-media-context-utils.test.js`  
+Run: `node tests/social-media-context-utils.test.js`
 Expected: `MODULE_NOT_FOUND`，因为纯渲染模块尚不存在。
 
 ### Task 2: 新增社媒原文上下文纯函数模块
@@ -59,7 +59,7 @@ function buildSocialMediaSupplementalMarkdown({ title = '', description = '', ta
 
 - [ ] **Step 2: 验证绿色**
 
-Run: `node tests/social-media-context-utils.test.js`  
+Run: `node tests/social-media-context-utils.test.js`
 Expected: `social-media-context-utils tests passed`。
 
 ### Task 3: 将入口的社媒上下文生成接到新模块
@@ -81,7 +81,7 @@ const { buildSocialMediaSupplementalMarkdown } = require('./social-media-context
 
 - [ ] **Step 3: 运行平台回归**
 
-Run: `node tests/plugin-social-media-transcript-context.test.js`  
+Run: `node tests/plugin-social-media-transcript-context.test.js`
 Expected: PASS；小红书、抖音、B 站、小宇宙在转写前仍包含标题、正文、标签和封面。
 
 ### Task 4: 保住抖音媒体回退与构建一致性
