@@ -1,4 +1,4 @@
-﻿const assert = require('assert');
+const assert = require('assert');
 const http = require('http');
 const https = require('https');
 const childProcess = require('child_process');
@@ -1141,9 +1141,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.85'), {
-  manifestVersion: '1.3.85',
-  runtimeVersion: '1.3.85',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.86'), {
+  manifestVersion: '1.3.86',
+  runtimeVersion: '1.3.86',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -7561,8 +7561,12 @@ async function runAsyncHydrationTests() {
     metadata: { url: 'https://www.douyin.com/video/7644566503081119019' },
   }, '', '', 'Session 失败回退');
   assert.strictEqual(sessionFallbackRecord.metadata.transcriptionStatus, 'failed');
-  assert.strictEqual(sessionFallbackRecord.metadata.conversionStatus, 'link_saved');
-  assert.strictEqual(sessionFallbackRenderCalls, 0);
+  assert.strictEqual(sessionFallbackRecord.metadata.conversionStatus, 'failed');
+  assert.strictEqual(
+    sessionFallbackRecord.metadata.mediaUrl,
+    'https://www.douyin.com/aweme/v1/play/?video_id=sessionfallback&ratio=720p',
+  );
+  assert.strictEqual(sessionFallbackRenderCalls, 1);
 
   const refreshIdentityPlugin = new PluginClass();
   let refreshIdentityRenderCalls = 0;
@@ -7601,8 +7605,11 @@ async function runAsyncHydrationTests() {
     metadata: { url: 'https://www.douyin.com/video/7644566503081119019' },
   }, '', '', '抖音真实页');
   assert.strictEqual(renderedDouyinRecord.metadata.transcriptionStatus, 'failed');
-  assert.strictEqual(renderedDouyinRecord.metadata.conversionStatus, 'link_saved');
-  assert.strictEqual(renderedDouyinRecord.metadata.mediaUrl, undefined);
+  assert.strictEqual(renderedDouyinRecord.metadata.conversionStatus, 'failed');
+  assert.strictEqual(
+    renderedDouyinRecord.metadata.mediaUrl,
+    'https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000rendered&ratio=720p&line=0',
+  );
 
   const unavailableDouyinPlugin = new PluginClass();
   unavailableDouyinPlugin.settings = { aiProvider: 'off' };
@@ -10335,7 +10342,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.85'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.86'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10374,8 +10381,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.85',
-        runtimeVersion: '1.3.85',
+        manifestVersion: '1.3.86',
+        runtimeVersion: '1.3.86',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10460,7 +10467,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   };
   plugin.writeRecord = async () => {
     throw helpers.createRetryableXiaohongshuContentError({
-      runtime: helpers.getPluginRuntimeIdentity('1.3.85'),
+      runtime: helpers.getPluginRuntimeIdentity('1.3.86'),
       request: {
         sourceHost: 'xhslink.cn',
         finalHost: 'xiaohongshu.com',
@@ -12558,7 +12565,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.85 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.86 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));

@@ -3815,7 +3815,7 @@ var {
 });
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.85";
+var PLUGIN_RUNTIME_VERSION = "1.3.86";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -4936,8 +4936,9 @@ function isRetryableTranscriptionError(error) {
 __name(isRetryableTranscriptionError, "isRetryableTranscriptionError");
 function shouldBypassExistingLocalNoteDedupe(record) {
   const metadata = record && record.metadata || {};
+  const type = String(record && record.type || "").toLowerCase();
   const sourceUrl = String(metadata.url || record && record.content || "").trim();
-  return String(record && record.type || "").toLowerCase() === "voice" || metadata.webpageMediaType === "audio_video" || Boolean(metadata.audioFileID) || metadata.transcriptOnly === true || isXiaohongshuUrl(sourceUrl);
+  return type === "voice" || metadata.webpageMediaType === "audio_video" || Boolean(metadata.audioFileID) || metadata.transcriptOnly === true || type === "webpage" && isDouyinUrl(sourceUrl) || isXiaohongshuUrl(sourceUrl);
 }
 __name(shouldBypassExistingLocalNoteDedupe, "shouldBypassExistingLocalNoteDedupe");
 function getPluginRuntimeIdentity(manifestVersion = "") {
@@ -5562,7 +5563,20 @@ function waitForPromiseWithAbort(promise, signal) {
   });
 }
 __name(waitForPromiseWithAbort, "waitForPromiseWithAbort");
-function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCount = 0) {
+function createMediaDownloadTimeoutError(kind = "idle") {
+  const detail = kind === "total" ? "媒体下载超时：下载超过最大等待时间仍未完成" : "媒体下载超时：连接长时间没有下载进度";
+  const error = new Error(`MEDIA_DOWNLOAD_TIMEOUT: ${detail}`);
+  error.code = "MEDIA_DOWNLOAD_TIMEOUT";
+  return error;
+}
+__name(createMediaDownloadTimeoutError, "createMediaDownloadTimeoutError");
+function createMediaDownloadInterruptedError() {
+  const error = new Error("MEDIA_DOWNLOAD_INTERRUPTED: 媒体下载连接中断");
+  error.code = "MEDIA_DOWNLOAD_INTERRUPTED";
+  return error;
+}
+__name(createMediaDownloadInterruptedError, "createMediaDownloadInterruptedError");
+function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCount = 0, deadlineAt = 0) {
   return new Promise((resolve, reject) => {
     let parsedUrl;
     try {
@@ -5576,34 +5590,67 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
       reject(createAbortError());
       return;
     }
+    const totalTimeoutMs = Math.max(0, Number(options.totalTimeoutMs) || 15 * 60 * 1e3);
+    const requestDeadlineAt = Number(deadlineAt) > 0 ? Number(deadlineAt) : totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : 0;
+    const remainingTotalTimeoutMs = requestDeadlineAt > 0 ? requestDeadlineAt - Date.now() : 0;
+    if (requestDeadlineAt > 0 && remainingTotalTimeoutMs <= 0) {
+      reject(createMediaDownloadTimeoutError("total"));
+      return;
+    }
     const transport = parsedUrl.protocol === "http:" ? http : https;
-    const request = transport.request(parsedUrl, {
+    const idleTimeoutMs = Math.max(1e3, Number(options.idleTimeoutMs || options.timeout) || 9e4);
+    let request = null;
+    let totalTimeoutTimer = null;
+    let settled = false;
+    let abort = null;
+    const clearTotalTimeout = /* @__PURE__ */ __name(() => {
+      if (totalTimeoutTimer) clearTimeout(totalTimeoutTimer);
+      totalTimeoutTimer = null;
+    }, "clearTotalTimeout");
+    const finish = /* @__PURE__ */ __name((callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTotalTimeout();
+      if (signal && abort && typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", abort);
+      }
+      callback(value);
+    }, "finish");
+    const fail = /* @__PURE__ */ __name((error) => {
+      if (request && !request.destroyed) request.destroy();
+      finish(reject, error instanceof Error ? error : new Error(String(error || "媒体下载失败")));
+    }, "fail");
+    request = transport.request(parsedUrl, {
       method: "GET",
       headers,
-      timeout: options.timeout || 3e4
+      timeout: idleTimeoutMs
     }, (response) => {
       const location = response.headers && response.headers.location;
       if (response.statusCode >= 300 && response.statusCode < 400 && location && redirectCount < 5) {
+        clearTotalTimeout();
         response.resume();
         try {
           const nextUrl = new URL(location, url).toString();
-          downloadArrayBufferViaNode(nextUrl, headers, options, redirectCount + 1).then(resolve, reject);
+          downloadArrayBufferViaNode(nextUrl, headers, options, redirectCount + 1, requestDeadlineAt).then((value) => finish(resolve, value), (error) => finish(reject, error));
         } catch (error) {
-          reject(error);
+          finish(reject, error);
         }
         return;
       }
       if (response.statusCode && (response.statusCode < 200 || response.statusCode >= 300)) {
         response.resume();
-        reject(new Error(`媒体下载失败：HTTP ${response.statusCode}`));
+        finish(reject, new Error(`媒体下载失败：HTTP ${response.statusCode}`));
         return;
       }
       const chunks = [];
       let received = 0;
       const total = Number(response.headers && response.headers["content-length"]) || 0;
+      response.once("aborted", () => fail(createMediaDownloadInterruptedError()));
+      response.once("error", (error) => fail(error && error.code ? error : createMediaDownloadInterruptedError()));
       response.on("data", (chunk) => {
+        if (settled) return;
         if (signal && signal.aborted) {
-          request.destroy(createAbortError());
+          fail(createAbortError());
           return;
         }
         const buffer = Buffer.from(chunk);
@@ -5617,9 +5664,9 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
           });
         }
       });
-      response.on("end", () => {
+      response.once("end", () => {
         if (signal && signal.aborted) {
-          reject(createAbortError());
+          finish(reject, createAbortError());
           return;
         }
         const buffer = Buffer.concat(chunks);
@@ -5630,17 +5677,19 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
             percent: 100
           });
         }
-        resolve(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+        finish(resolve, buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
       });
     });
-    const abort = /* @__PURE__ */ __name(() => request.destroy(createAbortError()), "abort");
+    if (requestDeadlineAt > 0) {
+      totalTimeoutTimer = setTimeout(() => fail(createMediaDownloadTimeoutError("total")), remainingTotalTimeoutMs);
+      if (totalTimeoutTimer && typeof totalTimeoutTimer.unref === "function") totalTimeoutTimer.unref();
+    }
+    abort = /* @__PURE__ */ __name(() => fail(createAbortError()), "abort");
     if (signal && typeof signal.addEventListener === "function") {
       signal.addEventListener("abort", abort, { once: true });
     }
-    request.on("timeout", () => {
-      request.destroy(new Error("媒体下载超时"));
-    });
-    request.on("error", reject);
+    request.on("timeout", () => fail(createMediaDownloadTimeoutError("idle")));
+    request.on("error", (error) => finish(reject, error));
     request.end();
   });
 }
@@ -8684,7 +8733,7 @@ function extractXiaohongshuAuthor(html) {
 }
 __name(extractXiaohongshuAuthor, "extractXiaohongshuAuthor");
 var buildXiaohongshuMarkdown = createXiaohongshuMarkdownBuilder({
-  buildCommentsMarkdown: buildSocialCommentsMarkdown
+  buildCommentsMarkdown: /* @__PURE__ */ __name((...args) => buildSocialCommentsMarkdown(...args), "buildCommentsMarkdown")
 });
 function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = "", options = {}) {
   url = cleanDisplayUrl(url);
@@ -11538,6 +11587,16 @@ function isMediaAuthorizationError(error) {
   );
 }
 __name(isMediaAuthorizationError, "isMediaAuthorizationError");
+function isMediaDownloadTimeoutError(error) {
+  return /\bMEDIA_DOWNLOAD_TIMEOUT\b|media download (?:hard )?timeout|media download timeout/i.test(
+    String(error && error.message || error || "")
+  );
+}
+__name(isMediaDownloadTimeoutError, "isMediaDownloadTimeoutError");
+function isRecoverableDouyinMediaDownloadError(error) {
+  return isMediaAuthorizationError(error) || isMediaDownloadTimeoutError(error);
+}
+__name(isRecoverableDouyinMediaDownloadError, "isRecoverableDouyinMediaDownloadError");
 function mergeDouyinDetailCandidates(current, incoming) {
   const previous = current && typeof current === "object" ? current : null;
   const next = incoming && typeof incoming === "object" ? incoming : null;
@@ -17588,40 +17647,78 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async downloadMediaToTempFile(audioUrl, options = {}) {
     const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl) ? await resolveRedirectUrl(audioUrl, 5, "GET") : audioUrl;
     throwIfAborted(options.signal);
-    const requestOptions = { signal: options.signal, onProgress: options.onProgress };
+    const mediaDownloadDeadlineAt = Date.now() + 15 * 60 * 1e3;
+    const getMediaDownloadRequestOptions = /* @__PURE__ */ __name(() => {
+      const remainingMs = mediaDownloadDeadlineAt - Date.now();
+      if (remainingMs <= 0) throw createMediaDownloadTimeoutError("total");
+      return {
+        signal: options.signal,
+        onProgress: options.onProgress,
+        idleTimeoutMs: 9e4,
+        totalTimeoutMs: remainingMs,
+        timeout: Math.max(100, Math.min(3e4, remainingMs))
+      };
+    }, "getMediaDownloadRequestOptions");
     const sourceUrl = String(options.sourceUrl || "").trim();
+    const refreshDouyinMediaUrlsWithinBudget = /* @__PURE__ */ __name(async () => {
+      const remainingMs = mediaDownloadDeadlineAt - Date.now();
+      if (remainingMs <= 0) throw createMediaDownloadTimeoutError("total");
+      try {
+        return await waitForPromiseWithAbort(
+          runBrowserTaskWithTimeout(
+            this.refreshDouyinMediaUrls(sourceUrl),
+            remainingMs,
+            "Douyin media refresh"
+          ),
+          options.signal
+        );
+      } catch (error) {
+        if (error && error.code === "BROWSER_TASK_TIMEOUT") {
+          throw createMediaDownloadTimeoutError("total");
+        }
+        throw error;
+      }
+    }, "refreshDouyinMediaUrlsWithinBudget");
     const requestHeaders = getSocialRequestHeaders(sourceUrl || resolvedUrl);
     const canRecoverDouyin = isDouyinUrl(sourceUrl) || isDouyinUrl(audioUrl) || isDouyinMediaUrl(resolvedUrl);
     let downloadedUrl = resolvedUrl;
     let downloadedArrayBuffer;
     try {
-      downloadedArrayBuffer = await this.downloadArrayBuffer(resolvedUrl, requestHeaders, requestOptions);
+      downloadedArrayBuffer = await this.downloadArrayBuffer(
+        resolvedUrl,
+        requestHeaders,
+        getMediaDownloadRequestOptions()
+      );
     } catch (error) {
-      if (!canRecoverDouyin || !isMediaAuthorizationError(error)) throw error;
+      if (!canRecoverDouyin || !isRecoverableDouyinMediaDownloadError(error)) throw error;
       let lastError = error;
       try {
-        downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(resolvedUrl, requestHeaders, requestOptions);
+        downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(
+          resolvedUrl,
+          requestHeaders,
+          getMediaDownloadRequestOptions()
+        );
       } catch (sessionError) {
         lastError = sessionError;
-        const refreshedUrls = sourceUrl ? await this.refreshDouyinMediaUrls(sourceUrl) : [];
+        const refreshedUrls = sourceUrl ? (await refreshDouyinMediaUrlsWithinBudget()).slice(0, 3) : [];
         for (const refreshedUrl of refreshedUrls) {
           if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
           try {
             downloadedArrayBuffer = await this.downloadArrayBuffer(
               refreshedUrl,
               getSocialRequestHeaders(sourceUrl || refreshedUrl),
-              requestOptions
+              getMediaDownloadRequestOptions()
             );
             downloadedUrl = refreshedUrl;
             break;
           } catch (refreshedError) {
             lastError = refreshedError;
-            if (!isMediaAuthorizationError(refreshedError)) continue;
+            if (!isRecoverableDouyinMediaDownloadError(refreshedError)) continue;
             try {
               downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(
                 refreshedUrl,
                 getSocialRequestHeaders(sourceUrl || refreshedUrl),
-                requestOptions
+                getMediaDownloadRequestOptions()
               );
               downloadedUrl = refreshedUrl;
               break;
@@ -20946,6 +21043,7 @@ WechatObsidianInboxPlugin.__test = {
   assertUsableTranscription,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
+  shouldBypassExistingLocalNoteDedupe,
   getPluginRuntimeIdentity,
   getSafeUrlDiagnostic,
   getTransportErrorDiagnostic,

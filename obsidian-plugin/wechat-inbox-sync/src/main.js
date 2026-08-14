@@ -178,7 +178,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.85';
+const PLUGIN_RUNTIME_VERSION = '1.3.86';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1665,11 +1665,14 @@ function isRetryableTranscriptionError(error) {
 
 function shouldBypassExistingLocalNoteDedupe(record) {
   const metadata = (record && record.metadata) || {};
+  const type = String((record && record.type) || '').toLowerCase();
   const sourceUrl = String(metadata.url || (record && record.content) || '').trim();
-  return String((record && record.type) || '').toLowerCase() === 'voice'
+  return type === 'voice'
     || metadata.webpageMediaType === 'audio_video'
     || Boolean(metadata.audioFileID)
     || metadata.transcriptOnly === true
+    // Older Douyin video records may predate webpageMediaType but still need repeat transcription.
+    || (type === 'webpage' && isDouyinUrl(sourceUrl))
     || isXiaohongshuUrl(sourceUrl);
 }
 
@@ -2426,7 +2429,22 @@ function waitForPromiseWithAbort(promise, signal) {
   });
 }
 
-function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCount = 0) {
+function createMediaDownloadTimeoutError(kind = 'idle') {
+  const detail = kind === 'total'
+    ? '\u5a92\u4f53\u4e0b\u8f7d\u8d85\u65f6\uff1a\u4e0b\u8f7d\u8d85\u8fc7\u6700\u5927\u7b49\u5f85\u65f6\u95f4\u4ecd\u672a\u5b8c\u6210'
+    : '\u5a92\u4f53\u4e0b\u8f7d\u8d85\u65f6\uff1a\u8fde\u63a5\u957f\u65f6\u95f4\u6ca1\u6709\u4e0b\u8f7d\u8fdb\u5ea6';
+  const error = new Error(`MEDIA_DOWNLOAD_TIMEOUT: ${detail}`);
+  error.code = 'MEDIA_DOWNLOAD_TIMEOUT';
+  return error;
+}
+
+function createMediaDownloadInterruptedError() {
+  const error = new Error('MEDIA_DOWNLOAD_INTERRUPTED: \u5a92\u4f53\u4e0b\u8f7d\u8fde\u63a5\u4e2d\u65ad');
+  error.code = 'MEDIA_DOWNLOAD_INTERRUPTED';
+  return error;
+}
+
+function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCount = 0, deadlineAt = 0) {
   return new Promise((resolve, reject) => {
     let parsedUrl;
     try {
@@ -2442,36 +2460,74 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
       return;
     }
 
+    const totalTimeoutMs = Math.max(0, Number(options.totalTimeoutMs) || (15 * 60 * 1000));
+    const requestDeadlineAt = Number(deadlineAt) > 0
+      ? Number(deadlineAt)
+      : (totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : 0);
+    const remainingTotalTimeoutMs = requestDeadlineAt > 0 ? requestDeadlineAt - Date.now() : 0;
+    if (requestDeadlineAt > 0 && remainingTotalTimeoutMs <= 0) {
+      reject(createMediaDownloadTimeoutError('total'));
+      return;
+    }
+
     const transport = parsedUrl.protocol === 'http:' ? http : https;
-    const request = transport.request(parsedUrl, {
+    const idleTimeoutMs = Math.max(1000, Number(options.idleTimeoutMs || options.timeout) || 90000);
+    let request = null;
+    let totalTimeoutTimer = null;
+    let settled = false;
+    let abort = null;
+    const clearTotalTimeout = () => {
+      if (totalTimeoutTimer) clearTimeout(totalTimeoutTimer);
+      totalTimeoutTimer = null;
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTotalTimeout();
+      if (signal && abort && typeof signal.removeEventListener === 'function') {
+        signal.removeEventListener('abort', abort);
+      }
+      callback(value);
+    };
+    const fail = (error) => {
+      if (request && !request.destroyed) request.destroy();
+      finish(reject, error instanceof Error ? error : new Error(String(error || '媒体下载失败')));
+    };
+
+    request = transport.request(parsedUrl, {
       method: 'GET',
       headers,
-      timeout: options.timeout || 30000,
+      timeout: idleTimeoutMs,
     }, (response) => {
       const location = response.headers && response.headers.location;
       if (response.statusCode >= 300 && response.statusCode < 400 && location && redirectCount < 5) {
+        clearTotalTimeout();
         response.resume();
         try {
           const nextUrl = new URL(location, url).toString();
-          downloadArrayBufferViaNode(nextUrl, headers, options, redirectCount + 1).then(resolve, reject);
+          downloadArrayBufferViaNode(nextUrl, headers, options, redirectCount + 1, requestDeadlineAt)
+            .then((value) => finish(resolve, value), (error) => finish(reject, error));
         } catch (error) {
-          reject(error);
+          finish(reject, error);
         }
         return;
       }
 
       if (response.statusCode && (response.statusCode < 200 || response.statusCode >= 300)) {
         response.resume();
-        reject(new Error(`媒体下载失败：HTTP ${response.statusCode}`));
+        finish(reject, new Error(`媒体下载失败：HTTP ${response.statusCode}`));
         return;
       }
 
       const chunks = [];
       let received = 0;
       const total = Number(response.headers && response.headers['content-length']) || 0;
+      response.once('aborted', () => fail(createMediaDownloadInterruptedError()));
+      response.once('error', (error) => fail(error && error.code ? error : createMediaDownloadInterruptedError()));
       response.on('data', (chunk) => {
+        if (settled) return;
         if (signal && signal.aborted) {
-          request.destroy(createAbortError());
+          fail(createAbortError());
           return;
         }
         const buffer = Buffer.from(chunk);
@@ -2485,9 +2541,9 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
           });
         }
       });
-      response.on('end', () => {
+      response.once('end', () => {
         if (signal && signal.aborted) {
-          reject(createAbortError());
+          finish(reject, createAbortError());
           return;
         }
         const buffer = Buffer.concat(chunks);
@@ -2498,22 +2554,23 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
             percent: 100,
           });
         }
-        resolve(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+        finish(resolve, buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
       });
     });
 
-    const abort = () => request.destroy(createAbortError());
+    if (requestDeadlineAt > 0) {
+      totalTimeoutTimer = setTimeout(() => fail(createMediaDownloadTimeoutError('total')), remainingTotalTimeoutMs);
+      if (totalTimeoutTimer && typeof totalTimeoutTimer.unref === 'function') totalTimeoutTimer.unref();
+    }
+    abort = () => fail(createAbortError());
     if (signal && typeof signal.addEventListener === 'function') {
       signal.addEventListener('abort', abort, { once: true });
     }
-    request.on('timeout', () => {
-      request.destroy(new Error('媒体下载超时'));
-    });
-    request.on('error', reject);
+    request.on('timeout', () => fail(createMediaDownloadTimeoutError('idle')));
+    request.on('error', (error) => finish(reject, error));
     request.end();
   });
 }
-
 function getRecordId(record) {
   return record._id || record.id || '';
 }
@@ -5993,7 +6050,7 @@ function extractXiaohongshuAuthor(html) {
 }
 
 const buildXiaohongshuMarkdown = createXiaohongshuMarkdownBuilder({
-  buildCommentsMarkdown: buildSocialCommentsMarkdown,
+  buildCommentsMarkdown: (...args) => buildSocialCommentsMarkdown(...args),
 });
 
 function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = '', options = {}) {
@@ -9208,6 +9265,16 @@ function isMediaAuthorizationError(error) {
   return /媒体下载失败：HTTP\s*(?:401|403)\b|\bHTTP\s*(?:401|403)\b/i.test(
     String((error && error.message) || error || ''),
   );
+}
+
+function isMediaDownloadTimeoutError(error) {
+  return /\bMEDIA_DOWNLOAD_TIMEOUT\b|media download (?:hard )?timeout|media download timeout/i.test(
+    String((error && error.message) || error || ''),
+  );
+}
+
+function isRecoverableDouyinMediaDownloadError(error) {
+  return isMediaAuthorizationError(error) || isMediaDownloadTimeoutError(error);
 }
 
 function mergeDouyinDetailCandidates(current, incoming) {
@@ -15858,8 +15925,38 @@ class WechatObsidianInboxPlugin extends Plugin {
       ? await resolveRedirectUrl(audioUrl, 5, 'GET')
       : audioUrl;
     throwIfAborted(options.signal);
-    const requestOptions = { signal: options.signal, onProgress: options.onProgress };
+    const mediaDownloadDeadlineAt = Date.now() + (15 * 60 * 1000);
+    const getMediaDownloadRequestOptions = () => {
+      const remainingMs = mediaDownloadDeadlineAt - Date.now();
+      if (remainingMs <= 0) throw createMediaDownloadTimeoutError('total');
+      return {
+        signal: options.signal,
+        onProgress: options.onProgress,
+        idleTimeoutMs: 90000,
+        totalTimeoutMs: remainingMs,
+        timeout: Math.max(100, Math.min(30000, remainingMs)),
+      };
+    };
     const sourceUrl = String(options.sourceUrl || '').trim();
+    const refreshDouyinMediaUrlsWithinBudget = async () => {
+      const remainingMs = mediaDownloadDeadlineAt - Date.now();
+      if (remainingMs <= 0) throw createMediaDownloadTimeoutError('total');
+      try {
+        return await waitForPromiseWithAbort(
+          runBrowserTaskWithTimeout(
+            this.refreshDouyinMediaUrls(sourceUrl),
+            remainingMs,
+            'Douyin media refresh',
+          ),
+          options.signal,
+        );
+      } catch (error) {
+        if (error && error.code === 'BROWSER_TASK_TIMEOUT') {
+          throw createMediaDownloadTimeoutError('total');
+        }
+        throw error;
+      }
+    };
     const requestHeaders = getSocialRequestHeaders(sourceUrl || resolvedUrl);
     const canRecoverDouyin = isDouyinUrl(sourceUrl)
       || isDouyinUrl(audioUrl)
@@ -15867,15 +15964,23 @@ class WechatObsidianInboxPlugin extends Plugin {
     let downloadedUrl = resolvedUrl;
     let downloadedArrayBuffer;
     try {
-      downloadedArrayBuffer = await this.downloadArrayBuffer(resolvedUrl, requestHeaders, requestOptions);
+      downloadedArrayBuffer = await this.downloadArrayBuffer(
+        resolvedUrl,
+        requestHeaders,
+        getMediaDownloadRequestOptions(),
+      );
     } catch (error) {
-      if (!canRecoverDouyin || !isMediaAuthorizationError(error)) throw error;
+      if (!canRecoverDouyin || !isRecoverableDouyinMediaDownloadError(error)) throw error;
       let lastError = error;
       try {
-        downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(resolvedUrl, requestHeaders, requestOptions);
+        downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(
+          resolvedUrl,
+          requestHeaders,
+          getMediaDownloadRequestOptions(),
+        );
       } catch (sessionError) {
         lastError = sessionError;
-        const refreshedUrls = sourceUrl ? await this.refreshDouyinMediaUrls(sourceUrl) : [];
+        const refreshedUrls = sourceUrl ? (await refreshDouyinMediaUrlsWithinBudget()).slice(0, 3) : [];
         for (const refreshedUrl of refreshedUrls) {
           if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
           try {
@@ -15883,19 +15988,19 @@ class WechatObsidianInboxPlugin extends Plugin {
             downloadedArrayBuffer = await this.downloadArrayBuffer(
               refreshedUrl,
               getSocialRequestHeaders(sourceUrl || refreshedUrl),
-              requestOptions,
+              getMediaDownloadRequestOptions(),
             );
             downloadedUrl = refreshedUrl;
             break;
           } catch (refreshedError) {
             lastError = refreshedError;
-            if (!isMediaAuthorizationError(refreshedError)) continue;
+            if (!isRecoverableDouyinMediaDownloadError(refreshedError)) continue;
             try {
               // eslint-disable-next-line no-await-in-loop
               downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(
                 refreshedUrl,
                 getSocialRequestHeaders(sourceUrl || refreshedUrl),
-                requestOptions,
+                getMediaDownloadRequestOptions(),
               );
               downloadedUrl = refreshedUrl;
               break;
@@ -19791,6 +19896,7 @@ WechatObsidianInboxPlugin.__test = {
   assertUsableTranscription,
   createRetryableTranscriptionError,
   isRetryableTranscriptionError,
+  shouldBypassExistingLocalNoteDedupe,
   getPluginRuntimeIdentity,
   getSafeUrlDiagnostic,
   getTransportErrorDiagnostic,

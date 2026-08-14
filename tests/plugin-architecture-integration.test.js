@@ -28,12 +28,17 @@ const expectedModules = [
   'record-identity-utils',
   'record-metadata-utils',
   'record-state-utils',
+  'social-comments-markdown-utils',
   'social-engagement-utils',
+  'social-media-context-utils',
+  'social-media-diagnostic-utils',
+  'social-platform-content-utils',
   'sync-lifecycle-utils',
   'transcription-note-title-utils',
   'transcription-quality-utils',
   'vault-path-utils',
   'wechat-channels-decrypt-utils',
+  'xiaohongshu-markdown-utils',
 ].sort();
 
 const source = fs.readFileSync(sourcePath, 'utf8');
@@ -57,8 +62,8 @@ for (const moduleName of expectedModules) {
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
-assert.strictEqual(manifest.version, '1.3.85');
-assert.ok(Object.prototype.hasOwnProperty.call(versions, '1.3.85'));
+assert.strictEqual(manifest.version, '1.3.86');
+assert.ok(Object.prototype.hasOwnProperty.call(versions, '1.3.86'));
 
 const builder = require(path.join(pluginRoot, 'build-plugin.js'));
 assert.strictEqual(builder.checkPluginBuild(), true, 'committed bundle must match the integrated source');
