@@ -146,6 +146,7 @@ const {
   hasSocialMetrics,
   withCapturedSocialMetrics,
 } = require('./social-engagement-utils');
+const { buildSocialMediaSupplementalMarkdown } = require('./social-media-context-utils');
 const {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -4065,33 +4066,6 @@ function extractWebpageMetadataFromHtml(html, url = '') {
     platform: getWebpageSourcePrefix(url),
     contentCategory: isDouyinUrl(url) || isBilibiliUrl(url) || isXiaoyuzhouUrl(url) ? '音视频' : '图文',
   };
-}
-
-function buildSocialMediaSupplementalMarkdown({
-  title = '',
-  description = '',
-  tags = [],
-  imageUrls = [],
-} = {}) {
-  const cleanedTitle = String(title || '').trim();
-  const cleanedDescription = String(description || '').trim();
-  const normalizedTags = (Array.isArray(tags) ? tags : extractKeywordList(tags))
-    .map((tag) => String(tag || '').trim())
-    .filter(Boolean)
-    .map((tag) => (tag.startsWith('#') ? tag : `#${tag}`));
-  const normalizedImages = (Array.isArray(imageUrls) ? imageUrls : [])
-    .map((url) => normalizeExtractedUrl(url))
-    .filter((url) => /^https?:\/\//i.test(url));
-  const lines = [];
-  if (cleanedTitle) lines.push('## 标题', '', cleanedTitle, '');
-  if (cleanedDescription) lines.push('## 原文正文', '', cleanedDescription, '');
-  if (normalizedTags.length) {
-    lines.push('## 标签', '', Array.from(new Set(normalizedTags)).join(' '), '');
-  }
-  if (normalizedImages.length) {
-    lines.push('## 封面图', '', `![封面](${normalizedImages[0]})`, '');
-  }
-  return cleanMarkdownForStorage(lines.join('\n').trim());
 }
 
 function buildSocialMediaSupplementalMarkdownFromHtml(html, url = '') {

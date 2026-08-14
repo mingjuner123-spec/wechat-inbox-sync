@@ -2997,6 +2997,47 @@ var require_social_engagement_utils = __commonJS({
   }
 });
 
+// src/social-media-context-utils.js
+var require_social_media_context_utils = __commonJS({
+  "src/social-media-context-utils.js"(exports2, module2) {
+    "use strict";
+    function normalizeSocialMediaImageUrl(value) {
+      const normalized = String(value || "").replace(/&amp;/gi, "&").replace(/\\u002F/g, "/").replace(/\\\//g, "/").trim();
+      if (!normalized || /^data:|^blob:/i.test(normalized)) return "";
+      if (normalized.startsWith("//")) return `https:${normalized}`;
+      return /^https?:\/\//i.test(normalized) ? normalized : "";
+    }
+    __name(normalizeSocialMediaImageUrl, "normalizeSocialMediaImageUrl");
+    function normalizeSocialMediaTags(value) {
+      const source = Array.isArray(value) ? value : String(value || "").split(/[,，、\s]+/);
+      return Array.from(new Set(source.map((tag) => String(tag || "").trim()).filter(Boolean).map((tag) => tag.startsWith("#") ? tag : `#${tag}`)));
+    }
+    __name(normalizeSocialMediaTags, "normalizeSocialMediaTags");
+    function buildSocialMediaSupplementalMarkdown2({
+      title = "",
+      description = "",
+      tags = [],
+      imageUrls = []
+    } = {}) {
+      const cleanedTitle = String(title || "").trim();
+      const cleanedDescription = String(description || "").trim();
+      const normalizedTags = normalizeSocialMediaTags(tags);
+      const normalizedImages = Array.from(new Set((Array.isArray(imageUrls) ? imageUrls : []).map(normalizeSocialMediaImageUrl).filter(Boolean)));
+      const lines = [];
+      if (cleanedTitle) lines.push("## 标题", "", cleanedTitle, "");
+      if (cleanedDescription) lines.push("## 原文正文", "", cleanedDescription, "");
+      if (normalizedTags.length) lines.push("## 标签", "", normalizedTags.join(" "), "");
+      if (normalizedImages.length) lines.push("## 封面图", "", `![封面](${normalizedImages[0]})`, "");
+      return lines.join("\n").trim();
+    }
+    __name(buildSocialMediaSupplementalMarkdown2, "buildSocialMediaSupplementalMarkdown");
+    module2.exports = {
+      buildSocialMediaSupplementalMarkdown: buildSocialMediaSupplementalMarkdown2,
+      normalizeSocialMediaImageUrl
+    };
+  }
+});
+
 // src/transcription-note-title-utils.js
 var require_transcription_note_title_utils = __commonJS({
   "src/transcription-note-title-utils.js"(exports2, module2) {
@@ -3359,6 +3400,7 @@ var {
   hasSocialMetrics,
   withCapturedSocialMetrics
 } = require_social_engagement_utils();
+var { buildSocialMediaSupplementalMarkdown } = require_social_media_context_utils();
 var {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -6623,28 +6665,6 @@ function extractWebpageMetadataFromHtml(html, url = "") {
   };
 }
 __name(extractWebpageMetadataFromHtml, "extractWebpageMetadataFromHtml");
-function buildSocialMediaSupplementalMarkdown({
-  title = "",
-  description = "",
-  tags = [],
-  imageUrls = []
-} = {}) {
-  const cleanedTitle = String(title || "").trim();
-  const cleanedDescription = String(description || "").trim();
-  const normalizedTags = (Array.isArray(tags) ? tags : extractKeywordList(tags)).map((tag) => String(tag || "").trim()).filter(Boolean).map((tag) => tag.startsWith("#") ? tag : `#${tag}`);
-  const normalizedImages = (Array.isArray(imageUrls) ? imageUrls : []).map((url) => normalizeExtractedUrl(url)).filter((url) => /^https?:\/\//i.test(url));
-  const lines = [];
-  if (cleanedTitle) lines.push("## 标题", "", cleanedTitle, "");
-  if (cleanedDescription) lines.push("## 原文正文", "", cleanedDescription, "");
-  if (normalizedTags.length) {
-    lines.push("## 标签", "", Array.from(new Set(normalizedTags)).join(" "), "");
-  }
-  if (normalizedImages.length) {
-    lines.push("## 封面图", "", `![封面](${normalizedImages[0]})`, "");
-  }
-  return cleanMarkdownForStorage(lines.join("\n").trim());
-}
-__name(buildSocialMediaSupplementalMarkdown, "buildSocialMediaSupplementalMarkdown");
 function buildSocialMediaSupplementalMarkdownFromHtml(html, url = "") {
   const metadata = extractWebpageMetadataFromHtml(html, url);
   const descriptionTags = extractTagsFromText(metadata.description, html);
