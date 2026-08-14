@@ -142,7 +142,7 @@ const {
 } = require('./ai-metadata-utils');
 const {
   buildSocialMetrics,
-  buildSocialMetricsFromText,
+  createSocialMetricsHtmlExtractor,
   hasSocialMetrics,
   withCapturedSocialMetrics,
 } = require('./social-engagement-utils');
@@ -4020,33 +4020,10 @@ const buildSocialMediaSupplementalMarkdownFromHtml = createSocialMediaContextHtm
   isBilibiliUrl,
 });
 
-function extractSocialMetricsFromLabeledHtml(html = '') {
-  const source = String(html || '');
-  const labels = '(?:视频)?播放(?:量|数|次数)?|(?:点赞|获赞)(?:量|数|次数)?|收藏(?:量|数|人数|次数)?|(?:评论|回复)(?:量|数|次数)?|(?:转发|分享)(?:量|数|人数|次数)?|(?:投硬币|硬币)(?:枚数|数|量|次数)?';
-  const count = '\\d+(?:\\.\\d+)?\\s*(?:万|w|k)?';
-  const pairPattern = new RegExp(
-    `<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(${labels})\\s*<\\/(?:span|div|li|em|strong|button)>\\s*<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(${count})\\s*<\\/(?:span|div|li|em|strong|button)>`,
-    'gi',
-  );
-  const pairs = [];
-  let match;
-  while ((match = pairPattern.exec(source))) pairs.push(`${match[1]} ${match[2]}`);
-  return buildSocialMetricsFromText(pairs.join(' '));
-}
-
-function extractSocialMetricsFromHtml(html = '') {
-  const blocks = collectTopLevelJsonObjectBlocks(html, {
-    maxBlocks: 20,
-    maxBlockCharacters: 1024 * 1024,
-    maxTotalCharacters: 2 * 1024 * 1024,
-    requiredTexts: ['"stat"', '"statistics"', '"playCount"', '"viewCount"'],
-  });
-  for (const block of blocks) {
-    const metrics = buildSocialMetrics(tryParseJson(block));
-    if (hasSocialMetrics(metrics)) return metrics;
-  }
-  return extractSocialMetricsFromLabeledHtml(html);
-}
+const extractSocialMetricsFromHtml = createSocialMetricsHtmlExtractor({
+  collectJsonBlocks: collectTopLevelJsonObjectBlocks,
+  tryParseJson,
+});
 
 function normalizeExtractedUrl(url) {
   const normalized = decodeHtmlEntities(String(url || ''))

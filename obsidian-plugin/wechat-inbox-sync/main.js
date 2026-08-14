@@ -2953,7 +2953,7 @@ var require_social_engagement_utils = __commonJS({
       return Object.fromEntries(Object.entries(metrics).filter(([, value]) => value !== null));
     }
     __name(buildSocialMetrics2, "buildSocialMetrics");
-    function buildSocialMetricsFromText2(value = "") {
+    function buildSocialMetricsFromText(value = "") {
       const source = String(value || "").replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/\s+/g, " ");
       const definitions = {
         views: ["(?:视频)?播放(?:量|数|次数)?"],
@@ -2975,7 +2975,7 @@ var require_social_engagement_utils = __commonJS({
       });
       return metrics;
     }
-    __name(buildSocialMetricsFromText2, "buildSocialMetricsFromText");
+    __name(buildSocialMetricsFromText, "buildSocialMetricsFromText");
     function hasSocialMetrics2(metrics = {}) {
       return METRIC_KEYS.some((key) => Number.isFinite(metrics && metrics[key]));
     }
@@ -2987,9 +2987,43 @@ var require_social_engagement_utils = __commonJS({
       return timestamp ? { ...normalized, capturedAt: timestamp } : normalized;
     }
     __name(withCapturedSocialMetrics2, "withCapturedSocialMetrics");
+    function createSocialMetricsHtmlExtractor2(dependencies = {}) {
+      const {
+        collectJsonBlocks = /* @__PURE__ */ __name(() => [], "collectJsonBlocks"),
+        tryParseJson: tryParseJson2 = /* @__PURE__ */ __name(() => null, "tryParseJson")
+      } = dependencies;
+      const labels = "(?:视频)?播放(?:量|数|次数)?|点赞(?:量|数|次数)?|收藏(?:量|人数|次数)?|(?:评论|回复)(?:量|数|次数)?|(?:转发|分享)(?:量|人数|次数)?|(?:投币|硬币)(?:枚数|数|量|次数)?";
+      const count = "\\d+(?:\\.\\d+)?\\s*(?:万|w|k)?";
+      const extractLabeledMetrics = /* @__PURE__ */ __name((html = "") => {
+        const pairPattern = new RegExp(
+          "<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(" + labels + ")\\s*<\\/(?:span|div|li|em|strong|button)>\\s*<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(" + count + ")\\s*<\\/(?:span|div|li|em|strong|button)>",
+          "gi"
+        );
+        const pairs = [];
+        let match;
+        const source = String(html || "");
+        while (match = pairPattern.exec(source)) pairs.push(match[1] + " " + match[2]);
+        return buildSocialMetricsFromText(pairs.join(" "));
+      }, "extractLabeledMetrics");
+      return (html = "") => {
+        const blocks = collectJsonBlocks(html, {
+          maxBlocks: 20,
+          maxBlockCharacters: 1024 * 1024,
+          maxTotalCharacters: 2 * 1024 * 1024,
+          requiredTexts: ['"stat"', '"statistics"', '"playCount"', '"viewCount"']
+        });
+        for (const block of blocks) {
+          const metrics = buildSocialMetrics2(tryParseJson2(block));
+          if (hasSocialMetrics2(metrics)) return metrics;
+        }
+        return extractLabeledMetrics(html);
+      };
+    }
+    __name(createSocialMetricsHtmlExtractor2, "createSocialMetricsHtmlExtractor");
     module2.exports = {
       buildSocialMetrics: buildSocialMetrics2,
-      buildSocialMetricsFromText: buildSocialMetricsFromText2,
+      buildSocialMetricsFromText,
+      createSocialMetricsHtmlExtractor: createSocialMetricsHtmlExtractor2,
       hasSocialMetrics: hasSocialMetrics2,
       normalizeMetricCount,
       withCapturedSocialMetrics: withCapturedSocialMetrics2
@@ -3706,7 +3740,7 @@ var {
 } = require_ai_metadata_utils();
 var {
   buildSocialMetrics,
-  buildSocialMetricsFromText,
+  createSocialMetricsHtmlExtractor,
   hasSocialMetrics,
   withCapturedSocialMetrics
 } = require_social_engagement_utils();
@@ -6938,34 +6972,10 @@ var buildSocialMediaSupplementalMarkdownFromHtml = createSocialMediaContextHtmlB
   normalizeUrl: normalizeExtractedUrl,
   isBilibiliUrl
 });
-function extractSocialMetricsFromLabeledHtml(html = "") {
-  const source = String(html || "");
-  const labels = "(?:视频)?播放(?:量|数|次数)?|(?:点赞|获赞)(?:量|数|次数)?|收藏(?:量|数|人数|次数)?|(?:评论|回复)(?:量|数|次数)?|(?:转发|分享)(?:量|数|人数|次数)?|(?:投硬币|硬币)(?:枚数|数|量|次数)?";
-  const count = "\\d+(?:\\.\\d+)?\\s*(?:万|w|k)?";
-  const pairPattern = new RegExp(
-    `<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(${labels})\\s*<\\/(?:span|div|li|em|strong|button)>\\s*<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(${count})\\s*<\\/(?:span|div|li|em|strong|button)>`,
-    "gi"
-  );
-  const pairs = [];
-  let match;
-  while (match = pairPattern.exec(source)) pairs.push(`${match[1]} ${match[2]}`);
-  return buildSocialMetricsFromText(pairs.join(" "));
-}
-__name(extractSocialMetricsFromLabeledHtml, "extractSocialMetricsFromLabeledHtml");
-function extractSocialMetricsFromHtml(html = "") {
-  const blocks = collectTopLevelJsonObjectBlocks(html, {
-    maxBlocks: 20,
-    maxBlockCharacters: 1024 * 1024,
-    maxTotalCharacters: 2 * 1024 * 1024,
-    requiredTexts: ['"stat"', '"statistics"', '"playCount"', '"viewCount"']
-  });
-  for (const block of blocks) {
-    const metrics = buildSocialMetrics(tryParseJson(block));
-    if (hasSocialMetrics(metrics)) return metrics;
-  }
-  return extractSocialMetricsFromLabeledHtml(html);
-}
-__name(extractSocialMetricsFromHtml, "extractSocialMetricsFromHtml");
+var extractSocialMetricsFromHtml = createSocialMetricsHtmlExtractor({
+  collectJsonBlocks: collectTopLevelJsonObjectBlocks,
+  tryParseJson
+});
 function normalizeExtractedUrl(url) {
   const normalized = decodeHtmlEntities(String(url || "")).replace(/\\u002F/g, "/").replace(/\\\//g, "/").trim();
   return normalized.startsWith("//") ? `https:${normalized}` : normalized;
