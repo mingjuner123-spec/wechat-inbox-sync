@@ -62,7 +62,8 @@ function createDouyinStructuredContentBuilder(dependencies = {}) {
     (Array.isArray(source.cha_list) ? source.cha_list : []).forEach((item) => {
       rememberTag(item && (item.cha_name || item.chaName));
     });
-    (Array.isArray(extractTags(description)) ? extractTags(description) : []).forEach(rememberTag);
+    const extractedTags = extractTags(description);
+    (Array.isArray(extractedTags) ? extractedTags : []).forEach(rememberTag);
     if (!structuredTags.length) {
       (Array.isArray(fallbackSource.tags) ? fallbackSource.tags : []).forEach(rememberTag);
     }
