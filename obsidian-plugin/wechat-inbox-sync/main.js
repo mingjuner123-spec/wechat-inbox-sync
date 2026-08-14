@@ -3062,6 +3062,94 @@ var require_social_media_context_utils = __commonJS({
   }
 });
 
+// src/social-platform-content-utils.js
+var require_social_platform_content_utils = __commonJS({
+  "src/social-platform-content-utils.js"(exports2, module2) {
+    "use strict";
+    function collectDouyinImageUrlList(value, urls) {
+      if (!value) return;
+      if (typeof value === "string") {
+        urls.push(value);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item) => collectDouyinImageUrlList(item, urls));
+        return;
+      }
+      if (typeof value === "object") {
+        collectDouyinImageUrlList(value.url_list, urls);
+        collectDouyinImageUrlList(value.urlList, urls);
+        collectDouyinImageUrlList(value.url, urls);
+        collectDouyinImageUrlList(value.uri, urls);
+      }
+    }
+    __name(collectDouyinImageUrlList, "collectDouyinImageUrlList");
+    function createDouyinStructuredContentBuilder2(dependencies = {}) {
+      const {
+        cleanDescription = /* @__PURE__ */ __name((value) => String(value || "").trim(), "cleanDescription"),
+        extractTags = /* @__PURE__ */ __name(() => [], "extractTags"),
+        buildMetrics = /* @__PURE__ */ __name(() => ({}), "buildMetrics"),
+        hasMetrics = /* @__PURE__ */ __name(() => false, "hasMetrics"),
+        isGenericTitle = /* @__PURE__ */ __name(() => false, "isGenericTitle"),
+        deriveTitle = /* @__PURE__ */ __name(() => "", "deriveTitle"),
+        normalizeUrl = /* @__PURE__ */ __name((value) => String(value || "").trim(), "normalizeUrl")
+      } = dependencies;
+      return (detail = {}, fallback = {}) => {
+        const source = detail && typeof detail === "object" ? detail : {};
+        const fallbackSource = fallback && typeof fallback === "object" ? fallback : {};
+        const description = cleanDescription(
+          source.desc || source.description || fallbackSource.description || ""
+        );
+        const title = [
+          source.title,
+          source.preview_title,
+          source.previewTitle,
+          fallbackSource.title
+        ].map((candidate) => cleanDescription(candidate || "")).find((candidate) => candidate && candidate !== description && candidate.length <= 80 && !candidate.includes("\n") && !isGenericTitle(candidate)) || deriveTitle(description);
+        const structuredTags = [];
+        const rememberTag = /* @__PURE__ */ __name((value) => {
+          const tag = String(value || "").replace(/^#+/, "").trim();
+          if (tag && !structuredTags.includes(tag)) structuredTags.push(tag);
+        }, "rememberTag");
+        (Array.isArray(source.text_extra) ? source.text_extra : []).forEach((item) => {
+          rememberTag(item && (item.hashtag_name || item.hashtagName));
+        });
+        (Array.isArray(source.cha_list) ? source.cha_list : []).forEach((item) => {
+          rememberTag(item && (item.cha_name || item.chaName));
+        });
+        (Array.isArray(extractTags(description)) ? extractTags(description) : []).forEach(rememberTag);
+        if (!structuredTags.length) {
+          (Array.isArray(fallbackSource.tags) ? fallbackSource.tags : []).forEach(rememberTag);
+        }
+        const video = source.video && typeof source.video === "object" ? source.video : {};
+        const coverUrls = [];
+        [
+          video.cover,
+          video.origin_cover,
+          video.originCover,
+          video.dynamic_cover,
+          video.dynamicCover,
+          video.animated_cover,
+          video.animatedCover
+        ].forEach((value) => collectDouyinImageUrlList(value, coverUrls));
+        const coverUrl = coverUrls.map((value) => normalizeUrl(value)).find(Boolean) || normalizeUrl(fallbackSource.coverUrl);
+        const socialMetrics = buildMetrics(source);
+        return {
+          title,
+          description,
+          tags: structuredTags,
+          coverUrl,
+          socialMetrics: hasMetrics(socialMetrics) ? socialMetrics : fallbackSource.socialMetrics || {}
+        };
+      };
+    }
+    __name(createDouyinStructuredContentBuilder2, "createDouyinStructuredContentBuilder");
+    module2.exports = {
+      createDouyinStructuredContentBuilder: createDouyinStructuredContentBuilder2
+    };
+  }
+});
+
 // src/transcription-note-title-utils.js
 var require_transcription_note_title_utils = __commonJS({
   "src/transcription-note-title-utils.js"(exports2, module2) {
@@ -3428,6 +3516,7 @@ var {
   buildSocialMediaSupplementalMarkdown,
   createSocialMediaContextHtmlBuilder
 } = require_social_media_context_utils();
+var { createDouyinStructuredContentBuilder } = require_social_platform_content_utils();
 var {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -5928,24 +6017,6 @@ function extractDouyinDetailFromShareHtml(html, awemeId) {
   );
 }
 __name(extractDouyinDetailFromShareHtml, "extractDouyinDetailFromShareHtml");
-function collectDouyinImageUrlList(value, urls) {
-  if (!value) return;
-  if (typeof value === "string") {
-    pushUniqueUrl(urls, value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectDouyinImageUrlList(item, urls));
-    return;
-  }
-  if (typeof value === "object") {
-    collectDouyinImageUrlList(value.url_list, urls);
-    collectDouyinImageUrlList(value.urlList, urls);
-    collectDouyinImageUrlList(value.url, urls);
-    collectDouyinImageUrlList(value.uri, urls);
-  }
-}
-__name(collectDouyinImageUrlList, "collectDouyinImageUrlList");
 function deriveDouyinTitleFromDescription(description = "") {
   const cleanedDescription = cleanSocialDescription(description);
   if (!cleanedDescription) return "";
@@ -5963,54 +6034,15 @@ function isGenericDouyinTitle(title = "") {
   return !compact || compact === "抖音" || compact === "douyin" || compact === "抖音短视频" || compact === "记录美好生活" || compact === "抖音记录美好生活";
 }
 __name(isGenericDouyinTitle, "isGenericDouyinTitle");
-function buildDouyinStructuredContent(detail = {}, fallback = {}) {
-  const source = detail && typeof detail === "object" ? detail : {};
-  const fallbackSource = fallback && typeof fallback === "object" ? fallback : {};
-  const description = cleanSocialDescription(
-    source.desc || source.description || fallbackSource.description || ""
-  );
-  const title = [
-    source.title,
-    source.preview_title,
-    source.previewTitle,
-    fallbackSource.title
-  ].map((candidate) => cleanSocialDescription(candidate || "")).find((candidate) => candidate && candidate !== description && candidate.length <= 80 && !candidate.includes("\n") && !isGenericDouyinTitle(candidate)) || deriveDouyinTitleFromDescription(description);
-  const structuredTags = [];
-  const rememberTag = /* @__PURE__ */ __name((value) => {
-    const tag = String(value || "").replace(/^#+/, "").trim();
-    if (tag && !structuredTags.includes(tag)) structuredTags.push(tag);
-  }, "rememberTag");
-  (Array.isArray(source.text_extra) ? source.text_extra : []).forEach((item) => {
-    rememberTag(item && (item.hashtag_name || item.hashtagName));
-  });
-  (Array.isArray(source.cha_list) ? source.cha_list : []).forEach((item) => {
-    rememberTag(item && (item.cha_name || item.chaName));
-  });
-  extractTagsFromText(description).forEach(rememberTag);
-  if (!structuredTags.length) {
-    (Array.isArray(fallbackSource.tags) ? fallbackSource.tags : []).forEach(rememberTag);
-  }
-  const video = source.video && typeof source.video === "object" ? source.video : {};
-  const coverUrls = [];
-  [
-    video.cover,
-    video.origin_cover,
-    video.originCover,
-    video.dynamic_cover,
-    video.dynamicCover,
-    video.animated_cover,
-    video.animatedCover
-  ].forEach((value) => collectDouyinImageUrlList(value, coverUrls));
-  const socialMetrics = buildSocialMetrics(source);
-  return {
-    title,
-    description,
-    tags: structuredTags,
-    coverUrl: coverUrls[0] || String(fallbackSource.coverUrl || "").trim(),
-    socialMetrics: hasSocialMetrics(socialMetrics) ? socialMetrics : fallbackSource.socialMetrics || {}
-  };
-}
-__name(buildDouyinStructuredContent, "buildDouyinStructuredContent");
+var buildDouyinStructuredContent = createDouyinStructuredContentBuilder({
+  cleanDescription: cleanSocialDescription,
+  extractTags: extractTagsFromText,
+  buildMetrics: buildSocialMetrics,
+  hasMetrics: hasSocialMetrics,
+  isGenericTitle: isGenericDouyinTitle,
+  deriveTitle: deriveDouyinTitleFromDescription,
+  normalizeUrl: normalizeExtractedUrl
+});
 function shouldResolveMediaDownloadUrl(url) {
   const text = String(url || "").toLowerCase();
   return text.includes("/aweme/v1/play") || text.includes("v.douyin.com") || text.includes("iesdouyin.com/share/video") || text.includes("amemv.com");

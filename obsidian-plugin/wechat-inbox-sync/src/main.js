@@ -150,6 +150,7 @@ const {
   buildSocialMediaSupplementalMarkdown,
   createSocialMediaContextHtmlBuilder,
 } = require('./social-media-context-utils');
+const { createDouyinStructuredContentBuilder } = require('./social-platform-content-utils');
 const {
   applyTranscriptionNoteIdentity,
   buildSemanticTranscriptionTitle,
@@ -3221,24 +3222,6 @@ function extractDouyinDetailFromShareHtml(html, awemeId) {
   );
 }
 
-function collectDouyinImageUrlList(value, urls) {
-  if (!value) return;
-  if (typeof value === 'string') {
-    pushUniqueUrl(urls, value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectDouyinImageUrlList(item, urls));
-    return;
-  }
-  if (typeof value === 'object') {
-    collectDouyinImageUrlList(value.url_list, urls);
-    collectDouyinImageUrlList(value.urlList, urls);
-    collectDouyinImageUrlList(value.url, urls);
-    collectDouyinImageUrlList(value.uri, urls);
-  }
-}
-
 function deriveDouyinTitleFromDescription(description = '') {
   const cleanedDescription = cleanSocialDescription(description);
   if (!cleanedDescription) return '';
@@ -3266,66 +3249,15 @@ function isGenericDouyinTitle(title = '') {
     || compact === '抖音记录美好生活';
 }
 
-function buildDouyinStructuredContent(detail = {}, fallback = {}) {
-  const source = detail && typeof detail === 'object' ? detail : {};
-  const fallbackSource = fallback && typeof fallback === 'object' ? fallback : {};
-  const description = cleanSocialDescription(
-    source.desc
-    || source.description
-    || fallbackSource.description
-    || '',
-  );
-  const title = [
-    source.title,
-    source.preview_title,
-    source.previewTitle,
-    fallbackSource.title,
-  ]
-    .map((candidate) => cleanSocialDescription(candidate || ''))
-    .find((candidate) => candidate
-      && candidate !== description
-      && candidate.length <= 80
-      && !candidate.includes('\n')
-      && !isGenericDouyinTitle(candidate))
-    || deriveDouyinTitleFromDescription(description);
-  const structuredTags = [];
-  const rememberTag = (value) => {
-    const tag = String(value || '').replace(/^#+/, '').trim();
-    if (tag && !structuredTags.includes(tag)) structuredTags.push(tag);
-  };
-  (Array.isArray(source.text_extra) ? source.text_extra : []).forEach((item) => {
-    rememberTag(item && (item.hashtag_name || item.hashtagName));
-  });
-  (Array.isArray(source.cha_list) ? source.cha_list : []).forEach((item) => {
-    rememberTag(item && (item.cha_name || item.chaName));
-  });
-  extractTagsFromText(description).forEach(rememberTag);
-  if (!structuredTags.length) {
-    (Array.isArray(fallbackSource.tags) ? fallbackSource.tags : []).forEach(rememberTag);
-  }
-
-  const video = source.video && typeof source.video === 'object' ? source.video : {};
-  const coverUrls = [];
-  [
-    video.cover,
-    video.origin_cover,
-    video.originCover,
-    video.dynamic_cover,
-    video.dynamicCover,
-    video.animated_cover,
-    video.animatedCover,
-  ].forEach((value) => collectDouyinImageUrlList(value, coverUrls));
-  const socialMetrics = buildSocialMetrics(source);
-  return {
-    title,
-    description,
-    tags: structuredTags,
-    coverUrl: coverUrls[0] || String(fallbackSource.coverUrl || '').trim(),
-    socialMetrics: hasSocialMetrics(socialMetrics)
-      ? socialMetrics
-      : (fallbackSource.socialMetrics || {}),
-  };
-}
+const buildDouyinStructuredContent = createDouyinStructuredContentBuilder({
+  cleanDescription: cleanSocialDescription,
+  extractTags: extractTagsFromText,
+  buildMetrics: buildSocialMetrics,
+  hasMetrics: hasSocialMetrics,
+  isGenericTitle: isGenericDouyinTitle,
+  deriveTitle: deriveDouyinTitleFromDescription,
+  normalizeUrl: normalizeExtractedUrl,
+});
 
 function shouldResolveMediaDownloadUrl(url) {
   const text = String(url || '').toLowerCase();
