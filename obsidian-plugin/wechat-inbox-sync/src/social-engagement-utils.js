@@ -93,9 +93,45 @@ function withCapturedSocialMetrics(metrics = {}, capturedAt = '') {
   return timestamp ? { ...normalized, capturedAt: timestamp } : normalized;
 }
 
+function createSocialMetricsHtmlExtractor(dependencies = {}) {
+  const {
+    collectJsonBlocks = () => [],
+    tryParseJson = () => null,
+  } = dependencies;
+  const labels = '(?:\u89c6\u9891)?\u64ad\u653e(?:\u91cf|\u6570|\u6b21\u6570)?|\u70b9\u8d5e(?:\u91cf|\u6570|\u6b21\u6570)?|\u6536\u85cf(?:\u91cf|\u4eba\u6570|\u6b21\u6570)?|(?:\u8bc4\u8bba|\u56de\u590d)(?:\u91cf|\u6570|\u6b21\u6570)?|(?:\u8f6c\u53d1|\u5206\u4eab)(?:\u91cf|\u4eba\u6570|\u6b21\u6570)?|(?:\u6295\u5e01|\u786c\u5e01)(?:\u679a\u6570|\u6570|\u91cf|\u6b21\u6570)?';
+  const count = '\\d+(?:\\.\\d+)?\\s*(?:\u4e07|w|k)?';
+
+  const extractLabeledMetrics = (html = '') => {
+    const pairPattern = new RegExp(
+      '<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(' + labels + ')\\s*<\\/(?:span|div|li|em|strong|button)>\\s*<(?:span|div|li|em|strong|button)\\b[^>]*>\\s*(' + count + ')\\s*<\\/(?:span|div|li|em|strong|button)>',
+      'gi',
+    );
+    const pairs = [];
+    let match;
+    const source = String(html || '');
+    while ((match = pairPattern.exec(source))) pairs.push(match[1] + ' ' + match[2]);
+    return buildSocialMetricsFromText(pairs.join(' '));
+  };
+
+  return (html = '') => {
+    const blocks = collectJsonBlocks(html, {
+      maxBlocks: 20,
+      maxBlockCharacters: 1024 * 1024,
+      maxTotalCharacters: 2 * 1024 * 1024,
+      requiredTexts: ['"stat"', '"statistics"', '"playCount"', '"viewCount"'],
+    });
+    for (const block of blocks) {
+      const metrics = buildSocialMetrics(tryParseJson(block));
+      if (hasSocialMetrics(metrics)) return metrics;
+    }
+    return extractLabeledMetrics(html);
+  };
+}
+
 module.exports = {
   buildSocialMetrics,
   buildSocialMetricsFromText,
+  createSocialMetricsHtmlExtractor,
   hasSocialMetrics,
   normalizeMetricCount,
   withCapturedSocialMetrics,

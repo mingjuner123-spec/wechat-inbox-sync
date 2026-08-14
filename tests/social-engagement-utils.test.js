@@ -1,5 +1,6 @@
 const assert = require('assert');
 const {
+  createSocialMetricsHtmlExtractor,
   buildSocialMetrics,
   buildSocialMetricsFromText,
   hasSocialMetrics,
@@ -68,6 +69,20 @@ function run() {
   }, 'B站真实简介里的平台数据必须作为 API 失败时的兜底');
   assert.deepStrictEqual(buildSocialMetrics({ statistics: { play_count: 'unavailable' } }), {});
   assert.strictEqual(hasSocialMetrics({}), false);
+
+  const extractSocialMetricsFromHtml = createSocialMetricsHtmlExtractor({
+    collectJsonBlocks: () => ['{"statistics":{"play_count":"1.2w","comment_count":3}}'],
+    tryParseJson: JSON.parse,
+  });
+  assert.deepStrictEqual(extractSocialMetricsFromHtml('<html></html>'), { views: 12000, comments: 3 });
+  const extractLabeledMetrics = createSocialMetricsHtmlExtractor({
+    collectJsonBlocks: () => [],
+    tryParseJson: JSON.parse,
+  });
+  assert.deepStrictEqual(
+    extractLabeledMetrics('<span>播放</span><span>12</span><span>点赞</span><span>3</span>'),
+    { views: 12, likes: 3 },
+  );
 }
 
 run();

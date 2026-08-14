@@ -502,6 +502,21 @@ async function run() {
     capturedAt: undefined,
   });
 
+  plugin.fetchDouyinMediaResolutionWithSession = async () => ({ mediaUrls: [], detail: null });
+  let targetedBrowserOptions = null;
+  plugin.renderSocialMediaUrls = async (_url, options) => {
+    targetedBrowserOptions = options;
+    return ['https://v.douyinvod.com/targeted-browser-video.mp4'];
+  };
+  const targetedBrowserDouyinRecord = await plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: `https://www.douyin.com/video/${sessionFallbackAwemeId}`,
+    metadata: { url: `https://www.douyin.com/video/${sessionFallbackAwemeId}` },
+  }, '', '', '抖音视频');
+  assert.strictEqual(targetedBrowserOptions.strictDouyinTarget, true);
+  assert.strictEqual(targetedBrowserDouyinRecord.metadata.transcriptionStatus, 'success');
+  assert.match(targetedBrowserDouyinRecord.metadata.mediaUrl, /targeted-browser-video/);
+
   const xhsTrailingRecord = {
     type: 'webpage',
     content: 'https://www.xiaohongshu.com/explore/trailing-comments',
