@@ -1141,9 +1141,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.88'), {
-  manifestVersion: '1.3.88',
-  runtimeVersion: '1.3.88',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.89'), {
+  manifestVersion: '1.3.89',
+  runtimeVersion: '1.3.89',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -6064,7 +6064,7 @@ assert.deepStrictEqual(
     finalUrl: 'https://www.douyin.com/',
     primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/unbound-video/?mime_type=video_mp4'],
   }),
-  [],
+  ['https://v11-weba.douyinvod.com/unbound-video/?mime_type=video_mp4'],
 );
 assert.deepStrictEqual(
   helpers.selectIdentityBoundDouyinBrowserMedia({
@@ -10484,7 +10484,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.88'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.89'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10523,8 +10523,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.88',
-        runtimeVersion: '1.3.88',
+        manifestVersion: '1.3.89',
+        runtimeVersion: '1.3.89',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10609,7 +10609,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   };
   plugin.writeRecord = async () => {
     throw helpers.createRetryableXiaohongshuContentError({
-      runtime: helpers.getPluginRuntimeIdentity('1.3.88'),
+      runtime: helpers.getPluginRuntimeIdentity('1.3.89'),
       request: {
         sourceHost: 'xhslink.cn',
         finalHost: 'xiaohongshu.com',
@@ -12707,7 +12707,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.88 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.89 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));

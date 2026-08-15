@@ -1,0 +1,51 @@
+# WeChat Inbox Sync 1.3.89 release task
+
+- Task ID: `plugin-release-1-3-89-001`
+- Created: 2026-08-15
+- Status: in progress
+- Risk: L3 (public GitHub release)
+- Branch: `codex/douyin-relax-target-identity`
+- Worktree: `D:\临时任务\plugin-release-1388-final`
+- Authoritative repository: `https://github.com/mingjuner123-spec/wechat-inbox-sync`
+- Base version: `1.3.88`
+- Target version: `1.3.89`
+
+## User authorization
+
+The user explicitly authorized publishing this focused Douyin compatibility change directly from the current online 1.3.88 baseline on 2026-08-15.
+
+## Release scope
+
+- Do not reject target-page media merely because Douyin preloaded multiple page identities.
+- When multiple unbound DOM players exist, select the strongest candidate using the existing playing, visibility, viewport, area, and source-order ranking.
+- Keep hard rejection when the loaded route explicitly points to another work or a player is explicitly bound to another work.
+- Preserve every 1.3.88 Feishu, diagnostic, installer, entitlement, and synchronization behavior.
+- No CloudBase deployment, user data access, binding modification, payment change, or installed `data.json` replacement.
+
+## Allowed paths
+
+- `docs/task-cards/plugin-release-1-3-89-001.md`
+- `docs/WORKLOG.md`
+- `main.js`
+- `manifest.json`
+- `versions.json`
+- `release-candidate.json`
+- `obsidian-plugin/wechat-inbox-sync/main.js`
+- `obsidian-plugin/wechat-inbox-sync/manifest.json`
+- `obsidian-plugin/wechat-inbox-sync/src/main.js`
+- `obsidian-plugin/wechat-inbox-sync/versions.json`
+- `tests/plugin-douyin-media.test.js`
+
+## Stop and rollback conditions
+
+- Stop before publishing if explicit wrong-work rejection, candidate ranking, plugin regressions, release governance, identity checks, or independent review fails.
+- Do not overwrite, move, delete, or recreate an existing tag or GitHub Release.
+- If a defect is found after publication, use a later incremented version; never mutate immutable 1.3.89 assets.
+
+## Acceptance criteria
+
+- Mixed page identities alone no longer block a usable current player.
+- Multiple unbound players select the strongest current candidate rather than failing closed.
+- Explicit wrong-route and wrong-player identity tests remain rejected.
+- Source, generated bundle, root mirror, manifest, versions, candidate receipt, tag, remote main, Release assets, and ZIP all identify 1.3.89.
+- Release contains exactly `main.js`, `manifest.json`, `styles.css`, `versions.json`, and `wechat-inbox-sync-1.3.89.zip`.
