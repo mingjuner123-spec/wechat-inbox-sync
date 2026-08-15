@@ -178,7 +178,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.89';
+const PLUGIN_RUNTIME_VERSION = '1.3.90';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -16730,25 +16730,32 @@ class WechatObsidianInboxPlugin extends Plugin {
       stats.localizedCount = 0;
       stats.failedCount = 0;
       stats.missingSourceCount = 0;
+      stats.localizedSources = [];
     }
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
     let nextMarkdown = String(markdown || '');
     let index = 1;
 
-    await this.ensureFolder(imageRootDir);
-    await this.ensureFolder(imageDayDir);
+    try {
+      await this.ensureFolder(imageRootDir);
+      await this.ensureFolder(imageDayDir);
+    } catch (error) {
+      for (const asset of assets) reportError(asset, error);
+      return nextMarkdown;
+    }
 
     for (const asset of assets) {
       const assetSource = String(asset && asset.src || '').trim();
+      const assetDownloadSource = String(asset && (asset.downloadSrc || asset.src) || '').trim();
       let decoded = decodeDataUrl(asset && asset.dataUrl);
-      if (!decoded && assetSource && /^https?:\/\//i.test(assetSource)) {
+      if (!decoded && assetDownloadSource && /^https?:\/\//i.test(assetDownloadSource)) {
         const imageHeaders = isSessionBackedSource
           ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl }
           : {};
         let downloadError = null;
         try {
-          const arrayBuffer = await this.downloadArrayBuffer(assetSource, imageHeaders);
+          const arrayBuffer = await this.downloadArrayBuffer(assetDownloadSource, imageHeaders);
           const buffer = Buffer.from(arrayBuffer || []);
           if (!buffer.length) throw new Error('image download returned an empty response');
           decoded = { buffer, mimeType: String(asset.mimeType || '') };
@@ -16756,7 +16763,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           downloadError = error;
           if (isSessionBackedSource && typeof this.downloadMediaArrayBufferWithSession === 'function') {
             try {
-              const arrayBuffer = await this.downloadMediaArrayBufferWithSession(assetSource, imageHeaders);
+              const arrayBuffer = await this.downloadMediaArrayBufferWithSession(assetDownloadSource, imageHeaders);
               const buffer = Buffer.from(arrayBuffer || []);
               if (!buffer.length) throw new Error('browser-session image download returned an empty response');
               decoded = { buffer, mimeType: String(asset.mimeType || '') };
@@ -16786,9 +16793,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       const ext = decoded.mimeType && decoded.mimeType !== 'application/octet-stream'
         ? getImageExtFromMime(decoded.mimeType)
-        : getImageExtFromBuffer(decoded.buffer, assetSource);
-      const imagePath = `${imageDayDir}/${title}-image-${String(index).padStart(2, '0')}.${ext}`;
-      await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
+        : getImageExtFromBuffer(decoded.buffer, assetDownloadSource || assetSource);
+      const preferredIndex = Math.max(0, Number(asset && asset.localIndex) || 0);
+      const imageIndex = preferredIndex || index;
+      const imagePath = `${imageDayDir}/${title}-image-${String(imageIndex).padStart(2, '0')}.${ext}`;
+      try {
+        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
+      } catch (error) {
+        reportError(asset, error);
+        continue;
+      }
       const normalizedAssetSource = decodeHtmlEntities(assetSource).trim();
       let replacementCount = 0;
       nextMarkdown = nextMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, _alt, markdownSource) => {
@@ -16798,11 +16812,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         return `![[${imagePath}]]`;
       });
       if (replacementCount > 0) {
-        if (stats) stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+        if (stats) {
+          stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+          stats.localizedSources.push(assetSource);
+        }
+        if (typeof options.onLocalized === 'function') {
+          options.onLocalized({ asset, imagePath, replacementCount });
+        }
       } else {
         reportError(asset, new Error('image attachment was saved but no matching Markdown image reference was found'));
       }
-      index += 1;
+      index = Math.max(index + 1, imageIndex + 1);
     }
 
     return nextMarkdown;
@@ -17536,25 +17556,45 @@ class WechatObsidianInboxPlugin extends Plugin {
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
-            const imageTokens = Array.from(new Set((cloudOpenApiResult.imageTokens || [])
+            const imageTmpDownloadUrls = cloudOpenApiResult.imageTmpDownloadUrls || {};
+            const markdownImageTokens = Array.from(String(cloudOpenApiResult.markdown || '')
+              .matchAll(/feishu-image:([^\s)]+)/g))
+              .map((match) => String(match[1] || '').trim())
+              .filter(Boolean);
+            const explicitImageTokens = (cloudOpenApiResult.imageTokens || [])
               .map((item) => String(item || '').trim())
-              .filter(Boolean)));
+              .filter(Boolean);
+            const hasCanonicalImageOrder = explicitImageTokens.length > 0 || markdownImageTokens.length > 0;
+            const imageTokens = Array.from(new Set([
+              ...explicitImageTokens,
+              ...markdownImageTokens,
+              ...Object.keys(imageTmpDownloadUrls),
+            ].map((item) => String(item || '').trim()).filter(Boolean)));
+            const resolvedImageTokens = new Set();
+            const imageAttemptErrorsByToken = new Map();
+            const rememberImageAttemptError = (token, error) => {
+              const normalizedToken = String(token || '').trim();
+              if (!normalizedToken) return;
+              const errors = imageAttemptErrorsByToken.get(normalizedToken) || [];
+              errors.push(String(error && (error.message || error) || 'unknown error'));
+              imageAttemptErrorsByToken.set(normalizedToken, errors.slice(-3));
+            };
+            const buildTokenAsset = (token, extra = {}) => ({
+              token,
+              src: `feishu-image:${token}`,
+              localIndex: imageTokens.indexOf(token) + 1,
+              ...extra,
+            });
             const imageDataAssets = [];
-            const imageDataErrors = [];
             for (const imageToken of imageTokens) {
               try {
                 // eslint-disable-next-line no-await-in-loop
                 const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
-                imageDataAssets.push({
-                  token: imageToken,
-                  // Keep the stable OpenAPI token as the Markdown identity.
-                  // Signed URLs may be escaped differently in Markdown, which
-                  // used to save the binary without replacing the note link.
-                  src: `feishu-image:${imageToken}`,
+                imageDataAssets.push(buildTokenAsset(imageToken, {
                   dataUrl: downloaded.dataUrl,
-                });
+                }));
               } catch (error) {
-                imageDataErrors.push(String(error && (error.message || error) || 'unknown error'));
+                rememberImageAttemptError(imageToken, error);
               }
             }
             let cleanedCloudOpenApiMarkdown = cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
@@ -17562,80 +17602,134 @@ class WechatObsidianInboxPlugin extends Plugin {
               feishuTitle,
             });
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
-            const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {})
-              .filter((value) => /^https?:\/\//i.test(String(value || '').trim()))
-              .length;
-            // 云端临时 URL 缺失不再等于图片缺失：成功通过 OAuth 媒体接口下载的
-            // token 已经能落成本地附件，因此只报告真正仍未解决的数量。
-            const missingImageTempUrlCount = Math.max(
-              0,
-              imageTokenCount - imageTempUrlCount - imageDataAssets.length,
-            );
-            const imageLocalizationErrors = [];
-            cleanedCloudOpenApiMarkdown = await this.saveWebpageImageAssets(
-              cleanedCloudOpenApiMarkdown,
-              imageDataAssets,
-              rootDir,
-              dateFolder,
-              feishuTitle,
-              {
-                sourceUrl: url,
-                onError: ({ error }) => {
-                  imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+            const localizeTokenAssets = async (assets) => {
+              if (!assets.length) return { assetCount: 0, localizedCount: 0, failedCount: 0 };
+              const stageStats = {};
+              cleanedCloudOpenApiMarkdown = await this.saveWebpageImageAssets(
+                cleanedCloudOpenApiMarkdown,
+                assets,
+                rootDir,
+                dateFolder,
+                feishuTitle,
+                {
+                  sourceUrl: url,
+                  stats: stageStats,
+                  onLocalized: ({ asset }) => {
+                    if (asset && asset.token) resolvedImageTokens.add(String(asset.token));
+                  },
+                  onError: ({ asset, error }) => {
+                    rememberImageAttemptError(asset && asset.token, error);
+                  },
                 },
-              },
-            );
-            // Only tokens that the OAuth media endpoint could not localize
-            // remain here; those may use a temporary URL/browser fallback.
-            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-              cleanedCloudOpenApiMarkdown,
-              [],
-              url,
-              cloudOpenApiResult.imageTmpDownloadUrls || {},
-            );
-            cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
-              cleanedCloudOpenApiMarkdown,
-              rootDir,
-              dateFolder,
-              feishuTitle,
-              {
-                sourceUrl: url,
-                onError: ({ error }) => {
-                  imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
-                },
-              },
-            );
+              );
+              return stageStats;
+            };
+            const officialImageStats = await localizeTokenAssets(imageDataAssets);
+            const getUnresolvedImageTokens = () => imageTokens.filter((token) => !resolvedImageTokens.has(token));
+            const temporaryImageAssets = getUnresolvedImageTokens()
+              .map((token) => {
+                const temporaryUrl = String(
+                  imageTmpDownloadUrls[token]
+                  || buildFeishuImageFallbackUrl(token, url)
+                  || '',
+                ).trim();
+                return /^https?:\/\//i.test(temporaryUrl)
+                  ? buildTokenAsset(token, { downloadSrc: temporaryUrl })
+                  : null;
+              })
+              .filter(Boolean);
+            const temporaryImageStats = await localizeTokenAssets(temporaryImageAssets);
             // The cloud OAuth response can contain image tokens without usable
             // temporary download URLs (or those URLs can return 401). In that
             // case, give the authenticated browser renderer one chance to
             // obtain the same document assets. Keep the API result as the
             // fallback so a browser failure never blocks text synchronization.
             let feishuImageFallbackNote = '';
-            if (imageTokenCount > 0 && (missingImageTempUrlCount > 0 || imageLocalizationErrors.length > 0)) {
+            if (getUnresolvedImageTokens().length > 0) {
               try {
                 const renderedFallback = await this.renderFeishuDocumentWithElectron(url);
-                const fallbackStats = {};
-                const fallbackMarkdown = await this.saveWebpageImageAssets(
-                  cleanMarkdownForStorage(renderedFallback.markdown, {
-                    dedupe: true,
-                    feishuTitle,
-                  }),
-                  renderedFallback.assets,
-                  rootDir,
-                  dateFolder,
-                  feishuTitle,
-                  { sourceUrl: url, stats: fallbackStats },
-                );
-                if (fallbackStats.localizedCount > 0) {
-                  cleanedCloudOpenApiMarkdown = fallbackMarkdown;
-                  feishuImageFallbackNote = `browser-image-fallback=${fallbackStats.localizedCount}/${fallbackStats.assetCount || 0}`;
-                } else {
-                  feishuImageFallbackNote = `browser-image-fallback=0/${fallbackStats.assetCount || 0}`;
+                const renderedAssets = Array.isArray(renderedFallback && renderedFallback.assets)
+                  ? renderedFallback.assets.filter((asset) => asset && String(asset.src || '').trim())
+                  : [];
+                const fallbackMarkdownSources = Array.from(String(renderedFallback && renderedFallback.markdown || '')
+                  .matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g))
+                  .map((match) => decodeHtmlEntities(String(match[1] || '').trim()))
+                  .filter(Boolean);
+                const assetsBySource = new Map(renderedAssets.map((asset) => [
+                  decodeHtmlEntities(String(asset.src || '').trim()),
+                  asset,
+                ]));
+                const orderedRenderedAssets = [];
+                const seenRenderedSources = new Set();
+                for (const source of fallbackMarkdownSources) {
+                  const asset = assetsBySource.get(source);
+                  if (!asset || seenRenderedSources.has(source)) continue;
+                  seenRenderedSources.add(source);
+                  orderedRenderedAssets.push(asset);
                 }
+                for (const asset of renderedAssets) {
+                  const source = decodeHtmlEntities(String(asset.src || '').trim());
+                  if (!source || seenRenderedSources.has(source)) continue;
+                  seenRenderedSources.add(source);
+                  orderedRenderedAssets.push(asset);
+                }
+                const unresolvedBeforeBrowser = getUnresolvedImageTokens();
+                const matchedBrowserAssets = new Map();
+                for (const token of unresolvedBeforeBrowser) {
+                  const exactAsset = orderedRenderedAssets.find((asset) => (
+                    String(asset.token || '').trim() === token
+                    || String(asset.src || '').includes(token)
+                  ));
+                  if (exactAsset) matchedBrowserAssets.set(token, exactAsset);
+                }
+                if (hasCanonicalImageOrder && orderedRenderedAssets.length === imageTokens.length) {
+                  imageTokens.forEach((token, index) => {
+                    if (!resolvedImageTokens.has(token) && !matchedBrowserAssets.has(token)) {
+                      matchedBrowserAssets.set(token, orderedRenderedAssets[index]);
+                    }
+                  });
+                } else if (
+                  hasCanonicalImageOrder
+                  && unresolvedBeforeBrowser.length === imageTokens.length
+                  && orderedRenderedAssets.length === unresolvedBeforeBrowser.length
+                ) {
+                  unresolvedBeforeBrowser.forEach((token, index) => {
+                    if (!matchedBrowserAssets.has(token)) matchedBrowserAssets.set(token, orderedRenderedAssets[index]);
+                  });
+                }
+                const browserTokenAssets = unresolvedBeforeBrowser
+                  .map((token) => {
+                    const browserAsset = matchedBrowserAssets.get(token);
+                    if (!browserAsset) return null;
+                    return buildTokenAsset(token, {
+                      dataUrl: browserAsset.dataUrl,
+                      downloadSrc: browserAsset.src,
+                      mimeType: browserAsset.mimeType,
+                    });
+                  })
+                  .filter(Boolean);
+                const browserImageStats = await localizeTokenAssets(browserTokenAssets);
+                feishuImageFallbackNote = `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`;
               } catch (fallbackError) {
                 feishuImageFallbackNote = `browser-image-fallback-failed=${getTransportErrorDiagnostic(fallbackError).message}`;
               }
             }
+            const unresolvedImageTokens = getUnresolvedImageTokens();
+            const unknownImageIdentityCount = Math.max(0, imageTokenCount - imageTokens.length);
+            const imageLocalizationFailedCount = unresolvedImageTokens.length + unknownImageIdentityCount;
+            const missingImageTempUrlCount = unknownImageIdentityCount + unresolvedImageTokens
+              .filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || '').trim()))
+              .length;
+            const finalImageErrors = unresolvedImageTokens.map((token) => {
+              const attempts = imageAttemptErrorsByToken.get(token) || [];
+              return attempts.length ? attempts[attempts.length - 1] : `image ${token} could not be localized`;
+            });
+            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanedCloudOpenApiMarkdown,
+              [],
+              url,
+              imageTmpDownloadUrls,
+            );
             return {
               ...record,
               metadata: enrichExtractedWebpageMetadata({
@@ -17645,15 +17739,17 @@ class WechatObsidianInboxPlugin extends Plugin {
                 conversionStatus: 'success',
                 conversionSource: 'feishu-cloud-oauth',
                 imageTempUrlMissingCount: missingImageTempUrlCount,
-                imageLocalizationFailedCount: imageDataErrors.length + imageLocalizationErrors.length,
-                imageLocalizationError: [...imageDataErrors, ...imageLocalizationErrors].slice(0, 3).join(' | '),
+                imageLocalizationFailedCount,
+                imageLocalizationError: finalImageErrors.slice(0, 3).join(' | '),
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : '',
+                  imageTokenCount ? `image-official-localized=${officialImageStats.localizedCount || 0}` : '',
+                  temporaryImageAssets.length ? `image-temporary-localized=${temporaryImageStats.localizedCount || 0}/${temporaryImageAssets.length}` : '',
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : '',
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
-                  (imageDataErrors.length + imageLocalizationErrors.length)
-                    ? `image-localize-failed=${imageDataErrors.length + imageLocalizationErrors.length}: ${[...imageDataErrors, ...imageLocalizationErrors].slice(0, 3).join(' | ')}`
+                  imageLocalizationFailedCount
+                    ? `image-localize-failed=${imageLocalizationFailedCount}: ${finalImageErrors.slice(0, 3).join(' | ')}`
                     : '',
                   feishuImageFallbackNote,
                 ].filter(Boolean).join('; '),
