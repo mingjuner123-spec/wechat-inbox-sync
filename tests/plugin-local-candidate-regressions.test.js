@@ -32,6 +32,7 @@ Module._load = originalLoad;
 async function testDouyin403UsesSessionFallback() {
   const plugin = new PluginClass();
   let sessionCalls = 0;
+  const attempts = [];
   plugin.downloadArrayBuffer = async () => {
     throw new Error('媒体下载失败：HTTP 403');
   };
@@ -42,9 +43,16 @@ async function testDouyin403UsesSessionFallback() {
   plugin.refreshDouyinMediaUrls = async () => [];
   const outputPath = await plugin.downloadMediaToTempFile(
     'https://v3-dy-o.zjcdn.com/example.mp3',
-    { sourceUrl: 'https://v.douyin.com/example/' },
+    {
+      sourceUrl: 'https://v.douyin.com/example/',
+      onMediaDownloadDiagnostic: (attempt) => attempts.push(attempt),
+    },
   );
   try {
+    assert.deepStrictEqual(attempts.map((attempt) => [attempt.transport, attempt.ok, attempt.refreshed]), [
+      ['node-http', false, false],
+      ['browser-session', true, false],
+    ], 'download diagnostics must record the direct failure and session recovery without exposing URLs');
     assert.strictEqual(sessionCalls, 1, '抖音 403 必须使用同一浏览器会话重试');
     assert.strictEqual(fs.existsSync(outputPath), true);
   } finally {

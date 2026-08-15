@@ -166,7 +166,7 @@ async function runDiagnosticHelperTest() {
   });
   assert.strictEqual(douyin.source.host, 'v.douyin.com');
   assert.strictEqual(douyin.resolved.host, 'douyin.com');
-  assert.strictEqual(douyin.stages[0].error.message, 'HTTP 403');
+  assert.strictEqual(douyin.stages[0].error, undefined, 'raw error messages must not leak media URLs or credentials into copied diagnostics');
 }
 
 async function run() {
