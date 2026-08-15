@@ -6256,6 +6256,7 @@ function selectIdentityBoundDouyinBrowserMedia({
   canonicalUrl = "",
   debuggerMediaUrls = [],
   domMediaCandidates = [],
+  pageIdentityIds = [],
   primaryDomMediaUrls = []
 } = {}) {
   const targetId = String(targetAwemeId || "").trim();
@@ -6263,10 +6264,35 @@ function selectIdentityBoundDouyinBrowserMedia({
   const exactPayloadMedia = normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
   if (exactPayloadMedia.length) return exactPayloadMedia;
   const loadedIds = [finalUrl, canonicalUrl].map((value) => extractDouyinAwemeId(value)).filter(Boolean);
-  if (!loadedIds.length || loadedIds.some((loadedId) => loadedId !== targetId)) return [];
-  if (!loadedIds.includes(targetId)) return [];
-  if (Array.isArray(domMediaCandidates) && domMediaCandidates.length) {
-    return selectPrimaryDouyinDomMediaUrls(domMediaCandidates, targetId);
+  if (loadedIds.some((loadedId) => loadedId !== targetId)) return [];
+  const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
+  const exactDomCandidates = candidates.filter((candidate) => {
+    const identityIds = Array.from(new Set(
+      (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
+    ));
+    return identityIds.includes(targetId) && !identityIds.some((identityId) => identityId !== targetId);
+  });
+  if (exactDomCandidates.length) {
+    return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
+  }
+  const normalizedPageIds = Array.from(new Set(
+    (Array.isArray(pageIdentityIds) ? pageIdentityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
+  ));
+  const pageUniquelyMatchesTarget = normalizedPageIds.length === 1 && normalizedPageIds[0] === targetId;
+  const loadedPageMatchesTarget = loadedIds.includes(targetId);
+  if (!loadedPageMatchesTarget && !pageUniquelyMatchesTarget) return [];
+  if (!loadedPageMatchesTarget && pageUniquelyMatchesTarget) {
+    const unboundVisiblePlayingCandidates = candidates.filter((candidate) => {
+      const identityIds = Array.from(new Set(
+        (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
+      ));
+      return identityIds.length === 0 && candidate.isPlaying === true && candidate.visible !== false && candidate.intersectsViewport !== false;
+    });
+    if (unboundVisiblePlayingCandidates.length !== 1) return [];
+    return selectPrimaryDouyinDomMediaUrls(unboundVisiblePlayingCandidates, targetId);
+  }
+  if (candidates.length) {
+    return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
   }
   return normalizeBrowserCapturedMediaUrls([primaryDomMediaUrls]);
 }
@@ -12860,6 +12886,20 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         }).filter((candidate) => candidate.urls.length);
         const canonicalNode = document.querySelector('link[rel=canonical]');
         const ogUrlNode = document.querySelector('meta[property=og:url]');
+        const pageIdentityIds = [];
+        const seenPageIdentityIds = new Set();
+        const addPageIdentityIds = (values) => {
+          (Array.isArray(values) ? values : []).forEach((value) => {
+            const identityId = String(value || '').trim();
+            if (!identityId || seenPageIdentityIds.has(identityId)) return;
+            seenPageIdentityIds.add(identityId);
+            pageIdentityIds.push(identityId);
+          });
+        };
+        addPageIdentityIds(collectIdentityIds(document.documentElement));
+        Array.from(document.querySelectorAll(
+          '[data-aweme-id], [data-item-id], a[href*="/video/"], a[href*="aweme_id="], a[href*="modal_id="]',
+        )).slice(0, 500).forEach((node) => addPageIdentityIds(collectIdentityIds(node)));
         return {
           urls,
           pageUrl: String(location.href || ''),
@@ -12869,6 +12909,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
             || '',
           ),
           domMediaCandidates,
+          pageIdentityIds,
         };
       })()
     `);
@@ -12881,7 +12922,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         finalUrl: payload && payload.pageUrl,
         canonicalUrl: payload && payload.canonicalUrl,
         debuggerMediaUrls,
-        domMediaCandidates: payload && payload.domMediaCandidates
+        domMediaCandidates: payload && payload.domMediaCandidates,
+        pageIdentityIds: payload && payload.pageIdentityIds
       });
     }
     return normalizeBrowserCapturedMediaUrls([
@@ -18358,9 +18400,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const ext = decoded.mimeType && decoded.mimeType !== "application/octet-stream" ? getImageExtFromMime(decoded.mimeType) : getImageExtFromBuffer(decoded.buffer, assetSource);
       const imagePath = `${imageDayDir}/${title}-image-${String(index).padStart(2, "0")}.${ext}`;
       await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
-      const pattern = new RegExp(`!\\[[^\\]]*\\]\\(${escapeRegExp(assetSource)}\\)`, "g");
-      nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
-      if (stats) stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+      const normalizedAssetSource = decodeHtmlEntities(assetSource).trim();
+      let replacementCount = 0;
+      nextMarkdown = nextMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, _alt, markdownSource) => {
+        const normalizedMarkdownSource = decodeHtmlEntities(String(markdownSource || "").trim()).trim();
+        if (normalizedMarkdownSource !== normalizedAssetSource) return full;
+        replacementCount += 1;
+        return `![[${imagePath}]]`;
+      });
+      if (replacementCount > 0) {
+        if (stats) stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+      } else {
+        reportError(asset, new Error("image attachment was saved but no matching Markdown image reference was found"));
+      }
       index += 1;
     }
     return nextMarkdown;
@@ -18998,34 +19050,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
                 imageDataAssets.push({
                   token: imageToken,
-                  src: String(
-                    cloudOpenApiResult.imageTmpDownloadUrls[imageToken] || buildFeishuImageFallbackUrl(imageToken, url) || `https://feishu.local/media/${encodeURIComponent(imageToken)}`
-                  ),
+                  // Keep the stable OpenAPI token as the Markdown identity.
+                  // Signed URLs may be escaped differently in Markdown, which
+                  // used to save the binary without replacing the note link.
+                  src: `feishu-image:${imageToken}`,
                   dataUrl: downloaded.dataUrl
                 });
               } catch (error) {
                 imageDataErrors.push(String(error && (error.message || error) || "unknown error"));
               }
             }
-            let cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-              cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
-                dedupe: true,
-                feishuTitle
-              }),
-              [],
-              url,
-              cloudOpenApiResult.imageTmpDownloadUrls || {}
-            );
-            const tokenUrlMap = Object.fromEntries(imageDataAssets.map((asset) => [
-              asset.token,
-              asset.src
-            ]));
-            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-              cleanedCloudOpenApiMarkdown,
-              imageDataAssets,
-              url,
-              tokenUrlMap
-            );
+            let cleanedCloudOpenApiMarkdown = cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
+              dedupe: true,
+              feishuTitle
+            });
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
             const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {}).filter((value) => /^https?:\/\//i.test(String(value || "").trim())).length;
             const missingImageTempUrlCount = Math.max(
@@ -19038,7 +19076,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               imageDataAssets,
               rootDir,
               dateFolder,
-              feishuTitle
+              feishuTitle,
+              {
+                sourceUrl: url,
+                onError: /* @__PURE__ */ __name(({ error }) => {
+                  imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
+                }, "onError")
+              }
+            );
+            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanedCloudOpenApiMarkdown,
+              [],
+              url,
+              cloudOpenApiResult.imageTmpDownloadUrls || {}
             );
             cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
               cleanedCloudOpenApiMarkdown,
