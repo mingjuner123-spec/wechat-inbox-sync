@@ -6314,22 +6314,6 @@ function selectIdentityBoundDouyinBrowserMedia({
   if (exactDomCandidates.length) {
     return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
   }
-  const normalizedPageIds = Array.from(new Set(
-    (Array.isArray(pageIdentityIds) ? pageIdentityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
-  ));
-  const pageUniquelyMatchesTarget = normalizedPageIds.length === 1 && normalizedPageIds[0] === targetId;
-  const loadedPageMatchesTarget = loadedIds.includes(targetId);
-  if (!loadedPageMatchesTarget && !pageUniquelyMatchesTarget) return [];
-  if (!loadedPageMatchesTarget && pageUniquelyMatchesTarget) {
-    const unboundVisiblePlayingCandidates = candidates.filter((candidate) => {
-      const identityIds = Array.from(new Set(
-        (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
-      ));
-      return identityIds.length === 0 && candidate.isPlaying === true && candidate.visible !== false && candidate.intersectsViewport !== false;
-    });
-    if (unboundVisiblePlayingCandidates.length !== 1) return [];
-    return selectPrimaryDouyinDomMediaUrls(unboundVisiblePlayingCandidates, targetId);
-  }
   if (candidates.length) {
     return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
   }

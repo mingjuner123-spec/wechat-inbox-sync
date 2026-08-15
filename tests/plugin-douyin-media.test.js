@@ -86,8 +86,8 @@ function runUniquePageIdentityFallbackTest() {
         area: 900000,
       }],
     }),
-    [],
-    'mixed page identities must not turn a recommendation player into the requested work',
+    ['https://v11-weba.douyinvod.com/recommendation/?mime_type=video_mp4'],
+    'mixed page identities alone must not reject the visible playing media from the opened target page',
   );
 
   assert.deepStrictEqual(
@@ -111,11 +111,52 @@ function runUniquePageIdentityFallbackTest() {
         area: 800000,
       }],
     }),
+    ['https://v11-weba.douyinvod.com/unbound-player-1/?mime_type=video_mp4'],
+    'multiple unbound players should select the strongest visible playing candidate instead of failing closed',
+  );
+}
+
+function runExplicitTargetMismatchStillRejectedTest() {
+  const targetAwemeId = '7644566503081119019';
+  const targetMediaUrl = 'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4';
+
+  assert.deepStrictEqual(
+    helpers.selectIdentityBoundDouyinBrowserMedia({
+      targetAwemeId,
+      finalUrl: 'https://www.douyin.com/video/9999999999999999999',
+      pageIdentityIds: [targetAwemeId],
+      domMediaCandidates: [{
+        urls: [targetMediaUrl],
+        identityIds: [],
+        isPlaying: true,
+        visible: true,
+        intersectsViewport: true,
+        area: 900000,
+      }],
+    }),
     [],
-    'multiple equally unbound visible players remain ambiguous and must be rejected',
+    'an explicit loaded route for another work must still be rejected',
+  );
+
+  assert.deepStrictEqual(
+    helpers.selectIdentityBoundDouyinBrowserMedia({
+      targetAwemeId,
+      finalUrl: 'https://www.douyin.com/',
+      domMediaCandidates: [{
+        urls: [targetMediaUrl],
+        identityIds: ['9999999999999999999'],
+        isPlaying: true,
+        visible: true,
+        intersectsViewport: true,
+        area: 900000,
+      }],
+    }),
+    [],
+    'a player explicitly bound to another work must still be rejected',
   );
 }
 
 runTargetBoundDomFallbackWithoutRouteIdentityTest();
 runUniquePageIdentityFallbackTest();
+runExplicitTargetMismatchStillRejectedTest();
 console.log('plugin-douyin-media.test.js passed');
