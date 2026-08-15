@@ -18411,6 +18411,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       stats.localizedCount = 0;
       stats.failedCount = 0;
       stats.missingSourceCount = 0;
+      stats.localizedSources = [];
     }
     const imageRootDir = `${rootDir}/网页图片`;
     const imageDayDir = `${imageRootDir}/${dateFolder}`;
@@ -18420,12 +18421,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     await this.ensureFolder(imageDayDir);
     for (const asset of assets) {
       const assetSource = String(asset && asset.src || "").trim();
+      const assetDownloadSource = String(asset && (asset.downloadSrc || asset.src) || "").trim();
       let decoded = decodeDataUrl(asset && asset.dataUrl);
-      if (!decoded && assetSource && /^https?:\/\//i.test(assetSource)) {
+      if (!decoded && assetDownloadSource && /^https?:\/\//i.test(assetDownloadSource)) {
         const imageHeaders = isSessionBackedSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : {};
         let downloadError = null;
         try {
-          const arrayBuffer = await this.downloadArrayBuffer(assetSource, imageHeaders);
+          const arrayBuffer = await this.downloadArrayBuffer(assetDownloadSource, imageHeaders);
           const buffer = Buffer.from(arrayBuffer || []);
           if (!buffer.length) throw new Error("image download returned an empty response");
           decoded = { buffer, mimeType: String(asset.mimeType || "") };
@@ -18433,7 +18435,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           downloadError = error;
           if (isSessionBackedSource && typeof this.downloadMediaArrayBufferWithSession === "function") {
             try {
-              const arrayBuffer = await this.downloadMediaArrayBufferWithSession(assetSource, imageHeaders);
+              const arrayBuffer = await this.downloadMediaArrayBufferWithSession(assetDownloadSource, imageHeaders);
               const buffer = Buffer.from(arrayBuffer || []);
               if (!buffer.length) throw new Error("browser-session image download returned an empty response");
               decoded = { buffer, mimeType: String(asset.mimeType || "") };
@@ -18455,8 +18457,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         reportError(asset, new Error(!assetSource ? "image asset has no source URL" : "image asset has no usable data"));
         continue;
       }
-      const ext = decoded.mimeType && decoded.mimeType !== "application/octet-stream" ? getImageExtFromMime(decoded.mimeType) : getImageExtFromBuffer(decoded.buffer, assetSource);
-      const imagePath = `${imageDayDir}/${title}-image-${String(index).padStart(2, "0")}.${ext}`;
+      const ext = decoded.mimeType && decoded.mimeType !== "application/octet-stream" ? getImageExtFromMime(decoded.mimeType) : getImageExtFromBuffer(decoded.buffer, assetDownloadSource || assetSource);
+      const preferredIndex = Math.max(0, Number(asset && asset.localIndex) || 0);
+      const imageIndex = preferredIndex || index;
+      const imagePath = `${imageDayDir}/${title}-image-${String(imageIndex).padStart(2, "0")}.${ext}`;
       await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
       const normalizedAssetSource = decodeHtmlEntities(assetSource).trim();
       let replacementCount = 0;
@@ -18467,11 +18471,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         return `![[${imagePath}]]`;
       });
       if (replacementCount > 0) {
-        if (stats) stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+        if (stats) {
+          stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+          stats.localizedSources.push(assetSource);
+        }
+        if (typeof options.onLocalized === "function") {
+          options.onLocalized({ asset, imagePath, replacementCount });
+        }
       } else {
         reportError(asset, new Error("image attachment was saved but no matching Markdown image reference was found"));
       }
-      index += 1;
+      index = Math.max(index + 1, imageIndex + 1);
     }
     return nextMarkdown;
   }
@@ -19110,22 +19120,37 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || "飞书文档";
-            const imageTokens = Array.from(new Set((cloudOpenApiResult.imageTokens || []).map((item) => String(item || "").trim()).filter(Boolean)));
+            const imageTmpDownloadUrls = cloudOpenApiResult.imageTmpDownloadUrls || {};
+            const markdownImageTokens = Array.from(String(cloudOpenApiResult.markdown || "").matchAll(/feishu-image:([^\s)]+)/g)).map((match) => String(match[1] || "").trim()).filter(Boolean);
+            const imageTokens = Array.from(new Set([
+              ...cloudOpenApiResult.imageTokens || [],
+              ...Object.keys(imageTmpDownloadUrls),
+              ...markdownImageTokens
+            ].map((item) => String(item || "").trim()).filter(Boolean)));
+            const resolvedImageTokens = /* @__PURE__ */ new Set();
+            const imageAttemptErrorsByToken = /* @__PURE__ */ new Map();
+            const rememberImageAttemptError = /* @__PURE__ */ __name((token, error) => {
+              const normalizedToken = String(token || "").trim();
+              if (!normalizedToken) return;
+              const errors = imageAttemptErrorsByToken.get(normalizedToken) || [];
+              errors.push(String(error && (error.message || error) || "unknown error"));
+              imageAttemptErrorsByToken.set(normalizedToken, errors.slice(-3));
+            }, "rememberImageAttemptError");
+            const buildTokenAsset = /* @__PURE__ */ __name((token, extra = {}) => ({
+              token,
+              src: `feishu-image:${token}`,
+              localIndex: imageTokens.indexOf(token) + 1,
+              ...extra
+            }), "buildTokenAsset");
             const imageDataAssets = [];
-            const imageDataErrors = [];
             for (const imageToken of imageTokens) {
               try {
                 const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
-                imageDataAssets.push({
-                  token: imageToken,
-                  // Keep the stable OpenAPI token as the Markdown identity.
-                  // Signed URLs may be escaped differently in Markdown, which
-                  // used to save the binary without replacing the note link.
-                  src: `feishu-image:${imageToken}`,
+                imageDataAssets.push(buildTokenAsset(imageToken, {
                   dataUrl: downloaded.dataUrl
-                });
+                }));
               } catch (error) {
-                imageDataErrors.push(String(error && (error.message || error) || "unknown error"));
+                rememberImageAttemptError(imageToken, error);
               }
             }
             let cleanedCloudOpenApiMarkdown = cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
@@ -19133,69 +19158,108 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               feishuTitle
             });
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
-            const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {}).filter((value) => /^https?:\/\//i.test(String(value || "").trim())).length;
-            const missingImageTempUrlCount = Math.max(
-              0,
-              imageTokenCount - imageTempUrlCount - imageDataAssets.length
-            );
-            const imageLocalizationErrors2 = [];
-            cleanedCloudOpenApiMarkdown = await this.saveWebpageImageAssets(
-              cleanedCloudOpenApiMarkdown,
-              imageDataAssets,
-              rootDir,
-              dateFolder,
-              feishuTitle,
-              {
-                sourceUrl: url,
-                onError: /* @__PURE__ */ __name(({ error }) => {
-                  imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
-                }, "onError")
-              }
-            );
-            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-              cleanedCloudOpenApiMarkdown,
-              [],
-              url,
-              cloudOpenApiResult.imageTmpDownloadUrls || {}
-            );
-            cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
-              cleanedCloudOpenApiMarkdown,
-              rootDir,
-              dateFolder,
-              feishuTitle,
-              {
-                sourceUrl: url,
-                onError: /* @__PURE__ */ __name(({ error }) => {
-                  imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
-                }, "onError")
-              }
-            );
+            const imageTempUrlCount = Object.values(imageTmpDownloadUrls).filter((value) => /^https?:\/\//i.test(String(value || "").trim())).length;
+            const localizeTokenAssets = /* @__PURE__ */ __name(async (assets) => {
+              if (!assets.length) return { assetCount: 0, localizedCount: 0, failedCount: 0 };
+              const stageStats = {};
+              cleanedCloudOpenApiMarkdown = await this.saveWebpageImageAssets(
+                cleanedCloudOpenApiMarkdown,
+                assets,
+                rootDir,
+                dateFolder,
+                feishuTitle,
+                {
+                  sourceUrl: url,
+                  stats: stageStats,
+                  onLocalized: /* @__PURE__ */ __name(({ asset }) => {
+                    if (asset && asset.token) resolvedImageTokens.add(String(asset.token));
+                  }, "onLocalized"),
+                  onError: /* @__PURE__ */ __name(({ asset, error }) => {
+                    rememberImageAttemptError(asset && asset.token, error);
+                  }, "onError")
+                }
+              );
+              return stageStats;
+            }, "localizeTokenAssets");
+            const officialImageStats = await localizeTokenAssets(imageDataAssets);
+            const getUnresolvedImageTokens = /* @__PURE__ */ __name(() => imageTokens.filter((token) => !resolvedImageTokens.has(token)), "getUnresolvedImageTokens");
+            const temporaryImageAssets = getUnresolvedImageTokens().map((token) => {
+              const temporaryUrl = String(
+                imageTmpDownloadUrls[token] || buildFeishuImageFallbackUrl(token, url) || ""
+              ).trim();
+              return /^https?:\/\//i.test(temporaryUrl) ? buildTokenAsset(token, { downloadSrc: temporaryUrl }) : null;
+            }).filter(Boolean);
+            const temporaryImageStats = await localizeTokenAssets(temporaryImageAssets);
             let feishuImageFallbackNote = "";
-            if (imageTokenCount > 0 && (missingImageTempUrlCount > 0 || imageLocalizationErrors2.length > 0)) {
+            if (getUnresolvedImageTokens().length > 0) {
               try {
                 const renderedFallback = await this.renderFeishuDocumentWithElectron(url);
-                const fallbackStats = {};
-                const fallbackMarkdown = await this.saveWebpageImageAssets(
-                  cleanMarkdownForStorage(renderedFallback.markdown, {
-                    dedupe: true,
-                    feishuTitle
-                  }),
-                  renderedFallback.assets,
-                  rootDir,
-                  dateFolder,
-                  feishuTitle,
-                  { sourceUrl: url, stats: fallbackStats }
-                );
-                if (fallbackStats.localizedCount > 0) {
-                  cleanedCloudOpenApiMarkdown = fallbackMarkdown;
-                  feishuImageFallbackNote = `browser-image-fallback=${fallbackStats.localizedCount}/${fallbackStats.assetCount || 0}`;
-                } else {
-                  feishuImageFallbackNote = `browser-image-fallback=0/${fallbackStats.assetCount || 0}`;
+                const renderedAssets = Array.isArray(renderedFallback && renderedFallback.assets) ? renderedFallback.assets.filter((asset) => asset && String(asset.src || "").trim()) : [];
+                const fallbackMarkdownSources = Array.from(String(renderedFallback && renderedFallback.markdown || "").matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g)).map((match) => decodeHtmlEntities(String(match[1] || "").trim())).filter(Boolean);
+                const assetsBySource = new Map(renderedAssets.map((asset) => [
+                  decodeHtmlEntities(String(asset.src || "").trim()),
+                  asset
+                ]));
+                const orderedRenderedAssets = [];
+                const seenRenderedSources = /* @__PURE__ */ new Set();
+                for (const source of fallbackMarkdownSources) {
+                  const asset = assetsBySource.get(source);
+                  if (!asset || seenRenderedSources.has(source)) continue;
+                  seenRenderedSources.add(source);
+                  orderedRenderedAssets.push(asset);
                 }
+                for (const asset of renderedAssets) {
+                  const source = decodeHtmlEntities(String(asset.src || "").trim());
+                  if (!source || seenRenderedSources.has(source)) continue;
+                  seenRenderedSources.add(source);
+                  orderedRenderedAssets.push(asset);
+                }
+                const unresolvedBeforeBrowser = getUnresolvedImageTokens();
+                const matchedBrowserAssets = /* @__PURE__ */ new Map();
+                for (const token of unresolvedBeforeBrowser) {
+                  const exactAsset = orderedRenderedAssets.find((asset) => String(asset.token || "").trim() === token || String(asset.src || "").includes(token));
+                  if (exactAsset) matchedBrowserAssets.set(token, exactAsset);
+                }
+                if (orderedRenderedAssets.length === imageTokens.length) {
+                  imageTokens.forEach((token, index) => {
+                    if (!resolvedImageTokens.has(token) && !matchedBrowserAssets.has(token)) {
+                      matchedBrowserAssets.set(token, orderedRenderedAssets[index]);
+                    }
+                  });
+                } else if (unresolvedBeforeBrowser.length === imageTokens.length && orderedRenderedAssets.length === unresolvedBeforeBrowser.length) {
+                  unresolvedBeforeBrowser.forEach((token, index) => {
+                    if (!matchedBrowserAssets.has(token)) matchedBrowserAssets.set(token, orderedRenderedAssets[index]);
+                  });
+                }
+                const browserTokenAssets = unresolvedBeforeBrowser.map((token) => {
+                  const browserAsset = matchedBrowserAssets.get(token);
+                  if (!browserAsset) return null;
+                  return buildTokenAsset(token, {
+                    dataUrl: browserAsset.dataUrl,
+                    downloadSrc: browserAsset.src,
+                    mimeType: browserAsset.mimeType
+                  });
+                }).filter(Boolean);
+                const browserImageStats = await localizeTokenAssets(browserTokenAssets);
+                feishuImageFallbackNote = `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`;
               } catch (fallbackError) {
                 feishuImageFallbackNote = `browser-image-fallback-failed=${getTransportErrorDiagnostic(fallbackError).message}`;
               }
             }
+            const unresolvedImageTokens = getUnresolvedImageTokens();
+            const unknownImageIdentityCount = Math.max(0, imageTokenCount - imageTokens.length);
+            const imageLocalizationFailedCount = unresolvedImageTokens.length + unknownImageIdentityCount;
+            const missingImageTempUrlCount = unknownImageIdentityCount + unresolvedImageTokens.filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || "").trim())).length;
+            const finalImageErrors = unresolvedImageTokens.map((token) => {
+              const attempts = imageAttemptErrorsByToken.get(token) || [];
+              return attempts.length ? attempts[attempts.length - 1] : `image ${token} could not be localized`;
+            });
+            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanedCloudOpenApiMarkdown,
+              [],
+              url,
+              imageTmpDownloadUrls
+            );
             return {
               ...record,
               metadata: enrichExtractedWebpageMetadata({
@@ -19205,14 +19269,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 conversionStatus: "success",
                 conversionSource: "feishu-cloud-oauth",
                 imageTempUrlMissingCount: missingImageTempUrlCount,
-                imageLocalizationFailedCount: imageDataErrors.length + imageLocalizationErrors2.length,
-                imageLocalizationError: [...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | "),
+                imageLocalizationFailedCount,
+                imageLocalizationError: finalImageErrors.slice(0, 3).join(" | "),
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : "",
+                  imageTokenCount ? `image-official-localized=${officialImageStats.localizedCount || 0}` : "",
+                  temporaryImageAssets.length ? `image-temporary-localized=${temporaryImageStats.localizedCount || 0}/${temporaryImageAssets.length}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
-                  imageDataErrors.length + imageLocalizationErrors2.length ? `image-localize-failed=${imageDataErrors.length + imageLocalizationErrors2.length}: ${[...imageDataErrors, ...imageLocalizationErrors2].slice(0, 3).join(" | ")}` : "",
+                  imageLocalizationFailedCount ? `image-localize-failed=${imageLocalizationFailedCount}: ${finalImageErrors.slice(0, 3).join(" | ")}` : "",
                   feishuImageFallbackNote
                 ].filter(Boolean).join("; ")
               })
