@@ -49,3 +49,13 @@ The user explicitly authorized publishing this focused Douyin compatibility chan
 - Explicit wrong-route and wrong-player identity tests remain rejected.
 - Source, generated bundle, root mirror, manifest, versions, candidate receipt, tag, remote main, Release assets, and ZIP all identify 1.3.89.
 - Release contains exactly `main.js`, `manifest.json`, `styles.css`, `versions.json`, and `wechat-inbox-sync-1.3.89.zip`.
+
+## Pre-publish evidence
+
+- Full release matrix: 34/34 passed, including Douyin media selection, fallback diagnostics, full plugin regression, marketplace packaging, release governance, and release identity.
+- Release governance: 126/126 passed.
+- Candidate: `1.3.89-92d5b1db32ad22f9`.
+- Candidate aggregate SHA-256: `92d5b1db32ad22f99bef6b0f17138c9ec6cf6188e80a508f383173b4e1db80ac`.
+- Root/plugin loose assets, candidate receipt, syntax, diff, local component manifest, and public CDN hashes passed.
+- Independent review: PASS, P0=0, P1=0, P2=0. The reviewer confirmed explicit wrong-route and wrong-player identity rejection remains intact and no 1.3.88 Feishu, binding, sync, ASR, or OCR business behavior regressed.
+- Remote re-read before publication: `origin/main=e5387f2a35e0773d9d04d1c2aa5a8b27ab8717bf`; tag `1.3.89` absent.
