@@ -19,7 +19,7 @@ Module._load = function mockObsidian(request, parent, isMain) {
 const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
 Module._load = originalLoad;
 
-function createVault() {
+function createVault(options = {}) {
   const files = {};
   return {
     files,
@@ -27,7 +27,10 @@ function createVault() {
       vault: {
         adapter: {
           exists: async () => false,
-          writeBinary: async (filePath, buffer) => { files[filePath] = Buffer.from(buffer); },
+          writeBinary: async (filePath, buffer) => {
+            if (options.writeError) throw options.writeError;
+            files[filePath] = Buffer.from(buffer);
+          },
         },
         createFolder: async () => {},
       },
@@ -163,8 +166,140 @@ async function runBrowserRecoveryKeepsOfficialMarkdownTest() {
   assert.strictEqual(Object.keys(vault.files).length, 6, 'all six browser-recovered images must be saved once');
 }
 
+async function runLegacyResponseUsesMarkdownImageOrderTest() {
+  const tokens = ['boxcnCanonicalFirst', 'boxcnCanonicalSecond'];
+  const plugin = new PluginClass();
+  const vault = createVault();
+  plugin.app = vault.app;
+  plugin.settings = PluginClass.__test.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'TEST-BINDING',
+    bindings: [{ token: 'TEST-BINDING', label: 'WeChat 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
+  });
+  plugin.ensureFolder = async () => {};
+  plugin.downloadArrayBuffer = async () => { throw new Error('temporary media unavailable'); };
+  plugin.downloadMediaArrayBufferWithSession = async () => { throw new Error('session media unavailable'); };
+  plugin.renderFeishuDocumentWithElectron = async () => ({
+    title: 'Browser title',
+    markdown: [
+      '# Browser title',
+      'Browser partial body.',
+      '![image](https://browser.example/canonical-first.png)',
+      '![image](https://browser.example/canonical-second.png)',
+    ].join('\n\n'),
+    assets: [
+      {
+        src: 'https://browser.example/canonical-first.png',
+        dataUrl: `data:image/png;base64,${Buffer.from('canonical-first').toString('base64')}`,
+      },
+      {
+        src: 'https://browser.example/canonical-second.png',
+        dataUrl: `data:image/png;base64,${Buffer.from('canonical-second').toString('base64')}`,
+      },
+    ],
+  });
+  plugin.requestJson = async (requestPath) => {
+    if (requestPath === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: 'Official document title',
+          documentId: 'docxLegacyOrdering',
+          blockCount: 4,
+          blocks: buildEnglishImageBlocks(tokens),
+          imageTokenCount: tokens.length,
+          imageTmpDownloadUrls: {
+            [tokens[1]]: `https://internal-api-drive-stream.feishu.cn/${tokens[1]}`,
+            [tokens[0]]: `https://internal-api-drive-stream.feishu.cn/${tokens[0]}`,
+          },
+        },
+      };
+    }
+    if (requestPath === '/feishu/media') throw new Error('official media unavailable');
+    throw new Error(`unexpected request path: ${requestPath}`);
+  };
+
+  const result = await plugin.hydrateWebpageMarkdown({
+    _id: 'feishu-legacy-ordering',
+    type: 'webpage',
+    content: 'https://example.feishu.cn/docx/docxLegacyOrdering',
+    metadata: { url: 'https://example.feishu.cn/docx/docxLegacyOrdering' },
+  }, 'Inbox', '2026-08-15', 'Feishu legacy ordering');
+
+  const refs = result.metadata.markdown.match(/!\[\[([^\]]+)\]\]/g) || [];
+  assert.strictEqual(refs.length, 2);
+  assert.ok(refs[0].includes('image-01.png'), 'the first Markdown image must retain canonical block order');
+  assert.ok(refs[1].includes('image-02.png'), 'the second Markdown image must retain canonical block order');
+  const firstPath = Object.keys(vault.files).find((filePath) => filePath.includes('image-01.png'));
+  const secondPath = Object.keys(vault.files).find((filePath) => filePath.includes('image-02.png'));
+  assert.strictEqual(vault.files[firstPath].toString(), 'canonical-first');
+  assert.strictEqual(vault.files[secondPath].toString(), 'canonical-second');
+}
+
+async function runLocalWriteFailureKeepsOfficialMarkdownTest() {
+  const token = 'boxcnWriteFailure';
+  const plugin = new PluginClass();
+  const vault = createVault({ writeError: new Error('vault write denied') });
+  plugin.app = vault.app;
+  plugin.settings = PluginClass.__test.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'TEST-BINDING',
+    bindings: [{ token: 'TEST-BINDING', label: 'WeChat 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
+  });
+  plugin.ensureFolder = async () => {};
+  plugin.downloadArrayBuffer = async () => { throw new Error('temporary media unavailable'); };
+  plugin.downloadMediaArrayBufferWithSession = async () => { throw new Error('session media unavailable'); };
+  plugin.renderFeishuDocumentWithElectron = async () => ({
+    title: 'Browser title',
+    markdown: '# Browser title\n\nBrowser partial body.\n\n![image](https://browser.example/image.png)',
+    assets: [{
+      src: 'https://browser.example/image.png',
+      dataUrl: `data:image/png;base64,${Buffer.from('browser-image').toString('base64')}`,
+    }],
+  });
+  plugin.requestJson = async (requestPath) => {
+    if (requestPath === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: 'Official document title',
+          documentId: 'docxWriteFailure',
+          blockCount: 3,
+          blocks: buildEnglishImageBlocks([token]),
+          imageTokens: [token],
+          imageTokenCount: 1,
+          imageTmpDownloadUrls: {},
+        },
+      };
+    }
+    if (requestPath === '/feishu/media') {
+      return {
+        success: true,
+        data: { dataUrl: `data:image/png;base64,${Buffer.from('official-image').toString('base64')}` },
+      };
+    }
+    throw new Error(`unexpected request path: ${requestPath}`);
+  };
+
+  const result = await plugin.hydrateWebpageMarkdown({
+    _id: 'feishu-local-write-failure',
+    type: 'webpage',
+    content: 'https://example.feishu.cn/docx/docxWriteFailure',
+    metadata: { url: 'https://example.feishu.cn/docx/docxWriteFailure' },
+  }, 'Inbox', '2026-08-15', 'Feishu local write failure');
+
+  assert.ok(result.metadata.markdown.includes('Official API body must remain canonical.'));
+  assert.ok(!result.metadata.markdown.includes('Browser partial body.'));
+  assert.strictEqual(result.metadata.imageLocalizationFailedCount, 1);
+  assert.ok(result.metadata.imageLocalizationError.includes('vault write denied'));
+}
+
 Promise.resolve()
   .then(runUniqueFailureAccountingTest)
   .then(runBrowserRecoveryKeepsOfficialMarkdownTest)
+  .then(runLegacyResponseUsesMarkdownImageOrderTest)
+  .then(runLocalWriteFailureKeepsOfficialMarkdownTest)
   .then(() => console.log('plugin feishu image identity accounting tests passed'))
   .catch((error) => { console.error(error); process.exitCode = 1; });

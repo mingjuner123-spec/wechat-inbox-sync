@@ -16737,8 +16737,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     let nextMarkdown = String(markdown || '');
     let index = 1;
 
-    await this.ensureFolder(imageRootDir);
-    await this.ensureFolder(imageDayDir);
+    try {
+      await this.ensureFolder(imageRootDir);
+      await this.ensureFolder(imageDayDir);
+    } catch (error) {
+      for (const asset of assets) reportError(asset, error);
+      return nextMarkdown;
+    }
 
     for (const asset of assets) {
       const assetSource = String(asset && asset.src || '').trim();
@@ -16792,7 +16797,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       const preferredIndex = Math.max(0, Number(asset && asset.localIndex) || 0);
       const imageIndex = preferredIndex || index;
       const imagePath = `${imageDayDir}/${title}-image-${String(imageIndex).padStart(2, '0')}.${ext}`;
-      await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
+      try {
+        await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
+      } catch (error) {
+        reportError(asset, error);
+        continue;
+      }
       const normalizedAssetSource = decodeHtmlEntities(assetSource).trim();
       let replacementCount = 0;
       nextMarkdown = nextMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, _alt, markdownSource) => {
@@ -17551,10 +17561,14 @@ class WechatObsidianInboxPlugin extends Plugin {
               .matchAll(/feishu-image:([^\s)]+)/g))
               .map((match) => String(match[1] || '').trim())
               .filter(Boolean);
+            const explicitImageTokens = (cloudOpenApiResult.imageTokens || [])
+              .map((item) => String(item || '').trim())
+              .filter(Boolean);
+            const hasCanonicalImageOrder = explicitImageTokens.length > 0 || markdownImageTokens.length > 0;
             const imageTokens = Array.from(new Set([
-              ...(cloudOpenApiResult.imageTokens || []),
-              ...Object.keys(imageTmpDownloadUrls),
+              ...explicitImageTokens,
               ...markdownImageTokens,
+              ...Object.keys(imageTmpDownloadUrls),
             ].map((item) => String(item || '').trim()).filter(Boolean)));
             const resolvedImageTokens = new Set();
             const imageAttemptErrorsByToken = new Map();
@@ -17588,9 +17602,6 @@ class WechatObsidianInboxPlugin extends Plugin {
               feishuTitle,
             });
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
-            const imageTempUrlCount = Object.values(imageTmpDownloadUrls)
-              .filter((value) => /^https?:\/\//i.test(String(value || '').trim()))
-              .length;
             const localizeTokenAssets = async (assets) => {
               if (!assets.length) return { assetCount: 0, localizedCount: 0, failedCount: 0 };
               const stageStats = {};
@@ -17671,14 +17682,15 @@ class WechatObsidianInboxPlugin extends Plugin {
                   ));
                   if (exactAsset) matchedBrowserAssets.set(token, exactAsset);
                 }
-                if (orderedRenderedAssets.length === imageTokens.length) {
+                if (hasCanonicalImageOrder && orderedRenderedAssets.length === imageTokens.length) {
                   imageTokens.forEach((token, index) => {
                     if (!resolvedImageTokens.has(token) && !matchedBrowserAssets.has(token)) {
                       matchedBrowserAssets.set(token, orderedRenderedAssets[index]);
                     }
                   });
                 } else if (
-                  unresolvedBeforeBrowser.length === imageTokens.length
+                  hasCanonicalImageOrder
+                  && unresolvedBeforeBrowser.length === imageTokens.length
                   && orderedRenderedAssets.length === unresolvedBeforeBrowser.length
                 ) {
                   unresolvedBeforeBrowser.forEach((token, index) => {
