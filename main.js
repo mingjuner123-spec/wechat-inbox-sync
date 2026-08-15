@@ -3194,6 +3194,26 @@ var require_social_media_diagnostic_utils = __commonJS({
         getSafeUrlDiagnostic: getSafeUrlDiagnostic2 = /* @__PURE__ */ __name(() => ({ protocol: "", host: "" }), "getSafeUrlDiagnostic"),
         getTransportErrorDiagnostic: getTransportErrorDiagnostic2 = /* @__PURE__ */ __name(() => ({}), "getTransportErrorDiagnostic")
       } = dependencies;
+      const safeText = /* @__PURE__ */ __name((value, maxLength = 64) => String(value || "").trim().slice(0, maxLength), "safeText");
+      const normalizeCode = /* @__PURE__ */ __name((value) => {
+        const code = safeText(value, 64);
+        return code ? /^[A-Z0-9_.-]+$/.test(code) ? code : "UNKNOWN" : "";
+      }, "normalizeCode");
+      const normalizeInteger = /* @__PURE__ */ __name((value, maxValue) => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return 0;
+        return Math.max(0, Math.min(maxValue, Math.round(numeric)));
+      }, "normalizeInteger");
+      const normalizeError = /* @__PURE__ */ __name((error) => {
+        if (!error) return void 0;
+        const diagnostic = getTransportErrorDiagnostic2(error) || {};
+        const safe = {};
+        const code = normalizeCode(diagnostic.code);
+        if (code) safe.code = code;
+        const status = normalizeInteger(diagnostic.status, 999);
+        if (status) safe.status = status;
+        return Object.keys(safe).length ? safe : void 0;
+      }, "normalizeError");
       return ({
         sourceUrl = "",
         resolvedUrl = "",
@@ -3201,20 +3221,39 @@ var require_social_media_diagnostic_utils = __commonJS({
         stages = [],
         mediaCandidateCount = 0,
         preciseMediaFound = false,
-        saveOriginalMediaEnabled = false
+        saveOriginalMediaEnabled = false,
+        selectedStage = "",
+        finalOutcome = "",
+        downloadAttempts = []
       } = {}) => ({
         source: getSafeUrlDiagnostic2(sourceUrl),
         resolved: getSafeUrlDiagnostic2(resolvedUrl),
-        awemeId: String(awemeId || "").slice(0, 64),
-        mediaCandidateCount: Number(mediaCandidateCount) || 0,
+        awemeId: safeText(awemeId),
+        mediaCandidateCount: normalizeInteger(mediaCandidateCount, 100),
         preciseMediaFound: preciseMediaFound === true,
         saveOriginalMediaEnabled: saveOriginalMediaEnabled === true,
+        selectedStage: safeText(selectedStage),
+        finalOutcome: safeText(finalOutcome),
         stages: (Array.isArray(stages) ? stages : []).slice(-12).map((stage) => ({
-          stage: String(stage && stage.stage || "").slice(0, 64),
+          stage: safeText(stage && stage.stage),
+          attempted: !stage || stage.attempted !== false,
           ok: stage && stage.ok !== false,
-          mediaCount: Number(stage && stage.mediaCount) || 0,
+          mediaCount: normalizeInteger(stage && stage.mediaCount, 100),
           detailFound: stage && stage.detailFound === true,
-          error: stage && stage.error ? getTransportErrorDiagnostic2(stage.error) : void 0
+          identityOutcome: safeText(stage && stage.identityOutcome),
+          rejectionReason: safeText(stage && stage.rejectionReason),
+          durationMs: normalizeInteger(stage && stage.durationMs, 30 * 60 * 1e3),
+          error: normalizeError(stage && stage.error)
+        })),
+        downloadAttempts: (Array.isArray(downloadAttempts) ? downloadAttempts : []).slice(-24).map((attempt) => ({
+          transport: safeText(attempt && attempt.transport),
+          ok: attempt && attempt.ok === true,
+          status: normalizeInteger(attempt && attempt.status, 999),
+          code: normalizeCode(attempt && attempt.code),
+          mediaType: safeText(attempt && attempt.mediaType),
+          bytes: normalizeInteger(attempt && attempt.bytes, 16 * 1024 * 1024 * 1024),
+          refreshed: attempt && attempt.refreshed === true,
+          durationMs: normalizeInteger(attempt && attempt.durationMs, 30 * 60 * 1e3)
         }))
       });
     }
@@ -6256,6 +6295,7 @@ function selectIdentityBoundDouyinBrowserMedia({
   canonicalUrl = "",
   debuggerMediaUrls = [],
   domMediaCandidates = [],
+  pageIdentityIds = [],
   primaryDomMediaUrls = []
 } = {}) {
   const targetId = String(targetAwemeId || "").trim();
@@ -6263,10 +6303,35 @@ function selectIdentityBoundDouyinBrowserMedia({
   const exactPayloadMedia = normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
   if (exactPayloadMedia.length) return exactPayloadMedia;
   const loadedIds = [finalUrl, canonicalUrl].map((value) => extractDouyinAwemeId(value)).filter(Boolean);
-  if (!loadedIds.length || loadedIds.some((loadedId) => loadedId !== targetId)) return [];
-  if (!loadedIds.includes(targetId)) return [];
-  if (Array.isArray(domMediaCandidates) && domMediaCandidates.length) {
-    return selectPrimaryDouyinDomMediaUrls(domMediaCandidates, targetId);
+  if (loadedIds.some((loadedId) => loadedId !== targetId)) return [];
+  const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
+  const exactDomCandidates = candidates.filter((candidate) => {
+    const identityIds = Array.from(new Set(
+      (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
+    ));
+    return identityIds.includes(targetId) && !identityIds.some((identityId) => identityId !== targetId);
+  });
+  if (exactDomCandidates.length) {
+    return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
+  }
+  const normalizedPageIds = Array.from(new Set(
+    (Array.isArray(pageIdentityIds) ? pageIdentityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
+  ));
+  const pageUniquelyMatchesTarget = normalizedPageIds.length === 1 && normalizedPageIds[0] === targetId;
+  const loadedPageMatchesTarget = loadedIds.includes(targetId);
+  if (!loadedPageMatchesTarget && !pageUniquelyMatchesTarget) return [];
+  if (!loadedPageMatchesTarget && pageUniquelyMatchesTarget) {
+    const unboundVisiblePlayingCandidates = candidates.filter((candidate) => {
+      const identityIds = Array.from(new Set(
+        (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
+      ));
+      return identityIds.length === 0 && candidate.isPlaying === true && candidate.visible !== false && candidate.intersectsViewport !== false;
+    });
+    if (unboundVisiblePlayingCandidates.length !== 1) return [];
+    return selectPrimaryDouyinDomMediaUrls(unboundVisiblePlayingCandidates, targetId);
+  }
+  if (candidates.length) {
+    return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
   }
   return normalizeBrowserCapturedMediaUrls([primaryDomMediaUrls]);
 }
@@ -12860,6 +12925,20 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         }).filter((candidate) => candidate.urls.length);
         const canonicalNode = document.querySelector('link[rel=canonical]');
         const ogUrlNode = document.querySelector('meta[property=og:url]');
+        const pageIdentityIds = [];
+        const seenPageIdentityIds = new Set();
+        const addPageIdentityIds = (values) => {
+          (Array.isArray(values) ? values : []).forEach((value) => {
+            const identityId = String(value || '').trim();
+            if (!identityId || seenPageIdentityIds.has(identityId)) return;
+            seenPageIdentityIds.add(identityId);
+            pageIdentityIds.push(identityId);
+          });
+        };
+        addPageIdentityIds(collectIdentityIds(document.documentElement));
+        Array.from(document.querySelectorAll(
+          '[data-aweme-id], [data-item-id], a[href*="/video/"], a[href*="aweme_id="], a[href*="modal_id="]',
+        )).slice(0, 500).forEach((node) => addPageIdentityIds(collectIdentityIds(node)));
         return {
           urls,
           pageUrl: String(location.href || ''),
@@ -12869,6 +12948,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
             || '',
           ),
           domMediaCandidates,
+          pageIdentityIds,
         };
       })()
     `);
@@ -12881,7 +12961,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         finalUrl: payload && payload.pageUrl,
         canonicalUrl: payload && payload.canonicalUrl,
         debuggerMediaUrls,
-        domMediaCandidates: payload && payload.domMediaCandidates
+        domMediaCandidates: payload && payload.domMediaCandidates,
+        pageIdentityIds: payload && payload.pageIdentityIds
       });
     }
     return normalizeBrowserCapturedMediaUrls([
@@ -16785,7 +16866,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `OCR 安装日志：${getLocalAsrInstallLogPath(ocrRoot)}`,
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`
     ];
-    if (lastSyncText && hasFailureSignal(lastSyncText)) {
+    if (lastSyncText && (hasFailureSignal(lastSyncText) || this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic)) {
       lines.push("", "最近同步失败状态：", lastSyncText);
     }
     if (!asrStatus.ready) {
@@ -17699,6 +17780,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         sourceUrl: options.sourceUrl || options.url || "",
         decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || "",
         signal: abortController.signal,
+        onMediaDownloadDiagnostic: options.onMediaDownloadDiagnostic,
         onProgress: /* @__PURE__ */ __name((progress = {}) => {
           if (typeof progress.percent === "number") {
             this.showSyncProgress({
@@ -17829,43 +17911,77 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const canRecoverDouyin = isDouyinUrl(sourceUrl) || isDouyinUrl(audioUrl) || isDouyinMediaUrl(resolvedUrl);
     let downloadedUrl = resolvedUrl;
     let downloadedArrayBuffer;
+    const reportDownloadAttempt = /* @__PURE__ */ __name((attempt = {}) => {
+      if (typeof options.onMediaDownloadDiagnostic !== "function") return;
+      try {
+        options.onMediaDownloadDiagnostic(attempt);
+      } catch (error) {
+      }
+    }, "reportDownloadAttempt");
+    const runDownloadAttempt = /* @__PURE__ */ __name(async (transport, refreshed, task) => {
+      const startedAt = Date.now();
+      try {
+        const result = await task();
+        reportDownloadAttempt({
+          transport,
+          ok: true,
+          status: 200,
+          bytes: result && Number(result.byteLength) || 0,
+          refreshed,
+          durationMs: Date.now() - startedAt
+        });
+        return result;
+      } catch (error) {
+        const status = Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
+        const rawCode = String(error && error.code || (status ? `HTTP_${status}` : "DOWNLOAD_ERROR")).toUpperCase();
+        reportDownloadAttempt({
+          transport,
+          ok: false,
+          status,
+          code: rawCode.replace(/[^A-Z0-9_.-]/g, "_").slice(0, 64),
+          refreshed,
+          durationMs: Date.now() - startedAt
+        });
+        throw error;
+      }
+    }, "runDownloadAttempt");
     try {
-      downloadedArrayBuffer = await this.downloadArrayBuffer(
+      downloadedArrayBuffer = await runDownloadAttempt("node-http", false, () => this.downloadArrayBuffer(
         resolvedUrl,
         requestHeaders,
         getMediaDownloadRequestOptions()
-      );
+      ));
     } catch (error) {
       if (!canRecoverDouyin || !isRecoverableDouyinMediaDownloadError(error)) throw error;
       let lastError = error;
       try {
-        downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(
+        downloadedArrayBuffer = await runDownloadAttempt("browser-session", false, () => this.downloadMediaArrayBufferWithSession(
           resolvedUrl,
           requestHeaders,
           getMediaDownloadRequestOptions()
-        );
+        ));
       } catch (sessionError) {
         lastError = sessionError;
         const refreshedUrls = sourceUrl ? (await refreshDouyinMediaUrlsWithinBudget()).slice(0, 3) : [];
         for (const refreshedUrl of refreshedUrls) {
           if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
           try {
-            downloadedArrayBuffer = await this.downloadArrayBuffer(
+            downloadedArrayBuffer = await runDownloadAttempt("node-http", true, () => this.downloadArrayBuffer(
               refreshedUrl,
               getSocialRequestHeaders(sourceUrl || refreshedUrl),
               getMediaDownloadRequestOptions()
-            );
+            ));
             downloadedUrl = refreshedUrl;
             break;
           } catch (refreshedError) {
             lastError = refreshedError;
             if (!isRecoverableDouyinMediaDownloadError(refreshedError)) continue;
             try {
-              downloadedArrayBuffer = await this.downloadMediaArrayBufferWithSession(
+              downloadedArrayBuffer = await runDownloadAttempt("browser-session", true, () => this.downloadMediaArrayBufferWithSession(
                 refreshedUrl,
                 getSocialRequestHeaders(sourceUrl || refreshedUrl),
                 getMediaDownloadRequestOptions()
-              );
+              ));
               downloadedUrl = refreshedUrl;
               break;
             } catch (refreshedSessionError) {
@@ -18358,9 +18474,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const ext = decoded.mimeType && decoded.mimeType !== "application/octet-stream" ? getImageExtFromMime(decoded.mimeType) : getImageExtFromBuffer(decoded.buffer, assetSource);
       const imagePath = `${imageDayDir}/${title}-image-${String(index).padStart(2, "0")}.${ext}`;
       await this.app.vault.adapter.writeBinary(normalizeVaultPath(imagePath), decoded.buffer);
-      const pattern = new RegExp(`!\\[[^\\]]*\\]\\(${escapeRegExp(assetSource)}\\)`, "g");
-      nextMarkdown = nextMarkdown.replace(pattern, `![[${imagePath}]]`);
-      if (stats) stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+      const normalizedAssetSource = decodeHtmlEntities(assetSource).trim();
+      let replacementCount = 0;
+      nextMarkdown = nextMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, _alt, markdownSource) => {
+        const normalizedMarkdownSource = decodeHtmlEntities(String(markdownSource || "").trim()).trim();
+        if (normalizedMarkdownSource !== normalizedAssetSource) return full;
+        replacementCount += 1;
+        return `![[${imagePath}]]`;
+      });
+      if (replacementCount > 0) {
+        if (stats) stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
+      } else {
+        reportError(asset, new Error("image attachment was saved but no matching Markdown image reference was found"));
+      }
       index += 1;
     }
     return nextMarkdown;
@@ -18554,6 +18680,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const normalizedSourceTitle = String(sourceTitle || metadata.sourceTitle || "").trim();
+    const mediaDiagnosticTrace = mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object" ? { ...mediaResolutionDiagnostic, downloadAttempts: [...Array.isArray(mediaResolutionDiagnostic.downloadAttempts) ? mediaResolutionDiagnostic.downloadAttempts : []] } : null;
+    const reportMediaDownloadAttempt = /* @__PURE__ */ __name((attempt = {}) => {
+      if (!mediaDiagnosticTrace) return;
+      mediaDiagnosticTrace.downloadAttempts.push(attempt);
+      mediaDiagnosticTrace.downloadAttempts = mediaDiagnosticTrace.downloadAttempts.slice(-24);
+    }, "reportMediaDownloadAttempt");
+    const getMediaResolutionDiagnostic = /* @__PURE__ */ __name((finalOutcome) => mediaDiagnosticTrace ? { ...mediaDiagnosticTrace, finalOutcome: String(finalOutcome || mediaDiagnosticTrace.finalOutcome || "") } : null, "getMediaResolutionDiagnostic");
     const metadataWithSocialMetrics = {
       ...metadata,
       contentCategory: metadata.contentCategory || "音视频",
@@ -18576,7 +18709,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           markdown,
           trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
-          mediaResolutionDiagnostic
+          mediaResolutionDiagnostic: getMediaResolutionDiagnostic("subtitle-ready")
         })
       };
     }
@@ -18624,7 +18757,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           markdown,
           trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
-          mediaResolutionDiagnostic
+          mediaResolutionDiagnostic: getMediaResolutionDiagnostic("no-media-candidate")
         })
       };
     }
@@ -18642,7 +18775,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             source: source || "media-url",
             localError: "user selected cloud transcription",
             allowCloudUrlFallback: true,
-            signal
+            signal,
+            onMediaDownloadDiagnostic: reportMediaDownloadAttempt
           }) : await this.runConfiguredTranscription(candidateUrl, {
             allowCloudUrlFallback: true,
             title: metadata.title || "",
@@ -18652,7 +18786,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             recordId: getRecordId(record),
             decryptKey: candidateDecryptKey,
             forceLocal: metadata.transcriptionMode === "local",
-            signal
+            signal,
+            onMediaDownloadDiagnostic: reportMediaDownloadAttempt
           });
           throwIfAborted(signal);
           const nextMetadata = buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
@@ -18668,7 +18803,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             markdown,
             trailingMarkdown,
             sourceTitle: normalizedSourceTitle,
-            mediaResolutionDiagnostic
+            mediaResolutionDiagnostic: getMediaResolutionDiagnostic("transcription-ready")
           });
           return {
             ...record,
@@ -18707,7 +18842,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           markdown,
           trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
-          mediaResolutionDiagnostic
+          mediaResolutionDiagnostic: getMediaResolutionDiagnostic("transcription-failed")
         })
       };
     }
@@ -18973,6 +19108,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let xiaohongshuResponseStatus = 0;
     let webpageTransportDiagnostic = null;
     let douyinResolutionStages = [];
+    let douyinSelectedStage = "";
     let douyinResolutionDiagnostic = null;
     if (!url) {
       return record;
@@ -18998,34 +19134,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
                 imageDataAssets.push({
                   token: imageToken,
-                  src: String(
-                    cloudOpenApiResult.imageTmpDownloadUrls[imageToken] || buildFeishuImageFallbackUrl(imageToken, url) || `https://feishu.local/media/${encodeURIComponent(imageToken)}`
-                  ),
+                  // Keep the stable OpenAPI token as the Markdown identity.
+                  // Signed URLs may be escaped differently in Markdown, which
+                  // used to save the binary without replacing the note link.
+                  src: `feishu-image:${imageToken}`,
                   dataUrl: downloaded.dataUrl
                 });
               } catch (error) {
                 imageDataErrors.push(String(error && (error.message || error) || "unknown error"));
               }
             }
-            let cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-              cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
-                dedupe: true,
-                feishuTitle
-              }),
-              [],
-              url,
-              cloudOpenApiResult.imageTmpDownloadUrls || {}
-            );
-            const tokenUrlMap = Object.fromEntries(imageDataAssets.map((asset) => [
-              asset.token,
-              asset.src
-            ]));
-            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
-              cleanedCloudOpenApiMarkdown,
-              imageDataAssets,
-              url,
-              tokenUrlMap
-            );
+            let cleanedCloudOpenApiMarkdown = cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
+              dedupe: true,
+              feishuTitle
+            });
             const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
             const imageTempUrlCount = Object.values(cloudOpenApiResult.imageTmpDownloadUrls || {}).filter((value) => /^https?:\/\//i.test(String(value || "").trim())).length;
             const missingImageTempUrlCount = Math.max(
@@ -19038,7 +19160,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               imageDataAssets,
               rootDir,
               dateFolder,
-              feishuTitle
+              feishuTitle,
+              {
+                sourceUrl: url,
+                onError: /* @__PURE__ */ __name(({ error }) => {
+                  imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
+                }, "onError")
+              }
+            );
+            cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
+              cleanedCloudOpenApiMarkdown,
+              [],
+              url,
+              cloudOpenApiResult.imageTmpDownloadUrls || {}
             );
             cleanedCloudOpenApiMarkdown = await this.saveMarkdownRemoteImageAssets(
               cleanedCloudOpenApiMarkdown,
@@ -19306,7 +19440,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
           for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
-            const shareStage = { stage: "mobile-share", ok: false, mediaCount: 0, detailFound: false };
+            const shareStage = { stage: "mobile-share", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
               const shareResponse = await requestUrl({
                 url: shareUrl,
@@ -19345,22 +19479,30 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 mediaUrls = sortMediaUrlsForTranscription([...shareUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
+                douyinSelectedStage = douyinSelectedStage || shareStage.stage;
                 shareStage.ok = true;
+                shareStage.identityOutcome = "target-id-matched";
                 break;
               }
             } catch (shareError) {
               shareStage.error = shareError;
             } finally {
+              if (!shareStage.ok) shareStage.rejectionReason = shareStage.error ? "transport-error" : "no-target-bound-media";
+              shareStage.durationMs = Date.now() - shareStage.startedAt;
+              delete shareStage.startedAt;
               douyinResolutionStages.push(shareStage);
             }
           }
           if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics) || !douyinStructuredContent) {
             for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
-              const detailStage = { stage: "aweme-detail", ok: false, mediaCount: 0, detailFound: false };
+              const detailStage = { stage: "aweme-detail", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
               try {
                 const detailResponse = await requestUrl({ url: detailUrl, method: "GET", headers: getSocialRequestHeaders(detailUrl) });
                 const detailPayload = detailResponse.json || JSON.parse(detailResponse.text || "{}");
-                if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) continue;
+                if (getDouyinDetailAwemeId(detailPayload) !== douyinAwemeId) {
+                  detailStage.rejectionReason = "target-id-mismatch";
+                  continue;
+                }
                 const detail = detailPayload.aweme_detail || detailPayload.awemeDetail || (Array.isArray(detailPayload.item_list) ? detailPayload.item_list[0] : null);
                 detailStage.detailFound = Boolean(detail);
                 const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
@@ -19386,18 +19528,23 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
                   mediaUrl = mediaUrls[0] || mediaUrl;
                   hasPreciseDouyinMedia = true;
+                  douyinSelectedStage = douyinSelectedStage || detailStage.stage;
                   detailStage.ok = true;
+                  detailStage.identityOutcome = "target-id-matched";
                   break;
                 }
               } catch (detailError) {
                 detailStage.error = detailError;
               } finally {
+                if (!detailStage.ok && !detailStage.rejectionReason) detailStage.rejectionReason = detailStage.error ? "transport-error" : "no-target-bound-media";
+                detailStage.durationMs = Date.now() - detailStage.startedAt;
+                delete detailStage.startedAt;
                 douyinResolutionStages.push(detailStage);
               }
             }
           }
           if (douyinAwemeId && (!hasPreciseDouyinMedia || !douyinStructuredContent || !hasSocialMetrics(douyinSocialMetrics))) {
-            const sessionStage = { stage: "authenticated-session", ok: false, mediaCount: 0, detailFound: false };
+            const sessionStage = { stage: "authenticated-session", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
               const hasLegacyInstanceResolver = Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaUrlsWithSession") && !Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaResolutionWithSession");
               const sessionResolution = !hasLegacyInstanceResolver && typeof this.fetchDouyinMediaResolutionWithSession === "function" ? await this.fetchDouyinMediaResolutionWithSession(resolvedUrl, douyinAwemeId) : {
@@ -19431,16 +19578,21 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 mediaUrls = sortMediaUrlsForTranscription([...sessionUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
+                douyinSelectedStage = douyinSelectedStage || sessionStage.stage;
                 sessionStage.ok = true;
+                sessionStage.identityOutcome = "target-id-matched";
               }
             } catch (sessionError) {
               sessionStage.error = sessionError;
             } finally {
+              if (!sessionStage.ok) sessionStage.rejectionReason = sessionStage.error ? "transport-error" : "no-target-bound-media";
+              sessionStage.durationMs = Date.now() - sessionStage.startedAt;
+              delete sessionStage.startedAt;
               douyinResolutionStages.push(sessionStage);
             }
           }
           if (!hasPreciseDouyinMedia && douyinAwemeId && typeof this.renderSocialMediaUrls === "function") {
-            const browserStage = { stage: "targeted-browser", ok: false, mediaCount: 0, detailFound: false };
+            const browserStage = { stage: "targeted-browser", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
               const browserUrls = await this.renderSocialMediaUrls(resolvedUrl, {
                 signal,
@@ -19451,12 +19603,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
+                douyinSelectedStage = douyinSelectedStage || browserStage.stage;
                 browserStage.ok = true;
+                browserStage.identityOutcome = "target-bound-or-page-unique";
               }
             } catch (browserError) {
               if (isAbortError(browserError)) throw browserError;
               browserStage.error = browserError;
             } finally {
+              if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? "transport-error" : "no-target-bound-media";
+              browserStage.durationMs = Date.now() - browserStage.startedAt;
+              delete browserStage.startedAt;
               douyinResolutionStages.push(browserStage);
             }
           }
@@ -19469,6 +19626,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             stages: douyinResolutionStages,
             mediaCandidateCount: mediaUrls.length,
             preciseMediaFound: hasPreciseDouyinMedia,
+            selectedStage: douyinSelectedStage,
+            finalOutcome: hasPreciseDouyinMedia ? "media-selected" : "no-target-bound-media",
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true
           });
         }
@@ -20165,7 +20324,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       filePath,
       title: fileTitle,
       committed: true,
-      conversionWarning: getRecordConversionWarning(recordForMarkdown)
+      conversionWarning: getRecordConversionWarning(recordForMarkdown),
+      mediaResolutionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.mediaResolutionDiagnostic || null : null
     };
   }
   async reportSyncLifecycleStatus(recordId, body, binding) {
@@ -20653,6 +20813,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       if (showNotice || written.length) {
         new Notice(finalMessage);
       }
+      const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
+      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.mediaResolutionDiagnostic);
       this.lastSyncDiagnostic = {
         status: failed.length ? "failed" : completionWarnings.length ? "warning" : "success",
         stage: "finished",
@@ -20662,7 +20824,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join("\n") : "",
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? "COMPLETION_REPORT_FAILED" : "",
-        ...failed.find((item) => item.diagnostic) ? { diagnostic: failed.find((item) => item.diagnostic).diagnostic } : {},
+        ...latestFailedDiagnostic ? { diagnostic: latestFailedDiagnostic.diagnostic } : latestSuccessfulDiagnostic ? { diagnostic: latestSuccessfulDiagnostic.mediaResolutionDiagnostic } : {},
         ...syncSnapshots.length ? { syncSnapshots } : {},
         time: (/* @__PURE__ */ new Date()).toISOString()
       };

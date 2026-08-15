@@ -21,7 +21,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 
-const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main.js');
+const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/src/main.js');
 const helpers = PluginClass.__test;
 
 function runTargetBoundDomFallbackWithoutRouteIdentityTest() {
