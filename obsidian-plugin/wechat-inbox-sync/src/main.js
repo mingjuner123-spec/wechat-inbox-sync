@@ -178,7 +178,7 @@ const {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.88';
+const PLUGIN_RUNTIME_VERSION = '1.3.89';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3221,10 +3221,9 @@ function selectIdentityBoundDouyinBrowserMedia({
   const exactPayloadMedia = normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
   if (exactPayloadMedia.length) return exactPayloadMedia;
 
-  // Douyin can withhold play_addr while its target page still has a playable
-  // main video. Accept that DOM media only after the loaded page or canonical
-  // URL proves that it is the requested work. Recommendation/preload resources
-  // are deliberately excluded from this fallback.
+  // A loaded route that explicitly points at another work is hard mismatch
+  // evidence. Generic/mixed page metadata is not: Douyin commonly preloads
+  // recommendation identities around the requested player.
   const loadedIds = [finalUrl, canonicalUrl]
     .map((value) => extractDouyinAwemeId(value))
     .filter(Boolean);
@@ -3246,32 +3245,6 @@ function selectIdentityBoundDouyinBrowserMedia({
   // evidence than that stripped route and remains safe to use.
   if (exactDomCandidates.length) {
     return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
-  }
-
-  const normalizedPageIds = Array.from(new Set(
-    (Array.isArray(pageIdentityIds) ? pageIdentityIds : [])
-      .map((value) => String(value || '').trim())
-      .filter(Boolean),
-  ));
-  const pageUniquelyMatchesTarget = normalizedPageIds.length === 1
-    && normalizedPageIds[0] === targetId;
-  const loadedPageMatchesTarget = loadedIds.includes(targetId);
-  if (!loadedPageMatchesTarget && !pageUniquelyMatchesTarget) return [];
-
-  if (!loadedPageMatchesTarget && pageUniquelyMatchesTarget) {
-    const unboundVisiblePlayingCandidates = candidates.filter((candidate) => {
-      const identityIds = Array.from(new Set(
-        (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : [])
-          .map((value) => String(value || '').trim())
-          .filter(Boolean),
-      ));
-      return identityIds.length === 0
-        && candidate.isPlaying === true
-        && candidate.visible !== false
-        && candidate.intersectsViewport !== false;
-    });
-    if (unboundVisiblePlayingCandidates.length !== 1) return [];
-    return selectPrimaryDouyinDomMediaUrls(unboundVisiblePlayingCandidates, targetId);
   }
 
   if (candidates.length) {

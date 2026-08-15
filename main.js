@@ -3854,7 +3854,7 @@ var {
 });
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.88";
+var PLUGIN_RUNTIME_VERSION = "1.3.89";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -6313,22 +6313,6 @@ function selectIdentityBoundDouyinBrowserMedia({
   });
   if (exactDomCandidates.length) {
     return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
-  }
-  const normalizedPageIds = Array.from(new Set(
-    (Array.isArray(pageIdentityIds) ? pageIdentityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
-  ));
-  const pageUniquelyMatchesTarget = normalizedPageIds.length === 1 && normalizedPageIds[0] === targetId;
-  const loadedPageMatchesTarget = loadedIds.includes(targetId);
-  if (!loadedPageMatchesTarget && !pageUniquelyMatchesTarget) return [];
-  if (!loadedPageMatchesTarget && pageUniquelyMatchesTarget) {
-    const unboundVisiblePlayingCandidates = candidates.filter((candidate) => {
-      const identityIds = Array.from(new Set(
-        (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
-      ));
-      return identityIds.length === 0 && candidate.isPlaying === true && candidate.visible !== false && candidate.intersectsViewport !== false;
-    });
-    if (unboundVisiblePlayingCandidates.length !== 1) return [];
-    return selectPrimaryDouyinDomMediaUrls(unboundVisiblePlayingCandidates, targetId);
   }
   if (candidates.length) {
     return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
