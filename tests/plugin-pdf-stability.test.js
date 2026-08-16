@@ -210,6 +210,8 @@ async function run() {
   assert.ok(sourceMain.includes('loadPdfJs: loadPdfJsLibrary'));
   assert.ok(sourceMain.includes('renderPdfPageForLocalOcr'));
   assert.ok(sourceMain.includes('metadata.pdfExtractionWarning'));
+  assert.ok(sourceMain.includes('nextMetadata.pdfExtractionErrorCode'));
+  assert.ok(sourceMain.includes('nextMetadata.pdfExtractionDiagnostic'));
 
   const bundledMain = fs.readFileSync(path.join(
     repoRoot,

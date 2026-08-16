@@ -47,6 +47,7 @@ function createDouyinMediaResolutionDiagnosticBuilder(dependencies = {}) {
     stages: (Array.isArray(stages) ? stages : []).slice(-12).map((stage) => ({
       stage: safeText(stage && stage.stage),
       attempted: !stage || stage.attempted !== false,
+      inputKind: safeText(stage && stage.inputKind),
       ok: stage && stage.ok !== false,
       mediaCount: normalizeInteger(stage && stage.mediaCount, 100),
       detailFound: stage && stage.detailFound === true,

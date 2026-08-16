@@ -513,7 +513,8 @@ async function run() {
     content: `https://www.douyin.com/video/${sessionFallbackAwemeId}`,
     metadata: { url: `https://www.douyin.com/video/${sessionFallbackAwemeId}` },
   }, '', '', '抖音视频');
-  assert.strictEqual(targetedBrowserOptions.strictDouyinTarget, true);
+  // Root-oriented fallback accepts page-player media when Douyin omits work IDs.
+  assert.strictEqual(targetedBrowserOptions.strictDouyinTarget, false);
   assert.strictEqual(targetedBrowserDouyinRecord.metadata.transcriptionStatus, 'success');
   assert.match(targetedBrowserDouyinRecord.metadata.mediaUrl, /targeted-browser-video/);
 

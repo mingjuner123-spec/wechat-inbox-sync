@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const Module = require('module');
 
 const originalLoad = Module._load;
@@ -221,16 +223,42 @@ function runBrowserFallbackRequestKeepsNonStrictCurrentPageTest() {
   );
 
   assert.deepStrictEqual(
-    helpers.buildDouyinBrowserFallbackRequest(
+    helpers.buildDouyinBrowserFallbackRequests(
       'https://v.douyin.com/example/',
       'https://www.douyin.com/video/7644566503081119019',
     ),
-    {
+    [{
+      awemeId: '7644566503081119019',
+      url: 'https://v.douyin.com/example/',
+      strictDouyinTarget: false,
+      inputKind: 'original-page',
+    }, {
       awemeId: '7644566503081119019',
       url: 'https://www.douyin.com/video/7644566503081119019',
-      strictDouyinTarget: true,
-    },
-    'a resolved target id should keep the precise browser path as the preferred request',
+      strictDouyinTarget: false,
+      inputKind: 'resolved-page',
+    }],
+    'a known target id must not remove the original/current-page browser fallbacks that worked in 1.3.30',
+  );
+}
+
+function runLegacyPlayerActivationAndPageMediaFallbackContractTest() {
+  const sourcePath = path.resolve(__dirname, pluginMainPath);
+  const source = fs.readFileSync(sourcePath, 'utf8');
+  assert.match(
+    source,
+    /node\.muted\s*=\s*true;[\s\S]{0,240}node\.play\(\)\.catch\(\(\)\s*=>\s*\{\}\)/,
+    'the hidden browser must activate the current video so Douyin emits its real media request',
+  );
+  assert.doesNotMatch(
+    source,
+    /isXiaohongshuUrl\(url\)\s*\|\|\s*Boolean\(douyinAwemeId\)\s*\?\s*\[\]/,
+    'discovering an aweme id must not discard media already present in the opened page HTML',
+  );
+  assert.doesNotMatch(
+    source,
+    /allowGenericSocialMediaRender\s*=\s*!\(douyinAwemeId/,
+    'discovering an aweme id must not disable the 1.3.30 current-page renderer',
   );
 }
 
@@ -259,6 +287,7 @@ function runTargetPlayerInsideMixedIdentityContainerTest() {
 }
 
 runBrowserFallbackRequestKeepsNonStrictCurrentPageTest();
+runLegacyPlayerActivationAndPageMediaFallbackContractTest();
 runTargetBoundDomFallbackWithoutRouteIdentityTest();
 runUniquePageIdentityFallbackTest();
 runOnlyExplicitFinalRouteMismatchIsRejectedTest();
