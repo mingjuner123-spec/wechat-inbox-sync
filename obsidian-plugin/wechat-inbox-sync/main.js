@@ -6831,8 +6831,112 @@ function parseJsonObjectAssignedTo(source, variableName) {
   return null;
 }
 __name(parseJsonObjectAssignedTo, "parseJsonObjectAssignedTo");
+function parseJsonValueAt(source, valueStart) {
+  const text = String(source || "");
+  const first = text[valueStart];
+  if (first !== "{" && first !== "[") return null;
+  const close = first === "{" ? "}" : "]";
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = valueStart; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === first) depth += 1;
+    if (char === close) {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(valueStart, index + 1));
+        } catch (error) {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+__name(parseJsonValueAt, "parseJsonValueAt");
+function decodeDouyinStateText(value) {
+  let text = String(value || "");
+  for (let index = 0; index < 2; index += 1) {
+    if (!/%(?:[0-9a-f]{2})/i.test(text)) break;
+    try {
+      const decoded = decodeURIComponent(text);
+      if (!decoded || decoded === text) break;
+      text = decoded;
+    } catch (error) {
+      break;
+    }
+  }
+  return text;
+}
+__name(decodeDouyinStateText, "decodeDouyinStateText");
+function collectDouyinPaceStateValues(source) {
+  const text = String(source || "");
+  const values = [];
+  const pushPattern = /self\.__pace_f\s*\.\s*push\s*\(/g;
+  let match;
+  while ((match = pushPattern.exec(text)) && values.length < 160) {
+    const arrayStart = text.indexOf("[", pushPattern.lastIndex);
+    if (arrayStart < 0) continue;
+    const payload = parseJsonValueAt(text, arrayStart);
+    if (!Array.isArray(payload)) continue;
+    payload.forEach((value) => {
+      if (typeof value === "string" && value.length <= 8e5) values.push(value);
+    });
+    pushPattern.lastIndex = Math.max(pushPattern.lastIndex, arrayStart + 1);
+  }
+  return values;
+}
+__name(collectDouyinPaceStateValues, "collectDouyinPaceStateValues");
+function extractDouyinMediaUrlsFromPaceState(source, awemeId) {
+  const targetId = String(awemeId || "").trim();
+  if (!targetId) return [];
+  const urls = [];
+  const tryPayload = /* @__PURE__ */ __name((payload) => {
+    extractDouyinMediaUrlsForAweme(payload, targetId).forEach((url) => pushUniqueMediaUrl(urls, url));
+  }, "tryPayload");
+  collectDouyinPaceStateValues(source).forEach((rawValue) => {
+    const text = decodeDouyinStateText(rawValue);
+    try {
+      tryPayload(JSON.parse(text));
+    } catch (error) {
+    }
+    const detailMarker = text.indexOf('"videoDetail"');
+    if (detailMarker >= 0) {
+      const detailStart = text.indexOf("{", detailMarker);
+      const detail = parseJsonValueAt(text, detailStart);
+      if (detail) tryPayload({ videoDetail: detail });
+    }
+    if (text.includes('\\"videoDetail\\"')) {
+      const unescaped = text.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      const escapedDetailMarker = unescaped.indexOf('"videoDetail"');
+      const escapedDetailStart = unescaped.indexOf("{", escapedDetailMarker);
+      const detail = parseJsonValueAt(unescaped, escapedDetailStart);
+      if (detail) tryPayload({ videoDetail: detail });
+    }
+  });
+  return sortMediaUrlsForTranscription(urls);
+}
+__name(extractDouyinMediaUrlsFromPaceState, "extractDouyinMediaUrlsFromPaceState");
 function extractDouyinMediaUrlsFromShareHtml(html, awemeId) {
   const source = String(html || "");
+  const paceUrls = extractDouyinMediaUrlsFromPaceState(source, awemeId);
+  if (paceUrls.length) return paceUrls;
   const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
   let match;
   while (match = scriptPattern.exec(source)) {
@@ -8579,6 +8683,7 @@ function collectDouyinUrlList(value, urls) {
     collectDouyinUrlList(value.url_list, urls);
     collectDouyinUrlList(value.urlList, urls);
     collectDouyinUrlList(value.url, urls);
+    collectDouyinUrlList(value.src, urls);
   }
 }
 __name(collectDouyinUrlList, "collectDouyinUrlList");
@@ -13358,6 +13463,27 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         Array.from(document.querySelectorAll(
           '[data-aweme-id], [data-item-id], a[href*="/video/"], a[href*="aweme_id="], a[href*="modal_id="]',
         )).slice(0, 500).forEach((node) => addPageIdentityIds(collectIdentityIds(node)));
+        let douyinPaceState = '';
+        if (${targetDouyinAwemeId ? "true" : "false"}) {
+          try {
+            const paceEntries = Array.isArray(self.__pace_f)
+              ? self.__pace_f.slice(-160)
+              : [];
+            douyinPaceState = paceEntries
+              .map((entry) => 'self.__pace_f.push(' + JSON.stringify(entry) + ');')
+              .join('
+')
+              .slice(0, 800000);
+            if (!douyinPaceState) {
+              douyinPaceState = Array.from(document.scripts)
+                .map((node) => String(node.textContent || ''))
+                .filter((text) => text.includes('__pace_f') || text.includes('videoDetail'))
+                .join('
+')
+                .slice(0, 800000);
+            }
+          } catch (error) {}
+        }
         return {
           urls,
           pageUrl: String(location.href || ''),
@@ -13368,18 +13494,20 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
           ),
           domMediaCandidates,
           pageIdentityIds,
+          douyinPaceState,
         };
       })()
     `);
     throwIfAborted(options.signal);
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
+    const paceStateMediaUrls = targetDouyinAwemeId ? extractDouyinMediaUrlsFromShareHtml(payload && payload.douyinPaceState, targetDouyinAwemeId) : [];
     if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
       return selectIdentityBoundDouyinBrowserMedia({
         targetAwemeId: targetDouyinAwemeId,
         finalUrl: payload && payload.pageUrl,
         canonicalUrl: payload && payload.canonicalUrl,
-        debuggerMediaUrls,
+        debuggerMediaUrls: [...debuggerMediaUrls, ...paceStateMediaUrls],
         domMediaCandidates: payload && payload.domMediaCandidates,
         pageIdentityIds: payload && payload.pageIdentityIds
       });
@@ -13387,7 +13515,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     return normalizeBrowserCapturedMediaUrls([
       capturedRequests,
       payload && Array.isArray(payload.urls) ? payload.urls : payload,
-      debuggerMediaUrls
+      debuggerMediaUrls,
+      paceStateMediaUrls
     ]);
   } finally {
     cleanupAbort();
