@@ -177,7 +177,9 @@ const {
   cleanMarkdownForStorage,
 });
 
-const PDFJS_MODULE_DATA_URL = __WECHAT_INBOX_PDFJS_DATA_URL__;
+const PDFJS_MODULE_DATA_URL = typeof __WECHAT_INBOX_PDFJS_DATA_URL__ === 'string'
+  ? __WECHAT_INBOX_PDFJS_DATA_URL__
+  : '';
 let cachedPdfJsLibraryPromise = null;
 async function loadPdfJsLibrary() {
   if (!cachedPdfJsLibraryPromise) {
@@ -188,7 +190,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.90';
+const PLUGIN_RUNTIME_VERSION = '1.3.91';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [

@@ -197,6 +197,14 @@ async function run() {
     'main.js',
   ), 'utf8');
   assert.ok(sourceMain.includes('__WECHAT_INBOX_PDFJS_DATA_URL__'));
+  const sourcePdfJsDeclaration = sourceMain.match(
+    /const PDFJS_MODULE_DATA_URL = [^;]+;/,
+  )?.[0];
+  assert.ok(sourcePdfJsDeclaration, 'source plugin must declare the PDF.js module URL');
+  assert.doesNotThrow(
+    () => Function(`${sourcePdfJsDeclaration}\nreturn PDFJS_MODULE_DATA_URL;`)(),
+    'raw source must remain loadable before the build replaces the PDF.js token',
+  );
   assert.ok(sourceMain.includes('import(PDFJS_MODULE_DATA_URL)'));
   assert.ok(sourceMain.includes('await extractPdfMarkdownWithFallback(nodeBuffer'));
   assert.ok(sourceMain.includes('loadPdfJs: loadPdfJsLibrary'));
@@ -214,7 +222,7 @@ async function run() {
   assert.ok(bundledMain.includes('data:text/javascript;base64,'));
 
   const bundledDataUrlMatch = bundledMain.match(
-    /var PDFJS_MODULE_DATA_URL = "(data:text\/javascript;base64,[A-Za-z0-9+/=]+)";/,
+    /var PDFJS_MODULE_DATA_URL = (?:true \? )?"(data:text\/javascript;base64,[A-Za-z0-9+/=]+)"(?: : "")?;/,
   );
   assert.ok(bundledDataUrlMatch, 'built plugin must contain the self-contained PDF.js module');
   const bundledPdfJs = await import(bundledDataUrlMatch[1]);
