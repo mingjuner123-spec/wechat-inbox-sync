@@ -167,6 +167,25 @@ async function runDiagnosticHelperTest() {
   assert.strictEqual(douyin.source.host, 'v.douyin.com');
   assert.strictEqual(douyin.resolved.host, 'douyin.com');
   assert.strictEqual(douyin.stages[0].error, undefined, 'raw error messages must not leak media URLs or credentials into copied diagnostics');
+
+  const browserFailure = PluginClass.__test.buildDouyinMediaResolutionDiagnostic({
+    sourceUrl: 'https://v.douyin.com/example',
+    resolvedUrl: 'https://www.douyin.com/video/123',
+    stages: [{
+      stage: 'targeted-browser',
+      inputKind: 'target-page',
+      ok: false,
+      error: Object.assign(new Error('browser navigation failed'), {
+        code: 'BROWSER_NAVIGATION_FAILED',
+        browserErrorCode: -118,
+      }),
+    }],
+  });
+  assert.deepStrictEqual(
+    browserFailure.stages[0].error,
+    { code: 'BROWSER_NAVIGATION_FAILED', browserErrorCode: -118 },
+    'the copied Douyin diagnostic must retain a safe Chromium navigation code without retaining any URL or session data',
+  );
 }
 
 async function run() {

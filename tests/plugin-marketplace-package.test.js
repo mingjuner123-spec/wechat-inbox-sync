@@ -34,7 +34,7 @@ const marketplacePromise = '把微信中收集的公众号文章、飞书文档�
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
 assert.strictEqual(manifest.name, 'WeChat Inbox Sync');
-assert.strictEqual(manifest.version, '1.3.92');
+assert.strictEqual(manifest.version, '1.3.93');
 assert.strictEqual(manifest.description, marketplacePromise);
 assert.ok(checklist.includes('不得仅因版本较旧就停用已安装组件'));
 assert.ok(checklist.includes(`本次为 \`${manifest.version}\``), 'release checklist target must match manifest version');
@@ -53,8 +53,8 @@ assert.strictEqual(manifest.minAppVersion, '1.0.0');
 assert.strictEqual(manifest.isDesktopOnly, true);
 assert.strictEqual(versions[manifest.version], manifest.minAppVersion);
 assert.ok(
-  /PLUGIN_RUNTIME_VERSION\s*=\s*["']1\.3\.92["']/.test(pluginMainSource),
-  'marketplace main.js runtime identity must match manifest version 1.3.92',
+  /PLUGIN_RUNTIME_VERSION\s*=\s*["']1\.3\.93["']/.test(pluginMainSource),
+  'marketplace main.js runtime identity must match manifest version 1.3.93',
 );
 assert.strictEqual(fs.existsSync(rootManifestPath), true, 'root manifest.json should exist for Obsidian marketplace version indexing');
 assert.strictEqual(fs.existsSync(rootVersionsPath), true, 'root versions.json should exist for Obsidian marketplace version indexing');
@@ -335,7 +335,7 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.26"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.27"'));
 assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"'));
 assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
@@ -766,7 +766,7 @@ assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/lo
 assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.9"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.10"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=180'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));

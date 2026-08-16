@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.26"
+$InstallerScriptVersion = "1.2.27"
 $NativeProcessRunnerVersion = "diagnostics-process-v1"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 90
@@ -35,6 +35,9 @@ $ModelFallbackUrls = @(
 )
 $WhisperWindowsFallbackUrls = @(
   "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"
+)
+$YtDlpWindowsUrls = @(
+  "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 )
 
 function New-CleanDirectory {
@@ -745,6 +748,37 @@ function Install-ModelPackage {
   throw $lastError
 }
 
+function Install-YtDlp {
+  param([Parameter(Mandatory = $true)][string]$DestinationPath)
+  if (Test-Path -LiteralPath $DestinationPath) {
+    try {
+      Assert-ExecutableRuns -Path $DestinationPath -Arguments @("--version") -Label "yt-dlp" | Out-Null
+      Write-Host "Existing yt-dlp is usable; skipping download."
+      return
+    } catch {
+      Write-Host "Existing yt-dlp is not usable; updating."
+    }
+  }
+  $stagePath = Join-Path $TempRoot "yt-dlp.exe"
+  $lastError = $null
+  foreach ($url in $YtDlpWindowsUrls) {
+    try {
+      Download-File -Url $url -OutFile $stagePath
+      Assert-DownloadedFile -Path $stagePath -MinBytes 1MB -Label "yt-dlp" | Out-Null
+      Assert-ExecutableRuns -Path $stagePath -Arguments @("--version") -Label "yt-dlp" | Out-Null
+      Copy-FileWithRetry -SourcePath $stagePath -DestinationPath $DestinationPath | Out-Null
+      Assert-ExecutableRuns -Path $DestinationPath -Arguments @("--version") -Label "yt-dlp" | Out-Null
+      Write-Host "yt-dlp is ready: $DestinationPath"
+      return
+    } catch {
+      $lastError = $_
+      Write-Host "yt-dlp source failed: $url"
+      Write-Host ($_.Exception.Message)
+    }
+  }
+  throw $lastError
+}
+
 function Get-LatestWhisperWindowsAsset {
   try {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -Headers $Headers
@@ -938,6 +972,12 @@ try {
   $WhisperStageDir = Join-Path $TempRoot "whisper"
   $FfmpegStageDir = Join-Path $TempRoot "ffmpeg"
   New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null
+
+  try {
+    Install-YtDlp -DestinationPath (Join-Path $InstallRoot "bin\yt-dlp.exe")
+  } catch {
+    Write-Warning "Douyin downloader update failed; continuing with the existing ASR component. $($_.Exception.Message)"
+  }
 
   $installedWhisper = Find-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe")
   if ($installedWhisper) {

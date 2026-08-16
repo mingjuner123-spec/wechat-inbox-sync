@@ -125,7 +125,7 @@ function runSetupOrchestrationHarness(setupReturnCode) {
       installer,
       '# Primary path: uv → Python → pip packages.',
       '# Locate whisper binary.',
-    );
+    ).replace(/\ninstall_ytdlp\(\) \{[\s\S]*?\n\}\n\nif ! install_ytdlp; then[\s\S]*?\nfi\n?/, '\n');
     fs.writeFileSync(
       harnessPath,
       [
@@ -133,6 +133,7 @@ function runSetupOrchestrationHarness(setupReturnCode) {
         'set -euo pipefail',
         'TEST_ROOT="$(cd "$(dirname "$0")" && pwd)"',
         `setup_python_and_packages() { return ${setupReturnCode}; }`,
+        'install_ytdlp() { :; }',
         'brew_install_formula() { printf "%s\\n" "$1" >> "$TEST_ROOT/brew.log"; }',
         setupOrchestration,
         '',

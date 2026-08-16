@@ -3600,6 +3600,11 @@ var require_social_media_diagnostic_utils = __commonJS({
         if (!Number.isFinite(numeric)) return 0;
         return Math.max(0, Math.min(maxValue, Math.round(numeric)));
       }, "normalizeInteger");
+      const normalizeSignedInteger = /* @__PURE__ */ __name((value, maxAbsoluteValue) => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return 0;
+        return Math.max(-maxAbsoluteValue, Math.min(maxAbsoluteValue, Math.round(numeric)));
+      }, "normalizeSignedInteger");
       const normalizeError = /* @__PURE__ */ __name((error) => {
         if (!error) return void 0;
         const diagnostic = getTransportErrorDiagnostic2(error) || {};
@@ -3608,6 +3613,8 @@ var require_social_media_diagnostic_utils = __commonJS({
         if (code) safe.code = code;
         const status = normalizeInteger(diagnostic.status, 999);
         if (status) safe.status = status;
+        const browserErrorCode = normalizeSignedInteger(diagnostic.browserErrorCode, 999);
+        if (browserErrorCode) safe.browserErrorCode = browserErrorCode;
         return Object.keys(safe).length ? safe : void 0;
       }, "normalizeError");
       return ({
@@ -4261,7 +4268,7 @@ async function loadPdfJsLibrary() {
 __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.92";
+var PLUGIN_RUNTIME_VERSION = "1.3.93";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -4532,6 +4539,63 @@ function getLocalAsrInstallRoot(homeDir = os.homedir(), mode = "default", platfo
   return joinLocalAsrPath(platform, homeDir, LOCAL_ASR_HOME);
 }
 __name(getLocalAsrInstallRoot, "getLocalAsrInstallRoot");
+function getLocalYtDlpExecutableCandidates(installRoot = getLocalAsrInstallRoot(), platform = os.platform()) {
+  const root = String(installRoot || "").trim();
+  if (!root) return [];
+  if (getLocalAsrPlatform(platform) === "darwin") {
+    return [
+      joinLocalAsrPath(platform, root, "bin", "yt-dlp"),
+      joinLocalAsrPath(platform, root, "python-venv", "bin", "yt-dlp")
+    ];
+  }
+  return [
+    joinLocalAsrPath(platform, root, "bin", "yt-dlp.exe"),
+    joinLocalAsrPath(platform, root, "yt-dlp.exe")
+  ];
+}
+__name(getLocalYtDlpExecutableCandidates, "getLocalYtDlpExecutableCandidates");
+function buildYtDlpDownloadArguments(sourceUrl, outputTemplate) {
+  return [
+    "--no-playlist",
+    "--no-progress",
+    "--no-warnings",
+    "--no-update",
+    "--format",
+    "bestaudio/best",
+    "--retries",
+    "3",
+    "--fragment-retries",
+    "3",
+    "--socket-timeout",
+    "60",
+    "--output",
+    String(outputTemplate || "").trim(),
+    "--print",
+    "after_move:filepath",
+    String(sourceUrl || "").trim()
+  ];
+}
+__name(buildYtDlpDownloadArguments, "buildYtDlpDownloadArguments");
+function buildYtDlpBrowserCookieArguments(browserName) {
+  const browser = String(browserName || "").trim().toLowerCase();
+  return ["chrome", "edge"].includes(browser) ? ["--cookies-from-browser", browser] : [];
+}
+__name(buildYtDlpBrowserCookieArguments, "buildYtDlpBrowserCookieArguments");
+function isYtDlpBrowserCookieRetryableFailure(errorText) {
+  const text = String(errorText || "").toLowerCase();
+  return /fresh cookies|cookies? are needed|sign in|login required|verify(?:ing)? you are human|captcha|access denied|http error 403/.test(text);
+}
+__name(isYtDlpBrowserCookieRetryableFailure, "isYtDlpBrowserCookieRetryableFailure");
+function classifyYtDlpFailure(errorText) {
+  const text = String(errorText || "").toLowerCase();
+  if (/could not copy .*cookie database|cookie database.*(?:locked|busy)/.test(text)) return "browser-cookie-locked";
+  if (/failed to decrypt.*(?:dpapi|keychain)|could not decrypt.*cookie/.test(text)) return "browser-cookie-unavailable";
+  if (/fresh cookies|cookies? are needed|sign in|login required|captcha|verify(?:ing)? you are human/.test(text)) return "authentication-required";
+  if (/timed out|timeout|network is unreachable|unable to resolve host|connection refused/.test(text)) return "network-unavailable";
+  if (/http error 403|access denied|forbidden/.test(text)) return "access-denied";
+  return "download-failed";
+}
+__name(classifyYtDlpFailure, "classifyYtDlpFailure");
 function getLocalOcrInstallRoot(homeDir = os.homedir(), platform = os.platform()) {
   return joinLocalAsrPath(platform, homeDir, LOCAL_OCR_HOME);
 }
@@ -5287,6 +5351,7 @@ function getTransportErrorDiagnostic(error) {
     name: String(source.name || "").slice(0, 80),
     code: String(source.code || "").slice(0, 80),
     status: Number.isFinite(status) ? status : 0,
+    browserErrorCode: Number(source.browserErrorCode || 0),
     message
   };
 }
@@ -5342,14 +5407,14 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     return hasMinimumInstallerVersion(
       source,
       /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 3, 8]
-    ) && !source.includes("SIMPLIFIED_PROMPT") && !source.includes("--prompt") && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"') && source.includes("CHUNK_SECONDS=120") && source.includes("choose_chunk_seconds") && source.includes("find_metal_resources_dir") && source.includes("GGML_METAL_PATH_RESOURCES") && source.includes("metalAcceleration=failed") && source.includes("transcribe-last.log") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes("run_with_heartbeat segmenting") && source.includes("validate_local_asr_inference") && source.includes("TENCENT_MODEL_URL=") && source.includes("bootstrap_uv") && source.includes("detect_uv_arch") && source.includes("setup_python_and_packages") && source.includes("UV_PYTHON_DOWNLOADS=automatic") && source.includes("UV_PYTHON_PREFERENCE=managed") && source.includes("PYTHON_BUILD_STANDALONE_BUILD=") && source.includes("PYTHON_BUILD_STANDALONE_VERSION=") && source.includes("PYTHON_RUNTIME_VERSION=") && source.includes("PYTHON_RUNTIME_SHA256_ARM64=") && source.includes("PYTHON_RUNTIME_SHA256_X64=") && source.includes("TENCENT_PYTHON_DOWNLOAD_BASE=") && source.includes("PORTABLE_PYTHON=") && source.includes("install_portable_python") && source.includes("python_runtime_sha256") && source.includes('verify_sha256 "$archive_path" "$expected_sha256"') && source.includes("sys.version.split()[0] == sys.argv[1]") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes('"$UV_BIN" python install 3.12') && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python') && portablePythonIndex >= 0 && uvManagedPythonIndex > portablePythonIndex;
+      [1, 3, 10]
+    ) && !source.includes("SIMPLIFIED_PROMPT") && !source.includes("--prompt") && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"') && source.includes("CHUNK_SECONDS=120") && source.includes("choose_chunk_seconds") && source.includes("find_metal_resources_dir") && source.includes("GGML_METAL_PATH_RESOURCES") && source.includes("metalAcceleration=failed") && source.includes("transcribe-last.log") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes("run_with_heartbeat segmenting") && source.includes("validate_local_asr_inference") && source.includes("TENCENT_MODEL_URL=") && source.includes("bootstrap_uv") && source.includes("detect_uv_arch") && source.includes("setup_python_and_packages") && source.includes("UV_PYTHON_DOWNLOADS=automatic") && source.includes("UV_PYTHON_PREFERENCE=managed") && source.includes("PYTHON_BUILD_STANDALONE_BUILD=") && source.includes("PYTHON_BUILD_STANDALONE_VERSION=") && source.includes("PYTHON_RUNTIME_VERSION=") && source.includes("PYTHON_RUNTIME_SHA256_ARM64=") && source.includes("PYTHON_RUNTIME_SHA256_X64=") && source.includes("TENCENT_PYTHON_DOWNLOAD_BASE=") && source.includes("PORTABLE_PYTHON=") && source.includes("install_portable_python") && source.includes("python_runtime_sha256") && source.includes('verify_sha256 "$archive_path" "$expected_sha256"') && source.includes("sys.version.split()[0] == sys.argv[1]") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes('"$UV_BIN" python install 3.12') && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python') && source.includes("install_ytdlp") && portablePythonIndex >= 0 && uvManagedPythonIndex > portablePythonIndex;
   }
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-    [1, 2, 26]
-  ) && source.includes("function Assert-TranscribeScriptCandidate") && source.includes("function Start-TranscribeScriptUpdate") && source.includes("function Promote-TranscribeScriptUpdate") && source.includes("function Restore-TranscribeScriptUpdate") && source.includes("function Complete-TranscribeScriptUpdate") && source.includes("[System.Management.Automation.Language.Parser]::ParseFile") && !source.includes("$SimplifiedPrompt") && !source.includes("--prompt") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes('-ProgressStage "segmenting"') && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"') && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"') && source.includes("Invoke-NativeProcess") && source.includes("System.Diagnostics.ProcessStartInfo") && source.includes("ReadToEndAsync") && !source.includes("Start-Process") && source.includes("Convert-ExitCodeToHex") && source.includes("$hex = Convert-ExitCodeToHex -ExitCode $ExitCode") && source.includes("[string]$InstallRoot") && source.includes("Install-ExtractedPackage") && !source.includes("Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir") && source.includes("safeModelPath") && source.includes("$TencentCosAssetBaseUrl") && source.includes("$WhisperWindowsTencentUrls") && source.includes("$WhisperWindowsCompatibilityUrls") && source.includes("$WhisperWindowsCompatibilitySha256") && source.includes("$FfmpegTencentUrls") && source.includes("$ModelTencentUrls") && source.includes("Get-EnabledAssetUrls") && source.includes("$WhisperWindowsFallbackUrls") && source.includes("Test-IllegalInstructionExitCode") && source.includes("whisper-bin-x64-compat.zip") && source.includes("Assert-FileSha256") && source.includes("GitHub release page parsing failed") && source.includes("INSTALLER FAILED") && source.includes("$DownloadTimeoutSeconds = 1200") && source.includes("--max-time $DownloadTimeoutSeconds") && source.includes("System.Text.UTF8Encoding") && source.includes("ReadAllText($chunkTxt, $Utf8NoBom)") && source.includes("WriteAllText($OutputPath");
+    [1, 2, 27]
+  ) && source.includes("function Assert-TranscribeScriptCandidate") && source.includes("function Start-TranscribeScriptUpdate") && source.includes("function Promote-TranscribeScriptUpdate") && source.includes("function Restore-TranscribeScriptUpdate") && source.includes("function Complete-TranscribeScriptUpdate") && source.includes("[System.Management.Automation.Language.Parser]::ParseFile") && !source.includes("$SimplifiedPrompt") && !source.includes("--prompt") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes('-ProgressStage "segmenting"') && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"') && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"') && source.includes("Invoke-NativeProcess") && source.includes("System.Diagnostics.ProcessStartInfo") && source.includes("ReadToEndAsync") && !source.includes("Start-Process") && source.includes("Convert-ExitCodeToHex") && source.includes("$hex = Convert-ExitCodeToHex -ExitCode $ExitCode") && source.includes("[string]$InstallRoot") && source.includes("Install-ExtractedPackage") && !source.includes("Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir") && source.includes("safeModelPath") && source.includes("$TencentCosAssetBaseUrl") && source.includes("$WhisperWindowsTencentUrls") && source.includes("$WhisperWindowsCompatibilityUrls") && source.includes("$WhisperWindowsCompatibilitySha256") && source.includes("$FfmpegTencentUrls") && source.includes("$ModelTencentUrls") && source.includes("Get-EnabledAssetUrls") && source.includes("$WhisperWindowsFallbackUrls") && source.includes("Test-IllegalInstructionExitCode") && source.includes("whisper-bin-x64-compat.zip") && source.includes("Install-YtDlp") && source.includes("yt-dlp.exe") && source.includes("Assert-FileSha256") && source.includes("GitHub release page parsing failed") && source.includes("INSTALLER FAILED") && source.includes("$DownloadTimeoutSeconds = 1200") && source.includes("--max-time $DownloadTimeoutSeconds") && source.includes("System.Text.UTF8Encoding") && source.includes("ReadAllText($chunkTxt, $Utf8NoBom)") && source.includes("WriteAllText($OutputPath");
 }
 __name(isLocalAsrInstallerCurrent, "isLocalAsrInstallerCurrent");
 function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
@@ -6762,7 +6827,7 @@ function buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl = "") {
   }, "addCurrentPage");
   addCurrentPage(original, "original-page");
   addCurrentPage(resolved, "resolved-page");
-  if (!requests.length) addCurrentPage(target.url, "target-page");
+  addCurrentPage(target.url, "target-page");
   return requests;
 }
 __name(buildDouyinBrowserFallbackRequests, "buildDouyinBrowserFallbackRequests");
@@ -6831,8 +6896,112 @@ function parseJsonObjectAssignedTo(source, variableName) {
   return null;
 }
 __name(parseJsonObjectAssignedTo, "parseJsonObjectAssignedTo");
+function parseJsonValueAt(source, valueStart) {
+  const text = String(source || "");
+  const first = text[valueStart];
+  if (first !== "{" && first !== "[") return null;
+  const close = first === "{" ? "}" : "]";
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = valueStart; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === first) depth += 1;
+    if (char === close) {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(valueStart, index + 1));
+        } catch (error) {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+__name(parseJsonValueAt, "parseJsonValueAt");
+function decodeDouyinStateText(value) {
+  let text = String(value || "");
+  for (let index = 0; index < 2; index += 1) {
+    if (!/%(?:[0-9a-f]{2})/i.test(text)) break;
+    try {
+      const decoded = decodeURIComponent(text);
+      if (!decoded || decoded === text) break;
+      text = decoded;
+    } catch (error) {
+      break;
+    }
+  }
+  return text;
+}
+__name(decodeDouyinStateText, "decodeDouyinStateText");
+function collectDouyinPaceStateValues(source) {
+  const text = String(source || "");
+  const values = [];
+  const pushPattern = /self\.__pace_f\s*\.\s*push\s*\(/g;
+  let match;
+  while ((match = pushPattern.exec(text)) && values.length < 160) {
+    const arrayStart = text.indexOf("[", pushPattern.lastIndex);
+    if (arrayStart < 0) continue;
+    const payload = parseJsonValueAt(text, arrayStart);
+    if (!Array.isArray(payload)) continue;
+    payload.forEach((value) => {
+      if (typeof value === "string" && value.length <= 8e5) values.push(value);
+    });
+    pushPattern.lastIndex = Math.max(pushPattern.lastIndex, arrayStart + 1);
+  }
+  return values;
+}
+__name(collectDouyinPaceStateValues, "collectDouyinPaceStateValues");
+function extractDouyinMediaUrlsFromPaceState(source, awemeId) {
+  const targetId = String(awemeId || "").trim();
+  if (!targetId) return [];
+  const urls = [];
+  const tryPayload = /* @__PURE__ */ __name((payload) => {
+    extractDouyinMediaUrlsForAweme(payload, targetId).forEach((url) => pushUniqueMediaUrl(urls, url));
+  }, "tryPayload");
+  collectDouyinPaceStateValues(source).forEach((rawValue) => {
+    const text = decodeDouyinStateText(rawValue);
+    try {
+      tryPayload(JSON.parse(text));
+    } catch (error) {
+    }
+    const detailMarker = text.indexOf('"videoDetail"');
+    if (detailMarker >= 0) {
+      const detailStart = text.indexOf("{", detailMarker);
+      const detail = parseJsonValueAt(text, detailStart);
+      if (detail) tryPayload({ videoDetail: detail });
+    }
+    if (text.includes('\\"videoDetail\\"')) {
+      const unescaped = text.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      const detailMarker2 = unescaped.indexOf('"videoDetail"');
+      const detailStart = unescaped.indexOf("{", detailMarker2);
+      const detail = parseJsonValueAt(unescaped, detailStart);
+      if (detail) tryPayload({ videoDetail: detail });
+    }
+  });
+  return sortMediaUrlsForTranscription(urls);
+}
+__name(extractDouyinMediaUrlsFromPaceState, "extractDouyinMediaUrlsFromPaceState");
 function extractDouyinMediaUrlsFromShareHtml(html, awemeId) {
   const source = String(html || "");
+  const paceUrls = extractDouyinMediaUrlsFromPaceState(source, awemeId);
+  if (paceUrls.length) return paceUrls;
   const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
   let match;
   while (match = scriptPattern.exec(source)) {
@@ -8579,6 +8748,7 @@ function collectDouyinUrlList(value, urls) {
     collectDouyinUrlList(value.url_list, urls);
     collectDouyinUrlList(value.urlList, urls);
     collectDouyinUrlList(value.url, urls);
+    collectDouyinUrlList(value.src, urls);
   }
 }
 __name(collectDouyinUrlList, "collectDouyinUrlList");
@@ -12617,24 +12787,32 @@ async function openExternalUrl(url) {
 __name(openExternalUrl, "openExternalUrl");
 function waitForWebContents(webContents, timeoutMs = 15e3) {
   return new Promise((resolve) => {
+    const timerHost = typeof window !== "undefined" ? window : globalThis;
     let done = false;
-    const finish = /* @__PURE__ */ __name(() => {
+    const finish = /* @__PURE__ */ __name((result) => {
       if (done) return;
       done = true;
-      resolve();
+      resolve(result);
     }, "finish");
-    const timer = window.setTimeout(finish, timeoutMs);
+    const timer = timerHost.setTimeout(() => finish({ outcome: "timed-out", errorCode: 0 }), timeoutMs);
     webContents.once("did-finish-load", () => {
-      window.clearTimeout(timer);
-      window.setTimeout(finish, 2500);
+      timerHost.clearTimeout(timer);
+      timerHost.setTimeout(() => finish({ outcome: "loaded", errorCode: 0 }), 2500);
     });
-    webContents.once("did-fail-load", () => {
-      window.clearTimeout(timer);
-      finish();
+    webContents.once("did-fail-load", (_event, errorCode) => {
+      timerHost.clearTimeout(timer);
+      finish({ outcome: "failed", errorCode: Number(errorCode) || 0 });
     });
   });
 }
 __name(waitForWebContents, "waitForWebContents");
+function createBrowserNavigationError(result = {}) {
+  const error = new Error("Hidden browser navigation did not complete");
+  error.code = "BROWSER_NAVIGATION_FAILED";
+  error.browserErrorCode = Number(result && result.errorCode) || 0;
+  return error;
+}
+__name(createBrowserNavigationError, "createBrowserNavigationError");
 async function renderUrlToMarkdownWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -13255,7 +13433,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     if (!beginBestEffortBrowserLoad(win, url)) {
       throw new Error("隐藏浏览器未能开始加载抖音页面");
     }
-    await loaded;
+    const navigationOutcome = await loaded;
+    if (typeof options.onNavigationOutcome === "function") {
+      try {
+        options.onNavigationOutcome(navigationOutcome);
+      } catch (error) {
+      }
+    }
     throwIfAborted(options.signal);
     const payload = await win.webContents.executeJavaScript(`
       (async () => {
@@ -13358,6 +13542,31 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         Array.from(document.querySelectorAll(
           '[data-aweme-id], [data-item-id], a[href*="/video/"], a[href*="aweme_id="], a[href*="modal_id="]',
         )).slice(0, 500).forEach((node) => addPageIdentityIds(collectIdentityIds(node)));
+        // Current Douyin pages keep the target work payload in React streamed
+        // self.__pace_f state. It is not necessarily exposed as a network
+        // response or a playable DOM video URL, so preserve a bounded local
+        // snapshot for the Node-side target-media parser below.
+        let douyinPaceState = '';
+        if (${targetDouyinAwemeId ? "true" : "false"}) {
+          try {
+            const paceEntries = Array.isArray(self.__pace_f)
+              ? self.__pace_f.slice(-160)
+              : [];
+            douyinPaceState = paceEntries
+              .map((entry) => 'self.__pace_f.push(' + JSON.stringify(entry) + ');')
+              .join('
+')
+              .slice(0, 800000);
+            if (!douyinPaceState) {
+              douyinPaceState = Array.from(document.scripts)
+                .map((node) => String(node.textContent || ''))
+                .filter((text) => text.includes('__pace_f') || text.includes('videoDetail'))
+                .join('
+')
+                .slice(0, 800000);
+            }
+          } catch (error) {}
+        }
         return {
           urls,
           pageUrl: String(location.href || ''),
@@ -13368,18 +13577,20 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
           ),
           domMediaCandidates,
           pageIdentityIds,
+          douyinPaceState,
         };
       })()
     `);
     throwIfAborted(options.signal);
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
+    const paceStateMediaUrls = targetDouyinAwemeId ? extractDouyinMediaUrlsFromShareHtml(payload && payload.douyinPaceState, targetDouyinAwemeId) : [];
     if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
       return selectIdentityBoundDouyinBrowserMedia({
         targetAwemeId: targetDouyinAwemeId,
         finalUrl: payload && payload.pageUrl,
         canonicalUrl: payload && payload.canonicalUrl,
-        debuggerMediaUrls,
+        debuggerMediaUrls: [...debuggerMediaUrls, ...paceStateMediaUrls],
         domMediaCandidates: payload && payload.domMediaCandidates,
         pageIdentityIds: payload && payload.pageIdentityIds
       });
@@ -13387,7 +13598,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     return normalizeBrowserCapturedMediaUrls([
       capturedRequests,
       payload && Array.isArray(payload.urls) ? payload.urls : payload,
-      debuggerMediaUrls
+      debuggerMediaUrls,
+      paceStateMediaUrls
     ]);
   } finally {
     cleanupAbort();
@@ -17294,6 +17506,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const ocrRoot = this.getConfiguredLocalOcrInstallRoot();
     const asrStatus = typeof this.getLocalAsrInstallStatus === "function" ? this.getLocalAsrInstallStatus() : getLocalAsrInstallStatus(asrRoot, fs.existsSync, platform);
     const ocrStatus = typeof this.getLocalOcrInstallStatus === "function" ? this.getLocalOcrInstallStatus() : getLocalOcrInstallStatus(ocrRoot, fs.existsSync, platform);
+    const ytDlpPath = getLocalYtDlpExecutableCandidates(asrRoot, platform).find((candidate) => fs.existsSync(candidate)) || "";
     const asrInstallLog = readLocalAsrInstallLog(asrRoot);
     const asrRunLog = readLocalAsrRunLog(asrRoot);
     const ocrInstallLog = readLocalAsrInstallLog(ocrRoot);
@@ -17331,6 +17544,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `音视频转写 ASR：${asrStatus.ready ? "可用" : "不可用"}`,
       `ASR 安装目录：${asrStatus.installRoot || asrRoot}`,
       `ASR 缺失项：${formatMissingReasons(asrStatus)}`,
+      `抖音下载器 yt-dlp：${ytDlpPath ? "可用" : "未安装（重新安装/更新本地转写组件即可补齐）"}`,
+      `yt-dlp 路径：${ytDlpPath || "-"}`,
       `图片文字识别 OCR：${ocrStatus.ready ? "可用" : "不可用"}`,
       `OCR 安装目录：${ocrStatus.installRoot || ocrRoot}`,
       `OCR 安装日志：${getLocalAsrInstallLogPath(ocrRoot)}`,
@@ -18170,6 +18385,167 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       throw new Error(`${options.localError || "本地转写失败"}；云端兜底失败：${cloudMessage}`);
     }
   }
+  getLocalYtDlpExecutable() {
+    const installRoot = this.getConfiguredLocalAsrInstallRoot();
+    const platform = this.getConfiguredLocalAsrPlatform();
+    return getLocalYtDlpExecutableCandidates(installRoot, platform).find((candidate) => fs.existsSync(candidate)) || "";
+  }
+  async downloadDouyinWithLocalYtDlp(sourceUrl, options = {}) {
+    const normalizedUrl = String(sourceUrl || "").trim();
+    if (!isDouyinUrl(normalizedUrl)) {
+      throw new Error("Only Douyin links can use the local media downloader.");
+    }
+    let executable = this.getLocalYtDlpExecutable();
+    if (!executable) {
+      await this.installLocalAsr({ reason: "douyin-downloader" });
+      executable = this.getLocalYtDlpExecutable();
+    }
+    if (!executable) {
+      const error = new Error("Local Douyin downloader is unavailable after component update.");
+      error.code = "YTDLP_UNAVAILABLE";
+      throw error;
+    }
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "wechat-inbox-douyin-"));
+    const outputTemplate = path.join(tempDirectory, "media.%(ext)s");
+    const reportAttempt = /* @__PURE__ */ __name((attempt = {}) => {
+      if (typeof options.onMediaDownloadDiagnostic !== "function") return;
+      try {
+        options.onMediaDownloadDiagnostic(attempt);
+      } catch (error) {
+      }
+    }, "reportAttempt");
+    const runAttempt = /* @__PURE__ */ __name(async (browser = "") => {
+      throwIfAborted(options.signal);
+      const startedAt = Date.now();
+      const argumentsList = [
+        ...buildYtDlpDownloadArguments(normalizedUrl, outputTemplate),
+        ...buildYtDlpBrowserCookieArguments(browser)
+      ];
+      return await new Promise((resolve, reject) => {
+        let child = null;
+        let settled = false;
+        const removeAbortHandler = /* @__PURE__ */ __name(() => {
+          if (options.signal) options.signal.removeEventListener("abort", abortHandler);
+        }, "removeAbortHandler");
+        const settle = /* @__PURE__ */ __name((callback, value) => {
+          if (settled) return;
+          settled = true;
+          removeAbortHandler();
+          callback(value);
+        }, "settle");
+        const abortHandler = /* @__PURE__ */ __name(() => {
+          try {
+            if (child && typeof child.kill === "function") child.kill();
+          } catch (error) {
+          }
+          settle(reject, createAbortError());
+        }, "abortHandler");
+        if (options.signal) {
+          if (options.signal.aborted) {
+            abortHandler();
+            return;
+          }
+          options.signal.addEventListener("abort", abortHandler, { once: true });
+        }
+        if (settled) return;
+        child = childProcess.execFile(executable, argumentsList, {
+          timeout: 8 * 60 * 1e3,
+          maxBuffer: 1024 * 1024,
+          windowsHide: true
+        }, (error, stdout, stderr) => {
+          var _a;
+          const output = `${stdout || ""}
+${stderr || ""}`;
+          if (options.signal && options.signal.aborted) {
+            settle(reject, createAbortError());
+            return;
+          }
+          if (error) {
+            const failureCode = classifyYtDlpFailure(output);
+            const failure = new Error(`抖音下载器未能获取可转写媒体（${failureCode}）。`);
+            failure.code = String(error.code || "YTDLP_DOWNLOAD_FAILED");
+            failure.ytDlpFailureCode = failureCode;
+            failure.ytDlpOutput = output;
+            reportAttempt({
+              transport: "yt-dlp",
+              ok: false,
+              code: failureCode,
+              cookieBrowser: browser || "",
+              cookieRetry: Boolean(browser),
+              durationMs: Date.now() - startedAt
+            });
+            settle(reject, failure);
+            return;
+          }
+          const outputPath = String(stdout || "").split(/\r?\n/).map((line) => line.trim()).reverse().find((line) => line && fs.existsSync(line));
+          const mediaPath = outputPath || ((_a = fs.readdirSync(tempDirectory, { withFileTypes: true }).find((entry) => entry.isFile())) == null ? void 0 : _a.name);
+          const resolvedPath = outputPath || (mediaPath ? path.join(tempDirectory, mediaPath) : "");
+          if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+            const failure = new Error("Local Douyin downloader completed without a media file.");
+            failure.code = "YTDLP_EMPTY_OUTPUT";
+            failure.ytDlpFailureCode = "empty-output";
+            failure.ytDlpOutput = output;
+            reportAttempt({
+              transport: "yt-dlp",
+              ok: false,
+              code: failure.ytDlpFailureCode,
+              cookieBrowser: browser || "",
+              cookieRetry: Boolean(browser),
+              durationMs: Date.now() - startedAt
+            });
+            settle(reject, failure);
+            return;
+          }
+          reportAttempt({
+            transport: "yt-dlp",
+            ok: true,
+            bytes: fs.statSync(resolvedPath).size,
+            cookieBrowser: browser || "",
+            cookieRetry: Boolean(browser),
+            durationMs: Date.now() - startedAt
+          });
+          settle(resolve, { localInputPath: resolvedPath, cleanupDirectory: tempDirectory });
+        });
+      });
+    }, "runAttempt");
+    try {
+      return await runAttempt();
+    } catch (firstError) {
+      if (isAbortError(firstError) || !isYtDlpBrowserCookieRetryableFailure(firstError.ytDlpOutput)) {
+        try {
+          fs.rmSync(tempDirectory, { recursive: true, force: true });
+        } catch (error) {
+        }
+        throw firstError;
+      }
+      for (const browser of ["chrome", "edge"]) {
+        try {
+          return await runAttempt(browser);
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          firstError = error;
+        }
+      }
+      try {
+        fs.rmSync(tempDirectory, { recursive: true, force: true });
+      } catch (error) {
+      }
+      throw firstError;
+    }
+  }
+  async runLocalTranscriptionWithCleanup(audioUrl, options = {}) {
+    try {
+      return await this.runLocalTranscription(audioUrl, options);
+    } finally {
+      const cleanupDirectory = String(options.localInputCleanupDirectory || "").trim();
+      if (cleanupDirectory) {
+        try {
+          fs.rmSync(cleanupDirectory, { recursive: true, force: true });
+        } catch (error) {
+        }
+      }
+    }
+  }
   async runLocalTranscription(audioUrl, options = {}) {
     await this.ensureLocalComponentReadyForUse("音视频转写", {
       reason: "first-use",
@@ -18238,7 +18614,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         title: progressTitle,
         percent: 0
       });
-      inputPath = await this.downloadMediaToTempFile(audioUrl, {
+      inputPath = String(options.localInputPath || "").trim() || await this.downloadMediaToTempFile(audioUrl, {
         sourceUrl: options.sourceUrl || options.url || "",
         decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || "",
         signal: abortController.signal,
@@ -18332,6 +18708,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         } catch (error) {
         }
       });
+      try {
+        if (options.localInputCleanupDirectory) {
+          fs.rmSync(options.localInputCleanupDirectory, { recursive: true, force: true });
+        }
+      } catch (error) {
+      }
     }
   }
   async downloadMediaToTempFile(audioUrl, options = {}) {
@@ -19232,7 +19614,33 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     addCandidate(mediaUrl);
     (Array.isArray(mediaUrls) ? mediaUrls : []).forEach((item) => addCandidate(item));
     (Array.isArray(mediaItems) ? mediaItems : []).forEach((item) => addCandidate(item));
-    const candidates = sortMediaUrlsForTranscription(Array.from(candidateMap.keys())).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean);
+    let candidates = sortMediaUrlsForTranscription(Array.from(candidateMap.keys())).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean);
+    const isDouyinMediaRequest = isDouyinUrl(url) || isDouyinUrl(mediaUrl) || String(platform || "") === "抖音";
+    let attemptedDouyinYtDlp = false;
+    if (isDouyinMediaRequest) {
+      attemptedDouyinYtDlp = true;
+      try {
+        const downloaded = await this.downloadDouyinWithLocalYtDlp(url, {
+          signal,
+          onMediaDownloadDiagnostic: reportMediaDownloadAttempt
+        });
+        if (downloaded && downloaded.localInputPath) {
+          candidates = [{
+            url: String(url || "").trim(),
+            localInputPath: downloaded.localInputPath,
+            localInputCleanupDirectory: downloaded.cleanupDirectory || "",
+            downloader: "yt-dlp"
+          }];
+          if (mediaDiagnosticTrace) {
+            mediaDiagnosticTrace.selectedStage = "yt-dlp";
+            mediaDiagnosticTrace.mediaCandidateCount = 1;
+          }
+        }
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        noMediaError = error && error.message ? error.message : noMediaError;
+      }
+    }
     if (!candidates.length) {
       return {
         ...record,
@@ -19261,7 +19669,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           const candidateUrl = candidate.url;
           const candidateDecryptKey = String(candidate.decryptKey || candidate.decodeKey || "").trim();
           const useCloudForWebpage = !candidateDecryptKey && (metadata.transcriptionMode === "cloud" || metadata.cloudTranscriptionRequested === true);
-          const result = useCloudForWebpage ? await this.runCloudFallbackTranscription(candidateUrl, {
+          const result = candidate.localInputPath ? {
+            transcription: await this.runLocalTranscriptionWithCleanup(candidateUrl, {
+              title: metadata.title || "",
+              source: source || "media-url",
+              sourceUrl: url,
+              binding,
+              recordId: getRecordId(record),
+              localInputPath: candidate.localInputPath,
+              localInputCleanupDirectory: candidate.localInputCleanupDirectory || "",
+              signal,
+              onMediaDownloadDiagnostic: reportMediaDownloadAttempt
+            }),
+            source: "yt-dlp-local"
+          } : useCloudForWebpage ? await this.runCloudFallbackTranscription(candidateUrl, {
             binding,
             title: title || metadata.title || "",
             source: source || "media-url",
@@ -19286,7 +19707,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             url,
             platform,
             mediaUrl: candidateUrl,
-            mediaUrls: candidates.map((candidate2) => candidate2.url),
+            mediaUrls: candidates.filter((item) => !item.localInputPath).map((item) => item.url),
             subtitleUrl,
             transcription: result.transcription,
             transcriptionStatus: "success",
@@ -20154,11 +20575,18 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 startedAt: Date.now()
               };
               try {
+                let navigationOutcome = null;
                 const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
                   signal,
-                  strictDouyinTarget: browserRequest.strictDouyinTarget
+                  strictDouyinTarget: browserRequest.strictDouyinTarget,
+                  onNavigationOutcome: /* @__PURE__ */ __name((outcome) => {
+                    navigationOutcome = outcome;
+                  }, "onNavigationOutcome")
                 });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
+                if (!browserStage.mediaCount && navigationOutcome && navigationOutcome.outcome !== "loaded") {
+                  browserStage.error = createBrowserNavigationError(navigationOutcome);
+                }
                 if (browserStage.mediaCount) {
                   mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
                   mediaUrl = mediaUrls[0] || mediaUrl;
@@ -20460,7 +20888,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (pendingXiaohongshuFailureDiagnostic && !mediaUrl) {
           throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
         }
-        if (mediaUrl) {
+        const isDouyinPage = isDouyinUrl(url) || isDouyinUrl(resolvedUrl);
+        if (mediaUrl || isDouyinPage) {
           if (isXiaohongshuUrl(url) && !xiaohongshuCapabilities.mediaTranscription) {
             return {
               ...record,
@@ -20482,7 +20911,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           const supplementalMarkdownParts = isXiaohongshuUrl(url) ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown) : { markdown: selectedSupplementalMarkdown, trailingMarkdown: "" };
           return await this.buildTranscriptRecordFromMedia(record, {
             url,
-            platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? "抖音" : "小红书",
+            platform: isDouyinPage ? "抖音" : "小红书",
             mediaUrl,
             mediaUrls,
             source: "video",
@@ -21790,6 +22219,11 @@ WechatObsidianInboxPlugin.__test = {
   extractLocalAsrInstallRootFromCommand,
   hasLocalAsrNativeCrash,
   getLocalAsrRepairAction,
+  getLocalYtDlpExecutableCandidates,
+  buildYtDlpDownloadArguments,
+  buildYtDlpBrowserCookieArguments,
+  isYtDlpBrowserCookieRetryableFailure,
+  classifyYtDlpFailure,
   resolveLocalAsrPlatform,
   getLocalAsrPlatformMismatchMessage,
   formatRedeemAccessError,
@@ -21932,6 +22366,7 @@ WechatObsidianInboxPlugin.__test = {
   getTransportErrorDiagnostic,
   buildWebpageTransportDiagnostic,
   buildDouyinMediaResolutionDiagnostic,
+  waitForWebContents,
   getXiaohongshuCapabilityMatrix,
   runWithXiaohongshuBrowserSessionLock,
   getXiaohongshuBrowserCandidates,

@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.9"
+INSTALLER_SCRIPT_VERSION="1.3.10"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -708,6 +708,39 @@ elif [ $setup_rc -ne 0 ]; then
   echo "请在终端运行: xcode-select --install" >&2
   echo "然后重新在 Obsidian 里安装。No Terminal command is required." >&2
   exit 1
+fi
+
+install_ytdlp() {
+  local target="$INSTALL_ROOT/bin/yt-dlp"
+  if [ -x "$target" ] && "$target" --version >/dev/null 2>&1; then
+    echo "Existing yt-dlp is usable: $target"
+    return 0
+  fi
+  if [ -x "$VENV_PYTHON" ]; then
+    echo "Installing yt-dlp into the local ASR Python environment..."
+    if "$VENV_PYTHON" -m pip install --upgrade yt-dlp \
+      -i "$TENCENT_PIP_INDEX_URL" \
+      --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+      if [ -x "$VENV_DIR/bin/yt-dlp" ]; then
+        ln -sf "$VENV_DIR/bin/yt-dlp" "$target"
+        "$target" --version >/dev/null 2>&1 && return 0
+      fi
+    fi
+  fi
+  echo "Python yt-dlp install failed; downloading the official macOS binary..." >&2
+  local stage="$TEMP_ROOT/yt-dlp"
+  curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
+    --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+    --max-time 900 -o "$stage" \
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+  chmod +x "$stage"
+  "$stage" --version >/dev/null 2>&1
+  mv "$stage" "$target"
+  "$target" --version >/dev/null 2>&1
+}
+
+if ! install_ytdlp; then
+  echo "Douyin downloader update failed; continuing with the existing ASR component." >&2
 fi
 
 # Locate whisper binary.

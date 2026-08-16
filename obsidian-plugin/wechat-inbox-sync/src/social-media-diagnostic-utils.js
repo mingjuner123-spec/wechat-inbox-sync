@@ -13,6 +13,11 @@ function createDouyinMediaResolutionDiagnosticBuilder(dependencies = {}) {
     if (!Number.isFinite(numeric)) return 0;
     return Math.max(0, Math.min(maxValue, Math.round(numeric)));
   };
+  const normalizeSignedInteger = (value, maxAbsoluteValue) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return 0;
+    return Math.max(-maxAbsoluteValue, Math.min(maxAbsoluteValue, Math.round(numeric)));
+  };
   const normalizeError = (error) => {
     if (!error) return undefined;
     const diagnostic = getTransportErrorDiagnostic(error) || {};
@@ -21,6 +26,8 @@ function createDouyinMediaResolutionDiagnosticBuilder(dependencies = {}) {
     if (code) safe.code = code;
     const status = normalizeInteger(diagnostic.status, 999);
     if (status) safe.status = status;
+    const browserErrorCode = normalizeSignedInteger(diagnostic.browserErrorCode, 999);
+    if (browserErrorCode) safe.browserErrorCode = browserErrorCode;
     return Object.keys(safe).length ? safe : undefined;
   };
 
