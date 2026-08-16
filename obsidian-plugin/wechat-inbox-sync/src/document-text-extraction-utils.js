@@ -546,10 +546,214 @@ function createDocumentTextExtractionHelpers({
     return text;
   }
 
+  function extractPdfJsTextContent(textContent = {}) {
+    const items = Array.isArray(textContent.items) ? textContent.items : [];
+    const lines = [];
+    let currentLine = '';
+    let previousY = null;
+    let previousItem = null;
+
+    const flushLine = () => {
+      const normalized = String(currentLine || '').replace(/\s+/g, ' ').trim();
+      if (normalized) lines.push(normalized);
+      currentLine = '';
+    };
+
+    for (const item of items) {
+      const value = String(item && item.str || '').replace(/\u0000/g, '').trim();
+      if (!value) continue;
+      const transform = Array.isArray(item && item.transform) ? item.transform : [];
+      const y = Number(transform[5]);
+      const movedToNewLine = previousY !== null
+        && Number.isFinite(y)
+        && Number.isFinite(previousY)
+        && Math.abs(y - previousY) > 3;
+      if (previousItem && (previousItem.hasEOL === true || movedToNewLine)) flushLine();
+      currentLine += `${currentLine ? ' ' : ''}${value}`;
+      previousY = Number.isFinite(y) ? y : previousY;
+      previousItem = item;
+      if (item && item.hasEOL === true) flushLine();
+    }
+    flushLine();
+    return cleanPdfExtractedText(lines.join('\n'));
+  }
+
+  function isUsablePdfPageText(value) {
+    const text = String(value || '').trim();
+    const meaningfulCharacters = text.replace(/[\s\p{P}\p{S}]/gu, '');
+    return meaningfulCharacters.length >= 12;
+  }
+
+  function createPdfFallbackError(message, options = {}) {
+    const error = new Error(message);
+    error.code = String(options.code || 'PDF_FALLBACK_FAILED');
+    error.diagnostic = options.diagnostic || null;
+    return error;
+  }
+
+  function normalizePdfJsFailure(error) {
+    const name = String(error && error.name || '');
+    const message = String(error && error.message || error || '').trim();
+    if (/PasswordException/i.test(name) || /password/i.test(message)) {
+      return createPdfFallbackError(
+        'PDF 已加密或需要密码，原始 PDF 附件已保留；请先解除密码后重新上传。',
+        { code: 'PDF_PASSWORD_REQUIRED' },
+      );
+    }
+    if (/InvalidPDFException|MissingPDFException|UnexpectedResponseException/i.test(name)) {
+      return createPdfFallbackError(
+        'PDF 文件损坏或格式不完整，原始 PDF 附件已保留；请重新导出 PDF 后上传。',
+        { code: 'PDF_INVALID' },
+      );
+    }
+    return createPdfFallbackError(
+      `PDF.js 无法读取这份 PDF，原始 PDF 附件已保留：${message || '未知解析错误'}`,
+      { code: 'PDFJS_OPEN_FAILED' },
+    );
+  }
+
+  async function extractPdfMarkdownWithFallback(bufferLike, {
+    pdfjsLib = null,
+    loadPdfJs = null,
+    ocrPage = null,
+  } = {}) {
+    let fastPathError = null;
+    try {
+      return {
+        markdown: extractPdfMarkdown(bufferLike),
+        provider: 'pdf-text-layer-fast',
+        diagnostic: {
+          pageCount: 0,
+          textPageNumbers: [],
+          ocrPageNumbers: [],
+          missingPageNumbers: [],
+        },
+      };
+    } catch (error) {
+      fastPathError = error;
+    }
+
+    let resolvedPdfJs = pdfjsLib;
+    if (!resolvedPdfJs && typeof loadPdfJs === 'function') {
+      try {
+        resolvedPdfJs = await loadPdfJs();
+      } catch (error) {
+        throw createPdfFallbackError(
+          `PDF 快速解析失败，且 PDF.js 加载失败；原始 PDF 附件已保留：${error.message || error}`,
+          { code: 'PDFJS_LOAD_FAILED' },
+        );
+      }
+    }
+    if (!resolvedPdfJs || typeof resolvedPdfJs.getDocument !== 'function') {
+      throw createPdfFallbackError(
+        `PDF 快速解析失败，且 PDF.js 解析器未就绪；原始 PDF 附件已保留：${fastPathError.message || fastPathError}`,
+        { code: 'PDFJS_NOT_READY' },
+      );
+    }
+
+    const buffer = toNodeBuffer(bufferLike);
+    let loadingTask;
+    let document;
+    try {
+      loadingTask = resolvedPdfJs.getDocument({
+        data: Uint8Array.from(buffer),
+        disableFontFace: false,
+        disableWorker: true,
+        isEvalSupported: false,
+        useSystemFonts: true,
+      });
+      document = await loadingTask.promise;
+    } catch (error) {
+      throw normalizePdfJsFailure(error);
+    }
+
+    const pages = [];
+    const textPageNumbers = [];
+    const ocrPageNumbers = [];
+    const missingPageNumbers = [];
+    try {
+      const pageCount = Math.max(0, Number(document && document.numPages) || 0);
+      for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+        const page = await document.getPage(pageNumber);
+        const textContent = await page.getTextContent({
+          disableCombineTextItems: false,
+          includeMarkedContent: false,
+        });
+        const textLayer = extractPdfJsTextContent(textContent);
+        if (isUsablePdfPageText(textLayer)) {
+          pages.push(textLayer);
+          textPageNumbers.push(pageNumber);
+          continue;
+        }
+
+        let ocrText = '';
+        if (typeof ocrPage === 'function') {
+          ocrText = cleanMarkdownForStorage(await ocrPage(page, {
+            pageCount,
+            pageNumber,
+            textLayer,
+          }));
+        }
+        if (ocrText) {
+          pages.push(ocrText);
+          ocrPageNumbers.push(pageNumber);
+          continue;
+        }
+        if (textLayer) pages.push(textLayer);
+        missingPageNumbers.push(pageNumber);
+      }
+
+      const markdown = cleanMarkdownForStorage(pages.filter(Boolean).join('\n\n'));
+      const diagnostic = {
+        pageCount,
+        textPageNumbers,
+        ocrPageNumbers,
+        missingPageNumbers,
+        fastPathError: String(fastPathError && fastPathError.message || fastPathError || ''),
+      };
+      if (!markdown) {
+        const pageLabel = missingPageNumbers.length
+          ? `第 ${missingPageNumbers.join('、')} 页`
+          : '全部页面';
+        throw createPdfFallbackError(
+          `扫描型 PDF ${pageLabel}没有文本层，且本地 OCR 组件未就绪或未能识别；原始 PDF 附件已保留。请在插件设置中修复本地转写组件后重试。`,
+          { code: 'PDF_SCAN_OCR_REQUIRED', diagnostic },
+        );
+      }
+      return {
+        markdown,
+        provider: ocrPageNumbers.length
+          ? 'pdfjs-text-layer+local-ocr'
+          : 'pdfjs-text-layer',
+        warning: missingPageNumbers.length
+          ? `PDF 第 ${missingPageNumbers.join('、')} 页没有可用文本层，且本地 OCR 未能识别；其余页面已保存。`
+          : '',
+        diagnostic,
+      };
+    } finally {
+      if (document && typeof document.destroy === 'function') {
+        try {
+          await document.destroy();
+        } catch (error) {
+          // Best-effort PDF.js cleanup only.
+        }
+      } else if (loadingTask && typeof loadingTask.destroy === 'function') {
+        try {
+          await loadingTask.destroy();
+        } catch (error) {
+          // Best-effort PDF.js cleanup only.
+        }
+      }
+    }
+  }
+
   return {
     cleanPdfExtractedText,
     extractDocxMarkdown,
     extractPdfMarkdown,
+    extractPdfMarkdownWithFallback,
+    extractPdfJsTextContent,
+    isUsablePdfPageText,
   };
 }
 

@@ -171,14 +171,26 @@ const {
   cleanPdfExtractedText,
   extractDocxMarkdown,
   extractPdfMarkdown,
+  extractPdfMarkdownWithFallback,
 } = createDocumentTextExtractionHelpers({
   toNodeBuffer,
   cleanMarkdownForStorage,
 });
 
+const PDFJS_MODULE_DATA_URL = typeof __WECHAT_INBOX_PDFJS_DATA_URL__ === 'string'
+  ? __WECHAT_INBOX_PDFJS_DATA_URL__
+  : '';
+let cachedPdfJsLibraryPromise = null;
+async function loadPdfJsLibrary() {
+  if (!cachedPdfJsLibraryPromise) {
+    cachedPdfJsLibraryPromise = import(PDFJS_MODULE_DATA_URL);
+  }
+  return cachedPdfJsLibraryPromise;
+}
+
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.90';
+const PLUGIN_RUNTIME_VERSION = '1.3.91';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3179,7 +3191,7 @@ function selectPrimaryDouyinDomMediaUrls(candidates = [], targetAwemeId = '') {
           .map((value) => String(value || '').trim())
           .filter(Boolean),
       ));
-      if (!urls.length || (targetId && identityIds.some((identityId) => identityId !== targetId))) {
+      if (!urls.length) {
         return null;
       }
       return {
@@ -3214,7 +3226,9 @@ function selectIdentityBoundDouyinBrowserMedia({
   primaryDomMediaUrls = [],
 } = {}) {
   const targetId = String(targetAwemeId || '').trim();
-  if (!targetId) return [];
+
+  const finalRouteId = extractDouyinAwemeId(finalUrl);
+  if (targetId && finalRouteId && finalRouteId !== targetId) return [];
 
   // Debugger response bodies are parsed together with the requested aweme id,
   // so these candidates are already bound to the target work.
@@ -3224,29 +3238,7 @@ function selectIdentityBoundDouyinBrowserMedia({
   // A loaded route that explicitly points at another work is hard mismatch
   // evidence. Generic/mixed page metadata is not: Douyin commonly preloads
   // recommendation identities around the requested player.
-  const loadedIds = [finalUrl, canonicalUrl]
-    .map((value) => extractDouyinAwemeId(value))
-    .filter(Boolean);
-  if (loadedIds.some((loadedId) => loadedId !== targetId)) return [];
-
   const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
-  const exactDomCandidates = candidates.filter((candidate) => {
-    const identityIds = Array.from(new Set(
-      (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : [])
-        .map((value) => String(value || '').trim())
-        .filter(Boolean),
-    ));
-    return identityIds.includes(targetId)
-      && !identityIds.some((identityId) => identityId !== targetId);
-  });
-
-  // Douyin may replace /video/:id with its generic root after the target
-  // player has loaded. A DOM player carrying the exact aweme id is stronger
-  // evidence than that stripped route and remains safe to use.
-  if (exactDomCandidates.length) {
-    return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
-  }
-
   if (candidates.length) {
     return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
   }
@@ -3268,6 +3260,15 @@ function normalizeDouyinTargetUrl(originalUrl, resolvedUrl = '') {
     return { awemeId: '', url: candidate };
   }
   return { awemeId: '', url: '' };
+}
+
+function buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl = '') {
+  const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
+  return {
+    awemeId: target.awemeId,
+    url: target.url,
+    strictDouyinTarget: Boolean(target.awemeId),
+  };
 }
 
 function getDouyinAwemeDetailUrls(awemeId) {
@@ -13015,6 +13016,7 @@ function getRecordConversionWarning(record) {
     }
   }
   const diagnosticNotice = diagnosticParts.join('；');
+  const pdfExtractionWarning = String(metadata.pdfExtractionWarning || '').trim();
   if (imageFailureCount > 0) {
     const details = [];
     if (imageTempUrlMissingCount > 0) {
@@ -13023,12 +13025,12 @@ function getRecordConversionWarning(record) {
     const localizationError = String(metadata.imageLocalizationError || '').trim();
     if (localizationError) details.push(localizationError);
     const imageWarning = `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join('；')}` : ''}`;
-    return [imageWarning, diagnosticNotice, aiMetadataWarning].filter(Boolean).join('；');
+    return [imageWarning, diagnosticNotice, pdfExtractionWarning, aiMetadataWarning].filter(Boolean).join('；');
   }
   const status = metadata.conversionStatus || metadata.transcriptionStatus || '';
   const errorMsg = metadata.conversionError || metadata.transcriptionError || '';
   if (status === 'failed') {
-    return [errorMsg || '网页转写失败（未知原因）', diagnosticNotice, aiMetadataWarning].filter(Boolean).join('；');
+    return [errorMsg || '网页转写失败（未知原因）', diagnosticNotice, pdfExtractionWarning, aiMetadataWarning].filter(Boolean).join('；');
   }
   if (status === 'wechat_captcha') {
     return ['微信安全验证拦截', aiMetadataWarning].filter(Boolean).join('；');
@@ -13036,7 +13038,7 @@ function getRecordConversionWarning(record) {
   if (status === 'link_saved') {
     return [errorMsg || '网页抓取未成功', diagnosticNotice, aiMetadataWarning].filter(Boolean).join('；');
   }
-  return aiMetadataWarning;
+  return [pdfExtractionWarning, aiMetadataWarning].filter(Boolean).join('；');
 }
 
 const LocalComponentInstallConfirmModalBase = Modal || class {};
@@ -14862,6 +14864,60 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async renderPdfPageForLocalOcr(page, {
+    pageNumber = 0,
+  } = {}) {
+    const status = this.getLocalOcrInstallStatus();
+    if (!status || !status.ready) return '';
+    const browserDocument = globalThis && globalThis.document;
+    if (!browserDocument || typeof browserDocument.createElement !== 'function') {
+      throw new Error(`PDF 第 ${pageNumber || '?'} 页需要 OCR，但当前 Obsidian 环境无法渲染 PDF 页面。`);
+    }
+
+    const initialViewport = page.getViewport({ scale: 2 });
+    const maxDimension = Math.max(Number(initialViewport.width) || 0, Number(initialViewport.height) || 0);
+    const scale = maxDimension > 2400 ? (2 * 2400) / maxDimension : 2;
+    const viewport = page.getViewport({ scale });
+    const canvas = browserDocument.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(viewport.width));
+    canvas.height = Math.max(1, Math.ceil(viewport.height));
+    const canvasContext = canvas.getContext('2d', { alpha: false });
+    if (!canvasContext) {
+      throw new Error(`PDF 第 ${pageNumber || '?'} 页需要 OCR，但无法创建图片渲染画布。`);
+    }
+
+    let imagePath = '';
+    try {
+      await page.render({
+        canvasContext,
+        viewport,
+        intent: 'print',
+        background: 'rgb(255,255,255)',
+      }).promise;
+      const dataUrl = canvas.toDataURL('image/png');
+      const separatorIndex = dataUrl.indexOf(',');
+      if (separatorIndex < 0) throw new Error('PDF 页面图片编码失败');
+      imagePath = path.join(
+        os.tmpdir(),
+        `wechat-inbox-pdf-page-${pageNumber || 'unknown'}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.png`,
+      );
+      fs.writeFileSync(imagePath, Buffer.from(dataUrl.slice(separatorIndex + 1), 'base64'));
+      return await this.runLocalImageOcr(imagePath);
+    } catch (error) {
+      throw new Error(`PDF 第 ${pageNumber || '?'} 页 OCR 失败：${error.message || error}`);
+    } finally {
+      canvas.width = 1;
+      canvas.height = 1;
+      if (imagePath) {
+        try {
+          fs.rmSync(imagePath, { force: true });
+        } catch (error) {
+          // Best-effort cleanup only.
+        }
+      }
+    }
+  }
+
   async getAvailableLocalAsrInstallerPath(options = {}) {
     const installerPath = this.getBundledLocalAsrInstallerPath();
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
@@ -15743,46 +15799,34 @@ class WechatObsidianInboxPlugin extends Plugin {
   async refreshDouyinMediaUrls(sourceUrl) {
     const originalUrl = String(sourceUrl || '').trim();
     if (!isDouyinUrl(originalUrl)) return [];
+    let resolvedUrl = originalUrl;
     const directTarget = normalizeDouyinTargetUrl(originalUrl, originalUrl);
-    if (directTarget.awemeId) {
-      const candidates = [];
+    if (!directTarget.awemeId) {
       try {
-        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(directTarget.url, directTarget.awemeId));
+        resolvedUrl = await resolveRedirectUrl(originalUrl, 5, 'GET');
+      } catch (error) {
+        resolvedUrl = originalUrl;
+      }
+    }
+    const browserRequest = buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl);
+    const candidates = [];
+    if (browserRequest.awemeId) {
+      try {
+        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(
+          browserRequest.url,
+          browserRequest.awemeId,
+        ));
       } catch (error) {}
-      if (candidates.length) return sortMediaUrlsForTranscription(candidates);
+    }
+    if (!candidates.length && browserRequest.url) {
       try {
-        candidates.push(...await this.renderSocialMediaUrls(directTarget.url, {
+        candidates.push(...await this.renderSocialMediaUrls(browserRequest.url, {
           timeoutMs: 18000,
-          strictDouyinTarget: true,
+          strictDouyinTarget: browserRequest.strictDouyinTarget,
         }));
       } catch (error) {}
-      return sortMediaUrlsForTranscription(candidates);
     }
-    let resolvedUrl = originalUrl;
-    try {
-      resolvedUrl = await resolveRedirectUrl(originalUrl, 5, 'GET');
-    } catch (error) {
-      resolvedUrl = originalUrl;
-    }
-    const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
-    const candidates = [];
-    if (target.awemeId) {
-      try {
-        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(target.url, target.awemeId));
-      } catch (error) {}
-      if (!candidates.length) {
-        try {
-          candidates.push(...await this.renderSocialMediaUrls(target.url, {
-            timeoutMs: 18000,
-            strictDouyinTarget: true,
-          }));
-        } catch (error) {}
-      }
-      return sortMediaUrlsForTranscription(candidates);
-    }
-    // Without a stable aweme id, a Douyin page can expose only recommendation
-    // videos. Fail closed instead of silently transcribing a different work.
-    return [];
+    return sortMediaUrlsForTranscription(candidates);
   }
 
   async renderSocialMediaUrls(url, options = {}) {
@@ -16634,8 +16678,16 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'pdf') {
           this.showSyncProgress({ ...progress, stage: 'processing', title: fileName });
-          nextMetadata.convertedMarkdown = extractPdfMarkdown(nodeBuffer);
-          nextMetadata.conversionProvider = 'pdf-text-layer';
+          const pdfResult = await extractPdfMarkdownWithFallback(nodeBuffer, {
+            loadPdfJs: loadPdfJsLibrary,
+            ocrPage: this.getLocalOcrInstallStatus().ready
+              ? (page, context) => this.renderPdfPageForLocalOcr(page, context)
+              : null,
+          });
+          nextMetadata.convertedMarkdown = pdfResult.markdown;
+          nextMetadata.conversionProvider = pdfResult.provider;
+          nextMetadata.pdfExtractionDiagnostic = pdfResult.diagnostic || null;
+          nextMetadata.pdfExtractionWarning = pdfResult.warning || '';
           nextMetadata.conversionStatus = 'success';
         } else if (fileExt === 'doc') {
           nextMetadata.conversionStatus = 'attachment_saved';
@@ -18169,16 +18221,15 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
           }
           if (!hasPreciseDouyinMedia
-            && douyinAwemeId
             && typeof this.renderSocialMediaUrls === 'function') {
             const browserStage = { stage: 'targeted-browser', attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
-              // The renderer returns only debugger responses whose aweme id is the
-              // target when strictDouyinTarget is set. This is the safe final
-              // fallback after Douyin's server-rendered share page omits media.
-              const browserUrls = await this.renderSocialMediaUrls(resolvedUrl, {
+              // Prefer a known target id, but preserve the 1.3.30 behavior when
+              // Douyin exposes only a playable current-page media element.
+              const browserRequest = buildDouyinBrowserFallbackRequest(url, resolvedUrl);
+              const browserUrls = await this.renderSocialMediaUrls(browserRequest.url || resolvedUrl, {
                 signal,
-                strictDouyinTarget: true,
+                strictDouyinTarget: browserRequest.strictDouyinTarget,
               });
               browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
               if (browserStage.mediaCount) {
@@ -18187,7 +18238,9 @@ class WechatObsidianInboxPlugin extends Plugin {
                 hasPreciseDouyinMedia = true;
                 douyinSelectedStage = douyinSelectedStage || browserStage.stage;
                 browserStage.ok = true;
-                browserStage.identityOutcome = 'target-bound-or-page-unique';
+                browserStage.identityOutcome = browserRequest.strictDouyinTarget
+                  ? 'target-preferred-primary-player'
+                  : 'primary-player-fallback';
               }
             } catch (browserError) {
               if (isAbortError(browserError)) throw browserError;
@@ -18949,10 +19002,21 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || 'pending';
-      throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      const transcriptionError = createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      if (metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === 'object') {
+        transcriptionError.diagnostic = metadata.mediaResolutionDiagnostic;
+      }
+      throw transcriptionError;
     }
     const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
-    if (lifecycleOutcomeError) throw lifecycleOutcomeError;
+    if (lifecycleOutcomeError) {
+      const mediaResolutionDiagnostic = recordForMarkdown.metadata
+        && recordForMarkdown.metadata.mediaResolutionDiagnostic;
+      if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object') {
+        lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
+      }
+      throw lifecycleOutcomeError;
+    }
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
@@ -20225,6 +20289,7 @@ WechatObsidianInboxPlugin.__test = {
   selectPrimaryDouyinDomMediaUrls,
   selectIdentityBoundDouyinBrowserMedia,
   normalizeDouyinTargetUrl,
+  buildDouyinBrowserFallbackRequest,
   getDouyinMobileSharePageUrls,
   extractDouyinMediaUrlsFromShareHtml,
   extractDouyinMediaUrlsFromDetailPayload,

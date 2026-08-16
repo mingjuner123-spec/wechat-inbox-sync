@@ -21,7 +21,8 @@ Module._load = function patchedLoad(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 
-const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/src/main.js');
+const pluginMainPath = process.env.PLUGIN_MAIN_PATH || '../obsidian-plugin/wechat-inbox-sync/src/main.js';
+const PluginClass = require(pluginMainPath);
 const helpers = PluginClass.__test;
 
 function runTargetBoundDomFallbackWithoutRouteIdentityTest() {
@@ -116,9 +117,19 @@ function runUniquePageIdentityFallbackTest() {
   );
 }
 
-function runExplicitTargetMismatchStillRejectedTest() {
+function runOnlyExplicitFinalRouteMismatchIsRejectedTest() {
   const targetAwemeId = '7644566503081119019';
   const targetMediaUrl = 'https://v11-weba.douyinvod.com/target-video/?mime_type=video_mp4';
+
+  assert.deepStrictEqual(
+    helpers.selectIdentityBoundDouyinBrowserMedia({
+      targetAwemeId,
+      finalUrl: 'https://www.douyin.com/video/9999999999999999999',
+      debuggerMediaUrls: [targetMediaUrl],
+    }),
+    [],
+    'an explicit final route mismatch must win over stale debugger media from the previous page',
+  );
 
   assert.deepStrictEqual(
     helpers.selectIdentityBoundDouyinBrowserMedia({
@@ -151,12 +162,106 @@ function runExplicitTargetMismatchStillRejectedTest() {
         area: 900000,
       }],
     }),
-    [],
-    'a player explicitly bound to another work must still be rejected',
+    [targetMediaUrl],
+    'candidate identity metadata must not block the visible playing media on the opened page',
+  );
+
+  assert.deepStrictEqual(
+    helpers.selectIdentityBoundDouyinBrowserMedia({
+      targetAwemeId,
+      finalUrl: 'https://www.douyin.com/',
+      canonicalUrl: 'https://www.douyin.com/video/9999999999999999999',
+      domMediaCandidates: [{
+        urls: [targetMediaUrl],
+        identityIds: [],
+        isPlaying: true,
+        visible: true,
+        intersectsViewport: true,
+        area: 900000,
+      }],
+    }),
+    [targetMediaUrl],
+    'canonical metadata from a preloaded work must not override the current playable page',
   );
 }
 
+function runNoStableAwemeIdStillUsesPrimaryPlayerTest() {
+  const mediaUrl = 'https://v11-weba.douyinvod.com/no-stable-id/?mime_type=video_mp4';
+
+  assert.deepStrictEqual(
+    helpers.selectIdentityBoundDouyinBrowserMedia({
+      targetAwemeId: '',
+      finalUrl: 'https://www.douyin.com/',
+      domMediaCandidates: [{
+        urls: [mediaUrl],
+        identityIds: [],
+        isPlaying: true,
+        visible: true,
+        intersectsViewport: true,
+        area: 900000,
+      }],
+    }),
+    [mediaUrl],
+    'missing aweme id must not fail closed when the current page has a playable primary video',
+  );
+}
+
+function runBrowserFallbackRequestKeepsNonStrictCurrentPageTest() {
+  assert.deepStrictEqual(
+    helpers.buildDouyinBrowserFallbackRequest(
+      'https://v.douyin.com/example/',
+      'https://www.douyin.com/',
+    ),
+    {
+      awemeId: '',
+      url: 'https://www.douyin.com/',
+      strictDouyinTarget: false,
+    },
+    'a current Douyin page without an id must still enter non-strict browser fallback',
+  );
+
+  assert.deepStrictEqual(
+    helpers.buildDouyinBrowserFallbackRequest(
+      'https://v.douyin.com/example/',
+      'https://www.douyin.com/video/7644566503081119019',
+    ),
+    {
+      awemeId: '7644566503081119019',
+      url: 'https://www.douyin.com/video/7644566503081119019',
+      strictDouyinTarget: true,
+    },
+    'a resolved target id should keep the precise browser path as the preferred request',
+  );
+}
+
+function runTargetPlayerInsideMixedIdentityContainerTest() {
+  const targetAwemeId = '7644566503081119019';
+  const targetMediaUrl = 'https://v11-weba.douyinvod.com/target-inside-feed/?mime_type=video_mp4';
+
+  assert.deepStrictEqual(
+    helpers.selectIdentityBoundDouyinBrowserMedia({
+      targetAwemeId,
+      finalUrl: `https://www.douyin.com/video/${targetAwemeId}`,
+      canonicalUrl: `https://www.douyin.com/video/${targetAwemeId}`,
+      domMediaCandidates: [{
+        index: 0,
+        urls: [targetMediaUrl],
+        identityIds: [targetAwemeId, '9999999999999999999'],
+        isPlaying: true,
+        visible: true,
+        intersectsViewport: true,
+        area: 900000,
+      }],
+    }),
+    [targetMediaUrl],
+    'the visible playing target media must survive recommendation ids inherited from a shared feed container',
+  );
+}
+
+runBrowserFallbackRequestKeepsNonStrictCurrentPageTest();
 runTargetBoundDomFallbackWithoutRouteIdentityTest();
 runUniquePageIdentityFallbackTest();
-runExplicitTargetMismatchStillRejectedTest();
+runOnlyExplicitFinalRouteMismatchIsRejectedTest();
+runTargetPlayerInsideMixedIdentityContainerTest();
+runNoStableAwemeIdStillUsesPrimaryPlayerTest();
 console.log('plugin-douyin-media.test.js passed');

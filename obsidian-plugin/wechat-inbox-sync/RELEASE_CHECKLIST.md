@@ -18,7 +18,7 @@
 - [ ] 正式仓库固定为 `mingjuner123-spec/wechat-inbox-sync`，插件发布源固定为 `obsidian-plugin/wechat-inbox-sync/`。
 - [ ] 只允许从干净发布工作区执行发布，且 `HEAD` 必须逐字节等于当前 `origin/main`。
 - [ ] 根目录和插件目录的 `manifest.json`、`versions.json` 必须一致，目标版本不得与远端标签、Release、本机已安装或已打包候选版本重名。
-- [ ] 当前发布目标使用动态版本号（本次为 `1.3.90`）；禁止复用、覆盖或重建已有 tag/Release。
+- [ ] 当前发布目标使用动态版本号（本次为 `1.3.91`）；禁止复用、覆盖或重建已有 tag/Release。
 - [ ] 在确认合并后的 `main` 和发布工作区完全一致后，先创建本地 annotated tag（暂不推送），再依次运行：
   - `node scripts/release-source-guard.js --tag <version>`
   - `node scripts/check-plugin-release-identity.js --prepublish --tag <version>`
@@ -53,6 +53,7 @@
 ## 回归与安全
 
 - [ ] 运行插件核心、市场包、发布治理、发布身份、语法和 CDN 校验。
+- [ ] 第三方平台提取不得仅因“可能误抓推荐内容”新增失败关闭。新增阻断必须附真实事故、脱敏复现样本、历史可用对照和用户影响；身份不完整、候选较多或诊断标签只能用于排序、诊断或备用路径。
 - [ ] Windows 与 macOS 分别验证安装、检测、失败恢复和已有用户升级路径。
 - [ ] 验证设置、绑定、同步、文件上传、网页提取和音视频转写。
 - [ ] 确认仓库与发布资产不包含测试密钥、个人 token、缓存、备份或临时文件。

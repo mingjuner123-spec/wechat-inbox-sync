@@ -7,6 +7,38 @@ const esbuild = require('esbuild');
 const PLUGIN_ROOT = __dirname;
 const SOURCE_PATH = path.join(PLUGIN_ROOT, 'src', 'main.js');
 const OUTPUT_PATH = path.join(PLUGIN_ROOT, 'main.js');
+const PDFJS_PACKAGE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'pdfjs-dist', 'package.json');
+const PDFJS_LICENSE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'pdfjs-dist', 'LICENSE');
+const PDFJS_MODULE_PATH = path.join(
+  PLUGIN_ROOT,
+  'node_modules',
+  'pdfjs-dist',
+  'legacy',
+  'build',
+  'pdf.mjs',
+);
+
+function getPdfJsLicenseBanner() {
+  const packageMetadata = JSON.parse(fs.readFileSync(PDFJS_PACKAGE_PATH, 'utf8'));
+  const licenseText = fs.readFileSync(PDFJS_LICENSE_PATH, 'utf8').trim();
+  return [
+    '/*!',
+    ` * Bundled dependency: pdfjs-dist ${packageMetadata.version}`,
+    ` * License: ${packageMetadata.license}`,
+    ' *',
+    ...licenseText.split(/\r?\n/).map((line) => (line ? ` * ${line}` : ' *')),
+    ' */',
+  ].join('\n');
+}
+
+function getPdfJsDataUrl() {
+  const pdfJsSource = fs.readFileSync(PDFJS_MODULE_PATH, 'utf8');
+  const browserRuntimeSource = [
+    'const process = undefined;',
+    pdfJsSource,
+  ].join('\n');
+  return `data:text/javascript;base64,${Buffer.from(browserRuntimeSource, 'utf8').toString('base64')}`;
+}
 
 function hasSourceModules(sourcePath = SOURCE_PATH) {
   const sourceDirectory = path.dirname(sourcePath);
@@ -69,8 +101,14 @@ function getPluginBuildBytes({
 
   const result = esbuild.buildSync({
     absWorkingDir: PLUGIN_ROOT,
+    banner: {
+      js: getPdfJsLicenseBanner(),
+    },
     bundle: true,
     charset: 'utf8',
+    define: {
+      __WECHAT_INBOX_PDFJS_DATA_URL__: JSON.stringify(getPdfJsDataUrl()),
+    },
     entryPoints: [sourcePath],
     external: ['obsidian'],
     format: 'cjs',
