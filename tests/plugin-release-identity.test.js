@@ -753,6 +753,8 @@ test('production CLI exposes only fixed prepublish/postpublish modes and no comm
   assert.match(cli, /collectLocalInputs\(tag,\s*\{\s*requireLocalAnnotatedTag:\s*false\s*\}\)/);
   assert.match(cli, /verifyPublishedAssetBytes\(lastRelease,\s*tag,\s*finalCommit\)/);
   assert.match(cli, /\['show',\s*`\$\{trustedCommit\}:/);
+  assert.match(cli, /const MAX_TRUSTED_GIT_SHOW_BYTES = 16 \* 1024 \* 1024/);
+  assert.match(cli, /maxBuffer:\s*MAX_TRUSTED_GIT_SHOW_BYTES/);
   assert.match(cli, /verifyPublishedAssetBytes[\s\S]*probeStableRemoteTag\(tag,\s*4,/);
 });
 

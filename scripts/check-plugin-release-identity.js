@@ -41,6 +41,9 @@ const REPOSITORY = 'wechat-inbox-sync';
 const API_ORIGIN = 'https://api.github.com';
 const GITHUB_API_TIMEOUT_MS = 20000;
 const GIT_TIMEOUT_MS = 30000;
+// PDF.js makes the bundled plugin exceed Node's default 1 MiB exec buffer.
+// Keep trusted git reads bounded while allowing a legitimate release asset.
+const MAX_TRUSTED_GIT_SHOW_BYTES = 16 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const ALLOWED_DOWNLOAD_HOSTS = new Set([
   'github.com',
@@ -357,6 +360,7 @@ function gitShowBytes(trustedCommit, relativePath) {
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: GIT_TIMEOUT_MS,
+        maxBuffer: MAX_TRUSTED_GIT_SHOW_BYTES,
       },
     );
   } catch (error) {
@@ -468,6 +472,7 @@ function verifyPromotionReceiptAtCommit(tag, trustedCommit) {
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: GIT_TIMEOUT_MS,
+        maxBuffer: MAX_TRUSTED_GIT_SHOW_BYTES,
       },
     );
   } catch (error) {
