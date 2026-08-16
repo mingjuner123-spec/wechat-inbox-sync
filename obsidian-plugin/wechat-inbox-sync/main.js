@@ -6651,7 +6651,7 @@ function selectPrimaryDouyinDomMediaUrls(candidates = [], targetAwemeId = "") {
     const identityIds = Array.from(new Set(
       (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
     ));
-    if (!urls.length || targetId && identityIds.some((identityId) => identityId !== targetId)) {
+    if (!urls.length) {
       return null;
     }
     return {
@@ -6676,21 +6676,11 @@ function selectIdentityBoundDouyinBrowserMedia({
   primaryDomMediaUrls = []
 } = {}) {
   const targetId = String(targetAwemeId || "").trim();
-  if (!targetId) return [];
+  const finalRouteId = extractDouyinAwemeId(finalUrl);
+  if (targetId && finalRouteId && finalRouteId !== targetId) return [];
   const exactPayloadMedia = normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
   if (exactPayloadMedia.length) return exactPayloadMedia;
-  const loadedIds = [finalUrl, canonicalUrl].map((value) => extractDouyinAwemeId(value)).filter(Boolean);
-  if (loadedIds.some((loadedId) => loadedId !== targetId)) return [];
   const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
-  const exactDomCandidates = candidates.filter((candidate) => {
-    const identityIds = Array.from(new Set(
-      (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
-    ));
-    return identityIds.includes(targetId) && !identityIds.some((identityId) => identityId !== targetId);
-  });
-  if (exactDomCandidates.length) {
-    return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
-  }
   if (candidates.length) {
     return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
   }
@@ -6714,6 +6704,15 @@ function normalizeDouyinTargetUrl(originalUrl, resolvedUrl = "") {
   return { awemeId: "", url: "" };
 }
 __name(normalizeDouyinTargetUrl, "normalizeDouyinTargetUrl");
+function buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl = "") {
+  const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
+  return {
+    awemeId: target.awemeId,
+    url: target.url,
+    strictDouyinTarget: Boolean(target.awemeId)
+  };
+}
+__name(buildDouyinBrowserFallbackRequest, "buildDouyinBrowserFallbackRequest");
 function getDouyinAwemeDetailUrls(awemeId) {
   const id = String(awemeId || "").trim();
   if (!id) return [];
@@ -17936,48 +17935,36 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async refreshDouyinMediaUrls(sourceUrl) {
     const originalUrl = String(sourceUrl || "").trim();
     if (!isDouyinUrl(originalUrl)) return [];
+    let resolvedUrl = originalUrl;
     const directTarget = normalizeDouyinTargetUrl(originalUrl, originalUrl);
-    if (directTarget.awemeId) {
-      const candidates2 = [];
+    if (!directTarget.awemeId) {
       try {
-        candidates2.push(...await this.fetchDouyinMediaUrlsWithSession(directTarget.url, directTarget.awemeId));
+        resolvedUrl = await resolveRedirectUrl(originalUrl, 5, "GET");
+      } catch (error) {
+        resolvedUrl = originalUrl;
+      }
+    }
+    const browserRequest = buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl);
+    const candidates = [];
+    if (browserRequest.awemeId) {
+      try {
+        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(
+          browserRequest.url,
+          browserRequest.awemeId
+        ));
       } catch (error) {
       }
-      if (candidates2.length) return sortMediaUrlsForTranscription(candidates2);
+    }
+    if (!candidates.length && browserRequest.url) {
       try {
-        candidates2.push(...await this.renderSocialMediaUrls(directTarget.url, {
+        candidates.push(...await this.renderSocialMediaUrls(browserRequest.url, {
           timeoutMs: 18e3,
-          strictDouyinTarget: true
+          strictDouyinTarget: browserRequest.strictDouyinTarget
         }));
       } catch (error) {
       }
-      return sortMediaUrlsForTranscription(candidates2);
     }
-    let resolvedUrl = originalUrl;
-    try {
-      resolvedUrl = await resolveRedirectUrl(originalUrl, 5, "GET");
-    } catch (error) {
-      resolvedUrl = originalUrl;
-    }
-    const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
-    const candidates = [];
-    if (target.awemeId) {
-      try {
-        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(target.url, target.awemeId));
-      } catch (error) {
-      }
-      if (!candidates.length) {
-        try {
-          candidates.push(...await this.renderSocialMediaUrls(target.url, {
-            timeoutMs: 18e3,
-            strictDouyinTarget: true
-          }));
-        } catch (error) {
-        }
-      }
-      return sortMediaUrlsForTranscription(candidates);
-    }
-    return [];
+    return sortMediaUrlsForTranscription(candidates);
   }
   async renderSocialMediaUrls(url, options = {}) {
     if (Object.prototype.hasOwnProperty.call(this, "renderSocialMediaUrl") && !Object.prototype.hasOwnProperty.call(this, "renderSocialMediaUrls")) {
@@ -20086,12 +20073,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               douyinResolutionStages.push(sessionStage);
             }
           }
-          if (!hasPreciseDouyinMedia && douyinAwemeId && typeof this.renderSocialMediaUrls === "function") {
+          if (!hasPreciseDouyinMedia && typeof this.renderSocialMediaUrls === "function") {
             const browserStage = { stage: "targeted-browser", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
-              const browserUrls = await this.renderSocialMediaUrls(resolvedUrl, {
+              const browserRequest = buildDouyinBrowserFallbackRequest(url, resolvedUrl);
+              const browserUrls = await this.renderSocialMediaUrls(browserRequest.url || resolvedUrl, {
                 signal,
-                strictDouyinTarget: true
+                strictDouyinTarget: browserRequest.strictDouyinTarget
               });
               browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
               if (browserStage.mediaCount) {
@@ -20100,7 +20088,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 hasPreciseDouyinMedia = true;
                 douyinSelectedStage = douyinSelectedStage || browserStage.stage;
                 browserStage.ok = true;
-                browserStage.identityOutcome = "target-bound-or-page-unique";
+                browserStage.identityOutcome = browserRequest.strictDouyinTarget ? "target-preferred-primary-player" : "primary-player-fallback";
               }
             } catch (browserError) {
               if (isAbortError(browserError)) throw browserError;
@@ -20761,10 +20749,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || "pending";
-      throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      const transcriptionError = createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      if (metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === "object") {
+        transcriptionError.diagnostic = metadata.mediaResolutionDiagnostic;
+      }
+      throw transcriptionError;
     }
     const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
-    if (lifecycleOutcomeError) throw lifecycleOutcomeError;
+    if (lifecycleOutcomeError) {
+      const mediaResolutionDiagnostic = recordForMarkdown.metadata && recordForMarkdown.metadata.mediaResolutionDiagnostic;
+      if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object") {
+        lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
+      }
+      throw lifecycleOutcomeError;
+    }
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
@@ -21794,6 +21792,7 @@ WechatObsidianInboxPlugin.__test = {
   selectPrimaryDouyinDomMediaUrls,
   selectIdentityBoundDouyinBrowserMedia,
   normalizeDouyinTargetUrl,
+  buildDouyinBrowserFallbackRequest,
   getDouyinMobileSharePageUrls,
   extractDouyinMediaUrlsFromShareHtml,
   extractDouyinMediaUrlsFromDetailPayload,

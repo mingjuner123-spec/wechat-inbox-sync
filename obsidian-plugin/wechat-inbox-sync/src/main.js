@@ -3189,7 +3189,7 @@ function selectPrimaryDouyinDomMediaUrls(candidates = [], targetAwemeId = '') {
           .map((value) => String(value || '').trim())
           .filter(Boolean),
       ));
-      if (!urls.length || (targetId && identityIds.some((identityId) => identityId !== targetId))) {
+      if (!urls.length) {
         return null;
       }
       return {
@@ -3224,7 +3224,9 @@ function selectIdentityBoundDouyinBrowserMedia({
   primaryDomMediaUrls = [],
 } = {}) {
   const targetId = String(targetAwemeId || '').trim();
-  if (!targetId) return [];
+
+  const finalRouteId = extractDouyinAwemeId(finalUrl);
+  if (targetId && finalRouteId && finalRouteId !== targetId) return [];
 
   // Debugger response bodies are parsed together with the requested aweme id,
   // so these candidates are already bound to the target work.
@@ -3234,29 +3236,7 @@ function selectIdentityBoundDouyinBrowserMedia({
   // A loaded route that explicitly points at another work is hard mismatch
   // evidence. Generic/mixed page metadata is not: Douyin commonly preloads
   // recommendation identities around the requested player.
-  const loadedIds = [finalUrl, canonicalUrl]
-    .map((value) => extractDouyinAwemeId(value))
-    .filter(Boolean);
-  if (loadedIds.some((loadedId) => loadedId !== targetId)) return [];
-
   const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
-  const exactDomCandidates = candidates.filter((candidate) => {
-    const identityIds = Array.from(new Set(
-      (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : [])
-        .map((value) => String(value || '').trim())
-        .filter(Boolean),
-    ));
-    return identityIds.includes(targetId)
-      && !identityIds.some((identityId) => identityId !== targetId);
-  });
-
-  // Douyin may replace /video/:id with its generic root after the target
-  // player has loaded. A DOM player carrying the exact aweme id is stronger
-  // evidence than that stripped route and remains safe to use.
-  if (exactDomCandidates.length) {
-    return selectPrimaryDouyinDomMediaUrls(exactDomCandidates, targetId);
-  }
-
   if (candidates.length) {
     return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
   }
@@ -3278,6 +3258,15 @@ function normalizeDouyinTargetUrl(originalUrl, resolvedUrl = '') {
     return { awemeId: '', url: candidate };
   }
   return { awemeId: '', url: '' };
+}
+
+function buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl = '') {
+  const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
+  return {
+    awemeId: target.awemeId,
+    url: target.url,
+    strictDouyinTarget: Boolean(target.awemeId),
+  };
 }
 
 function getDouyinAwemeDetailUrls(awemeId) {
@@ -15808,46 +15797,34 @@ class WechatObsidianInboxPlugin extends Plugin {
   async refreshDouyinMediaUrls(sourceUrl) {
     const originalUrl = String(sourceUrl || '').trim();
     if (!isDouyinUrl(originalUrl)) return [];
+    let resolvedUrl = originalUrl;
     const directTarget = normalizeDouyinTargetUrl(originalUrl, originalUrl);
-    if (directTarget.awemeId) {
-      const candidates = [];
+    if (!directTarget.awemeId) {
       try {
-        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(directTarget.url, directTarget.awemeId));
+        resolvedUrl = await resolveRedirectUrl(originalUrl, 5, 'GET');
+      } catch (error) {
+        resolvedUrl = originalUrl;
+      }
+    }
+    const browserRequest = buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl);
+    const candidates = [];
+    if (browserRequest.awemeId) {
+      try {
+        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(
+          browserRequest.url,
+          browserRequest.awemeId,
+        ));
       } catch (error) {}
-      if (candidates.length) return sortMediaUrlsForTranscription(candidates);
+    }
+    if (!candidates.length && browserRequest.url) {
       try {
-        candidates.push(...await this.renderSocialMediaUrls(directTarget.url, {
+        candidates.push(...await this.renderSocialMediaUrls(browserRequest.url, {
           timeoutMs: 18000,
-          strictDouyinTarget: true,
+          strictDouyinTarget: browserRequest.strictDouyinTarget,
         }));
       } catch (error) {}
-      return sortMediaUrlsForTranscription(candidates);
     }
-    let resolvedUrl = originalUrl;
-    try {
-      resolvedUrl = await resolveRedirectUrl(originalUrl, 5, 'GET');
-    } catch (error) {
-      resolvedUrl = originalUrl;
-    }
-    const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
-    const candidates = [];
-    if (target.awemeId) {
-      try {
-        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(target.url, target.awemeId));
-      } catch (error) {}
-      if (!candidates.length) {
-        try {
-          candidates.push(...await this.renderSocialMediaUrls(target.url, {
-            timeoutMs: 18000,
-            strictDouyinTarget: true,
-          }));
-        } catch (error) {}
-      }
-      return sortMediaUrlsForTranscription(candidates);
-    }
-    // Without a stable aweme id, a Douyin page can expose only recommendation
-    // videos. Fail closed instead of silently transcribing a different work.
-    return [];
+    return sortMediaUrlsForTranscription(candidates);
   }
 
   async renderSocialMediaUrls(url, options = {}) {
@@ -18242,16 +18219,15 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
           }
           if (!hasPreciseDouyinMedia
-            && douyinAwemeId
             && typeof this.renderSocialMediaUrls === 'function') {
             const browserStage = { stage: 'targeted-browser', attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
-              // The renderer returns only debugger responses whose aweme id is the
-              // target when strictDouyinTarget is set. This is the safe final
-              // fallback after Douyin's server-rendered share page omits media.
-              const browserUrls = await this.renderSocialMediaUrls(resolvedUrl, {
+              // Prefer a known target id, but preserve the 1.3.30 behavior when
+              // Douyin exposes only a playable current-page media element.
+              const browserRequest = buildDouyinBrowserFallbackRequest(url, resolvedUrl);
+              const browserUrls = await this.renderSocialMediaUrls(browserRequest.url || resolvedUrl, {
                 signal,
-                strictDouyinTarget: true,
+                strictDouyinTarget: browserRequest.strictDouyinTarget,
               });
               browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
               if (browserStage.mediaCount) {
@@ -18260,7 +18236,9 @@ class WechatObsidianInboxPlugin extends Plugin {
                 hasPreciseDouyinMedia = true;
                 douyinSelectedStage = douyinSelectedStage || browserStage.stage;
                 browserStage.ok = true;
-                browserStage.identityOutcome = 'target-bound-or-page-unique';
+                browserStage.identityOutcome = browserRequest.strictDouyinTarget
+                  ? 'target-preferred-primary-player'
+                  : 'primary-player-fallback';
               }
             } catch (browserError) {
               if (isAbortError(browserError)) throw browserError;
@@ -19022,10 +19000,21 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || 'pending';
-      throw createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      const transcriptionError = createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      if (metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === 'object') {
+        transcriptionError.diagnostic = metadata.mediaResolutionDiagnostic;
+      }
+      throw transcriptionError;
     }
     const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
-    if (lifecycleOutcomeError) throw lifecycleOutcomeError;
+    if (lifecycleOutcomeError) {
+      const mediaResolutionDiagnostic = recordForMarkdown.metadata
+        && recordForMarkdown.metadata.mediaResolutionDiagnostic;
+      if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object') {
+        lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
+      }
+      throw lifecycleOutcomeError;
+    }
     recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
@@ -20298,6 +20287,7 @@ WechatObsidianInboxPlugin.__test = {
   selectPrimaryDouyinDomMediaUrls,
   selectIdentityBoundDouyinBrowserMedia,
   normalizeDouyinTargetUrl,
+  buildDouyinBrowserFallbackRequest,
   getDouyinMobileSharePageUrls,
   extractDouyinMediaUrlsFromShareHtml,
   extractDouyinMediaUrlsFromDetailPayload,

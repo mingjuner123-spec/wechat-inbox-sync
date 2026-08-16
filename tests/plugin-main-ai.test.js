@@ -6047,7 +6047,7 @@ assert.deepStrictEqual(
     canonicalUrl: 'https://www.douyin.com/video/9999999999999999999',
     primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/conflicting-canonical-video/?mime_type=video_mp4'],
   }),
-  [],
+  ['https://v11-weba.douyinvod.com/conflicting-canonical-video/?mime_type=video_mp4'],
 );
 assert.deepStrictEqual(
   helpers.selectIdentityBoundDouyinBrowserMedia({
