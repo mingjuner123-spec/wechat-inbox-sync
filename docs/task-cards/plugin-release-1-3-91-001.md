@@ -2,7 +2,7 @@
 
 - Task ID：`plugin-release-1-3-91-001`
 - 创建日期：2026-08-16
-- 状态：发布准备中
+- 状态：已发布并完成独立回读
 - 风险级别：L3（公开 GitHub 插件发布）
 - 分支：`codex/release-1.3.91-pdf-douyin`
 - 权威仓库：`mingjuner123-spec/wechat-inbox-sync`
@@ -32,3 +32,18 @@
 - PR 门禁通过并合并到远端 main 后，创建 annotated tag `1.3.91`。
 - Release 精确包含 `main.js`、`manifest.json`、`styles.css`、`versions.json` 和 `wechat-inbox-sync-1.3.91.zip`。
 - 发布后回读 tag、Release、五项资产和 raw manifest，执行 postpublish 身份校验。
+
+## 发布结果
+
+- PR：`#62`；两项必需检查 `guards`、`windows-deployer` 均通过后 squash 合并。
+- 远端 `main`：`555293d8c23d748884b479f07a7ddf6750e759be`。
+- annotated tag：对象 `b135c65bff60be13e965cbc78344921a2152a708`，peeled commit 与远端 `main` 一致。
+- Release：`https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.91`，非草稿、非预发布并标记 Latest。
+- 五项正式资产齐全；`main.js` 为 2,087,769 bytes，SHA-256 `93603090d9fac8cf0e1789f0aebafc8965d6306033f8026de895a49328ef1cd0`；ZIP 为 526,665 bytes，SHA-256 `f8930d538871e71968ba964038cfa664479e6d6da346db6a308c02ea36ffcee1`。
+- 线上 ZIP 结构与内嵌 `manifest.json` 回读通过，版本为 `1.3.91`；raw `main/manifest.json` 同为 `1.3.91`。
+- GitHub Release workflow 在五项资产创建完成后的最后 postpublish 回读显示失败：`main.js` 增至 1 MiB 以上后，检查器 `git show` 仍使用 Node 默认 `execFileSync` 缓冲区，触发检查器自身容量边界。Release、tag、main、资产字节数与哈希均已通过独立回读；未删除、覆盖或重建 Release。
+
+## 回退与外部影响
+
+- 不修改 CloudBase、绑定码、Pro、支付、用户配置或用户数据。
+- 既有 Release 保持不可变；如发现业务回归，只通过新版本修复，不移动或覆盖 `1.3.91` tag/Release。

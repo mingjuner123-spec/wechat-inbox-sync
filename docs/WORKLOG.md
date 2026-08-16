@@ -1,5 +1,14 @@
 # Worklog
 
+### 2026-08-16 - 发布 WeChat Inbox Sync 1.3.91（PDF 稳定提取 + 抖音去除推测性阻断）
+
+- 授权与范围：用户明确要求将 PDF 稳定性更新和抖音过度约束移除一起发布；未部署 CloudBase，未修改绑定码、Pro、支付或用户数据。
+- 合并与身份：PR `#62` 两项必需检查通过并 squash 合并；远端 `main` 为 `555293d8c23d748884b479f07a7ddf6750e759be`；annotated tag `1.3.91` peeled commit 与 `main` 一致。
+- Release：`https://github.com/mingjuner123-spec/wechat-inbox-sync/releases/tag/1.3.91` 已发布并标记 Latest；五项正式资产齐全。`main.js` SHA-256 为 `93603090d9fac8cf0e1789f0aebafc8965d6306033f8026de895a49328ef1cd0`，ZIP SHA-256 为 `f8930d538871e71968ba964038cfa664479e6d6da346db6a308c02ea36ffcee1`。
+- 验证：候选 `1.3.91-e1f2274ba677d87c` 聚合 SHA-256 与发布准备收据一致；发布治理、候选、架构、市场包、PDF、抖音和主插件回归通过；线上五项资产哈希、ZIP 结构、内嵌 manifest、raw main manifest 均回读通过。
+- 已知发布工具边界：Release workflow 在资产创建后最后一步因 `main.js` 超过 Node `execFileSync` 默认缓冲区而红灯，属于 postpublish 检查器容量误报，不是插件或资产失败；未重建或覆盖 Release。后续应单独修复检查器的大文件读取能力。
+- 回退：保持 `1.3.91` tag/Release 不可变；业务回归只通过后续新版本修复。
+
 ### 2026-08-16 - 移除抖音推荐流推测性阻断（本地候选，未发布）
 
 - 证据复核：没有发现用户提交作品 A 却被插件转写为推荐作品 B 的真实事故；“推荐流误抓”只存在于开发注释、合成测试和发布任务的预防性验收条款。真实用户故障是详情接口空壳、页面 ID 丢失、播放器缺少身份属性，以及失败关闭门槛拒绝已经可播放的媒体。
