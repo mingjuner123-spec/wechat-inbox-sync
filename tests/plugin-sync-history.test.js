@@ -56,6 +56,37 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
     conversionError: 'PDF text missing',
   },
 }).code, 'EXTRACTION_FAILED');
+const detailedPdfFailure = helpers.getSyncLifecycleOutcomeError({
+  type: 'file',
+  metadata: {
+    fileExt: 'pdf',
+    conversionStatus: 'attachment_saved',
+    conversionError: '扫描型 PDF 第 1 页没有文本层，且本地 OCR 未能识别。',
+    pdfExtractionErrorCode: 'PDF_SCAN_OCR_REQUIRED',
+    pdfExtractionDiagnostic: {
+      provider: 'pdfjs-text-layer+local-ocr',
+      pageCount: 2,
+      textPageNumbers: [2],
+      ocrPageNumbers: [],
+      missingPageNumbers: [1],
+    },
+  },
+});
+assert.strictEqual(detailedPdfFailure.code, 'EXTRACTION_FAILED');
+assert.strictEqual(
+  detailedPdfFailure.message,
+  '扫描型 PDF 第 1 页没有文本层，且本地 OCR 未能识别。',
+  'PDF failures must preserve the concrete parser/OCR reason',
+);
+assert.deepStrictEqual(detailedPdfFailure.diagnostic, {
+  kind: 'pdf-extraction',
+  errorCode: 'PDF_SCAN_OCR_REQUIRED',
+  provider: 'pdfjs-text-layer+local-ocr',
+  pageCount: 2,
+  textPageNumbers: [2],
+  ocrPageNumbers: [],
+  missingPageNumbers: [1],
+});
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
   metadata: {

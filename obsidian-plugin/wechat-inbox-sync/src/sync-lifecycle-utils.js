@@ -94,10 +94,40 @@ function getSyncLifecycleBindingFingerprint(value) {
   return crypto.createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 32);
 }
 
-function createSyncLifecycleOutcomeError(code, message) {
+function createSyncLifecycleOutcomeError(code, message, diagnostic = null) {
   const error = new Error(String(message || '同步处理失败'));
   error.code = String(code || 'SYNC_FAILED').trim().toUpperCase() || 'SYNC_FAILED';
+  if (diagnostic && typeof diagnostic === 'object') {
+    error.diagnostic = diagnostic;
+  }
   return error;
+}
+
+function buildPdfExtractionFailureDiagnostic(metadata = {}) {
+  const source = metadata.pdfExtractionDiagnostic && typeof metadata.pdfExtractionDiagnostic === 'object'
+    ? metadata.pdfExtractionDiagnostic
+    : {};
+  const diagnostic = {
+    kind: 'pdf-extraction',
+  };
+  const errorCode = String(metadata.pdfExtractionErrorCode || '').trim();
+  if (errorCode) diagnostic.errorCode = errorCode;
+  const provider = String(source.provider || '').trim();
+  if (provider) diagnostic.provider = provider;
+  ['pageCount'].forEach((key) => {
+    const value = Number(source[key]);
+    if (Number.isFinite(value) && value >= 0) diagnostic[key] = value;
+  });
+  ['textPageNumbers', 'ocrPageNumbers', 'missingPageNumbers'].forEach((key) => {
+    if (!Array.isArray(source[key])) return;
+    diagnostic[key] = source[key]
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0)
+      .slice(0, 200);
+  });
+  const fastPathError = String(source.fastPathError || '').trim();
+  if (fastPathError) diagnostic.fastPathError = fastPathError.slice(0, 500);
+  return diagnostic;
 }
 
 function getMeaningfulMarkdownLength(markdown) {
@@ -229,7 +259,11 @@ function getSyncLifecycleOutcomeError(record) {
   }
 
   if (fileExt === 'pdf' && conversionStatus === 'attachment_saved') {
-    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', 'PDF 内容提取失败');
+    return createSyncLifecycleOutcomeError(
+      'EXTRACTION_FAILED',
+      declaredError || 'PDF 内容提取失败',
+      buildPdfExtractionFailureDiagnostic(metadata),
+    );
   }
 
   if (transcriptionStatus === 'failed' && !transcription) {

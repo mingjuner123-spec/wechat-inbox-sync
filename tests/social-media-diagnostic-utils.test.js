@@ -27,6 +27,7 @@ function run() {
     finalOutcome: '',
     stages: [{
       stage: 'share-page',
+      inputKind: '',
       ok: false,
       attempted: true,
       mediaCount: 0,
@@ -47,6 +48,7 @@ function run() {
     finalOutcome: 'transcription-ready',
     stages: [{
       stage: 'targeted-browser',
+      inputKind: 'original-page',
       attempted: true,
       ok: true,
       mediaCount: 1,
@@ -83,6 +85,7 @@ function run() {
   });
   assert.strictEqual(traced.selectedStage, 'targeted-browser');
   assert.strictEqual(traced.finalOutcome, 'transcription-ready');
+  assert.strictEqual(traced.stages[0].inputKind, 'original-page');
   assert.strictEqual(traced.stages[0].identityOutcome, 'page-unique-single-player');
   assert.strictEqual(traced.stages[0].error.code, 'UNKNOWN');
   assert.strictEqual(traced.stages[0].error.status, 403);

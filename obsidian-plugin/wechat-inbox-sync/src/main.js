@@ -190,7 +190,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.91';
+const PLUGIN_RUNTIME_VERSION = '1.3.92';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3269,6 +3269,30 @@ function buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl = '') {
     url: target.url,
     strictDouyinTarget: Boolean(target.awemeId),
   };
+}
+
+function buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl = '') {
+  const original = String(originalUrl || '').trim();
+  const resolved = String(resolvedUrl || '').trim();
+  const target = normalizeDouyinTargetUrl(original, resolved);
+  const requests = [];
+  const seen = new Set();
+  const addCurrentPage = (value, inputKind) => {
+    const candidate = String(value || '').trim();
+    if (!/^https?:\/\//i.test(candidate) || !isDouyinUrl(candidate) || seen.has(candidate)) return;
+    seen.add(candidate);
+    requests.push({
+      awemeId: target.awemeId,
+      url: candidate,
+      strictDouyinTarget: false,
+      inputKind,
+    });
+  };
+
+  addCurrentPage(original, 'original-page');
+  addCurrentPage(resolved, 'resolved-page');
+  if (!requests.length) addCurrentPage(target.url, 'target-page');
+  return requests;
 }
 
 function getDouyinAwemeDetailUrls(awemeId) {
@@ -10621,6 +10645,12 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         };
         const collect = () => {
           document.querySelectorAll('video, audio, source').forEach((node) => {
+            try {
+              if (node.tagName && node.tagName.toLowerCase() === 'video' && typeof node.play === 'function') {
+                node.muted = true;
+                node.play().catch(() => {});
+              }
+            } catch (error) {}
             if (urls.length >= maxUrls) return;
             add(node.currentSrc, 'media');
             add(node.src, 'media');
@@ -15818,13 +15848,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         ));
       } catch (error) {}
     }
-    if (!candidates.length && browserRequest.url) {
-      try {
-        candidates.push(...await this.renderSocialMediaUrls(browserRequest.url, {
-          timeoutMs: 18000,
-          strictDouyinTarget: browserRequest.strictDouyinTarget,
-        }));
-      } catch (error) {}
+    if (!candidates.length) {
+      const browserRequests = buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl);
+      for (const fallbackRequest of browserRequests) {
+        if (candidates.length) break;
+        try {
+          candidates.push(...await this.renderSocialMediaUrls(fallbackRequest.url, {
+            timeoutMs: 18000,
+            strictDouyinTarget: fallbackRequest.strictDouyinTarget,
+          }));
+        } catch (error) {}
+      }
     }
     return sortMediaUrlsForTranscription(candidates);
   }
@@ -16698,6 +16732,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (error) {
         nextMetadata.conversionStatus = 'attachment_saved';
         nextMetadata.conversionError = error.message || String(error);
+        if (fileExt === 'pdf') {
+          nextMetadata.pdfExtractionErrorCode = String(error && error.code || '').trim();
+          nextMetadata.pdfExtractionDiagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
+            ? error.diagnostic
+            : null;
+        }
       }
 
       if (isAudioVideoAttachmentExt(fileExt)) {
@@ -18034,7 +18074,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         // XHS media must come from an identity-bound note payload or the dedicated
         // browser media probe. Scanning the whole landing page can select a
         // recommendation video and lets an oversized feed block the Obsidian thread.
-        let mediaUrls = isXiaohongshuUrl(url) || Boolean(douyinAwemeId)
+        let mediaUrls = isXiaohongshuUrl(url)
           ? []
           : extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
@@ -18222,34 +18262,41 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (!hasPreciseDouyinMedia
             && typeof this.renderSocialMediaUrls === 'function') {
-            const browserStage = { stage: 'targeted-browser', attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
-            try {
-              // Prefer a known target id, but preserve the 1.3.30 behavior when
-              // Douyin exposes only a playable current-page media element.
-              const browserRequest = buildDouyinBrowserFallbackRequest(url, resolvedUrl);
-              const browserUrls = await this.renderSocialMediaUrls(browserRequest.url || resolvedUrl, {
-                signal,
-                strictDouyinTarget: browserRequest.strictDouyinTarget,
-              });
-              browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
-              if (browserStage.mediaCount) {
-                mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
-                mediaUrl = mediaUrls[0] || mediaUrl;
-                hasPreciseDouyinMedia = true;
-                douyinSelectedStage = douyinSelectedStage || browserStage.stage;
-                browserStage.ok = true;
-                browserStage.identityOutcome = browserRequest.strictDouyinTarget
-                  ? 'target-preferred-primary-player'
-                  : 'primary-player-fallback';
+            const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl);
+            for (const browserRequest of browserRequests) {
+              if (hasPreciseDouyinMedia) break;
+              const browserStage = {
+                stage: 'targeted-browser',
+                attempted: true,
+                ok: false,
+                mediaCount: 0,
+                detailFound: false,
+                inputKind: browserRequest.inputKind,
+                startedAt: Date.now(),
+              };
+              try {
+                const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
+                  signal,
+                  strictDouyinTarget: browserRequest.strictDouyinTarget,
+                });
+                browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
+                if (browserStage.mediaCount) {
+                  mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
+                  mediaUrl = mediaUrls[0] || mediaUrl;
+                  hasPreciseDouyinMedia = true;
+                  douyinSelectedStage = douyinSelectedStage || `${browserStage.stage}:${browserRequest.inputKind}`;
+                  browserStage.ok = true;
+                  browserStage.identityOutcome = 'primary-player-fallback';
+                }
+              } catch (browserError) {
+                if (isAbortError(browserError)) throw browserError;
+                browserStage.error = browserError;
+              } finally {
+                if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? 'transport-error' : 'no-target-bound-media';
+                browserStage.durationMs = Date.now() - browserStage.startedAt;
+                delete browserStage.startedAt;
+                douyinResolutionStages.push(browserStage);
               }
-            } catch (browserError) {
-              if (isAbortError(browserError)) throw browserError;
-              browserStage.error = browserError;
-            } finally {
-              if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? 'transport-error' : 'no-target-bound-media';
-              browserStage.durationMs = Date.now() - browserStage.startedAt;
-              delete browserStage.startedAt;
-              douyinResolutionStages.push(browserStage);
             }
           }
         }
@@ -18557,9 +18604,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const socialMediaRenderOptions = isXiaohongshuUrl(url)
           ? { includeComments: false, signal }
           : { signal };
-        const allowGenericSocialMediaRender = !(douyinAwemeId && (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)));
         if (!hasPreciseDouyinMedia
-          && allowGenericSocialMediaRender
           && isVideoIntent
           && typeof this.renderSocialMediaUrls === 'function') {
           try {
@@ -18573,7 +18618,6 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = mediaUrl || '';
           }
         } else if (!hasPreciseDouyinMedia
-          && allowGenericSocialMediaRender
           && !mediaUrl
           && isVideoIntent
           && typeof this.renderSocialMediaUrl === 'function') {
@@ -20290,6 +20334,7 @@ WechatObsidianInboxPlugin.__test = {
   selectIdentityBoundDouyinBrowserMedia,
   normalizeDouyinTargetUrl,
   buildDouyinBrowserFallbackRequest,
+  buildDouyinBrowserFallbackRequests,
   getDouyinMobileSharePageUrls,
   extractDouyinMediaUrlsFromShareHtml,
   extractDouyinMediaUrlsFromDetailPayload,

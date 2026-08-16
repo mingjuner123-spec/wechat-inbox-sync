@@ -1669,12 +1669,37 @@ var require_sync_lifecycle_utils = __commonJS({
       return crypto2.createHash("sha256").update(token, "utf8").digest("hex").slice(0, 32);
     }
     __name(getSyncLifecycleBindingFingerprint2, "getSyncLifecycleBindingFingerprint");
-    function createSyncLifecycleOutcomeError(code, message) {
+    function createSyncLifecycleOutcomeError(code, message, diagnostic = null) {
       const error = new Error(String(message || "同步处理失败"));
       error.code = String(code || "SYNC_FAILED").trim().toUpperCase() || "SYNC_FAILED";
+      if (diagnostic && typeof diagnostic === "object") {
+        error.diagnostic = diagnostic;
+      }
       return error;
     }
     __name(createSyncLifecycleOutcomeError, "createSyncLifecycleOutcomeError");
+    function buildPdfExtractionFailureDiagnostic(metadata = {}) {
+      const source = metadata.pdfExtractionDiagnostic && typeof metadata.pdfExtractionDiagnostic === "object" ? metadata.pdfExtractionDiagnostic : {};
+      const diagnostic = {
+        kind: "pdf-extraction"
+      };
+      const errorCode = String(metadata.pdfExtractionErrorCode || "").trim();
+      if (errorCode) diagnostic.errorCode = errorCode;
+      const provider = String(source.provider || "").trim();
+      if (provider) diagnostic.provider = provider;
+      ["pageCount"].forEach((key) => {
+        const value = Number(source[key]);
+        if (Number.isFinite(value) && value >= 0) diagnostic[key] = value;
+      });
+      ["textPageNumbers", "ocrPageNumbers", "missingPageNumbers"].forEach((key) => {
+        if (!Array.isArray(source[key])) return;
+        diagnostic[key] = source[key].map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0).slice(0, 200);
+      });
+      const fastPathError = String(source.fastPathError || "").trim();
+      if (fastPathError) diagnostic.fastPathError = fastPathError.slice(0, 500);
+      return diagnostic;
+    }
+    __name(buildPdfExtractionFailureDiagnostic, "buildPdfExtractionFailureDiagnostic");
     function getMeaningfulMarkdownLength(markdown) {
       return String(markdown || "").replace(/!\[[^\]]*\]\([^)]+\)|!\[\[[^\]]+\]\]/g, " ").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/https?:\/\/\S+/gi, " ").replace(/<[^>]+>/g, " ").replace(/[\s`#>*_\-|[\](){},.!?:;\u3000\uff0c\u3002\uff01\uff1f\uff1a\uff1b\u3001\u201c\u201d\u2018\u2019\u2026\u00b7]+/g, "").length;
     }
@@ -1774,7 +1799,11 @@ var require_sync_lifecycle_utils = __commonJS({
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：没有获得可写入的正文");
       }
       if (fileExt === "pdf" && conversionStatus === "attachment_saved") {
-        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "PDF 内容提取失败");
+        return createSyncLifecycleOutcomeError(
+          "EXTRACTION_FAILED",
+          declaredError || "PDF 内容提取失败",
+          buildPdfExtractionFailureDiagnostic(metadata)
+        );
       }
       if (transcriptionStatus === "failed" && !transcription) {
         return createSyncLifecycleOutcomeError(
@@ -3604,6 +3633,7 @@ var require_social_media_diagnostic_utils = __commonJS({
         stages: (Array.isArray(stages) ? stages : []).slice(-12).map((stage) => ({
           stage: safeText(stage && stage.stage),
           attempted: !stage || stage.attempted !== false,
+          inputKind: safeText(stage && stage.inputKind),
           ok: stage && stage.ok !== false,
           mediaCount: normalizeInteger(stage && stage.mediaCount, 100),
           detailFound: stage && stage.detailFound === true,
@@ -4231,7 +4261,7 @@ async function loadPdfJsLibrary() {
 __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.91";
+var PLUGIN_RUNTIME_VERSION = "1.3.92";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -6713,6 +6743,29 @@ function buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl = "") {
   };
 }
 __name(buildDouyinBrowserFallbackRequest, "buildDouyinBrowserFallbackRequest");
+function buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl = "") {
+  const original = String(originalUrl || "").trim();
+  const resolved = String(resolvedUrl || "").trim();
+  const target = normalizeDouyinTargetUrl(original, resolved);
+  const requests = [];
+  const seen = /* @__PURE__ */ new Set();
+  const addCurrentPage = /* @__PURE__ */ __name((value, inputKind) => {
+    const candidate = String(value || "").trim();
+    if (!/^https?:\/\//i.test(candidate) || !isDouyinUrl(candidate) || seen.has(candidate)) return;
+    seen.add(candidate);
+    requests.push({
+      awemeId: target.awemeId,
+      url: candidate,
+      strictDouyinTarget: false,
+      inputKind
+    });
+  }, "addCurrentPage");
+  addCurrentPage(original, "original-page");
+  addCurrentPage(resolved, "resolved-page");
+  if (!requests.length) addCurrentPage(target.url, "target-page");
+  return requests;
+}
+__name(buildDouyinBrowserFallbackRequests, "buildDouyinBrowserFallbackRequests");
 function getDouyinAwemeDetailUrls(awemeId) {
   const id = String(awemeId || "").trim();
   if (!id) return [];
@@ -13221,6 +13274,12 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         };
         const collect = () => {
           document.querySelectorAll('video, audio, source').forEach((node) => {
+            try {
+              if (node.tagName && node.tagName.toLowerCase() === 'video' && typeof node.play === 'function') {
+                node.muted = true;
+                node.play().catch(() => {});
+              }
+            } catch (error) {}
             if (urls.length >= maxUrls) return;
             add(node.currentSrc, 'media');
             add(node.src, 'media');
@@ -17955,13 +18014,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       } catch (error) {
       }
     }
-    if (!candidates.length && browserRequest.url) {
-      try {
-        candidates.push(...await this.renderSocialMediaUrls(browserRequest.url, {
-          timeoutMs: 18e3,
-          strictDouyinTarget: browserRequest.strictDouyinTarget
-        }));
-      } catch (error) {
+    if (!candidates.length) {
+      const browserRequests = buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl);
+      for (const fallbackRequest of browserRequests) {
+        if (candidates.length) break;
+        try {
+          candidates.push(...await this.renderSocialMediaUrls(fallbackRequest.url, {
+            timeoutMs: 18e3,
+            strictDouyinTarget: fallbackRequest.strictDouyinTarget
+          }));
+        } catch (error) {
+        }
       }
     }
     return sortMediaUrlsForTranscription(candidates);
@@ -18752,6 +18815,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       } catch (error) {
         nextMetadata.conversionStatus = "attachment_saved";
         nextMetadata.conversionError = error.message || String(error);
+        if (fileExt === "pdf") {
+          nextMetadata.pdfExtractionErrorCode = String(error && error.code || "").trim();
+          nextMetadata.pdfExtractionDiagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? error.diagnostic : null;
+        }
       }
       if (isAudioVideoAttachmentExt(fileExt)) {
         try {
@@ -19914,7 +19981,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           imageOcrEnabled: this.settings.xiaohongshuImageOcrEnabled === true,
           isLoggedIn: xiaohongshuLoggedIn
         });
-        let mediaUrls = isXiaohongshuUrl(url) || Boolean(douyinAwemeId) ? [] : extractSocialMediaUrlsFromHtml(html2);
+        let mediaUrls = isXiaohongshuUrl(url) ? [] : extractSocialMediaUrlsFromHtml(html2);
         let mediaUrl = mediaUrls[0] || "";
         let hasPreciseDouyinMedia = false;
         let douyinSocialMetrics = {};
@@ -20074,30 +20141,41 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             }
           }
           if (!hasPreciseDouyinMedia && typeof this.renderSocialMediaUrls === "function") {
-            const browserStage = { stage: "targeted-browser", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
-            try {
-              const browserRequest = buildDouyinBrowserFallbackRequest(url, resolvedUrl);
-              const browserUrls = await this.renderSocialMediaUrls(browserRequest.url || resolvedUrl, {
-                signal,
-                strictDouyinTarget: browserRequest.strictDouyinTarget
-              });
-              browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
-              if (browserStage.mediaCount) {
-                mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
-                mediaUrl = mediaUrls[0] || mediaUrl;
-                hasPreciseDouyinMedia = true;
-                douyinSelectedStage = douyinSelectedStage || browserStage.stage;
-                browserStage.ok = true;
-                browserStage.identityOutcome = browserRequest.strictDouyinTarget ? "target-preferred-primary-player" : "primary-player-fallback";
+            const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl);
+            for (const browserRequest of browserRequests) {
+              if (hasPreciseDouyinMedia) break;
+              const browserStage = {
+                stage: "targeted-browser",
+                attempted: true,
+                ok: false,
+                mediaCount: 0,
+                detailFound: false,
+                inputKind: browserRequest.inputKind,
+                startedAt: Date.now()
+              };
+              try {
+                const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
+                  signal,
+                  strictDouyinTarget: browserRequest.strictDouyinTarget
+                });
+                browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
+                if (browserStage.mediaCount) {
+                  mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
+                  mediaUrl = mediaUrls[0] || mediaUrl;
+                  hasPreciseDouyinMedia = true;
+                  douyinSelectedStage = douyinSelectedStage || `${browserStage.stage}:${browserRequest.inputKind}`;
+                  browserStage.ok = true;
+                  browserStage.identityOutcome = "primary-player-fallback";
+                }
+              } catch (browserError) {
+                if (isAbortError(browserError)) throw browserError;
+                browserStage.error = browserError;
+              } finally {
+                if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? "transport-error" : "no-target-bound-media";
+                browserStage.durationMs = Date.now() - browserStage.startedAt;
+                delete browserStage.startedAt;
+                douyinResolutionStages.push(browserStage);
               }
-            } catch (browserError) {
-              if (isAbortError(browserError)) throw browserError;
-              browserStage.error = browserError;
-            } finally {
-              if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? "transport-error" : "no-target-bound-media";
-              browserStage.durationMs = Date.now() - browserStage.startedAt;
-              delete browserStage.startedAt;
-              douyinResolutionStages.push(browserStage);
             }
           }
         }
@@ -20359,8 +20437,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
         }
         const socialMediaRenderOptions = isXiaohongshuUrl(url) ? { includeComments: false, signal } : { signal };
-        const allowGenericSocialMediaRender = !(douyinAwemeId && (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)));
-        if (!hasPreciseDouyinMedia && allowGenericSocialMediaRender && isVideoIntent && typeof this.renderSocialMediaUrls === "function") {
+        if (!hasPreciseDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === "function") {
           try {
             mediaUrls = sortMediaUrlsForTranscription([
               ...mediaUrls,
@@ -20371,7 +20448,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             if (isAbortError(renderError)) throw renderError;
             mediaUrl = mediaUrl || "";
           }
-        } else if (!hasPreciseDouyinMedia && allowGenericSocialMediaRender && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === "function") {
+        } else if (!hasPreciseDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === "function") {
           try {
             mediaUrl = await this.renderSocialMediaUrl(primarySocialMediaBrowserUrl, socialMediaRenderOptions);
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
@@ -21793,6 +21870,7 @@ WechatObsidianInboxPlugin.__test = {
   selectIdentityBoundDouyinBrowserMedia,
   normalizeDouyinTargetUrl,
   buildDouyinBrowserFallbackRequest,
+  buildDouyinBrowserFallbackRequests,
   getDouyinMobileSharePageUrls,
   extractDouyinMediaUrlsFromShareHtml,
   extractDouyinMediaUrlsFromDetailPayload,
