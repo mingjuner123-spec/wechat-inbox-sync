@@ -231,6 +231,8 @@ async function run() {
   assert.strictEqual(partialGuide.metadata.conversionStatus, 'partial');
   assert.strictEqual(partialGuide.metadata.conversionState, 'guide');
   assert.ok(partialGuide.metadata.markdown.includes('引导页可保存标题'));
+  assert.strictEqual(partialGuideCase.writes.length, 1);
+  assert.strictEqual(partialGuide.metadata.markdown.includes('https://mmbiz.qpic.cn/guide-cover.jpg'), false);
   assert.strictEqual(
     PluginClass.__test.getSyncLifecycleOutcomeError({
       type: 'webpage',
@@ -239,6 +241,15 @@ async function run() {
     }),
     null,
   );
+
+  const unavailableBrowserCase = createPlugin();
+  unavailableBrowserCase.plugin.renderWebpageWithElectron = async () => ({
+    markdown: '\u5185\u5bb9\u4e0d\u5b58\u5728\uff0c\u8be5\u6587\u7ae0\u5df2\u88ab\u5220\u9664\u3002This explanatory error page is intentionally long enough to fail the article-content guard.',
+    assets: [],
+  });
+  const unavailableBrowserResult = await hydrateWithHtml(unavailableBrowserCase.plugin, guideHtml);
+  assert.strictEqual(unavailableBrowserResult.metadata.conversionStatus, 'partial');
+  assert.strictEqual(unavailableBrowserResult.metadata.conversionState, 'unavailable');
 
   console.log('plugin-wechat-article-image-localization.test.js passed');
 }

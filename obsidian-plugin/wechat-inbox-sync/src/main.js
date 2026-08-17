@@ -120,6 +120,7 @@ const {
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
 const { runWechatArticlePipeline } = require('./wechat-article-pipeline');
+const { classifyWechatArticleHtml } = require('./wechat-article-utils');
 const {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -19626,23 +19627,46 @@ class WechatObsidianInboxPlugin extends Plugin {
           },
           isUsableBrowserArticle: ({ markdown }) => {
             const renderedText = String(markdown || '').trim();
+            const renderedState = classifyWechatArticleHtml(renderedText);
             return renderedText.length >= 40
-              && !/微信扫一扫可打开此内容|使用完整服务|使用小程序|环境异常|完成验证后即可继续访问/.test(renderedText);
+              && renderedState !== 'guide'
+              && renderedState !== 'captcha'
+              && renderedState !== 'unavailable';
           },
         });
 
         if (extracted.kind === 'fallback') {
+          const fallbackTitle = metadata.title || extracted.title || title || '公众号文章未提取正文';
+          const fallbackImageLocalizationErrors = [];
+          const fallbackMarkdown = await this.saveMarkdownRemoteImageAssets(
+            extracted.markdown,
+            rootDir,
+            dateFolder,
+            fallbackTitle,
+            {
+              sourceUrl: url,
+              onError: ({ error }) => {
+                fallbackImageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+              },
+            },
+          );
+          const fallbackConversionNote = [
+            'wechat-article-' + extracted.state + '-link-saved',
+            fallbackImageLocalizationErrors.length
+              ? 'image-localize-failed=' + fallbackImageLocalizationErrors.length + ': ' + fallbackImageLocalizationErrors.slice(0, 3).join(' | ')
+              : '',
+          ].filter(Boolean).join('; ');
           return {
             ...record,
             metadata: {
               ...metadata,
-              title: metadata.title || extracted.title || title || '公众号文章未提取正文',
-              markdown: extracted.markdown,
+              title: fallbackTitle,
+              markdown: fallbackMarkdown,
               conversionStatus: 'partial',
               conversionState: extracted.state,
-              conversionNote: `wechat-article-${extracted.state}-link-saved`,
-              imageLocalizationFailedCount: 0,
-              imageLocalizationError: '',
+              conversionNote: fallbackConversionNote,
+              imageLocalizationFailedCount: fallbackImageLocalizationErrors.length,
+              imageLocalizationError: fallbackImageLocalizationErrors.slice(0, 3).join(' | '),
             },
           };
         }

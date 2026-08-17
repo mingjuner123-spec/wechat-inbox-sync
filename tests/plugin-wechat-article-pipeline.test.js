@@ -30,6 +30,10 @@ assert.strictEqual(
   'article',
 );
 assert.strictEqual(classifyWechatArticleHtml(guideHtml), 'guide');
+assert.strictEqual(
+  classifyWechatArticleHtml('<div id="js_content">微信扫一扫可打开此内容。使用完整服务。This guide-page shell has enough text to previously look like an article.</div>'),
+  'guide',
+);
 assert.strictEqual(classifyWechatArticleHtml('<p>环境异常，完成验证后即可继续访问</p>'), 'captcha');
 
 assert.deepStrictEqual(extractWechatArticleFallbackMetadata(guideHtml), {

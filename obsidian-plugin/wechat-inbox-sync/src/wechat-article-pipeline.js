@@ -75,7 +75,9 @@ async function runWechatArticlePipeline({
         if (browser.markdown) article.markdown = browser.markdown;
         return article;
       }
-      return buildFallbackResult({ url, state: staticState, html: staticHtml });
+      const browserState = classifyWechatArticleHtml(browser.html || browser.markdown);
+      const fallbackState = browserState === 'unavailable' ? browserState : staticState;
+      return buildFallbackResult({ url, state: fallbackState, html: staticHtml });
     } catch (_) {
       return buildFallbackResult({ url, state: staticState, html: staticHtml });
     }

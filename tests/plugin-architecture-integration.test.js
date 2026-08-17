@@ -39,6 +39,7 @@ const expectedModules = [
   'transcription-quality-utils',
   'vault-path-utils',
   'wechat-article-pipeline',
+  'wechat-article-utils',
   'wechat-channels-decrypt-utils',
   'xiaohongshu-markdown-utils',
 ].sort();

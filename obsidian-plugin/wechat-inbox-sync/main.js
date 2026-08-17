@@ -2378,9 +2378,9 @@ var require_wechat_article_utils = __commonJS({
     __name(isTrustedCoverUrl, "isTrustedCoverUrl");
     function hasWechatArticleBody(html) {
       const source = String(html || "");
-      const opening = /<([a-z0-9]+)\b[^>]*\bid=["']js_content["'][^>]*>/i.exec(source);
+      const opening = /<div\b(?=[^>]*\sid=["']js_content["'])[^>]*>/i.exec(source);
       if (!opening) return false;
-      const tagName = opening[1];
+      const tagName = "div";
       const tagPattern = new RegExp(`<\\/?${tagName}\\b[^>]*>`, "gi");
       tagPattern.lastIndex = opening.index + opening[0].length;
       let depth = 1;
@@ -2398,15 +2398,15 @@ var require_wechat_article_utils = __commonJS({
       return stripHtml(bodyHtml).length >= 20;
     }
     __name(hasWechatArticleBody, "hasWechatArticleBody");
-    function classifyWechatArticleHtml(html) {
+    function classifyWechatArticleHtml2(html) {
       const text = stripHtml(html);
       if (/环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return "captcha";
-      if (hasWechatArticleBody(html)) return "article";
       if (/微信扫一扫可打开此内容/.test(text) && /使用完整服务|使用小程序/.test(text)) return "guide";
+      if (hasWechatArticleBody(html)) return "article";
       if (/内容不存在|已删除|暂时无法查看|加载失败/.test(text)) return "unavailable";
       return "unknown";
     }
-    __name(classifyWechatArticleHtml, "classifyWechatArticleHtml");
+    __name(classifyWechatArticleHtml2, "classifyWechatArticleHtml");
     function extractWechatArticleFallbackMetadata(html) {
       const title = getHtmlTitle(html);
       const description = getMetaContent(html, "og:description") || getMetaContent(html, "description");
@@ -2436,7 +2436,7 @@ var require_wechat_article_utils = __commonJS({
     __name(buildWechatArticleFallbackMarkdown, "buildWechatArticleFallbackMarkdown");
     module2.exports = {
       buildWechatArticleFallbackMarkdown,
-      classifyWechatArticleHtml,
+      classifyWechatArticleHtml: classifyWechatArticleHtml2,
       extractWechatArticleFallbackMetadata,
       hasWechatArticleBody,
       isGenericWechatMetadata,
@@ -2451,7 +2451,7 @@ var require_wechat_article_pipeline = __commonJS({
     "use strict";
     var {
       buildWechatArticleFallbackMarkdown,
-      classifyWechatArticleHtml,
+      classifyWechatArticleHtml: classifyWechatArticleHtml2,
       extractWechatArticleFallbackMetadata
     } = require_wechat_article_utils();
     function normalizeBrowserResult(value) {
@@ -2491,7 +2491,7 @@ var require_wechat_article_pipeline = __commonJS({
     } = {}) {
       if (typeof fetchStatic !== "function") throw new Error("fetchStatic is required");
       const staticHtml = String(await fetchStatic() || "");
-      const staticState = classifyWechatArticleHtml(staticHtml);
+      const staticState = classifyWechatArticleHtml2(staticHtml);
       if (staticState === "article") {
         return {
           kind: "article",
@@ -2508,7 +2508,7 @@ var require_wechat_article_pipeline = __commonJS({
       if (typeof renderBrowser === "function" && (staticState === "guide" || staticState === "unknown")) {
         try {
           const browser = normalizeBrowserResult(await renderBrowser());
-          const hasBrowserArticle = typeof isUsableBrowserArticle === "function" ? Boolean(isUsableBrowserArticle(browser)) : classifyWechatArticleHtml(browser.html) === "article";
+          const hasBrowserArticle = typeof isUsableBrowserArticle === "function" ? Boolean(isUsableBrowserArticle(browser)) : classifyWechatArticleHtml2(browser.html) === "article";
           if (hasBrowserArticle) {
             const article = {
               kind: "article",
@@ -2521,7 +2521,9 @@ var require_wechat_article_pipeline = __commonJS({
             if (browser.markdown) article.markdown = browser.markdown;
             return article;
           }
-          return buildFallbackResult({ url, state: staticState, html: staticHtml });
+          const browserState = classifyWechatArticleHtml2(browser.html || browser.markdown);
+          const fallbackState = browserState === "unavailable" ? browserState : staticState;
+          return buildFallbackResult({ url, state: fallbackState, html: staticHtml });
         } catch (_) {
           return buildFallbackResult({ url, state: staticState, html: staticHtml });
         }
@@ -4473,6 +4475,7 @@ var {
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
 var { createRecordBodyMarkdownHelpers } = require_record_body_markdown_utils();
 var { runWechatArticlePipeline } = require_wechat_article_pipeline();
+var { classifyWechatArticleHtml } = require_wechat_article_utils();
 var {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -21642,21 +21645,40 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }, "renderBrowser"),
           isUsableBrowserArticle: /* @__PURE__ */ __name(({ markdown: markdown3 }) => {
             const renderedText = String(markdown3 || "").trim();
-            return renderedText.length >= 40 && !/微信扫一扫可打开此内容|使用完整服务|使用小程序|环境异常|完成验证后即可继续访问/.test(renderedText);
+            const renderedState = classifyWechatArticleHtml(renderedText);
+            return renderedText.length >= 40 && renderedState !== "guide" && renderedState !== "captcha" && renderedState !== "unavailable";
           }, "isUsableBrowserArticle")
         });
         if (extracted.kind === "fallback") {
+          const fallbackTitle = metadata.title || extracted.title || title || "公众号文章未提取正文";
+          const fallbackImageLocalizationErrors = [];
+          const fallbackMarkdown = await this.saveMarkdownRemoteImageAssets(
+            extracted.markdown,
+            rootDir,
+            dateFolder,
+            fallbackTitle,
+            {
+              sourceUrl: url,
+              onError: /* @__PURE__ */ __name(({ error }) => {
+                fallbackImageLocalizationErrors.push(String(error && (error.message || error) || "unknown error"));
+              }, "onError")
+            }
+          );
+          const fallbackConversionNote = [
+            "wechat-article-" + extracted.state + "-link-saved",
+            fallbackImageLocalizationErrors.length ? "image-localize-failed=" + fallbackImageLocalizationErrors.length + ": " + fallbackImageLocalizationErrors.slice(0, 3).join(" | ") : ""
+          ].filter(Boolean).join("; ");
           return {
             ...record,
             metadata: {
               ...metadata,
-              title: metadata.title || extracted.title || title || "公众号文章未提取正文",
-              markdown: extracted.markdown,
+              title: fallbackTitle,
+              markdown: fallbackMarkdown,
               conversionStatus: "partial",
               conversionState: extracted.state,
-              conversionNote: `wechat-article-${extracted.state}-link-saved`,
-              imageLocalizationFailedCount: 0,
-              imageLocalizationError: ""
+              conversionNote: fallbackConversionNote,
+              imageLocalizationFailedCount: fallbackImageLocalizationErrors.length,
+              imageLocalizationError: fallbackImageLocalizationErrors.slice(0, 3).join(" | ")
             }
           };
         }
