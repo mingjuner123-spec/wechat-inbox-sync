@@ -240,6 +240,110 @@ function runBrowserFallbackRequestKeepsNonStrictCurrentPageTest() {
     }],
     'a known target id must not remove the original/current-page browser fallbacks that worked in 1.3.30',
   );
+
+  assert.deepStrictEqual(
+    helpers.buildDouyinBrowserFallbackRequests(
+      'https://v.douyin.com/example/',
+      'https://douyin.com/',
+      '7644566503081119019',
+    ),
+    [{
+      awemeId: '7644566503081119019',
+      url: 'https://v.douyin.com/example/',
+      strictDouyinTarget: false,
+      inputKind: 'original-page',
+    }, {
+      awemeId: '7644566503081119019',
+      url: 'https://douyin.com/',
+      strictDouyinTarget: false,
+      inputKind: 'resolved-page',
+    }, {
+      awemeId: '7644566503081119019',
+      url: 'https://www.douyin.com/video/7644566503081119019',
+      strictDouyinTarget: false,
+      inputKind: 'target-page',
+    }],
+    'a generic resolved page must be followed by the stable canonical work page when the work id is known',
+  );
+}
+
+function runHiddenDouyinRendererNeverCreatesVisibleChildWindowTest() {
+  let windowOpenHandler = null;
+  helpers.installExternalAppNavigationGuards({
+    on() {},
+    setWindowOpenHandler(handler) {
+      windowOpenHandler = handler;
+    },
+  });
+
+  assert.strictEqual(typeof windowOpenHandler, 'function');
+  assert.deepStrictEqual(
+    windowOpenHandler({ url: 'https://www.douyin.com/video/7644566503081119019' }),
+    { action: 'deny' },
+    'hidden social-media renderers must not let a page create a visible HTTP child window',
+  );
+}
+
+function runBrowserLoadFailureKeepsSafeDiagnosticCodeTest() {
+  assert.strictEqual(typeof helpers.createBrowserLoadFailureError, 'function');
+  const error = helpers.createBrowserLoadFailureError(-3, 'ERR_ABORTED');
+  assert.strictEqual(error.code, 'BROWSER_LOAD_ERR_ABORTED');
+}
+
+function runDouyinPersistentLoginContractTest() {
+  assert.strictEqual(typeof helpers.hasDouyinLoginCookies, 'function');
+  assert.strictEqual(typeof helpers.isDouyinChallengePageText, 'function');
+  assert.strictEqual(typeof helpers.shouldRetryDouyinChallengePage, 'function');
+  assert.strictEqual(
+    helpers.hasDouyinLoginCookies([{ name: 'sessionid', value: 'valid-session-cookie' }]),
+    true,
+    'a valid plugin-local Douyin session cookie must be recognized without reading a system browser profile',
+  );
+  assert.strictEqual(
+    helpers.hasDouyinLoginCookies([{ name: 'sessionid', value: '' }]),
+    false,
+    'an empty session cookie must not be reported as a signed-in Douyin account',
+  );
+  assert.strictEqual(typeof helpers.buildDouyinLoginPageConfig, 'function');
+  assert.match(helpers.buildDouyinLoginPageConfig().loginUrl, /^https:\/\/www\.douyin\.com\//);
+  assert.strictEqual(
+    helpers.isDouyinChallengePageText('sec_sdk risk-control captcha'),
+    true,
+    'the renderer must recognize a JavaScript/WAF challenge page before treating it as media-empty',
+  );
+  assert.strictEqual(
+    helpers.isDouyinChallengePageText('normal public Douyin video page'),
+    false,
+  );
+  assert.strictEqual(
+    helpers.shouldRetryDouyinChallengePage({ challengeDetected: true, retryAllowed: true }),
+    true,
+    'a cold anonymous session gets one quiet browser retry after a challenge page sets its cookies',
+  );
+  assert.strictEqual(
+    helpers.shouldRetryDouyinChallengePage({ challengeDetected: true, retryAllowed: false }),
+    false,
+    'fallback routes must not repeatedly reload a challenged page',
+  );
+}
+
+async function runDouyinBrowserSessionLockTest() {
+  assert.strictEqual(typeof helpers.runWithDouyinBrowserSessionLock, 'function');
+  const trace = [];
+  let releaseFirst;
+  const first = helpers.runWithDouyinBrowserSessionLock(async () => {
+    trace.push('first-start');
+    await new Promise((resolve) => { releaseFirst = resolve; });
+    trace.push('first-end');
+  });
+  const second = helpers.runWithDouyinBrowserSessionLock(async () => {
+    trace.push('second');
+  });
+  await Promise.resolve();
+  assert.deepStrictEqual(trace, ['first-start']);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepStrictEqual(trace, ['first-start', 'first-end', 'second']);
 }
 
 function runLegacyPlayerActivationAndPageMediaFallbackContractTest() {
@@ -517,6 +621,9 @@ function runTargetPlayerInsideMixedIdentityContainerTest() {
 }
 
 runBrowserFallbackRequestKeepsNonStrictCurrentPageTest();
+runHiddenDouyinRendererNeverCreatesVisibleChildWindowTest();
+runBrowserLoadFailureKeepsSafeDiagnosticCodeTest();
+runDouyinPersistentLoginContractTest();
 runLegacyPlayerActivationAndPageMediaFallbackContractTest();
 runPaceSsrStateMediaExtractionTest();
 runLegacyRouterDataCompatibilityTest();
@@ -527,4 +634,9 @@ runUniquePageIdentityFallbackTest();
 runOnlyExplicitFinalRouteMismatchIsRejectedTest();
 runTargetPlayerInsideMixedIdentityContainerTest();
 runNoStableAwemeIdStillUsesPrimaryPlayerTest();
-console.log('plugin-douyin-media.test.js passed');
+runDouyinBrowserSessionLockTest()
+  .then(() => console.log('plugin-douyin-media.test.js passed'))
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

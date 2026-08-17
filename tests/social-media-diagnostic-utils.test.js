@@ -14,6 +14,8 @@ function run() {
     awemeId: 'abc',
     mediaCandidateCount: 2,
     preciseMediaFound: true,
+    pluginDouyinLogin: true,
+    challengeDetected: true,
     saveOriginalMediaEnabled: true,
     stages: [{
       stage: 'share-page',
@@ -30,6 +32,8 @@ function run() {
     awemeId: 'abc',
     mediaCandidateCount: 2,
     preciseMediaFound: true,
+    pluginDouyinLogin: true,
+    challengeDetected: true,
     saveOriginalMediaEnabled: true,
     selectedStage: '',
     finalOutcome: '',
@@ -98,6 +102,8 @@ function run() {
     openid: 'secret-openid',
   });
   assert.strictEqual(traced.selectedStage, 'targeted-browser');
+  assert.strictEqual(traced.pluginDouyinLogin, false);
+  assert.strictEqual(traced.challengeDetected, false);
   assert.strictEqual(traced.finalOutcome, 'transcription-ready');
   assert.strictEqual(traced.stages[0].inputKind, 'original-page');
   assert.strictEqual(traced.stages[0].stateFormat, 'pace');
