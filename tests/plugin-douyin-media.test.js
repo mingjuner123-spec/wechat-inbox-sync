@@ -293,6 +293,48 @@ function runPaceSsrStateMediaExtractionTest() {
     [mediaUrl],
     'React Flight chunks with a stream row prefix must also expose target-bound media',
   );
+
+  const signedMediaUrl = 'https://v11-web.douyinvod.com/signed.mp4?token=a%2Fb%26c%3D1&mime_type=video_mp4';
+  const signedState = encodeURIComponent(JSON.stringify({
+    videoDetail: {
+      awemeId,
+      video: { playAddr: [{ src: signedMediaUrl }] },
+    },
+  }));
+  const signedHtml = `<script>self.__pace_f.push([1, ${JSON.stringify(signedState)}]);</script>`;
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(signedHtml, awemeId),
+    [signedMediaUrl],
+    'decoding the PACE envelope must not decode percent-escaped media signature parameters',
+  );
+
+  const splitState = `9:${JSON.stringify({
+    videoDetail: {
+      awemeId,
+      video: { playAddr: [{ src: mediaUrl }] },
+    },
+  })}`;
+  const splitAt = splitState.indexOf('videoDetail') + 5;
+  const splitHtml = [splitState.slice(0, splitAt), splitState.slice(splitAt)]
+    .map((chunk) => `<script>self.__pace_f.push([1, ${JSON.stringify(chunk)}]);</script>`)
+    .join('');
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(splitHtml, awemeId),
+    [mediaUrl],
+    'React state split across consecutive PACE pushes must be reassembled within a bounded buffer',
+  );
+
+  const recommendationUrl = 'https://v11-web.douyinvod.com/recommendation-first.mp4';
+  const multiRowState = [
+    `5:${JSON.stringify({ videoDetail: { awemeId: 'recommendation-id', video: { playAddr: [{ src: recommendationUrl }] } } })}`,
+    `6:${JSON.stringify({ videoDetail: { awemeId, video: { playAddr: [{ src: mediaUrl }] } } })}`,
+  ].join('\n');
+  const multiRowHtml = `<script>self.__pace_f.push([1, ${JSON.stringify(multiRowState)}]);</script>`;
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(multiRowHtml, awemeId),
+    [mediaUrl],
+    'all videoDetail rows must be inspected so a recommendation before the target cannot hide it',
+  );
 }
 
 function runLegacyRouterDataCompatibilityTest() {
@@ -326,6 +368,88 @@ function runLegacyRouterDataCompatibilityTest() {
     [legacyMediaUrl],
     'an unrelated PACE payload must fall through to target-bound legacy router data',
   );
+
+  const paceTargetMediaUrl = 'https://v11-web.douyinvod.com/target-primary.mp4';
+  const paceTargetState = encodeURIComponent(JSON.stringify({
+    videoDetail: {
+      awemeId,
+      video: { playAddr: [{ src: paceTargetMediaUrl }] },
+    },
+  }));
+  const exactMixedHtml = `<script>self.__pace_f.push([1, ${JSON.stringify(paceTargetState)}]);</script>${legacyHtml}`;
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(exactMixedHtml, awemeId).sort(),
+    [paceTargetMediaUrl, legacyMediaUrl].sort(),
+    'exact target media from PACE and legacy router state must both remain available for download retry',
+  );
+}
+
+function runDouyinPrimaryMediaFallbackWithoutExactIdTest() {
+  const requestedAwemeId = '7673128661335166246';
+  const paceMediaUrl = 'https://v11-web.douyinvod.com/video-tos-cn-p-0015/primary-fallback.mp4';
+  const recommendationMediaUrl = 'https://v11-web.douyinvod.com/video-tos-cn-p-0015/recommendation.mp4';
+  const paceState = encodeURIComponent(JSON.stringify({
+    videoDetail: {
+      awemeId: 'changed-or-unavailable-id',
+      video: { playAddr: [{ src: paceMediaUrl }] },
+    },
+    recommendationList: [{
+      awemeId: 'unrelated-recommendation-id',
+      video: { playAddr: [{ src: recommendationMediaUrl }] },
+    }],
+  }));
+  const paceHtml = `<script>self.__pace_f.push([1, ${JSON.stringify(paceState)}]);</script>`;
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(paceHtml, requestedAwemeId),
+    [paceMediaUrl],
+    'an explicit page-level videoDetail must outrank recommendations when its identity field is absent or changed',
+  );
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(paceHtml, ''),
+    [paceMediaUrl],
+    'a short-link page must use its explicit primary video even before an aweme id is known',
+  );
+
+  const nestedRecommendationState = encodeURIComponent(JSON.stringify({
+    recommendationList: [{
+      videoDetail: {
+        awemeId: 'unrelated-recommendation-id',
+        video: { playAddr: [{ src: recommendationMediaUrl }] },
+      },
+    }],
+  }));
+  const nestedRecommendationHtml = `<script>self.__pace_f.push([1, ${JSON.stringify(nestedRecommendationState)}]);</script>`;
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(nestedRecommendationHtml, requestedAwemeId),
+    [],
+    'a nested recommendation videoDetail must not be promoted to the page primary video',
+  );
+
+  const legacyMediaUrl = 'https://aweme.snssdk.com/aweme/v1/play/?video_id=legacy-primary-fallback';
+  const legacyHtml = `<script>window._ROUTER_DATA = ${JSON.stringify({
+    loaderData: {
+      video: {
+        video: { play_addr: { url_list: [legacyMediaUrl] } },
+      },
+    },
+  })};</script>`;
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(legacyHtml, requestedAwemeId),
+    [legacyMediaUrl],
+    'a legacy page with one explicit primary video must not fail only because its aweme id is missing',
+  );
+
+
+  const ambiguousState = [
+    `3:${JSON.stringify({ videoDetail: { awemeId: 'other-1', video: { playAddr: [{ src: paceMediaUrl }] } } })}`,
+    `4:${JSON.stringify({ videoDetail: { awemeId: 'other-2', video: { playAddr: [{ src: recommendationMediaUrl }] } } })}`,
+  ].join('\n');
+  const ambiguousHtml = `<script>self.__pace_f.push([1, ${JSON.stringify(ambiguousState)}]);</script>`;
+  assert.deepStrictEqual(
+    helpers.extractDouyinMediaUrlsFromShareHtml(ambiguousHtml, requestedAwemeId),
+    [],
+    'multiple unbound videoDetail candidates must not be guessed as the requested work',
+  );
 }
 
 function runBrowserPaceStateFallbackContractTest() {
@@ -338,8 +462,33 @@ function runBrowserPaceStateFallbackContractTest() {
   );
   assert.match(
     source,
-    /extractDouyinMediaUrlsFromShareHtml\(payload\s*&&\s*payload\.douyinPaceState/,
-    'the hidden browser result must parse target-bound media from the PACE state snapshot',
+    /resolveDouyinMediaFromShareHtml\(payload\s*&&\s*payload\.douyinPaceState/,
+    'the hidden browser result must preserve exact and primary media layers from its PACE snapshot',
+  );
+  assert.match(
+    source,
+    /const captureDouyinState = isDouyinUrl\(url\)/,
+    'short-link pages must capture PACE state even before an aweme id is available in the URL',
+  );
+  assert.match(
+    source,
+    /if \(paceStateResolution\.exactUrls\.length\)[\s\S]{0,180}?return paceStateResolution\.exactUrls/,
+    'target-bound PACE media must be returned before generic browser network candidates',
+  );
+  assert.match(
+    source,
+    /shareStage\.stateFormat\s*=/,
+    'copied diagnostics must identify whether the share page contained PACE or legacy Router state',
+  );
+  assert.match(
+    source,
+    /shareStage\.exactMediaCount\s*=\s*shareResolution\.exactUrls\.length/,
+    'copied diagnostics must distinguish exact target media from a primary-player fallback',
+  );
+  assert.match(
+    source,
+    /shareStage\.primaryMediaCount\s*=\s*shareResolution\.primaryUrls\.length/,
+    'copied diagnostics must record primary-player candidates without exposing their URLs',
   );
 }
 
@@ -371,6 +520,7 @@ runBrowserFallbackRequestKeepsNonStrictCurrentPageTest();
 runLegacyPlayerActivationAndPageMediaFallbackContractTest();
 runPaceSsrStateMediaExtractionTest();
 runLegacyRouterDataCompatibilityTest();
+runDouyinPrimaryMediaFallbackWithoutExactIdTest();
 runBrowserPaceStateFallbackContractTest();
 runTargetBoundDomFallbackWithoutRouteIdentityTest();
 runUniquePageIdentityFallbackTest();

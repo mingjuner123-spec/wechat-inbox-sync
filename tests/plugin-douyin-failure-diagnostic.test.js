@@ -38,7 +38,7 @@ async function run() {
     metadata: {
       ...(record.metadata || {}),
       transcriptionStatus: 'failed',
-      transcriptionError: '未能从抖音作品页获取到与目标作品一致的音频或视频地址',
+      transcriptionError: '未能从抖音作品页获取到可用的音频或视频地址',
       mediaResolutionDiagnostic: diagnostic,
     },
   });
