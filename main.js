@@ -3685,7 +3685,9 @@ var require_local_douyin_resolver_utils = __commonJS({
     }
     __name(selectLocalDouyinResolverAsset2, "selectLocalDouyinResolverAsset");
     function getLocalDouyinResolverRoot2(homeDir) {
-      return path2.join(String(homeDir || ""), ".wechat-inbox-local-asr", "tools", "yt-dlp");
+      const root = String(homeDir || "");
+      const pathApi = /^(?:[a-z]:[\\/]|\\\\)/i.test(root) ? path2.win32 : path2;
+      return pathApi.join(root, ".wechat-inbox-local-asr", "tools", "yt-dlp");
     }
     __name(getLocalDouyinResolverRoot2, "getLocalDouyinResolverRoot");
     function isDouyinCookieDomain(domain) {
@@ -4347,7 +4349,7 @@ async function loadPdfJsLibrary() {
 __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.95";
+var PLUGIN_RUNTIME_VERSION = "1.3.96";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
