@@ -153,6 +153,12 @@ const {
 const { createDouyinStructuredContentBuilder } = require('./social-platform-content-utils');
 const { createDouyinMediaResolutionDiagnosticBuilder } = require('./social-media-diagnostic-utils');
 const {
+  selectLocalDouyinResolverAsset,
+  getLocalDouyinResolverRoot,
+  buildNetscapeCookieFile,
+  extractLocalDouyinResolverMediaUrls,
+} = require('./local-douyin-resolver-utils');
+const {
   createXiaohongshuCommentMarkdownHelpers,
   createXiaohongshuMarkdownBuilder,
 } = require('./xiaohongshu-markdown-utils');
@@ -190,7 +196,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.93';
+const PLUGIN_RUNTIME_VERSION = '1.3.95';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -216,6 +222,8 @@ const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_COMPONENT_CDN_BASE_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com';
+const LOCAL_DOUYIN_RESOLVER_MANIFEST_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/yt-dlp/latest.json`;
+const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
 const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '65ff6ec5aa844c780a4ebf4f83c9ea2f206de1b33e145dd2f1b9e1129f4e2337';
@@ -1468,6 +1476,77 @@ function downloadTextViaNode(url) {
     });
     request.on('error', reject);
     request.end();
+  });
+}
+
+function downloadBinaryViaNode(url) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(String(url || ''));
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const client = parsed.protocol === 'http:' ? http : https;
+    const request = client.request(parsed, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'wechat-inbox-sync',
+        Accept: 'application/octet-stream,*/*',
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          try {
+            downloadBinaryViaNode(new URL(response.headers.location, url).toString()).then(resolve, reject);
+          } catch (error) {
+            reject(error);
+          }
+          return;
+        }
+        const bytes = Buffer.concat(chunks);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`HTTP ${response.statusCode}: resolver download failed`));
+          return;
+        }
+        resolve(bytes);
+      });
+    });
+    request.setTimeout(60000, () => request.destroy(new Error('resolver download timeout')));
+    request.on('error', reject);
+    request.end();
+  });
+}
+
+function getLocalDouyinResolverExecutablePath(installRoot, platform = process.platform) {
+  return path.join(installRoot, platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+}
+
+function getLocalDouyinResolverCookiePath(installRoot) {
+  return path.join(installRoot, `.cookies-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.txt`);
+}
+
+function calculateFileSha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+function runLocalDouyinResolver(executablePath, args, timeoutMs = LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    childProcess.execFile(executablePath, args, {
+      windowsHide: true,
+      timeout: timeoutMs,
+      maxBuffer: 2 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const message = String(stderr || error.message || 'yt-dlp failed').slice(0, 600);
+        reject(new Error(message));
+        return;
+      }
+      resolve(String(stdout || ''));
+    });
   });
 }
 
@@ -3271,10 +3350,14 @@ function buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl = '') {
   };
 }
 
-function buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl = '') {
+function buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl = '', knownAwemeId = '') {
   const original = String(originalUrl || '').trim();
   const resolved = String(resolvedUrl || '').trim();
-  const target = normalizeDouyinTargetUrl(original, resolved);
+  const inferredTarget = normalizeDouyinTargetUrl(original, resolved);
+  const awemeId = String(knownAwemeId || inferredTarget.awemeId || '').trim();
+  const target = awemeId
+    ? { awemeId, url: `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` }
+    : inferredTarget;
   const requests = [];
   const seen = new Set();
   const addCurrentPage = (value, inputKind) => {
@@ -3291,6 +3374,7 @@ function buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl = '') {
 
   addCurrentPage(original, 'original-page');
   addCurrentPage(resolved, 'resolved-page');
+  if (target.awemeId) addCurrentPage(target.url, 'target-page');
   if (!requests.length) addCurrentPage(target.url, 'target-page');
   return requests;
 }
@@ -4742,11 +4826,9 @@ function installExternalAppNavigationGuards(webContents) {
     webContents.on('will-redirect', preventExternalNavigation);
   }
   if (typeof webContents.setWindowOpenHandler === 'function') {
-    webContents.setWindowOpenHandler((details) => (
-      shouldBlockExternalAppUrl(details && details.url)
-        ? { action: 'deny' }
-        : { action: 'allow' }
-    ));
+    // This helper only protects hidden extraction windows. A child window created
+    // by page-side window.open can escape the hidden renderer and become visible.
+    webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   }
 }
 
@@ -4810,6 +4892,7 @@ function installXiaohongshuNavigationGuards(webContents) {
 
 const activeXiaohongshuBrowserWindows = new Set();
 let activeXiaohongshuLoginPromise = null;
+let activeDouyinLoginPromise = null;
 
 function trackXiaohongshuBrowserWindow(browserWindow) {
   if (!browserWindow) return browserWindow;
@@ -9616,6 +9699,13 @@ function getWechatSession() {
   }
 }
 
+function getDouyinSession() {
+  // Keep the established plugin partition. Existing users may have useful
+  // anonymous Douyin device/session state here even when they never logged in.
+  // A fresh partition would turn those users into a cold start after upgrade.
+  return getWechatSession();
+}
+
 async function readSessionFetchText(session, url, headers, timeoutMs = 12000) {
   if (!session || typeof session.fetch !== 'function' || !/^https?:\/\//i.test(String(url || ''))) return '';
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -9753,7 +9843,7 @@ function mergeDouyinDetailCandidates(current, incoming) {
 async function fetchDouyinMediaResolutionWithSession({
   pageUrl,
   awemeId,
-  session = getWechatSession(),
+  session = getDouyinSession(),
   requestTimeoutMs = 12000,
 }) {
   const target = normalizeDouyinTargetUrl(pageUrl, pageUrl);
@@ -9803,6 +9893,59 @@ function getXiaohongshuSession() {
   } catch (error) {
     return null;
   }
+}
+
+async function getDouyinCookies() {
+  const session = getDouyinSession();
+  if (!session || !session.cookies || typeof session.cookies.get !== 'function') return [];
+  try {
+    const groups = await Promise.all([
+      session.cookies.get({ domain: '.douyin.com' }),
+      session.cookies.get({ domain: 'www.douyin.com' }),
+    ]);
+    const seen = new Set();
+    return groups.flat().filter((cookie) => cookie && cookie.name
+      && !seen.has(cookie.name) && seen.add(cookie.name));
+  } catch (error) {
+    return [];
+  }
+}
+
+function hasDouyinLoginCookies(cookies = []) {
+  return (cookies || []).some((cookie) => {
+    const name = String(cookie && cookie.name || '').trim().toLowerCase();
+    const value = String(cookie && cookie.value || '').trim();
+    if (!['sessionid', 'sessionid_ss', 'sid_guard'].includes(name)) return false;
+    return value.length >= 8 && !/^(?:null|undefined|deleted|expired)$/i.test(value);
+  });
+}
+
+async function checkDouyinLoginStatus() {
+  return hasDouyinLoginCookies(await getDouyinCookies());
+}
+
+async function clearDouyinLoginSession() {
+  const session = getDouyinSession();
+  if (!session) return false;
+  const cookies = await getDouyinCookies();
+  if (session.cookies && typeof session.cookies.remove === 'function') {
+    await Promise.all(cookies.map(async (cookie) => {
+      const domain = String(cookie && cookie.domain || 'www.douyin.com').replace(/^\./, '') || 'www.douyin.com';
+      const path = String(cookie && cookie.path || '/');
+      try {
+        await session.cookies.remove(`https://${domain}${path}`, cookie.name);
+      } catch (error) {}
+    }));
+  }
+  if (typeof session.clearStorageData === 'function') {
+    try {
+      await session.clearStorageData({
+        origin: 'https://www.douyin.com',
+        storages: ['localstorage', 'indexdb', 'cachestorage', 'serviceworkers'],
+      });
+    } catch (error) {}
+  }
+  return true;
 }
 
 async function checkWechatLoginStatus() {
@@ -10079,6 +10222,12 @@ function buildXiaohongshuLoginPageConfig(targetUrl = '') {
   return { loginUrl, userAgent };
 }
 
+function buildDouyinLoginPageConfig(targetUrl = '') {
+  const loginUrl = String(targetUrl || 'https://www.douyin.com/').trim();
+  const userAgent = String(getSocialRequestHeaders(loginUrl)['User-Agent'] || '').trim();
+  return { loginUrl, userAgent };
+}
+
 function isAbortedBrowserNavigationError(error) {
   const code = error && error.code;
   const errno = error && error.errno;
@@ -10161,6 +10310,58 @@ async function loginXiaohongshuWeb(targetUrl) {
   }
 }
 
+async function loginDouyinWeb(targetUrl = '') {
+  if (activeDouyinLoginPromise) return await activeDouyinLoginPromise;
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) throw new Error('当前 Obsidian 环境不支持浏览器窗口');
+  const session = getDouyinSession();
+  if (!session) throw new Error('无法创建抖音登录会话');
+  const { loginUrl, userAgent } = buildDouyinLoginPageConfig(targetUrl);
+  const loginPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    const win = new BrowserWindow({
+      width: 1040,
+      height: 860,
+      show: true,
+      title: '抖音网页登录 - 登录后关闭窗口即可',
+      webPreferences: {
+        session,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    installExternalAppNavigationGuards(win.webContents);
+    const finish = async (error = null) => {
+      if (settled) return;
+      settled = true;
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(await checkDouyinLoginStatus());
+    };
+    if (win.webContents && typeof win.webContents.setUserAgent === 'function' && userAgent) {
+      win.webContents.setUserAgent(userAgent);
+    }
+    win.on('closed', () => finish());
+    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+      if (isMainFrame === false || isAbortedBrowserNavigationError({ code: errorCode, message: errorDescription })) return;
+      finish(new Error(`打开抖音登录页面失败（${errorCode}）：${errorDescription || '未知错误'}`));
+    });
+    win.loadURL(loginUrl, { userAgent }).catch((error) => {
+      if (isAbortedBrowserNavigationError(error)) return;
+      finish(new Error(`打开抖音登录页面失败：${error.message || error}`));
+    });
+  });
+  activeDouyinLoginPromise = loginPromise;
+  try {
+    return await loginPromise;
+  } finally {
+    if (activeDouyinLoginPromise === loginPromise) activeDouyinLoginPromise = null;
+  }
+}
+
 function getElectronShell() {
   const candidates = [];
   if (typeof require === 'function') candidates.push(require);
@@ -10215,8 +10416,68 @@ async function openExternalUrl(url) {
   return false;
 }
 
-function waitForWebContents(webContents, timeoutMs = 15000) {
-  return new Promise((resolve) => {
+function createBrowserLoadFailureError(errorCode, errorDescription) {
+  const failureName = String(errorDescription || 'UNKNOWN')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40) || 'UNKNOWN';
+  const error = new Error('Hidden browser page load failed');
+  error.code = `BROWSER_LOAD_${failureName}`;
+  error.browserLoadCode = Number(errorCode) || 0;
+  return error;
+}
+
+function isDouyinChallengeError(error) {
+  return String(error && error.code || '').toUpperCase() === 'DOUYIN_CHALLENGE';
+}
+
+function isDouyinChallengePageText(text) {
+  return /captcha|sec_sdk|risk[_ -]?control|__jsvprnt|安全验证|请完成验证/i.test(
+    String(text || '').slice(0, 12000),
+  );
+}
+
+function shouldRetryDouyinChallengePage({ challengeDetected = false, retryAllowed = true } = {}) {
+  return challengeDetected === true && retryAllowed === true;
+}
+
+async function isCurrentDouyinChallengePage(webContents) {
+  const detectorSource = isDouyinChallengePageText.toString();
+  return await runBrowserTaskWithTimeout(
+    webContents.executeJavaScript(`
+      (() => {
+        const isChallenge = ${detectorSource};
+        return isChallenge(String(document.documentElement && document.documentElement.innerText || ''));
+      })()
+    `),
+    3000,
+    'douyin-challenge-probe',
+  );
+}
+
+async function waitAndRetryDouyinChallengePage(webContents, {
+  signal = null,
+  retryAllowed = true,
+} = {}) {
+  const challengeDetected = await isCurrentDouyinChallengePage(webContents);
+  if (!shouldRetryDouyinChallengePage({ challengeDetected, retryAllowed })) return challengeDetected;
+
+  // The common sec_sdk/jsvprnt challenge can finish silently after it has
+  // written its device cookies. Wait once and reload once; do not loop, so a
+  // real CAPTCHA never turns into repeated traffic from a hidden window.
+  await waitForPromiseWithAbort(new Promise((resolve) => setTimeout(resolve, 3500)), signal);
+  throwIfAborted(signal);
+  if (!webContents || typeof webContents.reload !== 'function') return true;
+  const reloaded = waitForWebContents(webContents, 12000, { rejectOnFailure: true });
+  webContents.reload();
+  await waitForPromiseWithAbort(reloaded, signal);
+  throwIfAborted(signal);
+  return await isCurrentDouyinChallengePage(webContents);
+}
+
+function waitForWebContents(webContents, timeoutMs = 15000, { rejectOnFailure = false } = {}) {
+  return new Promise((resolve, reject) => {
     let done = false;
     const finish = () => {
       if (done) return;
@@ -10228,8 +10489,14 @@ function waitForWebContents(webContents, timeoutMs = 15000) {
       window.clearTimeout(timer);
       window.setTimeout(finish, 2500);
     });
-    webContents.once('did-fail-load', () => {
+    webContents.once('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+      if (isMainFrame === false) return;
       window.clearTimeout(timer);
+      if (rejectOnFailure) {
+        done = true;
+        reject(createBrowserLoadFailureError(errorCode, errorDescription));
+        return;
+      }
       finish();
     });
   });
@@ -10773,6 +11040,12 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
 
 async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   throwIfAborted(options.signal);
+  if (isDouyinUrl(url) && options.__douyinSessionLockHeld !== true) {
+    return await runWithDouyinBrowserSessionLock(() => renderSocialMediaUrlsWithElectron(url, {
+      ...options,
+      __douyinSessionLockHeld: true,
+    }), options.signal);
+  }
   if (isXiaohongshuUrl(url) && options.__xiaohongshuSessionLockHeld !== true) {
     return await runWithXiaohongshuBrowserSessionLock(() => renderSocialMediaUrlsWithElectron(url, {
       ...options,
@@ -10784,7 +11057,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     throw new Error('Current Obsidian environment does not support hidden browser rendering');
   }
 
-  const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();
+  const wechatSession = isXiaohongshuUrl(url)
+    ? getXiaohongshuSession()
+    : (isDouyinUrl(url) ? getDouyinSession() : getWechatSession());
   if (isDouyinUrl(url)) {
     await installDouyinExternalProtocolHandlers(wechatSession);
   }
@@ -10905,12 +11180,25 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
 
   try {
     throwIfAborted(options.signal);
-    const loaded = waitForWebContents(win.webContents, 18000);
+    const loaded = waitForWebContents(win.webContents, 18000, {
+      rejectOnFailure: isDouyinUrl(url),
+    });
     if (!beginBestEffortBrowserLoad(win, url)) {
       throw new Error('隐藏浏览器未能开始加载抖音页面');
     }
     await loaded;
     throwIfAborted(options.signal);
+    if (captureDouyinState) {
+      const challengeDetected = await waitAndRetryDouyinChallengePage(win.webContents, {
+        signal: options.signal,
+        retryAllowed: options.retryDouyinChallenge !== false,
+      });
+      if (challengeDetected) {
+        const error = new Error('抖音当前会话需要安全验证');
+        error.code = 'DOUYIN_CHALLENGE';
+        throw error;
+      }
+    }
     const payload = await win.webContents.executeJavaScript(`
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -11226,6 +11514,26 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
 }
 
 let xiaohongshuBrowserSessionQueue = Promise.resolve();
+let douyinBrowserSessionQueue = Promise.resolve();
+
+async function runWithDouyinBrowserSessionLock(task, signal = null) {
+  const previous = douyinBrowserSessionQueue;
+  let release;
+  const currentGate = new Promise((resolve) => {
+    release = resolve;
+  });
+  douyinBrowserSessionQueue = Promise.resolve(previous).then(
+    () => currentGate,
+    () => currentGate,
+  );
+  try {
+    await waitForPromiseWithAbort(previous, signal);
+    throwIfAborted(signal);
+    return await task();
+  } finally {
+    release();
+  }
+}
 
 async function runWithXiaohongshuBrowserSessionLock(task, signal = null) {
   const previous = xiaohongshuBrowserSessionQueue;
@@ -13623,6 +13931,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async checkDouyinLogin() {
+    try {
+      return await checkDouyinLoginStatus();
+    } catch (error) {
+      return false;
+    }
+  }
+
   async loginWechat() {
     try {
       const loggedIn = await loginWechatWeb(null);
@@ -13659,6 +13975,32 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     } catch (error) {
       new Notice(`小红书登录失败：${error.message || error}`);
+    }
+  }
+
+  async loginDouyin(targetUrl = '') {
+    try {
+      const loggedIn = await loginDouyinWeb(targetUrl);
+      if (loggedIn) {
+        new Notice('抖音登录已保存，后续抖音转写会复用该登录状态。');
+      } else {
+        new Notice('未检测到抖音登录状态；请在打开的窗口中完成登录后关闭窗口。');
+      }
+      return loggedIn;
+    } catch (error) {
+      new Notice(`抖音登录失败：${error.message || error}`);
+      return false;
+    }
+  }
+
+  async clearDouyinLogin() {
+    try {
+      await clearDouyinLoginSession();
+      new Notice('已退出插件内的抖音登录；不会影响浏览器或手机抖音。');
+      return true;
+    } catch (error) {
+      new Notice(`退出抖音登录失败：${error.message || error}`);
+      return false;
     }
   }
 
@@ -16081,6 +16423,137 @@ class WechatObsidianInboxPlugin extends Plugin {
     return response;
   }
 
+  getLocalDouyinResolverRoot() {
+    const asrRoot = typeof this.getConfiguredLocalAsrInstallRoot === 'function'
+      ? this.getConfiguredLocalAsrInstallRoot()
+      : getLocalAsrInstallRoot();
+    return path.join(asrRoot, 'tools', 'yt-dlp');
+  }
+
+  getInstalledLocalDouyinResolver() {
+    const platform = this.getConfiguredLocalAsrPlatform();
+    if (!['win32', 'darwin'].includes(platform)) return null;
+    const executablePath = getLocalDouyinResolverExecutablePath(this.getLocalDouyinResolverRoot(), platform);
+    return fs.existsSync(executablePath) ? { executablePath, platform } : null;
+  }
+
+  async ensureLocalDouyinResolver() {
+    if (this.localDouyinResolverInstallPromise) return await this.localDouyinResolverInstallPromise;
+    const platform = this.getConfiguredLocalAsrPlatform();
+    if (!['win32', 'darwin'].includes(platform)) {
+      throw new Error('当前系统暂不支持本地抖音解析组件');
+    }
+    const installRoot = this.getLocalDouyinResolverRoot();
+    const executablePath = getLocalDouyinResolverExecutablePath(installRoot, platform);
+    const hasCachedExecutable = fs.existsSync(executablePath);
+
+    this.localDouyinResolverInstallPromise = (async () => {
+      try {
+        let manifestText = '';
+        try {
+          const response = await requestUrl({ url: `${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`, method: 'GET' });
+          manifestText = response.text || '';
+        } catch (error) {
+          manifestText = await downloadTextViaNode(`${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`);
+        }
+        let manifest;
+        try {
+          manifest = JSON.parse(manifestText);
+        } catch (error) {
+          throw new Error('本地抖音解析组件更新清单无效');
+        }
+        const asset = selectLocalDouyinResolverAsset(manifest, platform, process.arch);
+        if (!asset) {
+          throw new Error(`本地抖音解析组件暂未提供 ${platform}-${process.arch} 安装包`);
+        }
+        if (hasCachedExecutable) {
+          try {
+            const installedSha256 = calculateFileSha256(fs.readFileSync(executablePath));
+            if (installedSha256.toLowerCase() === String(asset.sha256).toLowerCase()) {
+              return { executablePath, updated: false, source: 'verified-cache' };
+            }
+          } catch (error) {}
+        }
+        const bytes = await downloadBinaryViaNode(asset.url);
+        if (calculateFileSha256(bytes).toLowerCase() !== String(asset.sha256).toLowerCase()) {
+          throw new Error('本地抖音解析组件校验失败，已拒绝安装');
+        }
+        fs.mkdirSync(installRoot, { recursive: true });
+        const temporaryPath = `${executablePath}.${process.pid}.${Date.now()}.tmp`;
+        try {
+          fs.writeFileSync(temporaryPath, bytes, { mode: 0o700 });
+          if (platform !== 'win32') fs.chmodSync(temporaryPath, 0o700);
+          fs.renameSync(temporaryPath, executablePath);
+        } finally {
+          try { fs.rmSync(temporaryPath, { force: true }); } catch (error) {}
+        }
+        return { executablePath, updated: true, source: 'cdn' };
+      } catch (error) {
+        if (hasCachedExecutable && fs.existsSync(executablePath)) {
+          return { executablePath, updated: false, source: 'stale-cache' };
+        }
+        throw error;
+      }
+    })();
+    try {
+      return await this.localDouyinResolverInstallPromise;
+    } finally {
+      this.localDouyinResolverInstallPromise = null;
+    }
+  }
+
+  async installOrUpdateLocalDouyinResolver() {
+    try {
+      const resolver = await this.ensureLocalDouyinResolver();
+      new Notice(resolver.updated
+        ? '抖音增强解析组件已安装。'
+        : '抖音增强解析组件已是当前版本。');
+      return resolver;
+    } catch (error) {
+      new Notice(`抖音增强解析组件安装失败：${error.message || error}`);
+      return null;
+    }
+  }
+
+  async resolveDouyinMediaWithLocalResolver(pageUrl) {
+    const result = { mediaUrls: [], used: false, loginRequired: false, notInstalled: false, error: null };
+    let cookiePath = '';
+    try {
+      const resolver = this.getInstalledLocalDouyinResolver();
+      if (!resolver) {
+        result.notInstalled = true;
+        result.error = '抖音增强解析组件未安装';
+        return result;
+      }
+      const cookies = await getDouyinCookies();
+      cookiePath = getLocalDouyinResolverCookiePath(path.dirname(resolver.executablePath));
+      fs.writeFileSync(cookiePath, buildNetscapeCookieFile(cookies), { mode: 0o600 });
+      const output = await runLocalDouyinResolver(resolver.executablePath, [
+        '--dump-single-json',
+        '--no-playlist',
+        '--no-warnings',
+        '--skip-download',
+        '--format', 'bestaudio/best',
+        '--cookies', cookiePath,
+        String(pageUrl || ''),
+      ]);
+      result.mediaUrls = extractLocalDouyinResolverMediaUrls(output);
+      result.used = result.mediaUrls.length > 0;
+      if (!result.used) result.error = '本地解析组件未返回可用媒体地址';
+    } catch (error) {
+      const message = String(error && error.message || error || '本地抖音解析失败');
+      result.loginRequired = /fresh cookies|cookies are needed|login required|captcha|risk-control|sec_sdk/i.test(message);
+      result.error = result.loginRequired
+        ? '抖音需要在插件内完成一次登录后再同步'
+        : message.slice(0, 240);
+    } finally {
+      if (cookiePath) {
+        try { fs.rmSync(cookiePath, { force: true }); } catch (error) {}
+      }
+    }
+    return result;
+  }
+
   async fetchDouyinMediaUrlsWithSession(pageUrl, awemeId) {
     return fetchDouyinMediaUrlsWithSession({ pageUrl, awemeId });
   }
@@ -16090,7 +16563,10 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async downloadMediaArrayBufferWithSession(url, headers = {}, options = {}) {
-    return downloadArrayBufferViaElectronSession(url, headers, options);
+    const session = isDouyinUrl(url) || isDouyinMediaUrl(url)
+      ? getDouyinSession()
+      : getWechatSession();
+    return downloadArrayBufferViaElectronSession(url, headers, options, session);
   }
 
   async renderWebpageWithElectron(url) {
@@ -18391,6 +18867,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
         let hasUsableDouyinMedia = false;
+        let douyinLocalResolverLoginRequired = false;
+        let douyinLocalResolverNotInstalled = false;
         let douyinSocialMetrics = {};
         let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
@@ -18587,7 +19065,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (!hasUsableDouyinMedia
             && typeof this.renderSocialMediaUrls === 'function') {
-            const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl);
+            const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl, douyinAwemeId);
             for (const browserRequest of browserRequests) {
               if (hasUsableDouyinMedia) break;
               const browserStage = {
@@ -18600,10 +19078,11 @@ class WechatObsidianInboxPlugin extends Plugin {
                 startedAt: Date.now(),
               };
               try {
-                const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
-                  signal,
-                  strictDouyinTarget: browserRequest.strictDouyinTarget,
-                });
+            const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
+              signal,
+              strictDouyinTarget: browserRequest.strictDouyinTarget,
+              retryDouyinChallenge: browserRequest.inputKind === 'original-page',
+            });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
                   mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
@@ -18620,12 +19099,66 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? 'transport-error' : 'no-target-bound-media';
                 browserStage.durationMs = Date.now() - browserStage.startedAt;
                 delete browserStage.startedAt;
-                douyinResolutionStages.push(browserStage);
+              douyinResolutionStages.push(browserStage);
+            }
+          }
+          if (!hasUsableDouyinMedia
+            && typeof this.resolveDouyinMediaWithLocalResolver === 'function') {
+            const localResolverStage = {
+              stage: 'local-yt-dlp',
+              attempted: true,
+              ok: false,
+              mediaCount: 0,
+              detailFound: false,
+              startedAt: Date.now(),
+            };
+            try {
+              const localResolution = await this.resolveDouyinMediaWithLocalResolver(resolvedUrl || url);
+              const localUrls = Array.isArray(localResolution && localResolution.mediaUrls)
+                ? localResolution.mediaUrls
+                : [];
+              localResolverStage.mediaCount = localUrls.length;
+              if (localUrls.length) {
+                mediaUrls = sortMediaUrlsForTranscription([...localUrls, ...mediaUrls]);
+                mediaUrl = mediaUrls[0] || mediaUrl;
+                hasUsableDouyinMedia = true;
+                hasPreciseDouyinMedia = true;
+                douyinSelectedStage = douyinSelectedStage || localResolverStage.stage;
+                localResolverStage.ok = true;
+                localResolverStage.identityOutcome = 'plugin-session-cookie';
+              } else {
+                douyinLocalResolverLoginRequired = Boolean(localResolution && localResolution.loginRequired);
+                douyinLocalResolverNotInstalled = Boolean(localResolution && localResolution.notInstalled);
+                localResolverStage.attempted = !douyinLocalResolverNotInstalled;
+                localResolverStage.rejectionReason = douyinLocalResolverNotInstalled
+                  ? 'not-installed'
+                  : (douyinLocalResolverLoginRequired
+                  ? 'login-required'
+                  : 'resolver-no-media');
+                if (localResolution && localResolution.error) {
+                  localResolverStage.error = new Error(localResolution.error);
+                }
               }
+            } catch (localResolverError) {
+              if (isAbortError(localResolverError)) throw localResolverError;
+              localResolverStage.error = localResolverError;
+            } finally {
+              if (!localResolverStage.ok && !localResolverStage.rejectionReason) {
+                localResolverStage.rejectionReason = localResolverStage.error
+                  ? 'resolver-error'
+                  : 'resolver-no-media';
+              }
+              localResolverStage.durationMs = Date.now() - localResolverStage.startedAt;
+              delete localResolverStage.startedAt;
+              douyinResolutionStages.push(localResolverStage);
             }
           }
         }
-        if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
+        }
+        const isDouyinRecord = isDouyinUrl(url) || isDouyinUrl(resolvedUrl);
+        const douyinChallengeDetected = douyinResolutionStages.some((stage) => isDouyinChallengeError(stage && stage.error));
+        const hasPluginDouyinLogin = isDouyinRecord ? await this.checkDouyinLogin() : false;
+        if (isDouyinRecord) {
           douyinResolutionDiagnostic = buildDouyinMediaResolutionDiagnostic({
             sourceUrl: url,
             resolvedUrl,
@@ -18634,8 +19167,12 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaCandidateCount: mediaUrls.length,
             preciseMediaFound: hasPreciseDouyinMedia,
             selectedStage: douyinSelectedStage,
-            finalOutcome: hasUsableDouyinMedia ? 'media-selected' : 'no-target-bound-media',
+            finalOutcome: hasUsableDouyinMedia
+              ? 'media-selected'
+              : (douyinLocalResolverLoginRequired ? 'login-required' : (douyinLocalResolverNotInstalled ? 'resolver-not-installed' : (douyinChallengeDetected ? 'douyin-challenge' : 'no-target-bound-media'))),
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true,
+            pluginDouyinLogin: hasPluginDouyinLogin,
+            challengeDetected: douyinChallengeDetected,
           });
         }
         const isUnavailableXhs = isXiaohongshuUrl(url)
@@ -19011,8 +19548,14 @@ class WechatObsidianInboxPlugin extends Plugin {
             signal,
           });
         }
-        if (isVideoIntent && (isDouyinUrl(url) || isDouyinUrl(resolvedUrl))) {
-          const noMediaError = '未能从抖音作品页获取到可用的音频或视频地址';
+        if (isVideoIntent && isDouyinRecord) {
+          const noMediaError = (douyinChallengeDetected || douyinLocalResolverLoginRequired)
+            ? (hasPluginDouyinLogin
+              ? '抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。'
+              : '抖音要求安全验证，请在插件设置中登录抖音后再同步。')
+            : (douyinLocalResolverNotInstalled && hasPluginDouyinLogin
+              ? '插件内抖音已登录，但仍未获取到媒体地址。可在插件设置的“登录抖音转写”中按需安装“抖音增强解析组件”后重试。'
+            : '未能从抖音作品页获取到可用的音频或视频地址');
           return {
             ...record,
             metadata: {
@@ -20482,6 +21025,53 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }
       });
 
+    const douyinPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    douyinPanel.createEl('summary', { text: '登录抖音转写' });
+    douyinPanel.createDiv({
+      text: '用于提高抖音视频转写成功率。登录状态只保存在本插件，不读取、不影响 Chrome、Edge 或手机抖音。',
+      cls: 'wechat-inbox-sync-muted',
+    });
+    const douyinLoginSetting = new Setting(douyinPanel)
+      .setName('抖音登录状态')
+      .setDesc('正在检测抖音登录状态...')
+      .addButton((button) => button
+        .setButtonText('打开抖音登录')
+        .onClick(async () => {
+          douyinLoginSetting.setDesc('请在打开的抖音窗口中完成登录，完成后关闭窗口。');
+          await this.plugin.loginDouyin();
+          this.display();
+        }))
+      .addButton((button) => button
+        .setButtonText('刷新状态')
+        .onClick(async () => {
+          const loggedIn = await this.plugin.checkDouyinLogin();
+          douyinLoginSetting.setDesc(loggedIn
+            ? '已登录：同步抖音链接时会自动复用插件内会话。'
+            : '未登录或登录已过期：请打开抖音登录后再同步。');
+        }))
+      .addButton((button) => button
+        .setButtonText('退出登录')
+        .onClick(async () => {
+          await this.plugin.clearDouyinLogin();
+          this.display();
+        }));
+    this.plugin.checkDouyinLogin().then((loggedIn) => {
+      douyinLoginSetting.setDesc(loggedIn
+        ? '已登录：同步抖音链接时会自动复用插件内会话。'
+        : '未登录或登录已过期：请打开抖音登录后再同步。');
+    });
+
+    new Setting(douyinPanel)
+      .setName('抖音增强解析组件（可选）')
+      .setDesc('仅当插件内已登录抖音、但仍无法转写时按需安装。不会自动下载、不会后台检查或更新。')
+      .addButton((button) => button
+        .setButtonText('安装/更新组件')
+        .onClick(async () => {
+          button.setButtonText('处理中…').setDisabled(true);
+          await this.plugin.installOrUpdateLocalDouyinResolver();
+          this.display();
+        }));
+
     const socialPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     socialPanel.createEl('summary', { text: '登录小红书评论区' });
     socialPanel.createDiv({
@@ -20681,6 +21271,7 @@ WechatObsidianInboxPlugin.__test = {
   closeActiveXiaohongshuBrowserWindows,
   enableDebuggerNetworkCapture,
   beginBestEffortBrowserLoad,
+  createBrowserLoadFailureError,
   waitForBrowserTasksWithin,
   runBrowserTaskWithTimeout,
   sortMediaUrlsForTranscription,
@@ -20722,6 +21313,7 @@ WechatObsidianInboxPlugin.__test = {
   buildWebpageTransportDiagnostic,
   buildDouyinMediaResolutionDiagnostic,
   getXiaohongshuCapabilityMatrix,
+  runWithDouyinBrowserSessionLock,
   runWithXiaohongshuBrowserSessionLock,
   getXiaohongshuBrowserCandidates,
   scoreXiaohongshuExtraction,
@@ -20754,9 +21346,14 @@ WechatObsidianInboxPlugin.__test = {
   downloadTextViaNode,
   normalizeInstallerScriptText,
   getSocialRequestHeaders,
+  isDouyinChallengePageText,
+  shouldRetryDouyinChallengePage,
+  buildDouyinLoginPageConfig,
   buildXiaohongshuLoginPageConfig,
   isAbortedBrowserNavigationError,
   isXiaohongshuUrl,
+  hasDouyinLoginCookies,
+  checkDouyinLoginStatus,
   isTrustedXiaohongshuCookieUrl,
   isTrustedXiaohongshuTransportUrl,
   hasXiaohongshuLoginCookies,

@@ -1005,11 +1005,14 @@ const socialMediaRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderSocialMediaUrlsWithElectron'),
   pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
 );
-assert.ok(socialMediaRendererSource.includes('const wechatSession = isXiaohongshuUrl(url) ? getXiaohongshuSession() : getWechatSession();'));
+assert.ok(socialMediaRendererSource.includes("const wechatSession = isXiaohongshuUrl(url)"));
+assert.ok(socialMediaRendererSource.includes("isDouyinUrl(url) ? getDouyinSession() : getWechatSession()"));
 assert.ok(socialMediaRendererSource.includes('shouldBlockExternalAppUrl(details && details.url)'));
 assert.ok(socialMediaRendererSource.includes('isXiaohongshuCommentApiUrl(details && details.url)'));
 assert.ok(socialMediaRendererSource.includes('runWithXiaohongshuBrowserSessionLock'));
 assert.ok(socialMediaRendererSource.includes('__xiaohongshuSessionLockHeld'));
+assert.ok(socialMediaRendererSource.includes('runWithDouyinBrowserSessionLock'));
+assert.ok(socialMediaRendererSource.includes('__douyinSessionLockHeld'));
 assert.ok(socialMediaRendererSource.includes('installExternalAppNavigationGuards(win.webContents)'));
 assert.ok(socialMediaRendererSource.includes('await installDouyinExternalProtocolHandlers(wechatSession)'));
 assert.ok(
@@ -1141,9 +1144,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.93'), {
-  manifestVersion: '1.3.93',
-  runtimeVersion: '1.3.93',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.95'), {
+  manifestVersion: '1.3.95',
+  runtimeVersion: '1.3.95',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -1750,7 +1753,11 @@ externalNavigationHandlers['will-navigate']({
 assert.strictEqual(preventedSafeNavigation, false);
 assert.deepStrictEqual(externalWindowOpenHandler({ url: 'snssdk1128://aweme/detail/123' }), { action: 'deny' });
 assert.deepStrictEqual(externalWindowOpenHandler({ url: 'bytedance://aweme/detail/123' }), { action: 'deny' });
-assert.deepStrictEqual(externalWindowOpenHandler({ url: 'https://www.douyin.com/video/123' }), { action: 'allow' });
+assert.deepStrictEqual(
+  externalWindowOpenHandler({ url: 'https://www.douyin.com/video/123' }),
+  { action: 'deny' },
+  'a hidden extraction page must never create a visible HTTP child window',
+);
 assert.strictEqual(typeof helpers.installXiaohongshuNavigationGuards, 'function');
 assert.strictEqual(typeof helpers.shouldBlockXiaohongshuBrowserNavigationRequest, 'function');
 assert.strictEqual(
@@ -10485,7 +10492,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.93'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.95'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10524,8 +10531,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.93',
-        runtimeVersion: '1.3.93',
+        manifestVersion: '1.3.95',
+        runtimeVersion: '1.3.95',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10610,7 +10617,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   };
   plugin.writeRecord = async () => {
     throw helpers.createRetryableXiaohongshuContentError({
-      runtime: helpers.getPluginRuntimeIdentity('1.3.93'),
+      runtime: helpers.getPluginRuntimeIdentity('1.3.94'),
       request: {
         sourceHost: 'xhslink.cn',
         finalHost: 'xiaohongshu.com',
@@ -12708,7 +12715,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.93 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.95 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));

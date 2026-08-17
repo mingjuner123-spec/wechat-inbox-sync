@@ -79,6 +79,8 @@ jobs:
           node tests/plugin-wechat-channels-decrypt-utils.test.js
           node tests/plugin-date-utils.test.js
           node tests/plugin-diagnostic-redaction-utils.test.js
+          node tests/local-douyin-resolver-utils.test.js
+          node tests/douyin-resolver-mirror.test.js
           node tests/plugin-input-normalization-utils.test.js
           node tests/plugin-progress-notice-utils.test.js
           node tests/plugin-record-identity-utils.test.js
@@ -122,6 +124,7 @@ jobs:
           node --check scripts/check-plugin-release-identity.js
           node --check scripts/check-local-components-cdn.js
           node --check scripts/check-local-ocr-cdn.js
+          node --check scripts/sync-douyin-resolver-mirror.js
           node --check obsidian-plugin/wechat-inbox-sync/main.js
 
       - name: Reject local component manifest drift
