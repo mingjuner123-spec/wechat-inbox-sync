@@ -15,7 +15,15 @@ function run() {
     mediaCandidateCount: 2,
     preciseMediaFound: true,
     saveOriginalMediaEnabled: true,
-    stages: [{ stage: 'share-page', ok: false, mediaCount: 0, error: { code: 'HTTP_403' } }],
+    stages: [{
+      stage: 'share-page',
+      ok: false,
+      mediaCount: 0,
+      stateFormat: 'pace+router',
+      exactMediaCount: 0,
+      primaryMediaCount: 0,
+      error: { code: 'HTTP_403' },
+    }],
   }), {
     source: { host: 'v.douyin.com' },
     resolved: { host: 'www.douyin.com' },
@@ -31,6 +39,9 @@ function run() {
       ok: false,
       attempted: true,
       mediaCount: 0,
+      stateFormat: 'pace+router',
+      exactMediaCount: 0,
+      primaryMediaCount: 0,
       detailFound: false,
       error: { code: 'HTTP_403' },
       identityOutcome: '',
@@ -52,6 +63,9 @@ function run() {
       attempted: true,
       ok: true,
       mediaCount: 1,
+      stateFormat: 'pace',
+      exactMediaCount: 1,
+      primaryMediaCount: 0,
       identityOutcome: 'page-unique-single-player',
       durationMs: 421,
       mediaUrl: 'https://douyinvod.com/secret.mp4',
@@ -86,6 +100,9 @@ function run() {
   assert.strictEqual(traced.selectedStage, 'targeted-browser');
   assert.strictEqual(traced.finalOutcome, 'transcription-ready');
   assert.strictEqual(traced.stages[0].inputKind, 'original-page');
+  assert.strictEqual(traced.stages[0].stateFormat, 'pace');
+  assert.strictEqual(traced.stages[0].exactMediaCount, 1);
+  assert.strictEqual(traced.stages[0].primaryMediaCount, 0);
   assert.strictEqual(traced.stages[0].identityOutcome, 'page-unique-single-player');
   assert.strictEqual(traced.stages[0].error.code, 'UNKNOWN');
   assert.strictEqual(traced.stages[0].error.status, 403);

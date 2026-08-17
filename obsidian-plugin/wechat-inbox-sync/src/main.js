@@ -190,7 +190,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.92';
+const PLUGIN_RUNTIME_VERSION = '1.3.93';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3361,16 +3361,171 @@ function parseJsonObjectAssignedTo(source, variableName) {
   return null;
 }
 
-function extractDouyinMediaUrlsFromShareHtml(html, awemeId) {
-  const source = String(html || '');
+function parseJsonValueAt(source, valueStart) {
+  const text = String(source || '');
+  const first = text[valueStart];
+  if (first !== '{' && first !== '[') return null;
+  const close = first === '{' ? '}' : ']';
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let index = valueStart; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        quote = '';
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === first) depth += 1;
+    if (char === close) {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(valueStart, index + 1));
+        } catch (error) {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function decodeDouyinStateText(value) {
+  let text = String(value || '');
+  const hasStructuredState = (candidate) => {
+    const normalized = String(candidate || '').trim();
+    return normalized.startsWith('{')
+      || normalized.startsWith('[')
+      || normalized.includes('"videoDetail"')
+      || normalized.includes('\\"videoDetail\\"')
+      || normalized.includes('"aweme_detail"')
+      || normalized.includes('"awemeDetail"');
+  };
+  for (let index = 0; index < 2; index += 1) {
+    if (hasStructuredState(text)) break;
+    if (!/%(?:[0-9a-f]{2})/i.test(text)) break;
+    try {
+      const decoded = decodeURIComponent(text);
+      if (!decoded || decoded === text) break;
+      text = decoded;
+    } catch (error) {
+      break;
+    }
+  }
+  return text;
+}
+
+function collectDouyinPaceStateValues(source) {
+  const text = String(source || '');
+  const values = [];
+  const maxValues = 160;
+  const maxTotalCharacters = 2000000;
+  let totalCharacters = 0;
+  const pushPattern = /self\.__pace_f\s*\.\s*push\s*\(/g;
+  let match;
+  while ((match = pushPattern.exec(text)) && values.length < maxValues && totalCharacters < maxTotalCharacters) {
+    const arrayStart = text.indexOf('[', pushPattern.lastIndex);
+    if (arrayStart < 0) continue;
+    const payload = parseJsonValueAt(text, arrayStart);
+    if (!Array.isArray(payload)) continue;
+    payload.forEach((value) => {
+      if (typeof value !== 'string' || values.length >= maxValues || totalCharacters >= maxTotalCharacters) return;
+      const remaining = maxTotalCharacters - totalCharacters;
+      const bounded = value.slice(0, remaining);
+      if (!bounded) return;
+      values.push(bounded);
+      totalCharacters += bounded.length;
+    });
+    pushPattern.lastIndex = Math.max(pushPattern.lastIndex, arrayStart + 1);
+  }
+  return values;
+}
+
+function collectDouyinStatePayloadsFromText(value) {
+  const source = String(value || '');
+  const payloads = [];
+  const addPayload = (payload, allowPrimary = true) => {
+    if (payload && typeof payload === 'object' && payloads.length < 320) {
+      payloads.push({ payload, allowPrimary });
+    }
+  };
+  const inspect = (text) => {
+    if (!text) return;
+    const detailPattern = /"(?:videoDetail|aweme_detail|awemeDetail)"\s*:/g;
+    const detailMatches = Array.from(text.matchAll(detailPattern));
+    try {
+      addPayload(JSON.parse(text));
+    } catch (error) {}
+
+    const firstObjectStart = text.indexOf('{');
+    if (firstObjectStart >= 0) {
+      addPayload(parseJsonValueAt(text, firstObjectStart), detailMatches.length <= 1);
+    }
+
+    detailMatches.forEach((detailMatch) => {
+      if (payloads.length >= 320) return;
+      const detailStart = text.indexOf('{', Number(detailMatch.index) + detailMatch[0].length);
+      if (detailStart < 0) return;
+      const detail = parseJsonValueAt(text, detailStart);
+      if (detail) addPayload({ videoDetail: detail }, false);
+    });
+  };
+
+  inspect(source);
+  if (/\\"(?:videoDetail|aweme_detail|awemeDetail)\\"/.test(source)) {
+    inspect(source.replace(/\\"/g, '"').replace(/\\\\/g, '\\'));
+  }
+  return payloads;
+}
+
+function collectDouyinPaceStatePayloads(source) {
+  const values = collectDouyinPaceStateValues(source);
+  const candidateTexts = [];
+  const seenTexts = new Set();
+  const addText = (value) => {
+    const text = String(value || '');
+    if (!text || seenTexts.has(text)) return;
+    seenTexts.add(text);
+    candidateTexts.push(text);
+  };
+
+  values.forEach((value) => addText(decodeDouyinStateText(value)));
+  if (values.length > 1) {
+    addText(decodeDouyinStateText(values.join('')));
+    addText(values.map((value) => decodeDouyinStateText(value)).join(''));
+  }
+
+  const payloads = [];
+  candidateTexts.forEach((text) => {
+    collectDouyinStatePayloadsFromText(text).forEach((payload) => {
+      if (payloads.length < 320) payloads.push(payload);
+    });
+  });
+  return payloads;
+}
+
+function collectDouyinRouterStatePayloads(source) {
+  const text = String(source || '');
+  const payloads = [];
   const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
   let match;
-  while ((match = scriptPattern.exec(source))) {
+  while ((match = scriptPattern.exec(text))) {
     const payload = parseJsonObjectAssignedTo(match[1], 'window._ROUTER_DATA');
-    const urls = extractDouyinMediaUrlsForAweme(payload, awemeId);
-    if (urls.length) return urls;
+    if (payload) payloads.push(payload);
   }
-  return extractDouyinMediaUrlsForAweme(parseJsonObjectAssignedTo(source, 'window._ROUTER_DATA'), awemeId);
+  const fallbackPayload = parseJsonObjectAssignedTo(text, 'window._ROUTER_DATA');
+  if (fallbackPayload) payloads.push(fallbackPayload);
+  return payloads;
 }
 
 function findDouyinDetailForAweme(payload, awemeId) {
@@ -3396,21 +3551,147 @@ function findDouyinDetailForAweme(payload, awemeId) {
   return matched;
 }
 
-function extractDouyinDetailFromShareHtml(html, awemeId) {
-  const source = String(html || '');
-  const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
-  let match;
-  while ((match = scriptPattern.exec(source))) {
-    const detail = findDouyinDetailForAweme(
-      parseJsonObjectAssignedTo(match[1], 'window._ROUTER_DATA'),
-      awemeId,
-    );
-    if (detail) return detail;
+function collectExplicitDouyinPrimaryCandidates(payload) {
+  const candidates = [];
+  const addCandidate = (detail, priority) => {
+    if (!detail || typeof detail !== 'object') return;
+    const urls = extractDouyinMediaUrlsFromDetailPayload({ aweme_detail: detail });
+    if (!urls.length) return;
+    candidates.push({
+      detail,
+      priority,
+      identity: String(detail.aweme_id || detail.awemeId || '').trim(),
+      urls,
+    });
+  };
+  if (!payload || typeof payload !== 'object') return candidates;
+  addCandidate(payload.videoDetail, 100);
+  addCandidate(payload.aweme_detail, 100);
+  addCandidate(payload.awemeDetail, 100);
+  if (payload.loaderData && typeof payload.loaderData === 'object') {
+    addCandidate(payload.loaderData.video, 80);
   }
-  return findDouyinDetailForAweme(
-    parseJsonObjectAssignedTo(source, 'window._ROUTER_DATA'),
-    awemeId,
+  return candidates;
+}
+
+function resolveDouyinMediaFromPayloads(payloads, awemeId) {
+  const targetId = String(awemeId || '').trim();
+  const exactUrls = [];
+  let exactDetail = null;
+  const primaryCandidates = [];
+  (Array.isArray(payloads) ? payloads : []).forEach((entry) => {
+    const isStateEntry = Boolean(
+      entry
+      && typeof entry === 'object'
+      && Object.prototype.hasOwnProperty.call(entry, 'payload')
+      && Object.prototype.hasOwnProperty.call(entry, 'allowPrimary'),
+    );
+    const payload = isStateEntry ? entry.payload : entry;
+    if (targetId) {
+      extractDouyinMediaUrlsForAweme(payload, targetId)
+        .forEach((url) => pushUniqueMediaUrl(exactUrls, url));
+      exactDetail = exactDetail || findDouyinDetailForAweme(payload, targetId);
+    }
+    if (!isStateEntry || entry.allowPrimary) {
+      collectExplicitDouyinPrimaryCandidates(payload)
+        .forEach((candidate) => primaryCandidates.push(candidate));
+    }
+  });
+
+  const sortedExactUrls = sortMediaUrlsForTranscription(exactUrls);
+  if (sortedExactUrls.length) {
+    return { exactUrls: sortedExactUrls, primaryUrls: [], detail: exactDetail, identityOutcome: 'target-id-matched' };
+  }
+
+  const bestPriority = primaryCandidates.reduce(
+    (highest, candidate) => Math.max(highest, Number(candidate.priority) || 0),
+    -1,
   );
+  const bestCandidates = primaryCandidates.filter((candidate) => candidate.priority === bestPriority);
+  const uniqueCandidates = new Map();
+  bestCandidates.forEach((candidate) => {
+    const key = candidate.identity || candidate.urls.join('|');
+    if (!uniqueCandidates.has(key)) {
+      uniqueCandidates.set(key, { ...candidate });
+      return;
+    }
+    const previous = uniqueCandidates.get(key);
+    previous.urls = sortMediaUrlsForTranscription([...previous.urls, ...candidate.urls]);
+  });
+  if (uniqueCandidates.size === 1) {
+    const candidate = Array.from(uniqueCandidates.values())[0];
+    return {
+      exactUrls: [],
+      primaryUrls: candidate.urls,
+      detail: candidate.detail,
+      identityOutcome: 'unverified-primary-player',
+    };
+  }
+  return { exactUrls: [], primaryUrls: [], detail: exactDetail, identityOutcome: '' };
+}
+
+function mergeDouyinMediaResolutions(...resolutions) {
+  const exactUrls = [];
+  const primaryCandidates = new Map();
+  let exactDetail = null;
+  resolutions.forEach((resolution) => {
+    if (!resolution) return;
+    (resolution.exactUrls || []).forEach((url) => pushUniqueMediaUrl(exactUrls, url));
+    if (resolution.exactUrls && resolution.exactUrls.length) exactDetail = exactDetail || resolution.detail;
+    if (resolution.primaryUrls && resolution.primaryUrls.length) {
+      const identity = String(
+        resolution.detail && (resolution.detail.aweme_id || resolution.detail.awemeId) || '',
+      ).trim();
+      const key = identity || resolution.primaryUrls.join('|');
+      if (!primaryCandidates.has(key)) {
+        primaryCandidates.set(key, {
+          detail: resolution.detail,
+          urls: sortMediaUrlsForTranscription(resolution.primaryUrls),
+        });
+      } else {
+        const previous = primaryCandidates.get(key);
+        previous.urls = sortMediaUrlsForTranscription([...previous.urls, ...resolution.primaryUrls]);
+      }
+    }
+  });
+  const sortedExactUrls = sortMediaUrlsForTranscription(exactUrls);
+  const primaryCandidate = primaryCandidates.size === 1
+    ? Array.from(primaryCandidates.values())[0]
+    : null;
+  return {
+    exactUrls: sortedExactUrls,
+    primaryUrls: sortedExactUrls.length || !primaryCandidate ? [] : primaryCandidate.urls,
+    detail: exactDetail || (primaryCandidate && primaryCandidate.detail) || null,
+    identityOutcome: sortedExactUrls.length
+      ? 'target-id-matched'
+      : (primaryCandidate ? 'unverified-primary-player' : ''),
+  };
+}
+
+function resolveDouyinMediaFromPaceState(source, awemeId) {
+  return resolveDouyinMediaFromPayloads(collectDouyinPaceStatePayloads(source), awemeId);
+}
+
+function resolveDouyinMediaFromShareHtml(html, awemeId) {
+  const source = String(html || '');
+  return mergeDouyinMediaResolutions(
+    resolveDouyinMediaFromPaceState(source, awemeId),
+    resolveDouyinMediaFromPayloads(collectDouyinRouterStatePayloads(source), awemeId),
+  );
+}
+
+function extractDouyinMediaUrlsFromPaceState(source, awemeId) {
+  const resolution = resolveDouyinMediaFromPaceState(source, awemeId);
+  return resolution.exactUrls.length ? resolution.exactUrls : resolution.primaryUrls;
+}
+
+function extractDouyinMediaUrlsFromShareHtml(html, awemeId) {
+  const resolution = resolveDouyinMediaFromShareHtml(html, awemeId);
+  return resolution.exactUrls.length ? resolution.exactUrls : resolution.primaryUrls;
+}
+
+function extractDouyinDetailFromShareHtml(html, awemeId) {
+  return resolveDouyinMediaFromShareHtml(html, awemeId).detail;
 }
 
 function deriveDouyinTitleFromDescription(description = '') {
@@ -5346,6 +5627,7 @@ function collectDouyinUrlList(value, urls) {
     collectDouyinUrlList(value.url_list, urls);
     collectDouyinUrlList(value.urlList, urls);
     collectDouyinUrlList(value.url, urls);
+    collectDouyinUrlList(value.src, urls);
   }
 }
 
@@ -10525,6 +10807,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     : () => {};
 
   const capturedRequests = [];
+  const captureDouyinState = isDouyinUrl(url);
   const targetDouyinAwemeId = isDouyinUrl(url) ? extractDouyinAwemeId(url) : '';
   const blockXiaohongshuCommentRequests = isXiaohongshuUrl(url) && options.includeComments === false;
   const browserSession = (win.webContents && win.webContents.session) || wechatSession;
@@ -10729,6 +11012,23 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         Array.from(document.querySelectorAll(
           '[data-aweme-id], [data-item-id], a[href*="/video/"], a[href*="aweme_id="], a[href*="modal_id="]',
         )).slice(0, 500).forEach((node) => addPageIdentityIds(collectIdentityIds(node)));
+        let douyinPaceState = '';
+        if (${captureDouyinState ? 'true' : 'false'}) {
+          try {
+            const paceEntries = Array.isArray(self.__pace_f) ? self.__pace_f.slice(-320) : [];
+            douyinPaceState = paceEntries
+              .map((entry) => 'self.__pace_f.push(' + JSON.stringify(entry) + ');')
+              .join('\n')
+              .slice(-800000);
+            if (!douyinPaceState) {
+              douyinPaceState = Array.from(document.scripts)
+                .map((node) => String(node.textContent || ''))
+                .filter((text) => text.includes('__pace_f') || text.includes('videoDetail'))
+                .join('\n')
+                .slice(0, 800000);
+            }
+          } catch (error) {}
+        }
         return {
           urls,
           pageUrl: String(location.href || ''),
@@ -10739,6 +11039,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
           ),
           domMediaCandidates,
           pageIdentityIds,
+          douyinPaceState,
         };
       })()
     `);
@@ -10746,20 +11047,30 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     throwIfAborted(options.signal);
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
+    const paceStateResolution = captureDouyinState
+      ? resolveDouyinMediaFromShareHtml(payload && payload.douyinPaceState, targetDouyinAwemeId)
+      : { exactUrls: [], primaryUrls: [] };
+    if (paceStateResolution.exactUrls.length) return paceStateResolution.exactUrls;
+    if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
     if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
       return selectIdentityBoundDouyinBrowserMedia({
         targetAwemeId: targetDouyinAwemeId,
         finalUrl: payload && payload.pageUrl,
         canonicalUrl: payload && payload.canonicalUrl,
-        debuggerMediaUrls,
+        debuggerMediaUrls: [],
         domMediaCandidates: payload && payload.domMediaCandidates,
         pageIdentityIds: payload && payload.pageIdentityIds,
       });
     }
+    if (paceStateResolution.primaryUrls.length) return paceStateResolution.primaryUrls;
+    const primaryDomMediaUrls = selectPrimaryDouyinDomMediaUrls(
+      payload && payload.domMediaCandidates,
+      targetDouyinAwemeId,
+    );
+    if (primaryDomMediaUrls.length) return primaryDomMediaUrls;
     return normalizeBrowserCapturedMediaUrls([
       capturedRequests,
       payload && Array.isArray(payload.urls) ? payload.urls : payload,
-      debuggerMediaUrls,
     ]);
   } finally {
     cleanupAbort();
@@ -18079,6 +18390,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           : extractSocialMediaUrlsFromHtml(html);
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
+        let hasUsableDouyinMedia = false;
         let douyinSocialMetrics = {};
         let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
@@ -18092,8 +18404,18 @@ class WechatObsidianInboxPlugin extends Plugin {
                 headers: getDouyinMobileShareRequestHeaders(shareUrl),
               });
               const shareHtml = shareResponse.text || '';
-              const shareUrls = extractDouyinMediaUrlsFromShareHtml(shareHtml, douyinAwemeId);
-              const shareDetail = extractDouyinDetailFromShareHtml(shareHtml, douyinAwemeId);
+              const shareResolution = resolveDouyinMediaFromShareHtml(shareHtml, douyinAwemeId);
+              const hasPaceState = /self\.__pace_f/.test(shareHtml);
+              const hasRouterState = /window\._ROUTER_DATA/.test(shareHtml);
+              shareStage.stateFormat = hasPaceState && hasRouterState
+                ? 'pace+router'
+                : (hasPaceState ? 'pace' : (hasRouterState ? 'router' : 'none'));
+              shareStage.exactMediaCount = shareResolution.exactUrls.length;
+              shareStage.primaryMediaCount = shareResolution.primaryUrls.length;
+              const shareUrls = shareResolution.exactUrls.length
+                ? shareResolution.exactUrls
+                : shareResolution.primaryUrls;
+              const shareDetail = shareResolution.detail;
               shareStage.mediaCount = shareUrls.length;
               shareStage.detailFound = Boolean(shareDetail);
               if (shareDetail) {
@@ -18128,10 +18450,11 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (hasSocialMetrics(shareMetrics)) douyinSocialMetrics = shareMetrics;
                 mediaUrls = sortMediaUrlsForTranscription([...shareUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
-                hasPreciseDouyinMedia = true;
+                hasPreciseDouyinMedia = shareResolution.exactUrls.length > 0;
+                hasUsableDouyinMedia = true;
                 douyinSelectedStage = douyinSelectedStage || shareStage.stage;
                 shareStage.ok = true;
-                shareStage.identityOutcome = 'target-id-matched';
+                shareStage.identityOutcome = shareResolution.identityOutcome;
                 break;
               }
             } catch (shareError) {
@@ -18144,7 +18467,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               douyinResolutionStages.push(shareStage);
             }
           }
-          if (!hasPreciseDouyinMedia || !hasSocialMetrics(douyinSocialMetrics) || !douyinStructuredContent) {
+          if (!hasUsableDouyinMedia || !hasSocialMetrics(douyinSocialMetrics) || !douyinStructuredContent) {
             for (const detailUrl of getDouyinAwemeDetailUrls(douyinAwemeId)) {
               const detailStage = { stage: 'aweme-detail', attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
               try {
@@ -18185,6 +18508,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                   mediaUrls = sortMediaUrlsForTranscription([...detailUrls, ...mediaUrls]);
                   mediaUrl = mediaUrls[0] || mediaUrl;
                   hasPreciseDouyinMedia = true;
+                  hasUsableDouyinMedia = true;
                   douyinSelectedStage = douyinSelectedStage || detailStage.stage;
                   detailStage.ok = true;
                   detailStage.identityOutcome = 'target-id-matched';
@@ -18201,7 +18525,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               }
             }
           }
-          if (douyinAwemeId && (!hasPreciseDouyinMedia || !douyinStructuredContent || !hasSocialMetrics(douyinSocialMetrics))) {
+          if (douyinAwemeId && (!hasUsableDouyinMedia || !douyinStructuredContent || !hasSocialMetrics(douyinSocialMetrics))) {
             const sessionStage = { stage: 'authenticated-session', attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
               const hasLegacyInstanceResolver = Object.prototype.hasOwnProperty.call(this, 'fetchDouyinMediaUrlsWithSession')
@@ -18246,6 +18570,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 mediaUrls = sortMediaUrlsForTranscription([...sessionUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = true;
+                hasUsableDouyinMedia = true;
                 douyinSelectedStage = douyinSelectedStage || sessionStage.stage;
                 sessionStage.ok = true;
                 sessionStage.identityOutcome = 'target-id-matched';
@@ -18260,11 +18585,11 @@ class WechatObsidianInboxPlugin extends Plugin {
               douyinResolutionStages.push(sessionStage);
             }
           }
-          if (!hasPreciseDouyinMedia
+          if (!hasUsableDouyinMedia
             && typeof this.renderSocialMediaUrls === 'function') {
             const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl);
             for (const browserRequest of browserRequests) {
-              if (hasPreciseDouyinMedia) break;
+              if (hasUsableDouyinMedia) break;
               const browserStage = {
                 stage: 'targeted-browser',
                 attempted: true,
@@ -18283,7 +18608,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (browserStage.mediaCount) {
                   mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
                   mediaUrl = mediaUrls[0] || mediaUrl;
-                  hasPreciseDouyinMedia = true;
+                  hasUsableDouyinMedia = true;
                   douyinSelectedStage = douyinSelectedStage || `${browserStage.stage}:${browserRequest.inputKind}`;
                   browserStage.ok = true;
                   browserStage.identityOutcome = 'primary-player-fallback';
@@ -18309,7 +18634,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaCandidateCount: mediaUrls.length,
             preciseMediaFound: hasPreciseDouyinMedia,
             selectedStage: douyinSelectedStage,
-            finalOutcome: hasPreciseDouyinMedia ? 'media-selected' : 'no-target-bound-media',
+            finalOutcome: hasUsableDouyinMedia ? 'media-selected' : 'no-target-bound-media',
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true,
           });
         }
@@ -18604,7 +18929,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const socialMediaRenderOptions = isXiaohongshuUrl(url)
           ? { includeComments: false, signal }
           : { signal };
-        if (!hasPreciseDouyinMedia
+        if (!hasUsableDouyinMedia
           && isVideoIntent
           && typeof this.renderSocialMediaUrls === 'function') {
           try {
@@ -18617,7 +18942,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             if (isAbortError(renderError)) throw renderError;
             mediaUrl = mediaUrl || '';
           }
-        } else if (!hasPreciseDouyinMedia
+        } else if (!hasUsableDouyinMedia
           && !mediaUrl
           && isVideoIntent
           && typeof this.renderSocialMediaUrl === 'function') {
@@ -18687,7 +19012,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
         }
         if (isVideoIntent && (isDouyinUrl(url) || isDouyinUrl(resolvedUrl))) {
-          const noMediaError = '未能从抖音作品页获取到与目标作品一致的音频或视频地址';
+          const noMediaError = '未能从抖音作品页获取到可用的音频或视频地址';
           return {
             ...record,
             metadata: {
