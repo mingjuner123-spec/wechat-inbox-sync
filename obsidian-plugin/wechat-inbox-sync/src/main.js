@@ -119,6 +119,8 @@ const {
 } = require('./sync-lifecycle-utils');
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
+const { runWechatArticlePipeline } = require('./wechat-article-pipeline');
+const { classifyWechatArticleHtml } = require('./wechat-article-utils');
 const {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -196,7 +198,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.96';
+const PLUGIN_RUNTIME_VERSION = '1.3.97';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -19598,41 +19600,135 @@ class WechatObsidianInboxPlugin extends Plugin {
         };
       }
 
-      // For WeChat articles, try Electron rendering first if logged in (enables comment extraction).
       if (isWechatArticleUrl(url)) {
-        const wechatLoggedIn = await checkWechatLoginStatus();
-        if (wechatLoggedIn) {
-          try {
+        let usedNodeFallback = false;
+        const extracted = await runWechatArticlePipeline({
+          url,
+          fetchStatic: async () => {
+            try {
+              const response = await requestUrl({ url, method: 'GET' });
+              return response.text || '';
+            } catch (requestError) {
+              try {
+                usedNodeFallback = true;
+                return await this.downloadWebpageHtmlViaNode(url);
+              } catch (_) {
+                return '';
+              }
+            }
+          },
+          renderBrowser: async () => {
             const rendered = await this.renderWebpageWithElectron(url);
-            const renderedImageStats = {};
-            const markdown = await this.saveWebpageImageAssets(
-              rendered.markdown,
-              rendered.assets,
-              rootDir,
-              dateFolder,
-              title,
-              { sourceUrl: url, stats: renderedImageStats },
-            );
             return {
-              ...record,
-              metadata: {
-                ...metadata,
-                title: metadata.title || rendered.title || '',
-                markdown,
-                conversionStatus: 'success',
-                imageLocalizationFailedCount: renderedImageStats.failedCount || 0,
-                imageLocalizationError: renderedImageStats.failedCount
-                  ? `${renderedImageStats.failedCount} image assets could not be localized`
-                  : '',
-                conversionNote: renderedImageStats.failedCount
-                  ? `image-localize-failed=${renderedImageStats.failedCount}`
-                  : metadata.conversionNote,
-              },
+              markdown: rendered.markdown,
+              title: rendered.title,
+              assets: rendered.assets,
             };
-          } catch (electronError) {
-            // Electron rendering failed; fall through to the standard request path.
-          }
+          },
+          isUsableBrowserArticle: ({ markdown }) => {
+            const renderedText = String(markdown || '').trim();
+            const renderedState = classifyWechatArticleHtml(renderedText);
+            return renderedText.length >= 40
+              && renderedState !== 'guide'
+              && renderedState !== 'captcha'
+              && renderedState !== 'unavailable';
+          },
+        });
+
+        if (extracted.kind === 'fallback') {
+          const fallbackTitle = metadata.title || extracted.title || title || '公众号文章未提取正文';
+          const fallbackImageLocalizationErrors = [];
+          const fallbackMarkdown = await this.saveMarkdownRemoteImageAssets(
+            extracted.markdown,
+            rootDir,
+            dateFolder,
+            fallbackTitle,
+            {
+              sourceUrl: url,
+              onError: ({ error }) => {
+                fallbackImageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+              },
+            },
+          );
+          const fallbackConversionNote = [
+            'wechat-article-' + extracted.state + '-link-saved',
+            fallbackImageLocalizationErrors.length
+              ? 'image-localize-failed=' + fallbackImageLocalizationErrors.length + ': ' + fallbackImageLocalizationErrors.slice(0, 3).join(' | ')
+              : '',
+          ].filter(Boolean).join('; ');
+          return {
+            ...record,
+            metadata: {
+              ...metadata,
+              title: fallbackTitle,
+              markdown: fallbackMarkdown,
+              conversionStatus: 'partial',
+              conversionState: extracted.state,
+              conversionNote: fallbackConversionNote,
+              imageLocalizationFailedCount: fallbackImageLocalizationErrors.length,
+              imageLocalizationError: fallbackImageLocalizationErrors.slice(0, 3).join(' | '),
+            },
+          };
         }
+
+        const pageTitle = metadata.title || extracted.title || extractHtmlTitle(extracted.html) || title || '公众号文章';
+        const pageMeta = extracted.source === 'static'
+          ? extractWebpageMetadataFromHtml(extracted.html, url)
+          : {};
+        const imageLocalizationErrors = [];
+        let markdown = extracted.source === 'browser'
+          ? extracted.markdown
+          : htmlToMarkdown(extracted.html);
+        if (extracted.source === 'browser') {
+          const renderedImageStats = {};
+          markdown = await this.saveWebpageImageAssets(
+            markdown,
+            extracted.assets,
+            rootDir,
+            dateFolder,
+            pageTitle,
+            { sourceUrl: url, stats: renderedImageStats },
+          );
+          if (renderedImageStats.failedCount) {
+            imageLocalizationErrors.push(`${renderedImageStats.failedCount} image assets could not be localized`);
+          }
+        } else {
+          markdown = await this.saveMarkdownRemoteImageAssets(
+            markdown,
+            rootDir,
+            dateFolder,
+            pageTitle,
+            {
+              sourceUrl: url,
+              onError: ({ error }) => {
+                imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+              },
+            },
+          );
+        }
+        const conversionNote = [
+          usedNodeFallback ? '已通过备用通道抓取' : '',
+          imageLocalizationErrors.length
+            ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(' | ')}`
+            : '',
+        ].filter(Boolean).join('; ');
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            title: pageTitle,
+            author: metadata.author || pageMeta.author || '',
+            description: metadata.description || pageMeta.description || '',
+            keywords: metadata.keywords || pageMeta.keywords || [],
+            platform: metadata.platform || pageMeta.platform || '公众号',
+            contentCategory: metadata.contentCategory || pageMeta.contentCategory || '图文',
+            markdown,
+            conversionStatus: 'success',
+            conversionNote,
+            imageLocalizationFailedCount: imageLocalizationErrors.length,
+            imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
+          },
+        };
       }
 
       let html;

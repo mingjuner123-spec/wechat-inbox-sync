@@ -38,6 +38,8 @@ const expectedModules = [
   'transcription-note-title-utils',
   'transcription-quality-utils',
   'vault-path-utils',
+  'wechat-article-pipeline',
+  'wechat-article-utils',
   'wechat-channels-decrypt-utils',
   'xiaohongshu-markdown-utils',
 ].sort();
@@ -63,7 +65,7 @@ for (const moduleName of expectedModules) {
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const versions = JSON.parse(fs.readFileSync(versionsPath, 'utf8'));
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
-assert.strictEqual(manifest.version, '1.3.96');
+assert.strictEqual(manifest.version, '1.3.97');
 assert.ok(Object.prototype.hasOwnProperty.call(versions, '1.3.92'));
 
 const builder = require(path.join(pluginRoot, 'build-plugin.js'));
