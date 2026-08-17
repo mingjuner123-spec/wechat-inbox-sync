@@ -19,9 +19,21 @@ function shouldForceLocalDouyinResolverCheck(error) {
   return /extractor|unsupported url|outdated|signature|unable to extract/i.test(message);
 }
 
+function isValidSha256(value) {
+  return /^[a-f0-9]{64}$/i.test(String(value || ''));
+}
+
+function selectLocalDouyinResolverAsset(manifest, platform, arch) {
+  if (!manifest || manifest.schemaVersion !== 1 || !manifest.assets) return null;
+  const asset = manifest.assets[`${platform}-${arch}`];
+  if (!asset || !/^https:\/\//i.test(String(asset.url || '')) || !isValidSha256(asset.sha256)) return null;
+  return asset;
+}
+
 module.exports = {
   LOCAL_DOUYIN_RESOLVER_CHECK_INTERVAL_MS,
   shouldCheckLocalDouyinResolver,
   shouldForceLocalDouyinResolverCheck,
+  isValidSha256,
+  selectLocalDouyinResolverAsset,
 };
-
