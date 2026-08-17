@@ -14,7 +14,11 @@ function selectLocalDouyinResolverAsset(manifest, platform, arch) {
 }
 
 function getLocalDouyinResolverRoot(homeDir) {
-  return path.join(String(homeDir || ''), '.wechat-inbox-local-asr', 'tools', 'yt-dlp');
+  const root = String(homeDir || '');
+  // Tests and release tooling may run on a different OS than the plugin host.
+  // Preserve a Windows home path even when this helper executes on a Linux runner.
+  const pathApi = /^(?:[a-z]:[\\/]|\\\\)/i.test(root) ? path.win32 : path;
+  return pathApi.join(root, '.wechat-inbox-local-asr', 'tools', 'yt-dlp');
 }
 
 function isDouyinCookieDomain(domain) {
