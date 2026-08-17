@@ -327,6 +327,19 @@ function runDouyinPersistentLoginContractTest() {
   );
 }
 
+function runLocalResolverFallbackContractTest() {
+  const source = fs.readFileSync(path.resolve(__dirname, pluginMainPath), 'utf8');
+  assert.match(
+    source,
+    /!hasUsableDouyinMedia[\s\S]{0,160}resolveDouyinMediaWithLocalResolver/,
+    'the local resolver must run only after the existing Douyin media stages fail',
+  );
+  assert.match(source, /stage:\s*'local-yt-dlp'/);
+  assert.match(source, /getDouyinCookies\(\)/, 'yt-dlp must use the plugin session rather than a system browser profile');
+  assert.match(source, /fs\.rmSync\(cookiePath, \{ force: true \}\)/, 'temporary Cookie files must be deleted');
+  assert.doesNotMatch(source, /cookies-from-browser/, 'the plugin must not read Chrome/Edge browser profiles');
+}
+
 async function runDouyinBrowserSessionLockTest() {
   assert.strictEqual(typeof helpers.runWithDouyinBrowserSessionLock, 'function');
   const trace = [];
@@ -624,6 +637,7 @@ runBrowserFallbackRequestKeepsNonStrictCurrentPageTest();
 runHiddenDouyinRendererNeverCreatesVisibleChildWindowTest();
 runBrowserLoadFailureKeepsSafeDiagnosticCodeTest();
 runDouyinPersistentLoginContractTest();
+runLocalResolverFallbackContractTest();
 runLegacyPlayerActivationAndPageMediaFallbackContractTest();
 runPaceSsrStateMediaExtractionTest();
 runLegacyRouterDataCompatibilityTest();

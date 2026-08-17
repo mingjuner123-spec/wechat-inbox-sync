@@ -153,6 +153,14 @@ const {
 const { createDouyinStructuredContentBuilder } = require('./social-platform-content-utils');
 const { createDouyinMediaResolutionDiagnosticBuilder } = require('./social-media-diagnostic-utils');
 const {
+  shouldCheckLocalDouyinResolver,
+  shouldForceLocalDouyinResolverCheck,
+  selectLocalDouyinResolverAsset,
+  getLocalDouyinResolverRoot,
+  buildNetscapeCookieFile,
+  extractLocalDouyinResolverMediaUrls,
+} = require('./local-douyin-resolver-utils');
+const {
   createXiaohongshuCommentMarkdownHelpers,
   createXiaohongshuMarkdownBuilder,
 } = require('./xiaohongshu-markdown-utils');
@@ -190,7 +198,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.94';
+const PLUGIN_RUNTIME_VERSION = '1.3.95';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -216,6 +224,8 @@ const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_COMPONENT_CDN_BASE_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com';
+const LOCAL_DOUYIN_RESOLVER_MANIFEST_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/yt-dlp/latest.json`;
+const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
 const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '65ff6ec5aa844c780a4ebf4f83c9ea2f206de1b33e145dd2f1b9e1129f4e2337';
@@ -310,6 +320,7 @@ const DEFAULT_SETTINGS = {
   doubaoPollAttempts: 60,
   doubaoPollIntervalMs: 5000,
   pendingDoubaoTasks: {},
+  localDouyinResolverLastCheckedAt: 0,
   tencentSecretId: '',
   tencentSecretKey: '',
   tencentRegion: 'ap-shanghai',
@@ -1468,6 +1479,77 @@ function downloadTextViaNode(url) {
     });
     request.on('error', reject);
     request.end();
+  });
+}
+
+function downloadBinaryViaNode(url) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(String(url || ''));
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const client = parsed.protocol === 'http:' ? http : https;
+    const request = client.request(parsed, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'wechat-inbox-sync',
+        Accept: 'application/octet-stream,*/*',
+      },
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          try {
+            downloadBinaryViaNode(new URL(response.headers.location, url).toString()).then(resolve, reject);
+          } catch (error) {
+            reject(error);
+          }
+          return;
+        }
+        const bytes = Buffer.concat(chunks);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`HTTP ${response.statusCode}: resolver download failed`));
+          return;
+        }
+        resolve(bytes);
+      });
+    });
+    request.setTimeout(60000, () => request.destroy(new Error('resolver download timeout')));
+    request.on('error', reject);
+    request.end();
+  });
+}
+
+function getLocalDouyinResolverExecutablePath(installRoot, platform = process.platform) {
+  return path.join(installRoot, platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+}
+
+function getLocalDouyinResolverCookiePath(installRoot) {
+  return path.join(installRoot, `.cookies-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.txt`);
+}
+
+function calculateFileSha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+function runLocalDouyinResolver(executablePath, args, timeoutMs = LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    childProcess.execFile(executablePath, args, {
+      windowsHide: true,
+      timeout: timeoutMs,
+      maxBuffer: 2 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const message = String(stderr || error.message || 'yt-dlp failed').slice(0, 600);
+        reject(new Error(message));
+        return;
+      }
+      resolve(String(stdout || ''));
+    });
   });
 }
 
@@ -16344,6 +16426,120 @@ class WechatObsidianInboxPlugin extends Plugin {
     return response;
   }
 
+  getLocalDouyinResolverRoot() {
+    const asrRoot = typeof this.getConfiguredLocalAsrInstallRoot === 'function'
+      ? this.getConfiguredLocalAsrInstallRoot()
+      : getLocalAsrInstallRoot();
+    return path.join(asrRoot, 'tools', 'yt-dlp');
+  }
+
+  async persistLocalDouyinResolverCheck(now = Date.now()) {
+    this.settings.localDouyinResolverLastCheckedAt = Number(now) || Date.now();
+    if (typeof this.saveData === 'function') await this.saveData(this.settings);
+  }
+
+  async ensureLocalDouyinResolver(options = {}) {
+    if (this.localDouyinResolverInstallPromise) return await this.localDouyinResolverInstallPromise;
+    const platform = this.getConfiguredLocalAsrPlatform();
+    if (!['win32', 'darwin'].includes(platform)) {
+      throw new Error('当前系统暂不支持本地抖音解析组件');
+    }
+    const installRoot = this.getLocalDouyinResolverRoot();
+    const executablePath = getLocalDouyinResolverExecutablePath(installRoot, platform);
+    const hasCachedExecutable = fs.existsSync(executablePath);
+    const force = options.force === true;
+    const lastCheckedAt = Number(this.settings.localDouyinResolverLastCheckedAt) || 0;
+    if (hasCachedExecutable
+      && !shouldCheckLocalDouyinResolver({ lastCheckedAt, force })) {
+      return { executablePath, updated: false, source: 'cached' };
+    }
+
+    this.localDouyinResolverInstallPromise = (async () => {
+      try {
+        let manifestText = '';
+        try {
+          const response = await requestUrl({ url: `${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`, method: 'GET' });
+          manifestText = response.text || '';
+        } catch (error) {
+          manifestText = await downloadTextViaNode(`${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`);
+        }
+        let manifest;
+        try {
+          manifest = JSON.parse(manifestText);
+        } catch (error) {
+          throw new Error('本地抖音解析组件更新清单无效');
+        }
+        const asset = selectLocalDouyinResolverAsset(manifest, platform, process.arch);
+        if (!asset) {
+          throw new Error(`本地抖音解析组件暂未提供 ${platform}-${process.arch} 安装包`);
+        }
+        const bytes = await downloadBinaryViaNode(asset.url);
+        if (calculateFileSha256(bytes).toLowerCase() !== String(asset.sha256).toLowerCase()) {
+          throw new Error('本地抖音解析组件校验失败，已拒绝安装');
+        }
+        fs.mkdirSync(installRoot, { recursive: true });
+        const temporaryPath = `${executablePath}.${process.pid}.${Date.now()}.tmp`;
+        try {
+          fs.writeFileSync(temporaryPath, bytes, { mode: 0o700 });
+          if (platform !== 'win32') fs.chmodSync(temporaryPath, 0o700);
+          fs.renameSync(temporaryPath, executablePath);
+        } finally {
+          try { fs.rmSync(temporaryPath, { force: true }); } catch (error) {}
+        }
+        return { executablePath, updated: true, source: 'cdn' };
+      } catch (error) {
+        if (hasCachedExecutable && fs.existsSync(executablePath)) {
+          return { executablePath, updated: false, source: 'stale-cache' };
+        }
+        throw error;
+      } finally {
+        try { await this.persistLocalDouyinResolverCheck(); } catch (error) {}
+      }
+    })();
+    try {
+      return await this.localDouyinResolverInstallPromise;
+    } finally {
+      this.localDouyinResolverInstallPromise = null;
+    }
+  }
+
+  async resolveDouyinMediaWithLocalResolver(pageUrl, options = {}) {
+    const result = { mediaUrls: [], used: false, loginRequired: false, updated: false, error: null };
+    let cookiePath = '';
+    try {
+      const resolver = await this.ensureLocalDouyinResolver({
+        force: shouldForceLocalDouyinResolverCheck(options.previousError),
+      });
+      result.updated = resolver.updated === true;
+      const cookies = await getDouyinCookies();
+      cookiePath = getLocalDouyinResolverCookiePath(path.dirname(resolver.executablePath));
+      fs.writeFileSync(cookiePath, buildNetscapeCookieFile(cookies), { mode: 0o600 });
+      const output = await runLocalDouyinResolver(resolver.executablePath, [
+        '--dump-single-json',
+        '--no-playlist',
+        '--no-warnings',
+        '--skip-download',
+        '--format', 'bestaudio/best',
+        '--cookies', cookiePath,
+        String(pageUrl || ''),
+      ]);
+      result.mediaUrls = extractLocalDouyinResolverMediaUrls(output);
+      result.used = result.mediaUrls.length > 0;
+      if (!result.used) result.error = '本地解析组件未返回可用媒体地址';
+    } catch (error) {
+      const message = String(error && error.message || error || '本地抖音解析失败');
+      result.loginRequired = /fresh cookies|cookies are needed|login required|captcha|risk-control|sec_sdk/i.test(message);
+      result.error = result.loginRequired
+        ? '抖音需要在插件内完成一次登录后再同步'
+        : message.slice(0, 240);
+    } finally {
+      if (cookiePath) {
+        try { fs.rmSync(cookiePath, { force: true }); } catch (error) {}
+      }
+    }
+    return result;
+  }
+
   async fetchDouyinMediaUrlsWithSession(pageUrl, awemeId) {
     return fetchDouyinMediaUrlsWithSession({ pageUrl, awemeId });
   }
@@ -18657,6 +18853,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         let mediaUrl = mediaUrls[0] || '';
         let hasPreciseDouyinMedia = false;
         let hasUsableDouyinMedia = false;
+        let douyinLocalResolverLoginRequired = false;
         let douyinSocialMetrics = {};
         let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
@@ -18887,10 +19084,63 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? 'transport-error' : 'no-target-bound-media';
                 browserStage.durationMs = Date.now() - browserStage.startedAt;
                 delete browserStage.startedAt;
-                douyinResolutionStages.push(browserStage);
-              }
+              douyinResolutionStages.push(browserStage);
             }
           }
+          if (!hasUsableDouyinMedia
+            && typeof this.resolveDouyinMediaWithLocalResolver === 'function') {
+            const localResolverStage = {
+              stage: 'local-yt-dlp',
+              attempted: true,
+              ok: false,
+              mediaCount: 0,
+              detailFound: false,
+              startedAt: Date.now(),
+            };
+            try {
+              const previousError = douyinResolutionStages
+                .map((stage) => stage && stage.error)
+                .find(Boolean);
+              const localResolution = await this.resolveDouyinMediaWithLocalResolver(
+                resolvedUrl || url,
+                { signal, previousError },
+              );
+              const localUrls = Array.isArray(localResolution && localResolution.mediaUrls)
+                ? localResolution.mediaUrls
+                : [];
+              localResolverStage.mediaCount = localUrls.length;
+              if (localUrls.length) {
+                mediaUrls = sortMediaUrlsForTranscription([...localUrls, ...mediaUrls]);
+                mediaUrl = mediaUrls[0] || mediaUrl;
+                hasUsableDouyinMedia = true;
+                hasPreciseDouyinMedia = true;
+                douyinSelectedStage = douyinSelectedStage || localResolverStage.stage;
+                localResolverStage.ok = true;
+                localResolverStage.identityOutcome = 'plugin-session-cookie';
+              } else {
+                douyinLocalResolverLoginRequired = Boolean(localResolution && localResolution.loginRequired);
+                localResolverStage.rejectionReason = douyinLocalResolverLoginRequired
+                  ? 'login-required'
+                  : 'resolver-no-media';
+                if (localResolution && localResolution.error) {
+                  localResolverStage.error = new Error(localResolution.error);
+                }
+              }
+            } catch (localResolverError) {
+              if (isAbortError(localResolverError)) throw localResolverError;
+              localResolverStage.error = localResolverError;
+            } finally {
+              if (!localResolverStage.ok && !localResolverStage.rejectionReason) {
+                localResolverStage.rejectionReason = localResolverStage.error
+                  ? 'resolver-error'
+                  : 'resolver-no-media';
+              }
+              localResolverStage.durationMs = Date.now() - localResolverStage.startedAt;
+              delete localResolverStage.startedAt;
+              douyinResolutionStages.push(localResolverStage);
+            }
+          }
+        }
         }
         const isDouyinRecord = isDouyinUrl(url) || isDouyinUrl(resolvedUrl);
         const douyinChallengeDetected = douyinResolutionStages.some((stage) => isDouyinChallengeError(stage && stage.error));
@@ -18906,7 +19156,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             selectedStage: douyinSelectedStage,
             finalOutcome: hasUsableDouyinMedia
               ? 'media-selected'
-              : (douyinChallengeDetected ? 'douyin-challenge' : 'no-target-bound-media'),
+              : (douyinLocalResolverLoginRequired ? 'login-required' : (douyinChallengeDetected ? 'douyin-challenge' : 'no-target-bound-media')),
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true,
             pluginDouyinLogin: hasPluginDouyinLogin,
             challengeDetected: douyinChallengeDetected,
@@ -19286,7 +19536,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
         }
         if (isVideoIntent && isDouyinRecord) {
-          const noMediaError = douyinChallengeDetected
+          const noMediaError = (douyinChallengeDetected || douyinLocalResolverLoginRequired)
             ? (hasPluginDouyinLogin
               ? '抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。'
               : '抖音要求安全验证，请在插件设置中登录抖音后再同步。')
