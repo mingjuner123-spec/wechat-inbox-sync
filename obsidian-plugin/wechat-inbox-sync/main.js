@@ -3673,22 +3673,6 @@ var require_local_douyin_resolver_utils = __commonJS({
   "src/local-douyin-resolver-utils.js"(exports2, module2) {
     "use strict";
     var path2 = require("path");
-    var LOCAL_DOUYIN_RESOLVER_CHECK_INTERVAL_MS = 48 * 60 * 60 * 1e3;
-    function shouldCheckLocalDouyinResolver2({
-      now = Date.now(),
-      lastCheckedAt = 0,
-      force = false
-    } = {}) {
-      if (force) return true;
-      const checkedAt = Number(lastCheckedAt);
-      return !Number.isFinite(checkedAt) || checkedAt <= 0 || Number(now) - checkedAt >= LOCAL_DOUYIN_RESOLVER_CHECK_INTERVAL_MS;
-    }
-    __name(shouldCheckLocalDouyinResolver2, "shouldCheckLocalDouyinResolver");
-    function shouldForceLocalDouyinResolverCheck2(error) {
-      const message = String(error && error.message || error || "");
-      return /extractor|unsupported url|outdated|signature|unable to extract/i.test(message);
-    }
-    __name(shouldForceLocalDouyinResolverCheck2, "shouldForceLocalDouyinResolverCheck");
     function isValidSha256(value) {
       return /^[a-f0-9]{64}$/i.test(String(value || ""));
     }
@@ -3747,9 +3731,6 @@ var require_local_douyin_resolver_utils = __commonJS({
     }
     __name(extractLocalDouyinResolverMediaUrls2, "extractLocalDouyinResolverMediaUrls");
     module2.exports = {
-      LOCAL_DOUYIN_RESOLVER_CHECK_INTERVAL_MS,
-      shouldCheckLocalDouyinResolver: shouldCheckLocalDouyinResolver2,
-      shouldForceLocalDouyinResolverCheck: shouldForceLocalDouyinResolverCheck2,
       isValidSha256,
       selectLocalDouyinResolverAsset: selectLocalDouyinResolverAsset2,
       getLocalDouyinResolverRoot: getLocalDouyinResolverRoot2,
@@ -4326,8 +4307,6 @@ var {
 var { createDouyinStructuredContentBuilder } = require_social_platform_content_utils();
 var { createDouyinMediaResolutionDiagnosticBuilder } = require_social_media_diagnostic_utils();
 var {
-  shouldCheckLocalDouyinResolver,
-  shouldForceLocalDouyinResolverCheck,
   selectLocalDouyinResolverAsset,
   getLocalDouyinResolverRoot,
   buildNetscapeCookieFile,
@@ -4488,7 +4467,6 @@ var DEFAULT_SETTINGS = {
   doubaoPollAttempts: 60,
   doubaoPollIntervalMs: 5e3,
   pendingDoubaoTasks: {},
-  localDouyinResolverLastCheckedAt: 0,
   tencentSecretId: "",
   tencentSecretKey: "",
   tencentRegion: "ap-shanghai",
@@ -18657,11 +18635,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const asrRoot = typeof this.getConfiguredLocalAsrInstallRoot === "function" ? this.getConfiguredLocalAsrInstallRoot() : getLocalAsrInstallRoot();
     return path.join(asrRoot, "tools", "yt-dlp");
   }
-  async persistLocalDouyinResolverCheck(now = Date.now()) {
-    this.settings.localDouyinResolverLastCheckedAt = Number(now) || Date.now();
-    if (typeof this.saveData === "function") await this.saveData(this.settings);
+  getInstalledLocalDouyinResolver() {
+    const platform = this.getConfiguredLocalAsrPlatform();
+    if (!["win32", "darwin"].includes(platform)) return null;
+    const executablePath = getLocalDouyinResolverExecutablePath(this.getLocalDouyinResolverRoot(), platform);
+    return fs.existsSync(executablePath) ? { executablePath, platform } : null;
   }
-  async ensureLocalDouyinResolver(options = {}) {
+  async ensureLocalDouyinResolver() {
     if (this.localDouyinResolverInstallPromise) return await this.localDouyinResolverInstallPromise;
     const platform = this.getConfiguredLocalAsrPlatform();
     if (!["win32", "darwin"].includes(platform)) {
@@ -18670,11 +18650,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const installRoot = this.getLocalDouyinResolverRoot();
     const executablePath = getLocalDouyinResolverExecutablePath(installRoot, platform);
     const hasCachedExecutable = fs.existsSync(executablePath);
-    const force = options.force === true;
-    const lastCheckedAt = Number(this.settings.localDouyinResolverLastCheckedAt) || 0;
-    if (hasCachedExecutable && !shouldCheckLocalDouyinResolver({ lastCheckedAt, force })) {
-      return { executablePath, updated: false, source: "cached" };
-    }
     this.localDouyinResolverInstallPromise = (async () => {
       try {
         let manifestText = "";
@@ -18725,11 +18700,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           return { executablePath, updated: false, source: "stale-cache" };
         }
         throw error;
-      } finally {
-        try {
-          await this.persistLocalDouyinResolverCheck();
-        } catch (error) {
-        }
       }
     })();
     try {
@@ -18738,14 +18708,26 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       this.localDouyinResolverInstallPromise = null;
     }
   }
-  async resolveDouyinMediaWithLocalResolver(pageUrl, options = {}) {
-    const result = { mediaUrls: [], used: false, loginRequired: false, updated: false, error: null };
+  async installOrUpdateLocalDouyinResolver() {
+    try {
+      const resolver = await this.ensureLocalDouyinResolver();
+      new Notice(resolver.updated ? "抖音增强解析组件已安装。" : "抖音增强解析组件已是当前版本。");
+      return resolver;
+    } catch (error) {
+      new Notice(`抖音增强解析组件安装失败：${error.message || error}`);
+      return null;
+    }
+  }
+  async resolveDouyinMediaWithLocalResolver(pageUrl) {
+    const result = { mediaUrls: [], used: false, loginRequired: false, notInstalled: false, error: null };
     let cookiePath = "";
     try {
-      const resolver = await this.ensureLocalDouyinResolver({
-        force: shouldForceLocalDouyinResolverCheck(options.previousError)
-      });
-      result.updated = resolver.updated === true;
+      const resolver = this.getInstalledLocalDouyinResolver();
+      if (!resolver) {
+        result.notInstalled = true;
+        result.error = "抖音增强解析组件未安装";
+        return result;
+      }
       const cookies = await getDouyinCookies();
       cookiePath = getLocalDouyinResolverCookiePath(path.dirname(resolver.executablePath));
       fs.writeFileSync(cookiePath, buildNetscapeCookieFile(cookies), { mode: 384 });
@@ -20822,6 +20804,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         let hasPreciseDouyinMedia = false;
         let hasUsableDouyinMedia = false;
         let douyinLocalResolverLoginRequired = false;
+        let douyinLocalResolverNotInstalled = false;
         let douyinSocialMetrics = {};
         let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
@@ -21035,11 +21018,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 startedAt: Date.now()
               };
               try {
-                const previousError = douyinResolutionStages.map((stage) => stage && stage.error).find(Boolean);
-                const localResolution = await this.resolveDouyinMediaWithLocalResolver(
-                  resolvedUrl || url,
-                  { signal, previousError }
-                );
+                const localResolution = await this.resolveDouyinMediaWithLocalResolver(resolvedUrl || url);
                 const localUrls = Array.isArray(localResolution && localResolution.mediaUrls) ? localResolution.mediaUrls : [];
                 localResolverStage.mediaCount = localUrls.length;
                 if (localUrls.length) {
@@ -21052,7 +21031,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   localResolverStage.identityOutcome = "plugin-session-cookie";
                 } else {
                   douyinLocalResolverLoginRequired = Boolean(localResolution && localResolution.loginRequired);
-                  localResolverStage.rejectionReason = douyinLocalResolverLoginRequired ? "login-required" : "resolver-no-media";
+                  douyinLocalResolverNotInstalled = Boolean(localResolution && localResolution.notInstalled);
+                  localResolverStage.attempted = !douyinLocalResolverNotInstalled;
+                  localResolverStage.rejectionReason = douyinLocalResolverNotInstalled ? "not-installed" : douyinLocalResolverLoginRequired ? "login-required" : "resolver-no-media";
                   if (localResolution && localResolution.error) {
                     localResolverStage.error = new Error(localResolution.error);
                   }
@@ -21083,7 +21064,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             mediaCandidateCount: mediaUrls.length,
             preciseMediaFound: hasPreciseDouyinMedia,
             selectedStage: douyinSelectedStage,
-            finalOutcome: hasUsableDouyinMedia ? "media-selected" : douyinLocalResolverLoginRequired ? "login-required" : douyinChallengeDetected ? "douyin-challenge" : "no-target-bound-media",
+            finalOutcome: hasUsableDouyinMedia ? "media-selected" : douyinLocalResolverLoginRequired ? "login-required" : douyinLocalResolverNotInstalled ? "resolver-not-installed" : douyinChallengeDetected ? "douyin-challenge" : "no-target-bound-media",
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true,
             pluginDouyinLogin: hasPluginDouyinLogin,
             challengeDetected: douyinChallengeDetected
@@ -21395,7 +21376,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           });
         }
         if (isVideoIntent && isDouyinRecord) {
-          const noMediaError = douyinChallengeDetected || douyinLocalResolverLoginRequired ? hasPluginDouyinLogin ? "抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。" : "抖音要求安全验证，请在插件设置中登录抖音后再同步。" : "未能从抖音作品页获取到可用的音频或视频地址";
+          const noMediaError = douyinChallengeDetected || douyinLocalResolverLoginRequired ? hasPluginDouyinLogin ? "抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。" : "抖音要求安全验证，请在插件设置中登录抖音后再同步。" : douyinLocalResolverNotInstalled && hasPluginDouyinLogin ? "插件内抖音已登录，但仍未获取到媒体地址。可在插件设置的“登录抖音转写”中按需安装“抖音增强解析组件”后重试。" : "未能从抖音作品页获取到可用的音频或视频地址";
           return {
             ...record,
             metadata: {
@@ -22623,6 +22604,11 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     this.plugin.checkDouyinLogin().then((loggedIn) => {
       douyinLoginSetting.setDesc(loggedIn ? "已登录：同步抖音链接时会自动复用插件内会话。" : "未登录或登录已过期：请打开抖音登录后再同步。");
     });
+    new Setting(douyinPanel).setName("抖音增强解析组件（可选）").setDesc("仅当插件内已登录抖音、但仍无法转写时按需安装。不会自动下载、不会后台检查或更新。").addButton((button) => button.setButtonText("安装/更新组件").onClick(async () => {
+      button.setButtonText("处理中…").setDisabled(true);
+      await this.plugin.installOrUpdateLocalDouyinResolver();
+      this.display();
+    }));
     const socialPanel = containerEl.createEl("details", { cls: "wechat-inbox-sync-advanced-panel" });
     socialPanel.createEl("summary", { text: "登录小红书评论区" });
     socialPanel.createDiv({

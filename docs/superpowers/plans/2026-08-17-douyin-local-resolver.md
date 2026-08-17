@@ -1,5 +1,7 @@
 # Douyin Local Resolver Implementation Plan
 
+> **Superseded on 2026-08-17:** Do not auto-install, periodically check, or schedule CDN mirroring for yt-dlp. The component is optional, installed/updated only by an explicit settings action after plugin-session login has still failed. Keep the mirror script only for deliberate manual updates.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a locally installed yt-dlp resolver for Douyin while only asking users to log in after a confirmed Douyin challenge.
@@ -106,4 +108,3 @@ assert.equal(shouldForceLocalDouyinResolverCheck(new Error('fresh cookies are ne
 - [ ] Run: `npm run build`, `npm run check`, the three new/focused tests, `node tests/plugin-main-ai.test.js`, `node tests/plugin-marketplace-package.test.js`, and `node --check obsidian-plugin/wechat-inbox-sync/main.js`.
 - [ ] Run `node scripts/sync-plugin-release-mirror.js --write --source obsidian-plugin/wechat-inbox-sync --root .` and verify four loose mirror asset hashes.
 - [ ] As a separately authorized L3 action, verify the official source is a clean fast-forward, validate static CDN access only in the long deployment environment, publish a new immutable tag/Release, then read back release and mirror identity. Never read or modify short business data.
-

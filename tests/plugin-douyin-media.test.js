@@ -335,7 +335,8 @@ function runLocalResolverFallbackContractTest() {
     'the local resolver must run only after the existing Douyin media stages fail',
   );
   assert.match(source, /stage:\s*'local-yt-dlp'/);
-  assert.match(source, /installedSha256[\s\S]{0,140}verified-cache/, 'a 48-hour update check must not redownload an unchanged resolver');
+  assert.match(source, /getInstalledLocalDouyinResolver\(\)/, 'the resolver must run only when the optional component is already installed');
+  assert.doesNotMatch(source, /localDouyinResolverLastCheckedAt/, 'normal sync must not schedule periodic resolver checks');
   assert.match(source, /getDouyinCookies\(\)/, 'yt-dlp must use the plugin session rather than a system browser profile');
   assert.match(source, /fs\.rmSync\(cookiePath, \{ force: true \}\)/, 'temporary Cookie files must be deleted');
   assert.doesNotMatch(source, /cookies-from-browser/, 'the plugin must not read Chrome/Edge browser profiles');
