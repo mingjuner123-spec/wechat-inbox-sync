@@ -16473,6 +16473,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (!asset) {
           throw new Error(`本地抖音解析组件暂未提供 ${platform}-${process.arch} 安装包`);
         }
+        if (hasCachedExecutable) {
+          try {
+            const installedSha256 = calculateFileSha256(fs.readFileSync(executablePath));
+            if (installedSha256.toLowerCase() === String(asset.sha256).toLowerCase()) {
+              return { executablePath, updated: false, source: 'verified-cache' };
+            }
+          } catch (error) {}
+        }
         const bytes = await downloadBinaryViaNode(asset.url);
         if (calculateFileSha256(bytes).toLowerCase() !== String(asset.sha256).toLowerCase()) {
           throw new Error('本地抖音解析组件校验失败，已拒绝安装');
