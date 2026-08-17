@@ -4,7 +4,7 @@
 - 标题：公众号图文提取管线重构与引导页降级
 - 创建日期：2026-08-17
 - 类型：重构｜修复
-- 状态：设计评审中
+- 状态：待独立审查
 - 风险等级：L2
 - 所属阶段：公众号图文可靠性
 - 是否当前主线：否
@@ -12,7 +12,7 @@
 - 父主线：H2-002
 - 分支：codex/wechat-article-refactor
 - Worktree：.worktrees/wechat-article-refactor
-- 允许修改路径（allowedPaths）：obsidian-plugin/wechat-inbox-sync/src/main.js；obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline.js；obsidian-plugin/wechat-inbox-sync/src/wechat-article-utils.js；obsidian-plugin/wechat-inbox-sync/main.js；obsidian-plugin/wechat-inbox-sync/build-plugin.js；tests/plugin-wechat-article-pipeline.test.js；tests/plugin-main-ai.test.js；tests/plugin-wechat-article-image-localization.test.js；docs/task-cards/plugin-wechat-article-pipeline-001.md；docs/superpowers/specs/2026-08-17-wechat-article-pipeline-design.md；docs/superpowers/plans/2026-08-17-wechat-article-pipeline.md
+- 允许修改路径（allowedPaths）：obsidian-plugin/wechat-inbox-sync/src/main.js；obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline.js；obsidian-plugin/wechat-inbox-sync/src/wechat-article-utils.js；obsidian-plugin/wechat-inbox-sync/main.js；obsidian-plugin/wechat-inbox-sync/build-plugin.js；tests/plugin-wechat-article-pipeline.test.js；tests/plugin-main-ai.test.js；tests/plugin-wechat-article-image-localization.test.js；tests/plugin-architecture-integration.test.js；docs/task-cards/plugin-wechat-article-pipeline-001.md；docs/superpowers/specs/2026-08-17-wechat-article-pipeline-design.md；docs/superpowers/plans/2026-08-17-wechat-article-pipeline.md
 - 环境或发布链路占用：公开插件仓库代码；不占用发布、CloudBase 或用户数据
 - 紧急事实：不适用
 - 事故授权范围：不适用
@@ -53,7 +53,8 @@
 
 ## 纠偏记录
 
-暂无。
+- 新增“正文首段很短、后续段落才包含主要内容”的回归用例，暴露了原始 `js_content` 正文检测在第一个嵌套标签处过早截断的问题；已改为按同名标签层级提取完整正文容器后再判定。
+- 已本地重建发布资产；未读取真实用户数据、未部署、未发布。
 
 ## 已知风险
 
@@ -61,7 +62,7 @@
 
 ## 唯一下一步
 
-完成并审阅公众号图文管线设计文档，等待用户确认后写实施计划。
+由独立审查者覆盖页面分类、浏览器兜底、部分保存和图片失败路径；审查通过后再决定合并或发布。
 
 ## 是否需要负责人决定
 

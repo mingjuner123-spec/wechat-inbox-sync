@@ -199,6 +199,47 @@ async function run() {
   assert.ok(generic.metadata.markdown.includes(imageUrl));
   assert.strictEqual('imageLocalizationFailedCount' in generic.metadata, false);
 
+  const guideHtml = [
+    '<html><head><meta property="og:title" content="引导页可保存标题">',
+    '<meta property="og:image" content="https://mmbiz.qpic.cn/guide-cover.jpg"></head>',
+    '<body>微信扫一扫可打开此内容 使用小程序</body></html>',
+  ].join('');
+  const browserRecoveryCase = createPlugin();
+  let browserRecoveryCalls = 0;
+  browserRecoveryCase.plugin.renderWebpageWithElectron = async () => {
+    browserRecoveryCalls += 1;
+    return {
+      title: '浏览器恢复标题',
+      markdown: '这是通过隐藏浏览器获得的足够长的公众号正文，应该作为完整文章保存。\n\n![图片](https://mmbiz.qpic.cn/browser-body.jpg)',
+      assets: [{ src: 'https://mmbiz.qpic.cn/browser-body.jpg', alt: '图片' }],
+    };
+  };
+  const browserRecovered = await hydrateWithHtml(browserRecoveryCase.plugin, guideHtml);
+  assert.strictEqual(browserRecoveryCalls, 1);
+  assert.strictEqual(browserRecovered.metadata.conversionStatus, 'success');
+  assert.strictEqual(browserRecovered.metadata.title, '浏览器恢复标题');
+  assert.strictEqual(browserRecoveryCase.writes.length, 1);
+
+  const partialGuideCase = createPlugin();
+  let partialGuideBrowserCalls = 0;
+  partialGuideCase.plugin.renderWebpageWithElectron = async () => {
+    partialGuideBrowserCalls += 1;
+    return { markdown: '微信扫一扫可打开此内容 使用完整服务', assets: [] };
+  };
+  const partialGuide = await hydrateWithHtml(partialGuideCase.plugin, guideHtml);
+  assert.strictEqual(partialGuideBrowserCalls, 1);
+  assert.strictEqual(partialGuide.metadata.conversionStatus, 'partial');
+  assert.strictEqual(partialGuide.metadata.conversionState, 'guide');
+  assert.ok(partialGuide.metadata.markdown.includes('引导页可保存标题'));
+  assert.strictEqual(
+    PluginClass.__test.getSyncLifecycleOutcomeError({
+      type: 'webpage',
+      content: articleUrl,
+      metadata: partialGuide.metadata,
+    }),
+    null,
+  );
+
   console.log('plugin-wechat-article-image-localization.test.js passed');
 }
 
