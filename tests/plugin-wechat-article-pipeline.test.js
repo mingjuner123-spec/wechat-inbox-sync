@@ -5,6 +5,8 @@ const {
   classifyWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
   buildWechatArticleFallbackMarkdown,
+  isWechatArticleUrl,
+  normalizeWechatArticleUrl,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-utils');
 const { runWechatArticlePipeline } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
 
@@ -47,6 +49,18 @@ assert.deepStrictEqual(extractWechatArticleFallbackMetadata(genericGuideHtml), {
   coverUrl: '',
 });
 
+assert.strictEqual(isWechatArticleUrl('https://mp.weixin.qq.com/s/example'), true);
+assert.strictEqual(isWechatArticleUrl('https://mp.weixin.qq.com.evil.example/s?__biz=test'), false);
+assert.strictEqual(isWechatArticleUrl('https://mp.weixin.qq.com/s/example/extra'), false);
+assert.strictEqual(isWechatArticleUrl('https://mp.weixin.qq.com/s//example'), false);
+assert.strictEqual(isWechatArticleUrl('https://mp.weixin.qq.com/s/'), false);
+assert.strictEqual(normalizeWechatArticleUrl('https://mp.weixin.qq.com/s/example?scene=1#rd'), 'https://mp.weixin.qq.com/s/example');
+assert.strictEqual(
+  normalizeWechatArticleUrl('https://mp.weixin.qq.com/s?scene=169&mid=2&sn=signature&pass_ticket=secret&__biz=biz&idx=1#rd'),
+  'https://mp.weixin.qq.com/s?__biz=biz&mid=2&idx=1&sn=signature',
+);
+assert.strictEqual(normalizeWechatArticleUrl('https://mp.weixin.qq.com.evil.example/s?__biz=test'), '');
+
 const fallbackMarkdown = buildWechatArticleFallbackMarkdown({
   url: 'https://mp.weixin.qq.com/s/example',
   state: 'guide',
@@ -59,21 +73,35 @@ assert.match(fallbackMarkdown, /原始链接：https:\/\/mp\.weixin\.qq\.com\/s\
 assert.match(fallbackMarkdown, /!\[封面\]\(https:\/\/mmbiz\.qpic\.cn\/cover\.jpg\)/);
 
 async function runPipelineTests() {
+  let invalidFetchCalls = 0;
+  const invalidUrl = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/example/extra?pass_ticket=secret',
+    fetchStatic: async () => { invalidFetchCalls += 1; return articleHtml; },
+  });
+  assert.strictEqual(invalidFetchCalls, 0);
+  assert.strictEqual(invalidUrl.kind, 'fallback');
+  assert.doesNotMatch(invalidUrl.markdown, /pass_ticket/);
+
   const browserArticle = [
     '<html><head><title>浏览器正文标题</title></head><body>',
     '<div id="js_content"><p>这是浏览器兜底获得的足够长的公众号正文，应该作为完整文章保存。</p></div>',
     '</body></html>',
   ].join('');
   let browserCalls = 0;
+  let staticTargetUrl = '';
+  let browserTargetUrl = '';
   const recovered = await runWechatArticlePipeline({
-    url: 'https://mp.weixin.qq.com/s/recovered',
-    fetchStatic: async () => guideHtml,
-    renderBrowser: async () => {
+    url: 'https://mp.weixin.qq.com/s/recovered?scene=1&pass_ticket=secret',
+    fetchStatic: async (targetUrl) => { staticTargetUrl = targetUrl; return guideHtml; },
+    renderBrowser: async (targetUrl) => {
+      browserTargetUrl = targetUrl;
       browserCalls += 1;
       return { html: browserArticle, title: '浏览器正文标题', assets: [{ src: 'https://mmbiz.qpic.cn/body.jpg' }] };
     },
   });
   assert.strictEqual(browserCalls, 1);
+  assert.strictEqual(staticTargetUrl, 'https://mp.weixin.qq.com/s/recovered');
+  assert.strictEqual(browserTargetUrl, 'https://mp.weixin.qq.com/s/recovered');
   assert.deepStrictEqual(recovered, {
     kind: 'article',
     state: 'complete',
@@ -96,6 +124,13 @@ async function runPipelineTests() {
   assert.strictEqual(partial.kind, 'fallback');
   assert.strictEqual(partial.state, 'guide');
   assert.strictEqual(partial.source, 'fallback');
+
+  const sanitizedFallback = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s?scene=1&mid=2&pass_ticket=secret&__biz=biz&idx=1&sn=signature',
+    fetchStatic: async () => guideHtml,
+  });
+  assert.match(sanitizedFallback.markdown, /https:\/\/mp\.weixin\.qq\.com\/s\?__biz=biz&mid=2&idx=1&sn=signature/);
+  assert.doesNotMatch(sanitizedFallback.markdown, /pass_ticket|scene=1/);
   assert.match(partial.markdown, /微信公众号未返回正文/);
   assert.match(partial.markdown, /值得保存的文章标题/);
 
