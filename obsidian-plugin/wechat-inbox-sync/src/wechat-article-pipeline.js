@@ -4,6 +4,7 @@ const {
   buildWechatArticleFallbackMarkdown,
   classifyWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
+  normalizeWechatArticleUrl,
 } = require('./wechat-article-utils');
 
 function normalizeBrowserResult(value) {
@@ -42,7 +43,9 @@ async function runWechatArticlePipeline({
   isUsableBrowserArticle,
 } = {}) {
   if (typeof fetchStatic !== 'function') throw new Error('fetchStatic is required');
-  const staticHtml = String(await fetchStatic() || '');
+  const normalizedUrl = normalizeWechatArticleUrl(url);
+  if (!normalizedUrl) return buildFallbackResult({ url: '', state: 'unknown', html: '' });
+  const staticHtml = String(await fetchStatic(normalizedUrl) || '');
   const staticState = classifyWechatArticleHtml(staticHtml);
   if (staticState === 'article') {
     return {
@@ -55,11 +58,11 @@ async function runWechatArticlePipeline({
     };
   }
   if (staticState === 'captcha') {
-    return buildFallbackResult({ url, state: 'captcha', html: staticHtml });
+    return buildFallbackResult({ url: normalizedUrl, state: 'captcha', html: staticHtml });
   }
   if (typeof renderBrowser === 'function' && (staticState === 'guide' || staticState === 'unknown')) {
     try {
-      const browser = normalizeBrowserResult(await renderBrowser());
+      const browser = normalizeBrowserResult(await renderBrowser(normalizedUrl));
       const hasBrowserArticle = typeof isUsableBrowserArticle === 'function'
         ? Boolean(isUsableBrowserArticle(browser))
         : classifyWechatArticleHtml(browser.html) === 'article';
@@ -77,12 +80,12 @@ async function runWechatArticlePipeline({
       }
       const browserState = classifyWechatArticleHtml(browser.html || browser.markdown);
       const fallbackState = browserState === 'unavailable' ? browserState : staticState;
-      return buildFallbackResult({ url, state: fallbackState, html: staticHtml });
+      return buildFallbackResult({ url: normalizedUrl, state: fallbackState, html: staticHtml });
     } catch (_) {
-      return buildFallbackResult({ url, state: staticState, html: staticHtml });
+      return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
     }
   }
-  return buildFallbackResult({ url, state: staticState, html: staticHtml });
+  return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
 }
 
 module.exports = { runWechatArticlePipeline };

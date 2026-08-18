@@ -2340,6 +2340,31 @@ var require_record_body_markdown_utils = __commonJS({
 var require_wechat_article_utils = __commonJS({
   "src/wechat-article-utils.js"(exports2, module2) {
     "use strict";
+    var WECHAT_ARTICLE_HOST = "mp.weixin.qq.com";
+    var WECHAT_ARTICLE_ID_PARAMS = ["__biz", "mid", "idx", "sn"];
+    function isWechatArticleUrl2(value) {
+      try {
+        const parsed = new URL(String(value || "").trim());
+        return parsed.hostname.toLowerCase() === WECHAT_ARTICLE_HOST && (/^\/s$/.test(parsed.pathname || "") || /^\/s\/[^/]+$/.test(parsed.pathname || ""));
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isWechatArticleUrl2, "isWechatArticleUrl");
+    function normalizeWechatArticleUrl2(value) {
+      if (!isWechatArticleUrl2(value)) return "";
+      const parsed = new URL(String(value || "").trim());
+      const pathname = String(parsed.pathname || "").replace(/\/+$/, "") || "/s";
+      const normalized = new URL(`https://${WECHAT_ARTICLE_HOST}${pathname}`);
+      if (pathname === "/s") {
+        WECHAT_ARTICLE_ID_PARAMS.forEach((key) => {
+          const parameter = parsed.searchParams.get(key);
+          if (parameter) normalized.searchParams.set(key, parameter);
+        });
+      }
+      return normalized.toString();
+    }
+    __name(normalizeWechatArticleUrl2, "normalizeWechatArticleUrl");
     function decodeHtmlEntities2(value) {
       return String(value || "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/g, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
     }
@@ -2439,8 +2464,10 @@ var require_wechat_article_utils = __commonJS({
       classifyWechatArticleHtml: classifyWechatArticleHtml2,
       extractWechatArticleFallbackMetadata,
       hasWechatArticleBody,
+      isWechatArticleUrl: isWechatArticleUrl2,
       isGenericWechatMetadata,
-      isTrustedCoverUrl
+      isTrustedCoverUrl,
+      normalizeWechatArticleUrl: normalizeWechatArticleUrl2
     };
   }
 });
@@ -2452,7 +2479,8 @@ var require_wechat_article_pipeline = __commonJS({
     var {
       buildWechatArticleFallbackMarkdown,
       classifyWechatArticleHtml: classifyWechatArticleHtml2,
-      extractWechatArticleFallbackMetadata
+      extractWechatArticleFallbackMetadata,
+      normalizeWechatArticleUrl: normalizeWechatArticleUrl2
     } = require_wechat_article_utils();
     function normalizeBrowserResult(value) {
       if (typeof value === "string") return { html: value, title: "", assets: [] };
@@ -2490,7 +2518,9 @@ var require_wechat_article_pipeline = __commonJS({
       isUsableBrowserArticle
     } = {}) {
       if (typeof fetchStatic !== "function") throw new Error("fetchStatic is required");
-      const staticHtml = String(await fetchStatic() || "");
+      const normalizedUrl = normalizeWechatArticleUrl2(url);
+      if (!normalizedUrl) return buildFallbackResult({ url: "", state: "unknown", html: "" });
+      const staticHtml = String(await fetchStatic(normalizedUrl) || "");
       const staticState = classifyWechatArticleHtml2(staticHtml);
       if (staticState === "article") {
         return {
@@ -2503,11 +2533,11 @@ var require_wechat_article_pipeline = __commonJS({
         };
       }
       if (staticState === "captcha") {
-        return buildFallbackResult({ url, state: "captcha", html: staticHtml });
+        return buildFallbackResult({ url: normalizedUrl, state: "captcha", html: staticHtml });
       }
       if (typeof renderBrowser === "function" && (staticState === "guide" || staticState === "unknown")) {
         try {
-          const browser = normalizeBrowserResult(await renderBrowser());
+          const browser = normalizeBrowserResult(await renderBrowser(normalizedUrl));
           const hasBrowserArticle = typeof isUsableBrowserArticle === "function" ? Boolean(isUsableBrowserArticle(browser)) : classifyWechatArticleHtml2(browser.html) === "article";
           if (hasBrowserArticle) {
             const article = {
@@ -2523,12 +2553,12 @@ var require_wechat_article_pipeline = __commonJS({
           }
           const browserState = classifyWechatArticleHtml2(browser.html || browser.markdown);
           const fallbackState = browserState === "unavailable" ? browserState : staticState;
-          return buildFallbackResult({ url, state: fallbackState, html: staticHtml });
+          return buildFallbackResult({ url: normalizedUrl, state: fallbackState, html: staticHtml });
         } catch (_) {
-          return buildFallbackResult({ url, state: staticState, html: staticHtml });
+          return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
         }
       }
-      return buildFallbackResult({ url, state: staticState, html: staticHtml });
+      return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
     }
     __name(runWechatArticlePipeline2, "runWechatArticlePipeline");
     module2.exports = { runWechatArticlePipeline: runWechatArticlePipeline2 };
@@ -4475,7 +4505,7 @@ var {
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
 var { createRecordBodyMarkdownHelpers } = require_record_body_markdown_utils();
 var { runWechatArticlePipeline } = require_wechat_article_pipeline();
-var { classifyWechatArticleHtml } = require_wechat_article_utils();
+var { classifyWechatArticleHtml, isWechatArticleUrl, normalizeWechatArticleUrl } = require_wechat_article_utils();
 var {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -6852,11 +6882,6 @@ function isFeishuUrl(url) {
   return text.includes("feishu.cn") || text.includes("larksuite.com") || text.includes("feishu.net") || text.includes("feishu");
 }
 __name(isFeishuUrl, "isFeishuUrl");
-function isWechatArticleUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("mp.weixin.qq.com") || text.includes("weixin.qq.com");
-}
-__name(isWechatArticleUrl, "isWechatArticleUrl");
 function isWechatExplicitDecorativeImageAsset(asset) {
   if (!asset) return false;
   const alt = String(asset.alt || "").trim();
@@ -21619,24 +21644,25 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         };
       }
       if (isWechatArticleUrl(url)) {
+        const wechatArticleUrl = normalizeWechatArticleUrl(url);
         let usedNodeFallback = false;
         const extracted = await runWechatArticlePipeline({
-          url,
-          fetchStatic: /* @__PURE__ */ __name(async () => {
+          url: wechatArticleUrl,
+          fetchStatic: /* @__PURE__ */ __name(async (targetUrl) => {
             try {
-              const response = await requestUrl({ url, method: "GET" });
+              const response = await requestUrl({ url: targetUrl, method: "GET" });
               return response.text || "";
             } catch (requestError) {
               try {
                 usedNodeFallback = true;
-                return await this.downloadWebpageHtmlViaNode(url);
+                return await this.downloadWebpageHtmlViaNode(targetUrl);
               } catch (_) {
                 return "";
               }
             }
           }, "fetchStatic"),
-          renderBrowser: /* @__PURE__ */ __name(async () => {
-            const rendered = await this.renderWebpageWithElectron(url);
+          renderBrowser: /* @__PURE__ */ __name(async (targetUrl) => {
+            const rendered = await this.renderWebpageWithElectron(targetUrl);
             return {
               markdown: rendered.markdown,
               title: rendered.title,
@@ -21658,7 +21684,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             dateFolder,
             fallbackTitle,
             {
-              sourceUrl: url,
+              sourceUrl: wechatArticleUrl,
               onError: /* @__PURE__ */ __name(({ error }) => {
                 fallbackImageLocalizationErrors.push(String(error && (error.message || error) || "unknown error"));
               }, "onError")
@@ -21672,6 +21698,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             ...record,
             metadata: {
               ...metadata,
+              url: wechatArticleUrl,
+              originalUrl: wechatArticleUrl,
               title: fallbackTitle,
               markdown: fallbackMarkdown,
               conversionStatus: "partial",
@@ -21683,7 +21711,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           };
         }
         const pageTitle2 = metadata.title || extracted.title || extractHtmlTitle(extracted.html) || title || "公众号文章";
-        const pageMeta2 = extracted.source === "static" ? extractWebpageMetadataFromHtml(extracted.html, url) : {};
+        const pageMeta2 = extracted.source === "static" ? extractWebpageMetadataFromHtml(extracted.html, wechatArticleUrl) : {};
         const imageLocalizationErrors2 = [];
         let markdown2 = extracted.source === "browser" ? extracted.markdown : htmlToMarkdown(extracted.html);
         if (extracted.source === "browser") {
@@ -21694,7 +21722,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             rootDir,
             dateFolder,
             pageTitle2,
-            { sourceUrl: url, stats: renderedImageStats }
+            { sourceUrl: wechatArticleUrl, stats: renderedImageStats }
           );
           if (renderedImageStats.failedCount) {
             imageLocalizationErrors2.push(`${renderedImageStats.failedCount} image assets could not be localized`);
@@ -21706,7 +21734,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             dateFolder,
             pageTitle2,
             {
-              sourceUrl: url,
+              sourceUrl: wechatArticleUrl,
               onError: /* @__PURE__ */ __name(({ error }) => {
                 imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
               }, "onError")
@@ -21721,6 +21749,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           ...record,
           metadata: {
             ...metadata,
+            url: wechatArticleUrl,
+            originalUrl: wechatArticleUrl,
             title: pageTitle2,
             author: metadata.author || pageMeta2.author || "",
             description: metadata.description || pageMeta2.description || "",

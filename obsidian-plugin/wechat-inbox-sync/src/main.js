@@ -120,7 +120,7 @@ const {
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
 const { runWechatArticlePipeline } = require('./wechat-article-pipeline');
-const { classifyWechatArticleHtml } = require('./wechat-article-utils');
+const { classifyWechatArticleHtml, isWechatArticleUrl, normalizeWechatArticleUrl } = require('./wechat-article-utils');
 const {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -3058,11 +3058,6 @@ function isFeishuUrl(url) {
     || text.includes('larksuite.com')
     || text.includes('feishu.net')
     || text.includes('feishu');
-}
-
-function isWechatArticleUrl(url) {
-  const text = String(url || '').toLowerCase();
-  return text.includes('mp.weixin.qq.com') || text.includes('weixin.qq.com');
 }
 
 function isWechatExplicitDecorativeImageAsset(asset) {
@@ -19601,24 +19596,25 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isWechatArticleUrl(url)) {
+        const wechatArticleUrl = normalizeWechatArticleUrl(url);
         let usedNodeFallback = false;
         const extracted = await runWechatArticlePipeline({
-          url,
-          fetchStatic: async () => {
+          url: wechatArticleUrl,
+          fetchStatic: async (targetUrl) => {
             try {
-              const response = await requestUrl({ url, method: 'GET' });
+              const response = await requestUrl({ url: targetUrl, method: 'GET' });
               return response.text || '';
             } catch (requestError) {
               try {
                 usedNodeFallback = true;
-                return await this.downloadWebpageHtmlViaNode(url);
+                return await this.downloadWebpageHtmlViaNode(targetUrl);
               } catch (_) {
                 return '';
               }
             }
           },
-          renderBrowser: async () => {
-            const rendered = await this.renderWebpageWithElectron(url);
+          renderBrowser: async (targetUrl) => {
+            const rendered = await this.renderWebpageWithElectron(targetUrl);
             return {
               markdown: rendered.markdown,
               title: rendered.title,
@@ -19644,7 +19640,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             dateFolder,
             fallbackTitle,
             {
-              sourceUrl: url,
+              sourceUrl: wechatArticleUrl,
               onError: ({ error }) => {
                 fallbackImageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
               },
@@ -19660,6 +19656,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             ...record,
             metadata: {
               ...metadata,
+              url: wechatArticleUrl,
+              originalUrl: wechatArticleUrl,
               title: fallbackTitle,
               markdown: fallbackMarkdown,
               conversionStatus: 'partial',
@@ -19673,7 +19671,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
         const pageTitle = metadata.title || extracted.title || extractHtmlTitle(extracted.html) || title || '公众号文章';
         const pageMeta = extracted.source === 'static'
-          ? extractWebpageMetadataFromHtml(extracted.html, url)
+          ? extractWebpageMetadataFromHtml(extracted.html, wechatArticleUrl)
           : {};
         const imageLocalizationErrors = [];
         let markdown = extracted.source === 'browser'
@@ -19687,7 +19685,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             rootDir,
             dateFolder,
             pageTitle,
-            { sourceUrl: url, stats: renderedImageStats },
+            { sourceUrl: wechatArticleUrl, stats: renderedImageStats },
           );
           if (renderedImageStats.failedCount) {
             imageLocalizationErrors.push(`${renderedImageStats.failedCount} image assets could not be localized`);
@@ -19699,7 +19697,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             dateFolder,
             pageTitle,
             {
-              sourceUrl: url,
+              sourceUrl: wechatArticleUrl,
               onError: ({ error }) => {
                 imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
               },
@@ -19716,6 +19714,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           ...record,
           metadata: {
             ...metadata,
+            url: wechatArticleUrl,
+            originalUrl: wechatArticleUrl,
             title: pageTitle,
             author: metadata.author || pageMeta.author || '',
             description: metadata.description || pageMeta.description || '',

@@ -1,5 +1,32 @@
 'use strict';
 
+const WECHAT_ARTICLE_HOST = 'mp.weixin.qq.com';
+const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn'];
+
+function isWechatArticleUrl(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return parsed.hostname.toLowerCase() === WECHAT_ARTICLE_HOST
+      && (/^\/s$/.test(parsed.pathname || '') || /^\/s\/[^/]+$/.test(parsed.pathname || ''));
+  } catch (_) {
+    return false;
+  }
+}
+
+function normalizeWechatArticleUrl(value) {
+  if (!isWechatArticleUrl(value)) return '';
+  const parsed = new URL(String(value || '').trim());
+  const pathname = String(parsed.pathname || '').replace(/\/+$/, '') || '/s';
+  const normalized = new URL(`https://${WECHAT_ARTICLE_HOST}${pathname}`);
+  if (pathname === '/s') {
+    WECHAT_ARTICLE_ID_PARAMS.forEach((key) => {
+      const parameter = parsed.searchParams.get(key);
+      if (parameter) normalized.searchParams.set(key, parameter);
+    });
+  }
+  return normalized.toString();
+}
+
 function decodeHtmlEntities(value) {
   return String(value || '')
     .replace(/&nbsp;/gi, ' ')
@@ -114,6 +141,8 @@ module.exports = {
   classifyWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
   hasWechatArticleBody,
+  isWechatArticleUrl,
   isGenericWechatMetadata,
   isTrustedCoverUrl,
+  normalizeWechatArticleUrl,
 };
