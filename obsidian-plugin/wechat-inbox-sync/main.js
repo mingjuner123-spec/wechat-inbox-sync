@@ -4580,7 +4580,7 @@ async function loadPdfJsLibrary() {
 __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.97";
+var PLUGIN_RUNTIME_VERSION = "1.3.98";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -4625,6 +4625,11 @@ var normalizeNoteSaveMode = /* @__PURE__ */ __name((value) => normalizeNoteSaveM
   NOTE_SAVE_MODES,
   DEFAULT_SETTINGS.noteSaveMode
 ), "normalizeNoteSaveMode");
+var WECHAT_ARTICLE_IMAGE_STORAGE_MODES = {
+  local: "下载并保存到本地",
+  remote: "仅保留原始图片链接"
+};
+var normalizeWechatArticleImageStorageMode = /* @__PURE__ */ __name((value) => Object.prototype.hasOwnProperty.call(WECHAT_ARTICLE_IMAGE_STORAGE_MODES, value) ? value : "local", "normalizeWechatArticleImageStorageMode");
 var normalizeNotePropertyFields = /* @__PURE__ */ __name((value) => normalizeNotePropertyFieldsWithKeys(
   value,
   NOTE_PROPERTY_FIELD_KEYS
@@ -4681,6 +4686,7 @@ var DEFAULT_SETTINGS = {
   xiaohongshuImageOcrEnabled: false,
   xiaohongshuImageOcrConsentVersion: 0,
   saveOriginalMediaEnabled: false,
+  wechatArticleImageStorageMode: "local",
   wechatChannelsExperimentUrl: "",
   feishuOAuthStatus: null,
   feishuAppId: "",
@@ -4707,6 +4713,7 @@ var DEFAULT_SETTINGS = {
   tencentPollAttempts: 60,
   tencentPollIntervalMs: 5e3,
   locallyQuarantinedRecordIds: [],
+  recentSyncFailures: [],
   pendingSyncLifecycleAttempts: []
 };
 var XIAOHONGSHU_OCR_MAX_IMAGES = 18;
@@ -6112,6 +6119,24 @@ function normalizeLocallyQuarantinedRecordIds(value) {
   )].slice(0, 200);
 }
 __name(normalizeLocallyQuarantinedRecordIds, "normalizeLocallyQuarantinedRecordIds");
+function normalizeRecentSyncFailures(value) {
+  const unique = /* @__PURE__ */ new Map();
+  (Array.isArray(value) ? value : []).forEach((item) => {
+    const recordId = String(item && item.recordId || "").trim();
+    const bindingToken = normalizeBindCodeInput(item && item.bindingToken);
+    if (!recordId || !bindingToken) return;
+    const key = `${bindingToken}:${recordId}`;
+    unique.set(key, {
+      recordId,
+      bindingToken,
+      bindingLabel: String(item && item.bindingLabel || "").trim(),
+      message: String(item && item.message || "").trim().slice(0, 500),
+      failedAt: String(item && item.failedAt || "").trim()
+    });
+  });
+  return [...unique.values()].slice(-200);
+}
+__name(normalizeRecentSyncFailures, "normalizeRecentSyncFailures");
 function mergeSettings(savedSettings, platform = os.platform()) {
   const sourceSettings = savedSettings && typeof savedSettings === "object" ? savedSettings : {};
   const savedSettingsVersion = Number(sourceSettings.settingsVersion) || 0;
@@ -6179,6 +6204,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.xiaohongshuImageOcrConsentVersion = Number(merged.xiaohongshuImageOcrConsentVersion) === 1 ? 1 : 0;
   merged.xiaohongshuImageOcrEnabled = merged.xiaohongshuImageOcrConsentVersion === 1 && merged.xiaohongshuImageOcrEnabled === true;
   merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
+  merged.wechatArticleImageStorageMode = normalizeWechatArticleImageStorageMode(
+    merged.wechatArticleImageStorageMode
+  );
   merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || "").trim();
   merged.feishuOAuthStatus = merged.feishuOAuthStatus && typeof merged.feishuOAuthStatus === "object" && !Array.isArray(merged.feishuOAuthStatus) ? merged.feishuOAuthStatus : null;
   delete merged.feishuCloudOAuthEnabled;
@@ -6216,6 +6244,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
     merged.locallyQuarantinedRecordIds
   );
+  merged.recentSyncFailures = normalizeRecentSyncFailures(merged.recentSyncFailures);
   merged.pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(
     merged.pendingSyncLifecycleAttempts
   );
@@ -17602,14 +17631,13 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     pendingDeletes.delete(normalizedRecordId);
     return pending;
   }
-  async deleteCurrentTranscriptionRecord(context = {}) {
-    const recordId = String(context.recordId || "").trim();
-    const binding = context.binding || null;
-    if (!recordId || !binding || !binding.token) {
-      return { deleted: false, recordId, reason: "missing-context" };
+  async deleteCloudRecord(recordId, binding) {
+    const normalizedRecordId = String(recordId || "").trim();
+    if (!normalizedRecordId || !binding || !binding.token) {
+      return { deleted: false, recordId: normalizedRecordId, reason: "missing-context" };
     }
     const payload = await this.requestJson(
-      `/records/${encodeURIComponent(recordId)}/synced`,
+      `/records/${encodeURIComponent(normalizedRecordId)}/delete`,
       "POST",
       {},
       binding
@@ -17617,10 +17645,79 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const data = payload && payload.data ? payload.data : {};
     const responseRecordId = String(data.id || data.recordId || "").trim();
     return {
-      deleted: responseRecordId === recordId && (data.deleted === true || data.alreadyMissing === true || data.status === "deleted"),
-      recordId,
+      deleted: responseRecordId === normalizedRecordId && (data.deleted === true || data.alreadyMissing === true || data.status === "deleted"),
+      recordId: normalizedRecordId,
       response: data
     };
+  }
+  async deleteCurrentTranscriptionRecord(context = {}) {
+    return await this.deleteCloudRecord(context.recordId, context.binding || null);
+  }
+  getRecentSyncFailures() {
+    return normalizeRecentSyncFailures(this.settings && this.settings.recentSyncFailures);
+  }
+  async updateRecentSyncFailures({ failed = [], resolved = [] } = {}) {
+    const entries = new Map(this.getRecentSyncFailures().map((item) => [
+      `${item.bindingToken}:${item.recordId}`,
+      item
+    ]));
+    resolved.forEach((item) => {
+      const recordId = String(item && item.recordId || "").trim();
+      const bindingToken = normalizeBindCodeInput(item && item.bindingToken);
+      if (recordId && bindingToken) entries.delete(`${bindingToken}:${recordId}`);
+    });
+    failed.forEach((item) => {
+      const recordId = String(item && item.recordId || "").trim();
+      const bindingToken = normalizeBindCodeInput(item && item.bindingToken);
+      if (!recordId || !bindingToken) return;
+      entries.set(`${bindingToken}:${recordId}`, {
+        recordId,
+        bindingToken,
+        bindingLabel: String(item.bindingLabel || "").trim(),
+        message: String(item.message || "").trim().slice(0, 500),
+        failedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    });
+    const nextFailures = normalizeRecentSyncFailures([...entries.values()]);
+    await this.saveSettings({
+      ...this.settings,
+      recentSyncFailures: nextFailures
+    });
+    return nextFailures;
+  }
+  async clearRecentSyncFailures() {
+    if (this.syncInboxPromise) {
+      throw new Error("同步正在进行，请等待完成后再清理。");
+    }
+    const activeBindings = this.getActiveBindings();
+    const retained = [];
+    let deletedCount = 0;
+    let failedCount = 0;
+    for (const item of this.getRecentSyncFailures()) {
+      const binding = activeBindings.find((candidate) => candidate.token === item.bindingToken);
+      if (!binding) {
+        retained.push(item);
+        failedCount += 1;
+        continue;
+      }
+      try {
+        const result = await this.deleteCloudRecord(item.recordId, binding);
+        if (result.deleted) {
+          deletedCount += 1;
+        } else {
+          retained.push(item);
+          failedCount += 1;
+        }
+      } catch (error) {
+        retained.push(item);
+        failedCount += 1;
+      }
+    }
+    await this.saveSettings({
+      ...this.settings,
+      recentSyncFailures: retained
+    });
+    return { deletedCount, failedCount, remainingCount: retained.length };
   }
   async writeExpiredXiaohongshuLinkReceipt(record = {}) {
     const originalUrl = getRecordXiaohongshuIdentityCandidates(record).find((candidate) => isXiaohongshuShortLinkUrl(candidate)) || getRecordUrl(record);
@@ -19929,6 +20026,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const sourceUrl = String(options.sourceUrl || "").trim();
     const isFeishuSource = isFeishuUrl(sourceUrl);
+    const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
+    const wechatArticleImageStorageMode = normalizeWechatArticleImageStorageMode(
+      options.wechatArticleImageStorageMode || this.settings && this.settings.wechatArticleImageStorageMode
+    );
+    if (isWechatArticleSource && wechatArticleImageStorageMode === "remote") {
+      return markdown;
+    }
     const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl);
     const stats = options.stats && typeof options.stats === "object" ? options.stats : null;
     const reportError = /* @__PURE__ */ __name((asset, error) => {
@@ -19947,8 +20051,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       stats.missingSourceCount = 0;
       stats.localizedSources = [];
     }
-    const imageRootDir = `${rootDir}/网页图片`;
-    const imageDayDir = `${imageRootDir}/${dateFolder}`;
+    const useWechatArticleImageFolder = isWechatArticleSource && wechatArticleImageStorageMode === "local";
+    const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
+    const imageRootDir = useWechatArticleImageFolder ? noteDir : `${rootDir}/网页图片`;
+    const imageDayDir = useWechatArticleImageFolder ? `${noteDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
     let nextMarkdown = String(markdown || "");
     let index = 1;
     try {
@@ -20038,12 +20144,18 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     const isFeishuSource = isFeishuUrl(sourceUrl);
+    const wechatArticleImageStorageMode = normalizeWechatArticleImageStorageMode(
+      options.wechatArticleImageStorageMode || this.settings && this.settings.wechatArticleImageStorageMode
+    );
     const isSessionBackedSource = isFeishuSource || isWechatArticleSource;
     let nextMarkdown = isXiaohongshuSource ? sanitizeXiaohongshuMarkdownImages(String(markdown)) : String(markdown);
+    if (isWechatArticleSource && wechatArticleImageStorageMode === "remote") return nextMarkdown;
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return nextMarkdown;
-    const imageRootDir = `${rootDir}/网页图片`;
-    const imageDayDir = `${imageRootDir}/${dateFolder}`;
+    const useWechatArticleImageFolder = isWechatArticleSource && wechatArticleImageStorageMode === "local";
+    const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
+    const imageRootDir = useWechatArticleImageFolder ? noteDir : `${rootDir}/网页图片`;
+    const imageDayDir = useWechatArticleImageFolder ? `${noteDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
     let index = 1;
     const downloadedByUrl = /* @__PURE__ */ new Map();
     const safeTitle = sanitizeAttachmentName(title, "网页图片");
@@ -21568,21 +21680,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         if (mediaUrl) {
           if (isXiaohongshuUrl(url) && !xiaohongshuCapabilities.mediaTranscription) {
-            return {
-              ...record,
-              metadata: buildTranscriptOnlyMetadata(metadata, {
-                url,
-                platform: "小红书",
-                mediaUrl,
-                mediaUrls,
-                transcription: "",
-                transcriptionStatus: "failed",
-                transcriptionError: "小红书音视频转写需要有效 Pro。请先开通 Pro 并刷新插件权限。",
-                transcriptionSource: "pro-required",
-                conversionStatus: "failed",
-                markdown: ""
-              })
-            };
+            throw createRetryableTranscriptionError("转写未执行：Pro 已到期，请续期后重试。");
           }
           const selectedSupplementalMarkdown = isXiaohongshuUrl(url) && extractedXiaohongshu && String(extractedXiaohongshu.markdown || "").trim() ? extractedXiaohongshu.markdown : socialMediaSupplementalMarkdown;
           const supplementalMarkdownParts = isXiaohongshuUrl(url) ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown) : { markdown: selectedSupplementalMarkdown, trailingMarkdown: "" };
@@ -22533,6 +22631,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const completionWarnings = [];
       const pendingReviews = [];
       const syncSnapshots = [];
+      const recentFailureEntries = [];
+      const recentResolvedEntries = [];
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: "fetching" });
       for (const binding of bindings) {
@@ -22540,6 +22640,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           const result = await this.syncBinding(binding, shouldPrefixTitle);
           written.push(...result.written);
           failed.push(...result.failed);
+          result.written.forEach((item) => {
+            const recordId = getRecordId(item);
+            if (recordId) recentResolvedEntries.push({ recordId, bindingToken: binding.token });
+          });
+          result.failed.forEach((item) => {
+            const recordId = String(item && item.recordId || "").trim();
+            if (!recordId) return;
+            recentFailureEntries.push({
+              recordId,
+              bindingToken: binding.token,
+              bindingLabel: binding.label,
+              message: item.message
+            });
+          });
           if (result.skipped && result.skipped.length) {
             skipped.push(...result.skipped);
           }
@@ -22567,6 +22681,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             message: `${binding.label || binding.token}：${message}`
           });
         }
+      }
+      try {
+        await this.updateRecentSyncFailures({
+          failed: recentFailureEntries,
+          resolved: recentResolvedEntries
+        });
+      } catch (error) {
       }
       let finalMessage = buildSyncResultNotice(written, skipped, conversionWarnings, failed);
       const pendingReviewNotice = buildPendingReviewNotice(mergePendingReviewSummaries(pendingReviews));
@@ -22763,7 +22884,44 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         this.display();
       });
     });
+    new Setting(containerEl).setName("公众号文章图片保存方式").setDesc("默认下载到笔记同级的“文章图片”目录，避免原始图片链接过期或防盗链导致无法显示。选择仅保留链接时不下载。").addDropdown((dropdown) => {
+      Object.entries(WECHAT_ARTICLE_IMAGE_STORAGE_MODES).forEach(([value, label]) => {
+        dropdown.addOption(value, label);
+      });
+      dropdown.setValue(normalizeWechatArticleImageStorageMode(this.plugin.settings.wechatArticleImageStorageMode)).onChange(async (value) => {
+        await this.plugin.saveSettings({
+          ...this.plugin.settings,
+          wechatArticleImageStorageMode: normalizeWechatArticleImageStorageMode(value)
+        });
+      });
+    });
     new Setting(containerEl).setName("立即同步").setDesc("手动拉取云端收集箱，并写入当前 vault。").addButton((button) => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
+    const recentSyncFailures = this.plugin.getRecentSyncFailures();
+    new Setting(containerEl).setName("清理最近同步失败的内容").setDesc(recentSyncFailures.length ? `目前有 ${recentSyncFailures.length} 条内容仍未同步成功。清理后会从云端删除，后续不会再拉取；本地笔记不受影响。` : "当前没有仍未同步成功的内容。同步成功的内容会自动从此清单移除。").addButton((button) => {
+      button.setButtonText(recentSyncFailures.length ? `清理 ${recentSyncFailures.length} 条` : "暂无失败内容");
+      button.setDisabled(!recentSyncFailures.length);
+      button.onClick(async () => {
+        const confirmed = typeof window !== "undefined" && typeof window.confirm === "function" && window.confirm(`将从云端删除 ${recentSyncFailures.length} 条最近同步失败的内容。
+
+本地已经保存的笔记不会受到影响；删除后这些内容不会再被同步。`);
+        if (!confirmed) return;
+        button.setDisabled(true);
+        button.setButtonText("清理中…");
+        try {
+          const result = await this.plugin.clearRecentSyncFailures();
+          if (result.deletedCount) {
+            new Notice(`已从云端清理 ${result.deletedCount} 条失败内容，后续不会再拉取。`);
+          }
+          if (result.failedCount) {
+            new Notice(`${result.failedCount} 条内容暂未清理成功，仍会保留在失败清单中。`);
+          }
+        } catch (error) {
+          new Notice(`清理失败内容失败：${error.message || error}`);
+        } finally {
+          this.display();
+        }
+      });
+    });
     new Setting(containerEl).setName("同步/安装失败诊断").setDesc("同步失败、转写失败、下载卡住时，点这里复制诊断信息发给开发者张张（微信：heyhmjx）。里面包含最近同步阶段、转写日志和安装日志。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
       try {
         await this.plugin.copySyncDiagnosticText();

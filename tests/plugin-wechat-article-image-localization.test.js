@@ -99,10 +99,19 @@ async function run() {
   assert.strictEqual(successCase.downloads[0].headers.Referer, articleUrl);
   assert.ok(successCase.downloads[0].headers['User-Agent']);
   assert.strictEqual(successCase.writes.length, 1);
-  assert.ok(successCase.writes[0].filePath.startsWith('临时收集/网页图片/2026-08-11/'));
-  assert.ok(localized.metadata.markdown.includes('![[临时收集/网页图片/2026-08-11/'));
+  assert.ok(successCase.writes[0].filePath.startsWith('临时收集/2026-08-11/文章图片/'));
+  assert.ok(localized.metadata.markdown.includes('![[临时收集/2026-08-11/文章图片/'));
   assert.strictEqual(localized.metadata.markdown.includes(imageUrl), false);
   assert.strictEqual(localized.metadata.imageLocalizationFailedCount, 0);
+
+  const remoteOnlyCase = createPlugin();
+  remoteOnlyCase.plugin.settings = { wechatArticleImageStorageMode: 'remote' };
+  const remoteOnly = await hydrate(remoteOnlyCase.plugin);
+  assert.strictEqual(remoteOnly.metadata.conversionStatus, 'success');
+  assert.strictEqual(remoteOnlyCase.downloads.length, 0);
+  assert.strictEqual(remoteOnlyCase.writes.length, 0);
+  assert.ok(remoteOnly.metadata.markdown.includes(imageUrl));
+  assert.strictEqual(remoteOnly.metadata.imageLocalizationFailedCount, 0);
 
   const failureCase = createPlugin();
   failureCase.plugin.downloadArrayBuffer = async () => { throw new Error('HTTP 403'); };
@@ -135,7 +144,7 @@ async function run() {
   );
   assert.strictEqual(smallSvgCase.writes.length, 0);
   assert.strictEqual(smallSvgResult.metadata.markdown.includes(smallSvgUrl), false);
-  assert.strictEqual(smallSvgResult.metadata.markdown.includes('![[临时收集/网页图片/'), false);
+  assert.strictEqual(smallSvgResult.metadata.markdown.includes('![[临时收集/2026-08-11/文章图片/'), false);
 
   const largeSvgUrl = 'https://mmbiz.qpic.cn/mmbiz_svg/meaningful-diagram/640?wx_fmt=jpeg';
   const largeSvgCase = createPlugin();

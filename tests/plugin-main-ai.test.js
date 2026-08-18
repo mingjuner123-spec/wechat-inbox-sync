@@ -1144,9 +1144,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.97'), {
-  manifestVersion: '1.3.97',
-  runtimeVersion: '1.3.97',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.98'), {
+  manifestVersion: '1.3.98',
+  runtimeVersion: '1.3.98',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -7880,14 +7880,15 @@ async function runAsyncHydrationTests() {
     throw new Error(`unexpected request ${url}`);
   };
 
-  const xhsVideoRecord = await plugin.hydrateWebpageMarkdown({
-    type: 'webpage',
-    content: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145',
-    metadata: { url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145' },
-  }, '', '', '小红书视频');
-  assert.strictEqual(xhsVideoRecord.metadata.transcriptOnly, true);
-  assert.strictEqual(xhsVideoRecord.metadata.markdown, undefined);
-  assert.strictEqual(xhsVideoRecord.metadata.mediaUrl, 'https://video.example.com/xhs.mp4');
+  await assert.rejects(
+    () => plugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145',
+      metadata: { url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145' },
+    }, '', '', '小红书视频'),
+    (error) => error && error.code === 'TRANSCRIPTION_PENDING'
+      && error.message === '转写未执行：Pro 已到期，请续期后重试。',
+  );
 
   const targetGraphicNoteId = '6a4ccf88000000001101d144';
   const targetGraphicWithForeignMetaVideoHtml = [
@@ -8948,16 +8949,20 @@ async function runAsyncHydrationTests() {
       throw new Error(`unexpected video capability request ${url}`);
     };
     try {
-      const record = await videoCapabilityPlugin.hydrateWebpageMarkdown({
-        type: 'webpage',
-        content: 'https://www.xiaohongshu.com/explore/video-capability',
-        metadata: {
-          url: 'https://www.xiaohongshu.com/explore/video-capability',
-          webpageMediaType: 'audio_video',
-          transcriptionMode: 'local',
-        },
-      }, '', '', '小红书音视频权限测试');
-      return { record, transcriptionCalls };
+      try {
+        const record = await videoCapabilityPlugin.hydrateWebpageMarkdown({
+          type: 'webpage',
+          content: 'https://www.xiaohongshu.com/explore/video-capability',
+          metadata: {
+            url: 'https://www.xiaohongshu.com/explore/video-capability',
+            webpageMediaType: 'audio_video',
+            transcriptionMode: 'local',
+          },
+        }, '', '', '小红书音视频权限测试');
+        return { record, transcriptionCalls, error: null };
+      } catch (error) {
+        return { record: null, transcriptionCalls, error };
+      }
     } finally {
       requestUrlMock = previousVideoCapabilityRequestUrlMock;
     }
@@ -8965,8 +8970,9 @@ async function runAsyncHydrationTests() {
 
   const freeVideoCapability = await runXiaohongshuVideoCapabilityCase(false);
   assert.strictEqual(freeVideoCapability.transcriptionCalls, 0);
-  assert.strictEqual(freeVideoCapability.record.metadata.transcriptionStatus, 'failed');
-  assert.match(freeVideoCapability.record.metadata.transcriptionError, /Pro/);
+  assert.strictEqual(freeVideoCapability.record, null);
+  assert.strictEqual(freeVideoCapability.error && freeVideoCapability.error.code, 'TRANSCRIPTION_PENDING');
+  assert.strictEqual(freeVideoCapability.error && freeVideoCapability.error.message, '转写未执行：Pro 已到期，请续期后重试。');
 
   const proVideoCapability = await runXiaohongshuVideoCapabilityCase(true);
   assert.strictEqual(proVideoCapability.transcriptionCalls, 1);
@@ -10247,8 +10253,56 @@ async function runStopCurrentTranscriptionDeletesCurrentRecordTest() {
   await plugin.stopCurrentTranscription();
   assert.strictEqual(aborted, true);
   assert.deepStrictEqual(calls, [[
-    '/records/record-stop-1/synced', 'POST', {}, 'ABC-123',
+    '/records/record-stop-1/delete', 'POST', {}, 'ABC-123',
   ]]);
+}
+
+async function runRecentSyncFailureCleanupTests() {
+  const calls = [];
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
+    recentSyncFailures: [
+      {
+        recordId: 'record-resolved',
+        bindingToken: 'ABC-123',
+        bindingLabel: '微信 1',
+        message: 'old failure',
+        failedAt: '2026-08-19T00:00:00.000Z',
+      },
+      {
+        recordId: 'record-unbound',
+        bindingToken: 'OTHER-456',
+        bindingLabel: '旧设备',
+        message: 'old failure',
+        failedAt: '2026-08-19T00:00:00.000Z',
+      },
+    ],
+  });
+  plugin.saveData = async () => {};
+  await plugin.updateRecentSyncFailures({
+    resolved: [{ recordId: 'record-resolved', bindingToken: 'ABC-123' }],
+    failed: [{
+      recordId: 'record-delete',
+      bindingToken: 'ABC-123',
+      bindingLabel: '微信 1',
+      message: 'latest failure',
+    }],
+  });
+  assert.deepStrictEqual(
+    plugin.getRecentSyncFailures().map((item) => item.recordId).sort(),
+    ['record-delete', 'record-unbound'],
+  );
+  plugin.requestJson = async (path, method, body, binding) => {
+    calls.push([path, method, body, binding && binding.token]);
+    return { success: true, data: { id: 'record-delete', status: 'deleted', deleted: true } };
+  };
+  const result = await plugin.clearRecentSyncFailures();
+  assert.deepStrictEqual(result, { deletedCount: 1, failedCount: 1, remainingCount: 1 });
+  assert.deepStrictEqual(calls, [[
+    '/records/record-delete/delete', 'POST', {}, 'ABC-123',
+  ]]);
+  assert.deepStrictEqual(plugin.getRecentSyncFailures().map((item) => item.recordId), ['record-unbound']);
 }
 
 async function runStoppedTranscriptionDeleteUsesShortBusinessEndpointTest() {
@@ -10279,7 +10333,7 @@ async function runStoppedTranscriptionDeleteUsesShortBusinessEndpointTest() {
     assert.strictEqual(result.deleted, true);
     assert.strictEqual(
       requestedUrl,
-      'https://short.example.com/sync/records/record-control-plane/synced',
+      'https://short.example.com/sync/records/record-control-plane/delete',
     );
     requestUrlMock = async () => ({
       status: 200,
@@ -10492,7 +10546,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.97'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.98'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10531,8 +10585,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.97',
-        runtimeVersion: '1.3.97',
+        manifestVersion: '1.3.98',
+        runtimeVersion: '1.3.98',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -10607,7 +10661,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
         }],
       };
     }
-    if (path === '/records/expired-xhs-shortlink/synced') {
+    if (path === '/records/expired-xhs-shortlink/delete') {
       return {
         success: true,
         data: { id: 'expired-xhs-shortlink', deleted: true },
@@ -10663,7 +10717,7 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
     {},
     'ABC-123',
   ], [
-    '/records/expired-xhs-shortlink/synced',
+    '/records/expired-xhs-shortlink/delete',
     'POST',
     {},
     'ABC-123',
@@ -10718,7 +10772,7 @@ async function runExpiredXiaohongshuShortlinkDeleteFailureRemainsPendingTest() {
         }],
       };
     }
-    if (path === '/records/expired-xhs-delete-failed/synced') {
+    if (path === '/records/expired-xhs-delete-failed/delete') {
       throw new Error('delete temporarily unavailable');
     }
     throw new Error(`Unexpected request: ${path}`);
@@ -10738,7 +10792,7 @@ async function runExpiredXiaohongshuShortlinkDeleteFailureRemainsPendingTest() {
   assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已记录诊断，下次同步将重试。');
   assert.deepStrictEqual(calls, [
     '/records?status=pending',
-    '/records/expired-xhs-delete-failed/synced',
+    '/records/expired-xhs-delete-failed/delete',
   ]);
   assert.strictEqual(receiptWrites.length, 1);
   assert.strictEqual(receiptWrites[0].markdown.includes('云端旧记录已清理'), false);
@@ -12715,7 +12769,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.97 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.98 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -14421,6 +14475,7 @@ async function main() {
   await runXiaohongshuRemoteImageLocalizationHeadersTest();
   await runTranscriptionPreferenceSyncTest();
   await runStopCurrentTranscriptionDeletesCurrentRecordTest();
+  await runRecentSyncFailureCleanupTests();
   await runStoppedTranscriptionDeleteUsesShortBusinessEndpointTest();
   await runStopCurrentTranscriptionWithoutCurrentRecordDoesNotDeleteTest();
   await runStopCurrentTranscriptionWithoutActiveProcessDoesNotDeleteTest();
