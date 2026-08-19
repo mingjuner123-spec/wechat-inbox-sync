@@ -198,7 +198,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.104';
+const PLUGIN_RUNTIME_VERSION = '1.3.105';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3213,6 +3213,13 @@ function isXiaohongshuUrl(url) {
   return isHostnameWithinDomain(hostname, 'xiaohongshu.com')
     || isHostnameWithinDomain(hostname, 'xhslink.com')
     || isHostnameWithinDomain(hostname, 'xhslink.cn');
+}
+
+function shouldStoreWebpageNoteInOwnFolder(sourceUrl, wechatArticleImageStorageMode) {
+  if (isWechatArticleUrl(sourceUrl)) {
+    return normalizeWechatArticleImageStorageMode(wechatArticleImageStorageMode) === 'local';
+  }
+  return isFeishuUrl(sourceUrl) || isXiaohongshuUrl(sourceUrl);
 }
 
 function isXiaohongshuShortLinkUrl(url) {
@@ -17814,14 +17821,17 @@ class WechatObsidianInboxPlugin extends Plugin {
       stats.missingSourceCount = 0;
       stats.localizedSources = [];
     }
-    const useWechatArticleImageFolder = isWechatArticleSource && wechatArticleImageStorageMode === 'local';
+    const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(
+      sourceUrl,
+      wechatArticleImageStorageMode,
+    );
     const noteDir = this.settings && this.settings.noteSaveMode === 'root'
       ? rootDir
       : `${rootDir}/${dateFolder}`;
     const safeTitle = sanitizeAttachmentName(title, '文章');
     const articleFolderDir = `${noteDir}/${safeTitle}`;
-    const imageRootDir = useWechatArticleImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
-    const imageDayDir = useWechatArticleImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
+    const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
+    const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
     let nextMarkdown = String(markdown || '');
     let index = 1;
 
@@ -17940,14 +17950,17 @@ class WechatObsidianInboxPlugin extends Plugin {
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return nextMarkdown;
 
-    const useWechatArticleImageFolder = isWechatArticleSource && wechatArticleImageStorageMode === 'local';
+    const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(
+      sourceUrl,
+      wechatArticleImageStorageMode,
+    );
     const noteDir = this.settings && this.settings.noteSaveMode === 'root'
       ? rootDir
       : `${rootDir}/${dateFolder}`;
     const safeTitle = sanitizeAttachmentName(title, '文章');
     const articleFolderDir = `${noteDir}/${safeTitle}`;
-    const imageRootDir = useWechatArticleImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
-    const imageDayDir = useWechatArticleImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
+    const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
+    const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
     let index = 1;
     const downloadedByUrl = new Map();
 
@@ -20271,12 +20284,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
     const recordUrl = String(recordForMarkdown && recordForMarkdown.metadata && recordForMarkdown.metadata.url
       || recordForMarkdown && recordForMarkdown.content || '').trim();
-    const useWechatArticleFolder = isWechatArticleUrl(recordUrl)
-      && normalizeWechatArticleImageStorageMode(this.settings && this.settings.wechatArticleImageStorageMode) === 'local';
-    const targetNoteDir = useWechatArticleFolder
+    const usePerNoteFolder = shouldStoreWebpageNoteInOwnFolder(
+      recordUrl,
+      this.settings && this.settings.wechatArticleImageStorageMode,
+    );
+    const targetNoteDir = usePerNoteFolder
       ? normalizeVaultPath(`${noteDir}/${sanitizeAttachmentName(title, '文章')}`)
       : noteDir;
-    if (useWechatArticleFolder) await this.ensureFolder(targetNoteDir);
+    if (usePerNoteFolder) await this.ensureFolder(targetNoteDir);
     const filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
     this.showSyncProgress({ ...progress, stage: 'writing', title: fileTitle });
     const adapter = this.app.vault.adapter;
@@ -21187,7 +21202,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('公众号文章图片保存方式')
-      .setDesc('默认下载到笔记同级的“文章图片”目录，避免原始图片链接过期或防盗链导致无法显示。选择仅保留链接时不下载。')
+      .setDesc('默认下载到文章文件夹内的“文章图片”目录，和对应笔记放在一起，避免原始图片链接过期或防盗链导致无法显示。选择仅保留链接时不下载。')
       .addDropdown((dropdown) => {
         Object.entries(WECHAT_ARTICLE_IMAGE_STORAGE_MODES).forEach(([value, label]) => {
           dropdown.addOption(value, label);

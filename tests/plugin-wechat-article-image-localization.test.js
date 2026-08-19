@@ -108,6 +108,32 @@ async function run() {
   assert.strictEqual(localized.metadata.markdown.includes(imageUrl), false);
   assert.strictEqual(localized.metadata.imageLocalizationFailedCount, 0);
 
+  const xiaohongshuCase = createPlugin();
+  const xiaohongshuImageUrl = 'https://sns-webpic-qc.xhscdn.com/xiaohongshu-local-image-test.jpg';
+  const xiaohongshuMarkdown = await xiaohongshuCase.plugin.saveMarkdownRemoteImageAssets(
+    `![配图](${xiaohongshuImageUrl})`,
+    '临时收集',
+    '2026-08-11',
+    '小红书图片本地化测试',
+    { sourceUrl: 'https://www.xiaohongshu.com/explore/local-image-test' },
+  );
+  assert.strictEqual(xiaohongshuCase.writes.length, 1);
+  assert.ok(xiaohongshuCase.writes[0].filePath.startsWith('临时收集/2026-08-11/小红书图片本地化测试/文章图片/'));
+  assert.ok(xiaohongshuMarkdown.includes('![[临时收集/2026-08-11/小红书图片本地化测试/文章图片/'));
+
+  const feishuCase = createPlugin();
+  const feishuImageUrl = 'https://s1-imfile.feishucdn.com/feishu-local-image-test.jpg';
+  const feishuMarkdown = await feishuCase.plugin.saveWebpageImageAssets(
+    `![配图](${feishuImageUrl})`,
+    [{ src: feishuImageUrl }],
+    '临时收集',
+    '2026-08-11',
+    '飞书图片本地化测试',
+    { sourceUrl: 'https://example.feishu.cn/docx/local-image-test' },
+  );
+  assert.strictEqual(feishuCase.writes.length, 1);
+  assert.ok(feishuCase.writes[0].filePath.startsWith('临时收集/2026-08-11/飞书图片本地化测试/文章图片/'));
+  assert.ok(feishuMarkdown.includes('![[临时收集/2026-08-11/飞书图片本地化测试/文章图片/'));
   const remoteOnlyCase = createPlugin();
   remoteOnlyCase.plugin.settings = { wechatArticleImageStorageMode: 'remote' };
   const remoteOnly = await hydrate(remoteOnlyCase.plugin);
