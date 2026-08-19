@@ -61,8 +61,9 @@ async function hydrate(plugin) {
 }
 
 async function hydrateWithHtml(plugin, html) {
-  requestUrlMock = async ({ url }) => {
-    assert.strictEqual(url, articleUrl);
+  requestUrlMock = async (options) => {
+    assert.strictEqual(options.url, articleUrl);
+    plugin._lastWechatStaticRequestOptions = options;
     return { text: html };
   };
   return plugin.hydrateWebpageMarkdown({
@@ -94,13 +95,16 @@ async function run() {
   const successCase = createPlugin();
   const localized = await hydrate(successCase.plugin);
   assert.strictEqual(localized.metadata.conversionStatus, 'success');
+  assert.ok(successCase.plugin._lastWechatStaticRequestOptions.headers['User-Agent']);
+  assert.ok(successCase.plugin._lastWechatStaticRequestOptions.headers.Accept.includes('text/html'));
+  assert.ok(successCase.plugin._lastWechatStaticRequestOptions.headers['Accept-Language'].startsWith('zh-CN'));
   assert.strictEqual(successCase.downloads.length, 1);
   assert.strictEqual(successCase.downloads[0].url, imageUrl);
   assert.strictEqual(successCase.downloads[0].headers.Referer, articleUrl);
   assert.ok(successCase.downloads[0].headers['User-Agent']);
   assert.strictEqual(successCase.writes.length, 1);
-  assert.ok(successCase.writes[0].filePath.startsWith('临时收集/2026-08-11/文章图片/'));
-  assert.ok(localized.metadata.markdown.includes('![[临时收集/2026-08-11/文章图片/'));
+  assert.ok(successCase.writes[0].filePath.startsWith('临时收集/2026-08-11/公众号图片本地化测试/文章图片/'));
+  assert.ok(localized.metadata.markdown.includes('![[临时收集/2026-08-11/公众号图片本地化测试/文章图片/'));
   assert.strictEqual(localized.metadata.markdown.includes(imageUrl), false);
   assert.strictEqual(localized.metadata.imageLocalizationFailedCount, 0);
 
@@ -144,7 +148,7 @@ async function run() {
   );
   assert.strictEqual(smallSvgCase.writes.length, 0);
   assert.strictEqual(smallSvgResult.metadata.markdown.includes(smallSvgUrl), false);
-  assert.strictEqual(smallSvgResult.metadata.markdown.includes('![[临时收集/2026-08-11/文章图片/'), false);
+  assert.strictEqual(smallSvgResult.metadata.markdown.includes('![[临时收集/2026-08-11/公众号图片本地化测试/文章图片/'), false);
 
   const largeSvgUrl = 'https://mmbiz.qpic.cn/mmbiz_svg/meaningful-diagram/640?wx_fmt=jpeg';
   const largeSvgCase = createPlugin();
@@ -213,6 +217,17 @@ async function run() {
     '<meta property="og:image" content="https://mmbiz.qpic.cn/guide-cover.jpg"></head>',
     '<body>微信扫一扫可打开此内容 使用小程序</body></html>',
   ].join('');
+  const nodeRecoveryCase = createPlugin();
+  let nodeRecoveryCalls = 0;
+  nodeRecoveryCase.plugin.downloadWebpageHtmlViaNode = async () => {
+    nodeRecoveryCalls += 1;
+    return articleHtml;
+  };
+  const nodeRecovered = await hydrateWithHtml(nodeRecoveryCase.plugin, guideHtml);
+  assert.strictEqual(nodeRecoveryCalls, 1);
+  assert.strictEqual(nodeRecovered.metadata.conversionStatus, 'success');
+  assert.ok(nodeRecovered.metadata.markdown.includes('普通抓取路径会把图片保存到本地附件目录'));
+
   const browserRecoveryCase = createPlugin();
   let browserRecoveryCalls = 0;
   browserRecoveryCase.plugin.renderWebpageWithElectron = async () => {
