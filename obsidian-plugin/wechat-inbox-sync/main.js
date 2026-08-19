@@ -4580,7 +4580,7 @@ async function loadPdfJsLibrary() {
 __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.104";
+var PLUGIN_RUNTIME_VERSION = "1.3.105";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -7029,6 +7029,13 @@ function isXiaohongshuUrl(url) {
   return isHostnameWithinDomain(hostname, "xiaohongshu.com") || isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn");
 }
 __name(isXiaohongshuUrl, "isXiaohongshuUrl");
+function shouldStoreWebpageNoteInOwnFolder(sourceUrl, wechatArticleImageStorageMode) {
+  if (isWechatArticleUrl(sourceUrl)) {
+    return normalizeWechatArticleImageStorageMode(wechatArticleImageStorageMode) === "local";
+  }
+  return isFeishuUrl(sourceUrl) || isXiaohongshuUrl(sourceUrl);
+}
+__name(shouldStoreWebpageNoteInOwnFolder, "shouldStoreWebpageNoteInOwnFolder");
 function isXiaohongshuShortLinkUrl(url) {
   const hostname = getHttpUrlHostname(url);
   return isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn");
@@ -20137,12 +20144,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       stats.missingSourceCount = 0;
       stats.localizedSources = [];
     }
-    const useWechatArticleImageFolder = isWechatArticleSource && wechatArticleImageStorageMode === "local";
+    const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(
+      sourceUrl,
+      wechatArticleImageStorageMode
+    );
     const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
     const safeTitle = sanitizeAttachmentName(title, "文章");
     const articleFolderDir = `${noteDir}/${safeTitle}`;
-    const imageRootDir = useWechatArticleImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
-    const imageDayDir = useWechatArticleImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
+    const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
+    const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
     let nextMarkdown = String(markdown || "");
     let index = 1;
     try {
@@ -20240,12 +20250,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (isWechatArticleSource && wechatArticleImageStorageMode === "remote") return nextMarkdown;
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return nextMarkdown;
-    const useWechatArticleImageFolder = isWechatArticleSource && wechatArticleImageStorageMode === "local";
+    const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(
+      sourceUrl,
+      wechatArticleImageStorageMode
+    );
     const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
     const safeTitle = sanitizeAttachmentName(title, "文章");
     const articleFolderDir = `${noteDir}/${safeTitle}`;
-    const imageRootDir = useWechatArticleImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
-    const imageDayDir = useWechatArticleImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
+    const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
+    const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
     let index = 1;
     const downloadedByUrl = /* @__PURE__ */ new Map();
     try {
@@ -22258,9 +22271,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       propertyFields: this.settings.notePropertyFields
     });
     const recordUrl = String(recordForMarkdown && recordForMarkdown.metadata && recordForMarkdown.metadata.url || recordForMarkdown && recordForMarkdown.content || "").trim();
-    const useWechatArticleFolder = isWechatArticleUrl(recordUrl) && normalizeWechatArticleImageStorageMode(this.settings && this.settings.wechatArticleImageStorageMode) === "local";
-    const targetNoteDir = useWechatArticleFolder ? normalizeVaultPath(`${noteDir}/${sanitizeAttachmentName(title, "文章")}`) : noteDir;
-    if (useWechatArticleFolder) await this.ensureFolder(targetNoteDir);
+    const usePerNoteFolder = shouldStoreWebpageNoteInOwnFolder(
+      recordUrl,
+      this.settings && this.settings.wechatArticleImageStorageMode
+    );
+    const targetNoteDir = usePerNoteFolder ? normalizeVaultPath(`${noteDir}/${sanitizeAttachmentName(title, "文章")}`) : noteDir;
+    if (usePerNoteFolder) await this.ensureFolder(targetNoteDir);
     const filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
     this.showSyncProgress({ ...progress, stage: "writing", title: fileTitle });
     const adapter = this.app.vault.adapter;
@@ -22994,7 +23010,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         this.display();
       });
     });
-    new Setting(containerEl).setName("公众号文章图片保存方式").setDesc("默认下载到笔记同级的“文章图片”目录，避免原始图片链接过期或防盗链导致无法显示。选择仅保留链接时不下载。").addDropdown((dropdown) => {
+    new Setting(containerEl).setName("公众号文章图片保存方式").setDesc("默认下载到文章文件夹内的“文章图片”目录，和对应笔记放在一起，避免原始图片链接过期或防盗链导致无法显示。选择仅保留链接时不下载。").addDropdown((dropdown) => {
       Object.entries(WECHAT_ARTICLE_IMAGE_STORAGE_MODES).forEach(([value, label]) => {
         dropdown.addOption(value, label);
       });
