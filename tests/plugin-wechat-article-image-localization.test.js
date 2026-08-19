@@ -135,7 +135,7 @@ async function run() {
   assert.ok(feishuCase.writes[0].filePath.startsWith('临时收集/2026-08-11/飞书图片本地化测试/文章图片/'));
   assert.ok(feishuMarkdown.includes('![[临时收集/2026-08-11/飞书图片本地化测试/文章图片/'));
   const remoteOnlyCase = createPlugin();
-  remoteOnlyCase.plugin.settings = { wechatArticleImageStorageMode: 'remote' };
+  remoteOnlyCase.plugin.settings = { socialArticleImageStorageMode: 'remote' };
   const remoteOnly = await hydrate(remoteOnlyCase.plugin);
   assert.strictEqual(remoteOnly.metadata.conversionStatus, 'success');
   assert.strictEqual(remoteOnlyCase.downloads.length, 0);
@@ -143,6 +143,105 @@ async function run() {
   assert.ok(remoteOnly.metadata.markdown.includes(imageUrl));
   assert.strictEqual(remoteOnly.metadata.imageLocalizationFailedCount, 0);
 
+  const xiaohongshuRemoteCase = createPlugin();
+  xiaohongshuRemoteCase.plugin.settings = { socialArticleImageStorageMode: 'remote' };
+  const xiaohongshuRemote = await xiaohongshuRemoteCase.plugin.saveMarkdownRemoteImageAssets(
+    `![image](${xiaohongshuImageUrl})`,
+    '临时收集',
+    '2026-08-11',
+    '小红书远程图片测试',
+    { sourceUrl: 'https://www.xiaohongshu.com/explore/local-image-test' },
+  );
+  assert.strictEqual(xiaohongshuRemoteCase.downloads.length, 0);
+  assert.strictEqual(xiaohongshuRemoteCase.writes.length, 0);
+  assert.ok(xiaohongshuRemote.includes(xiaohongshuImageUrl));
+
+  const feishuRemoteCase = createPlugin();
+  feishuRemoteCase.plugin.settings = { socialArticleImageStorageMode: 'remote' };
+  const feishuRemote = await feishuRemoteCase.plugin.saveWebpageImageAssets(
+    `![image](${feishuImageUrl})`,
+    [{ src: feishuImageUrl }],
+    '临时收集',
+    '2026-08-11',
+    '飞书远程图片测试',
+    { sourceUrl: 'https://example.feishu.cn/docx/local-image-test' },
+  );
+  assert.strictEqual(feishuRemoteCase.downloads.length, 0);
+  assert.strictEqual(feishuRemoteCase.writes.length, 0);
+  assert.ok(feishuRemote.includes(feishuImageUrl));
+  const alignedFolderCase = createPlugin();
+  const imageDirectory = '\u6587\u7ae0\u56fe\u7247';
+  const sourceFolder = '临时收集/2026-08-11/公众号-临时标题';
+  const targetFolder = '临时收集/2026-08-11/公众号-最终标题';
+  const renamedFolders = [];
+  alignedFolderCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
+  alignedFolderCase.plugin.app.vault.adapter = {
+    async exists(path) { return path === sourceFolder; },
+    async rename(from, to) { renamedFolders.push({ from, to }); },
+  };
+  const alignedRecord = await alignedFolderCase.plugin.alignSocialArticleImageFolder({
+    metadata: {
+      markdown: `![[${sourceFolder}/${imageDirectory}/cover.jpg]]`,
+      snapshot: `![[${sourceFolder}/${imageDirectory}/body.jpg]]`,
+    },
+  }, {
+    sourceUrl: articleUrl,
+    noteDir: '临时收集/2026-08-11',
+    assetFolderTitle: '公众号-临时标题',
+    fileTitle: '公众号-最终标题',
+  });
+  assert.strictEqual(alignedRecord.folderName, '公众号-最终标题');
+  assert.deepStrictEqual(renamedFolders, [{ from: sourceFolder, to: targetFolder }]);
+  assert.ok(alignedRecord.record.metadata.markdown.includes(`${targetFolder}/${imageDirectory}/cover.jpg`));
+  assert.ok(alignedRecord.record.metadata.snapshot.includes(`${targetFolder}/${imageDirectory}/body.jpg`));
+  const writeRecordCase = createPlugin();
+  const createdNotes = [];
+  const writeRecordRenames = [];
+  const writeRecordFolders = [];
+  const writeRecordSourceFolder = '临时收集/2026-08-11/公众号-临时标题';
+  writeRecordCase.plugin.settings = {
+    inboxDir: '临时收集',
+    noteSaveMode: 'date',
+    notePropertyFields: [],
+    socialArticleImageStorageMode: 'local',
+  };
+  writeRecordCase.plugin.showSyncProgress = () => {};
+  writeRecordCase.plugin.ensureFolder = async (path) => { writeRecordFolders.push(path); };
+  let titleCall = 0;
+  writeRecordCase.plugin.nextRecordTitle = async () => (
+    titleCall++ === 0 ? '公众号-临时标题' : '公众号-最终标题'
+  );
+  writeRecordCase.plugin.hydrateWebpageMarkdown = async (record) => ({
+    ...record,
+    metadata: {
+      ...record.metadata,
+      title: '公众号-最终标题',
+      markdown: `![[${writeRecordSourceFolder}/${imageDirectory}/cover.jpg]]`,
+    },
+  });
+  writeRecordCase.plugin.saveSourceMediaAttachment = async (record) => record;
+  writeRecordCase.plugin.enrichRecordMetadataWithAi = async (record) => record;
+  writeRecordCase.plugin.app.vault.adapter = {
+    async exists(path) { return path === writeRecordSourceFolder; },
+    async rename(from, to) { writeRecordRenames.push({ from, to }); },
+    async write() {},
+    async remove() {},
+  };
+  writeRecordCase.plugin.app.vault.create = async (path, markdown) => { createdNotes.push({ path, markdown }); };
+  const writeRecordResult = await writeRecordCase.plugin.writeRecord({
+    id: 'same-folder-note-test',
+    type: 'webpage',
+    content: articleUrl,
+    createdAt: '2026-08-11T10:00:00.000Z',
+    metadata: { url: articleUrl },
+  }, '2026-08-11T10:01:00.000Z');
+  const writeRecordTargetFolder = '临时收集/2026-08-11/公众号-最终标题';
+  assert.strictEqual(writeRecordResult.filePath, `${writeRecordTargetFolder}/公众号-最终标题.md`);
+  assert.deepStrictEqual(writeRecordRenames, [{ from: writeRecordSourceFolder, to: writeRecordTargetFolder }]);
+  assert.ok(writeRecordFolders.includes(writeRecordTargetFolder));
+  assert.strictEqual(createdNotes.length, 1);
+  assert.strictEqual(createdNotes[0].path, `${writeRecordTargetFolder}/公众号-最终标题.md`);
+  assert.ok(createdNotes[0].markdown.includes(`${writeRecordTargetFolder}/${imageDirectory}/cover.jpg`));
   const failureCase = createPlugin();
   failureCase.plugin.downloadArrayBuffer = async () => { throw new Error('HTTP 403'); };
   const fallback = await hydrate(failureCase.plugin);

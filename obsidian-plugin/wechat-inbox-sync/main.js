@@ -4580,7 +4580,7 @@ async function loadPdfJsLibrary() {
 __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.105";
+var PLUGIN_RUNTIME_VERSION = "1.3.106";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -4625,11 +4625,11 @@ var normalizeNoteSaveMode = /* @__PURE__ */ __name((value) => normalizeNoteSaveM
   NOTE_SAVE_MODES,
   DEFAULT_SETTINGS.noteSaveMode
 ), "normalizeNoteSaveMode");
-var WECHAT_ARTICLE_IMAGE_STORAGE_MODES = {
+var SOCIAL_ARTICLE_IMAGE_STORAGE_MODES = {
   local: "下载并保存到本地",
   remote: "仅保留原始图片链接"
 };
-var normalizeWechatArticleImageStorageMode = /* @__PURE__ */ __name((value) => Object.prototype.hasOwnProperty.call(WECHAT_ARTICLE_IMAGE_STORAGE_MODES, value) ? value : "local", "normalizeWechatArticleImageStorageMode");
+var normalizeSocialArticleImageStorageMode = /* @__PURE__ */ __name((value) => Object.prototype.hasOwnProperty.call(SOCIAL_ARTICLE_IMAGE_STORAGE_MODES, value) ? value : "local", "normalizeSocialArticleImageStorageMode");
 var normalizeNotePropertyFields = /* @__PURE__ */ __name((value) => normalizeNotePropertyFieldsWithKeys(
   value,
   NOTE_PROPERTY_FIELD_KEYS
@@ -4686,7 +4686,7 @@ var DEFAULT_SETTINGS = {
   xiaohongshuImageOcrEnabled: false,
   xiaohongshuImageOcrConsentVersion: 0,
   saveOriginalMediaEnabled: false,
-  wechatArticleImageStorageMode: "local",
+  socialArticleImageStorageMode: "local",
   wechatChannelsExperimentUrl: "",
   feishuOAuthStatus: null,
   feishuAppId: "",
@@ -6224,9 +6224,10 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.xiaohongshuImageOcrConsentVersion = Number(merged.xiaohongshuImageOcrConsentVersion) === 1 ? 1 : 0;
   merged.xiaohongshuImageOcrEnabled = merged.xiaohongshuImageOcrConsentVersion === 1 && merged.xiaohongshuImageOcrEnabled === true;
   merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
-  merged.wechatArticleImageStorageMode = normalizeWechatArticleImageStorageMode(
-    merged.wechatArticleImageStorageMode
+  merged.socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
+    Object.prototype.hasOwnProperty.call(sourceSettings, "socialArticleImageStorageMode") ? sourceSettings.socialArticleImageStorageMode : sourceSettings.wechatArticleImageStorageMode
   );
+  delete merged.wechatArticleImageStorageMode;
   merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || "").trim();
   merged.feishuOAuthStatus = merged.feishuOAuthStatus && typeof merged.feishuOAuthStatus === "object" && !Array.isArray(merged.feishuOAuthStatus) ? merged.feishuOAuthStatus : null;
   delete merged.feishuCloudOAuthEnabled;
@@ -7029,11 +7030,12 @@ function isXiaohongshuUrl(url) {
   return isHostnameWithinDomain(hostname, "xiaohongshu.com") || isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn");
 }
 __name(isXiaohongshuUrl, "isXiaohongshuUrl");
-function shouldStoreWebpageNoteInOwnFolder(sourceUrl, wechatArticleImageStorageMode) {
-  if (isWechatArticleUrl(sourceUrl)) {
-    return normalizeWechatArticleImageStorageMode(wechatArticleImageStorageMode) === "local";
-  }
-  return isFeishuUrl(sourceUrl) || isXiaohongshuUrl(sourceUrl);
+function isSocialArticleUrl(sourceUrl) {
+  return isWechatArticleUrl(sourceUrl) || isFeishuUrl(sourceUrl) || isXiaohongshuUrl(sourceUrl);
+}
+__name(isSocialArticleUrl, "isSocialArticleUrl");
+function shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageMode) {
+  return isSocialArticleUrl(sourceUrl) && normalizeSocialArticleImageStorageMode(socialArticleImageStorageMode) === "local";
 }
 __name(shouldStoreWebpageNoteInOwnFolder, "shouldStoreWebpageNoteInOwnFolder");
 function isXiaohongshuShortLinkUrl(url) {
@@ -20120,10 +20122,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const sourceUrl = String(options.sourceUrl || "").trim();
     const isFeishuSource = isFeishuUrl(sourceUrl);
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
-    const wechatArticleImageStorageMode = normalizeWechatArticleImageStorageMode(
-      options.wechatArticleImageStorageMode || this.settings && this.settings.wechatArticleImageStorageMode
+    const socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
+      options.socialArticleImageStorageMode || this.settings && this.settings.socialArticleImageStorageMode
     );
-    if (isWechatArticleSource && wechatArticleImageStorageMode === "remote") {
+    if (isSocialArticleUrl(sourceUrl) && socialArticleImageStorageMode === "remote") {
       return markdown;
     }
     const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl);
@@ -20146,7 +20148,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(
       sourceUrl,
-      wechatArticleImageStorageMode
+      socialArticleImageStorageMode
     );
     const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
     const safeTitle = sanitizeAttachmentName(title, "文章");
@@ -20242,17 +20244,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     const isFeishuSource = isFeishuUrl(sourceUrl);
-    const wechatArticleImageStorageMode = normalizeWechatArticleImageStorageMode(
-      options.wechatArticleImageStorageMode || this.settings && this.settings.wechatArticleImageStorageMode
+    const socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
+      options.socialArticleImageStorageMode || this.settings && this.settings.socialArticleImageStorageMode
     );
     const isSessionBackedSource = isFeishuSource || isWechatArticleSource;
     let nextMarkdown = isXiaohongshuSource ? sanitizeXiaohongshuMarkdownImages(String(markdown)) : String(markdown);
-    if (isWechatArticleSource && wechatArticleImageStorageMode === "remote") return nextMarkdown;
+    if (isSocialArticleUrl(sourceUrl) && socialArticleImageStorageMode === "remote") return nextMarkdown;
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return nextMarkdown;
     const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(
       sourceUrl,
-      wechatArticleImageStorageMode
+      socialArticleImageStorageMode
     );
     const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
     const safeTitle = sanitizeAttachmentName(title, "文章");
@@ -22184,6 +22186,57 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     return "";
   }
+  async alignSocialArticleImageFolder(record, {
+    sourceUrl,
+    noteDir,
+    assetFolderTitle,
+    fileTitle
+  } = {}) {
+    const targetFolderName = sanitizeAttachmentName(fileTitle, "文章");
+    if (!shouldStoreWebpageNoteInOwnFolder(
+      sourceUrl,
+      this.settings && this.settings.socialArticleImageStorageMode
+    )) {
+      return { record, folderName: targetFolderName };
+    }
+    const sourceFolderName = sanitizeAttachmentName(assetFolderTitle, "文章");
+    if (sourceFolderName === targetFolderName) {
+      return { record, folderName: targetFolderName };
+    }
+    const sourceFolderPath = normalizeVaultPath(`${noteDir}/${sourceFolderName}`);
+    const targetFolderPath = normalizeVaultPath(`${noteDir}/${targetFolderName}`);
+    const sourceImagePath = normalizeVaultPath(`${sourceFolderPath}/文章图片/`);
+    const targetImagePath = normalizeVaultPath(`${targetFolderPath}/文章图片/`);
+    const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+    const markdownFields = ["markdown", "snapshot", "contentSnapshot"];
+    const containsLocalizedImages = markdownFields.some((field) => typeof metadata[field] === "string" && metadata[field].includes(sourceImagePath));
+    if (!containsLocalizedImages) {
+      return { record, folderName: targetFolderName };
+    }
+    const adapter = this.app && this.app.vault && this.app.vault.adapter;
+    if (!adapter || typeof adapter.rename !== "function" || typeof adapter.exists !== "function") {
+      return { record, folderName: sourceFolderName };
+    }
+    try {
+      if (!await adapter.exists(sourceFolderPath) || await adapter.exists(targetFolderPath)) {
+        return { record, folderName: sourceFolderName };
+      }
+      await adapter.rename(sourceFolderPath, targetFolderPath);
+      const nextMetadata = { ...metadata };
+      markdownFields.forEach((field) => {
+        if (typeof nextMetadata[field] === "string") {
+          nextMetadata[field] = nextMetadata[field].split(sourceImagePath).join(targetImagePath);
+        }
+      });
+      return {
+        record: { ...record, metadata: nextMetadata },
+        folderName: targetFolderName
+      };
+    } catch (error) {
+      console.warn("Failed to align social article image folder with note title", error);
+      return { record, folderName: sourceFolderName };
+    }
+  }
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const signal = progress.signal || null;
     throwIfAborted(signal);
@@ -22196,6 +22249,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
     let title = await this.nextRecordTitle(noteDir, record, bindingLabel);
+    const localizedImageFolderTitle = title;
     let recordForMarkdown = record;
     const recordType = String(record.type || "").toLowerCase();
     const linkAsWebpage = recordType === "link" && shouldHydrateLinkAsWebpage(record.metadata && record.metadata.url || record.content || "");
@@ -22264,18 +22318,25 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     recordForMarkdown = noteIdentity.record;
     const displayTitle = noteIdentity.displayTitle || title;
     const fileTitle = noteIdentity.titleSource ? await this.nextTitle(noteDir, noteIdentity.fileTitle) : title;
+    const recordUrl = String(recordForMarkdown && recordForMarkdown.metadata && recordForMarkdown.metadata.url || recordForMarkdown && recordForMarkdown.content || "").trim();
+    const usePerNoteFolder = shouldStoreWebpageNoteInOwnFolder(
+      recordUrl,
+      this.settings && this.settings.socialArticleImageStorageMode
+    );
+    const alignedImageFolder = await this.alignSocialArticleImageFolder(recordForMarkdown, {
+      sourceUrl: recordUrl,
+      noteDir,
+      assetFolderTitle: localizedImageFolderTitle,
+      fileTitle
+    });
+    recordForMarkdown = alignedImageFolder.record;
     const markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title: displayTitle,
       syncedAt,
       propertyFields: this.settings.notePropertyFields
     });
-    const recordUrl = String(recordForMarkdown && recordForMarkdown.metadata && recordForMarkdown.metadata.url || recordForMarkdown && recordForMarkdown.content || "").trim();
-    const usePerNoteFolder = shouldStoreWebpageNoteInOwnFolder(
-      recordUrl,
-      this.settings && this.settings.wechatArticleImageStorageMode
-    );
-    const targetNoteDir = usePerNoteFolder ? normalizeVaultPath(`${noteDir}/${sanitizeAttachmentName(title, "文章")}`) : noteDir;
+    const targetNoteDir = usePerNoteFolder ? normalizeVaultPath(`${noteDir}/${alignedImageFolder.folderName}`) : noteDir;
     if (usePerNoteFolder) await this.ensureFolder(targetNoteDir);
     const filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
     this.showSyncProgress({ ...progress, stage: "writing", title: fileTitle });
@@ -23010,14 +23071,14 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         this.display();
       });
     });
-    new Setting(containerEl).setName("公众号文章图片保存方式").setDesc("默认下载到文章文件夹内的“文章图片”目录，和对应笔记放在一起，避免原始图片链接过期或防盗链导致无法显示。选择仅保留链接时不下载。").addDropdown((dropdown) => {
-      Object.entries(WECHAT_ARTICLE_IMAGE_STORAGE_MODES).forEach(([value, label]) => {
+    new Setting(containerEl).setName("图文图片保存方式").setDesc("适用于公众号、飞书和小红书图文。下载到本地时，图片会放入与对应笔记同名的文件夹内的“文章图片”目录；选择仅保留链接时不下载图片。").addDropdown((dropdown) => {
+      Object.entries(SOCIAL_ARTICLE_IMAGE_STORAGE_MODES).forEach(([value, label]) => {
         dropdown.addOption(value, label);
       });
-      dropdown.setValue(normalizeWechatArticleImageStorageMode(this.plugin.settings.wechatArticleImageStorageMode)).onChange(async (value) => {
+      dropdown.setValue(normalizeSocialArticleImageStorageMode(this.plugin.settings.socialArticleImageStorageMode)).onChange(async (value) => {
         await this.plugin.saveSettings({
           ...this.plugin.settings,
-          wechatArticleImageStorageMode: normalizeWechatArticleImageStorageMode(value)
+          socialArticleImageStorageMode: normalizeSocialArticleImageStorageMode(value)
         });
       });
     });
