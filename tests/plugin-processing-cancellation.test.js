@@ -424,7 +424,7 @@ async function run() {
     if (requestPath === '/records?status=pending') {
       return { data: [record] };
     }
-    if (requestPath === '/records/record-xhs-stop/synced') {
+    if (requestPath === '/records/record-xhs-stop/delete') {
       return { data: { id: record._id, status: 'deleted' } };
     }
     throw new Error(`unexpected request: ${requestPath}`);
