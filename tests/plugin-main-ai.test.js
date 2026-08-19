@@ -1144,9 +1144,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.99'), {
-  manifestVersion: '1.3.99',
-  runtimeVersion: '1.3.99',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.104'), {
+  manifestVersion: '1.3.104',
+  runtimeVersion: '1.3.104',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -2616,6 +2616,18 @@ assert.strictEqual(
 assert.strictEqual(helpers.isWechatMpArticleUrl('https://mp.weixin.qq.com/s/example'), true);
 assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://mp.weixin.qq.com/s/example'), true);
 assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://developers.weixin.qq.com/miniprogram'), false);
+const wechatNestedContentMarkdown = helpers.htmlToMarkdown(`
+  <html><body>
+    <div id="js_content">
+      <div><p>这是公众号正文的开头段落，不能因为内嵌脚本被截断。</p></div>
+      <script>window.__WECHAT_IMAGE_READY__ = true;</script>
+      <div><p>这是公众号正文的后续段落，必须与开头一起保存到笔记中。</p></div>
+    </div>
+    <script>window.__OUTSIDE_ARTICLE__ = true;</script>
+  </body></html>
+`);
+assert.ok(wechatNestedContentMarkdown.includes('这是公众号正文的开头段落'));
+assert.ok(wechatNestedContentMarkdown.includes('这是公众号正文的后续段落'));
 const wechatCodeMarkdown = helpers.htmlToMarkdown(`
   <html>
     <body>
@@ -10302,8 +10314,49 @@ async function runRecentSyncFailureCleanupTests() {
   assert.deepStrictEqual(calls, [[
     '/records/record-delete/delete', 'POST', {}, 'ABC-123',
   ]]);
-  assert.deepStrictEqual(plugin.getRecentSyncFailures().map((item) => item.recordId), ['record-unbound']);
-}
+  assert.deepStrictEqual(plugin.getRecentSyncFailures().map((item) => item.recordId), ['record-unbound']);  assert.strictEqual(plugin.getRecentSyncFailureCleanupErrors().length, 1);
+
+  const compatibilityPlugin = new PluginClass();
+  compatibilityPlugin.settings = helpers.mergeSettings({
+    bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
+    recentSyncFailures: [{
+      recordId: 'record-legacy-delete',
+      bindingToken: 'ABC-123',
+      bindingLabel: '微信 1',
+      message: 'old failure',
+      failedAt: '2026-08-19T00:00:00.000Z',
+    }],
+  });
+  compatibilityPlugin.saveData = async () => {};
+  compatibilityPlugin.requestJson = async () => ({ success: true, data: { status: 'deleted' } });
+  const compatibilityResult = await compatibilityPlugin.clearRecentSyncFailures();
+  assert.deepStrictEqual(compatibilityResult, { deletedCount: 1, failedCount: 0, remainingCount: 0 });
+
+  const routeFallbackCalls = [];
+  const routeFallbackPlugin = new PluginClass();
+  routeFallbackPlugin.settings = helpers.mergeSettings({
+    bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
+    recentSyncFailures: [{
+      recordId: 'record-route-fallback',
+      bindingToken: 'ABC-123',
+      bindingLabel: '微信 1',
+      message: 'old production route',
+      failedAt: '2026-08-19T00:00:00.000Z',
+    }],
+  });
+  routeFallbackPlugin.saveData = async () => {};
+  routeFallbackPlugin.requestJson = async (path) => {
+    routeFallbackCalls.push(path);
+    if (path.endsWith('/delete')) throw new Error('Request failed, status 404: Route not found');
+    if (path.endsWith('/synced')) return { success: true, data: { id: 'record-route-fallback', status: 'deleted', deleted: true } };
+    throw new Error(`unexpected compatibility cleanup path: ${path}`);
+  };
+  const routeFallbackResult = await routeFallbackPlugin.clearRecentSyncFailures();
+  assert.deepStrictEqual(routeFallbackResult, { deletedCount: 1, failedCount: 0, remainingCount: 0 });
+  assert.deepStrictEqual(routeFallbackCalls, [
+    '/records/record-route-fallback/delete',
+    '/records/record-route-fallback/synced',
+  ]);}
 
 async function runStoppedTranscriptionDeleteUsesShortBusinessEndpointTest() {
   const previousRequestUrlMock = requestUrlMock;
@@ -10546,7 +10599,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.99'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.104'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10585,8 +10638,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.99',
-        runtimeVersion: '1.3.99',
+        manifestVersion: '1.3.104',
+        runtimeVersion: '1.3.104',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -12769,7 +12822,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.99 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.104 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -13314,6 +13367,32 @@ async function runCanonicalVaultFolderTests() {
     metadata: {},
   }, '2026-07-25T04:00:00.000Z');
   assert.strictEqual(datedResult.filePath, 'raw/wechatmd/2026-07-25/日期笔记.md');
+  pathPlugin.settings.wechatArticleImageStorageMode = 'local';
+  pathPlugin.nextRecordTitle = async () => 'wechat-article-folder';
+  pathPlugin.hydrateWebpageMarkdown = async (record) => ({
+    ...record,
+    metadata: {
+      ...(record.metadata || {}),
+      url: 'https://mp.weixin.qq.com/s/example-share',
+      markdown: 'complete article body',
+      conversionStatus: 'success',
+    },
+  });
+  pathPlugin.saveSourceMediaAttachment = async (record) => record;
+  const wechatArticleFolderResult = await pathPlugin.writeRecord({
+    _id: 'wechat-article-folder-1',
+    type: 'webpage',
+    content: 'https://mp.weixin.qq.com/s/example-share',
+    createdAt: '2026-07-25T03:49:04.246Z',
+    metadata: {
+      url: 'https://mp.weixin.qq.com/s/example-share',
+      conversionStatus: 'pending',
+    },
+  }, '2026-07-25T04:00:00.000Z');
+  assert.strictEqual(
+    wechatArticleFolderResult.filePath,
+    'raw/wechatmd/2026-07-25/wechat-article-folder/wechat-article-folder.md',
+  );
 
   pathPlugin.settings.noteSaveMode = 'root';
   pathPlugin.nextRecordTitle = async () => '视频号捕获';

@@ -33,8 +33,8 @@ assert.strictEqual(
 );
 assert.strictEqual(classifyWechatArticleHtml(guideHtml), 'guide');
 assert.strictEqual(
-  classifyWechatArticleHtml('<div id="js_content">微信扫一扫可打开此内容。使用完整服务。This guide-page shell has enough text to previously look like an article.</div>'),
-  'guide',
+  classifyWechatArticleHtml('<div id="js_content"><p>这是有效正文，长度足够，公众号页面的隐藏引导文案不应覆盖正文判定。</p></div><div style="display:none">微信扫一扫可打开此内容 使用完整服务</div>'),
+  'article',
 );
 assert.strictEqual(classifyWechatArticleHtml('<p>环境异常，完成验证后即可继续访问</p>'), 'captcha');
 

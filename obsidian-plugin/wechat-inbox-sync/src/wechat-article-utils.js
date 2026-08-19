@@ -99,8 +99,10 @@ function hasWechatArticleBody(html) {
 function classifyWechatArticleHtml(html) {
   const text = stripHtml(html);
   if (/环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return 'captcha';
-  if (/微信扫一扫可打开此内容/.test(text) && /使用完整服务|使用小程序/.test(text)) return 'guide';
+  // Full article pages can contain hidden QR/app guide text outside #js_content.
+  // Preserve the legacy successful behavior: substantive #js_content wins.
   if (hasWechatArticleBody(html)) return 'article';
+  if (/微信扫一扫可打开此内容/.test(text) && /使用完整服务|使用小程序/.test(text)) return 'guide';
   if (/内容不存在|已删除|暂时无法查看|加载失败/.test(text)) return 'unavailable';
   return 'unknown';
 }
