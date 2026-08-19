@@ -40,6 +40,7 @@ function createPlugin() {
   const writes = [];
   const downloads = [];
   const plugin = new PluginClass();
+  plugin.settings = { socialArticleImageStorageMode: 'local' };
   plugin.app = {
     vault: {
       adapter: {
@@ -93,6 +94,7 @@ function createArticleHtml(imageTags) {
 
 async function run() {
   const successCase = createPlugin();
+  successCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   const localized = await hydrate(successCase.plugin);
   assert.strictEqual(localized.metadata.conversionStatus, 'success');
   assert.ok(successCase.plugin._lastWechatStaticRequestOptions.headers['User-Agent']);
@@ -108,7 +110,15 @@ async function run() {
   assert.strictEqual(localized.metadata.markdown.includes(imageUrl), false);
   assert.strictEqual(localized.metadata.imageLocalizationFailedCount, 0);
 
+  const defaultRemoteCase = createPlugin();
+  defaultRemoteCase.plugin.settings = {};
+  const defaultRemote = await hydrate(defaultRemoteCase.plugin);
+  assert.strictEqual(defaultRemoteCase.downloads.length, 0);
+  assert.strictEqual(defaultRemoteCase.writes.length, 0);
+  assert.ok(defaultRemote.metadata.markdown.includes(imageUrl));
+
   const xiaohongshuCase = createPlugin();
+  xiaohongshuCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   const xiaohongshuImageUrl = 'https://sns-webpic-qc.xhscdn.com/xiaohongshu-local-image-test.jpg';
   const xiaohongshuMarkdown = await xiaohongshuCase.plugin.saveMarkdownRemoteImageAssets(
     `![配图](${xiaohongshuImageUrl})`,
@@ -122,6 +132,7 @@ async function run() {
   assert.ok(xiaohongshuMarkdown.includes('![[临时收集/2026-08-11/小红书图片本地化测试/文章图片/'));
 
   const feishuCase = createPlugin();
+  feishuCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   const feishuImageUrl = 'https://s1-imfile.feishucdn.com/feishu-local-image-test.jpg';
   const feishuMarkdown = await feishuCase.plugin.saveWebpageImageAssets(
     `![配图](${feishuImageUrl})`,
@@ -176,7 +187,7 @@ async function run() {
   const renamedFolders = [];
   alignedFolderCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   alignedFolderCase.plugin.app.vault.adapter = {
-    async exists(path) { return path === sourceFolder; },
+    async exists(path) { return path === `${sourceFolder}/${imageDirectory}`; },
     async rename(from, to) { renamedFolders.push({ from, to }); },
   };
   const alignedRecord = await alignedFolderCase.plugin.alignSocialArticleImageFolder({
@@ -194,6 +205,29 @@ async function run() {
   assert.deepStrictEqual(renamedFolders, [{ from: sourceFolder, to: targetFolder }]);
   assert.ok(alignedRecord.record.metadata.markdown.includes(`${targetFolder}/${imageDirectory}/cover.jpg`));
   assert.ok(alignedRecord.record.metadata.snapshot.includes(`${targetFolder}/${imageDirectory}/body.jpg`));
+
+  // Some converters add localized image references only while final Markdown is
+  // rendered. The existing per-note image directory must still be moved.
+  const lateMetadataCase = createPlugin();
+  const lateMetadataRenames = [];
+  lateMetadataCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
+  lateMetadataCase.plugin.app.vault.adapter = {
+    async exists(path) { return path === `${sourceFolder}/${imageDirectory}`; },
+    async rename(from, to) { lateMetadataRenames.push({ from, to }); },
+  };
+  const lateMetadataAligned = await lateMetadataCase.plugin.alignSocialArticleImageFolder({
+    metadata: { title: 'final-title-only' },
+  }, {
+    sourceUrl: articleUrl,
+    noteDir: '临时收集/2026-08-11',
+    assetFolderTitle: '公众号-临时标题',
+    fileTitle: '公众号-最终标题',
+  });
+  assert.strictEqual(lateMetadataAligned.folderName, '公众号-最终标题');
+  assert.deepStrictEqual(lateMetadataRenames, [{ from: sourceFolder, to: targetFolder }]);
+  assert.strictEqual(lateMetadataAligned.sourceImagePath, `${sourceFolder}/${imageDirectory}/`);
+  assert.strictEqual(lateMetadataAligned.targetImagePath, `${targetFolder}/${imageDirectory}/`);
+
   const writeRecordCase = createPlugin();
   const createdNotes = [];
   const writeRecordRenames = [];
@@ -222,7 +256,7 @@ async function run() {
   writeRecordCase.plugin.saveSourceMediaAttachment = async (record) => record;
   writeRecordCase.plugin.enrichRecordMetadataWithAi = async (record) => record;
   writeRecordCase.plugin.app.vault.adapter = {
-    async exists(path) { return path === writeRecordSourceFolder; },
+    async exists(path) { return path === `${writeRecordSourceFolder}/${imageDirectory}`; },
     async rename(from, to) { writeRecordRenames.push({ from, to }); },
     async write() {},
     async remove() {},
