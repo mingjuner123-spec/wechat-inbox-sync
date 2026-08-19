@@ -22205,20 +22205,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const sourceFolderPath = normalizeVaultPath(`${noteDir}/${sourceFolderName}`);
     const targetFolderPath = normalizeVaultPath(`${noteDir}/${targetFolderName}`);
-    const sourceImagePath = normalizeVaultPath(`${sourceFolderPath}/文章图片/`);
-    const targetImagePath = normalizeVaultPath(`${targetFolderPath}/文章图片/`);
+    const sourceImageFolderPath = normalizeVaultPath(`${sourceFolderPath}/文章图片`);
+    const targetImageFolderPath = normalizeVaultPath(`${targetFolderPath}/文章图片`);
+    const sourceImagePath = `${sourceImageFolderPath}/`;
+    const targetImagePath = `${targetImageFolderPath}/`;
     const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
     const markdownFields = ["markdown", "snapshot", "contentSnapshot"];
-    const containsLocalizedImages = markdownFields.some((field) => typeof metadata[field] === "string" && metadata[field].includes(sourceImagePath));
-    if (!containsLocalizedImages) {
-      return { record, folderName: targetFolderName };
-    }
     const adapter = this.app && this.app.vault && this.app.vault.adapter;
     if (!adapter || typeof adapter.rename !== "function" || typeof adapter.exists !== "function") {
       return { record, folderName: sourceFolderName };
     }
     try {
-      if (!await adapter.exists(sourceFolderPath) || await adapter.exists(targetFolderPath)) {
+      // Image localization happens while webpage metadata is being hydrated. Some
+      // webpage converters only materialize their image references when the final
+      // note markdown is built, so metadata is not a reliable condition for this
+      // move. The actual per-note image directory is the authoritative signal.
+      if (!await adapter.exists(sourceImageFolderPath) || await adapter.exists(targetFolderPath)) {
         return { record, folderName: sourceFolderName };
       }
       await adapter.rename(sourceFolderPath, targetFolderPath);
@@ -22230,7 +22232,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       });
       return {
         record: { ...record, metadata: nextMetadata },
-        folderName: targetFolderName
+        folderName: targetFolderName,
+        sourceImagePath,
+        targetImagePath
       };
     } catch (error) {
       console.warn("Failed to align social article image folder with note title", error);
@@ -22330,12 +22334,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       fileTitle
     });
     recordForMarkdown = alignedImageFolder.record;
-    const markdown = buildMarkdownForRecord({
+    let markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title: displayTitle,
       syncedAt,
       propertyFields: this.settings.notePropertyFields
     });
+    // Keep the final on-disk Markdown aligned even when a source converter keeps
+    // its localized image markdown outside metadata.markdown/snapshot fields.
+    if (alignedImageFolder.sourceImagePath && alignedImageFolder.targetImagePath) {
+      markdown = markdown.split(alignedImageFolder.sourceImagePath).join(alignedImageFolder.targetImagePath);
+    }
     const targetNoteDir = usePerNoteFolder ? normalizeVaultPath(`${noteDir}/${alignedImageFolder.folderName}`) : noteDir;
     if (usePerNoteFolder) await this.ensureFolder(targetNoteDir);
     const filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
