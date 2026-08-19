@@ -1144,9 +1144,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.106'), {
-  manifestVersion: '1.3.106',
-  runtimeVersion: '1.3.106',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.107'), {
+  manifestVersion: '1.3.107',
+  runtimeVersion: '1.3.107',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -7240,6 +7240,8 @@ async function runAsyncHydrationTests() {
     token: 'ABC-123',
     bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true },
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
   });
   cloudFeishuPlugin.app = {
     vault: {
@@ -7345,6 +7347,8 @@ async function runAsyncHydrationTests() {
     token: 'ABC-123',
     bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true },
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
   });
   fallbackFeishuPlugin.app = {
     vault: {
@@ -7403,6 +7407,8 @@ async function runAsyncHydrationTests() {
     token: 'ABC-123',
     bindings: [{ token: 'ABC-123', label: '微信 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true },
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
   });
   failedImagePlugin.app = {
     vault: {
@@ -10128,6 +10134,10 @@ async function runXiaohongshuRemoteImageLocalizationHeadersTest() {
   const writes = [];
   const downloads = [];
   const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
+  });
   plugin.app = {
     vault: {
       adapter: {
@@ -10599,7 +10609,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.106'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.107'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10638,8 +10648,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.106',
-        runtimeVersion: '1.3.106',
+        manifestVersion: '1.3.107',
+        runtimeVersion: '1.3.107',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -12822,7 +12832,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.106 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.107 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -13144,8 +13154,8 @@ async function runClipboardTextWebpagePromotionTests() {
   assert.strictEqual(hydrated[0].type, 'webpage');
   assert.strictEqual(hydrated[0].metadata.url, 'http://xhslink.cn/o/3twEehTqivC');
   assert.strictEqual(hydrated[0].metadata.shareText, originalText);
-  assert.strictEqual(result.filePath, 'raw/wechatmd/自动网页提取/自动网页提取.md');
-  assert.strictEqual(writes[0].filePath, 'raw/wechatmd/自动网页提取/自动网页提取.md');
+  assert.strictEqual(result.filePath, 'raw/wechatmd/自动网页提取.md');
+  assert.strictEqual(writes[0].filePath, 'raw/wechatmd/自动网页提取.md');
   assert.ok(writes[0].markdown.includes('## 原始剪切板内容'));
   assert.ok(writes[0].markdown.includes(originalText));
 

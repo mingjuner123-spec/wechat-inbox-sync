@@ -40,6 +40,7 @@ function createPlugin() {
   const writes = [];
   const downloads = [];
   const plugin = new PluginClass();
+  plugin.settings = { socialArticleImageStorageMode: 'local' };
   plugin.app = {
     vault: {
       adapter: {
@@ -93,6 +94,7 @@ function createArticleHtml(imageTags) {
 
 async function run() {
   const successCase = createPlugin();
+  successCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   const localized = await hydrate(successCase.plugin);
   assert.strictEqual(localized.metadata.conversionStatus, 'success');
   assert.ok(successCase.plugin._lastWechatStaticRequestOptions.headers['User-Agent']);
@@ -108,7 +110,15 @@ async function run() {
   assert.strictEqual(localized.metadata.markdown.includes(imageUrl), false);
   assert.strictEqual(localized.metadata.imageLocalizationFailedCount, 0);
 
+  const defaultRemoteCase = createPlugin();
+  defaultRemoteCase.plugin.settings = {};
+  const defaultRemote = await hydrate(defaultRemoteCase.plugin);
+  assert.strictEqual(defaultRemoteCase.downloads.length, 0);
+  assert.strictEqual(defaultRemoteCase.writes.length, 0);
+  assert.ok(defaultRemote.metadata.markdown.includes(imageUrl));
+
   const xiaohongshuCase = createPlugin();
+  xiaohongshuCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   const xiaohongshuImageUrl = 'https://sns-webpic-qc.xhscdn.com/xiaohongshu-local-image-test.jpg';
   const xiaohongshuMarkdown = await xiaohongshuCase.plugin.saveMarkdownRemoteImageAssets(
     `![配图](${xiaohongshuImageUrl})`,
@@ -122,6 +132,7 @@ async function run() {
   assert.ok(xiaohongshuMarkdown.includes('![[临时收集/2026-08-11/小红书图片本地化测试/文章图片/'));
 
   const feishuCase = createPlugin();
+  feishuCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   const feishuImageUrl = 'https://s1-imfile.feishucdn.com/feishu-local-image-test.jpg';
   const feishuMarkdown = await feishuCase.plugin.saveWebpageImageAssets(
     `![配图](${feishuImageUrl})`,

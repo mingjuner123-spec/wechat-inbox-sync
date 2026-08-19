@@ -198,7 +198,7 @@ async function loadPdfJsLibrary() {
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.106';
+const PLUGIN_RUNTIME_VERSION = '1.3.107';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -251,7 +251,7 @@ const SOCIAL_ARTICLE_IMAGE_STORAGE_MODES = {
 const normalizeSocialArticleImageStorageMode = (value) => (
   Object.prototype.hasOwnProperty.call(SOCIAL_ARTICLE_IMAGE_STORAGE_MODES, value)
     ? value
-    : 'local'
+    : 'remote'
 );
 const normalizeNotePropertyFields = (value) => normalizeNotePropertyFieldsWithKeys(
   value,
@@ -310,7 +310,8 @@ const DEFAULT_SETTINGS = {
   xiaohongshuImageOcrEnabled: false,
   xiaohongshuImageOcrConsentVersion: 0,
   saveOriginalMediaEnabled: false,
-  socialArticleImageStorageMode: 'local',
+  socialArticleImageStorageMode: 'remote',
+  socialArticleImageStorageModeConfigured: false,
   wechatChannelsExperimentUrl: '',
   feishuOAuthStatus: null,
   feishuAppId: '',
@@ -2302,11 +2303,16 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.xiaohongshuImageOcrEnabled = merged.xiaohongshuImageOcrConsentVersion === 1
     && merged.xiaohongshuImageOcrEnabled === true;
   merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
-  merged.socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
-    Object.prototype.hasOwnProperty.call(sourceSettings, 'socialArticleImageStorageMode')
-      ? sourceSettings.socialArticleImageStorageMode
-      : sourceSettings.wechatArticleImageStorageMode,
-  );
+  const hasLegacyImageStoragePreference = Object.prototype.hasOwnProperty.call(sourceSettings, 'wechatArticleImageStorageMode');
+  const hasExplicitSocialImageStoragePreference = sourceSettings.socialArticleImageStorageModeConfigured === true;
+  merged.socialArticleImageStorageMode = hasExplicitSocialImageStoragePreference || hasLegacyImageStoragePreference
+    ? normalizeSocialArticleImageStorageMode(
+      hasExplicitSocialImageStoragePreference
+        ? sourceSettings.socialArticleImageStorageMode
+        : sourceSettings.wechatArticleImageStorageMode,
+    )
+    : 'remote';
+  merged.socialArticleImageStorageModeConfigured = hasExplicitSocialImageStoragePreference || hasLegacyImageStoragePreference;
   delete merged.wechatArticleImageStorageMode;
   merged.wechatChannelsExperimentUrl = String(merged.wechatChannelsExperimentUrl || '').trim();
   merged.feishuOAuthStatus = merged.feishuOAuthStatus
@@ -20211,26 +20217,23 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     const sourceFolderPath = normalizeVaultPath(`${noteDir}/${sourceFolderName}`);
     const targetFolderPath = normalizeVaultPath(`${noteDir}/${targetFolderName}`);
-    const sourceImagePath = normalizeVaultPath(`${sourceFolderPath}/文章图片/`);
-    const targetImagePath = normalizeVaultPath(`${targetFolderPath}/文章图片/`);
+    const sourceImageFolderPath = normalizeVaultPath(`${sourceFolderPath}/文章图片`);
+    const targetImageFolderPath = normalizeVaultPath(`${targetFolderPath}/文章图片`);
+    const sourceImagePath = `${sourceImageFolderPath}/`;
+    const targetImagePath = `${targetImageFolderPath}/`;
     const metadata = record && record.metadata && typeof record.metadata === 'object'
       ? record.metadata
       : {};
     const markdownFields = ['markdown', 'snapshot', 'contentSnapshot'];
-    const containsLocalizedImages = markdownFields.some((field) => (
-      typeof metadata[field] === 'string' && metadata[field].includes(sourceImagePath)
-    ));
-    if (!containsLocalizedImages) {
-      return { record, folderName: targetFolderName };
-    }
-
     const adapter = this.app && this.app.vault && this.app.vault.adapter;
     if (!adapter || typeof adapter.rename !== 'function' || typeof adapter.exists !== 'function') {
       return { record, folderName: sourceFolderName };
     }
 
     try {
-      if (!(await adapter.exists(sourceFolderPath)) || await adapter.exists(targetFolderPath)) {
+      // Some converters add localized image references only when final Markdown is
+      // rendered. The actual per-note image directory is the authoritative signal.
+      if (!(await adapter.exists(sourceImageFolderPath)) || await adapter.exists(targetFolderPath)) {
         return { record, folderName: sourceFolderName };
       }
       await adapter.rename(sourceFolderPath, targetFolderPath);
@@ -20243,6 +20246,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       return {
         record: { ...record, metadata: nextMetadata },
         folderName: targetFolderName,
+        sourceImagePath,
+        targetImagePath,
       };
     } catch (error) {
       console.warn('Failed to align social article image folder with note title', error);
@@ -20356,12 +20361,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       fileTitle,
     });
     recordForMarkdown = alignedImageFolder.record;
-    const markdown = buildMarkdownForRecord({
+    let markdown = buildMarkdownForRecord({
       record: recordForMarkdown,
       title: displayTitle,
       syncedAt,
       propertyFields: this.settings.notePropertyFields,
     });
+    if (alignedImageFolder.sourceImagePath && alignedImageFolder.targetImagePath) {
+      markdown = markdown.split(alignedImageFolder.sourceImagePath).join(alignedImageFolder.targetImagePath);
+    }
     const targetNoteDir = usePerNoteFolder
       ? normalizeVaultPath(`${noteDir}/${alignedImageFolder.folderName}`)
       : noteDir;
@@ -21276,7 +21284,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('图文图片保存方式')
-      .setDesc('适用于公众号、飞书和小红书图文。下载到本地时，图片会放入与对应笔记同名的文件夹内的“文章图片”目录；选择仅保留链接时不下载图片。')
+      .setDesc('适用于公众号、飞书和小红书图文。默认仅保留原始图片链接，不下载图片；选择下载到本地时，图片会放入与对应笔记同名的文件夹内的“文章图片”目录。')
       .addDropdown((dropdown) => {
         Object.entries(SOCIAL_ARTICLE_IMAGE_STORAGE_MODES).forEach(([value, label]) => {
           dropdown.addOption(value, label);
@@ -21287,6 +21295,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings({
               ...this.plugin.settings,
               socialArticleImageStorageMode: normalizeSocialArticleImageStorageMode(value),
+              socialArticleImageStorageModeConfigured: true,
             });
           });
       });
