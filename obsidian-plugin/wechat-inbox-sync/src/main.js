@@ -1639,7 +1639,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     return hasMinimumInstallerVersion(
       source,
       /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 3, 8],
+      [1, 3, 10],
     )
       && !source.includes('SIMPLIFIED_PROMPT')
       && !source.includes('--prompt')
@@ -1674,13 +1674,15 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"')
       && source.includes('"$UV_BIN" python install 3.12')
       && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python')
+      && source.includes('mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"')
+      && !source.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"')
       && portablePythonIndex >= 0
       && uvManagedPythonIndex > portablePythonIndex;
   }
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 2, 26],
+      [1, 2, 27],
   )
     && source.includes('function Assert-TranscribeScriptCandidate')
     && source.includes('function Start-TranscribeScriptUpdate')
@@ -1712,6 +1714,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('$FfmpegTencentUrls')
     && source.includes('$ModelTencentUrls')
     && source.includes('Get-EnabledAssetUrls')
+    && source.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force')
+    && !source.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force')
     && source.includes('$WhisperWindowsFallbackUrls')
     && source.includes('Test-IllegalInstructionExitCode')
     && source.includes('whisper-bin-x64-compat.zip')
@@ -14033,8 +14037,24 @@ function showLocalComponentInstallFailure(app, message) {
   });
 }
 
+function getKnownLocalComponentInstallFailureReason(rawMessage) {
+  const message = String(rawMessage || '');
+  if (/磁盘空间不足|No space left on device|not enough (?:disk )?space/i.test(message)) {
+    return '磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。';
+  }
+  if (
+    /Copy-Item[\s\S]{0,240}System\.IO\.IOException|System\.IO\.IOException[\s\S]{0,240}CopyItemCommand/i.test(message)
+    && /ggml-small|cachedModelPath|modelPath|Whisper model|wechat-inbox-local-asr/i.test(message)
+  ) {
+    return '复制 Whisper 模型失败：通常是安装目录所在磁盘空间不足。请释放 Windows 默认 C: 盘空间后重试，建议至少预留 3GB，最好 5GB 以上。';
+  }
+  return '';
+}
+
 function formatLocalComponentInstallFailureReason(error) {
   const rawMessage = String(error && (error.message || error) || '未知错误').trim();
+  const knownReason = getKnownLocalComponentInstallFailureReason(rawMessage);
+  if (knownReason) return knownReason;
   const lines = rawMessage
     .split(/\r?\n/)
     .map((line) => line.trim())

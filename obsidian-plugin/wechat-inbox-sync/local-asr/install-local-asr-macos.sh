@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.9"
+INSTALLER_SCRIPT_VERSION="1.3.10"
 DOWNLOAD_LOW_SPEED_LIMIT=10240
 DOWNLOAD_LOW_SPEED_TIME=180
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -776,7 +776,7 @@ if [ ! -f "$MODEL_PATH" ]; then
   if [ ! -f "$CACHE_ROOT/ggml-small.bin" ]; then
     download_model "$CACHE_ROOT/ggml-small.bin"
   fi
-  cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"
+  mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"
 fi
 
 # Run inference validation (cached if state is still valid).

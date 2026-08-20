@@ -517,20 +517,27 @@ const markerOnlyLegacyWindowsAsrScriptSource = [
   'recoveryTriggered=1',
 ].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.26"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.27"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.26"', '$InstallerScriptVersion = "1.2.25"')
+  .replace('$InstallerScriptVersion = "1.2.27"', '$InstallerScriptVersion = "1.2.25"')
   .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
   .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
   .replaceAll('Complete-TranscribeScriptUpdate', 'Complete-LegacyTranscribeScriptUpdate');
+const copyModelWindowsAsrInstallerSource = windowsAsrInstallerSource
+  .replace(
+    'Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force',
+    'Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force',
+  );
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.9"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.10"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
   .replaceAll('install_portable_python', 'install_legacy_python');
+const copyModelMacAsrInstallerSource = macAsrInstallerSource
+  .replace('mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"', 'cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"');
 const runtimeVersionUnverifiedMacAsrInstallerSource = macAsrInstallerSource
   .replace('sys.version.split()[0] == sys.argv[1]', 'sys.version_info >= (3, 10)');
 const futurePythonMacAsrInstallerSource = macAsrInstallerSource
@@ -542,10 +549,12 @@ assert.strictEqual(typeof helpers.isLocalAsrInstallerCurrent, 'function');
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource, false), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(nonTransactionalWindowsAsrInstallerSource, false), false);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(copyModelWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(macAsrInstallerSource, true), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleMacAsrInstallerSource, true), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(promptedMacAsrInstallerSource, true), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(legacyUvOnlyMacAsrInstallerSource, true), false);
+assert.strictEqual(helpers.isLocalAsrInstallerCurrent(copyModelMacAsrInstallerSource, true), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(runtimeVersionUnverifiedMacAsrInstallerSource, true), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(futurePythonMacAsrInstallerSource, true), true);
 assert.strictEqual(typeof helpers.isLocalOcrInstallerCurrent, 'function');
@@ -2591,6 +2600,18 @@ assert.ok(pluginMainSource.includes('小红书登录状态正常'));
 assert.ok(pluginMainSource.includes('未检测到小红书登录状态'));
 assert.ok(pluginMainSource.includes('飞书连接状态已刷新：已连接'));
 assert.ok(pluginMainSource.includes('飞书连接状态已刷新：未连接或已过期'));
+assert.strictEqual(
+  helpers.formatLocalComponentInstallFailureReason('Copy-Item : 磁盘空间不足。'),
+  '磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。',
+);
+assert.strictEqual(
+  helpers.formatLocalComponentInstallFailureReason([
+    'Copy-Item : failed',
+    'FullyQualifiedErrorId : System.IO.IOException,Microsoft.PowerShell.Commands.CopyItemCommand',
+    'cachedModelPath=C:\\Users\\GP\\.wechat-inbox-local-asr\\cache\\ggml-small.bin',
+  ].join('\n')),
+  '复制 Whisper 模型失败：通常是安装目录所在磁盘空间不足。请释放 Windows 默认 C: 盘空间后重试，建议至少预留 3GB，最好 5GB 以上。',
+);
 assert.ok(pluginMainSource.includes('/transcriptions/cloud'));
 assert.ok(pluginMainSource.includes('runCloudFallbackTranscription'));
 assert.ok(pluginMainSource.includes('local-cloud-fallback'));
