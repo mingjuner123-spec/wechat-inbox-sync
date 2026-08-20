@@ -1710,6 +1710,10 @@ var require_sync_lifecycle_utils = __commonJS({
       if (/微信扫一扫可打开此内容|当前已为你保存原始链接|仅保存原始链接/.test(text)) {
         return true;
       }
+      const wechatEmptyShellPatterns = [
+        /\u89c6\u9891\s*\u5c0f\u7a0b\u5e8f\s*\u8d5e/,
+        /\u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e/
+      ];
       const shellPatterns = [
         /请(?:先)?登录.{0,16}(?:查看|继续|访问|阅读)/,
         /登录后.{0,16}(?:查看|继续|访问|阅读)/,
@@ -1721,8 +1725,9 @@ var require_sync_lifecycle_utils = __commonJS({
         /(?:正文提取失败|内容解析失败)(?:[：:，,。]|$)/
       ];
       const signalCount = shellPatterns.filter((pattern) => pattern.test(text)).length;
+      const isWechatEmptyShell = /mp\.weixin\.qq\.com\//.test(String(url || "")) && wechatEmptyShellPatterns.some((pattern) => pattern.test(text));
       const meaningfulLength = getMeaningfulMarkdownLength(text);
-      return signalCount >= 2 || signalCount >= 1 && meaningfulLength < 160;
+      return isWechatEmptyShell || signalCount >= 2 || signalCount >= 1 && meaningfulLength < 160;
     }
     __name(isLikelyWebpageShell, "isLikelyWebpageShell");
     function getMarkdownBody(markdown) {
@@ -1781,17 +1786,16 @@ var require_sync_lifecycle_utils = __commonJS({
       const meaningfulLength = getMeaningfulMarkdownLength(markdown);
       const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20;
       const hasDeclaredFailureState = ["failed", "link_saved", "wechat_captcha"].includes(conversionStatus) || transcriptionStatus === "failed";
-      const isSuccessfulWechatArticle = /mp\.weixin\.qq\.com\//.test(url) && conversionStatus === "success";
       if (/weixin\.qq\.com\/sph\//.test(url) && (["failed", "link_saved"].includes(conversionStatus) || transcriptionStatus === "failed") || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError) && (hasDeclaredFailureState || !hasUsableOutput)) {
         return createSyncLifecycleOutcomeError("UNSUPPORTED_PLATFORM", "暂不支持此平台");
       }
       if (conversionStatus === "wechat_captcha") {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信安全验证拦截");
       }
-      if (!isSuccessfulWechatArticle && /mp\.weixin\.qq\.com\//.test(url) && /微信扫一扫可打开此内容/.test(markdown) && /使用完整服务|使用小程序/.test(markdown)) {
+      if (/mp\.weixin\.qq\.com\//.test(url) && /微信扫一扫可打开此内容/.test(markdown) && /使用完整服务|使用小程序/.test(markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信仅返回打开引导页");
       }
-      if (!isSuccessfulWechatArticle && isLikelyWebpageShell(url, markdown)) {
+      if (isLikelyWebpageShell(url, markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：仅获取到打开或登录引导页");
       }
       const recordType = String(source.type || "").trim().toLowerCase();
@@ -2402,10 +2406,10 @@ var require_wechat_article_utils = __commonJS({
       }
     }
     __name(isTrustedCoverUrl, "isTrustedCoverUrl");
-    function hasWechatArticleBody(html) {
+    function extractWechatArticleBodyHtml(html) {
       const source = String(html || "");
       const opening = /<div\b(?=[^>]*\sid=["']js_content["'])[^>]*>/i.exec(source);
-      if (!opening) return false;
+      if (!opening) return "";
       const tagName = "div";
       const tagPattern = new RegExp(`<\\/?${tagName}\\b[^>]*>`, "gi");
       tagPattern.lastIndex = opening.index + opening[0].length;
@@ -2420,8 +2424,12 @@ var require_wechat_article_utils = __commonJS({
           break;
         }
       }
-      const bodyHtml = source.slice(opening.index + opening[0].length, closingIndex);
-      return stripHtml(bodyHtml).length >= 20;
+      return source.slice(opening.index + opening[0].length, closingIndex);
+    }
+    __name(extractWechatArticleBodyHtml, "extractWechatArticleBodyHtml");
+    function hasWechatArticleBody(html) {
+      const bodyHtml = extractWechatArticleBodyHtml(html);
+      return Boolean(stripHtml(bodyHtml)) || /<img\b[^>]+(?:data-src|src)=/i.test(bodyHtml) || /<(?:video|audio)\b/i.test(bodyHtml);
     }
     __name(hasWechatArticleBody, "hasWechatArticleBody");
     function classifyWechatArticleHtml2(html) {
@@ -2464,6 +2472,7 @@ var require_wechat_article_utils = __commonJS({
       buildWechatArticleFallbackMarkdown,
       classifyWechatArticleHtml: classifyWechatArticleHtml2,
       extractWechatArticleFallbackMetadata,
+      extractWechatArticleBodyHtml,
       hasWechatArticleBody,
       isWechatArticleUrl: isWechatArticleUrl2,
       isGenericWechatMetadata,
@@ -2489,7 +2498,8 @@ var require_wechat_article_pipeline = __commonJS({
         html: String(value && value.html || ""),
         markdown: String(value && value.markdown || ""),
         title: String(value && value.title || ""),
-        assets: Array.isArray(value && value.assets) ? value.assets : []
+        assets: Array.isArray(value && value.assets) ? value.assets : [],
+        bodyFound: Boolean(value && value.bodyFound === true)
       };
     }
     __name(normalizeBrowserResult, "normalizeBrowserResult");
@@ -2512,24 +2522,20 @@ var require_wechat_article_pipeline = __commonJS({
       };
     }
     __name(buildFallbackResult, "buildFallbackResult");
-    function buildBestEffortArticleResult({ state, source, html, markdown = "", title = "", assets = [] }) {
-      const article = {
-        kind: "article",
-        state: state || "best_effort",
-        source: source || "static",
-        html: String(html || ""),
-        title: String(title || ""),
-        assets: Array.isArray(assets) ? assets : [],
-        bestEffort: true
+    function buildRetryableBodyMissingResult({ staticState, browserState = "", browserError = null }) {
+      return {
+        kind: "retryable",
+        state: "body_missing",
+        source: browserState || browserError ? "browser" : "static",
+        diagnostic: {
+          reason: "wechat-article-body-missing",
+          staticState: String(staticState || "unknown"),
+          browserState: String(browserState || ""),
+          browserError: browserError ? String(browserError.message || browserError) : ""
+        }
       };
-      if (markdown) article.markdown = String(markdown || "");
-      return article;
     }
-    __name(buildBestEffortArticleResult, "buildBestEffortArticleResult");
-    function canUseBestEffortHtml(html, state) {
-      return Boolean(String(html || "").trim()) && state !== "captcha" && state !== "unavailable";
-    }
-    __name(canUseBestEffortHtml, "canUseBestEffortHtml");
+    __name(buildRetryableBodyMissingResult, "buildRetryableBodyMissingResult");
     async function runWechatArticlePipeline2({
       url = "",
       fetchStatic,
@@ -2574,44 +2580,12 @@ var require_wechat_article_pipeline = __commonJS({
           if (browserState === "captcha" || browserState === "unavailable") {
             return buildFallbackResult({ url: normalizedUrl, state: browserState, html: browser.html || browser.markdown });
           }
-          if (canUseBestEffortHtml(browser.markdown || browser.html, browserState)) {
-            return buildBestEffortArticleResult({
-              state: "best_effort",
-              source: "browser",
-              html: browser.html,
-              markdown: browser.markdown,
-              title: browser.title,
-              assets: browser.assets
-            });
-          }
-          if (canUseBestEffortHtml(staticHtml, staticState)) {
-            return buildBestEffortArticleResult({
-              state: "best_effort",
-              source: "static",
-              html: staticHtml
-            });
-          }
-          const fallbackState = browserState === "unavailable" ? browserState : staticState;
-          return buildFallbackResult({ url: normalizedUrl, state: fallbackState, html: staticHtml });
-        } catch (_) {
-          if (canUseBestEffortHtml(staticHtml, staticState)) {
-            return buildBestEffortArticleResult({
-              state: "best_effort",
-              source: "static",
-              html: staticHtml
-            });
-          }
-          return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
+          return buildRetryableBodyMissingResult({ staticState, browserState });
+        } catch (browserError) {
+          return buildRetryableBodyMissingResult({ staticState, browserError });
         }
       }
-      if (canUseBestEffortHtml(staticHtml, staticState)) {
-        return buildBestEffortArticleResult({
-          state: "best_effort",
-          source: "static",
-          html: staticHtml
-        });
-      }
-      return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
+      return buildRetryableBodyMissingResult({ staticState });
     }
     __name(runWechatArticlePipeline2, "runWechatArticlePipeline");
     module2.exports = { runWechatArticlePipeline: runWechatArticlePipeline2 };
@@ -4634,7 +4608,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.109";
+var PLUGIN_RUNTIME_VERSION = "1.3.110";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -6018,6 +5992,20 @@ function isRetryableXiaohongshuContentError(error) {
   return Boolean(error && error.code === "XIAOHONGSHU_CONTENT_UNAVAILABLE");
 }
 __name(isRetryableXiaohongshuContentError, "isRetryableXiaohongshuContentError");
+function createRetryableWechatArticleContentError(diagnostic = {}) {
+  const error = new Error("微信公众号暂未返回正文，已保留待同步记录，将在后续同步时自动重试。");
+  error.retryable = true;
+  error.code = "WECHAT_ARTICLE_BODY_MISSING";
+  error.diagnostic = redactSensitiveObject(
+    diagnostic && typeof diagnostic === "object" ? diagnostic : {}
+  );
+  return error;
+}
+__name(createRetryableWechatArticleContentError, "createRetryableWechatArticleContentError");
+function isRetryableWechatArticleContentError(error) {
+  return Boolean(error && error.code === "WECHAT_ARTICLE_BODY_MISSING");
+}
+__name(isRetryableWechatArticleContentError, "isRetryableWechatArticleContentError");
 function getRecordXiaohongshuIdentityCandidates(record = {}) {
   const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
   return [
@@ -13644,7 +13632,24 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
     const loaded = waitForWebContents(win.webContents);
     await win.loadURL(url, { userAgent: WECHAT_ARTICLE_MOBILE_USER_AGENT });
     await loaded;
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const bodyReady = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const hasBodyContent = (root) => {
+          if (!root) return false;
+          const text = String(root.innerText || root.textContent || '').replace(/\\s+/g, '');
+          return Boolean(text) || Boolean(root.querySelector('img[data-src], img[src], video, audio'));
+        };
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const root = document.querySelector('#js_content');
+          if (hasBodyContent(root)) return true;
+          window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+          await sleep(500);
+        }
+        return false;
+      })()
+    `);
+    if (!bodyReady) throw new Error("微信公众号页面未返回 #js_content 正文");
     const result = await win.webContents.executeJavaScript(`
       (() => {
         const clean = (value) => String(value || '')
@@ -13684,9 +13689,10 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
         };
       })()
     `);
-    if (!result || String(result.markdown || "").trim().length < 40) {
+    if (!result || !String(result.markdown || "").trim() && !(result.assets && result.assets.length)) {
       throw new Error("微信公众号页面未返回 #js_content 正文");
     }
+    result.bodyFound = true;
     return result;
   } finally {
     if (win && typeof win.destroy === "function" && (typeof win.isDestroyed !== "function" || !win.isDestroyed())) win.destroy();
@@ -22164,15 +22170,21 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             return {
               markdown: rendered.markdown,
               title: rendered.title,
-              assets: rendered.assets
+              assets: rendered.assets,
+              bodyFound: rendered.bodyFound === true
             };
           }, "renderBrowser"),
-          isUsableBrowserArticle: /* @__PURE__ */ __name(({ markdown: markdown3 }) => {
-            const renderedText = String(markdown3 || "").trim();
-            const renderedState = classifyWechatArticleHtml(renderedText);
-            return renderedText.length >= 40 && renderedState !== "guide" && renderedState !== "captcha" && renderedState !== "unavailable";
-          }, "isUsableBrowserArticle")
+          isUsableBrowserArticle: /* @__PURE__ */ __name(({ markdown: markdown3, bodyFound }) => Boolean(bodyFound && String(markdown3 || "").trim()), "isUsableBrowserArticle")
         });
+        if (extracted.kind === "retryable") {
+          throw createRetryableWechatArticleContentError({
+            ...wechatArticleDiagnostic,
+            finalKind: extracted.kind,
+            finalState: extracted.state,
+            finalSource: extracted.source,
+            ...extracted.diagnostic || {}
+          });
+        }
         if (extracted.kind === "fallback") {
           const fallbackTitle = metadata.title || extracted.title || title || "公众号文章未提取正文";
           const fallbackImageLocalizationErrors = [];
@@ -22246,7 +22258,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           );
         }
         const conversionNote2 = [
-          extracted.bestEffort ? "wechat-article-best-effort" : "",
           usedWechatSessionFallback ? "公众号本地会话备用通道已成功抓取" : "",
           usedNodeFallback ? "已通过备用通道抓取" : "",
           imageLocalizationErrors2.length ? `image-localize-failed=${imageLocalizationErrors2.length}: ${imageLocalizationErrors2.slice(0, 3).join(" | ")}` : ""
@@ -22270,8 +22281,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               ...wechatArticleDiagnostic,
               finalKind: extracted.kind,
               finalState: extracted.state,
-              finalSource: extracted.source,
-              bestEffort: Boolean(extracted.bestEffort)
+              finalSource: extracted.source
             },
             imageLocalizationFailedCount: imageLocalizationErrors2.length,
             imageLocalizationError: imageLocalizationErrors2.slice(0, 3).join(" | ")
@@ -22377,7 +22387,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       };
     } catch (error) {
       if (isAbortError(error)) throw error;
-      if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error)) {
+      if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
       }
       if (isXiaohongshuUrl(url)) {
