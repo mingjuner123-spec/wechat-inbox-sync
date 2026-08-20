@@ -146,6 +146,10 @@ function isLikelyWebpageShell(url, markdown) {
   if (/微信扫一扫可打开此内容|当前已为你保存原始链接|仅保存原始链接/.test(text)) {
     return true;
   }
+  const wechatEmptyShellPatterns = [
+    /\u89c6\u9891\s*\u5c0f\u7a0b\u5e8f\s*\u8d5e/,
+    /\u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e/,
+  ];
   const shellPatterns = [
     /请(?:先)?登录.{0,16}(?:查看|继续|访问|阅读)/,
     /登录后.{0,16}(?:查看|继续|访问|阅读)/,
@@ -157,8 +161,10 @@ function isLikelyWebpageShell(url, markdown) {
     /(?:正文提取失败|内容解析失败)(?:[：:，,。]|$)/,
   ];
   const signalCount = shellPatterns.filter((pattern) => pattern.test(text)).length;
+  const isWechatEmptyShell = /mp\.weixin\.qq\.com\//.test(String(url || ''))
+    && wechatEmptyShellPatterns.some((pattern) => pattern.test(text));
   const meaningfulLength = getMeaningfulMarkdownLength(text);
-  return signalCount >= 2 || (signalCount >= 1 && meaningfulLength < 160);
+  return isWechatEmptyShell || signalCount >= 2 || (signalCount >= 1 && meaningfulLength < 160);
 }
 
 function getMarkdownBody(markdown) {
@@ -227,8 +233,6 @@ function getSyncLifecycleOutcomeError(record) {
   const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20;
   const hasDeclaredFailureState = ['failed', 'link_saved', 'wechat_captcha'].includes(conversionStatus)
     || transcriptionStatus === 'failed';
-  const isSuccessfulWechatArticle = /mp\.weixin\.qq\.com\//.test(url)
-    && conversionStatus === 'success';
 
   if ((/weixin\.qq\.com\/sph\//.test(url)
       && (['failed', 'link_saved'].includes(conversionStatus) || transcriptionStatus === 'failed'))
@@ -241,14 +245,13 @@ function getSyncLifecycleOutcomeError(record) {
     return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信安全验证拦截');
   }
 
-  if (!isSuccessfulWechatArticle
-    && /mp\.weixin\.qq\.com\//.test(url)
+  if (/mp\.weixin\.qq\.com\//.test(url)
     && /微信扫一扫可打开此内容/.test(markdown)
     && /使用完整服务|使用小程序/.test(markdown)) {
     return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信仅返回打开引导页');
   }
 
-  if (!isSuccessfulWechatArticle && isLikelyWebpageShell(url, markdown)) {
+  if (isLikelyWebpageShell(url, markdown)) {
     return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败：仅获取到打开或登录引导页');
   }
 

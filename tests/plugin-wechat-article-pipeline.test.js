@@ -42,6 +42,14 @@ assert.strictEqual(
   classifyWechatArticleHtml('<div id="js_content"><p>This is valid body content long enough to win over hidden guide copy.</p></div><div style="display:none">Open in WeChat</div>'),
   'article',
 );
+assert.strictEqual(
+  classifyWechatArticleHtml('<div id="js_content"><p>Short.</p></div>'),
+  'article',
+);
+assert.strictEqual(
+  classifyWechatArticleHtml('<div id="js_content"><img data-src="https://mmbiz.qpic.cn/example.jpg"></div>'),
+  'article',
+);
 
 assert.deepStrictEqual(extractWechatArticleFallbackMetadata(guideHtml), {
   title: 'Useful title',
@@ -116,7 +124,7 @@ async function runPipelineTests() {
   });
 
   browserCalls = 0;
-  const bestEffortBrowser = await runWechatArticlePipeline({
+  const bodyMissingBrowser = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/partial',
     fetchStatic: async () => guideHtml,
     renderBrowser: async () => {
@@ -125,21 +133,29 @@ async function runPipelineTests() {
     },
   });
   assert.strictEqual(browserCalls, 1);
-  assert.strictEqual(bestEffortBrowser.kind, 'article');
-  assert.strictEqual(bestEffortBrowser.state, 'best_effort');
-  assert.strictEqual(bestEffortBrowser.source, 'browser');
-  assert.strictEqual(bestEffortBrowser.bestEffort, true);
-  assert.strictEqual(bestEffortBrowser.html, genericGuideHtml);
+  assert.strictEqual(bodyMissingBrowser.kind, 'retryable');
+  assert.strictEqual(bodyMissingBrowser.state, 'body_missing');
+  assert.strictEqual(bodyMissingBrowser.source, 'browser');
+  assert.strictEqual(bodyMissingBrowser.diagnostic.reason, 'wechat-article-body-missing');
 
-  const bestEffortStatic = await runWechatArticlePipeline({
+  const bodyMissingStatic = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s?scene=1&mid=2&pass_ticket=secret&__biz=biz&idx=1&sn=signature',
     fetchStatic: async () => guideHtml,
   });
-  assert.strictEqual(bestEffortStatic.kind, 'article');
-  assert.strictEqual(bestEffortStatic.state, 'best_effort');
-  assert.strictEqual(bestEffortStatic.source, 'static');
-  assert.strictEqual(bestEffortStatic.bestEffort, true);
-  assert.strictEqual(bestEffortStatic.html, guideHtml);
+  assert.strictEqual(bodyMissingStatic.kind, 'retryable');
+  assert.strictEqual(bodyMissingStatic.state, 'body_missing');
+  assert.strictEqual(bodyMissingStatic.source, 'static');
+  assert.strictEqual(bodyMissingStatic.diagnostic.reason, 'wechat-article-body-missing');
+
+  const browserTransportFailure = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/browser-error',
+    fetchStatic: async () => guideHtml,
+    renderBrowser: async () => { throw new Error('browser unavailable'); },
+  });
+  assert.strictEqual(browserTransportFailure.kind, 'retryable');
+  assert.strictEqual(browserTransportFailure.state, 'body_missing');
+  assert.strictEqual(browserTransportFailure.source, 'browser');
+  assert.match(browserTransportFailure.diagnostic.browserError, /browser unavailable/);
 
   browserCalls = 0;
   const captcha = await runWechatArticlePipeline({
