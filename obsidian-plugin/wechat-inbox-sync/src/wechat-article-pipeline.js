@@ -36,6 +36,26 @@ function buildFallbackResult({ url, state, html, title = '' }) {
   };
 }
 
+function buildBestEffortArticleResult({ state, source, html, markdown = '', title = '', assets = [] }) {
+  const article = {
+    kind: 'article',
+    state: state || 'best_effort',
+    source: source || 'static',
+    html: String(html || ''),
+    title: String(title || ''),
+    assets: Array.isArray(assets) ? assets : [],
+    bestEffort: true,
+  };
+  if (markdown) article.markdown = String(markdown || '');
+  return article;
+}
+
+function canUseBestEffortHtml(html, state) {
+  return Boolean(String(html || '').trim())
+    && state !== 'captcha'
+    && state !== 'unavailable';
+}
+
 async function runWechatArticlePipeline({
   url = '',
   fetchStatic,
@@ -57,8 +77,8 @@ async function runWechatArticlePipeline({
       assets: [],
     };
   }
-  if (staticState === 'captcha') {
-    return buildFallbackResult({ url: normalizedUrl, state: 'captcha', html: staticHtml });
+  if (staticState === 'captcha' || staticState === 'unavailable') {
+    return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
   }
   if (typeof renderBrowser === 'function' && (staticState === 'guide' || staticState === 'unknown')) {
     try {
@@ -79,11 +99,45 @@ async function runWechatArticlePipeline({
         return article;
       }
       const browserState = classifyWechatArticleHtml(browser.html || browser.markdown);
+      if (browserState === 'captcha' || browserState === 'unavailable') {
+        return buildFallbackResult({ url: normalizedUrl, state: browserState, html: browser.html || browser.markdown });
+      }
+      if (canUseBestEffortHtml(browser.markdown || browser.html, browserState)) {
+        return buildBestEffortArticleResult({
+          state: 'best_effort',
+          source: 'browser',
+          html: browser.html,
+          markdown: browser.markdown,
+          title: browser.title,
+          assets: browser.assets,
+        });
+      }
+      if (canUseBestEffortHtml(staticHtml, staticState)) {
+        return buildBestEffortArticleResult({
+          state: 'best_effort',
+          source: 'static',
+          html: staticHtml,
+        });
+      }
       const fallbackState = browserState === 'unavailable' ? browserState : staticState;
       return buildFallbackResult({ url: normalizedUrl, state: fallbackState, html: staticHtml });
     } catch (_) {
+      if (canUseBestEffortHtml(staticHtml, staticState)) {
+        return buildBestEffortArticleResult({
+          state: 'best_effort',
+          source: 'static',
+          html: staticHtml,
+        });
+      }
       return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
     }
+  }
+  if (canUseBestEffortHtml(staticHtml, staticState)) {
+    return buildBestEffortArticleResult({
+      state: 'best_effort',
+      source: 'static',
+      html: staticHtml,
+    });
   }
   return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
 }

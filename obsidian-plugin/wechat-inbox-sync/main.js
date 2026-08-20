@@ -1781,16 +1781,17 @@ var require_sync_lifecycle_utils = __commonJS({
       const meaningfulLength = getMeaningfulMarkdownLength(markdown);
       const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20;
       const hasDeclaredFailureState = ["failed", "link_saved", "wechat_captcha"].includes(conversionStatus) || transcriptionStatus === "failed";
+      const isSuccessfulWechatArticle = /mp\.weixin\.qq\.com\//.test(url) && conversionStatus === "success";
       if (/weixin\.qq\.com\/sph\//.test(url) && (["failed", "link_saved"].includes(conversionStatus) || transcriptionStatus === "failed") || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError) && (hasDeclaredFailureState || !hasUsableOutput)) {
         return createSyncLifecycleOutcomeError("UNSUPPORTED_PLATFORM", "暂不支持此平台");
       }
       if (conversionStatus === "wechat_captcha") {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信安全验证拦截");
       }
-      if (/mp\.weixin\.qq\.com\//.test(url) && /微信扫一扫可打开此内容/.test(markdown) && /使用完整服务|使用小程序/.test(markdown)) {
+      if (!isSuccessfulWechatArticle && /mp\.weixin\.qq\.com\//.test(url) && /微信扫一扫可打开此内容/.test(markdown) && /使用完整服务|使用小程序/.test(markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信仅返回打开引导页");
       }
-      if (isLikelyWebpageShell(url, markdown)) {
+      if (!isSuccessfulWechatArticle && isLikelyWebpageShell(url, markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：仅获取到打开或登录引导页");
       }
       const recordType = String(source.type || "").trim().toLowerCase();
@@ -2511,6 +2512,24 @@ var require_wechat_article_pipeline = __commonJS({
       };
     }
     __name(buildFallbackResult, "buildFallbackResult");
+    function buildBestEffortArticleResult({ state, source, html, markdown = "", title = "", assets = [] }) {
+      const article = {
+        kind: "article",
+        state: state || "best_effort",
+        source: source || "static",
+        html: String(html || ""),
+        title: String(title || ""),
+        assets: Array.isArray(assets) ? assets : [],
+        bestEffort: true
+      };
+      if (markdown) article.markdown = String(markdown || "");
+      return article;
+    }
+    __name(buildBestEffortArticleResult, "buildBestEffortArticleResult");
+    function canUseBestEffortHtml(html, state) {
+      return Boolean(String(html || "").trim()) && state !== "captcha" && state !== "unavailable";
+    }
+    __name(canUseBestEffortHtml, "canUseBestEffortHtml");
     async function runWechatArticlePipeline2({
       url = "",
       fetchStatic,
@@ -2532,8 +2551,8 @@ var require_wechat_article_pipeline = __commonJS({
           assets: []
         };
       }
-      if (staticState === "captcha") {
-        return buildFallbackResult({ url: normalizedUrl, state: "captcha", html: staticHtml });
+      if (staticState === "captcha" || staticState === "unavailable") {
+        return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
       }
       if (typeof renderBrowser === "function" && (staticState === "guide" || staticState === "unknown")) {
         try {
@@ -2552,11 +2571,45 @@ var require_wechat_article_pipeline = __commonJS({
             return article;
           }
           const browserState = classifyWechatArticleHtml2(browser.html || browser.markdown);
+          if (browserState === "captcha" || browserState === "unavailable") {
+            return buildFallbackResult({ url: normalizedUrl, state: browserState, html: browser.html || browser.markdown });
+          }
+          if (canUseBestEffortHtml(browser.markdown || browser.html, browserState)) {
+            return buildBestEffortArticleResult({
+              state: "best_effort",
+              source: "browser",
+              html: browser.html,
+              markdown: browser.markdown,
+              title: browser.title,
+              assets: browser.assets
+            });
+          }
+          if (canUseBestEffortHtml(staticHtml, staticState)) {
+            return buildBestEffortArticleResult({
+              state: "best_effort",
+              source: "static",
+              html: staticHtml
+            });
+          }
           const fallbackState = browserState === "unavailable" ? browserState : staticState;
           return buildFallbackResult({ url: normalizedUrl, state: fallbackState, html: staticHtml });
         } catch (_) {
+          if (canUseBestEffortHtml(staticHtml, staticState)) {
+            return buildBestEffortArticleResult({
+              state: "best_effort",
+              source: "static",
+              html: staticHtml
+            });
+          }
           return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
         }
+      }
+      if (canUseBestEffortHtml(staticHtml, staticState)) {
+        return buildBestEffortArticleResult({
+          state: "best_effort",
+          source: "static",
+          html: staticHtml
+        });
       }
       return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
     }
@@ -4579,8 +4632,9 @@ async function loadPdfJsLibrary() {
 }
 __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
+var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.107";
+var PLUGIN_RUNTIME_VERSION = "1.3.108";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -7042,6 +7096,13 @@ function shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageM
   return isSocialArticleUrl(sourceUrl) && normalizeSocialArticleImageStorageMode(socialArticleImageStorageMode) === "local";
 }
 __name(shouldStoreWebpageNoteInOwnFolder, "shouldStoreWebpageNoteInOwnFolder");
+function getSocialArticleLocalFolderTitle(sourceUrl, title) {
+  const safeTitle = sanitizeAttachmentName(title, "文章");
+  if (!isSocialArticleUrl(sourceUrl)) return safeTitle;
+  const prefix = sanitizeAttachmentName(getWebpageSourcePrefix(sourceUrl), "网页");
+  return safeTitle === prefix || safeTitle.startsWith(`${prefix}-`) ? safeTitle : `${prefix}-${safeTitle}`;
+}
+__name(getSocialArticleLocalFolderTitle, "getSocialArticleLocalFolderTitle");
 function isXiaohongshuShortLinkUrl(url) {
   const hostname = getHttpUrlHostname(url);
   return isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn");
@@ -13541,6 +13602,78 @@ function waitForWebContents(webContents, timeoutMs = 15e3, { rejectOnFailure = f
   });
 }
 __name(waitForWebContents, "waitForWebContents");
+async function renderWechatArticleToMarkdownWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error("当前 Obsidian 环境不支持隐藏浏览器渲染");
+  }
+  const win = new BrowserWindow({
+    width: 980,
+    height: 1600,
+    show: false,
+    webPreferences: {
+      session: getWechatSession() || void 0,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  try {
+    if (win.webContents && typeof win.webContents.setUserAgent === "function") {
+      win.webContents.setUserAgent(WECHAT_ARTICLE_MOBILE_USER_AGENT);
+    }
+    const loaded = waitForWebContents(win.webContents);
+    await win.loadURL(url, { userAgent: WECHAT_ARTICLE_MOBILE_USER_AGENT });
+    await loaded;
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const result = await win.webContents.executeJavaScript(`
+      (() => {
+        const clean = (value) => String(value || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/[ \\t]+\\n/g, '\\n')
+          .replace(/\\n{3,}/g, '\\n\\n')
+          .trim();
+        const root = document.querySelector('#js_content');
+        const titleNode = document.querySelector('#activity-name, h1');
+        const title = clean(titleNode && (titleNode.innerText || titleNode.textContent) || document.title || '');
+        const stateText = clean(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 600);
+        if (!root) return { title, markdown: '', assets: [], stateText };
+        const clone = root.cloneNode(true);
+        const assets = [];
+        clone.querySelectorAll('script,style,noscript,iframe,form').forEach((node) => node.remove());
+        clone.querySelectorAll('br').forEach((node) => node.replaceWith(document.createTextNode('\\n')));
+        clone.querySelectorAll('img').forEach((image) => {
+          const src = String(image.currentSrc || image.getAttribute('data-src') || image.getAttribute('src') || '').trim();
+          const alt = clean(image.getAttribute('alt') || image.getAttribute('data-alt') || '图片');
+          if (!src || /^data:image\\/gif/i.test(src)) {
+            image.remove();
+            return;
+          }
+          assets.push({ src, alt });
+          image.replaceWith(document.createTextNode('\\n\\n![' + alt + '](' + src + ')\\n\\n'));
+        });
+        clone.querySelectorAll('p,div,section,article,li,blockquote,h1,h2,h3,h4,h5,h6').forEach((node) => {
+          if (node.parentElement === clone || node.children.length === 0) {
+            node.appendChild(document.createTextNode('\\n\\n'));
+          }
+        });
+        return {
+          title,
+          markdown: clean(clone.innerText || clone.textContent || ''),
+          assets,
+          stateText,
+        };
+      })()
+    `);
+    if (!result || String(result.markdown || "").trim().length < 40) {
+      throw new Error("微信公众号页面未返回 #js_content 正文");
+    }
+    return result;
+  } finally {
+    if (win && typeof win.destroy === "function" && (typeof win.isDestroyed !== "function" || !win.isDestroyed())) win.destroy();
+  }
+}
+__name(renderWechatArticleToMarkdownWithElectron, "renderWechatArticleToMarkdownWithElectron");
 async function renderUrlToMarkdownWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -19196,6 +19329,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async renderWebpageWithElectron(url) {
     return renderUrlToMarkdownWithElectron(url);
   }
+  async renderWechatArticleWithElectron(url) {
+    return renderWechatArticleToMarkdownWithElectron(url);
+  }
+  async downloadWechatArticleHtmlViaSession(url, headers = {}) {
+    const session = getWechatSession();
+    return readSessionFetchText(session, url, {
+      ...headers,
+      "User-Agent": WECHAT_ARTICLE_MOBILE_USER_AGENT,
+      Referer: "https://mp.weixin.qq.com/"
+    }, 15e3);
+  }
   async renderFeishuDocumentWithElectron(url) {
     return renderFeishuUrlToSimpleMarkdownWithElectron(url);
   }
@@ -20155,7 +20299,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       socialArticleImageStorageMode
     );
     const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
-    const safeTitle = sanitizeAttachmentName(title, "文章");
+    const safeTitle = getSocialArticleLocalFolderTitle(sourceUrl, title);
     const articleFolderDir = `${noteDir}/${safeTitle}`;
     const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
     const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
@@ -20261,7 +20405,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       socialArticleImageStorageMode
     );
     const noteDir = this.settings && this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`;
-    const safeTitle = sanitizeAttachmentName(title, "文章");
+    const safeTitle = getSocialArticleLocalFolderTitle(sourceUrl, title);
     const articleFolderDir = `${noteDir}/${safeTitle}`;
     const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
     const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
@@ -21852,6 +21996,26 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       if (isWechatArticleUrl(url)) {
         const wechatArticleUrl = normalizeWechatArticleUrl(url);
         let usedNodeFallback = false;
+        let usedWechatSessionFallback = false;
+        const wechatArticleDiagnostic = {
+          source: "wechat-article",
+          urlKind: wechatArticleUrl.includes("/s?") ? "query-id" : "slug",
+          stages: []
+        };
+        const addWechatArticleStage = /* @__PURE__ */ __name((stage, details = {}) => {
+          const entry = {
+            stage,
+            outcome: String(details.outcome || "unknown")
+          };
+          if (details.state) entry.state = String(details.state);
+          ["htmlChars", "markdownChars", "assetCount", "durationMs"].forEach((key) => {
+            const value = Number(details[key]);
+            if (Number.isFinite(value) && value >= 0) entry[key] = value;
+          });
+          const errorText = String(details.error || "").replace(/\s+/g, " ").trim();
+          if (errorText) entry.error = errorText.slice(0, 220);
+          wechatArticleDiagnostic.stages.push(entry);
+        }, "addWechatArticleStage");
         const extracted = await runWechatArticlePipeline({
           url: wechatArticleUrl,
           fetchStatic: /* @__PURE__ */ __name(async (targetUrl) => {
@@ -21867,25 +22031,113 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 headers: articleHeaders
               })).text || "");
               const staticState = classifyWechatArticleHtml(staticHtml);
+              addWechatArticleStage("obsidian-request", {
+                outcome: "response",
+                state: staticState,
+                htmlChars: staticHtml.length
+              });
               if (staticState !== "guide" && staticState !== "unknown") return staticHtml;
+              const tryWechatSession = /* @__PURE__ */ __name(async () => {
+                try {
+                  const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || "");
+                  const sessionState = classifyWechatArticleHtml(sessionHtml);
+                  addWechatArticleStage("wechat-session", {
+                    outcome: "response",
+                    state: sessionState,
+                    htmlChars: sessionHtml.length
+                  });
+                  if (sessionState === "article") {
+                    usedWechatSessionFallback = true;
+                    return sessionHtml;
+                  }
+                } catch (sessionError) {
+                  addWechatArticleStage("wechat-session", {
+                    outcome: "error",
+                    error: sessionError && (sessionError.message || sessionError)
+                  });
+                }
+                return "";
+              }, "tryWechatSession");
               try {
                 usedNodeFallback = true;
                 const nodeHtml = await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders);
-                return classifyWechatArticleHtml(nodeHtml) === "article" ? nodeHtml : staticHtml;
-              } catch (_) {
-                return staticHtml;
+                const nodeState = classifyWechatArticleHtml(nodeHtml);
+                addWechatArticleStage("node-fallback", {
+                  outcome: "response",
+                  state: nodeState,
+                  htmlChars: String(nodeHtml || "").length
+                });
+                if (nodeState === "article") return nodeHtml;
+                return await tryWechatSession() || staticHtml;
+              } catch (nodeError) {
+                addWechatArticleStage("node-fallback", {
+                  outcome: "error",
+                  error: nodeError && (nodeError.message || nodeError)
+                });
+                return await tryWechatSession() || staticHtml;
               }
             } catch (requestError) {
+              addWechatArticleStage("obsidian-request", {
+                outcome: "error",
+                error: requestError && (requestError.message || requestError)
+              });
+              let nodeHtml = "";
               try {
                 usedNodeFallback = true;
-                return await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders);
-              } catch (_) {
-                return "";
+                nodeHtml = String(await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders) || "");
+                const nodeState = classifyWechatArticleHtml(nodeHtml);
+                addWechatArticleStage("node-fallback", {
+                  outcome: "response",
+                  state: nodeState,
+                  htmlChars: nodeHtml.length
+                });
+                if (nodeState === "article") return nodeHtml;
+              } catch (nodeError) {
+                addWechatArticleStage("node-fallback", {
+                  outcome: "error",
+                  error: nodeError && (nodeError.message || nodeError)
+                });
               }
+              try {
+                const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || "");
+                const sessionState = classifyWechatArticleHtml(sessionHtml);
+                addWechatArticleStage("wechat-session", {
+                  outcome: "response",
+                  state: sessionState,
+                  htmlChars: sessionHtml.length
+                });
+                if (sessionState === "article") {
+                  usedWechatSessionFallback = true;
+                  return sessionHtml;
+                }
+              } catch (sessionError) {
+                addWechatArticleStage("wechat-session", {
+                  outcome: "error",
+                  error: sessionError && (sessionError.message || sessionError)
+                });
+              }
+              return nodeHtml;
             }
           }, "fetchStatic"),
           renderBrowser: /* @__PURE__ */ __name(async (targetUrl) => {
-            const rendered = await this.renderWebpageWithElectron(targetUrl);
+            let rendered;
+            try {
+              rendered = await this.renderWechatArticleWithElectron(targetUrl);
+              const renderedText = String(rendered && (rendered.html || rendered.markdown) || "");
+              addWechatArticleStage("hidden-browser", {
+                outcome: "response",
+                state: classifyWechatArticleHtml(renderedText),
+                htmlChars: String(rendered && rendered.html || "").length,
+                markdownChars: String(rendered && rendered.markdown || "").length,
+                assetCount: Array.isArray(rendered && rendered.assets) ? rendered.assets.length : 0
+              });
+            } catch (browserError) {
+              addWechatArticleStage("hidden-browser", {
+                outcome: "error",
+                error: browserError && (browserError.message || browserError)
+              });
+              throw browserError;
+            }
             return {
               markdown: rendered.markdown,
               title: rendered.title,
@@ -21928,6 +22180,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               conversionStatus: "partial",
               conversionState: extracted.state,
               conversionNote: fallbackConversionNote,
+              conversionDiagnostic: {
+                ...wechatArticleDiagnostic,
+                finalKind: extracted.kind,
+                finalState: extracted.state,
+                finalSource: extracted.source
+              },
               imageLocalizationFailedCount: fallbackImageLocalizationErrors.length,
               imageLocalizationError: fallbackImageLocalizationErrors.slice(0, 3).join(" | ")
             }
@@ -21936,7 +22194,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         const pageTitle2 = metadata.title || extracted.title || extractHtmlTitle(extracted.html) || title || "公众号文章";
         const pageMeta2 = extracted.source === "static" ? extractWebpageMetadataFromHtml(extracted.html, wechatArticleUrl) : {};
         const imageLocalizationErrors2 = [];
-        let markdown2 = extracted.source === "browser" ? extracted.markdown : htmlToMarkdown(extracted.html);
+        let markdown2 = extracted.source === "browser" ? extracted.markdown || htmlToMarkdown(extracted.html) : htmlToMarkdown(extracted.html);
         if (extracted.source === "browser") {
           const renderedImageStats = {};
           markdown2 = await this.saveWebpageImageAssets(
@@ -21965,6 +22223,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           );
         }
         const conversionNote2 = [
+          extracted.bestEffort ? "wechat-article-best-effort" : "",
+          usedWechatSessionFallback ? "公众号本地会话备用通道已成功抓取" : "",
           usedNodeFallback ? "已通过备用通道抓取" : "",
           imageLocalizationErrors2.length ? `image-localize-failed=${imageLocalizationErrors2.length}: ${imageLocalizationErrors2.slice(0, 3).join(" | ")}` : ""
         ].filter(Boolean).join("; ");
@@ -21983,6 +22243,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             markdown: markdown2,
             conversionStatus: "success",
             conversionNote: conversionNote2,
+            conversionDiagnostic: {
+              ...wechatArticleDiagnostic,
+              finalKind: extracted.kind,
+              finalState: extracted.state,
+              finalSource: extracted.source,
+              bestEffort: Boolean(extracted.bestEffort)
+            },
             imageLocalizationFailedCount: imageLocalizationErrors2.length,
             imageLocalizationError: imageLocalizationErrors2.slice(0, 3).join(" | ")
           }
@@ -22197,49 +22464,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     fileTitle
   } = {}) {
     const targetFolderName = sanitizeAttachmentName(fileTitle, "文章");
-    if (!shouldStoreWebpageNoteInOwnFolder(
-      sourceUrl,
-      this.settings && this.settings.socialArticleImageStorageMode
-    )) {
-      return { record, folderName: targetFolderName };
-    }
-    const sourceFolderName = sanitizeAttachmentName(assetFolderTitle, "文章");
-    if (sourceFolderName === targetFolderName) {
-      return { record, folderName: targetFolderName };
-    }
-    const sourceFolderPath = normalizeVaultPath(`${noteDir}/${sourceFolderName}`);
-    const targetFolderPath = normalizeVaultPath(`${noteDir}/${targetFolderName}`);
-    const sourceImageFolderPath = normalizeVaultPath(`${sourceFolderPath}/文章图片`);
-    const targetImageFolderPath = normalizeVaultPath(`${targetFolderPath}/文章图片`);
-    const sourceImagePath = `${sourceImageFolderPath}/`;
-    const targetImagePath = `${targetImageFolderPath}/`;
-    const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
-    const markdownFields = ["markdown", "snapshot", "contentSnapshot"];
-    const adapter = this.app && this.app.vault && this.app.vault.adapter;
-    if (!adapter || typeof adapter.rename !== "function" || typeof adapter.exists !== "function") {
-      return { record, folderName: sourceFolderName };
-    }
-    try {
-      if (!await adapter.exists(sourceImageFolderPath) || await adapter.exists(targetFolderPath)) {
-        return { record, folderName: sourceFolderName };
-      }
-      await adapter.rename(sourceFolderPath, targetFolderPath);
-      const nextMetadata = { ...metadata };
-      markdownFields.forEach((field) => {
-        if (typeof nextMetadata[field] === "string") {
-          nextMetadata[field] = nextMetadata[field].split(sourceImagePath).join(targetImagePath);
-        }
-      });
-      return {
-        record: { ...record, metadata: nextMetadata },
-        folderName: targetFolderName,
-        sourceImagePath,
-        targetImagePath
-      };
-    } catch (error) {
-      console.warn("Failed to align social article image folder with note title", error);
-      return { record, folderName: sourceFolderName };
-    }
+    return { record, folderName: targetFolderName };
   }
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const signal = progress.signal || null;
@@ -22310,6 +22535,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const mediaResolutionDiagnostic = recordForMarkdown.metadata && recordForMarkdown.metadata.mediaResolutionDiagnostic;
       if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object") {
         lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
+      }
+      const conversionDiagnostic = recordForMarkdown.metadata && recordForMarkdown.metadata.conversionDiagnostic;
+      if (!lifecycleOutcomeError.diagnostic && conversionDiagnostic && typeof conversionDiagnostic === "object") {
+        lifecycleOutcomeError.diagnostic = conversionDiagnostic;
       }
       throw lifecycleOutcomeError;
     }
@@ -22385,7 +22614,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       title: fileTitle,
       committed: true,
       conversionWarning: getRecordConversionWarning(recordForMarkdown),
-      mediaResolutionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.mediaResolutionDiagnostic || null : null
+      mediaResolutionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.mediaResolutionDiagnostic || null : null,
+      conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.conversionDiagnostic || null : null
     };
   }
   async reportSyncLifecycleStatus(recordId, body, binding) {
@@ -22897,7 +23127,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
-      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.mediaResolutionDiagnostic);
+      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.mediaResolutionDiagnostic || item.conversionDiagnostic);
+      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic : null;
       this.lastSyncDiagnostic = {
         status: failed.length ? "failed" : completionWarnings.length ? "warning" : "success",
         stage: "finished",
@@ -22907,7 +23138,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join("\n") : "",
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? "COMPLETION_REPORT_FAILED" : "",
-        ...latestFailedDiagnostic ? { diagnostic: latestFailedDiagnostic.diagnostic } : latestSuccessfulDiagnostic ? { diagnostic: latestSuccessfulDiagnostic.mediaResolutionDiagnostic } : {},
+        ...latestFailedDiagnostic ? { diagnostic: latestFailedDiagnostic.diagnostic } : latestSuccessfulDiagnosticPayload ? { diagnostic: latestSuccessfulDiagnosticPayload } : {},
         ...syncSnapshots.length ? { syncSnapshots } : {},
         time: (/* @__PURE__ */ new Date()).toISOString()
       };
