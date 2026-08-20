@@ -69,8 +69,8 @@ assert.strictEqual(isWechatArticleUrl('https://mp.weixin.qq.com/s//example'), fa
 assert.strictEqual(isWechatArticleUrl('https://mp.weixin.qq.com/s/'), false);
 assert.strictEqual(normalizeWechatArticleUrl('https://mp.weixin.qq.com/s/example?scene=1#rd'), 'https://mp.weixin.qq.com/s/example');
 assert.strictEqual(
-  normalizeWechatArticleUrl('https://mp.weixin.qq.com/s?scene=169&mid=2&sn=signature&pass_ticket=secret&__biz=biz&idx=1#rd'),
-  'https://mp.weixin.qq.com/s?__biz=biz&mid=2&idx=1&sn=signature',
+  normalizeWechatArticleUrl('https://mp.weixin.qq.com/s?scene=169&mid=2&sn=signature&chksm=abc123&pass_ticket=secret&__biz=biz&idx=1#rd'),
+  'https://mp.weixin.qq.com/s?__biz=biz&mid=2&idx=1&sn=signature&chksm=abc123&scene=169',
 );
 assert.strictEqual(normalizeWechatArticleUrl('https://mp.weixin.qq.com.evil.example/s?__biz=test'), '');
 

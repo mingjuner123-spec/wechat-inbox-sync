@@ -2346,7 +2346,7 @@ var require_wechat_article_utils = __commonJS({
   "src/wechat-article-utils.js"(exports2, module2) {
     "use strict";
     var WECHAT_ARTICLE_HOST = "mp.weixin.qq.com";
-    var WECHAT_ARTICLE_ID_PARAMS = ["__biz", "mid", "idx", "sn"];
+    var WECHAT_ARTICLE_ID_PARAMS = ["__biz", "mid", "idx", "sn", "chksm", "scene"];
     function isWechatArticleUrl2(value) {
       try {
         const parsed = new URL(String(value || "").trim());
@@ -4608,7 +4608,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.110";
+var PLUGIN_RUNTIME_VERSION = "1.3.111";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -13625,6 +13625,15 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
       sandbox: true
     }
   });
+  installExternalAppNavigationGuards(win.webContents);
+  if (win && typeof win.on === "function") {
+    win.on("ready-to-show", () => {
+      try {
+        if (typeof win.isDestroyed !== "function" || !win.isDestroyed()) win.hide();
+      } catch (_) {
+      }
+    });
+  }
   try {
     if (win.webContents && typeof win.webContents.setUserAgent === "function") {
       win.webContents.setUserAgent(WECHAT_ARTICLE_MOBILE_USER_AGENT);
