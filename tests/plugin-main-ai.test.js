@@ -1144,9 +1144,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.108'), {
-  manifestVersion: '1.3.108',
-  runtimeVersion: '1.3.108',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.109'), {
+  manifestVersion: '1.3.109',
+  runtimeVersion: '1.3.109',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -1679,6 +1679,8 @@ assert.strictEqual(typeof helpers.enrichExtractedWebpageMetadata, 'function');
 assert.strictEqual(typeof helpers.extractSocialVideoMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractPodcastAudioUrlFromHtml, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliSubtitleUrlsFromHtml, 'function');
+assert.strictEqual(typeof helpers.extractBilibiliPageNumber, 'function');
+assert.strictEqual(typeof helpers.extractBilibiliCidFromPayload, 'function');
 assert.strictEqual(typeof helpers.parseBilibiliSubtitlePayload, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliAudioUrlFromPlayurlPayload, 'function');
 assert.strictEqual(typeof helpers.extractBilibiliProgressiveVideoUrlFromPlayurlPayload, 'function');
@@ -6264,6 +6266,40 @@ const bilibiliSubtitleUrls = helpers.extractBilibiliSubtitleUrlsFromHtml([
 ].join(''));
 assert.deepStrictEqual(bilibiliSubtitleUrls, ['https://subtitle.example.com/subtitle.json']);
 
+const bilibiliMultipartViewPayload = {
+  code: 0,
+  data: {
+    cid: 111,
+    pages: [
+      { page: 1, cid: 111, part: '第一集' },
+      { page: 2, cid: 222, part: '第二集' },
+      { page: 3, cid: 333, part: '第三集' },
+    ],
+  },
+};
+const bilibili98PartViewPayload = {
+  code: 0,
+  data: {
+    cid: 1001,
+    pages: Array.from({ length: 98 }, (_, index) => ({
+      page: index + 1,
+      cid: 1001 + index,
+      part: `第${index + 1}集`,
+    })),
+  },
+};
+assert.strictEqual(helpers.extractBilibiliPageNumber('https://www.bilibili.com/video/BV123'), 1);
+assert.strictEqual(helpers.extractBilibiliPageNumber('https://www.bilibili.com/video/BV123?p=2'), 2);
+assert.strictEqual(helpers.extractBilibiliPageNumber('https://www.bilibili.com/video/BV123?p=3&share_source=copy_web'), 3);
+assert.strictEqual(helpers.extractBilibiliPageNumber('https://www.bilibili.com/video/BV123?p=invalid'), 1);
+assert.strictEqual(helpers.extractBilibiliPageNumber('https://www.bilibili.com/video/BV123?p=2abc'), 1);
+assert.strictEqual(helpers.extractBilibiliPageNumber('https://www.bilibili.com/video/BV123?p=2.5'), 1);
+assert.strictEqual(helpers.extractBilibiliCidFromPayload(bilibiliMultipartViewPayload), '111');
+assert.strictEqual(helpers.extractBilibiliCidFromPayload(bilibiliMultipartViewPayload, 2), '222');
+assert.strictEqual(helpers.extractBilibiliCidFromPayload(bilibiliMultipartViewPayload, 3), '333');
+assert.strictEqual(helpers.extractBilibiliCidFromPayload(bilibiliMultipartViewPayload, 98), '');
+assert.strictEqual(helpers.extractBilibiliCidFromPayload(bilibili98PartViewPayload, 98), '1098');
+
 assert.strictEqual(helpers.parseBilibiliSubtitlePayload({
   body: [
     { content: '第一句口播。' },
@@ -9184,6 +9220,89 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(bilibiliRecord.metadata.transcriptionStatus, 'success');
   assert.strictEqual(bilibiliRecord.metadata.transcription, 'B站字幕第一句\nB站字幕第二句');
 
+  const bilibiliPartUrl = 'https://www.bilibili.com/video/BVMULTI123/?p=3&share_source=copy_web';
+  const bilibiliOutOfRangeUrl = 'https://www.bilibili.com/video/BVMULTIOUT123/?p=98&share_source=copy_web';
+  const bilibiliPartRequests = [];
+  const previousBilibiliRequestMock = requestUrlMock;
+  requestUrlMock = async ({ url }) => {
+    bilibiliPartRequests.push(url);
+    if (url === bilibiliPartUrl || url === bilibiliOutOfRangeUrl) {
+      return { text: '<script>{"subtitle_url":"https://subtitle.example.com/bilibili-part-1.json"}</script>' };
+    }
+    if (url === 'https://api.bilibili.com/x/web-interface/view?bvid=BVMULTI123') {
+      return { json: bilibiliMultipartViewPayload };
+    }
+    if (url === 'https://api.bilibili.com/x/web-interface/view?bvid=BVMULTIOUT123') {
+      return { json: bilibiliMultipartViewPayload };
+    }
+    if (url === 'https://api.bilibili.com/x/player/v2?bvid=BVMULTI123&cid=333') {
+      return {
+        json: {
+          code: 0,
+          data: {
+            subtitle: {
+              subtitles: [{ subtitle_url: 'https://subtitle.example.com/bilibili-part-3.json' }],
+            },
+          },
+        },
+      };
+    }
+    if (url === 'https://api.bilibili.com/x/player/playurl?bvid=BVMULTI123&cid=333&fnval=16&fourk=1') {
+      return {
+        json: {
+          code: 0,
+          data: {
+            dash: {
+              audio: [{ baseUrl: 'https://upos.example.com/bilibili-part-3-audio.m4s' }],
+            },
+          },
+        },
+      };
+    }
+    if (url === 'https://api.bilibili.com/x/player/playurl?bvid=BVMULTI123&cid=333&fnval=0&fourk=0') {
+      return {
+        json: {
+          code: 0,
+          data: {
+            durl: [{ url: 'https://upos.example.com/bilibili-part-3-video.mp4' }],
+          },
+        },
+      };
+    }
+    if (url === 'https://subtitle.example.com/bilibili-part-3.json') {
+      return { json: { body: [{ content: '正确的第三集字幕' }] } };
+    }
+    if (url === 'https://subtitle.example.com/bilibili-part-1.json') {
+      return { json: { body: [{ content: '错误的第一集字幕' }] } };
+    }
+    throw new Error(`unexpected multipart Bilibili request ${url}`);
+  };
+  try {
+    const bilibiliPartRecord = await plugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: bilibiliPartUrl,
+      metadata: { url: bilibiliPartUrl },
+    }, '', '', 'B站第三集');
+    assert.strictEqual(bilibiliPartRecord.metadata.transcriptionStatus, 'success');
+    assert.strictEqual(bilibiliPartRecord.metadata.transcription, '正确的第三集字幕');
+    assert.ok(bilibiliPartRequests.includes('https://api.bilibili.com/x/player/v2?bvid=BVMULTI123&cid=333'));
+    assert.ok(bilibiliPartRequests.includes('https://api.bilibili.com/x/player/playurl?bvid=BVMULTI123&cid=333&fnval=16&fourk=1'));
+    assert.ok(bilibiliPartRequests.includes('https://api.bilibili.com/x/player/playurl?bvid=BVMULTI123&cid=333&fnval=0&fourk=0'));
+    assert.strictEqual(bilibiliPartRequests.some((requestedUrl) => requestedUrl.includes('cid=111')), false);
+    assert.strictEqual(bilibiliPartRequests.includes('https://subtitle.example.com/bilibili-part-1.json'), false);
+
+    const bilibiliOutOfRangeRecord = await plugin.hydrateWebpageMarkdown({
+      type: 'webpage',
+      content: bilibiliOutOfRangeUrl,
+      metadata: { url: bilibiliOutOfRangeUrl },
+    }, '', '', 'B站越界分集');
+    assert.strictEqual(bilibiliOutOfRangeRecord.metadata.transcriptionStatus, 'failed');
+    assert.strictEqual(bilibiliPartRequests.some((requestedUrl) => requestedUrl.includes('BVMULTIOUT123&cid=')), false);
+    assert.strictEqual(bilibiliPartRequests.includes('https://subtitle.example.com/bilibili-part-1.json'), false);
+  } finally {
+    requestUrlMock = previousBilibiliRequestMock;
+  }
+
   const bilibiliAudioFallbackPlugin = new PluginClass();
   bilibiliAudioFallbackPlugin.settings = { aiProvider: 'off' };
   const bilibiliAudioRecord = await bilibiliAudioFallbackPlugin.hydrateWebpageMarkdown({
@@ -10609,7 +10728,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.108'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.109'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10648,8 +10767,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.108',
-        runtimeVersion: '1.3.108',
+        manifestVersion: '1.3.109',
+        runtimeVersion: '1.3.109',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -12832,7 +12951,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.108 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.109 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));

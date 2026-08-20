@@ -4634,7 +4634,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.108";
+var PLUGIN_RUNTIME_VERSION = "1.3.109";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -9846,10 +9846,29 @@ function extractBilibiliBvid(url) {
   return match ? match[0] : "";
 }
 __name(extractBilibiliBvid, "extractBilibiliBvid");
-function extractBilibiliCidFromPayload(payload) {
+function extractBilibiliPageNumber(url) {
+  const source = String(url || "").trim();
+  if (!source) return 1;
+  let value = "";
+  try {
+    value = new URL(source).searchParams.get("p") || "";
+  } catch (error) {
+    const match = source.match(/[?&]p=([^&#]*)/i);
+    value = match ? match[1] : "";
+  }
+  if (!/^\d+$/.test(value)) return 1;
+  const pageNumber = Number.parseInt(value, 10);
+  return Number.isSafeInteger(pageNumber) && pageNumber > 0 ? pageNumber : 1;
+}
+__name(extractBilibiliPageNumber, "extractBilibiliPageNumber");
+function extractBilibiliCidFromPayload(payload, pageNumber = 1) {
   const data = typeof payload === "string" ? tryParseJson(payload) : payload;
-  const pages = data && data.data && Array.isArray(data.data.pages) ? data.data.pages : [];
-  const cid = pages[0] && pages[0].cid || data && data.data && data.data.cid || "";
+  const viewData = data && data.data && typeof data.data === "object" ? data.data : {};
+  const pages = Array.isArray(viewData.pages) ? viewData.pages : [];
+  const requestedPage = Number.isSafeInteger(Number(pageNumber)) && Number(pageNumber) > 0 ? Number(pageNumber) : 1;
+  const exactPage = pages.find((item) => Number(item && item.page) === requestedPage);
+  const selectedPage = exactPage || pages[requestedPage - 1] || null;
+  const cid = selectedPage && selectedPage.cid || (requestedPage === 1 ? viewData.cid : "") || "";
   return cid ? String(cid) : "";
 }
 __name(extractBilibiliCidFromPayload, "extractBilibiliCidFromPayload");
@@ -20789,13 +20808,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   }
   async hydrateBilibiliTranscript(record, url, binding = null, title = "") {
     const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+    const requestedPageNumber = extractBilibiliPageNumber(resolvedUrl || url);
     const response = await requestUrl({ url: resolvedUrl, method: "GET", headers: getSocialRequestHeaders(resolvedUrl) });
     const html = response.text || "";
     let markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, resolvedUrl);
     const pageMetadata = extractWebpageMetadataFromHtml(html, resolvedUrl);
     let sourceTitle = pageMetadata.title;
     let bilibiliSocialMetrics = extractSocialMetricsFromHtml(html);
-    let subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(html);
+    const htmlSubtitleUrls = extractBilibiliSubtitleUrlsFromHtml(html);
+    let subtitleUrls = requestedPageNumber === 1 ? htmlSubtitleUrls : [];
     let bvid = extractBilibiliBvid(resolvedUrl) || extractBilibiliBvid(url) || extractBilibiliBvid(html);
     let cid = "";
     let playurlAudioUrl = "";
@@ -20824,15 +20845,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             ].filter(Boolean)
           });
         }
-        cid = extractBilibiliCidFromPayload(viewPayload);
+        cid = extractBilibiliCidFromPayload(viewPayload, requestedPageNumber);
         bilibiliSocialMetrics = hasSocialMetrics(buildSocialMetrics(viewPayload)) ? buildSocialMetrics(viewPayload) : bilibiliSocialMetrics;
-        if (cid && !subtitleUrls.length) {
+        if (cid && (!subtitleUrls.length || requestedPageNumber > 1)) {
           const playerResponse = await requestUrl({
             url: `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
             method: "GET",
             headers: getSocialRequestHeaders(resolvedUrl)
           });
-          subtitleUrls = extractBilibiliSubtitleUrlsFromHtml(JSON.stringify(playerResponse.json || tryParseJson(playerResponse.text) || {}));
+          const selectedPageSubtitleUrls = extractBilibiliSubtitleUrlsFromHtml(JSON.stringify(playerResponse.json || tryParseJson(playerResponse.text) || {}));
+          if (selectedPageSubtitleUrls.length) subtitleUrls = selectedPageSubtitleUrls;
         }
         if (cid) {
           const playurlResponse = await requestUrl({
@@ -20871,10 +20893,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         socialMetrics: bilibiliSocialMetrics
       });
     }
+    const htmlFallbackMediaUrl = requestedPageNumber === 1 ? extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html) : "";
     return this.buildTranscriptRecordFromMedia(record, {
       url,
       platform: "B站",
-      mediaUrl: playurlAudioUrl || extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html),
+      mediaUrl: playurlAudioUrl || htmlFallbackMediaUrl,
       mediaUrls: [progressiveVideoUrl, playurlAudioUrl].filter(Boolean),
       source: "audio",
       markdown,
@@ -23715,6 +23738,8 @@ WechatObsidianInboxPlugin.__test = {
   shouldPersistNormalizedInboxDir,
   shouldPersistAutoLocalAsrPlatform,
   extractBilibiliSubtitleUrlsFromHtml,
+  extractBilibiliPageNumber,
+  extractBilibiliCidFromPayload,
   parseBilibiliSubtitlePayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
   extractBilibiliProgressiveVideoUrlFromPlayurlPayload,
