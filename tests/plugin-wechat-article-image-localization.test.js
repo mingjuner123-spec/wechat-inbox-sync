@@ -438,6 +438,7 @@ async function run() {
       title: '浏览器恢复标题',
       markdown: '这是通过隐藏浏览器获得的足够长的公众号正文，应该作为完整文章保存。\n\n![图片](https://mmbiz.qpic.cn/browser-body.jpg)',
       assets: [{ src: 'https://mmbiz.qpic.cn/browser-body.jpg', alt: '图片' }],
+      bodyFound: true,
     };
   };
   const browserRecovered = await hydrateWithHtml(browserRecoveryCase.plugin, guideHtml);
@@ -450,24 +451,14 @@ async function run() {
   let partialGuideBrowserCalls = 0;
   partialGuideCase.plugin.renderWechatArticleWithElectron = async () => {
     partialGuideBrowserCalls += 1;
-    return { markdown: '微信扫一扫可打开此内容 使用完整服务', assets: [] };
+    return { markdown: 'Open in WeChat to continue reading this content.', assets: [], bodyFound: false };
   };
-  const partialGuide = await hydrateWithHtml(partialGuideCase.plugin, guideHtml);
-  assert.strictEqual(partialGuideBrowserCalls, 1);
-  assert.strictEqual(partialGuide.metadata.conversionStatus, 'success');
-  assert.strictEqual(partialGuide.metadata.conversionDiagnostic.bestEffort, true);
-  assert.ok(partialGuide.metadata.conversionDiagnostic.stages.some((stage) => stage.stage === 'hidden-browser'));
-  assert.ok(String(partialGuide.metadata.markdown || '').trim().length > 0);
-  assert.strictEqual(partialGuideCase.writes.length, 0);
-  assert.strictEqual(partialGuide.metadata.markdown.includes('https://mmbiz.qpic.cn/guide-cover.jpg'), false);
-  assert.strictEqual(
-    PluginClass.__test.getSyncLifecycleOutcomeError({
-      type: 'webpage',
-      content: articleUrl,
-      metadata: partialGuide.metadata,
-    }),
-    null,
+  await assert.rejects(
+    () => hydrateWithHtml(partialGuideCase.plugin, guideHtml),
+    (error) => error && error.code === 'WECHAT_ARTICLE_BODY_MISSING',
   );
+  assert.strictEqual(partialGuideBrowserCalls, 1);
+  assert.strictEqual(partialGuideCase.writes.length, 0);
 
   const unavailableBrowserCase = createPlugin();
   unavailableBrowserCase.plugin.renderWechatArticleWithElectron = async () => ({

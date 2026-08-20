@@ -1980,6 +1980,20 @@ function isRetryableXiaohongshuContentError(error) {
   return Boolean(error && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE');
 }
 
+function createRetryableWechatArticleContentError(diagnostic = {}) {
+  const error = new Error('\u5fae\u4fe1\u516c\u4f17\u53f7\u6682\u672a\u8fd4\u56de\u6b63\u6587\uff0c\u5df2\u4fdd\u7559\u5f85\u540c\u6b65\u8bb0\u5f55\uff0c\u5c06\u5728\u540e\u7eed\u540c\u6b65\u65f6\u81ea\u52a8\u91cd\u8bd5\u3002');
+  error.retryable = true;
+  error.code = 'WECHAT_ARTICLE_BODY_MISSING';
+  error.diagnostic = redactSensitiveObject(
+    diagnostic && typeof diagnostic === 'object' ? diagnostic : {},
+  );
+  return error;
+}
+
+function isRetryableWechatArticleContentError(error) {
+  return Boolean(error && error.code === 'WECHAT_ARTICLE_BODY_MISSING');
+}
+
 function getRecordXiaohongshuIdentityCandidates(record = {}) {
   const metadata = record && record.metadata && typeof record.metadata === 'object'
     ? record.metadata
@@ -10688,8 +10702,26 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
     const loaded = waitForWebContents(win.webContents);
     await win.loadURL(url, { userAgent: WECHAT_ARTICLE_MOBILE_USER_AGENT });
     await loaded;
-    // Public-account pages commonly hydrate the body after the initial load.
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    // Some public-account pages hydrate js_content after the initial load.
+    // Wait for the actual body rather than treating the surrounding shell as content.
+    const bodyReady = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const hasBodyContent = (root) => {
+          if (!root) return false;
+          const text = String(root.innerText || root.textContent || '').replace(/\\s+/g, '');
+          return Boolean(text) || Boolean(root.querySelector('img[data-src], img[src], video, audio'));
+        };
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          const root = document.querySelector('#js_content');
+          if (hasBodyContent(root)) return true;
+          window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+          await sleep(500);
+        }
+        return false;
+      })()
+    `);
+    if (!bodyReady) throw new Error('\u5fae\u4fe1\u516c\u4f17\u53f7\u9875\u9762\u672a\u8fd4\u56de #js_content \u6b63\u6587');
     const result = await win.webContents.executeJavaScript(`
       (() => {
         const clean = (value) => String(value || '')
@@ -10729,9 +10761,10 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
         };
       })()
     `);
-    if (!result || String(result.markdown || '').trim().length < 40) {
+    if (!result || (!String(result.markdown || '').trim() && !(result.assets && result.assets.length))) {
       throw new Error('微信公众号页面未返回 #js_content 正文');
     }
+    result.bodyFound = true;
     return result;
   } finally {
     if (win && typeof win.destroy === 'function'
@@ -20113,17 +20146,21 @@ class WechatObsidianInboxPlugin extends Plugin {
               markdown: rendered.markdown,
               title: rendered.title,
               assets: rendered.assets,
+              bodyFound: rendered.bodyFound === true,
             };
           },
-          isUsableBrowserArticle: ({ markdown }) => {
-            const renderedText = String(markdown || '').trim();
-            const renderedState = classifyWechatArticleHtml(renderedText);
-            return renderedText.length >= 40
-              && renderedState !== 'guide'
-              && renderedState !== 'captcha'
-              && renderedState !== 'unavailable';
-          },
+          isUsableBrowserArticle: ({ markdown, bodyFound }) => Boolean(bodyFound && String(markdown || '').trim()),
         });
+
+        if (extracted.kind === 'retryable') {
+          throw createRetryableWechatArticleContentError({
+            ...wechatArticleDiagnostic,
+            finalKind: extracted.kind,
+            finalState: extracted.state,
+            finalSource: extracted.source,
+            ...(extracted.diagnostic || {}),
+          });
+        }
 
         if (extracted.kind === 'fallback') {
           const fallbackTitle = metadata.title || extracted.title || title || '公众号文章未提取正文';
@@ -20205,7 +20242,6 @@ class WechatObsidianInboxPlugin extends Plugin {
           );
         }
         const conversionNote = [
-          extracted.bestEffort ? 'wechat-article-best-effort' : '',
           usedWechatSessionFallback ? '公众号本地会话备用通道已成功抓取' : '',
           usedNodeFallback ? '已通过备用通道抓取' : '',
           imageLocalizationErrors.length
@@ -20232,7 +20268,6 @@ class WechatObsidianInboxPlugin extends Plugin {
               finalKind: extracted.kind,
               finalState: extracted.state,
               finalSource: extracted.source,
-              bestEffort: Boolean(extracted.bestEffort),
             },
             imageLocalizationFailedCount: imageLocalizationErrors.length,
             imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
@@ -20344,7 +20379,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
     } catch (error) {
       if (isAbortError(error)) throw error;
-      if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error)) {
+      if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
       }
       if (isXiaohongshuUrl(url)) {

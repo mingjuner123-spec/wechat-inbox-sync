@@ -47,7 +47,7 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
     conversionStatus: 'success',
     markdown: '微信扫一扫可打开此内容，使用完整服务',
   },
-}), null);
+}).code, 'EXTRACTION_FAILED');
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'file',
   metadata: {
@@ -172,6 +172,14 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
     url: 'https://www.toutiao.com/article/app-only',
     conversionStatus: 'success',
     markdown: '请在今日头条客户端内查看完整内容',
+  },
+}).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
+  type: 'webpage',
+  metadata: {
+    url: 'https://mp.weixin.qq.com/s/legacy-shell',
+    conversionStatus: 'success',
+    markdown: '\u89c6\u9891 \u5c0f\u7a0b\u5e8f \u8d5e \u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e \u5728\u770b',
   },
 }).code, 'EXTRACTION_FAILED');
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({

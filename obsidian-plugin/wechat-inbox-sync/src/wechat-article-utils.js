@@ -74,10 +74,10 @@ function isTrustedCoverUrl(value) {
   }
 }
 
-function hasWechatArticleBody(html) {
+function extractWechatArticleBodyHtml(html) {
   const source = String(html || '');
   const opening = /<div\b(?=[^>]*\sid=["']js_content["'])[^>]*>/i.exec(source);
-  if (!opening) return false;
+  if (!opening) return '';
   const tagName = 'div';
   const tagPattern = new RegExp(`<\\/?${tagName}\\b[^>]*>`, 'gi');
   tagPattern.lastIndex = opening.index + opening[0].length;
@@ -92,8 +92,16 @@ function hasWechatArticleBody(html) {
       break;
     }
   }
-  const bodyHtml = source.slice(opening.index + opening[0].length, closingIndex);
-  return stripHtml(bodyHtml).length >= 20;
+  return source.slice(opening.index + opening[0].length, closingIndex);
+}
+
+function hasWechatArticleBody(html) {
+  const bodyHtml = extractWechatArticleBodyHtml(html);
+  // A short text article or an image-first article is still a real article.
+  // The required fact is an actual js_content body, not an arbitrary length.
+  return Boolean(stripHtml(bodyHtml))
+    || /<img\b[^>]+(?:data-src|src)=/i.test(bodyHtml)
+    || /<(?:video|audio)\b/i.test(bodyHtml);
 }
 
 function classifyWechatArticleHtml(html) {
@@ -142,6 +150,7 @@ module.exports = {
   buildWechatArticleFallbackMarkdown,
   classifyWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
+  extractWechatArticleBodyHtml,
   hasWechatArticleBody,
   isWechatArticleUrl,
   isGenericWechatMetadata,

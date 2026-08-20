@@ -14,6 +14,7 @@ function normalizeBrowserResult(value) {
     markdown: String(value && value.markdown || ''),
     title: String(value && value.title || ''),
     assets: Array.isArray(value && value.assets) ? value.assets : [],
+    bodyFound: Boolean(value && value.bodyFound === true),
   };
 }
 
@@ -36,24 +37,18 @@ function buildFallbackResult({ url, state, html, title = '' }) {
   };
 }
 
-function buildBestEffortArticleResult({ state, source, html, markdown = '', title = '', assets = [] }) {
-  const article = {
-    kind: 'article',
-    state: state || 'best_effort',
-    source: source || 'static',
-    html: String(html || ''),
-    title: String(title || ''),
-    assets: Array.isArray(assets) ? assets : [],
-    bestEffort: true,
+function buildRetryableBodyMissingResult({ staticState, browserState = '', browserError = null }) {
+  return {
+    kind: 'retryable',
+    state: 'body_missing',
+    source: browserState || browserError ? 'browser' : 'static',
+    diagnostic: {
+      reason: 'wechat-article-body-missing',
+      staticState: String(staticState || 'unknown'),
+      browserState: String(browserState || ''),
+      browserError: browserError ? String(browserError.message || browserError) : '',
+    },
   };
-  if (markdown) article.markdown = String(markdown || '');
-  return article;
-}
-
-function canUseBestEffortHtml(html, state) {
-  return Boolean(String(html || '').trim())
-    && state !== 'captcha'
-    && state !== 'unavailable';
 }
 
 async function runWechatArticlePipeline({
@@ -102,44 +97,12 @@ async function runWechatArticlePipeline({
       if (browserState === 'captcha' || browserState === 'unavailable') {
         return buildFallbackResult({ url: normalizedUrl, state: browserState, html: browser.html || browser.markdown });
       }
-      if (canUseBestEffortHtml(browser.markdown || browser.html, browserState)) {
-        return buildBestEffortArticleResult({
-          state: 'best_effort',
-          source: 'browser',
-          html: browser.html,
-          markdown: browser.markdown,
-          title: browser.title,
-          assets: browser.assets,
-        });
-      }
-      if (canUseBestEffortHtml(staticHtml, staticState)) {
-        return buildBestEffortArticleResult({
-          state: 'best_effort',
-          source: 'static',
-          html: staticHtml,
-        });
-      }
-      const fallbackState = browserState === 'unavailable' ? browserState : staticState;
-      return buildFallbackResult({ url: normalizedUrl, state: fallbackState, html: staticHtml });
-    } catch (_) {
-      if (canUseBestEffortHtml(staticHtml, staticState)) {
-        return buildBestEffortArticleResult({
-          state: 'best_effort',
-          source: 'static',
-          html: staticHtml,
-        });
-      }
-      return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
+      return buildRetryableBodyMissingResult({ staticState, browserState });
+    } catch (browserError) {
+      return buildRetryableBodyMissingResult({ staticState, browserError });
     }
   }
-  if (canUseBestEffortHtml(staticHtml, staticState)) {
-    return buildBestEffortArticleResult({
-      state: 'best_effort',
-      source: 'static',
-      html: staticHtml,
-    });
-  }
-  return buildFallbackResult({ url: normalizedUrl, state: staticState, html: staticHtml });
+  return buildRetryableBodyMissingResult({ staticState });
 }
 
 module.exports = { runWechatArticlePipeline };
