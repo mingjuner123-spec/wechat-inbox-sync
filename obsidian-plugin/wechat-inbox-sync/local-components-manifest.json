@@ -4,15 +4,15 @@
     {
       "id": "asr-macos-installer",
       "sourcePath": "local-asr/install-local-asr-macos.sh",
-      "sha256": "364c329fd4f07aea1c18d8d4f6d0abd2a49b1e77c8f461268d9bd5d041526bcc",
-      "immutablePath": "local-components/by-sha256/364c329fd4f07aea1c18d8d4f6d0abd2a49b1e77c8f461268d9bd5d041526bcc/install-local-asr-macos.sh",
+      "sha256": "c489dea38dea03e9c105f333460dd7af653d4ba8202bd9c72896d688d60e40a0",
+      "immutablePath": "local-components/by-sha256/c489dea38dea03e9c105f333460dd7af653d4ba8202bd9c72896d688d60e40a0/install-local-asr-macos.sh",
       "compatibilityAlias": "local-asr/common/install-local-asr-macos.sh"
     },
     {
       "id": "asr-windows-installer",
       "sourcePath": "local-asr/install-local-asr.ps1",
-      "sha256": "afcd66ff0d4e0d73bb4072e89353f4e4d8b54e055ca5d6a65e2887efa30b349f",
-      "immutablePath": "local-components/by-sha256/afcd66ff0d4e0d73bb4072e89353f4e4d8b54e055ca5d6a65e2887efa30b349f/install-local-asr.ps1",
+      "sha256": "6f047cde359ba98556629134e2f82b94e34fc47f507b7bc49da6889ba50f141b",
+      "immutablePath": "local-components/by-sha256/6f047cde359ba98556629134e2f82b94e34fc47f507b7bc49da6889ba50f141b/install-local-asr.ps1",
       "compatibilityAlias": "local-asr/common/install-local-asr.ps1"
     },
     {

@@ -335,7 +335,7 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.26"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.27"'));
 assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"'));
 assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
@@ -387,7 +387,9 @@ assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "ggml-small.bin"'));
 assert.ok(windowsInstaller.includes('Download-File -Url $Url -OutFile $CachePath -Resume'));
 assert.ok(windowsInstaller.includes('Resuming partial cached $Label package'));
 assert.ok(windowsInstaller.includes('Keeping partial $Label package for retry'));
-assert.ok(windowsInstaller.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.27"'));
+assert.ok(windowsInstaller.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'));
+assert.strictEqual(windowsInstaller.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'), false);
 assert.ok(windowsInstaller.includes('Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue'));
 assert.ok(
   windowsInstaller.indexOf('Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath') <
@@ -766,7 +768,7 @@ assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/lo
 assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.9"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.10"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=180'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));
@@ -780,7 +782,8 @@ assert.ok(macInstaller.includes('Python venv and ASR tools are already ready.'))
 assert.strictEqual(macInstaller.includes('rm -rf "$venv_dir"'), false);
 assert.ok(macInstaller.includes('Local ASR was already validated for the current files; skipping full inference validation.'));
 assert.ok(macInstaller.includes('download_model "$CACHE_ROOT/ggml-small.bin"'));
-assert.ok(macInstaller.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"'));
+assert.ok(macInstaller.includes('mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"'));
+assert.strictEqual(macInstaller.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"'), false);
 assert.ok(macInstaller.includes('rm -f "$CACHE_ROOT/ggml-small.bin"'));
 assert.ok(macInstaller.includes('whisper-cli validation failed.'));
 assert.ok(macInstaller.includes('ffmpeg validation failed.'));

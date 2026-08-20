@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.26"
+$InstallerScriptVersion = "1.2.27"
 $NativeProcessRunnerVersion = "diagnostics-process-v1"
 $DownloadLowSpeedLimitBytesPerSecond = 10240
 $DownloadLowSpeedTimeoutSeconds = 90
@@ -1015,7 +1015,7 @@ try {
       Remove-Item -LiteralPath $cachedModelPath -Force
     }
     Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelTencentUrls -FallbackUrls $ModelFallbackUrls) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
-    Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
+    Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
   Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
