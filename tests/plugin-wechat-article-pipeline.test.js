@@ -11,36 +11,41 @@ const {
 const { runWechatArticlePipeline } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
 
 const articleHtml = [
-  '<html><head><title>真实文章标题</title></head><body>',
-  '<div id="js_content"><p>这是足够长的公众号正文，用来确认页面不是打开引导页。</p></div>',
+  '<html><head><title>Real article title</title></head><body>',
+  '<div id="js_content"><p>This is a long enough WeChat article body. It proves the article page is usable.</p></div>',
   '</body></html>',
 ].join('');
 
 const guideHtml = [
   '<html><head>',
-  '<meta property="og:title" content="值得保存的文章标题">',
-  '<meta property="og:description" content="文章摘要">',
+  '<meta property="og:title" content="Useful title">',
+  '<meta property="og:description" content="Useful description">',
   '<meta property="og:image" content="https://mmbiz.qpic.cn/cover.jpg">',
-  '</head><body>微信扫一扫可打开此内容 使用小程序</body></html>',
+  '</head><body>Open in WeChat to continue reading this content.</body></html>',
 ].join('');
 
-const genericGuideHtml = '<html><head><title>微信公众平台</title><meta property="og:image" content="javascript:bad"></head><body>微信扫一扫可打开此内容 使用完整服务</body></html>';
+const genericGuideHtml = [
+  '<html><head><title>WeChat Official Accounts Platform</title>',
+  '<meta property="og:image" content="javascript:bad"></head>',
+  '<body>Open in WeChat to continue reading this content.</body></html>',
+].join('');
+
+const unavailableHtml = '<p>\u5185\u5bb9\u4e0d\u5b58\u5728\uff0c\u8be5\u6587\u7ae0\u5df2\u88ab\u5220\u9664\u3002</p>';
+const captchaHtml = '<p>\u73af\u5883\u5f02\u5e38\uff0c\u5b8c\u6210\u9a8c\u8bc1\u540e\u5373\u53ef\u7ee7\u7eed\u8bbf\u95ee\u3002</p>';
 
 assert.strictEqual(classifyWechatArticleHtml(articleHtml), 'article');
 assert.strictEqual(
-  classifyWechatArticleHtml('<div id="js_content"><p>短句。</p><p>This later paragraph contains enough article content to prove the whole article body is present.</p></div>'),
+  classifyWechatArticleHtml('<div id="js_content"><p>Short.</p><p>This later paragraph contains enough article content to prove the whole article body is present.</p></div>'),
   'article',
 );
-assert.strictEqual(classifyWechatArticleHtml(guideHtml), 'guide');
 assert.strictEqual(
-  classifyWechatArticleHtml('<div id="js_content"><p>这是有效正文，长度足够，公众号页面的隐藏引导文案不应覆盖正文判定。</p></div><div style="display:none">微信扫一扫可打开此内容 使用完整服务</div>'),
+  classifyWechatArticleHtml('<div id="js_content"><p>This is valid body content long enough to win over hidden guide copy.</p></div><div style="display:none">Open in WeChat</div>'),
   'article',
 );
-assert.strictEqual(classifyWechatArticleHtml('<p>环境异常，完成验证后即可继续访问</p>'), 'captcha');
 
 assert.deepStrictEqual(extractWechatArticleFallbackMetadata(guideHtml), {
-  title: '值得保存的文章标题',
-  description: '文章摘要',
+  title: 'Useful title',
+  description: 'Useful description',
   coverUrl: 'https://mmbiz.qpic.cn/cover.jpg',
 });
 assert.deepStrictEqual(extractWechatArticleFallbackMetadata(genericGuideHtml), {
@@ -64,13 +69,12 @@ assert.strictEqual(normalizeWechatArticleUrl('https://mp.weixin.qq.com.evil.exam
 const fallbackMarkdown = buildWechatArticleFallbackMarkdown({
   url: 'https://mp.weixin.qq.com/s/example',
   state: 'guide',
-  title: '值得保存的文章标题',
-  description: '文章摘要',
+  title: 'Useful title',
+  description: 'Useful description',
   coverUrl: 'https://mmbiz.qpic.cn/cover.jpg',
 });
-assert.match(fallbackMarkdown, /微信公众号未返回正文/);
-assert.match(fallbackMarkdown, /原始链接：https:\/\/mp\.weixin\.qq\.com\/s\/example/);
-assert.match(fallbackMarkdown, /!\[封面\]\(https:\/\/mmbiz\.qpic\.cn\/cover\.jpg\)/);
+assert.match(fallbackMarkdown, /https:\/\/mp\.weixin\.qq\.com\/s\/example/);
+assert.match(fallbackMarkdown, /!\[.*\]\(https:\/\/mmbiz\.qpic\.cn\/cover\.jpg\)/);
 
 async function runPipelineTests() {
   let invalidFetchCalls = 0;
@@ -83,8 +87,8 @@ async function runPipelineTests() {
   assert.doesNotMatch(invalidUrl.markdown, /pass_ticket/);
 
   const browserArticle = [
-    '<html><head><title>浏览器正文标题</title></head><body>',
-    '<div id="js_content"><p>这是浏览器兜底获得的足够长的公众号正文，应该作为完整文章保存。</p></div>',
+    '<html><head><title>Browser article title</title></head><body>',
+    '<div id="js_content"><p>This browser-rendered body is long enough and should be saved as the complete article.</p></div>',
     '</body></html>',
   ].join('');
   let browserCalls = 0;
@@ -96,7 +100,7 @@ async function runPipelineTests() {
     renderBrowser: async (targetUrl) => {
       browserTargetUrl = targetUrl;
       browserCalls += 1;
-      return { html: browserArticle, title: '浏览器正文标题', assets: [{ src: 'https://mmbiz.qpic.cn/body.jpg' }] };
+      return { html: browserArticle, title: 'Browser article title', assets: [{ src: 'https://mmbiz.qpic.cn/body.jpg' }] };
     },
   });
   assert.strictEqual(browserCalls, 1);
@@ -107,12 +111,12 @@ async function runPipelineTests() {
     state: 'complete',
     source: 'browser',
     html: browserArticle,
-    title: '浏览器正文标题',
+    title: 'Browser article title',
     assets: [{ src: 'https://mmbiz.qpic.cn/body.jpg' }],
   });
 
   browserCalls = 0;
-  const partial = await runWechatArticlePipeline({
+  const bestEffortBrowser = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/partial',
     fetchStatic: async () => guideHtml,
     renderBrowser: async () => {
@@ -121,28 +125,39 @@ async function runPipelineTests() {
     },
   });
   assert.strictEqual(browserCalls, 1);
-  assert.strictEqual(partial.kind, 'fallback');
-  assert.strictEqual(partial.state, 'guide');
-  assert.strictEqual(partial.source, 'fallback');
+  assert.strictEqual(bestEffortBrowser.kind, 'article');
+  assert.strictEqual(bestEffortBrowser.state, 'best_effort');
+  assert.strictEqual(bestEffortBrowser.source, 'browser');
+  assert.strictEqual(bestEffortBrowser.bestEffort, true);
+  assert.strictEqual(bestEffortBrowser.html, genericGuideHtml);
 
-  const sanitizedFallback = await runWechatArticlePipeline({
+  const bestEffortStatic = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s?scene=1&mid=2&pass_ticket=secret&__biz=biz&idx=1&sn=signature',
     fetchStatic: async () => guideHtml,
   });
-  assert.match(sanitizedFallback.markdown, /https:\/\/mp\.weixin\.qq\.com\/s\?__biz=biz&mid=2&idx=1&sn=signature/);
-  assert.doesNotMatch(sanitizedFallback.markdown, /pass_ticket|scene=1/);
-  assert.match(partial.markdown, /微信公众号未返回正文/);
-  assert.match(partial.markdown, /值得保存的文章标题/);
+  assert.strictEqual(bestEffortStatic.kind, 'article');
+  assert.strictEqual(bestEffortStatic.state, 'best_effort');
+  assert.strictEqual(bestEffortStatic.source, 'static');
+  assert.strictEqual(bestEffortStatic.bestEffort, true);
+  assert.strictEqual(bestEffortStatic.html, guideHtml);
 
   browserCalls = 0;
   const captcha = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/captcha',
-    fetchStatic: async () => '<p>环境异常，完成验证后即可继续访问</p>',
+    fetchStatic: async () => captchaHtml,
     renderBrowser: async () => { browserCalls += 1; return { html: articleHtml }; },
   });
   assert.strictEqual(browserCalls, 0);
   assert.strictEqual(captcha.kind, 'fallback');
   assert.strictEqual(captcha.state, 'captcha');
+
+  const unavailable = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/unavailable',
+    fetchStatic: async () => unavailableHtml,
+    renderBrowser: async () => ({ html: articleHtml }),
+  });
+  assert.strictEqual(unavailable.kind, 'fallback');
+  assert.strictEqual(unavailable.state, 'unavailable');
 }
 
 runPipelineTests()

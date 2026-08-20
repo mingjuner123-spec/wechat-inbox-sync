@@ -197,8 +197,12 @@ async function loadPdfJsLibrary() {
 }
 
 const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
+// Do not impersonate the WeChat app. A normal mobile browser UA is the most
+// broadly compatible public article surface, while still allowing the local
+// persistent session to contribute cookies when the user already has them.
+const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.107';
+const PLUGIN_RUNTIME_VERSION = '1.3.108';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3233,6 +3237,18 @@ function isSocialArticleUrl(sourceUrl) {
 function shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageMode) {
   return isSocialArticleUrl(sourceUrl)
     && normalizeSocialArticleImageStorageMode(socialArticleImageStorageMode) === 'local';
+}
+
+// A local social article has one public layout: <platform-title>/<platform-title>.md
+// plus <platform-title>/文章图片/.  Use the same title while downloading assets and
+// while writing the note, so no post-download folder migration is necessary.
+function getSocialArticleLocalFolderTitle(sourceUrl, title) {
+  const safeTitle = sanitizeAttachmentName(title, '文章');
+  if (!isSocialArticleUrl(sourceUrl)) return safeTitle;
+  const prefix = sanitizeAttachmentName(getWebpageSourcePrefix(sourceUrl), '网页');
+  return safeTitle === prefix || safeTitle.startsWith(`${prefix}-`)
+    ? safeTitle
+    : `${prefix}-${safeTitle}`;
 }
 
 function isXiaohongshuShortLinkUrl(url) {
@@ -10628,6 +10644,80 @@ async function settleRenderedPage(webContents) {
   `);
 }
 
+async function renderWechatArticleToMarkdownWithElectron(url) {
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
+  }
+  const win = new BrowserWindow({
+    width: 980,
+    height: 1600,
+    show: false,
+    webPreferences: {
+      session: getWechatSession() || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  try {
+    if (win.webContents && typeof win.webContents.setUserAgent === 'function') {
+      win.webContents.setUserAgent(WECHAT_ARTICLE_MOBILE_USER_AGENT);
+    }
+    const loaded = waitForWebContents(win.webContents);
+    await win.loadURL(url, { userAgent: WECHAT_ARTICLE_MOBILE_USER_AGENT });
+    await loaded;
+    // Public-account pages commonly hydrate the body after the initial load.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const result = await win.webContents.executeJavaScript(`
+      (() => {
+        const clean = (value) => String(value || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/[ \\t]+\\n/g, '\\n')
+          .replace(/\\n{3,}/g, '\\n\\n')
+          .trim();
+        const root = document.querySelector('#js_content');
+        const titleNode = document.querySelector('#activity-name, h1');
+        const title = clean(titleNode && (titleNode.innerText || titleNode.textContent) || document.title || '');
+        const stateText = clean(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 600);
+        if (!root) return { title, markdown: '', assets: [], stateText };
+        const clone = root.cloneNode(true);
+        const assets = [];
+        clone.querySelectorAll('script,style,noscript,iframe,form').forEach((node) => node.remove());
+        clone.querySelectorAll('br').forEach((node) => node.replaceWith(document.createTextNode('\\n')));
+        clone.querySelectorAll('img').forEach((image) => {
+          const src = String(image.currentSrc || image.getAttribute('data-src') || image.getAttribute('src') || '').trim();
+          const alt = clean(image.getAttribute('alt') || image.getAttribute('data-alt') || '图片');
+          if (!src || /^data:image\\/gif/i.test(src)) {
+            image.remove();
+            return;
+          }
+          assets.push({ src, alt });
+          image.replaceWith(document.createTextNode('\\n\\n![' + alt + '](' + src + ')\\n\\n'));
+        });
+        clone.querySelectorAll('p,div,section,article,li,blockquote,h1,h2,h3,h4,h5,h6').forEach((node) => {
+          if (node.parentElement === clone || node.children.length === 0) {
+            node.appendChild(document.createTextNode('\\n\\n'));
+          }
+        });
+        return {
+          title,
+          markdown: clean(clone.innerText || clone.textContent || ''),
+          assets,
+          stateText,
+        };
+      })()
+    `);
+    if (!result || String(result.markdown || '').trim().length < 40) {
+      throw new Error('微信公众号页面未返回 #js_content 正文');
+    }
+    return result;
+  } finally {
+    if (win && typeof win.destroy === 'function'
+      && (typeof win.isDestroyed !== 'function' || !win.isDestroyed())) win.destroy();
+  }
+}
+
 async function renderUrlToMarkdownWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -16789,6 +16879,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderUrlToMarkdownWithElectron(url);
   }
 
+  async renderWechatArticleWithElectron(url) {
+    return renderWechatArticleToMarkdownWithElectron(url);
+  }
+
+  async downloadWechatArticleHtmlViaSession(url, headers = {}) {
+    const session = getWechatSession();
+    return readSessionFetchText(session, url, {
+      ...headers,
+      'User-Agent': WECHAT_ARTICLE_MOBILE_USER_AGENT,
+      Referer: 'https://mp.weixin.qq.com/',
+    }, 15000);
+  }
+
   async renderFeishuDocumentWithElectron(url) {
     return renderFeishuUrlToSimpleMarkdownWithElectron(url);
   }
@@ -17841,7 +17944,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const noteDir = this.settings && this.settings.noteSaveMode === 'root'
       ? rootDir
       : `${rootDir}/${dateFolder}`;
-    const safeTitle = sanitizeAttachmentName(title, '文章');
+    const safeTitle = getSocialArticleLocalFolderTitle(sourceUrl, title);
     const articleFolderDir = `${noteDir}/${safeTitle}`;
     const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
     const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
@@ -17970,7 +18073,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const noteDir = this.settings && this.settings.noteSaveMode === 'root'
       ? rootDir
       : `${rootDir}/${dateFolder}`;
-    const safeTitle = sanitizeAttachmentName(title, '文章');
+    const safeTitle = getSocialArticleLocalFolderTitle(sourceUrl, title);
     const articleFolderDir = `${noteDir}/${safeTitle}`;
     const imageRootDir = usePerNoteImageFolder ? articleFolderDir : `${rootDir}/网页图片`;
     const imageDayDir = usePerNoteImageFolder ? `${articleFolderDir}/文章图片` : `${imageRootDir}/${dateFolder}`;
@@ -19831,6 +19934,26 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isWechatArticleUrl(url)) {
         const wechatArticleUrl = normalizeWechatArticleUrl(url);
         let usedNodeFallback = false;
+        let usedWechatSessionFallback = false;
+        const wechatArticleDiagnostic = {
+          source: 'wechat-article',
+          urlKind: wechatArticleUrl.includes('/s?') ? 'query-id' : 'slug',
+          stages: [],
+        };
+        const addWechatArticleStage = (stage, details = {}) => {
+          const entry = {
+            stage,
+            outcome: String(details.outcome || 'unknown'),
+          };
+          if (details.state) entry.state = String(details.state);
+          ['htmlChars', 'markdownChars', 'assetCount', 'durationMs'].forEach((key) => {
+            const value = Number(details[key]);
+            if (Number.isFinite(value) && value >= 0) entry[key] = value;
+          });
+          const errorText = String(details.error || '').replace(/\s+/g, ' ').trim();
+          if (errorText) entry.error = errorText.slice(0, 220);
+          wechatArticleDiagnostic.stages.push(entry);
+        };
         const extracted = await runWechatArticlePipeline({
           url: wechatArticleUrl,
           fetchStatic: async (targetUrl) => {
@@ -19846,28 +19969,119 @@ class WechatObsidianInboxPlugin extends Plugin {
                 headers: articleHeaders,
               })).text || '');
               const staticState = classifyWechatArticleHtml(staticHtml);
+              addWechatArticleStage('obsidian-request', {
+                outcome: 'response',
+                state: staticState,
+                htmlChars: staticHtml.length,
+              });
               // WeChat can return a 200 response containing only its QR/app guide.
               // That is not a usable article, so retry through Node instead of only
               // falling back when requestUrl throws a network exception.
               if (staticState !== 'guide' && staticState !== 'unknown') return staticHtml;
+              const tryWechatSession = async () => {
+                try {
+                  const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || '');
+                  const sessionState = classifyWechatArticleHtml(sessionHtml);
+                  addWechatArticleStage('wechat-session', {
+                    outcome: 'response',
+                    state: sessionState,
+                    htmlChars: sessionHtml.length,
+                  });
+                  if (sessionState === 'article') {
+                    usedWechatSessionFallback = true;
+                    return sessionHtml;
+                  }
+                } catch (sessionError) {
+                  addWechatArticleStage('wechat-session', {
+                    outcome: 'error',
+                    error: sessionError && (sessionError.message || sessionError),
+                  });
+                  // The browser stage below remains the final local fallback.
+                }
+                return '';
+              };
               try {
                 usedNodeFallback = true;
                 const nodeHtml = await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders);
-                return classifyWechatArticleHtml(nodeHtml) === 'article' ? nodeHtml : staticHtml;
-              } catch (_) {
-                return staticHtml;
+                const nodeState = classifyWechatArticleHtml(nodeHtml);
+                addWechatArticleStage('node-fallback', {
+                  outcome: 'response',
+                  state: nodeState,
+                  htmlChars: String(nodeHtml || '').length,
+                });
+                if (nodeState === 'article') return nodeHtml;
+                return (await tryWechatSession()) || staticHtml;
+              } catch (nodeError) {
+                addWechatArticleStage('node-fallback', {
+                  outcome: 'error',
+                  error: nodeError && (nodeError.message || nodeError),
+                });
+                return (await tryWechatSession()) || staticHtml;
               }
             } catch (requestError) {
+              addWechatArticleStage('obsidian-request', {
+                outcome: 'error',
+                error: requestError && (requestError.message || requestError),
+              });
+              let nodeHtml = '';
               try {
                 usedNodeFallback = true;
-                return await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders);
-              } catch (_) {
-                return '';
+                nodeHtml = String(await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders) || '');
+                const nodeState = classifyWechatArticleHtml(nodeHtml);
+                addWechatArticleStage('node-fallback', {
+                  outcome: 'response',
+                  state: nodeState,
+                  htmlChars: nodeHtml.length,
+                });
+                if (nodeState === 'article') return nodeHtml;
+              } catch (nodeError) {
+                addWechatArticleStage('node-fallback', {
+                  outcome: 'error',
+                  error: nodeError && (nodeError.message || nodeError),
+                });
+                // Continue to the persistent WeChat session below.
               }
+              try {
+                const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || '');
+                const sessionState = classifyWechatArticleHtml(sessionHtml);
+                addWechatArticleStage('wechat-session', {
+                  outcome: 'response',
+                  state: sessionState,
+                  htmlChars: sessionHtml.length,
+                });
+                if (sessionState === 'article') {
+                  usedWechatSessionFallback = true;
+                  return sessionHtml;
+                }
+              } catch (sessionError) {
+                addWechatArticleStage('wechat-session', {
+                  outcome: 'error',
+                  error: sessionError && (sessionError.message || sessionError),
+                });
+                // The hidden browser stage below remains the final local fallback.
+              }
+              return nodeHtml;
             }
           },
           renderBrowser: async (targetUrl) => {
-            const rendered = await this.renderWebpageWithElectron(targetUrl);
+            let rendered;
+            try {
+              rendered = await this.renderWechatArticleWithElectron(targetUrl);
+              const renderedText = String(rendered && (rendered.html || rendered.markdown) || '');
+              addWechatArticleStage('hidden-browser', {
+                outcome: 'response',
+                state: classifyWechatArticleHtml(renderedText),
+                htmlChars: String(rendered && rendered.html || '').length,
+                markdownChars: String(rendered && rendered.markdown || '').length,
+                assetCount: Array.isArray(rendered && rendered.assets) ? rendered.assets.length : 0,
+              });
+            } catch (browserError) {
+              addWechatArticleStage('hidden-browser', {
+                outcome: 'error',
+                error: browserError && (browserError.message || browserError),
+              });
+              throw browserError;
+            }
             return {
               markdown: rendered.markdown,
               title: rendered.title,
@@ -19916,6 +20130,12 @@ class WechatObsidianInboxPlugin extends Plugin {
               conversionStatus: 'partial',
               conversionState: extracted.state,
               conversionNote: fallbackConversionNote,
+              conversionDiagnostic: {
+                ...wechatArticleDiagnostic,
+                finalKind: extracted.kind,
+                finalState: extracted.state,
+                finalSource: extracted.source,
+              },
               imageLocalizationFailedCount: fallbackImageLocalizationErrors.length,
               imageLocalizationError: fallbackImageLocalizationErrors.slice(0, 3).join(' | '),
             },
@@ -19928,7 +20148,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           : {};
         const imageLocalizationErrors = [];
         let markdown = extracted.source === 'browser'
-          ? extracted.markdown
+          ? (extracted.markdown || htmlToMarkdown(extracted.html))
           : htmlToMarkdown(extracted.html);
         if (extracted.source === 'browser') {
           const renderedImageStats = {};
@@ -19958,6 +20178,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           );
         }
         const conversionNote = [
+          extracted.bestEffort ? 'wechat-article-best-effort' : '',
+          usedWechatSessionFallback ? '公众号本地会话备用通道已成功抓取' : '',
           usedNodeFallback ? '已通过备用通道抓取' : '',
           imageLocalizationErrors.length
             ? `image-localize-failed=${imageLocalizationErrors.length}: ${imageLocalizationErrors.slice(0, 3).join(' | ')}`
@@ -19978,6 +20200,13 @@ class WechatObsidianInboxPlugin extends Plugin {
             markdown,
             conversionStatus: 'success',
             conversionNote,
+            conversionDiagnostic: {
+              ...wechatArticleDiagnostic,
+              finalKind: extracted.kind,
+              finalState: extracted.state,
+              finalSource: extracted.source,
+              bestEffort: Boolean(extracted.bestEffort),
+            },
             imageLocalizationFailedCount: imageLocalizationErrors.length,
             imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
           },
@@ -20203,56 +20432,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     fileTitle,
   } = {}) {
     const targetFolderName = sanitizeAttachmentName(fileTitle, '文章');
-    if (!shouldStoreWebpageNoteInOwnFolder(
-      sourceUrl,
-      this.settings && this.settings.socialArticleImageStorageMode,
-    )) {
-      return { record, folderName: targetFolderName };
-    }
-
-    const sourceFolderName = sanitizeAttachmentName(assetFolderTitle, '文章');
-    if (sourceFolderName === targetFolderName) {
-      return { record, folderName: targetFolderName };
-    }
-
-    const sourceFolderPath = normalizeVaultPath(`${noteDir}/${sourceFolderName}`);
-    const targetFolderPath = normalizeVaultPath(`${noteDir}/${targetFolderName}`);
-    const sourceImageFolderPath = normalizeVaultPath(`${sourceFolderPath}/文章图片`);
-    const targetImageFolderPath = normalizeVaultPath(`${targetFolderPath}/文章图片`);
-    const sourceImagePath = `${sourceImageFolderPath}/`;
-    const targetImagePath = `${targetImageFolderPath}/`;
-    const metadata = record && record.metadata && typeof record.metadata === 'object'
-      ? record.metadata
-      : {};
-    const markdownFields = ['markdown', 'snapshot', 'contentSnapshot'];
-    const adapter = this.app && this.app.vault && this.app.vault.adapter;
-    if (!adapter || typeof adapter.rename !== 'function' || typeof adapter.exists !== 'function') {
-      return { record, folderName: sourceFolderName };
-    }
-
-    try {
-      // Some converters add localized image references only when final Markdown is
-      // rendered. The actual per-note image directory is the authoritative signal.
-      if (!(await adapter.exists(sourceImageFolderPath)) || await adapter.exists(targetFolderPath)) {
-        return { record, folderName: sourceFolderName };
-      }
-      await adapter.rename(sourceFolderPath, targetFolderPath);
-      const nextMetadata = { ...metadata };
-      markdownFields.forEach((field) => {
-        if (typeof nextMetadata[field] === 'string') {
-          nextMetadata[field] = nextMetadata[field].split(sourceImagePath).join(targetImagePath);
-        }
-      });
-      return {
-        record: { ...record, metadata: nextMetadata },
-        folderName: targetFolderName,
-        sourceImagePath,
-        targetImagePath,
-      };
-    } catch (error) {
-      console.warn('Failed to align social article image folder with note title', error);
-      return { record, folderName: sourceFolderName };
-    }
+    return { record, folderName: targetFolderName };
   }
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const signal = progress.signal || null;
@@ -20334,6 +20514,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         && recordForMarkdown.metadata.mediaResolutionDiagnostic;
       if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object') {
         lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
+      }
+      const conversionDiagnostic = recordForMarkdown.metadata
+        && recordForMarkdown.metadata.conversionDiagnostic;
+      if (!lifecycleOutcomeError.diagnostic
+        && conversionDiagnostic && typeof conversionDiagnostic === 'object') {
+        lifecycleOutcomeError.diagnostic = conversionDiagnostic;
       }
       throw lifecycleOutcomeError;
     }
@@ -20418,6 +20604,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       conversionWarning: getRecordConversionWarning(recordForMarkdown),
       mediaResolutionDiagnostic: recordForMarkdown && recordForMarkdown.metadata
         ? recordForMarkdown.metadata.mediaResolutionDiagnostic || null
+        : null,
+      conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata
+        ? recordForMarkdown.metadata.conversionDiagnostic || null
         : null,
     };
   }
@@ -20979,7 +21168,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
-      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.mediaResolutionDiagnostic);
+      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => (
+        item.mediaResolutionDiagnostic || item.conversionDiagnostic
+      ));
+      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic
+        ? latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic
+        : null;
       this.lastSyncDiagnostic = {
         status: failed.length ? 'failed' : (completionWarnings.length ? 'warning' : 'success'),
         stage: 'finished',
@@ -20991,8 +21185,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         completionWarningCode: completionWarnings.length ? 'COMPLETION_REPORT_FAILED' : '',
         ...(latestFailedDiagnostic
           ? { diagnostic: latestFailedDiagnostic.diagnostic }
-          : (latestSuccessfulDiagnostic
-            ? { diagnostic: latestSuccessfulDiagnostic.mediaResolutionDiagnostic }
+          : (latestSuccessfulDiagnosticPayload
+            ? { diagnostic: latestSuccessfulDiagnosticPayload }
             : {})),
         ...(syncSnapshots.length ? { syncSnapshots } : {}),
         time: new Date().toISOString(),

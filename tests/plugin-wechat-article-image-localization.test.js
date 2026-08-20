@@ -26,7 +26,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 const pluginMainPath = process.env.PLUGIN_MAIN_PATH || '../obsidian-plugin/wechat-inbox-sync/main.js';
 const PluginClass = require(pluginMainPath);
 
-const articleUrl = 'https://mp.weixin.qq.com/s/local-image-test';
+const articleUrl = 'https://mp.weixin.qq.com/s?__biz=local-image-test&mid=1&idx=1&sn=test';
 const imageUrl = 'https://mmbiz.qpic.cn/mmbiz_jpg/local-image-test/640?wx_fmt=jpeg';
 const articleHtml = [
   '<html><head><title>公众号图片本地化测试</title></head><body>',
@@ -105,8 +105,8 @@ async function run() {
   assert.strictEqual(successCase.downloads[0].headers.Referer, articleUrl);
   assert.ok(successCase.downloads[0].headers['User-Agent']);
   assert.strictEqual(successCase.writes.length, 1);
-  assert.ok(successCase.writes[0].filePath.startsWith('临时收集/2026-08-11/公众号图片本地化测试/文章图片/'));
-  assert.ok(localized.metadata.markdown.includes('![[临时收集/2026-08-11/公众号图片本地化测试/文章图片/'));
+  assert.ok(successCase.writes[0].filePath.startsWith('临时收集/2026-08-11/公众号-公众号图片本地化测试/文章图片/'));
+  assert.ok(localized.metadata.markdown.includes('![[临时收集/2026-08-11/公众号-公众号图片本地化测试/文章图片/'));
   assert.strictEqual(localized.metadata.markdown.includes(imageUrl), false);
   assert.strictEqual(localized.metadata.imageLocalizationFailedCount, 0);
 
@@ -128,8 +128,8 @@ async function run() {
     { sourceUrl: 'https://www.xiaohongshu.com/explore/local-image-test' },
   );
   assert.strictEqual(xiaohongshuCase.writes.length, 1);
-  assert.ok(xiaohongshuCase.writes[0].filePath.startsWith('临时收集/2026-08-11/小红书图片本地化测试/文章图片/'));
-  assert.ok(xiaohongshuMarkdown.includes('![[临时收集/2026-08-11/小红书图片本地化测试/文章图片/'));
+  assert.ok(xiaohongshuCase.writes[0].filePath.startsWith('临时收集/2026-08-11/小红书-小红书图片本地化测试/文章图片/'));
+  assert.ok(xiaohongshuMarkdown.includes('![[临时收集/2026-08-11/小红书-小红书图片本地化测试/文章图片/'));
 
   const feishuCase = createPlugin();
   feishuCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
@@ -143,8 +143,8 @@ async function run() {
     { sourceUrl: 'https://example.feishu.cn/docx/local-image-test' },
   );
   assert.strictEqual(feishuCase.writes.length, 1);
-  assert.ok(feishuCase.writes[0].filePath.startsWith('临时收集/2026-08-11/飞书图片本地化测试/文章图片/'));
-  assert.ok(feishuMarkdown.includes('![[临时收集/2026-08-11/飞书图片本地化测试/文章图片/'));
+  assert.ok(feishuCase.writes[0].filePath.startsWith('临时收集/2026-08-11/飞书-飞书图片本地化测试/文章图片/'));
+  assert.ok(feishuMarkdown.includes('![[临时收集/2026-08-11/飞书-飞书图片本地化测试/文章图片/'));
   const remoteOnlyCase = createPlugin();
   remoteOnlyCase.plugin.settings = { socialArticleImageStorageMode: 'remote' };
   const remoteOnly = await hydrate(remoteOnlyCase.plugin);
@@ -202,9 +202,9 @@ async function run() {
     fileTitle: '公众号-最终标题',
   });
   assert.strictEqual(alignedRecord.folderName, '公众号-最终标题');
-  assert.deepStrictEqual(renamedFolders, [{ from: sourceFolder, to: targetFolder }]);
-  assert.ok(alignedRecord.record.metadata.markdown.includes(`${targetFolder}/${imageDirectory}/cover.jpg`));
-  assert.ok(alignedRecord.record.metadata.snapshot.includes(`${targetFolder}/${imageDirectory}/body.jpg`));
+  assert.deepStrictEqual(renamedFolders, []);
+  assert.ok(alignedRecord.record.metadata.markdown.includes(`${sourceFolder}/${imageDirectory}/cover.jpg`));
+  assert.ok(alignedRecord.record.metadata.snapshot.includes(`${sourceFolder}/${imageDirectory}/body.jpg`));
 
   // Some converters add localized image references only while final Markdown is
   // rendered. The existing per-note image directory must still be moved.
@@ -224,15 +224,37 @@ async function run() {
     fileTitle: '公众号-最终标题',
   });
   assert.strictEqual(lateMetadataAligned.folderName, '公众号-最终标题');
-  assert.deepStrictEqual(lateMetadataRenames, [{ from: sourceFolder, to: targetFolder }]);
-  assert.strictEqual(lateMetadataAligned.sourceImagePath, `${sourceFolder}/${imageDirectory}/`);
-  assert.strictEqual(lateMetadataAligned.targetImagePath, `${targetFolder}/${imageDirectory}/`);
+  assert.deepStrictEqual(lateMetadataRenames, []);
+  assert.strictEqual(lateMetadataAligned.sourceImagePath, undefined);
+  assert.strictEqual(lateMetadataAligned.targetImagePath, undefined);
+
+  // The downloader can discover the final title before the note writer does.
+  // In that order images already live in the final folder while the pre-hydration
+  // share-id folder does not exist; the Markdown must still join the final folder.
+  const finalFolderAlreadyExistsCase = createPlugin();
+  const finalFolderRenames = [];
+  const finalFeishuFolder = '临时收集/2026-08-11/飞书图片本地化测试';
+  finalFolderAlreadyExistsCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
+  finalFolderAlreadyExistsCase.plugin.app.vault.adapter = {
+    async exists(path) { return path === finalFeishuFolder; },
+    async rename(from, to) { finalFolderRenames.push({ from, to }); },
+  };
+  const finalFolderAligned = await finalFolderAlreadyExistsCase.plugin.alignSocialArticleImageFolder({
+    metadata: { title: 'final-title-only' },
+  }, {
+    sourceUrl: 'https://example.feishu.cn/docx/local-image-test',
+    noteDir: '临时收集/2026-08-11',
+    assetFolderTitle: '飞书-LPYgwpZiWiJ8bPkAwX9cE56Enuh',
+    fileTitle: '飞书图片本地化测试',
+  });
+  assert.strictEqual(finalFolderAligned.folderName, '飞书图片本地化测试');
+  assert.deepStrictEqual(finalFolderRenames, []);
 
   const writeRecordCase = createPlugin();
   const createdNotes = [];
   const writeRecordRenames = [];
   const writeRecordFolders = [];
-  const writeRecordSourceFolder = '临时收集/2026-08-11/公众号-临时标题';
+  const writeRecordSourceFolder = '临时收集/2026-08-11/公众号-最终标题';
   writeRecordCase.plugin.settings = {
     inboxDir: '临时收集',
     noteSaveMode: 'date',
@@ -271,7 +293,7 @@ async function run() {
   }, '2026-08-11T10:01:00.000Z');
   const writeRecordTargetFolder = '临时收集/2026-08-11/公众号-最终标题';
   assert.strictEqual(writeRecordResult.filePath, `${writeRecordTargetFolder}/公众号-最终标题.md`);
-  assert.deepStrictEqual(writeRecordRenames, [{ from: writeRecordSourceFolder, to: writeRecordTargetFolder }]);
+  assert.deepStrictEqual(writeRecordRenames, []);
   assert.ok(writeRecordFolders.includes(writeRecordTargetFolder));
   assert.strictEqual(createdNotes.length, 1);
   assert.strictEqual(createdNotes[0].path, `${writeRecordTargetFolder}/公众号-最终标题.md`);
@@ -385,11 +407,32 @@ async function run() {
   const nodeRecovered = await hydrateWithHtml(nodeRecoveryCase.plugin, guideHtml);
   assert.strictEqual(nodeRecoveryCalls, 1);
   assert.strictEqual(nodeRecovered.metadata.conversionStatus, 'success');
+  assert.strictEqual(nodeRecovered.metadata.conversionDiagnostic.source, 'wechat-article');
+  assert.strictEqual(nodeRecovered.metadata.conversionDiagnostic.finalState, 'complete');
+  assert.ok(nodeRecovered.metadata.conversionDiagnostic.stages.some((stage) => stage.stage === 'node-fallback'));
   assert.ok(nodeRecovered.metadata.markdown.includes('普通抓取路径会把图片保存到本地附件目录'));
+
+  const sessionRecoveryCase = createPlugin();
+  let sessionRecoveryCalls = 0;
+  let sessionBrowserCalls = 0;
+  sessionRecoveryCase.plugin.downloadWebpageHtmlViaNode = async () => guideHtml;
+  sessionRecoveryCase.plugin.downloadWechatArticleHtmlViaSession = async () => {
+    sessionRecoveryCalls += 1;
+    return articleHtml;
+  };
+  sessionRecoveryCase.plugin.renderWechatArticleWithElectron = async () => {
+    sessionBrowserCalls += 1;
+    throw new Error('browser fallback should not run after session recovery');
+  };
+  const sessionRecovered = await hydrateWithHtml(sessionRecoveryCase.plugin, guideHtml);
+  assert.strictEqual(sessionRecoveryCalls, 1);
+  assert.strictEqual(sessionBrowserCalls, 0);
+  assert.strictEqual(sessionRecovered.metadata.conversionStatus, 'success');
+  assert.ok(sessionRecovered.metadata.conversionNote.includes('公众号本地会话备用通道'));
 
   const browserRecoveryCase = createPlugin();
   let browserRecoveryCalls = 0;
-  browserRecoveryCase.plugin.renderWebpageWithElectron = async () => {
+  browserRecoveryCase.plugin.renderWechatArticleWithElectron = async () => {
     browserRecoveryCalls += 1;
     return {
       title: '浏览器恢复标题',
@@ -405,16 +448,17 @@ async function run() {
 
   const partialGuideCase = createPlugin();
   let partialGuideBrowserCalls = 0;
-  partialGuideCase.plugin.renderWebpageWithElectron = async () => {
+  partialGuideCase.plugin.renderWechatArticleWithElectron = async () => {
     partialGuideBrowserCalls += 1;
     return { markdown: '微信扫一扫可打开此内容 使用完整服务', assets: [] };
   };
   const partialGuide = await hydrateWithHtml(partialGuideCase.plugin, guideHtml);
   assert.strictEqual(partialGuideBrowserCalls, 1);
-  assert.strictEqual(partialGuide.metadata.conversionStatus, 'partial');
-  assert.strictEqual(partialGuide.metadata.conversionState, 'guide');
-  assert.ok(partialGuide.metadata.markdown.includes('引导页可保存标题'));
-  assert.strictEqual(partialGuideCase.writes.length, 1);
+  assert.strictEqual(partialGuide.metadata.conversionStatus, 'success');
+  assert.strictEqual(partialGuide.metadata.conversionDiagnostic.bestEffort, true);
+  assert.ok(partialGuide.metadata.conversionDiagnostic.stages.some((stage) => stage.stage === 'hidden-browser'));
+  assert.ok(String(partialGuide.metadata.markdown || '').trim().length > 0);
+  assert.strictEqual(partialGuideCase.writes.length, 0);
   assert.strictEqual(partialGuide.metadata.markdown.includes('https://mmbiz.qpic.cn/guide-cover.jpg'), false);
   assert.strictEqual(
     PluginClass.__test.getSyncLifecycleOutcomeError({
@@ -426,7 +470,7 @@ async function run() {
   );
 
   const unavailableBrowserCase = createPlugin();
-  unavailableBrowserCase.plugin.renderWebpageWithElectron = async () => ({
+  unavailableBrowserCase.plugin.renderWechatArticleWithElectron = async () => ({
     markdown: '\u5185\u5bb9\u4e0d\u5b58\u5728\uff0c\u8be5\u6587\u7ae0\u5df2\u88ab\u5220\u9664\u3002This explanatory error page is intentionally long enough to fail the article-content guard.',
     assets: [],
   });

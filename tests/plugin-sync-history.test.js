@@ -47,7 +47,7 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
     conversionStatus: 'success',
     markdown: '微信扫一扫可打开此内容，使用完整服务',
   },
-}).code, 'EXTRACTION_FAILED');
+}), null);
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'file',
   metadata: {

@@ -1144,9 +1144,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.107'), {
-  manifestVersion: '1.3.107',
-  runtimeVersion: '1.3.107',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.108'), {
+  manifestVersion: '1.3.108',
+  runtimeVersion: '1.3.108',
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -7307,8 +7307,8 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(cloudHydrated.metadata.title, '云端授权标题');
   assert.ok(cloudHydrated.metadata.markdown.includes('# 云端授权一级标题'));
   assert.ok(cloudHydrated.metadata.markdown.includes('云端授权正文内容。'));
-  assert.ok(cloudHydrated.metadata.markdown.includes('![[临时收集/2026-07-04/云端授权标题/文章图片/云端授权标题-image-01.png]]'));
-  assert.ok(Buffer.isBuffer(cloudFeishuFiles['临时收集/2026-07-04/云端授权标题/文章图片/云端授权标题-image-01.png']));
+  assert.ok(cloudHydrated.metadata.markdown.includes('![[临时收集/2026-07-04/飞书-云端授权标题/文章图片/飞书-云端授权标题-image-01.png]]'));
+  assert.ok(Buffer.isBuffer(cloudFeishuFiles['临时收集/2026-07-04/飞书-云端授权标题/文章图片/飞书-云端授权标题-image-01.png']));
   assert.strictEqual(cloudHydrated.metadata.imageTempUrlMissingCount, 0);
   assert.strictEqual(cloudHydrated.metadata.imageLocalizationFailedCount, 0);
   assert.deepStrictEqual(cloudFeishuCalls, [[
@@ -7392,7 +7392,7 @@ async function runAsyncHydrationTests() {
       content: 'https://my.feishu.cn/docx/fallbackDocxToken',
       metadata: { url: 'https://my.feishu.cn/docx/fallbackDocxToken' },
     }, '临时收集', '2026-07-16', '飞书图片下载兜底');
-    const fallbackImagePath = '临时收集/2026-07-16/飞书图片下载兜底/文章图片/飞书图片下载兜底-image-01.png';
+    const fallbackImagePath = '临时收集/2026-07-16/飞书-飞书图片下载兜底/文章图片/飞书-飞书图片下载兜底-image-01.png';
     assert.ok(fallbackHydrated.metadata.markdown.includes(`![[${fallbackImagePath}]]`));
     assert.deepStrictEqual(fallbackFeishuFiles[fallbackImagePath], fallbackImageBytes);
     assert.strictEqual(fallbackImageRequestCount, 1);
@@ -10170,7 +10170,7 @@ async function runXiaohongshuRemoteImageLocalizationHeadersTest() {
   assert.strictEqual(downloads[0].headers.Referer, 'https://www.xiaohongshu.com/');
   assert.ok(downloads[0].headers['User-Agent']);
   assert.strictEqual(writes.length, 1);
-  assert.ok(localized.includes('![[临时收集/2026-07-20/小红书测试/文章图片/'));
+  assert.ok(localized.includes('![[临时收集/2026-07-20/小红书-小红书测试/文章图片/'));
   assert.strictEqual(localized.includes(imageUrl), false);
 
   downloads.length = 0;
@@ -10609,7 +10609,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.107'),
+        runtime: helpers.getPluginRuntimeIdentity('1.3.108'),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10648,8 +10648,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.107',
-        runtimeVersion: '1.3.107',
+        manifestVersion: '1.3.108',
+        runtimeVersion: '1.3.108',
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -12832,7 +12832,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.107 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes('运行 Bundle：1.3.108 / clipboard-link-path-v1'));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
