@@ -1,7 +1,12 @@
 'use strict';
 
 const WECHAT_ARTICLE_HOST = 'mp.weixin.qq.com';
-const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn'];
+// Keep the article identity plus WeChat's request signature/context. The
+// `chksm` value is part of the signed public-account URL; dropping it can
+// turn a valid article into a small guide/shell page. `scene` is retained
+// because WeChat uses it when routing shared links. Other tracking/secret
+// parameters remain intentionally omitted.
+const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn', 'chksm', 'scene'];
 
 function isWechatArticleUrl(value) {
   try {

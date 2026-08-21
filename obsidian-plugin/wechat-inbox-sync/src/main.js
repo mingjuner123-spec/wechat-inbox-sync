@@ -202,7 +202,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 // persistent session to contribute cookies when the user already has them.
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.110';
+const PLUGIN_RUNTIME_VERSION = '1.3.111';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -10699,6 +10699,20 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
       sandbox: true,
     },
   });
+  // Article extraction must remain invisible. A page can call window.open()
+  // while the hidden renderer is loading; without an explicit deny handler
+  // Electron may create a visible child window and leave the sync without a
+  // usable #js_content result. Keep extraction in this one hidden window.
+  installExternalAppNavigationGuards(win.webContents);
+  if (win && typeof win.on === 'function') {
+    win.on('ready-to-show', () => {
+      try {
+        if (typeof win.isDestroyed !== 'function' || !win.isDestroyed()) win.hide();
+      } catch (_) {
+        // The window can be destroyed by cancellation during startup.
+      }
+    });
+  }
   try {
     if (win.webContents && typeof win.webContents.setUserAgent === 'function') {
       win.webContents.setUserAgent(WECHAT_ARTICLE_MOBILE_USER_AGENT);
