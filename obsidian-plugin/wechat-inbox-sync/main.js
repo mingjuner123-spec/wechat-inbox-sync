@@ -8857,6 +8857,48 @@ function installExternalAppNavigationGuards(webContents) {
   }
 }
 __name(installExternalAppNavigationGuards, "installExternalAppNavigationGuards");
+function installHiddenBrowserChildWindowGuards(webContents) {
+  if (!webContents || typeof webContents.on !== "function") return () => {
+  };
+  const cleanups = [];
+  const preventLegacyWindow = /* @__PURE__ */ __name((event) => {
+    try {
+      if (event && typeof event.preventDefault === "function") event.preventDefault();
+    } catch (error) {
+    }
+  }, "preventLegacyWindow");
+  const destroyCreatedChild = /* @__PURE__ */ __name((_event, childWindow) => {
+    try {
+      if (childWindow && typeof childWindow.hide === "function") childWindow.hide();
+      const destroyed = childWindow && typeof childWindow.isDestroyed === "function" ? childWindow.isDestroyed() : false;
+      if (childWindow && !destroyed && typeof childWindow.destroy === "function") {
+        childWindow.destroy();
+      }
+    } catch (error) {
+    }
+  }, "destroyCreatedChild");
+  webContents.on("new-window", preventLegacyWindow);
+  cleanups.push(() => {
+    if (typeof webContents.removeListener === "function") {
+      webContents.removeListener("new-window", preventLegacyWindow);
+    }
+  });
+  webContents.on("did-create-window", destroyCreatedChild);
+  cleanups.push(() => {
+    if (typeof webContents.removeListener === "function") {
+      webContents.removeListener("did-create-window", destroyCreatedChild);
+    }
+  });
+  return () => {
+    cleanups.splice(0).reverse().forEach((cleanup) => {
+      try {
+        cleanup();
+      } catch (error) {
+      }
+    });
+  };
+}
+__name(installHiddenBrowserChildWindowGuards, "installHiddenBrowserChildWindowGuards");
 function isAllowedXiaohongshuBrowserNavigationUrl(url) {
   try {
     const parsed = new URL(String(url || "").trim());
@@ -8898,6 +8940,7 @@ function installXiaohongshuNavigationGuards(webContents) {
 }
 __name(installXiaohongshuNavigationGuards, "installXiaohongshuNavigationGuards");
 var activeXiaohongshuBrowserWindows = /* @__PURE__ */ new Set();
+var activeDouyinBrowserWindows = /* @__PURE__ */ new Set();
 var activeXiaohongshuLoginPromise = null;
 var activeDouyinLoginPromise = null;
 function trackXiaohongshuBrowserWindow(browserWindow) {
@@ -8911,6 +8954,17 @@ function trackXiaohongshuBrowserWindow(browserWindow) {
   return browserWindow;
 }
 __name(trackXiaohongshuBrowserWindow, "trackXiaohongshuBrowserWindow");
+function trackDouyinBrowserWindow(browserWindow) {
+  if (!browserWindow) return browserWindow;
+  activeDouyinBrowserWindows.add(browserWindow);
+  if (typeof browserWindow.on === "function") {
+    browserWindow.on("closed", () => {
+      activeDouyinBrowserWindows.delete(browserWindow);
+    });
+  }
+  return browserWindow;
+}
+__name(trackDouyinBrowserWindow, "trackDouyinBrowserWindow");
 function bindBrowserWindowToAbortSignal(browserWindow, signal) {
   if (!browserWindow || !signal || typeof signal.addEventListener !== "function") {
     return () => {
@@ -8957,6 +9011,22 @@ function closeActiveXiaohongshuBrowserWindows() {
   return closedCount;
 }
 __name(closeActiveXiaohongshuBrowserWindows, "closeActiveXiaohongshuBrowserWindows");
+function closeActiveDouyinBrowserWindows() {
+  let closedCount = 0;
+  for (const browserWindow of [...activeDouyinBrowserWindows]) {
+    activeDouyinBrowserWindows.delete(browserWindow);
+    try {
+      const destroyed = typeof browserWindow.isDestroyed === "function" ? browserWindow.isDestroyed() : false;
+      if (!destroyed && typeof browserWindow.destroy === "function") {
+        browserWindow.destroy();
+        closedCount += 1;
+      }
+    } catch (error) {
+    }
+  }
+  return closedCount;
+}
+__name(closeActiveDouyinBrowserWindows, "closeActiveDouyinBrowserWindows");
 function installXiaohongshuLoginWindowGuards(webContents) {
   installXiaohongshuNavigationGuards(webContents);
   if (webContents && typeof webContents.setWindowOpenHandler === "function") {
@@ -14566,7 +14636,29 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   if (isXiaohongshuUrl(url)) {
     trackXiaohongshuBrowserWindow(win);
   }
-  const cleanupAbort = isXiaohongshuUrl(url) ? bindBrowserWindowToAbortSignal(win, options.signal) : () => {
+  const isDouyinExtractionWindow = isDouyinUrl(url);
+  if (isDouyinExtractionWindow) {
+    trackDouyinBrowserWindow(win);
+  }
+  let cleanupHiddenChildWindowGuards = /* @__PURE__ */ __name(() => {
+  }, "cleanupHiddenChildWindowGuards");
+  if (isDouyinExtractionWindow) {
+    cleanupHiddenChildWindowGuards = installHiddenBrowserChildWindowGuards(win.webContents);
+    const hideWindow = /* @__PURE__ */ __name(() => {
+      try {
+        const destroyed = typeof win.isDestroyed === "function" && win.isDestroyed();
+        if (!destroyed && typeof win.hide === "function") win.hide();
+      } catch (error) {
+      }
+    }, "hideWindow");
+    hideWindow();
+    if (typeof win.on === "function") {
+      win.on("ready-to-show", hideWindow);
+      win.on("show", hideWindow);
+      win.__wechatInboxDouyinHideWindow = hideWindow;
+    }
+  }
+  const cleanupAbort = isXiaohongshuUrl(url) || isDouyinExtractionWindow ? bindBrowserWindowToAbortSignal(win, options.signal) : () => {
   };
   const capturedRequests = [];
   const captureDouyinState = isDouyinUrl(url);
@@ -14833,6 +14925,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     ]);
   } finally {
     cleanupAbort();
+    cleanupHiddenChildWindowGuards();
     installedWebRequestHandlers.forEach((method) => {
       try {
         if (browserSession && browserSession.webRequest && typeof browserSession.webRequest[method] === "function") {
@@ -14850,6 +14943,14 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     try {
       if (debuggerAttached && debuggerApi && typeof debuggerApi.detach === "function") {
         debuggerApi.detach();
+      }
+    } catch (error) {
+    }
+    try {
+      if (win && typeof win.removeListener === "function" && win.__wechatInboxDouyinHideWindow) {
+        win.removeListener("ready-to-show", win.__wechatInboxDouyinHideWindow);
+        win.removeListener("show", win.__wechatInboxDouyinHideWindow);
+        delete win.__wechatInboxDouyinHideWindow;
       }
     } catch (error) {
     }
@@ -18380,7 +18481,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       } catch (error) {
       }
     }
-    if (context && closeActiveXiaohongshuBrowserWindows() > 0) {
+    if (closeActiveXiaohongshuBrowserWindows() + closeActiveDouyinBrowserWindows() > 0) {
       stopped = true;
     }
     if (!stopped) {
@@ -24098,13 +24199,16 @@ WechatObsidianInboxPlugin.__test = {
   shouldBlockExternalAppUrl,
   installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
+  installHiddenBrowserChildWindowGuards,
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
   installXiaohongshuLoginWindowGuards,
   trackXiaohongshuBrowserWindow,
+  trackDouyinBrowserWindow,
   bindBrowserWindowToAbortSignal,
   closeActiveXiaohongshuBrowserWindows,
+  closeActiveDouyinBrowserWindows,
   enableDebuggerNetworkCapture,
   beginBestEffortBrowserLoad,
   createBrowserLoadFailureError,

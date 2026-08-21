@@ -4938,6 +4938,49 @@ function installExternalAppNavigationGuards(webContents) {
   }
 }
 
+// Social-media extraction pages must never be allowed to escape into a visible
+// child window.  setWindowOpenHandler is the primary guard, but older Electron
+// builds can still emit the legacy `new-window` event or create a child before
+// the handler is applied.  Keep this guard limited to hidden extraction
+// windows; explicit login windows continue to use their existing behavior.
+function installHiddenBrowserChildWindowGuards(webContents) {
+  if (!webContents || typeof webContents.on !== 'function') return () => {};
+  const cleanups = [];
+  const preventLegacyWindow = (event) => {
+    try {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    } catch (error) {}
+  };
+  const destroyCreatedChild = (_event, childWindow) => {
+    try {
+      if (childWindow && typeof childWindow.hide === 'function') childWindow.hide();
+      const destroyed = childWindow && typeof childWindow.isDestroyed === 'function'
+        ? childWindow.isDestroyed()
+        : false;
+      if (childWindow && !destroyed && typeof childWindow.destroy === 'function') {
+        childWindow.destroy();
+      }
+    } catch (error) {}
+  };
+  webContents.on('new-window', preventLegacyWindow);
+  cleanups.push(() => {
+    if (typeof webContents.removeListener === 'function') {
+      webContents.removeListener('new-window', preventLegacyWindow);
+    }
+  });
+  webContents.on('did-create-window', destroyCreatedChild);
+  cleanups.push(() => {
+    if (typeof webContents.removeListener === 'function') {
+      webContents.removeListener('did-create-window', destroyCreatedChild);
+    }
+  });
+  return () => {
+    cleanups.splice(0).reverse().forEach((cleanup) => {
+      try { cleanup(); } catch (error) {}
+    });
+  };
+}
+
 function isAllowedXiaohongshuBrowserNavigationUrl(url) {
   try {
     const parsed = new URL(String(url || '').trim());
@@ -4997,6 +5040,7 @@ function installXiaohongshuNavigationGuards(webContents) {
 }
 
 const activeXiaohongshuBrowserWindows = new Set();
+const activeDouyinBrowserWindows = new Set();
 let activeXiaohongshuLoginPromise = null;
 let activeDouyinLoginPromise = null;
 
@@ -5006,6 +5050,17 @@ function trackXiaohongshuBrowserWindow(browserWindow) {
   if (typeof browserWindow.on === 'function') {
     browserWindow.on('closed', () => {
       activeXiaohongshuBrowserWindows.delete(browserWindow);
+    });
+  }
+  return browserWindow;
+}
+
+function trackDouyinBrowserWindow(browserWindow) {
+  if (!browserWindow) return browserWindow;
+  activeDouyinBrowserWindows.add(browserWindow);
+  if (typeof browserWindow.on === 'function') {
+    browserWindow.on('closed', () => {
+      activeDouyinBrowserWindows.delete(browserWindow);
     });
   }
   return browserWindow;
@@ -5047,6 +5102,25 @@ function closeActiveXiaohongshuBrowserWindows() {
   let closedCount = 0;
   for (const browserWindow of [...activeXiaohongshuBrowserWindows]) {
     activeXiaohongshuBrowserWindows.delete(browserWindow);
+    try {
+      const destroyed = typeof browserWindow.isDestroyed === 'function'
+        ? browserWindow.isDestroyed()
+        : false;
+      if (!destroyed && typeof browserWindow.destroy === 'function') {
+        browserWindow.destroy();
+        closedCount += 1;
+      }
+    } catch (error) {
+      // The window may have closed between the state check and destroy call.
+    }
+  }
+  return closedCount;
+}
+
+function closeActiveDouyinBrowserWindows() {
+  let closedCount = 0;
+  for (const browserWindow of [...activeDouyinBrowserWindows]) {
+    activeDouyinBrowserWindows.delete(browserWindow);
     try {
       const destroyed = typeof browserWindow.isDestroyed === 'function'
         ? browserWindow.isDestroyed()
@@ -11376,7 +11450,29 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   if (isXiaohongshuUrl(url)) {
     trackXiaohongshuBrowserWindow(win);
   }
-  const cleanupAbort = isXiaohongshuUrl(url)
+  const isDouyinExtractionWindow = isDouyinUrl(url);
+  if (isDouyinExtractionWindow) {
+    trackDouyinBrowserWindow(win);
+  }
+  let cleanupHiddenChildWindowGuards = () => {};
+  if (isDouyinExtractionWindow) {
+    cleanupHiddenChildWindowGuards = installHiddenBrowserChildWindowGuards(win.webContents);
+    // Keep the extraction renderer hidden even on Electron builds that emit a
+    // ready-to-show/show event while navigating a redirect chain.
+    const hideWindow = () => {
+      try {
+        const destroyed = typeof win.isDestroyed === 'function' && win.isDestroyed();
+        if (!destroyed && typeof win.hide === 'function') win.hide();
+      } catch (error) {}
+    };
+    hideWindow();
+    if (typeof win.on === 'function') {
+      win.on('ready-to-show', hideWindow);
+      win.on('show', hideWindow);
+      win.__wechatInboxDouyinHideWindow = hideWindow;
+    }
+  }
+  const cleanupAbort = isXiaohongshuUrl(url) || isDouyinExtractionWindow
     ? bindBrowserWindowToAbortSignal(win, options.signal)
     : () => {};
 
@@ -11661,6 +11757,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     ]);
   } finally {
     cleanupAbort();
+    cleanupHiddenChildWindowGuards();
     installedWebRequestHandlers.forEach((method) => {
       try {
         if (browserSession && browserSession.webRequest && typeof browserSession.webRequest[method] === 'function') {
@@ -11676,6 +11773,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     try {
       if (debuggerAttached && debuggerApi && typeof debuggerApi.detach === 'function') {
         debuggerApi.detach();
+      }
+    } catch (error) {}
+    try {
+      if (win && typeof win.removeListener === 'function' && win.__wechatInboxDouyinHideWindow) {
+        win.removeListener('ready-to-show', win.__wechatInboxDouyinHideWindow);
+        win.removeListener('show', win.__wechatInboxDouyinHideWindow);
+        delete win.__wechatInboxDouyinHideWindow;
       }
     } catch (error) {}
     if (win && typeof win.destroy === 'function') {
@@ -15546,7 +15650,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         // Ignore process cleanup failures.
       }
     }
-    if (context && closeActiveXiaohongshuBrowserWindows() > 0) {
+    if (closeActiveXiaohongshuBrowserWindows() + closeActiveDouyinBrowserWindows() > 0) {
       stopped = true;
     }
     if (!stopped) {
@@ -22141,13 +22245,16 @@ WechatObsidianInboxPlugin.__test = {
   shouldBlockExternalAppUrl,
   installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
+  installHiddenBrowserChildWindowGuards,
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
   installXiaohongshuLoginWindowGuards,
   trackXiaohongshuBrowserWindow,
+  trackDouyinBrowserWindow,
   bindBrowserWindowToAbortSignal,
   closeActiveXiaohongshuBrowserWindows,
+  closeActiveDouyinBrowserWindows,
   enableDebuggerNetworkCapture,
   beginBestEffortBrowserLoad,
   createBrowserLoadFailureError,
