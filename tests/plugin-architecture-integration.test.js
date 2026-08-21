@@ -21,6 +21,7 @@ const expectedModules = [
   'document-text-extraction-utils',
   'douyin-media-utils',
   'feishu-markdown-utils',
+  'feishu-media-utils',
   'input-normalization-utils',
   'local-douyin-resolver-utils',
   'media-file-utils',
