@@ -1060,6 +1060,239 @@ var require_feishu_markdown_utils = __commonJS({
   }
 });
 
+// src/feishu-media-utils.js
+var require_feishu_media_utils = __commonJS({
+  "src/feishu-media-utils.js"(exports2, module2) {
+    "use strict";
+    var FEISHU_MEDIA_DOWNLOAD_SCOPE2 = "docs:document.media:download";
+    function normalizeFeishuImageToken2(value) {
+      return String(value || "").trim().replace(/^feishu-image:/i, "").trim();
+    }
+    __name(normalizeFeishuImageToken2, "normalizeFeishuImageToken");
+    function normalizeFeishuScope2(scope) {
+      if (Array.isArray(scope)) {
+        return scope.flatMap((item) => String(item || "").split(/[\s,]+/)).map((item) => item.trim()).filter(Boolean);
+      }
+      return String(scope || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
+    }
+    __name(normalizeFeishuScope2, "normalizeFeishuScope");
+    function hasFeishuMediaDownloadScope2(scope) {
+      return normalizeFeishuScope2(scope).includes(FEISHU_MEDIA_DOWNLOAD_SCOPE2);
+    }
+    __name(hasFeishuMediaDownloadScope2, "hasFeishuMediaDownloadScope");
+    function collectFeishuImageTokens2({
+      markdown = "",
+      imageTokens = [],
+      imageTmpDownloadUrls = {},
+      blocks = [],
+      imageTokenCount = 0
+    } = {}) {
+      const fromMarkdown = Array.from(String(markdown || "").matchAll(/feishu-image:([^\s)]+)/gi)).map((match) => normalizeFeishuImageToken2(match[1])).filter(Boolean);
+      const explicit = Array.isArray(imageTokens) ? imageTokens.map(normalizeFeishuImageToken2).filter(Boolean) : [];
+      const tmpKeys = imageTmpDownloadUrls && typeof imageTmpDownloadUrls === "object" ? Object.keys(imageTmpDownloadUrls).map(normalizeFeishuImageToken2).filter(Boolean) : [];
+      const blockTokens = [];
+      const visitBlock = /* @__PURE__ */ __name((value, imageContext = false) => {
+        if (!value || typeof value !== "object") return;
+        if (Array.isArray(value)) {
+          value.forEach((item) => visitBlock(item, imageContext));
+          return;
+        }
+        const isImageBlock = imageContext || Boolean(
+          value.image || value.raw_image || value.image_block || value.type === "image" || value.block_type === 27 || value.block_type === "image"
+        );
+        if (isImageBlock) {
+          ["token", "file_token", "fileToken", "image_token", "imageToken"].forEach((key) => {
+            const token = normalizeFeishuImageToken2(value[key]);
+            if (token) blockTokens.push(token);
+          });
+        }
+        Object.entries(value).forEach(([key, child]) => {
+          if (key === "image" || key === "raw_image" || key === "image_block") {
+            visitBlock(child, true);
+          } else if (child && typeof child === "object") {
+            visitBlock(child, isImageBlock && /(?:image|file|media)/i.test(key));
+          }
+        });
+      }, "visitBlock");
+      visitBlock(blocks);
+      const tokens = Array.from(/* @__PURE__ */ new Set([...explicit, ...fromMarkdown, ...tmpKeys, ...blockTokens]));
+      const normalizedTmpDownloadUrls = {};
+      if (imageTmpDownloadUrls && typeof imageTmpDownloadUrls === "object") {
+        Object.entries(imageTmpDownloadUrls).forEach(([key, value]) => {
+          const token = normalizeFeishuImageToken2(key);
+          const url = String(value || "").trim();
+          if (token && url && !Object.prototype.hasOwnProperty.call(normalizedTmpDownloadUrls, token)) {
+            normalizedTmpDownloadUrls[token] = url;
+          }
+        });
+      }
+      const declaredCount = Number(imageTokenCount) || 0;
+      return {
+        tokens,
+        declaredCount,
+        unknownIdentityCount: Math.max(0, declaredCount - tokens.length),
+        markdownTokenCount: fromMarkdown.length,
+        blockTokenCount: blockTokens.length,
+        imageTmpDownloadUrls: normalizedTmpDownloadUrls
+      };
+    }
+    __name(collectFeishuImageTokens2, "collectFeishuImageTokens");
+    function buildFeishuImageTokenAsset2(token, localIndex, extra = {}) {
+      const normalizedToken = normalizeFeishuImageToken2(token);
+      return {
+        token: normalizedToken,
+        src: `feishu-image:${normalizedToken}`,
+        localIndex: Math.max(0, Number(localIndex) || 0),
+        ...extra
+      };
+    }
+    __name(buildFeishuImageTokenAsset2, "buildFeishuImageTokenAsset");
+    function decodeBasicHtmlEntities(value) {
+      return String(value || "").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/g, "'");
+    }
+    __name(decodeBasicHtmlEntities, "decodeBasicHtmlEntities");
+    function normalizeMarkdownImageSource(value, decodeHtmlEntities2 = decodeBasicHtmlEntities) {
+      const decoder = typeof decodeHtmlEntities2 === "function" ? decodeHtmlEntities2 : decodeBasicHtmlEntities;
+      return String(decoder(String(value || "").trim()) || "").trim();
+    }
+    __name(normalizeMarkdownImageSource, "normalizeMarkdownImageSource");
+    function findFeishuTokenForSource(source) {
+      const normalized = String(source || "").trim();
+      const match = normalized.match(/^feishu-image:([^\s)]+)/i);
+      return match ? normalizeFeishuImageToken2(match[1]) : "";
+    }
+    __name(findFeishuTokenForSource, "findFeishuTokenForSource");
+    function replaceFeishuImageTokenPlaceholders2(markdown, assets = [], docUrl = "", tokenUrlMap = {}, buildFallbackUrl = () => "", decodeHtmlEntities2 = (source) => source) {
+      let result = String(markdown || "");
+      if (!result.includes("feishu-image:")) return result;
+      const tokenPattern = /!\[([^\]]*)\]\(feishu-image:([^\s)]+)\)/gi;
+      return result.replace(tokenPattern, (full, alt, rawToken) => {
+        const token = normalizeFeishuImageToken2(rawToken);
+        if (!token) return full;
+        const mappedUrl = String(tokenUrlMap && tokenUrlMap[token] || "").trim();
+        if (/^https?:\/\//i.test(mappedUrl)) {
+          return `![${alt || "图片"}](${mappedUrl})`;
+        }
+        const tokenAsset = Array.isArray(assets) ? assets.find((asset) => normalizeFeishuImageToken2(asset && asset.token) === token) || assets.find((asset) => findFeishuTokenForSource(asset && asset.src) === token) || assets.find((asset) => String(asset && asset.src || "").includes(token)) : null;
+        if (tokenAsset) {
+          const localPath = String(tokenAsset.localPath || tokenAsset.imagePath || "").trim();
+          if (localPath) return `![[${localPath}]]`;
+          const source = normalizeMarkdownImageSource(tokenAsset.src, decodeHtmlEntities2);
+          if (/^https?:\/\//i.test(source)) {
+            return `![${alt || "图片"}](${source})`;
+          }
+        }
+        const fallback = typeof buildFallbackUrl === "function" ? String(buildFallbackUrl(token, docUrl) || "").trim() : "";
+        return /^https?:\/\//i.test(fallback) ? `![${alt || "图片"}](${fallback})` : full;
+      });
+    }
+    __name(replaceFeishuImageTokenPlaceholders2, "replaceFeishuImageTokenPlaceholders");
+    function replaceFeishuImageAssetReference2(markdown, asset, imagePath, decodeHtmlEntities2 = decodeBasicHtmlEntities, options = {}) {
+      const token = normalizeFeishuImageToken2(asset && asset.token);
+      const assetSource = normalizeMarkdownImageSource(asset && asset.src, decodeHtmlEntities2);
+      const targetPath = String(imagePath || "").trim();
+      if (!targetPath) return { markdown: String(markdown || ""), replacementCount: 0 };
+      let replacementCount = 0;
+      const nextMarkdown = String(markdown || "").replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, alt, rawSource) => {
+        const source = normalizeMarkdownImageSource(rawSource, decodeHtmlEntities2);
+        const sourceToken = findFeishuTokenForSource(source);
+        const matched = Boolean(
+          token && sourceToken === token || assetSource && source === assetSource
+        );
+        if (!matched) return full;
+        replacementCount += 1;
+        return `![[${targetPath}]]`;
+      });
+      if (replacementCount > 0) return { markdown: nextMarkdown, replacementCount };
+      const referenceIndex = Number(options && options.referenceIndex);
+      if (Number.isInteger(referenceIndex) && referenceIndex >= 0) {
+        let imageIndex = -1;
+        let cursor = 0;
+        const positionalMarkdown = nextMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, alt, rawSource) => {
+          const source = normalizeMarkdownImageSource(rawSource, decodeHtmlEntities2);
+          if (imageIndex < 0 && !/^\[\[/.test(source) && cursor === referenceIndex) imageIndex = cursor;
+          cursor += 1;
+          return full;
+        });
+        if (imageIndex >= 0) {
+          let currentIndex = 0;
+          const replaced = positionalMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, alt, rawSource) => {
+            const next = currentIndex === imageIndex ? `![[${targetPath}]]` : full;
+            currentIndex += 1;
+            return next;
+          });
+          if (replaced !== positionalMarkdown) return { markdown: replaced, replacementCount: 1 };
+        }
+      }
+      if (options && options.appendWhenUnmatched) {
+        const suffix = `![[${targetPath}]]`;
+        const separator = String(nextMarkdown || "").trim() ? "\n\n" : "";
+        return {
+          markdown: `${nextMarkdown.trimEnd()}${separator}${suffix}`,
+          replacementCount: 1,
+          appended: true
+        };
+      }
+      return { markdown: nextMarkdown, replacementCount: 0 };
+    }
+    __name(replaceFeishuImageAssetReference2, "replaceFeishuImageAssetReference");
+    function buildFeishuMediaDiagnostic2({
+      scope = "",
+      scopeKnown = null,
+      tokenCount = 0,
+      official = {},
+      temporary = {},
+      browser = {},
+      markdownReferenceCount = 0,
+      localizedCount = 0,
+      unresolvedCount = 0,
+      errors = []
+    } = {}) {
+      const normalizedScope = normalizeFeishuScope2(scope);
+      const mediaScopeKnown = scopeKnown === null ? normalizedScope.length > 0 : Boolean(scopeKnown);
+      const mediaScopePresent = hasFeishuMediaDownloadScope2(normalizedScope);
+      return {
+        mediaScopeKnown,
+        mediaScopeStatus: !mediaScopeKnown ? "unknown" : mediaScopePresent ? "present" : "missing",
+        mediaScopePresent,
+        requiredScope: FEISHU_MEDIA_DOWNLOAD_SCOPE2,
+        imageTokenCount: Math.max(0, Number(tokenCount) || 0),
+        official: {
+          attempted: Boolean(official.attempted),
+          succeeded: Math.max(0, Number(official.succeeded) || 0),
+          failed: Math.max(0, Number(official.failed) || 0)
+        },
+        temporary: {
+          attempted: Boolean(temporary.attempted),
+          succeeded: Math.max(0, Number(temporary.succeeded) || 0),
+          failed: Math.max(0, Number(temporary.failed) || 0)
+        },
+        browser: {
+          attempted: Boolean(browser.attempted),
+          succeeded: Math.max(0, Number(browser.succeeded) || 0),
+          failed: Math.max(0, Number(browser.failed) || 0)
+        },
+        markdownReferenceCount: Math.max(0, Number(markdownReferenceCount) || 0),
+        localizedCount: Math.max(0, Number(localizedCount) || 0),
+        unresolvedCount: Math.max(0, Number(unresolvedCount) || 0),
+        errors: Array.from(new Set((Array.isArray(errors) ? errors : [errors]).map((error) => String(error || "").replace(/[\r\n]+/g, " ").trim()).filter(Boolean))).slice(0, 8)
+      };
+    }
+    __name(buildFeishuMediaDiagnostic2, "buildFeishuMediaDiagnostic");
+    module2.exports = {
+      FEISHU_MEDIA_DOWNLOAD_SCOPE: FEISHU_MEDIA_DOWNLOAD_SCOPE2,
+      normalizeFeishuImageToken: normalizeFeishuImageToken2,
+      normalizeFeishuScope: normalizeFeishuScope2,
+      hasFeishuMediaDownloadScope: hasFeishuMediaDownloadScope2,
+      collectFeishuImageTokens: collectFeishuImageTokens2,
+      buildFeishuImageTokenAsset: buildFeishuImageTokenAsset2,
+      replaceFeishuImageTokenPlaceholders: replaceFeishuImageTokenPlaceholders2,
+      replaceFeishuImageAssetReference: replaceFeishuImageAssetReference2,
+      buildFeishuMediaDiagnostic: buildFeishuMediaDiagnostic2
+    };
+  }
+});
+
 // src/progress-notice-utils.js
 var require_progress_notice_utils = __commonJS({
   "src/progress-notice-utils.js"(exports2, module2) {
@@ -5366,6 +5599,17 @@ var {
   postProcessFeishuMarkdown,
   isFeishuMarkdownLikelyTruncated
 } = require_feishu_markdown_utils();
+var {
+  FEISHU_MEDIA_DOWNLOAD_SCOPE,
+  normalizeFeishuImageToken,
+  normalizeFeishuScope,
+  hasFeishuMediaDownloadScope,
+  collectFeishuImageTokens,
+  buildFeishuImageTokenAsset,
+  replaceFeishuImageTokenPlaceholders: replaceFeishuImageTokenPlaceholdersFromModule,
+  replaceFeishuImageAssetReference,
+  buildFeishuMediaDiagnostic
+} = require_feishu_media_utils();
 var {
   buildConversionWarningsNotice,
   buildLocalAsrProgressKey,
@@ -14402,6 +14646,7 @@ async function renderUrlToMarkdownWithElectron(url) {
         const cvBlockCount = Object.keys(bm).length;
         const seqLen = Array.isArray(cv.block_sequence) ? cv.block_sequence.length : -1;
         const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(cv);
+        result.imageTokens = Array.from(String(clientVarsMarkdown || "").matchAll(/feishu-image:([^\s)]+)/gi)).map((match) => String(match[1] || "").trim()).filter(Boolean);
         const renderedLen = String(result.markdown || "").length;
         result.markdown = mergeFeishuRenderedAndClientVarsMarkdown(result.markdown, clientVarsMarkdown);
         __feishuDiag = `cv:ok bm=${cvBlockCount} seq=${seqLen} rendered=${renderedLen} structured=${clientVarsMarkdown.length} merged=${result.markdown.length}`;
@@ -14482,6 +14727,23 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
         const seenLines = new Set();
         const imageAssets = [];
         const seenImages = new Set();
+        const getImageToken = (img) => {
+          if (!img || typeof img.getAttribute !== 'function') return '';
+          const keys = [
+            'data-token', 'data-file-token', 'data-file_token',
+            'data-image-token', 'data-image_token', 'data-media-token',
+          ];
+          for (const key of keys) {
+            const value = String(img.getAttribute(key) || '').trim();
+            if (value) return value;
+          }
+          const dataset = img.dataset || {};
+          for (const key of ['token', 'fileToken', 'file_token', 'imageToken', 'image_token', 'mediaToken']) {
+            const value = String(dataset[key] || '').trim();
+            if (value) return value;
+          }
+          return '';
+        };
         const pushLine = (value) => {
           const text = clean(value);
           if (!text || text.length < 2 || seenLines.has(text)) return;
@@ -14498,7 +14760,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
             if ((width && height && (width < 80 || height < 80)) || /avatar|portrait|icon|logo/i.test(className)) return;
             seenImages.add(src);
             const alt = clean(img.alt || '图片') || '图片';
-            imageAssets.push({ src, alt, width, height });
+            imageAssets.push({ src, alt, width, height, token: getImageToken(img) });
             lines.push('![' + alt + '](' + src + ')');
           } catch (error) {}
         };
@@ -14614,12 +14876,33 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
           reader.onerror = () => reject(reader.error || new Error('image read failed'));
           reader.readAsDataURL(blob);
         });
+        const isTrustedFeishuImageSource = (source) => {
+          try {
+            const parsed = new URL(String(source || ''), location.href);
+            const host = String(parsed.hostname || '').toLowerCase().replace(/.$/, '');
+            if (parsed.origin === location.origin) return true;
+            return host === 'feishu.cn'
+              || host.endsWith('.feishu.cn')
+              || host === 'feishu.net'
+              || host.endsWith('.feishu.net')
+              || host === 'feishucdn.com'
+              || host.endsWith('.feishucdn.com')
+              || host === 'feishuusercontent.com'
+              || host.endsWith('.feishuusercontent.com')
+              || host === 'larksuite.com'
+              || host.endsWith('.larksuite.com')
+              || host === 'larkoffice.com'
+              || host.endsWith('.larkoffice.com');
+          } catch (error) {
+            return false;
+          }
+        };
         const uniqueAssets = [];
         for (const asset of imageAssets) {
-          const next = { src: asset.src, alt: asset.alt || '图片' };
+          const next = { src: asset.src, alt: asset.alt || '图片', token: asset.token || '' };
           if (asset.src.startsWith('data:')) {
             next.dataUrl = asset.src;
-          } else if (/feishu\\.cn|feishu\\.net|internal-api-drive-stream/i.test(asset.src)) {
+          } else if (isTrustedFeishuImageSource(asset.src)) {
             try {
               const blob = await fetch(asset.src, { credentials: 'include' }).then((response) => response.blob());
               if (blob && blob.size && /^image\\//i.test(blob.type || '')) {
@@ -17000,28 +17283,14 @@ function buildFeishuImageFallbackUrl(token, docUrl) {
 }
 __name(buildFeishuImageFallbackUrl, "buildFeishuImageFallbackUrl");
 function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl, tokenUrlMap = {}) {
-  let result = String(markdown || "");
-  if (!result.includes("feishu-image:")) return result;
-  const tokenPattern = /!\[([^\]]*)\]\(feishu-image:([^)]+)\)/g;
-  result = result.replace(tokenPattern, (full, alt, token) => {
-    const t = String(token || "").trim();
-    if (!t) return full;
-    const mappedUrl = String(tokenUrlMap && tokenUrlMap[t] || "").trim();
-    if (/^https?:\/\//i.test(mappedUrl)) {
-      return `![${alt || "图片"}](${mappedUrl})`;
-    }
-    if (Array.isArray(assets)) {
-      for (const asset of assets) {
-        const src = String(asset && asset.src || "");
-        if (src && src.indexOf(t) !== -1 && /^https?:\/\//i.test(src)) {
-          return `![${alt || "图片"}](${src})`;
-        }
-      }
-    }
-    const fallback = buildFeishuImageFallbackUrl(t, docUrl);
-    return fallback ? `![${alt || "图片"}](${fallback})` : full;
-  });
-  return result;
+  return replaceFeishuImageTokenPlaceholdersFromModule(
+    markdown,
+    assets,
+    docUrl,
+    tokenUrlMap,
+    buildFeishuImageFallbackUrl,
+    decodeHtmlEntities
+  );
 }
 __name(replaceFeishuImageTokenPlaceholders, "replaceFeishuImageTokenPlaceholders");
 function getRecordUrl(record, metadata = record && record.metadata || {}) {
@@ -17863,6 +18132,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       source: "feishu-cloud-oauth",
       title: String(data && data.title || "").trim(),
       markdown: extractFeishuMarkdownFromOpenApiBlocks(blocks),
+      blocks,
       documentId: String(data && data.documentId || "").trim(),
       blockCount: Number(data && data.blockCount || blocks.length) || blocks.length,
       imageTmpDownloadUrls: data && data.imageTmpDownloadUrls && typeof data.imageTmpDownloadUrls === "object" ? data.imageTmpDownloadUrls : {},
@@ -20897,14 +21167,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         reportError(asset, error);
         continue;
       }
-      const normalizedAssetSource = decodeHtmlEntities(assetSource).trim();
-      let replacementCount = 0;
-      nextMarkdown = nextMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, _alt, markdownSource) => {
-        const normalizedMarkdownSource = decodeHtmlEntities(String(markdownSource || "").trim()).trim();
-        if (normalizedMarkdownSource !== normalizedAssetSource) return full;
-        replacementCount += 1;
-        return `![[${imagePath}]]`;
-      });
+      const replacement = replaceFeishuImageAssetReference(
+        nextMarkdown,
+        asset,
+        imagePath,
+        decodeHtmlEntities,
+        {
+          referenceIndex: isFeishuSource && options.allowPositionalReferenceFallback && asset && asset.token ? Math.max(0, Number(asset.localIndex || 1) - 1) : null,
+          appendWhenUnmatched: Boolean(
+            isFeishuSource && options.allowUnmatchedImageAppend && asset && asset.token
+          )
+        }
+      );
+      nextMarkdown = replacement.markdown;
+      const replacementCount = replacement.replacementCount;
       if (replacementCount > 0) {
         if (stats) {
           stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
@@ -21569,15 +21845,34 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || "飞书文档";
-            const imageTmpDownloadUrls = cloudOpenApiResult.imageTmpDownloadUrls || {};
+            let imageTmpDownloadUrls = cloudOpenApiResult.imageTmpDownloadUrls || {};
             const markdownImageTokens = Array.from(String(cloudOpenApiResult.markdown || "").matchAll(/feishu-image:([^\s)]+)/g)).map((match) => String(match[1] || "").trim()).filter(Boolean);
             const explicitImageTokens = (cloudOpenApiResult.imageTokens || []).map((item) => String(item || "").trim()).filter(Boolean);
-            const hasCanonicalImageOrder = explicitImageTokens.length > 0 || markdownImageTokens.length > 0;
-            const imageTokens = Array.from(new Set([
+            let hasCanonicalImageOrder = explicitImageTokens.length > 0 || markdownImageTokens.length > 0;
+            let imageTokens = Array.from(new Set([
               ...explicitImageTokens,
               ...markdownImageTokens,
               ...Object.keys(imageTmpDownloadUrls)
             ].map((item) => String(item || "").trim()).filter(Boolean)));
+            const imageTokenInfo = collectFeishuImageTokens({
+              markdown: cloudOpenApiResult.markdown,
+              imageTokens,
+              imageTmpDownloadUrls,
+              blocks: cloudOpenApiResult.blocks,
+              imageTokenCount: cloudOpenApiResult.imageTokenCount
+            });
+            imageTokens = imageTokenInfo.tokens;
+            imageTmpDownloadUrls = imageTokenInfo.imageTmpDownloadUrls;
+            hasCanonicalImageOrder = hasCanonicalImageOrder || imageTokenInfo.blockTokenCount > 0;
+            const feishuMediaScope = String(feishuCloudOAuthStatus && feishuCloudOAuthStatus.scope || "").trim();
+            const feishuMediaScopeTokens = normalizeFeishuScope(feishuMediaScope);
+            const feishuMediaScopeKnown = feishuMediaScopeTokens.length > 0;
+            const feishuMediaScopeBlocked = feishuMediaScopeKnown && !hasFeishuMediaDownloadScope(feishuMediaScopeTokens);
+            const feishuMediaStage = {
+              official: { attempted: false, succeeded: 0, failed: 0 },
+              temporary: { attempted: false, succeeded: 0, failed: 0 },
+              browser: { attempted: false, succeeded: 0, failed: 0 }
+            };
             const resolvedImageTokens = /* @__PURE__ */ new Set();
             const imageAttemptErrorsByToken = /* @__PURE__ */ new Map();
             const rememberImageAttemptError = /* @__PURE__ */ __name((token, error) => {
@@ -21588,27 +21883,43 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               imageAttemptErrorsByToken.set(normalizedToken, errors.slice(-3));
             }, "rememberImageAttemptError");
             const buildTokenAsset = /* @__PURE__ */ __name((token, extra = {}) => ({
-              token,
-              src: `feishu-image:${token}`,
-              localIndex: imageTokens.indexOf(token) + 1,
+              ...buildFeishuImageTokenAsset(token, imageTokens.indexOf(token) + 1),
               ...extra
             }), "buildTokenAsset");
             const imageDataAssets = [];
-            for (const imageToken of imageTokens) {
-              try {
-                const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
-                imageDataAssets.push(buildTokenAsset(imageToken, {
-                  dataUrl: downloaded.dataUrl
-                }));
-              } catch (error) {
-                rememberImageAttemptError(imageToken, error);
+            if (imageTokens.length > 0) {
+              feishuMediaStage.official.attempted = true;
+              if (feishuMediaScopeBlocked) {
+                for (const imageToken of imageTokens) {
+                  rememberImageAttemptError(imageToken, new Error(`missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}`));
+                }
+                feishuMediaStage.official.failed = imageTokens.length;
+              } else {
+                for (const imageToken of imageTokens) {
+                  try {
+                    const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
+                    imageDataAssets.push(buildTokenAsset(imageToken, {
+                      dataUrl: downloaded.dataUrl
+                    }));
+                  } catch (error) {
+                    feishuMediaStage.official.failed += 1;
+                    rememberImageAttemptError(imageToken, error);
+                  }
+                }
               }
             }
             let cleanedCloudOpenApiMarkdown = cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
               dedupe: true,
               feishuTitle
             });
-            const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
+            const markdownReferenceCount = Array.from(
+              cleanedCloudOpenApiMarkdown.matchAll(/!\[[^\]]*\]\((?:https?:\/\/|feishu-image:)/g)
+            ).length;
+            const imageTokenCount = Math.max(
+              Number(cloudOpenApiResult.imageTokenCount) || 0,
+              imageTokenInfo.declaredCount,
+              imageTokens.length
+            );
             const localizeTokenAssets = /* @__PURE__ */ __name(async (assets) => {
               if (!assets.length) return { assetCount: 0, localizedCount: 0, failedCount: 0 };
               const stageStats = {};
@@ -21621,6 +21932,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 {
                   sourceUrl: url,
                   stats: stageStats,
+                  allowPositionalReferenceFallback: true,
+                  allowUnmatchedImageAppend: true,
                   onLocalized: /* @__PURE__ */ __name(({ asset }) => {
                     if (asset && asset.token) resolvedImageTokens.add(String(asset.token));
                   }, "onLocalized"),
@@ -21632,6 +21945,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               return stageStats;
             }, "localizeTokenAssets");
             const officialImageStats = await localizeTokenAssets(imageDataAssets);
+            feishuMediaStage.official.succeeded = officialImageStats.localizedCount || 0;
+            feishuMediaStage.official.failed += officialImageStats.failedCount || 0;
             const getUnresolvedImageTokens = /* @__PURE__ */ __name(() => imageTokens.filter((token) => !resolvedImageTokens.has(token)), "getUnresolvedImageTokens");
             const temporaryImageAssets = getUnresolvedImageTokens().map((token) => {
               const temporaryUrl = String(
@@ -21639,12 +21954,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               ).trim();
               return /^https?:\/\//i.test(temporaryUrl) ? buildTokenAsset(token, { downloadSrc: temporaryUrl }) : null;
             }).filter(Boolean);
+            feishuMediaStage.temporary.attempted = temporaryImageAssets.length > 0;
             const temporaryImageStats = await localizeTokenAssets(temporaryImageAssets);
+            feishuMediaStage.temporary.succeeded = temporaryImageStats.localizedCount || 0;
+            feishuMediaStage.temporary.failed = temporaryImageStats.failedCount || 0;
             let feishuImageFallbackNote = "";
             if (getUnresolvedImageTokens().length > 0) {
+              feishuMediaStage.browser.attempted = true;
               try {
                 const renderedFallback = await this.renderFeishuDocumentWithElectron(url);
                 const renderedAssets = Array.isArray(renderedFallback && renderedFallback.assets) ? renderedFallback.assets.filter((asset) => asset && String(asset.src || "").trim()) : [];
+                const browserImageTokens = Array.isArray(renderedFallback && renderedFallback.imageTokens) ? renderedFallback.imageTokens.map(normalizeFeishuImageToken).filter(Boolean) : [];
                 const fallbackMarkdownSources = Array.from(String(renderedFallback && renderedFallback.markdown || "").matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g)).map((match) => decodeHtmlEntities(String(match[1] || "").trim())).filter(Boolean);
                 const assetsBySource = new Map(renderedAssets.map((asset) => [
                   decodeHtmlEntities(String(asset.src || "").trim()),
@@ -21670,6 +21990,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   const exactAsset = orderedRenderedAssets.find((asset) => String(asset.token || "").trim() === token || String(asset.src || "").includes(token));
                   if (exactAsset) matchedBrowserAssets.set(token, exactAsset);
                 }
+                let usedBrowserOrderFallback = false;
+                if (browserImageTokens.length === imageTokens.length && orderedRenderedAssets.length >= browserImageTokens.length) {
+                  const candidateAssets = orderedRenderedAssets.filter((asset) => !String(asset.token || "").trim() && !isLikelyFeishuShellImage(asset.alt, asset.src));
+                  const orderedAssetsForTokens = candidateAssets.length >= browserImageTokens.length ? candidateAssets.slice(-browserImageTokens.length) : candidateAssets;
+                  browserImageTokens.forEach((browserToken, index) => {
+                    const asset = orderedAssetsForTokens[index];
+                    const targetToken = imageTokens.find((token) => token === browserToken);
+                    if (asset && targetToken && !matchedBrowserAssets.has(targetToken)) {
+                      matchedBrowserAssets.set(targetToken, asset);
+                      usedBrowserOrderFallback = true;
+                    }
+                  });
+                }
                 if (hasCanonicalImageOrder && orderedRenderedAssets.length === imageTokens.length) {
                   imageTokens.forEach((token, index) => {
                     if (!resolvedImageTokens.has(token) && !matchedBrowserAssets.has(token)) {
@@ -21691,8 +22024,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   });
                 }).filter(Boolean);
                 const browserImageStats = await localizeTokenAssets(browserTokenAssets);
-                feishuImageFallbackNote = `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`;
+                feishuMediaStage.browser.succeeded = browserImageStats.localizedCount || 0;
+                feishuMediaStage.browser.failed = browserImageStats.failedCount || 0;
+                feishuImageFallbackNote = [
+                  `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`,
+                  usedBrowserOrderFallback ? "browser-image-order-mapping=1" : ""
+                ].filter(Boolean).join("; ");
               } catch (fallbackError) {
+                feishuMediaStage.browser.failed += 1;
                 feishuImageFallbackNote = `browser-image-fallback-failed=${getTransportErrorDiagnostic(fallbackError).message}`;
               }
             }
@@ -21710,6 +22049,21 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               url,
               imageTmpDownloadUrls
             );
+            const feishuMediaDiagnostic = buildFeishuMediaDiagnostic({
+              scope: feishuMediaScope,
+              scopeKnown: feishuMediaScopeKnown,
+              tokenCount: imageTokenCount,
+              official: feishuMediaStage.official,
+              temporary: feishuMediaStage.temporary,
+              browser: feishuMediaStage.browser,
+              markdownReferenceCount,
+              localizedCount: resolvedImageTokens.size,
+              unresolvedCount: imageLocalizationFailedCount,
+              errors: [
+                ...finalImageErrors,
+                feishuMediaScopeBlocked && imageTokens.length ? `missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : ""
+              ]
+            });
             return {
               ...record,
               metadata: enrichExtractedWebpageMetadata({
@@ -21721,6 +22075,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 imageTempUrlMissingCount: missingImageTempUrlCount,
                 imageLocalizationFailedCount,
                 imageLocalizationError: finalImageErrors.slice(0, 3).join(" | "),
+                feishuMediaDiagnostic,
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : "",
@@ -21728,6 +22083,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   temporaryImageAssets.length ? `image-temporary-localized=${temporaryImageStats.localizedCount || 0}/${temporaryImageAssets.length}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
+                  feishuMediaScopeBlocked && imageTokens.length ? `image-media-scope-missing=${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : "",
                   imageLocalizationFailedCount ? `image-localize-failed=${imageLocalizationFailedCount}: ${finalImageErrors.slice(0, 3).join(" | ")}` : "",
                   feishuImageFallbackNote
                 ].filter(Boolean).join("; ")
@@ -24386,6 +24742,13 @@ WechatObsidianInboxPlugin.__test = {
   extractFeishuOpenApiUrlInfo,
   extractFeishuMarkdownFromOpenApiBlocks,
   fetchFeishuOpenApiMarkdownFromUrl,
+  FEISHU_MEDIA_DOWNLOAD_SCOPE,
+  normalizeFeishuScope,
+  hasFeishuMediaDownloadScope,
+  collectFeishuImageTokens,
+  buildFeishuImageTokenAsset,
+  replaceFeishuImageAssetReference,
+  buildFeishuMediaDiagnostic,
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   extractAiMetadataInputText,

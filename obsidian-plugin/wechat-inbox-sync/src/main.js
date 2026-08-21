@@ -52,6 +52,17 @@ const {
   isFeishuMarkdownLikelyTruncated,
 } = require('./feishu-markdown-utils');
 const {
+  FEISHU_MEDIA_DOWNLOAD_SCOPE,
+  normalizeFeishuImageToken,
+  normalizeFeishuScope,
+  hasFeishuMediaDownloadScope,
+  collectFeishuImageTokens,
+  buildFeishuImageTokenAsset,
+  replaceFeishuImageTokenPlaceholders: replaceFeishuImageTokenPlaceholdersFromModule,
+  replaceFeishuImageAssetReference,
+  buildFeishuMediaDiagnostic,
+} = require('./feishu-media-utils');
+const {
   buildConversionWarningsNotice,
   buildLocalAsrProgressKey,
   buildSkippedSyncNotice,
@@ -10532,6 +10543,9 @@ async function renderUrlToMarkdownWithElectron(url) {
         const cvBlockCount = Object.keys(bm).length;
         const seqLen = Array.isArray(cv.block_sequence) ? cv.block_sequence.length : -1;
         const clientVarsMarkdown = extractFeishuMarkdownFromClientVars(cv);
+        result.imageTokens = Array.from(String(clientVarsMarkdown || '').matchAll(/feishu-image:([^\s)]+)/gi))
+          .map((match) => String(match[1] || '').trim())
+          .filter(Boolean);
         const renderedLen = String(result.markdown || '').length;
         result.markdown = mergeFeishuRenderedAndClientVarsMarkdown(result.markdown, clientVarsMarkdown);
         __feishuDiag = `cv:ok bm=${cvBlockCount} seq=${seqLen} rendered=${renderedLen} structured=${clientVarsMarkdown.length} merged=${result.markdown.length}`;
@@ -10614,6 +10628,23 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
         const seenLines = new Set();
         const imageAssets = [];
         const seenImages = new Set();
+        const getImageToken = (img) => {
+          if (!img || typeof img.getAttribute !== 'function') return '';
+          const keys = [
+            'data-token', 'data-file-token', 'data-file_token',
+            'data-image-token', 'data-image_token', 'data-media-token',
+          ];
+          for (const key of keys) {
+            const value = String(img.getAttribute(key) || '').trim();
+            if (value) return value;
+          }
+          const dataset = img.dataset || {};
+          for (const key of ['token', 'fileToken', 'file_token', 'imageToken', 'image_token', 'mediaToken']) {
+            const value = String(dataset[key] || '').trim();
+            if (value) return value;
+          }
+          return '';
+        };
         const pushLine = (value) => {
           const text = clean(value);
           if (!text || text.length < 2 || seenLines.has(text)) return;
@@ -10630,7 +10661,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
             if ((width && height && (width < 80 || height < 80)) || /avatar|portrait|icon|logo/i.test(className)) return;
             seenImages.add(src);
             const alt = clean(img.alt || '图片') || '图片';
-            imageAssets.push({ src, alt, width, height });
+            imageAssets.push({ src, alt, width, height, token: getImageToken(img) });
             lines.push('![' + alt + '](' + src + ')');
           } catch (error) {}
         };
@@ -10746,12 +10777,33 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
           reader.onerror = () => reject(reader.error || new Error('image read failed'));
           reader.readAsDataURL(blob);
         });
+        const isTrustedFeishuImageSource = (source) => {
+          try {
+            const parsed = new URL(String(source || ''), location.href);
+            const host = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+            if (parsed.origin === location.origin) return true;
+            return host === 'feishu.cn'
+              || host.endsWith('.feishu.cn')
+              || host === 'feishu.net'
+              || host.endsWith('.feishu.net')
+              || host === 'feishucdn.com'
+              || host.endsWith('.feishucdn.com')
+              || host === 'feishuusercontent.com'
+              || host.endsWith('.feishuusercontent.com')
+              || host === 'larksuite.com'
+              || host.endsWith('.larksuite.com')
+              || host === 'larkoffice.com'
+              || host.endsWith('.larkoffice.com');
+          } catch (error) {
+            return false;
+          }
+        };
         const uniqueAssets = [];
         for (const asset of imageAssets) {
-          const next = { src: asset.src, alt: asset.alt || '图片' };
+          const next = { src: asset.src, alt: asset.alt || '图片', token: asset.token || '' };
           if (asset.src.startsWith('data:')) {
             next.dataUrl = asset.src;
-          } else if (/feishu\\.cn|feishu\\.net|internal-api-drive-stream/i.test(asset.src)) {
+          } else if (isTrustedFeishuImageSource(asset.src)) {
             try {
               const blob = await fetch(asset.src, { credentials: 'include' }).then((response) => response.blob());
               if (blob && blob.size && /^image\\//i.test(blob.type || '')) {
@@ -13303,29 +13355,14 @@ function buildFeishuImageFallbackUrl(token, docUrl) {
 // 把 markdown 里的 feishu-image:{token} 占位关联到 DOM 图片 assets 的真实 src，
 // 使 saveWebpageImageAssets 能按 src 匹配下载到本地；找不到则用飞书下载 URL 兜底
 function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl, tokenUrlMap = {}) {
-  let result = String(markdown || '');
-  if (!result.includes('feishu-image:')) return result;
-  const tokenPattern = /!\[([^\]]*)\]\(feishu-image:([^)]+)\)/g;
-  result = result.replace(tokenPattern, (full, alt, token) => {
-    const t = String(token || '').trim();
-    if (!t) return full;
-    const mappedUrl = String(tokenUrlMap && tokenUrlMap[t] || '').trim();
-    if (/^https?:\/\//i.test(mappedUrl)) {
-      return `![${alt || '图片'}](${mappedUrl})`;
-    }
-    if (Array.isArray(assets)) {
-      for (const asset of assets) {
-        const src = String((asset && asset.src) || '');
-        // 飞书 docx 图片 DOM src 通常含 token，且为 https 可下载链接
-        if (src && src.indexOf(t) !== -1 && /^https?:\/\//i.test(src)) {
-          return `![${alt || '图片'}](${src})`;
-        }
-      }
-    }
-    const fallback = buildFeishuImageFallbackUrl(t, docUrl);
-    return fallback ? `![${alt || '图片'}](${fallback})` : full;
-  });
-  return result;
+  return replaceFeishuImageTokenPlaceholdersFromModule(
+    markdown,
+    assets,
+    docUrl,
+    tokenUrlMap,
+    buildFeishuImageFallbackUrl,
+    decodeHtmlEntities,
+  );
 }
 
 function getRecordUrl(record, metadata = record && record.metadata || {}) {
@@ -14264,6 +14301,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       source: 'feishu-cloud-oauth',
       title: String((data && data.title) || '').trim(),
       markdown: extractFeishuMarkdownFromOpenApiBlocks(blocks),
+      blocks,
       documentId: String((data && data.documentId) || '').trim(),
       blockCount: Number((data && data.blockCount) || blocks.length) || blocks.length,
       imageTmpDownloadUrls: data && data.imageTmpDownloadUrls && typeof data.imageTmpDownloadUrls === 'object'
@@ -17639,14 +17677,25 @@ class WechatObsidianInboxPlugin extends Plugin {
         reportError(asset, error);
         continue;
       }
-      const normalizedAssetSource = decodeHtmlEntities(assetSource).trim();
-      let replacementCount = 0;
-      nextMarkdown = nextMarkdown.replace(/!\[([^\]]*)\]\(([^)\n]+)\)/g, (full, _alt, markdownSource) => {
-        const normalizedMarkdownSource = decodeHtmlEntities(String(markdownSource || '').trim()).trim();
-        if (normalizedMarkdownSource !== normalizedAssetSource) return full;
-        replacementCount += 1;
-        return `![[${imagePath}]]`;
-      });
+      const replacement = replaceFeishuImageAssetReference(
+        nextMarkdown,
+        asset,
+        imagePath,
+        decodeHtmlEntities,
+        {
+          referenceIndex: isFeishuSource && options.allowPositionalReferenceFallback && asset && asset.token
+            ? Math.max(0, Number(asset.localIndex || 1) - 1)
+            : null,
+          appendWhenUnmatched: Boolean(
+            isFeishuSource
+            && options.allowUnmatchedImageAppend
+            && asset
+            && asset.token,
+          ),
+        },
+      );
+      nextMarkdown = replacement.markdown;
+      const replacementCount = replacement.replacementCount;
       if (replacementCount > 0) {
         if (stats) {
           stats.localizedCount = (Number(stats.localizedCount) || 0) + 1;
@@ -18410,7 +18459,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           try {
             const cloudOpenApiResult = await this.fetchFeishuCloudOAuthMarkdownFromUrl(url, binding);
             const feishuTitle = metadata.title || cloudOpenApiResult.title || '飞书文档';
-            const imageTmpDownloadUrls = cloudOpenApiResult.imageTmpDownloadUrls || {};
+            let imageTmpDownloadUrls = cloudOpenApiResult.imageTmpDownloadUrls || {};
             const markdownImageTokens = Array.from(String(cloudOpenApiResult.markdown || '')
               .matchAll(/feishu-image:([^\s)]+)/g))
               .map((match) => String(match[1] || '').trim())
@@ -18418,12 +18467,32 @@ class WechatObsidianInboxPlugin extends Plugin {
             const explicitImageTokens = (cloudOpenApiResult.imageTokens || [])
               .map((item) => String(item || '').trim())
               .filter(Boolean);
-            const hasCanonicalImageOrder = explicitImageTokens.length > 0 || markdownImageTokens.length > 0;
-            const imageTokens = Array.from(new Set([
+            let hasCanonicalImageOrder = explicitImageTokens.length > 0 || markdownImageTokens.length > 0;
+            let imageTokens = Array.from(new Set([
               ...explicitImageTokens,
               ...markdownImageTokens,
               ...Object.keys(imageTmpDownloadUrls),
             ].map((item) => String(item || '').trim()).filter(Boolean)));
+            const imageTokenInfo = collectFeishuImageTokens({
+              markdown: cloudOpenApiResult.markdown,
+              imageTokens,
+              imageTmpDownloadUrls,
+              blocks: cloudOpenApiResult.blocks,
+              imageTokenCount: cloudOpenApiResult.imageTokenCount,
+            });
+            imageTokens = imageTokenInfo.tokens;
+            imageTmpDownloadUrls = imageTokenInfo.imageTmpDownloadUrls;
+            hasCanonicalImageOrder = hasCanonicalImageOrder || imageTokenInfo.blockTokenCount > 0;
+            const feishuMediaScope = String(feishuCloudOAuthStatus && feishuCloudOAuthStatus.scope || '').trim();
+            const feishuMediaScopeTokens = normalizeFeishuScope(feishuMediaScope);
+            const feishuMediaScopeKnown = feishuMediaScopeTokens.length > 0;
+            const feishuMediaScopeBlocked = feishuMediaScopeKnown
+              && !hasFeishuMediaDownloadScope(feishuMediaScopeTokens);
+            const feishuMediaStage = {
+              official: { attempted: false, succeeded: 0, failed: 0 },
+              temporary: { attempted: false, succeeded: 0, failed: 0 },
+              browser: { attempted: false, succeeded: 0, failed: 0 },
+            };
             const resolvedImageTokens = new Set();
             const imageAttemptErrorsByToken = new Map();
             const rememberImageAttemptError = (token, error) => {
@@ -18434,28 +18503,44 @@ class WechatObsidianInboxPlugin extends Plugin {
               imageAttemptErrorsByToken.set(normalizedToken, errors.slice(-3));
             };
             const buildTokenAsset = (token, extra = {}) => ({
-              token,
-              src: `feishu-image:${token}`,
-              localIndex: imageTokens.indexOf(token) + 1,
+              ...buildFeishuImageTokenAsset(token, imageTokens.indexOf(token) + 1),
               ...extra,
             });
             const imageDataAssets = [];
-            for (const imageToken of imageTokens) {
-              try {
-                // eslint-disable-next-line no-await-in-loop
-                const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
-                imageDataAssets.push(buildTokenAsset(imageToken, {
-                  dataUrl: downloaded.dataUrl,
-                }));
-              } catch (error) {
-                rememberImageAttemptError(imageToken, error);
+            if (imageTokens.length > 0) {
+              feishuMediaStage.official.attempted = true;
+              if (feishuMediaScopeBlocked) {
+                for (const imageToken of imageTokens) {
+                  rememberImageAttemptError(imageToken, new Error(`missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}`));
+                }
+                feishuMediaStage.official.failed = imageTokens.length;
+              } else {
+                for (const imageToken of imageTokens) {
+                  try {
+                    // eslint-disable-next-line no-await-in-loop
+                    const downloaded = await this.fetchFeishuCloudMediaDataUrl(imageToken, binding);
+                    imageDataAssets.push(buildTokenAsset(imageToken, {
+                      dataUrl: downloaded.dataUrl,
+                    }));
+                  } catch (error) {
+                    feishuMediaStage.official.failed += 1;
+                    rememberImageAttemptError(imageToken, error);
+                  }
+                }
               }
             }
             let cleanedCloudOpenApiMarkdown = cleanMarkdownForStorage(cloudOpenApiResult.markdown, {
               dedupe: true,
               feishuTitle,
             });
-            const imageTokenCount = Number(cloudOpenApiResult.imageTokenCount) || 0;
+            const markdownReferenceCount = Array.from(
+              cleanedCloudOpenApiMarkdown.matchAll(/!\[[^\]]*\]\((?:https?:\/\/|feishu-image:)/g),
+            ).length;
+            const imageTokenCount = Math.max(
+              Number(cloudOpenApiResult.imageTokenCount) || 0,
+              imageTokenInfo.declaredCount,
+              imageTokens.length,
+            );
             const localizeTokenAssets = async (assets) => {
               if (!assets.length) return { assetCount: 0, localizedCount: 0, failedCount: 0 };
               const stageStats = {};
@@ -18468,6 +18553,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 {
                   sourceUrl: url,
                   stats: stageStats,
+                  allowPositionalReferenceFallback: true,
+                  allowUnmatchedImageAppend: true,
                   onLocalized: ({ asset }) => {
                     if (asset && asset.token) resolvedImageTokens.add(String(asset.token));
                   },
@@ -18479,6 +18566,8 @@ class WechatObsidianInboxPlugin extends Plugin {
               return stageStats;
             };
             const officialImageStats = await localizeTokenAssets(imageDataAssets);
+            feishuMediaStage.official.succeeded = officialImageStats.localizedCount || 0;
+            feishuMediaStage.official.failed += officialImageStats.failedCount || 0;
             const getUnresolvedImageTokens = () => imageTokens.filter((token) => !resolvedImageTokens.has(token));
             const temporaryImageAssets = getUnresolvedImageTokens()
               .map((token) => {
@@ -18492,7 +18581,10 @@ class WechatObsidianInboxPlugin extends Plugin {
                   : null;
               })
               .filter(Boolean);
+            feishuMediaStage.temporary.attempted = temporaryImageAssets.length > 0;
             const temporaryImageStats = await localizeTokenAssets(temporaryImageAssets);
+            feishuMediaStage.temporary.succeeded = temporaryImageStats.localizedCount || 0;
+            feishuMediaStage.temporary.failed = temporaryImageStats.failedCount || 0;
             // The cloud OAuth response can contain image tokens without usable
             // temporary download URLs (or those URLs can return 401). In that
             // case, give the authenticated browser renderer one chance to
@@ -18500,10 +18592,14 @@ class WechatObsidianInboxPlugin extends Plugin {
             // fallback so a browser failure never blocks text synchronization.
             let feishuImageFallbackNote = '';
             if (getUnresolvedImageTokens().length > 0) {
+              feishuMediaStage.browser.attempted = true;
               try {
                 const renderedFallback = await this.renderFeishuDocumentWithElectron(url);
                 const renderedAssets = Array.isArray(renderedFallback && renderedFallback.assets)
                   ? renderedFallback.assets.filter((asset) => asset && String(asset.src || '').trim())
+                  : [];
+                const browserImageTokens = Array.isArray(renderedFallback && renderedFallback.imageTokens)
+                  ? renderedFallback.imageTokens.map(normalizeFeishuImageToken).filter(Boolean)
                   : [];
                 const fallbackMarkdownSources = Array.from(String(renderedFallback && renderedFallback.markdown || '')
                   .matchAll(/!\[[^\]]*\]\(([^)\n]+)\)/g))
@@ -18536,6 +18632,27 @@ class WechatObsidianInboxPlugin extends Plugin {
                   ));
                   if (exactAsset) matchedBrowserAssets.set(token, exactAsset);
                 }
+                let usedBrowserOrderFallback = false;
+                if (
+                  browserImageTokens.length === imageTokens.length
+                  && orderedRenderedAssets.length >= browserImageTokens.length
+                ) {
+                  const candidateAssets = orderedRenderedAssets.filter((asset) => (
+                    !String(asset.token || '').trim()
+                    && !isLikelyFeishuShellImage(asset.alt, asset.src)
+                  ));
+                  const orderedAssetsForTokens = candidateAssets.length >= browserImageTokens.length
+                    ? candidateAssets.slice(-browserImageTokens.length)
+                    : candidateAssets;
+                  browserImageTokens.forEach((browserToken, index) => {
+                    const asset = orderedAssetsForTokens[index];
+                    const targetToken = imageTokens.find((token) => token === browserToken);
+                    if (asset && targetToken && !matchedBrowserAssets.has(targetToken)) {
+                      matchedBrowserAssets.set(targetToken, asset);
+                      usedBrowserOrderFallback = true;
+                    }
+                  });
+                }
                 if (hasCanonicalImageOrder && orderedRenderedAssets.length === imageTokens.length) {
                   imageTokens.forEach((token, index) => {
                     if (!resolvedImageTokens.has(token) && !matchedBrowserAssets.has(token)) {
@@ -18563,8 +18680,14 @@ class WechatObsidianInboxPlugin extends Plugin {
                   })
                   .filter(Boolean);
                 const browserImageStats = await localizeTokenAssets(browserTokenAssets);
-                feishuImageFallbackNote = `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`;
+                feishuMediaStage.browser.succeeded = browserImageStats.localizedCount || 0;
+                feishuMediaStage.browser.failed = browserImageStats.failedCount || 0;
+                feishuImageFallbackNote = [
+                  `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`,
+                  usedBrowserOrderFallback ? 'browser-image-order-mapping=1' : '',
+                ].filter(Boolean).join('; ');
               } catch (fallbackError) {
+                feishuMediaStage.browser.failed += 1;
                 feishuImageFallbackNote = `browser-image-fallback-failed=${getTransportErrorDiagnostic(fallbackError).message}`;
               }
             }
@@ -18584,6 +18707,23 @@ class WechatObsidianInboxPlugin extends Plugin {
               url,
               imageTmpDownloadUrls,
             );
+            const feishuMediaDiagnostic = buildFeishuMediaDiagnostic({
+              scope: feishuMediaScope,
+              scopeKnown: feishuMediaScopeKnown,
+              tokenCount: imageTokenCount,
+              official: feishuMediaStage.official,
+              temporary: feishuMediaStage.temporary,
+              browser: feishuMediaStage.browser,
+              markdownReferenceCount,
+              localizedCount: resolvedImageTokens.size,
+              unresolvedCount: imageLocalizationFailedCount,
+              errors: [
+                ...finalImageErrors,
+                feishuMediaScopeBlocked && imageTokens.length
+                  ? `missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}`
+                  : '',
+              ],
+            });
             return {
               ...record,
               metadata: enrichExtractedWebpageMetadata({
@@ -18595,6 +18735,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 imageTempUrlMissingCount: missingImageTempUrlCount,
                 imageLocalizationFailedCount,
                 imageLocalizationError: finalImageErrors.slice(0, 3).join(' | '),
+                feishuMediaDiagnostic,
                 conversionNote: [
                   `feishu-cloud-oauth blocks=${cloudOpenApiResult.blockCount || 0}`,
                   imageTokenCount ? `images=${imageTokenCount}` : '',
@@ -18602,6 +18743,9 @@ class WechatObsidianInboxPlugin extends Plugin {
                   temporaryImageAssets.length ? `image-temporary-localized=${temporaryImageStats.localizedCount || 0}/${temporaryImageAssets.length}` : '',
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : '',
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
+                  feishuMediaScopeBlocked && imageTokens.length
+                    ? `image-media-scope-missing=${FEISHU_MEDIA_DOWNLOAD_SCOPE}`
+                    : '',
                   imageLocalizationFailedCount
                     ? `image-localize-failed=${imageLocalizationFailedCount}: ${finalImageErrors.slice(0, 3).join(' | ')}`
                     : '',
@@ -21754,6 +21898,13 @@ WechatObsidianInboxPlugin.__test = {
   extractFeishuOpenApiUrlInfo,
   extractFeishuMarkdownFromOpenApiBlocks,
   fetchFeishuOpenApiMarkdownFromUrl,
+  FEISHU_MEDIA_DOWNLOAD_SCOPE,
+  normalizeFeishuScope,
+  hasFeishuMediaDownloadScope,
+  collectFeishuImageTokens,
+  buildFeishuImageTokenAsset,
+  replaceFeishuImageAssetReference,
+  buildFeishuMediaDiagnostic,
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   extractAiMetadataInputText,

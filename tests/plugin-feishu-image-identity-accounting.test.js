@@ -62,6 +62,8 @@ async function runUniqueFailureAccountingTest() {
   plugin.settings = PluginClass.__test.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'TEST-BINDING',
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
     bindings: [{ token: 'TEST-BINDING', label: '微信 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
   });
@@ -113,6 +115,8 @@ async function runBrowserRecoveryKeepsOfficialMarkdownTest() {
   plugin.settings = PluginClass.__test.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'TEST-BINDING',
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
     bindings: [{ token: 'TEST-BINDING', label: 'WeChat 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
   });
@@ -174,6 +178,8 @@ async function runLegacyResponseUsesMarkdownImageOrderTest() {
   plugin.settings = PluginClass.__test.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'TEST-BINDING',
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
     bindings: [{ token: 'TEST-BINDING', label: 'WeChat 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
   });
@@ -237,6 +243,75 @@ async function runLegacyResponseUsesMarkdownImageOrderTest() {
   assert.strictEqual(vault.files[secondPath].toString(), 'canonical-second');
 }
 
+async function runBrowserExtraShellImageStillMapsDocumentImagesTest() {
+  const tokens = ['boxcnOrderImageA', 'boxcnOrderImageB'];
+  const plugin = new PluginClass();
+  const vault = createVault();
+  plugin.app = vault.app;
+  plugin.settings = PluginClass.__test.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'TEST-BINDING',
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
+    bindings: [{ token: 'TEST-BINDING', label: 'WeChat 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
+  });
+  plugin.ensureFolder = async () => {};
+  plugin.downloadArrayBuffer = async () => { throw new Error('temporary media unavailable'); };
+  plugin.downloadMediaArrayBufferWithSession = async () => { throw new Error('session media unavailable'); };
+  plugin.renderFeishuDocumentWithElectron = async () => ({
+    title: 'Browser title',
+    imageTokens: tokens,
+    markdown: [
+      '# Browser title',
+      'Browser body.',
+      '![cover](https://browser.example/cover.png)',
+      '![image](https://browser.example/image-a.png)',
+      '![image](https://browser.example/image-b.png)',
+    ].join('\n\n'),
+    assets: [
+      { src: 'https://browser.example/cover.png', alt: 'cover', dataUrl: `data:image/png;base64,${Buffer.from('cover').toString('base64')}` },
+      { src: 'https://browser.example/image-a.png', alt: 'image', dataUrl: `data:image/png;base64,${Buffer.from('image-a').toString('base64')}` },
+      { src: 'https://browser.example/image-b.png', alt: 'image', dataUrl: `data:image/png;base64,${Buffer.from('image-b').toString('base64')}` },
+    ],
+  });
+  plugin.requestJson = async (requestPath) => {
+    if (requestPath === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: 'Official document title',
+          documentId: 'docxExtraBrowserImage',
+          blockCount: tokens.length + 2,
+          blocks: buildEnglishImageBlocks(tokens),
+          imageTokenCount: tokens.length,
+          imageTmpDownloadUrls: {},
+          markdown: [
+            '# Official document title',
+            'Official API body.',
+            '![image](https://official.example/image-a.png)',
+            '![image](https://official.example/image-b.png)',
+          ].join('\n\n'),
+        },
+      };
+    }
+    if (requestPath === '/feishu/media') throw new Error('official media unavailable');
+    throw new Error(`unexpected request path: ${requestPath}`);
+  };
+
+  const result = await plugin.hydrateWebpageMarkdown({
+    _id: 'feishu-browser-extra-shell-image',
+    type: 'webpage',
+    content: 'https://example.feishu.cn/docx/docxExtraBrowserImage',
+    metadata: { url: 'https://example.feishu.cn/docx/docxExtraBrowserImage' },
+  }, 'Inbox', '2026-08-15', 'Feishu extra browser image');
+
+  assert.strictEqual(result.metadata.imageLocalizationFailedCount, 0);
+  assert.strictEqual(Object.keys(vault.files).length, 2);
+  assert.strictEqual((result.metadata.markdown.match(/!\[\[[^\]]+\]\]/g) || []).length, 2);
+  assert.ok(result.metadata.conversionNote.includes('browser-image-order-mapping=1'));
+}
+
 async function runLocalWriteFailureKeepsOfficialMarkdownTest() {
   const token = 'boxcnWriteFailure';
   const plugin = new PluginClass();
@@ -245,6 +320,8 @@ async function runLocalWriteFailureKeepsOfficialMarkdownTest() {
   plugin.settings = PluginClass.__test.mergeSettings({
     apiBase: 'https://example.com/sync',
     token: 'TEST-BINDING',
+    socialArticleImageStorageMode: 'local',
+    socialArticleImageStorageModeConfigured: true,
     bindings: [{ token: 'TEST-BINDING', label: 'WeChat 1', status: 'bound', enabled: true }],
     feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
   });
@@ -300,6 +377,7 @@ Promise.resolve()
   .then(runUniqueFailureAccountingTest)
   .then(runBrowserRecoveryKeepsOfficialMarkdownTest)
   .then(runLegacyResponseUsesMarkdownImageOrderTest)
+  .then(runBrowserExtraShellImageStillMapsDocumentImagesTest)
   .then(runLocalWriteFailureKeepsOfficialMarkdownTest)
   .then(() => console.log('plugin feishu image identity accounting tests passed'))
   .catch((error) => { console.error(error); process.exitCode = 1; });
