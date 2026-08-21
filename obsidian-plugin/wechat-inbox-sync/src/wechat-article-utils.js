@@ -109,6 +109,100 @@ function hasWechatArticleBody(html) {
     || /<(?:video|audio)\b/i.test(bodyHtml);
 }
 
+function getHtmlAttribute(attributes, name) {
+  const source = String(attributes || '');
+  const escapedName = String(name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = source.match(new RegExp(`\\b${escapedName}\\s*=\\s*(?:["']([^"']*)["']|([^\\s>]+))`, 'i'));
+  return decodeHtmlEntities((match && (match[1] || match[2])) || '').trim();
+}
+
+function normalizeWechatImageCandidate(value) {
+  const source = decodeHtmlEntities(String(value || '').trim());
+  if (!source || /^data:image\/gif/i.test(source) || /^javascript:/i.test(source)) return '';
+  if (/^\/\//.test(source)) return `https:${source}`;
+  if (/^https?:\/\//i.test(source)) return source;
+  return '';
+}
+
+function collectWechatArticleImageCandidates(html) {
+  const bodyHtml = extractWechatArticleBodyHtml(html);
+  if (!bodyHtml) return [];
+  const candidates = [];
+  const seen = new Set();
+  const imagePattern = /<img\b([^>]*)>/gi;
+  let match;
+  while ((match = imagePattern.exec(bodyHtml))) {
+    const attributes = match[1] || '';
+    const candidate = [
+      getHtmlAttribute(attributes, 'data-src'),
+      getHtmlAttribute(attributes, 'data-original'),
+      getHtmlAttribute(attributes, 'data-lazy-src'),
+      getHtmlAttribute(attributes, 'src'),
+      getHtmlAttribute(attributes, 'data-fail'),
+    ].map(normalizeWechatImageCandidate).find(Boolean) || '';
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    candidates.push(candidate);
+  }
+  return candidates;
+}
+
+function getWechatArticleBodyStats(html) {
+  const source = String(html || '');
+  const bodyHtml = extractWechatArticleBodyHtml(source);
+  const bodyText = stripHtml(bodyHtml);
+  const imageCandidates = collectWechatArticleImageCandidates(source);
+  const mediaCount = (bodyHtml.match(/<(?:video|audio|source)\b/gi) || []).length;
+  return {
+    hasJsContent: /<div\b(?=[^>]*\bid=["']js_content["'])/i.test(source),
+    bodyHtmlChars: bodyHtml.length,
+    bodyTextChars: bodyText.length,
+    imageCount: imageCandidates.length,
+    mediaCount,
+    imageCandidates,
+    hasSubstantiveBody: bodyText.length >= 50 || imageCandidates.length > 0 || mediaCount > 0,
+  };
+}
+
+function isWechatEmptyShellHtml(html) {
+  const source = String(html || '');
+  const stats = getWechatArticleBodyStats(source);
+  if (!/mp\.weixin\.qq\.com|rich_media|js_content|\u89c6\u9891|\u5c0f\u7a0b\u5e8f|\u8f7b\u70b9\u4e24\u4e0b/i.test(source)) return false;
+  return !stats.hasJsContent
+    || (!stats.hasSubstantiveBody && stats.bodyTextChars < 50);
+}
+
+function diagnoseWechatArticleHtml(html) {
+  const source = String(html || '');
+  const stats = getWechatArticleBodyStats(source);
+  const classifiedState = classifyWechatArticleHtml(source);
+  const text = stripHtml(source);
+  const markers = {
+    captcha: classifiedState === 'captcha',
+    unavailable: classifiedState === 'unavailable',
+    guide: classifiedState === 'guide',
+    emptyShell: isWechatEmptyShellHtml(source),
+    shellToolbar: /\u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e|\u5728\u770b|\u89c6\u9891|\u5c0f\u7a0b\u5e8f/i.test(text),
+  };
+  let pageKind = classifiedState;
+  if (markers.emptyShell && !markers.captcha && !markers.unavailable) {
+   pageKind = 'empty-shell';
+ }
+  return {
+    pageKind,
+    classifiedState,
+    hasHtml: Boolean(source.trim()),
+    htmlChars: source.length,
+    hasJsContent: stats.hasJsContent,
+    bodyHtmlChars: stats.bodyHtmlChars,
+    bodyTextChars: stats.bodyTextChars,
+    imageCount: stats.imageCount,
+    mediaCount: stats.mediaCount,
+    imageCandidateCount: stats.imageCandidates.length,
+    markers,
+  };
+}
+
 function classifyWechatArticleHtml(html) {
   const text = stripHtml(html);
   if (/环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return 'captcha';
@@ -154,10 +248,14 @@ function buildWechatArticleFallbackMarkdown({
 module.exports = {
   buildWechatArticleFallbackMarkdown,
   classifyWechatArticleHtml,
+  collectWechatArticleImageCandidates,
+  diagnoseWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
   extractWechatArticleBodyHtml,
+  getWechatArticleBodyStats,
   hasWechatArticleBody,
   isWechatArticleUrl,
+  isWechatEmptyShellHtml,
   isGenericWechatMetadata,
   isTrustedCoverUrl,
   normalizeWechatArticleUrl,

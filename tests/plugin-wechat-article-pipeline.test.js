@@ -2,13 +2,19 @@
 
 const assert = require('assert');
 const {
-  classifyWechatArticleHtml,
-  extractWechatArticleFallbackMetadata,
+ classifyWechatArticleHtml,
+  diagnoseWechatArticleHtml,
+ extractWechatArticleFallbackMetadata,
+  getWechatArticleBodyStats,
+  isWechatEmptyShellHtml,
   buildWechatArticleFallbackMarkdown,
   isWechatArticleUrl,
   normalizeWechatArticleUrl,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-utils');
-const { runWechatArticlePipeline } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
+const {
+  getFailureCacheInfo,
+  runWechatArticlePipeline,
+} = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
 
 const articleHtml = [
   '<html><head><title>Real article title</title></head><body>',
@@ -32,6 +38,7 @@ const genericGuideHtml = [
 
 const unavailableHtml = '<p>\u5185\u5bb9\u4e0d\u5b58\u5728\uff0c\u8be5\u6587\u7ae0\u5df2\u88ab\u5220\u9664\u3002</p>';
 const captchaHtml = '<p>\u73af\u5883\u5f02\u5e38\uff0c\u5b8c\u6210\u9a8c\u8bc1\u540e\u5373\u53ef\u7ee7\u7eed\u8bbf\u95ee\u3002</p>';
+const emptyShellHtml = '<html><body><div class="rich_media"><div class="toolbar">\u89c6\u9891 \u5c0f\u7a0b\u5e8f \u5728\u770b</div></div></body></html>';
 
 assert.strictEqual(classifyWechatArticleHtml(articleHtml), 'article');
 assert.strictEqual(
@@ -50,6 +57,13 @@ assert.strictEqual(
   classifyWechatArticleHtml('<div id="js_content"><img data-src="https://mmbiz.qpic.cn/example.jpg"></div>'),
   'article',
 );
+assert.strictEqual(isWechatEmptyShellHtml(emptyShellHtml), true);
+assert.strictEqual(diagnoseWechatArticleHtml(emptyShellHtml).pageKind, 'empty-shell');
+const imageStats = getWechatArticleBodyStats('<div id="js_content"><p>Body</p><img data-src="//mmbiz.qpic.cn/image.jpg"></div>');
+assert.strictEqual(imageStats.hasJsContent, true);
+assert.strictEqual(imageStats.bodyTextChars, 4);
+assert.strictEqual(imageStats.imageCount, 1);
+assert.deepStrictEqual(imageStats.imageCandidates, ['https://mmbiz.qpic.cn/image.jpg']);
 
 assert.deepStrictEqual(extractWechatArticleFallbackMetadata(guideHtml), {
   title: 'Useful title',
@@ -114,14 +128,14 @@ async function runPipelineTests() {
   assert.strictEqual(browserCalls, 1);
   assert.strictEqual(staticTargetUrl, 'https://mp.weixin.qq.com/s/recovered');
   assert.strictEqual(browserTargetUrl, 'https://mp.weixin.qq.com/s/recovered');
-  assert.deepStrictEqual(recovered, {
-    kind: 'article',
-    state: 'complete',
-    source: 'browser',
-    html: browserArticle,
-    title: 'Browser article title',
-    assets: [{ src: 'https://mmbiz.qpic.cn/body.jpg' }],
-  });
+  assert.strictEqual(recovered.kind, 'article');
+  assert.strictEqual(recovered.state, 'complete');
+  assert.strictEqual(recovered.source, 'browser');
+  assert.strictEqual(recovered.html, browserArticle);
+  assert.strictEqual(recovered.title, 'Browser article title');
+  assert.deepStrictEqual(recovered.assets, [{ src: 'https://mmbiz.qpic.cn/body.jpg' }]);
+  assert.strictEqual(recovered.diagnostic.completeness.articleBodyFound, true);
+  assert.strictEqual(recovered.diagnostic.browser.pageKind, 'article');
 
   browserCalls = 0;
   const bodyMissingBrowser = await runWechatArticlePipeline({
@@ -132,11 +146,27 @@ async function runPipelineTests() {
       return { html: genericGuideHtml };
     },
   });
-  assert.strictEqual(browserCalls, 1);
+  assert.strictEqual(browserCalls, 2);
   assert.strictEqual(bodyMissingBrowser.kind, 'retryable');
   assert.strictEqual(bodyMissingBrowser.state, 'body_missing');
-  assert.strictEqual(bodyMissingBrowser.source, 'browser');
-  assert.strictEqual(bodyMissingBrowser.diagnostic.reason, 'wechat-article-body-missing');
+ assert.strictEqual(bodyMissingBrowser.source, 'browser');
+ assert.strictEqual(bodyMissingBrowser.diagnostic.reason, 'wechat-article-body-missing');
+  assert.deepStrictEqual(bodyMissingBrowser.diagnostic.attemptedChannels, ['static', 'browser', 'browser']);
+  assert.strictEqual(bodyMissingBrowser.diagnostic.retryable, true);
+  const cachedFailure = getFailureCacheInfo('https://mp.weixin.qq.com/s/partial');
+  assert.strictEqual(cachedFailure.cacheHit, true);
+  let retryBrowserCalls = 0;
+  const retriedBodyMissing = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/partial',
+    fetchStatic: async () => guideHtml,
+    renderBrowser: async () => {
+      retryBrowserCalls += 1;
+      return { html: genericGuideHtml };
+    },
+  });
+  assert.strictEqual(retryBrowserCalls, 2);
+  assert.strictEqual(retriedBodyMissing.kind, 'retryable');
+  assert.strictEqual(retriedBodyMissing.diagnostic.previousFailure.cacheHit, true);
 
   const bodyMissingStatic = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s?scene=1&mid=2&pass_ticket=secret&__biz=biz&idx=1&sn=signature',

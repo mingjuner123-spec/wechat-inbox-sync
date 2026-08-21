@@ -120,7 +120,7 @@ const {
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
 const { runWechatArticlePipeline } = require('./wechat-article-pipeline');
-const { classifyWechatArticleHtml, isWechatArticleUrl, normalizeWechatArticleUrl } = require('./wechat-article-utils');
+const { diagnoseWechatArticleHtml, isWechatArticleUrl, normalizeWechatArticleUrl } = require('./wechat-article-utils');
 const {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -202,7 +202,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 // persistent session to contribute cookies when the user already has them.
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.111';
+const PLUGIN_RUNTIME_VERSION = '1.3.112';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -10725,13 +10725,44 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
     const bodyReady = await win.webContents.executeJavaScript(`
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const promoteLazyImages = (root) => {
+          if (!root || !root.querySelectorAll) return 0;
+          let promoted = 0;
+          root.querySelectorAll('img').forEach((image) => {
+            const source = image.getAttribute('data-src')
+              || image.getAttribute('data-original')
+              || image.getAttribute('data-lazy-src')
+              || image.getAttribute('data-fail')
+              || '';
+            if (source && !/^data:image\\/gif/i.test(source)
+              && (!image.getAttribute('src') || /^data:image\\/gif/i.test(image.getAttribute('src')))) {
+              image.setAttribute('src', source);
+              promoted += 1;
+            }
+            image.setAttribute('loading', 'eager');
+            image.setAttribute('decoding', 'sync');
+          });
+          return promoted;
+        };
         const hasBodyContent = (root) => {
           if (!root) return false;
           const text = String(root.innerText || root.textContent || '').replace(/\\s+/g, '');
-          return Boolean(text) || Boolean(root.querySelector('img[data-src], img[src], video, audio'));
+          if (text.length >= 50) return true;
+          const lazyImage = Array.from(root.querySelectorAll('img[data-src], img[data-original], img[data-lazy-src], img[data-fail]'))
+            .some((image) => {
+              const source = image.getAttribute('data-src')
+                || image.getAttribute('data-original')
+                || image.getAttribute('data-lazy-src')
+                || image.getAttribute('data-fail')
+                || '';
+              return source && !/^data:image\\/gif/i.test(source)
+                && !/(?:blank|loading|placeholder|default|avatar|icon)/i.test(source);
+            });
+          return lazyImage || Boolean(root.querySelector('video, audio'));
         };
         for (let attempt = 0; attempt < 30; attempt += 1) {
           const root = document.querySelector('#js_content');
+          promoteLazyImages(root);
           if (hasBodyContent(root)) return true;
           window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
           await sleep(500);
@@ -10776,6 +10807,15 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
           markdown: clean(clone.innerText || clone.textContent || ''),
           assets,
           stateText,
+          bodyTextChars: clean(root.innerText || root.textContent || '').replace(/\\s+/g, '').length,
+          imageCount: assets.length,
+          imageCandidateCount: root.querySelectorAll('img').length,
+          diagnostic: {
+            bodyTextChars: clean(root.innerText || root.textContent || '').replace(/\\s+/g, '').length,
+            imageCount: assets.length,
+            imageCandidateCount: root.querySelectorAll('img').length,
+            lazyImageCount: root.querySelectorAll('img[data-src], img[data-original], img[data-lazy-src]').length,
+          },
         };
       })()
     `);
@@ -20040,13 +20080,14 @@ class WechatObsidianInboxPlugin extends Plugin {
             outcome: String(details.outcome || 'unknown'),
           };
           if (details.state) entry.state = String(details.state);
-          ['htmlChars', 'markdownChars', 'assetCount', 'durationMs'].forEach((key) => {
+          ['htmlChars', 'markdownChars', 'assetCount', 'bodyTextChars', 'imageCount', 'imageCandidateCount', 'lazyImageCount', 'promotedImageCount', 'durationMs'].forEach((key) => {
             const value = Number(details[key]);
             if (Number.isFinite(value) && value >= 0) entry[key] = value;
           });
           const errorText = String(details.error || '').replace(/\s+/g, ' ').trim();
-          if (errorText) entry.error = errorText.slice(0, 220);
-          wechatArticleDiagnostic.stages.push(entry);
+         if (errorText) entry.error = errorText.slice(0, 220);
+          if (details.diagnostic && typeof details.diagnostic === 'object') entry.diagnostic = details.diagnostic;
+         wechatArticleDiagnostic.stages.push(entry);
         };
         const extracted = await runWechatArticlePipeline({
           url: wechatArticleUrl,
@@ -20062,24 +20103,28 @@ class WechatObsidianInboxPlugin extends Plugin {
                 method: 'GET',
                 headers: articleHeaders,
               })).text || '');
-              const staticState = classifyWechatArticleHtml(staticHtml);
+              const staticDiagnosis = diagnoseWechatArticleHtml(staticHtml);
+              const staticState = staticDiagnosis.pageKind;
               addWechatArticleStage('obsidian-request', {
                 outcome: 'response',
-                state: staticState,
-                htmlChars: staticHtml.length,
+               state: staticState,
+               htmlChars: staticHtml.length,
+                diagnostic: staticDiagnosis,
               });
               // WeChat can return a 200 response containing only its QR/app guide.
               // That is not a usable article, so retry through Node instead of only
               // falling back when requestUrl throws a network exception.
-              if (staticState !== 'guide' && staticState !== 'unknown') return staticHtml;
+              if (staticState !== 'guide' && staticState !== 'unknown' && staticState !== 'empty-shell') return staticHtml;
               const tryWechatSession = async () => {
                 try {
                   const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || '');
-                  const sessionState = classifyWechatArticleHtml(sessionHtml);
+                  const sessionDiagnosis = diagnoseWechatArticleHtml(sessionHtml);
+                  const sessionState = sessionDiagnosis.pageKind;
                   addWechatArticleStage('wechat-session', {
                     outcome: 'response',
-                    state: sessionState,
-                    htmlChars: sessionHtml.length,
+                   state: sessionState,
+                   htmlChars: sessionHtml.length,
+                    diagnostic: sessionDiagnosis,
                   });
                   if (sessionState === 'article') {
                     usedWechatSessionFallback = true;
@@ -20097,11 +20142,13 @@ class WechatObsidianInboxPlugin extends Plugin {
               try {
                 usedNodeFallback = true;
                 const nodeHtml = await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders);
-                const nodeState = classifyWechatArticleHtml(nodeHtml);
+                const nodeDiagnosis = diagnoseWechatArticleHtml(nodeHtml);
+                const nodeState = nodeDiagnosis.pageKind;
                 addWechatArticleStage('node-fallback', {
                   outcome: 'response',
-                  state: nodeState,
-                  htmlChars: String(nodeHtml || '').length,
+                 state: nodeState,
+                 htmlChars: String(nodeHtml || '').length,
+                  diagnostic: nodeDiagnosis,
                 });
                 if (nodeState === 'article') return nodeHtml;
                 return (await tryWechatSession()) || staticHtml;
@@ -20121,11 +20168,13 @@ class WechatObsidianInboxPlugin extends Plugin {
               try {
                 usedNodeFallback = true;
                 nodeHtml = String(await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders) || '');
-                const nodeState = classifyWechatArticleHtml(nodeHtml);
+                const nodeDiagnosis = diagnoseWechatArticleHtml(nodeHtml);
+                const nodeState = nodeDiagnosis.pageKind;
                 addWechatArticleStage('node-fallback', {
                   outcome: 'response',
-                  state: nodeState,
-                  htmlChars: nodeHtml.length,
+                 state: nodeState,
+                 htmlChars: nodeHtml.length,
+                  diagnostic: nodeDiagnosis,
                 });
                 if (nodeState === 'article') return nodeHtml;
               } catch (nodeError) {
@@ -20137,11 +20186,13 @@ class WechatObsidianInboxPlugin extends Plugin {
               }
               try {
                 const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || '');
-                const sessionState = classifyWechatArticleHtml(sessionHtml);
+                const sessionDiagnosis = diagnoseWechatArticleHtml(sessionHtml);
+                const sessionState = sessionDiagnosis.pageKind;
                 addWechatArticleStage('wechat-session', {
                   outcome: 'response',
-                  state: sessionState,
-                  htmlChars: sessionHtml.length,
+                 state: sessionState,
+                 htmlChars: sessionHtml.length,
+                  diagnostic: sessionDiagnosis,
                 });
                 if (sessionState === 'article') {
                   usedWechatSessionFallback = true;
@@ -20164,10 +20215,18 @@ class WechatObsidianInboxPlugin extends Plugin {
               const renderedText = String(rendered && (rendered.html || rendered.markdown) || '');
               addWechatArticleStage('hidden-browser', {
                 outcome: 'response',
-                state: classifyWechatArticleHtml(renderedText),
+                state: rendered && rendered.diagnostic && rendered.diagnostic.pageKind
+                  ? rendered.diagnostic.pageKind
+                  : diagnoseWechatArticleHtml(renderedText).pageKind,
                 htmlChars: String(rendered && rendered.html || '').length,
-                markdownChars: String(rendered && rendered.markdown || '').length,
-                assetCount: Array.isArray(rendered && rendered.assets) ? rendered.assets.length : 0,
+               markdownChars: String(rendered && rendered.markdown || '').length,
+               assetCount: Array.isArray(rendered && rendered.assets) ? rendered.assets.length : 0,
+                bodyTextChars: Number(rendered && rendered.bodyTextChars) || 0,
+                imageCount: Number(rendered && rendered.imageCount) || 0,
+                imageCandidateCount: Number(rendered && rendered.imageCandidateCount) || 0,
+                diagnostic: rendered && rendered.diagnostic && Object.keys(rendered.diagnostic).length
+                  ? rendered.diagnostic
+                  : diagnoseWechatArticleHtml(renderedText),
               });
             } catch (browserError) {
               addWechatArticleStage('hidden-browser', {
@@ -20181,6 +20240,10 @@ class WechatObsidianInboxPlugin extends Plugin {
               title: rendered.title,
               assets: rendered.assets,
               bodyFound: rendered.bodyFound === true,
+              bodyTextChars: Number(rendered.bodyTextChars) || 0,
+              imageCount: Number(rendered.imageCount) || 0,
+              imageCandidateCount: Number(rendered.imageCandidateCount) || 0,
+              diagnostic: rendered.diagnostic || {},
             };
           },
           isUsableBrowserArticle: ({ markdown, bodyFound }) => Boolean(bodyFound && String(markdown || '').trim()),
@@ -20230,6 +20293,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               conversionNote: fallbackConversionNote,
               conversionDiagnostic: {
                 ...wechatArticleDiagnostic,
+                ...(extracted.diagnostic || {}),
                 finalKind: extracted.kind,
                 finalState: extracted.state,
                 finalSource: extracted.source,
@@ -20245,11 +20309,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           ? extractWebpageMetadataFromHtml(extracted.html, wechatArticleUrl)
           : {};
         const imageLocalizationErrors = [];
+        const renderedImageStats = {};
         let markdown = extracted.source === 'browser'
           ? (extracted.markdown || htmlToMarkdown(extracted.html))
           : htmlToMarkdown(extracted.html);
         if (extracted.source === 'browser') {
-          const renderedImageStats = {};
           markdown = await this.saveWebpageImageAssets(
             markdown,
             extracted.assets,
@@ -20275,6 +20339,22 @@ class WechatObsidianInboxPlugin extends Plugin {
             },
           );
         }
+        const diagnosticImageCandidates = extracted.diagnostic && extracted.diagnostic.browser
+          ? Number(extracted.diagnostic.browser.imageCandidateCount) || 0
+          : extracted.diagnostic && extracted.diagnostic.static
+            ? Number(extracted.diagnostic.static.imageCandidateCount) || 0
+            : 0;
+        const imageCompleteness = {
+          candidateCount: diagnosticImageCandidates || (extracted.source === 'browser' ? extracted.assets.length : 0),
+          savedCount: extracted.source === 'browser'
+            ? Number(renderedImageStats.localizedCount) || 0
+            : Math.max(0, diagnosticImageCandidates - imageLocalizationErrors.length),
+          failedCount: extracted.source === 'browser'
+            ? Number(renderedImageStats.failedCount) || imageLocalizationErrors.length
+            : imageLocalizationErrors.length,
+          missingSourceCount: Number(renderedImageStats.missingSourceCount) || 0,
+          mode: extracted.source === 'browser' ? 'asset-localization' : 'remote-image-localization-best-effort',
+        };
         const conversionNote = [
           usedWechatSessionFallback ? '公众号本地会话备用通道已成功抓取' : '',
           usedNodeFallback ? '已通过备用通道抓取' : '',
@@ -20299,9 +20379,11 @@ class WechatObsidianInboxPlugin extends Plugin {
             conversionNote,
             conversionDiagnostic: {
               ...wechatArticleDiagnostic,
+              ...(extracted.diagnostic || {}),
               finalKind: extracted.kind,
               finalState: extracted.state,
               finalSource: extracted.source,
+              imageCompleteness,
             },
             imageLocalizationFailedCount: imageLocalizationErrors.length,
             imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
