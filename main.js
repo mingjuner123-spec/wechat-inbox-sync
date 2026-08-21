@@ -4280,6 +4280,628 @@ var require_local_douyin_resolver_utils = __commonJS({
   }
 });
 
+// src/douyin-media-utils.js
+var require_douyin_media_utils = __commonJS({
+  "src/douyin-media-utils.js"(exports2, module2) {
+    "use strict";
+    function createDouyinMediaHelpers2({
+      normalizeBrowserCapturedMediaUrls: normalizeBrowserCapturedMediaUrls2,
+      getSocialRequestHeaders: getSocialRequestHeaders2,
+      douyinMobileShareUserAgent,
+      pushUniqueMediaUrl: pushUniqueMediaUrl2,
+      sortMediaUrlsForTranscription: sortMediaUrlsForTranscription2
+    } = {}) {
+      const normalizeCaptured = typeof normalizeBrowserCapturedMediaUrls2 === "function" ? normalizeBrowserCapturedMediaUrls2 : () => [];
+      const buildSocialHeaders = typeof getSocialRequestHeaders2 === "function" ? getSocialRequestHeaders2 : () => ({});
+      const addUniqueMediaUrl = typeof pushUniqueMediaUrl2 === "function" ? pushUniqueMediaUrl2 : (list, value) => {
+        if (!list.includes(value)) list.push(value);
+      };
+      const sortMedia = typeof sortMediaUrlsForTranscription2 === "function" ? sortMediaUrlsForTranscription2 : (urls) => Array.from(new Set(Array.isArray(urls) ? urls : []));
+      function isDouyinUrl2(url) {
+        const text = String(url || "").toLowerCase();
+        return text.includes("douyin.com") || text.includes("iesdouyin.com") || text.includes("amemv.com");
+      }
+      __name(isDouyinUrl2, "isDouyinUrl");
+      function isDouyinMediaUrl2(url) {
+        return /douyinvod\.com|zjcdn\.com\/tos-|snssdk\.com\/aweme\/v1\/play|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ""));
+      }
+      __name(isDouyinMediaUrl2, "isDouyinMediaUrl");
+      function extractDouyinAwemeId2(url) {
+        const text = String(url || "");
+        const patterns = [
+          /\/video\/(\d{8,})/i,
+          /\/share\/video\/(\d{8,})/i,
+          /\/aweme\/detail\/(\d{8,})/i,
+          /[?&](?:aweme_id|item_id|item_ids|modal_id)=(\d{8,})/i
+        ];
+        for (const pattern of patterns) {
+          const match = text.match(pattern);
+          if (match && match[1]) return match[1];
+        }
+        return "";
+      }
+      __name(extractDouyinAwemeId2, "extractDouyinAwemeId");
+      function buildDouyinDomIdentityExtractorScript2() {
+        return String.raw`
+    const collectIdentityIds = (node) => {
+      const ids = [];
+      const seenIds = new Set();
+      const addIdentityText = (value) => {
+        const text = String(value || '');
+        const patterns = [
+          /(?:\/video\/|\/share\/video\/|\/aweme\/detail\/)(\d{8,})/ig,
+          /(?:aweme_id|item_id|item_ids|modal_id)[=:]+(\d{8,})/ig,
+        ];
+        patterns.forEach((pattern) => {
+          let match;
+          while ((match = pattern.exec(text))) {
+            if (!seenIds.has(match[1])) {
+              seenIds.add(match[1]);
+              ids.push(match[1]);
+            }
+          }
+        });
+        if (/^\d{8,}$/.test(text) && !seenIds.has(text)) {
+          seenIds.add(text);
+          ids.push(text);
+        }
+      };
+      let current = node;
+      for (let depth = 0; current && depth < 7; depth += 1) {
+        ['id', 'href', 'src', 'data-aweme-id', 'data-item-id', 'data-id'].forEach((name) => {
+          try { addIdentityText(current.getAttribute && current.getAttribute(name)); } catch (error) {}
+        });
+        current = current.parentElement;
+      }
+      return ids;
+    };
+  `;
+      }
+      __name(buildDouyinDomIdentityExtractorScript2, "buildDouyinDomIdentityExtractorScript");
+      function selectPrimaryDouyinDomMediaUrls2(candidates = [], targetAwemeId = "") {
+        const targetId = String(targetAwemeId || "").trim();
+        const ranked = (Array.isArray(candidates) ? candidates : []).map((candidate, fallbackIndex) => {
+          const urls = normalizeCaptured([candidate && candidate.urls]);
+          const identityIds = Array.from(new Set(
+            (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
+          ));
+          if (!urls.length) return null;
+          return {
+            urls,
+            exactIdentity: Boolean(targetId && identityIds.includes(targetId)),
+            isPlaying: candidate && candidate.isPlaying === true,
+            visibleInViewport: Boolean(candidate && candidate.visible && candidate.intersectsViewport),
+            area: Math.max(0, Number(candidate && candidate.area) || 0),
+            index: Number.isFinite(Number(candidate && candidate.index)) ? Number(candidate.index) : fallbackIndex
+          };
+        }).filter(Boolean).sort((left, right) => Number(right.exactIdentity) - Number(left.exactIdentity) || Number(right.isPlaying) - Number(left.isPlaying) || Number(right.visibleInViewport) - Number(left.visibleInViewport) || right.area - left.area || left.index - right.index);
+        return ranked.length ? ranked[0].urls : [];
+      }
+      __name(selectPrimaryDouyinDomMediaUrls2, "selectPrimaryDouyinDomMediaUrls");
+      function selectIdentityBoundDouyinBrowserMedia2({
+        targetAwemeId = "",
+        finalUrl = "",
+        canonicalUrl = "",
+        debuggerMediaUrls = [],
+        domMediaCandidates = [],
+        pageIdentityIds = [],
+        primaryDomMediaUrls = []
+      } = {}) {
+        const targetId = String(targetAwemeId || "").trim();
+        const finalRouteId = extractDouyinAwemeId2(finalUrl);
+        if (targetId && finalRouteId && finalRouteId !== targetId) return [];
+        const exactPayloadMedia = normalizeCaptured([debuggerMediaUrls]);
+        if (exactPayloadMedia.length) return exactPayloadMedia;
+        const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
+        if (candidates.length) return selectPrimaryDouyinDomMediaUrls2(candidates, targetId);
+        return normalizeCaptured([primaryDomMediaUrls]);
+      }
+      __name(selectIdentityBoundDouyinBrowserMedia2, "selectIdentityBoundDouyinBrowserMedia");
+      function normalizeDouyinTargetUrl2(originalUrl, resolvedUrl = "") {
+        const original = String(originalUrl || "").trim();
+        const resolved = String(resolvedUrl || "").trim();
+        const awemeId = extractDouyinAwemeId2(resolved) || extractDouyinAwemeId2(original);
+        if (awemeId) {
+          return { awemeId, url: `https://www.douyin.com/video/${awemeId}` };
+        }
+        const candidate = resolved || original;
+        if (/^https?:\/\//i.test(candidate) && isDouyinUrl2(candidate)) {
+          return { awemeId: "", url: candidate };
+        }
+        return { awemeId: "", url: "" };
+      }
+      __name(normalizeDouyinTargetUrl2, "normalizeDouyinTargetUrl");
+      function buildDouyinBrowserFallbackRequest2(originalUrl, resolvedUrl = "") {
+        const target = normalizeDouyinTargetUrl2(originalUrl, resolvedUrl);
+        return {
+          awemeId: target.awemeId,
+          url: target.url,
+          strictDouyinTarget: Boolean(target.awemeId)
+        };
+      }
+      __name(buildDouyinBrowserFallbackRequest2, "buildDouyinBrowserFallbackRequest");
+      function buildDouyinBrowserFallbackRequests2(originalUrl, resolvedUrl = "", knownAwemeId = "") {
+        const original = String(originalUrl || "").trim();
+        const resolved = String(resolvedUrl || "").trim();
+        const inferredTarget = normalizeDouyinTargetUrl2(original, resolved);
+        const awemeId = String(knownAwemeId || inferredTarget.awemeId || "").trim();
+        const target = awemeId ? { awemeId, url: `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` } : inferredTarget;
+        const requests = [];
+        const seen = /* @__PURE__ */ new Set();
+        const addCurrentPage = /* @__PURE__ */ __name((value, inputKind) => {
+          const candidate = String(value || "").trim();
+          if (!/^https?:\/\//i.test(candidate) || !isDouyinUrl2(candidate) || seen.has(candidate)) return;
+          seen.add(candidate);
+          requests.push({
+            awemeId: target.awemeId,
+            url: candidate,
+            strictDouyinTarget: false,
+            inputKind
+          });
+        }, "addCurrentPage");
+        addCurrentPage(original, "original-page");
+        addCurrentPage(resolved, "resolved-page");
+        if (target.awemeId) addCurrentPage(target.url, "target-page");
+        if (!requests.length) addCurrentPage(target.url, "target-page");
+        return requests;
+      }
+      __name(buildDouyinBrowserFallbackRequests2, "buildDouyinBrowserFallbackRequests");
+      function getDouyinAwemeDetailUrls2(awemeId) {
+        const id = String(awemeId || "").trim();
+        if (!id) return [];
+        const query = `aweme_id=${encodeURIComponent(id)}&aid=6383&device_platform=webapp`;
+        return [
+          `https://www.douyin.com/aweme/v1/web/aweme/detail/?${query}`,
+          `https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=${encodeURIComponent(id)}&aid=1128&device_platform=webapp`
+        ];
+      }
+      __name(getDouyinAwemeDetailUrls2, "getDouyinAwemeDetailUrls");
+      function getDouyinMobileSharePageUrls2(awemeId) {
+        const id = String(awemeId || "").trim();
+        if (!id) return [];
+        return [`https://www.iesdouyin.com/share/video/${encodeURIComponent(id)}/?from_ssr=1`];
+      }
+      __name(getDouyinMobileSharePageUrls2, "getDouyinMobileSharePageUrls");
+      function getDouyinMobileShareRequestHeaders2(url) {
+        return {
+          ...buildSocialHeaders(url),
+          "User-Agent": douyinMobileShareUserAgent,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          Referer: "https://www.iesdouyin.com/"
+        };
+      }
+      __name(getDouyinMobileShareRequestHeaders2, "getDouyinMobileShareRequestHeaders");
+      function parseJsonObjectAssignedTo2(source, variableName) {
+        const text = String(source || "");
+        const assignmentIndex = text.indexOf(variableName);
+        if (assignmentIndex < 0) return null;
+        const objectStart = text.indexOf("{", assignmentIndex + variableName.length);
+        if (objectStart < 0) return null;
+        let depth = 0;
+        let quote = "";
+        let escaped = false;
+        for (let index = objectStart; index < text.length; index += 1) {
+          const char = text[index];
+          if (quote) {
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === quote) quote = "";
+            continue;
+          }
+          if (char === '"' || char === "'") {
+            quote = char;
+            continue;
+          }
+          if (char === "{") depth += 1;
+          if (char === "}") {
+            depth -= 1;
+            if (depth === 0) {
+              try {
+                return JSON.parse(text.slice(objectStart, index + 1));
+              } catch (error) {
+                return null;
+              }
+            }
+          }
+        }
+        return null;
+      }
+      __name(parseJsonObjectAssignedTo2, "parseJsonObjectAssignedTo");
+      function parseJsonValueAt2(source, valueStart) {
+        const text = String(source || "");
+        const first = text[valueStart];
+        if (first !== "{" && first !== "[") return null;
+        const close = first === "{" ? "}" : "]";
+        let depth = 0;
+        let quote = "";
+        let escaped = false;
+        for (let index = valueStart; index < text.length; index += 1) {
+          const char = text[index];
+          if (quote) {
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === quote) quote = "";
+            continue;
+          }
+          if (char === '"' || char === "'") {
+            quote = char;
+            continue;
+          }
+          if (char === first) depth += 1;
+          if (char === close) {
+            depth -= 1;
+            if (depth === 0) {
+              try {
+                return JSON.parse(text.slice(valueStart, index + 1));
+              } catch (error) {
+                return null;
+              }
+            }
+          }
+        }
+        return null;
+      }
+      __name(parseJsonValueAt2, "parseJsonValueAt");
+      function decodeDouyinStateText2(value) {
+        let text = String(value || "");
+        const hasStructuredState = /* @__PURE__ */ __name((candidate) => {
+          const normalized = String(candidate || "").trim();
+          return normalized.startsWith("{") || normalized.startsWith("[") || normalized.includes('"videoDetail"') || normalized.includes('\\"videoDetail\\"') || normalized.includes('"aweme_detail"') || normalized.includes('"awemeDetail"');
+        }, "hasStructuredState");
+        for (let index = 0; index < 2; index += 1) {
+          if (hasStructuredState(text)) break;
+          if (!/%(?:[0-9a-f]{2})/i.test(text)) break;
+          try {
+            const decoded = decodeURIComponent(text);
+            if (!decoded || decoded === text) break;
+            text = decoded;
+          } catch (error) {
+            break;
+          }
+        }
+        return text;
+      }
+      __name(decodeDouyinStateText2, "decodeDouyinStateText");
+      function collectDouyinPaceStateValues2(source) {
+        const text = String(source || "");
+        const values = [];
+        const maxValues = 160;
+        const maxTotalCharacters = 2e6;
+        let totalCharacters = 0;
+        const pushPattern = /self\.__pace_f\s*\.\s*push\s*\(/g;
+        let match;
+        while ((match = pushPattern.exec(text)) && values.length < maxValues && totalCharacters < maxTotalCharacters) {
+          const arrayStart = text.indexOf("[", pushPattern.lastIndex);
+          if (arrayStart < 0) continue;
+          const payload = parseJsonValueAt2(text, arrayStart);
+          if (!Array.isArray(payload)) continue;
+          payload.forEach((value) => {
+            if (typeof value !== "string" || values.length >= maxValues || totalCharacters >= maxTotalCharacters) return;
+            const remaining = maxTotalCharacters - totalCharacters;
+            const bounded = value.slice(0, remaining);
+            if (!bounded) return;
+            values.push(bounded);
+            totalCharacters += bounded.length;
+          });
+          pushPattern.lastIndex = Math.max(pushPattern.lastIndex, arrayStart + 1);
+        }
+        return values;
+      }
+      __name(collectDouyinPaceStateValues2, "collectDouyinPaceStateValues");
+      function collectDouyinStatePayloadsFromText2(value) {
+        const source = String(value || "");
+        const payloads = [];
+        const addPayload = /* @__PURE__ */ __name((payload, allowPrimary = true) => {
+          if (payload && typeof payload === "object" && payloads.length < 320) payloads.push({ payload, allowPrimary });
+        }, "addPayload");
+        const inspect = /* @__PURE__ */ __name((text) => {
+          if (!text) return;
+          const detailPattern = /"(?:videoDetail|aweme_detail|awemeDetail)"\s*:/g;
+          const detailMatches = Array.from(text.matchAll(detailPattern));
+          try {
+            addPayload(JSON.parse(text));
+          } catch (error) {
+          }
+          const firstObjectStart = text.indexOf("{");
+          if (firstObjectStart >= 0) addPayload(parseJsonValueAt2(text, firstObjectStart), detailMatches.length <= 1);
+          detailMatches.forEach((detailMatch) => {
+            if (payloads.length >= 320) return;
+            const detailStart = text.indexOf("{", Number(detailMatch.index) + detailMatch[0].length);
+            if (detailStart < 0) return;
+            const detail = parseJsonValueAt2(text, detailStart);
+            if (detail) addPayload({ videoDetail: detail }, false);
+          });
+        }, "inspect");
+        inspect(source);
+        if (/\\"(?:videoDetail|aweme_detail|awemeDetail)\\"/.test(source)) {
+          inspect(source.replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
+        }
+        return payloads;
+      }
+      __name(collectDouyinStatePayloadsFromText2, "collectDouyinStatePayloadsFromText");
+      function collectDouyinPaceStatePayloads2(source) {
+        const values = collectDouyinPaceStateValues2(source);
+        const candidateTexts = [];
+        const seenTexts = /* @__PURE__ */ new Set();
+        const addText = /* @__PURE__ */ __name((value) => {
+          const text = String(value || "");
+          if (!text || seenTexts.has(text)) return;
+          seenTexts.add(text);
+          candidateTexts.push(text);
+        }, "addText");
+        values.forEach((value) => addText(decodeDouyinStateText2(value)));
+        if (values.length > 1) {
+          addText(decodeDouyinStateText2(values.join("")));
+          addText(values.map((value) => decodeDouyinStateText2(value)).join(""));
+        }
+        const payloads = [];
+        candidateTexts.forEach((text) => {
+          collectDouyinStatePayloadsFromText2(text).forEach((payload) => {
+            if (payloads.length < 320) payloads.push(payload);
+          });
+        });
+        return payloads;
+      }
+      __name(collectDouyinPaceStatePayloads2, "collectDouyinPaceStatePayloads");
+      function collectDouyinRouterStatePayloads2(source) {
+        const text = String(source || "");
+        const payloads = [];
+        const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+        let match;
+        while (match = scriptPattern.exec(text)) {
+          const payload = parseJsonObjectAssignedTo2(match[1], "window._ROUTER_DATA");
+          if (payload) payloads.push(payload);
+        }
+        const fallbackPayload = parseJsonObjectAssignedTo2(text, "window._ROUTER_DATA");
+        if (fallbackPayload) payloads.push(fallbackPayload);
+        return payloads;
+      }
+      __name(collectDouyinRouterStatePayloads2, "collectDouyinRouterStatePayloads");
+      function collectDouyinUrlList2(value, urls) {
+        if (!value) return;
+        if (typeof value === "string") {
+          addUniqueMediaUrl(urls, value);
+          return;
+        }
+        if (Array.isArray(value)) {
+          value.forEach((item) => collectDouyinUrlList2(item, urls));
+          return;
+        }
+        if (typeof value === "object") {
+          collectDouyinUrlList2(value.url_list, urls);
+          collectDouyinUrlList2(value.urlList, urls);
+          collectDouyinUrlList2(value.url, urls);
+          collectDouyinUrlList2(value.src, urls);
+        }
+      }
+      __name(collectDouyinUrlList2, "collectDouyinUrlList");
+      function extractDouyinMediaUrlsFromDetailPayload2(payload) {
+        const detail = payload && (payload.aweme_detail || payload.awemeDetail || payload.item_list && payload.item_list[0]);
+        if (!detail || typeof detail !== "object") return [];
+        const video = detail.video || {};
+        const urls = [];
+        collectDouyinUrlList2(video.play_addr, urls);
+        collectDouyinUrlList2(video.download_addr, urls);
+        collectDouyinUrlList2(video.playAddr, urls);
+        collectDouyinUrlList2(video.downloadAddr, urls);
+        (Array.isArray(video.bit_rate) ? video.bit_rate : []).forEach((item) => {
+          collectDouyinUrlList2(item && item.play_addr, urls);
+          collectDouyinUrlList2(item && item.playAddr, urls);
+        });
+        return sortMedia(urls);
+      }
+      __name(extractDouyinMediaUrlsFromDetailPayload2, "extractDouyinMediaUrlsFromDetailPayload");
+      function getDouyinDetailAwemeId2(payload) {
+        const detail = payload && (payload.aweme_detail || payload.awemeDetail || payload.item_list && payload.item_list[0]);
+        return String(detail && (detail.aweme_id || detail.awemeId) || "").trim();
+      }
+      __name(getDouyinDetailAwemeId2, "getDouyinDetailAwemeId");
+      function extractDouyinMediaUrlsForAweme2(payload, awemeId) {
+        const targetId = String(awemeId || "").trim();
+        if (!targetId) return [];
+        let root = payload;
+        if (typeof root === "string") {
+          try {
+            root = JSON.parse(root || "{}");
+          } catch (error) {
+            return [];
+          }
+        }
+        if (!root || typeof root !== "object") return [];
+        const urls = [];
+        const seen = /* @__PURE__ */ new Set();
+        const visit = /* @__PURE__ */ __name((value, depth = 0) => {
+          if (!value || typeof value !== "object" || depth > 16 || seen.size > 1e4 || seen.has(value)) return;
+          seen.add(value);
+          if (Array.isArray(value)) {
+            value.forEach((item) => visit(item, depth + 1));
+            return;
+          }
+          const candidateId = String(value.aweme_id || value.awemeId || "").trim();
+          if (candidateId === targetId && value.video && typeof value.video === "object") {
+            extractDouyinMediaUrlsFromDetailPayload2({ aweme_detail: value }).forEach((url) => addUniqueMediaUrl(urls, url));
+          }
+          Object.values(value).forEach((item) => visit(item, depth + 1));
+        }, "visit");
+        visit(root);
+        return sortMedia(urls);
+      }
+      __name(extractDouyinMediaUrlsForAweme2, "extractDouyinMediaUrlsForAweme");
+      function findDouyinDetailForAweme2(payload, awemeId) {
+        const targetId = String(awemeId || "").trim();
+        if (!targetId || !payload || typeof payload !== "object") return null;
+        const seen = /* @__PURE__ */ new Set();
+        let matched = null;
+        const visit = /* @__PURE__ */ __name((value, depth = 0) => {
+          if (matched || !value || typeof value !== "object" || depth > 16 || seen.size > 1e4 || seen.has(value)) return;
+          seen.add(value);
+          if (Array.isArray(value)) {
+            value.forEach((item) => visit(item, depth + 1));
+            return;
+          }
+          const candidateId = String(value.aweme_id || value.awemeId || "").trim();
+          if (candidateId === targetId) {
+            matched = value;
+            return;
+          }
+          Object.values(value).forEach((item) => visit(item, depth + 1));
+        }, "visit");
+        visit(payload);
+        return matched;
+      }
+      __name(findDouyinDetailForAweme2, "findDouyinDetailForAweme");
+      function collectExplicitDouyinPrimaryCandidates2(payload) {
+        const candidates = [];
+        const addCandidate = /* @__PURE__ */ __name((detail, priority) => {
+          if (!detail || typeof detail !== "object") return;
+          const urls = extractDouyinMediaUrlsFromDetailPayload2({ aweme_detail: detail });
+          if (!urls.length) return;
+          candidates.push({
+            detail,
+            priority,
+            identity: String(detail.aweme_id || detail.awemeId || "").trim(),
+            urls
+          });
+        }, "addCandidate");
+        if (!payload || typeof payload !== "object") return candidates;
+        addCandidate(payload.videoDetail, 100);
+        addCandidate(payload.aweme_detail, 100);
+        addCandidate(payload.awemeDetail, 100);
+        if (payload.loaderData && typeof payload.loaderData === "object") addCandidate(payload.loaderData.video, 80);
+        return candidates;
+      }
+      __name(collectExplicitDouyinPrimaryCandidates2, "collectExplicitDouyinPrimaryCandidates");
+      function resolveDouyinMediaFromPayloads2(payloads, awemeId) {
+        const targetId = String(awemeId || "").trim();
+        const exactUrls = [];
+        let exactDetail = null;
+        const primaryCandidates = [];
+        (Array.isArray(payloads) ? payloads : []).forEach((entry) => {
+          const isStateEntry = Boolean(
+            entry && typeof entry === "object" && Object.prototype.hasOwnProperty.call(entry, "payload") && Object.prototype.hasOwnProperty.call(entry, "allowPrimary")
+          );
+          const payload = isStateEntry ? entry.payload : entry;
+          if (targetId) {
+            extractDouyinMediaUrlsForAweme2(payload, targetId).forEach((url) => addUniqueMediaUrl(exactUrls, url));
+            exactDetail = exactDetail || findDouyinDetailForAweme2(payload, targetId);
+          }
+          if (!isStateEntry || entry.allowPrimary) collectExplicitDouyinPrimaryCandidates2(payload).forEach((candidate) => primaryCandidates.push(candidate));
+        });
+        const sortedExactUrls = sortMedia(exactUrls);
+        if (sortedExactUrls.length) return { exactUrls: sortedExactUrls, primaryUrls: [], detail: exactDetail, identityOutcome: "target-id-matched" };
+        const bestPriority = primaryCandidates.reduce((highest, candidate) => Math.max(highest, Number(candidate.priority) || 0), -1);
+        const bestCandidates = primaryCandidates.filter((candidate) => candidate.priority === bestPriority);
+        const uniqueCandidates = /* @__PURE__ */ new Map();
+        bestCandidates.forEach((candidate) => {
+          const key = candidate.identity || candidate.urls.join("|");
+          if (!uniqueCandidates.has(key)) {
+            uniqueCandidates.set(key, { ...candidate });
+            return;
+          }
+          const previous = uniqueCandidates.get(key);
+          previous.urls = sortMedia([...previous.urls, ...candidate.urls]);
+        });
+        if (uniqueCandidates.size === 1) {
+          const candidate = Array.from(uniqueCandidates.values())[0];
+          return { exactUrls: [], primaryUrls: candidate.urls, detail: candidate.detail, identityOutcome: "unverified-primary-player" };
+        }
+        return { exactUrls: [], primaryUrls: [], detail: exactDetail, identityOutcome: "" };
+      }
+      __name(resolveDouyinMediaFromPayloads2, "resolveDouyinMediaFromPayloads");
+      function mergeDouyinMediaResolutions2(...resolutions) {
+        const exactUrls = [];
+        const primaryCandidates = /* @__PURE__ */ new Map();
+        let exactDetail = null;
+        resolutions.forEach((resolution) => {
+          if (!resolution) return;
+          (resolution.exactUrls || []).forEach((url) => addUniqueMediaUrl(exactUrls, url));
+          if (resolution.exactUrls && resolution.exactUrls.length) exactDetail = exactDetail || resolution.detail;
+          if (resolution.primaryUrls && resolution.primaryUrls.length) {
+            const identity = String(resolution.detail && (resolution.detail.aweme_id || resolution.detail.awemeId) || "").trim();
+            const key = identity || resolution.primaryUrls.join("|");
+            if (!primaryCandidates.has(key)) primaryCandidates.set(key, { detail: resolution.detail, urls: sortMedia(resolution.primaryUrls) });
+            else {
+              const previous = primaryCandidates.get(key);
+              previous.urls = sortMedia([...previous.urls, ...resolution.primaryUrls]);
+            }
+          }
+        });
+        const sortedExactUrls = sortMedia(exactUrls);
+        const primaryCandidate = primaryCandidates.size === 1 ? Array.from(primaryCandidates.values())[0] : null;
+        return {
+          exactUrls: sortedExactUrls,
+          primaryUrls: sortedExactUrls.length || !primaryCandidate ? [] : primaryCandidate.urls,
+          detail: exactDetail || primaryCandidate && primaryCandidate.detail || null,
+          identityOutcome: sortedExactUrls.length ? "target-id-matched" : primaryCandidate ? "unverified-primary-player" : ""
+        };
+      }
+      __name(mergeDouyinMediaResolutions2, "mergeDouyinMediaResolutions");
+      function resolveDouyinMediaFromPaceState2(source, awemeId) {
+        return resolveDouyinMediaFromPayloads2(collectDouyinPaceStatePayloads2(source), awemeId);
+      }
+      __name(resolveDouyinMediaFromPaceState2, "resolveDouyinMediaFromPaceState");
+      function resolveDouyinMediaFromShareHtml2(html, awemeId) {
+        const source = String(html || "");
+        return mergeDouyinMediaResolutions2(
+          resolveDouyinMediaFromPaceState2(source, awemeId),
+          resolveDouyinMediaFromPayloads2(collectDouyinRouterStatePayloads2(source), awemeId)
+        );
+      }
+      __name(resolveDouyinMediaFromShareHtml2, "resolveDouyinMediaFromShareHtml");
+      function extractDouyinMediaUrlsFromPaceState2(source, awemeId) {
+        const resolution = resolveDouyinMediaFromPaceState2(source, awemeId);
+        return resolution.exactUrls.length ? resolution.exactUrls : resolution.primaryUrls;
+      }
+      __name(extractDouyinMediaUrlsFromPaceState2, "extractDouyinMediaUrlsFromPaceState");
+      function extractDouyinMediaUrlsFromShareHtml2(html, awemeId) {
+        const resolution = resolveDouyinMediaFromShareHtml2(html, awemeId);
+        return resolution.exactUrls.length ? resolution.exactUrls : resolution.primaryUrls;
+      }
+      __name(extractDouyinMediaUrlsFromShareHtml2, "extractDouyinMediaUrlsFromShareHtml");
+      function extractDouyinDetailFromShareHtml2(html, awemeId) {
+        return resolveDouyinMediaFromShareHtml2(html, awemeId).detail;
+      }
+      __name(extractDouyinDetailFromShareHtml2, "extractDouyinDetailFromShareHtml");
+      return {
+        isDouyinUrl: isDouyinUrl2,
+        isDouyinMediaUrl: isDouyinMediaUrl2,
+        extractDouyinAwemeId: extractDouyinAwemeId2,
+        buildDouyinDomIdentityExtractorScript: buildDouyinDomIdentityExtractorScript2,
+        selectPrimaryDouyinDomMediaUrls: selectPrimaryDouyinDomMediaUrls2,
+        selectIdentityBoundDouyinBrowserMedia: selectIdentityBoundDouyinBrowserMedia2,
+        normalizeDouyinTargetUrl: normalizeDouyinTargetUrl2,
+        buildDouyinBrowserFallbackRequest: buildDouyinBrowserFallbackRequest2,
+        buildDouyinBrowserFallbackRequests: buildDouyinBrowserFallbackRequests2,
+        getDouyinAwemeDetailUrls: getDouyinAwemeDetailUrls2,
+        getDouyinMobileSharePageUrls: getDouyinMobileSharePageUrls2,
+        getDouyinMobileShareRequestHeaders: getDouyinMobileShareRequestHeaders2,
+        parseJsonObjectAssignedTo: parseJsonObjectAssignedTo2,
+        parseJsonValueAt: parseJsonValueAt2,
+        decodeDouyinStateText: decodeDouyinStateText2,
+        collectDouyinPaceStateValues: collectDouyinPaceStateValues2,
+        collectDouyinStatePayloadsFromText: collectDouyinStatePayloadsFromText2,
+        collectDouyinPaceStatePayloads: collectDouyinPaceStatePayloads2,
+        collectDouyinRouterStatePayloads: collectDouyinRouterStatePayloads2,
+        collectDouyinUrlList: collectDouyinUrlList2,
+        extractDouyinMediaUrlsFromDetailPayload: extractDouyinMediaUrlsFromDetailPayload2,
+        getDouyinDetailAwemeId: getDouyinDetailAwemeId2,
+        extractDouyinMediaUrlsForAweme: extractDouyinMediaUrlsForAweme2,
+        findDouyinDetailForAweme: findDouyinDetailForAweme2,
+        collectExplicitDouyinPrimaryCandidates: collectExplicitDouyinPrimaryCandidates2,
+        resolveDouyinMediaFromPayloads: resolveDouyinMediaFromPayloads2,
+        mergeDouyinMediaResolutions: mergeDouyinMediaResolutions2,
+        resolveDouyinMediaFromPaceState: resolveDouyinMediaFromPaceState2,
+        resolveDouyinMediaFromShareHtml: resolveDouyinMediaFromShareHtml2,
+        extractDouyinMediaUrlsFromPaceState: extractDouyinMediaUrlsFromPaceState2,
+        extractDouyinMediaUrlsFromShareHtml: extractDouyinMediaUrlsFromShareHtml2,
+        extractDouyinDetailFromShareHtml: extractDouyinDetailFromShareHtml2
+      };
+    }
+    __name(createDouyinMediaHelpers2, "createDouyinMediaHelpers");
+    module2.exports = { createDouyinMediaHelpers: createDouyinMediaHelpers2 };
+  }
+});
+
 // src/xiaohongshu-markdown-utils.js
 var require_xiaohongshu_markdown_utils = __commonJS({
   "src/xiaohongshu-markdown-utils.js"(exports2, module2) {
@@ -4853,6 +5475,7 @@ var {
   buildNetscapeCookieFile,
   extractLocalDouyinResolverMediaUrls
 } = require_local_douyin_resolver_utils();
+var { createDouyinMediaHelpers } = require_douyin_media_utils();
 var {
   createXiaohongshuCommentMarkdownHelpers,
   createXiaohongshuMarkdownBuilder
@@ -4889,7 +5512,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.112";
+var PLUGIN_RUNTIME_VERSION = "1.3.113";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -7395,531 +8018,46 @@ function isTrustedXiaohongshuTransportUrl(url) {
   }
 }
 __name(isTrustedXiaohongshuTransportUrl, "isTrustedXiaohongshuTransportUrl");
-function isDouyinUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("douyin.com") || text.includes("iesdouyin.com") || text.includes("amemv.com");
-}
-__name(isDouyinUrl, "isDouyinUrl");
-function isDouyinMediaUrl(url) {
-  return /douyinvod\.com|zjcdn\.com\/tos-|snssdk\.com\/aweme\/v1\/play|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ""));
-}
-__name(isDouyinMediaUrl, "isDouyinMediaUrl");
-function extractDouyinAwemeId(url) {
-  const text = String(url || "");
-  const patterns = [
-    /\/video\/(\d{8,})/i,
-    /\/share\/video\/(\d{8,})/i,
-    /\/aweme\/detail\/(\d{8,})/i,
-    /[?&](?:aweme_id|item_id|item_ids|modal_id)=(\d{8,})/i
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match && match[1]) return match[1];
-  }
-  return "";
-}
-__name(extractDouyinAwemeId, "extractDouyinAwemeId");
-function buildDouyinDomIdentityExtractorScript() {
-  return String.raw`
-    const collectIdentityIds = (node) => {
-      const ids = [];
-      const seenIds = new Set();
-      const addIdentityText = (value) => {
-        const text = String(value || '');
-        const patterns = [
-          /(?:\/video\/|\/share\/video\/|\/aweme\/detail\/)(\d{8,})/ig,
-          /(?:aweme_id|item_id|item_ids|modal_id)[=:]+(\d{8,})/ig,
-        ];
-        patterns.forEach((pattern) => {
-          let match;
-          while ((match = pattern.exec(text))) {
-            if (!seenIds.has(match[1])) {
-              seenIds.add(match[1]);
-              ids.push(match[1]);
-            }
-          }
-        });
-        if (/^\d{8,}$/.test(text) && !seenIds.has(text)) {
-          seenIds.add(text);
-          ids.push(text);
-        }
-      };
-      let current = node;
-      for (let depth = 0; current && depth < 7; depth += 1) {
-        ['id', 'href', 'src', 'data-aweme-id', 'data-item-id', 'data-id'].forEach((name) => {
-          try { addIdentityText(current.getAttribute && current.getAttribute(name)); } catch (error) {}
-        });
-        current = current.parentElement;
-      }
-      return ids;
-    };
-  `;
-}
-__name(buildDouyinDomIdentityExtractorScript, "buildDouyinDomIdentityExtractorScript");
-function selectPrimaryDouyinDomMediaUrls(candidates = [], targetAwemeId = "") {
-  const targetId = String(targetAwemeId || "").trim();
-  const ranked = (Array.isArray(candidates) ? candidates : []).map((candidate, fallbackIndex) => {
-    const urls = normalizeBrowserCapturedMediaUrls([candidate && candidate.urls]);
-    const identityIds = Array.from(new Set(
-      (Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds : []).map((value) => String(value || "").trim()).filter(Boolean)
-    ));
-    if (!urls.length) {
-      return null;
-    }
-    return {
-      urls,
-      exactIdentity: Boolean(targetId && identityIds.includes(targetId)),
-      isPlaying: candidate && candidate.isPlaying === true,
-      visibleInViewport: Boolean(candidate && candidate.visible && candidate.intersectsViewport),
-      area: Math.max(0, Number(candidate && candidate.area) || 0),
-      index: Number.isFinite(Number(candidate && candidate.index)) ? Number(candidate.index) : fallbackIndex
-    };
-  }).filter(Boolean).sort((left, right) => Number(right.exactIdentity) - Number(left.exactIdentity) || Number(right.isPlaying) - Number(left.isPlaying) || Number(right.visibleInViewport) - Number(left.visibleInViewport) || right.area - left.area || left.index - right.index);
-  return ranked.length ? ranked[0].urls : [];
-}
-__name(selectPrimaryDouyinDomMediaUrls, "selectPrimaryDouyinDomMediaUrls");
-function selectIdentityBoundDouyinBrowserMedia({
-  targetAwemeId = "",
-  finalUrl = "",
-  canonicalUrl = "",
-  debuggerMediaUrls = [],
-  domMediaCandidates = [],
-  pageIdentityIds = [],
-  primaryDomMediaUrls = []
-} = {}) {
-  const targetId = String(targetAwemeId || "").trim();
-  const finalRouteId = extractDouyinAwemeId(finalUrl);
-  if (targetId && finalRouteId && finalRouteId !== targetId) return [];
-  const exactPayloadMedia = normalizeBrowserCapturedMediaUrls([debuggerMediaUrls]);
-  if (exactPayloadMedia.length) return exactPayloadMedia;
-  const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
-  if (candidates.length) {
-    return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
-  }
-  return normalizeBrowserCapturedMediaUrls([primaryDomMediaUrls]);
-}
-__name(selectIdentityBoundDouyinBrowserMedia, "selectIdentityBoundDouyinBrowserMedia");
-function normalizeDouyinTargetUrl(originalUrl, resolvedUrl = "") {
-  const original = String(originalUrl || "").trim();
-  const resolved = String(resolvedUrl || "").trim();
-  const awemeId = extractDouyinAwemeId(resolved) || extractDouyinAwemeId(original);
-  if (awemeId) {
-    return {
-      awemeId,
-      url: `https://www.douyin.com/video/${awemeId}`
-    };
-  }
-  const candidate = resolved || original;
-  if (/^https?:\/\//i.test(candidate) && isDouyinUrl(candidate)) {
-    return { awemeId: "", url: candidate };
-  }
-  return { awemeId: "", url: "" };
-}
-__name(normalizeDouyinTargetUrl, "normalizeDouyinTargetUrl");
-function buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl = "") {
-  const target = normalizeDouyinTargetUrl(originalUrl, resolvedUrl);
-  return {
-    awemeId: target.awemeId,
-    url: target.url,
-    strictDouyinTarget: Boolean(target.awemeId)
-  };
-}
-__name(buildDouyinBrowserFallbackRequest, "buildDouyinBrowserFallbackRequest");
-function buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl = "", knownAwemeId = "") {
-  const original = String(originalUrl || "").trim();
-  const resolved = String(resolvedUrl || "").trim();
-  const inferredTarget = normalizeDouyinTargetUrl(original, resolved);
-  const awemeId = String(knownAwemeId || inferredTarget.awemeId || "").trim();
-  const target = awemeId ? { awemeId, url: `https://www.douyin.com/video/${encodeURIComponent(awemeId)}` } : inferredTarget;
-  const requests = [];
-  const seen = /* @__PURE__ */ new Set();
-  const addCurrentPage = /* @__PURE__ */ __name((value, inputKind) => {
-    const candidate = String(value || "").trim();
-    if (!/^https?:\/\//i.test(candidate) || !isDouyinUrl(candidate) || seen.has(candidate)) return;
-    seen.add(candidate);
-    requests.push({
-      awemeId: target.awemeId,
-      url: candidate,
-      strictDouyinTarget: false,
-      inputKind
-    });
-  }, "addCurrentPage");
-  addCurrentPage(original, "original-page");
-  addCurrentPage(resolved, "resolved-page");
-  if (target.awemeId) addCurrentPage(target.url, "target-page");
-  if (!requests.length) addCurrentPage(target.url, "target-page");
-  return requests;
-}
-__name(buildDouyinBrowserFallbackRequests, "buildDouyinBrowserFallbackRequests");
-function getDouyinAwemeDetailUrls(awemeId) {
-  const id = String(awemeId || "").trim();
-  if (!id) return [];
-  const query = `aweme_id=${encodeURIComponent(id)}&aid=6383&device_platform=webapp`;
-  return [
-    `https://www.douyin.com/aweme/v1/web/aweme/detail/?${query}`,
-    `https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=${encodeURIComponent(id)}&aid=1128&device_platform=webapp`
-  ];
-}
-__name(getDouyinAwemeDetailUrls, "getDouyinAwemeDetailUrls");
-function getDouyinMobileSharePageUrls(awemeId) {
-  const id = String(awemeId || "").trim();
-  if (!id) return [];
-  return [`https://www.iesdouyin.com/share/video/${encodeURIComponent(id)}/?from_ssr=1`];
-}
-__name(getDouyinMobileSharePageUrls, "getDouyinMobileSharePageUrls");
-function getDouyinMobileShareRequestHeaders(url) {
-  return {
-    ...getSocialRequestHeaders(url),
-    "User-Agent": DOUYIN_MOBILE_SHARE_USER_AGENT,
-    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    Referer: "https://www.iesdouyin.com/"
-  };
-}
-__name(getDouyinMobileShareRequestHeaders, "getDouyinMobileShareRequestHeaders");
-function parseJsonObjectAssignedTo(source, variableName) {
-  const text = String(source || "");
-  const assignmentIndex = text.indexOf(variableName);
-  if (assignmentIndex < 0) return null;
-  const objectStart = text.indexOf("{", assignmentIndex + variableName.length);
-  if (objectStart < 0) return null;
-  let depth = 0;
-  let quote = "";
-  let escaped = false;
-  for (let index = objectStart; index < text.length; index += 1) {
-    const char = text[index];
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === quote) {
-        quote = "";
-      }
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === "{") depth += 1;
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        try {
-          return JSON.parse(text.slice(objectStart, index + 1));
-        } catch (error) {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
-}
-__name(parseJsonObjectAssignedTo, "parseJsonObjectAssignedTo");
-function parseJsonValueAt(source, valueStart) {
-  const text = String(source || "");
-  const first = text[valueStart];
-  if (first !== "{" && first !== "[") return null;
-  const close = first === "{" ? "}" : "]";
-  let depth = 0;
-  let quote = "";
-  let escaped = false;
-  for (let index = valueStart; index < text.length; index += 1) {
-    const char = text[index];
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === quote) {
-        quote = "";
-      }
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === first) depth += 1;
-    if (char === close) {
-      depth -= 1;
-      if (depth === 0) {
-        try {
-          return JSON.parse(text.slice(valueStart, index + 1));
-        } catch (error) {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
-}
-__name(parseJsonValueAt, "parseJsonValueAt");
-function decodeDouyinStateText(value) {
-  let text = String(value || "");
-  const hasStructuredState = /* @__PURE__ */ __name((candidate) => {
-    const normalized = String(candidate || "").trim();
-    return normalized.startsWith("{") || normalized.startsWith("[") || normalized.includes('"videoDetail"') || normalized.includes('\\"videoDetail\\"') || normalized.includes('"aweme_detail"') || normalized.includes('"awemeDetail"');
-  }, "hasStructuredState");
-  for (let index = 0; index < 2; index += 1) {
-    if (hasStructuredState(text)) break;
-    if (!/%(?:[0-9a-f]{2})/i.test(text)) break;
-    try {
-      const decoded = decodeURIComponent(text);
-      if (!decoded || decoded === text) break;
-      text = decoded;
-    } catch (error) {
-      break;
-    }
-  }
-  return text;
-}
-__name(decodeDouyinStateText, "decodeDouyinStateText");
-function collectDouyinPaceStateValues(source) {
-  const text = String(source || "");
-  const values = [];
-  const maxValues = 160;
-  const maxTotalCharacters = 2e6;
-  let totalCharacters = 0;
-  const pushPattern = /self\.__pace_f\s*\.\s*push\s*\(/g;
-  let match;
-  while ((match = pushPattern.exec(text)) && values.length < maxValues && totalCharacters < maxTotalCharacters) {
-    const arrayStart = text.indexOf("[", pushPattern.lastIndex);
-    if (arrayStart < 0) continue;
-    const payload = parseJsonValueAt(text, arrayStart);
-    if (!Array.isArray(payload)) continue;
-    payload.forEach((value) => {
-      if (typeof value !== "string" || values.length >= maxValues || totalCharacters >= maxTotalCharacters) return;
-      const remaining = maxTotalCharacters - totalCharacters;
-      const bounded = value.slice(0, remaining);
-      if (!bounded) return;
-      values.push(bounded);
-      totalCharacters += bounded.length;
-    });
-    pushPattern.lastIndex = Math.max(pushPattern.lastIndex, arrayStart + 1);
-  }
-  return values;
-}
-__name(collectDouyinPaceStateValues, "collectDouyinPaceStateValues");
-function collectDouyinStatePayloadsFromText(value) {
-  const source = String(value || "");
-  const payloads = [];
-  const addPayload = /* @__PURE__ */ __name((payload, allowPrimary = true) => {
-    if (payload && typeof payload === "object" && payloads.length < 320) {
-      payloads.push({ payload, allowPrimary });
-    }
-  }, "addPayload");
-  const inspect = /* @__PURE__ */ __name((text) => {
-    if (!text) return;
-    const detailPattern = /"(?:videoDetail|aweme_detail|awemeDetail)"\s*:/g;
-    const detailMatches = Array.from(text.matchAll(detailPattern));
-    try {
-      addPayload(JSON.parse(text));
-    } catch (error) {
-    }
-    const firstObjectStart = text.indexOf("{");
-    if (firstObjectStart >= 0) {
-      addPayload(parseJsonValueAt(text, firstObjectStart), detailMatches.length <= 1);
-    }
-    detailMatches.forEach((detailMatch) => {
-      if (payloads.length >= 320) return;
-      const detailStart = text.indexOf("{", Number(detailMatch.index) + detailMatch[0].length);
-      if (detailStart < 0) return;
-      const detail = parseJsonValueAt(text, detailStart);
-      if (detail) addPayload({ videoDetail: detail }, false);
-    });
-  }, "inspect");
-  inspect(source);
-  if (/\\"(?:videoDetail|aweme_detail|awemeDetail)\\"/.test(source)) {
-    inspect(source.replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
-  }
-  return payloads;
-}
-__name(collectDouyinStatePayloadsFromText, "collectDouyinStatePayloadsFromText");
-function collectDouyinPaceStatePayloads(source) {
-  const values = collectDouyinPaceStateValues(source);
-  const candidateTexts = [];
-  const seenTexts = /* @__PURE__ */ new Set();
-  const addText = /* @__PURE__ */ __name((value) => {
-    const text = String(value || "");
-    if (!text || seenTexts.has(text)) return;
-    seenTexts.add(text);
-    candidateTexts.push(text);
-  }, "addText");
-  values.forEach((value) => addText(decodeDouyinStateText(value)));
-  if (values.length > 1) {
-    addText(decodeDouyinStateText(values.join("")));
-    addText(values.map((value) => decodeDouyinStateText(value)).join(""));
-  }
-  const payloads = [];
-  candidateTexts.forEach((text) => {
-    collectDouyinStatePayloadsFromText(text).forEach((payload) => {
-      if (payloads.length < 320) payloads.push(payload);
-    });
-  });
-  return payloads;
-}
-__name(collectDouyinPaceStatePayloads, "collectDouyinPaceStatePayloads");
-function collectDouyinRouterStatePayloads(source) {
-  const text = String(source || "");
-  const payloads = [];
-  const scriptPattern = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
-  let match;
-  while (match = scriptPattern.exec(text)) {
-    const payload = parseJsonObjectAssignedTo(match[1], "window._ROUTER_DATA");
-    if (payload) payloads.push(payload);
-  }
-  const fallbackPayload = parseJsonObjectAssignedTo(text, "window._ROUTER_DATA");
-  if (fallbackPayload) payloads.push(fallbackPayload);
-  return payloads;
-}
-__name(collectDouyinRouterStatePayloads, "collectDouyinRouterStatePayloads");
-function findDouyinDetailForAweme(payload, awemeId) {
-  const targetId = String(awemeId || "").trim();
-  if (!targetId || !payload || typeof payload !== "object") return null;
-  const seen = /* @__PURE__ */ new Set();
-  let matched = null;
-  const visit = /* @__PURE__ */ __name((value, depth = 0) => {
-    if (matched || !value || typeof value !== "object" || depth > 16 || seen.size > 1e4 || seen.has(value)) return;
-    seen.add(value);
-    if (Array.isArray(value)) {
-      value.forEach((item) => visit(item, depth + 1));
-      return;
-    }
-    const candidateId = String(value.aweme_id || value.awemeId || "").trim();
-    if (candidateId === targetId) {
-      matched = value;
-      return;
-    }
-    Object.values(value).forEach((item) => visit(item, depth + 1));
-  }, "visit");
-  visit(payload);
-  return matched;
-}
-__name(findDouyinDetailForAweme, "findDouyinDetailForAweme");
-function collectExplicitDouyinPrimaryCandidates(payload) {
-  const candidates = [];
-  const addCandidate = /* @__PURE__ */ __name((detail, priority) => {
-    if (!detail || typeof detail !== "object") return;
-    const urls = extractDouyinMediaUrlsFromDetailPayload({ aweme_detail: detail });
-    if (!urls.length) return;
-    candidates.push({
-      detail,
-      priority,
-      identity: String(detail.aweme_id || detail.awemeId || "").trim(),
-      urls
-    });
-  }, "addCandidate");
-  if (!payload || typeof payload !== "object") return candidates;
-  addCandidate(payload.videoDetail, 100);
-  addCandidate(payload.aweme_detail, 100);
-  addCandidate(payload.awemeDetail, 100);
-  if (payload.loaderData && typeof payload.loaderData === "object") {
-    addCandidate(payload.loaderData.video, 80);
-  }
-  return candidates;
-}
-__name(collectExplicitDouyinPrimaryCandidates, "collectExplicitDouyinPrimaryCandidates");
-function resolveDouyinMediaFromPayloads(payloads, awemeId) {
-  const targetId = String(awemeId || "").trim();
-  const exactUrls = [];
-  let exactDetail = null;
-  const primaryCandidates = [];
-  (Array.isArray(payloads) ? payloads : []).forEach((entry) => {
-    const isStateEntry = Boolean(
-      entry && typeof entry === "object" && Object.prototype.hasOwnProperty.call(entry, "payload") && Object.prototype.hasOwnProperty.call(entry, "allowPrimary")
-    );
-    const payload = isStateEntry ? entry.payload : entry;
-    if (targetId) {
-      extractDouyinMediaUrlsForAweme(payload, targetId).forEach((url) => pushUniqueMediaUrl(exactUrls, url));
-      exactDetail = exactDetail || findDouyinDetailForAweme(payload, targetId);
-    }
-    if (!isStateEntry || entry.allowPrimary) {
-      collectExplicitDouyinPrimaryCandidates(payload).forEach((candidate) => primaryCandidates.push(candidate));
-    }
-  });
-  const sortedExactUrls = sortMediaUrlsForTranscription(exactUrls);
-  if (sortedExactUrls.length) {
-    return { exactUrls: sortedExactUrls, primaryUrls: [], detail: exactDetail, identityOutcome: "target-id-matched" };
-  }
-  const bestPriority = primaryCandidates.reduce(
-    (highest, candidate) => Math.max(highest, Number(candidate.priority) || 0),
-    -1
-  );
-  const bestCandidates = primaryCandidates.filter((candidate) => candidate.priority === bestPriority);
-  const uniqueCandidates = /* @__PURE__ */ new Map();
-  bestCandidates.forEach((candidate) => {
-    const key = candidate.identity || candidate.urls.join("|");
-    if (!uniqueCandidates.has(key)) {
-      uniqueCandidates.set(key, { ...candidate });
-      return;
-    }
-    const previous = uniqueCandidates.get(key);
-    previous.urls = sortMediaUrlsForTranscription([...previous.urls, ...candidate.urls]);
-  });
-  if (uniqueCandidates.size === 1) {
-    const candidate = Array.from(uniqueCandidates.values())[0];
-    return {
-      exactUrls: [],
-      primaryUrls: candidate.urls,
-      detail: candidate.detail,
-      identityOutcome: "unverified-primary-player"
-    };
-  }
-  return { exactUrls: [], primaryUrls: [], detail: exactDetail, identityOutcome: "" };
-}
-__name(resolveDouyinMediaFromPayloads, "resolveDouyinMediaFromPayloads");
-function mergeDouyinMediaResolutions(...resolutions) {
-  const exactUrls = [];
-  const primaryCandidates = /* @__PURE__ */ new Map();
-  let exactDetail = null;
-  resolutions.forEach((resolution) => {
-    if (!resolution) return;
-    (resolution.exactUrls || []).forEach((url) => pushUniqueMediaUrl(exactUrls, url));
-    if (resolution.exactUrls && resolution.exactUrls.length) exactDetail = exactDetail || resolution.detail;
-    if (resolution.primaryUrls && resolution.primaryUrls.length) {
-      const identity = String(
-        resolution.detail && (resolution.detail.aweme_id || resolution.detail.awemeId) || ""
-      ).trim();
-      const key = identity || resolution.primaryUrls.join("|");
-      if (!primaryCandidates.has(key)) {
-        primaryCandidates.set(key, {
-          detail: resolution.detail,
-          urls: sortMediaUrlsForTranscription(resolution.primaryUrls)
-        });
-      } else {
-        const previous = primaryCandidates.get(key);
-        previous.urls = sortMediaUrlsForTranscription([...previous.urls, ...resolution.primaryUrls]);
-      }
-    }
-  });
-  const sortedExactUrls = sortMediaUrlsForTranscription(exactUrls);
-  const primaryCandidate = primaryCandidates.size === 1 ? Array.from(primaryCandidates.values())[0] : null;
-  return {
-    exactUrls: sortedExactUrls,
-    primaryUrls: sortedExactUrls.length || !primaryCandidate ? [] : primaryCandidate.urls,
-    detail: exactDetail || primaryCandidate && primaryCandidate.detail || null,
-    identityOutcome: sortedExactUrls.length ? "target-id-matched" : primaryCandidate ? "unverified-primary-player" : ""
-  };
-}
-__name(mergeDouyinMediaResolutions, "mergeDouyinMediaResolutions");
-function resolveDouyinMediaFromPaceState(source, awemeId) {
-  return resolveDouyinMediaFromPayloads(collectDouyinPaceStatePayloads(source), awemeId);
-}
-__name(resolveDouyinMediaFromPaceState, "resolveDouyinMediaFromPaceState");
-function resolveDouyinMediaFromShareHtml(html, awemeId) {
-  const source = String(html || "");
-  return mergeDouyinMediaResolutions(
-    resolveDouyinMediaFromPaceState(source, awemeId),
-    resolveDouyinMediaFromPayloads(collectDouyinRouterStatePayloads(source), awemeId)
-  );
-}
-__name(resolveDouyinMediaFromShareHtml, "resolveDouyinMediaFromShareHtml");
-function extractDouyinMediaUrlsFromShareHtml(html, awemeId) {
-  const resolution = resolveDouyinMediaFromShareHtml(html, awemeId);
-  return resolution.exactUrls.length ? resolution.exactUrls : resolution.primaryUrls;
-}
-__name(extractDouyinMediaUrlsFromShareHtml, "extractDouyinMediaUrlsFromShareHtml");
+var {
+  isDouyinUrl,
+  isDouyinMediaUrl,
+  extractDouyinAwemeId,
+  buildDouyinDomIdentityExtractorScript,
+  selectPrimaryDouyinDomMediaUrls,
+  selectIdentityBoundDouyinBrowserMedia,
+  normalizeDouyinTargetUrl,
+  buildDouyinBrowserFallbackRequest,
+  buildDouyinBrowserFallbackRequests,
+  getDouyinAwemeDetailUrls,
+  getDouyinMobileSharePageUrls,
+  getDouyinMobileShareRequestHeaders,
+  parseJsonObjectAssignedTo,
+  parseJsonValueAt,
+  decodeDouyinStateText,
+  collectDouyinPaceStateValues,
+  collectDouyinStatePayloadsFromText,
+  collectDouyinPaceStatePayloads,
+  collectDouyinRouterStatePayloads,
+  collectDouyinUrlList,
+  extractDouyinMediaUrlsFromDetailPayload,
+  getDouyinDetailAwemeId,
+  extractDouyinMediaUrlsForAweme,
+  findDouyinDetailForAweme,
+  collectExplicitDouyinPrimaryCandidates,
+  resolveDouyinMediaFromPayloads,
+  mergeDouyinMediaResolutions,
+  resolveDouyinMediaFromPaceState,
+  resolveDouyinMediaFromShareHtml,
+  extractDouyinMediaUrlsFromPaceState,
+  extractDouyinMediaUrlsFromShareHtml,
+  extractDouyinDetailFromShareHtml
+} = createDouyinMediaHelpers({
+  normalizeBrowserCapturedMediaUrls,
+  getSocialRequestHeaders,
+  douyinMobileShareUserAgent: DOUYIN_MOBILE_SHARE_USER_AGENT,
+  pushUniqueMediaUrl,
+  sortMediaUrlsForTranscription
+});
 function deriveDouyinTitleFromDescription(description = "") {
   const cleanedDescription = cleanSocialDescription(description);
   if (!cleanedDescription) return "";
@@ -8857,6 +8995,48 @@ function installExternalAppNavigationGuards(webContents) {
   }
 }
 __name(installExternalAppNavigationGuards, "installExternalAppNavigationGuards");
+function installHiddenBrowserChildWindowGuards(webContents) {
+  if (!webContents || typeof webContents.on !== "function") return () => {
+  };
+  const cleanups = [];
+  const preventLegacyWindow = /* @__PURE__ */ __name((event) => {
+    try {
+      if (event && typeof event.preventDefault === "function") event.preventDefault();
+    } catch (error) {
+    }
+  }, "preventLegacyWindow");
+  const destroyCreatedChild = /* @__PURE__ */ __name((_event, childWindow) => {
+    try {
+      if (childWindow && typeof childWindow.hide === "function") childWindow.hide();
+      const destroyed = childWindow && typeof childWindow.isDestroyed === "function" ? childWindow.isDestroyed() : false;
+      if (childWindow && !destroyed && typeof childWindow.destroy === "function") {
+        childWindow.destroy();
+      }
+    } catch (error) {
+    }
+  }, "destroyCreatedChild");
+  webContents.on("new-window", preventLegacyWindow);
+  cleanups.push(() => {
+    if (typeof webContents.removeListener === "function") {
+      webContents.removeListener("new-window", preventLegacyWindow);
+    }
+  });
+  webContents.on("did-create-window", destroyCreatedChild);
+  cleanups.push(() => {
+    if (typeof webContents.removeListener === "function") {
+      webContents.removeListener("did-create-window", destroyCreatedChild);
+    }
+  });
+  return () => {
+    cleanups.splice(0).reverse().forEach((cleanup) => {
+      try {
+        cleanup();
+      } catch (error) {
+      }
+    });
+  };
+}
+__name(installHiddenBrowserChildWindowGuards, "installHiddenBrowserChildWindowGuards");
 function isAllowedXiaohongshuBrowserNavigationUrl(url) {
   try {
     const parsed = new URL(String(url || "").trim());
@@ -8898,6 +9078,7 @@ function installXiaohongshuNavigationGuards(webContents) {
 }
 __name(installXiaohongshuNavigationGuards, "installXiaohongshuNavigationGuards");
 var activeXiaohongshuBrowserWindows = /* @__PURE__ */ new Set();
+var activeDouyinBrowserWindows = /* @__PURE__ */ new Set();
 var activeXiaohongshuLoginPromise = null;
 var activeDouyinLoginPromise = null;
 function trackXiaohongshuBrowserWindow(browserWindow) {
@@ -8911,6 +9092,17 @@ function trackXiaohongshuBrowserWindow(browserWindow) {
   return browserWindow;
 }
 __name(trackXiaohongshuBrowserWindow, "trackXiaohongshuBrowserWindow");
+function trackDouyinBrowserWindow(browserWindow) {
+  if (!browserWindow) return browserWindow;
+  activeDouyinBrowserWindows.add(browserWindow);
+  if (typeof browserWindow.on === "function") {
+    browserWindow.on("closed", () => {
+      activeDouyinBrowserWindows.delete(browserWindow);
+    });
+  }
+  return browserWindow;
+}
+__name(trackDouyinBrowserWindow, "trackDouyinBrowserWindow");
 function bindBrowserWindowToAbortSignal(browserWindow, signal) {
   if (!browserWindow || !signal || typeof signal.addEventListener !== "function") {
     return () => {
@@ -8957,6 +9149,22 @@ function closeActiveXiaohongshuBrowserWindows() {
   return closedCount;
 }
 __name(closeActiveXiaohongshuBrowserWindows, "closeActiveXiaohongshuBrowserWindows");
+function closeActiveDouyinBrowserWindows() {
+  let closedCount = 0;
+  for (const browserWindow of [...activeDouyinBrowserWindows]) {
+    activeDouyinBrowserWindows.delete(browserWindow);
+    try {
+      const destroyed = typeof browserWindow.isDestroyed === "function" ? browserWindow.isDestroyed() : false;
+      if (!destroyed && typeof browserWindow.destroy === "function") {
+        browserWindow.destroy();
+        closedCount += 1;
+      }
+    } catch (error) {
+    }
+  }
+  return closedCount;
+}
+__name(closeActiveDouyinBrowserWindows, "closeActiveDouyinBrowserWindows");
 function installXiaohongshuLoginWindowGuards(webContents) {
   installXiaohongshuNavigationGuards(webContents);
   if (webContents && typeof webContents.setWindowOpenHandler === "function") {
@@ -9603,76 +9811,6 @@ function extractSocialMediaUrlFromHtml(html) {
   return extractSocialMediaUrlsFromHtml(html)[0] || "";
 }
 __name(extractSocialMediaUrlFromHtml, "extractSocialMediaUrlFromHtml");
-function collectDouyinUrlList(value, urls) {
-  if (!value) return;
-  if (typeof value === "string") {
-    pushUniqueMediaUrl(urls, value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectDouyinUrlList(item, urls));
-    return;
-  }
-  if (typeof value === "object") {
-    collectDouyinUrlList(value.url_list, urls);
-    collectDouyinUrlList(value.urlList, urls);
-    collectDouyinUrlList(value.url, urls);
-    collectDouyinUrlList(value.src, urls);
-  }
-}
-__name(collectDouyinUrlList, "collectDouyinUrlList");
-function extractDouyinMediaUrlsFromDetailPayload(payload) {
-  const detail = payload && (payload.aweme_detail || payload.awemeDetail || payload.item_list && payload.item_list[0]);
-  if (!detail || typeof detail !== "object") return [];
-  const video = detail.video || {};
-  const urls = [];
-  collectDouyinUrlList(video.play_addr, urls);
-  collectDouyinUrlList(video.download_addr, urls);
-  collectDouyinUrlList(video.playAddr, urls);
-  collectDouyinUrlList(video.downloadAddr, urls);
-  (Array.isArray(video.bit_rate) ? video.bit_rate : []).forEach((item) => {
-    collectDouyinUrlList(item && item.play_addr, urls);
-    collectDouyinUrlList(item && item.playAddr, urls);
-  });
-  return sortMediaUrlsForTranscription(urls);
-}
-__name(extractDouyinMediaUrlsFromDetailPayload, "extractDouyinMediaUrlsFromDetailPayload");
-function getDouyinDetailAwemeId(payload) {
-  const detail = payload && (payload.aweme_detail || payload.awemeDetail || payload.item_list && payload.item_list[0]);
-  return String(detail && (detail.aweme_id || detail.awemeId) || "").trim();
-}
-__name(getDouyinDetailAwemeId, "getDouyinDetailAwemeId");
-function extractDouyinMediaUrlsForAweme(payload, awemeId) {
-  const targetId = String(awemeId || "").trim();
-  if (!targetId) return [];
-  let root = payload;
-  if (typeof root === "string") {
-    try {
-      root = JSON.parse(root || "{}");
-    } catch (error) {
-      return [];
-    }
-  }
-  if (!root || typeof root !== "object") return [];
-  const urls = [];
-  const seen = /* @__PURE__ */ new Set();
-  const visit = /* @__PURE__ */ __name((value, depth = 0) => {
-    if (!value || typeof value !== "object" || depth > 16 || seen.size > 1e4 || seen.has(value)) return;
-    seen.add(value);
-    if (Array.isArray(value)) {
-      value.forEach((item) => visit(item, depth + 1));
-      return;
-    }
-    const candidateId = String(value.aweme_id || value.awemeId || "").trim();
-    if (candidateId === targetId && value.video && typeof value.video === "object") {
-      extractDouyinMediaUrlsFromDetailPayload({ aweme_detail: value }).forEach((url) => pushUniqueMediaUrl(urls, url));
-    }
-    Object.values(value).forEach((item) => visit(item, depth + 1));
-  }, "visit");
-  visit(root);
-  return sortMediaUrlsForTranscription(urls);
-}
-__name(extractDouyinMediaUrlsForAweme, "extractDouyinMediaUrlsForAweme");
 function isUnavailableXiaohongshuPage(html, url = "") {
   const source = decodeHtmlEntities(String(html || ""));
   const target = String(url || "");
@@ -14566,7 +14704,29 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   if (isXiaohongshuUrl(url)) {
     trackXiaohongshuBrowserWindow(win);
   }
-  const cleanupAbort = isXiaohongshuUrl(url) ? bindBrowserWindowToAbortSignal(win, options.signal) : () => {
+  const isDouyinExtractionWindow = isDouyinUrl(url);
+  if (isDouyinExtractionWindow) {
+    trackDouyinBrowserWindow(win);
+  }
+  let cleanupHiddenChildWindowGuards = /* @__PURE__ */ __name(() => {
+  }, "cleanupHiddenChildWindowGuards");
+  if (isDouyinExtractionWindow) {
+    cleanupHiddenChildWindowGuards = installHiddenBrowserChildWindowGuards(win.webContents);
+    const hideWindow = /* @__PURE__ */ __name(() => {
+      try {
+        const destroyed = typeof win.isDestroyed === "function" && win.isDestroyed();
+        if (!destroyed && typeof win.hide === "function") win.hide();
+      } catch (error) {
+      }
+    }, "hideWindow");
+    hideWindow();
+    if (typeof win.on === "function") {
+      win.on("ready-to-show", hideWindow);
+      win.on("show", hideWindow);
+      win.__wechatInboxDouyinHideWindow = hideWindow;
+    }
+  }
+  const cleanupAbort = isXiaohongshuUrl(url) || isDouyinExtractionWindow ? bindBrowserWindowToAbortSignal(win, options.signal) : () => {
   };
   const capturedRequests = [];
   const captureDouyinState = isDouyinUrl(url);
@@ -14833,6 +14993,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     ]);
   } finally {
     cleanupAbort();
+    cleanupHiddenChildWindowGuards();
     installedWebRequestHandlers.forEach((method) => {
       try {
         if (browserSession && browserSession.webRequest && typeof browserSession.webRequest[method] === "function") {
@@ -14850,6 +15011,14 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     try {
       if (debuggerAttached && debuggerApi && typeof debuggerApi.detach === "function") {
         debuggerApi.detach();
+      }
+    } catch (error) {
+    }
+    try {
+      if (win && typeof win.removeListener === "function" && win.__wechatInboxDouyinHideWindow) {
+        win.removeListener("ready-to-show", win.__wechatInboxDouyinHideWindow);
+        win.removeListener("show", win.__wechatInboxDouyinHideWindow);
+        delete win.__wechatInboxDouyinHideWindow;
       }
     } catch (error) {
     }
@@ -18380,7 +18549,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       } catch (error) {
       }
     }
-    if (context && closeActiveXiaohongshuBrowserWindows() > 0) {
+    if (closeActiveXiaohongshuBrowserWindows() + closeActiveDouyinBrowserWindows() > 0) {
       stopped = true;
     }
     if (!stopped) {
@@ -24098,13 +24267,16 @@ WechatObsidianInboxPlugin.__test = {
   shouldBlockExternalAppUrl,
   installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
+  installHiddenBrowserChildWindowGuards,
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
   installXiaohongshuLoginWindowGuards,
   trackXiaohongshuBrowserWindow,
+  trackDouyinBrowserWindow,
   bindBrowserWindowToAbortSignal,
   closeActiveXiaohongshuBrowserWindows,
+  closeActiveDouyinBrowserWindows,
   enableDebuggerNetworkCapture,
   beginBestEffortBrowserLoad,
   createBrowserLoadFailureError,
