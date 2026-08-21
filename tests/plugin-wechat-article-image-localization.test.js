@@ -457,7 +457,7 @@ async function run() {
     () => hydrateWithHtml(partialGuideCase.plugin, guideHtml),
     (error) => error && error.code === 'WECHAT_ARTICLE_BODY_MISSING',
   );
-  assert.strictEqual(partialGuideBrowserCalls, 1);
+  assert.strictEqual(partialGuideBrowserCalls, 2);
   assert.strictEqual(partialGuideCase.writes.length, 0);
 
   const unavailableBrowserCase = createPlugin();
