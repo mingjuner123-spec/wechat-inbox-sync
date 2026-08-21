@@ -284,6 +284,36 @@ function runHiddenDouyinRendererNeverCreatesVisibleChildWindowTest() {
   );
 }
 
+function runHiddenDouyinChildWindowGuardTest() {
+  assert.strictEqual(typeof helpers.installHiddenBrowserChildWindowGuards, 'function');
+  const handlers = new Map();
+  const webContents = {
+    on(name, handler) {
+      handlers.set(name, handler);
+    },
+    removeListener(name, handler) {
+      if (handlers.get(name) === handler) handlers.delete(name);
+    },
+  };
+  const cleanup = helpers.installHiddenBrowserChildWindowGuards(webContents);
+  let prevented = false;
+  handlers.get('new-window')({ preventDefault() { prevented = true; } });
+  assert.strictEqual(prevented, true, 'legacy Electron child-window events must be cancelled');
+
+  let hidden = false;
+  let destroyed = false;
+  const childWindow = {
+    hide() { hidden = true; },
+    isDestroyed() { return destroyed; },
+    destroy() { destroyed = true; },
+  };
+  handlers.get('did-create-window')({}, childWindow);
+  assert.strictEqual(hidden, true, 'a child created despite the handler must be hidden immediately');
+  assert.strictEqual(destroyed, true, 'a child created despite the handler must be destroyed');
+  cleanup();
+  assert.strictEqual(handlers.size, 0, 'window guards must be removable after extraction finishes');
+}
+
 function runBrowserLoadFailureKeepsSafeDiagnosticCodeTest() {
   assert.strictEqual(typeof helpers.createBrowserLoadFailureError, 'function');
   const error = helpers.createBrowserLoadFailureError(-3, 'ERR_ABORTED');
@@ -334,7 +364,7 @@ function runLocalResolverFallbackContractTest() {
     /!hasUsableDouyinMedia[\s\S]{0,160}resolveDouyinMediaWithLocalResolver/,
     'the local resolver must run only after the existing Douyin media stages fail',
   );
-  assert.match(source, /stage:\s*'local-yt-dlp'/);
+  assert.match(source, /stage:\s*['"]local-yt-dlp['"]/);
   assert.match(source, /getInstalledLocalDouyinResolver\(\)/, 'the resolver must run only when the optional component is already installed');
   assert.doesNotMatch(source, /localDouyinResolverLastCheckedAt/, 'normal sync must not schedule periodic resolver checks');
   assert.match(source, /getDouyinCookies\(\)/, 'yt-dlp must use the plugin session rather than a system browser profile');
@@ -637,6 +667,7 @@ function runTargetPlayerInsideMixedIdentityContainerTest() {
 
 runBrowserFallbackRequestKeepsNonStrictCurrentPageTest();
 runHiddenDouyinRendererNeverCreatesVisibleChildWindowTest();
+runHiddenDouyinChildWindowGuardTest();
 runBrowserLoadFailureKeepsSafeDiagnosticCodeTest();
 runDouyinPersistentLoginContractTest();
 runLocalResolverFallbackContractTest();
