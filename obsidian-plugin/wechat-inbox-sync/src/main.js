@@ -214,7 +214,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 // persistent session to contribute cookies when the user already has them.
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.115';
+const PLUGIN_RUNTIME_VERSION = '1.3.116';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -244,7 +244,7 @@ const LOCAL_DOUYIN_RESOLVER_MANIFEST_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/yt-d
 const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
-const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '65ff6ec5aa844c780a4ebf4f83c9ea2f206de1b33e145dd2f1b9e1129f4e2337';
+const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '5798e3fab037ff0bb970e0452b4c5df32a4d6d52920e5904ae9ac3bea5ed7d02';
 const LOCAL_OCR_MACOS_INSTALLER_SHA256 = 'de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074';
 const LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
 const LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
@@ -704,7 +704,7 @@ function findFirstExistingPath(candidates, exists) {
   return candidates.find((candidate) => candidate && exists(candidate)) || '';
 }
 
-const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = '23c195a46d2e7b875757ead4a76080891e9343eb7563171f726b1b33a66e2709';
+const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = '53bc6ffde07cd5d3828b20020ac4d7cfa56d775d0bd9e86d2e6fa8cdf4fc2c42';
 const LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = '509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb';
 
 function getLocalAsrScriptIdentityHash(source) {
@@ -740,6 +740,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       && source.includes('$ChunkRetrySeconds')
       && source.includes('$ChunkSeconds = 120')
       && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
+      && source.includes('$TranscriptPartialRecoveryVersion = "partial-recovery-v1"')
       && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"')
       && source.includes('TRANSCRIPT_HALLUCINATION')
       && source.includes('Invoke-NativeProcess')
@@ -1765,6 +1766,9 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('$PythonBuildStandaloneBuild = "20260623"')
     && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"')
     && source.includes('$PortablePython')
+    && source.includes('$PythonRuntimeFallbackMirrors')
+    && source.includes('function Get-PythonRuntimeUrls')
+    && source.includes('Invoke-DownloadFile -Urls')
     && source.includes('Download-TextFile')
     && source.includes('function Install-PortablePython')
     && source.includes('function Expand-TarGzArchiveWithPowerShell')

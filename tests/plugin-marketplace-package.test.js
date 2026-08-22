@@ -645,6 +645,7 @@ function runWindowsAsrCandidateValidationProbe(source) {
     '$invalid=Join-Path $root "invalid.ps1"',
     '$validSource=@\'',
     '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
+    '$TranscriptPartialRecoveryVersion = "partial-recovery-v1"',
     '$NativeProcessRunnerVersion = "diagnostics-process-v1"',
     'function Invoke-NativeProcess { $info = New-Object System.Diagnostics.ProcessStartInfo; $task = $process.StandardOutput.ReadToEndAsync() }',
     '$progressHeartbeatAt="now"',
