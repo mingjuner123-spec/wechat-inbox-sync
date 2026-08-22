@@ -347,6 +347,8 @@ PluginClass.prototype.requestXiaohongshuStaticPage = async function requestXiaoh
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const releaseManifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../obsidian-plugin/wechat-inbox-sync/manifest.json'), 'utf8'));
+const currentPluginVersion = releaseManifest.version;
 const legacyAiMetadataExports = [
   'tryParseJson',
   'cleanMarkdownForStorage',
@@ -358,8 +360,8 @@ const legacyAiMetadataExports = [
 ];
 const legacyAiMetadataMainSource = childProcess.execFileSync(
   'git',
-  ['show', '1a9c8d6e:obsidian-plugin/wechat-inbox-sync/main.js'],
-  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true },
+  ['show', '1.3.113:obsidian-plugin/wechat-inbox-sync/main.js'],
+  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 },
 );
 const instrumentedLegacyAiMetadataMainSource = legacyAiMetadataMainSource.replace(
   'module.exports = WechatObsidianInboxPlugin;',
@@ -407,8 +409,8 @@ const legacyRecordBodyExports = [
 ];
 const legacyRecordBodyMainSource = childProcess.execFileSync(
   'git',
-  ['show', '5d0fcbfd:obsidian-plugin/wechat-inbox-sync/main.js'],
-  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true },
+  ['show', '1.3.113:obsidian-plugin/wechat-inbox-sync/main.js'],
+  { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 },
 );
 const instrumentedLegacyRecordBodyMainSource = legacyRecordBodyMainSource.replace(
   'module.exports = WechatObsidianInboxPlugin;',
@@ -465,7 +467,7 @@ const historicalWindowsAsrInstallerSource = childProcess.execFileSync(
   {
     cwd: path.join(__dirname, '..'),
     encoding: 'utf8',
-    windowsHide: true,
+    windowsHide: true, maxBuffer: 32 * 1024 * 1024,
   },
 );
 const historicalTemplateStart = historicalWindowsAsrInstallerSource.lastIndexOf('# BEGIN_TRANSCRIBE_TEMPLATE');
@@ -1153,9 +1155,9 @@ assert.strictEqual(
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
-assert.deepStrictEqual(helpers.getPluginRuntimeIdentity('1.3.114'), {
-  manifestVersion: '1.3.114',
-  runtimeVersion: '1.3.114',
+assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
+  manifestVersion: currentPluginVersion,
+  runtimeVersion: currentPluginVersion,
   buildMarker: 'clipboard-link-path-v1',
   matchesManifest: true,
 });
@@ -10749,7 +10751,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     writeCalls.push(record._id);
     if (record._id === 'xhs-content-unavailable-1') {
       throw helpers.createRetryableXiaohongshuContentError({
-        runtime: helpers.getPluginRuntimeIdentity('1.3.114'),
+        runtime: helpers.getPluginRuntimeIdentity(currentPluginVersion),
         request: {
           sourceHost: 'xiaohongshu.com',
           finalHost: 'xiaohongshu.com',
@@ -10788,8 +10790,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
     message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
     diagnostic: {
       runtime: {
-        manifestVersion: '1.3.114',
-        runtimeVersion: '1.3.114',
+        manifestVersion: currentPluginVersion,
+        runtimeVersion: currentPluginVersion,
         buildMarker: 'clipboard-link-path-v1',
         matchesManifest: true,
       },
@@ -12972,7 +12974,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes('运行 Bundle：1.3.114 / clipboard-link-path-v1'));
+    assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion} / clipboard-link-path-v1`));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
