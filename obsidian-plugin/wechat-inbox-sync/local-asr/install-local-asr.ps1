@@ -808,6 +808,7 @@ function Assert-TranscribeScriptCandidate {
   $candidateSource = [System.IO.File]::ReadAllText($Path)
   $requiredMarkers = @(
     '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
+    '$TranscriptPartialRecoveryVersion = "partial-recovery-v1"',
     '$NativeProcessRunnerVersion = "diagnostics-process-v1"',
     'System.Diagnostics.ProcessStartInfo',
     'ReadToEndAsync',
@@ -1095,6 +1096,7 @@ $OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {
 $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $TranscriptQualityGuardVersion = "repeat-guard-v2"
+$TranscriptPartialRecoveryVersion = "partial-recovery-v1"
 $NativeProcessRunnerVersion = "diagnostics-process-v1"
 @(
   "time=$(Get-Date -Format o)"
@@ -1336,6 +1338,139 @@ function Test-TranscriptHasRepeatHallucination {
   return $false
 }
 
+function Trim-RepeatedTranscriptTailLegacy {
+  param([AllowNull()][string]$Text)
+  $source = [string]$Text
+  if (-not $source.Trim()) {
+    return ""
+  }
+
+  $lines = @($source -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  if ($lines.Count -lt 3) {
+    return $source.Trim()
+  }
+
+  # Repetition caused by a bad chunk is normally concentrated at its tail. Keep
+  # the useful prefix so one poisoned chunk does not discard the whole media.
+  $tailStart = [Math]::Max(0, $lines.Count - 36)
+  $cutoff = $lines.Count
+  $occurrences = @{}
+  for ($index = $tailStart; $index -lt $lines.Count; $index += 1) {
+    $key = (($lines[$index] -replace "\s+", " ").Trim()).ToLowerInvariant()
+    if ($key.Length -lt 6) {
+      continue
+    }
+    if (-not $occurrences.ContainsKey($key)) {
+      $occurrences[$key] = New-Object System.Collections.Generic.List[int]
+    }
+    $occurrences[$key].Add($index)
+  }
+  foreach ($entry in $occurrences.GetEnumerator()) {
+    $indexes = @($entry.Value)
+    if ($indexes.Count -ge 6) {
+      $cutoff = [Math]::Min($cutoff, [int]$indexes[0])
+    }
+  }
+  for ($index = $tailStart + 2; $index -lt $lines.Count; $index += 1) {
+    if ($lines[$index].Length -ge 6 -and $lines[$index] -eq $lines[$index - 1] -and $lines[$index] -eq $lines[$index - 2]) {
+      $cutoff = [Math]::Min($cutoff, $index - 2)
+      break
+    }
+  }
+  if ($cutoff -ge $lines.Count -or $cutoff -le 0) {
+    return ""
+  }
+
+  $prefixLines = @($lines[0..($cutoff - 1)])
+  while ($prefixLines.Count -gt 0) {
+    $last = $prefixLines[$prefixLines.Count - 1].Trim()
+    $looksLikeNoise = $last.Length -lt 3 -or
+      $last -match "^(?:字幕|本字幕|谢谢观看|请不吝点赞|www\\.|https?://)" -or
+      $last -match "^[A-Za-z\s\.,!?-]{1,8}$"
+    if (-not $looksLikeNoise) {
+      break
+    }
+    if ($prefixLines.Count -eq 1) {
+      $prefixLines = @()
+    } else {
+      $prefixLines = @($prefixLines[0..($prefixLines.Count - 2)])
+    }
+  }
+  if ($prefixLines.Count -eq 0) {
+    return ""
+  }
+  $prefix = ($prefixLines -join "`n").Trim()
+  if ($prefix.Length -lt 4) {
+    return ""
+  }
+  return $prefix
+}
+
+# Keep the trimming rule ASCII-only because Windows PowerShell may load a UTF-8
+# script without a BOM using the active code page.
+function Trim-RepeatedTranscriptTail {
+  param([AllowNull()][string]$Text)
+  $source = [string]$Text
+  if (-not $source.Trim()) {
+    return ""
+  }
+  $lines = @($source -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  if ($lines.Count -lt 3) {
+    return $source.Trim()
+  }
+  $tailStart = [Math]::Max(0, $lines.Count - 36)
+  $cutoff = $lines.Count
+  $occurrences = @{}
+  for ($index = $tailStart; $index -lt $lines.Count; $index += 1) {
+    $key = (($lines[$index] -replace "\s+", " ").Trim()).ToLowerInvariant()
+    if ($key.Length -lt 6) {
+      continue
+    }
+    if (-not $occurrences.ContainsKey($key)) {
+      $occurrences[$key] = New-Object System.Collections.Generic.List[int]
+    }
+    $occurrences[$key].Add($index)
+  }
+  foreach ($entry in $occurrences.GetEnumerator()) {
+    $indexes = @($entry.Value)
+    if ($indexes.Count -ge 6) {
+      $cutoff = [Math]::Min($cutoff, [int]$indexes[0])
+    }
+  }
+  for ($index = $tailStart + 2; $index -lt $lines.Count; $index += 1) {
+    if ($lines[$index].Length -ge 6 -and $lines[$index] -eq $lines[$index - 1] -and $lines[$index] -eq $lines[$index - 2]) {
+      $cutoff = [Math]::Min($cutoff, $index - 2)
+      break
+    }
+  }
+  if ($cutoff -ge $lines.Count -or $cutoff -le 0) {
+    return ""
+  }
+  $prefixLines = @($lines[0..($cutoff - 1)])
+  while ($prefixLines.Count -gt 0) {
+    $last = $prefixLines[$prefixLines.Count - 1].Trim()
+    $looksLikeNoise = $last.Length -lt 3 -or
+      $last -match "^(?:subtitle|subtitles|thanks for watching|www\\.|https?://)" -or
+      $last -match "^[A-Za-z\s\.,!?-]{1,8}$"
+    if (-not $looksLikeNoise) {
+      break
+    }
+    if ($prefixLines.Count -eq 1) {
+      $prefixLines = @()
+    } else {
+      $prefixLines = @($prefixLines[0..($prefixLines.Count - 2)])
+    }
+  }
+  if ($prefixLines.Count -eq 0) {
+    return ""
+  }
+  $prefix = ($prefixLines -join "`n").Trim()
+  if ($prefix.Length -lt 4) {
+    return ""
+  }
+  return $prefix
+}
+
 function Invoke-WhisperChunk {
   param(
     [Parameter(Mandatory = $true)][string]$ChunkPath,
@@ -1487,6 +1622,7 @@ function Invoke-TranscribeAttempt {
   $whisperExit = 0
   $chunkIndex = 0
   $recoveryTriggered = 0
+  $skippedRepeatChunks = 0
 
   if ($ffmpegExit -eq 0 -and $chunkFiles.Count -eq 0) {
     throw "ffmpeg did not generate audio chunks."
@@ -1514,10 +1650,25 @@ function Invoke-TranscribeAttempt {
           $whisperLogs.Add((Get-TranscriptPreview $normalizedText))
           $recovered = Invoke-RecoverRepeatedChunkText -ChunkPath $chunk.FullName -PathForNative $pathForNative
           $whisperLogs.Add($recovered.Logs)
-          if ($recovered.ExitCode -eq 0 -and $recovered.Text.Trim() -and -not (Test-TranscriptHasRepeatHallucination $recovered.Text)) {
-            $normalizedText = $recovered.Text
+          $candidateText = ""
+          if ($recovered.ExitCode -eq 0 -and $recovered.Text.Trim()) {
+            if (-not (Test-TranscriptHasRepeatHallucination $recovered.Text)) {
+              $candidateText = $recovered.Text.Trim()
+            } else {
+              $candidateText = Trim-RepeatedTranscriptTail -Text $recovered.Text
+            }
+          }
+          if (-not $candidateText) {
+            $candidateText = Trim-RepeatedTranscriptTail -Text $normalizedText
+          }
+          if ($candidateText) {
+            $normalizedText = $candidateText
           } else {
-            throw "TRANSCRIPT_HALLUCINATION: repeated transcript remained after local retry for $($chunk.Name)."
+            $skippedRepeatChunks += 1
+            $whisperLogs.Add("--- $($chunk.Name) repeat-unusable; skipped ---")
+            $chunkIndex += 1
+            Write-ProgressLog -Stage "transcribing" -Current $chunkIndex -Total $chunkFiles.Count
+            continue
           }
         }
         $mergedText.Add($normalizedText)
@@ -1533,6 +1684,7 @@ function Invoke-TranscribeAttempt {
     $result.WhisperExit = $whisperExit
     $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
     $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
+    $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force
     return $result
   } catch {
     $result.FfmpegOutput = $ffmpegOutput
@@ -1540,7 +1692,8 @@ function Invoke-TranscribeAttempt {
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
     $result.Error = ($_ | Out-String)
-    $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue 0 -Force
+    $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
+    $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force
     return $result
   } finally {
     if ($safeTempRoot -and (Test-Path -LiteralPath $safeTempRoot)) {
@@ -1567,6 +1720,7 @@ function Write-AttemptLog {
     "chunkRetrySeconds=$ChunkRetrySeconds"
     "chunkCount=$($Attempt.ChunkCount)"
     "recoveryTriggered=$($Attempt.RecoveryTriggered)"
+    "skippedRepeatChunks=$($Attempt.SkippedRepeatChunks)"
     "ffmpeg=$($Ffmpeg.FullName)"
     "ffmpegExit=$($Attempt.FfmpegExit)"
     "--- ffmpeg output ---"
@@ -1584,6 +1738,7 @@ function Write-AttemptLog {
       "safeInputPath=$($FallbackAttempt.InputPath)"
       "safeModelPath=$($FallbackAttempt.ModelPath)"
       "chunkCount=$($FallbackAttempt.ChunkCount)"
+      "skippedRepeatChunks=$($FallbackAttempt.SkippedRepeatChunks)"
       "ffmpegExit=$($FallbackAttempt.FfmpegExit)"
       "--- fallback ffmpeg output ---"
       $FallbackAttempt.FfmpegOutput
@@ -1619,6 +1774,9 @@ try {
     throw "whisper failed with exit code $($finalAttempt.WhisperExit). See $RunLog"
   }
   if (-not $finalAttempt.Text.Trim()) {
+    if ($finalAttempt.RecoveryTriggered -eq 1) {
+      throw "TRANSCRIPT_HALLUCINATION: no usable transcript remained after local retry. See $RunLog"
+    }
     throw "Whisper did not generate transcript text. See $RunLog"
   }
 

@@ -21,6 +21,9 @@ $PythonRuntimeBackupDir = Join-Path $InstallRoot "python-runtime-backup"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
 $TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
 $TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"
+$PythonRuntimeFallbackMirrors = @(
+  "https://github.com/astral-sh/python-build-standalone/releases/download"
+)
 $OcrWheelhouseBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/wheels"
 $TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
 $PypiFallbackIndexUrl = "https://pypi.org/simple"
@@ -152,37 +155,68 @@ function Invoke-NativeCommand {
 
 function Invoke-DownloadFile {
   param(
-    [Parameter(Mandatory = $true)][string]$Url,
+    [string]$Url = "",
+    [string[]]$Urls = @(),
     [Parameter(Mandatory = $true)][string]$OutFile,
-    [int]$TimeoutSec = 300
+    [int]$TimeoutSec = 300,
+    [string]$ExpectedSha256 = ""
   )
   $outDir = Split-Path -Parent $OutFile
   if ($outDir) {
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   }
-  Write-InstallLog "Downloading $Url"
+  $candidateUrls = @($Urls + @($Url)) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -Unique
+  if ($candidateUrls.Count -eq 0) {
+    throw "No download URL was supplied."
+  }
+
+  $errors = New-Object System.Collections.Generic.List[string]
   $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-  if ($curl) {
-    & $curl.Source `
-      -L `
-      --fail `
-      --silent `
-      --show-error `
-      --retry 3 `
-      --retry-delay 2 `
-      --connect-timeout 30 `
-      --max-time $TimeoutSec `
-      -o $OutFile `
-      $Url
-    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 100)) {
-      return
+  foreach ($candidateUrl in $candidateUrls) {
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+    Write-InstallLog "Downloading $candidateUrl"
+    if ($curl) {
+      & $curl.Source `
+        -L `
+        --fail `
+        --silent `
+        --show-error `
+        --retry 3 `
+        --retry-delay 2 `
+        --connect-timeout 30 `
+        --max-time $TimeoutSec `
+        -H ("User-Agent: $($Headers['User-Agent'])") `
+        -o $OutFile `
+        $candidateUrl
+      $curlExitCode = $LASTEXITCODE
+      if ($curlExitCode -eq 0 -and (Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 100)) {
+        if (-not $ExpectedSha256 -or (Test-FileSha256 -Path $OutFile -ExpectedSha256 $ExpectedSha256)) {
+          return
+        }
+        Write-InstallLog "Downloaded file SHA256 did not match for $candidateUrl; trying the next mirror."
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        continue
+      }
+      Write-InstallLog "curl download failed for $candidateUrl with exit code $curlExitCode; retrying with PowerShell."
     }
-    Write-InstallLog "curl download failed with exit code $LASTEXITCODE; retrying with PowerShell."
+    try {
+      Invoke-WebRequest -Uri $candidateUrl -OutFile $OutFile -UseBasicParsing -Headers $Headers -TimeoutSec $TimeoutSec
+      if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 100)) {
+        if (-not $ExpectedSha256 -or (Test-FileSha256 -Path $OutFile -ExpectedSha256 $ExpectedSha256)) {
+          return
+        }
+        throw "Downloaded file SHA256 validation failed."
+      }
+      throw "Downloaded file is empty or invalid."
+    } catch {
+      $errors.Add("${candidateUrl}: $($_.Exception.Message)")
+      Write-InstallLog "PowerShell download failed for $candidateUrl; trying the next mirror."
+      Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+    }
   }
-  Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -Headers $Headers -TimeoutSec $TimeoutSec
-  if (!(Test-Path -LiteralPath $OutFile) -or ((Get-Item -LiteralPath $OutFile).Length -le 100)) {
-    throw "Downloaded file is empty or invalid: $Url"
-  }
+  throw ("Downloaded file from all mirrors failed: " + ($errors -join " | "))
 }
 
 function Download-TextFile {
@@ -654,17 +688,27 @@ function Promote-StagedPortablePythonRuntime {
   }
 }
 
+function Get-PythonRuntimeUrls {
+  $bases = @($TencentPythonInstallMirror) + @($PythonRuntimeFallbackMirrors)
+  $urls = foreach ($base in $bases) {
+    if (-not [string]::IsNullOrWhiteSpace($base)) {
+      "$($base.TrimEnd('/'))/$PythonBuildStandaloneBuild/$PythonRuntimeFileName"
+    }
+  }
+  return @($urls | Select-Object -Unique)
+}
+
 function Install-PortablePython {
   if ((Test-Path -LiteralPath $PortablePython) -and (Test-PythonUsable -Command $PortablePython)) {
     Write-InstallLog "Pinned portable Python is already ready: $PortablePython"
     return $PortablePython
   }
 
-  $runtimeUrl = "$($TencentPythonInstallMirror.TrimEnd('/'))/$PythonBuildStandaloneBuild/$PythonRuntimeFileName"
+  $runtimeUrls = @(Get-PythonRuntimeUrls)
   $archivePath = Join-Path $CacheDir $PythonRuntimeFileName
   if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $PythonRuntimeSha256)) {
     Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
-    Invoke-DownloadFile -Url $runtimeUrl -OutFile $archivePath -TimeoutSec 1200
+    Invoke-DownloadFile -Urls $runtimeUrls -OutFile $archivePath -TimeoutSec 1200 -ExpectedSha256 $PythonRuntimeSha256
   }
   if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $PythonRuntimeSha256)) {
     throw "Pinned Python runtime SHA256 validation failed."

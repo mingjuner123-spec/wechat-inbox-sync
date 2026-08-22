@@ -5756,7 +5756,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.115";
+var PLUGIN_RUNTIME_VERSION = "1.3.116";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -5785,7 +5785,7 @@ var LOCAL_DOUYIN_RESOLVER_MANIFEST_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/yt-dlp
 var LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 9e4;
 var LOCAL_ASR_INSTALLER_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1";
 var LOCAL_ASR_MACOS_INSTALLER_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh";
-var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "65ff6ec5aa844c780a4ebf4f83c9ea2f206de1b33e145dd2f1b9e1129f4e2337";
+var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "5798e3fab037ff0bb970e0452b4c5df32a4d6d52920e5904ae9ac3bea5ed7d02";
 var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074";
 var LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
 var LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
@@ -6217,7 +6217,7 @@ function findFirstExistingPath(candidates, exists) {
   return candidates.find((candidate) => candidate && exists(candidate)) || "";
 }
 __name(findFirstExistingPath, "findFirstExistingPath");
-var CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = "23c195a46d2e7b875757ead4a76080891e9343eb7563171f726b1b33a66e2709";
+var CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = "53bc6ffde07cd5d3828b20020ac4d7cfa56d775d0bd9e86d2e6fa8cdf4fc2c42";
 var LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = "509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb";
 function getLocalAsrScriptIdentityHash(source) {
   const normalizedSource = String(source || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").trimEnd();
@@ -6240,7 +6240,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
         scriptOutdated: true
       };
     }
-    if (source.includes("transcribe-last.log") && source.includes("recoveryTriggered=") && source.includes("Split-AudioToChunks") && source.includes("Test-TranscriptHasRepeatHallucination") && source.includes("Invoke-RecoverRepeatedChunkText") && source.includes("$ChunkRetrySeconds") && source.includes("$ChunkSeconds = 120") && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"') && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"') && source.includes("TRANSCRIPT_HALLUCINATION") && source.includes("Invoke-NativeProcess") && source.includes("System.Diagnostics.ProcessStartInfo") && source.includes("ReadToEndAsync") && !source.includes("Start-Process") && source.includes("ConvertTo-SimplifiedChinese") && source.includes("SimplifiedChinese") && source.includes("System.Text.UTF8Encoding") && source.includes("ReadAllText") && source.includes("WriteAllText") && source.includes("Get-ShortPath") && source.includes("Test-WhisperNativeCrashExitCode") && source.includes("Convert-ExitCodeToHex") && source.includes("$hex = Convert-ExitCodeToHex -ExitCode $ExitCode") && source.includes('Invoke-TranscribeAttempt -Mode "normal"') && source.includes('Invoke-TranscribeAttempt -Mode "safe"') && source.includes("safeModelPath") && source.includes("progressPercent") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes('-ProgressStage "segmenting"') && !source.includes("$SimplifiedPrompt") && !source.includes('"--prompt"')) {
+    if (source.includes("transcribe-last.log") && source.includes("recoveryTriggered=") && source.includes("Split-AudioToChunks") && source.includes("Test-TranscriptHasRepeatHallucination") && source.includes("Invoke-RecoverRepeatedChunkText") && source.includes("$ChunkRetrySeconds") && source.includes("$ChunkSeconds = 120") && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"') && source.includes('$TranscriptPartialRecoveryVersion = "partial-recovery-v1"') && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"') && source.includes("TRANSCRIPT_HALLUCINATION") && source.includes("Invoke-NativeProcess") && source.includes("System.Diagnostics.ProcessStartInfo") && source.includes("ReadToEndAsync") && !source.includes("Start-Process") && source.includes("ConvertTo-SimplifiedChinese") && source.includes("SimplifiedChinese") && source.includes("System.Text.UTF8Encoding") && source.includes("ReadAllText") && source.includes("WriteAllText") && source.includes("Get-ShortPath") && source.includes("Test-WhisperNativeCrashExitCode") && source.includes("Convert-ExitCodeToHex") && source.includes("$hex = Convert-ExitCodeToHex -ExitCode $ExitCode") && source.includes('Invoke-TranscribeAttempt -Mode "normal"') && source.includes('Invoke-TranscribeAttempt -Mode "safe"') && source.includes("safeModelPath") && source.includes("progressPercent") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes('-ProgressStage "segmenting"') && !source.includes("$SimplifiedPrompt") && !source.includes('"--prompt"')) {
       if (sourceIdentityHash !== CURRENT_WINDOWS_ASR_SCRIPT_SHA256) {
         return {
           scriptVersion: "current-signature-mismatch",
@@ -6938,7 +6938,7 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
   if (isMac) {
     return source.includes("TENCENT_OCR_ASSET_BASE_URL") && source.includes("TENCENT_PIP_INDEX_URL") && source.includes("TENCENT_PYTHON_INSTALL_MIRROR") && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"') && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"') && source.includes("PORTABLE_PYTHON=") && source.includes("download_with_retry") && source.includes("find_existing_python") && source.includes("install_portable_python") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes(".wechat-inbox-local-asr/python-venv/bin/python");
   }
-  return source.includes("$TencentOcrAssetBaseUrl") && source.includes("$TencentPipIndexUrl") && source.includes("$TencentPythonInstallMirror") && source.includes('$PythonBuildStandaloneBuild = "20260623"') && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"') && source.includes("$PortablePython") && source.includes("Download-TextFile") && source.includes("function Install-PortablePython") && source.includes("function Expand-TarGzArchiveWithPowerShell") && source.includes("unique-staging-transaction-v2") && source.includes("$python = Install-PortablePython") && source.includes("Invoke-Python -PythonCommand $python -m venv $VenvDir");
+  return source.includes("$TencentOcrAssetBaseUrl") && source.includes("$TencentPipIndexUrl") && source.includes("$TencentPythonInstallMirror") && source.includes('$PythonBuildStandaloneBuild = "20260623"') && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"') && source.includes("$PortablePython") && source.includes("$PythonRuntimeFallbackMirrors") && source.includes("function Get-PythonRuntimeUrls") && source.includes("Invoke-DownloadFile -Urls") && source.includes("Download-TextFile") && source.includes("function Install-PortablePython") && source.includes("function Expand-TarGzArchiveWithPowerShell") && source.includes("unique-staging-transaction-v2") && source.includes("$python = Install-PortablePython") && source.includes("Invoke-Python -PythonCommand $python -m venv $VenvDir");
 }
 __name(isLocalOcrInstallerCurrent, "isLocalOcrInstallerCurrent");
 function isTrustedLocalOcrInstallerSource(scriptText, expectedSha256, isMac = false) {
