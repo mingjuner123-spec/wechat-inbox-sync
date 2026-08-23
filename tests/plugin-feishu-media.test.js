@@ -55,12 +55,21 @@ function runFeishuMediaIdentityHelpersTest() {
     scope: 'offline_access',
     tokenCount: 2,
     official: { attempted: true, failed: 2 },
+    remoteLinkedCount: 1,
     unresolvedCount: 2,
+    missingCount: 1,
+    images: [
+      { index: 1, finalOutcome: 'remote-link', attempts: [{ stage: 'official', outcome: 'failed', error: 'HTTP 403' }] },
+      { index: 2, finalOutcome: 'missing', attempts: [{ stage: 'browser', outcome: 'failed', error: 'no asset' }] },
+    ],
     errors: ['HTTP 403', 'HTTP 403'],
   });
   assert.strictEqual(diagnostic.mediaScopeKnown, true);
   assert.strictEqual(diagnostic.mediaScopePresent, false);
   assert.strictEqual(diagnostic.official.failed, 2);
+  assert.strictEqual(diagnostic.remoteLinkedCount, 1);
+  assert.strictEqual(diagnostic.missingCount, 1);
+  assert.deepStrictEqual(diagnostic.images.map((item) => item.finalOutcome), ['remote-link', 'missing']);
   assert.deepStrictEqual(diagnostic.errors, ['HTTP 403']);
 }
 
@@ -109,9 +118,69 @@ async function runSavedFeishuAttachmentMustBeLinkedTest() {
   assert.strictEqual(stats.failedCount, 0);
 }
 
+async function runElectronSessionAbortSignalCompatibilityTest() {
+  const helpers = PluginClass.__test;
+  const controller = new AbortController();
+  let receivedInit = null;
+  const expected = Buffer.from([1, 2, 3, 4]);
+  const session = {
+    fetch: async (_url, init) => {
+      receivedInit = init;
+      if (Object.prototype.hasOwnProperty.call(init, 'signal')) {
+        throw new TypeError("RequestInit: Expected signal to be an instance of AbortSignal");
+      }
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => expected,
+      };
+    },
+  };
+
+  const result = await helpers.downloadArrayBufferViaElectronSession(
+    'https://example.feishu.cn/image.png',
+    {},
+    { signal: controller.signal, timeout: 1000 },
+    session,
+  );
+  assert.deepStrictEqual(Buffer.from(result), expected);
+  assert.ok(receivedInit, 'Electron session fetch should be attempted');
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(receivedInit, 'signal'),
+    false,
+    'a Node-realm AbortSignal must not be passed into Electron session.fetch',
+  );
+
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(
+    () => helpers.downloadArrayBufferViaElectronSession(
+      'https://example.feishu.cn/image.png',
+      {},
+      { signal: aborted.signal, timeout: 1000 },
+      session,
+    ),
+    (error) => error && error.name === 'AbortError',
+  );
+
+  const interrupted = new AbortController();
+  const interruptedRequest = helpers.downloadArrayBufferViaElectronSession(
+    'https://example.feishu.cn/slow-image.png',
+    {},
+    { signal: interrupted.signal, timeout: 1000 },
+    { fetch: async () => new Promise(() => {}) },
+  );
+  interrupted.abort();
+  await assert.rejects(
+    () => interruptedRequest,
+    (error) => error && error.name === 'AbortError',
+  );
+}
+
 Promise.resolve()
   .then(() => runFeishuMediaIdentityHelpersTest())
   .then(() => runSavedFeishuAttachmentMustBeLinkedTest())
+  .then(() => runElectronSessionAbortSignalCompatibilityTest())
   .then(() => console.log('plugin-feishu-media.test.js passed'))
   .catch((error) => {
     console.error(error);

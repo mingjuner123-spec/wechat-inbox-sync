@@ -102,6 +102,14 @@ async function runUniqueFailureAccountingTest() {
   }, '临时收集', '2026-08-15', '飞书六图失败计数');
 
   assert.strictEqual(result.metadata.imageLocalizationFailedCount, 6, '6 张图片即使两个下载通道都失败，也只能按 6 个图片身份计数一次');
+  assert.strictEqual(result.metadata.imageRemoteFallbackCount, 6, 'download failures must retain one remote link per image when Feishu returned a URL');
+  assert.strictEqual(result.metadata.imageMissingCount, 0, 'a retained remote link is not a fully missing image');
+  assert.strictEqual(result.metadata.feishuMediaDiagnostic.remoteLinkedCount, 6);
+  assert.strictEqual(result.metadata.feishuMediaDiagnostic.missingCount, 0);
+  assert.deepStrictEqual(
+    result.metadata.feishuMediaDiagnostic.images.map((item) => item.finalOutcome),
+    Array(6).fill('remote-link'),
+  );
   assert.ok(result.metadata.markdown.includes('# 官方正文标题'));
   assert.ok(result.metadata.markdown.includes('这段官方 API 正文不能被浏览器图片兜底覆盖。'));
   assert.ok(!result.metadata.markdown.includes('浏览器只读到了残缺内容。'));
