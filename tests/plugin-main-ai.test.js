@@ -12094,8 +12094,8 @@ async function runLocalTranscriptionEntitlementTests() {
   };
   const setupStatus = await setupPlugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'bind', force: true });
   assert.strictEqual(setupStatus.hasAccess, true);
-  assert.strictEqual(confirmSetupReason, 'bind');
-  assert.deepStrictEqual(installComponentCalls, ['bind']);
+  assert.strictEqual(confirmSetupReason, '');
+  assert.deepStrictEqual(installComponentCalls, []);
 
   const refreshKeepsProStatusPlugin = new PluginClass();
   refreshKeepsProStatusPlugin.saveData = async () => {};
@@ -12131,7 +12131,7 @@ async function runLocalTranscriptionEntitlementTests() {
     force: true,
   });
   assert.strictEqual(refreshKeepsProStatus.hasAccess, true);
-  assert.strictEqual(refreshKeepsProStatus.localComponentInstallError, '图片文字识别 OCR：tar.exe 拒绝访问');
+  assert.strictEqual(refreshKeepsProStatus.localComponentInstallError, undefined);
 
   const ocrOnlyPlugin = new PluginClass();
   ocrOnlyPlugin.settings = helpers.mergeSettings({});
@@ -12190,6 +12190,51 @@ async function runLocalTranscriptionEntitlementTests() {
     /ASR install failed/,
   );
   assert.strictEqual(installAllOcrCalls, 1);
+
+  const implicitInstallPlugin = new PluginClass();
+  implicitInstallPlugin.ensureProFeatureAccess = async () => {
+    throw new Error('implicit component install must not reach entitlement or download logic');
+  };
+  const implicitInstallResult = await implicitInstallPlugin.doInstallLocalTranscriptionComponents({
+    reason: 'manual-refresh',
+  });
+  assert.deepStrictEqual(implicitInstallResult, {
+    installed: false,
+    skipped: true,
+    reason: 'manual-refresh',
+  });
+
+  for (const requested of [
+    { requireAsr: true, requireOcr: false },
+    { requireAsr: false, requireOcr: true },
+  ]) {
+    const firstUsePlugin = new PluginClass();
+    firstUsePlugin.settings = helpers.mergeSettings({});
+    let asrReady = false;
+    let ocrReady = false;
+    let promptReadiness = null;
+    firstUsePlugin.ensureProFeatureAccess = async () => ({ hasAccess: true });
+    firstUsePlugin.getLocalAsrInstallStatus = () => ({ ready: asrReady });
+    firstUsePlugin.getLocalOcrInstallStatus = () => ({ ready: ocrReady });
+    firstUsePlugin.confirmLocalComponentInstall = async (status, reason, readiness) => {
+      assert.strictEqual(status.hasAccess, true);
+      assert.strictEqual(reason, 'first-use');
+      promptReadiness = readiness;
+      return true;
+    };
+    firstUsePlugin.installLocalTranscriptionComponents = async (options = {}) => {
+      assert.strictEqual(options.requireAsr, requested.requireAsr);
+      assert.strictEqual(options.requireOcr, requested.requireOcr);
+      asrReady = requested.requireAsr;
+      ocrReady = requested.requireOcr;
+      return { installed: true };
+    };
+    await firstUsePlugin.ensureLocalComponentReadyForUse('first-use-component-test', {
+      reason: 'first-use',
+      ...requested,
+    });
+    assert.strictEqual(promptReadiness.missingComponents.length, 1);
+  }
 
   const freeSetupPlugin = new PluginClass();
   freeSetupPlugin.saveData = async () => {};
