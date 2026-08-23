@@ -121,4 +121,14 @@ matches `manifest.json`'s `version`, and attach `main.js`, `manifest.json`, and
 
 ## License
 
-MIT
+Starting with version 1.3.117, WeChat Inbox Sync is source-available under the
+[MIT License with the Commons Clause License Condition v1.0](LICENSE).
+Personal use, internal use, modification, and contribution are allowed under
+those terms, but the plugin or a product/service whose value substantially
+derives from its functionality may not be sold without separate permission.
+
+This is not an OSI-approved open-source license. Versions obtained before
+1.3.117 remain governed by the license that accompanied those versions.
+
+For commercial licensing, open an issue in the
+[project repository](https://github.com/mingjuner123-spec/wechat-inbox-sync/issues).

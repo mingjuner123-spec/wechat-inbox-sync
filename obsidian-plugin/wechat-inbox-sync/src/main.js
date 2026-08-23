@@ -214,7 +214,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 // persistent session to contribute cookies when the user already has them.
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.116';
+const PLUGIN_RUNTIME_VERSION = '1.3.117';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -9339,28 +9339,49 @@ function getDouyinSession() {
 
 async function readSessionFetchText(session, url, headers, timeoutMs = 12000) {
   if (!session || typeof session.fetch !== 'function' || !/^https?:\/\//i.test(String(url || ''))) return '';
-  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const response = await fetchWithElectronSession(session, url, {
+    method: 'GET',
+    headers,
+    credentials: 'include',
+    redirect: 'follow',
+  }, { timeoutMs });
+  return response && typeof response.text === 'function' ? await response.text() : '';
+}
+
+async function fetchWithElectronSession(session, url, requestInit = {}, options = {}) {
+  if (!session || typeof session.fetch !== 'function') {
+    throw new Error('当前环境无法使用浏览器会话发送请求');
+  }
+  const signal = options.signal || null;
+  throwIfAborted(signal);
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || 30000);
   let timer = null;
-  const requestTask = (async () => {
-    const response = await session.fetch(url, {
-      method: 'GET',
-      headers,
-      credentials: 'include',
-      redirect: 'follow',
-      ...(controller ? { signal: controller.signal } : {}),
-    });
-    return response && typeof response.text === 'function' ? await response.text() : '';
-  })();
-  const timeoutTask = new Promise((_, reject) => {
+  let abortListener = null;
+  const races = [session.fetch(url, {
+    ...requestInit,
+    // Electron rejects AbortSignal instances created in Obsidian's Node realm.
+    // Keep cancellation outside RequestInit so the authenticated session request
+    // can actually start on every supported Electron version.
+  })];
+  races.push(new Promise((_, reject) => {
     timer = setTimeout(() => {
-      if (controller) controller.abort();
       reject(new Error(`Electron Session request timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-  });
+  }));
+  if (signal && typeof signal.addEventListener === 'function') {
+    races.push(new Promise((_, reject) => {
+      abortListener = () => reject(createAbortError());
+      signal.addEventListener('abort', abortListener, { once: true });
+    }));
+  }
   try {
-    return await Promise.race([requestTask, timeoutTask]);
+    return await Promise.race(races);
   } finally {
     if (timer) clearTimeout(timer);
+    if (abortListener && signal && typeof signal.removeEventListener === 'function') {
+      signal.removeEventListener('abort', abortListener);
+    }
+    throwIfAborted(signal);
   }
 }
 
@@ -9373,41 +9394,17 @@ async function downloadArrayBufferViaElectronSession(
   if (!session || typeof session.fetch !== 'function') {
     throw new Error('当前环境无法使用浏览器会话下载媒体');
   }
-  throwIfAborted(options.signal);
   const timeoutMs = Math.max(100, Number(options.timeout) || 30000);
-  const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  const abortSessionRequest = () => {
-    if (controller) controller.abort();
-  };
-  if (options.signal && typeof options.signal.addEventListener === 'function') {
-    options.signal.addEventListener('abort', abortSessionRequest, { once: true });
-  }
-  let timer = null;
-  const requestTask = (async () => {
-    const response = await session.fetch(url, {
-      method: 'GET', headers, credentials: 'include', redirect: 'follow',
-      ...(controller ? { signal: controller.signal } : {}),
-    });
-    if (!response || !response.ok) {
-      throw new Error(`媒体下载失败：HTTP ${response ? response.status : 0}`);
-    }
-    return response.arrayBuffer();
-  })();
-  const timeoutTask = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      abortSessionRequest();
-      reject(new Error(`浏览器会话媒体下载超时（${timeoutMs}ms）`));
-    }, timeoutMs);
+  const response = await fetchWithElectronSession(session, url, {
+    method: 'GET', headers, credentials: 'include', redirect: 'follow',
+  }, {
+    signal: options.signal || null,
+    timeoutMs,
   });
-  try {
-    return await Promise.race([requestTask, timeoutTask]);
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (options.signal && typeof options.signal.removeEventListener === 'function') {
-      options.signal.removeEventListener('abort', abortSessionRequest);
-    }
-    throwIfAborted(options.signal);
+  if (!response || !response.ok) {
+    throw new Error(`媒体下载失败：HTTP ${response ? response.status : 0}`);
   }
+  return response.arrayBuffer();
 }
 
 function isMediaAuthorizationError(error) {
@@ -13467,6 +13464,9 @@ function getRecordConversionWarning(record) {
   const imageLocalizationFailedCount = Number(metadata.imageLocalizationFailedCount) || 0;
   const imageTempUrlMissingCount = Number(metadata.imageTempUrlMissingCount) || 0;
   const imageFailureCount = Math.max(imageLocalizationFailedCount, imageTempUrlMissingCount);
+  const feishuMediaDiagnostic = metadata.feishuMediaDiagnostic && typeof metadata.feishuMediaDiagnostic === 'object'
+    ? metadata.feishuMediaDiagnostic
+    : null;
   const diagnosticParts = [];
   const transportDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === 'object'
     ? metadata.conversionDiagnostic
@@ -13507,6 +13507,12 @@ function getRecordConversionWarning(record) {
     }
     const localizationError = String(metadata.imageLocalizationError || '').trim();
     if (localizationError) details.push(localizationError);
+    if (feishuMediaDiagnostic) {
+      const remoteLinkedCount = Number(feishuMediaDiagnostic.remoteLinkedCount) || 0;
+      const missingCount = Number(feishuMediaDiagnostic.missingCount) || 0;
+      if (remoteLinkedCount > 0) details.push(`${remoteLinkedCount} 张已保留远程图片链接`);
+      if (missingCount > 0) details.push(`${missingCount} 张既未保存到本地也没有可用链接`);
+    }
     const imageWarning = `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join('；')}` : ''}`;
     return [imageWarning, diagnosticNotice, pdfExtractionWarning, aiMetadataWarning].filter(Boolean).join('；');
   }
@@ -18498,6 +18504,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               browser: { attempted: false, succeeded: 0, failed: 0 },
             };
             const resolvedImageTokens = new Set();
+            const browserRemoteUrlsByToken = new Map();
             const imageAttemptErrorsByToken = new Map();
             const rememberImageAttemptError = (token, error) => {
               const normalizedToken = String(token || '').trim();
@@ -18676,6 +18683,10 @@ class WechatObsidianInboxPlugin extends Plugin {
                   .map((token) => {
                     const browserAsset = matchedBrowserAssets.get(token);
                     if (!browserAsset) return null;
+                    const browserRemoteUrl = /^https?:\/\//i.test(String(browserAsset.src || '').trim())
+                      ? String(browserAsset.src || '').trim()
+                      : '';
+                    if (browserRemoteUrl) browserRemoteUrlsByToken.set(token, browserRemoteUrl);
                     return buildTokenAsset(token, {
                       dataUrl: browserAsset.dataUrl,
                       downloadSrc: browserAsset.src,
@@ -18698,6 +18709,20 @@ class WechatObsidianInboxPlugin extends Plugin {
             const unresolvedImageTokens = getUnresolvedImageTokens();
             const unknownImageIdentityCount = Math.max(0, imageTokenCount - imageTokens.length);
             const imageLocalizationFailedCount = unresolvedImageTokens.length + unknownImageIdentityCount;
+            const remoteFallbackUrls = { ...imageTmpDownloadUrls };
+            for (const token of unresolvedImageTokens) {
+              if (browserRemoteUrlsByToken.has(token)) {
+                remoteFallbackUrls[token] = browserRemoteUrlsByToken.get(token);
+              }
+            }
+            const remotelyLinkedImageTokens = unresolvedImageTokens.filter((token) => (
+              /^https?:\/\//i.test(String(remoteFallbackUrls[token] || '').trim())
+              && cleanedCloudOpenApiMarkdown.includes(`feishu-image:${token}`)
+            ));
+            const remotelyLinkedImageTokenSet = new Set(remotelyLinkedImageTokens);
+            const imageMissingCount = unknownImageIdentityCount + unresolvedImageTokens
+              .filter((token) => !remotelyLinkedImageTokenSet.has(token))
+              .length;
             const missingImageTempUrlCount = unknownImageIdentityCount + unresolvedImageTokens
               .filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || '').trim()))
               .length;
@@ -18709,7 +18734,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               cleanedCloudOpenApiMarkdown,
               [],
               url,
-              imageTmpDownloadUrls,
+              remoteFallbackUrls,
             );
             const feishuMediaDiagnostic = buildFeishuMediaDiagnostic({
               scope: feishuMediaScope,
@@ -18720,7 +18745,15 @@ class WechatObsidianInboxPlugin extends Plugin {
               browser: feishuMediaStage.browser,
               markdownReferenceCount,
               localizedCount: resolvedImageTokens.size,
+              remoteLinkedCount: remotelyLinkedImageTokens.length,
               unresolvedCount: imageLocalizationFailedCount,
+              missingCount: imageMissingCount,
+              images: imageTokens.map((token, index) => ({
+                index: index + 1,
+                finalOutcome: resolvedImageTokens.has(token)
+                  ? 'localized'
+                  : (remotelyLinkedImageTokenSet.has(token) ? 'remote-link' : 'missing'),
+              })),
               errors: [
                 ...finalImageErrors,
                 feishuMediaScopeBlocked && imageTokens.length
@@ -18738,6 +18771,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 conversionSource: 'feishu-cloud-oauth',
                 imageTempUrlMissingCount: missingImageTempUrlCount,
                 imageLocalizationFailedCount,
+                imageRemoteFallbackCount: remotelyLinkedImageTokens.length,
+                imageMissingCount,
                 imageLocalizationError: finalImageErrors.slice(0, 3).join(' | '),
                 feishuMediaDiagnostic,
                 conversionNote: [
@@ -18745,6 +18780,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                   imageTokenCount ? `images=${imageTokenCount}` : '',
                   imageTokenCount ? `image-official-localized=${officialImageStats.localizedCount || 0}` : '',
                   temporaryImageAssets.length ? `image-temporary-localized=${temporaryImageStats.localizedCount || 0}/${temporaryImageAssets.length}` : '',
+                  remotelyLinkedImageTokens.length ? `image-remote-links=${remotelyLinkedImageTokens.length}` : '',
+                  imageMissingCount ? `image-fully-missing=${imageMissingCount}` : '',
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : '',
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
                   feishuMediaScopeBlocked && imageTokens.length
@@ -20428,6 +20465,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata
         ? recordForMarkdown.metadata.conversionDiagnostic || null
         : null,
+      feishuMediaDiagnostic: recordForMarkdown && recordForMarkdown.metadata
+        ? recordForMarkdown.metadata.feishuMediaDiagnostic || null
+        : null,
     };
   }
 
@@ -20989,10 +21029,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
       const latestSuccessfulDiagnostic = [...written].reverse().find((item) => (
-        item.mediaResolutionDiagnostic || item.conversionDiagnostic
+        item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic
       ));
       const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic
-        ? latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic
+        ? latestSuccessfulDiagnostic.feishuMediaDiagnostic
+          || latestSuccessfulDiagnostic.mediaResolutionDiagnostic
+          || latestSuccessfulDiagnostic.conversionDiagnostic
         : null;
       this.lastSyncDiagnostic = {
         status: failed.length ? 'failed' : (completionWarnings.length ? 'warning' : 'success'),
@@ -21825,6 +21867,8 @@ WechatObsidianInboxPlugin.__test = {
   buildSkippedSyncNotice,
   getRecordConversionWarning,
   buildConversionWarningsNotice,
+  fetchWithElectronSession,
+  downloadArrayBufferViaElectronSession,
   parseLocalAsrProgressLog,
   buildLocalAsrProgressKey,
   getTranscriptionQualityIssue,

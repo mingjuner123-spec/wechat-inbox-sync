@@ -1245,7 +1245,10 @@ var require_feishu_media_utils = __commonJS({
       browser = {},
       markdownReferenceCount = 0,
       localizedCount = 0,
+      remoteLinkedCount = 0,
       unresolvedCount = 0,
+      missingCount = 0,
+      images = [],
       errors = []
     } = {}) {
       const normalizedScope = normalizeFeishuScope2(scope);
@@ -1274,7 +1277,20 @@ var require_feishu_media_utils = __commonJS({
         },
         markdownReferenceCount: Math.max(0, Number(markdownReferenceCount) || 0),
         localizedCount: Math.max(0, Number(localizedCount) || 0),
+        remoteLinkedCount: Math.max(0, Number(remoteLinkedCount) || 0),
         unresolvedCount: Math.max(0, Number(unresolvedCount) || 0),
+        missingCount: Math.max(0, Number(missingCount) || 0),
+        images: (Array.isArray(images) ? images : []).slice(0, 50).map((image, index) => ({
+          index: Math.max(1, Number(image && image.index) || index + 1),
+          finalOutcome: ["localized", "remote-link", "missing"].includes(String(image && image.finalOutcome || "")) ? String(image.finalOutcome) : "missing",
+          attempts: (Array.isArray(image && image.attempts) ? image.attempts : []).slice(0, 6).map((attempt) => ({
+            stage: String(attempt && attempt.stage || "unknown").slice(0, 32),
+            outcome: String(attempt && attempt.outcome || "failed").slice(0, 32),
+            ...attempt && attempt.error ? {
+              error: String(attempt.error).replace(/[\r\n]+/g, " ").trim().slice(0, 240)
+            } : {}
+          }))
+        })),
         errors: Array.from(new Set((Array.isArray(errors) ? errors : [errors]).map((error) => String(error || "").replace(/[\r\n]+/g, " ").trim()).filter(Boolean))).slice(0, 8)
       };
     }
@@ -5756,7 +5772,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.116";
+var PLUGIN_RUNTIME_VERSION = "1.3.117";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -13537,73 +13553,70 @@ function getDouyinSession() {
 __name(getDouyinSession, "getDouyinSession");
 async function readSessionFetchText(session, url, headers, timeoutMs = 12e3) {
   if (!session || typeof session.fetch !== "function" || !/^https?:\/\//i.test(String(url || ""))) return "";
-  const controller = typeof AbortController === "function" ? new AbortController() : null;
-  let timer = null;
-  const requestTask = (async () => {
-    const response = await session.fetch(url, {
-      method: "GET",
-      headers,
-      credentials: "include",
-      redirect: "follow",
-      ...controller ? { signal: controller.signal } : {}
-    });
-    return response && typeof response.text === "function" ? await response.text() : "";
-  })();
-  const timeoutTask = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      if (controller) controller.abort();
-      reject(new Error(`Electron Session request timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([requestTask, timeoutTask]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  const response = await fetchWithElectronSession(session, url, {
+    method: "GET",
+    headers,
+    credentials: "include",
+    redirect: "follow"
+  }, { timeoutMs });
+  return response && typeof response.text === "function" ? await response.text() : "";
 }
 __name(readSessionFetchText, "readSessionFetchText");
+async function fetchWithElectronSession(session, url, requestInit = {}, options = {}) {
+  if (!session || typeof session.fetch !== "function") {
+    throw new Error("当前环境无法使用浏览器会话发送请求");
+  }
+  const signal = options.signal || null;
+  throwIfAborted(signal);
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || 3e4);
+  let timer = null;
+  let abortListener = null;
+  const races = [session.fetch(url, {
+    ...requestInit
+    // Electron rejects AbortSignal instances created in Obsidian's Node realm.
+    // Keep cancellation outside RequestInit so the authenticated session request
+    // can actually start on every supported Electron version.
+  })];
+  races.push(new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Electron Session request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  }));
+  if (signal && typeof signal.addEventListener === "function") {
+    races.push(new Promise((_, reject) => {
+      abortListener = /* @__PURE__ */ __name(() => reject(createAbortError()), "abortListener");
+      signal.addEventListener("abort", abortListener, { once: true });
+    }));
+  }
+  try {
+    return await Promise.race(races);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (abortListener && signal && typeof signal.removeEventListener === "function") {
+      signal.removeEventListener("abort", abortListener);
+    }
+    throwIfAborted(signal);
+  }
+}
+__name(fetchWithElectronSession, "fetchWithElectronSession");
 async function downloadArrayBufferViaElectronSession(url, headers = {}, options = {}, session = getWechatSession()) {
   if (!session || typeof session.fetch !== "function") {
     throw new Error("当前环境无法使用浏览器会话下载媒体");
   }
-  throwIfAborted(options.signal);
   const timeoutMs = Math.max(100, Number(options.timeout) || 3e4);
-  const controller = typeof AbortController === "function" ? new AbortController() : null;
-  const abortSessionRequest = /* @__PURE__ */ __name(() => {
-    if (controller) controller.abort();
-  }, "abortSessionRequest");
-  if (options.signal && typeof options.signal.addEventListener === "function") {
-    options.signal.addEventListener("abort", abortSessionRequest, { once: true });
-  }
-  let timer = null;
-  const requestTask = (async () => {
-    const response = await session.fetch(url, {
-      method: "GET",
-      headers,
-      credentials: "include",
-      redirect: "follow",
-      ...controller ? { signal: controller.signal } : {}
-    });
-    if (!response || !response.ok) {
-      throw new Error(`媒体下载失败：HTTP ${response ? response.status : 0}`);
-    }
-    return response.arrayBuffer();
-  })();
-  const timeoutTask = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      abortSessionRequest();
-      reject(new Error(`浏览器会话媒体下载超时（${timeoutMs}ms）`));
-    }, timeoutMs);
+  const response = await fetchWithElectronSession(session, url, {
+    method: "GET",
+    headers,
+    credentials: "include",
+    redirect: "follow"
+  }, {
+    signal: options.signal || null,
+    timeoutMs
   });
-  try {
-    return await Promise.race([requestTask, timeoutTask]);
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (options.signal && typeof options.signal.removeEventListener === "function") {
-      options.signal.removeEventListener("abort", abortSessionRequest);
-    }
-    throwIfAborted(options.signal);
+  if (!response || !response.ok) {
+    throw new Error(`媒体下载失败：HTTP ${response ? response.status : 0}`);
   }
+  return response.arrayBuffer();
 }
 __name(downloadArrayBufferViaElectronSession, "downloadArrayBufferViaElectronSession");
 function isMediaAuthorizationError(error) {
@@ -17384,6 +17397,7 @@ function getRecordConversionWarning(record) {
   const imageLocalizationFailedCount = Number(metadata.imageLocalizationFailedCount) || 0;
   const imageTempUrlMissingCount = Number(metadata.imageTempUrlMissingCount) || 0;
   const imageFailureCount = Math.max(imageLocalizationFailedCount, imageTempUrlMissingCount);
+  const feishuMediaDiagnostic = metadata.feishuMediaDiagnostic && typeof metadata.feishuMediaDiagnostic === "object" ? metadata.feishuMediaDiagnostic : null;
   const diagnosticParts = [];
   const transportDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === "object" ? metadata.conversionDiagnostic : null;
   if (transportDiagnostic) {
@@ -17416,6 +17430,12 @@ function getRecordConversionWarning(record) {
     }
     const localizationError = String(metadata.imageLocalizationError || "").trim();
     if (localizationError) details.push(localizationError);
+    if (feishuMediaDiagnostic) {
+      const remoteLinkedCount = Number(feishuMediaDiagnostic.remoteLinkedCount) || 0;
+      const missingCount = Number(feishuMediaDiagnostic.missingCount) || 0;
+      if (remoteLinkedCount > 0) details.push(`${remoteLinkedCount} 张已保留远程图片链接`);
+      if (missingCount > 0) details.push(`${missingCount} 张既未保存到本地也没有可用链接`);
+    }
     const imageWarning = `飞书图片有 ${imageFailureCount} 张未保存${details.length ? `：${details.join("；")}` : ""}`;
     return [imageWarning, diagnosticNotice, pdfExtractionWarning, aiMetadataWarning].filter(Boolean).join("；");
   }
@@ -21874,6 +21894,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               browser: { attempted: false, succeeded: 0, failed: 0 }
             };
             const resolvedImageTokens = /* @__PURE__ */ new Set();
+            const browserRemoteUrlsByToken = /* @__PURE__ */ new Map();
             const imageAttemptErrorsByToken = /* @__PURE__ */ new Map();
             const rememberImageAttemptError = /* @__PURE__ */ __name((token, error) => {
               const normalizedToken = String(token || "").trim();
@@ -22017,6 +22038,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 const browserTokenAssets = unresolvedBeforeBrowser.map((token) => {
                   const browserAsset = matchedBrowserAssets.get(token);
                   if (!browserAsset) return null;
+                  const browserRemoteUrl = /^https?:\/\//i.test(String(browserAsset.src || "").trim()) ? String(browserAsset.src || "").trim() : "";
+                  if (browserRemoteUrl) browserRemoteUrlsByToken.set(token, browserRemoteUrl);
                   return buildTokenAsset(token, {
                     dataUrl: browserAsset.dataUrl,
                     downloadSrc: browserAsset.src,
@@ -22038,6 +22061,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             const unresolvedImageTokens = getUnresolvedImageTokens();
             const unknownImageIdentityCount = Math.max(0, imageTokenCount - imageTokens.length);
             const imageLocalizationFailedCount = unresolvedImageTokens.length + unknownImageIdentityCount;
+            const remoteFallbackUrls = { ...imageTmpDownloadUrls };
+            for (const token of unresolvedImageTokens) {
+              if (browserRemoteUrlsByToken.has(token)) {
+                remoteFallbackUrls[token] = browserRemoteUrlsByToken.get(token);
+              }
+            }
+            const remotelyLinkedImageTokens = unresolvedImageTokens.filter((token) => /^https?:\/\//i.test(String(remoteFallbackUrls[token] || "").trim()) && cleanedCloudOpenApiMarkdown.includes(`feishu-image:${token}`));
+            const remotelyLinkedImageTokenSet = new Set(remotelyLinkedImageTokens);
+            const imageMissingCount = unknownImageIdentityCount + unresolvedImageTokens.filter((token) => !remotelyLinkedImageTokenSet.has(token)).length;
             const missingImageTempUrlCount = unknownImageIdentityCount + unresolvedImageTokens.filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || "").trim())).length;
             const finalImageErrors = unresolvedImageTokens.map((token) => {
               const attempts = imageAttemptErrorsByToken.get(token) || [];
@@ -22047,7 +22079,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               cleanedCloudOpenApiMarkdown,
               [],
               url,
-              imageTmpDownloadUrls
+              remoteFallbackUrls
             );
             const feishuMediaDiagnostic = buildFeishuMediaDiagnostic({
               scope: feishuMediaScope,
@@ -22058,7 +22090,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               browser: feishuMediaStage.browser,
               markdownReferenceCount,
               localizedCount: resolvedImageTokens.size,
+              remoteLinkedCount: remotelyLinkedImageTokens.length,
               unresolvedCount: imageLocalizationFailedCount,
+              missingCount: imageMissingCount,
+              images: imageTokens.map((token, index) => ({
+                index: index + 1,
+                finalOutcome: resolvedImageTokens.has(token) ? "localized" : remotelyLinkedImageTokenSet.has(token) ? "remote-link" : "missing"
+              })),
               errors: [
                 ...finalImageErrors,
                 feishuMediaScopeBlocked && imageTokens.length ? `missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : ""
@@ -22074,6 +22112,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 conversionSource: "feishu-cloud-oauth",
                 imageTempUrlMissingCount: missingImageTempUrlCount,
                 imageLocalizationFailedCount,
+                imageRemoteFallbackCount: remotelyLinkedImageTokens.length,
+                imageMissingCount,
                 imageLocalizationError: finalImageErrors.slice(0, 3).join(" | "),
                 feishuMediaDiagnostic,
                 conversionNote: [
@@ -22081,6 +22121,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   imageTokenCount ? `images=${imageTokenCount}` : "",
                   imageTokenCount ? `image-official-localized=${officialImageStats.localizedCount || 0}` : "",
                   temporaryImageAssets.length ? `image-temporary-localized=${temporaryImageStats.localizedCount || 0}/${temporaryImageAssets.length}` : "",
+                  remotelyLinkedImageTokens.length ? `image-remote-links=${remotelyLinkedImageTokens.length}` : "",
+                  imageMissingCount ? `image-fully-missing=${imageMissingCount}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
                   feishuMediaScopeBlocked && imageTokens.length ? `image-media-scope-missing=${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : "",
@@ -23546,7 +23588,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       committed: true,
       conversionWarning: getRecordConversionWarning(recordForMarkdown),
       mediaResolutionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.mediaResolutionDiagnostic || null : null,
-      conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.conversionDiagnostic || null : null
+      conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.conversionDiagnostic || null : null,
+      feishuMediaDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.feishuMediaDiagnostic || null : null
     };
   }
   async reportSyncLifecycleStatus(recordId, body, binding) {
@@ -24058,8 +24101,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
-      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.mediaResolutionDiagnostic || item.conversionDiagnostic);
-      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic : null;
+      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic);
+      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.feishuMediaDiagnostic || latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic : null;
       this.lastSyncDiagnostic = {
         status: failed.length ? "failed" : completionWarnings.length ? "warning" : "success",
         stage: "finished",
@@ -24665,6 +24708,8 @@ WechatObsidianInboxPlugin.__test = {
   buildSkippedSyncNotice,
   getRecordConversionWarning,
   buildConversionWarningsNotice,
+  fetchWithElectronSession,
+  downloadArrayBufferViaElectronSession,
   parseLocalAsrProgressLog,
   buildLocalAsrProgressKey,
   getTranscriptionQualityIssue,

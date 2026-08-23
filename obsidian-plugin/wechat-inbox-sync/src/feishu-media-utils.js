@@ -239,7 +239,10 @@ function buildFeishuMediaDiagnostic({
   browser = {},
   markdownReferenceCount = 0,
   localizedCount = 0,
+  remoteLinkedCount = 0,
   unresolvedCount = 0,
+  missingCount = 0,
+  images = [],
   errors = [],
 } = {}) {
   const normalizedScope = normalizeFeishuScope(scope);
@@ -268,7 +271,22 @@ function buildFeishuMediaDiagnostic({
     },
     markdownReferenceCount: Math.max(0, Number(markdownReferenceCount) || 0),
     localizedCount: Math.max(0, Number(localizedCount) || 0),
+    remoteLinkedCount: Math.max(0, Number(remoteLinkedCount) || 0),
     unresolvedCount: Math.max(0, Number(unresolvedCount) || 0),
+    missingCount: Math.max(0, Number(missingCount) || 0),
+    images: (Array.isArray(images) ? images : []).slice(0, 50).map((image, index) => ({
+      index: Math.max(1, Number(image && image.index) || index + 1),
+      finalOutcome: ['localized', 'remote-link', 'missing'].includes(String(image && image.finalOutcome || ''))
+        ? String(image.finalOutcome)
+        : 'missing',
+      attempts: (Array.isArray(image && image.attempts) ? image.attempts : []).slice(0, 6).map((attempt) => ({
+        stage: String(attempt && attempt.stage || 'unknown').slice(0, 32),
+        outcome: String(attempt && attempt.outcome || 'failed').slice(0, 32),
+        ...(attempt && attempt.error ? {
+          error: String(attempt.error).replace(/[\r\n]+/g, ' ').trim().slice(0, 240),
+        } : {}),
+      })),
+    })),
     errors: Array.from(new Set((Array.isArray(errors) ? errors : [errors])
       .map((error) => String(error || '').replace(/[\r\n]+/g, ' ').trim())
       .filter(Boolean))).slice(0, 8),
