@@ -5772,7 +5772,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.117";
+var PLUGIN_RUNTIME_VERSION = "1.3.118";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -19736,32 +19736,6 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         });
       }
     }
-    if (!status || !status.hasAccess) return status;
-    const readiness = this.getLocalTranscriptionComponentReadiness();
-    if (readiness.ready) return status;
-    const snoozedUntil = Date.parse(this.settings.proSetupInstallPromptSnoozedUntil || "");
-    if (!options.force && reason !== "first-use" && Number.isFinite(snoozedUntil) && snoozedUntil > now) {
-      return status;
-    }
-    const accepted = await this.confirmLocalComponentInstall(status, reason, readiness);
-    if (!accepted) {
-      await this.saveSettings({
-        ...this.settings,
-        proSetupInstallPromptSnoozedUntil: new Date(now + PRO_SETUP_PROMPT_COOLDOWN_MS).toISOString()
-      });
-      return status;
-    }
-    try {
-      await this.installLocalTranscriptionComponents({ reason, readiness });
-    } catch (error) {
-      if (reason === "first-use") {
-        throw error;
-      }
-      return {
-        ...status,
-        localComponentInstallError: error && error.message ? error.message : String(error || "")
-      };
-    }
     return status;
   }
   async confirmLocalComponentInstall(status, reason, readiness) {
@@ -19813,10 +19787,17 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。`, 12e3);
   }
   async doInstallLocalTranscriptionComponents(options = {}) {
+    const requireAsr = options.requireAsr === true;
+    const requireOcr = options.requireOcr === true;
+    if (!requireAsr && !requireOcr) {
+      return {
+        installed: false,
+        skipped: true,
+        reason: options.reason || ""
+      };
+    }
     await this.ensureProFeatureAccess("本地转写组件安装");
     const readiness = options.readiness || this.getLocalTranscriptionComponentReadiness();
-    const requireAsr = options.requireAsr !== false;
-    const requireOcr = options.requireOcr !== false;
     const failures = [];
     if (requireAsr && (!readiness.asrStatus || !readiness.asrStatus.ready)) {
       try {
@@ -19852,18 +19833,26 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   async ensureLocalComponentReadyForUse(featureName = "该功能", options = {}) {
     const status = await this.ensureProFeatureAccess(featureName);
     const readiness = this.getLocalTranscriptionComponentReadiness();
-    const requireAsr = options.requireAsr !== false;
-    const requireOcr = Boolean(options.requireOcr);
+    const requireAsr = options.requireAsr === true;
+    const requireOcr = options.requireOcr === true;
     const asrMissing = requireAsr && (!readiness.asrStatus || !readiness.asrStatus.ready);
     const ocrMissing = requireOcr && (!readiness.ocrStatus || !readiness.ocrStatus.ready);
     if (!asrMissing && !ocrMissing) return status;
-    const accepted = await this.confirmLocalComponentInstall(status, options.reason || "first-use", readiness);
+    const missingComponents = [];
+    if (asrMissing) missingComponents.push("音视频转写");
+    if (ocrMissing) missingComponents.push("图片文字识别 OCR");
+    const requiredReadiness = {
+      ...readiness,
+      ready: false,
+      missingComponents
+    };
+    const accepted = await this.confirmLocalComponentInstall(status, options.reason || "first-use", requiredReadiness);
     if (!accepted) {
       throw new Error(`${featureName}需要先安装本地转写组件。`);
     }
     await this.installLocalTranscriptionComponents({
       reason: options.reason || "first-use",
-      readiness,
+      readiness: requiredReadiness,
       requireAsr,
       requireOcr
     });
