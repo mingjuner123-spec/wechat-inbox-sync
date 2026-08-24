@@ -12221,6 +12221,16 @@ async function runLocalTranscriptionEntitlementTests() {
     });
     alreadyReadyAsrPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
     alreadyReadyAsrPlugin.getConfiguredLocalAsrInstallRoot = () => asrReadyRoot;
+    alreadyReadyAsrPlugin.getLocalAsrInstallStatus = (installRoot, platform) => {
+      assert.strictEqual(installRoot, asrReadyRoot);
+      assert.strictEqual(platform, 'win32');
+      return {
+        installRoot,
+        ready: true,
+        scriptOutdated: false,
+        missingReasons: [],
+      };
+    };
     alreadyReadyAsrPlugin.ensureLocalTranscriptionAccess = async () => ({ hasAccess: true });
     alreadyReadyAsrPlugin.getAvailableLocalAsrInstallerPath = async () => {
       throw new Error('already-ready ASR must not download or prepare an installer');
@@ -12247,6 +12257,15 @@ async function runLocalTranscriptionEntitlementTests() {
     });
     alreadyReadyOcrPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
     alreadyReadyOcrPlugin.getConfiguredLocalOcrInstallRoot = () => ocrReadyRoot;
+    alreadyReadyOcrPlugin.getLocalOcrInstallStatus = (installRoot, platform) => {
+      assert.strictEqual(installRoot, ocrReadyRoot);
+      assert.strictEqual(platform, 'win32');
+      return {
+        installRoot,
+        ready: true,
+        missingReasons: [],
+      };
+    };
     alreadyReadyOcrPlugin.ensureProFeatureAccess = async () => ({ hasAccess: true });
     alreadyReadyOcrPlugin.getAvailableLocalOcrInstallerPath = async () => {
       throw new Error('already-ready OCR must not download or prepare an installer');

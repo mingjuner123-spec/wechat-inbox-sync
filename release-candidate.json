@@ -3,8 +3,8 @@
   "pluginId": "wechat-inbox-sync",
   "pluginVersion": "1.3.119",
   "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
-  "candidateId": "1.3.119-51f21ef8d7a1f3b8",
-  "aggregateSha256": "51f21ef8d7a1f3b8eeb0dd9388d45d1dc6fec1884a92e3728637514dd05eb804",
+  "candidateId": "1.3.119-10071cc9f79c2932",
+  "aggregateSha256": "10071cc9f79c2932ec469821c4e8a5fdc9742ea8803bb2e765f9f44b1c8d6376",
   "looseAssets": [
     "main.js",
     "manifest.json",
@@ -64,8 +64,8 @@
     },
     {
       "path": "main.js",
-      "bytes": 2387030,
-      "sha256": "27cd8f11c97d19461fdb4c687d610adbac12b9853042e7541c01a16a2a3f5822"
+      "bytes": 2387092,
+      "sha256": "c575ea96e6c301b3562a3dba7319bba6cb7b4e56c0d111ec181fe436b5cbd516"
     },
     {
       "path": "manifest.json",

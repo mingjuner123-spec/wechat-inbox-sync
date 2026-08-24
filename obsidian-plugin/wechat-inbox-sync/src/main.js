@@ -15351,11 +15351,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  getLocalOcrInstallStatus() {
+  getLocalOcrInstallStatus(
+    installRoot = this.getConfiguredLocalOcrInstallRoot(),
+    platform = this.getConfiguredLocalAsrPlatform(),
+  ) {
     return getLocalOcrInstallStatus(
-      this.getConfiguredLocalOcrInstallRoot(),
+      installRoot,
       fs.existsSync,
-      this.getConfiguredLocalAsrPlatform(),
+      platform,
     );
   }
 
@@ -15376,7 +15379,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.ensureProFeatureAccess('本地转写组件安装');
     const platform = this.getConfiguredLocalAsrPlatform();
     const installRoot = this.getConfiguredLocalOcrInstallRoot();
-    const existingStatus = getLocalOcrInstallStatus(installRoot, fs.existsSync, platform);
+    const existingStatus = this.getLocalOcrInstallStatus(installRoot, platform);
     if (!options.force && existingStatus.ready) {
       return {
         skipped: true,
@@ -15713,8 +15716,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  getLocalAsrInstallStatus() {
-    return getLocalAsrInstallStatus(this.getConfiguredLocalAsrInstallRoot(), fs.existsSync, this.getConfiguredLocalAsrPlatform());
+  getLocalAsrInstallStatus(
+    installRoot = this.getConfiguredLocalAsrInstallRoot(),
+    platform = this.getConfiguredLocalAsrPlatform(),
+  ) {
+    return getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
   }
 
   getLocalAsrDiagnosticText() {
@@ -16359,7 +16365,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const platform = this.getConfiguredLocalAsrPlatform();
     const installMode = normalizeLocalAsrInstallMode(options.installMode || this.settings.localAsrInstallMode);
     const installRoot = this.getConfiguredLocalAsrInstallRoot(installMode);
-    const existingStatus = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
+    const existingStatus = this.getLocalAsrInstallStatus(installRoot, platform);
     if (!options.force && existingStatus.ready) {
       await this.saveSettings({
         ...this.settings,
@@ -16413,7 +16419,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         resolve({ stdout, stderr });
       });
     });
-    const installStatus = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
+    const installStatus = this.getLocalAsrInstallStatus(installRoot, platform);
     if (!installStatus.ready) {
       const missingText = installStatus.missingReasons && installStatus.missingReasons.length
         ? installStatus.missingReasons.join('；')
