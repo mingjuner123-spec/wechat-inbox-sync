@@ -1,11 +1,6 @@
 'use strict';
 
 const WECHAT_ARTICLE_HOST = 'mp.weixin.qq.com';
-// Keep the article identity plus WeChat's request signature/context. The
-// `chksm` value is part of the signed public-account URL; dropping it can
-// turn a valid article into a small guide/shell page. `scene` is retained
-// because WeChat uses it when routing shared links. Other tracking/secret
-// parameters remain intentionally omitted.
 const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn', 'chksm', 'scene'];
 
 function isWechatArticleUrl(value) {
@@ -30,6 +25,49 @@ function normalizeWechatArticleUrl(value) {
     });
   }
   return normalized.toString();
+}
+
+function getWechatArticleUrlShape(value) {
+  if (!isWechatArticleUrl(value)) return null;
+  const parsed = new URL(String(value || '').trim());
+  const parameterNames = Array.from(new Set(Array.from(parsed.searchParams.keys())))
+    .filter(Boolean)
+    .sort();
+  const retainedParameterNames = parameterNames.filter((name) => WECHAT_ARTICLE_ID_PARAMS.includes(name));
+  const strippedParameterNames = parameterNames.filter((name) => !WECHAT_ARTICLE_ID_PARAMS.includes(name));
+  return {
+    pathKind: parsed.pathname === '/s' ? 'query-id' : 'slug',
+    parameterNames,
+    retainedParameterNames,
+    strippedParameterNames,
+    hasFragment: Boolean(parsed.hash),
+  };
+}
+
+function buildWechatArticleRequestProfiles(value) {
+  const originalUrl = String(value || '').trim();
+  const normalizedUrl = normalizeWechatArticleUrl(originalUrl);
+  if (!normalizedUrl) return [];
+  const originalShape = getWechatArticleUrlShape(originalUrl);
+  const normalizedShape = getWechatArticleUrlShape(normalizedUrl);
+  return [
+    {
+      id: 'original-desktop',
+      inputKind: 'original-url',
+      userAgentProfile: 'desktop',
+      url: originalUrl,
+      urlShape: originalShape,
+      normalizedChanged: originalUrl !== normalizedUrl,
+    },
+    {
+      id: 'canonical-mobile',
+      inputKind: 'canonical-url',
+      userAgentProfile: 'mobile',
+      url: normalizedUrl,
+      urlShape: normalizedShape,
+      normalizedChanged: originalUrl !== normalizedUrl,
+    },
+  ];
 }
 
 function decodeHtmlEntities(value) {
@@ -247,12 +285,14 @@ function buildWechatArticleFallbackMarkdown({
 
 module.exports = {
   buildWechatArticleFallbackMarkdown,
+  buildWechatArticleRequestProfiles,
   classifyWechatArticleHtml,
   collectWechatArticleImageCandidates,
   diagnoseWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
   extractWechatArticleBodyHtml,
   getWechatArticleBodyStats,
+  getWechatArticleUrlShape,
   hasWechatArticleBody,
   isWechatArticleUrl,
   isWechatEmptyShellHtml,

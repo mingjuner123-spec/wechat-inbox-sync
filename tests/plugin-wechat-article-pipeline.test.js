@@ -1,8 +1,10 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
 const {
- classifyWechatArticleHtml,
+  buildWechatArticleRequestProfiles,
+  classifyWechatArticleHtml,
   diagnoseWechatArticleHtml,
  extractWechatArticleFallbackMetadata,
   getWechatArticleBodyStats,
@@ -13,6 +15,8 @@ const {
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-utils');
 const {
   getFailureCacheInfo,
+  inferWechatArticleFailureCategory,
+  redactDiagnosticText,
   runWechatArticlePipeline,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
 
@@ -88,6 +92,17 @@ assert.strictEqual(
 );
 assert.strictEqual(normalizeWechatArticleUrl('https://mp.weixin.qq.com.evil.example/s?__biz=test'), '');
 
+const requestProfiles = buildWechatArticleRequestProfiles(
+  'https://mp.weixin.qq.com/s/recovered?scene=1&pass_ticket=secret#rd',
+);
+assert.strictEqual(requestProfiles.length, 2);
+assert.strictEqual(requestProfiles[0].id, 'original-desktop');
+assert.strictEqual(requestProfiles[0].url, 'https://mp.weixin.qq.com/s/recovered?scene=1&pass_ticket=secret#rd');
+assert.strictEqual(requestProfiles[1].id, 'canonical-mobile');
+assert.strictEqual(requestProfiles[1].url, 'https://mp.weixin.qq.com/s/recovered');
+assert.deepStrictEqual(requestProfiles[0].urlShape.parameterNames, ['pass_ticket', 'scene']);
+assert.deepStrictEqual(requestProfiles[0].urlShape.strippedParameterNames, ['pass_ticket']);
+
 const fallbackMarkdown = buildWechatArticleFallbackMarkdown({
   url: 'https://mp.weixin.qq.com/s/example',
   state: 'guide',
@@ -97,6 +112,14 @@ const fallbackMarkdown = buildWechatArticleFallbackMarkdown({
 });
 assert.match(fallbackMarkdown, /https:\/\/mp\.weixin\.qq\.com\/s\/example/);
 assert.match(fallbackMarkdown, /!\[.*\]\(https:\/\/mmbiz\.qpic\.cn\/cover\.jpg\)/);
+
+const pluginMainSource = fs.readFileSync(
+  require.resolve('../obsidian-plugin/wechat-inbox-sync/src/main.js'),
+  'utf8',
+);
+assert.match(pluginMainSource, /redactDiagnosticText\(details\.error/);
+assert.match(pluginMainSource, /sanitizeDiagnosticValue\(details\.diagnostic\)/);
+assert.match(pluginMainSource, /redactDiagnosticText\(source\.message/);
 
 async function runPipelineTests() {
   let invalidFetchCalls = 0;
@@ -114,20 +137,34 @@ async function runPipelineTests() {
     '</body></html>',
   ].join('');
   let browserCalls = 0;
-  let staticTargetUrl = '';
-  let browserTargetUrl = '';
+  const staticTargets = [];
+  const browserTargets = [];
   const recovered = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/recovered?scene=1&pass_ticket=secret',
-    fetchStatic: async (targetUrl) => { staticTargetUrl = targetUrl; return guideHtml; },
+    fetchStatic: async (targetUrl, profile) => {
+      staticTargets.push({ targetUrl, profile: profile.id, userAgentProfile: profile.userAgentProfile });
+      return guideHtml;
+    },
     renderBrowser: async (targetUrl) => {
-      browserTargetUrl = targetUrl;
+      browserTargets.push(targetUrl);
       browserCalls += 1;
       return { html: browserArticle, title: 'Browser article title', assets: [{ src: 'https://mmbiz.qpic.cn/body.jpg' }] };
     },
   });
   assert.strictEqual(browserCalls, 1);
-  assert.strictEqual(staticTargetUrl, 'https://mp.weixin.qq.com/s/recovered');
-  assert.strictEqual(browserTargetUrl, 'https://mp.weixin.qq.com/s/recovered');
+  assert.deepStrictEqual(staticTargets, [
+    {
+      targetUrl: 'https://mp.weixin.qq.com/s/recovered?scene=1&pass_ticket=secret',
+      profile: 'original-desktop',
+      userAgentProfile: 'desktop',
+    },
+    {
+      targetUrl: 'https://mp.weixin.qq.com/s/recovered',
+      profile: 'canonical-mobile',
+      userAgentProfile: 'mobile',
+    },
+  ]);
+  assert.deepStrictEqual(browserTargets, ['https://mp.weixin.qq.com/s/recovered?scene=1&pass_ticket=secret']);
   assert.strictEqual(recovered.kind, 'article');
   assert.strictEqual(recovered.state, 'complete');
   assert.strictEqual(recovered.source, 'browser');
@@ -136,6 +173,18 @@ async function runPipelineTests() {
   assert.deepStrictEqual(recovered.assets, [{ src: 'https://mmbiz.qpic.cn/body.jpg' }]);
   assert.strictEqual(recovered.diagnostic.completeness.articleBodyFound, true);
   assert.strictEqual(recovered.diagnostic.browser.pageKind, 'article');
+  assert.strictEqual(recovered.diagnostic.selectedProfile.profile, 'original-desktop');
+  assert.doesNotMatch(JSON.stringify(recovered.diagnostic), /secret/);
+
+  const profileSensitive = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/profile-sensitive?scene=1&pass_ticket=private-value',
+    fetchStatic: async (_targetUrl, profile) => profile.id === 'original-desktop' ? guideHtml : articleHtml,
+    renderBrowser: async () => { throw new Error('browser should not run'); },
+  });
+  assert.strictEqual(profileSensitive.kind, 'article');
+  assert.strictEqual(profileSensitive.source, 'static');
+  assert.strictEqual(profileSensitive.diagnostic.selectedProfile.profile, 'canonical-mobile');
+  assert.doesNotMatch(JSON.stringify(profileSensitive.diagnostic), /private-value/);
 
   browserCalls = 0;
   const bodyMissingBrowser = await runWechatArticlePipeline({
@@ -151,8 +200,9 @@ async function runPipelineTests() {
   assert.strictEqual(bodyMissingBrowser.state, 'body_missing');
  assert.strictEqual(bodyMissingBrowser.source, 'browser');
  assert.strictEqual(bodyMissingBrowser.diagnostic.reason, 'wechat-article-body-missing');
-  assert.deepStrictEqual(bodyMissingBrowser.diagnostic.attemptedChannels, ['static', 'browser', 'browser']);
+  assert.deepStrictEqual(bodyMissingBrowser.diagnostic.attemptedChannels, ['static', 'static', 'browser', 'browser']);
   assert.strictEqual(bodyMissingBrowser.diagnostic.retryable, true);
+  assert.strictEqual(bodyMissingBrowser.diagnostic.failureCategory, 'identical-empty-shell-across-request-profiles');
   const cachedFailure = getFailureCacheInfo('https://mp.weixin.qq.com/s/partial');
   assert.strictEqual(cachedFailure.cacheHit, true);
   let retryBrowserCalls = 0;
@@ -187,23 +237,73 @@ async function runPipelineTests() {
   assert.strictEqual(browserTransportFailure.source, 'browser');
   assert.match(browserTransportFailure.diagnostic.browserError, /browser unavailable/);
 
+  const sensitiveFailure = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/sensitive?scene=1&pass_ticket=private-ticket',
+    fetchStatic: async (targetUrl) => {
+      throw new Error(`request failed for ${targetUrl}&token=private-token`);
+    },
+    renderBrowser: async (targetUrl) => {
+      const error = new Error(`loadURL failed: ${targetUrl}&secret=private-secret`);
+      error.wechatArticleDiagnostic = { currentUrl: targetUrl, pass_ticket: 'private-ticket' };
+      throw error;
+    },
+  });
+  const sensitiveDiagnostic = JSON.stringify(sensitiveFailure.diagnostic);
+  assert.doesNotMatch(sensitiveDiagnostic, /private-ticket|private-token|private-secret/);
+  assert.match(sensitiveDiagnostic, /pass_ticket/);
+  assert.match(sensitiveDiagnostic, /\[REDACTED\]/);
+  assert.doesNotMatch(redactDiagnosticText('token=secret-value'), /secret-value/);
+
   browserCalls = 0;
   const captcha = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/captcha',
     fetchStatic: async () => captchaHtml,
     renderBrowser: async () => { browserCalls += 1; return { html: articleHtml }; },
   });
-  assert.strictEqual(browserCalls, 0);
-  assert.strictEqual(captcha.kind, 'fallback');
-  assert.strictEqual(captcha.state, 'captcha');
+  assert.strictEqual(browserCalls, 1);
+  assert.strictEqual(captcha.kind, 'article');
+
+  const terminalCaptcha = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/terminal-captcha',
+    fetchStatic: async () => captchaHtml,
+    renderBrowser: async () => ({ html: captchaHtml }),
+  });
+  assert.strictEqual(terminalCaptcha.kind, 'fallback');
+  assert.strictEqual(terminalCaptcha.state, 'captcha');
+  assert.strictEqual(terminalCaptcha.diagnostic.failureCategory, 'wechat-verification-required');
 
   const unavailable = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/unavailable',
     fetchStatic: async () => unavailableHtml,
     renderBrowser: async () => ({ html: articleHtml }),
   });
-  assert.strictEqual(unavailable.kind, 'fallback');
-  assert.strictEqual(unavailable.state, 'unavailable');
+  assert.strictEqual(unavailable.kind, 'article');
+
+  const terminalUnavailable = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/terminal-unavailable',
+    fetchStatic: async () => unavailableHtml,
+    renderBrowser: async () => ({ html: unavailableHtml }),
+  });
+  assert.strictEqual(terminalUnavailable.kind, 'fallback');
+  assert.strictEqual(terminalUnavailable.state, 'unavailable');
+  assert.strictEqual(terminalUnavailable.diagnostic.failureCategory, 'article-unavailable');
+
+  const selectorMismatch = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/selector-mismatch',
+    fetchStatic: async () => emptyShellHtml,
+    renderBrowser: async () => {
+      const error = new Error('missing selector');
+      error.wechatArticleDiagnostic = { hasJsContent: false, visibleTextChars: 600 };
+      throw error;
+    },
+  });
+  assert.strictEqual(selectorMismatch.kind, 'retryable');
+  assert.strictEqual(selectorMismatch.diagnostic.failureCategory, 'extractor-selector-mismatch');
+
+  assert.strictEqual(inferWechatArticleFailureCategory([
+    { channel: 'static', profile: 'original-desktop', outcome: 'empty-shell' },
+    { channel: 'static', profile: 'canonical-mobile', outcome: 'guide' },
+  ]), 'request-profile-sensitive-response');
 }
 
 runPipelineTests()

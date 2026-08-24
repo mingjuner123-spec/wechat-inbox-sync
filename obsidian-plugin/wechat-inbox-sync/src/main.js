@@ -135,8 +135,17 @@ const {
 } = require('./sync-lifecycle-utils');
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
-const { runWechatArticlePipeline } = require('./wechat-article-pipeline');
-const { diagnoseWechatArticleHtml, isWechatArticleUrl, normalizeWechatArticleUrl } = require('./wechat-article-utils');
+const {
+  redactDiagnosticText,
+  runWechatArticlePipeline,
+  sanitizeDiagnosticValue,
+} = require('./wechat-article-pipeline');
+const {
+  buildWechatArticleRequestProfiles,
+  diagnoseWechatArticleHtml,
+  isWechatArticleUrl,
+  normalizeWechatArticleUrl,
+} = require('./wechat-article-utils');
 const {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -218,9 +227,10 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 // Do not impersonate the WeChat app. A normal mobile browser UA is the most
 // broadly compatible public article surface, while still allowing the local
 // persistent session to contribute cookies when the user already has them.
+const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.119';
+const PLUGIN_RUNTIME_VERSION = '1.3.120';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1638,7 +1648,7 @@ function runLocalDouyinResolver(executablePath, args, timeoutMs = LOCAL_DOUYIN_R
 function getTransportErrorDiagnostic(error) {
   const source = error && typeof error === 'object' ? error : {};
   const status = Number(source.status || source.statusCode || (source.response && source.response.status) || 0);
-  const message = String(source.message || source || 'unknown error')
+  const message = redactDiagnosticText(source.message || source || 'unknown error')
     .replace(/[\r\n]+/g, ' ')
     .trim()
     .slice(0, 240);
@@ -10231,7 +10241,12 @@ async function settleRenderedPage(webContents) {
   `);
 }
 
-async function renderWechatArticleToMarkdownWithElectron(url) {
+async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
+  const userAgentProfile = options.userAgentProfile === 'desktop' ? 'desktop' : 'mobile';
+  const userAgent = userAgentProfile === 'desktop'
+    ? WECHAT_ARTICLE_DESKTOP_USER_AGENT
+    : WECHAT_ARTICLE_MOBILE_USER_AGENT;
+  const requestProfile = String(options.profile || '');
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
@@ -10263,10 +10278,10 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
   }
   try {
     if (win.webContents && typeof win.webContents.setUserAgent === 'function') {
-      win.webContents.setUserAgent(WECHAT_ARTICLE_MOBILE_USER_AGENT);
+      win.webContents.setUserAgent(userAgent);
     }
     const loaded = waitForWebContents(win.webContents);
-    await win.loadURL(url, { userAgent: WECHAT_ARTICLE_MOBILE_USER_AGENT });
+    await win.loadURL(url, { userAgent });
     await loaded;
     // Some public-account pages hydrate js_content after the initial load.
     // Wait for the actual body rather than treating the surrounding shell as content.
@@ -10318,7 +10333,32 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
         return false;
       })()
     `);
-    if (!bodyReady) throw new Error('\u5fae\u4fe1\u516c\u4f17\u53f7\u9875\u9762\u672a\u8fd4\u56de #js_content \u6b63\u6587');
+    if (!bodyReady) {
+      const failureDiagnostic = await win.webContents.executeJavaScript(`
+        (() => {
+          const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+          const bodyText = clean(document.body && (document.body.innerText || document.body.textContent) || '');
+          const root = document.querySelector('#js_content');
+          return {
+            hasJsContent: Boolean(root),
+            bodyTextChars: root ? clean(root.innerText || root.textContent || '').length : 0,
+            visibleTextChars: bodyText.length,
+            imageCount: root ? root.querySelectorAll('img').length : 0,
+            pageTitleKind: clean(document.title || '') ? 'present' : 'missing',
+            verificationMarker: /\u73af\u5883\u5f02\u5e38|\u5b89\u5168\u9a8c\u8bc1|\u5b8c\u6210\u9a8c\u8bc1|\u8bbf\u95ee\u9891\u7e41|\u53bb\u9a8c\u8bc1/.test(bodyText),
+            unavailableMarker: /\u5185\u5bb9\u4e0d\u5b58\u5728|\u5df2\u5220\u9664|\u6682\u65f6\u65e0\u6cd5\u67e5\u770b|\u52a0\u8f7d\u5931\u8d25/.test(bodyText),
+          };
+        })()
+      `);
+      const error = new Error('\u5fae\u4fe1\u516c\u4f17\u53f7\u9875\u9762\u672a\u8fd4\u56de #js_content \u6b63\u6587');
+      error.wechatArticleDiagnostic = {
+        requestProfile,
+        userAgentProfile,
+        finalHost: getSafeUrlDiagnostic(win.webContents && win.webContents.getURL ? win.webContents.getURL() : url).host,
+        ...failureDiagnostic,
+      };
+      throw error;
+    }
     const result = await win.webContents.executeJavaScript(`
       (() => {
         const clean = (value) => String(value || '')
@@ -10371,6 +10411,12 @@ async function renderWechatArticleToMarkdownWithElectron(url) {
       throw new Error('微信公众号页面未返回 #js_content 正文');
     }
     result.bodyFound = true;
+    result.diagnostic = {
+      ...(result.diagnostic || {}),
+      requestProfile,
+      userAgentProfile,
+      finalHost: getSafeUrlDiagnostic(win.webContents && win.webContents.getURL ? win.webContents.getURL() : url).host,
+    };
     return result;
   } finally {
     if (win && typeof win.destroy === 'function'
@@ -16642,15 +16688,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderUrlToMarkdownWithElectron(url);
   }
 
-  async renderWechatArticleWithElectron(url) {
-    return renderWechatArticleToMarkdownWithElectron(url);
+  async renderWechatArticleWithElectron(url, options = {}) {
+    return renderWechatArticleToMarkdownWithElectron(url, options);
   }
 
   async downloadWechatArticleHtmlViaSession(url, headers = {}) {
     const session = getWechatSession();
     return readSessionFetchText(session, url, {
       ...headers,
-      'User-Agent': WECHAT_ARTICLE_MOBILE_USER_AGENT,
+      'User-Agent': headers['User-Agent'] || headers['user-agent'] || WECHAT_ARTICLE_MOBILE_USER_AGENT,
       Referer: 'https://mp.weixin.qq.com/',
     }, 15000);
   }
@@ -19838,48 +19884,81 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isWechatArticleUrl(url)) {
-        const wechatArticleUrl = normalizeWechatArticleUrl(url);
+        const originalWechatArticleUrl = String(url || '').trim();
+        const wechatArticleUrl = normalizeWechatArticleUrl(originalWechatArticleUrl);
+        const wechatRequestProfiles = buildWechatArticleRequestProfiles(originalWechatArticleUrl);
         let usedNodeFallback = false;
         let usedWechatSessionFallback = false;
         const wechatArticleDiagnostic = {
           source: 'wechat-article',
           urlKind: wechatArticleUrl.includes('/s?') ? 'query-id' : 'slug',
+          requestProfiles: wechatRequestProfiles.map((profile) => ({
+            profile: profile.id,
+            inputKind: profile.inputKind,
+            userAgentProfile: profile.userAgentProfile,
+            pathKind: profile.urlShape && profile.urlShape.pathKind || '',
+            parameterNames: profile.urlShape && profile.urlShape.parameterNames || [],
+            retainedParameterNames: profile.urlShape && profile.urlShape.retainedParameterNames || [],
+            strippedParameterNames: profile.urlShape && profile.urlShape.strippedParameterNames || [],
+            normalizedChanged: Boolean(profile.normalizedChanged),
+          })),
           stages: [],
         };
+        let currentWechatProfileDetails = null;
         const addWechatArticleStage = (stage, details = {}) => {
           const entry = {
             stage,
             outcome: String(details.outcome || 'unknown'),
+            ...(currentWechatProfileDetails || {}),
           };
           if (details.state) entry.state = String(details.state);
-          ['htmlChars', 'markdownChars', 'assetCount', 'bodyTextChars', 'imageCount', 'imageCandidateCount', 'lazyImageCount', 'promotedImageCount', 'durationMs'].forEach((key) => {
+          ['status', 'htmlChars', 'markdownChars', 'assetCount', 'bodyTextChars', 'imageCount', 'imageCandidateCount', 'lazyImageCount', 'promotedImageCount', 'durationMs'].forEach((key) => {
             const value = Number(details[key]);
             if (Number.isFinite(value) && value >= 0) entry[key] = value;
           });
-          const errorText = String(details.error || '').replace(/\s+/g, ' ').trim();
-         if (errorText) entry.error = errorText.slice(0, 220);
-          if (details.diagnostic && typeof details.diagnostic === 'object') entry.diagnostic = details.diagnostic;
+          ['contentType', 'statusSource', 'finalHost'].forEach((key) => {
+            const value = String(details[key] || '').trim();
+            if (value) entry[key] = value.slice(0, 120);
+          });
+          const errorText = redactDiagnosticText(details.error || '').replace(/\s+/g, ' ').trim();
+          if (errorText) entry.error = errorText.slice(0, 220);
+          if (details.diagnostic && typeof details.diagnostic === 'object') {
+            entry.diagnostic = sanitizeDiagnosticValue(details.diagnostic);
+          }
          wechatArticleDiagnostic.stages.push(entry);
         };
         const extracted = await runWechatArticlePipeline({
-          url: wechatArticleUrl,
-          fetchStatic: async (targetUrl) => {
+          url: originalWechatArticleUrl,
+          fetchStatic: async (targetUrl, profile = {}) => {
+            currentWechatProfileDetails = {
+              profile: String(profile.id || ''),
+              inputKind: String(profile.inputKind || ''),
+              userAgentProfile: String(profile.userAgentProfile || ''),
+            };
             const articleHeaders = {
               ...getSocialRequestHeaders(targetUrl),
+              'User-Agent': profile.userAgentProfile === 'mobile'
+                ? WECHAT_ARTICLE_MOBILE_USER_AGENT
+                : WECHAT_ARTICLE_DESKTOP_USER_AGENT,
               Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
               'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             };
             try {
-              const staticHtml = String((await requestUrl({
+              const staticResponse = await requestUrl({
                 url: targetUrl,
                 method: 'GET',
                 headers: articleHeaders,
-              })).text || '');
+              });
+              const staticHtml = String(staticResponse && staticResponse.text || '');
               const staticDiagnosis = diagnoseWechatArticleHtml(staticHtml);
               const staticState = staticDiagnosis.pageKind;
               addWechatArticleStage('obsidian-request', {
                 outcome: 'response',
                state: staticState,
+               status: Number(staticResponse && staticResponse.status) || 200,
+               statusSource: Number(staticResponse && staticResponse.status) ? 'response' : 'inferred-success',
+               contentType: String(staticResponse && staticResponse.headers && (staticResponse.headers['content-type'] || staticResponse.headers['Content-Type']) || ''),
+               finalHost: getSafeUrlDiagnostic(staticResponse && staticResponse.url || targetUrl).host,
                htmlChars: staticHtml.length,
                 diagnostic: staticDiagnosis,
               });
@@ -19894,6 +19973,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                   const sessionState = sessionDiagnosis.pageKind;
                   addWechatArticleStage('wechat-session', {
                     outcome: 'response',
+                   status: 200,
+                   statusSource: 'inferred-success',
                    state: sessionState,
                    htmlChars: sessionHtml.length,
                     diagnostic: sessionDiagnosis,
@@ -19918,6 +19999,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 const nodeState = nodeDiagnosis.pageKind;
                 addWechatArticleStage('node-fallback', {
                   outcome: 'response',
+                 status: 200,
+                 statusSource: 'inferred-success',
                  state: nodeState,
                  htmlChars: String(nodeHtml || '').length,
                   diagnostic: nodeDiagnosis,
@@ -19944,6 +20027,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 const nodeState = nodeDiagnosis.pageKind;
                 addWechatArticleStage('node-fallback', {
                   outcome: 'response',
+                 status: 200,
+                 statusSource: 'inferred-success',
                  state: nodeState,
                  htmlChars: nodeHtml.length,
                   diagnostic: nodeDiagnosis,
@@ -19962,6 +20047,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 const sessionState = sessionDiagnosis.pageKind;
                 addWechatArticleStage('wechat-session', {
                   outcome: 'response',
+                 status: 200,
+                 statusSource: 'inferred-success',
                  state: sessionState,
                  htmlChars: sessionHtml.length,
                   diagnostic: sessionDiagnosis,
@@ -19980,10 +20067,18 @@ class WechatObsidianInboxPlugin extends Plugin {
               return nodeHtml;
             }
           },
-          renderBrowser: async (targetUrl) => {
+          renderBrowser: async (targetUrl, profile = {}) => {
+            currentWechatProfileDetails = {
+              profile: String(profile.id || ''),
+              inputKind: String(profile.inputKind || ''),
+              userAgentProfile: String(profile.userAgentProfile || ''),
+            };
             let rendered;
             try {
-              rendered = await this.renderWechatArticleWithElectron(targetUrl);
+              rendered = await this.renderWechatArticleWithElectron(targetUrl, {
+                profile: profile.id,
+                userAgentProfile: profile.userAgentProfile,
+              });
               const renderedText = String(rendered && (rendered.html || rendered.markdown) || '');
               addWechatArticleStage('hidden-browser', {
                 outcome: 'response',
@@ -20004,6 +20099,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               addWechatArticleStage('hidden-browser', {
                 outcome: 'error',
                 error: browserError && (browserError.message || browserError),
+                diagnostic: browserError && browserError.wechatArticleDiagnostic || null,
               });
               throw browserError;
             }
