@@ -954,7 +954,7 @@ try {
   if (-not $installedWhisper) {
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `
@@ -989,10 +989,10 @@ try {
   if (-not $installedFfmpeg) {
     $ffmpegZip = Join-Path $CacheRoot "ffmpeg.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $FfmpegTencentUrls -FallbackUrls @(
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls @(
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
-      )) `
+      ) -FallbackUrls $FfmpegTencentUrls) `
       -ZipPath $ffmpegZip `
       -StageDir $FfmpegStageDir `
       -MinBytes 10MB `
@@ -1015,7 +1015,7 @@ try {
     if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
       Remove-Item -LiteralPath $cachedModelPath -Force
     }
-    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelTencentUrls -FallbackUrls $ModelFallbackUrls) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelFallbackUrls -FallbackUrls $ModelTencentUrls) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
@@ -1028,7 +1028,7 @@ try {
     Write-Host ($_.Exception.Message)
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `

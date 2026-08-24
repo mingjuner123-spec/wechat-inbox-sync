@@ -5,6 +5,11 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const path = require('path');
+const EMBEDDED_LOCAL_ASR_WINDOWS_INSTALLER_SOURCE = require('../local-asr/install-local-asr.ps1');
+const EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE = require('../local-asr/install-local-asr-macos.sh');
+const EMBEDDED_LOCAL_OCR_WINDOWS_INSTALLER_SOURCE = require('../local-ocr/install-local-ocr.ps1');
+const EMBEDDED_LOCAL_OCR_MACOS_INSTALLER_SOURCE = require('../local-ocr/install-local-ocr-macos.sh');
+const EMBEDDED_LOCAL_OCR_RUNTIME_SOURCE = require('../local-ocr/ocr_image.py');
 const {
   Modal,
   Notice,
@@ -167,6 +172,7 @@ const { createDouyinStructuredContentBuilder } = require('./social-platform-cont
 const { createDouyinMediaResolutionDiagnosticBuilder } = require('./social-media-diagnostic-utils');
 const {
   selectLocalDouyinResolverAsset,
+  buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
   buildNetscapeCookieFile,
   extractLocalDouyinResolverMediaUrls,
@@ -214,7 +220,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 // persistent session to contribute cookies when the user already has them.
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.118';
+const PLUGIN_RUNTIME_VERSION = '1.3.119';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -241,11 +247,12 @@ const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_COMPONENT_CDN_BASE_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com';
 const LOCAL_DOUYIN_RESOLVER_MANIFEST_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/yt-dlp/latest.json`;
+const LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest';
 const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
-const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '5798e3fab037ff0bb970e0452b4c5df32a4d6d52920e5904ae9ac3bea5ed7d02';
-const LOCAL_OCR_MACOS_INSTALLER_SHA256 = 'de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074';
+const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = 'ac093b480ccf10fca55f46c967389c897664b697b9bda49017a7ba1a4128e2d2';
+const LOCAL_OCR_MACOS_INSTALLER_SHA256 = '650f1b259a94efa30015ca02200cd7b800a0abe8e95e65d970abe258b9ad7847';
 const LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
 const LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
 const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -1512,6 +1519,51 @@ function downloadTextViaNode(url, requestHeaders = {}) {
   });
 }
 
+async function downloadTextWithFallback(url, requestHeaders = {}) {
+  try {
+    const response = await requestUrl({ url, method: 'GET', headers: requestHeaders });
+    return response.text || '';
+  } catch (error) {
+    return downloadTextViaNode(url, requestHeaders);
+  }
+}
+
+async function fetchLocalDouyinResolverManifest() {
+  let githubError = null;
+  try {
+    const githubHeaders = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'wechat-inbox-sync-component-fallback',
+    };
+    const releasePayload = JSON.parse(await downloadTextWithFallback(
+      LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL,
+      githubHeaders,
+    ));
+    const tagName = String(releasePayload && releasePayload.tag_name || '').trim();
+    if (!/^\d{4}\.\d{2}\.\d{2}(?:[.-][A-Za-z0-9.-]+)?$/.test(tagName)) {
+      throw new Error('GitHub release tag is invalid');
+    }
+    const checksumsUrl = `https://github.com/yt-dlp/yt-dlp/releases/download/${tagName}/SHA2-256SUMS`;
+    const checksumsText = await downloadTextWithFallback(checksumsUrl, githubHeaders);
+    const manifest = buildLocalDouyinResolverGithubManifest(releasePayload, checksumsText);
+    if (!manifest) throw new Error('GitHub release metadata or checksums are invalid');
+    return { manifest, source: 'github' };
+  } catch (error) {
+    githubError = error;
+  }
+
+  try {
+    const manifestText = await downloadTextWithFallback(`${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`);
+    const manifest = JSON.parse(manifestText);
+    if (!manifest || manifest.schemaVersion !== 1 || !manifest.assets) {
+      throw new Error('CloudBase manifest schema is invalid');
+    }
+    return { manifest, source: 'cloudbase' };
+  } catch (cloudbaseError) {
+    throw new Error(`GitHub 与 CloudBase 组件清单均不可用：${cloudbaseError.message || cloudbaseError}; GitHub: ${githubError && (githubError.message || githubError)}`);
+  }
+}
+
 function downloadBinaryViaNode(url) {
   return new Promise((resolve, reject) => {
     let parsed;
@@ -1679,6 +1731,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('PYTHON_RUNTIME_SHA256_ARM64=')
       && source.includes('PYTHON_RUNTIME_SHA256_X64=')
       && source.includes('TENCENT_PYTHON_DOWNLOAD_BASE=')
+      && source.includes('GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"')
+      && source.includes('PYTHON_DOWNLOAD_BASES=')
       && source.includes('PORTABLE_PYTHON=')
       && source.includes('install_portable_python')
       && source.includes('python_runtime_sha256')
@@ -1751,6 +1805,8 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     return source.includes('TENCENT_OCR_ASSET_BASE_URL')
       && source.includes('TENCENT_PIP_INDEX_URL')
       && source.includes('TENCENT_PYTHON_INSTALL_MIRROR')
+      && source.includes('GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"')
+      && source.includes('PYTHON_RUNTIME_MIRRORS=')
       && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"')
       && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"')
       && source.includes('PORTABLE_PYTHON=')
@@ -15267,9 +15323,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     const sourcePath = path.join(this.getPluginBaseDir(), 'local-ocr', 'ocr_image.py');
     const targetPath = path.join(path.dirname(installerPath), 'ocr_image.py');
     try {
-      if (!fs.existsSync(sourcePath)) return;
-      if (path.resolve(sourcePath) === path.resolve(targetPath)) return;
-      fs.copyFileSync(sourcePath, targetPath);
+      if (fs.existsSync(sourcePath) && path.resolve(sourcePath) !== path.resolve(targetPath)) {
+        fs.copyFileSync(sourcePath, targetPath);
+        return;
+      }
+      if (path.resolve(sourcePath) !== path.resolve(targetPath)) {
+        fs.writeFileSync(targetPath, EMBEDDED_LOCAL_OCR_RUNTIME_SOURCE, 'utf8');
+      }
     } catch (error) {
       console.warn('Failed to copy bundled OCR runtime asset:', error);
     }
@@ -15363,7 +15423,29 @@ class WechatObsidianInboxPlugin extends Plugin {
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_OCR_MACOS_INSTALLER_URL : LOCAL_OCR_INSTALLER_URL;
     const installerSha256 = isMac ? LOCAL_OCR_MACOS_INSTALLER_SHA256 : LOCAL_OCR_WINDOWS_INSTALLER_SHA256;
-    const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-ocr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
+    const downloadedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-local-ocr-installer-'));
+    const downloadedPath = path.join(downloadedDirectory, isMac ? 'install-local-ocr-macos.sh' : 'install-local-ocr.ps1');
+    const embeddedScriptText = isMac
+      ? EMBEDDED_LOCAL_OCR_MACOS_INSTALLER_SOURCE
+      : EMBEDDED_LOCAL_OCR_WINDOWS_INSTALLER_SOURCE;
+
+    if (isTrustedLocalOcrInstallerSource(embeddedScriptText, installerSha256, isMac)) {
+      fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(embeddedScriptText, isMac), 'utf8');
+      this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
+      return downloadedPath;
+    }
+
+    if (fs.existsSync(installerPath)) {
+      const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
+      if (isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)) {
+        if (isMac) {
+          fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
+          this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
+          return downloadedPath;
+        }
+        return installerPath;
+      }
+    }
 
     try {
       let scriptText = '';
@@ -15380,17 +15462,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
       return downloadedPath;
     } catch (downloadError) {
-      if (fs.existsSync(installerPath)) {
-        const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
-        if (isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)) {
-          if (isMac) {
-            fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
-            this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
-            return downloadedPath;
-          }
-          return installerPath;
-        }
-      }
       throw new Error(`无法下载本地转写 OCR 安装器：${downloadError.message || downloadError}`);
     }
   }
@@ -15574,6 +15645,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     const isMac = this.getConfiguredLocalAsrPlatform() === 'darwin';
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? '.sh' : '.ps1'}`);
+    const embeddedScriptText = isMac
+      ? EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE
+      : EMBEDDED_LOCAL_ASR_WINDOWS_INSTALLER_SOURCE;
 
     const isInstallerCurrent = (scriptText) => isLocalAsrInstallerCurrent(scriptText, isMac);
     const fetchInstallerText = typeof options.fetchInstallerText === 'function'
@@ -15587,6 +15661,22 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       };
 
+    if (isInstallerCurrent(embeddedScriptText)) {
+      fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(embeddedScriptText, isMac), 'utf8');
+      return downloadedPath;
+    }
+
+    if (fs.existsSync(installerPath)) {
+      const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
+      if (isInstallerCurrent(bundledScriptText)) {
+        if (isMac) {
+          fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
+          return downloadedPath;
+        }
+        return installerPath;
+      }
+    }
+
     try {
       const scriptText = await fetchInstallerText(`${installerUrl}?t=${Date.now()}`);
       if (!isInstallerCurrent(scriptText)) {
@@ -15595,16 +15685,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(scriptText, isMac), 'utf8');
       return downloadedPath;
     } catch (downloadError) {
-      if (fs.existsSync(installerPath)) {
-        const bundledScriptText = fs.readFileSync(installerPath, 'utf8');
-        if (isInstallerCurrent(bundledScriptText)) {
-          if (isMac) {
-            fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), 'utf8');
-            return downloadedPath;
-          }
-          return installerPath;
-        }
-      }
       throw new Error(`无法下载最新本地转写安装器：${downloadError.message || downloadError}`);
     }
   }
@@ -16406,19 +16486,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     this.localDouyinResolverInstallPromise = (async () => {
       try {
-        let manifestText = '';
-        try {
-          const response = await requestUrl({ url: `${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`, method: 'GET' });
-          manifestText = response.text || '';
-        } catch (error) {
-          manifestText = await downloadTextViaNode(`${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`);
-        }
-        let manifest;
-        try {
-          manifest = JSON.parse(manifestText);
-        } catch (error) {
-          throw new Error('本地抖音解析组件更新清单无效');
-        }
+        const { manifest, source: manifestSource } = await fetchLocalDouyinResolverManifest();
         const asset = selectLocalDouyinResolverAsset(manifest, platform, process.arch);
         if (!asset) {
           throw new Error(`本地抖音解析组件暂未提供 ${platform}-${process.arch} 安装包`);
@@ -16444,7 +16512,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         } finally {
           try { fs.rmSync(temporaryPath, { force: true }); } catch (error) {}
         }
-        return { executablePath, updated: true, source: 'cdn' };
+        return { executablePath, updated: true, source: manifestSource };
       } catch (error) {
         if (hasCachedExecutable && fs.existsSync(executablePath)) {
           return { executablePath, updated: false, source: 'stale-cache' };

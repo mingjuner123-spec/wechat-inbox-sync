@@ -13,6 +13,44 @@ function selectLocalDouyinResolverAsset(manifest, platform, arch) {
   return asset;
 }
 
+function parseOfficialChecksums(text) {
+  const checksums = new Map();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const match = line.match(/^([a-f0-9]{64})\s+\*?(.+)$/i);
+    if (match) checksums.set(match[2].trim(), match[1].toLowerCase());
+  }
+  return checksums;
+}
+
+function buildLocalDouyinResolverGithubManifest(releasePayload, checksumsText) {
+  const tagName = String(releasePayload && releasePayload.tag_name || '').trim();
+  if (!/^\d{4}\.\d{2}\.\d{2}(?:[.-][A-Za-z0-9.-]+)?$/.test(tagName)) return null;
+  const checksums = parseOfficialChecksums(checksumsText);
+  const releaseBaseUrl = `https://github.com/yt-dlp/yt-dlp/releases/download/${tagName}`;
+  const windowsSha256 = checksums.get('yt-dlp.exe');
+  const macosSha256 = checksums.get('yt-dlp_macos');
+  if (!isValidSha256(windowsSha256) || !isValidSha256(macosSha256)) return null;
+  return {
+    schemaVersion: 1,
+    upstream: 'yt-dlp',
+    version: tagName,
+    assets: {
+      'win32-x64': {
+        url: `${releaseBaseUrl}/yt-dlp.exe`,
+        sha256: windowsSha256,
+      },
+      'darwin-arm64': {
+        url: `${releaseBaseUrl}/yt-dlp_macos`,
+        sha256: macosSha256,
+      },
+      'darwin-x64': {
+        url: `${releaseBaseUrl}/yt-dlp_macos`,
+        sha256: macosSha256,
+      },
+    },
+  };
+}
+
 function getLocalDouyinResolverRoot(homeDir) {
   const root = String(homeDir || '');
   // Tests and release tooling may run on a different OS than the plugin host.
@@ -72,6 +110,8 @@ function extractLocalDouyinResolverMediaUrls(output) {
 module.exports = {
   isValidSha256,
   selectLocalDouyinResolverAsset,
+  parseOfficialChecksums,
+  buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
   isDouyinCookieDomain,
   buildNetscapeCookieFile,

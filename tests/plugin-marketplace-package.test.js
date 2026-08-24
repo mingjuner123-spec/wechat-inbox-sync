@@ -141,6 +141,7 @@ assert.ok(windowsOcrInstaller.includes('$PypiFallbackIndexUrl = "https://pypi.or
 assert.ok(windowsOcrInstaller.includes('$PythonBuildStandaloneBuild = "20260623"'));
 assert.ok(windowsOcrInstaller.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"'));
 assert.ok(windowsOcrInstaller.includes('$TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"'));
+assert.ok(windowsOcrInstaller.includes('$bases = @($PythonRuntimeFallbackMirrors) + @($TencentPythonInstallMirror)'));
 assert.ok(windowsOcrInstaller.includes('$PythonRuntimeFileName = "cpython-$PythonBuildStandaloneVersion-x86_64-pc-windows-msvc-install_only.tar.gz"'));
 assert.ok(windowsOcrInstaller.includes('$PythonRuntimeSha256 = "C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E"'));
 assert.ok(windowsOcrInstaller.includes('function Install-PortablePython'));
@@ -225,6 +226,8 @@ assert.ok(macOcrInstaller.includes('PYPI_FALLBACK_INDEX_URL="https://pypi.org/si
 assert.ok(macOcrInstaller.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"'));
 assert.ok(macOcrInstaller.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"'));
 assert.ok(macOcrInstaller.includes('TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
+assert.ok(macOcrInstaller.includes('GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"'));
+assert.ok(macOcrInstaller.includes('PYTHON_RUNTIME_MIRRORS=("$GITHUB_PYTHON_INSTALL_MIRROR" "$TENCENT_PYTHON_INSTALL_MIRROR")'));
 assert.ok(macOcrInstaller.indexOf('PYTHON_RUNTIME_DIR="${INSTALL_ROOT}/python-runtime"') < macOcrInstaller.indexOf('PORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python3"'));
 assert.ok(macOcrInstaller.includes('PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"'));
 assert.ok(macOcrInstaller.includes('PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"'));
@@ -321,7 +324,7 @@ assert.ok(windowsInstaller.includes('[System.Management.Automation.Language.Pars
 assert.ok(windowsInstaller.includes('Assert-TranscribeScriptCandidate -Path $candidatePath'));
 assert.ok(
   windowsInstaller.indexOf('$transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot')
-    < windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
+    < windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls'),
   'Windows installer must retain a rollback-capable script update before heavy asset work',
 );
 assert.ok(
@@ -344,9 +347,9 @@ assert.ok(windowsInstaller.includes('$FfmpegTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('$ModelTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('function Get-EnabledAssetUrls'));
 assert.ok(windowsInstaller.includes('Skipping invalid primary asset URL'));
-assert.ok(windowsInstaller.includes('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'));
-assert.ok(windowsInstaller.includes('-PrimaryUrls $FfmpegTencentUrls'));
-assert.ok(windowsInstaller.includes('-PrimaryUrls $ModelTencentUrls -FallbackUrls $ModelFallbackUrls'));
+assert.ok(windowsInstaller.includes('-PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls'));
+assert.ok(windowsInstaller.includes('-FallbackUrls $FfmpegTencentUrls'));
+assert.ok(windowsInstaller.includes('-PrimaryUrls $ModelFallbackUrls -FallbackUrls $ModelTencentUrls'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsFallbackUrls'));
 assert.ok(windowsInstaller.includes('whisper-bin-x64-compat.zip'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilitySha256'));
@@ -405,7 +408,7 @@ assert.ok(
 );
 assert.ok(
   windowsInstaller.indexOf('$transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot') <
-    windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
+    windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls'),
   'Windows installer should refresh transcribe.ps1 before heavy downloads or runtime validation',
 );
 const templateStart = windowsInstaller.lastIndexOf('# BEGIN_TRANSCRIBE_TEMPLATE');
@@ -746,6 +749,8 @@ assert.ok(macInstaller.includes('PYTHON_RUNTIME_VERSION="${PYTHON_BUILD_STANDALO
 assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"'));
 assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"'));
 assert.ok(macInstaller.includes('TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
+assert.ok(macInstaller.includes('GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"'));
+assert.ok(macInstaller.includes('PYTHON_DOWNLOAD_BASES=("$GITHUB_PYTHON_DOWNLOAD_BASE" "$TENCENT_PYTHON_DOWNLOAD_BASE")'));
 assert.ok(macInstaller.includes('PORTABLE_PYTHON="$PYTHON_RUNTIME_DIR/python/bin/python"'));
 assert.ok(macInstaller.includes("sys.version.split()[0] == sys.argv[1]"));
 assert.ok(macInstaller.includes('"$PYTHON_RUNTIME_VERSION"'));
@@ -769,7 +774,7 @@ assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/lo
 assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.10"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.11"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=180'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));
@@ -777,7 +782,7 @@ assert.ok(macInstaller.includes('--speed-time "$DOWNLOAD_LOW_SPEED_TIME"'));
 assert.ok(macInstaller.includes('CACHE_ROOT="$INSTALL_ROOT/cache"'));
 assert.ok(macInstaller.includes('TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"'));
 assert.ok(macInstaller.includes('TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"'));
-assert.ok(macInstaller.includes('MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")'));
+assert.ok(macInstaller.includes('MODEL_URLS=("$MODEL_MIRROR_URL" "$MODEL_URL" "$TENCENT_MODEL_URL")'));
 assert.ok(macInstaller.includes('local urls=("${MODEL_URLS[@]}")'));
 assert.ok(macInstaller.includes('Python venv and ASR tools are already ready.'));
 assert.strictEqual(macInstaller.includes('rm -rf "$venv_dir"'), false);

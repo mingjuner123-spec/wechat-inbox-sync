@@ -190,6 +190,1919 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// local-asr/install-local-asr.ps1
+var require_install_local_asr = __commonJS({
+  "local-asr/install-local-asr.ps1"(exports2, module2) {
+    module2.exports = 'param(\n  [string]$InstallRoot = (Join-Path $env:USERPROFILE ".wechat-inbox-local-asr")\n)\n\n$ErrorActionPreference = "Stop"\n$ProgressPreference = "SilentlyContinue"\n\n$TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))\n$CacheRoot = Join-Path $InstallRoot "cache"\n$InstallStatePath = Join-Path $InstallRoot ".install-state.json"\n$InstallerScriptVersion = "1.2.27"\n$NativeProcessRunnerVersion = "diagnostics-process-v1"\n$DownloadLowSpeedLimitBytesPerSecond = 10240\n$DownloadLowSpeedTimeoutSeconds = 90\n$DownloadTimeoutSeconds = 1200\n$InstallLockPath = Join-Path $InstallRoot ".install.lock"\n$InstallMutexName = "Global\\WechatInboxLocalAsrInstall"\n$Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }\n$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"\n$WhisperWindowsTencentUrls = @()\n$WhisperWindowsCompatibilityUrls = @()\n$WhisperWindowsCompatibilitySha256 = \'7B562DEEF031BD8A1A3954E3F5FF43BE0ACE2E86974235518530594BEECFF4B7\'\n$FfmpegTencentUrls = @()\n$ModelTencentUrls = @()\nif (-not [string]::IsNullOrWhiteSpace($TencentCosAssetBaseUrl)) {\n  $tencentCosAssetBase = $TencentCosAssetBaseUrl.TrimEnd("/")\n  $WhisperWindowsTencentUrls += "$tencentCosAssetBase/whisper-bin-x64.zip"\n  $WhisperWindowsCompatibilityUrls += "$tencentCosAssetBase/whisper-bin-x64-compat.zip"\n  $FfmpegTencentUrls += "$tencentCosAssetBase/ffmpeg-release-essentials.zip"\n  $ModelTencentUrls += "$tencentCosAssetBase/ggml-small.bin"\n}\n$ModelFallbackUrls = @(\n  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",\n  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"\n)\n$WhisperWindowsFallbackUrls = @(\n  "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"\n)\n\nfunction New-CleanDirectory {\n  param([Parameter(Mandatory = $true)][string]$Path)\n  if (Test-Path -LiteralPath $Path) {\n    Remove-Item -LiteralPath $Path -Recurse -Force\n  }\n  New-Item -ItemType Directory -Force -Path $Path | Out-Null\n}\n\nfunction Acquire-InstallLock {\n  New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null\n  $mutex = New-Object System.Threading.Mutex($false, $InstallMutexName)\n  $acquired = $false\n  try {\n    $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(10))\n  } catch [System.Threading.AbandonedMutexException] {\n    $acquired = $true\n  }\n  if (-not $acquired) {\n    throw "Another local ASR installation is already running. Please stop the previous installation or wait a few minutes, then retry."\n  }\n  Set-Content -LiteralPath $InstallLockPath -Encoding UTF8 -Value @(\n    "pid=$PID"\n    "time=$(Get-Date -Format o)"\n  )\n  return $mutex\n}\n\nfunction Release-InstallLock {\n  param([AllowNull()]$Mutex)\n  if ($Mutex) {\n    try {\n      $Mutex.ReleaseMutex()\n    } catch {\n      # The mutex may already be abandoned if the process is exiting.\n    }\n    $Mutex.Dispose()\n  }\n  Remove-Item -LiteralPath $InstallLockPath -Force -ErrorAction SilentlyContinue\n}\n\nfunction Copy-FileWithRetry {\n  param(\n    [Parameter(Mandatory = $true)][string]$SourcePath,\n    [Parameter(Mandatory = $true)][string]$DestinationPath,\n    [int]$Attempts = 10,\n    [int]$DelayMilliseconds = 1000\n  )\n  $lastError = $null\n  $destinationDir = Split-Path -Parent $DestinationPath\n  if ($destinationDir) {\n    New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null\n  }\n  for ($i = 1; $i -le $Attempts; $i += 1) {\n    try {\n      Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force\n      return $DestinationPath\n    } catch {\n      $lastError = $_\n      Write-Host "File is busy, retrying copy $i/$Attempts`: $SourcePath"\n      Start-Sleep -Milliseconds $DelayMilliseconds\n    }\n  }\n  throw $lastError\n}\n\nfunction Prepare-ZipForExtraction {\n  param(\n    [Parameter(Mandatory = $true)][string]$ZipPath,\n    [Parameter(Mandatory = $true)][string]$TempRoot,\n    [Parameter(Mandatory = $true)][string]$Label,\n    [string]$FallbackUrl = ""\n  )\n  $extractZipPath = Join-Path $TempRoot ("extract-" + [guid]::NewGuid().ToString("N") + ".zip")\n  try {\n    Copy-FileWithRetry -SourcePath $ZipPath -DestinationPath $extractZipPath | Out-Null\n    return $extractZipPath\n  } catch {\n    if (-not $FallbackUrl) {\n      throw\n    }\n    Write-Host "$Label cache package is locked or unreadable; downloading a fresh temporary package."\n    Download-File -Url $FallbackUrl -OutFile $extractZipPath -Resume\n    return $extractZipPath\n  }\n}\n\nfunction Remove-ItemIfNotBusy {\n  param([Parameter(Mandatory = $true)][string]$Path)\n  try {\n    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop\n    return $true\n  } catch {\n    Write-Host "Cannot remove busy cache file; keeping it for a later retry: $Path"\n    return $false\n  }\n}\n\nfunction Download-ZipToCacheOrTemp {\n  param(\n    [Parameter(Mandatory = $true)][string]$Url,\n    [Parameter(Mandatory = $true)][string]$CachePath,\n    [Parameter(Mandatory = $true)][string]$TempPath\n  )\n  try {\n    Download-File -Url $Url -OutFile $CachePath -Resume\n    return $CachePath\n  } catch {\n    Write-Host "Cache download failed or cache is busy; downloading to a temporary package."\n    Download-File -Url $Url -OutFile $TempPath -Resume\n    return $TempPath\n  }\n}\n\nfunction Download-File {\n  param(\n    [Parameter(Mandatory = $true)][string]$Url,\n    [Parameter(Mandatory = $true)][string]$OutFile,\n    [switch]$Resume\n  )\n  $outDir = Split-Path -Parent $OutFile\n  if ($outDir) {\n    New-Item -ItemType Directory -Force -Path $outDir | Out-Null\n  }\n  Write-Host "Downloading $Url"\n  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue\n  if ($Resume -and $curl) {\n    & $curl.Source `\n      -L `\n      --fail `\n      --silent `\n      --show-error `\n      --retry 2 `\n      --retry-delay 2 `\n      --connect-timeout 30 `\n      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `\n      --speed-time $DownloadLowSpeedTimeoutSeconds `\n      --max-time $DownloadTimeoutSeconds `\n      -C - `\n      -o $OutFile `\n      $Url\n    if ($LASTEXITCODE -eq 0) {\n      return\n    }\n    Write-Host "curl resumable download failed with exit code $LASTEXITCODE; retrying with PowerShell."\n  }\n  try {\n    Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers -TimeoutSec $DownloadTimeoutSeconds\n  } catch {\n    Write-Host "PowerShell download failed, retrying with curl."\n    if (-not $curl) {\n      throw\n    }\n    & $curl.Source `\n      -L `\n      --fail `\n      --silent `\n      --show-error `\n      --retry 2 `\n      --retry-delay 2 `\n      --connect-timeout 30 `\n      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `\n      --speed-time $DownloadLowSpeedTimeoutSeconds `\n      --max-time $DownloadTimeoutSeconds `\n      -C - `\n      -o $OutFile `\n      $Url\n    if ($LASTEXITCODE -ne 0) {\n      throw "curl download failed with exit code $LASTEXITCODE"\n    }\n  }\n}\n\nfunction Assert-DownloadedFile {\n  param(\n    [Parameter(Mandatory = $true)][string]$Path,\n    [Parameter(Mandatory = $true)][Int64]$MinBytes,\n    [Parameter(Mandatory = $true)][string]$Label\n  )\n  if (-not (Test-Path -LiteralPath $Path)) {\n    throw "$Label download failed: file not found at $Path"\n  }\n  $item = Get-Item -LiteralPath $Path\n  if ($item.Length -lt $MinBytes) {\n    throw "$Label download looks incomplete: $($item.Length) bytes at $Path. Please retry with a more stable network."\n  }\n  return $item\n}\n\nfunction Find-InstalledFile {\n  param(\n    [Parameter(Mandatory = $true)][string]$Root,\n    [Parameter(Mandatory = $true)][string[]]$Names\n  )\n  if (-not (Test-Path -LiteralPath $Root)) {\n    return $null\n  }\n  return Get-ChildItem -LiteralPath $Root -Recurse -File |\n    Where-Object { $Names -contains $_.Name } |\n    Sort-Object @{ Expression = { [array]::IndexOf($Names, $_.Name) } }, FullName |\n    Select-Object -First 1\n}\n\nfunction Assert-InstalledFile {\n  param(\n    [Parameter(Mandatory = $true)][string]$Root,\n    [Parameter(Mandatory = $true)][string[]]$Names,\n    [Parameter(Mandatory = $true)][string]$Label\n  )\n  $found = Find-InstalledFile -Root $Root -Names $Names\n  if (-not $found) {\n    throw "$Label install validation failed: cannot find $($Names -join \' or \') under $Root"\n  }\n  return $found\n}\n\nfunction Convert-ExitCodeToHex {\n  param([Parameter(Mandatory = $true)][int]$ExitCode)\n  $signed = [int64]$ExitCode\n  if ($signed -lt 0) {\n    $signed = 4294967296 + $signed\n  }\n  return "0x{0:X8}" -f $signed\n}\n\nfunction ConvertTo-NativeArgument {\n  param([AllowNull()][string]$Value)\n  $text = [string]$Value\n  if ($text -eq "") {\n    return \'""\'\n  }\n  if ($text -notmatch \'[\\s"]\') {\n    return $text\n  }\n  return \'"\' + ($text -replace \'"\', \'\\"\') + \'"\'\n}\n\nfunction Invoke-NativeProcess {\n  param(\n    [Parameter(Mandatory = $true)][string]$FilePath,\n    [Parameter(Mandatory = $true)][string[]]$Arguments,\n    [switch]$ReportProgress,\n    [string]$ProgressStage = "transcribing",\n    [int]$ProgressCurrent = 0,\n    [int]$ProgressTotal = 0\n  )\n  $process = $null\n  try {\n    $startInfo = New-Object System.Diagnostics.ProcessStartInfo\n    $startInfo.FileName = $FilePath\n    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")\n    $startInfo.UseShellExecute = $false\n    $startInfo.CreateNoWindow = $true\n    $startInfo.RedirectStandardOutput = $true\n    $startInfo.RedirectStandardError = $true\n    $process = New-Object System.Diagnostics.Process\n    $process.StartInfo = $startInfo\n    if (-not $process.Start()) {\n      throw "Native process did not start: $FilePath"\n    }\n    $stdoutTask = $process.StandardOutput.ReadToEndAsync()\n    $stderrTask = $process.StandardError.ReadToEndAsync()\n    while (-not $process.WaitForExit(5000)) {\n      if ($ReportProgress) {\n        Write-ProgressLog -Stage $ProgressStage -Current $ProgressCurrent -Total $ProgressTotal -ProcessId $process.Id\n      }\n    }\n    $process.WaitForExit()\n    $stdoutText = [string]$stdoutTask.GetAwaiter().GetResult()\n    $stderrText = [string]$stderrTask.GetAwaiter().GetResult()\n    $exitCode = [int]$process.ExitCode\n  } finally {\n    if ($process) {\n      $process.Dispose()\n    }\n  }\n\n  $combined = @(\n    "--- stdout ---"\n    ([string]$stdoutText).TrimEnd()\n    "--- stderr ---"\n    ([string]$stderrText).TrimEnd()\n  ) -join [Environment]::NewLine\n  return [PSCustomObject]@{\n    ExitCode = $exitCode\n    Output = $combined\n  }\n}\n\nfunction Get-ShortPath {\n  param([AllowNull()][string]$Path)\n  $text = [string]$Path\n  if ($text -eq "") {\n    return ""\n  }\n  try {\n    $fso = New-Object -ComObject Scripting.FileSystemObject\n    if (Test-Path -LiteralPath $text -PathType Leaf) {\n      return $fso.GetFile($text).ShortPath\n    }\n    if (Test-Path -LiteralPath $text -PathType Container) {\n      return $fso.GetFolder($text).ShortPath\n    }\n    $parent = Split-Path -Parent $text\n    $name = Split-Path -Leaf $text\n    if ($parent -and (Test-Path -LiteralPath $parent)) {\n      $shortParent = Get-ShortPath $parent\n      if ($shortParent) {\n        return Join-Path $shortParent $name\n      }\n    }\n  } catch {\n    return $text\n  }\n  return $text\n}\n\nfunction New-SafeTempDirectory {\n  $baseCandidates = @()\n  if ($env:ProgramData) {\n    $baseCandidates += (Join-Path $env:ProgramData "wechat-inbox-local-asr")\n  }\n  if ($env:PUBLIC) {\n    $baseCandidates += (Join-Path $env:PUBLIC "wechat-inbox-local-asr")\n  }\n  if ($env:SystemDrive) {\n    $baseCandidates += (Join-Path $env:SystemDrive "wechat-inbox-local-asr-temp")\n  }\n  if ($env:TEMP) {\n    $baseCandidates += $env:TEMP\n  }\n\n  foreach ($base in $baseCandidates) {\n    try {\n      New-Item -ItemType Directory -Force -Path $base | Out-Null\n      $dir = Join-Path $base ("run-" + [guid]::NewGuid().ToString("N"))\n      New-Item -ItemType Directory -Force -Path $dir | Out-Null\n      return $dir\n    } catch {\n      continue\n    }\n  }\n\n  throw "Cannot create a local ASR temp directory."\n}\n\nfunction Install-VcRuntime {\n  $vcInstaller = Join-Path $TempRoot "vc_redist.x64.exe"\n  Write-Host "Installing Microsoft Visual C++ Runtime for whisper.cpp."\n  Download-File -Url "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcInstaller\n  Assert-DownloadedFile -Path $vcInstaller -MinBytes 1MB -Label "Microsoft Visual C++ Runtime" | Out-Null\n  & $vcInstaller /install /quiet /norestart\n  $exit = $LASTEXITCODE\n  if ($exit -notin @(0, 3010)) {\n    throw "Microsoft Visual C++ Runtime install failed with exit code $exit"\n  }\n}\n\nfunction Assert-ExecutableRuns {\n  param(\n    [Parameter(Mandatory = $true)][string]$Path,\n    [Parameter(Mandatory = $true)][string[]]$Arguments,\n    [Parameter(Mandatory = $true)][string]$Label,\n    [switch]$TryInstallVcRuntime\n  )\n  $result = Invoke-NativeProcess -FilePath $Path -Arguments $Arguments\n  $output = $result.Output\n  $exit = $result.ExitCode\n  if ($exit -eq 0) {\n    return $output\n  }\n\n  $hex = Convert-ExitCodeToHex -ExitCode $exit\n  if ($TryInstallVcRuntime -and ($exit -eq -1073741515 -or $hex -eq "0xC0000135")) {\n    Write-Host "$Label failed to start with $exit/$hex. This usually means the Windows VC++ Runtime is missing."\n    Install-VcRuntime\n    $result = Invoke-NativeProcess -FilePath $Path -Arguments $Arguments\n    $output = $result.Output\n    $exit = $result.ExitCode\n    if ($exit -eq 0) {\n      return $output\n    }\n    $hex = Convert-ExitCodeToHex -ExitCode $exit\n  }\n\n  throw "$Label runtime validation failed with exit code $exit/$hex. $output"\n}\n\nfunction Assert-FileSha256 {\n  param(\n    [Parameter(Mandatory = $true)][string]$Path,\n    [Parameter(Mandatory = $true)][string]$ExpectedSha256,\n    [Parameter(Mandatory = $true)][string]$Label\n  )\n  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {\n    throw "$Label is missing after download: $Path"\n  }\n  $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()\n  if ($actualSha256 -ne $ExpectedSha256.ToUpperInvariant()) {\n    throw "$Label SHA-256 mismatch (expected $ExpectedSha256, got $actualSha256)."\n  }\n}\n\nfunction Test-IllegalInstructionExitCode {\n  param([AllowNull()]$Value)\n  if ($Value -is [int]) {\n    return $Value -eq -1073741795 -or (Convert-ExitCodeToHex -ExitCode $Value) -eq "0xC000001D"\n  }\n  $text = [string]$Value\n  return $text -match "exit code\\\\s+-1073741795/0xC000001D" -or $text -match "0xC000001D"\n}\n\nfunction Assert-LocalAsrInference {\n  param(\n    [Parameter(Mandatory = $true)][string]$WhisperPath,\n    [Parameter(Mandatory = $true)][string]$FfmpegPath,\n    [Parameter(Mandatory = $true)][string]$ModelPath\n  )\n  $validationDir = New-SafeTempDirectory\n  try {\n    $samplePath = Join-Path $validationDir "validation.wav"\n    $outputBase = Join-Path $validationDir "validation"\n    $safeModelPath = Join-Path $validationDir "ggml-small.bin"\n    Copy-Item -LiteralPath $ModelPath -Destination $safeModelPath -Force\n    Assert-ExecutableRuns `\n      -Path $FfmpegPath `\n      -Arguments @(\n        "-hide_banner", "-loglevel", "error", "-y",\n        "-f", "lavfi",\n        "-i", "sine=frequency=440:duration=1",\n        "-ar", "16000",\n        "-ac", "1",\n        "-c:a", "pcm_s16le",\n        $samplePath\n      ) `\n      -Label "ffmpeg inference validation" | Out-Null\n    Assert-ExecutableRuns `\n      -Path $WhisperPath `\n      -Arguments @(\n        "-m", (Get-ShortPath $safeModelPath),\n        "-f", (Get-ShortPath $samplePath),\n        "-l", "zh",\n        "-otxt",\n        "-of", (Get-ShortPath $outputBase)\n      ) `\n      -Label "whisper.cpp inference validation" `\n      -TryInstallVcRuntime | Out-Null\n    Write-Host "Local ASR inference validation passed."\n  } finally {\n    if (Test-Path -LiteralPath $validationDir) {\n      Remove-Item -LiteralPath $validationDir -Recurse -Force -ErrorAction SilentlyContinue\n    }\n  }\n}\n\nfunction Read-InstallState {\n  if (-not (Test-Path -LiteralPath $InstallStatePath)) {\n    return $null\n  }\n  try {\n    return Get-Content -LiteralPath $InstallStatePath -Raw | ConvertFrom-Json\n  } catch {\n    Write-Host "Install state is unreadable; running full validation."\n    return $null\n  }\n}\n\nfunction Get-FileState {\n  param([Parameter(Mandatory = $true)][string]$Path)\n  if (-not (Test-Path -LiteralPath $Path)) {\n    return $null\n  }\n  $item = Get-Item -LiteralPath $Path\n  return [pscustomobject]@{\n    path = $item.FullName\n    length = [Int64]$item.Length\n    lastWriteUtcTicks = [Int64]$item.LastWriteTimeUtc.Ticks\n  }\n}\n\nfunction Test-FileStateMatches {\n  param(\n    [AllowNull()]$State,\n    [Parameter(Mandatory = $true)][string]$Path\n  )\n  if (-not $State) {\n    return $false\n  }\n  $actual = Get-FileState -Path $Path\n  if (-not $actual) {\n    return $false\n  }\n  return (\n    $State.path -eq $actual.path -and\n    [Int64]$State.length -eq $actual.length -and\n    [Int64]$State.lastWriteUtcTicks -eq $actual.lastWriteUtcTicks\n  )\n}\n\nfunction Test-InstallStateValid {\n  param(\n    [AllowNull()]$State,\n    [Parameter(Mandatory = $true)][string]$WhisperPath,\n    [Parameter(Mandatory = $true)][string]$FfmpegPath,\n    [Parameter(Mandatory = $true)][string]$ModelPath\n  )\n  if (-not $State) {\n    return $false\n  }\n  if ($State.installerScriptVersion -ne $InstallerScriptVersion) {\n    return $false\n  }\n  if ($State.validationStatus -ne "passed") {\n    return $false\n  }\n  return (\n    (Test-FileStateMatches -State $State.whisper -Path $WhisperPath) -and\n    (Test-FileStateMatches -State $State.ffmpeg -Path $FfmpegPath) -and\n    (Test-FileStateMatches -State $State.model -Path $ModelPath)\n  )\n}\n\nfunction Write-InstallState {\n  param(\n    [Parameter(Mandatory = $true)][string]$WhisperPath,\n    [Parameter(Mandatory = $true)][string]$FfmpegPath,\n    [Parameter(Mandatory = $true)][string]$ModelPath\n  )\n  $state = [pscustomobject]@{\n    installerScriptVersion = $InstallerScriptVersion\n    validationStatus = "passed"\n    validatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")\n    whisper = Get-FileState -Path $WhisperPath\n    ffmpeg = Get-FileState -Path $FfmpegPath\n    model = Get-FileState -Path $ModelPath\n  }\n  $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $InstallStatePath -Encoding UTF8\n}\n\nfunction Invoke-LocalAsrValidation {\n  param(\n    [Parameter(Mandatory = $true)][string]$WhisperPath,\n    [Parameter(Mandatory = $true)][string]$FfmpegPath,\n    [Parameter(Mandatory = $true)][string]$ModelPath\n  )\n  $state = Read-InstallState\n  if (Test-InstallStateValid -State $state -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath) {\n    Write-Host "Local ASR was already validated for the current files; skipping full inference validation."\n    return\n  }\n  Assert-LocalAsrInference -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath\n  Write-InstallState -WhisperPath $WhisperPath -FfmpegPath $FfmpegPath -ModelPath $ModelPath\n}\n\nfunction Get-EnabledAssetUrls {\n  param(\n    [string[]]$PrimaryUrls = @(),\n    [string[]]$FallbackUrls = @()\n  )\n  $enabledPrimaryUrls = @()\n  foreach ($url in $PrimaryUrls) {\n    $value = [string]$url\n    if ([string]::IsNullOrWhiteSpace($value)) {\n      continue\n    }\n    $trimmed = $value.Trim()\n    if ($trimmed -match "example\\.com|your-cos-url|<|>") {\n      Write-Host "Skipping invalid primary asset URL: $trimmed"\n      continue\n    }\n    $enabledPrimaryUrls += $trimmed\n  }\n  return @($enabledPrimaryUrls + $FallbackUrls)\n}\n\nfunction Install-ZipPackage {\n  param(\n    [Parameter(Mandatory = $true)][string[]]$Urls,\n    [Parameter(Mandatory = $true)][string]$ZipPath,\n    [Parameter(Mandatory = $true)][string]$StageDir,\n    [Parameter(Mandatory = $true)][Int64]$MinBytes,\n    [Parameter(Mandatory = $true)][string[]]$ExpectedFiles,\n    [Parameter(Mandatory = $true)][string]$Label\n  )\n  $lastError = $null\n  foreach ($url in $Urls) {\n    try {\n      New-CleanDirectory -Path $StageDir\n      $cacheFile = $ZipPath\n      if ((Test-Path -LiteralPath $cacheFile) -and ((Get-Item -LiteralPath $cacheFile).Length -ge $MinBytes)) {\n        Write-Host "Using cached $Label package: $cacheFile"\n        $extractZipPath = Prepare-ZipForExtraction -ZipPath $cacheFile -TempRoot $TempRoot -Label $Label -FallbackUrl $url\n      } else {\n        if (Test-Path -LiteralPath $cacheFile) {\n          Write-Host "Resuming partial cached $Label package: $cacheFile"\n        }\n        $downloadTempPath = Join-Path $TempRoot ("download-" + [guid]::NewGuid().ToString("N") + ".zip")\n        $zipForExtraction = Download-ZipToCacheOrTemp -Url $url -CachePath $cacheFile -TempPath $downloadTempPath\n        $extractZipPath = Prepare-ZipForExtraction -ZipPath $zipForExtraction -TempRoot $TempRoot -Label $Label -FallbackUrl $url\n      }\n      Assert-DownloadedFile -Path $extractZipPath -MinBytes $MinBytes -Label $Label | Out-Null\n      Expand-Archive -LiteralPath $extractZipPath -DestinationPath $StageDir -Force\n      return Assert-InstalledFile -Root $StageDir -Names $ExpectedFiles -Label $Label\n    } catch {\n      $lastError = $_\n      Write-Host "$Label source failed: $url"\n      Write-Host ($_.Exception.Message)\n      if (Test-Path -LiteralPath $ZipPath) {\n        $cachedZip = Get-Item -LiteralPath $ZipPath\n        if ($cachedZip.Length -ge $MinBytes) {\n          Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue\n        } else {\n          Write-Host "Keeping partial $Label package for retry: $ZipPath"\n        }\n      }\n    }\n  }\n  throw $lastError\n}\n\nfunction Install-ExtractedPackage {\n  param(\n    [Parameter(Mandatory = $true)][string]$StageDir,\n    [Parameter(Mandatory = $true)][string]$DestinationDir,\n    [Parameter(Mandatory = $true)][string[]]$ExpectedFiles,\n    [Parameter(Mandatory = $true)][string]$Label\n  )\n  $found = Find-InstalledFile -Root $StageDir -Names $ExpectedFiles\n  if (-not $found) {\n    throw "$Label install validation failed: cannot find $($ExpectedFiles -join \' or \') under $StageDir"\n  }\n  if (Test-Path -LiteralPath $DestinationDir) {\n    Remove-Item -LiteralPath $DestinationDir -Recurse -Force\n  }\n  New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null\n  Get-ChildItem -LiteralPath $StageDir -Force |\n    Copy-Item -Destination $DestinationDir -Recurse -Force\n  return Assert-InstalledFile -Root $DestinationDir -Names $ExpectedFiles -Label $Label\n}\n\nfunction Install-WhisperCompatibilityPackage {\n  param(\n    [Parameter(Mandatory = $true)][string]$DestinationDir,\n    [Parameter(Mandatory = $true)][string]$StageDir\n  )\n  $compatibilityUrls = Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsCompatibilityUrls\n  if (-not $compatibilityUrls -or $compatibilityUrls.Count -eq 0) {\n    throw "whisper.cpp compatibility build is not configured. Please contact support with the installer diagnostic."\n  }\n  Write-Host "Current whisper.cpp uses unsupported CPU instructions; trying the compatibility build."\n  $optimizedCachePath = Join-Path $CacheRoot "whisper.zip"\n  Remove-Item -LiteralPath $optimizedCachePath -Force -ErrorAction SilentlyContinue\n  $compatibilityZip = Join-Path $CacheRoot "whisper-compat.zip"\n  Install-ZipPackage `\n    -Urls $compatibilityUrls `\n    -ZipPath $compatibilityZip `\n    -StageDir $StageDir `\n    -MinBytes 1MB `\n    -ExpectedFiles @("whisper-cli.exe", "main.exe") `\n    -Label "whisper.cpp compatibility" | Out-Null\n  Assert-FileSha256 -Path $compatibilityZip `\n    -ExpectedSha256 $WhisperWindowsCompatibilitySha256 `\n    -Label "whisper.cpp compatibility"\n  $installed = Install-ExtractedPackage `\n    -StageDir $StageDir `\n    -DestinationDir $DestinationDir `\n    -ExpectedFiles @("whisper-cli.exe", "main.exe") `\n    -Label "whisper.cpp compatibility"\n  Assert-ExecutableRuns -Path $installed.FullName -Arguments @("--help") -Label "whisper.cpp compatibility" -TryInstallVcRuntime | Out-Null\n  return $installed\n}\n\nfunction Install-ModelPackage {\n  param(\n    [Parameter(Mandatory = $true)][string[]]$Urls,\n    [Parameter(Mandatory = $true)][string]$OutFile,\n    [Parameter(Mandatory = $true)][Int64]$MinBytes,\n    [Parameter(Mandatory = $true)][string]$Label\n  )\n  $lastError = $null\n  foreach ($url in $Urls) {\n    try {\n      if (Test-Path -LiteralPath $OutFile) {\n        if ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes) {\n          Write-Host "Using cached $Label package: $OutFile"\n          return $OutFile\n        }\n        Write-Host "Resuming partial cached $Label package: $OutFile"\n      }\n      Download-File -Url $url -OutFile $OutFile -Resume\n      Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null\n      return $OutFile\n    } catch {\n      $lastError = $_\n      Write-Host "$Label source failed: $url"\n      Write-Host ($_.Exception.Message)\n      if (Test-Path -LiteralPath $OutFile) {\n        $cachedFile = Get-Item -LiteralPath $OutFile\n        if ($cachedFile.Length -ge $MinBytes) {\n          Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue\n        } else {\n          Write-Host "Keeping partial $Label package for retry: $OutFile"\n        }\n      }\n    }\n  }\n  throw $lastError\n}\n\nfunction Get-LatestWhisperWindowsAsset {\n  try {\n    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -Headers $Headers\n    $asset = $release.assets |\n      Where-Object {\n        $_.name -match "\\.zip$" -and\n        $_.name -match "(win|windows|mingw|x64)" -and\n        $_.name -match "(bin|whisper)"\n      } |\n      Sort-Object @{ Expression = { if ($_.name -match "x64") { 0 } else { 1 } } }, name |\n      Select-Object -First 1\n    if ($asset) {\n      return $asset.browser_download_url\n    }\n  } catch {\n    Write-Host "GitHub API unavailable, falling back to release page parsing."\n  }\n\n  try {\n    $latestResponse = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/latest" -Headers $Headers -MaximumRedirection 0 -ErrorAction Stop\n    $location = $latestResponse.Headers.Location\n    if (-not $location) {\n      throw "Cannot locate latest whisper.cpp release."\n    }\n    $tag = Split-Path -Leaf ([uri]$location).AbsolutePath\n    $assetsPage = Invoke-WebRequest -Uri "https://github.com/ggml-org/whisper.cpp/releases/expanded_assets/$tag" -Headers $Headers -ErrorAction Stop\n    $match = [regex]::Match($assetsPage.Content, \'/ggml-org/whisper\\.cpp/releases/download/[^"]+whisper-bin-x64\\.zip\')\n    if (-not $match.Success) {\n      $match = [regex]::Match($assetsPage.Content, \'/ggml-org/whisper\\.cpp/releases/download/[^"]+whisper[^"]+x64[^"]+\\.zip\')\n    }\n    if ($match.Success) {\n      return "https://github.com$($match.Value)"\n    }\n    throw "Cannot find a Windows x64 whisper.cpp release asset on the expanded assets page."\n  } catch {\n    Write-Host "GitHub release page parsing failed; falling back to bundled whisper.cpp release URL."\n    Write-Host ($_.Exception.Message)\n  }\n  return $WhisperWindowsFallbackUrls[0]\n}\n\nfunction Assert-TranscribeScriptCandidate {\n  param([Parameter(Mandatory = $true)][string]$Path)\n\n  if (-not (Test-Path -LiteralPath $Path) -or (Get-Item -LiteralPath $Path).Length -le 0) {\n    throw "Cannot prepare transcribe script candidate."\n  }\n\n  $tokens = $null\n  $parseErrors = $null\n  [System.Management.Automation.Language.Parser]::ParseFile(\n    $Path,\n    [ref]$tokens,\n    [ref]$parseErrors\n  ) | Out-Null\n  if ($parseErrors -and $parseErrors.Count -gt 0) {\n    $parseSummary = ($parseErrors | ForEach-Object { $_.Message }) -join "; "\n    throw ("Cannot parse transcribe script candidate: " + $parseSummary)\n  }\n\n  $candidateSource = [System.IO.File]::ReadAllText($Path)\n  $requiredMarkers = @(\n    \'$TranscriptQualityGuardVersion = "repeat-guard-v2"\',\n    \'$TranscriptPartialRecoveryVersion = "partial-recovery-v1"\',\n    \'$NativeProcessRunnerVersion = "diagnostics-process-v1"\',\n    \'System.Diagnostics.ProcessStartInfo\',\n    \'ReadToEndAsync\',\n    \'progressHeartbeatAt\',\n    \'progressPid\',\n    \'-ProgressStage "segmenting"\'\n  )\n  foreach ($marker in $requiredMarkers) {\n    if (-not $candidateSource.Contains($marker)) {\n      throw ("Transcribe script candidate is missing required capability: " + $marker)\n    }\n  }\n}\n\nfunction Start-TranscribeScriptUpdate {\n  param([Parameter(Mandatory = $true)][string]$InstallRoot)\n\n  $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.ScriptName }\n  if (-not $scriptPath) {\n    throw "Cannot determine installer script path."\n  }\n  $installerSource = [System.IO.File]::ReadAllText($scriptPath)\n  $beginMarker = "# BEGIN_TRANSCRIBE_TEMPLATE"\n  $endMarker = "# END_TRANSCRIBE_TEMPLATE"\n  $beginIndex = $installerSource.LastIndexOf($beginMarker)\n  $endIndex = $installerSource.LastIndexOf($endMarker)\n  if ($beginIndex -lt 0 -or $endIndex -le $beginIndex) {\n    throw "Cannot find embedded transcribe script template."\n  }\n\n  $quoteIndex = $installerSource.IndexOf("@\'", $beginIndex)\n  $contentStart = $installerSource.IndexOf("`n", $quoteIndex)\n  $quoteEnd = $installerSource.IndexOf("`n\'@", $contentStart)\n  if ($quoteIndex -lt 0 -or $contentStart -lt 0 -or $quoteEnd -le $contentStart) {\n    throw "Cannot parse embedded transcribe script template."\n  }\n\n  $template = $installerSource.Substring($contentStart + 1, $quoteEnd - $contentStart - 1).TrimEnd("`r", "`n")\n  $updateId = [guid]::NewGuid().ToString("N")\n  $targetPath = Join-Path $InstallRoot "transcribe.ps1"\n  $candidatePath = Join-Path $InstallRoot ("transcribe.ps1.candidate-" + $updateId)\n  $backupPath = Join-Path $InstallRoot ("transcribe.ps1.backup-" + $updateId)\n  Set-Content -LiteralPath $candidatePath -Value $template -Encoding UTF8\n  try {\n    Assert-TranscribeScriptCandidate -Path $candidatePath\n  } catch {\n    Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue\n    throw\n  }\n  return [pscustomobject]@{\n    TargetPath = $targetPath\n    CandidatePath = $candidatePath\n    BackupPath = $backupPath\n    HadOriginal = $false\n    Promoted = $false\n    Completed = $false\n  }\n}\n\nfunction Restore-TranscribeScriptUpdate {\n  param($State)\n  if (-not $State) {\n    return\n  }\n  if ($State.Completed) {\n    return\n  }\n  if ($State.Promoted -and (Test-Path -LiteralPath $State.TargetPath)) {\n    Remove-Item -LiteralPath $State.TargetPath -Force -ErrorAction SilentlyContinue\n  }\n  if (Test-Path -LiteralPath $State.BackupPath) {\n    Move-Item -LiteralPath $State.BackupPath -Destination $State.TargetPath -Force\n  }\n  if (Test-Path -LiteralPath $State.CandidatePath) {\n    Remove-Item -LiteralPath $State.CandidatePath -Force -ErrorAction SilentlyContinue\n  }\n}\n\nfunction Promote-TranscribeScriptUpdate {\n  param([Parameter(Mandatory = $true)]$State)\n  try {\n    if (Test-Path -LiteralPath $State.TargetPath) {\n      Move-Item -LiteralPath $State.TargetPath -Destination $State.BackupPath -Force\n      $State.HadOriginal = $true\n    }\n    Move-Item -LiteralPath $State.CandidatePath -Destination $State.TargetPath -Force\n    $State.Promoted = $true\n  } catch {\n    Restore-TranscribeScriptUpdate -State $State\n    throw\n  }\n}\n\nfunction Complete-TranscribeScriptUpdate {\n  param($State)\n  if (-not $State) {\n    return\n  }\n  $State.Completed = $true\n  if (Test-Path -LiteralPath $State.BackupPath) {\n    try {\n      Remove-Item -LiteralPath $State.BackupPath -Force -ErrorAction Stop\n    } catch {\n      Write-Warning "Validated transcribe script is active, but the old backup could not be removed: $($_.Exception.Message)"\n    }\n  }\n  if (Test-Path -LiteralPath $State.CandidatePath) {\n    try {\n      Remove-Item -LiteralPath $State.CandidatePath -Force -ErrorAction Stop\n    } catch {\n      Write-Warning "Validated transcribe script is active, but the candidate residue could not be removed: $($_.Exception.Message)"\n    }\n  }\n}\n\n$installMutex = $null\n$transcribeScriptUpdate = $null\ntry {\n  $installMutex = Acquire-InstallLock\n  New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null\n  New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null\n  $transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot\n  New-CleanDirectory -Path $TempRoot\n\n  $WhisperDir = Join-Path $InstallRoot "whisper"\n  $FfmpegDir = Join-Path $InstallRoot "ffmpeg"\n  $ModelDir = Join-Path $InstallRoot "models"\n  $WhisperStageDir = Join-Path $TempRoot "whisper"\n  $FfmpegStageDir = Join-Path $TempRoot "ffmpeg"\n  New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null\n\n  $installedWhisper = Find-InstalledFile -Root $WhisperDir -Names @("whisper-cli.exe", "main.exe")\n  if ($installedWhisper) {\n    try {\n      Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null\n      Write-Host "Existing whisper.cpp is usable; skipping download."\n    } catch {\n      Write-Host "Existing whisper.cpp is not usable; reinstalling."\n      Write-Host ($_.Exception.Message)\n      $installedWhisper = $null\n    }\n  }\n  if (-not $installedWhisper) {\n    $whisperZip = Join-Path $CacheRoot "whisper.zip"\n    Install-ZipPackage `\n      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls) `\n      -ZipPath $whisperZip `\n      -StageDir $WhisperStageDir `\n      -MinBytes 1MB `\n      -ExpectedFiles @("whisper-cli.exe", "main.exe") `\n      -Label "whisper.cpp" | Out-Null\n\n    if (Test-Path -LiteralPath $WhisperDir) {\n      Remove-Item -LiteralPath $WhisperDir -Recurse -Force\n    }\n    $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"\n    try {\n      Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null\n    } catch {\n      if (-not (Test-IllegalInstructionExitCode -Value ($_ | Out-String))) {\n        throw\n      }\n      $installedWhisper = Install-WhisperCompatibilityPackage -DestinationDir $WhisperDir -StageDir (Join-Path $TempRoot "whisper-compat")\n    }\n  }\n\n  $installedFfmpeg = Find-InstalledFile -Root $FfmpegDir -Names @("ffmpeg.exe")\n  if ($installedFfmpeg) {\n    try {\n      Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null\n      Write-Host "Existing ffmpeg is usable; skipping download."\n    } catch {\n      Write-Host "Existing ffmpeg is not usable; reinstalling."\n      Write-Host ($_.Exception.Message)\n      $installedFfmpeg = $null\n    }\n  }\n  if (-not $installedFfmpeg) {\n    $ffmpegZip = Join-Path $CacheRoot "ffmpeg.zip"\n    Install-ZipPackage `\n      -Urls (Get-EnabledAssetUrls -PrimaryUrls @(\n        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",\n        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"\n      ) -FallbackUrls $FfmpegTencentUrls) `\n      -ZipPath $ffmpegZip `\n      -StageDir $FfmpegStageDir `\n      -MinBytes 10MB `\n      -ExpectedFiles @("ffmpeg.exe") `\n      -Label "ffmpeg" | Out-Null\n\n    if (Test-Path -LiteralPath $FfmpegDir) {\n      Remove-Item -LiteralPath $FfmpegDir -Recurse -Force\n    }\n    $installedFfmpeg = Install-ExtractedPackage -StageDir $FfmpegStageDir -DestinationDir $FfmpegDir -ExpectedFiles @("ffmpeg.exe") -Label "ffmpeg"\n    Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null\n  }\n\n  $modelPath = Join-Path $ModelDir "ggml-small.bin"\n  $cachedModelPath = Join-Path $CacheRoot "ggml-small.bin"\n  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {\n    Remove-Item -LiteralPath $modelPath -Force\n  }\n  if (-not (Test-Path -LiteralPath $modelPath)) {\n    if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {\n      Remove-Item -LiteralPath $cachedModelPath -Force\n    }\n    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelFallbackUrls -FallbackUrls $ModelTencentUrls) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null\n    Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force\n  }\n\n  Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null\n\n  try {\n    Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath\n  } catch {\n    Write-Host "Current whisper.cpp failed real inference validation; reinstalling once."\n    Write-Host ($_.Exception.Message)\n    $whisperZip = Join-Path $CacheRoot "whisper.zip"\n    Install-ZipPackage `\n      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls) `\n      -ZipPath $whisperZip `\n      -StageDir $WhisperStageDir `\n      -MinBytes 1MB `\n      -ExpectedFiles @("whisper-cli.exe", "main.exe") `\n      -Label "whisper.cpp" | Out-Null\n    if (Test-Path -LiteralPath $WhisperDir) {\n      Remove-Item -LiteralPath $WhisperDir -Recurse -Force\n    }\n    $installedWhisper = Install-ExtractedPackage -StageDir $WhisperStageDir -DestinationDir $WhisperDir -ExpectedFiles @("whisper-cli.exe", "main.exe") -Label "whisper.cpp"\n    try {\n      Assert-ExecutableRuns -Path $installedWhisper.FullName -Arguments @("--help") -Label "whisper.cpp" -TryInstallVcRuntime | Out-Null\n      Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath\n    } catch {\n      if (-not (Test-IllegalInstructionExitCode -Value ($_ | Out-String))) {\n        throw\n      }\n      $installedWhisper = Install-WhisperCompatibilityPackage -DestinationDir $WhisperDir -StageDir (Join-Path $TempRoot "whisper-compat")\n      Assert-LocalAsrInference -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath\n    }\n    Write-InstallState -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath\n  }\n  Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue\n\n# BEGIN_TRANSCRIBE_TEMPLATE\n  $embeddedTranscribeTemplate = @\'\nparam(\n  [Parameter(Mandatory = $true)][string]$InputPath,\n  [Parameter(Mandatory = $true)][string]$OutputPath\n)\n\n$ErrorActionPreference = "Stop"\n$Root = Split-Path -Parent $MyInvocation.MyCommand.Path\n\n$Whisper = Get-ChildItem -LiteralPath (Join-Path $Root "whisper") -Recurse -File |\n  Where-Object { $_.Name -in @("whisper-cli.exe", "main.exe") } |\n  Sort-Object @{ Expression = { if ($_.Name -eq "whisper-cli.exe") { 0 } else { 1 } } }, FullName |\n  Select-Object -First 1\nif (-not $Whisper) {\n  throw "whisper-cli.exe not found. Please rerun install-local-asr.ps1."\n}\n\n$Ffmpeg = Get-ChildItem -LiteralPath (Join-Path $Root "ffmpeg") -Recurse -File -Filter "ffmpeg.exe" |\n  Select-Object -First 1\nif (-not $Ffmpeg) {\n  throw "ffmpeg.exe not found. Please rerun install-local-asr.ps1."\n}\n\n$Model = Join-Path $Root "models\\ggml-small.bin"\nif (-not (Test-Path -LiteralPath $Model)) {\n  throw "Whisper model not found: $Model"\n}\n\n$OutputDir = Split-Path -Parent $OutputPath\nif ($OutputDir) {\n  New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null\n}\n\n$ChunkSeconds = 120\n$ChunkRetrySeconds = 30\n$OutputBase = if ($OutputPath.ToLowerInvariant().EndsWith(".txt")) {\n  $OutputPath.Substring(0, $OutputPath.Length - 4)\n} else {\n  $OutputPath\n}\n$RunLog = Join-Path $Root "transcribe-last.log"\n$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)\n$TranscriptQualityGuardVersion = "repeat-guard-v2"\n$TranscriptPartialRecoveryVersion = "partial-recovery-v1"\n$NativeProcessRunnerVersion = "diagnostics-process-v1"\n@(\n  "time=$(Get-Date -Format o)"\n  "status=pending"\n  "inputPath=$InputPath"\n  "outputPath=$OutputPath"\n  "chunkSeconds=$ChunkSeconds"\n  "chunkRetrySeconds=$ChunkRetrySeconds"\n  "progressStage=preparing"\n  "progressCurrent=0"\n  "progressTotal=0"\n  "progressPercent=0"\n  "recoveryTriggered=0"\n) | Set-Content -LiteralPath $RunLog -Encoding UTF8\n\nfunction ConvertTo-NativeArgument {\n  param([AllowNull()][string]$Value)\n  $text = [string]$Value\n  if ($text -eq "") {\n    return \'""\'\n  }\n  if ($text -notmatch \'[\\s"]\') {\n    return $text\n  }\n  return \'"\' + ($text -replace \'"\', \'\\"\') + \'"\'\n}\n\nfunction Convert-ExitCodeToHex {\n  param([Parameter(Mandatory = $true)][int]$ExitCode)\n  $signed = [int64]$ExitCode\n  if ($signed -lt 0) {\n    $signed = 4294967296 + $signed\n  }\n  return "0x{0:X8}" -f $signed\n}\n\nfunction Get-ShortPath {\n  param([AllowNull()][string]$Path)\n  $text = [string]$Path\n  if ($text -eq "") {\n    return ""\n  }\n  try {\n    $fso = New-Object -ComObject Scripting.FileSystemObject\n    if (Test-Path -LiteralPath $text -PathType Leaf) {\n      return $fso.GetFile($text).ShortPath\n    }\n    if (Test-Path -LiteralPath $text -PathType Container) {\n      return $fso.GetFolder($text).ShortPath\n    }\n    $parent = Split-Path -Parent $text\n    $name = Split-Path -Leaf $text\n    if ($parent -and (Test-Path -LiteralPath $parent)) {\n      $shortParent = Get-ShortPath $parent\n      if ($shortParent) {\n        return Join-Path $shortParent $name\n      }\n    }\n  } catch {\n    return $text\n  }\n  return $text\n}\n\nfunction New-SafeTempDirectory {\n  $baseCandidates = @()\n  if ($env:ProgramData) {\n    $baseCandidates += (Join-Path $env:ProgramData "wechat-inbox-local-asr")\n  }\n  if ($env:PUBLIC) {\n    $baseCandidates += (Join-Path $env:PUBLIC "wechat-inbox-local-asr")\n  }\n  if ($env:SystemDrive) {\n    $baseCandidates += (Join-Path $env:SystemDrive "wechat-inbox-local-asr-temp")\n  }\n  if ($env:TEMP) {\n    $baseCandidates += $env:TEMP\n  }\n\n  foreach ($base in $baseCandidates) {\n    try {\n      New-Item -ItemType Directory -Force -Path $base | Out-Null\n      $dir = Join-Path $base ("run-" + [guid]::NewGuid().ToString("N"))\n      New-Item -ItemType Directory -Force -Path $dir | Out-Null\n      return $dir\n    } catch {\n      continue\n    }\n  }\n\n  throw "Cannot create a local ASR temp directory."\n}\n\nfunction Test-WhisperNativeCrashExitCode {\n  param([int]$ExitCode)\n  $hex = Convert-ExitCodeToHex -ExitCode $ExitCode\n  return ($ExitCode -eq -1073740791 -or $hex -eq "0xC0000409")\n}\n\nfunction Invoke-NativeProcess {\n  param(\n    [Parameter(Mandatory = $true)][string]$FilePath,\n    [Parameter(Mandatory = $true)][string[]]$Arguments,\n    [switch]$ReportProgress,\n    [string]$ProgressStage = "transcribing",\n    [int]$ProgressCurrent = 0,\n    [int]$ProgressTotal = 0\n  )\n  $process = $null\n  try {\n    $startInfo = New-Object System.Diagnostics.ProcessStartInfo\n    $startInfo.FileName = $FilePath\n    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")\n    $startInfo.UseShellExecute = $false\n    $startInfo.CreateNoWindow = $true\n    $startInfo.RedirectStandardOutput = $true\n    $startInfo.RedirectStandardError = $true\n    $process = New-Object System.Diagnostics.Process\n    $process.StartInfo = $startInfo\n    if (-not $process.Start()) {\n      throw "Native process did not start: $FilePath"\n    }\n    $stdoutTask = $process.StandardOutput.ReadToEndAsync()\n    $stderrTask = $process.StandardError.ReadToEndAsync()\n    while (-not $process.WaitForExit(5000)) {\n      if ($ReportProgress) {\n        Write-ProgressLog -Stage $ProgressStage -Current $ProgressCurrent -Total $ProgressTotal -ProcessId $process.Id\n      }\n    }\n    $process.WaitForExit()\n    $stdoutText = [string]$stdoutTask.GetAwaiter().GetResult()\n    $stderrText = [string]$stderrTask.GetAwaiter().GetResult()\n    $exitCode = [int]$process.ExitCode\n  } finally {\n    if ($process) {\n      $process.Dispose()\n    }\n  }\n\n  $combined = @(\n    "--- stdout ---"\n    ([string]$stdoutText).TrimEnd()\n    "--- stderr ---"\n    ([string]$stderrText).TrimEnd()\n  ) -join [Environment]::NewLine\n  return [PSCustomObject]@{\n    ExitCode = $exitCode\n    Output = $combined\n  }\n}\n\nfunction ConvertTo-SimplifiedChinese {\n  param([AllowNull()][string]$Text)\n  $source = [string]$Text\n  if ($source -eq "") {\n    return ""\n  }\n  try {\n    Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop\n    return [Microsoft.VisualBasic.Strings]::StrConv($source, [Microsoft.VisualBasic.VbStrConv]::SimplifiedChinese, 0x0804)\n  } catch {\n    return $source\n  }\n}\n\nfunction Write-ProgressLog {\n  param(\n    [Parameter(Mandatory = $true)][string]$Stage,\n    [Parameter(Mandatory = $true)][int]$Current,\n    [Parameter(Mandatory = $true)][int]$Total,\n    [int]$ProcessId = 0\n  )\n  $now = (Get-Date).ToUniversalTime().ToString("o")\n  if ($script:ProgressStageName -ne $Stage -or -not $script:ProgressStageStartedAt) {\n    $script:ProgressStageName = $Stage\n    $script:ProgressStageStartedAt = $now\n  }\n  $percent = 0\n  if ($Total -gt 0) {\n    $percent = [Math]::Floor(($Current * 100) / $Total)\n  }\n  Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value @(\n    "progressStage=$Stage"\n    "progressCurrent=$Current"\n    "progressTotal=$Total"\n    "progressPercent=$percent"\n    "progressStartedAt=$script:ProgressStageStartedAt"\n    "progressHeartbeatAt=$now"\n    "progressPid=$ProcessId"\n  )\n}\n\nfunction Get-TranscriptPreview {\n  param([AllowNull()][string]$Text)\n  $value = [string]$Text\n  if ($value.Length -le 160) {\n    return $value\n  }\n  return $value.Substring(0, 160)\n}\n\nfunction Test-TranscriptHasRepeatHallucination {\n  param([AllowNull()][string]$Text)\n  $source = [string]$Text\n  if (-not $source.Trim()) {\n    return $false\n  }\n  $lines = $source -split "\\r?\\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }\n  if ($lines.Count -lt 3) {\n    return $false\n  }\n  $current = $null\n  $repeatCount = 0\n  foreach ($line in $lines) {\n    if ($line -eq $current) {\n      $repeatCount += 1\n      if ($repeatCount -ge 2 -and $line.Length -ge 6) {\n        return $true\n      }\n      continue\n    }\n    $current = $line\n    $repeatCount = 0\n  }\n  $joined = ($lines -join "")\n  if (-not $joined) {\n    return $false\n  }\n  $unique = @{}\n  foreach ($line in $lines) {\n    if (-not $unique.ContainsKey($line)) {\n      $unique[$line] = 0\n    }\n    $unique[$line] += 1\n    if ($line.Length -ge 6 -and $unique[$line] -ge 6) {\n      return $true\n    }\n  }\n  return $false\n}\n\nfunction Trim-RepeatedTranscriptTailLegacy {\n  param([AllowNull()][string]$Text)\n  $source = [string]$Text\n  if (-not $source.Trim()) {\n    return ""\n  }\n\n  $lines = @($source -split "\\r?\\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })\n  if ($lines.Count -lt 3) {\n    return $source.Trim()\n  }\n\n  # Repetition caused by a bad chunk is normally concentrated at its tail. Keep\n  # the useful prefix so one poisoned chunk does not discard the whole media.\n  $tailStart = [Math]::Max(0, $lines.Count - 36)\n  $cutoff = $lines.Count\n  $occurrences = @{}\n  for ($index = $tailStart; $index -lt $lines.Count; $index += 1) {\n    $key = (($lines[$index] -replace "\\s+", " ").Trim()).ToLowerInvariant()\n    if ($key.Length -lt 6) {\n      continue\n    }\n    if (-not $occurrences.ContainsKey($key)) {\n      $occurrences[$key] = New-Object System.Collections.Generic.List[int]\n    }\n    $occurrences[$key].Add($index)\n  }\n  foreach ($entry in $occurrences.GetEnumerator()) {\n    $indexes = @($entry.Value)\n    if ($indexes.Count -ge 6) {\n      $cutoff = [Math]::Min($cutoff, [int]$indexes[0])\n    }\n  }\n  for ($index = $tailStart + 2; $index -lt $lines.Count; $index += 1) {\n    if ($lines[$index].Length -ge 6 -and $lines[$index] -eq $lines[$index - 1] -and $lines[$index] -eq $lines[$index - 2]) {\n      $cutoff = [Math]::Min($cutoff, $index - 2)\n      break\n    }\n  }\n  if ($cutoff -ge $lines.Count -or $cutoff -le 0) {\n    return ""\n  }\n\n  $prefixLines = @($lines[0..($cutoff - 1)])\n  while ($prefixLines.Count -gt 0) {\n    $last = $prefixLines[$prefixLines.Count - 1].Trim()\n    $looksLikeNoise = $last.Length -lt 3 -or\n      $last -match "^(?:字幕|本字幕|谢谢观看|请不吝点赞|www\\\\.|https?://)" -or\n      $last -match "^[A-Za-z\\s\\.,!?-]{1,8}$"\n    if (-not $looksLikeNoise) {\n      break\n    }\n    if ($prefixLines.Count -eq 1) {\n      $prefixLines = @()\n    } else {\n      $prefixLines = @($prefixLines[0..($prefixLines.Count - 2)])\n    }\n  }\n  if ($prefixLines.Count -eq 0) {\n    return ""\n  }\n  $prefix = ($prefixLines -join "`n").Trim()\n  if ($prefix.Length -lt 4) {\n    return ""\n  }\n  return $prefix\n}\n\n# Keep the trimming rule ASCII-only because Windows PowerShell may load a UTF-8\n# script without a BOM using the active code page.\nfunction Trim-RepeatedTranscriptTail {\n  param([AllowNull()][string]$Text)\n  $source = [string]$Text\n  if (-not $source.Trim()) {\n    return ""\n  }\n  $lines = @($source -split "\\r?\\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })\n  if ($lines.Count -lt 3) {\n    return $source.Trim()\n  }\n  $tailStart = [Math]::Max(0, $lines.Count - 36)\n  $cutoff = $lines.Count\n  $occurrences = @{}\n  for ($index = $tailStart; $index -lt $lines.Count; $index += 1) {\n    $key = (($lines[$index] -replace "\\s+", " ").Trim()).ToLowerInvariant()\n    if ($key.Length -lt 6) {\n      continue\n    }\n    if (-not $occurrences.ContainsKey($key)) {\n      $occurrences[$key] = New-Object System.Collections.Generic.List[int]\n    }\n    $occurrences[$key].Add($index)\n  }\n  foreach ($entry in $occurrences.GetEnumerator()) {\n    $indexes = @($entry.Value)\n    if ($indexes.Count -ge 6) {\n      $cutoff = [Math]::Min($cutoff, [int]$indexes[0])\n    }\n  }\n  for ($index = $tailStart + 2; $index -lt $lines.Count; $index += 1) {\n    if ($lines[$index].Length -ge 6 -and $lines[$index] -eq $lines[$index - 1] -and $lines[$index] -eq $lines[$index - 2]) {\n      $cutoff = [Math]::Min($cutoff, $index - 2)\n      break\n    }\n  }\n  if ($cutoff -ge $lines.Count -or $cutoff -le 0) {\n    return ""\n  }\n  $prefixLines = @($lines[0..($cutoff - 1)])\n  while ($prefixLines.Count -gt 0) {\n    $last = $prefixLines[$prefixLines.Count - 1].Trim()\n    $looksLikeNoise = $last.Length -lt 3 -or\n      $last -match "^(?:subtitle|subtitles|thanks for watching|www\\\\.|https?://)" -or\n      $last -match "^[A-Za-z\\s\\.,!?-]{1,8}$"\n    if (-not $looksLikeNoise) {\n      break\n    }\n    if ($prefixLines.Count -eq 1) {\n      $prefixLines = @()\n    } else {\n      $prefixLines = @($prefixLines[0..($prefixLines.Count - 2)])\n    }\n  }\n  if ($prefixLines.Count -eq 0) {\n    return ""\n  }\n  $prefix = ($prefixLines -join "`n").Trim()\n  if ($prefix.Length -lt 4) {\n    return ""\n  }\n  return $prefix\n}\n\nfunction Invoke-WhisperChunk {\n  param(\n    [Parameter(Mandatory = $true)][string]$ChunkPath,\n    [Parameter(Mandatory = $true)][string]$ChunkBase,\n    [Parameter(Mandatory = $true)][scriptblock]$PathForNative,\n    [string[]]$ExtraArguments = @(),\n    [int]$ProgressCurrent = 0,\n    [int]$ProgressTotal = 0\n  )\n  $arguments = @(\n    "-m", (& $PathForNative $attemptModelPath),\n    "-f", (& $PathForNative $ChunkPath),\n    "-l", "zh"\n  ) + $ExtraArguments + @(\n    "-otxt",\n    "-of", (& $PathForNative $ChunkBase)\n  )\n  return Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments $arguments -ReportProgress -ProgressStage "transcribing" -ProgressCurrent $ProgressCurrent -ProgressTotal $ProgressTotal\n}\n\nfunction Split-AudioToChunks {\n  param(\n    [Parameter(Mandatory = $true)][string]$AudioPath,\n    [Parameter(Mandatory = $true)][string]$OutputDir,\n    [Parameter(Mandatory = $true)][int]$SegmentSeconds,\n    [Parameter(Mandatory = $true)][scriptblock]$PathForNative\n  )\n  New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null\n  $pattern = Join-Path $OutputDir "chunk-%03d.wav"\n  $result = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(\n    "-hide_banner", "-loglevel", "error", "-y",\n    "-i", (& $PathForNative $AudioPath),\n    "-ar", "16000",\n    "-ac", "1",\n    "-c:a", "pcm_s16le",\n    "-f", "segment",\n    "-segment_time", [string]$SegmentSeconds,\n    "-reset_timestamps", "1",\n    $pattern\n  ) -ReportProgress -ProgressStage "segmenting"\n  $chunks = @(Get-ChildItem -LiteralPath $OutputDir -Filter "chunk-*.wav" | Sort-Object Name)\n  return [PSCustomObject]@{\n    FfmpegResult = $result\n    ChunkFiles = $chunks\n    ChunkPattern = $pattern\n  }\n}\n\nfunction Invoke-RecoverRepeatedChunkText {\n  param(\n    [Parameter(Mandatory = $true)][string]$ChunkPath,\n    [Parameter(Mandatory = $true)][scriptblock]$PathForNative\n  )\n  $recoverDir = Join-Path (Split-Path -Parent $ChunkPath) ([System.IO.Path]::GetFileNameWithoutExtension($ChunkPath) + "-retry")\n  if (Test-Path -LiteralPath $recoverDir) {\n    Remove-Item -LiteralPath $recoverDir -Recurse -Force -ErrorAction SilentlyContinue\n  }\n  $split = Split-AudioToChunks -AudioPath $ChunkPath -OutputDir $recoverDir -SegmentSeconds $ChunkRetrySeconds -PathForNative $PathForNative\n  $logs = New-Object System.Collections.Generic.List[string]\n  $texts = New-Object System.Collections.Generic.List[string]\n  $exitCode = $split.FfmpegResult.ExitCode\n  $logs.Add("--- recovery ffmpeg exit=$exitCode ---")\n  $logs.Add($split.FfmpegResult.Output)\n  if ($exitCode -ne 0) {\n    return [PSCustomObject]@{\n      ExitCode = $exitCode\n      Logs = ($logs -join [Environment]::NewLine)\n      Text = ""\n    }\n  }\n  foreach ($recoverChunk in $split.ChunkFiles) {\n    $recoverBase = [System.IO.Path]::Combine($recoverDir, [System.IO.Path]::GetFileNameWithoutExtension($recoverChunk.Name))\n    $recoverTxt = "$recoverBase.txt"\n    $recoverResult = Invoke-WhisperChunk -ChunkPath $recoverChunk.FullName -ChunkBase $recoverBase -PathForNative $PathForNative -ExtraArguments @("-mc", "0", "-ml", "80", "-sow", "-bo", "1", "-bs", "1", "-tp", "0", "-nf", "-sns")\n    $logs.Add("--- recovery $($recoverChunk.Name) exit=$($recoverResult.ExitCode) ---")\n    $logs.Add($recoverResult.Output)\n    if ($recoverResult.ExitCode -ne 0) {\n      return [PSCustomObject]@{\n        ExitCode = $recoverResult.ExitCode\n        Logs = ($logs -join [Environment]::NewLine)\n        Text = ""\n      }\n    }\n    if (Test-Path -LiteralPath $recoverTxt) {\n      $recoverText = ([System.IO.File]::ReadAllText($recoverTxt, $Utf8NoBom)).Trim()\n      if ($recoverText) {\n        $texts.Add((ConvertTo-SimplifiedChinese $recoverText))\n      }\n    }\n  }\n  return [PSCustomObject]@{\n    ExitCode = 0\n    Logs = ($logs -join [Environment]::NewLine)\n    Text = (ConvertTo-SimplifiedChinese ($texts -join "`n"))\n  }\n}\n\nfunction Invoke-TranscribeAttempt {\n  param(\n    [Parameter(Mandatory = $true)][ValidateSet("normal", "safe")][string]$Mode\n  )\n  $safeTempRoot = $null\n  $tempWorkDir = $null\n  $attemptInputPath = $InputPath\n  $attemptModelPath = $Model\n  if ($Mode -eq "safe") {\n    $safeTempRoot = New-SafeTempDirectory\n    $tempWorkDir = Join-Path $safeTempRoot "chunks"\n    $attemptInputPath = Join-Path $safeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))\n    $attemptModelPath = Join-Path $safeTempRoot "ggml-small.bin"\n    Copy-Item -LiteralPath $InputPath -Destination $attemptInputPath -Force\n    Copy-Item -LiteralPath $Model -Destination $attemptModelPath -Force\n  } else {\n    $tempWorkDir = Join-Path $env:TEMP ("wechat-inbox-local-asr-" + [guid]::NewGuid().ToString("N"))\n  }\n  $pathForNative = {\n    param([string]$PathValue)\n    if ($Mode -eq "safe") {\n      return Get-ShortPath $PathValue\n    }\n    return $PathValue\n  }\n\n  $result = [PSCustomObject]@{\n    Mode = $Mode\n    TempWorkDir = $tempWorkDir\n    InputPath = $attemptInputPath\n    ModelPath = $attemptModelPath\n    FfmpegOutput = ""\n    FfmpegExit = 0\n    ChunkCount = 0\n    WhisperLogs = ""\n    WhisperExit = 0\n    Text = ""\n    Error = ""\n  }\n\n  try {\n  New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null\n  Write-ProgressLog -Stage "segmenting" -Current 0 -Total 0\n  $split = Split-AudioToChunks -AudioPath $attemptInputPath -OutputDir $tempWorkDir -SegmentSeconds $ChunkSeconds -PathForNative $pathForNative\n  $ffmpegOutput = $split.FfmpegResult.Output\n  $ffmpegExit = $split.FfmpegResult.ExitCode\n  $chunkFiles = @($split.ChunkFiles)\n  $result.ChunkCount = $chunkFiles.Count\n  Write-ProgressLog -Stage "transcribing" -Current 0 -Total $chunkFiles.Count\n  $whisperLogs = New-Object System.Collections.Generic.List[string]\n  $mergedText = New-Object System.Collections.Generic.List[string]\n  $whisperExit = 0\n  $chunkIndex = 0\n  $recoveryTriggered = 0\n  $skippedRepeatChunks = 0\n\n  if ($ffmpegExit -eq 0 -and $chunkFiles.Count -eq 0) {\n    throw "ffmpeg did not generate audio chunks."\n  }\n\n  foreach ($chunk in $chunkFiles) {\n    $chunkBase = [System.IO.Path]::Combine($tempWorkDir, [System.IO.Path]::GetFileNameWithoutExtension($chunk.Name))\n    $chunkTxt = "$chunkBase.txt"\n    $chunkResult = Invoke-WhisperChunk -ChunkPath $chunk.FullName -ChunkBase $chunkBase -PathForNative $pathForNative -ProgressCurrent $chunkIndex -ProgressTotal $chunkFiles.Count\n    $chunkOutput = $chunkResult.Output\n    $currentExit = $chunkResult.ExitCode\n    $whisperLogs.Add("--- $($chunk.Name) exit=$currentExit ---")\n    $whisperLogs.Add($chunkOutput)\n    if ($currentExit -ne 0) {\n      $whisperExit = $currentExit\n      break\n    }\n    if (Test-Path -LiteralPath $chunkTxt) {\n      $text = ([System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)).Trim()\n      if ($text) {\n        $normalizedText = ConvertTo-SimplifiedChinese $text\n        if (Test-TranscriptHasRepeatHallucination $normalizedText) {\n          $recoveryTriggered = 1\n          $whisperLogs.Add("--- $($chunk.Name) repeat-detected preview ---")\n          $whisperLogs.Add((Get-TranscriptPreview $normalizedText))\n          $recovered = Invoke-RecoverRepeatedChunkText -ChunkPath $chunk.FullName -PathForNative $pathForNative\n          $whisperLogs.Add($recovered.Logs)\n          $candidateText = ""\n          if ($recovered.ExitCode -eq 0 -and $recovered.Text.Trim()) {\n            if (-not (Test-TranscriptHasRepeatHallucination $recovered.Text)) {\n              $candidateText = $recovered.Text.Trim()\n            } else {\n              $candidateText = Trim-RepeatedTranscriptTail -Text $recovered.Text\n            }\n          }\n          if (-not $candidateText) {\n            $candidateText = Trim-RepeatedTranscriptTail -Text $normalizedText\n          }\n          if ($candidateText) {\n            $normalizedText = $candidateText\n          } else {\n            $skippedRepeatChunks += 1\n            $whisperLogs.Add("--- $($chunk.Name) repeat-unusable; skipped ---")\n            $chunkIndex += 1\n            Write-ProgressLog -Stage "transcribing" -Current $chunkIndex -Total $chunkFiles.Count\n            continue\n          }\n        }\n        $mergedText.Add($normalizedText)\n      }\n    }\n    $chunkIndex += 1\n    Write-ProgressLog -Stage "transcribing" -Current $chunkIndex -Total $chunkFiles.Count\n  }\n\n    $result.FfmpegOutput = $ffmpegOutput\n    $result.FfmpegExit = $ffmpegExit\n    $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)\n    $result.WhisperExit = $whisperExit\n    $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")\n    $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force\n    $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force\n    return $result\n  } catch {\n    $result.FfmpegOutput = $ffmpegOutput\n    $result.FfmpegExit = $ffmpegExit\n    $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)\n    $result.WhisperExit = $whisperExit\n    $result.Error = ($_ | Out-String)\n    $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force\n    $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force\n    return $result\n  } finally {\n    if ($safeTempRoot -and (Test-Path -LiteralPath $safeTempRoot)) {\n      Remove-Item -LiteralPath $safeTempRoot -Recurse -Force\n    } elseif ($tempWorkDir -and (Test-Path -LiteralPath $tempWorkDir)) {\n      Remove-Item -LiteralPath $tempWorkDir -Recurse -Force\n    }\n  }\n}\n\nfunction Write-AttemptLog {\n  param(\n    [Parameter(Mandatory = $true)]$Attempt,\n    [AllowNull()]$FallbackAttempt\n  )\n  $lines = @(\n    "time=$(Get-Date -Format o)"\n    "status=running"\n    "inputPath=$InputPath"\n    "outputPath=$OutputPath"\n    "mode=$($Attempt.Mode)"\n    "tempWorkDir=$($Attempt.TempWorkDir)"\n    "chunkSeconds=$ChunkSeconds"\n    "chunkRetrySeconds=$ChunkRetrySeconds"\n    "chunkCount=$($Attempt.ChunkCount)"\n    "recoveryTriggered=$($Attempt.RecoveryTriggered)"\n    "skippedRepeatChunks=$($Attempt.SkippedRepeatChunks)"\n    "ffmpeg=$($Ffmpeg.FullName)"\n    "ffmpegExit=$($Attempt.FfmpegExit)"\n    "--- ffmpeg output ---"\n    $Attempt.FfmpegOutput\n    "whisper=$($Whisper.FullName)"\n    "whisperExit=$($Attempt.WhisperExit)"\n    "--- whisper output ---"\n    $Attempt.WhisperLogs\n  )\n  if ($FallbackAttempt) {\n    $lines += @(\n      "--- fallback attempt ---"\n      "mode=$($FallbackAttempt.Mode)"\n      "tempWorkDir=$($FallbackAttempt.TempWorkDir)"\n      "safeInputPath=$($FallbackAttempt.InputPath)"\n      "safeModelPath=$($FallbackAttempt.ModelPath)"\n      "chunkCount=$($FallbackAttempt.ChunkCount)"\n      "skippedRepeatChunks=$($FallbackAttempt.SkippedRepeatChunks)"\n      "ffmpegExit=$($FallbackAttempt.FfmpegExit)"\n      "--- fallback ffmpeg output ---"\n      $FallbackAttempt.FfmpegOutput\n      "whisperExit=$($FallbackAttempt.WhisperExit)"\n      "--- fallback whisper output ---"\n      $FallbackAttempt.WhisperLogs\n      "--- fallback error ---"\n      $FallbackAttempt.Error\n    )\n  }\n  $lines | Set-Content -LiteralPath $RunLog -Encoding UTF8\n}\n\ntry {\n  $normalAttempt = Invoke-TranscribeAttempt -Mode "normal"\n  $finalAttempt = $normalAttempt\n  $fallbackAttempt = $null\n  if ($normalAttempt.FfmpegExit -eq 0 -and (Test-WhisperNativeCrashExitCode $normalAttempt.WhisperExit)) {\n    $fallbackAttempt = Invoke-TranscribeAttempt -Mode "safe"\n    if ($fallbackAttempt.FfmpegExit -eq 0 -and $fallbackAttempt.WhisperExit -eq 0 -and $fallbackAttempt.Text.Trim()) {\n      $finalAttempt = $fallbackAttempt\n    }\n  }\n  Write-AttemptLog -Attempt $normalAttempt -FallbackAttempt $fallbackAttempt\n\n  if ($finalAttempt.Error -and $finalAttempt.Error -match "TRANSCRIPT_HALLUCINATION") {\n    throw $finalAttempt.Error\n  }\n  if ($finalAttempt.FfmpegExit -ne 0) {\n    throw "ffmpeg failed with exit code $($finalAttempt.FfmpegExit). See $RunLog"\n  }\n  if ($finalAttempt.WhisperExit -ne 0) {\n    throw "whisper failed with exit code $($finalAttempt.WhisperExit). See $RunLog"\n  }\n  if (-not $finalAttempt.Text.Trim()) {\n    if ($finalAttempt.RecoveryTriggered -eq 1) {\n      throw "TRANSCRIPT_HALLUCINATION: no usable transcript remained after local retry. See $RunLog"\n    }\n    throw "Whisper did not generate transcript text. See $RunLog"\n  }\n\n  $finalText = ConvertTo-SimplifiedChinese $finalAttempt.Text\n  [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)\n  Write-ProgressLog -Stage "done" -Current $finalAttempt.ChunkCount -Total $finalAttempt.ChunkCount\n  Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"\n  [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)\n} catch {\n  Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value @(\n    "status=failed"\n    "--- error ---"\n    ($_ | Out-String)\n  )\n  throw\n}\n\'@\n  $null = $embeddedTranscribeTemplate\n# END_TRANSCRIBE_TEMPLATE\n\n  Promote-TranscribeScriptUpdate -State $transcribeScriptUpdate\n  Assert-InstalledFile -Root $InstallRoot -Names @("transcribe.ps1") -Label "transcribe script" | Out-Null\n  Complete-TranscribeScriptUpdate -State $transcribeScriptUpdate\n  $transcribeScriptUpdate = $null\n\n  Write-Host ""\n  Write-Host "Local ASR install validation passed."\n  Write-Host "whisper: $($installedWhisper.FullName)"\n  Write-Host "ffmpeg: $($installedFfmpeg.FullName)"\n  Write-Host "model: $modelPath"\n  Write-Host "Local ASR installed to: $InstallRoot"\n  Write-Host "Use this Obsidian plugin command:"\n  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\\transcribe.ps1`" -InputPath {input} -OutputPath {output}"\n} catch {\n  Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate\n  Write-Host ""\n  Write-Host "INSTALLER FAILED"\n  Write-Host ($_ | Out-String)\n  throw\n} finally {\n  if (Test-Path -LiteralPath $TempRoot) {\n    Remove-Item -LiteralPath $TempRoot -Recurse -Force\n  }\n  Release-InstallLock -Mutex $installMutex\n}\n';
+  }
+});
+
+// local-asr/install-local-asr-macos.sh
+var require_install_local_asr_macos = __commonJS({
+  "local-asr/install-local-asr-macos.sh"(exports2, module2) {
+    module2.exports = `#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
+TEMP_ROOT="$(mktemp -d "\${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
+CACHE_ROOT="$INSTALL_ROOT/cache"
+INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
+INSTALLER_SCRIPT_VERSION="1.3.11"
+DOWNLOAD_LOW_SPEED_LIMIT=10240
+DOWNLOAD_LOW_SPEED_TIME=180
+LOCK_DIR="$INSTALL_ROOT/.install.lock"
+LOCK_HELD=0
+
+TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
+TENCENT_PYTHON_DOWNLOAD_BASE="\${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"
+PYTHON_DOWNLOAD_BASES=("$GITHUB_PYTHON_DOWNLOAD_BASE" "$TENCENT_PYTHON_DOWNLOAD_BASE")
+ASR_WHEELHOUSE_BASE_URL="\${TENCENT_BASE_URL}/local-asr/wheels"
+TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
+PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
+TENCENT_MODEL_URL="\${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"
+MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+MODEL_URLS=("$MODEL_MIRROR_URL" "$MODEL_URL" "$TENCENT_MODEL_URL")
+
+cleanup() {
+  if [ "$LOCK_HELD" -eq 1 ]; then
+    rm -rf "$LOCK_DIR"
+  fi
+  rm -rf "$TEMP_ROOT"
+}
+trap cleanup EXIT
+
+acquire_install_lock() {
+  mkdir -p "$INSTALL_ROOT"
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_HELD=1
+    echo "$$" > "$LOCK_DIR/pid"
+    return
+  fi
+
+  local existing_pid=""
+  if [ -f "$LOCK_DIR/pid" ]; then
+    existing_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  fi
+  if [ -n "$existing_pid" ] && ! kill -0 "$existing_pid" 2>/dev/null; then
+    rm -rf "$LOCK_DIR"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      LOCK_HELD=1
+      echo "$$" > "$LOCK_DIR/pid"
+      return
+    fi
+  fi
+
+  echo "Another WeChat Inbox Sync local ASR installation is already running." >&2
+  echo "Please wait a few minutes for the current installation to finish, then retry in Obsidian." >&2
+  echo "No Terminal command is required." >&2
+  exit 1
+}
+
+# ── uv bootstrap ────────────────────────────────────────────────────────────
+# uv is a single Rust binary (~50 MB) that can install Python and manage venvs.
+# Primary download from Tencent CDN, fallback to GitHub releases.
+
+UV_VERSION="0.9.14"
+PYTHON_BUILD_STANDALONE_BUILD="20260623"
+PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"
+PYTHON_RUNTIME_VERSION="\${PYTHON_BUILD_STANDALONE_VERSION%%+*}"
+PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"
+PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"
+UV_BIN="$INSTALL_ROOT/bin/uv"
+PYTHON_RUNTIME_DIR="$INSTALL_ROOT/python-runtime"
+PORTABLE_PYTHON="$PYTHON_RUNTIME_DIR/python/bin/python"
+ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")
+export UV_PYTHON_DOWNLOADS=automatic
+export UV_PYTHON_PREFERENCE=managed
+
+detect_uv_arch() {
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64)  echo "aarch64-apple-darwin" ;;
+    x86_64) echo "x86_64-apple-darwin"   ;;
+    *)
+      echo "Unsupported macOS architecture: $arch" >&2
+      return 1
+      ;;
+  esac
+}
+
+portable_python_is_usable() {
+  local python_bin="$1"
+  [ -x "$python_bin" ] \\
+    && "$python_bin" -c 'import sys, venv; raise SystemExit(0 if sys.version.split()[0] == sys.argv[1] else 1)' \\
+      "$PYTHON_RUNTIME_VERSION" >/dev/null 2>&1
+}
+
+python_runtime_sha256() {
+  case "$(uname -m)" in
+    arm64) echo "$PYTHON_RUNTIME_SHA256_ARM64" ;;
+    x86_64) echo "$PYTHON_RUNTIME_SHA256_X64" ;;
+    *) return 1 ;;
+  esac
+}
+
+file_sha256() {
+  shasum -a 256 "$1" | awk '{ print toupper($1) }'
+}
+
+verify_sha256() {
+  local file_path="$1"
+  local expected_sha256="$2"
+  [ -s "$file_path" ] || return 1
+  [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]
+}
+
+install_portable_python() {
+  if portable_python_is_usable "$PORTABLE_PYTHON"; then
+    echo "Pinned portable Python is already ready: $PORTABLE_PYTHON"
+    return 0
+  fi
+
+  local arch archive_name archive_path expected_sha256 stage_dir staged_python archive_url download_base
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64) archive_name="cpython-\${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;
+    x86_64) archive_name="cpython-\${PYTHON_BUILD_STANDALONE_VERSION}-x86_64-apple-darwin-install_only.tar.gz" ;;
+    *)
+      echo "Unsupported macOS architecture for portable Python: $arch" >&2
+      return 1
+      ;;
+  esac
+
+  archive_path="$CACHE_ROOT/$archive_name"
+  expected_sha256="$(python_runtime_sha256)" || return 1
+  stage_dir="$TEMP_ROOT/python-runtime-stage"
+  rm -rf "$stage_dir"
+  mkdir -p "$CACHE_ROOT" "$stage_dir"
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    rm -f "$archive_path"
+    for download_base in "\${PYTHON_DOWNLOAD_BASES[@]}"; do
+      archive_url="\${download_base%/}/\${PYTHON_BUILD_STANDALONE_BUILD}/\${archive_name}"
+      echo "Downloading pinned portable Python from \${download_base}..."
+      rm -f "$archive_path"
+      if curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \\
+        --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\
+        --max-time 900 -o "$archive_path" "$archive_url" \\
+        && verify_sha256 "$archive_path" "$expected_sha256"; then
+        break
+      fi
+      echo "Pinned portable Python source failed or did not match SHA256: \${download_base}" >&2
+    done
+  fi
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    echo "Pinned portable Python SHA256 validation failed." >&2
+    return 1
+  fi
+  if ! tar xzf "$archive_path" -C "$stage_dir"; then
+    echo "Pinned portable Python archive extraction failed." >&2
+    return 1
+  fi
+  staged_python="$stage_dir/python/bin/python"
+  if ! portable_python_is_usable "$staged_python"; then
+    echo "Pinned portable Python validation failed." >&2
+    return 1
+  fi
+
+  rm -rf "$PYTHON_RUNTIME_DIR"
+  mv "$stage_dir" "$PYTHON_RUNTIME_DIR"
+  if ! portable_python_is_usable "$PORTABLE_PYTHON"; then
+    echo "Installed portable Python validation failed." >&2
+    return 1
+  fi
+  echo "Pinned portable Python is ready: $PORTABLE_PYTHON"
+  return 0
+}
+
+download_uv() {
+  local uv_arch="$1"
+  local uv_temp="$2"
+  local urls=(
+    "\${TENCENT_BASE_URL}/local-asr/common/uv-\${uv_arch}"
+    "https://github.com/astral-sh/uv/releases/download/\${UV_VERSION}/uv-\${uv_arch}.tar.gz"
+  )
+
+  for url in "\${urls[@]}"; do
+    echo "Downloading uv from $url"
+    if command -v curl >/dev/null 2>&1; then
+      if curl -L --retry 2 --retry-delay 2 --connect-timeout 30 \\
+        --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\
+        --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\
+        -o "$uv_temp" "$url" 2>&1; then
+        # Check if it's a tar.gz (GitHub) or raw binary (CDN)
+        if file "$uv_temp" 2>/dev/null | grep -q 'gzip'; then
+          tar xzf "$uv_temp" -C "$INSTALL_ROOT/bin" --strip-components=1 2>/dev/null || true
+          rm -f "$uv_temp"
+          if [ -x "$UV_BIN" ]; then
+            return 0
+          fi
+        else
+          mv "$uv_temp" "$UV_BIN"
+          chmod +x "$UV_BIN"
+          if [ -x "$UV_BIN" ]; then
+            return 0
+          fi
+        fi
+      fi
+    fi
+    rm -f "$uv_temp"
+    echo "uv download failed from $url, trying next source." >&2
+  done
+  return 1
+}
+
+bootstrap_uv() {
+  if [ -x "$UV_BIN" ] && "$UV_BIN" --version >/dev/null 2>&1; then
+    echo "uv is already available: $UV_BIN"
+    return 0
+  fi
+
+  mkdir -p "$INSTALL_ROOT/bin"
+  local uv_arch
+  uv_arch="$(detect_uv_arch)" || return 1
+  local uv_temp="$TEMP_ROOT/uv-download"
+
+  if download_uv "$uv_arch" "$uv_temp"; then
+    echo "uv installed to $UV_BIN"
+    return 0
+  fi
+
+  echo "" >&2
+  echo "无法下载 uv（Python 安装工具）。" >&2
+  echo "请检查网络连接后重试。No Terminal command is required." >&2
+  return 1
+}
+
+# ── Python + packages via uv ────────────────────────────────────────────────
+
+VENV_DIR="$INSTALL_ROOT/python-venv"
+VENV_PYTHON="$VENV_DIR/bin/python"
+
+find_metal_resources_dir() {
+  local binary_path="\${1:-}"
+  local candidate=""
+  if [ -n "$binary_path" ] && [ -e "$binary_path" ]; then
+    candidate="$(find "$(dirname "$binary_path")" -maxdepth 4 -type f -name 'ggml-metal.metal' 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ]; then
+      dirname "$candidate"
+      return
+    fi
+  fi
+  if [ -n "\${VENV_DIR:-}" ] && [ -d "$VENV_DIR" ]; then
+    candidate="$(find "$VENV_DIR" -type f -name 'ggml-metal.metal' 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ]; then
+      dirname "$candidate"
+      return
+    fi
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    local brew_prefix
+    brew_prefix="$(brew --prefix whisper-cpp 2>/dev/null || true)"
+    if [ -n "$brew_prefix" ] && [ -f "$brew_prefix/share/whisper-cpp/ggml-metal.metal" ]; then
+      echo "$brew_prefix/share/whisper-cpp"
+      return
+    fi
+  fi
+  local dir
+  for dir in \\
+    "$INSTALL_ROOT/share/whisper-cpp" \\
+    /opt/homebrew/opt/whisper-cpp/share/whisper-cpp \\
+    /opt/homebrew/share/whisper-cpp \\
+    /usr/local/opt/whisper-cpp/share/whisper-cpp \\
+    /usr/local/share/whisper-cpp; do
+    if [ -f "$dir/ggml-metal.metal" ]; then
+      echo "$dir"
+      return
+    fi
+  done
+}
+
+extract_whisper_wrapper_target() {
+  local wrapper_path="$1"
+  local target=""
+  if [ -f "$wrapper_path" ]; then
+    target="$(sed -n 's/^WHISPER_CPP_BIN="\\(.*\\)"$/\\1/p' "$wrapper_path" 2>/dev/null | head -n 1 || true)"
+  fi
+  if [ -n "$target" ] && [ -x "$target" ]; then
+    echo "$target"
+  fi
+}
+
+extract_whisper_wrapper_metal_resources() {
+  local wrapper_path="$1"
+  local target=""
+  if [ -f "$wrapper_path" ]; then
+    target="$(sed -n 's/^GGML_METAL_RESOURCES_DIR="\\(.*\\)"$/\\1/p' "$wrapper_path" 2>/dev/null | head -n 1 || true)"
+  fi
+  if [ -n "$target" ]; then
+    echo "$target"
+  fi
+}
+
+resolve_symlink_target() {
+  local link_path="$1"
+  local target
+  target="$(readlink "$link_path" 2>/dev/null || true)"
+  if [ -z "$target" ]; then
+    echo "$link_path"
+    return
+  fi
+  case "$target" in
+    /*) echo "$target" ;;
+    *) echo "$(cd "$(dirname "$link_path")" && cd "$(dirname "$target")" && pwd)/$(basename "$target")" ;;
+  esac
+}
+
+write_whisper_wrapper() {
+  local whisper_target="$1"
+  local metal_resources_dir
+  metal_resources_dir="$(find_metal_resources_dir "$whisper_target" || true)"
+  rm -f "$INSTALL_ROOT/bin/whisper-cli"
+  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
+#!/usr/bin/env bash
+WHISPER_CPP_BIN="$whisper_target"
+GGML_METAL_RESOURCES_DIR="$metal_resources_dir"
+if [ -n "\\$GGML_METAL_RESOURCES_DIR" ] && [ -f "\\$GGML_METAL_RESOURCES_DIR/ggml-metal.metal" ]; then
+  export GGML_METAL_PATH_RESOURCES="\\$GGML_METAL_RESOURCES_DIR"
+  exec "\\$WHISPER_CPP_BIN" "\\$@"
+fi
+exec "\\$WHISPER_CPP_BIN" --no-gpu "\\$@"
+SCRIPT
+  chmod +x "$INSTALL_ROOT/bin/whisper-cli"
+}
+
+find_homebrew_whisper_command() {
+  local name prefix candidate
+  for prefix in /opt/homebrew /usr/local; do
+    for name in whisper-cli whisper-cpp whisper main; do
+      if [ -x "$prefix/bin/$name" ]; then
+        echo "$prefix/bin/$name"
+        return
+      fi
+    done
+    candidate="$(find "$prefix" -path '*/whisper-cpp/*' -type f \\( -name 'whisper-cli' -o -name 'whisper-cpp' -o -name 'whisper' -o -name 'main' \\) -perm -111 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ]; then
+      echo "$candidate"
+      return
+    fi
+  done
+}
+
+asr_wheelhouse_url() {
+  case "$(uname -m)" in
+    arm64) echo "\${ASR_WHEELHOUSE_BASE_URL%/}/macosx_11_0_arm64/index.html" ;;
+    x86_64) echo "\${ASR_WHEELHOUSE_BASE_URL%/}/macosx_10_12_x86_64/index.html" ;;
+    *)
+      echo "Unsupported macOS architecture for the ASR wheelhouse: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+}
+
+install_asr_packages_from_wheelhouse() {
+  local python_bin="$1"
+  local wheelhouse_url
+  wheelhouse_url="$(asr_wheelhouse_url)" || return 1
+  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  echo "Installing ASR packages from Tencent CDN wheelhouse: $wheelhouse_url"
+  "$python_bin" -m pip install --upgrade --no-index --find-links "$wheelhouse_url" \\
+    "\${ASR_PACKAGE_REQUIREMENTS[@]}" 2>&1
+}
+
+install_asr_packages() {
+  local python_bin="$1"
+  if install_asr_packages_from_wheelhouse "$python_bin"; then
+    return 0
+  fi
+
+  echo "Tencent CDN ASR wheelhouse install failed; retrying package indexes." >&2
+  "$python_bin" -m pip install --upgrade pip \\
+    -i "$TENCENT_PIP_INDEX_URL" \\
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
+  "$python_bin" -m pip install --upgrade "\${ASR_PACKAGE_REQUIREMENTS[@]}" \\
+    -i "$TENCENT_PIP_INDEX_URL" \\
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1
+}
+
+setup_python_and_packages() {
+  # If everything is already set up and working, skip.
+  if [ -x "$VENV_PYTHON" ] && [ -x "$INSTALL_ROOT/bin/whisper-cli" ] && [ -x "$INSTALL_ROOT/bin/ffmpeg" ]; then
+    if "$VENV_PYTHON" -c 'import imageio_ffmpeg' >/dev/null 2>&1; then
+      echo "Python venv and ASR tools are already ready."
+      return 0
+    fi
+  fi
+
+  local portable_python_ready=0
+  echo "Setting up Python environment (this may take a few minutes on first run)..."
+  if install_portable_python; then
+    rm -rf "$VENV_DIR"
+    if "$PORTABLE_PYTHON" -m venv "$VENV_DIR" 2>&1; then
+      portable_python_ready=1
+      echo "Created ASR venv with pinned portable Python."
+    else
+      echo "Pinned portable Python could not create the ASR venv; trying uv fallback." >&2
+      rm -rf "$VENV_DIR"
+    fi
+  fi
+
+  if [ "$portable_python_ready" -ne 1 ]; then
+    bootstrap_uv || return 1
+
+  # Create venv.  uv will use system Python 3 if a working one exists;
+  # otherwise it auto-downloads a standalone Python build.
+  echo "Setting up Python environment (this may take a few minutes on first run)..."
+  if ! "$UV_BIN" python install 3.12 2>&1; then
+    echo "" >&2
+    echo "Failed to install managed Python 3.12 via uv." >&2
+    echo "Please check your network connection and retry. No Terminal command is required." >&2
+    return 1
+  fi
+  if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python 2>&1; then
+    # If 3.12 is unavailable, let uv pick the best available Python.
+    if ! "$UV_BIN" venv "$VENV_DIR" --python 3.12 2>&1; then
+      echo "" >&2
+      echo "无法创建 Python 虚拟环境。" >&2
+      echo "请尝试在终端运行: xcode-select --install" >&2
+      echo "安装 Xcode Command Line Tools 后重试。" >&2
+      echo "No Terminal command is required for the retry." >&2
+      return 1
+    fi
+  fi
+
+  fi
+
+  if [ ! -x "$VENV_PYTHON" ]; then
+    echo "Python venv was not created at $VENV_PYTHON" >&2
+    return 1
+  fi
+
+  echo "Installing whisper.cpp-cli and imageio-ffmpeg..."
+  if ! install_asr_packages "$VENV_PYTHON"; then
+    echo "" >&2
+    echo "whisper.cpp-cli / imageio-ffmpeg 安装失败。" >&2
+    echo "请检查网络连接后重试。No Terminal command is required." >&2
+
+    # Fallback: try Homebrew
+    if command -v brew >/dev/null 2>&1; then
+      echo "尝试通过 Homebrew 安装..." >&2
+      return 2  # signal caller to try Homebrew
+    fi
+    return 1
+  fi
+
+  # Locate whisper-cpp binary in the venv.
+  local whisper_cpp_bin
+  whisper_cpp_bin="$VENV_DIR/bin/whisper-cpp"
+  if [ ! -x "$whisper_cpp_bin" ]; then
+    whisper_cpp_bin="$(find "$VENV_DIR/bin" -maxdepth 1 -type f -name 'whisper-cpp*' -perm -111 2>/dev/null | head -n 1 || true)"
+  fi
+  if [ -z "$whisper_cpp_bin" ] || [ ! -x "$whisper_cpp_bin" ]; then
+    echo "whisper.cpp-cli did not install the whisper-cpp command." >&2
+    return 1
+  fi
+
+  write_whisper_wrapper "$whisper_cpp_bin"
+
+  cat > "$INSTALL_ROOT/bin/ffmpeg" <<SCRIPT
+#!/usr/bin/env bash
+exec "$VENV_PYTHON" -c 'import os, sys, imageio_ffmpeg; exe = imageio_ffmpeg.get_ffmpeg_exe(); os.execv(exe, [exe] + sys.argv[1:])' "\\$@"
+SCRIPT
+
+  chmod +x "$INSTALL_ROOT/bin/ffmpeg"
+
+  if ! "$INSTALL_ROOT/bin/whisper-cli" -h >/dev/null 2>&1; then
+    echo "whisper-cli validation failed." >&2
+    return 1
+  fi
+  if ! "$INSTALL_ROOT/bin/ffmpeg" -version >/dev/null 2>&1; then
+    echo "ffmpeg validation failed." >&2
+    return 1
+  fi
+
+  echo "Python ASR tools installed successfully."
+  return 0
+}
+
+# ── Homebrew fallback (only if uv pip install fails) ────────────────────────
+
+brew_install_formula() {
+  local formula="$1"
+  local max_attempts=3
+  local retry_delay_seconds=10
+
+  if brew list --versions "$formula" >/dev/null 2>&1; then
+    echo "Homebrew formula already installed: $formula"
+    return
+  fi
+
+  echo "Installing Homebrew formula: $formula"
+  local attempt output status
+  for attempt in $(seq 1 "$max_attempts"); do
+    set +e
+    output="$(HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install "$formula" 2>&1)"
+    status=$?
+    set -e
+    printf '%s\\n' "$output"
+    if [ "$status" -eq 0 ]; then
+      return
+    fi
+    if brew list --versions "$formula" >/dev/null 2>&1; then
+      echo "Homebrew formula is now installed despite a non-zero brew exit: $formula"
+      return
+    fi
+    if printf '%s\\n' "$output" | grep -Eiq 'already locked|Please wait|another process'; then
+      echo "Homebrew is busy. Waiting before retry $attempt/$max_attempts..." >&2
+      sleep "$retry_delay_seconds"
+      continue
+    fi
+    break
+  done
+
+  echo "" >&2
+  echo "Homebrew did not finish installing $formula." >&2
+  echo "Please retry in Obsidian after closing other installers." >&2
+  echo "No Terminal command is required." >&2
+  exit 1
+}
+
+find_command() {
+  local name="$1"
+  if [ -x "$INSTALL_ROOT/bin/$name" ]; then
+    echo "$INSTALL_ROOT/bin/$name"
+    return
+  fi
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return
+  fi
+  for prefix in /opt/homebrew /usr/local; do
+    if [ -x "$prefix/bin/$name" ]; then
+      echo "$prefix/bin/$name"
+      return
+    fi
+  done
+  return 1
+}
+
+# ── Model download ──────────────────────────────────────────────────────────
+
+download_file() {
+  local url="$1"
+  local out_file="$2"
+  echo "Downloading $url"
+  if command -v curl >/dev/null 2>&1; then
+    if curl -L \\
+      --retry 2 \\
+      --retry-delay 2 \\
+      --connect-timeout 30 \\
+      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\
+      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\
+      -C - \\
+      -o "$out_file" \\
+      "$url"; then
+      return 0
+    fi
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    if wget -O "$out_file" "$url"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+download_model() {
+  local out_file="$1"
+  local temp_file="$out_file.part"
+  local urls=("\${MODEL_URLS[@]}")
+
+  for url in "\${urls[@]}"; do
+    if download_file "$url" "$temp_file"; then
+      local model_size
+      model_size="$(wc -c < "$temp_file" | tr -d ' ')"
+      if [ "$model_size" -ge 400000000 ]; then
+        mv -f "$temp_file" "$out_file"
+        return 0
+      fi
+      echo "Downloaded model is too small from $url, trying next source." >&2
+      rm -f "$temp_file"
+    else
+      echo "Model download failed from $url, trying next source." >&2
+      rm -f "$temp_file"
+    fi
+  done
+
+  echo "Whisper model download failed from all sources." >&2
+  echo "The local ASR engine is installed, but the model file could not be downloaded." >&2
+  echo "Please retry installation later or switch network. No Terminal command is required." >&2
+  return 1
+}
+
+# ── Validation ──────────────────────────────────────────────────────────────
+
+validate_local_asr_inference() {
+  local whisper_bin="$1"
+  local ffmpeg_bin="$2"
+  local model_path="$3"
+  local validation_dir="$TEMP_ROOT/inference-validation"
+  local validation_wav="$validation_dir/validation.wav"
+  local validation_base="$validation_dir/validation"
+  local validation_log="$validation_dir/whisper.log"
+  local metal_resources_path=""
+  metal_resources_path="$(extract_whisper_wrapper_metal_resources "$whisper_bin" || true)"
+
+  mkdir -p "$validation_dir"
+  echo "metalResourcesPath=\${metal_resources_path:-missing}"
+  if ! "$ffmpeg_bin" -hide_banner -loglevel error -y -f lavfi -i anullsrc=r=16000:cl=mono -t 1 -c:a pcm_s16le "$validation_wav"; then
+    echo "ffmpeg inference validation audio generation failed." >&2
+    return 1
+  fi
+  if ! "$whisper_bin" -m "$model_path" -f "$validation_wav" -l zh -otxt -of "$validation_base" >"$validation_log" 2>&1; then
+    echo "whisper inference validation failed." >&2
+    cat "$validation_log" >&2 || true
+    return 1
+  fi
+  if grep -Fq 'ggml_backend_metal_init() failed' "$validation_log" 2>/dev/null; then
+    echo "metalAcceleration=failed"
+    echo "metalFallback=cpu"
+  else
+    echo "metalAcceleration=ok"
+  fi
+  echo "Local ASR inference validation passed."
+}
+
+file_state() {
+  local file_path="$1"
+  if [ ! -e "$file_path" ]; then
+    echo "::missing::"
+    return
+  fi
+  local size mtime
+  size="$(wc -c < "$file_path" | tr -d ' ')"
+  mtime="$(stat -f '%m' "$file_path" 2>/dev/null || stat -c '%Y' "$file_path" 2>/dev/null || echo 0)"
+  printf '%s|%s|%s' "$file_path" "$size" "$mtime"
+}
+
+install_state_is_valid() {
+  local whisper_bin="$1"
+  local ffmpeg_bin="$2"
+  local model_path="$3"
+  [ -f "$INSTALL_STATE_PATH" ] || return 1
+  grep -Fqx "installerScriptVersion=$INSTALLER_SCRIPT_VERSION" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "validationStatus=passed" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "whisper=$(file_state "$whisper_bin")" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "ffmpeg=$(file_state "$ffmpeg_bin")" "$INSTALL_STATE_PATH" || return 1
+  grep -Fqx "model=$(file_state "$model_path")" "$INSTALL_STATE_PATH" || return 1
+}
+
+write_install_state() {
+  local whisper_bin="$1"
+  local ffmpeg_bin="$2"
+  local model_path="$3"
+  {
+    echo "installerScriptVersion=$INSTALLER_SCRIPT_VERSION"
+    echo "validationStatus=passed"
+    echo "validatedAtUtc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "whisper=$(file_state "$whisper_bin")"
+    echo "ffmpeg=$(file_state "$ffmpeg_bin")"
+    echo "model=$(file_state "$model_path")"
+  } > "$INSTALL_STATE_PATH"
+}
+
+run_or_skip_local_asr_validation() {
+  local whisper_bin="$1"
+  local ffmpeg_bin="$2"
+  local model_path="$3"
+  if install_state_is_valid "$whisper_bin" "$ffmpeg_bin" "$model_path"; then
+    echo "Local ASR was already validated for the current files; skipping full inference validation."
+    return
+  fi
+  validate_local_asr_inference "$whisper_bin" "$ffmpeg_bin" "$model_path"
+  write_install_state "$whisper_bin" "$ffmpeg_bin" "$model_path"
+}
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+# Ensure Homebrew is on PATH for Apple Silicon Macs (used only as fallback).
+if ! command -v brew >/dev/null 2>&1; then
+  if [ -x /opt/homebrew/bin/brew ]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [ -x /usr/local/bin/brew ]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+  fi
+fi
+
+acquire_install_lock
+mkdir -p "$INSTALL_ROOT/bin" "$INSTALL_ROOT/models" "$CACHE_ROOT"
+
+# Primary path: uv → Python → pip packages.
+# Returns 2 if uv pip install failed but Homebrew is available as fallback.
+setup_rc=0
+setup_python_and_packages || setup_rc=$?
+
+if [ $setup_rc -eq 2 ]; then
+  # uv pip install failed, but Homebrew is available.
+  brew_install_formula ffmpeg
+  brew_install_formula whisper-cpp
+elif [ $setup_rc -ne 0 ]; then
+  # uv pipeline failed and no Homebrew available.
+  echo "" >&2
+  echo "本地转写组件安装失败。" >&2
+  echo "常见原因：网络不通、macOS 版本过旧、缺少 Xcode Command Line Tools。" >&2
+  echo "请在终端运行: xcode-select --install" >&2
+  echo "然后重新在 Obsidian 里安装。No Terminal command is required." >&2
+  exit 1
+fi
+
+# Locate whisper binary.
+WHISPER_BIN="$(find_command whisper-cli || true)"
+if [ -z "$WHISPER_BIN" ]; then
+  WHISPER_BIN="$(find_command whisper-cpp || true)"
+fi
+if [ -z "$WHISPER_BIN" ]; then
+  WHISPER_BIN="$(find_command whisper || true)"
+fi
+if [ -z "$WHISPER_BIN" ]; then
+  for prefix in /opt/homebrew /usr/local; do
+    candidate="$(find "$prefix" -path '*/whisper-cpp/*' -type f \\( -name 'whisper-cli' -o -name 'whisper-cpp' -o -name 'whisper' -o -name 'main' \\) -perm -111 2>/dev/null | head -n 1 || true)"
+    if [ -n "$candidate" ]; then
+      WHISPER_BIN="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "$WHISPER_BIN" ]; then
+  echo "whisper command was not found after installation." >&2
+  echo "Please retry in Obsidian. No Terminal command is required." >&2
+  exit 1
+fi
+
+FFMPEG_BIN="$(find_command ffmpeg || true)"
+if [ -z "$FFMPEG_BIN" ]; then
+  echo "ffmpeg was not found after installation." >&2
+  exit 1
+fi
+
+# Refresh the whisper wrapper so existing installs pick up Metal resource discovery.
+EXISTING_WHISPER_TARGET=""
+if [ "$WHISPER_BIN" = "$INSTALL_ROOT/bin/whisper-cli" ]; then
+  if [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
+    EXISTING_WHISPER_TARGET="$(resolve_symlink_target "$INSTALL_ROOT/bin/whisper-cli")"
+  else
+    EXISTING_WHISPER_TARGET="$(extract_whisper_wrapper_target "$INSTALL_ROOT/bin/whisper-cli" || true)"
+  fi
+  if [ -n "$EXISTING_WHISPER_TARGET" ]; then
+    WHISPER_BIN="$EXISTING_WHISPER_TARGET"
+  fi
+fi
+if [ "$WHISPER_BIN" != "$INSTALL_ROOT/bin/whisper-cli" ] || [ -n "$EXISTING_WHISPER_TARGET" ] || [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
+  write_whisper_wrapper "$WHISPER_BIN"
+fi
+if [ "$FFMPEG_BIN" != "$INSTALL_ROOT/bin/ffmpeg" ]; then
+  ln -sf "$FFMPEG_BIN" "$INSTALL_ROOT/bin/ffmpeg"
+fi
+
+# Download model.
+MODEL_PATH="$INSTALL_ROOT/models/ggml-small.bin"
+if [ -f "$MODEL_PATH" ]; then
+  model_size="$(wc -c < "$MODEL_PATH" | tr -d ' ')"
+  if [ "$model_size" -lt 400000000 ]; then
+    rm -f "$MODEL_PATH"
+  fi
+fi
+if [ ! -f "$MODEL_PATH" ]; then
+  if [ -f "$CACHE_ROOT/ggml-small.bin" ]; then
+    cached_model_size="$(wc -c < "$CACHE_ROOT/ggml-small.bin" | tr -d ' ')"
+    if [ "$cached_model_size" -lt 400000000 ]; then
+      rm -f "$CACHE_ROOT/ggml-small.bin"
+    fi
+  fi
+  if [ ! -f "$CACHE_ROOT/ggml-small.bin" ]; then
+    download_model "$CACHE_ROOT/ggml-small.bin"
+  fi
+  mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"
+fi
+
+# Run inference validation (cached if state is still valid).
+run_or_skip_local_asr_validation "$INSTALL_ROOT/bin/whisper-cli" "$INSTALL_ROOT/bin/ffmpeg" "$MODEL_PATH"
+rm -f "$CACHE_ROOT/ggml-small.bin"
+
+# ── Transcribe script ───────────────────────────────────────────────────────
+
+cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+# legacyPluginScriptCheck=find_metal_resources_dir
+# legacyPluginScriptCheck=GGML_METAL_PATH_RESOURCES
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+INPUT_PATH=""
+OUTPUT_PATH=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --input|-InputPath)
+      INPUT_PATH="\${2:-}"
+      shift 2
+      ;;
+    --output|-OutputPath)
+      OUTPUT_PATH="\${2:-}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$INPUT_PATH" ] || [ -z "$OUTPUT_PATH" ]; then
+  echo "Usage: transcribe.sh --input <audio-or-video> --output <text-file>" >&2
+  exit 1
+fi
+
+WHISPER="$ROOT/bin/whisper-cli"
+FFMPEG="$ROOT/bin/ffmpeg"
+MODEL="$ROOT/models/ggml-small.bin"
+TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"
+
+if [ ! -x "$WHISPER" ]; then
+  echo "whisper-cli not found. Please rerun install-local-asr-macos.sh." >&2
+  exit 1
+fi
+if [ ! -x "$FFMPEG" ]; then
+  echo "ffmpeg not found. Please rerun install-local-asr-macos.sh." >&2
+  exit 1
+fi
+if [ ! -f "$MODEL" ]; then
+  echo "Whisper model not found: $MODEL" >&2
+  exit 1
+fi
+
+get_wrapper_metal_resources_path() {
+  local target=""
+  target="$(sed -n 's/^GGML_METAL_RESOURCES_DIR="\\(.*\\)"$/\\1/p' "$WHISPER" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$target" ]; then
+    echo "$target"
+  fi
+}
+
+get_media_duration_seconds() {
+  local ffmpeg_output duration hours minutes seconds
+  ffmpeg_output="$("$FFMPEG" -hide_banner -i "$INPUT_PATH" 2>&1 || true)"
+  duration="$(printf '%s\\n' "$ffmpeg_output" | sed -n 's/.*Duration: \\([0-9][0-9]*:[0-9][0-9]:[0-9][0-9.]*\\).*/\\1/p' | head -n 1 || true)"
+  if [ -z "$duration" ]; then
+    echo 0
+    return
+  fi
+  hours="\${duration%%:*}"
+  duration="\${duration#*:}"
+  minutes="\${duration%%:*}"
+  seconds="\${duration#*:}"
+  awk -v h="$hours" -v m="$minutes" -v s="$seconds" 'BEGIN { printf "%d\\n", (h * 3600) + (m * 60) + s }'
+}
+
+choose_chunk_seconds() {
+  local duration_seconds="\${1:-0}"
+  case "$duration_seconds" in
+    ''|*[!0-9]*) echo "$SHORT_CHUNK_SECONDS"; return ;;
+  esac
+  if [ "$duration_seconds" -gt "$LONG_MEDIA_THRESHOLD_SECONDS" ]; then
+    echo "$LONG_CHUNK_SECONDS"
+  else
+    echo "$SHORT_CHUNK_SECONDS"
+  fi
+}
+
+mkdir -p "$(dirname "$OUTPUT_PATH")"
+TEMP_WORK_DIR="\${TMPDIR:-/tmp}/wechat-inbox-local-asr-$(uuidgen 2>/dev/null || date +%s%N)"
+SHORT_CHUNK_SECONDS=120
+LONG_CHUNK_SECONDS=600
+LONG_MEDIA_THRESHOLD_SECONDS=600
+DURATION_SECONDS="$(get_media_duration_seconds)"
+CHUNK_SECONDS="$(choose_chunk_seconds "$DURATION_SECONDS")"
+METAL_RESOURCES_PATH="$(get_wrapper_metal_resources_path)"
+OUTPUT_BASE="$OUTPUT_PATH"
+case "$OUTPUT_BASE" in
+  *.txt) OUTPUT_BASE="\${OUTPUT_BASE%.txt}" ;;
+esac
+RUN_LOG="$ROOT/transcribe-last.log"
+
+cleanup() {
+  rm -rf "$TEMP_WORK_DIR"
+}
+trap cleanup EXIT
+
+mkdir -p "$TEMP_WORK_DIR"
+{
+  echo "time=$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  echo "status=pending"
+  echo "inputPath=$INPUT_PATH"
+  echo "outputPath=$OUTPUT_PATH"
+  echo "tempWorkDir=$TEMP_WORK_DIR"
+  echo "durationSeconds=$DURATION_SECONDS"
+  echo "chunkSeconds=$CHUNK_SECONDS"
+  echo "metalResourcesPath=\${METAL_RESOURCES_PATH:-missing}"
+  if [ -n "$METAL_RESOURCES_PATH" ] && [ -f "$METAL_RESOURCES_PATH/ggml-metal.metal" ]; then
+    echo "metalResourcesStatus=present"
+  else
+    echo "metalResourcesStatus=missing"
+  fi
+  echo "progressStage=preparing"
+  echo "progressCurrent=0"
+  echo "progressTotal=0"
+  echo "progressPercent=0"
+} > "$RUN_LOG"
+
+write_progress() {
+  local stage="$1"
+  local current="$2"
+  local total="$3"
+  local pid="\${4:-0}"
+  local now
+  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  if [ "\${PROGRESS_STAGE_NAME:-}" != "$stage" ] || [ -z "\${PROGRESS_STAGE_STARTED_AT:-}" ]; then
+    PROGRESS_STAGE_NAME="$stage"
+    PROGRESS_STAGE_STARTED_AT="$now"
+  fi
+  local percent=0
+  if [ "$total" -gt 0 ]; then
+    percent=$((current * 100 / total))
+  fi
+  {
+    echo "progressStage=$stage"
+    echo "progressCurrent=$current"
+    echo "progressTotal=$total"
+    echo "progressPercent=$percent"
+    echo "progressStartedAt=$PROGRESS_STAGE_STARTED_AT"
+    echo "progressHeartbeatAt=$now"
+    echo "progressPid=$pid"
+  } >> "$RUN_LOG"
+}
+
+run_with_heartbeat() {
+  local stage="$1"
+  local current="$2"
+  local total="$3"
+  shift 3
+  "$@" >> "$RUN_LOG" 2>&1 &
+  local native_pid=$!
+  local last_heartbeat=0
+  while kill -0 "$native_pid" 2>/dev/null; do
+    local now_epoch
+    now_epoch="$(date +%s)"
+    if [ "$last_heartbeat" -eq 0 ] || [ $((now_epoch - last_heartbeat)) -ge 5 ]; then
+      write_progress "$stage" "$current" "$total" "$native_pid"
+      last_heartbeat="$now_epoch"
+    fi
+    sleep 1
+  done
+  wait "$native_pid"
+}
+
+write_progress segmenting 0 0 0
+run_with_heartbeat segmenting 0 0 "$FFMPEG" -hide_banner -loglevel error -y -i "$INPUT_PATH" -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time "$CHUNK_SECONDS" -reset_timestamps 1 "$TEMP_WORK_DIR/chunk-%03d.wav"
+
+chunk_count="$(find "$TEMP_WORK_DIR" -name 'chunk-*.wav' -type f | wc -l | tr -d ' ')"
+echo "chunkCount=$chunk_count" >> "$RUN_LOG"
+{
+  echo "progressStage=transcribing"
+  echo "progressCurrent=0"
+  echo "progressTotal=$chunk_count"
+  echo "progressPercent=0"
+} >> "$RUN_LOG"
+if [ "$chunk_count" -eq 0 ]; then
+  echo "ffmpeg did not generate audio chunks." >&2
+  echo "status=failed" >> "$RUN_LOG"
+  exit 1
+fi
+
+: > "$OUTPUT_PATH"
+chunk_index=0
+for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
+  chunk_base="\${chunk%.wav}"
+  chunk_txt="$chunk_base.txt"
+  {
+    echo "--- $(basename "$chunk") ---"
+  } >> "$RUN_LOG"
+  run_with_heartbeat transcribing "$chunk_index" "$chunk_count" "$WHISPER" -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base"
+  if [ ! -f "$chunk_txt" ]; then
+    echo "Whisper did not generate transcript: $chunk_txt" >&2
+    echo "status=failed" >> "$RUN_LOG"
+    exit 1
+  fi
+  if [ -s "$chunk_txt" ]; then
+    cat "$chunk_txt" >> "$OUTPUT_PATH"
+    printf '\\n\\n' >> "$OUTPUT_PATH"
+  fi
+  chunk_index=$((chunk_index + 1))
+  progress_percent=$((chunk_index * 100 / chunk_count))
+  {
+    echo "progressStage=transcribing"
+    echo "progressCurrent=$chunk_index"
+    echo "progressTotal=$chunk_count"
+    echo "progressPercent=$progress_percent"
+  } >> "$RUN_LOG"
+done
+
+if [ ! -s "$OUTPUT_PATH" ]; then
+  echo "Whisper did not generate transcript text." >&2
+  echo "status=failed" >> "$RUN_LOG"
+  exit 1
+fi
+
+{
+  echo "progressStage=done"
+  echo "progressCurrent=$chunk_count"
+  echo "progressTotal=$chunk_count"
+  echo "progressPercent=100"
+} >> "$RUN_LOG"
+if grep -Fq 'ggml_backend_metal_init() failed' "$RUN_LOG" 2>/dev/null; then
+  echo "metalAcceleration=failed" >> "$RUN_LOG"
+  echo "metalFallback=cpu" >> "$RUN_LOG"
+else
+  echo "metalAcceleration=ok" >> "$RUN_LOG"
+fi
+echo "status=success" >> "$RUN_LOG"
+cat "$OUTPUT_PATH"
+SCRIPT
+
+chmod +x "$INSTALL_ROOT/transcribe.sh"
+
+echo ""
+echo "Local ASR installed to: $INSTALL_ROOT"
+echo "Use this Obsidian plugin command:"
+echo '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}'
+`;
+  }
+});
+
+// local-ocr/install-local-ocr.ps1
+var require_install_local_ocr = __commonJS({
+  "local-ocr/install-local-ocr.ps1"(exports2, module2) {
+    module2.exports = `param(
+  [string]$InstallRoot = (Join-Path $env:USERPROFILE ".wechat-inbox-local-ocr")
+)
+
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PythonScript = Join-Path $ScriptDir "ocr_image.py"
+$ActiveVenvDir = Join-Path $InstallRoot "venv"
+$StagingVenvDir = Join-Path $InstallRoot ("venv-staging-" + [guid]::NewGuid().ToString("N"))
+$BackupVenvDir = Join-Path $InstallRoot "venv-backup"
+$PendingSwitchPath = Join-Path $InstallRoot "pending-venv-switch.json"
+$VenvDir = $StagingVenvDir
+$InstallerCapability = "unique-staging-transaction-v2"
+$RuntimeScript = Join-Path $InstallRoot "ocr_image.py"
+$LogPath = Join-Path $InstallRoot "install.log"
+$BinDir = Join-Path $InstallRoot "bin"
+$CacheDir = Join-Path $InstallRoot "cache"
+$PythonRuntimeDir = Join-Path $InstallRoot "python-runtime"
+$PythonRuntimeBackupDir = Join-Path $InstallRoot "python-runtime-backup"
+$Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
+$TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
+$TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"
+$PythonRuntimeFallbackMirrors = @(
+  "https://github.com/astral-sh/python-build-standalone/releases/download"
+)
+$OcrWheelhouseBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/wheels"
+$TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
+$PypiFallbackIndexUrl = "https://pypi.org/simple"
+$PythonBuildStandaloneBuild = "20260623"
+$PythonBuildStandaloneVersion = "3.12.13+20260623"
+$PythonRuntimeFileName = "cpython-$PythonBuildStandaloneVersion-x86_64-pc-windows-msvc-install_only.tar.gz"
+$PythonRuntimeSha256 = "C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E"
+$PortablePython = Join-Path $PythonRuntimeDir "python\\python.exe"
+$OcrPackageRequirements = @(
+  "rapidocr-onnxruntime==1.4.4",
+  "pillow==12.3.0",
+  "onnxruntime==1.27.0",
+  "numpy==2.5.1",
+  "opencv-python==5.0.0.93"
+)
+$OcrCompatibilityPackageRequirements = @(
+  "rapidocr-onnxruntime==1.4.4",
+  "pillow==12.3.0",
+  "onnxruntime==1.20.1",
+  "numpy==1.26.4",
+  "opencv-python==4.10.0.84"
+)
+$MicrosoftVisualCppRuntimeUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+$MicrosoftVisualCppRuntimeInstaller = $null
+$script:LastOcrImportFailureModule = ""
+$script:LastOcrImportFailureMessage = ""
+$script:LastOcrImportFailureText = ""
+$script:VisualCppRuntimeRepairAttempted = $false
+$script:VisualCppRuntimeRepairFailureMessage = ""
+$script:VisualCppRuntimeRestartRequired = $false
+$script:OcrCompatibilityRepairAttempted = $false
+New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
+
+function Write-InstallLog {
+  param([string]$Message)
+  $line = "$(Get-Date -Format o) $Message"
+  Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+  Write-Host $Message
+}
+
+function Remove-DirectoryStrict {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [int]$MaxAttempts = 4
+  )
+  if (!(Test-Path -LiteralPath $Path)) {
+    return
+  }
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt += 1) {
+    try {
+      Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    } catch {
+      if ($attempt -ge $MaxAttempts) {
+        throw "Cannot remove OCR environment directory '$Path'. Another process or security software may be using it. $($_.Exception.Message)"
+      }
+      Start-Sleep -Milliseconds (250 * $attempt)
+    }
+    if (!(Test-Path -LiteralPath $Path)) {
+      return
+    }
+  }
+  throw "Cannot remove OCR environment directory '$Path'."
+}
+
+function Write-PendingOcrSwitch {
+  $payload = [ordered]@{
+    capability = $InstallerCapability
+    staging = $StagingVenvDir
+    target = $ActiveVenvDir
+    backup = $BackupVenvDir
+    createdAt = (Get-Date).ToUniversalTime().ToString("o")
+  }
+  $payload | ConvertTo-Json | Set-Content -LiteralPath $PendingSwitchPath -Encoding UTF8
+  Write-InstallLog "OCR environment is ready and will be activated after Obsidian restarts."
+}
+
+function Promote-StagedOcrEnvironment {
+  $stagedPython = Join-Path $StagingVenvDir "Scripts\\python.exe"
+  if (!(Test-OcrPythonReady -PythonPath $stagedPython)) {
+    throw "Staged OCR environment failed validation before activation."
+  }
+
+  Remove-DirectoryStrict -Path $BackupVenvDir
+  $movedActive = $false
+  try {
+    if (Test-Path -LiteralPath $ActiveVenvDir) {
+      Move-Item -LiteralPath $ActiveVenvDir -Destination $BackupVenvDir -ErrorAction Stop
+      $movedActive = $true
+    }
+    Move-Item -LiteralPath $StagingVenvDir -Destination $ActiveVenvDir -ErrorAction Stop
+  } catch {
+    if ($movedActive -and !(Test-Path -LiteralPath $ActiveVenvDir) -and (Test-Path -LiteralPath $BackupVenvDir)) {
+      Move-Item -LiteralPath $BackupVenvDir -Destination $ActiveVenvDir -ErrorAction SilentlyContinue
+    }
+    Write-PendingOcrSwitch
+    return $false
+  }
+
+  $activePython = Join-Path $ActiveVenvDir "Scripts\\python.exe"
+  if (!(Test-OcrPythonReady -PythonPath $activePython)) {
+    Remove-DirectoryStrict -Path $ActiveVenvDir
+    if (Test-Path -LiteralPath $BackupVenvDir) {
+      Move-Item -LiteralPath $BackupVenvDir -Destination $ActiveVenvDir -ErrorAction Stop
+    }
+    throw "Activated OCR environment failed validation; the previous environment was restored."
+  }
+
+  Remove-DirectoryStrict -Path $BackupVenvDir
+  Remove-Item -LiteralPath $PendingSwitchPath -Force -ErrorAction SilentlyContinue
+  return $true
+}
+
+function Invoke-NativeCommand {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+}
+
+function Invoke-DownloadFile {
+  param(
+    [string]$Url = "",
+    [string[]]$Urls = @(),
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [int]$TimeoutSec = 300,
+    [string]$ExpectedSha256 = ""
+  )
+  $outDir = Split-Path -Parent $OutFile
+  if ($outDir) {
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+  }
+  $candidateUrls = @($Urls + @($Url)) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -Unique
+  if ($candidateUrls.Count -eq 0) {
+    throw "No download URL was supplied."
+  }
+
+  $errors = New-Object System.Collections.Generic.List[string]
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  foreach ($candidateUrl in $candidateUrls) {
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+    Write-InstallLog "Downloading $candidateUrl"
+    if ($curl) {
+      & $curl.Source \`
+        -L \`
+        --fail \`
+        --silent \`
+        --show-error \`
+        --retry 3 \`
+        --retry-delay 2 \`
+        --connect-timeout 30 \`
+        --max-time $TimeoutSec \`
+        -H ("User-Agent: $($Headers['User-Agent'])") \`
+        -o $OutFile \`
+        $candidateUrl
+      $curlExitCode = $LASTEXITCODE
+      if ($curlExitCode -eq 0 -and (Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 100)) {
+        if (-not $ExpectedSha256 -or (Test-FileSha256 -Path $OutFile -ExpectedSha256 $ExpectedSha256)) {
+          return
+        }
+        Write-InstallLog "Downloaded file SHA256 did not match for $candidateUrl; trying the next mirror."
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        continue
+      }
+      Write-InstallLog "curl download failed for $candidateUrl with exit code $curlExitCode; retrying with PowerShell."
+    }
+    try {
+      Invoke-WebRequest -Uri $candidateUrl -OutFile $OutFile -UseBasicParsing -Headers $Headers -TimeoutSec $TimeoutSec
+      if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 100)) {
+        if (-not $ExpectedSha256 -or (Test-FileSha256 -Path $OutFile -ExpectedSha256 $ExpectedSha256)) {
+          return
+        }
+        throw "Downloaded file SHA256 validation failed."
+      }
+      throw "Downloaded file is empty or invalid."
+    } catch {
+      $errors.Add("\${candidateUrl}: $($_.Exception.Message)")
+      Write-InstallLog "PowerShell download failed for $candidateUrl; trying the next mirror."
+      Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+    }
+  }
+  throw ("Downloaded file from all mirrors failed: " + ($errors -join " | "))
+}
+
+function Download-TextFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Url,
+    [Parameter(Mandatory = $true)][string]$OutFile
+  )
+  try {
+    Invoke-DownloadFile -Url $Url -OutFile $OutFile -TimeoutSec 180
+  } catch {
+    throw "Failed to download $Url. $($_.Exception.Message)"
+  }
+}
+
+function Test-PythonUsable {
+  param([Parameter(Mandatory = $true)][string]$Command)
+  try {
+    $version = & $Command -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.version_info < (3, 13) else 1)" 2>&1
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
+function Find-Python {
+  $candidates = @("python", "python3")
+  foreach ($candidate in $candidates) {
+    if (Test-PythonUsable -Command $candidate) {
+      return $candidate
+    }
+  }
+  try {
+    $pyVersion = & py -3.12 -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 10) and sys.version_info < (3, 13) else 1)" 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      return "py -3.12"
+    }
+  } catch {
+  }
+  return $null
+}
+
+function Invoke-Python {
+  param(
+    [Parameter(Mandatory = $true)][string]$PythonCommand,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments
+  )
+  if ($PythonCommand -eq "py -3.12") {
+    & py -3.12 @Arguments
+    return $LASTEXITCODE
+  }
+  & $PythonCommand @Arguments
+  return $LASTEXITCODE
+}
+
+function Test-OcrPythonImports {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+
+  $probeCode = @'
+import importlib
+import json
+import traceback
+
+for module_name in ('numpy', 'cv2', 'onnxruntime', 'rapidocr_onnxruntime'):
+    try:
+        module = importlib.import_module(module_name)
+        if module_name == 'rapidocr_onnxruntime':
+            getattr(module, 'RapidOCR')
+        print(json.dumps({'stage': 'ocr-import', 'module': module_name, 'ok': True}, ensure_ascii=False))
+    except Exception as exc:
+        print(json.dumps({
+            'stage': 'ocr-import',
+            'module': module_name,
+            'ok': False,
+            'error': str(exc),
+            'traceback': traceback.format_exc(),
+        }, ensure_ascii=False))
+        raise SystemExit(1)
+'@
+
+  $output = @()
+  $exitCode = 1
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = @(& $PythonPath -c $probeCode 2>&1 | ForEach-Object { [string]$_ })
+    $exitCode = $LASTEXITCODE
+  } catch {
+    $output += [string]$_.Exception.Message
+    $exitCode = 1
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  $script:LastOcrImportFailureModule = ""
+  $script:LastOcrImportFailureMessage = ""
+  $script:LastOcrImportFailureText = ($output -join "\`n").Trim()
+  foreach ($line in $output) {
+    Write-InstallLog "OCR import probe: $line"
+    try {
+      $result = $line | ConvertFrom-Json -ErrorAction Stop
+      if ($result.stage -eq "ocr-import" -and $result.ok -eq $false) {
+        $script:LastOcrImportFailureModule = [string]$result.module
+        $script:LastOcrImportFailureMessage = [string]$result.error
+      }
+    } catch {
+    }
+  }
+  return $exitCode -eq 0
+}
+
+function Test-MissingVisualCppRuntime {
+  param([string]$FailureText = $script:LastOcrImportFailureText)
+  if ([string]::IsNullOrWhiteSpace($FailureText)) {
+    return $false
+  }
+  return $FailureText -match '(?i)(DLL load failed|WinError\\s*(126|127|193)|onnxruntime_pybind11_state|VCRUNTIME|MSVCP140|api-ms-win-crt|initialization routine failed|dynamic link library)'
+}
+
+function Install-MicrosoftVisualCppRuntime {
+  Write-InstallLog "OCR native dependency is unavailable; downloading the official Microsoft Visual C++ x64 runtime."
+  $MicrosoftVisualCppRuntimeInstaller = Join-Path $BinDir "vc_redist.x64-$([Guid]::NewGuid().ToString('N')).exe"
+  try {
+    Invoke-DownloadFile -Url $MicrosoftVisualCppRuntimeUrl -OutFile $MicrosoftVisualCppRuntimeInstaller -TimeoutSec 600
+    if (!(Test-Path -LiteralPath $MicrosoftVisualCppRuntimeInstaller) -or ((Get-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller).Length -lt 1MB)) {
+      throw "Microsoft Visual C++ runtime download is incomplete."
+    }
+
+    $signature = Get-AuthenticodeSignature -FilePath $MicrosoftVisualCppRuntimeInstaller
+    $signerSubject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { "" }
+    if ($signature.Status -ne "Valid" -or $signerSubject -notmatch 'Microsoft Corporation') {
+      throw "Microsoft Visual C++ runtime signature validation failed; installation was stopped."
+    }
+
+    Write-InstallLog "Starting the Microsoft Visual C++ runtime installer. Windows may request administrator approval."
+    $process = Start-Process \`
+      -FilePath $MicrosoftVisualCppRuntimeInstaller \`
+      -ArgumentList @("/install", "/quiet", "/norestart") \`
+      -Verb RunAs \`
+      -WindowStyle Hidden \`
+      -Wait \`
+      -PassThru
+    $exitCode = [int]$process.ExitCode
+    if ($exitCode -in @(3010, 1641)) {
+      $script:VisualCppRuntimeRestartRequired = $true
+    }
+    if ($exitCode -notin @(0, 1638, 3010, 1641)) {
+      throw "Microsoft Visual C++ runtime installation failed with exit code $exitCode."
+    }
+    Write-InstallLog "Microsoft Visual C++ runtime installer completed with exit code $exitCode."
+  } catch {
+    throw "Microsoft Visual C++ runtime installation was cancelled or could not start. $($_.Exception.Message)"
+  } finally {
+    if ($MicrosoftVisualCppRuntimeInstaller) {
+      Remove-Item -LiteralPath $MicrosoftVisualCppRuntimeInstaller -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Test-OcrPythonReady {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  if (Test-OcrPythonImports -PythonPath $PythonPath) {
+    return $true
+  }
+
+  if (!(Test-MissingVisualCppRuntime)) {
+    return $false
+  }
+
+  if (!$script:OcrCompatibilityRepairAttempted) {
+    $script:OcrCompatibilityRepairAttempted = $true
+    Write-InstallLog "OCR DLL import failed; replacing the moving native dependency stack with the Windows 10 compatible stack."
+    if ((Install-OcrCompatibilityPackages -PythonPath $PythonPath) -and (Test-OcrPythonImports -PythonPath $PythonPath)) {
+      Write-InstallLog "OCR import validation passed with the Windows compatibility stack."
+      return $true
+    }
+    Write-InstallLog "OCR compatibility stack did not resolve the DLL import; trying the official Microsoft runtime repair."
+  }
+
+  if ($script:VisualCppRuntimeRepairAttempted -or !(Test-MissingVisualCppRuntime)) {
+    return $false
+  }
+
+  $script:VisualCppRuntimeRepairAttempted = $true
+  Write-InstallLog "OCR import failure matches a missing Visual C++ runtime; starting one automatic repair attempt."
+  try {
+    Install-MicrosoftVisualCppRuntime
+  } catch {
+    $script:VisualCppRuntimeRepairFailureMessage = [string]$_.Exception.Message
+    Write-InstallLog "Visual C++ runtime repair failed: $($script:VisualCppRuntimeRepairFailureMessage)"
+    return $false
+  }
+
+  Write-InstallLog "Visual C++ runtime repair finished; retrying OCR import validation."
+  Start-Sleep -Seconds 2
+  return Test-OcrPythonImports -PythonPath $PythonPath
+}
+
+function Get-OcrImportFailureDetail {
+  $details = @()
+  if ($script:VisualCppRuntimeRepairFailureMessage) {
+    $details += $script:VisualCppRuntimeRepairFailureMessage
+  }
+  if ($script:VisualCppRuntimeRestartRequired) {
+    $details += "Microsoft Visual C++ runtime was installed, but Windows must be restarted before OCR can be validated."
+  }
+  if ($script:LastOcrImportFailureModule -or $script:LastOcrImportFailureMessage) {
+    $moduleName = if ($script:LastOcrImportFailureModule) { $script:LastOcrImportFailureModule } else { "unknown module" }
+    $message = if ($script:LastOcrImportFailureMessage) { $script:LastOcrImportFailureMessage } else { "unknown import error" }
+    $details += "OCR import failed at \${moduleName}: $message"
+  }
+  return ($details -join " ").Trim()
+}
+
+function Test-FileSha256 {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$ExpectedSha256
+  )
+  if (!(Test-Path -LiteralPath $Path)) {
+    return $false
+  }
+  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant()
+  return $actual -eq $ExpectedSha256.ToUpperInvariant()
+}
+
+function Read-ExactStreamBytes {
+  param(
+    [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
+    [Parameter(Mandatory = $true)][byte[]]$Buffer,
+    [int]$Offset = 0,
+    [int]$Count = $Buffer.Length
+  )
+  $totalRead = 0
+  while ($totalRead -lt $Count) {
+    $read = $Stream.Read($Buffer, $Offset + $totalRead, $Count - $totalRead)
+    if ($read -le 0) {
+      break
+    }
+    $totalRead += $read
+  }
+  return $totalRead
+}
+
+function Skip-StreamBytes {
+  param(
+    [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
+    [long]$Count
+  )
+  if ($Count -le 0) {
+    return
+  }
+  $buffer = New-Object byte[] 8192
+  $remaining = [long]$Count
+  while ($remaining -gt 0) {
+    $chunkSize = [int][Math]::Min($buffer.Length, $remaining)
+    $read = Read-ExactStreamBytes -Stream $Stream -Buffer $buffer -Count $chunkSize
+    if ($read -lt $chunkSize) {
+      throw "Portable Python archive ended before all bytes could be skipped."
+    }
+    $remaining -= $read
+  }
+}
+
+function Get-TarHeaderString {
+  param(
+    [Parameter(Mandatory = $true)][byte[]]$Header,
+    [Parameter(Mandatory = $true)][int]$Offset,
+    [Parameter(Mandatory = $true)][int]$Length
+  )
+  $text = [System.Text.Encoding]::ASCII.GetString($Header, $Offset, $Length)
+  $nullIndex = $text.IndexOf([char]0)
+  if ($nullIndex -ge 0) {
+    $text = $text.Substring(0, $nullIndex)
+  }
+  return $text.Trim()
+}
+
+function Get-TarHeaderOctalValue {
+  param(
+    [Parameter(Mandatory = $true)][byte[]]$Header,
+    [Parameter(Mandatory = $true)][int]$Offset,
+    [Parameter(Mandatory = $true)][int]$Length
+  )
+  $text = Get-TarHeaderString -Header $Header -Offset $Offset -Length $Length
+  if ([string]::IsNullOrWhiteSpace($text)) {
+    return [long]0
+  }
+  return [Convert]::ToInt64($text, 8)
+}
+
+function Resolve-TarDestinationPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$EntryPath
+  )
+  $normalized = ($EntryPath -replace '\\\\', '/').Trim()
+  if ([string]::IsNullOrWhiteSpace($normalized)) {
+    throw "Portable Python archive contains an empty path entry."
+  }
+  if ($normalized.StartsWith('/')) {
+    throw "Portable Python archive entry '$EntryPath' is absolute."
+  }
+  if ($normalized -match '^[A-Za-z]:') {
+    throw "Portable Python archive entry '$EntryPath' is drive-qualified."
+  }
+  $segments = @()
+  foreach ($segment in ($normalized -split '/')) {
+    if ([string]::IsNullOrWhiteSpace($segment) -or $segment -eq '.') {
+      continue
+    }
+    if ($segment -eq '..') {
+      throw "Portable Python archive entry '$EntryPath' escapes the install directory."
+    }
+    $segments += $segment
+  }
+  if ($segments.Count -eq 0) {
+    throw "Portable Python archive entry '$EntryPath' does not contain a usable relative path."
+  }
+  $destination = $Root
+  foreach ($segment in $segments) {
+    $destination = Join-Path $destination $segment
+  }
+  return $destination
+}
+
+function Expand-TarGzArchiveWithPowerShell {
+  param(
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $fileStream = $null
+  $gzipStream = $null
+  $fileBuffer = New-Object byte[] 65536
+  try {
+    $fileStream = [System.IO.File]::OpenRead($ArchivePath)
+    $gzipStream = New-Object System.IO.Compression.GzipStream($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+
+    while ($true) {
+      $header = New-Object byte[] 512
+      $headerBytes = Read-ExactStreamBytes -Stream $gzipStream -Buffer $header -Count 512
+      if ($headerBytes -eq 0) {
+        break
+      }
+      if ($headerBytes -lt 512) {
+        throw "Portable Python archive header is truncated."
+      }
+      if (($header | Measure-Object -Sum).Sum -eq 0) {
+        break
+      }
+
+      $name = Get-TarHeaderString -Header $header -Offset 0 -Length 100
+      $prefix = Get-TarHeaderString -Header $header -Offset 345 -Length 155
+      if ($prefix) {
+        $name = if ($name) { "$prefix/$name" } else { $prefix }
+      }
+      $size = Get-TarHeaderOctalValue -Header $header -Offset 124 -Length 12
+      $typeFlag = [char]$header[156]
+      if ($typeFlag -eq [char]0) {
+        $typeFlag = '0'
+      }
+      $destinationPath = Resolve-TarDestinationPath -Root $Destination -EntryPath $name
+
+      switch ($typeFlag) {
+        '5' {
+          New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
+        }
+        default {
+          $parent = Split-Path -Parent $destinationPath
+          if ($parent) {
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+          }
+          $outputStream = $null
+          try {
+            $outputStream = [System.IO.File]::Open($destinationPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $remaining = [long]$size
+            while ($remaining -gt 0) {
+              $chunkSize = [int][Math]::Min($fileBuffer.Length, $remaining)
+              $read = Read-ExactStreamBytes -Stream $gzipStream -Buffer $fileBuffer -Count $chunkSize
+              if ($read -lt $chunkSize) {
+                throw "Portable Python archive entry '$name' ended unexpectedly."
+              }
+              $outputStream.Write($fileBuffer, 0, $read)
+              $remaining -= $read
+            }
+          } finally {
+            if ($outputStream) {
+              $outputStream.Dispose()
+            }
+          }
+        }
+      }
+
+      $padding = (512 - ($size % 512)) % 512
+      if ($padding -gt 0) {
+        Skip-StreamBytes -Stream $gzipStream -Count $padding
+      }
+    }
+  } finally {
+    if ($gzipStream) {
+      $gzipStream.Dispose()
+    }
+    if ($fileStream) {
+      $fileStream.Dispose()
+    }
+  }
+}
+
+function Expand-TarGzArchive {
+  param(
+    [Parameter(Mandatory = $true)][string]$ArchivePath,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+  if ($tar) {
+    try {
+      $exitCode = Invoke-NativeCommand -FilePath $tar.Source -Arguments @("-xzf", $ArchivePath, "-C", $Destination)
+      if ($exitCode -eq 0) {
+        return "tar.exe"
+      }
+      Write-InstallLog "tar.exe failed with exit code $exitCode; falling back to the built-in PowerShell extractor."
+    } catch {
+      Write-InstallLog "tar.exe is unavailable or blocked; falling back to the built-in PowerShell extractor. $($_.Exception.Message)"
+    }
+  } else {
+    Write-InstallLog "tar.exe is unavailable or blocked; falling back to the built-in PowerShell extractor."
+  }
+
+  Expand-TarGzArchiveWithPowerShell -ArchivePath $ArchivePath -Destination $Destination
+  return "powershell"
+}
+
+function Promote-StagedPortablePythonRuntime {
+  param([Parameter(Mandatory = $true)][string]$StageDir)
+
+  if (Test-Path -LiteralPath $PythonRuntimeBackupDir) {
+    Remove-DirectoryStrict -Path $PythonRuntimeBackupDir
+  }
+
+  $movedActiveRuntime = $false
+  try {
+    if (Test-Path -LiteralPath $PythonRuntimeDir) {
+      Move-Item -LiteralPath $PythonRuntimeDir -Destination $PythonRuntimeBackupDir -Force
+      $movedActiveRuntime = $true
+    }
+    Move-Item -LiteralPath $StageDir -Destination $PythonRuntimeDir -Force
+
+    $promotedPython = Join-Path $PythonRuntimeDir "python\\python.exe"
+    if (!(Test-PythonUsable -Command $promotedPython)) {
+      try {
+        Remove-DirectoryStrict -Path $PythonRuntimeDir
+      } finally {
+        if ($movedActiveRuntime -and !(Test-Path -LiteralPath $PythonRuntimeDir) -and (Test-Path -LiteralPath $PythonRuntimeBackupDir)) {
+          Move-Item -LiteralPath $PythonRuntimeBackupDir -Destination $PythonRuntimeDir -Force
+        }
+      }
+      throw "Pinned portable Python runtime validation failed after promotion."
+    }
+  } catch {
+    if ($movedActiveRuntime -and !(Test-Path -LiteralPath $PythonRuntimeDir) -and (Test-Path -LiteralPath $PythonRuntimeBackupDir)) {
+      Move-Item -LiteralPath $PythonRuntimeBackupDir -Destination $PythonRuntimeDir -Force
+    }
+    throw
+  }
+
+  if (Test-Path -LiteralPath $PythonRuntimeBackupDir) {
+    Remove-Item -LiteralPath $PythonRuntimeBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Get-PythonRuntimeUrls {
+  $bases = @($PythonRuntimeFallbackMirrors) + @($TencentPythonInstallMirror)
+  $urls = foreach ($base in $bases) {
+    if (-not [string]::IsNullOrWhiteSpace($base)) {
+      "$($base.TrimEnd('/'))/$PythonBuildStandaloneBuild/$PythonRuntimeFileName"
+    }
+  }
+  return @($urls | Select-Object -Unique)
+}
+
+function Install-PortablePython {
+  if ((Test-Path -LiteralPath $PortablePython) -and (Test-PythonUsable -Command $PortablePython)) {
+    Write-InstallLog "Pinned portable Python is already ready: $PortablePython"
+    return $PortablePython
+  }
+
+  $runtimeUrls = @(Get-PythonRuntimeUrls)
+  $archivePath = Join-Path $CacheDir $PythonRuntimeFileName
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $PythonRuntimeSha256)) {
+    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+    Invoke-DownloadFile -Urls $runtimeUrls -OutFile $archivePath -TimeoutSec 1200 -ExpectedSha256 $PythonRuntimeSha256
+  }
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $PythonRuntimeSha256)) {
+    throw "Pinned Python runtime SHA256 validation failed."
+  }
+
+  $stageDir = Join-Path $InstallRoot (".python-runtime-stage-" + [guid]::NewGuid().ToString("N"))
+  try {
+    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+    $extractor = Expand-TarGzArchive -ArchivePath $archivePath -Destination $stageDir
+    Write-InstallLog "Pinned Python runtime extracted via $extractor."
+    $stagedPython = Join-Path $stageDir "python\\python.exe"
+    if (!(Test-Path -LiteralPath $stagedPython) -or !(Test-PythonUsable -Command $stagedPython)) {
+      throw "Pinned Python runtime validation failed after extraction."
+    }
+
+    Promote-StagedPortablePythonRuntime -StageDir $stageDir
+  } finally {
+    Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  if (!(Test-Path -LiteralPath $PortablePython) -or !(Test-PythonUsable -Command $PortablePython)) {
+    throw "Pinned portable Python was not installed correctly."
+  }
+  Write-InstallLog "Pinned portable Python installed: $PortablePython"
+  return $PortablePython
+}
+
+function Get-OcrWheelhouseUrl {
+  $platform = "win_amd64"
+  return "$($OcrWheelhouseBaseUrl.TrimEnd("/"))/$platform/index.html"
+}
+
+function Install-OcrPackagesFromWheelhouse {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  $wheelhouseUrl = Get-OcrWheelhouseUrl
+  Write-InstallLog "Installing OCR packages from CDN wheelhouse: $wheelhouseUrl"
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
+  return $exitCode -eq 0
+}
+
+function Install-OcrPackagesWithPip {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  if (Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath) {
+    return $true
+  }
+  Write-InstallLog "CDN OCR wheelhouse install failed; retrying package indexes."
+  Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "pip", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl) | Out-Null
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
+  if ($exitCode -eq 0) {
+    return $true
+  }
+  Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl))
+  return $exitCode -eq 0
+}
+
+function Install-OcrCompatibilityPackages {
+  param([Parameter(Mandatory = $true)][string]$PythonPath)
+  Write-InstallLog "Installing the pinned OCR Windows compatibility stack."
+  $commonArguments = @("-m", "pip", "install", "--upgrade", "--force-reinstall") + $OcrCompatibilityPackageRequirements
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
+  if ($exitCode -eq 0) {
+    return $true
+  }
+  Write-InstallLog "Tencent PyPI compatibility install failed; retrying with PyPI only."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $PypiFallbackIndexUrl))
+  return $exitCode -eq 0
+}
+
+function Setup-PythonEnvironment {
+  $venvPython = Join-Path $VenvDir "Scripts\\python.exe"
+  if ((Test-Path -LiteralPath $venvPython) -and (Test-OcrPythonReady -PythonPath $venvPython)) {
+    Write-InstallLog "OCR Python environment is already ready."
+    return $venvPython
+  }
+
+  $python = Find-Python
+  if ($python) {
+    Write-InstallLog "Using existing Python command: $python"
+    Invoke-Python -PythonCommand $python -m venv $VenvDir | Out-Null
+    if ((Test-Path -LiteralPath $venvPython) -and (Install-OcrPackagesWithPip -PythonPath $venvPython) -and (Test-OcrPythonReady -PythonPath $venvPython)) {
+      Write-InstallLog "Python OCR environment ready via existing Python."
+      return $venvPython
+    }
+    Write-InstallLog "Existing Python OCR setup failed; falling back to pinned portable Python."
+    Remove-DirectoryStrict -Path $VenvDir
+    $script:OcrCompatibilityRepairAttempted = $false
+  }
+
+  $python = Install-PortablePython
+  Write-InstallLog "Creating an isolated OCR environment with pinned Python 3.12."
+  Invoke-Python -PythonCommand $python -m venv $VenvDir | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Pinned Python 3.12 failed to create the OCR virtual environment."
+  }
+  if (!(Test-Path -LiteralPath $venvPython)) {
+    throw "venv python not found: $venvPython"
+  }
+  if (!(Install-OcrPackagesWithPip -PythonPath $venvPython)) {
+    throw "rapidocr-onnxruntime / pillow install failed. Please check network and retry."
+  }
+  if (!(Test-OcrPythonReady -PythonPath $venvPython)) {
+    $failureDetail = Get-OcrImportFailureDetail
+    if ($failureDetail) {
+      throw "rapidocr-onnxruntime import validation failed. $failureDetail"
+    }
+    throw "rapidocr-onnxruntime import validation failed. See the OCR import probe in install.log."
+  }
+  Write-InstallLog "Python OCR environment ready via pinned portable Python."
+  return $venvPython
+}
+
+Write-InstallLog "Installing local OCR component into $InstallRoot"
+if (!(Test-Path -LiteralPath $PythonScript)) {
+  $downloadedScript = Join-Path $InstallRoot "ocr_image.downloaded.py"
+  $assetBase = $TencentOcrAssetBaseUrl.TrimEnd("/")
+  Download-TextFile -Url "$assetBase/ocr_image.py" -OutFile $downloadedScript
+  $PythonScript = $downloadedScript
+}
+
+$null = $InstallerCapability
+Remove-DirectoryStrict -Path $StagingVenvDir
+$VenvPython = Setup-PythonEnvironment
+Copy-Item -LiteralPath $PythonScript -Destination $RuntimeScript -Force
+$activated = Promote-StagedOcrEnvironment
+
+if ($activated) {
+  Write-InstallLog "Local OCR component installed."
+  Write-Host "Python: $(Join-Path $ActiveVenvDir 'Scripts\\python.exe')"
+}
+Write-Host "Script: $RuntimeScript"
+`;
+  }
+});
+
+// local-ocr/install-local-ocr-macos.sh
+var require_install_local_ocr_macos = __commonJS({
+  "local-ocr/install-local-ocr-macos.sh"(exports2, module2) {
+    module2.exports = '#!/usr/bin/env bash\nset -euo pipefail\n\nINSTALL_ROOT="${HOME}/.wechat-inbox-local-ocr"\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nPYTHON_SCRIPT="${SCRIPT_DIR}/ocr_image.py"\nVENV_DIR="${INSTALL_ROOT}/venv"\nPYTHON_RUNTIME_DIR="${INSTALL_ROOT}/python-runtime"\nCACHE_DIR="${INSTALL_ROOT}/cache"\nRUNTIME_SCRIPT="${INSTALL_ROOT}/ocr_image.py"\nLOG_PATH="${INSTALL_ROOT}/install.log"\n\nTENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"\nTENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"\nTENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"\nGITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"\nPYTHON_RUNTIME_MIRRORS=("$GITHUB_PYTHON_INSTALL_MIRROR" "$TENCENT_PYTHON_INSTALL_MIRROR")\nOCR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-ocr/wheels"\nTENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"\nPYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"\n\nDOWNLOAD_LOW_SPEED_LIMIT=10240\nDOWNLOAD_LOW_SPEED_TIME=180\nPYTHON_BUILD_STANDALONE_BUILD="20260623"\nPYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"\nPYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"\nPYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"\nPORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python3"\nOCR_PACKAGE_REQUIREMENTS=("rapidocr-onnxruntime==1.4.4" "pillow==12.3.0")\n\nmkdir -p "$INSTALL_ROOT" "$CACHE_DIR"\n: > "$LOG_PATH"\n\nlog() {\n  echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") $*" | tee -a "$LOG_PATH"\n}\n\n# ── Downloads ───────────────────────────────────────────────────────────────\n\ncurl_supports_retry_all_errors() {\n  command -v curl >/dev/null 2>&1 && curl --help all 2>/dev/null | grep -q -- \'--retry-all-errors\'\n}\n\ndownload_with_curl() {\n  local url="$1"\n  local out_file="$2"\n  local max_time="${3:-300}"\n  if curl_supports_retry_all_errors; then\n    curl -fL --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors \\\n      --connect-timeout 30 \\\n      --max-time "$max_time" \\\n      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\\n      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\\n      -o "$out_file" "$url"\n  else\n    curl -fL --silent --show-error --retry 5 --retry-delay 2 \\\n      --connect-timeout 30 \\\n      --max-time "$max_time" \\\n      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\\n      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\\n      -o "$out_file" "$url"\n  fi\n}\n\ndownload_with_retry() {\n  local url="$1"\n  local out_file="$2"\n  local label="${3:-file}"\n  local max_time="${4:-300}"\n  local attempt\n  for attempt in 1 2 3; do\n    log "Downloading ${label} (attempt ${attempt}/3): ${url}"\n    rm -f "$out_file"\n    if command -v curl >/dev/null 2>&1; then\n      if download_with_curl "$url" "$out_file" "$max_time" && [ -s "$out_file" ]; then\n        return 0\n      fi\n    elif command -v wget >/dev/null 2>&1; then\n      if wget -q --tries=3 --timeout=30 -O "$out_file" "$url" && [ -s "$out_file" ]; then\n        return 0\n      fi\n    else\n      log "ERROR: Neither curl nor wget is available."\n      return 1\n    fi\n    rm -f "$out_file"\n    sleep $((attempt * 2))\n  done\n  log "ERROR: Download failed for ${label}: ${url}"\n  return 1\n}\n\nis_python_usable() {\n  local python_bin="$1"\n  [ -n "$python_bin" ] || return 1\n  if [ ! -x "$python_bin" ]; then\n    python_bin="$(command -v "$python_bin" 2>/dev/null || true)"\n    [ -n "$python_bin" ] || return 1\n  fi\n  "$python_bin" -c \'import sys, venv; raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 13) else 1)\' >/dev/null 2>&1\n}\n\nfind_existing_python() {\n  local candidates=(\n    "${HOME}/.wechat-inbox-local-asr/python-venv/bin/python"\n    "${HOME}/.wechat-inbox-local-asr/venv/bin/python"\n    "${HOME}/.wechat-inbox-local-asr/.venv/bin/python"\n    "/opt/homebrew/bin/python3"\n    "/usr/local/bin/python3"\n  )\n  local candidate\n  for candidate in "${candidates[@]}"; do\n    if is_python_usable "$candidate"; then\n      echo "$candidate"\n      return 0\n    fi\n  done\n  candidate="$(command -v python3 2>/dev/null || true)"\n  if [ -n "$candidate" ] && is_python_usable "$candidate"; then\n    echo "$candidate"\n    return 0\n  fi\n  return 1\n}\n\nvalidate_ocr_python() {\n  local python_bin="$1"\n  "$python_bin" -c "from rapidocr_onnxruntime import RapidOCR; print(\'rapidocr-ready\')" 2>&1\n}\n\ndetect_ocr_wheel_platform() {\n  local arch\n  arch="$(uname -m)"\n  case "$arch" in\n    arm64)  echo "macosx_11_0_arm64" ;;\n    x86_64) echo "macosx_11_0_x86_64" ;;\n    *)\n      log "ERROR: Unsupported macOS wheelhouse architecture: $arch"\n      return 1\n      ;;\n  esac\n}\n\nocr_wheelhouse_url() {\n  local wheel_platform\n  wheel_platform="$(detect_ocr_wheel_platform)" || return 1\n  echo "${OCR_WHEELHOUSE_BASE_URL%/}/${wheel_platform}/index.html"\n}\n\ninstall_ocr_packages_from_wheelhouse() {\n  local installer="$1"\n  shift\n  local wheelhouse_url\n  wheelhouse_url="$(ocr_wheelhouse_url)" || return 1\n  log "Installing OCR packages from CDN wheelhouse: $wheelhouse_url"\n  "$installer" "$@" install --upgrade \\\n    --no-index \\\n    --find-links "$wheelhouse_url" \\\n    "${OCR_PACKAGE_REQUIREMENTS[@]}" 2>&1\n}\n\ninstall_ocr_packages_with_python() {\n  local python_bin="$1"\n  export PIP_DISABLE_PIP_VERSION_CHECK=1\n  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true\n  if install_ocr_packages_from_wheelhouse "$python_bin" -m pip; then\n    return 0\n  fi\n  log "CDN OCR wheelhouse install failed; retrying package indexes."\n  "$python_bin" -m pip install --upgrade pip \\\n    -i "$TENCENT_PIP_INDEX_URL" \\\n    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true\n  if "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \\\n    -i "$TENCENT_PIP_INDEX_URL" \\\n    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then\n    return 0\n  fi\n  log "Tencent PyPI mirror install failed; retrying with PyPI only."\n  "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \\\n    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1\n}\n\npython_runtime_file_name() {\n  local arch\n  arch="$(uname -m)"\n  case "$arch" in\n    arm64)  echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;\n    x86_64) echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-x86_64-apple-darwin-install_only.tar.gz" ;;\n    *)\n      log "ERROR: Unsupported macOS architecture: $arch"\n      return 1\n      ;;\n  esac\n}\n\npython_runtime_sha256() {\n  case "$(uname -m)" in\n    arm64) echo "$PYTHON_RUNTIME_SHA256_ARM64" ;;\n    x86_64) echo "$PYTHON_RUNTIME_SHA256_X64" ;;\n    *) return 1 ;;\n  esac\n}\n\nfile_sha256() {\n  shasum -a 256 "$1" | awk \'{ print toupper($1) }\'\n}\n\nverify_sha256() {\n  local file_path="$1"\n  local expected_sha256="$2"\n  [ -s "$file_path" ] || return 1\n  [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]\n}\n\ninstall_portable_python() {\n  if is_python_usable "$PORTABLE_PYTHON"; then\n    log "Pinned portable Python is already ready: $PORTABLE_PYTHON"\n    return 0\n  fi\n\n  local file_name expected_sha256 archive_path runtime_url runtime_mirror stage_dir staged_python\n  file_name="$(python_runtime_file_name)" || return 1\n  expected_sha256="$(python_runtime_sha256)" || return 1\n  archive_path="${CACHE_DIR}/${file_name}"\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    rm -f "$archive_path"\n    for runtime_mirror in "${PYTHON_RUNTIME_MIRRORS[@]}"; do\n      runtime_url="${runtime_mirror%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}"\n      rm -f "$archive_path"\n      if download_with_retry "$runtime_url" "$archive_path" "pinned Python runtime" 1200 \\\n        && verify_sha256 "$archive_path" "$expected_sha256"; then\n        break\n      fi\n      log "Pinned Python runtime source failed or did not match SHA256: ${runtime_mirror}"\n    done\n  fi\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    log "ERROR: Pinned Python runtime SHA256 validation failed."\n    return 1\n  fi\n\n  stage_dir="$(mktemp -d "${INSTALL_ROOT}/.python-runtime-stage.XXXXXX")"\n  if ! tar -xzf "$archive_path" -C "$stage_dir"; then\n    rm -rf "$stage_dir"\n    log "ERROR: Pinned Python runtime extraction failed."\n    return 1\n  fi\n  staged_python="${stage_dir}/python/bin/python3"\n  if ! is_python_usable "$staged_python"; then\n    rm -rf "$stage_dir"\n    log "ERROR: Pinned Python runtime validation failed after extraction."\n    return 1\n  fi\n\n  rm -rf "$PYTHON_RUNTIME_DIR"\n  mv "$stage_dir" "$PYTHON_RUNTIME_DIR"\n  if ! is_python_usable "$PORTABLE_PYTHON"; then\n    log "ERROR: Pinned portable Python was not installed correctly."\n    return 1\n  fi\n  log "Pinned portable Python installed: $PORTABLE_PYTHON"\n  return 0\n}\n\n# ── Python venv via pinned portable runtime ─────────────────────────────────\n\nsetup_python_venv() {\n  # If venv already exists and works, skip.\n  local venv_python="${VENV_DIR}/bin/python"\n  if [ -x "$venv_python" ] && validate_ocr_python "$venv_python" >/dev/null 2>&1; then\n    log "OCR Python environment is already ready."\n    return 0\n  fi\n\n  local existing_python\n  existing_python="$(find_existing_python || true)"\n  if [ -n "$existing_python" ]; then\n    log "Reusing existing Python for OCR environment: $existing_python"\n    rm -rf "$VENV_DIR"\n    if "$existing_python" -m venv "$VENV_DIR" 2>&1 \\\n      && [ -x "$venv_python" ] \\\n      && install_ocr_packages_with_python "$venv_python" \\\n      && validate_ocr_python "$venv_python" >/dev/null 2>&1; then\n      log "Python OCR environment ready via existing Python."\n      return 0\n    fi\n    log "Existing Python OCR setup failed; falling back to pinned portable Python."\n    rm -rf "$VENV_DIR"\n  fi\n\n  install_portable_python || return 1\n  log "Creating an isolated OCR environment with pinned Python 3.12."\n  rm -rf "$VENV_DIR"\n  if ! "$PORTABLE_PYTHON" -m venv "$VENV_DIR" 2>&1; then\n    log "ERROR: Pinned Python 3.12 failed to create the OCR virtual environment."\n    return 1\n  fi\n\n  if [ ! -x "$venv_python" ]; then\n    log "ERROR: Python venv was not created at $venv_python"\n    return 1\n  fi\n\n  log "Installing rapidocr-onnxruntime and pillow..."\n  if ! install_ocr_packages_with_python "$venv_python"; then\n    log "ERROR: rapidocr-onnxruntime / pillow 安装失败。请检查网络连接后重试。"\n    return 1\n  fi\n\n  # Validate.\n  if ! validate_ocr_python "$venv_python"; then\n    log "ERROR: rapidocr-onnxruntime 导入验证失败。"\n    return 1\n  fi\n\n  log "Python OCR environment ready."\n  return 0\n}\n\n# ── OCR script ──────────────────────────────────────────────────────────────\n\ndownload_text_file() {\n  local url="$1"\n  local out_file="$2"\n  download_with_retry "$url" "$out_file" "ocr script" 180\n  test -s "$out_file" || {\n    log "ERROR: Downloaded file is empty or invalid: $url"\n    return 1\n  }\n}\n\ninstall_ocr_script() {\n  local source_script=""\n  local downloaded_script="${INSTALL_ROOT}/ocr_image.downloaded.py"\n  local staged_script="${INSTALL_ROOT}/.ocr_image.py.tmp.$$"\n\n  is_valid_ocr_script() {\n    local candidate="$1"\n    [ -s "$candidate" ] \\\n      && grep -q \'RapidOCR\' "$candidate" \\\n      && grep -q -- \'--input\' "$candidate" \\\n      && grep -q -- \'--output\' "$candidate"\n  }\n\n  if is_valid_ocr_script "$RUNTIME_SCRIPT"; then\n    log "OCR script is already ready."\n    return 0\n  fi\n\n  # Community plugin updates may not include extra runtime files, so bundled\n  # assets are preferred but the CDN remains the normal fallback.\n  if is_valid_ocr_script "$PYTHON_SCRIPT"; then\n    source_script="$PYTHON_SCRIPT"\n    log "Using bundled OCR script."\n  elif download_text_file "${TENCENT_OCR_ASSET_BASE_URL%/}/ocr_image.py" "$downloaded_script" \\\n    && is_valid_ocr_script "$downloaded_script"; then\n    source_script="$downloaded_script"\n    log "OCR script downloaded from CDN."\n  fi\n\n  if [ -z "$source_script" ]; then\n    log "ERROR: 无法获取有效的 OCR 脚本。请检查网络连接后重试。"\n    return 1\n  fi\n\n  rm -f "$staged_script"\n  cp "$source_script" "$staged_script"\n  if ! is_valid_ocr_script "$staged_script"; then\n    rm -f "$staged_script"\n    log "ERROR: OCR 脚本校验失败。"\n    return 1\n  fi\n  mv -f "$staged_script" "$RUNTIME_SCRIPT"\n  log "OCR script installed atomically."\n  return 0\n}\n\n# ── Main ────────────────────────────────────────────────────────────────────\n\nlog "Installing local OCR component into $INSTALL_ROOT"\n\ninstall_ocr_script || {\n  log "status=failed"\n  log "stage=ocr_script"\n  log "OCR component installation failed at script download step."\n  exit 1\n}\n\nsetup_python_venv || {\n  log "status=failed"\n  log "stage=python_environment"\n  log "OCR component installation failed at Python environment step."\n  exit 1\n}\n\nlog "status=success"\nlog "stage=complete"\nlog "Local OCR component installed."\necho "Python: ${VENV_DIR}/bin/python"\necho "Script: $RUNTIME_SCRIPT"\n';
+  }
+});
+
+// local-ocr/ocr_image.py
+var require_ocr_image = __commonJS({
+  "local-ocr/ocr_image.py"(exports2, module2) {
+    module2.exports = '#!/usr/bin/env python3\nimport argparse\nimport json\nimport sys\nfrom pathlib import Path\n\n\ndef flatten_rapidocr_result(value):\n    if value is None:\n        return []\n    if hasattr(value, "txts"):\n        return [str(item).strip() for item in getattr(value, "txts", []) if str(item).strip()]\n    if isinstance(value, tuple) and value:\n        return flatten_rapidocr_result(value[0])\n    if isinstance(value, list):\n        texts = []\n        for item in value:\n            if item is None:\n                continue\n            if isinstance(item, str):\n                text = item.strip()\n            elif isinstance(item, (list, tuple)) and len(item) >= 2:\n                text = str(item[1]).strip()\n            elif isinstance(item, dict):\n                text = str(item.get("text") or item.get("rec_text") or item.get("txt") or "").strip()\n            else:\n                text = str(item).strip()\n            if text:\n                texts.append(text)\n        return texts\n    return []\n\n\ndef main():\n    parser = argparse.ArgumentParser(description="Run local OCR for one image.")\n    parser.add_argument("--input", required=True, help="Input image path")\n    parser.add_argument("--output", required=True, help="Output text path")\n    parser.add_argument("--json", action="store_true", help="Write JSON result instead of plain text")\n    args = parser.parse_args()\n\n    image_path = Path(args.input)\n    if not image_path.exists():\n        raise FileNotFoundError(f"input image not found: {image_path}")\n\n    try:\n        from rapidocr_onnxruntime import RapidOCR\n    except Exception:\n        from rapidocr import RapidOCR\n\n    engine = RapidOCR()\n    result = engine(str(image_path))\n    texts = flatten_rapidocr_result(result)\n    text = "\\n".join(texts).strip()\n\n    output_path = Path(args.output)\n    output_path.parent.mkdir(parents=True, exist_ok=True)\n    if args.json:\n        output_path.write_text(json.dumps({"text": text, "lines": texts}, ensure_ascii=False), encoding="utf-8")\n    else:\n        output_path.write_text(text, encoding="utf-8")\n    print(text)\n\n\nif __name__ == "__main__":\n    try:\n        main()\n    except Exception as error:\n        print(f"LOCAL_OCR_ERROR: {error}", file=sys.stderr)\n        sys.exit(1)\n';
+  }
+});
+
 // src/date-utils.js
 var require_date_utils = __commonJS({
   "src/date-utils.js"(exports2, module2) {
@@ -4470,6 +6383,44 @@ var require_local_douyin_resolver_utils = __commonJS({
       return asset;
     }
     __name(selectLocalDouyinResolverAsset2, "selectLocalDouyinResolverAsset");
+    function parseOfficialChecksums(text) {
+      const checksums = /* @__PURE__ */ new Map();
+      for (const line of String(text || "").split(/\r?\n/)) {
+        const match = line.match(/^([a-f0-9]{64})\s+\*?(.+)$/i);
+        if (match) checksums.set(match[2].trim(), match[1].toLowerCase());
+      }
+      return checksums;
+    }
+    __name(parseOfficialChecksums, "parseOfficialChecksums");
+    function buildLocalDouyinResolverGithubManifest2(releasePayload, checksumsText) {
+      const tagName = String(releasePayload && releasePayload.tag_name || "").trim();
+      if (!/^\d{4}\.\d{2}\.\d{2}(?:[.-][A-Za-z0-9.-]+)?$/.test(tagName)) return null;
+      const checksums = parseOfficialChecksums(checksumsText);
+      const releaseBaseUrl = `https://github.com/yt-dlp/yt-dlp/releases/download/${tagName}`;
+      const windowsSha256 = checksums.get("yt-dlp.exe");
+      const macosSha256 = checksums.get("yt-dlp_macos");
+      if (!isValidSha256(windowsSha256) || !isValidSha256(macosSha256)) return null;
+      return {
+        schemaVersion: 1,
+        upstream: "yt-dlp",
+        version: tagName,
+        assets: {
+          "win32-x64": {
+            url: `${releaseBaseUrl}/yt-dlp.exe`,
+            sha256: windowsSha256
+          },
+          "darwin-arm64": {
+            url: `${releaseBaseUrl}/yt-dlp_macos`,
+            sha256: macosSha256
+          },
+          "darwin-x64": {
+            url: `${releaseBaseUrl}/yt-dlp_macos`,
+            sha256: macosSha256
+          }
+        }
+      };
+    }
+    __name(buildLocalDouyinResolverGithubManifest2, "buildLocalDouyinResolverGithubManifest");
     function getLocalDouyinResolverRoot2(homeDir) {
       const root = String(homeDir || "");
       const pathApi = /^(?:[a-z]:[\\/]|\\\\)/i.test(root) ? path2.win32 : path2;
@@ -4521,6 +6472,8 @@ var require_local_douyin_resolver_utils = __commonJS({
     module2.exports = {
       isValidSha256,
       selectLocalDouyinResolverAsset: selectLocalDouyinResolverAsset2,
+      parseOfficialChecksums,
+      buildLocalDouyinResolverGithubManifest: buildLocalDouyinResolverGithubManifest2,
       getLocalDouyinResolverRoot: getLocalDouyinResolverRoot2,
       isDouyinCookieDomain,
       buildNetscapeCookieFile: buildNetscapeCookieFile2,
@@ -5569,6 +7522,11 @@ var http = require("http");
 var https = require("https");
 var os = require("os");
 var path = require("path");
+var EMBEDDED_LOCAL_ASR_WINDOWS_INSTALLER_SOURCE = require_install_local_asr();
+var EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE = require_install_local_asr_macos();
+var EMBEDDED_LOCAL_OCR_WINDOWS_INSTALLER_SOURCE = require_install_local_ocr();
+var EMBEDDED_LOCAL_OCR_MACOS_INSTALLER_SOURCE = require_install_local_ocr_macos();
+var EMBEDDED_LOCAL_OCR_RUNTIME_SOURCE = require_ocr_image();
 var {
   Modal,
   Notice,
@@ -5731,6 +7689,7 @@ var { createDouyinStructuredContentBuilder } = require_social_platform_content_u
 var { createDouyinMediaResolutionDiagnosticBuilder } = require_social_media_diagnostic_utils();
 var {
   selectLocalDouyinResolverAsset,
+  buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
   buildNetscapeCookieFile,
   extractLocalDouyinResolverMediaUrls
@@ -5772,7 +7731,7 @@ __name(loadPdfJsLibrary, "loadPdfJsLibrary");
 var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.118";
+var PLUGIN_RUNTIME_VERSION = "1.3.119";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -5798,11 +7757,12 @@ var LOCAL_TRANSCRIPTION_PLAN = "local_transcription_beta";
 var LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ["local_transcription_trial"];
 var LOCAL_COMPONENT_CDN_BASE_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com";
 var LOCAL_DOUYIN_RESOLVER_MANIFEST_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/yt-dlp/latest.json`;
+var LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 var LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 9e4;
 var LOCAL_ASR_INSTALLER_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1";
 var LOCAL_ASR_MACOS_INSTALLER_URL = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh";
-var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "5798e3fab037ff0bb970e0452b4c5df32a4d6d52920e5904ae9ac3bea5ed7d02";
-var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074";
+var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "ac093b480ccf10fca55f46c967389c897664b697b9bda49017a7ba1a4128e2d2";
+var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "650f1b259a94efa30015ca02200cd7b800a0abe8e95e65d970abe258b9ad7847";
 var LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
 var LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
 var LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1e3;
@@ -6802,6 +8762,50 @@ function downloadTextViaNode(url, requestHeaders = {}) {
   });
 }
 __name(downloadTextViaNode, "downloadTextViaNode");
+async function downloadTextWithFallback(url, requestHeaders = {}) {
+  try {
+    const response = await requestUrl({ url, method: "GET", headers: requestHeaders });
+    return response.text || "";
+  } catch (error) {
+    return downloadTextViaNode(url, requestHeaders);
+  }
+}
+__name(downloadTextWithFallback, "downloadTextWithFallback");
+async function fetchLocalDouyinResolverManifest() {
+  let githubError = null;
+  try {
+    const githubHeaders = {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "wechat-inbox-sync-component-fallback"
+    };
+    const releasePayload = JSON.parse(await downloadTextWithFallback(
+      LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL,
+      githubHeaders
+    ));
+    const tagName = String(releasePayload && releasePayload.tag_name || "").trim();
+    if (!/^\d{4}\.\d{2}\.\d{2}(?:[.-][A-Za-z0-9.-]+)?$/.test(tagName)) {
+      throw new Error("GitHub release tag is invalid");
+    }
+    const checksumsUrl = `https://github.com/yt-dlp/yt-dlp/releases/download/${tagName}/SHA2-256SUMS`;
+    const checksumsText = await downloadTextWithFallback(checksumsUrl, githubHeaders);
+    const manifest = buildLocalDouyinResolverGithubManifest(releasePayload, checksumsText);
+    if (!manifest) throw new Error("GitHub release metadata or checksums are invalid");
+    return { manifest, source: "github" };
+  } catch (error) {
+    githubError = error;
+  }
+  try {
+    const manifestText = await downloadTextWithFallback(`${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`);
+    const manifest = JSON.parse(manifestText);
+    if (!manifest || manifest.schemaVersion !== 1 || !manifest.assets) {
+      throw new Error("CloudBase manifest schema is invalid");
+    }
+    return { manifest, source: "cloudbase" };
+  } catch (cloudbaseError) {
+    throw new Error(`GitHub 与 CloudBase 组件清单均不可用：${cloudbaseError.message || cloudbaseError}; GitHub: ${githubError && (githubError.message || githubError)}`);
+  }
+}
+__name(fetchLocalDouyinResolverManifest, "fetchLocalDouyinResolverManifest");
 function downloadBinaryViaNode(url) {
   return new Promise((resolve, reject) => {
     let parsed;
@@ -6937,7 +8941,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       source,
       /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
       [1, 3, 10]
-    ) && !source.includes("SIMPLIFIED_PROMPT") && !source.includes("--prompt") && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"') && source.includes("CHUNK_SECONDS=120") && source.includes("choose_chunk_seconds") && source.includes("find_metal_resources_dir") && source.includes("GGML_METAL_PATH_RESOURCES") && source.includes("metalAcceleration=failed") && source.includes("transcribe-last.log") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes("run_with_heartbeat segmenting") && source.includes("validate_local_asr_inference") && source.includes("TENCENT_MODEL_URL=") && source.includes("bootstrap_uv") && source.includes("detect_uv_arch") && source.includes("setup_python_and_packages") && source.includes("UV_PYTHON_DOWNLOADS=automatic") && source.includes("UV_PYTHON_PREFERENCE=managed") && source.includes("PYTHON_BUILD_STANDALONE_BUILD=") && source.includes("PYTHON_BUILD_STANDALONE_VERSION=") && source.includes("PYTHON_RUNTIME_VERSION=") && source.includes("PYTHON_RUNTIME_SHA256_ARM64=") && source.includes("PYTHON_RUNTIME_SHA256_X64=") && source.includes("TENCENT_PYTHON_DOWNLOAD_BASE=") && source.includes("PORTABLE_PYTHON=") && source.includes("install_portable_python") && source.includes("python_runtime_sha256") && source.includes('verify_sha256 "$archive_path" "$expected_sha256"') && source.includes("sys.version.split()[0] == sys.argv[1]") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes('"$UV_BIN" python install 3.12') && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python') && source.includes('mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && !source.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && portablePythonIndex >= 0 && uvManagedPythonIndex > portablePythonIndex;
+    ) && !source.includes("SIMPLIFIED_PROMPT") && !source.includes("--prompt") && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"') && source.includes("CHUNK_SECONDS=120") && source.includes("choose_chunk_seconds") && source.includes("find_metal_resources_dir") && source.includes("GGML_METAL_PATH_RESOURCES") && source.includes("metalAcceleration=failed") && source.includes("transcribe-last.log") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes("run_with_heartbeat segmenting") && source.includes("validate_local_asr_inference") && source.includes("TENCENT_MODEL_URL=") && source.includes("bootstrap_uv") && source.includes("detect_uv_arch") && source.includes("setup_python_and_packages") && source.includes("UV_PYTHON_DOWNLOADS=automatic") && source.includes("UV_PYTHON_PREFERENCE=managed") && source.includes("PYTHON_BUILD_STANDALONE_BUILD=") && source.includes("PYTHON_BUILD_STANDALONE_VERSION=") && source.includes("PYTHON_RUNTIME_VERSION=") && source.includes("PYTHON_RUNTIME_SHA256_ARM64=") && source.includes("PYTHON_RUNTIME_SHA256_X64=") && source.includes("TENCENT_PYTHON_DOWNLOAD_BASE=") && source.includes('GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"') && source.includes("PYTHON_DOWNLOAD_BASES=") && source.includes("PORTABLE_PYTHON=") && source.includes("install_portable_python") && source.includes("python_runtime_sha256") && source.includes('verify_sha256 "$archive_path" "$expected_sha256"') && source.includes("sys.version.split()[0] == sys.argv[1]") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes('"$UV_BIN" python install 3.12') && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python') && source.includes('mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && !source.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && portablePythonIndex >= 0 && uvManagedPythonIndex > portablePythonIndex;
   }
   return hasMinimumInstallerVersion(
     source,
@@ -6952,7 +8956,7 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
   if (!source.includes("rapidocr-onnxruntime==1.4.4")) return false;
   if (!source.includes("pillow==12.3.0")) return false;
   if (isMac) {
-    return source.includes("TENCENT_OCR_ASSET_BASE_URL") && source.includes("TENCENT_PIP_INDEX_URL") && source.includes("TENCENT_PYTHON_INSTALL_MIRROR") && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"') && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"') && source.includes("PORTABLE_PYTHON=") && source.includes("download_with_retry") && source.includes("find_existing_python") && source.includes("install_portable_python") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes(".wechat-inbox-local-asr/python-venv/bin/python");
+    return source.includes("TENCENT_OCR_ASSET_BASE_URL") && source.includes("TENCENT_PIP_INDEX_URL") && source.includes("TENCENT_PYTHON_INSTALL_MIRROR") && source.includes('GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"') && source.includes("PYTHON_RUNTIME_MIRRORS=") && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"') && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"') && source.includes("PORTABLE_PYTHON=") && source.includes("download_with_retry") && source.includes("find_existing_python") && source.includes("install_portable_python") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes(".wechat-inbox-local-asr/python-venv/bin/python");
   }
   return source.includes("$TencentOcrAssetBaseUrl") && source.includes("$TencentPipIndexUrl") && source.includes("$TencentPythonInstallMirror") && source.includes('$PythonBuildStandaloneBuild = "20260623"') && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"') && source.includes("$PortablePython") && source.includes("$PythonRuntimeFallbackMirrors") && source.includes("function Get-PythonRuntimeUrls") && source.includes("Invoke-DownloadFile -Urls") && source.includes("Download-TextFile") && source.includes("function Install-PortablePython") && source.includes("function Expand-TarGzArchiveWithPowerShell") && source.includes("unique-staging-transaction-v2") && source.includes("$python = Install-PortablePython") && source.includes("Invoke-Python -PythonCommand $python -m venv $VenvDir");
 }
@@ -18994,9 +20998,13 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const sourcePath = path.join(this.getPluginBaseDir(), "local-ocr", "ocr_image.py");
     const targetPath = path.join(path.dirname(installerPath), "ocr_image.py");
     try {
-      if (!fs.existsSync(sourcePath)) return;
-      if (path.resolve(sourcePath) === path.resolve(targetPath)) return;
-      fs.copyFileSync(sourcePath, targetPath);
+      if (fs.existsSync(sourcePath) && path.resolve(sourcePath) !== path.resolve(targetPath)) {
+        fs.copyFileSync(sourcePath, targetPath);
+        return;
+      }
+      if (path.resolve(sourcePath) !== path.resolve(targetPath)) {
+        fs.writeFileSync(targetPath, EMBEDDED_LOCAL_OCR_RUNTIME_SOURCE, "utf8");
+      }
     } catch (error) {
       console.warn("Failed to copy bundled OCR runtime asset:", error);
     }
@@ -19082,7 +21090,25 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const isMac = this.getConfiguredLocalAsrPlatform() === "darwin";
     const installerUrl = isMac ? LOCAL_OCR_MACOS_INSTALLER_URL : LOCAL_OCR_INSTALLER_URL;
     const installerSha256 = isMac ? LOCAL_OCR_MACOS_INSTALLER_SHA256 : LOCAL_OCR_WINDOWS_INSTALLER_SHA256;
-    const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-ocr-installer-${Date.now()}${isMac ? ".sh" : ".ps1"}`);
+    const downloadedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "wechat-inbox-local-ocr-installer-"));
+    const downloadedPath = path.join(downloadedDirectory, isMac ? "install-local-ocr-macos.sh" : "install-local-ocr.ps1");
+    const embeddedScriptText = isMac ? EMBEDDED_LOCAL_OCR_MACOS_INSTALLER_SOURCE : EMBEDDED_LOCAL_OCR_WINDOWS_INSTALLER_SOURCE;
+    if (isTrustedLocalOcrInstallerSource(embeddedScriptText, installerSha256, isMac)) {
+      fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(embeddedScriptText, isMac), "utf8");
+      this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
+      return downloadedPath;
+    }
+    if (fs.existsSync(installerPath)) {
+      const bundledScriptText = fs.readFileSync(installerPath, "utf8");
+      if (isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)) {
+        if (isMac) {
+          fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), "utf8");
+          this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
+          return downloadedPath;
+        }
+        return installerPath;
+      }
+    }
     try {
       let scriptText = "";
       try {
@@ -19098,17 +21124,6 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
       return downloadedPath;
     } catch (downloadError) {
-      if (fs.existsSync(installerPath)) {
-        const bundledScriptText = fs.readFileSync(installerPath, "utf8");
-        if (isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)) {
-          if (isMac) {
-            fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), "utf8");
-            this.copyBundledLocalOcrRuntimeAssets(downloadedPath);
-            return downloadedPath;
-          }
-          return installerPath;
-        }
-      }
       throw new Error(`无法下载本地转写 OCR 安装器：${downloadError.message || downloadError}`);
     }
   }
@@ -19276,6 +21291,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const isMac = this.getConfiguredLocalAsrPlatform() === "darwin";
     const installerUrl = isMac ? LOCAL_ASR_MACOS_INSTALLER_URL : LOCAL_ASR_INSTALLER_URL;
     const downloadedPath = path.join(os.tmpdir(), `wechat-inbox-local-asr-installer-${Date.now()}${isMac ? ".sh" : ".ps1"}`);
+    const embeddedScriptText = isMac ? EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE : EMBEDDED_LOCAL_ASR_WINDOWS_INSTALLER_SOURCE;
     const isInstallerCurrent = /* @__PURE__ */ __name((scriptText) => isLocalAsrInstallerCurrent(scriptText, isMac), "isInstallerCurrent");
     const fetchInstallerText = typeof options.fetchInstallerText === "function" ? options.fetchInstallerText : async (url) => {
       try {
@@ -19285,6 +21301,20 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         return downloadTextViaNode(url);
       }
     };
+    if (isInstallerCurrent(embeddedScriptText)) {
+      fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(embeddedScriptText, isMac), "utf8");
+      return downloadedPath;
+    }
+    if (fs.existsSync(installerPath)) {
+      const bundledScriptText = fs.readFileSync(installerPath, "utf8");
+      if (isInstallerCurrent(bundledScriptText)) {
+        if (isMac) {
+          fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), "utf8");
+          return downloadedPath;
+        }
+        return installerPath;
+      }
+    }
     try {
       const scriptText = await fetchInstallerText(`${installerUrl}?t=${Date.now()}`);
       if (!isInstallerCurrent(scriptText)) {
@@ -19293,16 +21323,6 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(scriptText, isMac), "utf8");
       return downloadedPath;
     } catch (downloadError) {
-      if (fs.existsSync(installerPath)) {
-        const bundledScriptText = fs.readFileSync(installerPath, "utf8");
-        if (isInstallerCurrent(bundledScriptText)) {
-          if (isMac) {
-            fs.writeFileSync(downloadedPath, normalizeInstallerScriptText(bundledScriptText, isMac), "utf8");
-            return downloadedPath;
-          }
-          return installerPath;
-        }
-      }
       throw new Error(`无法下载最新本地转写安装器：${downloadError.message || downloadError}`);
     }
   }
@@ -20025,19 +22045,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const hasCachedExecutable = fs.existsSync(executablePath);
     this.localDouyinResolverInstallPromise = (async () => {
       try {
-        let manifestText = "";
-        try {
-          const response = await requestUrl({ url: `${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`, method: "GET" });
-          manifestText = response.text || "";
-        } catch (error) {
-          manifestText = await downloadTextViaNode(`${LOCAL_DOUYIN_RESOLVER_MANIFEST_URL}?t=${Date.now()}`);
-        }
-        let manifest;
-        try {
-          manifest = JSON.parse(manifestText);
-        } catch (error) {
-          throw new Error("本地抖音解析组件更新清单无效");
-        }
+        const { manifest, source: manifestSource } = await fetchLocalDouyinResolverManifest();
         const asset = selectLocalDouyinResolverAsset(manifest, platform, process.arch);
         if (!asset) {
           throw new Error(`本地抖音解析组件暂未提供 ${platform}-${process.arch} 安装包`);
@@ -20067,7 +22075,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           } catch (error) {
           }
         }
-        return { executablePath, updated: true, source: "cdn" };
+        return { executablePath, updated: true, source: manifestSource };
       } catch (error) {
         if (hasCachedExecutable && fs.existsSync(executablePath)) {
           return { executablePath, updated: false, source: "stale-cache" };

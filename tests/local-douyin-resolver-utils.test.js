@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   isValidSha256,
   selectLocalDouyinResolverAsset,
+  buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
   buildNetscapeCookieFile,
   extractLocalDouyinResolverMediaUrls,
@@ -21,6 +22,17 @@ const manifest = {
 assert.deepEqual(selectLocalDouyinResolverAsset(manifest, 'win32', 'x64'), manifest.assets['win32-x64']);
 assert.equal(selectLocalDouyinResolverAsset(manifest, 'linux', 'x64'), null);
 assert.equal(isValidSha256('not-a-hash'), false);
+
+const githubManifest = buildLocalDouyinResolverGithubManifest(
+  { tag_name: '2026.08.24' },
+  `${'b'.repeat(64)}  yt-dlp.exe\n${'c'.repeat(64)}  yt-dlp_macos\n`,
+);
+assert.equal(
+  githubManifest.assets['win32-x64'].url,
+  'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.24/yt-dlp.exe',
+);
+assert.equal(githubManifest.assets['darwin-arm64'].sha256, 'c'.repeat(64));
+assert.equal(buildLocalDouyinResolverGithubManifest({ tag_name: '../latest' }, ''), null);
 
 assert.equal(
   getLocalDouyinResolverRoot('C:\\Users\\Alice'),

@@ -689,7 +689,7 @@ function Promote-StagedPortablePythonRuntime {
 }
 
 function Get-PythonRuntimeUrls {
-  $bases = @($TencentPythonInstallMirror) + @($PythonRuntimeFallbackMirrors)
+  $bases = @($PythonRuntimeFallbackMirrors) + @($TencentPythonInstallMirror)
   $urls = foreach ($base in $bases) {
     if (-not [string]::IsNullOrWhiteSpace($base)) {
       "$($base.TrimEnd('/'))/$PythonBuildStandaloneBuild/$PythonRuntimeFileName"

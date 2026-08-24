@@ -533,7 +533,7 @@ const copyModelWindowsAsrInstallerSource = windowsAsrInstallerSource
     'Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force',
   );
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.10"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.11"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
@@ -12902,34 +12902,20 @@ async function runLocalAsrRepairDecisionTests() {
   installerMatrixPlugin.getConfiguredLocalAsrInstallRoot = () => installedRoot;
   installerMatrixPlugin.getBundledLocalAsrInstallerPath = () => bundledInstallerPath;
   try {
+    let bundledInstallerNetworkCalls = 0;
     const downloadedInstallerPath = await installerMatrixPlugin.getAvailableLocalAsrInstallerPath({
-      fetchInstallerText: async () => windowsAsrInstallerSource,
+      fetchInstallerText: async () => {
+        bundledInstallerNetworkCalls += 1;
+        throw new Error('the bundled installer must avoid a network request');
+      },
     });
     assert.notStrictEqual(downloadedInstallerPath, bundledInstallerPath);
+    assert.strictEqual(bundledInstallerNetworkCalls, 0);
     assert.strictEqual(
       helpers.isLocalAsrInstallerCurrent(fs.readFileSync(downloadedInstallerPath, 'utf8'), false),
       true,
     );
     fs.rmSync(downloadedInstallerPath, { force: true });
-
-    for (const networkFailure of [new Error('HTTP 418'), new Error('request timed out')]) {
-      const fallbackInstallerPath = await installerMatrixPlugin.getAvailableLocalAsrInstallerPath({
-        fetchInstallerText: async () => {
-          throw networkFailure;
-        },
-      });
-      assert.strictEqual(fallbackInstallerPath, bundledInstallerPath);
-    }
-
-    installerMatrixPlugin.getBundledLocalAsrInstallerPath = () => path.join(installerMatrixRoot, 'missing-installer.ps1');
-    await assert.rejects(
-      installerMatrixPlugin.getAvailableLocalAsrInstallerPath({
-        fetchInstallerText: async () => {
-          throw new Error('HTTP 418');
-        },
-      }),
-      /HTTP 418/,
-    );
     assert.strictEqual(
       helpers.getLocalAsrInstallStatus(
         installedRoot,
@@ -12943,6 +12929,27 @@ async function runLocalAsrRepairDecisionTests() {
     }
   } finally {
     fs.rmSync(installerMatrixRoot, { recursive: true, force: true });
+  }
+
+  const embeddedOcrPlugin = new PluginClass();
+  embeddedOcrPlugin.settings = helpers.mergeSettings({ localAsrPlatform: 'win32' });
+  embeddedOcrPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+  embeddedOcrPlugin.getPluginBaseDir = () => path.join(os.tmpdir(), 'missing-wechat-inbox-plugin-dir');
+  const embeddedOcrInstallerPath = await embeddedOcrPlugin.getAvailableLocalOcrInstallerPath();
+  try {
+    const embeddedOcrSource = fs.readFileSync(embeddedOcrInstallerPath, 'utf8');
+    assert.strictEqual(helpers.isLocalOcrInstallerCurrent(embeddedOcrSource, false), true);
+    assert.strictEqual(
+      helpers.isTrustedLocalOcrInstallerSource(
+        embeddedOcrSource,
+        helpers.LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
+        false,
+      ),
+      true,
+    );
+    assert.ok(fs.existsSync(path.join(path.dirname(embeddedOcrInstallerPath), 'ocr_image.py')));
+  } finally {
+    fs.rmSync(path.dirname(embeddedOcrInstallerPath), { recursive: true, force: true });
   }
 
   const crashRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-crash-log-'));
