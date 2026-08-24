@@ -202,9 +202,11 @@ async function run() {
     fileTitle: '公众号-最终标题',
   });
   assert.strictEqual(alignedRecord.folderName, '公众号-最终标题');
-  assert.deepStrictEqual(renamedFolders, []);
-  assert.ok(alignedRecord.record.metadata.markdown.includes(`${sourceFolder}/${imageDirectory}/cover.jpg`));
-  assert.ok(alignedRecord.record.metadata.snapshot.includes(`${sourceFolder}/${imageDirectory}/body.jpg`));
+  assert.deepStrictEqual(renamedFolders, [{ from: sourceFolder, to: targetFolder }]);
+  assert.ok(alignedRecord.record.metadata.markdown.includes(`${targetFolder}/${imageDirectory}/cover.jpg`));
+  assert.ok(alignedRecord.record.metadata.snapshot.includes(`${targetFolder}/${imageDirectory}/body.jpg`));
+  assert.strictEqual(alignedRecord.sourceImagePath, `${sourceFolder}/${imageDirectory}/`);
+  assert.strictEqual(alignedRecord.targetImagePath, `${targetFolder}/${imageDirectory}/`);
 
   // Some converters add localized image references only while final Markdown is
   // rendered. The existing per-note image directory must still be moved.
@@ -224,9 +226,9 @@ async function run() {
     fileTitle: '公众号-最终标题',
   });
   assert.strictEqual(lateMetadataAligned.folderName, '公众号-最终标题');
-  assert.deepStrictEqual(lateMetadataRenames, []);
-  assert.strictEqual(lateMetadataAligned.sourceImagePath, undefined);
-  assert.strictEqual(lateMetadataAligned.targetImagePath, undefined);
+  assert.deepStrictEqual(lateMetadataRenames, [{ from: sourceFolder, to: targetFolder }]);
+  assert.strictEqual(lateMetadataAligned.sourceImagePath, `${sourceFolder}/${imageDirectory}/`);
+  assert.strictEqual(lateMetadataAligned.targetImagePath, `${targetFolder}/${imageDirectory}/`);
 
   // The downloader can discover the final title before the note writer does.
   // In that order images already live in the final folder while the pre-hydration
@@ -236,7 +238,7 @@ async function run() {
   const finalFeishuFolder = '临时收集/2026-08-11/飞书图片本地化测试';
   finalFolderAlreadyExistsCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
   finalFolderAlreadyExistsCase.plugin.app.vault.adapter = {
-    async exists(path) { return path === finalFeishuFolder; },
+    async exists(path) { return path === `${finalFeishuFolder}/${imageDirectory}`; },
     async rename(from, to) { finalFolderRenames.push({ from, to }); },
   };
   const finalFolderAligned = await finalFolderAlreadyExistsCase.plugin.alignSocialArticleImageFolder({
@@ -254,7 +256,7 @@ async function run() {
   const createdNotes = [];
   const writeRecordRenames = [];
   const writeRecordFolders = [];
-  const writeRecordSourceFolder = '临时收集/2026-08-11/公众号-最终标题';
+  const writeRecordSourceFolder = '临时收集/2026-08-11/公众号-临时标题';
   writeRecordCase.plugin.settings = {
     inboxDir: '临时收集',
     noteSaveMode: 'date',
@@ -293,7 +295,9 @@ async function run() {
   }, '2026-08-11T10:01:00.000Z');
   const writeRecordTargetFolder = '临时收集/2026-08-11/公众号-最终标题';
   assert.strictEqual(writeRecordResult.filePath, `${writeRecordTargetFolder}/公众号-最终标题.md`);
-  assert.deepStrictEqual(writeRecordRenames, []);
+  assert.deepStrictEqual(writeRecordRenames, [
+    { from: writeRecordSourceFolder, to: writeRecordTargetFolder },
+  ]);
   assert.ok(writeRecordFolders.includes(writeRecordTargetFolder));
   assert.strictEqual(createdNotes.length, 1);
   assert.strictEqual(createdNotes[0].path, `${writeRecordTargetFolder}/公众号-最终标题.md`);

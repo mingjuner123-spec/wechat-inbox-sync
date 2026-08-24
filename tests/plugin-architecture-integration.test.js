@@ -31,6 +31,7 @@ const expectedModules = [
   'record-identity-utils',
   'record-metadata-utils',
   'record-state-utils',
+  'social-article-folder-utils',
   'social-comments-markdown-utils',
   'social-engagement-utils',
   'social-media-context-utils',
