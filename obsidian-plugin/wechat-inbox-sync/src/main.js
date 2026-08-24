@@ -135,7 +135,11 @@ const {
 } = require('./sync-lifecycle-utils');
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
-const { runWechatArticlePipeline } = require('./wechat-article-pipeline');
+const {
+  redactDiagnosticText,
+  runWechatArticlePipeline,
+  sanitizeDiagnosticValue,
+} = require('./wechat-article-pipeline');
 const {
   buildWechatArticleRequestProfiles,
   diagnoseWechatArticleHtml,
@@ -226,7 +230,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.119';
+const PLUGIN_RUNTIME_VERSION = '1.3.120';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1644,7 +1648,7 @@ function runLocalDouyinResolver(executablePath, args, timeoutMs = LOCAL_DOUYIN_R
 function getTransportErrorDiagnostic(error) {
   const source = error && typeof error === 'object' ? error : {};
   const status = Number(source.status || source.statusCode || (source.response && source.response.status) || 0);
-  const message = String(source.message || source || 'unknown error')
+  const message = redactDiagnosticText(source.message || source || 'unknown error')
     .replace(/[\r\n]+/g, ' ')
     .trim()
     .slice(0, 240);
@@ -19916,9 +19920,11 @@ class WechatObsidianInboxPlugin extends Plugin {
             const value = String(details[key] || '').trim();
             if (value) entry[key] = value.slice(0, 120);
           });
-          const errorText = String(details.error || '').replace(/\s+/g, ' ').trim();
-         if (errorText) entry.error = errorText.slice(0, 220);
-          if (details.diagnostic && typeof details.diagnostic === 'object') entry.diagnostic = details.diagnostic;
+          const errorText = redactDiagnosticText(details.error || '').replace(/\s+/g, ' ').trim();
+          if (errorText) entry.error = errorText.slice(0, 220);
+          if (details.diagnostic && typeof details.diagnostic === 'object') {
+            entry.diagnostic = sanitizeDiagnosticValue(details.diagnostic);
+          }
          wechatArticleDiagnostic.stages.push(entry);
         };
         const extracted = await runWechatArticlePipeline({

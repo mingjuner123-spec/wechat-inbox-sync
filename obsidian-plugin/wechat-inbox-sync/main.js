@@ -4799,6 +4799,50 @@ var require_wechat_article_pipeline = __commonJS({
     var FAILURE_CACHE_TTL_MS = 10 * 60 * 1e3;
     var FAILURE_CACHE_MAX_ENTRIES = 128;
     var failureCache = /* @__PURE__ */ new Map();
+    var SENSITIVE_DIAGNOSTIC_KEYS = /* @__PURE__ */ new Set([
+      "access_token",
+      "auth",
+      "authorization",
+      "key",
+      "pass_ticket",
+      "password",
+      "secret",
+      "session",
+      "ticket",
+      "token"
+    ]);
+    function redactDiagnosticText2(value) {
+      return String(value || "").replace(/https?:\/\/[^\s"'<>]+/gi, (match) => {
+        try {
+          const parsed = new URL(match);
+          for (const name of Array.from(parsed.searchParams.keys())) parsed.searchParams.set(name, "[REDACTED]");
+          parsed.hash = "";
+          return parsed.toString();
+        } catch (_) {
+          return match;
+        }
+      }).replace(
+        /\b(access_token|authorization|key|pass_ticket|password|secret|session|ticket|token)\b\s*([=:])\s*([^\s,;&]+)/gi,
+        (_match, name, separator) => `${name}${separator}[REDACTED]`
+      );
+    }
+    __name(redactDiagnosticText2, "redactDiagnosticText");
+    function sanitizeDiagnosticValue2(value, depth = 0) {
+      if (depth > 6 || value === null || value === void 0) return value;
+      if (typeof value === "string") return redactDiagnosticText2(value).slice(0, 1e3);
+      if (typeof value !== "object") return value;
+      if (Array.isArray(value)) return value.slice(0, 100).map((entry) => sanitizeDiagnosticValue2(entry, depth + 1));
+      const result = {};
+      for (const [key, entry] of Object.entries(value).slice(0, 100)) {
+        result[key] = SENSITIVE_DIAGNOSTIC_KEYS.has(String(key).toLowerCase()) ? "[REDACTED]" : sanitizeDiagnosticValue2(entry, depth + 1);
+      }
+      return result;
+    }
+    __name(sanitizeDiagnosticValue2, "sanitizeDiagnosticValue");
+    function getSafeErrorMessage(error) {
+      return redactDiagnosticText2(error && (error.message || error) || "").slice(0, 300);
+    }
+    __name(getSafeErrorMessage, "getSafeErrorMessage");
     function cacheKey(url) {
       return normalizeWechatArticleUrl2(url) || String(url || "").trim();
     }
@@ -4961,7 +5005,7 @@ var require_wechat_article_pipeline = __commonJS({
         staticState: String(staticState || "unknown"),
         staticDiagnosis: staticDiagnostic || null,
         browserState: String(browserState || ""),
-        browserError: browserError ? String(browserError.message || browserError).slice(0, 300) : "",
+        browserError: browserError ? getSafeErrorMessage(browserError) : "",
         attempts,
         attemptedChannels: attempts.map((attempt) => attempt.channel).filter(Boolean),
         attemptedProfiles: Array.from(new Set(attempts.map((attempt) => attempt.profile).filter(Boolean))),
@@ -5016,7 +5060,7 @@ var require_wechat_article_pipeline = __commonJS({
             imageCandidateCount: staticDiagnostic.imageCandidateCount,
             hasJsContent: staticDiagnostic.hasJsContent,
             responseSignature: getResponseSignature(staticDiagnostic),
-            ...Object.keys(staticResult.diagnostic).length ? { transportDiagnostic: staticResult.diagnostic } : {}
+            ...Object.keys(staticResult.diagnostic).length ? { transportDiagnostic: sanitizeDiagnosticValue2(staticResult.diagnostic) } : {}
           });
           if (staticState === "article") {
             clearFailure(normalizedUrl);
@@ -5049,7 +5093,7 @@ var require_wechat_article_pipeline = __commonJS({
             channel: "static",
             ...safeProfile,
             outcome: "error",
-            error: String(staticError && (staticError.message || staticError) || "").slice(0, 300)
+            error: getSafeErrorMessage(staticError)
           });
         }
       }
@@ -5090,7 +5134,7 @@ var require_wechat_article_pipeline = __commonJS({
               hasJsContent: browserDiagnostic.hasJsContent,
               responseSignature: getResponseSignature(browserDiagnostic),
               ...failureCategory ? { failureCategory } : {},
-              ...Object.keys(browser.diagnostic).length ? { renderDiagnostic: browser.diagnostic } : {}
+              ...Object.keys(browser.diagnostic).length ? { renderDiagnostic: sanitizeDiagnosticValue2(browser.diagnostic) } : {}
             });
             const hasBrowserArticle = typeof isUsableBrowserArticle === "function" ? Boolean(isUsableBrowserArticle(browser)) : browserDiagnostic.pageKind === "article";
             if (hasBrowserArticle) {
@@ -5128,8 +5172,8 @@ var require_wechat_article_pipeline = __commonJS({
               channel: "browser",
               ...safeProfile,
               outcome: "error",
-              error: String(browserError && (browserError.message || browserError) || "").slice(0, 300),
-              ...Object.keys(renderDiagnostic).length ? { renderDiagnostic } : {},
+              error: getSafeErrorMessage(browserError),
+              ...Object.keys(renderDiagnostic).length ? { renderDiagnostic: sanitizeDiagnosticValue2(renderDiagnostic) } : {},
               ...!renderDiagnostic.hasJsContent && Number(renderDiagnostic.visibleTextChars) >= 200 ? { failureCategory: "extractor-selector-mismatch" } : {}
             });
           }
@@ -5170,7 +5214,9 @@ var require_wechat_article_pipeline = __commonJS({
       buildRetryableBodyMissingResult,
       getFailureCacheInfo,
       inferWechatArticleFailureCategory,
+      redactDiagnosticText: redactDiagnosticText2,
       normalizeBrowserResult,
+      sanitizeDiagnosticValue: sanitizeDiagnosticValue2,
       runWechatArticlePipeline: runWechatArticlePipeline2
     };
   }
@@ -7793,7 +7839,11 @@ var {
 } = require_sync_lifecycle_utils();
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
 var { createRecordBodyMarkdownHelpers } = require_record_body_markdown_utils();
-var { runWechatArticlePipeline } = require_wechat_article_pipeline();
+var {
+  redactDiagnosticText,
+  runWechatArticlePipeline,
+  sanitizeDiagnosticValue
+} = require_wechat_article_pipeline();
 var {
   buildWechatArticleRequestProfiles,
   diagnoseWechatArticleHtml,
@@ -7878,7 +7928,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.119";
+var PLUGIN_RUNTIME_VERSION = "1.3.120";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -9027,7 +9077,7 @@ __name(runLocalDouyinResolver, "runLocalDouyinResolver");
 function getTransportErrorDiagnostic(error) {
   const source = error && typeof error === "object" ? error : {};
   const status = Number(source.status || source.statusCode || source.response && source.response.status || 0);
-  const message = String(source.message || source || "unknown error").replace(/[\r\n]+/g, " ").trim().slice(0, 240);
+  const message = redactDiagnosticText(source.message || source || "unknown error").replace(/[\r\n]+/g, " ").trim().slice(0, 240);
   return {
     name: String(source.name || "").slice(0, 80),
     code: String(source.code || "").slice(0, 80),
@@ -25169,9 +25219,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             const value = String(details[key] || "").trim();
             if (value) entry[key] = value.slice(0, 120);
           });
-          const errorText = String(details.error || "").replace(/\s+/g, " ").trim();
+          const errorText = redactDiagnosticText(details.error || "").replace(/\s+/g, " ").trim();
           if (errorText) entry.error = errorText.slice(0, 220);
-          if (details.diagnostic && typeof details.diagnostic === "object") entry.diagnostic = details.diagnostic;
+          if (details.diagnostic && typeof details.diagnostic === "object") {
+            entry.diagnostic = sanitizeDiagnosticValue(details.diagnostic);
+          }
           wechatArticleDiagnostic.stages.push(entry);
         }, "addWechatArticleStage");
         const extracted = await runWechatArticlePipeline({

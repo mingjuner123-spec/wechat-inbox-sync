@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
 const {
   buildWechatArticleRequestProfiles,
   classifyWechatArticleHtml,
@@ -15,6 +16,7 @@ const {
 const {
   getFailureCacheInfo,
   inferWechatArticleFailureCategory,
+  redactDiagnosticText,
   runWechatArticlePipeline,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
 
@@ -110,6 +112,14 @@ const fallbackMarkdown = buildWechatArticleFallbackMarkdown({
 });
 assert.match(fallbackMarkdown, /https:\/\/mp\.weixin\.qq\.com\/s\/example/);
 assert.match(fallbackMarkdown, /!\[.*\]\(https:\/\/mmbiz\.qpic\.cn\/cover\.jpg\)/);
+
+const pluginMainSource = fs.readFileSync(
+  require.resolve('../obsidian-plugin/wechat-inbox-sync/src/main.js'),
+  'utf8',
+);
+assert.match(pluginMainSource, /redactDiagnosticText\(details\.error/);
+assert.match(pluginMainSource, /sanitizeDiagnosticValue\(details\.diagnostic\)/);
+assert.match(pluginMainSource, /redactDiagnosticText\(source\.message/);
 
 async function runPipelineTests() {
   let invalidFetchCalls = 0;
@@ -226,6 +236,23 @@ async function runPipelineTests() {
   assert.strictEqual(browserTransportFailure.state, 'body_missing');
   assert.strictEqual(browserTransportFailure.source, 'browser');
   assert.match(browserTransportFailure.diagnostic.browserError, /browser unavailable/);
+
+  const sensitiveFailure = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/sensitive?scene=1&pass_ticket=private-ticket',
+    fetchStatic: async (targetUrl) => {
+      throw new Error(`request failed for ${targetUrl}&token=private-token`);
+    },
+    renderBrowser: async (targetUrl) => {
+      const error = new Error(`loadURL failed: ${targetUrl}&secret=private-secret`);
+      error.wechatArticleDiagnostic = { currentUrl: targetUrl, pass_ticket: 'private-ticket' };
+      throw error;
+    },
+  });
+  const sensitiveDiagnostic = JSON.stringify(sensitiveFailure.diagnostic);
+  assert.doesNotMatch(sensitiveDiagnostic, /private-ticket|private-token|private-secret/);
+  assert.match(sensitiveDiagnostic, /pass_ticket/);
+  assert.match(sensitiveDiagnostic, /\[REDACTED\]/);
+  assert.doesNotMatch(redactDiagnosticText('token=secret-value'), /secret-value/);
 
   browserCalls = 0;
   const captcha = await runWechatArticlePipeline({

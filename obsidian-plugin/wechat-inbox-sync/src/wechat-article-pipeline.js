@@ -12,6 +12,53 @@ const FAILURE_CACHE_TTL_MS = 10 * 60 * 1000;
 const FAILURE_CACHE_MAX_ENTRIES = 128;
 const failureCache = new Map();
 
+const SENSITIVE_DIAGNOSTIC_KEYS = new Set([
+  'access_token',
+  'auth',
+  'authorization',
+  'key',
+  'pass_ticket',
+  'password',
+  'secret',
+  'session',
+  'ticket',
+  'token',
+]);
+
+function redactDiagnosticText(value) {
+  return String(value || '').replace(/https?:\/\/[^\s"'<>]+/gi, (match) => {
+    try {
+      const parsed = new URL(match);
+      for (const name of Array.from(parsed.searchParams.keys())) parsed.searchParams.set(name, '[REDACTED]');
+      parsed.hash = '';
+      return parsed.toString();
+    } catch (_) {
+      return match;
+    }
+  }).replace(
+    /\b(access_token|authorization|key|pass_ticket|password|secret|session|ticket|token)\b\s*([=:])\s*([^\s,;&]+)/gi,
+    (_match, name, separator) => `${name}${separator}[REDACTED]`,
+  );
+}
+
+function sanitizeDiagnosticValue(value, depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return value;
+  if (typeof value === 'string') return redactDiagnosticText(value).slice(0, 1000);
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.slice(0, 100).map((entry) => sanitizeDiagnosticValue(entry, depth + 1));
+  const result = {};
+  for (const [key, entry] of Object.entries(value).slice(0, 100)) {
+    result[key] = SENSITIVE_DIAGNOSTIC_KEYS.has(String(key).toLowerCase())
+      ? '[REDACTED]'
+      : sanitizeDiagnosticValue(entry, depth + 1);
+  }
+  return result;
+}
+
+function getSafeErrorMessage(error) {
+  return redactDiagnosticText(error && (error.message || error) || '').slice(0, 300);
+}
+
 function cacheKey(url) {
   return normalizeWechatArticleUrl(url) || String(url || '').trim();
 }
@@ -183,7 +230,7 @@ function buildRetryableBodyMissingResult({
     staticState: String(staticState || 'unknown'),
     staticDiagnosis: staticDiagnostic || null,
     browserState: String(browserState || ''),
-    browserError: browserError ? String(browserError.message || browserError).slice(0, 300) : '',
+    browserError: browserError ? getSafeErrorMessage(browserError) : '',
     attempts,
     attemptedChannels: attempts.map((attempt) => attempt.channel).filter(Boolean),
     attemptedProfiles: Array.from(new Set(attempts.map((attempt) => attempt.profile).filter(Boolean))),
@@ -240,7 +287,9 @@ async function runWechatArticlePipeline({
         imageCandidateCount: staticDiagnostic.imageCandidateCount,
         hasJsContent: staticDiagnostic.hasJsContent,
         responseSignature: getResponseSignature(staticDiagnostic),
-        ...(Object.keys(staticResult.diagnostic).length ? { transportDiagnostic: staticResult.diagnostic } : {}),
+        ...(Object.keys(staticResult.diagnostic).length
+          ? { transportDiagnostic: sanitizeDiagnosticValue(staticResult.diagnostic) }
+          : {}),
       });
       if (staticState === 'article') {
         clearFailure(normalizedUrl);
@@ -273,7 +322,7 @@ async function runWechatArticlePipeline({
         channel: 'static',
         ...safeProfile,
         outcome: 'error',
-        error: String(staticError && (staticError.message || staticError) || '').slice(0, 300),
+        error: getSafeErrorMessage(staticError),
       });
     }
   }
@@ -319,7 +368,9 @@ async function runWechatArticlePipeline({
           hasJsContent: browserDiagnostic.hasJsContent,
           responseSignature: getResponseSignature(browserDiagnostic),
           ...(failureCategory ? { failureCategory } : {}),
-          ...(Object.keys(browser.diagnostic).length ? { renderDiagnostic: browser.diagnostic } : {}),
+          ...(Object.keys(browser.diagnostic).length
+            ? { renderDiagnostic: sanitizeDiagnosticValue(browser.diagnostic) }
+            : {}),
         });
         const hasBrowserArticle = typeof isUsableBrowserArticle === 'function'
           ? Boolean(isUsableBrowserArticle(browser))
@@ -362,8 +413,10 @@ async function runWechatArticlePipeline({
           channel: 'browser',
           ...safeProfile,
           outcome: 'error',
-          error: String(browserError && (browserError.message || browserError) || '').slice(0, 300),
-          ...(Object.keys(renderDiagnostic).length ? { renderDiagnostic } : {}),
+          error: getSafeErrorMessage(browserError),
+          ...(Object.keys(renderDiagnostic).length
+            ? { renderDiagnostic: sanitizeDiagnosticValue(renderDiagnostic) }
+            : {}),
           ...(!renderDiagnostic.hasJsContent && Number(renderDiagnostic.visibleTextChars) >= 200
             ? { failureCategory: 'extractor-selector-mismatch' }
             : {}),
@@ -412,6 +465,8 @@ module.exports = {
   buildRetryableBodyMissingResult,
   getFailureCacheInfo,
   inferWechatArticleFailureCategory,
+  redactDiagnosticText,
   normalizeBrowserResult,
+  sanitizeDiagnosticValue,
   runWechatArticlePipeline,
 };
