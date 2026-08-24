@@ -519,10 +519,10 @@ const markerOnlyLegacyWindowsAsrScriptSource = [
   'recoveryTriggered=1',
 ].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.27"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.28"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.27"', '$InstallerScriptVersion = "1.2.25"')
+  .replace('$InstallerScriptVersion = "1.2.28"', '$InstallerScriptVersion = "1.2.25"')
   .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
   .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
@@ -533,7 +533,7 @@ const copyModelWindowsAsrInstallerSource = windowsAsrInstallerSource
     'Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force',
   );
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.11"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.12"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
@@ -12203,6 +12203,61 @@ async function runLocalTranscriptionEntitlementTests() {
     skipped: true,
     reason: 'manual-refresh',
   });
+
+  const alreadyReadyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-already-ready-'));
+  try {
+    const asrReadyRoot = path.join(alreadyReadyRoot, 'asr');
+    fs.mkdirSync(path.join(asrReadyRoot, 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(asrReadyRoot, 'models'), { recursive: true });
+    fs.writeFileSync(path.join(asrReadyRoot, 'transcribe.ps1'), currentWindowsAsrScriptSource, 'utf8');
+    fs.writeFileSync(path.join(asrReadyRoot, 'bin', 'whisper-cli.exe'), 'ready-whisper', 'utf8');
+    fs.writeFileSync(path.join(asrReadyRoot, 'bin', 'ffmpeg.exe'), 'ready-ffmpeg', 'utf8');
+    fs.writeFileSync(path.join(asrReadyRoot, 'models', 'ggml-small.bin'), 'ready-model', 'utf8');
+
+    const alreadyReadyAsrPlugin = new PluginClass();
+    alreadyReadyAsrPlugin.settings = helpers.mergeSettings({
+      localAsrPlatform: 'win32',
+      localAsrInstallMode: 'default',
+    });
+    alreadyReadyAsrPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+    alreadyReadyAsrPlugin.getConfiguredLocalAsrInstallRoot = () => asrReadyRoot;
+    alreadyReadyAsrPlugin.ensureLocalTranscriptionAccess = async () => ({ hasAccess: true });
+    alreadyReadyAsrPlugin.getAvailableLocalAsrInstallerPath = async () => {
+      throw new Error('already-ready ASR must not download or prepare an installer');
+    };
+    let savedAlreadyReadyAsrSettings = null;
+    alreadyReadyAsrPlugin.saveSettings = async (settings) => {
+      savedAlreadyReadyAsrSettings = settings;
+      alreadyReadyAsrPlugin.settings = settings;
+    };
+    const alreadyReadyAsrResult = await alreadyReadyAsrPlugin.doInstallLocalAsr();
+    assert.strictEqual(alreadyReadyAsrResult.skipped, true);
+    assert.strictEqual(alreadyReadyAsrResult.reason, 'already-ready');
+    assert.strictEqual(alreadyReadyAsrResult.status.ready, true);
+    assert.strictEqual(savedAlreadyReadyAsrSettings.aiProvider, 'local');
+
+    const ocrReadyRoot = path.join(alreadyReadyRoot, 'ocr');
+    fs.mkdirSync(path.join(ocrReadyRoot, 'venv', 'Scripts'), { recursive: true });
+    fs.writeFileSync(path.join(ocrReadyRoot, 'venv', 'Scripts', 'python.exe'), 'ready-python', 'utf8');
+    fs.writeFileSync(path.join(ocrReadyRoot, 'ocr_image.py'), 'ready-ocr-script', 'utf8');
+
+    const alreadyReadyOcrPlugin = new PluginClass();
+    alreadyReadyOcrPlugin.settings = helpers.mergeSettings({
+      localAsrPlatform: 'win32',
+    });
+    alreadyReadyOcrPlugin.getConfiguredLocalAsrPlatform = () => 'win32';
+    alreadyReadyOcrPlugin.getConfiguredLocalOcrInstallRoot = () => ocrReadyRoot;
+    alreadyReadyOcrPlugin.ensureProFeatureAccess = async () => ({ hasAccess: true });
+    alreadyReadyOcrPlugin.getAvailableLocalOcrInstallerPath = async () => {
+      throw new Error('already-ready OCR must not download or prepare an installer');
+    };
+    const alreadyReadyOcrResult = await alreadyReadyOcrPlugin.doInstallLocalOcr();
+    assert.strictEqual(alreadyReadyOcrResult.skipped, true);
+    assert.strictEqual(alreadyReadyOcrResult.reason, 'already-ready');
+    assert.strictEqual(alreadyReadyOcrResult.status.ready, true);
+  } finally {
+    fs.rmSync(alreadyReadyRoot, { recursive: true, force: true });
+  }
 
   for (const requested of [
     { requireAsr: true, requireOcr: false },

@@ -8,10 +8,10 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.27"
+$InstallerScriptVersion = "1.2.28"
 $NativeProcessRunnerVersion = "diagnostics-process-v1"
-$DownloadLowSpeedLimitBytesPerSecond = 10240
-$DownloadLowSpeedTimeoutSeconds = 90
+$DownloadLowSpeedLimitBytesPerSecond = 65536
+$DownloadLowSpeedTimeoutSeconds = 30
 $DownloadTimeoutSeconds = 1200
 $InstallLockPath = Join-Path $InstallRoot ".install.lock"
 $InstallMutexName = "Global\WechatInboxLocalAsrInstall"
@@ -30,7 +30,9 @@ if (-not [string]::IsNullOrWhiteSpace($TencentCosAssetBaseUrl)) {
   $ModelTencentUrls += "$tencentCosAssetBase/ggml-small.bin"
 }
 $ModelFallbackUrls = @(
-  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+)
+$ModelOfficialFallbackUrls = @(
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 )
 $WhisperWindowsFallbackUrls = @(
@@ -954,7 +956,7 @@ try {
   if (-not $installedWhisper) {
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `
@@ -1015,7 +1017,7 @@ try {
     if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
       Remove-Item -LiteralPath $cachedModelPath -Force
     }
-    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelFallbackUrls -FallbackUrls $ModelTencentUrls) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelFallbackUrls -FallbackUrls @($ModelTencentUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
@@ -1028,7 +1030,7 @@ try {
     Write-Host ($_.Exception.Message)
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsFallbackUrls -FallbackUrls $WhisperWindowsTencentUrls) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `

@@ -3,8 +3,8 @@
   "pluginId": "wechat-inbox-sync",
   "pluginVersion": "1.3.119",
   "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
-  "candidateId": "1.3.119-6e6164f1d132baf2",
-  "aggregateSha256": "6e6164f1d132baf2c02181efa8d1f815dac5fb9cfdde230118bb4053a6ce9a15",
+  "candidateId": "1.3.119-51f21ef8d7a1f3b8",
+  "aggregateSha256": "51f21ef8d7a1f3b8eeb0dd9388d45d1dc6fec1884a92e3728637514dd05eb804",
   "looseAssets": [
     "main.js",
     "manifest.json",
@@ -29,13 +29,13 @@
     },
     {
       "path": "local-asr/install-local-asr-macos.sh",
-      "bytes": 34057,
-      "sha256": "05fa92d8a2196bea2257e0362b795fd2f5f73eb63dff956db6c8ca435946456b"
+      "bytes": 34056,
+      "sha256": "746b35f1241f1b77b5cd9347d17ff9200acbd91f7213e63ff30790f029b5fe49"
     },
     {
       "path": "local-asr/install-local-asr.ps1",
-      "bytes": 63978,
-      "sha256": "f8ce285010f7debc7a21e046e4e521c90141eaa9f1fd470435a75ae49a95eed0"
+      "bytes": 64043,
+      "sha256": "c39f704ff928625583cef8e21ad49ac38966d17a958171ea9676ee75c69ea3ce"
     },
     {
       "path": "local-asr/windows/whisper-bin-x64-compat.json",
@@ -49,13 +49,13 @@
     },
     {
       "path": "local-ocr/install-local-ocr-macos.sh",
-      "bytes": 13252,
-      "sha256": "d5e957cc68f8f6bf9a8f43917a027ee49a8315f4f2ef5a21d41527bdf37d332a"
+      "bytes": 13251,
+      "sha256": "9623ff5b5071f9cf76ad97684f00992c5705bbdaca2e2ed04661ff517e79c0d5"
     },
     {
       "path": "local-ocr/install-local-ocr.ps1",
       "bytes": 32127,
-      "sha256": "ac6b9328abc2918e8818bcaccc815b28c9d42979c2659f93e9526e57a21ac5c3"
+      "sha256": "7ebf366d71277ccd02ddcb4f2d0a340e70741188b8b0c6ea2196effe9134fffa"
     },
     {
       "path": "local-ocr/ocr_image.py",
@@ -64,8 +64,8 @@
     },
     {
       "path": "main.js",
-      "bytes": 2385268,
-      "sha256": "64835e4802a82d010e94d27a6f9fcc22feb10ff46dc15ae9f6ae2cdba5c42a1d"
+      "bytes": 2387030,
+      "sha256": "27cd8f11c97d19461fdb4c687d610adbac12b9853042e7541c01a16a2a3f5822"
     },
     {
       "path": "manifest.json",

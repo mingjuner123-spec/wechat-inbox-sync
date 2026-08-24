@@ -251,8 +251,8 @@ const LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = 'https://api.github.com/rep
 const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
-const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = 'ac6b9328abc2918e8818bcaccc815b28c9d42979c2659f93e9526e57a21ac5c3';
-const LOCAL_OCR_MACOS_INSTALLER_SHA256 = 'd5e957cc68f8f6bf9a8f43917a027ee49a8315f4f2ef5a21d41527bdf37d332a';
+const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '7ebf366d71277ccd02ddcb4f2d0a340e70741188b8b0c6ea2196effe9134fffa';
+const LOCAL_OCR_MACOS_INSTALLER_SHA256 = '9623ff5b5071f9cf76ad97684f00992c5705bbdaca2e2ed04661ff517e79c0d5';
 const LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
 const LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
 const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -1720,6 +1720,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('run_with_heartbeat segmenting')
       && source.includes('validate_local_asr_inference')
       && source.includes('TENCENT_MODEL_URL=')
+      && source.includes('MODEL_URLS=("$MODEL_MIRROR_URL" "$TENCENT_MODEL_URL" "$MODEL_URL")')
       && source.includes('bootstrap_uv')
       && source.includes('detect_uv_arch')
       && source.includes('setup_python_and_packages')
@@ -1732,7 +1733,9 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('PYTHON_RUNTIME_SHA256_X64=')
       && source.includes('TENCENT_PYTHON_DOWNLOAD_BASE=')
       && source.includes('GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"')
-      && source.includes('PYTHON_DOWNLOAD_BASES=')
+      && source.includes('PYTHON_DOWNLOAD_BASES=("$TENCENT_PYTHON_DOWNLOAD_BASE" "$GITHUB_PYTHON_DOWNLOAD_BASE")')
+      && source.includes('DOWNLOAD_LOW_SPEED_LIMIT=65536')
+      && source.includes('DOWNLOAD_LOW_SPEED_TIME=30')
       && source.includes('PORTABLE_PYTHON=')
       && source.includes('install_portable_python')
       && source.indexOf('Package index ASR install failed; retrying Tencent CDN wheelhouse.') >= 0
@@ -1751,7 +1754,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 2, 27],
+      [1, 2, 28],
   )
     && source.includes('function Assert-TranscribeScriptCandidate')
     && source.includes('function Start-TranscribeScriptUpdate')
@@ -1782,7 +1785,10 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('$WhisperWindowsCompatibilitySha256')
     && source.includes('$FfmpegTencentUrls')
     && source.includes('$ModelTencentUrls')
+    && source.includes('$ModelOfficialFallbackUrls')
     && source.includes('Get-EnabledAssetUrls')
+    && source.includes('-PrimaryUrls $ModelFallbackUrls -FallbackUrls @($ModelTencentUrls + $ModelOfficialFallbackUrls)')
+    && source.includes('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls')
     && source.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force')
     && !source.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force')
     && source.includes('$WhisperWindowsFallbackUrls')
@@ -1791,6 +1797,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('Assert-FileSha256')
     && source.includes('GitHub release page parsing failed')
     && source.includes('INSTALLER FAILED')
+    && source.includes('$DownloadLowSpeedLimitBytesPerSecond = 65536')
+    && source.includes('$DownloadLowSpeedTimeoutSeconds = 30')
     && source.includes('$DownloadTimeoutSeconds = 1200')
     && source.includes('--max-time $DownloadTimeoutSeconds')
     && source.includes('System.Text.UTF8Encoding')
@@ -1808,7 +1816,9 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('TENCENT_PIP_INDEX_URL')
       && source.includes('TENCENT_PYTHON_INSTALL_MIRROR')
       && source.includes('GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"')
-      && source.includes('PYTHON_RUNTIME_MIRRORS=')
+      && source.includes('PYTHON_RUNTIME_MIRRORS=("$TENCENT_PYTHON_INSTALL_MIRROR" "$GITHUB_PYTHON_INSTALL_MIRROR")')
+      && source.includes('DOWNLOAD_LOW_SPEED_LIMIT=65536')
+      && source.includes('DOWNLOAD_LOW_SPEED_TIME=30')
       && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"')
       && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"')
       && source.includes('PORTABLE_PYTHON=')
@@ -1828,6 +1838,7 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('$PortablePython')
     && source.includes('$PythonRuntimeFallbackMirrors')
     && source.includes('function Get-PythonRuntimeUrls')
+    && source.includes('$bases = @($TencentPythonInstallMirror) + @($PythonRuntimeFallbackMirrors)')
     && source.includes('Invoke-DownloadFile -Urls')
     && source.includes('Download-TextFile')
     && source.includes('function Install-PortablePython')
@@ -15348,12 +15359,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     );
   }
 
-  async installLocalOcr() {
+  async installLocalOcr(options = {}) {
     if (this.localOcrInstallPromise) {
       new Notice('本地转写组件的图片文字识别模块正在安装中，请等待当前安装完成后再重试。');
       return await this.localOcrInstallPromise;
     }
-    this.localOcrInstallPromise = this.doInstallLocalOcr();
+    this.localOcrInstallPromise = this.doInstallLocalOcr(options);
     try {
       return await this.localOcrInstallPromise;
     } finally {
@@ -15361,14 +15372,22 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async doInstallLocalOcr() {
+  async doInstallLocalOcr(options = {}) {
     await this.ensureProFeatureAccess('本地转写组件安装');
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const installRoot = this.getConfiguredLocalOcrInstallRoot();
+    const existingStatus = getLocalOcrInstallStatus(installRoot, fs.existsSync, platform);
+    if (!options.force && existingStatus.ready) {
+      return {
+        skipped: true,
+        reason: 'already-ready',
+        status: existingStatus,
+      };
+    }
     const installerPath = await this.getAvailableLocalOcrInstallerPath();
     if (!fs.existsSync(installerPath)) {
       throw new Error(`本地转写组件的图片文字识别安装器不存在：${installerPath}`);
     }
-    const platform = this.getConfiguredLocalAsrPlatform();
-    const installRoot = this.getConfiguredLocalOcrInstallRoot();
     const command = buildLocalOcrInstallCommand(installerPath, platform, platform === 'win32' ? installRoot : '');
     new Notice('开始安装本地转写组件的图片文字识别模块，可能需要几分钟。');
     const installResult = await new Promise((resolve, reject) => {
@@ -16337,10 +16356,24 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (mismatchMessage) {
       throw new Error(mismatchMessage);
     }
-    const installerPath = await this.getAvailableLocalAsrInstallerPath();
     const platform = this.getConfiguredLocalAsrPlatform();
     const installMode = normalizeLocalAsrInstallMode(options.installMode || this.settings.localAsrInstallMode);
     const installRoot = this.getConfiguredLocalAsrInstallRoot(installMode);
+    const existingStatus = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
+    if (!options.force && existingStatus.ready) {
+      await this.saveSettings({
+        ...this.settings,
+        aiProvider: 'local',
+        localAsrInstallMode: installMode,
+        localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform, installRoot),
+      });
+      return {
+        skipped: true,
+        reason: 'already-ready',
+        status: existingStatus,
+      };
+    }
+    const installerPath = await this.getAvailableLocalAsrInstallerPath();
     const command = buildLocalAsrInstallCommand(installerPath, platform, platform === 'win32' ? installRoot : '');
     new Notice('开始安装本地转写组件，可能需要几分钟。');
     await new Promise((resolve, reject) => {

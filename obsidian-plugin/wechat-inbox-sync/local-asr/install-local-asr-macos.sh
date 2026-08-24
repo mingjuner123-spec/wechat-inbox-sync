@@ -5,23 +5,23 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.11"
-DOWNLOAD_LOW_SPEED_LIMIT=10240
-DOWNLOAD_LOW_SPEED_TIME=180
+INSTALLER_SCRIPT_VERSION="1.3.12"
+DOWNLOAD_LOW_SPEED_LIMIT=65536
+DOWNLOAD_LOW_SPEED_TIME=30
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
 
 TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
 TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
 GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"
-PYTHON_DOWNLOAD_BASES=("$GITHUB_PYTHON_DOWNLOAD_BASE" "$TENCENT_PYTHON_DOWNLOAD_BASE")
+PYTHON_DOWNLOAD_BASES=("$TENCENT_PYTHON_DOWNLOAD_BASE" "$GITHUB_PYTHON_DOWNLOAD_BASE")
 ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"
 TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
 PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
 TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-MODEL_URLS=("$MODEL_MIRROR_URL" "$MODEL_URL" "$TENCENT_MODEL_URL")
+MODEL_URLS=("$MODEL_MIRROR_URL" "$TENCENT_MODEL_URL" "$MODEL_URL")
 
 cleanup() {
   if [ "$LOCK_HELD" -eq 1 ]; then

@@ -865,6 +865,26 @@ test('the generic component verifier CLI checks immutable assets, aliases, and t
   );
 });
 
+test('the generic component verifier warning mode only downgrades CDN availability failures', () => {
+  const verifier = loadComponentVerifier();
+  assert.equal(
+    verifier.isCdnAvailabilityFailure(new Error('component: CDN returned HTTP 418')),
+    true,
+  );
+  assert.equal(
+    verifier.isCdnAvailabilityFailure(new Error('component: timed out after 15000ms')),
+    true,
+  );
+  assert.equal(
+    verifier.isCdnAvailabilityFailure(new Error('component: byte/hash mismatch')),
+    false,
+  );
+  assert.equal(
+    verifier.isCdnAvailabilityFailure(new Error('local-components/manifest.json: exact committed-byte mismatch')),
+    false,
+  );
+});
+
 test('the generic component verifier checks canonical hashes and pinned external runtimes', async (t) => {
   const fixture = await createComponentCdnFixture(t);
   const verifier = loadComponentVerifier();
