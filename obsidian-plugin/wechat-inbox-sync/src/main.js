@@ -134,6 +134,7 @@ const {
   sanitizeSyncNoteTitle,
 } = require('./sync-lifecycle-utils');
 const { createNoteOutputPlanHelpers } = require('./note-output-plan-utils');
+const { createSocialArticleFolderAlignmentHelpers } = require('./social-article-folder-utils');
 const { createRecordBodyMarkdownHelpers } = require('./record-body-markdown-utils');
 const {
   redactDiagnosticText,
@@ -230,7 +231,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.120';
+const PLUGIN_RUNTIME_VERSION = '1.3.121';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3355,9 +3356,10 @@ function shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageM
     && normalizeSocialArticleImageStorageMode(socialArticleImageStorageMode) === 'local';
 }
 
-// A local social article has one public layout: <platform-title>/<platform-title>.md
-// plus <platform-title>/文章图片/.  Use the same title while downloading assets and
-// while writing the note, so no post-download folder migration is necessary.
+// A local social article has one public layout: <final-title>/<final-title>.md
+// plus <final-title>/文章图片/. Assets can be downloaded under the pre-hydration
+// title, so writeRecord must pass through the shared folder-alignment boundary
+// after the final title is known.
 function getSocialArticleLocalFolderTitle(sourceUrl, title) {
   const safeTitle = sanitizeAttachmentName(title, '文章');
   if (!isSocialArticleUrl(sourceUrl)) return safeTitle;
@@ -13573,6 +13575,17 @@ const {
   buildNoteOutputPlan,
 } = noteOutputPlanHelpers;
 
+const {
+  alignSocialArticleImageFolder: alignSocialArticleFolder,
+} = createSocialArticleFolderAlignmentHelpers({
+  normalizeVaultPath,
+  sanitizeAttachmentName,
+  shouldStoreWebpageNoteInOwnFolder,
+  onWarning: (error) => {
+    console.warn('Failed to align social article image folder with note title', error);
+  },
+});
+
 function getRecordConversionWarning(record) {
   if (!record) return '';
   const metadata = record.metadata || {};
@@ -20477,8 +20490,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     assetFolderTitle,
     fileTitle,
   } = {}) {
-    const targetFolderName = sanitizeAttachmentName(fileTitle, '文章');
-    return { record, folderName: targetFolderName };
+    return alignSocialArticleFolder(record, {
+      sourceUrl,
+      noteDir,
+      assetFolderTitle,
+      fileTitle,
+      storageMode: this.settings && this.settings.socialArticleImageStorageMode,
+      adapter: this.app && this.app.vault && this.app.vault.adapter,
+    });
   }
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const signal = progress.signal || null;
