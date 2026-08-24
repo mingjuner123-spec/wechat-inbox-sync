@@ -8,10 +8,10 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.27"
+$InstallerScriptVersion = "1.2.28"
 $NativeProcessRunnerVersion = "diagnostics-process-v1"
-$DownloadLowSpeedLimitBytesPerSecond = 10240
-$DownloadLowSpeedTimeoutSeconds = 90
+$DownloadLowSpeedLimitBytesPerSecond = 65536
+$DownloadLowSpeedTimeoutSeconds = 30
 $DownloadTimeoutSeconds = 1200
 $InstallLockPath = Join-Path $InstallRoot ".install.lock"
 $InstallMutexName = "Global\WechatInboxLocalAsrInstall"
@@ -30,7 +30,9 @@ if (-not [string]::IsNullOrWhiteSpace($TencentCosAssetBaseUrl)) {
   $ModelTencentUrls += "$tencentCosAssetBase/ggml-small.bin"
 }
 $ModelFallbackUrls = @(
-  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+)
+$ModelOfficialFallbackUrls = @(
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 )
 $WhisperWindowsFallbackUrls = @(
@@ -989,10 +991,10 @@ try {
   if (-not $installedFfmpeg) {
     $ffmpegZip = Join-Path $CacheRoot "ffmpeg.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $FfmpegTencentUrls -FallbackUrls @(
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls @(
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
-      )) `
+      ) -FallbackUrls $FfmpegTencentUrls) `
       -ZipPath $ffmpegZip `
       -StageDir $FfmpegStageDir `
       -MinBytes 10MB `
@@ -1015,7 +1017,7 @@ try {
     if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
       Remove-Item -LiteralPath $cachedModelPath -Force
     }
-    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelTencentUrls -FallbackUrls $ModelFallbackUrls) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelFallbackUrls -FallbackUrls @($ModelTencentUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 

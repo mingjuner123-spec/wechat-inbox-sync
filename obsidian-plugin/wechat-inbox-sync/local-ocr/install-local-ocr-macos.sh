@@ -13,12 +13,14 @@ LOG_PATH="${INSTALL_ROOT}/install.log"
 TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
 TENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"
 TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"
+PYTHON_RUNTIME_MIRRORS=("$TENCENT_PYTHON_INSTALL_MIRROR" "$GITHUB_PYTHON_INSTALL_MIRROR")
 OCR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-ocr/wheels"
 TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
 PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
 
-DOWNLOAD_LOW_SPEED_LIMIT=10240
-DOWNLOAD_LOW_SPEED_TIME=180
+DOWNLOAD_LOW_SPEED_LIMIT=65536
+DOWNLOAD_LOW_SPEED_TIME=30
 PYTHON_BUILD_STANDALONE_BUILD="20260623"
 PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"
 PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"
@@ -161,10 +163,6 @@ install_ocr_packages_with_python() {
   local python_bin="$1"
   export PIP_DISABLE_PIP_VERSION_CHECK=1
   "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  if install_ocr_packages_from_wheelhouse "$python_bin" -m pip; then
-    return 0
-  fi
-  log "CDN OCR wheelhouse install failed; retrying package indexes."
   "$python_bin" -m pip install --upgrade pip \
     -i "$TENCENT_PIP_INDEX_URL" \
     --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
@@ -174,8 +172,12 @@ install_ocr_packages_with_python() {
     return 0
   fi
   log "Tencent PyPI mirror install failed; retrying with PyPI only."
-  "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
-    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
+  if "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
+    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+    return 0
+  fi
+  log "Package index OCR install failed; retrying CDN wheelhouse."
+  install_ocr_packages_from_wheelhouse "$python_bin" -m pip
 }
 
 python_runtime_file_name() {
@@ -216,15 +218,21 @@ install_portable_python() {
     return 0
   fi
 
-  local file_name expected_sha256 archive_path runtime_url stage_dir staged_python
+  local file_name expected_sha256 archive_path runtime_url runtime_mirror stage_dir staged_python
   file_name="$(python_runtime_file_name)" || return 1
   expected_sha256="$(python_runtime_sha256)" || return 1
   archive_path="${CACHE_DIR}/${file_name}"
-  runtime_url="${TENCENT_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}"
-
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
     rm -f "$archive_path"
-    download_with_retry "$runtime_url" "$archive_path" "pinned Python runtime" 1200 || return 1
+    for runtime_mirror in "${PYTHON_RUNTIME_MIRRORS[@]}"; do
+      runtime_url="${runtime_mirror%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}"
+      rm -f "$archive_path"
+      if download_with_retry "$runtime_url" "$archive_path" "pinned Python runtime" 1200 \
+        && verify_sha256 "$archive_path" "$expected_sha256"; then
+        break
+      fi
+      log "Pinned Python runtime source failed or did not match SHA256: ${runtime_mirror}"
+    done
   fi
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
     log "ERROR: Pinned Python runtime SHA256 validation failed."

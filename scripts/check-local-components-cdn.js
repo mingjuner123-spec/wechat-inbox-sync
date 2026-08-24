@@ -49,6 +49,11 @@ const USAGE = `Usage: node scripts/check-local-components-cdn.js [option]
 Options:
   --skip-external-runtimes  Test-only: skip the separately hosted pinned Python runtimes
   --help                    Show this help
+
+Environment:
+  LOCAL_COMPONENTS_CDN_WARN_ON_UNAVAILABLE=1
+    Emit a warning instead of failing when the public CloudBase CDN is
+    unavailable. Byte/hash mismatches and malformed remote content still fail.
 `;
 
 function normalizeBaseUrl(value, label) {
@@ -314,8 +319,23 @@ function parseCliArgs(args) {
   throw new TypeError(`Invalid arguments.\n${USAGE}`);
 }
 
+function parseBooleanEnv(value) {
+  return /^(?:1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
+function isCdnAvailabilityFailure(error) {
+  const message = String(error && error.message || error || '');
+  return (
+    /\bCDN returned HTTP (?:408|418|429|5\d\d)\b/.test(message)
+    || /\btimed out after \d+ms\b/i.test(message)
+    || /\bfetch failed\b/i.test(message)
+  );
+}
+
 async function runCli(args = process.argv.slice(2), {
   failurePrefix = 'LOCAL_COMPONENTS_CDN_CHECK_FAILED',
+  warningPrefix = 'LOCAL_COMPONENTS_CDN_CHECK_WARNING',
+  env = process.env,
 } = {}) {
   try {
     const options = parseCliArgs(args);
@@ -326,6 +346,13 @@ async function runCli(args = process.argv.slice(2), {
     await main(options);
     return 0;
   } catch (error) {
+    if (
+      parseBooleanEnv(env.LOCAL_COMPONENTS_CDN_WARN_ON_UNAVAILABLE)
+      && isCdnAvailabilityFailure(error)
+    ) {
+      process.stderr.write(`${warningPrefix}: ${error.message || error}\n`);
+      return 0;
+    }
     process.stderr.write(`${failurePrefix}: ${error.message || error}\n`);
     return 1;
   }
@@ -350,6 +377,7 @@ module.exports = {
   assertExpectedBytes,
   fetchBytes,
   fetchBytesWithRetry,
+  isCdnAvailabilityFailure,
   main,
   normalizeBaseUrl,
   parseCliArgs,

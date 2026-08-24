@@ -5,21 +5,23 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.10"
-DOWNLOAD_LOW_SPEED_LIMIT=10240
-DOWNLOAD_LOW_SPEED_TIME=180
+INSTALLER_SCRIPT_VERSION="1.3.12"
+DOWNLOAD_LOW_SPEED_LIMIT=65536
+DOWNLOAD_LOW_SPEED_TIME=30
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
 
 TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
 TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"
+PYTHON_DOWNLOAD_BASES=("$TENCENT_PYTHON_DOWNLOAD_BASE" "$GITHUB_PYTHON_DOWNLOAD_BASE")
 ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"
 TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
 PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
 TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-MODEL_URLS=("$TENCENT_MODEL_URL" "$MODEL_MIRROR_URL" "$MODEL_URL")
+MODEL_URLS=("$MODEL_MIRROR_URL" "$TENCENT_MODEL_URL" "$MODEL_URL")
 
 cleanup() {
   if [ "$LOCK_HELD" -eq 1 ]; then
@@ -118,7 +120,7 @@ install_portable_python() {
     return 0
   fi
 
-  local arch archive_name archive_path expected_sha256 stage_dir staged_python archive_url
+  local arch archive_name archive_path expected_sha256 stage_dir staged_python archive_url download_base
   arch="$(uname -m)"
   case "$arch" in
     arm64) archive_name="cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;
@@ -132,18 +134,22 @@ install_portable_python() {
   archive_path="$CACHE_ROOT/$archive_name"
   expected_sha256="$(python_runtime_sha256)" || return 1
   stage_dir="$TEMP_ROOT/python-runtime-stage"
-  archive_url="${TENCENT_PYTHON_DOWNLOAD_BASE%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}"
   rm -rf "$stage_dir"
   mkdir -p "$CACHE_ROOT" "$stage_dir"
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
     rm -f "$archive_path"
-    echo "Downloading pinned portable Python from Tencent CDN..."
-    if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
-      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
-      --max-time 900 -o "$archive_path" "$archive_url"; then
-      echo "Pinned portable Python download failed." >&2
-      return 1
-    fi
+    for download_base in "${PYTHON_DOWNLOAD_BASES[@]}"; do
+      archive_url="${download_base%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}"
+      echo "Downloading pinned portable Python from ${download_base}..."
+      rm -f "$archive_path"
+      if curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
+        --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+        --max-time 900 -o "$archive_path" "$archive_url" \
+        && verify_sha256 "$archive_path" "$expected_sha256"; then
+        break
+      fi
+      echo "Pinned portable Python source failed or did not match SHA256: ${download_base}" >&2
+    done
   fi
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
     echo "Pinned portable Python SHA256 validation failed." >&2
@@ -366,17 +372,18 @@ install_asr_packages_from_wheelhouse() {
 
 install_asr_packages() {
   local python_bin="$1"
-  if install_asr_packages_from_wheelhouse "$python_bin"; then
-    return 0
-  fi
-
-  echo "Tencent CDN ASR wheelhouse install failed; retrying package indexes." >&2
+  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
   "$python_bin" -m pip install --upgrade pip \
     -i "$TENCENT_PIP_INDEX_URL" \
     --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
-  "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
+  if "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
     -i "$TENCENT_PIP_INDEX_URL" \
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+    return 0
+  fi
+
+  echo "Package index ASR install failed; retrying Tencent CDN wheelhouse." >&2
+  install_asr_packages_from_wheelhouse "$python_bin"
 }
 
 setup_python_and_packages() {

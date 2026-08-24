@@ -113,6 +113,11 @@ function getPluginBuildBytes({
     external: ['obsidian'],
     format: 'cjs',
     keepNames: true,
+    loader: {
+      '.ps1': 'text',
+      '.py': 'text',
+      '.sh': 'text',
+    },
     legalComments: 'inline',
     logLevel: 'silent',
     minify: false,

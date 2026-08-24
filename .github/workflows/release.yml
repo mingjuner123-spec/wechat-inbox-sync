@@ -159,6 +159,8 @@ jobs:
           }
 
       - name: Verify public local component assets
+        env:
+          LOCAL_COMPONENTS_CDN_WARN_ON_UNAVAILABLE: '1'
         run: node scripts/check-local-components-cdn.js
 
       - name: Package plugin release assets
