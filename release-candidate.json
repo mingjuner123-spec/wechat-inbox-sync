@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "pluginId": "wechat-inbox-sync",
-  "pluginVersion": "1.3.118",
+  "pluginVersion": "1.3.119",
   "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
-  "candidateId": "1.3.118-8da3da020481ae12",
-  "aggregateSha256": "8da3da020481ae12ded445b79d696e531aa283b9391ee6a3dc5da893cd356a96",
+  "candidateId": "1.3.119-6e6164f1d132baf2",
+  "aggregateSha256": "6e6164f1d132baf2c02181efa8d1f815dac5fb9cfdde230118bb4053a6ce9a15",
   "looseAssets": [
     "main.js",
     "manifest.json",
@@ -29,13 +29,13 @@
     },
     {
       "path": "local-asr/install-local-asr-macos.sh",
-      "bytes": 33596,
-      "sha256": "c489dea38dea03e9c105f333460dd7af653d4ba8202bd9c72896d688d60e40a0"
+      "bytes": 34057,
+      "sha256": "05fa92d8a2196bea2257e0362b795fd2f5f73eb63dff956db6c8ca435946456b"
     },
     {
       "path": "local-asr/install-local-asr.ps1",
       "bytes": 63978,
-      "sha256": "bac259cf92e24a5a1384898401534d78b34375419845ed1f39d0424d2bc824fc"
+      "sha256": "f8ce285010f7debc7a21e046e4e521c90141eaa9f1fd470435a75ae49a95eed0"
     },
     {
       "path": "local-asr/windows/whisper-bin-x64-compat.json",
@@ -49,13 +49,13 @@
     },
     {
       "path": "local-ocr/install-local-ocr-macos.sh",
-      "bytes": 12786,
-      "sha256": "de54e86dec02cca3bdd5e0e84e89ae4dd50918cff3300968aa84e7bb1f846074"
+      "bytes": 13252,
+      "sha256": "d5e957cc68f8f6bf9a8f43917a027ee49a8315f4f2ef5a21d41527bdf37d332a"
     },
     {
       "path": "local-ocr/install-local-ocr.ps1",
-      "bytes": 32129,
-      "sha256": "5798e3fab037ff0bb970e0452b4c5df32a4d6d52920e5904ae9ac3bea5ed7d02"
+      "bytes": 32127,
+      "sha256": "ac6b9328abc2918e8818bcaccc815b28c9d42979c2659f93e9526e57a21ac5c3"
     },
     {
       "path": "local-ocr/ocr_image.py",
@@ -64,13 +64,13 @@
     },
     {
       "path": "main.js",
-      "bytes": 2230490,
-      "sha256": "e92d988e6921370f3fdfcd3a41e695a0640d2db1f1ed7c010cd00f26c052e1ed"
+      "bytes": 2385268,
+      "sha256": "64835e4802a82d010e94d27a6f9fcc22feb10ff46dc15ae9f6ae2cdba5c42a1d"
     },
     {
       "path": "manifest.json",
       "bytes": 398,
-      "sha256": "fd8be1c79f113c1a35b4a9f885f0b2bb616a950ad75625b02a7f8a109c5ad115"
+      "sha256": "c7ce6b06d712abb48c7b4a82057656227f24ca4734cb423f3ccc77d455a0c84c"
     },
     {
       "path": "styles.css",
@@ -79,8 +79,8 @@
     },
     {
       "path": "versions.json",
-      "bytes": 5282,
-      "sha256": "0386d678ec554ab35b4c4fe8fcd594515e9172321808e42a66c7a564ed2dbf1f"
+      "bytes": 5304,
+      "sha256": "e5d9905d99cbd287fda5b1e04256525404e4ab1553b66ec7dacb0b2ffbda95b5"
     }
   ]
 }
