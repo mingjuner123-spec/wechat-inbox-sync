@@ -163,10 +163,6 @@ install_ocr_packages_with_python() {
   local python_bin="$1"
   export PIP_DISABLE_PIP_VERSION_CHECK=1
   "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  if install_ocr_packages_from_wheelhouse "$python_bin" -m pip; then
-    return 0
-  fi
-  log "CDN OCR wheelhouse install failed; retrying package indexes."
   "$python_bin" -m pip install --upgrade pip \
     -i "$TENCENT_PIP_INDEX_URL" \
     --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
@@ -176,8 +172,12 @@ install_ocr_packages_with_python() {
     return 0
   fi
   log "Tencent PyPI mirror install failed; retrying with PyPI only."
-  "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
-    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1
+  if "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \
+    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+    return 0
+  fi
+  log "Package index OCR install failed; retrying CDN wheelhouse."
+  install_ocr_packages_from_wheelhouse "$python_bin" -m pip
 }
 
 python_runtime_file_name() {

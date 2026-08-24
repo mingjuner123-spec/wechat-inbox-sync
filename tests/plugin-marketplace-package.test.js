@@ -243,7 +243,8 @@ assert.ok(macOcrInstaller.includes('macosx_11_0_arm64'));
 assert.ok(macOcrInstaller.includes('macosx_11_0_x86_64'));
 assert.ok(macOcrInstaller.includes('--no-index'));
 assert.ok(macOcrInstaller.includes('--find-links'));
-assert.ok(macOcrInstaller.indexOf('install_ocr_packages_from_wheelhouse') < macOcrInstaller.indexOf('Tencent PyPI mirror install failed'));
+assert.ok(macOcrInstaller.indexOf('Tencent PyPI mirror install failed') < macOcrInstaller.indexOf('Package index OCR install failed; retrying CDN wheelhouse.'));
+assert.ok(macOcrInstaller.indexOf('Package index OCR install failed; retrying CDN wheelhouse.') < macOcrInstaller.lastIndexOf('install_ocr_packages_from_wheelhouse'));
 assert.ok(macOcrInstaller.includes('download_text_file'));
 assert.ok(cdnVerifier.includes('cpython-3.12.13+20260623-x86_64-pc-windows-msvc-install_only.tar.gz'));
 assert.ok(cdnVerifier.includes('cpython-3.12.13+20260623-aarch64-apple-darwin-install_only.tar.gz'));
@@ -773,6 +774,7 @@ assert.ok(macInstaller.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --mana
 assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"'));
 assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
+assert.ok(macInstaller.indexOf('Package index ASR install failed; retrying Tencent CDN wheelhouse.') < macInstaller.lastIndexOf('install_asr_packages_from_wheelhouse'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
 assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.11"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=10240'));

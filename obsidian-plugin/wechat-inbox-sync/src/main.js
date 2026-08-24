@@ -251,8 +251,8 @@ const LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = 'https://api.github.com/rep
 const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
 const LOCAL_ASR_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1';
 const LOCAL_ASR_MACOS_INSTALLER_URL = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh';
-const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = 'ac093b480ccf10fca55f46c967389c897664b697b9bda49017a7ba1a4128e2d2';
-const LOCAL_OCR_MACOS_INSTALLER_SHA256 = '650f1b259a94efa30015ca02200cd7b800a0abe8e95e65d970abe258b9ad7847';
+const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = 'ac6b9328abc2918e8818bcaccc815b28c9d42979c2659f93e9526e57a21ac5c3';
+const LOCAL_OCR_MACOS_INSTALLER_SHA256 = 'd5e957cc68f8f6bf9a8f43917a027ee49a8315f4f2ef5a21d41527bdf37d332a';
 const LOCAL_OCR_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`;
 const LOCAL_OCR_MACOS_INSTALLER_URL = `${LOCAL_COMPONENT_CDN_BASE_URL}/local-components/by-sha256/${LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`;
 const LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -1735,6 +1735,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('PYTHON_DOWNLOAD_BASES=')
       && source.includes('PORTABLE_PYTHON=')
       && source.includes('install_portable_python')
+      && source.indexOf('Package index ASR install failed; retrying Tencent CDN wheelhouse.') >= 0
+      && source.indexOf('Package index ASR install failed; retrying Tencent CDN wheelhouse.') < source.lastIndexOf('install_asr_packages_from_wheelhouse')
       && source.includes('python_runtime_sha256')
       && source.includes('verify_sha256 "$archive_path" "$expected_sha256"')
       && source.includes('sys.version.split()[0] == sys.argv[1]')
@@ -1813,6 +1815,8 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('download_with_retry')
       && source.includes('find_existing_python')
       && source.includes('install_portable_python')
+      && source.indexOf('Package index OCR install failed; retrying CDN wheelhouse.') >= 0
+      && source.indexOf('Package index OCR install failed; retrying CDN wheelhouse.') < source.lastIndexOf('install_ocr_packages_from_wheelhouse')
       && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"')
       && source.includes('.wechat-inbox-local-asr/python-venv/bin/python');
   }
@@ -1828,6 +1832,7 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('Download-TextFile')
     && source.includes('function Install-PortablePython')
     && source.includes('function Expand-TarGzArchiveWithPowerShell')
+    && source.includes('Package index OCR install failed; retrying CDN wheelhouse.')
     && source.includes('unique-staging-transaction-v2')
     && source.includes('$python = Install-PortablePython')
     && source.includes('Invoke-Python -PythonCommand $python -m venv $VenvDir');

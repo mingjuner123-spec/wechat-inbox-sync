@@ -372,17 +372,18 @@ install_asr_packages_from_wheelhouse() {
 
 install_asr_packages() {
   local python_bin="$1"
-  if install_asr_packages_from_wheelhouse "$python_bin"; then
-    return 0
-  fi
-
-  echo "Tencent CDN ASR wheelhouse install failed; retrying package indexes." >&2
+  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
   "$python_bin" -m pip install --upgrade pip \
     -i "$TENCENT_PIP_INDEX_URL" \
     --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
-  "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
+  if "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
     -i "$TENCENT_PIP_INDEX_URL" \
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1
+    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+    return 0
+  fi
+
+  echo "Package index ASR install failed; retrying Tencent CDN wheelhouse." >&2
+  install_asr_packages_from_wheelhouse "$python_bin"
 }
 
 setup_python_and_packages() {

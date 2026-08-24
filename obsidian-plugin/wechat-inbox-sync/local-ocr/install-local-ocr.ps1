@@ -751,10 +751,6 @@ function Install-OcrPackagesFromWheelhouse {
 
 function Install-OcrPackagesWithPip {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
-  if (Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath) {
-    return $true
-  }
-  Write-InstallLog "CDN OCR wheelhouse install failed; retrying package indexes."
   Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "pip", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl) | Out-Null
   $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
   if ($exitCode -eq 0) {
@@ -762,7 +758,11 @@ function Install-OcrPackagesWithPip {
   }
   Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
   $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl))
-  return $exitCode -eq 0
+  if ($exitCode -eq 0) {
+    return $true
+  }
+  Write-InstallLog "Package index OCR install failed; retrying CDN wheelhouse."
+  return Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath
 }
 
 function Install-OcrCompatibilityPackages {
