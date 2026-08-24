@@ -82,10 +82,15 @@ function createSocialArticleFolderAlignmentHelpers(dependencies = {}) {
         if (metadataReferencesPath(targetImagePath)) {
           return { record, folderName: targetFolderName };
         }
-        // The asset location is unknown. Preserve the original references and
-        // keep the note beside their expected source folder rather than
-        // manufacturing a cross-directory or dangling layout.
-        return sourceFallback;
+        if (metadataReferencesPath(sourceImagePath)) {
+          // The metadata still expects source assets that are not currently
+          // visible. Preserve those references and keep the note beside their
+          // expected source folder rather than manufacturing a dangling layout.
+          return sourceFallback;
+        }
+        // No local article-image assets or references exist. Keep the normal
+        // final-title note layout instead of retaining a temporary share ID.
+        return { record, folderName: targetFolderName };
       }
 
       // Never merge into or overwrite a pre-existing final-title folder. Keep

@@ -4209,6 +4209,102 @@ ${diagnosticMarkers ? `${diagnosticMarkers}
   }
 });
 
+// src/social-article-folder-utils.js
+var require_social_article_folder_utils = __commonJS({
+  "src/social-article-folder-utils.js"(exports2, module2) {
+    "use strict";
+    function requireFunction(value, name) {
+      if (typeof value !== "function") {
+        throw new TypeError(`social article folder dependency is required: ${name}`);
+      }
+      return value;
+    }
+    __name(requireFunction, "requireFunction");
+    function createSocialArticleFolderAlignmentHelpers2(dependencies = {}) {
+      const normalizeVaultPath2 = requireFunction(dependencies.normalizeVaultPath, "normalizeVaultPath");
+      const sanitizeAttachmentName2 = requireFunction(dependencies.sanitizeAttachmentName, "sanitizeAttachmentName");
+      const shouldStoreWebpageNoteInOwnFolder2 = requireFunction(
+        dependencies.shouldStoreWebpageNoteInOwnFolder,
+        "shouldStoreWebpageNoteInOwnFolder"
+      );
+      const onWarning = typeof dependencies.onWarning === "function" ? dependencies.onWarning : () => {
+      };
+      async function alignSocialArticleImageFolder(record, {
+        sourceUrl,
+        noteDir,
+        assetFolderTitle,
+        fileTitle,
+        storageMode,
+        adapter
+      } = {}) {
+        const targetFolderName = sanitizeAttachmentName2(fileTitle, "文章");
+        if (!shouldStoreWebpageNoteInOwnFolder2(sourceUrl, storageMode)) {
+          return { record, folderName: targetFolderName };
+        }
+        const sourceFolderName = sanitizeAttachmentName2(assetFolderTitle, "文章");
+        if (sourceFolderName === targetFolderName) {
+          return { record, folderName: targetFolderName };
+        }
+        const sourceFolderPath = normalizeVaultPath2(`${noteDir}/${sourceFolderName}`);
+        const targetFolderPath = normalizeVaultPath2(`${noteDir}/${targetFolderName}`);
+        const sourceImageFolderPath = normalizeVaultPath2(`${sourceFolderPath}/文章图片`);
+        const targetImageFolderPath = normalizeVaultPath2(`${targetFolderPath}/文章图片`);
+        const sourceImagePath = `${sourceImageFolderPath}/`;
+        const targetImagePath = `${targetImageFolderPath}/`;
+        const sourceFallback = { record, folderName: sourceFolderName };
+        const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+        const metadataFields = ["markdown", "snapshot", "contentSnapshot"];
+        const metadataReferencesPath = /* @__PURE__ */ __name((path2) => metadataFields.some((field) => typeof metadata[field] === "string" && metadata[field].includes(path2)), "metadataReferencesPath");
+        const rewriteRecordImagePaths = /* @__PURE__ */ __name(() => {
+          const nextMetadata = { ...metadata };
+          metadataFields.forEach((field) => {
+            if (typeof nextMetadata[field] === "string") {
+              nextMetadata[field] = nextMetadata[field].split(sourceImagePath).join(targetImagePath);
+            }
+          });
+          return {
+            record: { ...record, metadata: nextMetadata },
+            folderName: targetFolderName,
+            sourceImagePath,
+            targetImagePath
+          };
+        }, "rewriteRecordImagePaths");
+        if (!adapter || typeof adapter.rename !== "function" || typeof adapter.exists !== "function") {
+          return sourceFallback;
+        }
+        try {
+          const sourceImagesExist = await adapter.exists(sourceImageFolderPath);
+          if (!sourceImagesExist) {
+            const targetImagesExist = await adapter.exists(targetImageFolderPath);
+            if (targetImagesExist) {
+              return metadataReferencesPath(sourceImagePath) ? rewriteRecordImagePaths() : { record, folderName: targetFolderName };
+            }
+            if (metadataReferencesPath(targetImagePath)) {
+              return { record, folderName: targetFolderName };
+            }
+            if (metadataReferencesPath(sourceImagePath)) {
+              return sourceFallback;
+            }
+            return { record, folderName: targetFolderName };
+          }
+          if (await adapter.exists(targetFolderPath)) {
+            return sourceFallback;
+          }
+          await adapter.rename(sourceFolderPath, targetFolderPath);
+          return rewriteRecordImagePaths();
+        } catch (error) {
+          onWarning(error);
+          return sourceFallback;
+        }
+      }
+      __name(alignSocialArticleImageFolder, "alignSocialArticleImageFolder");
+      return { alignSocialArticleImageFolder };
+    }
+    __name(createSocialArticleFolderAlignmentHelpers2, "createSocialArticleFolderAlignmentHelpers");
+    module2.exports = { createSocialArticleFolderAlignmentHelpers: createSocialArticleFolderAlignmentHelpers2 };
+  }
+});
+
 // src/record-body-markdown-utils.js
 var require_record_body_markdown_utils = __commonJS({
   "src/record-body-markdown-utils.js"(exports2, module2) {
@@ -7838,6 +7934,7 @@ var {
   sanitizeSyncNoteTitle
 } = require_sync_lifecycle_utils();
 var { createNoteOutputPlanHelpers } = require_note_output_plan_utils();
+var { createSocialArticleFolderAlignmentHelpers } = require_social_article_folder_utils();
 var { createRecordBodyMarkdownHelpers } = require_record_body_markdown_utils();
 var {
   redactDiagnosticText,
@@ -7928,7 +8025,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.120";
+var PLUGIN_RUNTIME_VERSION = "1.3.121";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -19625,6 +19722,16 @@ var {
   buildMarkdownForRecord,
   buildNoteOutputPlan
 } = noteOutputPlanHelpers;
+var {
+  alignSocialArticleImageFolder: alignSocialArticleFolder
+} = createSocialArticleFolderAlignmentHelpers({
+  normalizeVaultPath,
+  sanitizeAttachmentName,
+  shouldStoreWebpageNoteInOwnFolder,
+  onWarning: /* @__PURE__ */ __name((error) => {
+    console.warn("Failed to align social article image folder with note title", error);
+  }, "onWarning")
+});
 function getRecordConversionWarning(record) {
   if (!record) return "";
   const metadata = record.metadata || {};
@@ -25734,8 +25841,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     assetFolderTitle,
     fileTitle
   } = {}) {
-    const targetFolderName = sanitizeAttachmentName(fileTitle, "文章");
-    return { record, folderName: targetFolderName };
+    return alignSocialArticleFolder(record, {
+      sourceUrl,
+      noteDir,
+      assetFolderTitle,
+      fileTitle,
+      storageMode: this.settings && this.settings.socialArticleImageStorageMode,
+      adapter: this.app && this.app.vault && this.app.vault.adapter
+    });
   }
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const signal = progress.signal || null;

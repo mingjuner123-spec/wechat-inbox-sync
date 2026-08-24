@@ -129,6 +129,16 @@ async function run() {
   assert.strictEqual(missingSource.folderName, sourceTitle);
   assert.ok(missingSource.record.metadata.markdown.includes(sourceImageFolder));
 
+  const missingSourceWithoutReferences = await align(missingSourcePlugin, {
+    metadata: {
+      markdown: '正文（无本地图片）',
+      snapshot: '正文快照',
+      contentSnapshot: 'https://example.com/remote-image.png',
+    },
+  });
+  assert.strictEqual(missingSourceWithoutReferences.folderName, targetTitle);
+  assert.strictEqual(missingSourceWithoutReferences.record.metadata.markdown, '正文（无本地图片）');
+
   const remoteRenames = [];
   const remotePlugin = createPlugin({
     async exists() { return true; },
@@ -191,6 +201,54 @@ async function run() {
   assert.strictEqual(createdNotes[0].path, expectedNotePath);
   assert.ok(createdNotes[0].markdown.includes(targetImageFolder));
   assert.strictEqual(createdNotes[0].markdown.includes(sourceImageFolder), false);
+
+  const noAssetRenames = [];
+  const noAssetCreatedNotes = [];
+  const noAssetWritePlugin = createPlugin({
+    async exists() { return false; },
+    async rename(from, to) { noAssetRenames.push({ from, to }); },
+    async write() {},
+    async remove() {},
+  });
+  noAssetWritePlugin.settings = {
+    inboxDir: noteDir.split('/')[0],
+    noteSaveMode: 'date',
+    notePropertyFields: [],
+    socialArticleImageStorageMode: 'local',
+  };
+  noAssetWritePlugin.showSyncProgress = () => {};
+  noAssetWritePlugin.ensureFolder = async () => {};
+  let noAssetTitleCall = 0;
+  noAssetWritePlugin.nextRecordTitle = async () => (
+    noAssetTitleCall++ === 0 ? sourceTitle : targetTitle
+  );
+  noAssetWritePlugin.hydrateWebpageMarkdown = async (record) => ({
+    ...record,
+    metadata: {
+      ...record.metadata,
+      title: targetTitle,
+      markdown: '正文（无本地图片）',
+      snapshot: '正文快照',
+      contentSnapshot: 'https://example.com/remote-image.png',
+    },
+  });
+  noAssetWritePlugin.saveSourceMediaAttachment = async (record) => record;
+  noAssetWritePlugin.enrichRecordMetadataWithAi = async (record) => record;
+  noAssetWritePlugin.app.vault.create = async (path, markdown) => {
+    noAssetCreatedNotes.push({ path, markdown });
+  };
+  const noAssetWriteResult = await noAssetWritePlugin.writeRecord({
+    id: 'feishu-folder-cohesion-no-assets',
+    type: 'webpage',
+    content: feishuUrl,
+    createdAt: '2026-08-23T10:02:00.000Z',
+    metadata: { url: feishuUrl },
+  }, '2026-08-23T10:03:00.000Z');
+  assert.strictEqual(noAssetWriteResult.filePath, expectedNotePath);
+  assert.deepStrictEqual(noAssetRenames, []);
+  assert.strictEqual(noAssetCreatedNotes.length, 1);
+  assert.strictEqual(noAssetCreatedNotes[0].path, expectedNotePath);
+  assert.ok(noAssetCreatedNotes[0].markdown.includes('正文（无本地图片）'));
 
   console.log('plugin social article folder cohesion tests passed');
 }
