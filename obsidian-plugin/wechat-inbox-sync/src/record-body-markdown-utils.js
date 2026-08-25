@@ -15,6 +15,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     formatCreatedTime: requireFunction(dependencies.formatCreatedTime, 'formatCreatedTime'),
     getWebpageSourcePrefix: requireFunction(dependencies.getWebpageSourcePrefix, 'getWebpageSourcePrefix'),
     isFeishuUrl: requireFunction(dependencies.isFeishuUrl, 'isFeishuUrl'),
+    isImageAttachmentExt: requireFunction(dependencies.isImageAttachmentExt, 'isImageAttachmentExt'),
     isWechatChannelsUrl: requireFunction(dependencies.isWechatChannelsUrl, 'isWechatChannelsUrl'),
     isXiaohongshuUrl: requireFunction(dependencies.isXiaohongshuUrl, 'isXiaohongshuUrl'),
     normalizeExtractedUrl: requireFunction(dependencies.normalizeExtractedUrl, 'normalizeExtractedUrl'),
@@ -276,6 +277,17 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     const fileName = metadata.fileName || record.content || 'upload-file';
     const fileID = metadata.fileID || '';
     const filePath = metadata.filePath || '';
+    const fileExt = String(metadata.fileExt || filePath || fileName || '')
+      .split(/[?#]/)[0]
+      .split('.')
+      .pop()
+      .toLowerCase()
+      .replace(/^\./, '');
+    const attachmentLine = filePath
+      ? helpers.isImageAttachmentExt(fileExt)
+        ? `本地图片：![[${filePath}]]`
+        : `本地附件：[[${filePath}]]`
+      : '';
     const converted = helpers.cleanMarkdownForStorage(metadata.markdown || metadata.convertedMarkdown || '');
     const status = metadata.conversionStatus || 'pending';
     const errorText = metadata.conversionError || '';
@@ -288,7 +300,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
         : '转写处理中，或未配置可用的转写方案。');
       return [
         `文件名：${fileName}`,
-        filePath ? `本地附件：[[${filePath}]]` : '',
+        attachmentLine,
         fileID ? `云端文件：${fileID}` : '',
         metadata.transcriptionSource ? `转写来源：${metadata.transcriptionSource}` : '',
         '',
@@ -306,7 +318,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
 
     return [
       `文件名：${fileName}`,
-      filePath ? `本地附件：[[${filePath}]]` : '',
+      attachmentLine,
       fileID ? `云端文件：${fileID}` : '',
       '',
       '## Markdown 内容',

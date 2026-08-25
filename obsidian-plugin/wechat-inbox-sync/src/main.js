@@ -159,6 +159,7 @@ const {
   getInvalidDownloadedMediaReason,
   hasVideoTrackInMediaBuffer,
   isAudioVideoAttachmentExt,
+  isImageAttachmentExt,
   isMarkdownConvertibleExt,
   sanitizeAttachmentName,
   toNodeBuffer,
@@ -2993,6 +2994,38 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
 }
 function getRecordId(record) {
   return record._id || record.id || '';
+}
+
+function getAttachmentDiagnosticKind(fileExt = '') {
+  return isImageAttachmentExt(fileExt) ? 'image' : 'file';
+}
+
+function redactAttachmentDiagnosticError(error, settings = {}) {
+  return redactKnownCredentials(error && error.message ? error.message : String(error || ''), settings)
+    .replace(/https?:\/\/[^\s)'"<>]+/gi, '[URL_REDACTED]')
+    .replace(/\b(token|code|secret|authorization|cookie|fileID|fileId)=([^\s&]+)/gi, '$1=[REDACTED]')
+    .slice(0, 1000);
+}
+
+function buildAttachmentDiagnostic({
+  status = '',
+  fileExt = '',
+  filePath = '',
+  byteLength = 0,
+  error = null,
+  settings = {},
+} = {}) {
+  const diagnostic = {
+    status: String(status || '').trim() || 'unknown',
+    kind: getAttachmentDiagnosticKind(fileExt),
+    fileExt: String(fileExt || '').trim().toLowerCase().replace(/^\./, ''),
+    filePath: String(filePath || '').trim() ? normalizeVaultPath(filePath) : '',
+    byteLength: Number.isFinite(Number(byteLength)) ? Math.max(0, Number(byteLength)) : 0,
+  };
+  if (diagnostic.status === 'failed') {
+    diagnostic.error = redactAttachmentDiagnosticError(error, settings);
+  }
+  return diagnostic;
 }
 
 function getTypeDisplayName(type) {
@@ -13677,6 +13710,7 @@ const recordBodyMarkdownHelpers = createRecordBodyMarkdownHelpers({
   formatCreatedTime,
   getWebpageSourcePrefix,
   isFeishuUrl,
+  isImageAttachmentExt,
   isWechatChannelsUrl,
   isXiaohongshuUrl,
   normalizeExtractedUrl,
@@ -17858,20 +17892,39 @@ class WechatObsidianInboxPlugin extends Plugin {
   async writeFileAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
     rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = record.metadata || {};
+    const fileName = metadata.fileName || record.content || `${title}.bin`;
+    const fileExt = getAttachmentExt(fileName, metadata.fileExt);
+    const safeFileName = sanitizeAttachmentName(fileName, `${title}${fileExt ? `.${fileExt}` : ''}`);
+    const fileRootDir = `${rootDir}/文件附件`;
+    const fileDayDir = `${fileRootDir}/${dateFolder}`;
+    const filePath = `${fileDayDir}/${title}-${safeFileName}`;
+    let byteLength = 0;
     if (!metadata.fileID) {
-      return record;
+      return {
+        ...record,
+        metadata: {
+          ...metadata,
+          fileName,
+          fileExt,
+          conversionStatus: 'failed',
+          conversionError: '云端文件标识缺失，无法下载附件',
+          attachmentDiagnostic: buildAttachmentDiagnostic({
+            status: 'missing_file_id',
+            fileExt,
+            filePath: '',
+            byteLength: 0,
+            settings: this.settings,
+          }),
+        },
+      };
     }
 
     try {
-      const fileName = metadata.fileName || record.content || `${title}.bin`;
-      const fileExt = getAttachmentExt(fileName, metadata.fileExt);
-      const safeFileName = sanitizeAttachmentName(fileName, `${title}${fileExt ? `.${fileExt}` : ''}`);
-      const fileRootDir = `${rootDir}/文件附件`;
-      const fileDayDir = `${fileRootDir}/${dateFolder}`;
-      const filePath = `${fileDayDir}/${title}-${safeFileName}`;
       const tempFileURL = await this.requestFileDownloadUrl(metadata.fileID, binding);
       this.showSyncProgress({ ...progress, stage: 'downloading', title: fileName });
       const fileBuffer = await this.downloadArrayBuffer(tempFileURL);
+      const nodeBuffer = toNodeBuffer(fileBuffer);
+      byteLength = nodeBuffer.length;
 
       if (typeof this.app.vault.adapter.writeBinary !== 'function') {
         throw new Error('当前 Obsidian 环境不支持写入二进制附件');
@@ -17880,13 +17933,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       await this.ensureFolder(fileRootDir);
       await this.ensureFolder(fileDayDir);
       await this.app.vault.adapter.writeBinary(normalizeVaultPath(filePath), fileBuffer);
-      const nodeBuffer = toNodeBuffer(fileBuffer);
 
       const nextMetadata = {
         ...metadata,
         fileName,
         fileExt,
         filePath,
+        attachmentDiagnostic: buildAttachmentDiagnostic({
+          status: 'saved',
+          fileExt,
+          filePath,
+          byteLength,
+          settings: this.settings,
+        }),
       };
 
       try {
@@ -17977,8 +18036,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...record,
         metadata: {
           ...metadata,
+          fileName,
+          fileExt,
+          filePath,
           conversionStatus: 'failed',
           conversionError: error.message || String(error),
+          attachmentDiagnostic: buildAttachmentDiagnostic({
+            status: 'failed',
+            fileExt,
+            filePath,
+            byteLength,
+            error,
+            settings: this.settings,
+          }),
         },
       };
     }
@@ -20833,9 +20903,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
     if (lifecycleOutcomeError) {
+      const attachmentDiagnostic = recordForMarkdown.metadata
+        && recordForMarkdown.metadata.attachmentDiagnostic;
+      if (attachmentDiagnostic && typeof attachmentDiagnostic === 'object'
+        && ['failed', 'missing_file_id'].includes(String(attachmentDiagnostic.status || '').toLowerCase())) {
+        lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
+      }
       const mediaResolutionDiagnostic = recordForMarkdown.metadata
         && recordForMarkdown.metadata.mediaResolutionDiagnostic;
-      if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object') {
+      if (!lifecycleOutcomeError.diagnostic
+        && mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object') {
         lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
       }
       const conversionDiagnostic = recordForMarkdown.metadata
@@ -20843,6 +20920,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!lifecycleOutcomeError.diagnostic
         && conversionDiagnostic && typeof conversionDiagnostic === 'object') {
         lifecycleOutcomeError.diagnostic = conversionDiagnostic;
+      }
+      if (!lifecycleOutcomeError.diagnostic
+        && attachmentDiagnostic && typeof attachmentDiagnostic === 'object') {
+        lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
       }
       throw lifecycleOutcomeError;
     }
@@ -20930,6 +21011,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         : null,
       conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata
         ? recordForMarkdown.metadata.conversionDiagnostic || null
+        : null,
+      attachmentDiagnostic: recordForMarkdown && recordForMarkdown.metadata
+        ? recordForMarkdown.metadata.attachmentDiagnostic || null
         : null,
       feishuMediaDiagnostic: recordForMarkdown && recordForMarkdown.metadata
         ? recordForMarkdown.metadata.feishuMediaDiagnostic || null
@@ -21500,12 +21584,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
       const latestSuccessfulDiagnostic = [...written].reverse().find((item) => (
-        item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic
+        item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic || item.attachmentDiagnostic
       ));
       const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic
         ? latestSuccessfulDiagnostic.feishuMediaDiagnostic
           || latestSuccessfulDiagnostic.mediaResolutionDiagnostic
           || latestSuccessfulDiagnostic.conversionDiagnostic
+          || latestSuccessfulDiagnostic.attachmentDiagnostic
         : null;
       const completionWarningDetails = completionWarnings
         .map((item) => {
@@ -22242,6 +22327,7 @@ WechatObsidianInboxPlugin.__test = {
   formatHttpError,
   parseTencentCreateTaskResponse,
   parseTencentTaskStatusResponse,
+  buildAttachmentDiagnostic,
   buildRecordTitleBase,
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
@@ -22350,6 +22436,7 @@ WechatObsidianInboxPlugin.__test = {
   extractBilibiliAudioUrlFromPlayurlPayload,
   extractBilibiliProgressiveVideoUrlFromPlayurlPayload,
   hasVideoTrackInMediaBuffer,
+  isImageAttachmentExt,
   cleanTrailingTranscriptionHallucinations,
   buildAudioTranscriptMarkdown,
   buildTranscriptPropertyMetadata,

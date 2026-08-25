@@ -4324,6 +4324,7 @@ var require_record_body_markdown_utils = __commonJS({
         formatCreatedTime: requireFunction(dependencies.formatCreatedTime, "formatCreatedTime"),
         getWebpageSourcePrefix: requireFunction(dependencies.getWebpageSourcePrefix, "getWebpageSourcePrefix"),
         isFeishuUrl: requireFunction(dependencies.isFeishuUrl, "isFeishuUrl"),
+        isImageAttachmentExt: requireFunction(dependencies.isImageAttachmentExt, "isImageAttachmentExt"),
         isWechatChannelsUrl: requireFunction(dependencies.isWechatChannelsUrl, "isWechatChannelsUrl"),
         isXiaohongshuUrl: requireFunction(dependencies.isXiaohongshuUrl, "isXiaohongshuUrl"),
         normalizeExtractedUrl: requireFunction(dependencies.normalizeExtractedUrl, "normalizeExtractedUrl"),
@@ -4547,6 +4548,8 @@ var require_record_body_markdown_utils = __commonJS({
         const fileName = metadata.fileName || record.content || "upload-file";
         const fileID = metadata.fileID || "";
         const filePath = metadata.filePath || "";
+        const fileExt = String(metadata.fileExt || filePath || fileName || "").split(/[?#]/)[0].split(".").pop().toLowerCase().replace(/^\./, "");
+        const attachmentLine = filePath ? helpers.isImageAttachmentExt(fileExt) ? `本地图片：![[${filePath}]]` : `本地附件：[[${filePath}]]` : "";
         const converted = helpers.cleanMarkdownForStorage(metadata.markdown || metadata.convertedMarkdown || "");
         const status = metadata.conversionStatus || "pending";
         const errorText = metadata.conversionError || "";
@@ -4557,7 +4560,7 @@ var require_record_body_markdown_utils = __commonJS({
           const content = transcription || (transcriptionStatus === "failed" ? `转写失败。${transcriptionError || "未能提取到音视频文案。"}` : "转写处理中，或未配置可用的转写方案。");
           return [
             `文件名：${fileName}`,
-            filePath ? `本地附件：[[${filePath}]]` : "",
+            attachmentLine,
             fileID ? `云端文件：${fileID}` : "",
             metadata.transcriptionSource ? `转写来源：${metadata.transcriptionSource}` : "",
             "",
@@ -4574,7 +4577,7 @@ var require_record_body_markdown_utils = __commonJS({
 说明：${errorText}` : "暂未提取到可用正文。"}` : "文件转 Markdown 处理中，已先保存文件信息。";
         return [
           `文件名：${fileName}`,
-          filePath ? `本地附件：[[${filePath}]]` : "",
+          attachmentLine,
           fileID ? `云端文件：${fileID}` : "",
           "",
           "## Markdown 内容",
@@ -5448,6 +5451,10 @@ var require_media_file_utils = __commonJS({
       return ["mp3", "m4a", "wav", "aac", "amr", "silk", "ogg", "flac", "mp4", "mov", "m4v"].includes(String(ext || "").toLowerCase());
     }
     __name(isAudioVideoAttachmentExt2, "isAudioVideoAttachmentExt");
+    function isImageAttachmentExt2(ext) {
+      return ["jpg", "jpeg", "png", "webp", "gif", "bmp", "svg", "avif", "heic", "heif"].includes(String(ext || "").toLowerCase().replace(/^\./, ""));
+    }
+    __name(isImageAttachmentExt2, "isImageAttachmentExt");
     function decodeUtf8ArrayBuffer2(buffer) {
       return toNodeBuffer2(buffer).toString("utf8");
     }
@@ -5473,6 +5480,7 @@ var require_media_file_utils = __commonJS({
       getInvalidDownloadedMediaReason: getInvalidDownloadedMediaReason2,
       hasVideoTrackInMediaBuffer: hasVideoTrackInMediaBuffer2,
       isAudioVideoAttachmentExt: isAudioVideoAttachmentExt2,
+      isImageAttachmentExt: isImageAttachmentExt2,
       isMarkdownConvertibleExt: isMarkdownConvertibleExt2,
       sanitizeAttachmentName: sanitizeAttachmentName2,
       toNodeBuffer: toNodeBuffer2
@@ -7959,6 +7967,7 @@ var {
   getInvalidDownloadedMediaReason,
   hasVideoTrackInMediaBuffer,
   isAudioVideoAttachmentExt,
+  isImageAttachmentExt,
   isMarkdownConvertibleExt,
   sanitizeAttachmentName,
   toNodeBuffer
@@ -10214,6 +10223,35 @@ function getRecordId(record) {
   return record._id || record.id || "";
 }
 __name(getRecordId, "getRecordId");
+function getAttachmentDiagnosticKind(fileExt = "") {
+  return isImageAttachmentExt(fileExt) ? "image" : "file";
+}
+__name(getAttachmentDiagnosticKind, "getAttachmentDiagnosticKind");
+function redactAttachmentDiagnosticError(error, settings = {}) {
+  return redactKnownCredentials(error && error.message ? error.message : String(error || ""), settings).replace(/https?:\/\/[^\s)'"<>]+/gi, "[URL_REDACTED]").replace(/\b(token|code|secret|authorization|cookie|fileID|fileId)=([^\s&]+)/gi, "$1=[REDACTED]").slice(0, 1e3);
+}
+__name(redactAttachmentDiagnosticError, "redactAttachmentDiagnosticError");
+function buildAttachmentDiagnostic({
+  status = "",
+  fileExt = "",
+  filePath = "",
+  byteLength = 0,
+  error = null,
+  settings = {}
+} = {}) {
+  const diagnostic = {
+    status: String(status || "").trim() || "unknown",
+    kind: getAttachmentDiagnosticKind(fileExt),
+    fileExt: String(fileExt || "").trim().toLowerCase().replace(/^\./, ""),
+    filePath: String(filePath || "").trim() ? normalizeVaultPath(filePath) : "",
+    byteLength: Number.isFinite(Number(byteLength)) ? Math.max(0, Number(byteLength)) : 0
+  };
+  if (diagnostic.status === "failed") {
+    diagnostic.error = redactAttachmentDiagnosticError(error, settings);
+  }
+  return diagnostic;
+}
+__name(buildAttachmentDiagnostic, "buildAttachmentDiagnostic");
 function getTypeDisplayName(type) {
   const normalized = String(type || "").toLowerCase();
   if (!TYPE_DISPLAY_NAMES[normalized]) {
@@ -19801,6 +19839,7 @@ var recordBodyMarkdownHelpers = createRecordBodyMarkdownHelpers({
   formatCreatedTime,
   getWebpageSourcePrefix,
   isFeishuUrl,
+  isImageAttachmentExt,
   isWechatChannelsUrl,
   isXiaohongshuUrl,
   normalizeExtractedUrl,
@@ -23547,31 +23586,56 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async writeFileAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
     rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = record.metadata || {};
+    const fileName = metadata.fileName || record.content || `${title}.bin`;
+    const fileExt = getAttachmentExt(fileName, metadata.fileExt);
+    const safeFileName = sanitizeAttachmentName(fileName, `${title}${fileExt ? `.${fileExt}` : ""}`);
+    const fileRootDir = `${rootDir}/文件附件`;
+    const fileDayDir = `${fileRootDir}/${dateFolder}`;
+    const filePath = `${fileDayDir}/${title}-${safeFileName}`;
+    let byteLength = 0;
     if (!metadata.fileID) {
-      return record;
+      return {
+        ...record,
+        metadata: {
+          ...metadata,
+          fileName,
+          fileExt,
+          conversionStatus: "failed",
+          conversionError: "云端文件标识缺失，无法下载附件",
+          attachmentDiagnostic: buildAttachmentDiagnostic({
+            status: "missing_file_id",
+            fileExt,
+            filePath: "",
+            byteLength: 0,
+            settings: this.settings
+          })
+        }
+      };
     }
     try {
-      const fileName = metadata.fileName || record.content || `${title}.bin`;
-      const fileExt = getAttachmentExt(fileName, metadata.fileExt);
-      const safeFileName = sanitizeAttachmentName(fileName, `${title}${fileExt ? `.${fileExt}` : ""}`);
-      const fileRootDir = `${rootDir}/文件附件`;
-      const fileDayDir = `${fileRootDir}/${dateFolder}`;
-      const filePath = `${fileDayDir}/${title}-${safeFileName}`;
       const tempFileURL = await this.requestFileDownloadUrl(metadata.fileID, binding);
       this.showSyncProgress({ ...progress, stage: "downloading", title: fileName });
       const fileBuffer = await this.downloadArrayBuffer(tempFileURL);
+      const nodeBuffer = toNodeBuffer(fileBuffer);
+      byteLength = nodeBuffer.length;
       if (typeof this.app.vault.adapter.writeBinary !== "function") {
         throw new Error("当前 Obsidian 环境不支持写入二进制附件");
       }
       await this.ensureFolder(fileRootDir);
       await this.ensureFolder(fileDayDir);
       await this.app.vault.adapter.writeBinary(normalizeVaultPath(filePath), fileBuffer);
-      const nodeBuffer = toNodeBuffer(fileBuffer);
       const nextMetadata = {
         ...metadata,
         fileName,
         fileExt,
-        filePath
+        filePath,
+        attachmentDiagnostic: buildAttachmentDiagnostic({
+          status: "saved",
+          fileExt,
+          filePath,
+          byteLength,
+          settings: this.settings
+        })
       };
       try {
         if (isMarkdownConvertibleExt(fileExt)) {
@@ -23655,8 +23719,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         ...record,
         metadata: {
           ...metadata,
+          fileName,
+          fileExt,
+          filePath,
           conversionStatus: "failed",
-          conversionError: error.message || String(error)
+          conversionError: error.message || String(error),
+          attachmentDiagnostic: buildAttachmentDiagnostic({
+            status: "failed",
+            fileExt,
+            filePath,
+            byteLength,
+            error,
+            settings: this.settings
+          })
         }
       };
     }
@@ -26131,13 +26206,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
     if (lifecycleOutcomeError) {
+      const attachmentDiagnostic = recordForMarkdown.metadata && recordForMarkdown.metadata.attachmentDiagnostic;
+      if (attachmentDiagnostic && typeof attachmentDiagnostic === "object" && ["failed", "missing_file_id"].includes(String(attachmentDiagnostic.status || "").toLowerCase())) {
+        lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
+      }
       const mediaResolutionDiagnostic = recordForMarkdown.metadata && recordForMarkdown.metadata.mediaResolutionDiagnostic;
-      if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object") {
+      if (!lifecycleOutcomeError.diagnostic && mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object") {
         lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
       }
       const conversionDiagnostic = recordForMarkdown.metadata && recordForMarkdown.metadata.conversionDiagnostic;
       if (!lifecycleOutcomeError.diagnostic && conversionDiagnostic && typeof conversionDiagnostic === "object") {
         lifecycleOutcomeError.diagnostic = conversionDiagnostic;
+      }
+      if (!lifecycleOutcomeError.diagnostic && attachmentDiagnostic && typeof attachmentDiagnostic === "object") {
+        lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
       }
       throw lifecycleOutcomeError;
     }
@@ -26215,6 +26297,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       conversionWarning: getRecordConversionWarning(recordForMarkdown),
       mediaResolutionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.mediaResolutionDiagnostic || null : null,
       conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.conversionDiagnostic || null : null,
+      attachmentDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.attachmentDiagnostic || null : null,
       feishuMediaDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.feishuMediaDiagnostic || null : null
     };
   }
@@ -26730,8 +26813,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
-      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic);
-      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.feishuMediaDiagnostic || latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic : null;
+      const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic || item.attachmentDiagnostic);
+      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.feishuMediaDiagnostic || latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic || latestSuccessfulDiagnostic.attachmentDiagnostic : null;
       const completionWarningDetails = completionWarnings.map((item) => {
         const recordId = String(item && item.recordId || "").trim().slice(0, 128);
         const code = String(item && item.code || "").trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 64);
@@ -27238,6 +27321,7 @@ WechatObsidianInboxPlugin.__test = {
   formatHttpError,
   parseTencentCreateTaskResponse,
   parseTencentTaskStatusResponse,
+  buildAttachmentDiagnostic,
   buildRecordTitleBase,
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
@@ -27346,6 +27430,7 @@ WechatObsidianInboxPlugin.__test = {
   extractBilibiliAudioUrlFromPlayurlPayload,
   extractBilibiliProgressiveVideoUrlFromPlayurlPayload,
   hasVideoTrackInMediaBuffer,
+  isImageAttachmentExt,
   cleanTrailingTranscriptionHallucinations,
   buildAudioTranscriptMarkdown,
   buildTranscriptPropertyMetadata,
