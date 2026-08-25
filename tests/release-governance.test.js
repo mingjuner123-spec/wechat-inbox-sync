@@ -1709,6 +1709,54 @@ test('the component-integrity workflow runs on a schedule and by manual dispatch
   assertExecutableCommand(runs, 'node scripts/check-local-components-cdn.js');
 });
 
+test('embedded component standards are compared with public CloudBase assets before every release', () => {
+  const releaseWorkflow = readText(relativePaths.releaseWorkflow);
+  const releaseJob = workflowJob(releaseWorkflow, 'release');
+  const releaseRuns = executableRuns(releaseJob);
+  const releaseManifestIndex = releaseRuns.findIndex((run) => (
+    executableCommandPattern('node scripts/update-local-components-manifest.js --check').test(run)
+  ));
+  const releaseCdnIndex = releaseRuns.findIndex((run) => (
+    executableCommandPattern('node scripts/check-local-components-cdn.js').test(run)
+  ));
+  const releasePackageIndex = releaseRuns.findIndex((run) => (
+    executableCommandPattern(
+      'zip -r "$ZIP_PATH" main.js manifest.json styles.css versions.json README.md LICENSE local-asr local-ocr',
+    ).test(run)
+  ));
+  assert.notEqual(releaseManifestIndex, -1, 'release must reject embedded local component manifest drift');
+  assert.notEqual(releaseCdnIndex, -1, 'release must compare embedded component standards with public CloudBase assets');
+  assert.notEqual(releasePackageIndex, -1, 'release must package only after component integrity gates');
+  assert.ok(releaseManifestIndex < releaseCdnIndex, 'embedded manifest drift check must run before public CloudBase comparison');
+  assert.ok(releaseCdnIndex < releasePackageIndex, 'public CloudBase comparison must run before release packaging');
+
+  const releaseCdnStep = yamlSteps(releaseJob)
+    .find((step) => executableCommandPattern('node scripts/check-local-components-cdn.js').test(runBody(step)));
+  assert.ok(releaseCdnStep, 'release workflow must keep a dedicated public component verification step');
+  assert.match(
+    releaseCdnStep,
+    /^\s+LOCAL_COMPONENTS_CDN_WARN_ON_UNAVAILABLE:\s*['"]?1['"]?\s*$/m,
+    'release may warn only when CloudBase is temporarily unavailable, not when bytes differ',
+  );
+  assert.doesNotMatch(
+    runBody(releaseCdnStep),
+    /--skip-external-runtimes/,
+    'release must not skip public runtime asset comparison',
+  );
+
+  const integrityWorkflow = readText(relativePaths.integrityWorkflow);
+  const integrityRuns = executableRuns(workflowJob(integrityWorkflow, 'integrity'));
+  const integrityManifestIndex = integrityRuns.findIndex((run) => (
+    executableCommandPattern('node scripts/update-local-components-manifest.js --check').test(run)
+  ));
+  const integrityCdnIndex = integrityRuns.findIndex((run) => (
+    executableCommandPattern('node scripts/check-local-components-cdn.js').test(run)
+  ));
+  assert.notEqual(integrityManifestIndex, -1, 'scheduled integrity must check embedded manifest drift');
+  assert.notEqual(integrityCdnIndex, -1, 'scheduled integrity must compare embedded standards with CloudBase');
+  assert.ok(integrityManifestIndex < integrityCdnIndex, 'scheduled integrity must check local manifest drift before CloudBase comparison');
+});
+
 test('tag releases only trigger for numeric version-shaped tags', () => {
   const workflow = readText(relativePaths.releaseWorkflow);
   const triggers = yamlBlock(workflow, /^on:\s*$/);

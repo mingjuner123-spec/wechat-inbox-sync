@@ -86,6 +86,7 @@ function runRecordBodyMarkdownModuleTests() {
     formatCreatedTime: legacyRecordBodyHelpers.formatCreatedTime,
     getWebpageSourcePrefix: legacyRecordBodyHelpers.getWebpageSourcePrefix,
     isFeishuUrl: legacyRecordBodyHelpers.isFeishuUrl,
+    isImageAttachmentExt: (ext) => ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'svg', 'avif', 'heic', 'heif'].includes(String(ext || '').toLowerCase().replace(/^\./, '')),
     isWechatChannelsUrl: legacyRecordBodyHelpers.isWechatChannelsUrl,
     isXiaohongshuUrl: legacyRecordBodyHelpers.isXiaohongshuUrl,
     normalizeExtractedUrl: legacyRecordBodyHelpers.normalizeExtractedUrl,
@@ -136,6 +137,32 @@ function runRecordBodyMarkdownModuleTests() {
     assert.strictEqual(fixture.candidate(), fixture.actual(), fixture.name);
     assert.strictEqual(JSON.stringify(fixture.record), snapshot, `${fixture.name} 不得改写输入`);
   }
+
+  const imageFileMarkdown = output.buildFileMarkdownBody({
+    type: 'file',
+    content: 'album-image-1.jpg',
+    metadata: {
+      fileName: 'album-image-1.jpg',
+      fileExt: 'jpg',
+      filePath: '临时收集/文件附件/2026-08-25/图片测试-album-image-1.jpg',
+      conversionStatus: 'attachment_saved',
+    },
+  });
+  assert.ok(imageFileMarkdown.includes('本地图片：![[临时收集/文件附件/2026-08-25/图片测试-album-image-1.jpg]]'));
+  assert.strictEqual(imageFileMarkdown.includes('本地附件：[[临时收集/文件附件/2026-08-25/图片测试-album-image-1.jpg]]'), false);
+
+  const pdfFileMarkdown = output.buildFileMarkdownBody({
+    type: 'file',
+    content: '文档.pdf',
+    metadata: {
+      fileName: '文档.pdf',
+      fileExt: 'pdf',
+      filePath: '临时收集/文件附件/2026-08-25/文档测试.pdf',
+      conversionStatus: 'attachment_saved',
+    },
+  });
+  assert.ok(pdfFileMarkdown.includes('本地附件：[[临时收集/文件附件/2026-08-25/文档测试.pdf]]'));
+  assert.strictEqual(pdfFileMarkdown.includes('本地图片：![[临时收集/文件附件/2026-08-25/文档测试.pdf]]'), false);
 
   const transcriptMetadata = { transcription: '一段足够长的转写内容，用来生成简介。', title: '转写标题' };
   assert.deepStrictEqual(
@@ -487,6 +514,9 @@ const currentWindowsAsrScriptSource = windowsAsrInstallerSource.slice(
   currentTemplateContentStart + 1,
   currentTemplateQuoteEnd,
 );
+const previousDiagnosticsWindowsAsrScriptSource = currentWindowsAsrScriptSource
+  .replace('$NativeProcessRunnerVersion = "diagnostics-process-v2"', '$NativeProcessRunnerVersion = "diagnostics-process-v1"')
+  .replace('\n    $null = $process.Handle', '');
 const portableWindowsLayoutPlatform = os.platform() === 'win32' ? 'win32' : 'linux';
 const macAsrInstallerSource = fs.readFileSync(
   path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'local-asr', 'install-local-asr-macos.sh'),
@@ -519,10 +549,10 @@ const markerOnlyLegacyWindowsAsrScriptSource = [
   'recoveryTriggered=1',
 ].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.28"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.29"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.28"', '$InstallerScriptVersion = "1.2.25"')
+  .replace('$InstallerScriptVersion = "1.2.29"', '$InstallerScriptVersion = "1.2.25"')
   .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
   .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
@@ -3498,14 +3528,29 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
 }
 assert.ok(pluginMainSource.includes('ffmpeg 路径：'));
 assert.ok(pluginMainSource.includes('缺失项：'));
+assert.ok(currentWindowsAsrScriptSource.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"'));
+assert.ok(currentWindowsAsrScriptSource.includes('$null = $process.Handle'));
+assert.ok(currentWindowsAsrScriptSource.indexOf('$null = $process.Handle') < currentWindowsAsrScriptSource.indexOf('WaitForExit(5000)'));
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
     existsSync: () => true,
     readFileSync: () => currentWindowsAsrScriptSource,
   }),
   {
-    scriptVersion: 'adaptive-chunked-diagnostics-process-repeat-guard-v2-heartbeat-run-log',
+    scriptVersion: 'adaptive-chunked-diagnostics-process-v2-repeat-guard-v2-heartbeat-run-log',
     scriptOutdated: false,
+  },
+);
+assert.deepStrictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => previousDiagnosticsWindowsAsrScriptSource,
+  }),
+  {
+    scriptVersion: 'adaptive-chunked-diagnostics-process-v1-repeat-guard-v2-heartbeat-run-log',
+    scriptOutdated: false,
+    upgradeRecommended: true,
+    compatibilityMode: 'diagnostics-process-v1',
   },
 );
 assert.deepStrictEqual(
@@ -3596,6 +3641,27 @@ assert.deepStrictEqual(
   assert.strictEqual(legacyStatus.compatibilityMode, 'legacy-start-process');
   assert.deepStrictEqual(legacyStatus.missingReasons, []);
   fs.rmSync(tempLegacyAsrRoot, { recursive: true, force: true });
+}
+{
+  const tempPreviousAsrRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-previous-diagnostics-ready-'));
+  fs.mkdirSync(path.join(tempPreviousAsrRoot, 'whisper'), { recursive: true });
+  fs.mkdirSync(path.join(tempPreviousAsrRoot, 'ffmpeg'), { recursive: true });
+  fs.mkdirSync(path.join(tempPreviousAsrRoot, 'models'), { recursive: true });
+  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'whisper', 'whisper-cli.exe'), '');
+  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'ffmpeg', 'ffmpeg.exe'), '');
+  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'models', 'ggml-small.bin'), '');
+  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'transcribe.ps1'), previousDiagnosticsWindowsAsrScriptSource, 'utf8');
+  const previousStatus = helpers.getLocalAsrInstallStatus(
+    tempPreviousAsrRoot,
+    fs.existsSync,
+    portableWindowsLayoutPlatform,
+  );
+  assert.strictEqual(previousStatus.ready, true);
+  assert.strictEqual(previousStatus.scriptOutdated, false);
+  assert.strictEqual(previousStatus.upgradeRecommended, true);
+  assert.strictEqual(previousStatus.compatibilityMode, 'diagnostics-process-v1');
+  assert.deepStrictEqual(previousStatus.missingReasons, []);
+  fs.rmSync(tempPreviousAsrRoot, { recursive: true, force: true });
 }
 assert.deepStrictEqual(
   helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
@@ -12650,6 +12716,275 @@ async function runAudioVideoFileAttachmentTranscriptionTests() {
   assert.ok(markdown.includes('评论区才是最好的选题库'));
   assert.match(markdown, /^description: .*评论区才是最好的选题库/m);
   assert.match(markdown, /^keywords: .+/m);
+}
+
+async function runFileAttachmentDiagnosticTests() {
+  assert.strictEqual(helpers.isImageAttachmentExt('jpg'), true);
+  assert.strictEqual(helpers.isImageAttachmentExt('.png'), true);
+  assert.strictEqual(helpers.isImageAttachmentExt('pdf'), false);
+
+  const createAttachmentPlugin = () => {
+    const plugin = new PluginClass();
+    const diagnosticRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-attachment-diag-'));
+    plugin.settings = helpers.mergeSettings({
+      inboxDir: 'raw\\wechatmd',
+      noteSaveMode: 'root',
+      apiBase: 'https://example.com/sync',
+      token: 'ABC-123',
+      bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
+    });
+    plugin.saveData = async () => {};
+    plugin.showSyncProgress = () => {};
+    plugin.setTranscriptionStopAvailable = () => {};
+    plugin.getConfiguredLocalAsrInstallRoot = () => diagnosticRoot;
+    plugin.ensureFolder = async () => {};
+    return plugin;
+  };
+
+  const imageBytes = Buffer.from('image-bytes');
+  const successWrites = [];
+  const successPlugin = createAttachmentPlugin();
+  successPlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        writeBinary: async (filePath, buffer) => {
+          successWrites.push([filePath, Buffer.from(buffer)]);
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  successPlugin.requestFileDownloadUrl = async () => 'https://temp.example.com/album-image-1.jpg?token=SECRET';
+  successPlugin.downloadArrayBuffer = async () => imageBytes;
+  const successRecord = await successPlugin.writeFileAttachment({
+    _id: 'image-attachment-success',
+    type: 'file',
+    content: 'album-image-1.jpg',
+    createdAt: '2026-08-25T00:00:00.000Z',
+    metadata: {
+      fileID: 'cloud://files/album-image-1.jpg',
+      fileName: 'album-image-1.jpg',
+      fileExt: 'jpg',
+    },
+  }, 'raw\\wechatmd', '2026-08-25', '相册图片', { token: 'ABC-123' });
+  assert.deepStrictEqual(successWrites, [[
+    'raw/wechatmd/文件附件/2026-08-25/相册图片-album-image-1.jpg',
+    imageBytes,
+  ]]);
+  assert.deepStrictEqual(successRecord.metadata.attachmentDiagnostic, {
+    status: 'saved',
+    kind: 'image',
+    fileExt: 'jpg',
+    filePath: 'raw/wechatmd/文件附件/2026-08-25/相册图片-album-image-1.jpg',
+    byteLength: imageBytes.length,
+  });
+
+  const failurePlugin = createAttachmentPlugin();
+  failurePlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        writeBinary: async () => {
+          throw new Error('writeBinary should not run after download failure');
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  failurePlugin.requestFileDownloadUrl = async () => 'https://temp.example.com/private-image.jpg?token=ABC-123';
+  failurePlugin.downloadArrayBuffer = async () => {
+    throw new Error('download failed https://temp.example.com/private-image.jpg?token=ABC-123');
+  };
+  const failedRecord = await failurePlugin.writeFileAttachment({
+    _id: 'image-attachment-failed',
+    type: 'file',
+    content: 'album-image-1.jpg',
+    createdAt: '2026-08-25T00:00:00.000Z',
+    metadata: {
+      fileID: 'cloud://files/album-image-1.jpg',
+      fileName: 'album-image-1.jpg',
+      fileExt: 'jpg',
+    },
+  }, 'raw\\wechatmd', '2026-08-25', '失败图片', { token: 'ABC-123' });
+  assert.strictEqual(failedRecord.metadata.conversionStatus, 'failed');
+  assert.strictEqual(failedRecord.metadata.attachmentDiagnostic.status, 'failed');
+  assert.strictEqual(failedRecord.metadata.attachmentDiagnostic.kind, 'image');
+  assert.strictEqual(failedRecord.metadata.attachmentDiagnostic.fileExt, 'jpg');
+  assert.strictEqual(failedRecord.metadata.attachmentDiagnostic.filePath, 'raw/wechatmd/文件附件/2026-08-25/失败图片-album-image-1.jpg');
+  assert.strictEqual(failedRecord.metadata.attachmentDiagnostic.byteLength, 0);
+  assert.match(failedRecord.metadata.attachmentDiagnostic.error, /download failed/);
+  assert.strictEqual(failedRecord.metadata.attachmentDiagnostic.error.includes('ABC-123'), false);
+  assert.strictEqual(failedRecord.metadata.attachmentDiagnostic.error.includes('https://temp.example.com'), false);
+
+  const duplicateWrites = [];
+  const duplicatePlugin = createAttachmentPlugin();
+  duplicatePlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        writeBinary: async (filePath) => {
+          duplicateWrites.push(filePath);
+        },
+      },
+      createFolder: async () => {},
+    },
+  };
+  duplicatePlugin.requestFileDownloadUrl = async () => 'https://temp.example.com/album-image-1.jpg';
+  duplicatePlugin.downloadArrayBuffer = async () => Buffer.from('same-name');
+  const duplicateRecord = {
+    type: 'file',
+    content: 'album-image-1.jpg',
+    createdAt: '2026-08-25T00:00:00.000Z',
+    metadata: {
+      fileID: 'cloud://files/same-name.jpg',
+      fileName: 'album-image-1.jpg',
+      fileExt: 'jpg',
+    },
+  };
+  const firstDuplicate = await duplicatePlugin.writeFileAttachment({
+    ...duplicateRecord,
+    _id: 'same-name-image-1',
+  }, 'raw\\wechatmd', '2026-08-25', '相册图片', { token: 'ABC-123' });
+  const secondDuplicate = await duplicatePlugin.writeFileAttachment({
+    ...duplicateRecord,
+    _id: 'same-name-image-2',
+  }, 'raw\\wechatmd', '2026-08-25', '相册图片-002', { token: 'ABC-123' });
+  assert.strictEqual(duplicateWrites.length, 2);
+  assert.notStrictEqual(firstDuplicate.metadata.filePath, secondDuplicate.metadata.filePath);
+  assert.ok(firstDuplicate.metadata.filePath.endsWith('/相册图片-album-image-1.jpg'));
+  assert.ok(secondDuplicate.metadata.filePath.endsWith('/相册图片-002-album-image-1.jpg'));
+
+  const missingDirectPlugin = createAttachmentPlugin();
+  const missingDirectRecord = await missingDirectPlugin.writeFileAttachment({
+    _id: 'missing-file-id-direct-image',
+    type: 'file',
+    content: 'album-image-1.jpg',
+    createdAt: '2026-08-25T00:00:00.000Z',
+    metadata: {
+      fileName: 'album-image-1.jpg',
+      fileExt: 'jpg',
+    },
+  }, 'raw\\wechatmd', '2026-08-25', '缺失图片', { token: 'ABC-123' });
+  assert.strictEqual(missingDirectRecord.metadata.conversionStatus, 'failed');
+  assert.strictEqual(missingDirectRecord.metadata.conversionError, '云端文件标识缺失，无法下载附件');
+  assert.deepStrictEqual(missingDirectRecord.metadata.attachmentDiagnostic, {
+    status: 'missing_file_id',
+    kind: 'image',
+    fileExt: 'jpg',
+    filePath: '',
+    byteLength: 0,
+  });
+
+  const missingPlugin = createAttachmentPlugin();
+  const missingWrites = [];
+  missingPlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        write: async (filePath, markdown) => {
+          missingWrites.push({ filePath, markdown });
+        },
+        remove: async () => {},
+        writeBinary: async () => {
+          throw new Error('missing fileID must not download binary data');
+        },
+      },
+      create: async (filePath, markdown) => {
+        missingWrites.push({ filePath, markdown });
+      },
+      createFolder: async () => {},
+    },
+  };
+  missingPlugin.findExistingRecordNotePath = async () => '';
+  missingPlugin.nextRecordTitle = async () => '缺失图片';
+  missingPlugin.requestJson = async (requestPath, method) => {
+    if (requestPath === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'missing-file-id-image',
+          type: 'file',
+          content: 'album-image-1.jpg',
+          createdAt: '2026-08-25T00:00:00.000Z',
+          metadata: {
+            fileName: 'album-image-1.jpg',
+            fileExt: 'jpg',
+          },
+        }],
+      };
+    }
+    throw new Error(`missing fileID must not report sync success via ${method} ${requestPath}`);
+  };
+  const missingSyncResult = await missingPlugin.syncBinding({ token: 'ABC-123', label: '微信 1' }, false);
+  assert.strictEqual(missingSyncResult.written.length, 0);
+  assert.strictEqual(missingSyncResult.failed.length, 1);
+  assert.deepStrictEqual(missingWrites, []);
+  assert.strictEqual(missingSyncResult.failed[0].diagnostic.status, 'missing_file_id');
+  assert.strictEqual(missingSyncResult.failed[0].diagnostic.kind, 'image');
+  assert.strictEqual(missingSyncResult.failed[0].diagnostic.fileExt, 'jpg');
+
+  const syncPlugin = createAttachmentPlugin();
+  const syncWrites = [];
+  const syncBinaries = [];
+  syncPlugin.app = {
+    vault: {
+      adapter: {
+        exists: async () => false,
+        write: async (filePath, markdown) => {
+          syncWrites.push({ filePath, markdown, temporary: true });
+        },
+        remove: async () => {},
+        writeBinary: async (filePath, buffer) => {
+          syncBinaries.push({ filePath, buffer: Buffer.from(buffer) });
+        },
+      },
+      create: async (filePath, markdown) => {
+        syncWrites.push({ filePath, markdown, temporary: false });
+      },
+      createFolder: async () => {},
+    },
+  };
+  syncPlugin.findExistingRecordNotePath = async () => '';
+  syncPlugin.nextRecordTitle = async () => '成功图片';
+  syncPlugin.enrichRecordMetadataWithAi = async (record) => record;
+  syncPlugin.requestFileDownloadUrl = async () => 'https://temp.example.com/success-image.jpg';
+  syncPlugin.downloadArrayBuffer = async () => imageBytes;
+  const syncCalls = [];
+  syncPlugin.requestJson = async (requestPath, method) => {
+    syncCalls.push([requestPath, method]);
+    if (requestPath === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'successful-image-file',
+          type: 'file',
+          content: 'album-image-1.jpg',
+          createdAt: '2026-08-25T00:00:00.000Z',
+          metadata: {
+            fileID: 'cloud://files/success-image.jpg',
+            fileName: 'album-image-1.jpg',
+            fileExt: 'jpg',
+          },
+        }],
+      };
+    }
+    return { success: true, data: {} };
+  };
+  await syncPlugin.runSyncInboxOnce(false);
+  assert.strictEqual(syncBinaries.length, 1);
+  assert.ok(syncWrites.some((item) => item.temporary === false));
+  const finalNote = syncWrites.find((item) => item.temporary === false);
+  assert.ok(finalNote.markdown.includes('本地图片：![[raw/wechatmd/文件附件/2026-08-25/成功图片-album-image-1.jpg]]'));
+  assert.strictEqual(syncPlugin.lastSyncDiagnostic.status, 'success');
+  assert.deepStrictEqual(syncPlugin.lastSyncDiagnostic.diagnostic, {
+    status: 'saved',
+    kind: 'image',
+    fileExt: 'jpg',
+    filePath: 'raw/wechatmd/文件附件/2026-08-25/成功图片-album-image-1.jpg',
+    byteLength: imageBytes.length,
+  });
+  assert.ok(syncCalls.some(([requestPath]) => requestPath.includes('/synced')));
 }
 
 async function runSourceMediaAttachmentTests() {

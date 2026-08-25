@@ -141,6 +141,10 @@ function isAudioVideoAttachmentExt(ext) {
   return ['mp3', 'm4a', 'wav', 'aac', 'amr', 'silk', 'ogg', 'flac', 'mp4', 'mov', 'm4v'].includes(String(ext || '').toLowerCase());
 }
 
+function isImageAttachmentExt(ext) {
+  return ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'svg', 'avif', 'heic', 'heif'].includes(String(ext || '').toLowerCase().replace(/^\./, ''));
+}
+
 function decodeUtf8ArrayBuffer(buffer) {
   return toNodeBuffer(buffer).toString('utf8');
 }
@@ -166,6 +170,7 @@ module.exports = {
   getInvalidDownloadedMediaReason,
   hasVideoTrackInMediaBuffer,
   isAudioVideoAttachmentExt,
+  isImageAttachmentExt,
   isMarkdownConvertibleExt,
   sanitizeAttachmentName,
   toNodeBuffer,

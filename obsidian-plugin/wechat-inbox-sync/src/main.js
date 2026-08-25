@@ -159,6 +159,7 @@ const {
   getInvalidDownloadedMediaReason,
   hasVideoTrackInMediaBuffer,
   isAudioVideoAttachmentExt,
+  isImageAttachmentExt,
   isMarkdownConvertibleExt,
   sanitizeAttachmentName,
   toNodeBuffer,
@@ -231,7 +232,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.123';
+const PLUGIN_RUNTIME_VERSION = '1.3.124';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -546,22 +547,114 @@ function getLocalOcrScriptPath(platform = os.platform(), installRoot = getLocalO
   return joinLocalAsrPath(platform, installRoot, 'ocr_image.py');
 }
 
+function getLocalOcrScriptIdentityHash(source) {
+  const normalizedSource = String(source || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n')
+    .trimEnd();
+  return crypto.createHash('sha256').update(normalizedSource, 'utf8').digest('hex');
+}
+
+const CURRENT_LOCAL_OCR_RUNTIME_SHA256 = getLocalOcrScriptIdentityHash(EMBEDDED_LOCAL_OCR_RUNTIME_SOURCE);
+
+function getLocalOcrScriptVersionStatus(scriptPath, fileSystem = fs) {
+  try {
+    if (!scriptPath || !fileSystem.existsSync(scriptPath)) {
+      return {
+        scriptVersion: 'missing',
+        scriptOutdated: false,
+      };
+    }
+    const source = String(fileSystem.readFileSync(scriptPath, 'utf8') || '');
+    const sourceIdentityHash = getLocalOcrScriptIdentityHash(source);
+    if (sourceIdentityHash === CURRENT_LOCAL_OCR_RUNTIME_SHA256) {
+      return {
+        scriptVersion: 'current',
+        scriptOutdated: false,
+      };
+    }
+    return {
+      scriptVersion: 'legacy-or-custom',
+      scriptOutdated: false,
+      upgradeRecommended: true,
+      compatibilityMode: 'legacy-ocr-script',
+    };
+  } catch (error) {
+    return {
+      scriptVersion: 'unknown',
+      scriptOutdated: false,
+    };
+  }
+}
+
 function getLocalOcrInstallStatus(installRoot = getLocalOcrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
   const pythonPath = getLocalOcrPythonPath(platform, installRoot);
   const scriptPath = getLocalOcrScriptPath(platform, installRoot);
   const hasPython = Boolean(pythonPath && exists(pythonPath));
   const hasScript = Boolean(scriptPath && exists(scriptPath));
+  const scriptVersionStatus = hasScript && exists === fs.existsSync
+    ? getLocalOcrScriptVersionStatus(scriptPath)
+    : {
+      scriptVersion: hasScript ? 'unknown' : 'missing',
+      scriptOutdated: false,
+    };
   const missingReasons = [];
   if (!hasPython) missingReasons.push('Python OCR 运行环境未找到，请安装/更新本地转写组件');
   if (!hasScript) missingReasons.push('OCR 脚本未找到，请安装/更新本地转写组件');
+  if (hasScript && scriptVersionStatus.scriptOutdated) missingReasons.push('OCR 脚本过旧，请重新安装/更新本地转写组件');
   return {
     installRoot,
     pythonPath,
     scriptPath,
     hasPython,
     hasScript,
+    scriptVersion: scriptVersionStatus.scriptVersion,
+    scriptOutdated: scriptVersionStatus.scriptOutdated,
+    ...(scriptVersionStatus.upgradeRecommended === undefined
+      ? {}
+      : {
+        upgradeRecommended: Boolean(scriptVersionStatus.upgradeRecommended),
+        compatibilityMode: scriptVersionStatus.compatibilityMode || 'current',
+      }),
     missingReasons,
-    ready: hasPython && hasScript,
+    ready: hasPython && hasScript && !scriptVersionStatus.scriptOutdated,
+  };
+}
+
+function buildLocalComponentRefreshPlan(readiness = {}, options = {}) {
+  const includeOptionalUpdates = options.includeOptionalUpdates === true;
+  const asrStatus = readiness && readiness.asrStatus ? readiness.asrStatus : {};
+  const ocrStatus = readiness && readiness.ocrStatus ? readiness.ocrStatus : {};
+  const missingComponents = Array.isArray(readiness.missingComponents)
+    ? readiness.missingComponents.filter(Boolean)
+    : [];
+  const ensureMissing = (name) => {
+    if (!missingComponents.includes(name)) missingComponents.push(name);
+  };
+  const asrMissing = !asrStatus.ready;
+  const ocrMissing = !ocrStatus.ready;
+  if (asrMissing) ensureMissing('音视频转写');
+  if (ocrMissing) ensureMissing('图片文字识别 OCR');
+
+  const updateComponents = [];
+  const ensureUpdate = (name) => {
+    if (!updateComponents.includes(name)) updateComponents.push(name);
+  };
+  const asrUpdateRecommended = Boolean(includeOptionalUpdates && !asrMissing && asrStatus.upgradeRecommended);
+  const ocrUpdateRecommended = Boolean(includeOptionalUpdates && !ocrMissing && ocrStatus.upgradeRecommended);
+  if (asrUpdateRecommended) ensureUpdate('音视频转写');
+  if (ocrUpdateRecommended) ensureUpdate('图片文字识别 OCR');
+
+  return {
+    requireAsr: asrMissing || asrUpdateRecommended,
+    requireOcr: ocrMissing || ocrUpdateRecommended,
+    forceAsr: asrUpdateRecommended,
+    forceOcr: ocrUpdateRecommended,
+    missingComponents,
+    updateComponents,
+    hasRepairs: missingComponents.length > 0,
+    hasUpdates: updateComponents.length > 0,
+    hasRequiredChanges: missingComponents.length > 0 || updateComponents.length > 0,
   };
 }
 
@@ -722,7 +815,8 @@ function findFirstExistingPath(candidates, exists) {
   return candidates.find((candidate) => candidate && exists(candidate)) || '';
 }
 
-const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = '53bc6ffde07cd5d3828b20020ac4d7cfa56d775d0bd9e86d2e6fa8cdf4fc2c42';
+const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = 'd2c3f1b263a31e53a8758eff8c6a14c77370736f04c51558c5bf5b0ba853f845';
+const PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256 = '53bc6ffde07cd5d3828b20020ac4d7cfa56d775d0bd9e86d2e6fa8cdf4fc2c42';
 const LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = '509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb';
 
 function getLocalAsrScriptIdentityHash(source) {
@@ -731,6 +825,52 @@ function getLocalAsrScriptIdentityHash(source) {
     .replace(/\r\n?/g, '\n')
     .trimEnd();
   return crypto.createHash('sha256').update(normalizedSource, 'utf8').digest('hex');
+}
+
+function hasDiagnosticsProcessAsrRuntimeFeatures(
+  source,
+  {
+    nativeProcessRunnerVersion,
+    requireHandleInitialization = false,
+  } = {},
+) {
+  const runnerVersionText = nativeProcessRunnerVersion
+    ? `$NativeProcessRunnerVersion = "${nativeProcessRunnerVersion}"`
+    : '$NativeProcessRunnerVersion = ';
+  return source.includes('transcribe-last.log')
+    && source.includes('recoveryTriggered=')
+    && source.includes('Split-AudioToChunks')
+    && source.includes('Test-TranscriptHasRepeatHallucination')
+    && source.includes('Invoke-RecoverRepeatedChunkText')
+    && source.includes('$ChunkRetrySeconds')
+    && source.includes('$ChunkSeconds = 120')
+    && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
+    && source.includes('$TranscriptPartialRecoveryVersion = "partial-recovery-v1"')
+    && source.includes(runnerVersionText)
+    && source.includes('TRANSCRIPT_HALLUCINATION')
+    && source.includes('Invoke-NativeProcess')
+    && source.includes('System.Diagnostics.ProcessStartInfo')
+    && source.includes('ReadToEndAsync')
+    && !source.includes('Start-Process')
+    && source.includes('ConvertTo-SimplifiedChinese')
+    && source.includes('SimplifiedChinese')
+    && source.includes('System.Text.UTF8Encoding')
+    && source.includes('ReadAllText')
+    && source.includes('WriteAllText')
+    && source.includes('Get-ShortPath')
+    && source.includes('Test-WhisperNativeCrashExitCode')
+    && source.includes('Convert-ExitCodeToHex')
+    && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
+    && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
+    && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
+    && source.includes('safeModelPath')
+    && source.includes('progressPercent')
+    && source.includes('progressHeartbeatAt')
+    && source.includes('progressPid')
+    && source.includes('-ProgressStage "segmenting"')
+    && !source.includes('$SimplifiedPrompt')
+    && !source.includes('"--prompt"')
+    && (!requireHandleInitialization || source.includes('$null = $process.Handle'));
 }
 
 function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
@@ -749,41 +889,10 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
         scriptOutdated: true,
       };
     }
-    if (
-      source.includes('transcribe-last.log')
-      && source.includes('recoveryTriggered=')
-      && source.includes('Split-AudioToChunks')
-      && source.includes('Test-TranscriptHasRepeatHallucination')
-      && source.includes('Invoke-RecoverRepeatedChunkText')
-      && source.includes('$ChunkRetrySeconds')
-      && source.includes('$ChunkSeconds = 120')
-      && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
-      && source.includes('$TranscriptPartialRecoveryVersion = "partial-recovery-v1"')
-      && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"')
-      && source.includes('TRANSCRIPT_HALLUCINATION')
-      && source.includes('Invoke-NativeProcess')
-      && source.includes('System.Diagnostics.ProcessStartInfo')
-      && source.includes('ReadToEndAsync')
-      && !source.includes('Start-Process')
-      && source.includes('ConvertTo-SimplifiedChinese')
-      && source.includes('SimplifiedChinese')
-      && source.includes('System.Text.UTF8Encoding')
-      && source.includes('ReadAllText')
-      && source.includes('WriteAllText')
-      && source.includes('Get-ShortPath')
-      && source.includes('Test-WhisperNativeCrashExitCode')
-      && source.includes('Convert-ExitCodeToHex')
-      && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
-      && source.includes('Invoke-TranscribeAttempt -Mode "normal"')
-      && source.includes('Invoke-TranscribeAttempt -Mode "safe"')
-      && source.includes('safeModelPath')
-      && source.includes('progressPercent')
-      && source.includes('progressHeartbeatAt')
-      && source.includes('progressPid')
-      && source.includes('-ProgressStage "segmenting"')
-      && !source.includes('$SimplifiedPrompt')
-      && !source.includes('"--prompt"')
-    ) {
+    if (hasDiagnosticsProcessAsrRuntimeFeatures(source, {
+      nativeProcessRunnerVersion: 'diagnostics-process-v2',
+      requireHandleInitialization: true,
+    })) {
       if (sourceIdentityHash !== CURRENT_WINDOWS_ASR_SCRIPT_SHA256) {
         return {
           scriptVersion: 'current-signature-mismatch',
@@ -791,8 +900,24 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
         };
       }
       return {
-        scriptVersion: 'adaptive-chunked-diagnostics-process-repeat-guard-v2-heartbeat-run-log',
+        scriptVersion: 'adaptive-chunked-diagnostics-process-v2-repeat-guard-v2-heartbeat-run-log',
         scriptOutdated: false,
+      };
+    }
+    if (hasDiagnosticsProcessAsrRuntimeFeatures(source, {
+      nativeProcessRunnerVersion: 'diagnostics-process-v1',
+    })) {
+      if (sourceIdentityHash !== PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256) {
+        return {
+          scriptVersion: 'diagnostics-process-v1-signature-mismatch',
+          scriptOutdated: true,
+        };
+      }
+      return {
+        scriptVersion: 'adaptive-chunked-diagnostics-process-v1-repeat-guard-v2-heartbeat-run-log',
+        scriptOutdated: false,
+        upgradeRecommended: true,
+        compatibilityMode: 'diagnostics-process-v1',
       };
     }
     if (
@@ -1765,7 +1890,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 2, 28],
+      [1, 2, 29],
   )
     && source.includes('function Assert-TranscribeScriptCandidate')
     && source.includes('function Start-TranscribeScriptUpdate')
@@ -1779,10 +1904,11 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('progressPid')
     && source.includes('-ProgressStage "segmenting"')
     && source.includes('$TranscriptQualityGuardVersion = "repeat-guard-v2"')
-    && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"')
+    && source.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"')
     && source.includes('Invoke-NativeProcess')
     && source.includes('System.Diagnostics.ProcessStartInfo')
     && source.includes('ReadToEndAsync')
+    && source.includes('$null = $process.Handle')
     && !source.includes('Start-Process')
     && source.includes('Convert-ExitCodeToHex')
     && source.includes('$hex = Convert-ExitCodeToHex -ExitCode $ExitCode')
@@ -2868,6 +2994,38 @@ function downloadArrayBufferViaNode(url, headers = {}, options = {}, redirectCou
 }
 function getRecordId(record) {
   return record._id || record.id || '';
+}
+
+function getAttachmentDiagnosticKind(fileExt = '') {
+  return isImageAttachmentExt(fileExt) ? 'image' : 'file';
+}
+
+function redactAttachmentDiagnosticError(error, settings = {}) {
+  return redactKnownCredentials(error && error.message ? error.message : String(error || ''), settings)
+    .replace(/https?:\/\/[^\s)'"<>]+/gi, '[URL_REDACTED]')
+    .replace(/\b(token|code|secret|authorization|cookie|fileID|fileId)=([^\s&]+)/gi, '$1=[REDACTED]')
+    .slice(0, 1000);
+}
+
+function buildAttachmentDiagnostic({
+  status = '',
+  fileExt = '',
+  filePath = '',
+  byteLength = 0,
+  error = null,
+  settings = {},
+} = {}) {
+  const diagnostic = {
+    status: String(status || '').trim() || 'unknown',
+    kind: getAttachmentDiagnosticKind(fileExt),
+    fileExt: String(fileExt || '').trim().toLowerCase().replace(/^\./, ''),
+    filePath: String(filePath || '').trim() ? normalizeVaultPath(filePath) : '',
+    byteLength: Number.isFinite(Number(byteLength)) ? Math.max(0, Number(byteLength)) : 0,
+  };
+  if (diagnostic.status === 'failed') {
+    diagnostic.error = redactAttachmentDiagnosticError(error, settings);
+  }
+  return diagnostic;
 }
 
 function getTypeDisplayName(type) {
@@ -13552,6 +13710,7 @@ const recordBodyMarkdownHelpers = createRecordBodyMarkdownHelpers({
   formatCreatedTime,
   getWebpageSourcePrefix,
   isFeishuUrl,
+  isImageAttachmentExt,
   isWechatChannelsUrl,
   isXiaohongshuUrl,
   normalizeExtractedUrl,
@@ -16240,13 +16399,18 @@ class WechatObsidianInboxPlugin extends Plugin {
     const ocrStatus = this.getLocalOcrInstallStatus();
     const platform = this.getConfiguredLocalAsrPlatform();
     const missingComponents = [];
+    const updateComponents = [];
     if (!asrStatus.ready) missingComponents.push('音视频转写');
     if (!ocrStatus.ready) missingComponents.push('图片文字识别 OCR');
+    if (asrStatus.ready && asrStatus.upgradeRecommended) updateComponents.push('音视频转写');
+    if (ocrStatus.ready && ocrStatus.upgradeRecommended) updateComponents.push('图片文字识别 OCR');
     return {
       ready: missingComponents.length === 0,
       platform,
       platformName: LOCAL_ASR_PLATFORM_NAMES[platform] || platform,
       missingComponents,
+      updateComponents,
+      updateRecommended: updateComponents.length > 0,
       asrStatus,
       ocrStatus,
     };
@@ -16280,37 +16444,72 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     if (status && status.hasAccess) {
       let readiness = this.getLocalTranscriptionComponentReadiness();
+      let refreshPlan = buildLocalComponentRefreshPlan(readiness, {
+        includeOptionalUpdates: reason === 'manual-refresh',
+      });
+      readiness = {
+        ...readiness,
+        missingComponents: refreshPlan.missingComponents,
+        updateComponents: refreshPlan.updateComponents,
+        updateRecommended: refreshPlan.updateComponents.length > 0,
+      };
       status = {
         ...status,
         localComponentReadiness: readiness,
+        localComponentRefreshPlan: refreshPlan,
       };
       const shouldInstallMissingComponents = (
         options.installMissingComponents === true
         || reason === 'manual-refresh'
       );
-      if (shouldInstallMissingComponents && !readiness.ready) {
-        const requireAsr = !readiness.asrStatus || !readiness.asrStatus.ready;
-        const requireOcr = !readiness.ocrStatus || !readiness.ocrStatus.ready;
+      if (shouldInstallMissingComponents && refreshPlan.hasRequiredChanges) {
+        const accepted = await this.confirmLocalComponentInstall(status, reason, readiness);
+        if (!accepted) {
+          status = {
+            ...status,
+            localComponentInstallSkipped: {
+              reason: 'user-declined',
+              ...refreshPlan,
+            },
+          };
+          return status;
+        }
         try {
           const installResult = await this.installLocalTranscriptionComponents({
             reason,
             readiness,
-            requireAsr,
-            requireOcr,
+            requireAsr: refreshPlan.requireAsr,
+            requireOcr: refreshPlan.requireOcr,
+            forceAsr: refreshPlan.forceAsr,
+            forceOcr: refreshPlan.forceOcr,
           });
           readiness = installResult && installResult.readiness
             ? installResult.readiness
             : this.getLocalTranscriptionComponentReadiness();
+          refreshPlan = buildLocalComponentRefreshPlan(readiness, {
+            includeOptionalUpdates: reason === 'manual-refresh',
+          });
+          readiness = {
+            ...readiness,
+            missingComponents: refreshPlan.missingComponents,
+            updateComponents: refreshPlan.updateComponents,
+            updateRecommended: refreshPlan.updateComponents.length > 0,
+          };
           status = {
             ...status,
             localComponentInstallResult: installResult,
             localComponentReadiness: readiness,
+            localComponentRefreshPlan: refreshPlan,
           };
         } catch (error) {
+          const failedReadiness = this.getLocalTranscriptionComponentReadiness();
           status = {
             ...status,
             localComponentInstallError: formatLocalComponentInstallFailureReason(error),
-            localComponentReadiness: this.getLocalTranscriptionComponentReadiness(),
+            localComponentReadiness: failedReadiness,
+            localComponentRefreshPlan: buildLocalComponentRefreshPlan(failedReadiness, {
+              includeOptionalUpdates: reason === 'manual-refresh',
+            }),
           };
         }
       }
@@ -16320,17 +16519,39 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async confirmLocalComponentInstall(status, reason, readiness) {
-    const missingText = readiness.missingComponents.join('、') || '本地转写组件';
+    const missingComponents = Array.isArray(readiness.missingComponents)
+      ? readiness.missingComponents.filter(Boolean)
+      : [];
+    const updateComponents = Array.isArray(readiness.updateComponents)
+      ? readiness.updateComponents.filter(Boolean)
+      : [];
+    const missingText = missingComponents.join('、');
+    const updateText = updateComponents.join('、');
+    const hasMissing = missingComponents.length > 0;
+    const hasUpdates = updateComponents.length > 0;
+    const fallbackComponentText = missingText || updateText || '本地转写组件';
     const reasonText = reason === 'first-use'
       ? '当前操作需要使用本地转写组件。'
-      : '检测到你已开通 Pro，但本地转写组件还没有准备完整。';
-    const message = [
-      reasonText,
-      `缺少：${missingText}`,
+      : hasMissing
+        ? '检测到你已开通 Pro，但本地转写组件还没有准备完整。'
+        : hasUpdates
+          ? '检测到本地转写组件可以正常使用，但低于当前插件内置标准。'
+          : '检测到本地转写组件需要确认。';
+    const actionText = hasMissing && hasUpdates
+      ? '修复/更新'
+      : hasUpdates
+        ? '更新'
+        : '安装/修复';
+    const messageLines = [reasonText];
+    if (hasMissing) messageLines.push(`需要修复：${missingText}`);
+    if (hasUpdates) messageLines.push(`建议更新：${updateText}`);
+    messageLines.push(
       `当前电脑：${readiness.platformName || '当前系统'}`,
+      '本次只会处理上面列出的组件，已经可用且无需更新的部分不会下载。',
       '这个组件用于音视频转写和小红书图片文字识别，图片会在本机识别，不上传到云端。',
-      '现在开始安装/修复吗？',
-    ].join('\n');
+      `现在开始${actionText}吗？`,
+    );
+    const message = messageLines.join('\n');
     const modalResult = showLocalComponentInstallConfirm(this.app, message);
     if (modalResult) {
       return await modalResult;
@@ -16338,7 +16559,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
       return Boolean(window.confirm(message));
     }
-    new Notice(`Pro 已开通，但缺少${missingText}。请在插件设置的 Pro 高级功能里安装本地转写组件。`, 10000);
+    new Notice(`Pro 已开通，但${fallbackComponentText}需要${actionText}。请在插件设置的 Pro 高级功能里处理本地转写组件。`, 10000);
     return false;
   }
 
@@ -16375,6 +16596,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   async doInstallLocalTranscriptionComponents(options = {}) {
     const requireAsr = options.requireAsr === true;
     const requireOcr = options.requireOcr === true;
+    const forceAsr = options.forceAsr === true;
+    const forceOcr = options.forceOcr === true;
     if (!requireAsr && !requireOcr) {
       return {
         installed: false,
@@ -16385,9 +16608,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.ensureProFeatureAccess('本地转写组件安装');
     const readiness = options.readiness || this.getLocalTranscriptionComponentReadiness();
     const failures = [];
-    if (requireAsr && (!readiness.asrStatus || !readiness.asrStatus.ready)) {
+    const shouldInstallAsr = requireAsr && (forceAsr || !readiness.asrStatus || !readiness.asrStatus.ready);
+    if (shouldInstallAsr) {
       try {
-        await this.installLocalAsr({ installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode), reason: options.reason });
+        await this.installLocalAsr({
+          installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode),
+          reason: options.reason,
+          force: forceAsr,
+        });
       } catch (error) {
         failures.push({
           component: '音视频转写 ASR',
@@ -16396,9 +16624,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
     const ocrStatus = this.getLocalOcrInstallStatus();
-    if (requireOcr && !ocrStatus.ready) {
+    const shouldInstallOcr = requireOcr && (forceOcr || !ocrStatus.ready);
+    if (shouldInstallOcr) {
       try {
-        await this.installLocalOcr({ reason: options.reason });
+        await this.installLocalOcr({
+          reason: options.reason,
+          force: forceOcr,
+        });
       } catch (error) {
         failures.push({
           component: '图片文字识别 OCR',
@@ -16413,7 +16645,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error(message);
     }
     return {
-      installed: true,
+      installed: shouldInstallAsr || shouldInstallOcr,
+      skipped: !(shouldInstallAsr || shouldInstallOcr),
       reason: options.reason || '',
       readiness: this.getLocalTranscriptionComponentReadiness(),
     };
@@ -17659,20 +17892,39 @@ class WechatObsidianInboxPlugin extends Plugin {
   async writeFileAttachment(record, rootDir, dateFolder, title, binding = null, progress = {}) {
     rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = record.metadata || {};
+    const fileName = metadata.fileName || record.content || `${title}.bin`;
+    const fileExt = getAttachmentExt(fileName, metadata.fileExt);
+    const safeFileName = sanitizeAttachmentName(fileName, `${title}${fileExt ? `.${fileExt}` : ''}`);
+    const fileRootDir = `${rootDir}/文件附件`;
+    const fileDayDir = `${fileRootDir}/${dateFolder}`;
+    const filePath = `${fileDayDir}/${title}-${safeFileName}`;
+    let byteLength = 0;
     if (!metadata.fileID) {
-      return record;
+      return {
+        ...record,
+        metadata: {
+          ...metadata,
+          fileName,
+          fileExt,
+          conversionStatus: 'failed',
+          conversionError: '云端文件标识缺失，无法下载附件',
+          attachmentDiagnostic: buildAttachmentDiagnostic({
+            status: 'missing_file_id',
+            fileExt,
+            filePath: '',
+            byteLength: 0,
+            settings: this.settings,
+          }),
+        },
+      };
     }
 
     try {
-      const fileName = metadata.fileName || record.content || `${title}.bin`;
-      const fileExt = getAttachmentExt(fileName, metadata.fileExt);
-      const safeFileName = sanitizeAttachmentName(fileName, `${title}${fileExt ? `.${fileExt}` : ''}`);
-      const fileRootDir = `${rootDir}/文件附件`;
-      const fileDayDir = `${fileRootDir}/${dateFolder}`;
-      const filePath = `${fileDayDir}/${title}-${safeFileName}`;
       const tempFileURL = await this.requestFileDownloadUrl(metadata.fileID, binding);
       this.showSyncProgress({ ...progress, stage: 'downloading', title: fileName });
       const fileBuffer = await this.downloadArrayBuffer(tempFileURL);
+      const nodeBuffer = toNodeBuffer(fileBuffer);
+      byteLength = nodeBuffer.length;
 
       if (typeof this.app.vault.adapter.writeBinary !== 'function') {
         throw new Error('当前 Obsidian 环境不支持写入二进制附件');
@@ -17681,13 +17933,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       await this.ensureFolder(fileRootDir);
       await this.ensureFolder(fileDayDir);
       await this.app.vault.adapter.writeBinary(normalizeVaultPath(filePath), fileBuffer);
-      const nodeBuffer = toNodeBuffer(fileBuffer);
 
       const nextMetadata = {
         ...metadata,
         fileName,
         fileExt,
         filePath,
+        attachmentDiagnostic: buildAttachmentDiagnostic({
+          status: 'saved',
+          fileExt,
+          filePath,
+          byteLength,
+          settings: this.settings,
+        }),
       };
 
       try {
@@ -17778,8 +18036,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...record,
         metadata: {
           ...metadata,
+          fileName,
+          fileExt,
+          filePath,
           conversionStatus: 'failed',
           conversionError: error.message || String(error),
+          attachmentDiagnostic: buildAttachmentDiagnostic({
+            status: 'failed',
+            fileExt,
+            filePath,
+            byteLength,
+            error,
+            settings: this.settings,
+          }),
         },
       };
     }
@@ -20634,9 +20903,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     const lifecycleOutcomeError = getSyncLifecycleOutcomeError(recordForMarkdown);
     if (lifecycleOutcomeError) {
+      const attachmentDiagnostic = recordForMarkdown.metadata
+        && recordForMarkdown.metadata.attachmentDiagnostic;
+      if (attachmentDiagnostic && typeof attachmentDiagnostic === 'object'
+        && ['failed', 'missing_file_id'].includes(String(attachmentDiagnostic.status || '').toLowerCase())) {
+        lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
+      }
       const mediaResolutionDiagnostic = recordForMarkdown.metadata
         && recordForMarkdown.metadata.mediaResolutionDiagnostic;
-      if (mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object') {
+      if (!lifecycleOutcomeError.diagnostic
+        && mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === 'object') {
         lifecycleOutcomeError.diagnostic = mediaResolutionDiagnostic;
       }
       const conversionDiagnostic = recordForMarkdown.metadata
@@ -20644,6 +20920,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!lifecycleOutcomeError.diagnostic
         && conversionDiagnostic && typeof conversionDiagnostic === 'object') {
         lifecycleOutcomeError.diagnostic = conversionDiagnostic;
+      }
+      if (!lifecycleOutcomeError.diagnostic
+        && attachmentDiagnostic && typeof attachmentDiagnostic === 'object') {
+        lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
       }
       throw lifecycleOutcomeError;
     }
@@ -20731,6 +21011,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         : null,
       conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata
         ? recordForMarkdown.metadata.conversionDiagnostic || null
+        : null,
+      attachmentDiagnostic: recordForMarkdown && recordForMarkdown.metadata
+        ? recordForMarkdown.metadata.attachmentDiagnostic || null
         : null,
       feishuMediaDiagnostic: recordForMarkdown && recordForMarkdown.metadata
         ? recordForMarkdown.metadata.feishuMediaDiagnostic || null
@@ -21301,12 +21584,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
       const latestSuccessfulDiagnostic = [...written].reverse().find((item) => (
-        item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic
+        item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic || item.attachmentDiagnostic
       ));
       const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic
         ? latestSuccessfulDiagnostic.feishuMediaDiagnostic
           || latestSuccessfulDiagnostic.mediaResolutionDiagnostic
           || latestSuccessfulDiagnostic.conversionDiagnostic
+          || latestSuccessfulDiagnostic.attachmentDiagnostic
         : null;
       const completionWarningDetails = completionWarnings
         .map((item) => {
@@ -21745,8 +22029,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
               const proAccessNotice = `Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`;
               if (status.localComponentInstallError) {
                 new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8000);
+              } else if (status.localComponentInstallSkipped && status.localComponentInstallSkipped.reason === 'user-declined') {
+                new Notice(`${proAccessNotice}；已取消本地转写组件更新/修复。`, 8000);
               } else if (status.localComponentInstallResult && status.localComponentInstallResult.installed) {
-                new Notice(`${proAccessNotice}；本地转写组件已安装/修复。`, 8000);
+                new Notice(`${proAccessNotice}；本地转写组件已安装/修复/更新。`, 8000);
               } else {
                 new Notice(proAccessNotice);
               }
@@ -22041,6 +22327,7 @@ WechatObsidianInboxPlugin.__test = {
   formatHttpError,
   parseTencentCreateTaskResponse,
   parseTencentTaskStatusResponse,
+  buildAttachmentDiagnostic,
   buildRecordTitleBase,
   hasRecordIdInFrontmatter,
   extractXiaohongshuMarkdownFromHtml,
@@ -22149,6 +22436,7 @@ WechatObsidianInboxPlugin.__test = {
   extractBilibiliAudioUrlFromPlayurlPayload,
   extractBilibiliProgressiveVideoUrlFromPlayurlPayload,
   hasVideoTrackInMediaBuffer,
+  isImageAttachmentExt,
   cleanTrailingTranscriptionHallucinations,
   buildAudioTranscriptMarkdown,
   buildTranscriptPropertyMetadata,
@@ -22197,6 +22485,10 @@ WechatObsidianInboxPlugin.__test = {
   getLocalOcrInstallStatus,
   getLocalOcrPythonPath,
   getLocalOcrScriptPath,
+  getLocalOcrScriptIdentityHash,
+  getLocalOcrScriptVersionStatus,
+  CURRENT_LOCAL_OCR_RUNTIME_SHA256,
+  buildLocalComponentRefreshPlan,
   getLocalAsrScriptVersionStatus,
   explainLocalAsrExitCode,
   getLocalAsrRunLogPath,

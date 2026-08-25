@@ -339,8 +339,8 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.28"'));
-assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.29"'));
+assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"'));
 assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilityUrls = @()'));
@@ -391,7 +391,7 @@ assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "ggml-small.bin"'));
 assert.ok(windowsInstaller.includes('Download-File -Url $Url -OutFile $CachePath -Resume'));
 assert.ok(windowsInstaller.includes('Resuming partial cached $Label package'));
 assert.ok(windowsInstaller.includes('Keeping partial $Label package for retry'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.28"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.29"'));
 assert.ok(windowsInstaller.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'));
 assert.strictEqual(windowsInstaller.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'), false);
 assert.ok(windowsInstaller.includes('Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue'));
@@ -651,8 +651,8 @@ function runWindowsAsrCandidateValidationProbe(source) {
     '$validSource=@\'',
     '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
     '$TranscriptPartialRecoveryVersion = "partial-recovery-v1"',
-    '$NativeProcessRunnerVersion = "diagnostics-process-v1"',
-    'function Invoke-NativeProcess { $info = New-Object System.Diagnostics.ProcessStartInfo; $task = $process.StandardOutput.ReadToEndAsync() }',
+    '$NativeProcessRunnerVersion = "diagnostics-process-v2"',
+    'function Invoke-NativeProcess { $info = New-Object System.Diagnostics.ProcessStartInfo; $process = New-Object System.Diagnostics.Process; $null = $process.Handle; $task = $process.StandardOutput.ReadToEndAsync() }',
     '$progressHeartbeatAt="now"',
     '$progressPid=1',
     'Write-ProgressLog -ProgressStage "segmenting"',
@@ -697,11 +697,21 @@ if (process.platform === 'win32') {
 assert.ok(transcribeScriptTemplate.includes('function ConvertTo-NativeArgument'));
 assert.ok(transcribeScriptTemplate.includes('function Convert-ExitCodeToHex'));
 assert.ok(
-  transcribeScriptTemplate.includes('$NativeProcessRunnerVersion = "diagnostics-process-v1"'),
-  'Windows transcribe script must advertise the ProcessStartInfo exit-code fix',
+  transcribeScriptTemplate.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"'),
+  'Windows transcribe script must advertise the initialized-handle ProcessStartInfo exit-code fix',
 );
 assert.ok(transcribeScriptTemplate.includes('System.Diagnostics.ProcessStartInfo'));
 assert.ok(transcribeScriptTemplate.includes('ReadToEndAsync'));
+assert.ok(transcribeScriptTemplate.includes('$null = $process.Handle'));
+assert.ok(
+  transcribeScriptTemplate.indexOf('$null = $process.Handle') < transcribeScriptTemplate.indexOf('WaitForExit(5000)'),
+  'Windows transcribe runner must initialize the process handle before waiting or reading ExitCode',
+);
+assert.ok(windowsInstaller.includes('$null = $process.Handle'));
+assert.ok(
+  windowsInstaller.indexOf('$null = $process.Handle') < windowsInstaller.indexOf('WaitForExit(5000)'),
+  'Windows installer runner must initialize the process handle before waiting or reading ExitCode',
+);
 assert.strictEqual(
   extractPowerShellFunction(transcribeScriptTemplate, 'Invoke-NativeProcess').includes('Start-Process'),
   false,
