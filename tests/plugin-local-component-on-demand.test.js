@@ -33,32 +33,52 @@ function createPlugin() {
   return plugin;
 }
 
-async function verifyStatusRefreshNeverInstalls() {
+async function verifyStatusRefreshInstallsMissingComponentsOnlyOnManualRefresh() {
   const plugin = createPlugin();
   let refreshes = 0;
   let prompts = 0;
-  let installs = 0;
+  let installedOcr = false;
+  const installOptions = [];
   plugin.getProFeatureAccessStatus = async () => {
     refreshes += 1;
     return { hasAccess: true, status: 'active' };
   };
-  plugin.getLocalTranscriptionComponentReadiness = () => ({ ready: false });
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: installedOcr,
+    missingComponents: installedOcr ? [] : ['OCR'],
+    asrStatus: { ready: true },
+    ocrStatus: { ready: installedOcr },
+  });
   plugin.confirmLocalComponentInstall = async () => {
     prompts += 1;
     return true;
   };
-  plugin.installLocalTranscriptionComponents = async () => {
-    installs += 1;
-    return { installed: true };
+  plugin.installLocalTranscriptionComponents = async (options) => {
+    installOptions.push(options);
+    installedOcr = true;
+    return {
+      installed: true,
+      reason: options.reason,
+      readiness: plugin.getLocalTranscriptionComponentReadiness(),
+    };
   };
 
-  for (const reason of ['bind', 'settings-open', 'manual-refresh']) {
+  for (const reason of ['bind', 'settings-open']) {
     const status = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason, force: true });
     assert.strictEqual(status.hasAccess, true);
+    assert.strictEqual(status.localComponentReadiness.ready, false);
   }
+  const manualStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'manual-refresh', force: true });
+  assert.strictEqual(manualStatus.hasAccess, true);
+  assert.strictEqual(manualStatus.localComponentReadiness.ready, true);
+  assert.strictEqual(manualStatus.localComponentInstallResult.installed, true);
+
   assert.strictEqual(refreshes, 3);
   assert.strictEqual(prompts, 0);
-  assert.strictEqual(installs, 0);
+  assert.strictEqual(installOptions.length, 1);
+  assert.strictEqual(installOptions[0].reason, 'manual-refresh');
+  assert.strictEqual(installOptions[0].requireAsr, false);
+  assert.strictEqual(installOptions[0].requireOcr, true);
 }
 
 async function verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr, requireOcr }) {
@@ -108,7 +128,7 @@ async function verifyImplicitInstallIsNoOp() {
 }
 
 (async () => {
-  await verifyStatusRefreshNeverInstalls();
+  await verifyStatusRefreshInstallsMissingComponentsOnlyOnManualRefresh();
   await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: true, requireOcr: false });
   await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: false, requireOcr: true });
   await verifyImplicitInstallIsNoOp();

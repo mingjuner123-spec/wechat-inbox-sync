@@ -231,7 +231,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.122';
+const PLUGIN_RUNTIME_VERSION = '1.3.123';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
