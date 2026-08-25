@@ -12120,10 +12120,14 @@ async function runLocalTranscriptionEntitlementTests() {
     ready: false,
     platform: 'win32',
     platformName: 'Windows',
+    asrStatus: { ready: true },
+    ocrStatus: { ready: false },
     missingComponents: ['图片文字识别 OCR'],
   });
   refreshKeepsProStatusPlugin.confirmLocalComponentInstall = async () => true;
-  refreshKeepsProStatusPlugin.installLocalTranscriptionComponents = async () => {
+  let refreshInstallOptions = null;
+  refreshKeepsProStatusPlugin.installLocalTranscriptionComponents = async (options = {}) => {
+    refreshInstallOptions = options;
     throw new Error('图片文字识别 OCR：tar.exe 拒绝访问');
   };
   const refreshKeepsProStatus = await refreshKeepsProStatusPlugin.refreshProAndMaybePromptLocalComponentInstall({
@@ -12131,7 +12135,39 @@ async function runLocalTranscriptionEntitlementTests() {
     force: true,
   });
   assert.strictEqual(refreshKeepsProStatus.hasAccess, true);
-  assert.strictEqual(refreshKeepsProStatus.localComponentInstallError, undefined);
+  assert.strictEqual(refreshInstallOptions.reason, 'manual-refresh');
+  assert.strictEqual(refreshInstallOptions.requireAsr, false);
+  assert.strictEqual(refreshInstallOptions.requireOcr, true);
+  assert.strictEqual(refreshInstallOptions.readiness.ready, false);
+  assert.match(refreshKeepsProStatus.localComponentInstallError, /OCR|tar\.exe/);
+  assert.strictEqual(refreshKeepsProStatus.localComponentReadiness.ready, false);
+
+  const refreshReadyPlugin = new PluginClass();
+  refreshReadyPlugin.settings = helpers.mergeSettings({});
+  refreshReadyPlugin.getProFeatureAccessStatus = async () => ({
+    hasAccess: true,
+    plan: 'local_transcription_beta',
+    status: 'active',
+    expiresAt: '2026-08-01T00:00:00.000Z',
+  });
+  refreshReadyPlugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: true,
+    platform: 'win32',
+    platformName: 'Windows',
+    asrStatus: { ready: true },
+    ocrStatus: { ready: true },
+    missingComponents: [],
+  });
+  refreshReadyPlugin.installLocalTranscriptionComponents = async () => {
+    throw new Error('ready components must not download during manual refresh');
+  };
+  const refreshReadyStatus = await refreshReadyPlugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'manual-refresh',
+    force: true,
+  });
+  assert.strictEqual(refreshReadyStatus.hasAccess, true);
+  assert.strictEqual(refreshReadyStatus.localComponentInstallError, undefined);
+  assert.strictEqual(refreshReadyStatus.localComponentReadiness.ready, true);
 
   const ocrOnlyPlugin = new PluginClass();
   ocrOnlyPlugin.settings = helpers.mergeSettings({});

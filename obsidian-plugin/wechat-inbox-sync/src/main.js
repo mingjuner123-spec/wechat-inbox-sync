@@ -231,7 +231,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.122';
+const PLUGIN_RUNTIME_VERSION = '1.3.123';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -16278,6 +16278,44 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
+    if (status && status.hasAccess) {
+      let readiness = this.getLocalTranscriptionComponentReadiness();
+      status = {
+        ...status,
+        localComponentReadiness: readiness,
+      };
+      const shouldInstallMissingComponents = (
+        options.installMissingComponents === true
+        || reason === 'manual-refresh'
+      );
+      if (shouldInstallMissingComponents && !readiness.ready) {
+        const requireAsr = !readiness.asrStatus || !readiness.asrStatus.ready;
+        const requireOcr = !readiness.ocrStatus || !readiness.ocrStatus.ready;
+        try {
+          const installResult = await this.installLocalTranscriptionComponents({
+            reason,
+            readiness,
+            requireAsr,
+            requireOcr,
+          });
+          readiness = installResult && installResult.readiness
+            ? installResult.readiness
+            : this.getLocalTranscriptionComponentReadiness();
+          status = {
+            ...status,
+            localComponentInstallResult: installResult,
+            localComponentReadiness: readiness,
+          };
+        } catch (error) {
+          status = {
+            ...status,
+            localComponentInstallError: formatLocalComponentInstallFailureReason(error),
+            localComponentReadiness: this.getLocalTranscriptionComponentReadiness(),
+          };
+        }
+      }
+    }
+
     return status;
   }
 
@@ -21707,6 +21745,8 @@ class WechatInboxSettingTab extends PluginSettingTab {
               const proAccessNotice = `Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`;
               if (status.localComponentInstallError) {
                 new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8000);
+              } else if (status.localComponentInstallResult && status.localComponentInstallResult.installed) {
+                new Notice(`${proAccessNotice}；本地转写组件已安装/修复。`, 8000);
               } else {
                 new Notice(proAccessNotice);
               }
