@@ -33,7 +33,7 @@ function createPlugin() {
   return plugin;
 }
 
-async function verifyStatusRefreshInstallsMissingComponentsOnlyOnManualRefresh() {
+async function verifyStatusRefreshPromptsAndInstallsMissingComponentsOnlyOnManualRefresh() {
   const plugin = createPlugin();
   let refreshes = 0;
   let prompts = 0;
@@ -74,11 +74,124 @@ async function verifyStatusRefreshInstallsMissingComponentsOnlyOnManualRefresh()
   assert.strictEqual(manualStatus.localComponentInstallResult.installed, true);
 
   assert.strictEqual(refreshes, 3);
-  assert.strictEqual(prompts, 0);
+  assert.strictEqual(prompts, 1);
   assert.strictEqual(installOptions.length, 1);
   assert.strictEqual(installOptions[0].reason, 'manual-refresh');
   assert.strictEqual(installOptions[0].requireAsr, false);
   assert.strictEqual(installOptions[0].requireOcr, true);
+  assert.strictEqual(installOptions[0].forceAsr, false);
+  assert.strictEqual(installOptions[0].forceOcr, false);
+}
+
+async function verifyManualRefreshDeclineSkipsDownload() {
+  const plugin = createPlugin();
+  let prompts = 0;
+  plugin.getProFeatureAccessStatus = async () => ({ hasAccess: true, status: 'active' });
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: false,
+    missingComponents: ['OCR'],
+    asrStatus: { ready: true },
+    ocrStatus: { ready: false },
+  });
+  plugin.confirmLocalComponentInstall = async () => {
+    prompts += 1;
+    return false;
+  };
+  plugin.installLocalTranscriptionComponents = async () => {
+    throw new Error('declined refresh must not download components');
+  };
+
+  const status = await plugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'manual-refresh',
+    force: true,
+  });
+
+  assert.strictEqual(status.hasAccess, true);
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(status.localComponentInstallSkipped.reason, 'user-declined');
+  assert.strictEqual(status.localComponentInstallSkipped.requireAsr, false);
+  assert.strictEqual(status.localComponentInstallSkipped.requireOcr, true);
+}
+
+async function verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConfirmation() {
+  const plugin = createPlugin();
+  let prompts = 0;
+  const installOptions = [];
+  let upgraded = false;
+  plugin.getProFeatureAccessStatus = async () => ({ hasAccess: true, status: 'active' });
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: true,
+    missingComponents: [],
+    updateComponents: upgraded ? [] : ['音视频转写', '图片文字识别 OCR'],
+    updateRecommended: !upgraded,
+    asrStatus: {
+      ready: true,
+      upgradeRecommended: !upgraded,
+      compatibilityMode: upgraded ? 'current' : 'diagnostics-process-v1',
+    },
+    ocrStatus: {
+      ready: true,
+      upgradeRecommended: !upgraded,
+      compatibilityMode: upgraded ? 'current' : 'legacy-ocr-script',
+    },
+  });
+  plugin.confirmLocalComponentInstall = async (status, reason, readiness) => {
+    prompts += 1;
+    assert.strictEqual(reason, 'manual-refresh');
+    assert.deepStrictEqual(readiness.missingComponents, []);
+    assert.deepStrictEqual(readiness.updateComponents, ['音视频转写', '图片文字识别 OCR']);
+    return true;
+  };
+  plugin.installLocalTranscriptionComponents = async (options) => {
+    installOptions.push(options);
+    upgraded = true;
+    return {
+      installed: true,
+      reason: options.reason,
+      readiness: plugin.getLocalTranscriptionComponentReadiness(),
+    };
+  };
+
+  const passiveStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'settings-open',
+    force: true,
+  });
+  assert.strictEqual(passiveStatus.localComponentRefreshPlan.hasRequiredChanges, false);
+  assert.strictEqual(prompts, 0);
+  assert.strictEqual(installOptions.length, 0);
+
+  const manualStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'manual-refresh',
+    force: true,
+  });
+  assert.strictEqual(manualStatus.localComponentInstallResult.installed, true);
+  assert.strictEqual(manualStatus.localComponentReadiness.updateRecommended, false);
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(installOptions.length, 1);
+  assert.strictEqual(installOptions[0].requireAsr, true);
+  assert.strictEqual(installOptions[0].requireOcr, true);
+  assert.strictEqual(installOptions[0].forceAsr, true);
+  assert.strictEqual(installOptions[0].forceOcr, true);
+}
+
+function verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested() {
+  const readiness = {
+    ready: true,
+    missingComponents: [],
+    asrStatus: { ready: true, upgradeRecommended: true },
+    ocrStatus: { ready: true, upgradeRecommended: false },
+  };
+  const passivePlan = helpers.buildLocalComponentRefreshPlan(readiness);
+  assert.strictEqual(passivePlan.hasRequiredChanges, false);
+  assert.strictEqual(passivePlan.forceAsr, false);
+
+  const manualPlan = helpers.buildLocalComponentRefreshPlan(readiness, {
+    includeOptionalUpdates: true,
+  });
+  assert.strictEqual(manualPlan.hasRequiredChanges, true);
+  assert.strictEqual(manualPlan.requireAsr, true);
+  assert.strictEqual(manualPlan.forceAsr, true);
+  assert.deepStrictEqual(manualPlan.updateComponents, ['音视频转写']);
 }
 
 async function verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr, requireOcr }) {
@@ -128,7 +241,10 @@ async function verifyImplicitInstallIsNoOp() {
 }
 
 (async () => {
-  await verifyStatusRefreshInstallsMissingComponentsOnlyOnManualRefresh();
+  await verifyStatusRefreshPromptsAndInstallsMissingComponentsOnlyOnManualRefresh();
+  await verifyManualRefreshDeclineSkipsDownload();
+  await verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConfirmation();
+  verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested();
   await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: true, requireOcr: false });
   await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: false, requireOcr: true });
   await verifyImplicitInstallIsNoOp();

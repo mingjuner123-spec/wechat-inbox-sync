@@ -8,8 +8,8 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.28"
-$NativeProcessRunnerVersion = "diagnostics-process-v1"
+$InstallerScriptVersion = "1.2.29"
+$NativeProcessRunnerVersion = "diagnostics-process-v2"
 $DownloadLowSpeedLimitBytesPerSecond = 65536
 $DownloadLowSpeedTimeoutSeconds = 30
 $DownloadTimeoutSeconds = 1200
@@ -298,6 +298,7 @@ function Invoke-NativeProcess {
     if (-not $process.Start()) {
       throw "Native process did not start: $FilePath"
     }
+    $null = $process.Handle
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     while (-not $process.WaitForExit(5000)) {
@@ -811,9 +812,10 @@ function Assert-TranscribeScriptCandidate {
   $requiredMarkers = @(
     '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
     '$TranscriptPartialRecoveryVersion = "partial-recovery-v1"',
-    '$NativeProcessRunnerVersion = "diagnostics-process-v1"',
+    '$NativeProcessRunnerVersion = "diagnostics-process-v2"',
     'System.Diagnostics.ProcessStartInfo',
     'ReadToEndAsync',
+    '$null = $process.Handle',
     'progressHeartbeatAt',
     'progressPid',
     '-ProgressStage "segmenting"'
@@ -1099,7 +1101,7 @@ $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $TranscriptQualityGuardVersion = "repeat-guard-v2"
 $TranscriptPartialRecoveryVersion = "partial-recovery-v1"
-$NativeProcessRunnerVersion = "diagnostics-process-v1"
+$NativeProcessRunnerVersion = "diagnostics-process-v2"
 @(
   "time=$(Get-Date -Format o)"
   "status=pending"
@@ -1221,6 +1223,7 @@ function Invoke-NativeProcess {
     if (-not $process.Start()) {
       throw "Native process did not start: $FilePath"
     }
+    $null = $process.Handle
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
     while (-not $process.WaitForExit(5000)) {
