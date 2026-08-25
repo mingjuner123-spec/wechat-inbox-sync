@@ -2497,6 +2497,10 @@ assert.ok(pluginMainSource.includes('refreshProAndMaybePromptLocalComponentInsta
 assert.ok(pluginMainSource.includes('installLocalTranscriptionComponents'));
 assert.ok(pluginMainSource.includes('confirmLocalComponentInstall'));
 assert.ok(pluginMainSource.includes("createEl('button', { text: '稍后再试' })"));
+assert.ok(pluginMainSource.includes("confirmButton.type = 'button'"));
+assert.ok(pluginMainSource.includes("laterButton.type = 'button'"));
+assert.ok(pluginMainSource.includes('proSetupInstallPromptSnoozedUntil'));
+assert.ok(pluginMainSource.includes('isLocalComponentInstallPromptSnoozed'));
 assert.ok(pluginMainSource.includes('ensureLocalComponentReadyForUse'));
 assert.ok(pluginMainSource.includes('PRO_SETUP_CHECK_INTERVAL_MS'));
 assert.ok(pluginMainSource.includes('PRO_SETUP_PROMPT_COOLDOWN_MS'));
