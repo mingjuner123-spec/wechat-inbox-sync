@@ -411,6 +411,39 @@ async function runSupportedLifecycleSuccessTest() {
   assert.deepStrictEqual(plugin.settings.pendingSyncLifecycleAttempts, []);
 }
 
+async function runNonDeletingCompletionAcknowledgementTest() {
+  const plugin = createPlugin();
+  plugin.requestJson = async (path, method, body) => {
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'history-plugin-non-deleting-ack',
+          type: 'text',
+          content: 'queue item must remain retryable when deletion is not confirmed',
+          metadata: { title: '需要重试的笔记' },
+        }],
+      };
+    }
+    if (path === '/records/history-plugin-non-deleting-ack/synced') {
+      return { success: true, data: { status: 'synced' } };
+    }
+    throw new Error(`unexpected request ${method} ${path}`);
+  };
+  plugin.writeRecord = async () => ({
+    recordId: 'history-plugin-non-deleting-ack',
+    title: '需要重试的笔记',
+    filePath: 'vault/需要重试的笔记.md',
+  });
+
+  const result = await plugin.syncBinding({ token: 'ABC-123' }, false);
+  assert.strictEqual(result.written.length, 1);
+  assert.strictEqual(result.completionWarnings.length, 1);
+  assert.strictEqual(result.completionWarnings[0].recordId, 'history-plugin-non-deleting-ack');
+  assert.strictEqual(result.completionWarnings[0].code, 'COMPLETION_REPORT_FAILED');
+  assert.strictEqual(result.completionWarnings[0].serverCode, 'SYNC_COMPLETION_DELETE_UNCONFIRMED');
+}
+
 async function runLegacyResponseWithoutMetadataSendsTitleTest() {
   const calls = [];
   const plugin = createPlugin();
@@ -971,6 +1004,7 @@ async function runPendingLifecycleReplayTerminalCleanupTest() {
 
 Promise.resolve()
   .then(runSupportedLifecycleSuccessTest)
+  .then(runNonDeletingCompletionAcknowledgementTest)
   .then(runLegacyResponseWithoutMetadataSendsTitleTest)
   .then(runFailureLifecycleReportingTest)
   .then(runLegacyFallbackAndConflictTest)
