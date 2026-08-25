@@ -22115,6 +22115,38 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         });
       }
     }
+    if (status && status.hasAccess) {
+      let readiness = this.getLocalTranscriptionComponentReadiness();
+      status = {
+        ...status,
+        localComponentReadiness: readiness
+      };
+      const shouldInstallMissingComponents = options.installMissingComponents === true || reason === "manual-refresh";
+      if (shouldInstallMissingComponents && !readiness.ready) {
+        const requireAsr = !readiness.asrStatus || !readiness.asrStatus.ready;
+        const requireOcr = !readiness.ocrStatus || !readiness.ocrStatus.ready;
+        try {
+          const installResult = await this.installLocalTranscriptionComponents({
+            reason,
+            readiness,
+            requireAsr,
+            requireOcr
+          });
+          readiness = installResult && installResult.readiness ? installResult.readiness : this.getLocalTranscriptionComponentReadiness();
+          status = {
+            ...status,
+            localComponentInstallResult: installResult,
+            localComponentReadiness: readiness
+          };
+        } catch (error) {
+          status = {
+            ...status,
+            localComponentInstallError: formatLocalComponentInstallFailureReason(error),
+            localComponentReadiness: this.getLocalTranscriptionComponentReadiness()
+          };
+        }
+      }
+    }
     return status;
   }
   async confirmLocalComponentInstall(status, reason, readiness) {
@@ -26805,6 +26837,8 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
           const proAccessNotice = `Pro 权限有效${status2.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status2.expiresAt)}` : ""}`;
           if (status2.localComponentInstallError) {
             new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8e3);
+          } else if (status2.localComponentInstallResult && status2.localComponentInstallResult.installed) {
+            new Notice(`${proAccessNotice}；本地转写组件已安装/修复。`, 8e3);
           } else {
             new Notice(proAccessNotice);
           }

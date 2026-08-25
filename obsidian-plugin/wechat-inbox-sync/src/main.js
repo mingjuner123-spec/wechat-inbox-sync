@@ -16278,6 +16278,44 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
+    if (status && status.hasAccess) {
+      let readiness = this.getLocalTranscriptionComponentReadiness();
+      status = {
+        ...status,
+        localComponentReadiness: readiness,
+      };
+      const shouldInstallMissingComponents = (
+        options.installMissingComponents === true
+        || reason === 'manual-refresh'
+      );
+      if (shouldInstallMissingComponents && !readiness.ready) {
+        const requireAsr = !readiness.asrStatus || !readiness.asrStatus.ready;
+        const requireOcr = !readiness.ocrStatus || !readiness.ocrStatus.ready;
+        try {
+          const installResult = await this.installLocalTranscriptionComponents({
+            reason,
+            readiness,
+            requireAsr,
+            requireOcr,
+          });
+          readiness = installResult && installResult.readiness
+            ? installResult.readiness
+            : this.getLocalTranscriptionComponentReadiness();
+          status = {
+            ...status,
+            localComponentInstallResult: installResult,
+            localComponentReadiness: readiness,
+          };
+        } catch (error) {
+          status = {
+            ...status,
+            localComponentInstallError: formatLocalComponentInstallFailureReason(error),
+            localComponentReadiness: this.getLocalTranscriptionComponentReadiness(),
+          };
+        }
+      }
+    }
+
     return status;
   }
 
@@ -21707,6 +21745,8 @@ class WechatInboxSettingTab extends PluginSettingTab {
               const proAccessNotice = `Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`;
               if (status.localComponentInstallError) {
                 new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8000);
+              } else if (status.localComponentInstallResult && status.localComponentInstallResult.installed) {
+                new Notice(`${proAccessNotice}；本地转写组件已安装/修复。`, 8000);
               } else {
                 new Notice(proAccessNotice);
               }
