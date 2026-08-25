@@ -231,7 +231,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.121';
+const PLUGIN_RUNTIME_VERSION = '1.3.122';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -2185,6 +2185,23 @@ function isRemoteAsrDownloadFailure(error) {
 function isRecordNotFoundError(error) {
   const message = String((error && error.message) || error || '');
   return /Record not found/i.test(message);
+}
+
+function getSyncCompletionWarningDetails(error) {
+  const status = Number(error && (
+    error.statusCode
+    || error.status
+    || (error.response && error.response.status)
+  )) || 0;
+  const serverCode = String(error && error.code || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, '')
+    .slice(0, 64);
+  return {
+    ...(status >= 400 && status <= 599 ? { status } : {}),
+    ...(serverCode ? { serverCode } : {}),
+  };
 }
 
 function getDefaultLocalTranscriptionScriptPath(platform = os.platform(), installRoot = '') {
@@ -14380,7 +14397,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isBindingInvalidMessage(message)) {
         throw new Error('绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」');
       }
-      throw new Error(message);
+      const requestError = new Error(message);
+      requestError.status = Number(response.status) || 0;
+      requestError.statusCode = requestError.status;
+      if (payload && payload.errCode) requestError.code = String(payload.errCode);
+      throw requestError;
     }
     return payload;
   }
@@ -20834,7 +20855,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         attemptId: lifecycle.attemptId,
         ...(safeNoteTitle ? { noteTitle: safeNoteTitle } : {}),
       }
-      : (lifecycle.legacyFallback && safeNoteTitle ? { noteTitle: safeNoteTitle } : {});
+      : (safeNoteTitle ? { noteTitle: safeNoteTitle } : {});
     try {
       return await this.requestJson(
         `/records/${encodeURIComponent(recordId)}/synced`,
@@ -20859,9 +20880,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       return null;
     } catch (error) {
       if (isRecordNotFoundError(error)) return null;
+      const details = getSyncCompletionWarningDetails(error);
+      const reason = details.status
+        ? `HTTP ${details.status}`
+        : (details.serverCode || 'request failed');
       return {
         code: 'COMPLETION_REPORT_FAILED',
-        message: 'sync completion report failed; local note is preserved',
+        ...details,
+        message: `sync completion report failed (${reason}); local note is preserved`,
       };
     }
   }
@@ -21244,6 +21270,23 @@ class WechatObsidianInboxPlugin extends Plugin {
           || latestSuccessfulDiagnostic.mediaResolutionDiagnostic
           || latestSuccessfulDiagnostic.conversionDiagnostic
         : null;
+      const completionWarningDetails = completionWarnings
+        .map((item) => {
+          const recordId = String(item && item.recordId || '').trim().slice(0, 128);
+          const code = String(item && item.code || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 64);
+          const status = Number(item && item.status) || 0;
+          const serverCode = String(item && item.serverCode || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 64);
+          if (!recordId && !code && !(status >= 400 && status <= 599) && !serverCode) return null;
+          return {
+            ...(recordId ? { recordId } : {}),
+            ...(code ? { code } : {}),
+            ...(status >= 400 && status <= 599 ? { status } : {}),
+            ...(serverCode ? { serverCode } : {}),
+            reason: status >= 400 && status <= 599 ? `HTTP ${status}` : (serverCode || 'request failed'),
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 100);
       this.lastSyncDiagnostic = {
         status: failed.length ? 'failed' : (completionWarnings.length ? 'warning' : 'success'),
         stage: 'finished',
@@ -21253,6 +21296,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n') : '',
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? 'COMPLETION_REPORT_FAILED' : '',
+        ...(completionWarningDetails.length ? { completionWarningDetails } : {}),
         ...(latestFailedDiagnostic
           ? { diagnostic: latestFailedDiagnostic.diagnostic }
           : (latestSuccessfulDiagnosticPayload

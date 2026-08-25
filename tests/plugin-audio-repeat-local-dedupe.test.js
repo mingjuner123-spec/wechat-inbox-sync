@@ -154,17 +154,17 @@ const helpers = PluginClass.__test;
   ], [
     '/records/repeat-voice-record/synced',
     'POST',
-    {},
+    { noteTitle: 'repeat voice' },
     'ABC-123',
   ], [
     '/records/retry-after-mark-failure/synced',
     'POST',
-    {},
+    { noteTitle: 'retry-transcript' },
     'ABC-123',
   ], [
     '/records/repeat-audio-video-record/synced',
     'POST',
-    {},
+    { noteTitle: 'repeat voice' },
     'ABC-123',
   ]]);
 
