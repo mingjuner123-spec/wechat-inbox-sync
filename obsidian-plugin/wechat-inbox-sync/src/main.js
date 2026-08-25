@@ -130,6 +130,7 @@ const {
   isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
+  normalizeCompletedSyncReceipts,
   normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
 } = require('./sync-lifecycle-utils');
@@ -375,6 +376,7 @@ const DEFAULT_SETTINGS = {
   locallyQuarantinedRecordIds: [],
   recentSyncFailures: [],
   pendingSyncLifecycleAttempts: [],
+  completedSyncReceipts: [],
 };
 
 const XIAOHONGSHU_OCR_MAX_IMAGES = 18;
@@ -2631,6 +2633,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(
     merged.pendingSyncLifecycleAttempts,
   );
+  merged.completedSyncReceipts = normalizeCompletedSyncReceipts(merged.completedSyncReceipts);
 
   return merged;
 }
@@ -21095,6 +21098,61 @@ class WechatObsidianInboxPlugin extends Plugin {
     return pendingSyncLifecycleAttempts;
   }
 
+  async persistCompletedSyncReceipts(value) {
+    const completedSyncReceipts = normalizeCompletedSyncReceipts(value);
+    this.settings = {
+      ...this.settings,
+      completedSyncReceipts,
+    };
+    if (typeof this.saveData === 'function') {
+      await this.saveData(this.settings);
+    }
+    return completedSyncReceipts;
+  }
+
+  findCompletedSyncReceipt(binding, recordId) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!bindingFingerprint || !normalizedRecordId) return null;
+    return normalizeCompletedSyncReceipts(this.settings.completedSyncReceipts).find((item) => (
+      item.bindingFingerprint === bindingFingerprint && item.recordId === normalizedRecordId
+    )) || null;
+  }
+
+  async rememberCompletedSyncReceipt(binding, value = {}) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const recordId = String(value.recordId || '').trim();
+    if (!bindingFingerprint || !recordId) return null;
+    const current = normalizeCompletedSyncReceipts(this.settings.completedSyncReceipts);
+    const next = normalizeCompletedSyncReceipts([
+      ...current.filter((item) => !(
+        item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+      )),
+      {
+        recordId,
+        bindingFingerprint,
+        noteTitle: value.noteTitle,
+        completedAt: new Date().toISOString(),
+      },
+    ]);
+    await this.persistCompletedSyncReceipts(next);
+    return next.find((item) => (
+      item.bindingFingerprint === bindingFingerprint && item.recordId === recordId
+    )) || null;
+  }
+
+  async rememberCompletedSyncReceiptBestEffort(binding, value = {}) {
+    try {
+      await this.rememberCompletedSyncReceipt(binding, value);
+      return null;
+    } catch (error) {
+      return {
+        code: 'COMPLETED_RECEIPT_SAVE_FAILED',
+        message: 'local note is saved; completed-record receipt could not be persisted',
+      };
+    }
+  }
+
   async upsertPendingSyncLifecycleAttempt(binding, value = {}) {
     const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
     const recordId = String(value.recordId || '').trim();
@@ -21178,6 +21236,10 @@ class WechatObsidianInboxPlugin extends Plugin {
           await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || '', binding, {
             enabled: true,
             attemptId: item.attemptId,
+          });
+          await this.rememberCompletedSyncReceiptBestEffort(binding, {
+            recordId: item.recordId,
+            noteTitle: item.noteTitle || '',
           });
         } else {
           await this.reportSyncLifecycleStatus(item.recordId, {
@@ -21345,6 +21407,45 @@ class WechatObsidianInboxPlugin extends Plugin {
             stage: 'processing',
           });
         }
+        const completedReceipt = this.findCompletedSyncReceipt(binding, recordId);
+        if (completedReceipt) {
+          localCommitFact = {
+            recordId,
+            title: completedReceipt.noteTitle || '',
+            committed: true,
+          };
+          skipped.push({
+            recordId,
+            reason: 'already-committed-local-receipt',
+          });
+          this.showSyncProgress({
+            ...progress,
+            stage: 'marking',
+            title: completedReceipt.noteTitle || buildRecordTitleBase(record),
+          });
+          let markerWarning = null;
+          if (lifecycle.enabled && lifecycle.attemptId) {
+            markerWarning = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              noteTitle: completedReceipt.noteTitle || '',
+            });
+          }
+          const completionWarning = await this.reportSyncRecordCompletionBestEffort(
+            recordId,
+            completedReceipt.noteTitle || '',
+            binding,
+            lifecycle,
+          );
+          if (completionWarning) {
+            completionWarnings.push({ recordId, ...completionWarning });
+            if (markerWarning) completionWarnings.push({ recordId, ...markerWarning });
+          } else if (lifecycle.enabled && lifecycle.attemptId) {
+            const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
+            if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
+          }
+          continue;
+        }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           localCommitFact = { recordId, filePath: existingFilePath };
@@ -21363,6 +21464,10 @@ class WechatObsidianInboxPlugin extends Plugin {
               noteTitle: existingNoteTitle,
             });
           }
+          const receiptWarning = await this.rememberCompletedSyncReceiptBestEffort(binding, {
+            recordId,
+            noteTitle: existingNoteTitle,
+          });
           const completionWarning = await this.reportSyncRecordCompletionBestEffort(
             recordId,
             existingNoteTitle,
@@ -21372,6 +21477,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (completionWarning) {
             completionWarnings.push({ recordId, ...completionWarning });
             if (markerWarning) completionWarnings.push({ recordId, ...markerWarning });
+            if (receiptWarning) completionWarnings.push({ recordId, ...receiptWarning });
           }
           else if (lifecycle.enabled && lifecycle.attemptId) {
             const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
@@ -21396,6 +21502,10 @@ class WechatObsidianInboxPlugin extends Plugin {
             noteTitle: item.title,
           });
         }
+        const receiptWarning = await this.rememberCompletedSyncReceiptBestEffort(binding, {
+          recordId: item.recordId,
+          noteTitle: item.title,
+        });
         this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
         const completionWarning = await this.reportSyncRecordCompletionBestEffort(
           item.recordId,
@@ -21406,6 +21516,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (completionWarning) {
           completionWarnings.push({ recordId: item.recordId, ...completionWarning });
           if (markerWarning) completionWarnings.push({ recordId: item.recordId, ...markerWarning });
+          if (receiptWarning) completionWarnings.push({ recordId: item.recordId, ...receiptWarning });
         }
         else if (lifecycle.enabled && lifecycle.attemptId) {
           const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, item.recordId);
@@ -22329,6 +22440,7 @@ WechatObsidianInboxPlugin.__test = {
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   isExistingLocalNoteDeliverable,
+  normalizeCompletedSyncReceipts,
   normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,

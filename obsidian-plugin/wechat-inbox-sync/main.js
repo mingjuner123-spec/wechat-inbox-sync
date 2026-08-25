@@ -3762,6 +3762,7 @@ var require_sync_lifecycle_utils = __commonJS({
       SYNC_FAILED: "同步处理失败，请重新同步"
     });
     var MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS = 100;
+    var MAX_COMPLETED_SYNC_RECEIPTS = 500;
     function sanitizeSyncNoteTitle2(value) {
       const source = String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
       const basename = source.split(/[\\/]/).pop() || "";
@@ -3826,6 +3827,25 @@ var require_sync_lifecycle_utils = __commonJS({
       return [...byIdentity.values()].slice(-MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS);
     }
     __name(normalizePendingSyncLifecycleAttempts2, "normalizePendingSyncLifecycleAttempts");
+    function normalizeCompletedSyncReceipts2(value) {
+      const byIdentity = /* @__PURE__ */ new Map();
+      for (const source of Array.isArray(value) ? value : []) {
+        if (!source || typeof source !== "object" || Array.isArray(source)) continue;
+        const recordId = String(source.recordId || "").trim().slice(0, 128);
+        const bindingFingerprint = String(source.bindingFingerprint || "").trim().toLowerCase();
+        if (!recordId || !/^[a-f0-9]{16,64}$/.test(bindingFingerprint)) continue;
+        const normalized = {
+          recordId,
+          bindingFingerprint,
+          noteTitle: sanitizeSyncNoteTitle2(source.noteTitle),
+          completedAt: normalizeLifecycleTimestamp(source.completedAt)
+        };
+        if (!normalized.noteTitle) delete normalized.noteTitle;
+        byIdentity.set(`${bindingFingerprint}:${recordId}`, normalized);
+      }
+      return [...byIdentity.values()].slice(-MAX_COMPLETED_SYNC_RECEIPTS);
+    }
+    __name(normalizeCompletedSyncReceipts2, "normalizeCompletedSyncReceipts");
     function getSyncLifecycleBindingFingerprint2(value) {
       const token = String(value || "").trim();
       if (!token) return "";
@@ -3999,6 +4019,7 @@ var require_sync_lifecycle_utils = __commonJS({
     }
     __name(isSyncRecordBusyError2, "isSyncRecordBusyError");
     module2.exports = {
+      MAX_COMPLETED_SYNC_RECEIPTS,
       MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS,
       SYNC_LIFECYCLE_FAILURE_MESSAGES,
       categorizeSyncFailure: categorizeSyncFailure2,
@@ -4009,6 +4030,7 @@ var require_sync_lifecycle_utils = __commonJS({
       isKnownFailureReceiptMarkdown,
       isLegacySyncLifecycleError: isLegacySyncLifecycleError2,
       isSyncRecordBusyError: isSyncRecordBusyError2,
+      normalizeCompletedSyncReceipts: normalizeCompletedSyncReceipts2,
       normalizePendingSyncLifecycleAttempts: normalizePendingSyncLifecycleAttempts2,
       sanitizeSyncNoteTitle: sanitizeSyncNoteTitle2
     };
@@ -7938,6 +7960,7 @@ var {
   isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
+  normalizeCompletedSyncReceipts,
   normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle
 } = require_sync_lifecycle_utils();
@@ -8170,7 +8193,8 @@ var DEFAULT_SETTINGS = {
   tencentPollIntervalMs: 5e3,
   locallyQuarantinedRecordIds: [],
   recentSyncFailures: [],
-  pendingSyncLifecycleAttempts: []
+  pendingSyncLifecycleAttempts: [],
+  completedSyncReceipts: []
 };
 var XIAOHONGSHU_OCR_MAX_IMAGES = 18;
 var XIAOHONGSHU_OCR_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -9906,6 +9930,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.pendingSyncLifecycleAttempts = normalizePendingSyncLifecycleAttempts(
     merged.pendingSyncLifecycleAttempts
   );
+  merged.completedSyncReceipts = normalizeCompletedSyncReceipts(merged.completedSyncReceipts);
   return merged;
 }
 __name(mergeSettings, "mergeSettings");
@@ -26370,6 +26395,51 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     return pendingSyncLifecycleAttempts;
   }
+  async persistCompletedSyncReceipts(value) {
+    const completedSyncReceipts = normalizeCompletedSyncReceipts(value);
+    this.settings = {
+      ...this.settings,
+      completedSyncReceipts
+    };
+    if (typeof this.saveData === "function") {
+      await this.saveData(this.settings);
+    }
+    return completedSyncReceipts;
+  }
+  findCompletedSyncReceipt(binding, recordId) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const normalizedRecordId = String(recordId || "").trim();
+    if (!bindingFingerprint || !normalizedRecordId) return null;
+    return normalizeCompletedSyncReceipts(this.settings.completedSyncReceipts).find((item) => item.bindingFingerprint === bindingFingerprint && item.recordId === normalizedRecordId) || null;
+  }
+  async rememberCompletedSyncReceipt(binding, value = {}) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const recordId = String(value.recordId || "").trim();
+    if (!bindingFingerprint || !recordId) return null;
+    const current = normalizeCompletedSyncReceipts(this.settings.completedSyncReceipts);
+    const next = normalizeCompletedSyncReceipts([
+      ...current.filter((item) => !(item.bindingFingerprint === bindingFingerprint && item.recordId === recordId)),
+      {
+        recordId,
+        bindingFingerprint,
+        noteTitle: value.noteTitle,
+        completedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    ]);
+    await this.persistCompletedSyncReceipts(next);
+    return next.find((item) => item.bindingFingerprint === bindingFingerprint && item.recordId === recordId) || null;
+  }
+  async rememberCompletedSyncReceiptBestEffort(binding, value = {}) {
+    try {
+      await this.rememberCompletedSyncReceipt(binding, value);
+      return null;
+    } catch (error) {
+      return {
+        code: "COMPLETED_RECEIPT_SAVE_FAILED",
+        message: "local note is saved; completed-record receipt could not be persisted"
+      };
+    }
+  }
   async upsertPendingSyncLifecycleAttempt(binding, value = {}) {
     const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
     const recordId = String(value.recordId || "").trim();
@@ -26440,6 +26510,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || "", binding, {
             enabled: true,
             attemptId: item.attemptId
+          });
+          await this.rememberCompletedSyncReceiptBestEffort(binding, {
+            recordId: item.recordId,
+            noteTitle: item.noteTitle || ""
           });
         } else {
           await this.reportSyncLifecycleStatus(item.recordId, {
@@ -26591,6 +26665,45 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             stage: "processing"
           });
         }
+        const completedReceipt = this.findCompletedSyncReceipt(binding, recordId);
+        if (completedReceipt) {
+          localCommitFact = {
+            recordId,
+            title: completedReceipt.noteTitle || "",
+            committed: true
+          };
+          skipped.push({
+            recordId,
+            reason: "already-committed-local-receipt"
+          });
+          this.showSyncProgress({
+            ...progress,
+            stage: "marking",
+            title: completedReceipt.noteTitle || buildRecordTitleBase(record)
+          });
+          let markerWarning2 = null;
+          if (lifecycle.enabled && lifecycle.attemptId) {
+            markerWarning2 = await this.persistCommittedSyncLifecycleAttemptBestEffort(binding, {
+              recordId,
+              attemptId: lifecycle.attemptId,
+              noteTitle: completedReceipt.noteTitle || ""
+            });
+          }
+          const completionWarning2 = await this.reportSyncRecordCompletionBestEffort(
+            recordId,
+            completedReceipt.noteTitle || "",
+            binding,
+            lifecycle
+          );
+          if (completionWarning2) {
+            completionWarnings.push({ recordId, ...completionWarning2 });
+            if (markerWarning2) completionWarnings.push({ recordId, ...markerWarning2 });
+          } else if (lifecycle.enabled && lifecycle.attemptId) {
+            const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
+            if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
+          }
+          continue;
+        }
         const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           localCommitFact = { recordId, filePath: existingFilePath };
@@ -26609,6 +26722,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               noteTitle: existingNoteTitle
             });
           }
+          const receiptWarning2 = await this.rememberCompletedSyncReceiptBestEffort(binding, {
+            recordId,
+            noteTitle: existingNoteTitle
+          });
           const completionWarning2 = await this.reportSyncRecordCompletionBestEffort(
             recordId,
             existingNoteTitle,
@@ -26618,6 +26735,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           if (completionWarning2) {
             completionWarnings.push({ recordId, ...completionWarning2 });
             if (markerWarning2) completionWarnings.push({ recordId, ...markerWarning2 });
+            if (receiptWarning2) completionWarnings.push({ recordId, ...receiptWarning2 });
           } else if (lifecycle.enabled && lifecycle.attemptId) {
             const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
             if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
@@ -26641,6 +26759,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             noteTitle: item.title
           });
         }
+        const receiptWarning = await this.rememberCompletedSyncReceiptBestEffort(binding, {
+          recordId: item.recordId,
+          noteTitle: item.title
+        });
         this.showSyncProgress({ ...progress, stage: "marking", title: item.title });
         const completionWarning = await this.reportSyncRecordCompletionBestEffort(
           item.recordId,
@@ -26651,6 +26773,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (completionWarning) {
           completionWarnings.push({ recordId: item.recordId, ...completionWarning });
           if (markerWarning) completionWarnings.push({ recordId: item.recordId, ...markerWarning });
+          if (receiptWarning) completionWarnings.push({ recordId: item.recordId, ...receiptWarning });
         } else if (lifecycle.enabled && lifecycle.attemptId) {
           const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, item.recordId);
           if (clearWarning) completionWarnings.push({ recordId: item.recordId, ...clearWarning });
@@ -27320,6 +27443,7 @@ WechatObsidianInboxPlugin.__test = {
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   isExistingLocalNoteDeliverable,
+  normalizeCompletedSyncReceipts,
   normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
   XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
