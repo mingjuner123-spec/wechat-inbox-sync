@@ -8057,7 +8057,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.125";
+var PLUGIN_RUNTIME_VERSION = "1.3.126";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -26556,21 +26556,27 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       attemptId: lifecycle.attemptId,
       ...safeNoteTitle ? { noteTitle: safeNoteTitle } : {}
     } : safeNoteTitle ? { noteTitle: safeNoteTitle } : {};
-    try {
-      return await this.requestJson(
+    const requestCompletion = /* @__PURE__ */ __name(async (completionBody) => {
+      const response = await this.requestJson(
         `/records/${encodeURIComponent(recordId)}/synced`,
         "POST",
-        body,
+        completionBody,
         binding
       );
+      const data = response && response.data && typeof response.data === "object" ? response.data : {};
+      const status = String(data.status || "").trim().toLowerCase();
+      if (status && !["deleted", "already_missing", "alreadymissing"].includes(status)) {
+        const error = new Error("sync completion queue record deletion was not confirmed");
+        error.code = "SYNC_COMPLETION_DELETE_UNCONFIRMED";
+        throw error;
+      }
+      return response;
+    }, "requestCompletion");
+    try {
+      return await requestCompletion(body);
     } catch (error) {
       if (!lifecycle.enabled || !isLegacySyncLifecycleError(error)) throw error;
-      return await this.requestJson(
-        `/records/${encodeURIComponent(recordId)}/synced`,
-        "POST",
-        safeNoteTitle ? { noteTitle: safeNoteTitle } : {},
-        binding
-      );
+      return await requestCompletion(safeNoteTitle ? { noteTitle: safeNoteTitle } : {});
     }
   }
   async reportSyncRecordCompletionBestEffort(recordId, noteTitle, binding, lifecycle = {}) {
