@@ -10825,7 +10825,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   ], [
     '/records/plain-record-after-xhs-failure/synced',
     'POST',
-    {},
+    { noteTitle: '失败后仍应继续处理' },
     'ABC-123',
   ]]);
 }
@@ -11076,7 +11076,7 @@ async function runLocallyQuarantinedXiaohongshuRecordDoesNotRetryTest() {
   ], [
     '/records/new-record-after-stale-xhs/synced',
     'POST',
-    {},
+    { noteTitle: '新记录仍应正常同步' },
     'ABC-123',
   ]]);
   assert.strictEqual(
@@ -11269,7 +11269,7 @@ async function runExistingLocalRecordDedupSyncTest() {
   ], [
     '/records/existing-record-1/synced',
     'POST',
-    {},
+    { noteTitle: '旧内容' },
     'ABC-123',
   ]]);
 }
@@ -11351,7 +11351,7 @@ async function runExistingLocalRecordUrlDedupSyncTest() {
   ], [
     '/records/new-cloud-id-for-same-url/synced',
     'POST',
-    {},
+    { noteTitle: '小红书-重复保存图文' },
     'ABC-123',
   ]]);
 }
@@ -11414,7 +11414,7 @@ async function runMarkSyncedRecordNotFoundIsIdempotentTest() {
   ], [
     '/records/record-vanished-after-write/synced',
     'POST',
-    {},
+    { noteTitle: '文本-本地已经写入' },
     'ABC-123',
   ]]);
 }

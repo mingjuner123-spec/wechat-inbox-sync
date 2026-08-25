@@ -385,6 +385,41 @@ async function runSupportedLifecycleSuccessTest() {
   assert.deepStrictEqual(plugin.settings.pendingSyncLifecycleAttempts, []);
 }
 
+async function runLegacyResponseWithoutMetadataSendsTitleTest() {
+  const calls = [];
+  const plugin = createPlugin();
+  plugin.requestJson = async (path, method, body) => {
+    calls.push({ path, method, body });
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'history-plugin-legacy-metadata',
+          type: 'text',
+          content: 'legacy response without lifecycle metadata',
+          metadata: { title: '上传标题' },
+        }],
+      };
+    }
+    if (path === '/records/history-plugin-legacy-metadata/synced') return { success: true, data: {} };
+    throw new Error(`unexpected request ${method} ${path}`);
+  };
+  plugin.writeRecord = async () => ({
+    recordId: 'history-plugin-legacy-metadata',
+    title: '实际 Obsidian 笔记',
+    filePath: 'private-vault/实际 Obsidian 笔记.md',
+  });
+
+  const result = await plugin.syncBinding({ token: 'ABC-123' }, false);
+  assert.strictEqual(result.failed.length, 0);
+  assert.strictEqual(result.written.length, 1);
+  assert.deepStrictEqual(calls.map((item) => item.path), [
+    '/records?status=pending',
+    '/records/history-plugin-legacy-metadata/synced',
+  ]);
+  assert.deepStrictEqual(calls[1].body, { noteTitle: '实际 Obsidian 笔记' });
+}
+
 async function runFailureLifecycleReportingTest() {
   const calls = [];
   const plugin = createPlugin();
@@ -573,7 +608,8 @@ async function runCompletionReportFailurePreservesLocalWriteTest() {
   assert.deepStrictEqual(result.completionWarnings, [{
     recordId: 'history-plugin-completion-failure',
     code: 'COMPLETION_REPORT_FAILED',
-    message: 'sync completion report failed; local note is preserved',
+    status: 503,
+    message: 'sync completion report failed (HTTP 503); local note is preserved',
   }]);
   assert.strictEqual(calls.some((item) => item.body && item.body.status === 'failed'), false);
   assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts.length, 1);
@@ -606,6 +642,11 @@ async function runCompletionWarningIsVisibleTest() {
   assert.ok(notices.some((message) => message.includes('同步状态回报失败')));
   assert.match(plugin.lastSyncDiagnostic.message, /同步状态回报失败/);
   assert.strictEqual(plugin.lastSyncDiagnostic.completionWarningCount, 1);
+  assert.deepStrictEqual(plugin.lastSyncDiagnostic.completionWarningDetails, [{
+    recordId: 'completion-warning-visible',
+    code: 'COMPLETION_REPORT_FAILED',
+    reason: 'request failed',
+  }]);
 }
 
 
@@ -851,6 +892,7 @@ async function runPendingLifecycleReplayTerminalCleanupTest() {
 
 Promise.resolve()
   .then(runSupportedLifecycleSuccessTest)
+  .then(runLegacyResponseWithoutMetadataSendsTitleTest)
   .then(runFailureLifecycleReportingTest)
   .then(runLegacyFallbackAndConflictTest)
   .then(runFailureReportFailurePreservesOriginalErrorTest)

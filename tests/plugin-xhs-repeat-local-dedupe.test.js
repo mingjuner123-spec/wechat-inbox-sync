@@ -124,17 +124,17 @@ const helpers = PluginClass.__test;
   ], [
     '/records/new-xhs-record/synced',
     'POST',
-    {},
+    { noteTitle: '重复保存的小红书笔记' },
     'ABC-123',
   ], [
     '/records/old-xhs-record/synced',
     'POST',
-    {},
+    { noteTitle: 'old-xhs-note' },
     'ABC-123',
   ], [
     '/records/new-ordinary-record/synced',
     'POST',
-    {},
+    { noteTitle: 'old-ordinary-page' },
     'ABC-123',
   ]]);
 
