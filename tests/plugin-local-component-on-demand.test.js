@@ -109,8 +109,50 @@ async function verifyManualRefreshDeclineSkipsDownload() {
   assert.strictEqual(status.hasAccess, true);
   assert.strictEqual(prompts, 1);
   assert.strictEqual(status.localComponentInstallSkipped.reason, 'user-declined');
+  assert.ok(Date.parse(status.localComponentInstallSkipped.snoozedUntil) > Date.now());
+  assert.strictEqual(plugin.settings.proSetupInstallPromptSnoozedUntil, status.localComponentInstallSkipped.snoozedUntil);
   assert.strictEqual(status.localComponentInstallSkipped.requireAsr, false);
   assert.strictEqual(status.localComponentInstallSkipped.requireOcr, true);
+}
+
+async function verifyFirstUseDeclineSnoozesPromptAndSkipsRepeatedDialogs() {
+  const plugin = createPlugin();
+  let prompts = 0;
+  let installs = 0;
+  plugin.ensureProFeatureAccess = async () => ({ hasAccess: true, status: 'active' });
+  plugin.getLocalAsrInstallStatus = () => ({ ready: false });
+  plugin.getLocalOcrInstallStatus = () => ({ ready: true });
+  plugin.confirmLocalComponentInstall = async () => {
+    prompts += 1;
+    return false;
+  };
+  plugin.installLocalTranscriptionComponents = async () => {
+    installs += 1;
+    throw new Error('declined first-use prompt must not install components');
+  };
+
+  await assert.rejects(
+    () => plugin.ensureLocalComponentReadyForUse('音视频转写', {
+      reason: 'first-use',
+      requireAsr: true,
+      requireOcr: false,
+    }),
+    /需要先安装本地转写组件/,
+  );
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(installs, 0);
+  assert.ok(Date.parse(plugin.settings.proSetupInstallPromptSnoozedUntil) > Date.now());
+
+  await assert.rejects(
+    () => plugin.ensureLocalComponentReadyForUse('音视频转写', {
+      reason: 'first-use',
+      requireAsr: true,
+      requireOcr: false,
+    }),
+    /已选择稍后再试/,
+  );
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(installs, 0);
 }
 
 async function verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConfirmation() {
@@ -172,6 +214,52 @@ async function verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConf
   assert.strictEqual(installOptions[0].requireOcr, true);
   assert.strictEqual(installOptions[0].forceAsr, true);
   assert.strictEqual(installOptions[0].forceOcr, true);
+}
+
+async function verifyManualRefreshIgnoresPromptSnoozeAndClearsItAfterInstall() {
+  const plugin = createPlugin();
+  let prompts = 0;
+  const installOptions = [];
+  plugin.settings = helpers.mergeSettings({
+    proSetupInstallPromptSnoozedUntil: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  });
+  plugin.getProFeatureAccessStatus = async () => ({ hasAccess: true, status: 'active' });
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: false,
+    missingComponents: ['OCR'],
+    asrStatus: { ready: true },
+    ocrStatus: { ready: false },
+  });
+  plugin.confirmLocalComponentInstall = async (status, reason) => {
+    prompts += 1;
+    assert.strictEqual(status.hasAccess, true);
+    assert.strictEqual(reason, 'manual-refresh');
+    return true;
+  };
+  plugin.installLocalTranscriptionComponents = async (options) => {
+    installOptions.push(options);
+    return {
+      installed: true,
+      reason: options.reason,
+      readiness: {
+        ready: true,
+        missingComponents: [],
+        updateComponents: [],
+        asrStatus: { ready: true },
+        ocrStatus: { ready: true },
+      },
+    };
+  };
+
+  const status = await plugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'manual-refresh',
+    force: true,
+  });
+
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(installOptions.length, 1);
+  assert.strictEqual(status.localComponentInstallResult.installed, true);
+  assert.strictEqual(plugin.settings.proSetupInstallPromptSnoozedUntil, '');
 }
 
 function verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested() {
@@ -243,7 +331,9 @@ async function verifyImplicitInstallIsNoOp() {
 (async () => {
   await verifyStatusRefreshPromptsAndInstallsMissingComponentsOnlyOnManualRefresh();
   await verifyManualRefreshDeclineSkipsDownload();
+  await verifyFirstUseDeclineSnoozesPromptAndSkipsRepeatedDialogs();
   await verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConfirmation();
+  await verifyManualRefreshIgnoresPromptSnoozeAndClearsItAfterInstall();
   verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested();
   await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: true, requireOcr: false });
   await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: false, requireOcr: true });

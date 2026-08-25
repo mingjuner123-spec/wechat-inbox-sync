@@ -13867,15 +13867,25 @@ class LocalComponentInstallConfirmModal extends LocalComponentInstallConfirmModa
 
     const buttonRow = contentEl.createDiv({ cls: 'wechat-inbox-sync-modal-actions' });
     const confirmButton = buttonRow.createEl('button', { text: '开始安装/修复' });
+    confirmButton.type = 'button';
     if (typeof confirmButton.addClass === 'function') {
       confirmButton.addClass('mod-cta');
     } else {
       confirmButton.className = `${confirmButton.className || ''} mod-cta`.trim();
     }
-    confirmButton.addEventListener('click', () => this.finish(true));
+    confirmButton.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      this.finish(true);
+    });
 
     const laterButton = buttonRow.createEl('button', { text: '稍后再试' });
-    laterButton.addEventListener('click', () => this.finish(false));
+    laterButton.type = 'button';
+    laterButton.addEventListener('click', (event) => {
+      if (event && typeof event.preventDefault === 'function') event.preventDefault();
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      this.finish(false);
+    });
   }
 
   onClose() {
@@ -16416,6 +16426,29 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
+  isLocalComponentInstallPromptSnoozed(reason = '') {
+    if (reason === 'manual-refresh') return false;
+    const snoozedUntil = Date.parse(this.settings.proSetupInstallPromptSnoozedUntil || '');
+    return Number.isFinite(snoozedUntil) && Date.now() < snoozedUntil;
+  }
+
+  async snoozeLocalComponentInstallPrompt(now = Date.now()) {
+    const snoozedUntil = new Date(now + PRO_SETUP_PROMPT_COOLDOWN_MS).toISOString();
+    await this.saveSettings({
+      ...this.settings,
+      proSetupInstallPromptSnoozedUntil: snoozedUntil,
+    });
+    return snoozedUntil;
+  }
+
+  async clearLocalComponentInstallPromptSnooze() {
+    if (!this.settings.proSetupInstallPromptSnoozedUntil) return;
+    await this.saveSettings({
+      ...this.settings,
+      proSetupInstallPromptSnoozedUntil: '',
+    });
+  }
+
   async refreshProAndMaybePromptLocalComponentInstall(options = {}) {
     const reason = options.reason || 'settings-open';
     const now = Date.now();
@@ -16463,12 +16496,25 @@ class WechatObsidianInboxPlugin extends Plugin {
         || reason === 'manual-refresh'
       );
       if (shouldInstallMissingComponents && refreshPlan.hasRequiredChanges) {
+        if (this.isLocalComponentInstallPromptSnoozed(reason)) {
+          status = {
+            ...status,
+            localComponentInstallSkipped: {
+              reason: 'snoozed',
+              snoozedUntil: this.settings.proSetupInstallPromptSnoozedUntil,
+              ...refreshPlan,
+            },
+          };
+          return status;
+        }
         const accepted = await this.confirmLocalComponentInstall(status, reason, readiness);
         if (!accepted) {
+          const snoozedUntil = await this.snoozeLocalComponentInstallPrompt(now);
           status = {
             ...status,
             localComponentInstallSkipped: {
               reason: 'user-declined',
+              snoozedUntil,
               ...refreshPlan,
             },
           };
@@ -16501,6 +16547,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             localComponentReadiness: readiness,
             localComponentRefreshPlan: refreshPlan,
           };
+          await this.clearLocalComponentInstallPromptSnooze();
         } catch (error) {
           const failedReadiness = this.getLocalTranscriptionComponentReadiness();
           status = {
@@ -16670,16 +16717,22 @@ class WechatObsidianInboxPlugin extends Plugin {
       missingComponents,
     };
 
-    const accepted = await this.confirmLocalComponentInstall(status, options.reason || 'first-use', requiredReadiness);
+    const promptReason = options.reason || 'first-use';
+    if (this.isLocalComponentInstallPromptSnoozed(promptReason)) {
+      throw new Error(`${featureName}需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“刷新权限”后安装/修复。`);
+    }
+    const accepted = await this.confirmLocalComponentInstall(status, promptReason, requiredReadiness);
     if (!accepted) {
+      await this.snoozeLocalComponentInstallPrompt();
       throw new Error(`${featureName}需要先安装本地转写组件。`);
     }
     await this.installLocalTranscriptionComponents({
-      reason: options.reason || 'first-use',
+      reason: promptReason,
       readiness: requiredReadiness,
       requireAsr,
       requireOcr,
     });
+    await this.clearLocalComponentInstallPromptSnooze();
 
     const nextReadiness = this.getLocalTranscriptionComponentReadiness();
     const stillAsrMissing = requireAsr && (!nextReadiness.asrStatus || !nextReadiness.asrStatus.ready);
