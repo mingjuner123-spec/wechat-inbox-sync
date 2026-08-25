@@ -14,6 +14,7 @@ const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
 });
 
 const MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS = 100;
+const MAX_COMPLETED_SYNC_RECEIPTS = 500;
 
 function sanitizeSyncNoteTitle(value) {
   const source = String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
@@ -86,6 +87,25 @@ function normalizePendingSyncLifecycleAttempts(value) {
     byIdentity.set(`${bindingFingerprint}:${recordId}`, normalized);
   }
   return [...byIdentity.values()].slice(-MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS);
+}
+
+function normalizeCompletedSyncReceipts(value) {
+  const byIdentity = new Map();
+  for (const source of Array.isArray(value) ? value : []) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+    const recordId = String(source.recordId || '').trim().slice(0, 128);
+    const bindingFingerprint = String(source.bindingFingerprint || '').trim().toLowerCase();
+    if (!recordId || !/^[a-f0-9]{16,64}$/.test(bindingFingerprint)) continue;
+    const normalized = {
+      recordId,
+      bindingFingerprint,
+      noteTitle: sanitizeSyncNoteTitle(source.noteTitle),
+      completedAt: normalizeLifecycleTimestamp(source.completedAt),
+    };
+    if (!normalized.noteTitle) delete normalized.noteTitle;
+    byIdentity.set(`${bindingFingerprint}:${recordId}`, normalized);
+  }
+  return [...byIdentity.values()].slice(-MAX_COMPLETED_SYNC_RECEIPTS);
 }
 
 function getSyncLifecycleBindingFingerprint(value) {
@@ -300,6 +320,7 @@ function isSyncRecordBusyError(error) {
 }
 
 module.exports = {
+  MAX_COMPLETED_SYNC_RECEIPTS,
   MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS,
   SYNC_LIFECYCLE_FAILURE_MESSAGES,
   categorizeSyncFailure,
@@ -310,6 +331,7 @@ module.exports = {
   isKnownFailureReceiptMarkdown,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
+  normalizeCompletedSyncReceipts,
   normalizePendingSyncLifecycleAttempts,
   sanitizeSyncNoteTitle,
 };

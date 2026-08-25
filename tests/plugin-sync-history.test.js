@@ -303,6 +303,32 @@ assert.strictEqual(helpers.normalizePendingSyncLifecycleAttempts(
   })),
 ).length, 100);
 
+const normalizedCompletedReceipts = helpers.normalizeCompletedSyncReceipts([
+  {
+    recordId: 'completed-record-1',
+    bindingFingerprint: '0123456789abcdef',
+    noteTitle: 'private\\vault\\safe-title.md',
+    completedAt: '2026-08-11T03:00:00.000Z',
+    token: 'SECRET-TOKEN',
+    url: 'https://private.example/path',
+    content: 'private body',
+  },
+]);
+assert.deepStrictEqual(normalizedCompletedReceipts, [{
+  recordId: 'completed-record-1',
+  bindingFingerprint: '0123456789abcdef',
+  noteTitle: 'safe-title',
+  completedAt: '2026-08-11T03:00:00.000Z',
+}]);
+assert.doesNotMatch(JSON.stringify(normalizedCompletedReceipts), /SECRET|private|url|content|token/i);
+assert.strictEqual(helpers.normalizeCompletedSyncReceipts(
+  Array.from({ length: 520 }, (_, index) => ({
+    recordId: `completed-record-${index}`,
+    bindingFingerprint: 'fedcba9876543210',
+    completedAt: '2026-08-11T03:00:00.000Z',
+  })),
+).length, 500);
+
 const builtPluginSource = fs.readFileSync(path.join(
   __dirname,
   '../obsidian-plugin/wechat-inbox-sync/main.js',
@@ -615,6 +641,59 @@ async function runCompletionReportFailurePreservesLocalWriteTest() {
   assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts.length, 1);
   assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].stage, 'committed');
   assert.strictEqual(plugin.settings.pendingSyncLifecycleAttempts[0].noteTitle, 'safe title');
+  assert.deepStrictEqual(plugin.settings.completedSyncReceipts, [{
+    recordId: 'history-plugin-completion-failure',
+    bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint('ABC-123'),
+    noteTitle: 'safe title',
+    completedAt: plugin.settings.completedSyncReceipts[0].completedAt,
+  }]);
+}
+
+async function runCompletedReceiptPreventsRepeatWriteTest() {
+  const plugin = createPlugin();
+  const binding = { token: 'ABC-123', label: 'test binding' };
+  plugin.settings.completedSyncReceipts = helpers.normalizeCompletedSyncReceipts([{
+    recordId: 'history-repeat-record',
+    bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint(binding.token),
+    noteTitle: 'previously saved note',
+    completedAt: '2026-08-11T03:00:00.000Z',
+  }]);
+  const calls = [];
+  plugin.requestJson = async (path, method, body) => {
+    calls.push({ path, method, body });
+    if (path === '/records?status=pending') {
+      return {
+        success: true,
+        data: [{
+          _id: 'history-repeat-record',
+          type: 'webpage',
+          content: 'https://private.example.invalid/repeated',
+          metadata: { title: 'old record returned again' },
+        }],
+        meta: { syncLifecycleStatus: true },
+      };
+    }
+    if (path === '/records/history-repeat-record/status') {
+      return { success: true, data: { attemptId: 'attempt-repeat-record' } };
+    }
+    if (path === '/records/history-repeat-record/synced') return { success: true, data: {} };
+    throw new Error(`unexpected request ${method} ${path}`);
+  };
+  let writeCalled = false;
+  plugin.writeRecord = async () => {
+    writeCalled = true;
+    throw new Error('a completed cloud record must not be written again');
+  };
+
+  const result = await plugin.syncBinding(binding, false);
+
+  assert.strictEqual(writeCalled, false);
+  assert.deepStrictEqual(result.skipped, [{
+    recordId: 'history-repeat-record',
+    reason: 'already-committed-local-receipt',
+  }]);
+  assert.deepStrictEqual(result.completionWarnings, []);
+  assert.strictEqual(calls.some((item) => item.path.endsWith('/synced')), true);
 }
 
 async function runCompletionWarningIsVisibleTest() {
@@ -897,6 +976,7 @@ Promise.resolve()
   .then(runLegacyFallbackAndConflictTest)
   .then(runFailureReportFailurePreservesOriginalErrorTest)
   .then(runCompletionReportFailurePreservesLocalWriteTest)
+  .then(runCompletedReceiptPreventsRepeatWriteTest)
   .then(runCompletionWarningIsVisibleTest)
   .then(runRequestJsonPreservesHttpStatusTest)
   .then(runFailedReceiptDoesNotTriggerLocalDedupeTest)
