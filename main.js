@@ -8057,7 +8057,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.126";
+var PLUGIN_RUNTIME_VERSION = "1.3.127";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -24610,6 +24610,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             const feishuMediaScopeTokens = normalizeFeishuScope(feishuMediaScope);
             const feishuMediaScopeKnown = feishuMediaScopeTokens.length > 0;
             const feishuMediaScopeBlocked = feishuMediaScopeKnown && !hasFeishuMediaDownloadScope(feishuMediaScopeTokens);
+            const feishuImageStorageMode = normalizeSocialArticleImageStorageMode(
+              this.settings && this.settings.socialArticleImageStorageMode
+            );
+            const shouldLocalizeFeishuImages = feishuImageStorageMode === "local";
             const feishuMediaStage = {
               official: { attempted: false, succeeded: 0, failed: 0 },
               temporary: { attempted: false, succeeded: 0, failed: 0 },
@@ -24630,7 +24634,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               ...extra
             }), "buildTokenAsset");
             const imageDataAssets = [];
-            if (imageTokens.length > 0) {
+            if (shouldLocalizeFeishuImages && imageTokens.length > 0) {
               feishuMediaStage.official.attempted = true;
               if (feishuMediaScopeBlocked) {
                 for (const imageToken of imageTokens) {
@@ -24691,7 +24695,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             feishuMediaStage.official.succeeded = officialImageStats.localizedCount || 0;
             feishuMediaStage.official.failed += officialImageStats.failedCount || 0;
             const getUnresolvedImageTokens = /* @__PURE__ */ __name(() => imageTokens.filter((token) => !resolvedImageTokens.has(token)), "getUnresolvedImageTokens");
-            const temporaryImageAssets = getUnresolvedImageTokens().map((token) => {
+            const temporaryImageAssets = (shouldLocalizeFeishuImages ? getUnresolvedImageTokens() : []).map((token) => {
               const temporaryUrl = String(
                 imageTmpDownloadUrls[token] || buildFeishuImageFallbackUrl(token, url) || ""
               ).trim();
@@ -24702,7 +24706,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             feishuMediaStage.temporary.succeeded = temporaryImageStats.localizedCount || 0;
             feishuMediaStage.temporary.failed = temporaryImageStats.failedCount || 0;
             let feishuImageFallbackNote = "";
-            if (getUnresolvedImageTokens().length > 0) {
+            const getImageTokensNeedingBrowser = /* @__PURE__ */ __name(() => {
+              const unresolved = getUnresolvedImageTokens();
+              if (shouldLocalizeFeishuImages) return unresolved;
+              return unresolved.filter((token) => !/^https?:\/\//i.test(
+                String(imageTmpDownloadUrls[token] || "").trim()
+              ));
+            }, "getImageTokensNeedingBrowser");
+            if (getImageTokensNeedingBrowser().length > 0) {
               feishuMediaStage.browser.attempted = true;
               try {
                 const renderedFallback = await this.renderFeishuDocumentWithElectron(url);
@@ -24727,7 +24738,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   seenRenderedSources.add(source);
                   orderedRenderedAssets.push(asset);
                 }
-                const unresolvedBeforeBrowser = getUnresolvedImageTokens();
+                const unresolvedBeforeBrowser = getImageTokensNeedingBrowser();
                 const matchedBrowserAssets = /* @__PURE__ */ new Map();
                 for (const token of unresolvedBeforeBrowser) {
                   const exactAsset = orderedRenderedAssets.find((asset) => String(asset.token || "").trim() === token || String(asset.src || "").includes(token));
@@ -24768,11 +24779,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                     mimeType: browserAsset.mimeType
                   });
                 }).filter(Boolean);
-                const browserImageStats = await localizeTokenAssets(browserTokenAssets);
-                feishuMediaStage.browser.succeeded = browserImageStats.localizedCount || 0;
+                const browserImageStats = shouldLocalizeFeishuImages ? await localizeTokenAssets(browserTokenAssets) : {
+                  localizedCount: 0,
+                  remoteLinkedCount: browserTokenAssets.filter((asset) => /^https?:\/\//i.test(String(asset && asset.downloadSrc || "").trim())).length,
+                  failedCount: Math.max(0, unresolvedBeforeBrowser.length - browserTokenAssets.length)
+                };
+                feishuMediaStage.browser.succeeded = shouldLocalizeFeishuImages ? browserImageStats.localizedCount || 0 : browserImageStats.remoteLinkedCount || 0;
                 feishuMediaStage.browser.failed = browserImageStats.failedCount || 0;
                 feishuImageFallbackNote = [
-                  `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`,
+                  shouldLocalizeFeishuImages ? `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}` : `browser-image-remote-links=${browserImageStats.remoteLinkedCount || 0}/${unresolvedBeforeBrowser.length}`,
                   usedBrowserOrderFallback ? "browser-image-order-mapping=1" : ""
                 ].filter(Boolean).join("; ");
               } catch (fallbackError) {
@@ -24782,7 +24797,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             }
             const unresolvedImageTokens = getUnresolvedImageTokens();
             const unknownImageIdentityCount = Math.max(0, imageTokenCount - imageTokens.length);
-            const imageLocalizationFailedCount = unresolvedImageTokens.length + unknownImageIdentityCount;
+            const imageLocalizationFailedCount = shouldLocalizeFeishuImages ? unresolvedImageTokens.length + unknownImageIdentityCount : 0;
             const remoteFallbackUrls = { ...imageTmpDownloadUrls };
             for (const token of unresolvedImageTokens) {
               if (browserRemoteUrlsByToken.has(token)) {
@@ -24792,10 +24807,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             const remotelyLinkedImageTokens = unresolvedImageTokens.filter((token) => /^https?:\/\//i.test(String(remoteFallbackUrls[token] || "").trim()) && cleanedCloudOpenApiMarkdown.includes(`feishu-image:${token}`));
             const remotelyLinkedImageTokenSet = new Set(remotelyLinkedImageTokens);
             const imageMissingCount = unknownImageIdentityCount + unresolvedImageTokens.filter((token) => !remotelyLinkedImageTokenSet.has(token)).length;
-            const missingImageTempUrlCount = unknownImageIdentityCount + unresolvedImageTokens.filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || "").trim())).length;
-            const finalImageErrors = unresolvedImageTokens.map((token) => {
+            const missingImageTempUrlCount = shouldLocalizeFeishuImages ? unknownImageIdentityCount + unresolvedImageTokens.filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || "").trim())).length : imageMissingCount;
+            const finalImageErrorTokens = shouldLocalizeFeishuImages ? unresolvedImageTokens : unresolvedImageTokens.filter((token) => !remotelyLinkedImageTokenSet.has(token));
+            const finalImageErrors = finalImageErrorTokens.map((token) => {
               const attempts = imageAttemptErrorsByToken.get(token) || [];
-              return attempts.length ? attempts[attempts.length - 1] : `image ${token} could not be localized`;
+              return attempts.length ? attempts[attempts.length - 1] : shouldLocalizeFeishuImages ? `image ${token} could not be localized` : `image ${token} has no usable remote URL`;
             });
             cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanedCloudOpenApiMarkdown,
@@ -24813,7 +24829,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               markdownReferenceCount,
               localizedCount: resolvedImageTokens.size,
               remoteLinkedCount: remotelyLinkedImageTokens.length,
-              unresolvedCount: imageLocalizationFailedCount,
+              unresolvedCount: shouldLocalizeFeishuImages ? imageLocalizationFailedCount : imageMissingCount,
               missingCount: imageMissingCount,
               images: imageTokens.map((token, index) => ({
                 index: index + 1,
@@ -24821,7 +24837,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               })),
               errors: [
                 ...finalImageErrors,
-                feishuMediaScopeBlocked && imageTokens.length ? `missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : ""
+                shouldLocalizeFeishuImages && feishuMediaScopeBlocked && imageTokens.length ? `missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : ""
               ]
             });
             return {
@@ -24847,7 +24863,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                   imageMissingCount ? `image-fully-missing=${imageMissingCount}` : "",
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : "",
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : "",
-                  feishuMediaScopeBlocked && imageTokens.length ? `image-media-scope-missing=${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : "",
+                  shouldLocalizeFeishuImages && feishuMediaScopeBlocked && imageTokens.length ? `image-media-scope-missing=${FEISHU_MEDIA_DOWNLOAD_SCOPE}` : "",
                   imageLocalizationFailedCount ? `image-localize-failed=${imageLocalizationFailedCount}: ${finalImageErrors.slice(0, 3).join(" | ")}` : "",
                   feishuImageFallbackNote
                 ].filter(Boolean).join("; ")

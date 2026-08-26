@@ -381,11 +381,76 @@ async function runLocalWriteFailureKeepsOfficialMarkdownTest() {
   assert.ok(result.metadata.imageLocalizationError.includes('vault write denied'));
 }
 
+async function runRemoteModeSkipsMediaDownloadAndReportsOnlyMissingLinksTest() {
+  const tokens = ['boxcnRemoteOne', 'boxcnRemoteTwo', 'boxcnRemoteMissing'];
+  const plugin = new PluginClass();
+  const vault = createVault();
+  let mediaRequestCount = 0;
+  plugin.app = vault.app;
+  plugin.settings = PluginClass.__test.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: 'TEST-BINDING',
+    socialArticleImageStorageMode: 'remote',
+    socialArticleImageStorageModeConfigured: true,
+    bindings: [{ token: 'TEST-BINDING', label: 'WeChat 1', status: 'bound', enabled: true }],
+    feishuOAuthStatus: { connected: true, scope: 'offline_access docx:document:readonly docs:document.media:download' },
+  });
+  plugin.ensureFolder = async () => {};
+  plugin.renderFeishuDocumentWithElectron = async () => {
+    throw new Error('browser has no additional remote image URLs');
+  };
+  plugin.requestJson = async (requestPath) => {
+    if (requestPath === '/feishu/extract') {
+      return {
+        success: true,
+        data: {
+          title: 'Remote links only',
+          documentId: 'docxRemoteLinksOnly',
+          blockCount: tokens.length + 2,
+          blocks: buildEnglishImageBlocks(tokens),
+          imageTokens: tokens,
+          imageTokenCount: tokens.length,
+          imageTmpDownloadUrls: {
+            [tokens[0]]: 'https://remote.example/one.png',
+            [tokens[1]]: 'https://remote.example/two.png',
+          },
+        },
+      };
+    }
+    if (requestPath === '/feishu/media') {
+      mediaRequestCount += 1;
+      throw new Error('Route not found');
+    }
+    throw new Error(`unexpected request path: ${requestPath}`);
+  };
+
+  const result = await plugin.hydrateWebpageMarkdown({
+    _id: 'feishu-remote-links-only',
+    type: 'webpage',
+    content: 'https://example.feishu.cn/docx/docxRemoteLinksOnly',
+    metadata: { url: 'https://example.feishu.cn/docx/docxRemoteLinksOnly' },
+  }, 'Inbox', '2026-08-26', 'Feishu remote links only');
+
+  assert.strictEqual(mediaRequestCount, 0, 'remote mode must not call /feishu/media');
+  assert.strictEqual(Object.keys(vault.files).length, 0, 'remote mode must not write image files');
+  assert.strictEqual(result.metadata.imageLocalizationFailedCount, 0, 'choosing remote links is not a localization failure');
+  assert.strictEqual(result.metadata.imageRemoteFallbackCount, 2);
+  assert.strictEqual(result.metadata.imageMissingCount, 1);
+  assert.strictEqual(result.metadata.imageTempUrlMissingCount, 1);
+  assert.strictEqual(result.metadata.feishuMediaDiagnostic.official.attempted, false);
+  assert.strictEqual(result.metadata.feishuMediaDiagnostic.remoteLinkedCount, 2);
+  assert.strictEqual(result.metadata.feishuMediaDiagnostic.unresolvedCount, 1);
+  assert.ok(result.metadata.markdown.includes('https://remote.example/one.png'));
+  assert.ok(result.metadata.markdown.includes('https://remote.example/two.png'));
+  assert.ok(!result.metadata.imageLocalizationError.includes('Route not found'));
+}
+
 Promise.resolve()
   .then(runUniqueFailureAccountingTest)
   .then(runBrowserRecoveryKeepsOfficialMarkdownTest)
   .then(runLegacyResponseUsesMarkdownImageOrderTest)
   .then(runBrowserExtraShellImageStillMapsDocumentImagesTest)
   .then(runLocalWriteFailureKeepsOfficialMarkdownTest)
+  .then(runRemoteModeSkipsMediaDownloadAndReportsOnlyMissingLinksTest)
   .then(() => console.log('plugin feishu image identity accounting tests passed'))
   .catch((error) => { console.error(error); process.exitCode = 1; });
