@@ -549,10 +549,10 @@ const markerOnlyLegacyWindowsAsrScriptSource = [
   'recoveryTriggered=1',
 ].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.29"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.30"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.29"', '$InstallerScriptVersion = "1.2.25"')
+  .replace('$InstallerScriptVersion = "1.2.30"', '$InstallerScriptVersion = "1.2.25"')
   .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
   .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
@@ -582,6 +582,9 @@ assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource,
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(nonTransactionalWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(copyModelWindowsAsrInstallerSource, false), false);
+assert.ok(windowsAsrInstallerSource.includes('$InstallerScriptVersion = "1.2.30"'));
+assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $FfmpegTencentUrls -FallbackUrls @('));
+assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $ModelTencentUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)'));
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(macAsrInstallerSource, true), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleMacAsrInstallerSource, true), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(promptedMacAsrInstallerSource, true), false);
@@ -2647,6 +2650,10 @@ assert.strictEqual(
     'cachedModelPath=C:\\Users\\GP\\.wechat-inbox-local-asr\\cache\\ggml-small.bin',
   ].join('\n')),
   '复制 Whisper 模型失败：通常是安装目录所在磁盘空间不足。请释放 Windows 默认 C: 盘空间后重试，建议至少预留 3GB，最好 5GB 以上。',
+);
+assert.strictEqual(
+  helpers.formatLocalComponentInstallFailureReason('Local ASR installer download returned outdated or invalid content'),
+  '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“刷新权限”重试。若仍失败，请复制诊断信息联系开发者。',
 );
 assert.ok(pluginMainSource.includes('/transcriptions/cloud'));
 assert.ok(pluginMainSource.includes('runCloudFallbackTranscription'));

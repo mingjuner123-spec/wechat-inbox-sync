@@ -155,43 +155,34 @@ async function verifyFirstUseDeclineSnoozesPromptAndSkipsRepeatedDialogs() {
   assert.strictEqual(installs, 0);
 }
 
-async function verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConfirmation() {
+async function verifyManualRefreshLeavesCompatibleLegacyComponentsUntouched() {
   const plugin = createPlugin();
   let prompts = 0;
   const installOptions = [];
-  let upgraded = false;
   plugin.getProFeatureAccessStatus = async () => ({ hasAccess: true, status: 'active' });
   plugin.getLocalTranscriptionComponentReadiness = () => ({
     ready: true,
     missingComponents: [],
-    updateComponents: upgraded ? [] : ['音视频转写', '图片文字识别 OCR'],
-    updateRecommended: !upgraded,
+    updateComponents: ['音视频转写', '图片文字识别 OCR'],
+    updateRecommended: true,
     asrStatus: {
       ready: true,
-      upgradeRecommended: !upgraded,
-      compatibilityMode: upgraded ? 'current' : 'diagnostics-process-v1',
+      upgradeRecommended: true,
+      compatibilityMode: 'diagnostics-process-v1',
     },
     ocrStatus: {
       ready: true,
-      upgradeRecommended: !upgraded,
-      compatibilityMode: upgraded ? 'current' : 'legacy-ocr-script',
+      upgradeRecommended: true,
+      compatibilityMode: 'legacy-ocr-script',
     },
   });
-  plugin.confirmLocalComponentInstall = async (status, reason, readiness) => {
+  plugin.confirmLocalComponentInstall = async () => {
     prompts += 1;
-    assert.strictEqual(reason, 'manual-refresh');
-    assert.deepStrictEqual(readiness.missingComponents, []);
-    assert.deepStrictEqual(readiness.updateComponents, ['音视频转写', '图片文字识别 OCR']);
-    return true;
+    throw new Error('compatible legacy components must not prompt during permission refresh');
   };
   plugin.installLocalTranscriptionComponents = async (options) => {
     installOptions.push(options);
-    upgraded = true;
-    return {
-      installed: true,
-      reason: options.reason,
-      readiness: plugin.getLocalTranscriptionComponentReadiness(),
-    };
+    throw new Error('compatible legacy components must not download during permission refresh');
   };
 
   const passiveStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({
@@ -206,14 +197,39 @@ async function verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConf
     reason: 'manual-refresh',
     force: true,
   });
-  assert.strictEqual(manualStatus.localComponentInstallResult.installed, true);
+  assert.strictEqual(manualStatus.localComponentRefreshPlan.hasRequiredChanges, false);
   assert.strictEqual(manualStatus.localComponentReadiness.updateRecommended, false);
-  assert.strictEqual(prompts, 1);
-  assert.strictEqual(installOptions.length, 1);
-  assert.strictEqual(installOptions[0].requireAsr, true);
-  assert.strictEqual(installOptions[0].requireOcr, true);
-  assert.strictEqual(installOptions[0].forceAsr, true);
-  assert.strictEqual(installOptions[0].forceOcr, true);
+  assert.strictEqual(manualStatus.localComponentInstallResult, undefined);
+  assert.strictEqual(prompts, 0);
+  assert.strictEqual(installOptions.length, 0);
+}
+
+async function verifyManualRefreshRequiresReloadWhenPluginFilesDoNotMatch() {
+  const plugin = createPlugin();
+  plugin.manifest = { version: '1.3.126' };
+  plugin.getProFeatureAccessStatus = async () => ({ hasAccess: true, status: 'active' });
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: false,
+    missingComponents: ['音视频转写'],
+    asrStatus: { ready: false },
+    ocrStatus: { ready: true },
+  });
+  plugin.confirmLocalComponentInstall = async () => {
+    throw new Error('mismatched plugin files must not prompt for component repair');
+  };
+  plugin.installLocalTranscriptionComponents = async () => {
+    throw new Error('mismatched plugin files must not download components');
+  };
+
+  const status = await plugin.refreshProAndMaybePromptLocalComponentInstall({
+    reason: 'manual-refresh',
+    force: true,
+  });
+
+  assert.strictEqual(status.hasAccess, true);
+  assert.strictEqual(status.localComponentInstallSkipped.reason, 'plugin-runtime-mismatch');
+  assert.strictEqual(status.localComponentInstallSkipped.identity.manifestVersion, '1.3.126');
+  assert.strictEqual(status.localComponentInstallSkipped.identity.matchesManifest, false);
 }
 
 async function verifyManualRefreshIgnoresPromptSnoozeAndClearsItAfterInstall() {
@@ -332,7 +348,8 @@ async function verifyImplicitInstallIsNoOp() {
   await verifyStatusRefreshPromptsAndInstallsMissingComponentsOnlyOnManualRefresh();
   await verifyManualRefreshDeclineSkipsDownload();
   await verifyFirstUseDeclineSnoozesPromptAndSkipsRepeatedDialogs();
-  await verifyManualRefreshUpdatesCompatibleLegacyComponentsOnlyAfterConfirmation();
+  await verifyManualRefreshLeavesCompatibleLegacyComponentsUntouched();
+  await verifyManualRefreshRequiresReloadWhenPluginFilesDoNotMatch();
   await verifyManualRefreshIgnoresPromptSnoozeAndClearsItAfterInstall();
   verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested();
   await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: true, requireOcr: false });
