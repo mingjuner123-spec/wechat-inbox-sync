@@ -233,7 +233,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.126';
+const PLUGIN_RUNTIME_VERSION = '1.3.127';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -19034,6 +19034,10 @@ class WechatObsidianInboxPlugin extends Plugin {
             const feishuMediaScopeKnown = feishuMediaScopeTokens.length > 0;
             const feishuMediaScopeBlocked = feishuMediaScopeKnown
               && !hasFeishuMediaDownloadScope(feishuMediaScopeTokens);
+            const feishuImageStorageMode = normalizeSocialArticleImageStorageMode(
+              this.settings && this.settings.socialArticleImageStorageMode,
+            );
+            const shouldLocalizeFeishuImages = feishuImageStorageMode === 'local';
             const feishuMediaStage = {
               official: { attempted: false, succeeded: 0, failed: 0 },
               temporary: { attempted: false, succeeded: 0, failed: 0 },
@@ -19054,7 +19058,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               ...extra,
             });
             const imageDataAssets = [];
-            if (imageTokens.length > 0) {
+            if (shouldLocalizeFeishuImages && imageTokens.length > 0) {
               feishuMediaStage.official.attempted = true;
               if (feishuMediaScopeBlocked) {
                 for (const imageToken of imageTokens) {
@@ -19116,7 +19120,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             feishuMediaStage.official.succeeded = officialImageStats.localizedCount || 0;
             feishuMediaStage.official.failed += officialImageStats.failedCount || 0;
             const getUnresolvedImageTokens = () => imageTokens.filter((token) => !resolvedImageTokens.has(token));
-            const temporaryImageAssets = getUnresolvedImageTokens()
+            const temporaryImageAssets = (shouldLocalizeFeishuImages ? getUnresolvedImageTokens() : [])
               .map((token) => {
                 const temporaryUrl = String(
                   imageTmpDownloadUrls[token]
@@ -19138,7 +19142,14 @@ class WechatObsidianInboxPlugin extends Plugin {
             // obtain the same document assets. Keep the API result as the
             // fallback so a browser failure never blocks text synchronization.
             let feishuImageFallbackNote = '';
-            if (getUnresolvedImageTokens().length > 0) {
+            const getImageTokensNeedingBrowser = () => {
+              const unresolved = getUnresolvedImageTokens();
+              if (shouldLocalizeFeishuImages) return unresolved;
+              return unresolved.filter((token) => !/^https?:\/\//i.test(
+                String(imageTmpDownloadUrls[token] || '').trim(),
+              ));
+            };
+            if (getImageTokensNeedingBrowser().length > 0) {
               feishuMediaStage.browser.attempted = true;
               try {
                 const renderedFallback = await this.renderFeishuDocumentWithElectron(url);
@@ -19170,7 +19181,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                   seenRenderedSources.add(source);
                   orderedRenderedAssets.push(asset);
                 }
-                const unresolvedBeforeBrowser = getUnresolvedImageTokens();
+                const unresolvedBeforeBrowser = getImageTokensNeedingBrowser();
                 const matchedBrowserAssets = new Map();
                 for (const token of unresolvedBeforeBrowser) {
                   const exactAsset = orderedRenderedAssets.find((asset) => (
@@ -19230,11 +19241,23 @@ class WechatObsidianInboxPlugin extends Plugin {
                     });
                   })
                   .filter(Boolean);
-                const browserImageStats = await localizeTokenAssets(browserTokenAssets);
-                feishuMediaStage.browser.succeeded = browserImageStats.localizedCount || 0;
+                const browserImageStats = shouldLocalizeFeishuImages
+                  ? await localizeTokenAssets(browserTokenAssets)
+                  : {
+                    localizedCount: 0,
+                    remoteLinkedCount: browserTokenAssets.filter((asset) => (
+                      /^https?:\/\//i.test(String(asset && asset.downloadSrc || '').trim())
+                    )).length,
+                    failedCount: Math.max(0, unresolvedBeforeBrowser.length - browserTokenAssets.length),
+                  };
+                feishuMediaStage.browser.succeeded = shouldLocalizeFeishuImages
+                  ? (browserImageStats.localizedCount || 0)
+                  : (browserImageStats.remoteLinkedCount || 0);
                 feishuMediaStage.browser.failed = browserImageStats.failedCount || 0;
                 feishuImageFallbackNote = [
-                  `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`,
+                  shouldLocalizeFeishuImages
+                    ? `browser-image-fallback=${browserImageStats.localizedCount || 0}/${unresolvedBeforeBrowser.length}`
+                    : `browser-image-remote-links=${browserImageStats.remoteLinkedCount || 0}/${unresolvedBeforeBrowser.length}`,
                   usedBrowserOrderFallback ? 'browser-image-order-mapping=1' : '',
                 ].filter(Boolean).join('; ');
               } catch (fallbackError) {
@@ -19244,7 +19267,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
             const unresolvedImageTokens = getUnresolvedImageTokens();
             const unknownImageIdentityCount = Math.max(0, imageTokenCount - imageTokens.length);
-            const imageLocalizationFailedCount = unresolvedImageTokens.length + unknownImageIdentityCount;
+            const imageLocalizationFailedCount = shouldLocalizeFeishuImages
+              ? unresolvedImageTokens.length + unknownImageIdentityCount
+              : 0;
             const remoteFallbackUrls = { ...imageTmpDownloadUrls };
             for (const token of unresolvedImageTokens) {
               if (browserRemoteUrlsByToken.has(token)) {
@@ -19259,12 +19284,21 @@ class WechatObsidianInboxPlugin extends Plugin {
             const imageMissingCount = unknownImageIdentityCount + unresolvedImageTokens
               .filter((token) => !remotelyLinkedImageTokenSet.has(token))
               .length;
-            const missingImageTempUrlCount = unknownImageIdentityCount + unresolvedImageTokens
-              .filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || '').trim()))
-              .length;
-            const finalImageErrors = unresolvedImageTokens.map((token) => {
+            const missingImageTempUrlCount = shouldLocalizeFeishuImages
+              ? unknownImageIdentityCount + unresolvedImageTokens
+                .filter((token) => !/^https?:\/\//i.test(String(imageTmpDownloadUrls[token] || '').trim()))
+                .length
+              : imageMissingCount;
+            const finalImageErrorTokens = shouldLocalizeFeishuImages
+              ? unresolvedImageTokens
+              : unresolvedImageTokens.filter((token) => !remotelyLinkedImageTokenSet.has(token));
+            const finalImageErrors = finalImageErrorTokens.map((token) => {
               const attempts = imageAttemptErrorsByToken.get(token) || [];
-              return attempts.length ? attempts[attempts.length - 1] : `image ${token} could not be localized`;
+              return attempts.length
+                ? attempts[attempts.length - 1]
+                : (shouldLocalizeFeishuImages
+                  ? `image ${token} could not be localized`
+                  : `image ${token} has no usable remote URL`);
             });
             cleanedCloudOpenApiMarkdown = replaceFeishuImageTokenPlaceholders(
               cleanedCloudOpenApiMarkdown,
@@ -19282,7 +19316,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               markdownReferenceCount,
               localizedCount: resolvedImageTokens.size,
               remoteLinkedCount: remotelyLinkedImageTokens.length,
-              unresolvedCount: imageLocalizationFailedCount,
+              unresolvedCount: shouldLocalizeFeishuImages ? imageLocalizationFailedCount : imageMissingCount,
               missingCount: imageMissingCount,
               images: imageTokens.map((token, index) => ({
                 index: index + 1,
@@ -19292,7 +19326,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               })),
               errors: [
                 ...finalImageErrors,
-                feishuMediaScopeBlocked && imageTokens.length
+                shouldLocalizeFeishuImages && feishuMediaScopeBlocked && imageTokens.length
                   ? `missing OAuth scope: ${FEISHU_MEDIA_DOWNLOAD_SCOPE}`
                   : '',
               ],
@@ -19320,7 +19354,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                   imageMissingCount ? `image-fully-missing=${imageMissingCount}` : '',
                   missingImageTempUrlCount ? `image-temp-url-missing=${missingImageTempUrlCount}` : '',
                   cloudOpenApiResult.imageDownloadError ? `image-download: ${cloudOpenApiResult.imageDownloadError}` : '',
-                  feishuMediaScopeBlocked && imageTokens.length
+                  shouldLocalizeFeishuImages && feishuMediaScopeBlocked && imageTokens.length
                     ? `image-media-scope-missing=${FEISHU_MEDIA_DOWNLOAD_SCOPE}`
                     : '',
                   imageLocalizationFailedCount
