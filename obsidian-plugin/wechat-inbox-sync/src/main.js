@@ -233,7 +233,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.127';
+const PLUGIN_RUNTIME_VERSION = '1.3.128';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1892,7 +1892,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
   return hasMinimumInstallerVersion(
     source,
     /\$InstallerScriptVersion\s*=\s*["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 2, 29],
+      [1, 2, 30],
   )
     && source.includes('function Assert-TranscribeScriptCandidate')
     && source.includes('function Start-TranscribeScriptUpdate')
@@ -1926,7 +1926,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('$ModelTencentUrls')
     && source.includes('$ModelOfficialFallbackUrls')
     && source.includes('Get-EnabledAssetUrls')
-    && source.includes('-PrimaryUrls $ModelFallbackUrls -FallbackUrls @($ModelTencentUrls + $ModelOfficialFallbackUrls)')
+    && source.includes('-PrimaryUrls $FfmpegTencentUrls -FallbackUrls @(')
+    && source.includes('-PrimaryUrls $ModelTencentUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)')
     && source.includes('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls')
     && source.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force')
     && !source.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force')
@@ -13957,6 +13958,9 @@ function getKnownLocalComponentInstallFailureReason(rawMessage) {
   if (/磁盘空间不足|No space left on device|not enough (?:disk )?space/i.test(message)) {
     return '磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。';
   }
+  if (/Local ASR installer download returned outdated or invalid content/i.test(message)) {
+    return '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“刷新权限”重试。若仍失败，请复制诊断信息联系开发者。';
+  }
   if (
     /Copy-Item[\s\S]{0,240}System\.IO\.IOException|System\.IO\.IOException[\s\S]{0,240}CopyItemCommand/i.test(message)
     && /ggml-small|cachedModelPath|modelPath|Whisper model|wechat-inbox-local-asr/i.test(message)
@@ -16480,9 +16484,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     if (status && status.hasAccess) {
       let readiness = this.getLocalTranscriptionComponentReadiness();
-      let refreshPlan = buildLocalComponentRefreshPlan(readiness, {
-        includeOptionalUpdates: reason === 'manual-refresh',
-      });
+      let refreshPlan = buildLocalComponentRefreshPlan(readiness);
       readiness = {
         ...readiness,
         missingComponents: refreshPlan.missingComponents,
@@ -16494,6 +16496,26 @@ class WechatObsidianInboxPlugin extends Plugin {
         localComponentReadiness: readiness,
         localComponentRefreshPlan: refreshPlan,
       };
+      const manifestVersion = this.manifest && this.manifest.version
+        ? String(this.manifest.version).trim()
+        : '';
+      const runtimeIdentity = manifestVersion ? getPluginRuntimeIdentity(manifestVersion) : null;
+      if (
+        reason === 'manual-refresh'
+        && refreshPlan.hasRequiredChanges
+        && runtimeIdentity
+        && !runtimeIdentity.matchesManifest
+      ) {
+        new Notice('插件文件没有更新完整。请先更新插件，并完全退出后重新打开 Obsidian，再点击“刷新权限”修复转写组件。', 12000);
+        return {
+          ...status,
+          localComponentInstallSkipped: {
+            reason: 'plugin-runtime-mismatch',
+            identity: runtimeIdentity,
+            ...refreshPlan,
+          },
+        };
+      }
       const shouldInstallMissingComponents = (
         options.installMissingComponents === true
         || reason === 'manual-refresh'
@@ -16535,9 +16557,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           readiness = installResult && installResult.readiness
             ? installResult.readiness
             : this.getLocalTranscriptionComponentReadiness();
-          refreshPlan = buildLocalComponentRefreshPlan(readiness, {
-            includeOptionalUpdates: reason === 'manual-refresh',
-          });
+          refreshPlan = buildLocalComponentRefreshPlan(readiness);
           readiness = {
             ...readiness,
             missingComponents: refreshPlan.missingComponents,
@@ -16557,9 +16577,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             ...status,
             localComponentInstallError: formatLocalComponentInstallFailureReason(error),
             localComponentReadiness: failedReadiness,
-            localComponentRefreshPlan: buildLocalComponentRefreshPlan(failedReadiness, {
-              includeOptionalUpdates: reason === 'manual-refresh',
-            }),
+            localComponentRefreshPlan: buildLocalComponentRefreshPlan(failedReadiness),
           };
         }
       }
@@ -16582,6 +16600,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     const fallbackComponentText = missingText || updateText || '本地转写组件';
     const reasonText = reason === 'first-use'
       ? '当前操作需要使用本地转写组件。'
+      : reason === 'manual-refresh' && hasMissing
+        ? '检测到本地转写组件确实缺失或损坏。请确认插件已更新，并完全退出后重新打开 Obsidian，再继续修复。'
       : hasMissing
         ? '检测到你已开通 Pro，但本地转写组件还没有准备完整。'
         : hasUpdates

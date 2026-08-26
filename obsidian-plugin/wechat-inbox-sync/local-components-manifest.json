@@ -11,8 +11,8 @@
     {
       "id": "asr-windows-installer",
       "sourcePath": "local-asr/install-local-asr.ps1",
-      "sha256": "64a19c7a748e5ea8c625f4bc161e48c13402eda1c09b351f434977761ebb0c7e",
-      "immutablePath": "local-components/by-sha256/64a19c7a748e5ea8c625f4bc161e48c13402eda1c09b351f434977761ebb0c7e/install-local-asr.ps1",
+      "sha256": "46086111b5cf8b36ea60b0222390f3a8ad126ddb82ce6e48c25707b8e18dab38",
+      "immutablePath": "local-components/by-sha256/46086111b5cf8b36ea60b0222390f3a8ad126ddb82ce6e48c25707b8e18dab38/install-local-asr.ps1",
       "compatibilityAlias": "local-asr/common/install-local-asr.ps1"
     },
     {
