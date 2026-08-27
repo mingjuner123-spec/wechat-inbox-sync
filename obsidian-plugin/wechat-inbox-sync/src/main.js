@@ -1691,8 +1691,10 @@ function isWindowsLocalAsrInstallerCommand(commandLine, installRoot) {
     getWindowsCommandLineArgument(commandLine, '-InstallRoot'),
   );
   if (!normalizedRoot || !commandInstallRoot) return false;
-  const hasInstaller = /(?:wechat-inbox-local-asr-installer-[^\s"']+|install-local-asr)\.ps1(?:["']|\s|$)/i.test(
-    String(commandLine || ''),
+  const installerPath = getWindowsCommandLineArgument(commandLine, '-File');
+  const installerName = path.win32.basename(String(installerPath || '').replace(/\//g, '\\'));
+  const hasInstaller = /^(?:wechat-inbox-local-asr-installer-[^\s"']+|install-local-asr)\.ps1$/i.test(
+    installerName,
   );
   return hasInstaller
     && commandInstallRoot === normalizedRoot;

@@ -15381,6 +15381,22 @@ async function runLocalAsrInstallerRecoveryTests() {
   );
   assert.strictEqual(
     helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -Command "Write-Host C:\\Temp\\install-local-asr.ps1" -InstallRoot "${installRoot}"`,
+      installRoot,
+    ),
+    false,
+    'mentioning an installer path outside the -File argument must never authorize termination',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -File="C:\\Temp\\install-local-asr.ps1" -InstallRoot "${installRoot}"`,
+      installRoot,
+    ),
+    true,
+    'the equals form of -File must be parsed as the exact installer argument',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
       'powershell -NoProfile -File "C:\\scripts\\unrelated.ps1" -InstallRoot "C:\\Users\\demo\\.wechat-inbox-local-asr"',
       installRoot,
     ),
