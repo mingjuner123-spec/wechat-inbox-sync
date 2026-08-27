@@ -2260,6 +2260,29 @@ assert.strictEqual(
 );
 assert.strictEqual(helpers.LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_beta');
 assert.strictEqual(helpers.LOCAL_COMPONENT_MANIFEST_PATH, '/local-components/manifest');
+assert.strictEqual(
+  helpers.LOCAL_COMPONENT_DOWNLOAD_HOST,
+  'wechat-inbox-components-1428610652.cos.ap-shanghai.myqcloud.com',
+);
+const authorizedModelUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'a'.repeat(64)}/ggml-small.bin?q-signature=temporary&x-cos-security-token=role-token`;
+const authorizedEncodedFileName = 'cpython-3.12.13+20260623-x86_64-pc-windows-msvc-install_only.tar.gz';
+const authorizedEncodedUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'b'.repeat(64)}/${authorizedEncodedFileName.replace('+', '%2B')}?q-signature=temporary&x-cos-security-token=role-token`;
+assert.strictEqual(
+  helpers.isAuthorizedLocalComponentDownloadUrl(
+    authorizedEncodedUrl,
+    'b'.repeat(64),
+    authorizedEncodedFileName,
+  ),
+  true,
+);
+assert.strictEqual(
+  helpers.isAuthorizedLocalComponentDownloadUrl(
+    `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/prefix/local-components/by-sha256/${'b'.repeat(64)}/${authorizedEncodedFileName.replace('+', '%2B')}?q-signature=temporary&x-cos-security-token=role-token`,
+    'b'.repeat(64),
+    authorizedEncodedFileName,
+  ),
+  false,
+);
 const authorizedComponentManifest = helpers.normalizeAuthorizedLocalComponentManifest({
   data: {
     schemaVersion: 2,
@@ -2273,7 +2296,7 @@ const authorizedComponentManifest = helpers.normalizeAuthorizedLocalComponentMan
       fileName: 'ggml-small.bin',
       sha256: 'a'.repeat(64),
       byteLength: 487601967,
-      downloadUrl: 'https://private.example.com/model?temporary-signature=1',
+      downloadUrl: authorizedModelUrl,
     }],
   },
 }, { component: 'asr', platform: 'win32', arch: 'x64' }, Date.parse('2036-08-27T00:00:00.000Z'));
@@ -2286,8 +2309,25 @@ assert.strictEqual(authorizedProcessEnv.EXISTING_ENV, 'kept');
 assert.strictEqual(authorizedProcessEnv.WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN, '1');
 assert.strictEqual(
   authorizedProcessEnv.WECHAT_INBOX_ASR_MODEL_URL,
-  'https://private.example.com/model?temporary-signature=1',
+  authorizedModelUrl,
 );
+assert.throws(() => helpers.normalizeAuthorizedLocalComponentManifest({
+  data: {
+    schemaVersion: 2,
+    component: 'asr',
+    platform: 'win32',
+    arch: 'x64',
+    version: 'secure-test-v1',
+    expiresAt: '2036-08-27T00:10:00.000Z',
+    assets: [{
+      id: 'model',
+      fileName: 'ggml-small.bin',
+      sha256: 'a'.repeat(64),
+      byteLength: 487601967,
+      downloadUrl: 'https://attacker.example.com/model?q-signature=temporary&x-cos-security-token=role-token',
+    }],
+  },
+}, { component: 'asr', platform: 'win32', arch: 'x64' }, Date.parse('2036-08-27T00:00:00.000Z')));
 assert.ok(pluginMainSource.includes('getAvailableLocalAsrInstallerPath'));
 assert.ok(pluginMainSource.includes('getAvailableLocalOcrInstallerPath'));
 assert.strictEqual(pluginMainSource.includes('tcloudbaseapp.com'), false);
@@ -2311,6 +2351,12 @@ assert.ok(pluginMainSource.includes("fs.copyFileSync(sourcePath, targetPath)"));
 assert.ok(macOcrInstallerSource.includes('find_existing_python'));
 assert.ok(macOcrInstallerSource.includes('.wechat-inbox-local-asr/python-venv/bin/python'));
 assert.ok(macOcrInstallerSource.includes('download_with_retry'));
+assert.ok(windowsOcrInstallerSource.includes('Resolve-OcrWheelhouseLocation'));
+assert.ok(windowsOcrInstallerSource.includes('Authorized OCR wheelhouse ZIP SHA256 validation failed.'));
+assert.ok(macOcrInstallerSource.includes('resolve_ocr_wheelhouse_location'));
+assert.ok(macOcrInstallerSource.includes('Authorized OCR wheelhouse ZIP SHA256 validation failed.'));
+assert.ok(macAsrInstallerSource.includes('resolve_asr_wheelhouse_location'));
+assert.ok(macAsrInstallerSource.includes('Authorized ASR wheelhouse ZIP SHA256 validation failed.'));
 assert.ok(macOcrInstallerSource.includes('--retry-all-errors'));
 assert.ok(macOcrInstallerSource.includes('--silent --show-error'));
 const localOcrInstallerValidatorSource = pluginMainSource.slice(

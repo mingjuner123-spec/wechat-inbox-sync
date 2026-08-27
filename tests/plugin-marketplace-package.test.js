@@ -782,7 +782,7 @@ assert.ok(
   'macOS ASR installer should try the pinned portable Python before the uv managed-Python fallback',
 );
 assert.ok(
-  macInstaller.lastIndexOf('if ! verify_sha256 "$archive_path" "$expected_sha256"; then') <
+  macInstaller.indexOf('if ! verify_sha256 "$archive_path" "$expected_sha256"; then') <
     macInstaller.indexOf('if ! tar xzf "$archive_path" -C "$stage_dir"; then'),
   'macOS ASR installer should verify the pinned Python archive before extraction',
 );

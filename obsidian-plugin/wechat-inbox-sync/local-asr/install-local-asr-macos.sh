@@ -357,13 +357,48 @@ asr_wheelhouse_url() {
   echo "$AUTHORIZED_WHEELHOUSE_URL"
 }
 
+RESOLVED_ASR_WHEELHOUSE_LOCATION=""
+resolve_asr_wheelhouse_location() {
+  local wheelhouse_url expected_sha256 archive_path extract_dir
+  RESOLVED_ASR_WHEELHOUSE_LOCATION=""
+  wheelhouse_url="$(asr_wheelhouse_url)" || return 1
+  case "$wheelhouse_url" in
+    *.zip|*.zip\?*) ;;
+    *) RESOLVED_ASR_WHEELHOUSE_LOCATION="$wheelhouse_url"; return 0 ;;
+  esac
+  expected_sha256="$(printf '%s' "$wheelhouse_url" | sed -nE 's#.*\/by-sha256\/([A-Fa-f0-9]{64})\/.*#\1#p' | tr '[:lower:]' '[:upper:]')"
+  [ -n "$expected_sha256" ] || { echo "Authorized ASR wheelhouse ZIP URL is not content-addressed." >&2; return 1; }
+  archive_path="$CACHE_ROOT/authorized-asr-wheelhouse-$(printf '%s' "$expected_sha256" | tr '[:upper:]' '[:lower:]').zip"
+  extract_dir="$CACHE_ROOT/authorized-asr-wheelhouse-$(printf '%s' "$expected_sha256" | tr '[:upper:]' '[:lower:]')"
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    rm -f "$archive_path"
+    download_file "$wheelhouse_url" "$archive_path" || return 1
+  fi
+  verify_sha256 "$archive_path" "$expected_sha256" || { echo "Authorized ASR wheelhouse ZIP SHA256 validation failed." >&2; return 1; }
+  if ! find "$extract_dir" -maxdepth 1 -type f -name '*.whl' -print -quit 2>/dev/null | grep -q .; then
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+    if command -v ditto >/dev/null 2>&1; then
+      ditto -x -k "$archive_path" "$extract_dir"
+    elif command -v unzip >/dev/null 2>&1; then
+      unzip -q "$archive_path" -d "$extract_dir"
+    else
+      echo "Neither ditto nor unzip is available for the authorized ASR wheelhouse." >&2
+      return 1
+    fi
+  fi
+  find "$extract_dir" -maxdepth 1 -type f -name '*.whl' -print -quit | grep -q . || return 1
+  RESOLVED_ASR_WHEELHOUSE_LOCATION="$extract_dir"
+}
+
 install_asr_packages_from_wheelhouse() {
   local python_bin="$1"
-  local wheelhouse_url
-  wheelhouse_url="$(asr_wheelhouse_url)" || return 1
+  local wheelhouse_location
+  resolve_asr_wheelhouse_location || return 1
+  wheelhouse_location="$RESOLVED_ASR_WHEELHOUSE_LOCATION"
   "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  echo "Installing ASR packages from an authorized wheelhouse: $wheelhouse_url"
-  "$python_bin" -m pip install --upgrade --no-index --find-links "$wheelhouse_url" \
+  echo "Installing ASR packages from an authorized wheelhouse."
+  "$python_bin" -m pip install --upgrade --no-index --find-links "$wheelhouse_location" \
     "${ASR_PACKAGE_REQUIREMENTS[@]}" 2>&1
 }
 

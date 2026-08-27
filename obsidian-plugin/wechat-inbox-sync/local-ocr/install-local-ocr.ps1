@@ -744,12 +744,44 @@ function Get-OcrWheelhouseUrl {
   return $AuthorizedWheelhouseUrl
 }
 
+function Resolve-OcrWheelhouseLocation {
+  $wheelhouseUrl = Get-OcrWheelhouseUrl
+  if ([string]::IsNullOrWhiteSpace($wheelhouseUrl)) { return "" }
+  if ($wheelhouseUrl -notmatch '(?i)\.zip(?:\?|$)') { return $wheelhouseUrl }
+
+  $hashMatch = [regex]::Match($wheelhouseUrl, '(?i)/by-sha256/([a-f0-9]{64})/')
+  if (-not $hashMatch.Success) {
+    throw "Authorized OCR wheelhouse ZIP URL is not content-addressed."
+  }
+  $expectedSha256 = $hashMatch.Groups[1].Value.ToUpperInvariant()
+  $archivePath = Join-Path $CacheDir ("authorized-ocr-wheelhouse-$($expectedSha256.ToLowerInvariant()).zip")
+  $extractDir = Join-Path $CacheDir ("authorized-ocr-wheelhouse-$($expectedSha256.ToLowerInvariant())")
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $expectedSha256)) {
+    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+    Invoke-DownloadFile -Urls @($wheelhouseUrl) -OutFile $archivePath -TimeoutSec 1200 -ExpectedSha256 $expectedSha256
+  }
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $expectedSha256)) {
+    throw "Authorized OCR wheelhouse ZIP SHA256 validation failed."
+  }
+  $existingWheel = Get-ChildItem -LiteralPath $extractDir -Filter '*.whl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $existingWheel) {
+    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
+  }
+  $wheel = Get-ChildItem -LiteralPath $extractDir -Filter '*.whl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $wheel) {
+    throw "Authorized OCR wheelhouse ZIP contains no wheel files."
+  }
+  return $extractDir
+}
+
 function Install-OcrPackagesFromWheelhouse {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
-  $wheelhouseUrl = Get-OcrWheelhouseUrl
-  if ([string]::IsNullOrWhiteSpace($wheelhouseUrl)) { return $false }
-  Write-InstallLog "Installing OCR packages from an authorized wheelhouse: $wheelhouseUrl"
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
+  $wheelhouseLocation = Resolve-OcrWheelhouseLocation
+  if ([string]::IsNullOrWhiteSpace($wheelhouseLocation)) { return $false }
+  Write-InstallLog "Installing OCR packages from an authorized wheelhouse."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseLocation) + $OcrPackageRequirements)
   return $exitCode -eq 0
 }
 

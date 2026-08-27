@@ -259,10 +259,11 @@ const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_COMPONENT_MANIFEST_PATH = '/local-components/manifest';
+const LOCAL_COMPONENT_DOWNLOAD_HOST = 'wechat-inbox-components-1428610652.cos.ap-shanghai.myqcloud.com';
 const LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest';
 const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
-const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '91128cc51cf226d90784dfb5406b576124cff544af7dbc8d43bb24719c2e2b94';
-const LOCAL_OCR_MACOS_INSTALLER_SHA256 = 'd571fa9b50b120db9c9c19e5ed7886f4066a8461acfb7954bfc6a00f3d1cdf48';
+const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = 'c6efec45d13e557b9f0feccbcd22d1249145b3d817d0c3fe2f98f847c470251b';
+const LOCAL_OCR_MACOS_INSTALLER_SHA256 = '03bd44b0872e06234756eaaceca0028cd16d4eeb36096ec2bc276e0923956823';
 const LOCAL_COMPONENT_ASSET_ENV_KEYS = Object.freeze({
   asr: Object.freeze({
     model: 'WECHAT_INBOX_ASR_MODEL_URL',
@@ -1817,6 +1818,24 @@ function normalizeInstallerScriptText(scriptText, isMac = false) {
     .replace(/\r\n?/g, '\n');
 }
 
+function isAuthorizedLocalComponentDownloadUrl(downloadUrl, sha256, fileName) {
+  try {
+    const parsed = new URL(String(downloadUrl || ''));
+    const expectedPath = `/local-components/by-sha256/${sha256}/${fileName}`;
+    const decodedPathname = decodeURIComponent(parsed.pathname);
+    return parsed.protocol === 'https:'
+      && parsed.hostname === LOCAL_COMPONENT_DOWNLOAD_HOST
+      && !parsed.port
+      && !parsed.username
+      && !parsed.password
+      && decodedPathname === expectedPath
+      && parsed.searchParams.has('q-signature')
+      && parsed.searchParams.has('x-cos-security-token');
+  } catch (error) {
+    return false;
+  }
+}
+
 function normalizeAuthorizedLocalComponentManifest(payload, expected = {}, now = Date.now()) {
   const manifest = payload && payload.data ? payload.data : payload;
   const component = String(manifest && manifest.component || '').trim().toLowerCase();
@@ -1850,7 +1869,7 @@ function normalizeAuthorizedLocalComponentManifest(payload, expected = {}, now =
       || !/^[a-f0-9]{64}$/.test(sha256)
       || !Number.isSafeInteger(byteLength)
       || byteLength <= 0
-      || !/^https:\/\//i.test(downloadUrl)) {
+      || !isAuthorizedLocalComponentDownloadUrl(downloadUrl, sha256, fileName)) {
       throw new Error('授权组件清单包含无效资产');
     }
     totalBytes += byteLength;
@@ -1930,6 +1949,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('bootstrap_uv')
       && source.includes('detect_uv_arch')
       && source.includes('setup_python_and_packages')
+      && source.includes('resolve_asr_wheelhouse_location')
+      && source.includes('Authorized ASR wheelhouse ZIP SHA256 validation failed.')
       && source.includes('UV_PYTHON_DOWNLOADS=automatic')
       && source.includes('UV_PYTHON_PREFERENCE=managed')
       && source.includes('PYTHON_BUILD_STANDALONE_BUILD=')
@@ -2035,6 +2056,8 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('download_with_retry')
       && source.includes('find_existing_python')
       && source.includes('install_portable_python')
+      && source.includes('resolve_ocr_wheelhouse_location')
+      && source.includes('Authorized OCR wheelhouse ZIP SHA256 validation failed.')
       && source.indexOf('Package index OCR install failed; retrying authorized wheelhouse.') >= 0
       && source.indexOf('Package index OCR install failed; retrying authorized wheelhouse.') < source.lastIndexOf('install_ocr_packages_from_wheelhouse')
       && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"')
@@ -2053,6 +2076,8 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('Invoke-DownloadFile -Urls')
     && source.includes('Download-TextFile')
     && source.includes('function Install-PortablePython')
+    && source.includes('function Resolve-OcrWheelhouseLocation')
+    && source.includes('Authorized OCR wheelhouse ZIP SHA256 validation failed.')
     && source.includes('function Expand-TarGzArchiveWithPowerShell')
     && source.includes('Package index OCR install failed; retrying authorized wheelhouse.')
     && source.includes('unique-staging-transaction-v2')
@@ -22608,9 +22633,11 @@ WechatObsidianInboxPlugin.__test = {
   MAX_PLUGIN_BINDINGS,
   LOCAL_TRANSCRIPTION_PLAN,
   LOCAL_COMPONENT_MANIFEST_PATH,
+  LOCAL_COMPONENT_DOWNLOAD_HOST,
   LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
   LOCAL_OCR_MACOS_INSTALLER_SHA256,
   LOCAL_COMPONENT_ASSET_ENV_KEYS,
+  isAuthorizedLocalComponentDownloadUrl,
   normalizeAuthorizedLocalComponentManifest,
   buildAuthorizedLocalComponentProcessEnv,
   LOCAL_OCR_BATCH_RUNNER_VERSION,

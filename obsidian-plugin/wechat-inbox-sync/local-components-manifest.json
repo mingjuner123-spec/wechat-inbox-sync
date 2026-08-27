@@ -4,8 +4,8 @@
     {
       "id": "asr-macos-installer",
       "sourcePath": "local-asr/install-local-asr-macos.sh",
-      "sha256": "c0ee9b5f7ddd19f89885db8966b48874de893360008f4720d0f26f872322ff20",
-      "immutablePath": "local-components/by-sha256/c0ee9b5f7ddd19f89885db8966b48874de893360008f4720d0f26f872322ff20/install-local-asr-macos.sh",
+      "sha256": "a16f8b2a078b8803646110ab1c904c7a24867cbaa6a9146f5a877d6e75c8e62a",
+      "immutablePath": "local-components/by-sha256/a16f8b2a078b8803646110ab1c904c7a24867cbaa6a9146f5a877d6e75c8e62a/install-local-asr-macos.sh",
       "compatibilityAlias": "local-asr/common/install-local-asr-macos.sh"
     },
     {
@@ -25,15 +25,15 @@
     {
       "id": "ocr-macos-installer",
       "sourcePath": "local-ocr/install-local-ocr-macos.sh",
-      "sha256": "d571fa9b50b120db9c9c19e5ed7886f4066a8461acfb7954bfc6a00f3d1cdf48",
-      "immutablePath": "local-components/by-sha256/d571fa9b50b120db9c9c19e5ed7886f4066a8461acfb7954bfc6a00f3d1cdf48/install-local-ocr-macos.sh",
+      "sha256": "03bd44b0872e06234756eaaceca0028cd16d4eeb36096ec2bc276e0923956823",
+      "immutablePath": "local-components/by-sha256/03bd44b0872e06234756eaaceca0028cd16d4eeb36096ec2bc276e0923956823/install-local-ocr-macos.sh",
       "compatibilityAlias": "local-ocr/common/install-local-ocr-macos.sh"
     },
     {
       "id": "ocr-windows-installer",
       "sourcePath": "local-ocr/install-local-ocr.ps1",
-      "sha256": "91128cc51cf226d90784dfb5406b576124cff544af7dbc8d43bb24719c2e2b94",
-      "immutablePath": "local-components/by-sha256/91128cc51cf226d90784dfb5406b576124cff544af7dbc8d43bb24719c2e2b94/install-local-ocr.ps1",
+      "sha256": "c6efec45d13e557b9f0feccbcd22d1249145b3d817d0c3fe2f98f847c470251b",
+      "immutablePath": "local-components/by-sha256/c6efec45d13e557b9f0feccbcd22d1249145b3d817d0c3fe2f98f847c470251b/install-local-ocr.ps1",
       "compatibilityAlias": "local-ocr/common/install-local-ocr.ps1"
     },
     {

@@ -144,15 +144,50 @@ ocr_wheelhouse_url() {
   echo "$AUTHORIZED_WHEELHOUSE_URL"
 }
 
+RESOLVED_OCR_WHEELHOUSE_LOCATION=""
+resolve_ocr_wheelhouse_location() {
+  local wheelhouse_url expected_sha256 archive_path extract_dir
+  RESOLVED_OCR_WHEELHOUSE_LOCATION=""
+  wheelhouse_url="$(ocr_wheelhouse_url)" || return 1
+  case "$wheelhouse_url" in
+    *.zip|*.zip\?*) ;;
+    *) RESOLVED_OCR_WHEELHOUSE_LOCATION="$wheelhouse_url"; return 0 ;;
+  esac
+  expected_sha256="$(printf '%s' "$wheelhouse_url" | sed -nE 's#.*\/by-sha256\/([A-Fa-f0-9]{64})\/.*#\1#p' | tr '[:lower:]' '[:upper:]')"
+  [ -n "$expected_sha256" ] || { log "ERROR: Authorized OCR wheelhouse ZIP URL is not content-addressed."; return 1; }
+  archive_path="$CACHE_DIR/authorized-ocr-wheelhouse-$(printf '%s' "$expected_sha256" | tr '[:upper:]' '[:lower:]').zip"
+  extract_dir="$CACHE_DIR/authorized-ocr-wheelhouse-$(printf '%s' "$expected_sha256" | tr '[:upper:]' '[:lower:]')"
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    rm -f "$archive_path"
+    download_with_retry "$wheelhouse_url" "$archive_path" "authorized OCR wheelhouse" 1200 || return 1
+  fi
+  verify_sha256 "$archive_path" "$expected_sha256" || { log "ERROR: Authorized OCR wheelhouse ZIP SHA256 validation failed."; return 1; }
+  if ! find "$extract_dir" -maxdepth 1 -type f -name '*.whl' -print -quit 2>/dev/null | grep -q .; then
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+    if command -v ditto >/dev/null 2>&1; then
+      ditto -x -k "$archive_path" "$extract_dir"
+    elif command -v unzip >/dev/null 2>&1; then
+      unzip -q "$archive_path" -d "$extract_dir"
+    else
+      log "ERROR: Neither ditto nor unzip is available for the authorized OCR wheelhouse."
+      return 1
+    fi
+  fi
+  find "$extract_dir" -maxdepth 1 -type f -name '*.whl' -print -quit | grep -q . || return 1
+  RESOLVED_OCR_WHEELHOUSE_LOCATION="$extract_dir"
+}
+
 install_ocr_packages_from_wheelhouse() {
   local installer="$1"
   shift
-  local wheelhouse_url
-  wheelhouse_url="$(ocr_wheelhouse_url)" || return 1
-  log "Installing OCR packages from an authorized wheelhouse: $wheelhouse_url"
+  local wheelhouse_location
+  resolve_ocr_wheelhouse_location || return 1
+  wheelhouse_location="$RESOLVED_OCR_WHEELHOUSE_LOCATION"
+  log "Installing OCR packages from an authorized wheelhouse."
   "$installer" "$@" install --upgrade \
     --no-index \
-    --find-links "$wheelhouse_url" \
+    --find-links "$wheelhouse_location" \
     "${OCR_PACKAGE_REQUIREMENTS[@]}" 2>&1
 }
 
