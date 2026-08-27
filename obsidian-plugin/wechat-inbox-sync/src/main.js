@@ -1623,23 +1623,79 @@ function readLocalAsrInstallLogState(installRoot, fileSystem = fs) {
   }
 }
 
-function normalizeWindowsCommandLine(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/\//g, '\\')
-    .replace(/\\+/g, '\\');
+function parseWindowsCommandLineArguments(commandLine) {
+  const source = String(commandLine || '');
+  const args = [];
+  let current = '';
+  let quote = '';
+  let started = false;
+  for (const character of source) {
+    if (quote) {
+      if (character === quote) {
+        quote = '';
+      } else {
+        current += character;
+      }
+      started = true;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (started) {
+        args.push(current);
+        current = '';
+        started = false;
+      }
+      continue;
+    }
+    current += character;
+    started = true;
+  }
+  if (started) args.push(current);
+  return args;
+}
+
+function getWindowsCommandLineArgument(commandLine, argumentName) {
+  const expected = String(argumentName || '').trim().toLowerCase();
+  if (!expected) return '';
+  const args = parseWindowsCommandLineArguments(commandLine);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = String(args[index] || '');
+    const lowerArgument = argument.toLowerCase();
+    if (lowerArgument === expected) return String(args[index + 1] || '');
+    if (lowerArgument.startsWith(`${expected}=`)) {
+      return argument.slice(expected.length + 1);
+    }
+  }
+  return '';
+}
+
+function normalizeWindowsAbsolutePathForComparison(value) {
+  const source = String(value || '').trim();
+  if (!source || !path.win32.isAbsolute(source)) return '';
+  const normalized = path.win32.normalize(source);
+  const root = path.win32.parse(normalized).root;
+  const withoutTrailingSeparators = normalized.length > root.length
+    ? normalized.replace(/[\\/]+$/g, '')
+    : normalized;
+  return withoutTrailingSeparators.toLowerCase();
 }
 
 function isWindowsLocalAsrInstallerCommand(commandLine, installRoot) {
-  const normalizedCommand = normalizeWindowsCommandLine(commandLine);
-  const normalizedRoot = normalizeWindowsCommandLine(path.win32.normalize(String(installRoot || '')));
-  if (!normalizedCommand || !normalizedRoot) return false;
-  const hasInstaller = /(?:wechat-inbox-local-asr-installer-[^\s"]+|install-local-asr)\.ps1(?:"|\s|$)/i.test(
+  const normalizedRoot = normalizeWindowsAbsolutePathForComparison(installRoot);
+  const commandInstallRoot = normalizeWindowsAbsolutePathForComparison(
+    getWindowsCommandLineArgument(commandLine, '-InstallRoot'),
+  );
+  if (!normalizedRoot || !commandInstallRoot) return false;
+  const hasInstaller = /(?:wechat-inbox-local-asr-installer-[^\s"']+|install-local-asr)\.ps1(?:["']|\s|$)/i.test(
     String(commandLine || ''),
   );
   return hasInstaller
-    && /(?:^|\s)-installroot(?:\s|$)/i.test(String(commandLine || ''))
-    && normalizedCommand.includes(normalizedRoot);
+    && commandInstallRoot === normalizedRoot;
 }
 
 function getWindowsProcessCommandLine(pid, execFile = childProcess.execFile) {

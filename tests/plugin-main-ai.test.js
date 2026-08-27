@@ -15348,6 +15348,39 @@ async function runLocalAsrInstallerRecoveryTests() {
   assert.strictEqual(helpers.isWindowsLocalAsrInstallerCommand(ownCommand, installRoot), true);
   assert.strictEqual(
     helpers.isWindowsLocalAsrInstallerCommand(
+      `${ownCommand}-backup`,
+      installRoot,
+    ),
+    false,
+    'a neighboring install-root suffix must not be treated as the same ASR installation',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      ownCommand,
+      `${installRoot}-parent`,
+    ),
+    false,
+    'an expected-root prefix must not match a shorter command-line root',
+  );
+  const spacedInstallRoot = 'C:\\Users\\Demo User\\Local ASR';
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -File 'C:\\Temp\\install-local-asr.ps1' -InstallRoot '${spacedInstallRoot}\\'`,
+      spacedInstallRoot,
+    ),
+    true,
+    'quoted roots with spaces and a trailing separator must compare by normalized full path',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -File "C:\\Temp\\install-local-asr.ps1" -InstallRoot="${spacedInstallRoot}"`,
+      spacedInstallRoot,
+    ),
+    true,
+    'the equals form of -InstallRoot must still be recognized exactly',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
       'powershell -NoProfile -File "C:\\scripts\\unrelated.ps1" -InstallRoot "C:\\Users\\demo\\.wechat-inbox-local-asr"',
       installRoot,
     ),
