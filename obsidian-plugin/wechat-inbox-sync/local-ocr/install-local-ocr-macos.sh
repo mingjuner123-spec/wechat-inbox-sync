@@ -10,12 +10,10 @@ CACHE_DIR="${INSTALL_ROOT}/cache"
 RUNTIME_SCRIPT="${INSTALL_ROOT}/ocr_image.py"
 LOG_PATH="${INSTALL_ROOT}/install.log"
 
-TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
-TENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"
-TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+PUBLIC_CLOUDBASE_CDN_DISABLED="${WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN:-1}"
+AUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL:-}"
+AUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_OCR_WHEELHOUSE_URL:-}"
 GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"
-PYTHON_RUNTIME_MIRRORS=("$TENCENT_PYTHON_INSTALL_MIRROR" "$GITHUB_PYTHON_INSTALL_MIRROR")
-OCR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-ocr/wheels"
 TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
 PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
 
@@ -142,9 +140,8 @@ detect_ocr_wheel_platform() {
 }
 
 ocr_wheelhouse_url() {
-  local wheel_platform
-  wheel_platform="$(detect_ocr_wheel_platform)" || return 1
-  echo "${OCR_WHEELHOUSE_BASE_URL%/}/${wheel_platform}/index.html"
+  [ -n "$AUTHORIZED_WHEELHOUSE_URL" ] || return 1
+  echo "$AUTHORIZED_WHEELHOUSE_URL"
 }
 
 install_ocr_packages_from_wheelhouse() {
@@ -152,7 +149,7 @@ install_ocr_packages_from_wheelhouse() {
   shift
   local wheelhouse_url
   wheelhouse_url="$(ocr_wheelhouse_url)" || return 1
-  log "Installing OCR packages from CDN wheelhouse: $wheelhouse_url"
+  log "Installing OCR packages from an authorized wheelhouse: $wheelhouse_url"
   "$installer" "$@" install --upgrade \
     --no-index \
     --find-links "$wheelhouse_url" \
@@ -176,7 +173,7 @@ install_ocr_packages_with_python() {
     -i "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
     return 0
   fi
-  log "Package index OCR install failed; retrying CDN wheelhouse."
+  log "Package index OCR install failed; retrying authorized wheelhouse."
   install_ocr_packages_from_wheelhouse "$python_bin" -m pip
 }
 
@@ -218,20 +215,22 @@ install_portable_python() {
     return 0
   fi
 
-  local file_name expected_sha256 archive_path runtime_url runtime_mirror stage_dir staged_python
+  local file_name expected_sha256 archive_path runtime_url stage_dir staged_python
+  local runtime_urls=()
   file_name="$(python_runtime_file_name)" || return 1
   expected_sha256="$(python_runtime_sha256)" || return 1
   archive_path="${CACHE_DIR}/${file_name}"
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
     rm -f "$archive_path"
-    for runtime_mirror in "${PYTHON_RUNTIME_MIRRORS[@]}"; do
-      runtime_url="${runtime_mirror%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}"
+    if [ -n "$AUTHORIZED_PYTHON_RUNTIME_URL" ]; then runtime_urls+=("$AUTHORIZED_PYTHON_RUNTIME_URL"); fi
+    runtime_urls+=("${GITHUB_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}")
+    for runtime_url in "${runtime_urls[@]}"; do
       rm -f "$archive_path"
       if download_with_retry "$runtime_url" "$archive_path" "pinned Python runtime" 1200 \
         && verify_sha256 "$archive_path" "$expected_sha256"; then
         break
       fi
-      log "Pinned Python runtime source failed or did not match SHA256: ${runtime_mirror}"
+      log "Pinned Python runtime source failed or did not match SHA256."
     done
   fi
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
@@ -347,15 +346,11 @@ install_ocr_script() {
     return 0
   fi
 
-  # Community plugin updates may not include extra runtime files, so bundled
-  # assets are preferred but the CDN remains the normal fallback.
+  # The signed component manifest only provides large runtime assets. The
+  # executable OCR script itself must come from the verified plugin package.
   if is_valid_ocr_script "$PYTHON_SCRIPT"; then
     source_script="$PYTHON_SCRIPT"
     log "Using bundled OCR script."
-  elif download_text_file "${TENCENT_OCR_ASSET_BASE_URL%/}/ocr_image.py" "$downloaded_script" \
-    && is_valid_ocr_script "$downloaded_script"; then
-    source_script="$downloaded_script"
-    log "OCR script downloaded from CDN."
   fi
 
   if [ -z "$source_script" ]; then

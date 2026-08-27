@@ -549,10 +549,10 @@ const markerOnlyLegacyWindowsAsrScriptSource = [
   'recoveryTriggered=1',
 ].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.30"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.31"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.30"', '$InstallerScriptVersion = "1.2.25"')
+  .replace('$InstallerScriptVersion = "1.2.31"', '$InstallerScriptVersion = "1.2.25"')
   .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
   .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
@@ -563,7 +563,7 @@ const copyModelWindowsAsrInstallerSource = windowsAsrInstallerSource
     'Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force',
   );
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.12"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.13"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
@@ -582,9 +582,11 @@ assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource,
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(nonTransactionalWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(copyModelWindowsAsrInstallerSource, false), false);
-assert.ok(windowsAsrInstallerSource.includes('$InstallerScriptVersion = "1.2.30"'));
-assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $FfmpegTencentUrls -FallbackUrls @('));
-assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $ModelTencentUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)'));
+assert.ok(windowsAsrInstallerSource.includes('$InstallerScriptVersion = "1.2.31"'));
+assert.ok(windowsAsrInstallerSource.includes('$env:WECHAT_INBOX_ASR_MODEL_URL'));
+assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $FfmpegAuthorizedUrls -FallbackUrls @('));
+assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)'));
+assert.strictEqual(windowsAsrInstallerSource.includes('tcloudbaseapp.com'), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(macAsrInstallerSource, true), true);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleMacAsrInstallerSource, true), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(promptedMacAsrInstallerSource, true), false);
@@ -2257,29 +2259,43 @@ assert.strictEqual(
   'param()\r\nWrite-Host ok\r\n',
 );
 assert.strictEqual(helpers.LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_beta');
-assert.strictEqual(
-  helpers.LOCAL_ASR_INSTALLER_URL,
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1',
+assert.strictEqual(helpers.LOCAL_COMPONENT_MANIFEST_PATH, '/local-components/manifest');
+const authorizedComponentManifest = helpers.normalizeAuthorizedLocalComponentManifest({
+  data: {
+    schemaVersion: 2,
+    component: 'asr',
+    platform: 'win32',
+    arch: 'x64',
+    version: 'secure-test-v1',
+    expiresAt: '2036-08-27T00:10:00.000Z',
+    assets: [{
+      id: 'model',
+      fileName: 'ggml-small.bin',
+      sha256: 'a'.repeat(64),
+      byteLength: 487601967,
+      downloadUrl: 'https://private.example.com/model?temporary-signature=1',
+    }],
+  },
+}, { component: 'asr', platform: 'win32', arch: 'x64' }, Date.parse('2036-08-27T00:00:00.000Z'));
+assert.strictEqual(authorizedComponentManifest.totalBytes, 487601967);
+const authorizedProcessEnv = helpers.buildAuthorizedLocalComponentProcessEnv(
+  { EXISTING_ENV: 'kept' },
+  authorizedComponentManifest,
 );
+assert.strictEqual(authorizedProcessEnv.EXISTING_ENV, 'kept');
+assert.strictEqual(authorizedProcessEnv.WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN, '1');
 assert.strictEqual(
-  helpers.LOCAL_ASR_MACOS_INSTALLER_URL,
-  'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh',
-);
-assert.strictEqual(
-  helpers.LOCAL_OCR_INSTALLER_URL,
-  `https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-components/by-sha256/${helpers.LOCAL_OCR_WINDOWS_INSTALLER_SHA256}/install-local-ocr.ps1`,
-);
-assert.strictEqual(
-  helpers.LOCAL_OCR_MACOS_INSTALLER_URL,
-  `https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-components/by-sha256/${helpers.LOCAL_OCR_MACOS_INSTALLER_SHA256}/install-local-ocr-macos.sh`,
+  authorizedProcessEnv.WECHAT_INBOX_ASR_MODEL_URL,
+  'https://private.example.com/model?temporary-signature=1',
 );
 assert.ok(pluginMainSource.includes('getAvailableLocalAsrInstallerPath'));
 assert.ok(pluginMainSource.includes('getAvailableLocalOcrInstallerPath'));
-assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr.ps1'));
-assert.ok(pluginMainSource.includes('he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/common/install-local-asr-macos.sh'));
+assert.strictEqual(pluginMainSource.includes('tcloudbaseapp.com'), false);
+assert.strictEqual(windowsOcrInstallerSource.includes('tcloudbaseapp.com'), false);
+assert.strictEqual(macOcrInstallerSource.includes('tcloudbaseapp.com'), false);
+assert.strictEqual(macAsrInstallerSource.includes('tcloudbaseapp.com'), false);
 assert.ok(pluginMainSource.includes('LOCAL_OCR_WINDOWS_INSTALLER_SHA256'));
 assert.ok(pluginMainSource.includes('LOCAL_OCR_MACOS_INSTALLER_SHA256'));
-assert.ok(pluginMainSource.includes('isTrustedLocalOcrInstallerSource(scriptText, installerSha256, isMac)'));
 assert.ok(pluginMainSource.includes('isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)'));
 assert.ok(pluginMainSource.includes("const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';"));
 assert.ok(pluginMainSource.includes("const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';"));
@@ -2287,7 +2303,7 @@ assert.ok(pluginMainSource.includes('const feishuCallbackUrl = `${trimTrailingSl
 assert.ok(pluginMainSource.includes("'X-Wechat-Inbox-Token': token"));
 assert.strictEqual(pluginMainSource.includes('authToken=${encodeURIComponent(token)}'), false);
 assert.strictEqual(pluginMainSource.includes('authToken: token'), false);
-assert.ok(pluginMainSource.includes('installerUrl}?t=${Date.now()}'));
+assert.ok(pluginMainSource.includes('安全模式不会从公开静态链接补下载安装器'));
 assert.ok(pluginMainSource.includes('copyBundledLocalOcrRuntimeAssets'));
 assert.strictEqual(pluginMainSource.includes("source.includes('PyMuPDF')"), false, 'image OCR installer validation must not require PDF dependencies');
 assert.strictEqual(pluginMainSource.includes("source.includes('opencc-python-reimplemented')"), false, 'image OCR installer validation must not require OpenCC');
@@ -2314,16 +2330,16 @@ assert.ok(pluginMainSource.includes("source.includes('choose_chunk_seconds')"));
 assert.ok(pluginMainSource.includes("source.includes('metalAcceleration=failed')"));
 assert.ok(pluginMainSource.includes("source.includes('GGML_METAL_PATH_RESOURCES')"));
 assert.ok(pluginMainSource.includes("source.includes('validate_local_asr_inference')"));
-assert.ok(pluginMainSource.includes("source.includes('TENCENT_MODEL_URL=')"));
+assert.ok(pluginMainSource.includes("source.includes('AUTHORIZED_MODEL_URL=\"${WECHAT_INBOX_ASR_MODEL_URL:-}\"')"));
 assert.ok(pluginMainSource.includes("source.includes('bootstrap_uv')"));
 assert.ok(pluginMainSource.includes("source.includes('detect_uv_arch')"));
 assert.ok(pluginMainSource.includes("source.includes('setup_python_and_packages')"));
 assert.ok(pluginMainSource.includes("source.includes('[string]$InstallRoot')"));
 assert.ok(pluginMainSource.includes("source.includes('safeModelPath')"));
-assert.ok(pluginMainSource.includes("source.includes('$TencentCosAssetBaseUrl')"));
-assert.ok(pluginMainSource.includes("source.includes('$WhisperWindowsTencentUrls')"));
-assert.ok(pluginMainSource.includes("source.includes('$FfmpegTencentUrls')"));
-assert.ok(pluginMainSource.includes("source.includes('$ModelTencentUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('$PublicCloudBaseCdnDisabled')"));
+assert.ok(pluginMainSource.includes("source.includes('$WhisperWindowsAuthorizedUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('$FfmpegAuthorizedUrls')"));
+assert.ok(pluginMainSource.includes("source.includes('$ModelAuthorizedUrls')"));
 assert.ok(pluginMainSource.includes("source.includes('Get-EnabledAssetUrls')"));
 assert.ok(pluginMainSource.includes("source.includes('$WhisperWindowsFallbackUrls')"));
 assert.ok(pluginMainSource.includes("source.includes('GitHub release page parsing failed')"));
@@ -2336,10 +2352,10 @@ assert.ok(pluginMainSource.includes('return downloadedPath'));
 assert.ok(pluginMainSource.includes('return installerPath'));
 assert.ok(pluginMainSource.indexOf('return downloadedPath') < pluginMainSource.indexOf('return installerPath'));
 assert.strictEqual(pluginMainSource.includes('if (fs.existsSync(installerPath)) return installerPath'), false);
-assert.ok(pluginMainSource.includes('Local ASR installer download returned outdated or invalid content'));
+assert.ok(pluginMainSource.includes('安全模式不会从公开静态链接补下载安装器'));
 assert.ok(pluginMainSource.includes("source.includes('Install-ExtractedPackage')"));
 assert.ok(pluginMainSource.includes("!source.includes('Move-Item -LiteralPath $FfmpegStageDir -Destination $FfmpegDir')"));
-assert.ok(pluginMainSource.includes('无法下载最新本地转写安装器'));
+assert.ok(pluginMainSource.includes('插件内置的 ASR 安装器不完整'));
 const defaultLocalTranscriptionCommand = helpers.getDefaultLocalTranscriptionCommand();
 assert.ok(defaultLocalTranscriptionCommand.includes('%USERPROFILE%'));
 assert.strictEqual(defaultLocalTranscriptionCommand.includes('$env:USERPROFILE'), false);

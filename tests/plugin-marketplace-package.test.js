@@ -27,8 +27,10 @@ const pluginMainSource = fs.readFileSync(path.join(pluginDir, 'main.js'), 'utf8'
 const releaseWorkflowPath = path.resolve(__dirname, '../.github/workflows/release.yml');
 const releaseWorkflow = fs.readFileSync(releaseWorkflowPath, 'utf8');
 const gitAttributes = fs.readFileSync(path.resolve(__dirname, '../.gitattributes'), 'utf8');
-const cdnVerifierPath = path.resolve(__dirname, '../scripts/check-local-components-cdn.js');
-const cdnVerifier = fs.existsSync(cdnVerifierPath) ? fs.readFileSync(cdnVerifierPath, 'utf8') : '';
+const componentAccessPolicyPath = path.resolve(__dirname, '../scripts/check-local-component-access-policy.js');
+const componentAccessPolicy = fs.existsSync(componentAccessPolicyPath)
+  ? fs.readFileSync(componentAccessPolicyPath, 'utf8')
+  : '';
 const marketplacePromise = '把微信中收集的公众号文章、飞书文档、小红书、抖音、B站、小宇宙等网页链接、PDF、MP3、MP4 等文件和速记，一键同步到本地知识库，自动整理为可检索笔记.';
 
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
@@ -117,12 +119,12 @@ assert.ok(releaseWorkflow.includes('root_manifest_version="$(node -p'));
 assert.ok(releaseWorkflow.includes('subdir manifest.json version'));
 assert.ok(releaseWorkflow.includes('root manifest.json version'));
 assert.ok(releaseWorkflow.includes('if [ "$manifest_version" != "$TAG_NAME" ]; then'));
-assert.strictEqual(fs.existsSync(cdnVerifierPath), true, 'release must include a public CDN consistency verifier');
-assert.ok(releaseWorkflow.includes('node scripts/check-local-components-cdn.js'), 'release must verify all component CDN assets before creating a GitHub Release');
-assert.ok(cdnVerifier.includes('local-components-manifest.json'));
-assert.ok(cdnVerifier.includes('compatibilityAlias'));
-assert.ok(cdnVerifier.includes('immutablePath'));
-assert.ok(cdnVerifier.includes('sha256'));
+assert.strictEqual(fs.existsSync(componentAccessPolicyPath), true, 'release must include a component access-policy verifier');
+assert.ok(releaseWorkflow.includes('node scripts/check-local-component-access-policy.js'), 'release must reject public CloudBase component paths before creating a GitHub Release');
+assert.strictEqual(releaseWorkflow.includes('node scripts/check-local-components-cdn.js'), false, 'release must not fetch or require the retired public component CDN');
+assert.ok(componentAccessPolicy.includes('PUBLIC_CLOUDBASE_HOST_PATTERN'));
+assert.ok(componentAccessPolicy.includes('WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN'));
+assert.ok(componentAccessPolicy.includes('getAuthorizedLocalComponentManifest'));
 assert.ok(gitAttributes.includes('local-ocr/install-local-ocr.ps1 text eol=lf'));
 assert.ok(gitAttributes.includes('local-ocr/install-local-ocr-macos.sh text eol=lf'));
 assert.ok(gitAttributes.includes('local-ocr/ocr_image.py text eol=lf'));
@@ -135,13 +137,15 @@ assert.strictEqual(windowsOcrInstaller.includes('opencc-python-reimplemented'), 
 assert.strictEqual(windowsOcrInstaller.includes("'fitz'"), false, 'Windows image OCR installer must not validate the PDF renderer');
 assert.strictEqual(windowsOcrInstaller.includes("'opencc'"), false, 'Windows image OCR installer must not validate OpenCC');
 assert.ok(windowsOcrInstaller.includes('ocr_image.py'));
-assert.ok(windowsOcrInstaller.includes('$TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"'));
+assert.ok(windowsOcrInstaller.includes('$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"'));
+assert.ok(windowsOcrInstaller.includes('$AuthorizedPythonRuntimeUrl = $env:WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL'));
+assert.ok(windowsOcrInstaller.includes('$AuthorizedWheelhouseUrl = $env:WECHAT_INBOX_OCR_WHEELHOUSE_URL'));
 assert.ok(windowsOcrInstaller.includes('$TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"'));
 assert.ok(windowsOcrInstaller.includes('$PypiFallbackIndexUrl = "https://pypi.org/simple"'));
 assert.ok(windowsOcrInstaller.includes('$PythonBuildStandaloneBuild = "20260623"'));
 assert.ok(windowsOcrInstaller.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"'));
-assert.ok(windowsOcrInstaller.includes('$TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"'));
-assert.ok(windowsOcrInstaller.includes('$bases = @($TencentPythonInstallMirror) + @($PythonRuntimeFallbackMirrors)'));
+assert.ok(windowsOcrInstaller.includes('$bases = @($PythonRuntimeFallbackMirrors)'));
+assert.ok(windowsOcrInstaller.includes('$urls += $AuthorizedPythonRuntimeUrl'));
 assert.ok(windowsOcrInstaller.includes('$PythonRuntimeFileName = "cpython-$PythonBuildStandaloneVersion-x86_64-pc-windows-msvc-install_only.tar.gz"'));
 assert.ok(windowsOcrInstaller.includes('$PythonRuntimeSha256 = "C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E"'));
 assert.ok(windowsOcrInstaller.includes('function Install-PortablePython'));
@@ -152,13 +156,14 @@ assert.ok(windowsOcrInstaller.includes('tar.exe is unavailable or blocked; falli
 assert.ok(windowsOcrInstaller.includes('sys.version_info >= (3, 10) and sys.version_info < (3, 13)'));
 assert.strictEqual(windowsOcrInstaller.includes('$env:UV_PYTHON_INSTALL_MIRROR'), false, 'Windows OCR must not ask uv to resolve the mirrored Python runtime');
 assert.strictEqual(windowsOcrInstaller.includes('& $UvExe python install 3.12'), false, 'Windows OCR must download the pinned Python runtime directly');
-assert.ok(windowsOcrInstaller.includes('$OcrWheelhouseBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/wheels"'));
+assert.ok(windowsOcrInstaller.includes('return $AuthorizedWheelhouseUrl'));
 assert.ok(windowsOcrInstaller.includes('function Install-OcrPackagesFromWheelhouse'));
 assert.ok(windowsOcrInstaller.includes('--no-index'));
 assert.ok(windowsOcrInstaller.includes('--find-links'));
 assert.ok(windowsOcrInstaller.indexOf('Install-OcrPackagesFromWheelhouse') < windowsOcrInstaller.indexOf('Tencent PyPI mirror install failed'));
 assert.ok(windowsOcrInstaller.includes('Download-TextFile'));
 assert.ok(windowsOcrInstaller.includes('Invoke-NativeCommand'));
+assert.strictEqual(windowsOcrInstaller.includes('tcloudbaseapp.com'), false, 'Windows OCR must never embed the public CloudBase static domain');
 assert.ok(windowsOcrInstaller.includes('$MicrosoftVisualCppRuntimeUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"'), 'Windows OCR installer must use the official Microsoft Visual C++ runtime installer');
 assert.ok(windowsOcrInstaller.includes('function Test-OcrPythonImports'), 'Windows OCR installer must diagnose imports module by module');
 assert.ok(windowsOcrInstaller.includes("{'stage': 'ocr-import'"), 'Windows PowerShell must pass the Python probe without stripping JSON string quotes');
@@ -216,18 +221,18 @@ assert.ok(macOcrInstaller.includes('rapidocr-onnxruntime'));
 assert.strictEqual(macOcrInstaller.includes('PyMuPDF'), false, 'macOS image OCR installer must not install the PDF renderer');
 assert.strictEqual(macOcrInstaller.includes('opencc-python-reimplemented'), false, 'macOS image OCR installer must not install OpenCC');
 assert.strictEqual(macOcrInstaller.includes('import fitz, opencc'), false, 'macOS image OCR installer must not validate PDF and OpenCC imports');
-assert.ok(macOcrInstaller.includes('TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"'));
+assert.ok(macOcrInstaller.includes('PUBLIC_CLOUDBASE_CDN_DISABLED="${WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN:-1}"'));
+assert.ok(macOcrInstaller.includes('AUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL:-}"'));
+assert.ok(macOcrInstaller.includes('AUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_OCR_WHEELHOUSE_URL:-}"'));
 assert.ok(macOcrInstaller.includes('stage=ocr_script'));
 assert.ok(macOcrInstaller.includes('status=failed'));
 assert.ok(macOcrInstaller.indexOf('install_ocr_script ||') < macOcrInstaller.indexOf('setup_python_venv ||'));
-assert.ok(macOcrInstaller.includes('TENCENT_OCR_ASSET_BASE_URL="${TENCENT_BASE_URL}/local-ocr/common"'));
 assert.ok(macOcrInstaller.includes('TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"'));
 assert.ok(macOcrInstaller.includes('PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"'));
 assert.ok(macOcrInstaller.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"'));
 assert.ok(macOcrInstaller.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"'));
-assert.ok(macOcrInstaller.includes('TENCENT_PYTHON_INSTALL_MIRROR="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
 assert.ok(macOcrInstaller.includes('GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"'));
-assert.ok(macOcrInstaller.includes('PYTHON_RUNTIME_MIRRORS=("$TENCENT_PYTHON_INSTALL_MIRROR" "$GITHUB_PYTHON_INSTALL_MIRROR")'));
+assert.ok(macOcrInstaller.includes('runtime_urls+=("${GITHUB_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}")'));
 assert.ok(macOcrInstaller.indexOf('PYTHON_RUNTIME_DIR="${INSTALL_ROOT}/python-runtime"') < macOcrInstaller.indexOf('PORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python3"'));
 assert.ok(macOcrInstaller.includes('PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"'));
 assert.ok(macOcrInstaller.includes('PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"'));
@@ -237,21 +242,22 @@ assert.ok(macOcrInstaller.includes('tar -xzf'));
 assert.ok(macOcrInstaller.includes('(3, 10) <= sys.version_info < (3, 13)'));
 assert.strictEqual(macOcrInstaller.includes('UV_PYTHON_INSTALL_MIRROR'), false, 'macOS OCR must not ask uv to resolve the mirrored Python runtime');
 assert.strictEqual(macOcrInstaller.includes('"$UV_BIN" python install 3.12'), false, 'macOS OCR must download the pinned Python runtime directly');
-assert.ok(macOcrInstaller.includes('OCR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-ocr/wheels"'));
+assert.ok(macOcrInstaller.includes('echo "$AUTHORIZED_WHEELHOUSE_URL"'));
 assert.ok(macOcrInstaller.includes('install_ocr_packages_from_wheelhouse'));
 assert.ok(macOcrInstaller.includes('macosx_11_0_arm64'));
 assert.ok(macOcrInstaller.includes('macosx_11_0_x86_64'));
 assert.ok(macOcrInstaller.includes('--no-index'));
 assert.ok(macOcrInstaller.includes('--find-links'));
-assert.ok(macOcrInstaller.indexOf('Tencent PyPI mirror install failed') < macOcrInstaller.indexOf('Package index OCR install failed; retrying CDN wheelhouse.'));
-assert.ok(macOcrInstaller.indexOf('Package index OCR install failed; retrying CDN wheelhouse.') < macOcrInstaller.lastIndexOf('install_ocr_packages_from_wheelhouse'));
+assert.ok(macOcrInstaller.indexOf('Tencent PyPI mirror install failed') < macOcrInstaller.indexOf('Package index OCR install failed; retrying authorized wheelhouse.'));
+assert.ok(macOcrInstaller.indexOf('Package index OCR install failed; retrying authorized wheelhouse.') < macOcrInstaller.lastIndexOf('install_ocr_packages_from_wheelhouse'));
 assert.ok(macOcrInstaller.includes('download_text_file'));
-assert.ok(cdnVerifier.includes('cpython-3.12.13+20260623-x86_64-pc-windows-msvc-install_only.tar.gz'));
-assert.ok(cdnVerifier.includes('cpython-3.12.13+20260623-aarch64-apple-darwin-install_only.tar.gz'));
-assert.ok(cdnVerifier.includes('cpython-3.12.13+20260623-x86_64-apple-darwin-install_only.tar.gz'));
-assert.ok(cdnVerifier.includes('C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E'));
-assert.ok(cdnVerifier.includes('3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16'));
-assert.ok(cdnVerifier.includes('7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791'));
+assert.strictEqual(macOcrInstaller.includes('tcloudbaseapp.com'), false, 'macOS OCR must never embed the public CloudBase static domain');
+assert.ok(windowsOcrInstaller.includes('cpython-$PythonBuildStandaloneVersion-x86_64-pc-windows-msvc-install_only.tar.gz'));
+assert.ok(macOcrInstaller.includes('cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz'));
+assert.ok(macOcrInstaller.includes('cpython-${PYTHON_BUILD_STANDALONE_VERSION}-x86_64-apple-darwin-install_only.tar.gz'));
+assert.ok(windowsOcrInstaller.includes('C6AF85BB83D5158C9FF71F50DFAD467853D1CD236F932B144E87E26E2EA2A83E'));
+assert.ok(macOcrInstaller.includes('3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16'));
+assert.ok(macOcrInstaller.includes('7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791'));
 assert.ok(localOcrScript.includes('RapidOCR'));
 assert.strictEqual(localOcrScript.includes('pdf-page-ocr-v1'), false, 'local image OCR runtime must not advertise PDF support');
 assert.strictEqual(localOcrScript.includes('import fitz'), false, 'local image OCR runtime must not render PDF pages');
@@ -325,7 +331,7 @@ assert.ok(windowsInstaller.includes('[System.Management.Automation.Language.Pars
 assert.ok(windowsInstaller.includes('Assert-TranscribeScriptCandidate -Path $candidatePath'));
 assert.ok(
   windowsInstaller.indexOf('$transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot')
-    < windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
+    < windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsAuthorizedUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
   'Windows installer must retain a rollback-capable script update before heavy asset work',
 );
 assert.ok(
@@ -339,20 +345,20 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.30"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.31"'));
 assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"'));
-assert.ok(windowsInstaller.includes('$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"'));
-assert.ok(windowsInstaller.includes('$WhisperWindowsTencentUrls = @()'));
-assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilityUrls = @()'));
-assert.ok(windowsInstaller.includes('$FfmpegTencentUrls = @()'));
-assert.ok(windowsInstaller.includes('$ModelTencentUrls = @()'));
+assert.ok(windowsInstaller.includes('$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"'));
+assert.ok(windowsInstaller.includes('$WhisperWindowsAuthorizedUrls = @($env:WECHAT_INBOX_ASR_WHISPER_URL)'));
+assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilityUrls = @($env:WECHAT_INBOX_ASR_WHISPER_COMPAT_URL)'));
+assert.ok(windowsInstaller.includes('$FfmpegAuthorizedUrls = @($env:WECHAT_INBOX_ASR_FFMPEG_URL)'));
+assert.ok(windowsInstaller.includes('$ModelAuthorizedUrls = @($env:WECHAT_INBOX_ASR_MODEL_URL)'));
 assert.ok(windowsInstaller.includes('function Get-EnabledAssetUrls'));
 assert.ok(windowsInstaller.includes('Skipping invalid primary asset URL'));
-assert.ok(windowsInstaller.includes('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'));
-assert.ok(windowsInstaller.includes('-PrimaryUrls $FfmpegTencentUrls -FallbackUrls @('));
-assert.ok(windowsInstaller.includes('-PrimaryUrls $ModelTencentUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)'));
+assert.ok(windowsInstaller.includes('-PrimaryUrls $WhisperWindowsAuthorizedUrls -FallbackUrls $WhisperWindowsFallbackUrls'));
+assert.ok(windowsInstaller.includes('-PrimaryUrls $FfmpegAuthorizedUrls -FallbackUrls @('));
+assert.ok(windowsInstaller.includes('-PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsFallbackUrls'));
-assert.ok(windowsInstaller.includes('whisper-bin-x64-compat.zip'));
+assert.ok(windowsInstaller.includes('$env:WECHAT_INBOX_ASR_WHISPER_COMPAT_URL'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsCompatibilitySha256'));
 assert.ok(windowsInstaller.includes('Assert-FileSha256 -Path $compatibilityZip'));
 assert.ok(windowsInstaller.includes('function Test-IllegalInstructionExitCode'));
@@ -391,7 +397,8 @@ assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "ggml-small.bin"'));
 assert.ok(windowsInstaller.includes('Download-File -Url $Url -OutFile $CachePath -Resume'));
 assert.ok(windowsInstaller.includes('Resuming partial cached $Label package'));
 assert.ok(windowsInstaller.includes('Keeping partial $Label package for retry'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.30"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.31"'));
+assert.strictEqual(windowsInstaller.includes('tcloudbaseapp.com'), false, 'Windows ASR must never embed the public CloudBase static domain');
 assert.ok(windowsInstaller.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'));
 assert.strictEqual(windowsInstaller.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'), false);
 assert.ok(windowsInstaller.includes('Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue'));
@@ -410,7 +417,7 @@ assert.ok(
 );
 assert.ok(
   windowsInstaller.indexOf('$transcribeScriptUpdate = Start-TranscribeScriptUpdate -InstallRoot $InstallRoot') <
-    windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
+    windowsInstaller.indexOf('-PrimaryUrls $WhisperWindowsAuthorizedUrls -FallbackUrls $WhisperWindowsFallbackUrls'),
   'Windows installer should refresh transcribe.ps1 before heavy downloads or runtime validation',
 );
 const templateStart = windowsInstaller.lastIndexOf('# BEGIN_TRANSCRIBE_TEMPLATE');
@@ -760,9 +767,8 @@ assert.ok(macInstaller.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+202606
 assert.ok(macInstaller.includes('PYTHON_RUNTIME_VERSION="${PYTHON_BUILD_STANDALONE_VERSION%%+*}"'));
 assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"'));
 assert.ok(macInstaller.includes('PYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"'));
-assert.ok(macInstaller.includes('TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"'));
 assert.ok(macInstaller.includes('GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"'));
-assert.ok(macInstaller.includes('PYTHON_DOWNLOAD_BASES=("$TENCENT_PYTHON_DOWNLOAD_BASE" "$GITHUB_PYTHON_DOWNLOAD_BASE")'));
+assert.ok(macInstaller.includes('runtime_urls+=("${GITHUB_PYTHON_DOWNLOAD_BASE%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}")'));
 assert.ok(macInstaller.includes('PORTABLE_PYTHON="$PYTHON_RUNTIME_DIR/python/bin/python"'));
 assert.ok(macInstaller.includes("sys.version.split()[0] == sys.argv[1]"));
 assert.ok(macInstaller.includes('"$PYTHON_RUNTIME_VERSION"'));
@@ -782,21 +788,23 @@ assert.ok(
 );
 assert.ok(macInstaller.includes('"$UV_BIN" python install 3.12'));
 assert.ok(macInstaller.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python'));
-assert.ok(macInstaller.includes('ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"'));
+assert.ok(macInstaller.includes('AUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_ASR_WHEELHOUSE_URL:-}"'));
 assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0.3" "imageio-ffmpeg==0.6.0")'));
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
-assert.ok(macInstaller.indexOf('Package index ASR install failed; retrying Tencent CDN wheelhouse.') < macInstaller.lastIndexOf('install_asr_packages_from_wheelhouse'));
+assert.ok(macInstaller.indexOf('Package index ASR install failed; retrying authorized wheelhouse.') < macInstaller.lastIndexOf('install_asr_packages_from_wheelhouse'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.12"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.13"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=65536'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=30'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));
 assert.ok(macInstaller.includes('--speed-time "$DOWNLOAD_LOW_SPEED_TIME"'));
 assert.ok(macInstaller.includes('CACHE_ROOT="$INSTALL_ROOT/cache"'));
-assert.ok(macInstaller.includes('TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"'));
-assert.ok(macInstaller.includes('TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"'));
-assert.ok(macInstaller.includes('MODEL_URLS=("$MODEL_MIRROR_URL" "$TENCENT_MODEL_URL" "$MODEL_URL")'));
+assert.ok(macInstaller.includes('PUBLIC_CLOUDBASE_CDN_DISABLED="${WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN:-1}"'));
+assert.ok(macInstaller.includes('AUTHORIZED_MODEL_URL="${WECHAT_INBOX_ASR_MODEL_URL:-}"'));
+assert.ok(macInstaller.includes('MODEL_URLS=()'));
+assert.ok(macInstaller.includes('MODEL_URLS+=("$MODEL_MIRROR_URL" "$MODEL_URL")'));
 assert.ok(macInstaller.includes('local urls=("${MODEL_URLS[@]}")'));
+assert.strictEqual(macInstaller.includes('tcloudbaseapp.com'), false, 'macOS ASR must never embed the public CloudBase static domain');
 assert.ok(macInstaller.includes('Python venv and ASR tools are already ready.'));
 assert.strictEqual(macInstaller.includes('rm -rf "$venv_dir"'), false);
 assert.ok(macInstaller.includes('Local ASR was already validated for the current files; skipping full inference validation.'));

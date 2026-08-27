@@ -84,12 +84,14 @@ jobs:
           node --check scripts/update-local-components-manifest.js
           node --check scripts/release-source-guard-core.js
           node --check scripts/release-source-guard.js
-          node --check scripts/check-local-components-cdn.js
-          node --check scripts/check-local-ocr-cdn.js
+          node --check scripts/check-local-component-access-policy.js
           node --check obsidian-plugin/wechat-inbox-sync/main.js
 
       - name: Reject local component manifest drift
         run: node scripts/update-local-components-manifest.js --check
+
+      - name: Reject public CloudBase component download paths
+        run: node scripts/check-local-component-access-policy.js
 
       - name: Check macOS installer shell syntax
         run: |

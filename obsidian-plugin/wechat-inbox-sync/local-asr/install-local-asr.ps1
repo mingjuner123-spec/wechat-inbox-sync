@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.30"
+$InstallerScriptVersion = "1.2.31"
 $NativeProcessRunnerVersion = "diagnostics-process-v2"
 $DownloadLowSpeedLimitBytesPerSecond = 65536
 $DownloadLowSpeedTimeoutSeconds = 30
@@ -16,19 +16,12 @@ $DownloadTimeoutSeconds = 1200
 $InstallLockPath = Join-Path $InstallRoot ".install.lock"
 $InstallMutexName = "Global\WechatInboxLocalAsrInstall"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-asr-installer" }
-$TencentCosAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-asr/windows"
-$WhisperWindowsTencentUrls = @()
-$WhisperWindowsCompatibilityUrls = @()
+$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"
+$WhisperWindowsAuthorizedUrls = @($env:WECHAT_INBOX_ASR_WHISPER_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$WhisperWindowsCompatibilityUrls = @($env:WECHAT_INBOX_ASR_WHISPER_COMPAT_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $WhisperWindowsCompatibilitySha256 = '7B562DEEF031BD8A1A3954E3F5FF43BE0ACE2E86974235518530594BEECFF4B7'
-$FfmpegTencentUrls = @()
-$ModelTencentUrls = @()
-if (-not [string]::IsNullOrWhiteSpace($TencentCosAssetBaseUrl)) {
-  $tencentCosAssetBase = $TencentCosAssetBaseUrl.TrimEnd("/")
-  $WhisperWindowsTencentUrls += "$tencentCosAssetBase/whisper-bin-x64.zip"
-  $WhisperWindowsCompatibilityUrls += "$tencentCosAssetBase/whisper-bin-x64-compat.zip"
-  $FfmpegTencentUrls += "$tencentCosAssetBase/ffmpeg-release-essentials.zip"
-  $ModelTencentUrls += "$tencentCosAssetBase/ggml-small.bin"
-}
+$FfmpegAuthorizedUrls = @($env:WECHAT_INBOX_ASR_FFMPEG_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$ModelAuthorizedUrls = @($env:WECHAT_INBOX_ASR_MODEL_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $ModelFallbackUrls = @(
   "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 )
@@ -958,7 +951,7 @@ try {
   if (-not $installedWhisper) {
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsAuthorizedUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `
@@ -993,7 +986,7 @@ try {
   if (-not $installedFfmpeg) {
     $ffmpegZip = Join-Path $CacheRoot "ffmpeg.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $FfmpegTencentUrls -FallbackUrls @(
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $FfmpegAuthorizedUrls -FallbackUrls @(
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
       )) `
@@ -1019,7 +1012,7 @@ try {
     if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
       Remove-Item -LiteralPath $cachedModelPath -Force
     }
-    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelTencentUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
@@ -1032,7 +1025,7 @@ try {
     Write-Host ($_.Exception.Message)
     $whisperZip = Join-Path $CacheRoot "whisper.zip"
     Install-ZipPackage `
-      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsTencentUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
+      -Urls (Get-EnabledAssetUrls -PrimaryUrls $WhisperWindowsAuthorizedUrls -FallbackUrls $WhisperWindowsFallbackUrls) `
       -ZipPath $whisperZip `
       -StageDir $WhisperStageDir `
       -MinBytes 1MB `

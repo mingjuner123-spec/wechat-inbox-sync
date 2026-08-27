@@ -19,12 +19,12 @@ $CacheDir = Join-Path $InstallRoot "cache"
 $PythonRuntimeDir = Join-Path $InstallRoot "python-runtime"
 $PythonRuntimeBackupDir = Join-Path $InstallRoot "python-runtime-backup"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
-$TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
-$TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"
+$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"
+$AuthorizedPythonRuntimeUrl = $env:WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL
+$AuthorizedWheelhouseUrl = $env:WECHAT_INBOX_OCR_WHEELHOUSE_URL
 $PythonRuntimeFallbackMirrors = @(
   "https://github.com/astral-sh/python-build-standalone/releases/download"
 )
-$OcrWheelhouseBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/wheels"
 $TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
 $PypiFallbackIndexUrl = "https://pypi.org/simple"
 $PythonBuildStandaloneBuild = "20260623"
@@ -689,8 +689,12 @@ function Promote-StagedPortablePythonRuntime {
 }
 
 function Get-PythonRuntimeUrls {
-  $bases = @($TencentPythonInstallMirror) + @($PythonRuntimeFallbackMirrors)
-  $urls = foreach ($base in $bases) {
+  $urls = @()
+  if (-not [string]::IsNullOrWhiteSpace($AuthorizedPythonRuntimeUrl)) {
+    $urls += $AuthorizedPythonRuntimeUrl
+  }
+  $bases = @($PythonRuntimeFallbackMirrors)
+  $urls += foreach ($base in $bases) {
     if (-not [string]::IsNullOrWhiteSpace($base)) {
       "$($base.TrimEnd('/'))/$PythonBuildStandaloneBuild/$PythonRuntimeFileName"
     }
@@ -737,14 +741,14 @@ function Install-PortablePython {
 }
 
 function Get-OcrWheelhouseUrl {
-  $platform = "win_amd64"
-  return "$($OcrWheelhouseBaseUrl.TrimEnd("/"))/$platform/index.html"
+  return $AuthorizedWheelhouseUrl
 }
 
 function Install-OcrPackagesFromWheelhouse {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
   $wheelhouseUrl = Get-OcrWheelhouseUrl
-  Write-InstallLog "Installing OCR packages from CDN wheelhouse: $wheelhouseUrl"
+  if ([string]::IsNullOrWhiteSpace($wheelhouseUrl)) { return $false }
+  Write-InstallLog "Installing OCR packages from an authorized wheelhouse: $wheelhouseUrl"
   $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
   return $exitCode -eq 0
 }
@@ -761,7 +765,7 @@ function Install-OcrPackagesWithPip {
   if ($exitCode -eq 0) {
     return $true
   }
-  Write-InstallLog "Package index OCR install failed; retrying CDN wheelhouse."
+  Write-InstallLog "Package index OCR install failed; retrying authorized wheelhouse."
   return Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath
 }
 
@@ -823,10 +827,7 @@ function Setup-PythonEnvironment {
 
 Write-InstallLog "Installing local OCR component into $InstallRoot"
 if (!(Test-Path -LiteralPath $PythonScript)) {
-  $downloadedScript = Join-Path $InstallRoot "ocr_image.downloaded.py"
-  $assetBase = $TencentOcrAssetBaseUrl.TrimEnd("/")
-  Download-TextFile -Url "$assetBase/ocr_image.py" -OutFile $downloadedScript
-  $PythonScript = $downloadedScript
+  throw "Bundled OCR runtime script is missing. Please update the plugin and restart Obsidian."
 }
 
 $null = $InstallerCapability
