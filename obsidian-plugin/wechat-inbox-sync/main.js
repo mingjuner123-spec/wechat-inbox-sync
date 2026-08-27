@@ -12207,17 +12207,95 @@ function installExternalAppNavigationGuards(webContents) {
   }
 }
 __name(installExternalAppNavigationGuards, "installExternalAppNavigationGuards");
-function installHiddenBrowserChildWindowGuards(webContents) {
+function createXiaohongshuBrowserDiagnostic() {
+  return {
+    source: "xiaohongshu-browser",
+    loginCookiePresent: null,
+    commentAccess: "not_checked",
+    stages: [],
+    events: []
+  };
+}
+__name(createXiaohongshuBrowserDiagnostic, "createXiaohongshuBrowserDiagnostic");
+function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
+  const diagnostic = options && options.xiaohongshuBrowserDiagnostic;
+  if (!diagnostic || typeof diagnostic !== "object") return null;
+  if (!Array.isArray(diagnostic.stages)) diagnostic.stages = [];
+  if (!Array.isArray(diagnostic.events)) diagnostic.events = [];
+  const type = String(entry.type || "").trim().slice(0, 64);
+  const safeEntry = {
+    ...type ? { type } : {},
+    ...entry.stage ? { stage: String(entry.stage).trim().slice(0, 64) } : {},
+    ...entry.outcome ? { outcome: String(entry.outcome).trim().slice(0, 64) } : {},
+    ...entry.action ? { action: String(entry.action).trim().slice(0, 64) } : {},
+    ...entry.code ? { code: String(entry.code).trim().slice(0, 32) } : {}
+  };
+  const host = getSafeUrlDiagnostic(entry.url || "").host;
+  if (host) safeEntry.host = host;
+  if (type === "login_cookie_checked") {
+    diagnostic.loginCookiePresent = entry.present === true;
+  }
+  if (type === "comment_access") {
+    diagnostic.commentAccess = safeEntry.outcome || "unknown";
+  }
+  if (type === "security_restriction") {
+    diagnostic.securityRestriction = {
+      code: safeEntry.code || "",
+      stage: safeEntry.stage || ""
+    };
+  }
+  const bucket = type === "stage" ? diagnostic.stages : diagnostic.events;
+  const key = JSON.stringify(safeEntry);
+  if (Object.keys(safeEntry).length && !bucket.some((item) => JSON.stringify(item) === key)) {
+    bucket.push(safeEntry);
+    if (bucket.length > 24) bucket.splice(0, bucket.length - 24);
+  }
+  return diagnostic;
+}
+__name(appendXiaohongshuBrowserDiagnostic, "appendXiaohongshuBrowserDiagnostic");
+function detectXiaohongshuSecurityRestriction(text = "") {
+  const source = String(text || "");
+  const hasCode = /(?:^|\D)300011(?:\D|$)/.test(source);
+  const hasRestrictionWall = /安全限制/.test(source) && /账号异常|请稍后重试|返回首页|我要反馈/.test(source);
+  if (!hasCode && !hasRestrictionWall) return null;
+  return {
+    code: hasCode ? "300011" : "",
+    kind: "security_restriction"
+  };
+}
+__name(detectXiaohongshuSecurityRestriction, "detectXiaohongshuSecurityRestriction");
+function recordXiaohongshuSecurityRestriction(options = {}, text = "", stage = "") {
+  const restriction = detectXiaohongshuSecurityRestriction(text);
+  if (!restriction) return null;
+  appendXiaohongshuBrowserDiagnostic(options, {
+    type: "security_restriction",
+    stage,
+    outcome: "detected",
+    code: restriction.code
+  });
+  return restriction;
+}
+__name(recordXiaohongshuSecurityRestriction, "recordXiaohongshuSecurityRestriction");
+function installHiddenBrowserChildWindowGuards(webContents, options = {}) {
   if (!webContents || typeof webContents.on !== "function") return () => {
   };
   const cleanups = [];
-  const preventLegacyWindow = /* @__PURE__ */ __name((event) => {
+  const preventLegacyWindow = /* @__PURE__ */ __name((event, targetUrl) => {
     try {
       if (event && typeof event.preventDefault === "function") event.preventDefault();
     } catch (error) {
     }
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "legacy_window_open_blocked",
+      stage: options.diagnosticStage,
+      action: "prevented",
+      url: targetUrl
+    });
   }, "preventLegacyWindow");
-  const destroyCreatedChild = /* @__PURE__ */ __name((_event, childWindow) => {
+  const destroyCreatedChild = /* @__PURE__ */ __name((firstArgument, secondArgument) => {
+    const firstLooksLikeWindow = firstArgument && (typeof firstArgument.hide === "function" || typeof firstArgument.destroy === "function");
+    const childWindow = firstLooksLikeWindow ? firstArgument : secondArgument;
+    const details = firstLooksLikeWindow ? secondArgument : null;
     try {
       if (childWindow && typeof childWindow.hide === "function") childWindow.hide();
       const destroyed = childWindow && typeof childWindow.isDestroyed === "function" ? childWindow.isDestroyed() : false;
@@ -12226,6 +12304,12 @@ function installHiddenBrowserChildWindowGuards(webContents) {
       }
     } catch (error) {
     }
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "created_child_window_destroyed",
+      stage: options.diagnosticStage,
+      action: "hidden_and_destroyed",
+      url: details && details.url
+    });
   }, "destroyCreatedChild");
   webContents.on("new-window", preventLegacyWindow);
   cleanups.push(() => {
@@ -12249,6 +12333,43 @@ function installHiddenBrowserChildWindowGuards(webContents) {
   };
 }
 __name(installHiddenBrowserChildWindowGuards, "installHiddenBrowserChildWindowGuards");
+function installHiddenBrowserWindowGuards(browserWindow, options = {}) {
+  if (!browserWindow) return () => {
+  };
+  const cleanupChildWindows = installHiddenBrowserChildWindowGuards(
+    browserWindow.webContents,
+    options
+  );
+  const hideWindow = /* @__PURE__ */ __name((eventType = "") => {
+    try {
+      const destroyed = typeof browserWindow.isDestroyed === "function" && browserWindow.isDestroyed();
+      if (!destroyed && typeof browserWindow.hide === "function") browserWindow.hide();
+    } catch (error) {
+    }
+    if (eventType) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "hidden_window_visibility_blocked",
+        stage: options.diagnosticStage,
+        action: eventType
+      });
+    }
+  }, "hideWindow");
+  const handleReadyToShow = /* @__PURE__ */ __name(() => hideWindow("ready_to_show_hidden"), "handleReadyToShow");
+  const handleShow = /* @__PURE__ */ __name(() => hideWindow("show_hidden"), "handleShow");
+  hideWindow();
+  if (typeof browserWindow.on === "function") {
+    browserWindow.on("ready-to-show", handleReadyToShow);
+    browserWindow.on("show", handleShow);
+  }
+  return () => {
+    cleanupChildWindows();
+    if (typeof browserWindow.removeListener === "function") {
+      browserWindow.removeListener("ready-to-show", handleReadyToShow);
+      browserWindow.removeListener("show", handleShow);
+    }
+  };
+}
+__name(installHiddenBrowserWindowGuards, "installHiddenBrowserWindowGuards");
 function isAllowedXiaohongshuBrowserNavigationUrl(url) {
   try {
     const parsed = new URL(String(url || "").trim());
@@ -12271,12 +12392,18 @@ function shouldBlockXiaohongshuBrowserNavigationRequest(details = {}) {
   return isNavigation && !isAllowedXiaohongshuBrowserNavigationUrl(details && details.url);
 }
 __name(shouldBlockXiaohongshuBrowserNavigationRequest, "shouldBlockXiaohongshuBrowserNavigationRequest");
-function installXiaohongshuNavigationGuards(webContents) {
+function installXiaohongshuNavigationGuards(webContents, options = {}) {
   if (!webContents) return;
   const preventUntrustedNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
     const targetUrl = typeof navigationUrl === "string" ? navigationUrl : navigationUrl && navigationUrl.url || event && event.url;
     if (!isAllowedXiaohongshuBrowserNavigationUrl(targetUrl) && event && typeof event.preventDefault === "function") {
       event.preventDefault();
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "external_navigation_blocked",
+        stage: options.diagnosticStage,
+        action: "prevented",
+        url: targetUrl
+      });
     }
   }, "preventUntrustedNavigation");
   if (typeof webContents.on === "function") {
@@ -12285,7 +12412,15 @@ function installXiaohongshuNavigationGuards(webContents) {
     webContents.on("will-redirect", preventUntrustedNavigation);
   }
   if (typeof webContents.setWindowOpenHandler === "function") {
-    webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    webContents.setWindowOpenHandler((details = {}) => {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "window_open_blocked",
+        stage: options.diagnosticStage,
+        action: "denied",
+        url: details.url
+      });
+      return { action: "deny" };
+    });
   }
 }
 __name(installXiaohongshuNavigationGuards, "installXiaohongshuNavigationGuards");
@@ -16779,9 +16914,34 @@ async function checkXiaohongshuLoginStatus() {
 __name(checkXiaohongshuLoginStatus, "checkXiaohongshuLoginStatus");
 async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
   throwIfAborted(options.signal);
+  const hasLoginCookie = await checkXiaohongshuLoginStatus();
+  appendXiaohongshuBrowserDiagnostic(options, {
+    type: "login_cookie_checked",
+    stage: "login_check",
+    outcome: hasLoginCookie ? "present" : "missing",
+    present: hasLoginCookie
+  });
+  if (!hasLoginCookie) {
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "comment_access",
+      stage: "login_check",
+      outcome: "skipped_no_login_cookie"
+    });
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "skipped_no_login_cookie"
+    });
+    return false;
+  }
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
-    return await checkXiaohongshuLoginStatus();
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "cookie_only_environment"
+    });
+    return true;
   }
   const session = getXiaohongshuSession();
   if (!session) return false;
@@ -16797,9 +16957,16 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
     }
   });
   trackXiaohongshuBrowserWindow(win);
-  installXiaohongshuNavigationGuards(win.webContents);
+  const hiddenWindowOptions = { ...options, diagnosticStage: "login_check" };
+  const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win, hiddenWindowOptions);
+  installXiaohongshuNavigationGuards(win.webContents, hiddenWindowOptions);
   const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
   try {
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "page_probe_started"
+    });
     throwIfAborted(options.signal);
     const url = targetUrl || "https://www.xiaohongshu.com/";
     const loaded = waitForWebContents(win.webContents, 15e3);
@@ -16830,14 +16997,32 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
       XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS,
       "xiaohongshu-login-probe"
     );
+    recordXiaohongshuSecurityRestriction(options, state && state.text, "login_check");
     if (state && state.hasLoginWall) return false;
-    const hasCookie = await checkXiaohongshuLoginStatus();
-    return Boolean(hasCookie && state && (state.hasAccountApiSignal || state.hasUserSignal));
+    const hasCookieAfterProbe = await checkXiaohongshuLoginStatus();
+    const loggedIn = Boolean(hasCookieAfterProbe && state && (state.hasAccountApiSignal || state.hasUserSignal));
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "comment_access",
+      stage: "login_check",
+      outcome: loggedIn ? "eligible" : "skipped_login_unconfirmed"
+    });
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: loggedIn ? "authenticated" : "unconfirmed"
+    });
+    return loggedIn;
   } catch (error) {
     if (isAbortError(error)) throw error;
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "probe_failed"
+    });
     return false;
   } finally {
     cleanupAbort();
+    cleanupHiddenWindowGuards();
     if (win && typeof win.destroy === "function") {
       win.destroy();
     }
@@ -17983,7 +18168,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       sandbox: true
     }
   });
-  if (isXiaohongshuUrl(url)) {
+  const isXiaohongshuExtractionWindow = isXiaohongshuUrl(url);
+  if (isXiaohongshuExtractionWindow) {
     trackXiaohongshuBrowserWindow(win);
   }
   const isDouyinExtractionWindow = isDouyinUrl(url);
@@ -17992,6 +18178,23 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   }
   let cleanupHiddenChildWindowGuards = /* @__PURE__ */ __name(() => {
   }, "cleanupHiddenChildWindowGuards");
+  let cleanupXiaohongshuHiddenWindowGuards = /* @__PURE__ */ __name(() => {
+  }, "cleanupXiaohongshuHiddenWindowGuards");
+  const xiaohongshuHiddenWindowOptions = {
+    ...options,
+    diagnosticStage: "media_extraction"
+  };
+  if (isXiaohongshuExtractionWindow) {
+    cleanupXiaohongshuHiddenWindowGuards = installHiddenBrowserWindowGuards(
+      win,
+      xiaohongshuHiddenWindowOptions
+    );
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "media_extraction",
+      outcome: "started"
+    });
+  }
   if (isDouyinExtractionWindow) {
     cleanupHiddenChildWindowGuards = installHiddenBrowserChildWindowGuards(win.webContents);
     const hideWindow = /* @__PURE__ */ __name(() => {
@@ -18048,8 +18251,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   });
   installWebRequestHandler("onBeforeRedirect", captureWebRequestDetails);
   installWebRequestHandler("onCompleted", captureWebRequestDetails);
-  if (isXiaohongshuUrl(url)) {
-    installXiaohongshuNavigationGuards(win.webContents);
+  if (isXiaohongshuExtractionWindow) {
+    installXiaohongshuNavigationGuards(win.webContents, xiaohongshuHiddenWindowOptions);
   } else {
     installExternalAppNavigationGuards(win.webContents);
   }
@@ -18244,9 +18447,18 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
           domMediaCandidates,
           pageIdentityIds,
           douyinPaceState,
+          bodyText: String(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 1000),
         };
       })()
     `);
+    if (isXiaohongshuExtractionWindow) {
+      recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "stage",
+        stage: "media_extraction",
+        outcome: "completed"
+      });
+    }
     throwIfAborted(options.signal);
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
@@ -18276,6 +18488,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   } finally {
     cleanupAbort();
     cleanupHiddenChildWindowGuards();
+    cleanupXiaohongshuHiddenWindowGuards();
     installedWebRequestHandlers.forEach((method) => {
       try {
         if (browserSession && browserSession.webRequest && typeof browserSession.webRequest[method] === "function") {
@@ -18329,7 +18542,9 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     }
   });
   trackXiaohongshuBrowserWindow(win);
-  installXiaohongshuNavigationGuards(win.webContents);
+  const hiddenWindowOptions = { ...options, diagnosticStage: "content_extraction" };
+  const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win, hiddenWindowOptions);
+  installXiaohongshuNavigationGuards(win.webContents, hiddenWindowOptions);
   const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
   const browserSession = win.webContents && win.webContents.session || xiaohongshuSession;
   let blocksCommentRequests = false;
@@ -18351,6 +18566,11 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     }
   );
   try {
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "content_extraction",
+      outcome: "started"
+    });
     throwIfAborted(options.signal);
     if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === "function") {
       browserSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
@@ -18404,6 +18624,12 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(500, remainingAfterSnapshotMs)));
     }
     throwIfAborted(options.signal);
+    recordXiaohongshuSecurityRestriction(options, payload && payload.html, "content_extraction");
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "content_extraction",
+      outcome: "completed"
+    });
     return {
       html: String(payload && payload.html || ""),
       url: String(payload && payload.url || win.webContents && win.webContents.getURL && win.webContents.getURL() || url),
@@ -18417,6 +18643,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     };
   } finally {
     cleanupAbort();
+    cleanupHiddenWindowGuards();
     try {
       if (blocksCommentRequests && browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === "function") {
         browserSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, null);
@@ -18476,6 +18703,35 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     if (options.includeComments === false) {
       return await renderXiaohongshuContentWithElectron(url, options);
     }
+    const hasLoginCookie = await checkXiaohongshuLoginStatus();
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "login_cookie_checked",
+      stage: "comment_extraction",
+      outcome: hasLoginCookie ? "present" : "missing",
+      present: hasLoginCookie
+    });
+    if (!hasLoginCookie) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "comment_access",
+        stage: "comment_extraction",
+        outcome: "skipped_no_login_cookie"
+      });
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "stage",
+        stage: "comment_extraction",
+        outcome: "skipped_no_login_cookie"
+      });
+      return {
+        html: "",
+        comments: [],
+        identityUrl: "",
+        commentDiagnosticDetails: {
+          source: "disabled",
+          stopReason: "skipped_no_login_cookie",
+          partial: false
+        }
+      };
+    }
     const expectedIdentityUrl = resolveXiaohongshuIdentityUrl([
       options.expectedUrl,
       url
@@ -18516,8 +18772,15 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       }
     });
     trackXiaohongshuBrowserWindow(win);
-    installXiaohongshuNavigationGuards(win.webContents);
+    const hiddenWindowOptions = { ...options, diagnosticStage: "comment_extraction" };
+    const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win, hiddenWindowOptions);
+    installXiaohongshuNavigationGuards(win.webContents, hiddenWindowOptions);
     const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "comment_extraction",
+      outcome: "started"
+    });
     const commentApiRequests = [];
     const browserSession = win.webContents && win.webContents.session || wechatSession;
     const seenCommentApiRequests = /* @__PURE__ */ new Set();
@@ -18723,6 +18986,11 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         );
       }
       if (!identitySnapshot || !identitySnapshot.matched) {
+        recordXiaohongshuSecurityRestriction(
+          options,
+          identitySnapshot && identitySnapshot.html,
+          "comment_extraction"
+        );
         return {
           html: String(identitySnapshot && identitySnapshot.html || ""),
           comments: [],
@@ -19226,6 +19494,16 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       commentDiagnosticDetails.partial = isPartialXiaohongshuCommentResult(commentDiagnosticDetails);
       const commentDiagnostic = buildXiaohongshuCommentDiagnostic(commentDiagnosticDetails);
       throwIfAborted(options.signal);
+      recordXiaohongshuSecurityRestriction(
+        options,
+        identitySnapshot && identitySnapshot.html,
+        "comment_extraction"
+      );
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "stage",
+        stage: "comment_extraction",
+        outcome: "completed"
+      });
       return {
         html: renderedHtml,
         identityUrl: expectedIdentityUrl,
@@ -19238,6 +19516,7 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       };
     } finally {
       cleanupAbort();
+      cleanupHiddenWindowGuards();
       try {
         if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeSendHeaders === "function") {
           browserSession.webRequest.onBeforeSendHeaders({ urls: ["*://*.xiaohongshu.com/*"] }, null);
@@ -20583,6 +20862,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
+    this.lastXiaohongshuBrowserDiagnostic = null;
     this.syncStatusBar = typeof this.addStatusBarItem === "function" ? this.addStatusBarItem() : null;
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === "function") {
       this.syncStatusBar.setText("");
@@ -25152,6 +25432,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
+    const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(url) ? createXiaohongshuBrowserDiagnostic() : null;
+    if (xiaohongshuBrowserDiagnostic) {
+      this.lastXiaohongshuBrowserDiagnostic = xiaohongshuBrowserDiagnostic;
+    }
+    const xiaohongshuBrowserOptions = xiaohongshuBrowserDiagnostic ? { xiaohongshuBrowserDiagnostic } : {};
     let xiaohongshuRedirectDiagnostic = null;
     let xiaohongshuResolvedUrl = url || "";
     let xiaohongshuResponseStatus = 0;
@@ -25601,7 +25886,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               const candidatePage = await this.renderXiaohongshuPage(candidate.url, {
                 includeComments: false,
                 expectedUrl: targetIdentityUrl || resolvedUrl,
-                signal
+                signal,
+                ...xiaohongshuBrowserOptions
               });
               const candidateFinalUrl = String(candidatePage && candidatePage.url || "").trim();
               if (!isTrustedXiaohongshuCookieUrl(candidateFinalUrl)) {
@@ -25639,12 +25925,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         xiaohongshuResponseStatus = Number(response.status) || 0;
         let html2 = response.text || "";
+        if (xiaohongshuBrowserDiagnostic) {
+          recordXiaohongshuSecurityRestriction(
+            xiaohongshuBrowserOptions,
+            html2,
+            "static_content"
+          );
+        }
         let socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdownFromHtml(html2, resolvedUrl);
         const hasProAdvancedAccess = isXiaohongshuUrl(url) ? await this.hasProFeatureAccess() : false;
         let xiaohongshuLoggedIn = false;
         if (isXiaohongshuUrl(url) && hasProAdvancedAccess && this.settings.xiaohongshuCommentsEnabled !== false) {
           try {
-            xiaohongshuLoggedIn = await this.checkXiaohongshuLogin({ signal });
+            xiaohongshuLoggedIn = await this.checkXiaohongshuLogin({
+              signal,
+              ...xiaohongshuBrowserOptions
+            });
           } catch (error) {
             if (isAbortError(error)) throw error;
             xiaohongshuLoggedIn = false;
@@ -25970,7 +26266,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 candidatePage = renderedXiaohongshuPage && renderedXiaohongshuUrl === candidate.url && renderedXiaohongshuIncludesComments === false ? renderedXiaohongshuPage : await this.renderXiaohongshuPage(candidate.url, {
                   includeComments: false,
                   expectedUrl: xiaohongshuIdentityUrl,
-                  signal
+                  signal,
+                  ...xiaohongshuBrowserOptions
                 });
                 const candidateHtml = String(candidatePage && candidatePage.html || "");
                 const candidateFinalUrl = String(candidatePage && candidatePage.url || resolvedUrl);
@@ -26046,7 +26343,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               try {
                 mediaUrls = sortMediaUrlsForTranscription([
                   ...mediaUrls,
-                  ...await this.renderSocialMediaUrls(candidate.url, { includeComments: false, signal })
+                  ...await this.renderSocialMediaUrls(candidate.url, {
+                    includeComments: false,
+                    signal,
+                    ...xiaohongshuBrowserOptions
+                  })
                 ]);
                 mediaUrl = mediaUrls[0] || "";
                 if (mediaUrl) break;
@@ -26061,7 +26362,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               const commentsPage = await this.renderXiaohongshuPage(commentsRenderUrl, {
                 includeComments: true,
                 expectedUrl: xiaohongshuIdentityUrl,
-                signal
+                signal,
+                ...xiaohongshuBrowserOptions
               });
               const renderedXiaohongshuComments = commentsPage && Array.isArray(commentsPage.comments) ? commentsPage.comments : [];
               const renderedDiagnosticDetails = commentsPage && commentsPage.commentDiagnosticDetails && typeof commentsPage.commentDiagnosticDetails === "object" ? commentsPage.commentDiagnosticDetails : {};
@@ -26117,6 +26419,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               redirectDiagnostic: redirectResult.diagnostic,
               browserAttempts: xiaohongshuBrowserAttempts
             });
+            if (xiaohongshuBrowserDiagnostic) {
+              pendingXiaohongshuFailureDiagnostic.browser = redactSensitiveObject(
+                xiaohongshuBrowserDiagnostic
+              );
+            }
             if (!isVideoIntent) {
               throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
             }
@@ -26171,7 +26478,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             };
           }
         }
-        const socialMediaRenderOptions = isXiaohongshuUrl(url) ? { includeComments: false, signal } : { signal };
+        const socialMediaRenderOptions = isXiaohongshuUrl(url) ? { includeComments: false, signal, ...xiaohongshuBrowserOptions } : { signal };
         if (!hasUsableDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === "function") {
           try {
             mediaUrls = sortMediaUrlsForTranscription([
@@ -27515,6 +27822,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       return;
     }
     try {
+      this.lastXiaohongshuBrowserDiagnostic = null;
       const bindings = this.getActiveBindings();
       const shouldPrefixTitle = bindings.length > 1;
       const written = [];
@@ -27597,7 +27905,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
       const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic || item.attachmentDiagnostic);
-      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.feishuMediaDiagnostic || latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic || latestSuccessfulDiagnostic.attachmentDiagnostic : null;
+      const latestSuccessfulRecordDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.feishuMediaDiagnostic || latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic || latestSuccessfulDiagnostic.attachmentDiagnostic : null;
+      const latestXiaohongshuBrowserDiagnostic = this.lastXiaohongshuBrowserDiagnostic && typeof this.lastXiaohongshuBrowserDiagnostic === "object" ? redactSensitiveObject(this.lastXiaohongshuBrowserDiagnostic) : null;
+      const latestSuccessfulDiagnosticPayload = latestSuccessfulRecordDiagnosticPayload && latestXiaohongshuBrowserDiagnostic ? {
+        ...latestSuccessfulRecordDiagnosticPayload,
+        xiaohongshuBrowser: latestXiaohongshuBrowserDiagnostic
+      } : latestSuccessfulRecordDiagnosticPayload || latestXiaohongshuBrowserDiagnostic;
       const completionWarningDetails = completionWarnings.map((item) => {
         const recordId = String(item && item.recordId || "").trim().slice(0, 128);
         const code = String(item && item.code || "").trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 64);
@@ -28185,7 +28498,11 @@ WechatObsidianInboxPlugin.__test = {
   shouldBlockExternalAppUrl,
   installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
+  createXiaohongshuBrowserDiagnostic,
+  appendXiaohongshuBrowserDiagnostic,
+  detectXiaohongshuSecurityRestriction,
   installHiddenBrowserChildWindowGuards,
+  installHiddenBrowserWindowGuards,
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
@@ -28246,6 +28563,7 @@ WechatObsidianInboxPlugin.__test = {
   getXiaohongshuCapabilityMatrix,
   runWithDouyinBrowserSessionLock,
   runWithXiaohongshuBrowserSessionLock,
+  renderXiaohongshuPageWithElectron,
   getXiaohongshuBrowserCandidates,
   scoreXiaohongshuExtraction,
   mergeXiaohongshuExtractions,
