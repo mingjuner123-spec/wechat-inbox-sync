@@ -5,23 +5,25 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.12"
+INSTALLER_SCRIPT_VERSION="1.3.13"
 DOWNLOAD_LOW_SPEED_LIMIT=65536
 DOWNLOAD_LOW_SPEED_TIME=30
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
 LOCK_HELD=0
 
-TENCENT_BASE_URL="https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com"
-TENCENT_PYTHON_DOWNLOAD_BASE="${TENCENT_BASE_URL}/local-python/python-build-standalone/releases/download"
+PUBLIC_CLOUDBASE_CDN_DISABLED="${WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN:-1}"
+AUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_ASR_PYTHON_RUNTIME_URL:-}"
+AUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_ASR_WHEELHOUSE_URL:-}"
+AUTHORIZED_UV_URL="${WECHAT_INBOX_ASR_UV_URL:-}"
+AUTHORIZED_MODEL_URL="${WECHAT_INBOX_ASR_MODEL_URL:-}"
 GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"
-PYTHON_DOWNLOAD_BASES=("$TENCENT_PYTHON_DOWNLOAD_BASE" "$GITHUB_PYTHON_DOWNLOAD_BASE")
-ASR_WHEELHOUSE_BASE_URL="${TENCENT_BASE_URL}/local-asr/wheels"
 TENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"
 PYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"
-TENCENT_MODEL_URL="${TENCENT_BASE_URL}/local-asr/windows/ggml-small.bin"
 MODEL_MIRROR_URL="https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-MODEL_URLS=("$MODEL_MIRROR_URL" "$TENCENT_MODEL_URL" "$MODEL_URL")
+MODEL_URLS=()
+if [ -n "$AUTHORIZED_MODEL_URL" ]; then MODEL_URLS+=("$AUTHORIZED_MODEL_URL"); fi
+MODEL_URLS+=("$MODEL_MIRROR_URL" "$MODEL_URL")
 
 cleanup() {
   if [ "$LOCK_HELD" -eq 1 ]; then
@@ -120,7 +122,8 @@ install_portable_python() {
     return 0
   fi
 
-  local arch archive_name archive_path expected_sha256 stage_dir staged_python archive_url download_base
+  local arch archive_name archive_path expected_sha256 stage_dir staged_python archive_url
+  local runtime_urls=()
   arch="$(uname -m)"
   case "$arch" in
     arm64) archive_name="cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;
@@ -138,9 +141,10 @@ install_portable_python() {
   mkdir -p "$CACHE_ROOT" "$stage_dir"
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
     rm -f "$archive_path"
-    for download_base in "${PYTHON_DOWNLOAD_BASES[@]}"; do
-      archive_url="${download_base%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}"
-      echo "Downloading pinned portable Python from ${download_base}..."
+    if [ -n "$AUTHORIZED_PYTHON_RUNTIME_URL" ]; then runtime_urls+=("$AUTHORIZED_PYTHON_RUNTIME_URL"); fi
+    runtime_urls+=("${GITHUB_PYTHON_DOWNLOAD_BASE%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}")
+    for archive_url in "${runtime_urls[@]}"; do
+      echo "Downloading pinned portable Python from an authorized or official source..."
       rm -f "$archive_path"
       if curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
         --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
@@ -148,7 +152,7 @@ install_portable_python() {
         && verify_sha256 "$archive_path" "$expected_sha256"; then
         break
       fi
-      echo "Pinned portable Python source failed or did not match SHA256: ${download_base}" >&2
+      echo "Pinned portable Python source failed or did not match SHA256." >&2
     done
   fi
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
@@ -178,10 +182,9 @@ install_portable_python() {
 download_uv() {
   local uv_arch="$1"
   local uv_temp="$2"
-  local urls=(
-    "${TENCENT_BASE_URL}/local-asr/common/uv-${uv_arch}"
-    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz"
-  )
+  local urls=()
+  if [ -n "$AUTHORIZED_UV_URL" ]; then urls+=("$AUTHORIZED_UV_URL"); fi
+  urls+=("https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz")
 
   for url in "${urls[@]}"; do
     echo "Downloading uv from $url"
@@ -350,23 +353,52 @@ find_homebrew_whisper_command() {
 }
 
 asr_wheelhouse_url() {
-  case "$(uname -m)" in
-    arm64) echo "${ASR_WHEELHOUSE_BASE_URL%/}/macosx_11_0_arm64/index.html" ;;
-    x86_64) echo "${ASR_WHEELHOUSE_BASE_URL%/}/macosx_10_12_x86_64/index.html" ;;
-    *)
-      echo "Unsupported macOS architecture for the ASR wheelhouse: $(uname -m)" >&2
-      return 1
-      ;;
+  [ -n "$AUTHORIZED_WHEELHOUSE_URL" ] || return 1
+  echo "$AUTHORIZED_WHEELHOUSE_URL"
+}
+
+RESOLVED_ASR_WHEELHOUSE_LOCATION=""
+resolve_asr_wheelhouse_location() {
+  local wheelhouse_url expected_sha256 archive_path extract_dir
+  RESOLVED_ASR_WHEELHOUSE_LOCATION=""
+  wheelhouse_url="$(asr_wheelhouse_url)" || return 1
+  case "$wheelhouse_url" in
+    *.zip|*.zip\?*) ;;
+    *) RESOLVED_ASR_WHEELHOUSE_LOCATION="$wheelhouse_url"; return 0 ;;
   esac
+  expected_sha256="$(printf '%s' "$wheelhouse_url" | sed -nE 's#.*\/by-sha256\/([A-Fa-f0-9]{64})\/.*#\1#p' | tr '[:lower:]' '[:upper:]')"
+  [ -n "$expected_sha256" ] || { echo "Authorized ASR wheelhouse ZIP URL is not content-addressed." >&2; return 1; }
+  archive_path="$CACHE_ROOT/authorized-asr-wheelhouse-$(printf '%s' "$expected_sha256" | tr '[:upper:]' '[:lower:]').zip"
+  extract_dir="$CACHE_ROOT/authorized-asr-wheelhouse-$(printf '%s' "$expected_sha256" | tr '[:upper:]' '[:lower:]')"
+  if ! verify_sha256 "$archive_path" "$expected_sha256"; then
+    rm -f "$archive_path"
+    download_file "$wheelhouse_url" "$archive_path" || return 1
+  fi
+  verify_sha256 "$archive_path" "$expected_sha256" || { echo "Authorized ASR wheelhouse ZIP SHA256 validation failed." >&2; return 1; }
+  if ! find "$extract_dir" -maxdepth 1 -type f -name '*.whl' -print -quit 2>/dev/null | grep -q .; then
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+    if command -v ditto >/dev/null 2>&1; then
+      ditto -x -k "$archive_path" "$extract_dir"
+    elif command -v unzip >/dev/null 2>&1; then
+      unzip -q "$archive_path" -d "$extract_dir"
+    else
+      echo "Neither ditto nor unzip is available for the authorized ASR wheelhouse." >&2
+      return 1
+    fi
+  fi
+  find "$extract_dir" -maxdepth 1 -type f -name '*.whl' -print -quit | grep -q . || return 1
+  RESOLVED_ASR_WHEELHOUSE_LOCATION="$extract_dir"
 }
 
 install_asr_packages_from_wheelhouse() {
   local python_bin="$1"
-  local wheelhouse_url
-  wheelhouse_url="$(asr_wheelhouse_url)" || return 1
+  local wheelhouse_location
+  resolve_asr_wheelhouse_location || return 1
+  wheelhouse_location="$RESOLVED_ASR_WHEELHOUSE_LOCATION"
   "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  echo "Installing ASR packages from Tencent CDN wheelhouse: $wheelhouse_url"
-  "$python_bin" -m pip install --upgrade --no-index --find-links "$wheelhouse_url" \
+  echo "Installing ASR packages from an authorized wheelhouse."
+  "$python_bin" -m pip install --upgrade --no-index --find-links "$wheelhouse_location" \
     "${ASR_PACKAGE_REQUIREMENTS[@]}" 2>&1
 }
 
@@ -382,7 +414,7 @@ install_asr_packages() {
     return 0
   fi
 
-  echo "Package index ASR install failed; retrying Tencent CDN wheelhouse." >&2
+  echo "Package index ASR install failed; retrying authorized wheelhouse." >&2
   install_asr_packages_from_wheelhouse "$python_bin"
 }
 

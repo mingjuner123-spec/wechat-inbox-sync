@@ -81,6 +81,8 @@ Then choose **Local transcription** in the plugin settings and click **One-click
 - The plugin stores the sync API URL, bind code, and optional speech API keys locally in the current Obsidian vault configuration.
 - Speech API keys are not sent to the mini program by this plugin. They are only used locally by the plugin when it calls the selected speech provider.
 - The plugin sends network requests to the configured sync API and, only when enabled, to the selected speech-to-text provider.
+- Official local ASR/OCR assets are requested only after an active Pro check. The API may return short-lived authorized URLs; the plugin never embeds or calls a public CloudBase static-hosting component URL.
+- If the authorized component source is unavailable, the installer can use its declared GitHub, Hugging Face, or PyPI fallback. It does not silently reopen the retired public CloudBase path.
 - Cloud inbox content exists in the configured CloudBase environment until the backend marks it synced and applies its cleanup policy.
 
 ## Supported Content

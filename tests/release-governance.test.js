@@ -25,6 +25,7 @@ const repoRoot = path.resolve(__dirname, '..');
 const relativePaths = {
   componentManifest: 'obsidian-plugin/wechat-inbox-sync/local-components-manifest.json',
   componentVerifier: 'scripts/check-local-components-cdn.js',
+  componentAccessPolicy: 'scripts/check-local-component-access-policy.js',
   legacyOcrVerifier: 'scripts/check-local-ocr-cdn.js',
   manifestChecker: 'scripts/update-local-components-manifest.js',
   releaseSourceGuard: 'scripts/release-source-guard.js',
@@ -52,10 +53,10 @@ const governanceCommands = [
   'node --check scripts/update-local-components-manifest.js',
   'node --check scripts/release-source-guard-core.js',
   'node --check scripts/release-source-guard.js',
-  'node --check scripts/check-local-components-cdn.js',
-  'node --check scripts/check-local-ocr-cdn.js',
+  'node --check scripts/check-local-component-access-policy.js',
   'node --check obsidian-plugin/wechat-inbox-sync/main.js',
   'node scripts/update-local-components-manifest.js --check',
+  'node scripts/check-local-component-access-policy.js',
 ];
 const macInstallerPaths = [
   'obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh',
@@ -1706,18 +1707,18 @@ test('the component-integrity workflow runs on a schedule and by manual dispatch
   assertNode24(integrityJob);
   const runs = executableRuns(integrityJob);
   assertExecutableCommand(runs, 'node scripts/update-local-components-manifest.js --check');
-  assertExecutableCommand(runs, 'node scripts/check-local-components-cdn.js');
+  assertExecutableCommand(runs, 'node scripts/check-local-component-access-policy.js');
 });
 
-test('embedded component standards are compared with public CloudBase assets before every release', () => {
+test('public CloudBase component paths are rejected before every release', () => {
   const releaseWorkflow = readText(relativePaths.releaseWorkflow);
   const releaseJob = workflowJob(releaseWorkflow, 'release');
   const releaseRuns = executableRuns(releaseJob);
   const releaseManifestIndex = releaseRuns.findIndex((run) => (
     executableCommandPattern('node scripts/update-local-components-manifest.js --check').test(run)
   ));
-  const releaseCdnIndex = releaseRuns.findIndex((run) => (
-    executableCommandPattern('node scripts/check-local-components-cdn.js').test(run)
+  const releasePolicyIndex = releaseRuns.findIndex((run) => (
+    executableCommandPattern('node scripts/check-local-component-access-policy.js').test(run)
   ));
   const releasePackageIndex = releaseRuns.findIndex((run) => (
     executableCommandPattern(
@@ -1725,36 +1726,27 @@ test('embedded component standards are compared with public CloudBase assets bef
     ).test(run)
   ));
   assert.notEqual(releaseManifestIndex, -1, 'release must reject embedded local component manifest drift');
-  assert.notEqual(releaseCdnIndex, -1, 'release must compare embedded component standards with public CloudBase assets');
+  assert.notEqual(releasePolicyIndex, -1, 'release must reject public CloudBase component paths');
   assert.notEqual(releasePackageIndex, -1, 'release must package only after component integrity gates');
-  assert.ok(releaseManifestIndex < releaseCdnIndex, 'embedded manifest drift check must run before public CloudBase comparison');
-  assert.ok(releaseCdnIndex < releasePackageIndex, 'public CloudBase comparison must run before release packaging');
+  assert.ok(releaseManifestIndex < releasePolicyIndex, 'embedded manifest drift check must run before the access-policy gate');
+  assert.ok(releasePolicyIndex < releasePackageIndex, 'access-policy gate must run before release packaging');
 
-  const releaseCdnStep = yamlSteps(releaseJob)
-    .find((step) => executableCommandPattern('node scripts/check-local-components-cdn.js').test(runBody(step)));
-  assert.ok(releaseCdnStep, 'release workflow must keep a dedicated public component verification step');
-  assert.match(
-    releaseCdnStep,
-    /^\s+LOCAL_COMPONENTS_CDN_WARN_ON_UNAVAILABLE:\s*['"]?1['"]?\s*$/m,
-    'release may warn only when CloudBase is temporarily unavailable, not when bytes differ',
-  );
-  assert.doesNotMatch(
-    runBody(releaseCdnStep),
-    /--skip-external-runtimes/,
-    'release must not skip public runtime asset comparison',
-  );
+  const releasePolicyStep = yamlSteps(releaseJob)
+    .find((step) => executableCommandPattern('node scripts/check-local-component-access-policy.js').test(runBody(step)));
+  assert.ok(releasePolicyStep, 'release workflow must keep a dedicated component access-policy step');
+  assert.doesNotMatch(releaseWorkflow, /node\s+scripts\/check-local-components-cdn\.js/);
 
   const integrityWorkflow = readText(relativePaths.integrityWorkflow);
   const integrityRuns = executableRuns(workflowJob(integrityWorkflow, 'integrity'));
   const integrityManifestIndex = integrityRuns.findIndex((run) => (
     executableCommandPattern('node scripts/update-local-components-manifest.js --check').test(run)
   ));
-  const integrityCdnIndex = integrityRuns.findIndex((run) => (
-    executableCommandPattern('node scripts/check-local-components-cdn.js').test(run)
+  const integrityPolicyIndex = integrityRuns.findIndex((run) => (
+    executableCommandPattern('node scripts/check-local-component-access-policy.js').test(run)
   ));
   assert.notEqual(integrityManifestIndex, -1, 'scheduled integrity must check embedded manifest drift');
-  assert.notEqual(integrityCdnIndex, -1, 'scheduled integrity must compare embedded standards with CloudBase');
-  assert.ok(integrityManifestIndex < integrityCdnIndex, 'scheduled integrity must check local manifest drift before CloudBase comparison');
+  assert.notEqual(integrityPolicyIndex, -1, 'scheduled integrity must enforce the component access policy');
+  assert.ok(integrityManifestIndex < integrityPolicyIndex, 'scheduled integrity must check local manifest drift before access policy');
 });
 
 test('tag releases only trigger for numeric version-shaped tags', () => {
@@ -1789,8 +1781,8 @@ test('tag releases enforce all governance gates before publication', () => {
   const guardIndex = runs.findIndex((run) => (
     executableCommandPattern('node scripts/release-source-guard.js --tag "$TAG_NAME"').test(run)
   ));
-  const cdnIndex = runs.findIndex((run) => (
-    executableCommandPattern('node scripts/check-local-components-cdn.js').test(run)
+  const accessPolicyIndex = runs.findIndex((run) => (
+    executableCommandPattern('node scripts/check-local-component-access-policy.js').test(run)
   ));
   const packageIndex = runs.findIndex((run) => (
     executableCommandPattern(
@@ -1801,13 +1793,13 @@ test('tag releases enforce all governance gates before publication', () => {
   assert.notEqual(fetchIndex, -1, 'release workflow must fetch origin/main explicitly');
   assert.notEqual(identifyIndex, -1, 'release workflow must identify fetched origin/main');
   assert.notEqual(guardIndex, -1, 'release workflow must execute the main-equality release-source guard');
-  assert.notEqual(cdnIndex, -1, 'release workflow must execute the generic component CDN verifier');
+  assert.notEqual(accessPolicyIndex, -1, 'release workflow must execute the component access-policy verifier');
   assert.notEqual(packageIndex, -1, 'release workflow must preserve the complete plugin release package');
   assert.notEqual(publishIndex, -1, 'release workflow must contain a GitHub Release publication step');
   assert.ok(fetchIndex < identifyIndex, 'origin/main must be fetched before it is identified');
   assert.ok(identifyIndex < guardIndex, 'origin/main must be identified before the release-source guard');
   assert.ok(guardIndex < publishIndex, 'release-source guard must execute before GitHub Release publication');
-  assert.ok(cdnIndex < publishIndex, 'generic CDN verification must execute before GitHub Release publication');
+  assert.ok(accessPolicyIndex < publishIndex, 'component access-policy verification must execute before GitHub Release publication');
   assert.ok(packageIndex < publishIndex, 'release assets must be packaged before GitHub Release publication');
   assert.equal(
     publishIndex,

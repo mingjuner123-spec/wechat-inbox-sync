@@ -1,4 +1,4 @@
-name: Component integrity
+name: Component access policy
 
 on:
   schedule:
@@ -26,5 +26,5 @@ jobs:
       - name: Reject local component manifest drift
         run: node scripts/update-local-components-manifest.js --check
 
-      - name: Verify public local component assets
-        run: node scripts/check-local-components-cdn.js
+      - name: Reject public CloudBase component download paths
+        run: node scripts/check-local-component-access-policy.js

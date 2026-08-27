@@ -19,12 +19,12 @@ $CacheDir = Join-Path $InstallRoot "cache"
 $PythonRuntimeDir = Join-Path $InstallRoot "python-runtime"
 $PythonRuntimeBackupDir = Join-Path $InstallRoot "python-runtime-backup"
 $Headers = @{ "User-Agent" = "wechat-inbox-sync-local-ocr-installer" }
-$TencentOcrAssetBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/common"
-$TencentPythonInstallMirror = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-python/python-build-standalone/releases/download"
+$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"
+$AuthorizedPythonRuntimeUrl = $env:WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL
+$AuthorizedWheelhouseUrl = $env:WECHAT_INBOX_OCR_WHEELHOUSE_URL
 $PythonRuntimeFallbackMirrors = @(
   "https://github.com/astral-sh/python-build-standalone/releases/download"
 )
-$OcrWheelhouseBaseUrl = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcloudbaseapp.com/local-ocr/wheels"
 $TencentPipIndexUrl = "https://mirrors.cloud.tencent.com/pypi/simple"
 $PypiFallbackIndexUrl = "https://pypi.org/simple"
 $PythonBuildStandaloneBuild = "20260623"
@@ -689,8 +689,12 @@ function Promote-StagedPortablePythonRuntime {
 }
 
 function Get-PythonRuntimeUrls {
-  $bases = @($TencentPythonInstallMirror) + @($PythonRuntimeFallbackMirrors)
-  $urls = foreach ($base in $bases) {
+  $urls = @()
+  if (-not [string]::IsNullOrWhiteSpace($AuthorizedPythonRuntimeUrl)) {
+    $urls += $AuthorizedPythonRuntimeUrl
+  }
+  $bases = @($PythonRuntimeFallbackMirrors)
+  $urls += foreach ($base in $bases) {
     if (-not [string]::IsNullOrWhiteSpace($base)) {
       "$($base.TrimEnd('/'))/$PythonBuildStandaloneBuild/$PythonRuntimeFileName"
     }
@@ -737,15 +741,47 @@ function Install-PortablePython {
 }
 
 function Get-OcrWheelhouseUrl {
-  $platform = "win_amd64"
-  return "$($OcrWheelhouseBaseUrl.TrimEnd("/"))/$platform/index.html"
+  return $AuthorizedWheelhouseUrl
+}
+
+function Resolve-OcrWheelhouseLocation {
+  $wheelhouseUrl = Get-OcrWheelhouseUrl
+  if ([string]::IsNullOrWhiteSpace($wheelhouseUrl)) { return "" }
+  if ($wheelhouseUrl -notmatch '(?i)\.zip(?:\?|$)') { return $wheelhouseUrl }
+
+  $hashMatch = [regex]::Match($wheelhouseUrl, '(?i)/by-sha256/([a-f0-9]{64})/')
+  if (-not $hashMatch.Success) {
+    throw "Authorized OCR wheelhouse ZIP URL is not content-addressed."
+  }
+  $expectedSha256 = $hashMatch.Groups[1].Value.ToUpperInvariant()
+  $archivePath = Join-Path $CacheDir ("authorized-ocr-wheelhouse-$($expectedSha256.ToLowerInvariant()).zip")
+  $extractDir = Join-Path $CacheDir ("authorized-ocr-wheelhouse-$($expectedSha256.ToLowerInvariant())")
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $expectedSha256)) {
+    Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+    Invoke-DownloadFile -Urls @($wheelhouseUrl) -OutFile $archivePath -TimeoutSec 1200 -ExpectedSha256 $expectedSha256
+  }
+  if (!(Test-FileSha256 -Path $archivePath -ExpectedSha256 $expectedSha256)) {
+    throw "Authorized OCR wheelhouse ZIP SHA256 validation failed."
+  }
+  $existingWheel = Get-ChildItem -LiteralPath $extractDir -Filter '*.whl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $existingWheel) {
+    Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
+  }
+  $wheel = Get-ChildItem -LiteralPath $extractDir -Filter '*.whl' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $wheel) {
+    throw "Authorized OCR wheelhouse ZIP contains no wheel files."
+  }
+  return $extractDir
 }
 
 function Install-OcrPackagesFromWheelhouse {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
-  $wheelhouseUrl = Get-OcrWheelhouseUrl
-  Write-InstallLog "Installing OCR packages from CDN wheelhouse: $wheelhouseUrl"
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseUrl) + $OcrPackageRequirements)
+  $wheelhouseLocation = Resolve-OcrWheelhouseLocation
+  if ([string]::IsNullOrWhiteSpace($wheelhouseLocation)) { return $false }
+  Write-InstallLog "Installing OCR packages from an authorized wheelhouse."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade", "--no-index", "--find-links", $wheelhouseLocation) + $OcrPackageRequirements)
   return $exitCode -eq 0
 }
 
@@ -761,7 +797,7 @@ function Install-OcrPackagesWithPip {
   if ($exitCode -eq 0) {
     return $true
   }
-  Write-InstallLog "Package index OCR install failed; retrying CDN wheelhouse."
+  Write-InstallLog "Package index OCR install failed; retrying authorized wheelhouse."
   return Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath
 }
 
@@ -823,10 +859,7 @@ function Setup-PythonEnvironment {
 
 Write-InstallLog "Installing local OCR component into $InstallRoot"
 if (!(Test-Path -LiteralPath $PythonScript)) {
-  $downloadedScript = Join-Path $InstallRoot "ocr_image.downloaded.py"
-  $assetBase = $TencentOcrAssetBaseUrl.TrimEnd("/")
-  Download-TextFile -Url "$assetBase/ocr_image.py" -OutFile $downloadedScript
-  $PythonScript = $downloadedScript
+  throw "Bundled OCR runtime script is missing. Please update the plugin and restart Obsidian."
 }
 
 $null = $InstallerCapability

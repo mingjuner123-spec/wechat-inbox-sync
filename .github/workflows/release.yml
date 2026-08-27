@@ -122,9 +122,7 @@ jobs:
           node --check scripts/release-source-guard.js
           node --check scripts/plugin-release-identity-core.js
           node --check scripts/check-plugin-release-identity.js
-          node --check scripts/check-local-components-cdn.js
-          node --check scripts/check-local-ocr-cdn.js
-          node --check scripts/sync-douyin-resolver-mirror.js
+          node --check scripts/check-local-component-access-policy.js
           node --check obsidian-plugin/wechat-inbox-sync/main.js
 
       - name: Reject local component manifest drift
@@ -158,10 +156,8 @@ jobs:
             }
           }
 
-      - name: Verify public local component assets
-        env:
-          LOCAL_COMPONENTS_CDN_WARN_ON_UNAVAILABLE: '1'
-        run: node scripts/check-local-components-cdn.js
+      - name: Reject public CloudBase component download paths
+        run: node scripts/check-local-component-access-policy.js
 
       - name: Package plugin release assets
         env:
