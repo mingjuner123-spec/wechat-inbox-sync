@@ -15247,6 +15247,152 @@ async function runXiaohongshuOcrBatchTests() {
   );
 }
 
+async function runLocalAsrInstallerRecoveryTests() {
+  assert.strictEqual(helpers.LOCAL_ASR_INSTALL_STALL_TIMEOUT_MS, 10 * 60 * 1000);
+  const installRoot = 'C:\\Users\\demo\\.wechat-inbox-local-asr';
+  const ownCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\demo\\AppData\\Local\\Temp\\wechat-inbox-local-asr-installer-123.ps1" -InstallRoot "${installRoot}"`;
+  assert.strictEqual(helpers.isWindowsLocalAsrInstallerCommand(ownCommand, installRoot), true);
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      'powershell -NoProfile -File "C:\\scripts\\unrelated.ps1" -InstallRoot "C:\\Users\\demo\\.wechat-inbox-local-asr"',
+      installRoot,
+    ),
+    false,
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(ownCommand, 'C:\\Users\\other\\.wechat-inbox-local-asr'),
+    false,
+  );
+
+  const tempRoots = [];
+  const createRoot = ({ startedAt, failedAt = 0, progressAt = 0 }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-recovery-test-'));
+    tempRoots.push(root);
+    fs.writeFileSync(
+      path.join(root, '.install.lock'),
+      `pid=43210\ntime=${new Date(startedAt).toISOString()}\n`,
+      'utf8',
+    );
+    if (failedAt) {
+      fs.writeFileSync(
+        path.join(root, 'install.log'),
+        `time=${new Date(failedAt).toISOString()}\nstatus=failed\n`,
+        'utf8',
+      );
+    }
+    if (progressAt) {
+      const cacheRoot = path.join(root, 'cache');
+      fs.mkdirSync(cacheRoot, { recursive: true });
+      const progressPath = path.join(cacheRoot, 'whisper.zip');
+      fs.writeFileSync(progressPath, Buffer.alloc(16));
+      fs.utimesSync(progressPath, new Date(progressAt), new Date(progressAt));
+    }
+    return root;
+  };
+
+  try {
+    const now = Date.parse('2026-08-27T10:20:00.000Z');
+    const failedRoot = createRoot({
+      startedAt: now - 60 * 1000,
+      failedAt: now - 10 * 1000,
+    });
+    let stoppedPid = 0;
+    const failedResult = await helpers.waitForExistingWindowsLocalAsrInstall(failedRoot, {
+      now: () => now,
+      stopOnRecentFailure: true,
+      getCommandLine: async () => `powershell -File "C:\\Temp\\wechat-inbox-local-asr-installer-1.ps1" -InstallRoot "${failedRoot}"`,
+      stopTree: async (pid) => { stoppedPid = pid; },
+    });
+    assert.strictEqual(failedResult.status, 'stopped-after-failure');
+    assert.strictEqual(stoppedPid, 43210);
+    assert.strictEqual(fs.existsSync(path.join(failedRoot, '.install.lock')), false);
+
+    const stalledRoot = createRoot({ startedAt: now - 11 * 60 * 1000 });
+    stoppedPid = 0;
+    const stalledResult = await helpers.waitForExistingWindowsLocalAsrInstall(stalledRoot, {
+      now: () => now,
+      stallTimeoutMs: 10 * 60 * 1000,
+      getCommandLine: async () => `powershell -File "C:\\Temp\\wechat-inbox-local-asr-installer-2.ps1" -InstallRoot "${stalledRoot}"`,
+      stopTree: async (pid) => { stoppedPid = pid; },
+    });
+    assert.strictEqual(stalledResult.status, 'stopped-stalled');
+    assert.strictEqual(stoppedPid, 43210);
+
+    const activeRoot = createRoot({
+      startedAt: now - 11 * 60 * 1000,
+      progressAt: now - 5 * 1000,
+    });
+    let activeStops = 0;
+    const activeResult = await helpers.waitForExistingWindowsLocalAsrInstall(activeRoot, {
+      now: () => now,
+      delay: async () => {},
+      isAlive: () => false,
+      getCommandLine: async () => `powershell -File "C:\\Temp\\wechat-inbox-local-asr-installer-3.ps1" -InstallRoot "${activeRoot}"`,
+      stopTree: async () => { activeStops += 1; },
+    });
+    assert.strictEqual(activeResult.status, 'completed-or-exited');
+    assert.strictEqual(activeStops, 0, 'recent file progress must not be killed');
+
+    const unrelatedRoot = createRoot({ startedAt: now - 20 * 60 * 1000 });
+    let unrelatedStops = 0;
+    const unrelatedResult = await helpers.waitForExistingWindowsLocalAsrInstall(unrelatedRoot, {
+      now: () => now,
+      getCommandLine: async () => 'powershell -File "C:\\scripts\\backup.ps1"',
+      stopTree: async () => { unrelatedStops += 1; },
+    });
+    assert.strictEqual(unrelatedResult.status, 'stale-lock-cleared');
+    assert.strictEqual(unrelatedStops, 0, 'unrelated PowerShell must never be terminated');
+
+    const unverifiedRoot = createRoot({ startedAt: now - 20 * 60 * 1000 });
+    let unverifiedStops = 0;
+    const unverifiedResult = await helpers.waitForExistingWindowsLocalAsrInstall(unverifiedRoot, {
+      now: () => now,
+      isAlive: () => true,
+      getCommandLine: async () => '',
+      stopTree: async () => { unverifiedStops += 1; },
+    });
+    assert.strictEqual(unverifiedResult.status, 'unverified-running');
+    assert.strictEqual(unverifiedStops, 0, 'an unverified live process must never be terminated');
+    assert.strictEqual(fs.existsSync(path.join(unverifiedRoot, '.install.lock')), true);
+
+    const { EventEmitter } = require('node:events');
+    const launched = {};
+    let launchClock = 0;
+    let launchedPidStopped = 0;
+    const fakeExecFile = (file, args, options, callback) => {
+      launched.file = file;
+      launched.args = args;
+      launched.options = options;
+      launched.callback = callback;
+      return {
+        pid: 54321,
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter(),
+      };
+    };
+    await assert.rejects(
+      () => helpers.runWindowsLocalAsrInstaller('C:\\Temp\\installer.ps1', installRoot, {}, {
+        execFile: fakeExecFile,
+        stopTree: async (pid) => { launchedPidStopped = pid; },
+        now: () => { launchClock += 10; return launchClock; },
+        stallTimeoutMs: 5,
+        pollIntervalMs: 1,
+      }),
+      (error) => error && error.localAsrInstallStalled === true,
+    );
+    assert.strictEqual(launched.file, 'powershell');
+    assert.deepStrictEqual(launched.args.slice(0, 6), [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\Temp\\installer.ps1', '-InstallRoot',
+    ]);
+    assert.strictEqual(launched.args[6], installRoot);
+    assert.strictEqual(launchedPidStopped, 54321);
+  } finally {
+    for (const root of tempRoots) {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+}
+
 async function main() {
   runNoteOutputPlanModuleTests();
   runRecordBodyMarkdownModuleTests();
@@ -15304,6 +15450,7 @@ async function main() {
   await runPdfNoOcrFallbackTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
+  await runLocalAsrInstallerRecoveryTests();
   await runDiagnosticFailureLogFilteringTests();
 }
 
