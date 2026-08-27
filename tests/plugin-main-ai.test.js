@@ -1069,13 +1069,17 @@ const xiaohongshuPageRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
   pluginMainSource.indexOf('async function renderXiaohongshuCommentsWithElectron'),
 );
-assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGuards(win.webContents)'));
+assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGuards('));
+assert.ok(xiaohongshuPageRendererSource.includes('installHiddenBrowserWindowGuards(win, hiddenWindowOptions)'));
 assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
 assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
 const xiaohongshuContentRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuContentWithElectron'),
   pluginMainSource.indexOf('let xiaohongshuBrowserSessionQueue'),
 );
+assert.ok(xiaohongshuContentRendererSource.includes('installHiddenBrowserWindowGuards(win, hiddenWindowOptions)'));
+assert.ok(socialMediaRendererSource.includes('const isXiaohongshuExtractionWindow = isXiaohongshuUrl(url)'));
+assert.ok(socialMediaRendererSource.includes('cleanupXiaohongshuHiddenWindowGuards'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -1807,6 +1811,13 @@ assert.deepStrictEqual(
   'a hidden extraction page must never create a visible HTTP child window',
 );
 assert.strictEqual(typeof helpers.installXiaohongshuNavigationGuards, 'function');
+assert.strictEqual(typeof helpers.createXiaohongshuBrowserDiagnostic, 'function');
+assert.strictEqual(typeof helpers.detectXiaohongshuSecurityRestriction, 'function');
+assert.deepStrictEqual(
+  helpers.detectXiaohongshuSecurityRestriction('安全限制 账号异常，请稍后重试 300011'),
+  { code: '300011', kind: 'security_restriction' },
+);
+assert.strictEqual(helpers.detectXiaohongshuSecurityRestriction('正常的小红书笔记正文'), null);
 assert.strictEqual(typeof helpers.shouldBlockXiaohongshuBrowserNavigationRequest, 'function');
 assert.strictEqual(
   helpers.shouldBlockXiaohongshuBrowserNavigationRequest({
@@ -1881,6 +1892,57 @@ assert.deepStrictEqual(
   xiaohongshuWindowOpenHandler({ url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144' }),
   { action: 'deny' },
 );
+{
+  const hiddenWindowDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
+  const hiddenWebContents = new EventEmitter();
+  let legacyPrevented = false;
+  let hiddenCount = 0;
+  let destroyCount = 0;
+  const cleanupChildGuards = helpers.installHiddenBrowserChildWindowGuards(hiddenWebContents, {
+    xiaohongshuBrowserDiagnostic: hiddenWindowDiagnostic,
+    diagnosticStage: 'content_extraction',
+  });
+  hiddenWebContents.emit('new-window', {
+    preventDefault() { legacyPrevented = true; },
+  }, 'https://www.xiaohongshu.com/explore/demo');
+  hiddenWebContents.emit('did-create-window', {
+    hide() { hiddenCount += 1; },
+    isDestroyed() { return false; },
+    destroy() { destroyCount += 1; },
+  }, { url: 'https://www.xiaohongshu.com/explore/demo' });
+  assert.strictEqual(legacyPrevented, true);
+  assert.strictEqual(hiddenCount, 1);
+  assert.strictEqual(destroyCount, 1);
+  assert.ok(hiddenWindowDiagnostic.events.some((event) => event.type === 'legacy_window_open_blocked'));
+  assert.ok(hiddenWindowDiagnostic.events.some((event) => event.type === 'created_child_window_destroyed'));
+  cleanupChildGuards();
+  assert.strictEqual(hiddenWebContents.listenerCount('new-window'), 0);
+  assert.strictEqual(hiddenWebContents.listenerCount('did-create-window'), 0);
+}
+{
+  const hiddenWindowDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
+  const browserWindow = new EventEmitter();
+  browserWindow.webContents = new EventEmitter();
+  browserWindow.isDestroyed = () => false;
+  let hideCount = 0;
+  browserWindow.hide = () => { hideCount += 1; };
+  const cleanupWindowGuards = helpers.installHiddenBrowserWindowGuards(browserWindow, {
+    xiaohongshuBrowserDiagnostic: hiddenWindowDiagnostic,
+    diagnosticStage: 'comment_extraction',
+  });
+  browserWindow.emit('ready-to-show');
+  browserWindow.emit('show');
+  assert.strictEqual(hideCount, 3, '初始化、ready-to-show 和 show 都必须重新隐藏窗口');
+  assert.deepStrictEqual(
+    hiddenWindowDiagnostic.events
+      .filter((event) => event.type === 'hidden_window_visibility_blocked')
+      .map((event) => event.action),
+    ['ready_to_show_hidden', 'show_hidden'],
+  );
+  cleanupWindowGuards();
+  assert.strictEqual(browserWindow.listenerCount('ready-to-show'), 0);
+  assert.strictEqual(browserWindow.listenerCount('show'), 0);
+}
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');
@@ -2643,6 +2705,19 @@ assert.ok(pluginMainSource.includes("return await probeXiaohongshuLoginStatus(''
 const xiaohongshuLoginProbeSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function probeXiaohongshuLoginStatus'),
   pluginMainSource.indexOf('async function getXiaohongshuCookieHeader'),
+);
+assert.ok(
+  xiaohongshuLoginProbeSource.indexOf('const hasLoginCookie = await checkXiaohongshuLoginStatus()')
+    < xiaohongshuLoginProbeSource.indexOf('const BrowserWindow = getElectronBrowserWindow()'),
+  '小红书登录探测必须先检查 web_session，再决定是否创建隐藏浏览器',
+);
+assert.ok(
+  xiaohongshuLoginProbeSource.includes("outcome: 'skipped_no_login_cookie'"),
+  '无登录 Cookie 时必须留下跳过评论访问的诊断',
+);
+assert.ok(
+  pluginMainSource.includes('xiaohongshuBrowser: latestXiaohongshuBrowserDiagnostic'),
+  '成功同步必须把小红书隐藏浏览器诊断与已有诊断合并',
 );
 assert.ok(
   xiaohongshuLoginProbeSource.includes('beginBestEffortBrowserLoad(win, url)'),
@@ -6813,6 +6888,25 @@ assert.deepStrictEqual(helpers.parseTencentTaskStatusResponse({
 });
 
 async function runAsyncHydrationTests() {
+  const noCookieCommentDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
+  const noCookieCommentPage = await helpers.renderXiaohongshuPageWithElectron(
+    'https://www.xiaohongshu.com/explore/68a000000000000000000001',
+    {
+      includeComments: true,
+      xiaohongshuBrowserDiagnostic: noCookieCommentDiagnostic,
+    },
+  );
+  assert.deepStrictEqual(noCookieCommentPage.comments, []);
+  assert.strictEqual(
+    noCookieCommentPage.commentDiagnosticDetails.stopReason,
+    'skipped_no_login_cookie',
+  );
+  assert.strictEqual(noCookieCommentDiagnostic.loginCookiePresent, false);
+  assert.strictEqual(noCookieCommentDiagnostic.commentAccess, 'skipped_no_login_cookie');
+  assert.ok(noCookieCommentDiagnostic.stages.some((stage) => (
+    stage.stage === 'comment_extraction' && stage.outcome === 'skipped_no_login_cookie'
+  )));
+
   const xiaohongshuRenderOrder = [];
   let releaseFirstXiaohongshuRender;
   const firstXiaohongshuRenderGate = new Promise((resolve) => {
