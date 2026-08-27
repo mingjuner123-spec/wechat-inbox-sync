@@ -30,6 +30,7 @@ function createPlugin() {
   const plugin = new PluginClass();
   plugin.saveData = async () => {};
   plugin.settings = helpers.mergeSettings({});
+  plugin.recoverExistingLocalAsrInstall = async () => ({ status: 'none' });
   return plugin;
 }
 

@@ -1069,13 +1069,17 @@ const xiaohongshuPageRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuPageWithElectron'),
   pluginMainSource.indexOf('async function renderXiaohongshuCommentsWithElectron'),
 );
-assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGuards(win.webContents)'));
+assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGuards('));
+assert.ok(xiaohongshuPageRendererSource.includes('installHiddenBrowserWindowGuards(win, hiddenWindowOptions)'));
 assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
 assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
 const xiaohongshuContentRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuContentWithElectron'),
   pluginMainSource.indexOf('let xiaohongshuBrowserSessionQueue'),
 );
+assert.ok(xiaohongshuContentRendererSource.includes('installHiddenBrowserWindowGuards(win, hiddenWindowOptions)'));
+assert.ok(socialMediaRendererSource.includes('const isXiaohongshuExtractionWindow = isXiaohongshuUrl(url)'));
+assert.ok(socialMediaRendererSource.includes('cleanupXiaohongshuHiddenWindowGuards'));
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -1807,6 +1811,13 @@ assert.deepStrictEqual(
   'a hidden extraction page must never create a visible HTTP child window',
 );
 assert.strictEqual(typeof helpers.installXiaohongshuNavigationGuards, 'function');
+assert.strictEqual(typeof helpers.createXiaohongshuBrowserDiagnostic, 'function');
+assert.strictEqual(typeof helpers.detectXiaohongshuSecurityRestriction, 'function');
+assert.deepStrictEqual(
+  helpers.detectXiaohongshuSecurityRestriction('安全限制 账号异常，请稍后重试 300011'),
+  { code: '300011', kind: 'security_restriction' },
+);
+assert.strictEqual(helpers.detectXiaohongshuSecurityRestriction('正常的小红书笔记正文'), null);
 assert.strictEqual(typeof helpers.shouldBlockXiaohongshuBrowserNavigationRequest, 'function');
 assert.strictEqual(
   helpers.shouldBlockXiaohongshuBrowserNavigationRequest({
@@ -1881,6 +1892,57 @@ assert.deepStrictEqual(
   xiaohongshuWindowOpenHandler({ url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144' }),
   { action: 'deny' },
 );
+{
+  const hiddenWindowDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
+  const hiddenWebContents = new EventEmitter();
+  let legacyPrevented = false;
+  let hiddenCount = 0;
+  let destroyCount = 0;
+  const cleanupChildGuards = helpers.installHiddenBrowserChildWindowGuards(hiddenWebContents, {
+    xiaohongshuBrowserDiagnostic: hiddenWindowDiagnostic,
+    diagnosticStage: 'content_extraction',
+  });
+  hiddenWebContents.emit('new-window', {
+    preventDefault() { legacyPrevented = true; },
+  }, 'https://www.xiaohongshu.com/explore/demo');
+  hiddenWebContents.emit('did-create-window', {
+    hide() { hiddenCount += 1; },
+    isDestroyed() { return false; },
+    destroy() { destroyCount += 1; },
+  }, { url: 'https://www.xiaohongshu.com/explore/demo' });
+  assert.strictEqual(legacyPrevented, true);
+  assert.strictEqual(hiddenCount, 1);
+  assert.strictEqual(destroyCount, 1);
+  assert.ok(hiddenWindowDiagnostic.events.some((event) => event.type === 'legacy_window_open_blocked'));
+  assert.ok(hiddenWindowDiagnostic.events.some((event) => event.type === 'created_child_window_destroyed'));
+  cleanupChildGuards();
+  assert.strictEqual(hiddenWebContents.listenerCount('new-window'), 0);
+  assert.strictEqual(hiddenWebContents.listenerCount('did-create-window'), 0);
+}
+{
+  const hiddenWindowDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
+  const browserWindow = new EventEmitter();
+  browserWindow.webContents = new EventEmitter();
+  browserWindow.isDestroyed = () => false;
+  let hideCount = 0;
+  browserWindow.hide = () => { hideCount += 1; };
+  const cleanupWindowGuards = helpers.installHiddenBrowserWindowGuards(browserWindow, {
+    xiaohongshuBrowserDiagnostic: hiddenWindowDiagnostic,
+    diagnosticStage: 'comment_extraction',
+  });
+  browserWindow.emit('ready-to-show');
+  browserWindow.emit('show');
+  assert.strictEqual(hideCount, 3, '初始化、ready-to-show 和 show 都必须重新隐藏窗口');
+  assert.deepStrictEqual(
+    hiddenWindowDiagnostic.events
+      .filter((event) => event.type === 'hidden_window_visibility_blocked')
+      .map((event) => event.action),
+    ['ready_to_show_hidden', 'show_hidden'],
+  );
+  cleanupWindowGuards();
+  assert.strictEqual(browserWindow.listenerCount('ready-to-show'), 0);
+  assert.strictEqual(browserWindow.listenerCount('show'), 0);
+}
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptOnlyMetadata, 'function');
@@ -2643,6 +2705,19 @@ assert.ok(pluginMainSource.includes("return await probeXiaohongshuLoginStatus(''
 const xiaohongshuLoginProbeSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function probeXiaohongshuLoginStatus'),
   pluginMainSource.indexOf('async function getXiaohongshuCookieHeader'),
+);
+assert.ok(
+  xiaohongshuLoginProbeSource.indexOf('const hasLoginCookie = await checkXiaohongshuLoginStatus()')
+    < xiaohongshuLoginProbeSource.indexOf('const BrowserWindow = getElectronBrowserWindow()'),
+  '小红书登录探测必须先检查 web_session，再决定是否创建隐藏浏览器',
+);
+assert.ok(
+  xiaohongshuLoginProbeSource.includes("outcome: 'skipped_no_login_cookie'"),
+  '无登录 Cookie 时必须留下跳过评论访问的诊断',
+);
+assert.ok(
+  pluginMainSource.includes('xiaohongshuBrowser: latestXiaohongshuBrowserDiagnostic'),
+  '成功同步必须把小红书隐藏浏览器诊断与已有诊断合并',
 );
 assert.ok(
   xiaohongshuLoginProbeSource.includes('beginBestEffortBrowserLoad(win, url)'),
@@ -6813,6 +6888,25 @@ assert.deepStrictEqual(helpers.parseTencentTaskStatusResponse({
 });
 
 async function runAsyncHydrationTests() {
+  const noCookieCommentDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
+  const noCookieCommentPage = await helpers.renderXiaohongshuPageWithElectron(
+    'https://www.xiaohongshu.com/explore/68a000000000000000000001',
+    {
+      includeComments: true,
+      xiaohongshuBrowserDiagnostic: noCookieCommentDiagnostic,
+    },
+  );
+  assert.deepStrictEqual(noCookieCommentPage.comments, []);
+  assert.strictEqual(
+    noCookieCommentPage.commentDiagnosticDetails.stopReason,
+    'skipped_no_login_cookie',
+  );
+  assert.strictEqual(noCookieCommentDiagnostic.loginCookiePresent, false);
+  assert.strictEqual(noCookieCommentDiagnostic.commentAccess, 'skipped_no_login_cookie');
+  assert.ok(noCookieCommentDiagnostic.stages.some((stage) => (
+    stage.stage === 'comment_extraction' && stage.outcome === 'skipped_no_login_cookie'
+  )));
+
   const xiaohongshuRenderOrder = [];
   let releaseFirstXiaohongshuRender;
   const firstXiaohongshuRenderGate = new Promise((resolve) => {
@@ -15247,6 +15341,201 @@ async function runXiaohongshuOcrBatchTests() {
   );
 }
 
+async function runLocalAsrInstallerRecoveryTests() {
+  assert.strictEqual(helpers.LOCAL_ASR_INSTALL_STALL_TIMEOUT_MS, 10 * 60 * 1000);
+  const installRoot = 'C:\\Users\\demo\\.wechat-inbox-local-asr';
+  const ownCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\demo\\AppData\\Local\\Temp\\wechat-inbox-local-asr-installer-123.ps1" -InstallRoot "${installRoot}"`;
+  assert.strictEqual(helpers.isWindowsLocalAsrInstallerCommand(ownCommand, installRoot), true);
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `${ownCommand}-backup`,
+      installRoot,
+    ),
+    false,
+    'a neighboring install-root suffix must not be treated as the same ASR installation',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      ownCommand,
+      `${installRoot}-parent`,
+    ),
+    false,
+    'an expected-root prefix must not match a shorter command-line root',
+  );
+  const spacedInstallRoot = 'C:\\Users\\Demo User\\Local ASR';
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -File 'C:\\Temp\\install-local-asr.ps1' -InstallRoot '${spacedInstallRoot}\\'`,
+      spacedInstallRoot,
+    ),
+    true,
+    'quoted roots with spaces and a trailing separator must compare by normalized full path',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -File "C:\\Temp\\install-local-asr.ps1" -InstallRoot="${spacedInstallRoot}"`,
+      spacedInstallRoot,
+    ),
+    true,
+    'the equals form of -InstallRoot must still be recognized exactly',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -Command "Write-Host C:\\Temp\\install-local-asr.ps1" -InstallRoot "${installRoot}"`,
+      installRoot,
+    ),
+    false,
+    'mentioning an installer path outside the -File argument must never authorize termination',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      `powershell -File="C:\\Temp\\install-local-asr.ps1" -InstallRoot "${installRoot}"`,
+      installRoot,
+    ),
+    true,
+    'the equals form of -File must be parsed as the exact installer argument',
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(
+      'powershell -NoProfile -File "C:\\scripts\\unrelated.ps1" -InstallRoot "C:\\Users\\demo\\.wechat-inbox-local-asr"',
+      installRoot,
+    ),
+    false,
+  );
+  assert.strictEqual(
+    helpers.isWindowsLocalAsrInstallerCommand(ownCommand, 'C:\\Users\\other\\.wechat-inbox-local-asr'),
+    false,
+  );
+
+  const tempRoots = [];
+  const createRoot = ({ startedAt, failedAt = 0, progressAt = 0 }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-asr-recovery-test-'));
+    tempRoots.push(root);
+    fs.writeFileSync(
+      path.join(root, '.install.lock'),
+      `pid=43210\ntime=${new Date(startedAt).toISOString()}\n`,
+      'utf8',
+    );
+    if (failedAt) {
+      fs.writeFileSync(
+        path.join(root, 'install.log'),
+        `time=${new Date(failedAt).toISOString()}\nstatus=failed\n`,
+        'utf8',
+      );
+    }
+    if (progressAt) {
+      const cacheRoot = path.join(root, 'cache');
+      fs.mkdirSync(cacheRoot, { recursive: true });
+      const progressPath = path.join(cacheRoot, 'whisper.zip');
+      fs.writeFileSync(progressPath, Buffer.alloc(16));
+      fs.utimesSync(progressPath, new Date(progressAt), new Date(progressAt));
+    }
+    return root;
+  };
+
+  try {
+    const now = Date.parse('2026-08-27T10:20:00.000Z');
+    const failedRoot = createRoot({
+      startedAt: now - 60 * 1000,
+      failedAt: now - 10 * 1000,
+    });
+    let stoppedPid = 0;
+    const failedResult = await helpers.waitForExistingWindowsLocalAsrInstall(failedRoot, {
+      now: () => now,
+      stopOnRecentFailure: true,
+      getCommandLine: async () => `powershell -File "C:\\Temp\\wechat-inbox-local-asr-installer-1.ps1" -InstallRoot "${failedRoot}"`,
+      stopTree: async (pid) => { stoppedPid = pid; },
+    });
+    assert.strictEqual(failedResult.status, 'stopped-after-failure');
+    assert.strictEqual(stoppedPid, 43210);
+    assert.strictEqual(fs.existsSync(path.join(failedRoot, '.install.lock')), false);
+
+    const stalledRoot = createRoot({ startedAt: now - 11 * 60 * 1000 });
+    stoppedPid = 0;
+    const stalledResult = await helpers.waitForExistingWindowsLocalAsrInstall(stalledRoot, {
+      now: () => now,
+      stallTimeoutMs: 10 * 60 * 1000,
+      getCommandLine: async () => `powershell -File "C:\\Temp\\wechat-inbox-local-asr-installer-2.ps1" -InstallRoot "${stalledRoot}"`,
+      stopTree: async (pid) => { stoppedPid = pid; },
+    });
+    assert.strictEqual(stalledResult.status, 'stopped-stalled');
+    assert.strictEqual(stoppedPid, 43210);
+
+    const activeRoot = createRoot({
+      startedAt: now - 11 * 60 * 1000,
+      progressAt: now - 5 * 1000,
+    });
+    let activeStops = 0;
+    const activeResult = await helpers.waitForExistingWindowsLocalAsrInstall(activeRoot, {
+      now: () => now,
+      delay: async () => {},
+      isAlive: () => false,
+      getCommandLine: async () => `powershell -File "C:\\Temp\\wechat-inbox-local-asr-installer-3.ps1" -InstallRoot "${activeRoot}"`,
+      stopTree: async () => { activeStops += 1; },
+    });
+    assert.strictEqual(activeResult.status, 'completed-or-exited');
+    assert.strictEqual(activeStops, 0, 'recent file progress must not be killed');
+
+    const unrelatedRoot = createRoot({ startedAt: now - 20 * 60 * 1000 });
+    let unrelatedStops = 0;
+    const unrelatedResult = await helpers.waitForExistingWindowsLocalAsrInstall(unrelatedRoot, {
+      now: () => now,
+      getCommandLine: async () => 'powershell -File "C:\\scripts\\backup.ps1"',
+      stopTree: async () => { unrelatedStops += 1; },
+    });
+    assert.strictEqual(unrelatedResult.status, 'stale-lock-cleared');
+    assert.strictEqual(unrelatedStops, 0, 'unrelated PowerShell must never be terminated');
+
+    const unverifiedRoot = createRoot({ startedAt: now - 20 * 60 * 1000 });
+    let unverifiedStops = 0;
+    const unverifiedResult = await helpers.waitForExistingWindowsLocalAsrInstall(unverifiedRoot, {
+      now: () => now,
+      isAlive: () => true,
+      getCommandLine: async () => '',
+      stopTree: async () => { unverifiedStops += 1; },
+    });
+    assert.strictEqual(unverifiedResult.status, 'unverified-running');
+    assert.strictEqual(unverifiedStops, 0, 'an unverified live process must never be terminated');
+    assert.strictEqual(fs.existsSync(path.join(unverifiedRoot, '.install.lock')), true);
+
+    const { EventEmitter } = require('node:events');
+    const launched = {};
+    let launchClock = 0;
+    let launchedPidStopped = 0;
+    const fakeExecFile = (file, args, options, callback) => {
+      launched.file = file;
+      launched.args = args;
+      launched.options = options;
+      launched.callback = callback;
+      return {
+        pid: 54321,
+        stdout: new EventEmitter(),
+        stderr: new EventEmitter(),
+      };
+    };
+    await assert.rejects(
+      () => helpers.runWindowsLocalAsrInstaller('C:\\Temp\\installer.ps1', installRoot, {}, {
+        execFile: fakeExecFile,
+        stopTree: async (pid) => { launchedPidStopped = pid; },
+        now: () => { launchClock += 10; return launchClock; },
+        stallTimeoutMs: 5,
+        pollIntervalMs: 1,
+      }),
+      (error) => error && error.localAsrInstallStalled === true,
+    );
+    assert.strictEqual(launched.file, 'powershell');
+    assert.deepStrictEqual(launched.args.slice(0, 6), [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\Temp\\installer.ps1', '-InstallRoot',
+    ]);
+    assert.strictEqual(launched.args[6], installRoot);
+    assert.strictEqual(launchedPidStopped, 54321);
+  } finally {
+    for (const root of tempRoots) {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+}
+
 async function main() {
   runNoteOutputPlanModuleTests();
   runRecordBodyMarkdownModuleTests();
@@ -15304,6 +15593,7 @@ async function main() {
   await runPdfNoOcrFallbackTests();
   await runPodcastDownloadHeaderTests();
   await runLocalAsrRepairDecisionTests();
+  await runLocalAsrInstallerRecoveryTests();
   await runDiagnosticFailureLogFilteringTests();
 }
 

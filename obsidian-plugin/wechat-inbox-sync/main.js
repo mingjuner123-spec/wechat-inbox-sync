@@ -8122,7 +8122,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.129";
+var PLUGIN_RUNTIME_VERSION = "1.3.130";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -8168,6 +8168,8 @@ var LOCAL_COMPONENT_ASSET_ENV_KEYS = Object.freeze({
   })
 });
 var LOCAL_ASR_INSTALL_TIMEOUT_MS = 20 * 60 * 1e3;
+var LOCAL_ASR_INSTALL_STALL_TIMEOUT_MS = 10 * 60 * 1e3;
+var LOCAL_ASR_INSTALL_POLL_INTERVAL_MS = 5 * 1e3;
 var PRO_SETUP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1e3;
 var PRO_SETUP_PROMPT_COOLDOWN_MS = 24 * 60 * 60 * 1e3;
 var NOTE_SAVE_MODES = {
@@ -9136,6 +9138,405 @@ function buildLocalAsrInstallCommand(installerPath, platform = os.platform(), in
   return `powershell -NoProfile -ExecutionPolicy Bypass -File ${quoteCommandPath(installerPath)}${rootArg}`;
 }
 __name(buildLocalAsrInstallCommand, "buildLocalAsrInstallCommand");
+function getLocalAsrInstallLockPath(installRoot = getLocalAsrInstallRoot()) {
+  return path.join(installRoot, ".install.lock");
+}
+__name(getLocalAsrInstallLockPath, "getLocalAsrInstallLockPath");
+function parseLocalAsrInstallLock(text) {
+  const fields = {};
+  String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/).forEach((line) => {
+    const separator = line.indexOf("=");
+    if (separator <= 0) return;
+    fields[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+  });
+  const pid = Number(fields.pid || 0);
+  const startedAt = Date.parse(fields.time || "");
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return {
+    pid,
+    startedAt: Number.isFinite(startedAt) ? startedAt : 0
+  };
+}
+__name(parseLocalAsrInstallLock, "parseLocalAsrInstallLock");
+function readLocalAsrInstallLock(installRoot = getLocalAsrInstallRoot(), fileSystem = fs) {
+  const lockPath = getLocalAsrInstallLockPath(installRoot);
+  try {
+    if (!fileSystem.existsSync(lockPath)) return null;
+    const parsed = parseLocalAsrInstallLock(fileSystem.readFileSync(lockPath, "utf8"));
+    return parsed ? { ...parsed, lockPath } : null;
+  } catch (error) {
+    return null;
+  }
+}
+__name(readLocalAsrInstallLock, "readLocalAsrInstallLock");
+function clearLocalAsrInstallLock(installRoot, expectedPid, fileSystem = fs) {
+  const lockPath = getLocalAsrInstallLockPath(installRoot);
+  try {
+    const current = readLocalAsrInstallLock(installRoot, fileSystem);
+    if (current && Number(current.pid) !== Number(expectedPid)) return false;
+    if (fileSystem.existsSync(lockPath)) fileSystem.unlinkSync(lockPath);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+__name(clearLocalAsrInstallLock, "clearLocalAsrInstallLock");
+function getLocalAsrInstallProgressSnapshot(installRoot, fileSystem = fs) {
+  const candidates = [
+    ["cache", "whisper.zip"],
+    ["cache", "ffmpeg.zip"],
+    ["cache", "ggml-small.bin"],
+    ["models", "ggml-small.bin"],
+    ["whisper"],
+    ["ffmpeg"],
+    ["transcribe.ps1"],
+    [".install-state.json"]
+  ];
+  const entries = [];
+  let latestMtimeMs = 0;
+  for (const parts of candidates) {
+    const candidatePath = path.join(installRoot, ...parts);
+    try {
+      const stat = fileSystem.statSync(candidatePath);
+      const mtimeMs = Number(stat.mtimeMs || 0);
+      const size = Number(stat.size || 0);
+      latestMtimeMs = Math.max(latestMtimeMs, mtimeMs);
+      entries.push(`${parts.join("/")}:${size}:${Math.floor(mtimeMs)}`);
+    } catch (error) {
+    }
+  }
+  return {
+    key: entries.join("|"),
+    latestMtimeMs
+  };
+}
+__name(getLocalAsrInstallProgressSnapshot, "getLocalAsrInstallProgressSnapshot");
+function readLocalAsrInstallLogState(installRoot, fileSystem = fs) {
+  const logPath = getLocalAsrInstallLogPath(installRoot);
+  try {
+    if (!fileSystem.existsSync(logPath)) return null;
+    const text = String(fileSystem.readFileSync(logPath, "utf8") || "");
+    const timeMatch = text.match(/^time=([^\r\n]+)/m);
+    const statusMatch = text.match(/^status=([^\r\n]+)/m);
+    const time = Date.parse(timeMatch ? timeMatch[1].trim() : "");
+    return {
+      status: statusMatch ? statusMatch[1].trim().toLowerCase() : "",
+      time: Number.isFinite(time) ? time : 0
+    };
+  } catch (error) {
+    return null;
+  }
+}
+__name(readLocalAsrInstallLogState, "readLocalAsrInstallLogState");
+function parseWindowsCommandLineArguments(commandLine) {
+  const source = String(commandLine || "");
+  const args = [];
+  let current = "";
+  let quote = "";
+  let started = false;
+  for (const character of source) {
+    if (quote) {
+      if (character === quote) {
+        quote = "";
+      } else {
+        current += character;
+      }
+      started = true;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(character)) {
+      if (started) {
+        args.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += character;
+    started = true;
+  }
+  if (started) args.push(current);
+  return args;
+}
+__name(parseWindowsCommandLineArguments, "parseWindowsCommandLineArguments");
+function getWindowsCommandLineArgument(commandLine, argumentName) {
+  const expected = String(argumentName || "").trim().toLowerCase();
+  if (!expected) return "";
+  const args = parseWindowsCommandLineArguments(commandLine);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = String(args[index] || "");
+    const lowerArgument = argument.toLowerCase();
+    if (lowerArgument === expected) return String(args[index + 1] || "");
+    if (lowerArgument.startsWith(`${expected}=`)) {
+      return argument.slice(expected.length + 1);
+    }
+  }
+  return "";
+}
+__name(getWindowsCommandLineArgument, "getWindowsCommandLineArgument");
+function normalizeWindowsAbsolutePathForComparison(value) {
+  const source = String(value || "").trim();
+  if (!source || !path.win32.isAbsolute(source)) return "";
+  const normalized = path.win32.normalize(source);
+  const root = path.win32.parse(normalized).root;
+  const withoutTrailingSeparators = normalized.length > root.length ? normalized.replace(/[\\/]+$/g, "") : normalized;
+  return withoutTrailingSeparators.toLowerCase();
+}
+__name(normalizeWindowsAbsolutePathForComparison, "normalizeWindowsAbsolutePathForComparison");
+function isWindowsLocalAsrInstallerCommand(commandLine, installRoot) {
+  const normalizedRoot = normalizeWindowsAbsolutePathForComparison(installRoot);
+  const commandInstallRoot = normalizeWindowsAbsolutePathForComparison(
+    getWindowsCommandLineArgument(commandLine, "-InstallRoot")
+  );
+  if (!normalizedRoot || !commandInstallRoot) return false;
+  const installerPath = getWindowsCommandLineArgument(commandLine, "-File");
+  const installerName = path.win32.basename(String(installerPath || "").replace(/\//g, "\\"));
+  const hasInstaller = /^(?:wechat-inbox-local-asr-installer-[^\s"']+|install-local-asr)\.ps1$/i.test(
+    installerName
+  );
+  return hasInstaller && commandInstallRoot === normalizedRoot;
+}
+__name(isWindowsLocalAsrInstallerCommand, "isWindowsLocalAsrInstallerCommand");
+function getWindowsProcessCommandLine(pid, execFile = childProcess.execFile) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return Promise.resolve("");
+  const script = [
+    `$target = Get-CimInstance Win32_Process -Filter 'ProcessId = ${numericPid}' -ErrorAction SilentlyContinue`,
+    "if ($target) { [Console]::Out.Write([string]$target.CommandLine) }"
+  ].join("; ");
+  return new Promise((resolve) => {
+    execFile("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      windowsHide: true,
+      timeout: 15e3,
+      maxBuffer: 1024 * 1024
+    }, (error, stdout) => resolve(error ? "" : String(stdout || "").trim()));
+  });
+}
+__name(getWindowsProcessCommandLine, "getWindowsProcessCommandLine");
+function isProcessAlive(pid, kill = process.kill) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
+  try {
+    kill(numericPid, 0);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+__name(isProcessAlive, "isProcessAlive");
+function terminateWindowsProcessTree(pid, execFile = childProcess.execFile) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) {
+    return Promise.reject(new Error("ASR 安装进程 PID 无效，未执行结束操作。"));
+  }
+  return new Promise((resolve, reject) => {
+    execFile("taskkill", ["/PID", String(numericPid), "/T", "/F"], {
+      windowsHide: true,
+      timeout: 15e3,
+      maxBuffer: 1024 * 1024
+    }, (error, stdout, stderr) => {
+      if (error && !/not found|没有找到|找不到|no running instance/i.test(`${stdout || ""}
+${stderr || ""}
+${error.message || ""}`)) {
+        reject(new Error(`无法结束卡住的 ASR 安装进程：${stderr || stdout || error.message || error}`));
+        return;
+      }
+      resolve(true);
+    });
+  });
+}
+__name(terminateWindowsProcessTree, "terminateWindowsProcessTree");
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+__name(delay, "delay");
+async function waitForExistingWindowsLocalAsrInstall(installRoot, options = {}) {
+  const fileSystem = options.fileSystem || fs;
+  const now = typeof options.now === "function" ? options.now : () => Date.now();
+  const wait = typeof options.delay === "function" ? options.delay : delay;
+  const getCommandLine = options.getCommandLine || getWindowsProcessCommandLine;
+  const checkAlive = options.isAlive || isProcessAlive;
+  const stopTree = options.stopTree || terminateWindowsProcessTree;
+  const stallTimeoutMs = Number(options.stallTimeoutMs) > 0 ? Number(options.stallTimeoutMs) : LOCAL_ASR_INSTALL_STALL_TIMEOUT_MS;
+  const pollIntervalMs = Number(options.pollIntervalMs) > 0 ? Number(options.pollIntervalMs) : LOCAL_ASR_INSTALL_POLL_INTERVAL_MS;
+  const lock = readLocalAsrInstallLock(installRoot, fileSystem);
+  if (!lock) return { status: "none" };
+  const initialCommandLine = await getCommandLine(lock.pid);
+  if (!initialCommandLine) {
+    if (checkAlive(lock.pid)) return { status: "unverified-running", pid: lock.pid };
+    clearLocalAsrInstallLock(installRoot, lock.pid, fileSystem);
+    return { status: "stale-lock-cleared", pid: lock.pid };
+  }
+  if (!isWindowsLocalAsrInstallerCommand(initialCommandLine, installRoot)) {
+    clearLocalAsrInstallLock(installRoot, lock.pid, fileSystem);
+    return { status: "stale-lock-cleared", pid: lock.pid };
+  }
+  const startedAt = lock.startedAt || now();
+  let snapshot = getLocalAsrInstallProgressSnapshot(installRoot, fileSystem);
+  let lastProgressAt = Math.max(
+    startedAt,
+    snapshot.latestMtimeMs >= startedAt - 1e3 ? snapshot.latestMtimeMs : 0
+  );
+  const stopExactInstaller = /* @__PURE__ */ __name(async (status) => {
+    const currentCommandLine = await getCommandLine(lock.pid);
+    if (!currentCommandLine && checkAlive(lock.pid)) {
+      return { status: "unverified-running", pid: lock.pid };
+    }
+    if (!isWindowsLocalAsrInstallerCommand(currentCommandLine, installRoot)) {
+      clearLocalAsrInstallLock(installRoot, lock.pid, fileSystem);
+      return { status: "stale-lock-cleared", pid: lock.pid };
+    }
+    await stopTree(lock.pid);
+    clearLocalAsrInstallLock(installRoot, lock.pid, fileSystem);
+    return { status, pid: lock.pid };
+  }, "stopExactInstaller");
+  const failedLog = readLocalAsrInstallLogState(installRoot, fileSystem);
+  if (options.stopOnRecentFailure === true && failedLog && failedLog.status === "failed" && failedLog.time >= startedAt - 1e3) {
+    return await stopExactInstaller("stopped-after-failure");
+  }
+  if (now() - lastProgressAt >= stallTimeoutMs) {
+    return await stopExactInstaller("stopped-stalled");
+  }
+  if (typeof options.onWaiting === "function") {
+    options.onWaiting({ pid: lock.pid, startedAt, lastProgressAt });
+  }
+  while (true) {
+    await wait(pollIntervalMs);
+    if (!checkAlive(lock.pid)) {
+      clearLocalAsrInstallLock(installRoot, lock.pid, fileSystem);
+      return { status: "completed-or-exited", pid: lock.pid };
+    }
+    const nextSnapshot = getLocalAsrInstallProgressSnapshot(installRoot, fileSystem);
+    if (nextSnapshot.key !== snapshot.key) {
+      snapshot = nextSnapshot;
+      lastProgressAt = now();
+      if (typeof options.onProgress === "function") {
+        options.onProgress({ pid: lock.pid, lastProgressAt });
+      }
+    }
+    const nextFailedLog = options.stopOnRecentFailure === true ? readLocalAsrInstallLogState(installRoot, fileSystem) : null;
+    if (nextFailedLog && nextFailedLog.status === "failed" && nextFailedLog.time >= startedAt - 1e3) {
+      return await stopExactInstaller("stopped-after-failure");
+    }
+    if (now() - lastProgressAt >= stallTimeoutMs) {
+      return await stopExactInstaller("stopped-stalled");
+    }
+  }
+}
+__name(waitForExistingWindowsLocalAsrInstall, "waitForExistingWindowsLocalAsrInstall");
+function runWindowsLocalAsrInstaller(installerPath, installRoot, processEnv, options = {}) {
+  const execFile = options.execFile || childProcess.execFile;
+  const stopTree = options.stopTree || terminateWindowsProcessTree;
+  const fileSystem = options.fileSystem || fs;
+  const now = typeof options.now === "function" ? options.now : () => Date.now();
+  const stallTimeoutMs = Number(options.stallTimeoutMs) > 0 ? Number(options.stallTimeoutMs) : LOCAL_ASR_INSTALL_STALL_TIMEOUT_MS;
+  const pollIntervalMs = Number(options.pollIntervalMs) > 0 ? Number(options.pollIntervalMs) : LOCAL_ASR_INSTALL_POLL_INTERVAL_MS;
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    installerPath,
+    "-InstallRoot",
+    installRoot
+  ];
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stopping = false;
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let lastProgressAt = now();
+    let snapshot = getLocalAsrInstallProgressSnapshot(installRoot, fileSystem);
+    let pollTimer = null;
+    const appendOutput = /* @__PURE__ */ __name((current, value) => `${current}${String(value || "")}`.slice(-20 * 1024 * 1024), "appendOutput");
+    const finish = /* @__PURE__ */ __name((error, stdout = stdoutBuffer, stderr = stderrBuffer) => {
+      if (settled) return;
+      settled = true;
+      if (pollTimer) clearInterval(pollTimer);
+      if (error) {
+        error.stdout = String(stdout || stdoutBuffer || "");
+        error.stderr = String(stderr || stderrBuffer || "");
+        reject(error);
+        return;
+      }
+      resolve({
+        stdout: String(stdout || stdoutBuffer || ""),
+        stderr: String(stderr || stderrBuffer || "")
+      });
+    }, "finish");
+    let child = null;
+    child = execFile("powershell", args, {
+      timeout: LOCAL_ASR_INSTALL_TIMEOUT_MS,
+      maxBuffer: 20 * 1024 * 1024,
+      windowsHide: true,
+      env: processEnv
+    }, (error, stdout, stderr) => {
+      if (settled || stopping) return;
+      stdoutBuffer = String(stdout || stdoutBuffer || "").slice(-20 * 1024 * 1024);
+      stderrBuffer = String(stderr || stderrBuffer || "").slice(-20 * 1024 * 1024);
+      if (!error) {
+        finish(null, stdoutBuffer, stderrBuffer);
+        return;
+      }
+      const hardTimedOut = error.killed || error.signal === "SIGTERM" || /timed out|timeout/i.test(error.message || "");
+      if (hardTimedOut && child && Number.isInteger(child.pid) && child.pid > 0) {
+        stopTree(child.pid).catch(() => false).finally(() => {
+          error.localAsrInstallTimedOut = true;
+          finish(error, stdoutBuffer, stderrBuffer);
+        });
+        return;
+      }
+      finish(error, stdoutBuffer, stderrBuffer);
+    });
+    const recordOutputProgress = /* @__PURE__ */ __name((value, stream) => {
+      if (!value) return;
+      if (stream === "stderr") stderrBuffer = appendOutput(stderrBuffer, value);
+      else stdoutBuffer = appendOutput(stdoutBuffer, value);
+      lastProgressAt = now();
+      if (typeof options.onProgress === "function") {
+        options.onProgress({ pid: child.pid, lastProgressAt });
+      }
+    }, "recordOutputProgress");
+    if (child && child.stdout && typeof child.stdout.on === "function") {
+      child.stdout.on("data", (chunk) => recordOutputProgress(chunk, "stdout"));
+    }
+    if (child && child.stderr && typeof child.stderr.on === "function") {
+      child.stderr.on("data", (chunk) => recordOutputProgress(chunk, "stderr"));
+    }
+    pollTimer = setInterval(() => {
+      if (settled || stopping) return;
+      const nextSnapshot = getLocalAsrInstallProgressSnapshot(installRoot, fileSystem);
+      if (nextSnapshot.key !== snapshot.key) {
+        snapshot = nextSnapshot;
+        lastProgressAt = now();
+        if (typeof options.onProgress === "function") {
+          options.onProgress({ pid: child && child.pid, lastProgressAt });
+        }
+        return;
+      }
+      if (now() - lastProgressAt < stallTimeoutMs) return;
+      stopping = true;
+      const stalledError = new Error("本地转写组件安装已连续 10 分钟没有进展，插件已自动结束卡住的安装；请点击“刷新权限”重新安装。");
+      stalledError.localAsrInstallStalled = true;
+      if (!child || !Number.isInteger(child.pid) || child.pid <= 0) {
+        finish(stalledError, stdoutBuffer, stderrBuffer);
+        return;
+      }
+      stopTree(child.pid).then(() => finish(stalledError, stdoutBuffer, stderrBuffer)).catch((stopError) => {
+        stalledError.message = `${stalledError.message}
+${stopError.message || stopError}`;
+        finish(stalledError, stdoutBuffer, stderrBuffer);
+      });
+    }, pollIntervalMs);
+    if (pollTimer && typeof pollTimer.unref === "function") pollTimer.unref();
+  });
+}
+__name(runWindowsLocalAsrInstaller, "runWindowsLocalAsrInstaller");
 function buildLocalOcrInstallCommand(installerPath, platform = os.platform(), installRoot = "") {
   if (getLocalAsrPlatform(platform) === "darwin" || String(installerPath || "").endsWith(".sh")) {
     return `/bin/bash ${quoteCommandPath(installerPath)}`;
@@ -11866,17 +12267,95 @@ function installExternalAppNavigationGuards(webContents) {
   }
 }
 __name(installExternalAppNavigationGuards, "installExternalAppNavigationGuards");
-function installHiddenBrowserChildWindowGuards(webContents) {
+function createXiaohongshuBrowserDiagnostic() {
+  return {
+    source: "xiaohongshu-browser",
+    loginCookiePresent: null,
+    commentAccess: "not_checked",
+    stages: [],
+    events: []
+  };
+}
+__name(createXiaohongshuBrowserDiagnostic, "createXiaohongshuBrowserDiagnostic");
+function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
+  const diagnostic = options && options.xiaohongshuBrowserDiagnostic;
+  if (!diagnostic || typeof diagnostic !== "object") return null;
+  if (!Array.isArray(diagnostic.stages)) diagnostic.stages = [];
+  if (!Array.isArray(diagnostic.events)) diagnostic.events = [];
+  const type = String(entry.type || "").trim().slice(0, 64);
+  const safeEntry = {
+    ...type ? { type } : {},
+    ...entry.stage ? { stage: String(entry.stage).trim().slice(0, 64) } : {},
+    ...entry.outcome ? { outcome: String(entry.outcome).trim().slice(0, 64) } : {},
+    ...entry.action ? { action: String(entry.action).trim().slice(0, 64) } : {},
+    ...entry.code ? { code: String(entry.code).trim().slice(0, 32) } : {}
+  };
+  const host = getSafeUrlDiagnostic(entry.url || "").host;
+  if (host) safeEntry.host = host;
+  if (type === "login_cookie_checked") {
+    diagnostic.loginCookiePresent = entry.present === true;
+  }
+  if (type === "comment_access") {
+    diagnostic.commentAccess = safeEntry.outcome || "unknown";
+  }
+  if (type === "security_restriction") {
+    diagnostic.securityRestriction = {
+      code: safeEntry.code || "",
+      stage: safeEntry.stage || ""
+    };
+  }
+  const bucket = type === "stage" ? diagnostic.stages : diagnostic.events;
+  const key = JSON.stringify(safeEntry);
+  if (Object.keys(safeEntry).length && !bucket.some((item) => JSON.stringify(item) === key)) {
+    bucket.push(safeEntry);
+    if (bucket.length > 24) bucket.splice(0, bucket.length - 24);
+  }
+  return diagnostic;
+}
+__name(appendXiaohongshuBrowserDiagnostic, "appendXiaohongshuBrowserDiagnostic");
+function detectXiaohongshuSecurityRestriction(text = "") {
+  const source = String(text || "");
+  const hasCode = /(?:^|\D)300011(?:\D|$)/.test(source);
+  const hasRestrictionWall = /安全限制/.test(source) && /账号异常|请稍后重试|返回首页|我要反馈/.test(source);
+  if (!hasCode && !hasRestrictionWall) return null;
+  return {
+    code: hasCode ? "300011" : "",
+    kind: "security_restriction"
+  };
+}
+__name(detectXiaohongshuSecurityRestriction, "detectXiaohongshuSecurityRestriction");
+function recordXiaohongshuSecurityRestriction(options = {}, text = "", stage = "") {
+  const restriction = detectXiaohongshuSecurityRestriction(text);
+  if (!restriction) return null;
+  appendXiaohongshuBrowserDiagnostic(options, {
+    type: "security_restriction",
+    stage,
+    outcome: "detected",
+    code: restriction.code
+  });
+  return restriction;
+}
+__name(recordXiaohongshuSecurityRestriction, "recordXiaohongshuSecurityRestriction");
+function installHiddenBrowserChildWindowGuards(webContents, options = {}) {
   if (!webContents || typeof webContents.on !== "function") return () => {
   };
   const cleanups = [];
-  const preventLegacyWindow = /* @__PURE__ */ __name((event) => {
+  const preventLegacyWindow = /* @__PURE__ */ __name((event, targetUrl) => {
     try {
       if (event && typeof event.preventDefault === "function") event.preventDefault();
     } catch (error) {
     }
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "legacy_window_open_blocked",
+      stage: options.diagnosticStage,
+      action: "prevented",
+      url: targetUrl
+    });
   }, "preventLegacyWindow");
-  const destroyCreatedChild = /* @__PURE__ */ __name((_event, childWindow) => {
+  const destroyCreatedChild = /* @__PURE__ */ __name((firstArgument, secondArgument) => {
+    const firstLooksLikeWindow = firstArgument && (typeof firstArgument.hide === "function" || typeof firstArgument.destroy === "function");
+    const childWindow = firstLooksLikeWindow ? firstArgument : secondArgument;
+    const details = firstLooksLikeWindow ? secondArgument : null;
     try {
       if (childWindow && typeof childWindow.hide === "function") childWindow.hide();
       const destroyed = childWindow && typeof childWindow.isDestroyed === "function" ? childWindow.isDestroyed() : false;
@@ -11885,6 +12364,12 @@ function installHiddenBrowserChildWindowGuards(webContents) {
       }
     } catch (error) {
     }
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "created_child_window_destroyed",
+      stage: options.diagnosticStage,
+      action: "hidden_and_destroyed",
+      url: details && details.url
+    });
   }, "destroyCreatedChild");
   webContents.on("new-window", preventLegacyWindow);
   cleanups.push(() => {
@@ -11908,6 +12393,43 @@ function installHiddenBrowserChildWindowGuards(webContents) {
   };
 }
 __name(installHiddenBrowserChildWindowGuards, "installHiddenBrowserChildWindowGuards");
+function installHiddenBrowserWindowGuards(browserWindow, options = {}) {
+  if (!browserWindow) return () => {
+  };
+  const cleanupChildWindows = installHiddenBrowserChildWindowGuards(
+    browserWindow.webContents,
+    options
+  );
+  const hideWindow = /* @__PURE__ */ __name((eventType = "") => {
+    try {
+      const destroyed = typeof browserWindow.isDestroyed === "function" && browserWindow.isDestroyed();
+      if (!destroyed && typeof browserWindow.hide === "function") browserWindow.hide();
+    } catch (error) {
+    }
+    if (eventType) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "hidden_window_visibility_blocked",
+        stage: options.diagnosticStage,
+        action: eventType
+      });
+    }
+  }, "hideWindow");
+  const handleReadyToShow = /* @__PURE__ */ __name(() => hideWindow("ready_to_show_hidden"), "handleReadyToShow");
+  const handleShow = /* @__PURE__ */ __name(() => hideWindow("show_hidden"), "handleShow");
+  hideWindow();
+  if (typeof browserWindow.on === "function") {
+    browserWindow.on("ready-to-show", handleReadyToShow);
+    browserWindow.on("show", handleShow);
+  }
+  return () => {
+    cleanupChildWindows();
+    if (typeof browserWindow.removeListener === "function") {
+      browserWindow.removeListener("ready-to-show", handleReadyToShow);
+      browserWindow.removeListener("show", handleShow);
+    }
+  };
+}
+__name(installHiddenBrowserWindowGuards, "installHiddenBrowserWindowGuards");
 function isAllowedXiaohongshuBrowserNavigationUrl(url) {
   try {
     const parsed = new URL(String(url || "").trim());
@@ -11930,12 +12452,18 @@ function shouldBlockXiaohongshuBrowserNavigationRequest(details = {}) {
   return isNavigation && !isAllowedXiaohongshuBrowserNavigationUrl(details && details.url);
 }
 __name(shouldBlockXiaohongshuBrowserNavigationRequest, "shouldBlockXiaohongshuBrowserNavigationRequest");
-function installXiaohongshuNavigationGuards(webContents) {
+function installXiaohongshuNavigationGuards(webContents, options = {}) {
   if (!webContents) return;
   const preventUntrustedNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
     const targetUrl = typeof navigationUrl === "string" ? navigationUrl : navigationUrl && navigationUrl.url || event && event.url;
     if (!isAllowedXiaohongshuBrowserNavigationUrl(targetUrl) && event && typeof event.preventDefault === "function") {
       event.preventDefault();
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "external_navigation_blocked",
+        stage: options.diagnosticStage,
+        action: "prevented",
+        url: targetUrl
+      });
     }
   }, "preventUntrustedNavigation");
   if (typeof webContents.on === "function") {
@@ -11944,7 +12472,15 @@ function installXiaohongshuNavigationGuards(webContents) {
     webContents.on("will-redirect", preventUntrustedNavigation);
   }
   if (typeof webContents.setWindowOpenHandler === "function") {
-    webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    webContents.setWindowOpenHandler((details = {}) => {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "window_open_blocked",
+        stage: options.diagnosticStage,
+        action: "denied",
+        url: details.url
+      });
+      return { action: "deny" };
+    });
   }
 }
 __name(installXiaohongshuNavigationGuards, "installXiaohongshuNavigationGuards");
@@ -16438,9 +16974,34 @@ async function checkXiaohongshuLoginStatus() {
 __name(checkXiaohongshuLoginStatus, "checkXiaohongshuLoginStatus");
 async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
   throwIfAborted(options.signal);
+  const hasLoginCookie = await checkXiaohongshuLoginStatus();
+  appendXiaohongshuBrowserDiagnostic(options, {
+    type: "login_cookie_checked",
+    stage: "login_check",
+    outcome: hasLoginCookie ? "present" : "missing",
+    present: hasLoginCookie
+  });
+  if (!hasLoginCookie) {
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "comment_access",
+      stage: "login_check",
+      outcome: "skipped_no_login_cookie"
+    });
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "skipped_no_login_cookie"
+    });
+    return false;
+  }
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
-    return await checkXiaohongshuLoginStatus();
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "cookie_only_environment"
+    });
+    return true;
   }
   const session = getXiaohongshuSession();
   if (!session) return false;
@@ -16456,9 +17017,16 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
     }
   });
   trackXiaohongshuBrowserWindow(win);
-  installXiaohongshuNavigationGuards(win.webContents);
+  const hiddenWindowOptions = { ...options, diagnosticStage: "login_check" };
+  const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win, hiddenWindowOptions);
+  installXiaohongshuNavigationGuards(win.webContents, hiddenWindowOptions);
   const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
   try {
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "page_probe_started"
+    });
     throwIfAborted(options.signal);
     const url = targetUrl || "https://www.xiaohongshu.com/";
     const loaded = waitForWebContents(win.webContents, 15e3);
@@ -16489,14 +17057,32 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
       XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS,
       "xiaohongshu-login-probe"
     );
+    recordXiaohongshuSecurityRestriction(options, state && state.text, "login_check");
     if (state && state.hasLoginWall) return false;
-    const hasCookie = await checkXiaohongshuLoginStatus();
-    return Boolean(hasCookie && state && (state.hasAccountApiSignal || state.hasUserSignal));
+    const hasCookieAfterProbe = await checkXiaohongshuLoginStatus();
+    const loggedIn = Boolean(hasCookieAfterProbe && state && (state.hasAccountApiSignal || state.hasUserSignal));
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "comment_access",
+      stage: "login_check",
+      outcome: loggedIn ? "eligible" : "skipped_login_unconfirmed"
+    });
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: loggedIn ? "authenticated" : "unconfirmed"
+    });
+    return loggedIn;
   } catch (error) {
     if (isAbortError(error)) throw error;
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "login_check",
+      outcome: "probe_failed"
+    });
     return false;
   } finally {
     cleanupAbort();
+    cleanupHiddenWindowGuards();
     if (win && typeof win.destroy === "function") {
       win.destroy();
     }
@@ -17642,7 +18228,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       sandbox: true
     }
   });
-  if (isXiaohongshuUrl(url)) {
+  const isXiaohongshuExtractionWindow = isXiaohongshuUrl(url);
+  if (isXiaohongshuExtractionWindow) {
     trackXiaohongshuBrowserWindow(win);
   }
   const isDouyinExtractionWindow = isDouyinUrl(url);
@@ -17651,6 +18238,23 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   }
   let cleanupHiddenChildWindowGuards = /* @__PURE__ */ __name(() => {
   }, "cleanupHiddenChildWindowGuards");
+  let cleanupXiaohongshuHiddenWindowGuards = /* @__PURE__ */ __name(() => {
+  }, "cleanupXiaohongshuHiddenWindowGuards");
+  const xiaohongshuHiddenWindowOptions = {
+    ...options,
+    diagnosticStage: "media_extraction"
+  };
+  if (isXiaohongshuExtractionWindow) {
+    cleanupXiaohongshuHiddenWindowGuards = installHiddenBrowserWindowGuards(
+      win,
+      xiaohongshuHiddenWindowOptions
+    );
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "media_extraction",
+      outcome: "started"
+    });
+  }
   if (isDouyinExtractionWindow) {
     cleanupHiddenChildWindowGuards = installHiddenBrowserChildWindowGuards(win.webContents);
     const hideWindow = /* @__PURE__ */ __name(() => {
@@ -17707,8 +18311,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   });
   installWebRequestHandler("onBeforeRedirect", captureWebRequestDetails);
   installWebRequestHandler("onCompleted", captureWebRequestDetails);
-  if (isXiaohongshuUrl(url)) {
-    installXiaohongshuNavigationGuards(win.webContents);
+  if (isXiaohongshuExtractionWindow) {
+    installXiaohongshuNavigationGuards(win.webContents, xiaohongshuHiddenWindowOptions);
   } else {
     installExternalAppNavigationGuards(win.webContents);
   }
@@ -17903,9 +18507,18 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
           domMediaCandidates,
           pageIdentityIds,
           douyinPaceState,
+          bodyText: String(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 1000),
         };
       })()
     `);
+    if (isXiaohongshuExtractionWindow) {
+      recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "stage",
+        stage: "media_extraction",
+        outcome: "completed"
+      });
+    }
     throwIfAborted(options.signal);
     await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     throwIfAborted(options.signal);
@@ -17935,6 +18548,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   } finally {
     cleanupAbort();
     cleanupHiddenChildWindowGuards();
+    cleanupXiaohongshuHiddenWindowGuards();
     installedWebRequestHandlers.forEach((method) => {
       try {
         if (browserSession && browserSession.webRequest && typeof browserSession.webRequest[method] === "function") {
@@ -17988,7 +18602,9 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     }
   });
   trackXiaohongshuBrowserWindow(win);
-  installXiaohongshuNavigationGuards(win.webContents);
+  const hiddenWindowOptions = { ...options, diagnosticStage: "content_extraction" };
+  const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win, hiddenWindowOptions);
+  installXiaohongshuNavigationGuards(win.webContents, hiddenWindowOptions);
   const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
   const browserSession = win.webContents && win.webContents.session || xiaohongshuSession;
   let blocksCommentRequests = false;
@@ -18010,6 +18626,11 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     }
   );
   try {
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "content_extraction",
+      outcome: "started"
+    });
     throwIfAborted(options.signal);
     if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === "function") {
       browserSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
@@ -18063,6 +18684,12 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(500, remainingAfterSnapshotMs)));
     }
     throwIfAborted(options.signal);
+    recordXiaohongshuSecurityRestriction(options, payload && payload.html, "content_extraction");
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "content_extraction",
+      outcome: "completed"
+    });
     return {
       html: String(payload && payload.html || ""),
       url: String(payload && payload.url || win.webContents && win.webContents.getURL && win.webContents.getURL() || url),
@@ -18076,6 +18703,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     };
   } finally {
     cleanupAbort();
+    cleanupHiddenWindowGuards();
     try {
       if (blocksCommentRequests && browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeRequest === "function") {
         browserSession.webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, null);
@@ -18135,6 +18763,35 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     if (options.includeComments === false) {
       return await renderXiaohongshuContentWithElectron(url, options);
     }
+    const hasLoginCookie = await checkXiaohongshuLoginStatus();
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "login_cookie_checked",
+      stage: "comment_extraction",
+      outcome: hasLoginCookie ? "present" : "missing",
+      present: hasLoginCookie
+    });
+    if (!hasLoginCookie) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "comment_access",
+        stage: "comment_extraction",
+        outcome: "skipped_no_login_cookie"
+      });
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "stage",
+        stage: "comment_extraction",
+        outcome: "skipped_no_login_cookie"
+      });
+      return {
+        html: "",
+        comments: [],
+        identityUrl: "",
+        commentDiagnosticDetails: {
+          source: "disabled",
+          stopReason: "skipped_no_login_cookie",
+          partial: false
+        }
+      };
+    }
     const expectedIdentityUrl = resolveXiaohongshuIdentityUrl([
       options.expectedUrl,
       url
@@ -18175,8 +18832,15 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       }
     });
     trackXiaohongshuBrowserWindow(win);
-    installXiaohongshuNavigationGuards(win.webContents);
+    const hiddenWindowOptions = { ...options, diagnosticStage: "comment_extraction" };
+    const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win, hiddenWindowOptions);
+    installXiaohongshuNavigationGuards(win.webContents, hiddenWindowOptions);
     const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: "stage",
+      stage: "comment_extraction",
+      outcome: "started"
+    });
     const commentApiRequests = [];
     const browserSession = win.webContents && win.webContents.session || wechatSession;
     const seenCommentApiRequests = /* @__PURE__ */ new Set();
@@ -18382,6 +19046,11 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         );
       }
       if (!identitySnapshot || !identitySnapshot.matched) {
+        recordXiaohongshuSecurityRestriction(
+          options,
+          identitySnapshot && identitySnapshot.html,
+          "comment_extraction"
+        );
         return {
           html: String(identitySnapshot && identitySnapshot.html || ""),
           comments: [],
@@ -18885,6 +19554,16 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       commentDiagnosticDetails.partial = isPartialXiaohongshuCommentResult(commentDiagnosticDetails);
       const commentDiagnostic = buildXiaohongshuCommentDiagnostic(commentDiagnosticDetails);
       throwIfAborted(options.signal);
+      recordXiaohongshuSecurityRestriction(
+        options,
+        identitySnapshot && identitySnapshot.html,
+        "comment_extraction"
+      );
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: "stage",
+        stage: "comment_extraction",
+        outcome: "completed"
+      });
       return {
         html: renderedHtml,
         identityUrl: expectedIdentityUrl,
@@ -18897,6 +19576,7 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       };
     } finally {
       cleanupAbort();
+      cleanupHiddenWindowGuards();
       try {
         if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeSendHeaders === "function") {
           browserSession.webRequest.onBeforeSendHeaders({ urls: ["*://*.xiaohongshu.com/*"] }, null);
@@ -20242,6 +20922,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
+    this.lastXiaohongshuBrowserDiagnostic = null;
     this.syncStatusBar = typeof this.addStatusBarItem === "function" ? this.addStatusBarItem() : null;
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === "function") {
       this.syncStatusBar.setText("");
@@ -22481,6 +23162,24 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }
     }
     if (status && status.hasAccess) {
+      if (reason === "manual-refresh" && this.getConfiguredLocalAsrPlatform() === "win32") {
+        try {
+          const recovery = await this.recoverExistingLocalAsrInstall({
+            reason,
+            stopOnRecentFailure: true
+          });
+          status = {
+            ...status,
+            localAsrInstallRecovery: recovery
+          };
+        } catch (error) {
+          return {
+            ...status,
+            localComponentInstallError: formatLocalComponentInstallFailureReason(error),
+            localComponentReadiness: this.getLocalTranscriptionComponentReadiness()
+          };
+        }
+      }
       let readiness = this.getLocalTranscriptionComponentReadiness();
       let refreshPlan = buildLocalComponentRefreshPlan(readiness);
       readiness = {
@@ -22727,6 +23426,35 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   async ensureLocalTranscriptionAccess() {
     return await this.ensureProFeatureAccess("音视频转写权限");
   }
+  async recoverExistingLocalAsrInstall(options = {}) {
+    if (this.getConfiguredLocalAsrPlatform() !== "win32") {
+      return { status: "unsupported-platform" };
+    }
+    const installMode = normalizeLocalAsrInstallMode(options.installMode || this.settings.localAsrInstallMode);
+    const installRoot = this.getConfiguredLocalAsrInstallRoot(installMode);
+    let waitingNoticeShown = false;
+    const result = await waitForExistingWindowsLocalAsrInstall(installRoot, {
+      stopOnRecentFailure: options.stopOnRecentFailure === true,
+      onWaiting: /* @__PURE__ */ __name(() => {
+        waitingNoticeShown = true;
+        new Notice("检测到已有 ASR 安装正在运行，插件会继续等待；连续 10 分钟没有进展时会自动结束并重试。", 1e4);
+      }, "onWaiting")
+    });
+    if (result.status === "unverified-running") {
+      throw new Error("检测到 ASR 安装进程仍在运行，但 Windows 未返回可核对的命令行。为避免结束其他程序，本次没有强制结束它；请稍后再次点击“刷新权限”。");
+    }
+    if (result.status === "stopped-after-failure") {
+      new Notice("已自动结束上次报错后仍未退出的 ASR 安装进程，现在可以重新安装。", 8e3);
+    } else if (result.status === "stopped-stalled") {
+      new Notice("ASR 安装已连续 10 分钟没有进展，插件已自动结束卡住的进程，现在开始重新安装。", 8e3);
+    } else if (waitingNoticeShown && result.status === "completed-or-exited") {
+      new Notice("上一次 ASR 安装进程已结束，正在重新检查本地组件。", 6e3);
+    }
+    return {
+      ...result,
+      installRoot
+    };
+  }
   async installLocalAsr(options = {}) {
     if (this.localAsrInstallPromise) {
       new Notice("本地转写组件正在安装中，请等待当前安装完成后再重试。");
@@ -22748,7 +23476,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const platform = this.getConfiguredLocalAsrPlatform();
     const installMode = normalizeLocalAsrInstallMode(options.installMode || this.settings.localAsrInstallMode);
     const installRoot = this.getConfiguredLocalAsrInstallRoot(installMode);
-    const existingStatus = this.getLocalAsrInstallStatus(installRoot, platform);
+    let existingStatus = this.getLocalAsrInstallStatus(installRoot, platform);
     if (!options.force && existingStatus.ready) {
       await this.saveSettings({
         ...this.settings,
@@ -22762,47 +23490,79 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         status: existingStatus
       };
     }
+    if (platform === "win32") {
+      const recovery = await this.recoverExistingLocalAsrInstall({
+        reason: options.reason || "install",
+        installMode,
+        stopOnRecentFailure: options.reason === "manual-refresh"
+      });
+      if (recovery.status === "completed-or-exited") {
+        existingStatus = this.getLocalAsrInstallStatus(installRoot, platform);
+        if (existingStatus.ready) {
+          await this.saveSettings({
+            ...this.settings,
+            aiProvider: "local",
+            localAsrInstallMode: installMode,
+            localTranscriptionCommand: getDefaultLocalTranscriptionCommand(platform, installRoot)
+          });
+          return {
+            skipped: true,
+            reason: "existing-install-completed",
+            status: existingStatus
+          };
+        }
+      }
+    }
     const authorizedManifest = await this.getAuthorizedLocalComponentManifest("asr");
     const componentProcessEnv = buildAuthorizedLocalComponentProcessEnv(process.env, authorizedManifest);
     const installerPath = await this.getAvailableLocalAsrInstallerPath();
     const command = buildLocalAsrInstallCommand(installerPath, platform, platform === "win32" ? installRoot : "");
     new Notice("开始安装本地转写组件，可能需要几分钟。");
-    await new Promise((resolve, reject) => {
-      childProcess.exec(command, {
-        timeout: LOCAL_ASR_INSTALL_TIMEOUT_MS,
-        maxBuffer: 20 * 1024 * 1024,
-        windowsHide: true,
-        env: componentProcessEnv
-      }, (error, stdout, stderr) => {
-        if (error) {
-          const timedOut = error.killed || error.signal === "SIGTERM" || /timed out|timeout/i.test(error.message || "");
-          const errorText = timedOut ? "本地转写组件安装超时：安装超过 20 分钟仍未完成。通常是腾讯云下载源、ffmpeg、模型文件或 Python 依赖访问过慢。安装已中止，请复制诊断信息联系开发者。" : error.message || String(error);
-          const logPath = writeLocalAsrInstallLog({
-            installRoot,
-            platform,
-            installerPath,
-            command,
-            stdout,
-            stderr,
-            error: errorText,
-            status: "failed"
-          });
-          const message = timedOut ? errorText : stderr || stdout || errorText;
-          reject(new Error(`${message}${logPath ? `
-安装日志：${logPath}` : ""}`));
-          return;
-        }
-        writeLocalAsrInstallLog({
-          installRoot,
-          platform,
-          installerPath,
-          command,
-          stdout,
-          stderr,
-          status: "success"
+    let installOutput = null;
+    try {
+      installOutput = platform === "win32" ? await runWindowsLocalAsrInstaller(installerPath, installRoot, componentProcessEnv) : await new Promise((resolve, reject) => {
+        childProcess.exec(command, {
+          timeout: LOCAL_ASR_INSTALL_TIMEOUT_MS,
+          maxBuffer: 20 * 1024 * 1024,
+          windowsHide: true,
+          env: componentProcessEnv
+        }, (error, stdout, stderr) => {
+          if (error) {
+            error.stdout = stdout;
+            error.stderr = stderr;
+            reject(error);
+            return;
+          }
+          resolve({ stdout, stderr });
         });
-        resolve({ stdout, stderr });
       });
+    } catch (error) {
+      const timedOut = error.localAsrInstallStalled || error.localAsrInstallTimedOut || error.killed || error.signal === "SIGTERM" || /timed out|timeout/i.test(error.message || "");
+      const errorText = error.localAsrInstallStalled ? error.message || String(error) : timedOut ? "本地转写组件安装超时：安装超过 20 分钟仍未完成。通常是腾讯云下载源、ffmpeg、模型文件或 Python 依赖访问过慢。安装已中止，请复制诊断信息联系开发者。" : error.message || String(error);
+      const stdout = String(error.stdout || "");
+      const stderr = String(error.stderr || "");
+      const logPath = writeLocalAsrInstallLog({
+        installRoot,
+        platform,
+        installerPath,
+        command,
+        stdout,
+        stderr,
+        error: errorText,
+        status: "failed"
+      });
+      const message = timedOut ? errorText : stderr || stdout || errorText;
+      throw new Error(`${message}${logPath ? `
+安装日志：${logPath}` : ""}`);
+    }
+    writeLocalAsrInstallLog({
+      installRoot,
+      platform,
+      installerPath,
+      command,
+      stdout: installOutput && installOutput.stdout,
+      stderr: installOutput && installOutput.stderr,
+      status: "success"
     });
     const installStatus = this.getLocalAsrInstallStatus(installRoot, platform);
     if (!installStatus.ready) {
@@ -24732,6 +25492,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
+    const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(url) ? createXiaohongshuBrowserDiagnostic() : null;
+    if (xiaohongshuBrowserDiagnostic) {
+      this.lastXiaohongshuBrowserDiagnostic = xiaohongshuBrowserDiagnostic;
+    }
+    const xiaohongshuBrowserOptions = xiaohongshuBrowserDiagnostic ? { xiaohongshuBrowserDiagnostic } : {};
     let xiaohongshuRedirectDiagnostic = null;
     let xiaohongshuResolvedUrl = url || "";
     let xiaohongshuResponseStatus = 0;
@@ -25181,7 +25946,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               const candidatePage = await this.renderXiaohongshuPage(candidate.url, {
                 includeComments: false,
                 expectedUrl: targetIdentityUrl || resolvedUrl,
-                signal
+                signal,
+                ...xiaohongshuBrowserOptions
               });
               const candidateFinalUrl = String(candidatePage && candidatePage.url || "").trim();
               if (!isTrustedXiaohongshuCookieUrl(candidateFinalUrl)) {
@@ -25219,12 +25985,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         xiaohongshuResponseStatus = Number(response.status) || 0;
         let html2 = response.text || "";
+        if (xiaohongshuBrowserDiagnostic) {
+          recordXiaohongshuSecurityRestriction(
+            xiaohongshuBrowserOptions,
+            html2,
+            "static_content"
+          );
+        }
         let socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdownFromHtml(html2, resolvedUrl);
         const hasProAdvancedAccess = isXiaohongshuUrl(url) ? await this.hasProFeatureAccess() : false;
         let xiaohongshuLoggedIn = false;
         if (isXiaohongshuUrl(url) && hasProAdvancedAccess && this.settings.xiaohongshuCommentsEnabled !== false) {
           try {
-            xiaohongshuLoggedIn = await this.checkXiaohongshuLogin({ signal });
+            xiaohongshuLoggedIn = await this.checkXiaohongshuLogin({
+              signal,
+              ...xiaohongshuBrowserOptions
+            });
           } catch (error) {
             if (isAbortError(error)) throw error;
             xiaohongshuLoggedIn = false;
@@ -25550,7 +26326,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 candidatePage = renderedXiaohongshuPage && renderedXiaohongshuUrl === candidate.url && renderedXiaohongshuIncludesComments === false ? renderedXiaohongshuPage : await this.renderXiaohongshuPage(candidate.url, {
                   includeComments: false,
                   expectedUrl: xiaohongshuIdentityUrl,
-                  signal
+                  signal,
+                  ...xiaohongshuBrowserOptions
                 });
                 const candidateHtml = String(candidatePage && candidatePage.html || "");
                 const candidateFinalUrl = String(candidatePage && candidatePage.url || resolvedUrl);
@@ -25626,7 +26403,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               try {
                 mediaUrls = sortMediaUrlsForTranscription([
                   ...mediaUrls,
-                  ...await this.renderSocialMediaUrls(candidate.url, { includeComments: false, signal })
+                  ...await this.renderSocialMediaUrls(candidate.url, {
+                    includeComments: false,
+                    signal,
+                    ...xiaohongshuBrowserOptions
+                  })
                 ]);
                 mediaUrl = mediaUrls[0] || "";
                 if (mediaUrl) break;
@@ -25641,7 +26422,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               const commentsPage = await this.renderXiaohongshuPage(commentsRenderUrl, {
                 includeComments: true,
                 expectedUrl: xiaohongshuIdentityUrl,
-                signal
+                signal,
+                ...xiaohongshuBrowserOptions
               });
               const renderedXiaohongshuComments = commentsPage && Array.isArray(commentsPage.comments) ? commentsPage.comments : [];
               const renderedDiagnosticDetails = commentsPage && commentsPage.commentDiagnosticDetails && typeof commentsPage.commentDiagnosticDetails === "object" ? commentsPage.commentDiagnosticDetails : {};
@@ -25697,6 +26479,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               redirectDiagnostic: redirectResult.diagnostic,
               browserAttempts: xiaohongshuBrowserAttempts
             });
+            if (xiaohongshuBrowserDiagnostic) {
+              pendingXiaohongshuFailureDiagnostic.browser = redactSensitiveObject(
+                xiaohongshuBrowserDiagnostic
+              );
+            }
             if (!isVideoIntent) {
               throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
             }
@@ -25751,7 +26538,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             };
           }
         }
-        const socialMediaRenderOptions = isXiaohongshuUrl(url) ? { includeComments: false, signal } : { signal };
+        const socialMediaRenderOptions = isXiaohongshuUrl(url) ? { includeComments: false, signal, ...xiaohongshuBrowserOptions } : { signal };
         if (!hasUsableDouyinMedia && isVideoIntent && typeof this.renderSocialMediaUrls === "function") {
           try {
             mediaUrls = sortMediaUrlsForTranscription([
@@ -27095,6 +27882,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       return;
     }
     try {
+      this.lastXiaohongshuBrowserDiagnostic = null;
       const bindings = this.getActiveBindings();
       const shouldPrefixTitle = bindings.length > 1;
       const written = [];
@@ -27177,7 +27965,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
       const latestSuccessfulDiagnostic = [...written].reverse().find((item) => item.feishuMediaDiagnostic || item.mediaResolutionDiagnostic || item.conversionDiagnostic || item.attachmentDiagnostic);
-      const latestSuccessfulDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.feishuMediaDiagnostic || latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic || latestSuccessfulDiagnostic.attachmentDiagnostic : null;
+      const latestSuccessfulRecordDiagnosticPayload = latestSuccessfulDiagnostic ? latestSuccessfulDiagnostic.feishuMediaDiagnostic || latestSuccessfulDiagnostic.mediaResolutionDiagnostic || latestSuccessfulDiagnostic.conversionDiagnostic || latestSuccessfulDiagnostic.attachmentDiagnostic : null;
+      const latestXiaohongshuBrowserDiagnostic = this.lastXiaohongshuBrowserDiagnostic && typeof this.lastXiaohongshuBrowserDiagnostic === "object" ? redactSensitiveObject(this.lastXiaohongshuBrowserDiagnostic) : null;
+      const latestSuccessfulDiagnosticPayload = latestSuccessfulRecordDiagnosticPayload && latestXiaohongshuBrowserDiagnostic ? {
+        ...latestSuccessfulRecordDiagnosticPayload,
+        xiaohongshuBrowser: latestXiaohongshuBrowserDiagnostic
+      } : latestSuccessfulRecordDiagnosticPayload || latestXiaohongshuBrowserDiagnostic;
       const completionWarningDetails = completionWarnings.map((item) => {
         const recordId = String(item && item.recordId || "").trim().slice(0, 128);
         const code = String(item && item.code || "").trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 64);
@@ -27647,6 +28440,7 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
   LOCAL_OCR_MACOS_INSTALLER_SHA256,
   LOCAL_COMPONENT_ASSET_ENV_KEYS,
+  LOCAL_ASR_INSTALL_STALL_TIMEOUT_MS,
   isAuthorizedLocalComponentDownloadUrl,
   normalizeAuthorizedLocalComponentManifest,
   buildAuthorizedLocalComponentProcessEnv,
@@ -27764,7 +28558,11 @@ WechatObsidianInboxPlugin.__test = {
   shouldBlockExternalAppUrl,
   installDouyinExternalProtocolHandlers,
   installExternalAppNavigationGuards,
+  createXiaohongshuBrowserDiagnostic,
+  appendXiaohongshuBrowserDiagnostic,
+  detectXiaohongshuSecurityRestriction,
   installHiddenBrowserChildWindowGuards,
+  installHiddenBrowserWindowGuards,
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
@@ -27825,6 +28623,7 @@ WechatObsidianInboxPlugin.__test = {
   getXiaohongshuCapabilityMatrix,
   runWithDouyinBrowserSessionLock,
   runWithXiaohongshuBrowserSessionLock,
+  renderXiaohongshuPageWithElectron,
   getXiaohongshuBrowserCandidates,
   scoreXiaohongshuExtraction,
   mergeXiaohongshuExtractions,
@@ -27856,6 +28655,16 @@ WechatObsidianInboxPlugin.__test = {
   appendLocalAsrRunLog,
   readLocalAsrRunLog,
   buildLocalAsrInstallCommand,
+  getLocalAsrInstallLockPath,
+  parseLocalAsrInstallLock,
+  readLocalAsrInstallLock,
+  clearLocalAsrInstallLock,
+  getLocalAsrInstallProgressSnapshot,
+  readLocalAsrInstallLogState,
+  isWindowsLocalAsrInstallerCommand,
+  isProcessAlive,
+  waitForExistingWindowsLocalAsrInstall,
+  runWindowsLocalAsrInstaller,
   buildLocalOcrInstallCommand,
   downloadTextViaNode,
   normalizeInstallerScriptText,
