@@ -1073,6 +1073,11 @@ assert.ok(xiaohongshuPageRendererSource.includes('installXiaohongshuNavigationGu
 assert.ok(xiaohongshuPageRendererSource.includes('installHiddenBrowserWindowGuards(win, hiddenWindowOptions)'));
 assert.ok(pluginMainSource.includes('async function renderXiaohongshuContentWithElectron'));
 assert.ok(xiaohongshuPageRendererSource.includes('options.includeComments === false'));
+assert.ok(
+  xiaohongshuPageRendererSource.indexOf('options.includeComments === false')
+    < xiaohongshuPageRendererSource.indexOf('const hasLoginCookie = await checkXiaohongshuLoginStatus()'),
+  '公开正文提取必须先于 Cookie/评论判断，不能把 Cookie 变成正文前提',
+);
 const xiaohongshuContentRendererSource = pluginMainSource.slice(
   pluginMainSource.indexOf('async function renderXiaohongshuContentWithElectron'),
   pluginMainSource.indexOf('let xiaohongshuBrowserSessionQueue'),
@@ -1080,6 +1085,18 @@ const xiaohongshuContentRendererSource = pluginMainSource.slice(
 assert.ok(xiaohongshuContentRendererSource.includes('installHiddenBrowserWindowGuards(win, hiddenWindowOptions)'));
 assert.ok(socialMediaRendererSource.includes('const isXiaohongshuExtractionWindow = isXiaohongshuUrl(url)'));
 assert.ok(socialMediaRendererSource.includes('cleanupXiaohongshuHiddenWindowGuards'));
+assert.ok(
+  socialMediaRendererSource.includes('backgroundThrottling: !isXiaohongshuUrl(url)'),
+  '小红书媒体窗口物理隐藏时必须保持页面脚本为前台可见状态',
+);
+assert.ok(
+  xiaohongshuContentRendererSource.includes('backgroundThrottling: false'),
+  '小红书正文窗口物理隐藏时必须禁用后台节流',
+);
+assert.ok(
+  socialMediaRendererSource.includes("'xiaohongshu-media-extraction'"),
+  '小红书媒体脚本必须有可诊断的超时边界',
+);
 
 function utf16BeHex(text) {
   const bytes = [0xfe, 0xff];
@@ -1942,6 +1959,56 @@ assert.deepStrictEqual(
   cleanupWindowGuards();
   assert.strictEqual(browserWindow.listenerCount('ready-to-show'), 0);
   assert.strictEqual(browserWindow.listenerCount('show'), 0);
+}
+{
+  const failedBrowserDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
+  const timeoutError = new Error('sensitive page script timed out');
+  timeoutError.code = 'BROWSER_TASK_TIMEOUT';
+  helpers.appendXiaohongshuBrowserFailure(
+    { xiaohongshuBrowserDiagnostic: failedBrowserDiagnostic },
+    'media_extraction',
+    timeoutError,
+  );
+  assert.ok(failedBrowserDiagnostic.stages.some((stage) => (
+    stage.stage === 'media_extraction'
+      && stage.outcome === 'failed'
+      && stage.failureKind === 'BROWSER_TASK_TIMEOUT'
+  )));
+  assert.strictEqual(
+    JSON.stringify(failedBrowserDiagnostic).includes('sensitive page script'),
+    false,
+    '浏览器失败诊断不能保存原始异常正文',
+  );
+}
+{
+  const automaticFailure = helpers.createAutomaticWebpageExtractionError(
+    'http://xhslink.cn/o/demo?xsec_token=source-secret',
+    helpers.buildAutomaticWebpageFailureDiagnostic(
+      'http://xhslink.cn/o/demo?xsec_token=source-secret',
+      {
+        metadata: {
+          conversionStatus: 'failed',
+          conversionDiagnostic: {
+            source: 'xiaohongshu',
+            request: { sourceHost: 'xhslink.cn', responseStatus: 0 },
+          },
+        },
+      },
+      {
+        source: 'xiaohongshu-browser',
+        stages: [{ type: 'stage', stage: 'media_extraction', outcome: 'failed', failureKind: 'BROWSER_TASK_TIMEOUT' }],
+        events: [],
+      },
+    ),
+  );
+  assert.strictEqual(automaticFailure.code, 'AUTOMATIC_WEBPAGE_EXTRACTION_FAILED');
+  assert.strictEqual(automaticFailure.diagnostic.sourceHost, 'xhslink.cn');
+  assert.strictEqual(automaticFailure.diagnostic.cause.source, 'xiaohongshu');
+  assert.strictEqual(
+    automaticFailure.diagnostic.xiaohongshuBrowser.stages[0].failureKind,
+    'BROWSER_TASK_TIMEOUT',
+  );
+  assert.strictEqual(JSON.stringify(automaticFailure.diagnostic).includes('source-secret'), false);
 }
 assert.strictEqual(typeof helpers.buildAudioTranscriptMarkdown, 'function');
 assert.strictEqual(typeof helpers.buildTranscriptPropertyMetadata, 'function');
