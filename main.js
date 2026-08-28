@@ -8122,7 +8122,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.130";
+var PLUGIN_RUNTIME_VERSION = "1.3.131";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -11569,10 +11569,29 @@ function isAutomaticWebpageHydrationSuccessful(record) {
   return (conversionStatus === "success" || transcriptionStatus === "success") && hasStoredContent;
 }
 __name(isAutomaticWebpageHydrationSuccessful, "isAutomaticWebpageHydrationSuccessful");
-function createAutomaticWebpageExtractionError(url) {
+function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuBrowserDiagnostic = null) {
+  const metadata = record && record.metadata || {};
+  const cause = metadata.conversionDiagnostic || metadata.mediaResolutionDiagnostic || metadata.attachmentDiagnostic || null;
+  return redactSensitiveObject({
+    source: "automatic-webpage",
+    stage: "hydration",
+    outcome: "failed",
+    failureKind: "AUTOMATIC_WEBPAGE_EXTRACTION_FAILED",
+    sourceHost: getSafeUrlDiagnostic(url).host || "unknown-host",
+    conversionStatus: String(metadata.conversionStatus || "").toLowerCase() || "unknown",
+    transcriptionStatus: String(metadata.transcriptionStatus || "").toLowerCase() || "unknown",
+    ...cause && typeof cause === "object" ? { cause } : {},
+    ...xiaohongshuBrowserDiagnostic && typeof xiaohongshuBrowserDiagnostic === "object" ? { xiaohongshuBrowser: xiaohongshuBrowserDiagnostic } : {}
+  });
+}
+__name(buildAutomaticWebpageFailureDiagnostic, "buildAutomaticWebpageFailureDiagnostic");
+function createAutomaticWebpageExtractionError(url, diagnostic = null) {
   const host = getSafeUrlDiagnostic(url).host || "unknown-host";
   const error = new Error(`剪切板链接网页提取失败，已保留待重试：${host}`);
   error.code = "AUTOMATIC_WEBPAGE_EXTRACTION_FAILED";
+  if (diagnostic && typeof diagnostic === "object") {
+    error.diagnostic = redactSensitiveObject(diagnostic);
+  }
   return error;
 }
 __name(createAutomaticWebpageExtractionError, "createAutomaticWebpageExtractionError");
@@ -12288,7 +12307,10 @@ function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
     ...entry.stage ? { stage: String(entry.stage).trim().slice(0, 64) } : {},
     ...entry.outcome ? { outcome: String(entry.outcome).trim().slice(0, 64) } : {},
     ...entry.action ? { action: String(entry.action).trim().slice(0, 64) } : {},
-    ...entry.code ? { code: String(entry.code).trim().slice(0, 32) } : {}
+    ...entry.code ? { code: String(entry.code).trim().slice(0, 32) } : {},
+    ...entry.failureKind ? {
+      failureKind: String(entry.failureKind).trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 64)
+    } : {}
   };
   const host = getSafeUrlDiagnostic(entry.url || "").host;
   if (host) safeEntry.host = host;
@@ -12313,6 +12335,24 @@ function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
   return diagnostic;
 }
 __name(appendXiaohongshuBrowserDiagnostic, "appendXiaohongshuBrowserDiagnostic");
+function getXiaohongshuBrowserFailureCode(error) {
+  const explicitCode = String(error && error.code || "").trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 32);
+  if (explicitCode) return explicitCode;
+  const message = String(error && error.message || error || "");
+  if (/timed?\s*out|timeout/i.test(message)) return "BROWSER_TASK_TIMEOUT";
+  if (/load|navigation|ERR_/i.test(message)) return "BROWSER_LOAD_FAILED";
+  return "BROWSER_EXTRACTION_FAILED";
+}
+__name(getXiaohongshuBrowserFailureCode, "getXiaohongshuBrowserFailureCode");
+function appendXiaohongshuBrowserFailure(options = {}, stage = "", error = null) {
+  return appendXiaohongshuBrowserDiagnostic(options, {
+    type: "stage",
+    stage,
+    outcome: isAbortError(error) ? "aborted" : "failed",
+    failureKind: getXiaohongshuBrowserFailureCode(error)
+  });
+}
+__name(appendXiaohongshuBrowserFailure, "appendXiaohongshuBrowserFailure");
 function detectXiaohongshuSecurityRestriction(text = "") {
   const source = String(text || "");
   const hasCode = /(?:^|\D)300011(?:\D|$)/.test(source);
@@ -17013,7 +17053,8 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
       session,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      backgroundThrottling: false
     }
   });
   trackXiaohongshuBrowserWindow(win);
@@ -17030,7 +17071,11 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
     throwIfAborted(options.signal);
     const url = targetUrl || "https://www.xiaohongshu.com/";
     const loaded = waitForWebContents(win.webContents, 15e3);
-    if (!beginBestEffortBrowserLoad(win, url)) return false;
+    if (!beginBestEffortBrowserLoad(win, url)) {
+      const loadError = new Error("小红书登录探测窗口未能开始加载");
+      loadError.code = "BROWSER_LOAD_START_FAILED";
+      throw loadError;
+    }
     await loaded;
     throwIfAborted(options.signal);
     await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -17074,11 +17119,7 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
     return loggedIn;
   } catch (error) {
     if (isAbortError(error)) throw error;
-    appendXiaohongshuBrowserDiagnostic(options, {
-      type: "stage",
-      stage: "login_check",
-      outcome: "probe_failed"
-    });
+    appendXiaohongshuBrowserFailure(options, "login_check", error);
     return false;
   } finally {
     cleanupAbort();
@@ -18225,7 +18266,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       session: wechatSession || void 0,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      backgroundThrottling: !isXiaohongshuUrl(url)
     }
   });
   const isXiaohongshuExtractionWindow = isXiaohongshuUrl(url);
@@ -18376,7 +18418,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         throw error;
       }
     }
-    const payload = await win.webContents.executeJavaScript(`
+    const mediaExtractionTask = win.webContents.executeJavaScript(`
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const urls = [];
@@ -18511,6 +18553,11 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         };
       })()
     `);
+    const payload = isXiaohongshuExtractionWindow ? await runBrowserTaskWithTimeout(
+      mediaExtractionTask,
+      XIAOHONGSHU_CONTENT_DEADLINE_MS,
+      "xiaohongshu-media-extraction"
+    ) : await mediaExtractionTask;
     if (isXiaohongshuExtractionWindow) {
       recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
       appendXiaohongshuBrowserDiagnostic(options, {
@@ -18545,6 +18592,11 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       capturedRequests,
       payload && Array.isArray(payload.urls) ? payload.urls : payload
     ]);
+  } catch (error) {
+    if (isXiaohongshuExtractionWindow) {
+      appendXiaohongshuBrowserFailure(options, "media_extraction", error);
+    }
+    throw error;
   } finally {
     cleanupAbort();
     cleanupHiddenChildWindowGuards();
@@ -18598,7 +18650,8 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       session: xiaohongshuSession || void 0,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      backgroundThrottling: false
     }
   });
   trackXiaohongshuBrowserWindow(win);
@@ -18701,6 +18754,9 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         partial: false
       }
     };
+  } catch (error) {
+    appendXiaohongshuBrowserFailure(options, "content_extraction", error);
+    throw error;
   } finally {
     cleanupAbort();
     cleanupHiddenWindowGuards();
@@ -18828,7 +18884,8 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         session: wechatSession || void 0,
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: true
+        sandbox: true,
+        backgroundThrottling: false
       }
     });
     trackXiaohongshuBrowserWindow(win);
@@ -26560,6 +26617,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
         }
         if (pendingXiaohongshuFailureDiagnostic && !mediaUrl) {
+          if (xiaohongshuBrowserDiagnostic) {
+            pendingXiaohongshuFailureDiagnostic.browser = redactSensitiveObject(
+              xiaohongshuBrowserDiagnostic
+            );
+          }
           throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
         }
         if (mediaUrl) {
@@ -27072,14 +27134,18 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         throw error;
       }
       if (isXiaohongshuUrl(url)) {
-        throw createRetryableXiaohongshuContentError(buildXiaohongshuFailureDiagnostic({
+        const failureDiagnostic = buildXiaohongshuFailureDiagnostic({
           manifestVersion: this.manifest && this.manifest.version,
           sourceUrl: url,
           resolvedUrl: xiaohongshuResolvedUrl || url,
           responseStatus: xiaohongshuResponseStatus,
           requestError: error,
           redirectDiagnostic: xiaohongshuRedirectDiagnostic
-        }));
+        });
+        if (xiaohongshuBrowserDiagnostic) {
+          failureDiagnostic.browser = redactSensitiveObject(xiaohongshuBrowserDiagnostic);
+        }
+        throw createRetryableXiaohongshuContentError(failureDiagnostic);
       }
       if (isXiaoyuzhouUrl(url) || isBilibiliUrl(url) || isDouyinUrl(url)) {
         return {
@@ -27235,7 +27301,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       );
       throwIfAborted(signal);
       if (textAsWebpage && !isAutomaticWebpageHydrationSuccessful(recordForMarkdown)) {
-        throw createAutomaticWebpageExtractionError(textWebpageUrl);
+        const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(textWebpageUrl) ? this.lastXiaohongshuBrowserDiagnostic : null;
+        throw createAutomaticWebpageExtractionError(
+          textWebpageUrl,
+          buildAutomaticWebpageFailureDiagnostic(
+            textWebpageUrl,
+            recordForMarkdown,
+            xiaohongshuBrowserDiagnostic
+          )
+        );
       }
       recordForMarkdown = await this.saveSourceMediaAttachment(recordForMarkdown, rootDir, dateFolder, title);
       title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
@@ -28560,6 +28634,9 @@ WechatObsidianInboxPlugin.__test = {
   installExternalAppNavigationGuards,
   createXiaohongshuBrowserDiagnostic,
   appendXiaohongshuBrowserDiagnostic,
+  appendXiaohongshuBrowserFailure,
+  buildAutomaticWebpageFailureDiagnostic,
+  createAutomaticWebpageExtractionError,
   detectXiaohongshuSecurityRestriction,
   installHiddenBrowserChildWindowGuards,
   installHiddenBrowserWindowGuards,
