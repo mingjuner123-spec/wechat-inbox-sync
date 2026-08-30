@@ -233,7 +233,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.131';
+const PLUGIN_RUNTIME_VERSION = '1.3.132';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -347,6 +347,7 @@ const DEFAULT_SETTINGS = {
   proEntitlementLastErrorAt: '',
   proSetupLastCheckedAt: '',
   proSetupInstallPromptSnoozedUntil: '',
+  localComponentAutoPromptedIssues: {},
   bindings: [],
   clientId: '',
   inboxDir: '临时收集',
@@ -670,6 +671,43 @@ function buildLocalComponentRefreshPlan(readiness = {}, options = {}) {
     hasRepairs: missingComponents.length > 0,
     hasUpdates: updateComponents.length > 0,
     hasRequiredChanges: missingComponents.length > 0 || updateComponents.length > 0,
+  };
+}
+
+function normalizeLocalComponentAutoPromptedIssues(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  return {
+    ...(source.asr === true ? { asr: true } : {}),
+    ...(source.ocr === true ? { ocr: true } : {}),
+  };
+}
+
+function getLocalComponentRequiredIssueState(readiness = {}) {
+  const asrStatus = readiness && readiness.asrStatus ? readiness.asrStatus : {};
+  const ocrStatus = readiness && readiness.ocrStatus ? readiness.ocrStatus : {};
+  return {
+    asr: asrStatus.ready !== true,
+    ocr: ocrStatus.ready !== true,
+  };
+}
+
+function buildLocalComponentAutomaticRepairPlan(refreshPlan = {}, componentKeys = []) {
+  const selected = new Set(Array.isArray(componentKeys) ? componentKeys : []);
+  const requireAsr = selected.has('asr') && refreshPlan.requireAsr === true;
+  const requireOcr = selected.has('ocr') && refreshPlan.requireOcr === true;
+  const missingComponents = [];
+  if (requireAsr) missingComponents.push('音视频转写');
+  if (requireOcr) missingComponents.push('图片文字识别 OCR');
+  return {
+    requireAsr,
+    requireOcr,
+    forceAsr: false,
+    forceOcr: false,
+    missingComponents,
+    updateComponents: [],
+    hasRepairs: missingComponents.length > 0,
+    hasUpdates: false,
+    hasRequiredChanges: missingComponents.length > 0,
   };
 }
 
@@ -1942,7 +1980,7 @@ function runWindowsLocalAsrInstaller(installerPath, installRoot, processEnv, opt
       }
       if (now() - lastProgressAt < stallTimeoutMs) return;
       stopping = true;
-      const stalledError = new Error('本地转写组件安装已连续 10 分钟没有进展，插件已自动结束卡住的安装；请点击“刷新权限”重新安装。');
+      const stalledError = new Error('本地转写组件安装已连续 10 分钟没有进展，插件已自动结束卡住的安装；请点击“安装/修复/更新”重新安装。');
       stalledError.localAsrInstallStalled = true;
       if (!child || !Number.isInteger(child.pid) || child.pid <= 0) {
         finish(stalledError, stdoutBuffer, stderrBuffer);
@@ -1988,7 +2026,7 @@ function getProEntitlementStatusFingerprint(status) {
 
 function buildLocalTranscriptionEntitlementText(status) {
   if (!status || typeof status !== 'object') {
-    return '权限状态：未刷新。请先绑定小程序并开通 Pro，再回到插件点击「刷新权限」。';
+    return '权限状态：未刷新。请先绑定小程序并开通 Pro；插件会在打开设置时自动检查，也可使用下方本地转写组件入口。';
   }
   if (status.hasAccess) {
     return `权限状态：已开通${status.code ? `，兑换码：${status.code}` : ''}${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}${status.bindingLabel ? `，绑定：${status.bindingLabel}` : ''}`;
@@ -2000,12 +2038,12 @@ function buildLocalTranscriptionEntitlementText(status) {
     return `权限状态：兑换码无效${status.code ? `（${status.code}）` : ''}。`;
   }
   if (status.status === 'expired') {
-    return `权限状态：已过期${status.expiresAt ? `，到期时间 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}。请在小程序里续费 Pro 后刷新权限。`;
+    return `权限状态：已过期${status.expiresAt ? `，到期时间 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}。请在小程序里续费 Pro 后重新打开设置。`;
   }
   if (status.status === 'unbound') {
     return '权限状态：未绑定小程序。请先完成小程序绑定。';
   }
-  return '权限状态：未开通。请在小程序开通 Pro 后，再回到插件刷新权限。';
+  return '权限状态：未开通。请在小程序开通 Pro 后，再回到插件重新打开设置。';
 }
 
 function isCachedProStatusActive(status, now = Date.now()) {
@@ -3083,6 +3121,9 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.proEntitlementLastError = String(merged.proEntitlementLastError || '').trim();
   merged.proEntitlementLastErrorAt = String(merged.proEntitlementLastErrorAt || '').trim();
   merged.proSetupInstallPromptSnoozedUntil = String(merged.proSetupInstallPromptSnoozedUntil || '').trim();
+  merged.localComponentAutoPromptedIssues = normalizeLocalComponentAutoPromptedIssues(
+    merged.localComponentAutoPromptedIssues,
+  );
   merged.clientId = String(merged.clientId || '').trim() || createClientId();
   merged.inboxDir = normalizeConfiguredVaultPath(merged.inboxDir);
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
@@ -14839,7 +14880,7 @@ function getKnownLocalComponentInstallFailureReason(rawMessage) {
     return '磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。';
   }
   if (/Local ASR installer download returned outdated or invalid content/i.test(message)) {
-    return '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“刷新权限”重试。若仍失败，请复制诊断信息联系开发者。';
+    return '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装/修复/更新”重试。若仍失败，请复制诊断信息联系开发者。';
   }
   if (
     /Copy-Item[\s\S]{0,240}System\.IO\.IOException|System\.IO\.IOException[\s\S]{0,240}CopyItemCommand/i.test(message)
@@ -17359,29 +17400,68 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
 
+  async reconcileLocalComponentAutoPromptedIssues(readiness = {}) {
+    const previous = normalizeLocalComponentAutoPromptedIssues(
+      this.settings.localComponentAutoPromptedIssues,
+    );
+    const next = { ...previous };
+    if (readiness.asrStatus && readiness.asrStatus.ready === true) delete next.asr;
+    if (readiness.ocrStatus && readiness.ocrStatus.ready === true) delete next.ocr;
+    if (JSON.stringify(next) !== JSON.stringify(previous)) {
+      await this.saveSettings({
+        ...this.settings,
+        localComponentAutoPromptedIssues: next,
+      });
+    }
+    if (readiness.ready === true && this.settings.proSetupInstallPromptSnoozedUntil) {
+      await this.clearLocalComponentInstallPromptSnooze();
+    }
+    return next;
+  }
+
+  async markLocalComponentAutoPromptedIssues(componentKeys = []) {
+    const previous = normalizeLocalComponentAutoPromptedIssues(
+      this.settings.localComponentAutoPromptedIssues,
+    );
+    const next = { ...previous };
+    for (const key of componentKeys) {
+      if (key === 'asr' || key === 'ocr') next[key] = true;
+    }
+    if (JSON.stringify(next) !== JSON.stringify(previous)) {
+      await this.saveSettings({
+        ...this.settings,
+        localComponentAutoPromptedIssues: next,
+      });
+    }
+    return next;
+  }
+
   async refreshProAndMaybePromptLocalComponentInstall(options = {}) {
     const reason = options.reason || 'settings-open';
     const now = Date.now();
     const lastCheckedAt = Date.parse(this.settings.proSetupLastCheckedAt || '');
-    if (
+    const cached = this.settings.localTranscriptionEntitlementStatus;
+    const canUseCachedStatus = (
       !options.force
       && reason === 'settings-open'
       && Number.isFinite(lastCheckedAt)
       && now - lastCheckedAt < PRO_SETUP_CHECK_INTERVAL_MS
-    ) {
-      const cached = this.settings.localTranscriptionEntitlementStatus;
-      if (isCachedProStatusActive(cached)) return cached;
-    }
+      && isCachedProStatusActive(cached)
+    );
 
     let status = null;
-    try {
-      status = await this.getProFeatureAccessStatus({ forceRefresh: Boolean(options.force) });
-    } finally {
-      if (reason === 'settings-open') {
-        await this.saveSettings({
-          ...this.settings,
-          proSetupLastCheckedAt: new Date(now).toISOString(),
-        });
+    if (canUseCachedStatus) {
+      status = cached;
+    } else {
+      try {
+        status = await this.getProFeatureAccessStatus({ forceRefresh: Boolean(options.force) });
+      } finally {
+        if (reason === 'settings-open') {
+          await this.saveSettings({
+            ...this.settings,
+            proSetupLastCheckedAt: new Date(now).toISOString(),
+          });
+        }
       }
     }
 
@@ -17404,8 +17484,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           };
         }
       }
+      const isManualRefresh = reason === 'manual-refresh';
       let readiness = this.getLocalTranscriptionComponentReadiness();
-      let refreshPlan = buildLocalComponentRefreshPlan(readiness);
+      let refreshPlan = buildLocalComponentRefreshPlan(readiness, {
+        includeOptionalUpdates: isManualRefresh,
+      });
       readiness = {
         ...readiness,
         missingComponents: refreshPlan.missingComponents,
@@ -17417,43 +17500,61 @@ class WechatObsidianInboxPlugin extends Plugin {
         localComponentReadiness: readiness,
         localComponentRefreshPlan: refreshPlan,
       };
+      const promptedIssues = await this.reconcileLocalComponentAutoPromptedIssues(readiness);
+      const currentIssues = getLocalComponentRequiredIssueState(readiness);
+      const automaticPromptReason = reason === 'settings-open' || reason === 'bind';
+      const automaticComponentKeys = automaticPromptReason
+        ? ['asr', 'ocr'].filter((key) => currentIssues[key] && promptedIssues[key] !== true)
+        : [];
+      const automaticRepairPlan = buildLocalComponentAutomaticRepairPlan(
+        refreshPlan,
+        automaticComponentKeys,
+      );
+      const installPlan = (isManualRefresh || options.installMissingComponents === true)
+        ? refreshPlan
+        : automaticRepairPlan;
+      const shouldOfferComponentChanges = installPlan.hasRequiredChanges === true;
       const manifestVersion = this.manifest && this.manifest.version
         ? String(this.manifest.version).trim()
         : '';
       const runtimeIdentity = manifestVersion ? getPluginRuntimeIdentity(manifestVersion) : null;
       if (
-        reason === 'manual-refresh'
-        && refreshPlan.hasRequiredChanges
+        shouldOfferComponentChanges
         && runtimeIdentity
         && !runtimeIdentity.matchesManifest
       ) {
-        new Notice('插件文件没有更新完整。请先更新插件，并完全退出后重新打开 Obsidian，再点击“刷新权限”修复转写组件。', 12000);
+        new Notice('插件文件没有更新完整。请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装/修复/更新”处理本地转写组件。', 12000);
         return {
           ...status,
           localComponentInstallSkipped: {
             reason: 'plugin-runtime-mismatch',
             identity: runtimeIdentity,
-            ...refreshPlan,
+            ...installPlan,
           },
         };
       }
-      const shouldInstallMissingComponents = (
-        options.installMissingComponents === true
-        || reason === 'manual-refresh'
-      );
-      if (shouldInstallMissingComponents && refreshPlan.hasRequiredChanges) {
+      if (shouldOfferComponentChanges) {
         if (this.isLocalComponentInstallPromptSnoozed(reason)) {
           status = {
             ...status,
             localComponentInstallSkipped: {
               reason: 'snoozed',
               snoozedUntil: this.settings.proSetupInstallPromptSnoozedUntil,
-              ...refreshPlan,
+              ...installPlan,
             },
           };
           return status;
         }
-        const accepted = await this.confirmLocalComponentInstall(status, reason, readiness);
+        if (automaticComponentKeys.length) {
+          await this.markLocalComponentAutoPromptedIssues(automaticComponentKeys);
+        }
+        const promptReadiness = {
+          ...readiness,
+          missingComponents: installPlan.missingComponents,
+          updateComponents: installPlan.updateComponents,
+          updateRecommended: installPlan.updateComponents.length > 0,
+        };
+        const accepted = await this.confirmLocalComponentInstall(status, reason, promptReadiness);
         if (!accepted) {
           const snoozedUntil = await this.snoozeLocalComponentInstallPrompt(now);
           status = {
@@ -17461,7 +17562,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             localComponentInstallSkipped: {
               reason: 'user-declined',
               snoozedUntil,
-              ...refreshPlan,
+              ...installPlan,
             },
           };
           return status;
@@ -17469,16 +17570,18 @@ class WechatObsidianInboxPlugin extends Plugin {
         try {
           const installResult = await this.installLocalTranscriptionComponents({
             reason,
-            readiness,
-            requireAsr: refreshPlan.requireAsr,
-            requireOcr: refreshPlan.requireOcr,
-            forceAsr: refreshPlan.forceAsr,
-            forceOcr: refreshPlan.forceOcr,
+            readiness: promptReadiness,
+            requireAsr: installPlan.requireAsr,
+            requireOcr: installPlan.requireOcr,
+            forceAsr: installPlan.forceAsr,
+            forceOcr: installPlan.forceOcr,
           });
           readiness = installResult && installResult.readiness
             ? installResult.readiness
             : this.getLocalTranscriptionComponentReadiness();
-          refreshPlan = buildLocalComponentRefreshPlan(readiness);
+          refreshPlan = buildLocalComponentRefreshPlan(readiness, {
+            includeOptionalUpdates: isManualRefresh,
+          });
           readiness = {
             ...readiness,
             missingComponents: refreshPlan.missingComponents,
@@ -17491,6 +17594,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             localComponentReadiness: readiness,
             localComponentRefreshPlan: refreshPlan,
           };
+          await this.reconcileLocalComponentAutoPromptedIssues(readiness);
           await this.clearLocalComponentInstallPromptSnooze();
         } catch (error) {
           const failedReadiness = this.getLocalTranscriptionComponentReadiness();
@@ -17498,7 +17602,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             ...status,
             localComponentInstallError: formatLocalComponentInstallFailureReason(error),
             localComponentReadiness: failedReadiness,
-            localComponentRefreshPlan: buildLocalComponentRefreshPlan(failedReadiness),
+            localComponentRefreshPlan: buildLocalComponentRefreshPlan(failedReadiness, {
+              includeOptionalUpdates: isManualRefresh,
+            }),
           };
         }
       }
@@ -17663,7 +17769,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     const promptReason = options.reason || 'first-use';
     if (this.isLocalComponentInstallPromptSnoozed(promptReason)) {
-      throw new Error(`${featureName}需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“刷新权限”后安装/修复。`);
+      throw new Error(`${featureName}需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“安装/修复/更新”。`);
     }
     const accepted = await this.confirmLocalComponentInstall(status, promptReason, requiredReadiness);
     if (!accepted) {
@@ -17706,7 +17812,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       },
     });
     if (result.status === 'unverified-running') {
-      throw new Error('检测到 ASR 安装进程仍在运行，但 Windows 未返回可核对的命令行。为避免结束其他程序，本次没有强制结束它；请稍后再次点击“刷新权限”。');
+      throw new Error('检测到 ASR 安装进程仍在运行，但 Windows 未返回可核对的命令行。为避免结束其他程序，本次没有强制结束它；请稍后再次点击“安装/修复/更新”。');
     }
     if (result.status === 'stopped-after-failure') {
       new Notice('已自动结束上次报错后仍未退出的 ASR 安装进程，现在可以重新安装。', 8000);
@@ -23290,16 +23396,16 @@ class WechatInboxSettingTab extends PluginSettingTab {
     proPanel.open = true;
     proPanel.createEl('summary', { text: 'Pro 状态' });
     proPanel.createDiv({
-      text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；开通 Pro 后点击刷新即可更新有效期和本地组件状态。${proStatusText}`,
+      text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；本地组件缺失或损坏时会提示一次，兼容可用时保持静默。${proStatusText}`,
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(proPanel)
-      .setName('刷新 Pro 权限')
+      .setName('本地转写组件')
       .setDesc(this.plugin.settings.pendingRedeemCode
         ? `兑换码：${this.plugin.settings.pendingRedeemCode}`
-        : '兑换码会在成功识别 Pro 后自动显示；普通使用只需要绑定小程序并开通 Pro。')
+        : '点击后会先刷新 Pro 权益，再检查本地组件；缺失则安装，损坏或不兼容则修复，有新版时提示更新。')
       .addButton((button) => button
-        .setButtonText('刷新权限')
+        .setButtonText('安装/修复/更新')
         .setCta()
         .onClick(async () => {
           try {

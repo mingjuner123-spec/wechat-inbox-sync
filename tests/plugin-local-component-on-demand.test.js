@@ -34,7 +34,7 @@ function createPlugin() {
   return plugin;
 }
 
-async function verifyStatusRefreshPromptsAndInstallsMissingComponentsOnlyOnManualRefresh() {
+async function verifyPassiveRefreshPromptsOnceAndInstallsOnlyMissingComponents() {
   const plugin = createPlugin();
   let refreshes = 0;
   let prompts = 0;
@@ -64,24 +64,136 @@ async function verifyStatusRefreshPromptsAndInstallsMissingComponentsOnlyOnManua
     };
   };
 
-  for (const reason of ['bind', 'settings-open']) {
-    const status = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason, force: true });
-    assert.strictEqual(status.hasAccess, true);
-    assert.strictEqual(status.localComponentReadiness.ready, false);
-  }
-  const manualStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'manual-refresh', force: true });
-  assert.strictEqual(manualStatus.hasAccess, true);
-  assert.strictEqual(manualStatus.localComponentReadiness.ready, true);
-  assert.strictEqual(manualStatus.localComponentInstallResult.installed, true);
+  const bindStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'bind', force: true });
+  assert.strictEqual(bindStatus.hasAccess, true);
+  assert.strictEqual(bindStatus.localComponentReadiness.ready, true);
+  assert.strictEqual(bindStatus.localComponentInstallResult.installed, true);
 
-  assert.strictEqual(refreshes, 3);
+  const settingsStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
+  assert.strictEqual(settingsStatus.hasAccess, true);
+  assert.strictEqual(settingsStatus.localComponentReadiness.ready, true);
+
+  assert.strictEqual(refreshes, 2);
   assert.strictEqual(prompts, 1);
   assert.strictEqual(installOptions.length, 1);
-  assert.strictEqual(installOptions[0].reason, 'manual-refresh');
+  assert.strictEqual(installOptions[0].reason, 'bind');
   assert.strictEqual(installOptions[0].requireAsr, false);
   assert.strictEqual(installOptions[0].requireOcr, true);
   assert.strictEqual(installOptions[0].forceAsr, false);
   assert.strictEqual(installOptions[0].forceOcr, false);
+}
+
+async function verifyCachedEntitlementStillChecksLocalComponents() {
+  const plugin = createPlugin();
+  plugin.settings = helpers.mergeSettings({
+    proSetupLastCheckedAt: new Date().toISOString(),
+    localTranscriptionEntitlementStatus: {
+      hasAccess: true,
+      status: 'active',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    },
+  });
+  let prompts = 0;
+  let installs = 0;
+  plugin.getProFeatureAccessStatus = async () => {
+    throw new Error('fresh entitlement cache should avoid a cloud permission request');
+  };
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: false,
+    missingComponents: ['OCR'],
+    asrStatus: { ready: true },
+    ocrStatus: { ready: false },
+  });
+  plugin.confirmLocalComponentInstall = async () => {
+    prompts += 1;
+    return true;
+  };
+  plugin.installLocalTranscriptionComponents = async (options) => {
+    installs += 1;
+    assert.strictEqual(options.requireAsr, false);
+    assert.strictEqual(options.requireOcr, true);
+    return {
+      installed: true,
+      readiness: {
+        ready: true,
+        missingComponents: [],
+        asrStatus: { ready: true },
+        ocrStatus: { ready: true },
+      },
+    };
+  };
+
+  const status = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open' });
+  assert.strictEqual(status.hasAccess, true);
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(installs, 1);
+}
+
+async function verifyDeclinedOrFailedAutomaticPromptDoesNotLoop() {
+  for (const outcome of ['declined', 'failed']) {
+    const plugin = createPlugin();
+    let prompts = 0;
+    let installs = 0;
+    plugin.getProFeatureAccessStatus = async () => ({ hasAccess: true, status: 'active' });
+    plugin.getLocalTranscriptionComponentReadiness = () => ({
+      ready: false,
+      missingComponents: ['图片文字识别 OCR'],
+      asrStatus: { ready: true },
+      ocrStatus: { ready: false },
+    });
+    plugin.confirmLocalComponentInstall = async () => {
+      prompts += 1;
+      return outcome !== 'declined';
+    };
+    plugin.installLocalTranscriptionComponents = async () => {
+      installs += 1;
+      throw new Error('OCR repair failed');
+    };
+
+    const first = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
+    assert.strictEqual(first.hasAccess, true);
+    assert.strictEqual(prompts, 1);
+    assert.strictEqual(installs, outcome === 'failed' ? 1 : 0);
+    assert.strictEqual(plugin.settings.localComponentAutoPromptedIssues.ocr, true);
+
+    await plugin.saveSettings({
+      ...plugin.settings,
+      proSetupInstallPromptSnoozedUntil: '',
+    });
+    const second = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
+    assert.strictEqual(second.hasAccess, true);
+    assert.strictEqual(prompts, 1);
+    assert.strictEqual(installs, outcome === 'failed' ? 1 : 0);
+  }
+}
+
+async function verifyHealthyStateClearsAutomaticPromptEpisode() {
+  const plugin = createPlugin();
+  let ready = false;
+  let prompts = 0;
+  plugin.getProFeatureAccessStatus = async () => ({ hasAccess: true, status: 'active' });
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready,
+    missingComponents: ready ? [] : ['音视频转写'],
+    asrStatus: { ready },
+    ocrStatus: { ready: true },
+  });
+  plugin.confirmLocalComponentInstall = async () => {
+    prompts += 1;
+    return true;
+  };
+  plugin.installLocalTranscriptionComponents = async () => {
+    ready = true;
+    return { installed: true, readiness: plugin.getLocalTranscriptionComponentReadiness() };
+  };
+
+  await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(plugin.settings.localComponentAutoPromptedIssues.asr, undefined);
+
+  ready = false;
+  await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
+  assert.strictEqual(prompts, 2);
 }
 
 async function verifyManualRefreshDeclineSkipsDownload() {
@@ -156,7 +268,7 @@ async function verifyFirstUseDeclineSnoozesPromptAndSkipsRepeatedDialogs() {
   assert.strictEqual(installs, 0);
 }
 
-async function verifyManualRefreshLeavesCompatibleLegacyComponentsUntouched() {
+async function verifyCompatibleComponentsStaySilentUntilManualUpdateCheck() {
   const plugin = createPlugin();
   let prompts = 0;
   const installOptions = [];
@@ -179,11 +291,19 @@ async function verifyManualRefreshLeavesCompatibleLegacyComponentsUntouched() {
   });
   plugin.confirmLocalComponentInstall = async () => {
     prompts += 1;
-    throw new Error('compatible legacy components must not prompt during permission refresh');
+    return true;
   };
   plugin.installLocalTranscriptionComponents = async (options) => {
     installOptions.push(options);
-    throw new Error('compatible legacy components must not download during permission refresh');
+    return {
+      installed: true,
+      readiness: {
+        ready: true,
+        missingComponents: [],
+        asrStatus: { ready: true },
+        ocrStatus: { ready: true },
+      },
+    };
   };
 
   const passiveStatus = await plugin.refreshProAndMaybePromptLocalComponentInstall({
@@ -198,11 +318,11 @@ async function verifyManualRefreshLeavesCompatibleLegacyComponentsUntouched() {
     reason: 'manual-refresh',
     force: true,
   });
-  assert.strictEqual(manualStatus.localComponentRefreshPlan.hasRequiredChanges, false);
-  assert.strictEqual(manualStatus.localComponentReadiness.updateRecommended, false);
-  assert.strictEqual(manualStatus.localComponentInstallResult, undefined);
-  assert.strictEqual(prompts, 0);
-  assert.strictEqual(installOptions.length, 0);
+  assert.strictEqual(manualStatus.localComponentInstallResult.installed, true);
+  assert.strictEqual(prompts, 1);
+  assert.strictEqual(installOptions.length, 1);
+  assert.strictEqual(installOptions[0].forceAsr, true);
+  assert.strictEqual(installOptions[0].forceOcr, true);
 }
 
 async function verifyManualRefreshRequiresReloadWhenPluginFilesDoNotMatch() {
@@ -346,10 +466,13 @@ async function verifyImplicitInstallIsNoOp() {
 }
 
 (async () => {
-  await verifyStatusRefreshPromptsAndInstallsMissingComponentsOnlyOnManualRefresh();
+  await verifyPassiveRefreshPromptsOnceAndInstallsOnlyMissingComponents();
+  await verifyCachedEntitlementStillChecksLocalComponents();
+  await verifyDeclinedOrFailedAutomaticPromptDoesNotLoop();
+  await verifyHealthyStateClearsAutomaticPromptEpisode();
   await verifyManualRefreshDeclineSkipsDownload();
   await verifyFirstUseDeclineSnoozesPromptAndSkipsRepeatedDialogs();
-  await verifyManualRefreshLeavesCompatibleLegacyComponentsUntouched();
+  await verifyCompatibleComponentsStaySilentUntilManualUpdateCheck();
   await verifyManualRefreshRequiresReloadWhenPluginFilesDoNotMatch();
   await verifyManualRefreshIgnoresPromptSnoozeAndClearsItAfterInstall();
   verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested();
