@@ -2804,6 +2804,8 @@ assert.strictEqual(pluginMainSource.includes("id: 'open-wechat-channels-listener
 assert.strictEqual(pluginMainSource.includes("text: '音视频转写组件安装'"), false);
 assert.strictEqual(pluginMainSource.includes("text: '本地转写组件'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('手动安装 / 修复本地组件')"), false);
+assert.ok(pluginMainSource.includes(".setName('本地转写组件')"));
+assert.ok(pluginMainSource.includes(".setButtonText('安装/修复/更新')"));
 assert.strictEqual(pluginMainSource.includes('const localAsrPanel = containerEl.createEl'), false);
 assert.strictEqual(pluginMainSource.includes('runLocalAsrButtonTask(button'), false);
 assert.strictEqual(pluginMainSource.includes('button.setButtonText(runningText)'), false);
@@ -2857,7 +2859,7 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.formatLocalComponentInstallFailureReason('Local ASR installer download returned outdated or invalid content'),
-  '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“刷新权限”重试。若仍失败，请复制诊断信息联系开发者。',
+  '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装/修复/更新”重试。若仍失败，请复制诊断信息联系开发者。',
 );
 assert.ok(pluginMainSource.includes('/transcriptions/cloud'));
 assert.ok(pluginMainSource.includes('runCloudFallbackTranscription'));
@@ -12394,8 +12396,8 @@ async function runLocalTranscriptionEntitlementTests() {
   };
   const setupStatus = await setupPlugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'bind', force: true });
   assert.strictEqual(setupStatus.hasAccess, true);
-  assert.strictEqual(confirmSetupReason, '');
-  assert.deepStrictEqual(installComponentCalls, []);
+  assert.strictEqual(confirmSetupReason, 'bind');
+  assert.deepStrictEqual(installComponentCalls, ['bind']);
 
   const refreshKeepsProStatusPlugin = new PluginClass();
   refreshKeepsProStatusPlugin.saveData = async () => {};
