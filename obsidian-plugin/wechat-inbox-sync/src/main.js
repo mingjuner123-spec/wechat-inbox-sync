@@ -233,7 +233,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.133';
+const PLUGIN_RUNTIME_VERSION = '1.3.134';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -4252,9 +4252,18 @@ function isXiaoyuzhouUrl(url) {
 const WECHAT_CHANNELS_FEED_INFO_URL = 'https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info';
 
 function isWechatChannelsUrl(url) {
-  const text = String(url || '').toLowerCase();
-  return text.includes('channels.weixin.qq.com')
-    || /(^|\/\/)weixin\.qq\.com\/sph\//i.test(text);
+  const text = String(url || '').trim();
+  if (!text) return false;
+  try {
+    const parsed = new URL(text);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    const hostname = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+    if (hostname === 'channels.weixin.qq.com') return true;
+    return hostname === 'weixin.qq.com' && parsed.pathname.startsWith('/sph/');
+  } catch (_) {
+    return false;
+  }
 }
 
 function isWechatChannelsMediaUrl(url) {
@@ -4295,6 +4304,7 @@ function extractWechatChannelsRequestPayload(url) {
 
 function shouldHydrateLinkAsWebpage(url) {
   return isWechatMpArticleUrl(url)
+    || isWechatChannelsUrl(url)
     || isFeishuUrl(url)
     || isXiaohongshuUrl(url)
     || isDouyinUrl(url)

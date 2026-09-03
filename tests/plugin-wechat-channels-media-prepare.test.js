@@ -60,7 +60,7 @@ async function run() {
 
   const sourceRecord = {
     _id: 'wechat-channels-record-1',
-    type: 'webpage',
+    type: 'link',
     content: 'https://weixin.qq.com/sph/A7ULN6a876',
     metadata: {
       url: 'https://weixin.qq.com/sph/A7ULN6a876',
@@ -70,6 +70,7 @@ async function run() {
       transcriptionStatus: 'pending',
     },
   };
+  assert.strictEqual(helpers.shouldHydrateLinkAsWebpage(sourceRecord.metadata.url), true);
   const hydrated = await plugin.hydrateWebpageMarkdown(
     sourceRecord,
     '临时收集',

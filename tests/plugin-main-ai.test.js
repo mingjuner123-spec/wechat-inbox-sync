@@ -2166,6 +2166,13 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/sph/A7ULN6a876'), true);
 assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=A7ULN6a876'), true);
+assert.strictEqual(helpers.isWechatChannelsUrl('https://channels.weixin.qq.com.evil.example/x'), false);
+assert.strictEqual(helpers.isWechatChannelsUrl('https://evil.example/?next=channels.weixin.qq.com'), false);
+assert.strictEqual(helpers.isWechatChannelsUrl('channels.weixin.qq.com/finder-preview/pages/sph'), false);
+assert.strictEqual(helpers.isWechatChannelsUrl('javascript:channels.weixin.qq.com'), false);
+assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com.evil.example/sph/demo'), false);
+assert.strictEqual(helpers.isWechatChannelsUrl('https://weixin.qq.com/not-sph/demo'), false);
+assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://channels.weixin.qq.com.evil.example/x'), false);
 const unavailableWechatChannelsMarkdown = helpers.buildMarkdownForRecord({
   record: {
     _id: 'wechat-channels-unavailable',
@@ -2364,7 +2371,7 @@ assert.deepStrictEqual(
   `),
   ['https://mpvideo.qpic.cn/0b2eiaaaakiaaaaabcdef/0?dis_k=demo'],
 );
-assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);
+assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), true);
 assert.strictEqual(typeof helpers.getLocalAsrInstallRoot, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrInstallStatus, 'function');
 assert.strictEqual(typeof helpers.getLocalAsrScriptVersionStatus, 'function');
@@ -7485,7 +7492,7 @@ async function runAsyncHydrationTests() {
 
   assert.strictEqual(await helpers.installDouyinExternalProtocolHandlers(null), false);
 
-  assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), false);
+  assert.strictEqual(helpers.shouldHydrateLinkAsWebpage('https://weixin.qq.com/sph/A7ULN6a876'), true);
 
   const feishuOpenApiRequests = [];
   const feishuOpenApiResult = await helpers.fetchFeishuOpenApiMarkdownFromUrl(
@@ -14279,6 +14286,32 @@ async function runCanonicalVaultFolderTests() {
     'raw/wechatmd/2026-07-25/wechat-article-folder/wechat-article-folder.md',
   );
 
+  let shortcutChannelsHydrationInput = null;
+  pathPlugin.nextRecordTitle = async () => '视频号快捷指令';
+  pathPlugin.hydrateWebpageMarkdown = async (record) => {
+    shortcutChannelsHydrationInput = record;
+    return {
+      ...record,
+      metadata: {
+        ...(record.metadata || {}),
+        markdown: '视频号快捷指令转写正文',
+        conversionStatus: 'success',
+      },
+    };
+  };
+  const shortcutChannelsResult = await pathPlugin.writeRecord({
+    _id: 'wechat-channels-shortcut-link-1',
+    type: 'link',
+    content: 'https://weixin.qq.com/sph/A7ULN6a876',
+    createdAt: '2026-07-25T03:49:04.246Z',
+    metadata: { url: 'https://weixin.qq.com/sph/A7ULN6a876' },
+  }, '2026-07-25T04:00:00.000Z');
+  assert.strictEqual(shortcutChannelsHydrationInput.type, 'webpage');
+  assert.strictEqual(shortcutChannelsHydrationInput.metadata.url, 'https://weixin.qq.com/sph/A7ULN6a876');
+  assert.strictEqual(
+    shortcutChannelsResult.filePath,
+    'raw/wechatmd/2026-07-25/视频号快捷指令.md',
+  );
   pathPlugin.settings.noteSaveMode = 'root';
   pathPlugin.nextRecordTitle = async () => '视频号捕获';
   const channelResult = await pathPlugin.writeCapturedWechatChannelsRecord({
