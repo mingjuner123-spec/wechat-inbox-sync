@@ -31,7 +31,7 @@ const componentAccessPolicyPath = path.resolve(__dirname, '../scripts/check-loca
 const componentAccessPolicy = fs.existsSync(componentAccessPolicyPath)
   ? fs.readFileSync(componentAccessPolicyPath, 'utf8')
   : '';
-const marketplacePromise = '把微信中收集的公众号文章、飞书文档、小红书、抖音、B站、小宇宙等网页链接、PDF、MP3、MP4 等文件和速记，一键同步到本地知识库，自动整理为可检索笔记.';
+const marketplacePromise = '把微信中收集的公众号文章、视频号、飞书文档、小红书、抖音、B站、小宇宙等网页链接、PDF、MP3、MP4 等文件和速记，一键同步到本地知识库，自动整理为可检索笔记.';
 
 assert.strictEqual(manifest.id, 'wechat-inbox-sync');
 assert.strictEqual(manifest.id.includes('obsidian'), false);
