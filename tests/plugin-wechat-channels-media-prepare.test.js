@@ -108,9 +108,52 @@ async function run() {
   assert.ok(hydrated.metadata.markdown.includes('Original post body. #Obsidian #Knowledge'));
   assert.ok(hydrated.metadata.markdown.includes('## 标签'));
   assert.ok(hydrated.metadata.markdown.includes('#Obsidian #Knowledge'));
-  const metadataPreserved = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
-  assert.strictEqual(metadataPreserved, hydrated);
-  assert.strictEqual(hydrated.metadata.title, '服务端解析的视频号标题');
+  let aiMetadataInput = null;
+  let aiMetadataCalls = 0;
+  plugin.hasProFeatureAccess = async () => true;
+  plugin.generateMetadataWithDeepSeek = async (record) => {
+    aiMetadataCalls += 1;
+    aiMetadataInput = record;
+    return {
+      title: '用 AI 整理视频号口播内容',
+      description: '介绍如何将视频号内容转写并整理进本地知识库。',
+      keywords: ['视频号转写', '本地知识库', 'AI整理'],
+    };
+  };
+  const aiEnriched = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
+  assert.notStrictEqual(aiEnriched, hydrated);
+  assert.ok(helpers.extractAiMetadataInputText(aiMetadataInput).includes('这是通过云端解析媒体地址后在本地完成的视频号转写。'));
+  assert.ok(helpers.extractAiMetadataInputText(aiMetadataInput).includes('Original post body. #Obsidian #Knowledge'));
+  assert.strictEqual(aiEnriched.metadata.semanticTitle, '用 AI 整理视频号口播内容');
+  assert.strictEqual(aiEnriched.metadata.description, '介绍如何将视频号内容转写并整理进本地知识库。');
+  assert.deepStrictEqual(aiEnriched.metadata.keywords, ['视频号转写', '本地知识库', 'AI整理']);
+  assert.strictEqual(aiEnriched.metadata.aiMetadataSource, 'cloud');
+  assert.strictEqual(aiEnriched.metadata.sourceTitle, '服务端解析的视频号标题');
+  assert.strictEqual(aiMetadataCalls, 1);
+
+  const completeNonChannelsRecord = {
+    type: 'webpage',
+    content: 'https://example.com/complete',
+    metadata: {
+      url: 'https://example.com/complete',
+      sourceMetadataComplete: true,
+      transcriptionStatus: 'success',
+      transcription: '其他平台完整转写。',
+      platform: '其他平台',
+    },
+  };
+  const skippedNonChannelsAi = await plugin.enrichRecordMetadataWithAi(completeNonChannelsRecord, binding);
+  assert.strictEqual(skippedNonChannelsAi, completeNonChannelsRecord);
+  assert.strictEqual(aiMetadataCalls, 1);
+
+  plugin.generateMetadataWithDeepSeek = async () => {
+    throw new Error('AI provider unavailable');
+  };
+  const aiFailureFallback = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
+  assert.strictEqual(aiFailureFallback.metadata.title, '服务端解析的视频号标题');
+  assert.strictEqual(aiFailureFallback.metadata.description, 'Original post body. #Obsidian #Knowledge');
+  assert.deepStrictEqual(aiFailureFallback.metadata.keywords, ['#Obsidian', '#Knowledge']);
+  assert.ok(aiFailureFallback.metadata.aiMetadataError);
 
   const writtenBinaries = [];
   plugin.ensureProFeatureAccess = async () => ({ hasAccess: true });

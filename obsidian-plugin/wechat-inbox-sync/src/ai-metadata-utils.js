@@ -108,9 +108,13 @@ function createAiMetadataHelpers(dependencies = {}) {
         metadata.transcriptionStatus === 'success'
         && String(metadata.transcription || '').trim()
       );
+    const isWechatChannelsTranscript = isTranscriptRecord
+      && String(metadata.platform || '').trim() === '视频号';
     const parts = isTranscriptRecord
       ? [
-        metadata.title,
+        ...(isWechatChannelsTranscript
+          ? [metadata.sourceTitle, metadata.title, metadata.description]
+          : [metadata.title]),
         metadata.transcription,
       ].filter(Boolean)
       : [

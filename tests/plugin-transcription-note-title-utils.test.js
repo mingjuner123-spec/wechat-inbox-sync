@@ -207,6 +207,39 @@ assert.deepStrictEqual(
   'social platforms must retain their canonical source title before AI title or description',
 );
 
+const aiSummarizedWechatChannelsRecord = {
+  type: 'webpage',
+  content: 'https://weixin.qq.com/sph/example',
+  metadata: {
+    platform: '视频号',
+    sourceTitle: '这是发布正文的第一句，不应作为最终标题',
+    semanticTitle: 'AI 重写的视频号主题标题',
+    aiMetadataSource: 'cloud',
+    description: 'AI 根据口播生成的一句话简介。',
+    keywords: ['AI关键词', '视频号转写', '内容整理'],
+    transcriptionStatus: 'success',
+    transcription: '这里是完整的视频号口播转写正文。',
+  },
+};
+assert.deepStrictEqual(
+  buildTranscriptionNoteIdentity(aiSummarizedWechatChannelsRecord, { fallbackTitle: '视频号口播文案' }),
+  {
+    displayTitle: 'AI 重写的视频号主题标题',
+    fileTitle: '视频号-AI 重写的视频号主题标题',
+    source: '视频号',
+    titleSource: 'ai-title',
+  },
+  '视频号完成 AI 总结后必须优先使用 AI 标题，原始标题只保留为来源信息',
+);
+
+const appliedWechatChannelsAiIdentity = applyTranscriptionNoteIdentity(aiSummarizedWechatChannelsRecord, {
+  fallbackTitle: '视频号口播文案',
+});
+assert.strictEqual(appliedWechatChannelsAiIdentity.record.metadata.title, 'AI 重写的视频号主题标题');
+assert.strictEqual(appliedWechatChannelsAiIdentity.record.metadata.originalTitle, undefined);
+assert.strictEqual(appliedWechatChannelsAiIdentity.record.metadata.sourceTitle, '这是发布正文的第一句，不应作为最终标题');
+assert.strictEqual(appliedWechatChannelsAiIdentity.record.metadata.semanticTitleSource, 'ai-title');
+
 const localKeywordFallbackRecord = {
   type: 'voice',
   metadata: {

@@ -3855,6 +3855,13 @@ function sleep(ms) {
   return new Promise((resolve) => schedule(resolve, ms));
 }
 
+function shouldForceWechatChannelsAiMetadata(record) {
+  const metadata = (record && record.metadata) || {};
+  if (metadata.transcriptionStatus !== 'success' || !String(metadata.transcription || '').trim()) return false;
+  const url = String(metadata.url || record && record.content || '').trim();
+  return String(metadata.platform || '').trim() === '视频号' || isWechatChannelsUrl(url);
+}
+
 function shouldGenerateAiMetadata(settings, record) {
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
@@ -15736,7 +15743,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async enrichRecordMetadataWithAi(record, binding = null) {
-    if (record && record.metadata && record.metadata.sourceMetadataComplete === true) return record;
+    if (record && record.metadata && record.metadata.sourceMetadataComplete === true
+      && !shouldForceWechatChannelsAiMetadata(record)) return record;
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
     delete metadata.aiMetadataError;

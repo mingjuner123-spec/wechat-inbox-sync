@@ -6336,8 +6336,9 @@ var require_ai_metadata_utils = __commonJS({
       function extractAiMetadataInputText2(record) {
         const metadata = record && record.metadata || {};
         const isTranscriptRecord = metadata.transcriptOnly || metadata.webpageMediaType === "audio_video" || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim();
+        const isWechatChannelsTranscript = isTranscriptRecord && String(metadata.platform || "").trim() === "视频号";
         const parts = isTranscriptRecord ? [
-          metadata.title,
+          ...isWechatChannelsTranscript ? [metadata.sourceTitle, metadata.title, metadata.description] : [metadata.title],
           metadata.transcription
         ].filter(Boolean) : [
           metadata.title,
@@ -7798,6 +7799,12 @@ var require_transcription_note_title_utils = __commonJS({
     function buildSemanticTitleCandidate(record, fallbackTitle = "") {
       const metadata = getMetadata(record);
       const source = getTranscriptionSourcePrefix2(record);
+      const semanticTitle = cleanTitlePart(metadata.semanticTitle || metadata.aiTitle);
+      const aiMetadataSource = String(metadata.aiMetadataSource || "").trim().toLowerCase();
+      const shouldPreferAiTitle = source === "视频号" && ["cloud", "deepseek"].includes(aiMetadataSource) && semanticTitle && !GENERIC_TRANSCRIPTION_TITLE.test(semanticTitle);
+      if (shouldPreferAiTitle) {
+        return { title: semanticTitle, titleSource: "ai-title" };
+      }
       const sourceTitleCandidate = getCanonicalSourceTitleCandidate(record);
       if (sourceTitleCandidate.title) return sourceTitleCandidate;
       const keywordTitle = buildTitleFromKeywords(metadata.keywords);
@@ -7805,7 +7812,6 @@ var require_transcription_note_title_utils = __commonJS({
       if (shouldPreferKeywordTitle && keywordTitle && !GENERIC_TRANSCRIPTION_TITLE.test(keywordTitle)) {
         return { title: keywordTitle, titleSource: "keywords" };
       }
-      const semanticTitle = cleanTitlePart(metadata.semanticTitle || metadata.aiTitle);
       if (semanticTitle && !GENERIC_TRANSCRIPTION_TITLE.test(semanticTitle)) {
         return { title: semanticTitle, titleSource: "ai-title" };
       }
@@ -11092,6 +11098,13 @@ function sleep(ms) {
   return new Promise((resolve) => schedule(resolve, ms));
 }
 __name(sleep, "sleep");
+function shouldForceWechatChannelsAiMetadata(record) {
+  const metadata = record && record.metadata || {};
+  if (metadata.transcriptionStatus !== "success" || !String(metadata.transcription || "").trim()) return false;
+  const url = String(metadata.url || record && record.content || "").trim();
+  return String(metadata.platform || "").trim() === "视频号" || isWechatChannelsUrl(url);
+}
+__name(shouldForceWechatChannelsAiMetadata, "shouldForceWechatChannelsAiMetadata");
 function shouldGenerateAiMetadata(settings, record) {
   if (!record || !record.metadata) return false;
   const metadata = record.metadata || {};
@@ -21764,7 +21777,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
   }
   async enrichRecordMetadataWithAi(record, binding = null) {
-    if (record && record.metadata && record.metadata.sourceMetadataComplete === true) return record;
+    if (record && record.metadata && record.metadata.sourceMetadataComplete === true && !shouldForceWechatChannelsAiMetadata(record)) return record;
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...record && record.metadata || {} };
     delete metadata.aiMetadataError;
