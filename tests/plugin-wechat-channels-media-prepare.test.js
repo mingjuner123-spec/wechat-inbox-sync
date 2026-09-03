@@ -131,6 +131,64 @@ async function run() {
   assert.strictEqual(aiEnriched.metadata.sourceTitle, '服务端解析的视频号标题');
   assert.strictEqual(aiMetadataCalls, 1);
 
+  const directDeepSeekPlugin = new PluginClass();
+  directDeepSeekPlugin.settings = helpers.mergeSettings({
+    deepseekApiKey: 'test-only-key',
+    deepseekBaseUrl: 'https://api.example.test/chat/completions',
+  });
+  const directDeepSeekRequests = [];
+  directDeepSeekPlugin.requestExternalJson = async (url, options) => {
+    const requestBody = JSON.parse(options.body);
+    directDeepSeekRequests.push({ url, requestBody });
+    const content = directDeepSeekRequests.length === 1
+      ? JSON.stringify({
+        description: 'Summarizes local transcription into a reusable knowledge asset.',
+        keywords: ['local transcription', 'knowledge base', 'AI organization'],
+      })
+      : JSON.stringify({ title: 'Reusable Video Knowledge Assets' });
+    return { choices: [{ message: { content } }] };
+  };
+  const directDeepSeekMetadata = await directDeepSeekPlugin.generateMetadataWithDeepSeek(hydrated, binding);
+  assert.strictEqual(directDeepSeekRequests.length, 2);
+  assert.strictEqual(directDeepSeekMetadata.title, 'Reusable Video Knowledge Assets');
+  const directTitlePrompt = JSON.stringify(directDeepSeekRequests[1].requestBody.messages);
+  assert.ok(directTitlePrompt.includes(directDeepSeekMetadata.description));
+  assert.ok(directTitlePrompt.includes('local transcription'));
+  assert.ok(!directTitlePrompt.includes(hydrated.metadata.transcription));
+
+  let failedTitleRequestCount = 0;
+  directDeepSeekPlugin.requestExternalJson = async () => {
+    failedTitleRequestCount += 1;
+    if (failedTitleRequestCount === 2) throw new Error('title provider unavailable');
+    return {
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            description: 'Summarizes local transcription into a reusable knowledge asset.',
+            keywords: ['local transcription', 'knowledge base', 'AI organization'],
+          }),
+        },
+      }],
+    };
+  };
+  const directDeepSeekFallback = await directDeepSeekPlugin.generateMetadataWithDeepSeek(hydrated, binding);
+  assert.strictEqual(failedTitleRequestCount, 2);
+  assert.strictEqual(
+    directDeepSeekFallback.title,
+    'local\u4E0Etranscription',
+  );
+  plugin.generateMetadataWithDeepSeek = async () => ({
+    title: '这是通过云端解析媒体地址后在本地完成的视频号转写',
+    description: '介绍视频号本地转写与知识库整理的完整流程。',
+    keywords: ['视频号转写', '本地知识库', 'AI整理'],
+  });
+  const copiedOpeningRejected = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
+  assert.strictEqual(copiedOpeningRejected.metadata.semanticTitle, '视频号转写与本地知识库');
+  assert.notStrictEqual(
+    copiedOpeningRejected.metadata.semanticTitle,
+    '这是通过云端解析媒体地址后在本地完成的视频号转写',
+  );
+
   const completeNonChannelsRecord = {
     type: 'webpage',
     content: 'https://example.com/complete',

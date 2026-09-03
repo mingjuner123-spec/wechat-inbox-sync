@@ -100,6 +100,45 @@ function createAiMetadataHelpers(dependencies = {}) {
     };
   }
 
+  function normalizeGeneratedTitleForComparison(value) {
+    return String(value || '')
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/https?:\/\/[^\s<>()\]]+/gi, '')
+      .replace(/[\s\p{P}\p{S}_]+/gu, '');
+  }
+
+  function extractGeneratedTitleOpeningSentence(value) {
+    return String(value || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\s+/g, ' ')
+      .split(/[。！？!?；;\n]+/)[0]
+      .trim()
+      .slice(0, 160);
+  }
+
+  function buildKeywordDerivedTitle(keywords) {
+    return Array.from(normalizeGeneratedKeywords(keywords).slice(0, 2).join('与'))
+      .slice(0, 36)
+      .join('');
+  }
+
+  function isGeneratedTitleIndependent(title, {
+    content = '',
+    sourceTitle = '',
+    description = '',
+  } = {}) {
+    const candidate = normalizeGeneratedTitleForComparison(title);
+    if (candidate.length < 4) return false;
+    const opening = normalizeGeneratedTitleForComparison(extractGeneratedTitleOpeningSentence(content));
+    const source = normalizeGeneratedTitleForComparison(sourceTitle);
+    const summary = normalizeGeneratedTitleForComparison(description);
+    if (candidate === source || candidate === summary || candidate === opening) return false;
+    if (candidate.length >= 8 && (opening.includes(candidate) || (opening.length >= 8 && candidate.includes(opening)))) return false;
+    if (candidate.length >= 8 && (source.includes(candidate) || (source.length >= 8 && candidate.includes(source)))) return false;
+    return true;
+  }
+
   function extractAiMetadataInputText(record) {
     const metadata = (record && record.metadata) || {};
     const isTranscriptRecord = metadata.transcriptOnly
@@ -141,6 +180,9 @@ function createAiMetadataHelpers(dependencies = {}) {
     normalizeGeneratedKeywords,
     parseGeneratedMetadataResponse,
     normalizeGeneratedMetadataResult,
+    buildKeywordDerivedTitle,
+    extractGeneratedTitleOpeningSentence,
+    isGeneratedTitleIndependent,
     extractAiMetadataInputText,
   };
 }
