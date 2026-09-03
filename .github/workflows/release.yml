@@ -77,6 +77,7 @@ jobs:
           node tests/plugin-sync-history.test.js
           node tests/plugin-wechat-article-image-localization.test.js
           node tests/plugin-wechat-channels-decrypt-utils.test.js
+          node tests/plugin-wechat-channels-media-prepare.test.js
           node tests/plugin-date-utils.test.js
           node tests/plugin-diagnostic-redaction-utils.test.js
           node tests/local-douyin-resolver-utils.test.js

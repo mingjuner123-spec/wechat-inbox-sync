@@ -233,7 +233,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.132';
+const PLUGIN_RUNTIME_VERSION = '1.3.133';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3694,7 +3694,7 @@ function buildTencentRequest({
 
 function isVideoPlatform(platform, url = '') {
   const source = `${String(platform || '')} ${String(url || '')}`.toLowerCase();
-  return /抖音|小红书|b站|bilibili|douyin|xiaohongshu/.test(source);
+  return /抖音|小红书|视频号|b站|bilibili|douyin|xiaohongshu|wechat-channels|channels\.weixin\.qq\.com|weixin\.qq\.com\/sph\//.test(source);
 }
 
 function cleanTrailingTranscriptionHallucinations(text) {
@@ -8512,6 +8512,27 @@ function buildWechatChannelsUnavailableMarkdown(url, feed = {}, reason = '') {
   ];
   if (feed.description) {
     lines.push('', '## 发布简介（仅供定位，不作为口播转写）', '', feed.description);
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function buildWechatChannelsSourceMarkdown(feed = {}) {
+  const lines = [];
+  const coverUrl = normalizeExtractedUrl(feed.coverUrl || '');
+  const description = String(feed.description || '').trim();
+  const tags = Array.from(new Set(
+    (Array.isArray(feed.tags) ? feed.tags : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean),
+  ));
+  if (/^https?:\/\//i.test(coverUrl)) {
+    lines.push('## 视频封面', '', '![视频封面](' + coverUrl + ')');
+  }
+  if (description) {
+    lines.push('', '## 发布正文', '', description);
+  }
+  if (tags.length) {
+    lines.push('', '## 标签', '', tags.join(' '));
   }
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -15705,6 +15726,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async enrichRecordMetadataWithAi(record, binding = null) {
+    if (record && record.metadata && record.metadata.sourceMetadataComplete === true) return record;
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
     delete metadata.aiMetadataError;
@@ -19964,6 +19986,34 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
 
+  async prepareWechatChannelsMedia(record, url, binding = null, title = '') {
+    const response = await this.requestJson('/media/prepare', 'POST', {
+      url,
+      recordId: getRecordId(record),
+      source: 'wechat-channels-local-transcription',
+      title: title || record?.metadata?.title || '',
+    }, binding, { noCache: true });
+    const data = response?.data || {};
+    const mediaUrl = String(data.mediaUrl || data.audioUrl || '').trim();
+    if (!/^https?:\/\//i.test(mediaUrl)) {
+      throw new Error('视频号云端解析未返回可下载的媒体地址');
+    }
+    return {
+      mediaUrl,
+      source: String(data.source || 'wechat-channels-media-prepare'),
+      title: String(data.title || ''),
+      author: String(data.author || ''),
+      description: String(data.description || ''),
+      tags: Array.isArray(data.tags)
+        ? data.tags.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+      coverUrl: String(data.coverUrl || ''),
+      durationSeconds: Number(data.durationSeconds || 0) || 0,
+      preparedFileID: String(data.preparedFileID || ''),
+      mediaPreparedByCloud: Boolean(data.mediaPreparedByCloud || data.cached),
+      expiresAt: String(data.expiresAt || ''),
+    };
+  }
   async fetchWechatChannelsFeedInfo(url) {
     const payload = extractWechatChannelsRequestPayload(url);
     if (!payload.shortUri && !payload.exportId) {
@@ -20000,68 +20050,77 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async hydrateWechatChannelsTranscript(record, url, binding = null, title = '') {
     const metadata = record.metadata || {};
-    const feed = await this.fetchWechatChannelsFeedInfo(url);
-    let mediaUrl = feed.videoUrl || '';
-    let mediaUrls = Array.isArray(feed.mediaUrls) ? feed.mediaUrls : [];
-    const mediaItems = Array.isArray(feed.mediaItems) ? feed.mediaItems : [];
-    let mediaSource = mediaUrl ? 'wechat-channels-feed' : 'video';
+    let feed = {};
+    let preparedMedia = null;
+    let resolutionError = '';
 
-    if (typeof this.renderSocialMediaUrls === 'function') {
-      try {
-        const renderedUrls = await this.renderSocialMediaUrls(buildWechatChannelsPreviewUrl(url));
-        mediaUrls = sortMediaUrlsForTranscription([mediaUrl, ...mediaUrls, ...renderedUrls]);
-        mediaUrl = mediaUrls[0] || '';
-        if (renderedUrls && renderedUrls.length) {
-          mediaSource = mediaSource === 'wechat-channels-feed'
-            ? 'wechat-channels-feed-rendered'
-            : 'video-rendered';
-        }
-      } catch (error) {
-        mediaUrls = sortMediaUrlsForTranscription([mediaUrl, ...mediaUrls]);
-        mediaUrl = mediaUrls[0] || '';
-      }
+    try {
+      preparedMedia = await this.prepareWechatChannelsMedia(record, url, binding, title);
+      feed = {
+        title: preparedMedia.title,
+        author: preparedMedia.author,
+        description: preparedMedia.description,
+        tags: preparedMedia.tags,
+        coverUrl: preparedMedia.coverUrl,
+      };
+    } catch (error) {
+      resolutionError = String(error?.message || error || '视频号云端解析失败');
     }
-    mediaUrls = sortMediaUrlsForTranscription([mediaUrl, ...mediaUrls]);
-    mediaUrl = mediaUrls[0] || '';
 
+    const mediaUrl = preparedMedia?.mediaUrl || '';
     if (mediaUrl) {
       const transcribedRecord = await this.buildTranscriptRecordFromMedia(record, {
         url,
         platform: '视频号',
         mediaUrl,
-        mediaUrls,
-        mediaItems,
-        source: mediaSource,
+        mediaUrls: [mediaUrl],
+        mediaItems: [{ url: mediaUrl }],
+        source: preparedMedia.source || 'wechat-channels-media-prepare',
+        markdown: buildWechatChannelsSourceMarkdown(feed),
         binding,
         title,
-        noMediaError: '视频号网页端未返回可转写的视频资源',
+        sourceTitle: feed.title || '',
+        noMediaError: '视频号云端解析未返回可转写的视频资源',
       });
       const nextMetadata = transcribedRecord.metadata || {};
+      const sourceTags = Array.isArray(feed.tags)
+        ? feed.tags.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+      const hasSourceMetadata = Boolean(feed.description || sourceTags.length);
       const transcriptProperties = nextMetadata.transcriptionStatus === 'success'
         ? buildTranscriptPropertyMetadata({
           transcription: nextMetadata.transcription,
-          title: metadata.title || nextMetadata.title || '视频号口播文案',
+          title: feed.title || metadata.title || nextMetadata.title || '视频号口播文案',
         })
         : { description: '', keywords: [], aiMetadataSource: '' };
       return {
         ...transcribedRecord,
         metadata: {
           ...nextMetadata,
-          title: metadata.title || nextMetadata.title || '视频号口播文案',
-          author: metadata.author || feed.author || nextMetadata.author || '',
+          title: feed.title || metadata.title || nextMetadata.title || '视频号口播文案',
+          sourceTitle: feed.title || nextMetadata.sourceTitle || metadata.sourceTitle || '',
+          author: feed.author || metadata.author || nextMetadata.author || '',
           platform: metadata.platform || '视频号',
           contentCategory: metadata.contentCategory || '视频',
           coverUrl: feed.coverUrl || metadata.coverUrl || nextMetadata.coverUrl || '',
-          dynamicExportId: feed.dynamicExportId || metadata.dynamicExportId || nextMetadata.dynamicExportId || '',
-          wechatChannelsDecodeKey: feed.decodeKey || nextMetadata.wechatChannelsDecodeKey || '',
-          wechatChannelsEncryptedMedia: Boolean(feed.decodeKey) || Boolean(nextMetadata.wechatChannelsEncryptedMedia),
-          description: nextMetadata.description || transcriptProperties.description,
-          keywords: getRecordKeywords(nextMetadata).length ? getRecordKeywords(nextMetadata) : transcriptProperties.keywords,
-          aiMetadataSource: nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource,
+          mediaPreparedByCloud: Boolean(preparedMedia.mediaPreparedByCloud),
+          preparedMediaFileID: preparedMedia.preparedFileID || '',
+          preparedMediaExpiresAt: preparedMedia.expiresAt || '',
+          description: feed.description || nextMetadata.description || transcriptProperties.description,
+          keywords: sourceTags.length
+            ? sourceTags
+            : getRecordKeywords(nextMetadata).length
+              ? getRecordKeywords(nextMetadata)
+              : transcriptProperties.keywords,
+          aiMetadataSource: hasSourceMetadata
+            ? 'wechat-channels-feed'
+            : nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource,
+          sourceMetadataComplete: hasSourceMetadata,
         },
       };
     }
 
+    const finalError = resolutionError || '视频号云端解析暂不可用，已保留原始链接';
     return {
       ...record,
       metadata: {
@@ -20070,28 +20129,20 @@ class WechatObsidianInboxPlugin extends Plugin {
           platform: '视频号',
           transcription: '',
           transcriptionStatus: 'failed',
-          transcriptionSource: 'wechat-channels-preview',
-          transcriptionError: feed.errMsg || '视频号网页端未返回可转写的视频资源，无法提取视频口播文案',
+          transcriptionSource: 'wechat-channels-private-resolver',
+          transcriptionError: finalError,
           conversionStatus: 'link_saved',
         }),
-        markdown: buildWechatChannelsUnavailableMarkdown(
-          url,
-          feed,
-          feed.errMsg || '视频号网页端未返回可转写的视频资源，无法提取视频口播文案',
-        ),
+        markdown: buildWechatChannelsUnavailableMarkdown(url, feed, finalError),
         conversionStatus: 'link_saved',
-        title: metadata.title || feed.title || '视频号口播文案',
-        author: metadata.author || feed.author || '',
+        title: metadata.title || '视频号口播文案',
+        author: metadata.author || '',
         platform: metadata.platform || '视频号',
         contentCategory: metadata.contentCategory || '视频',
-        coverUrl: feed.coverUrl || metadata.coverUrl || '',
-        dynamicExportId: feed.dynamicExportId || metadata.dynamicExportId || '',
-        wechatChannelsDecodeKey: feed.decodeKey || metadata.wechatChannelsDecodeKey || '',
-        wechatChannelsEncryptedMedia: Boolean(feed.decodeKey) || Boolean(metadata.wechatChannelsEncryptedMedia),
+        coverUrl: metadata.coverUrl || '',
       },
     };
   }
-
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null, options = {}) {
     const signal = options.signal || null;
     throwIfAborted(signal);
@@ -20127,6 +20178,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
 
     try {
+      if (isWechatChannelsUrl(url)) {
+        return await this.hydrateWechatChannelsTranscript(record, url, binding, title);
+      }
       if (isFeishuLink) {
         let openApiError = null;
         const shouldUseFeishuCloudOAuth = feishuCloudOAuthStatus && feishuCloudOAuthStatus.connected;
@@ -23660,6 +23714,7 @@ WechatObsidianInboxPlugin.__test = {
   buildDouyinFallbackMarkdown,
   buildXiaohongshuFallbackMarkdown,
   buildWechatChannelsUnavailableMarkdown,
+  buildWechatChannelsSourceMarkdown,
   categorizeSyncFailure,
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
