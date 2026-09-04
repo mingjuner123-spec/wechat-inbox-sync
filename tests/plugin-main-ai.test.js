@@ -241,6 +241,30 @@ function runAiMetadataFormattingModuleTests() {
     legacyAiMetadataHelpers.normalizeGeneratedMetadataResult(oversizedResult),
   );
 
+  const opening = '我觉得真正重要的是先建立自己的内容资产。后面再讲具体方法。';
+  assert.strictEqual(output.extractGeneratedTitleOpeningSentence(opening), '我觉得真正重要的是先建立自己的内容资产');
+  assert.strictEqual(output.isGeneratedTitleIndependent('我觉得真正重要的是先建立自己的内容资产', {
+    content: opening,
+    sourceTitle: '原始发布正文',
+    description: '介绍如何建立可持续积累的个人内容资产。',
+  }), false);
+  assert.strictEqual(output.isGeneratedTitleIndependent('建立自己的内容资产', {
+    content: opening,
+    sourceTitle: '原始发布正文',
+    description: '介绍如何建立可持续积累的个人内容资产。',
+  }), false);
+  assert.strictEqual(output.isGeneratedTitleIndependent(output.extractGeneratedTitleOpeningSentence(opening) + ' plus three methods', {
+    content: opening,
+    sourceTitle: '原始发布正文',
+    description: '介绍如何建立可持续积累的个人内容资产。',
+  }), false);
+  assert.strictEqual(output.isGeneratedTitleIndependent('建立可持续积累的内容资产', {
+    content: opening,
+    sourceTitle: '原始发布正文',
+    description: '介绍如何建立可持续积累的个人内容资产。',
+  }), true);
+  assert.strictEqual(output.buildKeywordDerivedTitle(['内容资产', '知识管理', 'AI']), '内容资产与知识管理');
+
   const records = [
     {
       name: '网页记录的 AI 输入',

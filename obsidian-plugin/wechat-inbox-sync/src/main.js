@@ -233,7 +233,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.134';
+const PLUGIN_RUNTIME_VERSION = '1.3.135';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3853,6 +3853,13 @@ function sleep(ms) {
     ? globalThis.setTimeout.bind(globalThis)
     : window.setTimeout.bind(window);
   return new Promise((resolve) => schedule(resolve, ms));
+}
+
+function shouldForceWechatChannelsAiMetadata(record) {
+  const metadata = (record && record.metadata) || {};
+  if (metadata.transcriptionStatus !== 'success' || !String(metadata.transcription || '').trim()) return false;
+  const url = String(metadata.url || record && record.content || '').trim();
+  return String(metadata.platform || '').trim() === '视频号' || isWechatChannelsUrl(url);
 }
 
 function shouldGenerateAiMetadata(settings, record) {
@@ -14656,6 +14663,8 @@ const {
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   normalizeGeneratedMetadataResult,
+  buildKeywordDerivedTitle,
+  isGeneratedTitleIndependent,
   extractAiMetadataInputText,
 } = aiMetadataHelpers;
 
@@ -15710,6 +15719,65 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     const inputText = extractAiMetadataInputText(record);
     if (!inputText) return { title: '', description: '', keywords: [] };
+    if (shouldForceWechatChannelsAiMetadata(record)) {
+      const requestVideoMetadata = async (messages) => {
+        return await this.requestExternalJson(this.settings.deepseekBaseUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + this.settings.deepseekApiKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: this.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel,
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+            messages,
+          }),
+        });
+      };
+      const summaryPayload = await requestVideoMetadata([
+        {
+          role: 'system',
+          content: 'Generate a one-sentence description and 3 to 8 concise keywords from the user content. Return ONLY JSON: {"description":"...","keywords":["..."]}. Use Simplified Chinese when the content is mainly Chinese.',
+        },
+        {
+          role: 'user',
+          content: inputText,
+        },
+      ]);
+      const summary = parseGeneratedMetadataResponse(
+        extractOpenAICompatibleText(summaryPayload) || JSON.stringify(summaryPayload || {}),
+      );
+      const description = String(summary.description || '').trim();
+      const keywords = getRecordKeywords(summary).map((item) => String(item || '').trim()).filter(Boolean);
+      if (!description || !keywords.length) {
+        throw new Error('DeepSeek video metadata summary response is empty.');
+      }
+      let modelTitle = '';
+      try {
+        const titlePayload = await requestVideoMetadata([
+          {
+            role: 'system',
+            content: 'Generate one independent concise title using ONLY the supplied description and keywords. Return ONLY JSON: {"title":"..."}. Do not repeat the description verbatim. For Chinese metadata, use a natural 8 to 24 character Simplified Chinese title.',
+          },
+          {
+            role: 'user',
+            content: 'Description: ' + description + '\nKeywords: ' + keywords.join(', '),
+          },
+        ]);
+        const parsedTitle = parseGeneratedMetadataResponse(
+          extractOpenAICompatibleText(titlePayload) || JSON.stringify(titlePayload || {}),
+        );
+        modelTitle = String(parsedTitle.title || '').trim();
+      } catch (error) {
+        modelTitle = '';
+      }
+      return {
+        title: modelTitle || buildKeywordDerivedTitle(keywords),
+        description,
+        keywords,
+      };
+    }
     const payload = await this.requestExternalJson(this.settings.deepseekBaseUrl, {
       method: 'POST',
       headers: {
@@ -15736,7 +15804,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async enrichRecordMetadataWithAi(record, binding = null) {
-    if (record && record.metadata && record.metadata.sourceMetadataComplete === true) return record;
+    if (record && record.metadata && record.metadata.sourceMetadataComplete === true
+      && !shouldForceWechatChannelsAiMetadata(record)) return record;
     if (!shouldGenerateAiMetadata(this.settings, record)) return record;
     const metadata = { ...((record && record.metadata) || {}) };
     delete metadata.aiMetadataError;
@@ -15767,9 +15836,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       return fail(error);
     }
-    const semanticTitle = String(generated && generated.title || '').trim();
+    const inputText = extractAiMetadataInputText(record);
+    const generatedTitle = String(generated && generated.title || '').trim();
     const description = String(generated && generated.description || '').trim();
     const keywords = getRecordKeywords(generated || {}).map((item) => String(item || '').trim()).filter(Boolean);
+    const shouldValidateGeneratedTitle = shouldForceWechatChannelsAiMetadata(record);
+    const semanticTitle = shouldValidateGeneratedTitle
+      ? (isGeneratedTitleIndependent(generatedTitle, {
+        content: metadata.transcription,
+        sourceTitle: metadata.sourceTitle || metadata.title || record && record.title || '',
+        description,
+      })
+        ? generatedTitle
+        : buildKeywordDerivedTitle(keywords))
+      : generatedTitle;
     if (!semanticTitle && !description && !keywords.length) {
       return fail('empty-response');
     }
@@ -22662,11 +22742,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...progress,
         signal: processingAbortController.signal,
       };
+      let processingTitle = recordId || String(record && record.type || 'unknown');
+      try {
+        processingTitle = buildRecordTitleBase(record);
+      } catch (error) {
+      }
       this.currentProcessingAbortController = processingAbortController;
       this.currentProcessingContext = {
         recordId,
         binding: binding ? { ...binding } : null,
-        title: buildRecordTitleBase(record),
+        title: processingTitle,
       };
       this.setTranscriptionStopAvailable(true);
       try {

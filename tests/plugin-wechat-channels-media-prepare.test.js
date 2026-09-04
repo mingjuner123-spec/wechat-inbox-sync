@@ -108,9 +108,110 @@ async function run() {
   assert.ok(hydrated.metadata.markdown.includes('Original post body. #Obsidian #Knowledge'));
   assert.ok(hydrated.metadata.markdown.includes('## 标签'));
   assert.ok(hydrated.metadata.markdown.includes('#Obsidian #Knowledge'));
-  const metadataPreserved = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
-  assert.strictEqual(metadataPreserved, hydrated);
-  assert.strictEqual(hydrated.metadata.title, '服务端解析的视频号标题');
+  let aiMetadataInput = null;
+  let aiMetadataCalls = 0;
+  plugin.hasProFeatureAccess = async () => true;
+  plugin.generateMetadataWithDeepSeek = async (record) => {
+    aiMetadataCalls += 1;
+    aiMetadataInput = record;
+    return {
+      title: '用 AI 整理视频号口播内容',
+      description: '介绍如何将视频号内容转写并整理进本地知识库。',
+      keywords: ['视频号转写', '本地知识库', 'AI整理'],
+    };
+  };
+  const aiEnriched = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
+  assert.notStrictEqual(aiEnriched, hydrated);
+  assert.ok(helpers.extractAiMetadataInputText(aiMetadataInput).includes('这是通过云端解析媒体地址后在本地完成的视频号转写。'));
+  assert.ok(helpers.extractAiMetadataInputText(aiMetadataInput).includes('Original post body. #Obsidian #Knowledge'));
+  assert.strictEqual(aiEnriched.metadata.semanticTitle, '用 AI 整理视频号口播内容');
+  assert.strictEqual(aiEnriched.metadata.description, '介绍如何将视频号内容转写并整理进本地知识库。');
+  assert.deepStrictEqual(aiEnriched.metadata.keywords, ['视频号转写', '本地知识库', 'AI整理']);
+  assert.strictEqual(aiEnriched.metadata.aiMetadataSource, 'cloud');
+  assert.strictEqual(aiEnriched.metadata.sourceTitle, '服务端解析的视频号标题');
+  assert.strictEqual(aiMetadataCalls, 1);
+
+  const directDeepSeekPlugin = new PluginClass();
+  directDeepSeekPlugin.settings = helpers.mergeSettings({
+    deepseekApiKey: 'test-only-key',
+    deepseekBaseUrl: 'https://api.example.test/chat/completions',
+  });
+  const directDeepSeekRequests = [];
+  directDeepSeekPlugin.requestExternalJson = async (url, options) => {
+    const requestBody = JSON.parse(options.body);
+    directDeepSeekRequests.push({ url, requestBody });
+    const content = directDeepSeekRequests.length === 1
+      ? JSON.stringify({
+        description: 'Summarizes local transcription into a reusable knowledge asset.',
+        keywords: ['local transcription', 'knowledge base', 'AI organization'],
+      })
+      : JSON.stringify({ title: 'Reusable Video Knowledge Assets' });
+    return { choices: [{ message: { content } }] };
+  };
+  const directDeepSeekMetadata = await directDeepSeekPlugin.generateMetadataWithDeepSeek(hydrated, binding);
+  assert.strictEqual(directDeepSeekRequests.length, 2);
+  assert.strictEqual(directDeepSeekMetadata.title, 'Reusable Video Knowledge Assets');
+  const directTitlePrompt = JSON.stringify(directDeepSeekRequests[1].requestBody.messages);
+  assert.ok(directTitlePrompt.includes(directDeepSeekMetadata.description));
+  assert.ok(directTitlePrompt.includes('local transcription'));
+  assert.ok(!directTitlePrompt.includes(hydrated.metadata.transcription));
+
+  let failedTitleRequestCount = 0;
+  directDeepSeekPlugin.requestExternalJson = async () => {
+    failedTitleRequestCount += 1;
+    if (failedTitleRequestCount === 2) throw new Error('title provider unavailable');
+    return {
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            description: 'Summarizes local transcription into a reusable knowledge asset.',
+            keywords: ['local transcription', 'knowledge base', 'AI organization'],
+          }),
+        },
+      }],
+    };
+  };
+  const directDeepSeekFallback = await directDeepSeekPlugin.generateMetadataWithDeepSeek(hydrated, binding);
+  assert.strictEqual(failedTitleRequestCount, 2);
+  assert.strictEqual(
+    directDeepSeekFallback.title,
+    'local\u4E0Etranscription',
+  );
+  plugin.generateMetadataWithDeepSeek = async () => ({
+    title: '这是通过云端解析媒体地址后在本地完成的视频号转写',
+    description: '介绍视频号本地转写与知识库整理的完整流程。',
+    keywords: ['视频号转写', '本地知识库', 'AI整理'],
+  });
+  const copiedOpeningRejected = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
+  assert.strictEqual(copiedOpeningRejected.metadata.semanticTitle, '视频号转写与本地知识库');
+  assert.notStrictEqual(
+    copiedOpeningRejected.metadata.semanticTitle,
+    '这是通过云端解析媒体地址后在本地完成的视频号转写',
+  );
+
+  const completeNonChannelsRecord = {
+    type: 'webpage',
+    content: 'https://example.com/complete',
+    metadata: {
+      url: 'https://example.com/complete',
+      sourceMetadataComplete: true,
+      transcriptionStatus: 'success',
+      transcription: '其他平台完整转写。',
+      platform: '其他平台',
+    },
+  };
+  const skippedNonChannelsAi = await plugin.enrichRecordMetadataWithAi(completeNonChannelsRecord, binding);
+  assert.strictEqual(skippedNonChannelsAi, completeNonChannelsRecord);
+  assert.strictEqual(aiMetadataCalls, 1);
+
+  plugin.generateMetadataWithDeepSeek = async () => {
+    throw new Error('AI provider unavailable');
+  };
+  const aiFailureFallback = await plugin.enrichRecordMetadataWithAi(hydrated, binding);
+  assert.strictEqual(aiFailureFallback.metadata.title, '服务端解析的视频号标题');
+  assert.strictEqual(aiFailureFallback.metadata.description, 'Original post body. #Obsidian #Knowledge');
+  assert.deepStrictEqual(aiFailureFallback.metadata.keywords, ['#Obsidian', '#Knowledge']);
+  assert.ok(aiFailureFallback.metadata.aiMetadataError);
 
   const writtenBinaries = [];
   plugin.ensureProFeatureAccess = async () => ({ hasAccess: true });

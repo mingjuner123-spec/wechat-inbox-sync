@@ -150,6 +150,16 @@ function getCanonicalSourceTitleCandidate(record) {
 function buildSemanticTitleCandidate(record, fallbackTitle = '') {
   const metadata = getMetadata(record);
   const source = getTranscriptionSourcePrefix(record);
+  const semanticTitle = cleanTitlePart(metadata.semanticTitle || metadata.aiTitle);
+  const aiMetadataSource = String(metadata.aiMetadataSource || '').trim().toLowerCase();
+  const shouldPreferAiTitle = source === '视频号'
+    && ['cloud', 'deepseek'].includes(aiMetadataSource)
+    && semanticTitle
+    && !GENERIC_TRANSCRIPTION_TITLE.test(semanticTitle);
+  if (shouldPreferAiTitle) {
+    return { title: semanticTitle, titleSource: 'ai-title' };
+  }
+
   const sourceTitleCandidate = getCanonicalSourceTitleCandidate(record);
   if (sourceTitleCandidate.title) return sourceTitleCandidate;
 
@@ -159,7 +169,6 @@ function buildSemanticTitleCandidate(record, fallbackTitle = '') {
     return { title: keywordTitle, titleSource: 'keywords' };
   }
 
-  const semanticTitle = cleanTitlePart(metadata.semanticTitle || metadata.aiTitle);
   if (semanticTitle && !GENERIC_TRANSCRIPTION_TITLE.test(semanticTitle)) {
     return { title: semanticTitle, titleSource: 'ai-title' };
   }
