@@ -8170,7 +8170,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.136";
+var PLUGIN_RUNTIME_VERSION = "1.3.137";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -12721,13 +12721,107 @@ function closeActiveDouyinBrowserWindows() {
   return closedCount;
 }
 __name(closeActiveDouyinBrowserWindows, "closeActiveDouyinBrowserWindows");
-function installXiaohongshuLoginWindowGuards(webContents) {
-  installXiaohongshuNavigationGuards(webContents);
-  if (webContents && typeof webContents.setWindowOpenHandler === "function") {
-    webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+function getSocialLoginWindowDomains(platform) {
+  const normalized = String(platform || "").trim().toLowerCase();
+  if (normalized === "xiaohongshu") {
+    return ["xiaohongshu.com", "xhslink.com", "xhslink.cn"];
+  }
+  if (normalized === "douyin") {
+    return ["douyin.com", "iesdouyin.com"];
+  }
+  return [];
+}
+__name(getSocialLoginWindowDomains, "getSocialLoginWindowDomains");
+function isAllowedSocialLoginWindowUrl(value, platform) {
+  const source = String(value || "").trim();
+  if (source === "about:blank") return true;
+  try {
+    const parsed = new URL(source);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port && parsed.port !== "443") {
+      return false;
+    }
+    return getSocialLoginWindowDomains(platform).some((domain) => isHostnameWithinDomain(parsed.hostname, domain));
+  } catch (error) {
+    return false;
   }
 }
+__name(isAllowedSocialLoginWindowUrl, "isAllowedSocialLoginWindowUrl");
+function getBrowserNavigationTargetUrl(event, navigationUrl) {
+  return typeof navigationUrl === "string" ? navigationUrl : navigationUrl && navigationUrl.url || event && event.url || "";
+}
+__name(getBrowserNavigationTargetUrl, "getBrowserNavigationTargetUrl");
+function isAllowedSocialLoginTopLevelNavigationUrl(value, platform) {
+  if (String(platform || "").trim().toLowerCase() === "xiaohongshu") {
+    return isAllowedSocialLoginWindowUrl(value, platform);
+  }
+  const source = String(value || "").trim();
+  if (source === "about:blank") return true;
+  try {
+    const parsed = new URL(source);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password && (!parsed.port || parsed.port === "443");
+  } catch (error) {
+    return false;
+  }
+}
+__name(isAllowedSocialLoginTopLevelNavigationUrl, "isAllowedSocialLoginTopLevelNavigationUrl");
+function installSocialLoginWindowGuards(webContents, platform) {
+  if (!webContents) return;
+  const preventUntrustedTopLevelNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
+    const targetUrl = getBrowserNavigationTargetUrl(event, navigationUrl);
+    if (!isAllowedSocialLoginTopLevelNavigationUrl(targetUrl, platform) && event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  }, "preventUntrustedTopLevelNavigation");
+  const preventExternalFrameNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
+    const targetUrl = getBrowserNavigationTargetUrl(event, navigationUrl);
+    if (shouldBlockExternalAppUrl(targetUrl) && event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  }, "preventExternalFrameNavigation");
+  if (typeof webContents.on === "function") {
+    webContents.on("will-navigate", preventUntrustedTopLevelNavigation);
+    webContents.on("will-redirect", preventUntrustedTopLevelNavigation);
+    webContents.on("will-frame-navigate", preventExternalFrameNavigation);
+    webContents.on("did-create-window", (childWindow) => {
+      if (!childWindow) return;
+      if (String(platform || "").toLowerCase() === "xiaohongshu") {
+        trackXiaohongshuBrowserWindow(childWindow);
+      } else if (String(platform || "").toLowerCase() === "douyin") {
+        trackDouyinBrowserWindow(childWindow);
+      }
+      installSocialLoginWindowGuards(childWindow.webContents, platform);
+    });
+  }
+  if (typeof webContents.setWindowOpenHandler === "function") {
+    webContents.setWindowOpenHandler((details = {}) => {
+      if (!isAllowedSocialLoginWindowUrl(details.url, platform)) {
+        return { action: "deny" };
+      }
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          show: true,
+          width: 1040,
+          height: 860,
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true
+          }
+        }
+      };
+    });
+  }
+}
+__name(installSocialLoginWindowGuards, "installSocialLoginWindowGuards");
+function installXiaohongshuLoginWindowGuards(webContents) {
+  installSocialLoginWindowGuards(webContents, "xiaohongshu");
+}
 __name(installXiaohongshuLoginWindowGuards, "installXiaohongshuLoginWindowGuards");
+function installDouyinLoginWindowGuards(webContents) {
+  installSocialLoginWindowGuards(webContents, "douyin");
+}
+__name(installDouyinLoginWindowGuards, "installDouyinLoginWindowGuards");
 function enableDebuggerNetworkCapture(debuggerApi) {
   if (!debuggerApi || typeof debuggerApi.sendCommand !== "function") return false;
   try {
@@ -17549,7 +17643,8 @@ async function loginDouyinWeb(targetUrl = "") {
         sandbox: true
       }
     });
-    installExternalAppNavigationGuards(win.webContents);
+    trackDouyinBrowserWindow(win);
+    installDouyinLoginWindowGuards(win.webContents);
     const finish = /* @__PURE__ */ __name(async (error = null) => {
       if (settled) return;
       settled = true;
@@ -29176,7 +29271,10 @@ WechatObsidianInboxPlugin.__test = {
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
+  isAllowedSocialLoginWindowUrl,
+  installSocialLoginWindowGuards,
   installXiaohongshuLoginWindowGuards,
+  installDouyinLoginWindowGuards,
   trackXiaohongshuBrowserWindow,
   trackDouyinBrowserWindow,
   bindBrowserWindowToAbortSignal,

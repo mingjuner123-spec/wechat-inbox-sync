@@ -1851,6 +1851,93 @@ assert.deepStrictEqual(
   { action: 'deny' },
   'a hidden extraction page must never create a visible HTTP child window',
 );
+assert.strictEqual(typeof helpers.isAllowedSocialLoginWindowUrl, 'function');
+assert.strictEqual(typeof helpers.installDouyinLoginWindowGuards, 'function');
+assert.strictEqual(typeof helpers.installXiaohongshuLoginWindowGuards, 'function');
+assert.strictEqual(helpers.isAllowedSocialLoginWindowUrl('about:blank', 'douyin'), true);
+assert.strictEqual(helpers.isAllowedSocialLoginWindowUrl('https://sso.douyin.com/login', 'douyin'), true);
+assert.strictEqual(helpers.isAllowedSocialLoginWindowUrl('https://www.xiaohongshu.com/login', 'xiaohongshu'), true);
+assert.strictEqual(helpers.isAllowedSocialLoginWindowUrl('https://douyin.com.attacker.example/login', 'douyin'), false);
+assert.strictEqual(helpers.isAllowedSocialLoginWindowUrl('http://www.douyin.com/login', 'douyin'), false);
+assert.strictEqual(helpers.isAllowedSocialLoginWindowUrl('bytedance://aweme/detail/123', 'douyin'), false);
+const douyinLoginNavigationHandlers = {};
+let douyinLoginWindowOpenHandler = null;
+helpers.installDouyinLoginWindowGuards({
+  on(eventName, handler) {
+    douyinLoginNavigationHandlers[eventName] = handler;
+  },
+  setWindowOpenHandler(handler) {
+    douyinLoginWindowOpenHandler = handler;
+  },
+});
+const allowedDouyinPopup = douyinLoginWindowOpenHandler({ url: 'https://sso.douyin.com/login' });
+assert.strictEqual(allowedDouyinPopup.action, 'allow');
+assert.deepStrictEqual(allowedDouyinPopup.overrideBrowserWindowOptions.webPreferences, {
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: true,
+});
+assert.deepStrictEqual(
+  douyinLoginWindowOpenHandler({ url: 'https://attacker.example/login' }),
+  { action: 'deny' },
+);
+let preventedThirdPartyHttpsNavigation = false;
+douyinLoginNavigationHandlers['will-navigate']({
+  preventDefault() {
+    preventedThirdPartyHttpsNavigation = true;
+  },
+}, 'https://captcha.example/login');
+assert.strictEqual(preventedThirdPartyHttpsNavigation, false);
+let preventedInsecureDouyinNavigation = false;
+douyinLoginNavigationHandlers['will-navigate']({
+  preventDefault() {
+    preventedInsecureDouyinNavigation = true;
+  },
+}, 'http://www.douyin.com/login');
+assert.strictEqual(preventedInsecureDouyinNavigation, true);
+let preventedTrustedDouyinNavigation = false;
+douyinLoginNavigationHandlers['will-redirect']({
+  preventDefault() {
+    preventedTrustedDouyinNavigation = true;
+  },
+}, 'https://www.douyin.com/login');
+assert.strictEqual(preventedTrustedDouyinNavigation, false);
+let preventedThirdPartyCaptchaFrame = false;
+douyinLoginNavigationHandlers['will-frame-navigate']({
+  preventDefault() {
+    preventedThirdPartyCaptchaFrame = true;
+  },
+}, 'https://captcha.example/challenge');
+assert.strictEqual(preventedThirdPartyCaptchaFrame, false);
+let preventedExternalDouyinFrame = false;
+douyinLoginNavigationHandlers['will-frame-navigate']({
+  preventDefault() {
+    preventedExternalDouyinFrame = true;
+  },
+}, 'snssdk1128://aweme/detail/123');
+assert.strictEqual(preventedExternalDouyinFrame, true);
+let xiaohongshuLoginWindowOpenHandler = null;
+helpers.installXiaohongshuLoginWindowGuards({
+  on() {},
+  setWindowOpenHandler(handler) {
+    xiaohongshuLoginWindowOpenHandler = handler;
+  },
+});
+assert.strictEqual(
+  xiaohongshuLoginWindowOpenHandler({ url: 'https://www.xiaohongshu.com/login' }).action,
+  'allow',
+);
+assert.deepStrictEqual(
+  xiaohongshuLoginWindowOpenHandler({ url: 'https://attacker.example/login' }),
+  { action: 'deny' },
+);
+const douyinLoginSource = pluginMainSource.slice(
+  pluginMainSource.indexOf('async function loginDouyinWeb'),
+  pluginMainSource.indexOf('function getElectronShell'),
+);
+assert.ok(douyinLoginSource.includes('trackDouyinBrowserWindow(win);'));
+assert.ok(douyinLoginSource.includes('installDouyinLoginWindowGuards(win.webContents);'));
+assert.ok(!douyinLoginSource.includes('installExternalAppNavigationGuards(win.webContents);'));
 assert.strictEqual(typeof helpers.installXiaohongshuNavigationGuards, 'function');
 assert.strictEqual(typeof helpers.createXiaohongshuBrowserDiagnostic, 'function');
 assert.strictEqual(typeof helpers.detectXiaohongshuSecurityRestriction, 'function');
