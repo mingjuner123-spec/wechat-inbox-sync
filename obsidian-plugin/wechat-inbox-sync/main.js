@@ -12721,13 +12721,107 @@ function closeActiveDouyinBrowserWindows() {
   return closedCount;
 }
 __name(closeActiveDouyinBrowserWindows, "closeActiveDouyinBrowserWindows");
-function installXiaohongshuLoginWindowGuards(webContents) {
-  installXiaohongshuNavigationGuards(webContents);
-  if (webContents && typeof webContents.setWindowOpenHandler === "function") {
-    webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+function getSocialLoginWindowDomains(platform) {
+  const normalized = String(platform || "").trim().toLowerCase();
+  if (normalized === "xiaohongshu") {
+    return ["xiaohongshu.com", "xhslink.com", "xhslink.cn"];
+  }
+  if (normalized === "douyin") {
+    return ["douyin.com", "iesdouyin.com"];
+  }
+  return [];
+}
+__name(getSocialLoginWindowDomains, "getSocialLoginWindowDomains");
+function isAllowedSocialLoginWindowUrl(value, platform) {
+  const source = String(value || "").trim();
+  if (source === "about:blank") return true;
+  try {
+    const parsed = new URL(source);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port && parsed.port !== "443") {
+      return false;
+    }
+    return getSocialLoginWindowDomains(platform).some((domain) => isHostnameWithinDomain(parsed.hostname, domain));
+  } catch (error) {
+    return false;
   }
 }
+__name(isAllowedSocialLoginWindowUrl, "isAllowedSocialLoginWindowUrl");
+function getBrowserNavigationTargetUrl(event, navigationUrl) {
+  return typeof navigationUrl === "string" ? navigationUrl : navigationUrl && navigationUrl.url || event && event.url || "";
+}
+__name(getBrowserNavigationTargetUrl, "getBrowserNavigationTargetUrl");
+function isAllowedSocialLoginTopLevelNavigationUrl(value, platform) {
+  if (String(platform || "").trim().toLowerCase() === "xiaohongshu") {
+    return isAllowedSocialLoginWindowUrl(value, platform);
+  }
+  const source = String(value || "").trim();
+  if (source === "about:blank") return true;
+  try {
+    const parsed = new URL(source);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password && (!parsed.port || parsed.port === "443");
+  } catch (error) {
+    return false;
+  }
+}
+__name(isAllowedSocialLoginTopLevelNavigationUrl, "isAllowedSocialLoginTopLevelNavigationUrl");
+function installSocialLoginWindowGuards(webContents, platform) {
+  if (!webContents) return;
+  const preventUntrustedTopLevelNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
+    const targetUrl = getBrowserNavigationTargetUrl(event, navigationUrl);
+    if (!isAllowedSocialLoginTopLevelNavigationUrl(targetUrl, platform) && event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  }, "preventUntrustedTopLevelNavigation");
+  const preventExternalFrameNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
+    const targetUrl = getBrowserNavigationTargetUrl(event, navigationUrl);
+    if (shouldBlockExternalAppUrl(targetUrl) && event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  }, "preventExternalFrameNavigation");
+  if (typeof webContents.on === "function") {
+    webContents.on("will-navigate", preventUntrustedTopLevelNavigation);
+    webContents.on("will-redirect", preventUntrustedTopLevelNavigation);
+    webContents.on("will-frame-navigate", preventExternalFrameNavigation);
+    webContents.on("did-create-window", (childWindow) => {
+      if (!childWindow) return;
+      if (String(platform || "").toLowerCase() === "xiaohongshu") {
+        trackXiaohongshuBrowserWindow(childWindow);
+      } else if (String(platform || "").toLowerCase() === "douyin") {
+        trackDouyinBrowserWindow(childWindow);
+      }
+      installSocialLoginWindowGuards(childWindow.webContents, platform);
+    });
+  }
+  if (typeof webContents.setWindowOpenHandler === "function") {
+    webContents.setWindowOpenHandler((details = {}) => {
+      if (!isAllowedSocialLoginWindowUrl(details.url, platform)) {
+        return { action: "deny" };
+      }
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          show: true,
+          width: 1040,
+          height: 860,
+          webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true
+          }
+        }
+      };
+    });
+  }
+}
+__name(installSocialLoginWindowGuards, "installSocialLoginWindowGuards");
+function installXiaohongshuLoginWindowGuards(webContents) {
+  installSocialLoginWindowGuards(webContents, "xiaohongshu");
+}
 __name(installXiaohongshuLoginWindowGuards, "installXiaohongshuLoginWindowGuards");
+function installDouyinLoginWindowGuards(webContents) {
+  installSocialLoginWindowGuards(webContents, "douyin");
+}
+__name(installDouyinLoginWindowGuards, "installDouyinLoginWindowGuards");
 function enableDebuggerNetworkCapture(debuggerApi) {
   if (!debuggerApi || typeof debuggerApi.sendCommand !== "function") return false;
   try {
@@ -17549,7 +17643,8 @@ async function loginDouyinWeb(targetUrl = "") {
         sandbox: true
       }
     });
-    installExternalAppNavigationGuards(win.webContents);
+    trackDouyinBrowserWindow(win);
+    installDouyinLoginWindowGuards(win.webContents);
     const finish = /* @__PURE__ */ __name(async (error = null) => {
       if (settled) return;
       settled = true;
@@ -29176,7 +29271,10 @@ WechatObsidianInboxPlugin.__test = {
   isAllowedXiaohongshuBrowserNavigationUrl,
   shouldBlockXiaohongshuBrowserNavigationRequest,
   installXiaohongshuNavigationGuards,
+  isAllowedSocialLoginWindowUrl,
+  installSocialLoginWindowGuards,
   installXiaohongshuLoginWindowGuards,
+  installDouyinLoginWindowGuards,
   trackXiaohongshuBrowserWindow,
   trackDouyinBrowserWindow,
   bindBrowserWindowToAbortSignal,
