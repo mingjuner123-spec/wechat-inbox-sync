@@ -194,6 +194,17 @@ function getMarkdownBody(markdown) {
     .trim();
 }
 
+function getLocalFileAttachmentPaths(markdown) {
+  const paths = [];
+  const pattern = /^\s*本地(?:图片|附件)\s*[：:]\s*!?\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]\s*$/gim;
+  let match = null;
+  while ((match = pattern.exec(String(markdown || ''))) !== null) {
+    const attachmentPath = String(match[1] || '').trim();
+    if (attachmentPath && !paths.includes(attachmentPath)) paths.push(attachmentPath);
+  }
+  return paths;
+}
+
 function isKnownFailureReceiptMarkdown(markdown) {
   const body = getMarkdownBody(markdown);
   if (!body) return false;
@@ -219,8 +230,7 @@ function isExistingLocalNoteDeliverable(record, markdown) {
 
   if (recordType === 'text') return meaningfulLength > 0;
   if (recordType === 'file') {
-    if (fileExt && fileExt !== 'pdf' && hasEmbeddedAttachment) return true;
-    return meaningfulLength >= 8;
+    return getLocalFileAttachmentPaths(body).length > 0;
   }
   if (recordType === 'voice'
     || metadata.webpageMediaType === 'audio_video'
@@ -324,6 +334,7 @@ module.exports = {
   MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS,
   SYNC_LIFECYCLE_FAILURE_MESSAGES,
   categorizeSyncFailure,
+  getLocalFileAttachmentPaths,
   getSyncLifecycleOutcomeError,
   getSyncLifecycleBindingFingerprint,
   getSyncNoteTitleFromPath,

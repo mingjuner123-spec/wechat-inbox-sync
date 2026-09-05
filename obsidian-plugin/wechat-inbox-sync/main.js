@@ -3789,13 +3789,13 @@ var require_record_identity_utils = __commonJS({
       }
     }
     __name(normalizeRecordUrlForCompare2, "normalizeRecordUrlForCompare");
-    function hasRecordUrlInFrontmatter2(markdown, recordUrl) {
+    function hasRecordUrlInFrontmatter(markdown, recordUrl) {
       const expected = normalizeRecordUrlForCompare2(recordUrl);
       if (!expected) return false;
       const actual = normalizeRecordUrlForCompare2(getFrontmatterScalar2(markdown, "url"));
       return Boolean(actual && actual === expected);
     }
-    __name(hasRecordUrlInFrontmatter2, "hasRecordUrlInFrontmatter");
+    __name(hasRecordUrlInFrontmatter, "hasRecordUrlInFrontmatter");
     module2.exports = {
       buildRecordIdMarker: buildRecordIdMarker2,
       getFrontmatterBlock: getFrontmatterBlock2,
@@ -3804,7 +3804,7 @@ var require_record_identity_utils = __commonJS({
       getRecordIdFromHiddenMarker: getRecordIdFromHiddenMarker2,
       getRecordIdFromMarkdown: getRecordIdFromMarkdown2,
       hasRecordIdInFrontmatter: hasRecordIdInFrontmatter2,
-      hasRecordUrlInFrontmatter: hasRecordUrlInFrontmatter2,
+      hasRecordUrlInFrontmatter,
       normalizeRecordUrlForCompare: normalizeRecordUrlForCompare2,
       normalizeYamlScalar: normalizeYamlScalar2
     };
@@ -3982,6 +3982,17 @@ var require_sync_lifecycle_utils = __commonJS({
       return String(markdown || "").replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").replace(/<!--\s*wechat-inbox-record-id\s*:[\s\S]*?-->/gi, "").trim();
     }
     __name(getMarkdownBody, "getMarkdownBody");
+    function getLocalFileAttachmentPaths2(markdown) {
+      const paths = [];
+      const pattern = /^\s*本地(?:图片|附件)\s*[：:]\s*!?\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]\s*$/gim;
+      let match = null;
+      while ((match = pattern.exec(String(markdown || ""))) !== null) {
+        const attachmentPath = String(match[1] || "").trim();
+        if (attachmentPath && !paths.includes(attachmentPath)) paths.push(attachmentPath);
+      }
+      return paths;
+    }
+    __name(getLocalFileAttachmentPaths2, "getLocalFileAttachmentPaths");
     function isKnownFailureReceiptMarkdown(markdown) {
       const body = getMarkdownBody(markdown);
       if (!body) return false;
@@ -4003,8 +4014,7 @@ var require_sync_lifecycle_utils = __commonJS({
       const meaningfulLength = getMeaningfulMarkdownLength(contentOnlyBody);
       if (recordType === "text") return meaningfulLength > 0;
       if (recordType === "file") {
-        if (fileExt && fileExt !== "pdf" && hasEmbeddedAttachment) return true;
-        return meaningfulLength >= 8;
+        return getLocalFileAttachmentPaths2(body).length > 0;
       }
       if (recordType === "voice" || metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly === true) {
         return meaningfulLength >= 8;
@@ -4088,6 +4098,7 @@ var require_sync_lifecycle_utils = __commonJS({
       MAX_PENDING_SYNC_LIFECYCLE_ATTEMPTS,
       SYNC_LIFECYCLE_FAILURE_MESSAGES,
       categorizeSyncFailure: categorizeSyncFailure2,
+      getLocalFileAttachmentPaths: getLocalFileAttachmentPaths2,
       getSyncLifecycleOutcomeError: getSyncLifecycleOutcomeError2,
       getSyncLifecycleBindingFingerprint: getSyncLifecycleBindingFingerprint2,
       getSyncNoteTitleFromPath: getSyncNoteTitleFromPath2,
@@ -8050,12 +8061,12 @@ var {
   getRecordIdFromHiddenMarker,
   getRecordIdFromMarkdown,
   hasRecordIdInFrontmatter,
-  hasRecordUrlInFrontmatter,
   normalizeRecordUrlForCompare,
   normalizeYamlScalar
 } = require_record_identity_utils();
 var {
   categorizeSyncFailure,
+  getLocalFileAttachmentPaths,
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
@@ -9855,8 +9866,11 @@ function runLocalDouyinResolver(executablePath, args, timeoutMs = LOCAL_DOUYIN_R
 __name(runLocalDouyinResolver, "runLocalDouyinResolver");
 function getTransportErrorDiagnostic(error) {
   const source = error && typeof error === "object" ? error : {};
-  const status = Number(source.status || source.statusCode || source.response && source.response.status || 0);
   const message = redactDiagnosticText(source.message || source || "unknown error").replace(/[\r\n]+/g, " ").trim().slice(0, 240);
+  const messageStatusMatch = message.match(/(?:status|HTTP)\s*[:=]?\s*(\d{3})\b/i);
+  const status = Number(
+    source.status || source.statusCode || source.response && source.response.status || messageStatusMatch && messageStatusMatch[1] || 0
+  );
   return {
     name: String(source.name || "").slice(0, 80),
     code: String(source.code || "").slice(0, 80),
@@ -10614,8 +10628,8 @@ function requestJsonViaNode(options) {
     const body = options.body || "";
     const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : 16 * 1024 * 1024;
     const headers = {
-      ...options.headers || {},
-      "User-Agent": "WeChat-Inbox-Sync-Obsidian/1.0"
+      "User-Agent": "WeChat-Inbox-Sync-Obsidian/1.0",
+      ...options.headers || {}
     };
     if (body && !headers["Content-Length"]) {
       headers["Content-Length"] = Buffer.byteLength(body);
@@ -13821,43 +13835,96 @@ function extractBilibiliCidFromPayload(payload, pageNumber = 1) {
   return cid ? String(cid) : "";
 }
 __name(extractBilibiliCidFromPayload, "extractBilibiliCidFromPayload");
-function extractBilibiliAudioUrlFromPlayurlPayload(payload) {
+function extractBilibiliAudioUrlsFromPlayurlPayload(payload) {
   const data = typeof payload === "string" ? tryParseJson(payload) : payload;
   const playData = data && data.data ? data.data : {};
+  const urls = [];
+  const addUrl = /* @__PURE__ */ __name((value) => {
+    const url = normalizeExtractedUrl(value);
+    if (url && !urls.includes(url)) urls.push(url);
+  }, "addUrl");
   const audioList = playData.dash && Array.isArray(playData.dash.audio) ? playData.dash.audio : [];
   for (const item of audioList) {
-    const url = normalizeExtractedUrl(item && (item.baseUrl || item.base_url || item.url));
-    if (url) return url;
+    addUrl(item && (item.baseUrl || item.base_url || item.url));
     const backups = item && (item.backupUrl || item.backup_url) || [];
-    if (Array.isArray(backups) && backups.length) {
-      const backupUrl = normalizeExtractedUrl(backups[0]);
-      if (backupUrl) return backupUrl;
-    }
+    if (Array.isArray(backups)) backups.forEach(addUrl);
   }
   const durlList = Array.isArray(playData.durl) ? playData.durl : [];
   for (const item of durlList) {
-    const url = normalizeExtractedUrl(item && item.url);
-    if (url) return url;
+    addUrl(item && item.url);
+    const backups = item && (item.backupUrl || item.backup_url) || [];
+    if (Array.isArray(backups)) backups.forEach(addUrl);
   }
-  return "";
+  return urls;
+}
+__name(extractBilibiliAudioUrlsFromPlayurlPayload, "extractBilibiliAudioUrlsFromPlayurlPayload");
+function extractBilibiliAudioUrlFromPlayurlPayload(payload) {
+  return extractBilibiliAudioUrlsFromPlayurlPayload(payload)[0] || "";
 }
 __name(extractBilibiliAudioUrlFromPlayurlPayload, "extractBilibiliAudioUrlFromPlayurlPayload");
-function extractBilibiliProgressiveVideoUrlFromPlayurlPayload(payload) {
+function extractBilibiliProgressiveVideoUrlsFromPlayurlPayload(payload) {
   const data = typeof payload === "string" ? tryParseJson(payload) : payload;
   const playData = data && data.data ? data.data : {};
+  const urls = [];
+  const addUrl = /* @__PURE__ */ __name((value) => {
+    const url = normalizeExtractedUrl(value);
+    if (url && !urls.includes(url)) urls.push(url);
+  }, "addUrl");
   const durlList = Array.isArray(playData.durl) ? playData.durl : [];
   for (const item of durlList) {
-    const url = normalizeExtractedUrl(item && item.url);
-    if (url) return url;
+    addUrl(item && item.url);
     const backups = item && (item.backupUrl || item.backup_url) || [];
-    if (Array.isArray(backups) && backups.length) {
-      const backupUrl = normalizeExtractedUrl(backups[0]);
-      if (backupUrl) return backupUrl;
-    }
+    if (Array.isArray(backups)) backups.forEach(addUrl);
   }
-  return "";
+  return urls;
+}
+__name(extractBilibiliProgressiveVideoUrlsFromPlayurlPayload, "extractBilibiliProgressiveVideoUrlsFromPlayurlPayload");
+function extractBilibiliProgressiveVideoUrlFromPlayurlPayload(payload) {
+  return extractBilibiliProgressiveVideoUrlsFromPlayurlPayload(payload)[0] || "";
 }
 __name(extractBilibiliProgressiveVideoUrlFromPlayurlPayload, "extractBilibiliProgressiveVideoUrlFromPlayurlPayload");
+function createBilibiliHttpError(stage, response = {}, apiCode = 0) {
+  const httpStatus = Number(response && response.status) || 0;
+  const normalizedStatus = httpStatus || (Number(apiCode) === -412 ? 412 : 0);
+  const error = new Error(
+    normalizedStatus ? `B站 ${stage} 请求失败：HTTP ${normalizedStatus}` : `B站 ${stage} 请求失败${apiCode ? `：API ${apiCode}` : ""}`
+  );
+  error.code = normalizedStatus === 412 ? "BILIBILI_HTTP_412" : "BILIBILI_REQUEST_FAILED";
+  error.status = normalizedStatus;
+  return error;
+}
+__name(createBilibiliHttpError, "createBilibiliHttpError");
+function getBilibiliResponseFailure(response = {}, stage = "") {
+  const status = Number(response && response.status) || 0;
+  const payload = response && (response.json || tryParseJson(response.text || ""));
+  const apiCode = Number(payload && payload.code);
+  if (status && (status < 200 || status >= 300)) {
+    return createBilibiliHttpError(stage, response, apiCode);
+  }
+  if (Number.isFinite(apiCode) && apiCode !== 0) {
+    return createBilibiliHttpError(stage, response, apiCode);
+  }
+  return null;
+}
+__name(getBilibiliResponseFailure, "getBilibiliResponseFailure");
+function appendBilibiliDiagnosticStage(diagnostic, {
+  stage,
+  transport,
+  url,
+  ok,
+  error = null
+} = {}) {
+  if (!diagnostic || !Array.isArray(diagnostic.stages)) return;
+  diagnostic.stages.push({
+    stage: String(stage || "unknown").slice(0, 64),
+    transport: String(transport || "unknown").slice(0, 64),
+    host: getSafeUrlDiagnostic(url).host || "unknown-host",
+    ok: ok === true,
+    ...error ? { error: getTransportErrorDiagnostic(error) } : {}
+  });
+  diagnostic.stages = diagnostic.stages.slice(-24);
+}
+__name(appendBilibiliDiagnosticStage, "appendBilibiliDiagnosticStage");
 function extractBilibiliAudioUrlFromHtml(html) {
   const source = String(html || "");
   const urls = [];
@@ -25362,12 +25429,18 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     socialMetrics = {},
     sourceTitle = "",
     mediaResolutionDiagnostic = null,
+    refreshMediaUrls = null,
     signal = null
   }) {
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const normalizedSourceTitle = String(sourceTitle || metadata.sourceTitle || "").trim();
-    const mediaDiagnosticTrace = mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object" ? { ...mediaResolutionDiagnostic, downloadAttempts: [...Array.isArray(mediaResolutionDiagnostic.downloadAttempts) ? mediaResolutionDiagnostic.downloadAttempts : []] } : null;
+    const mediaDiagnosticTrace = mediaResolutionDiagnostic && typeof mediaResolutionDiagnostic === "object" ? mediaResolutionDiagnostic : null;
+    if (mediaDiagnosticTrace) {
+      mediaDiagnosticTrace.downloadAttempts = [
+        ...Array.isArray(mediaDiagnosticTrace.downloadAttempts) ? mediaDiagnosticTrace.downloadAttempts : []
+      ];
+    }
     const reportMediaDownloadAttempt = /* @__PURE__ */ __name((attempt = {}) => {
       if (!mediaDiagnosticTrace) return;
       mediaDiagnosticTrace.downloadAttempts.push(attempt);
@@ -25427,7 +25500,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     addCandidate(mediaUrl);
     (Array.isArray(mediaUrls) ? mediaUrls : []).forEach((item) => addCandidate(item));
     (Array.isArray(mediaItems) ? mediaItems : []).forEach((item) => addCandidate(item));
-    const candidates = sortMediaUrlsForTranscription(Array.from(candidateMap.keys())).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean);
+    const getCandidates = /* @__PURE__ */ __name(() => sortMediaUrlsForTranscription(Array.from(candidateMap.keys())).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
+    const candidates = getCandidates();
     if (!candidates.length) {
       return {
         ...record,
@@ -25449,8 +25523,23 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       };
     }
     let lastError = null;
+    const processedCandidateUrls = /* @__PURE__ */ new Set();
+    let refreshedMediaUrls = false;
+    let shouldRefreshMediaUrls = false;
     try {
-      for (const candidate of candidates) {
+      while (true) {
+        const candidate = getCandidates().find((item) => !processedCandidateUrls.has(item.url));
+        if (!candidate) {
+          if (!refreshedMediaUrls && typeof refreshMediaUrls === "function" && shouldRefreshMediaUrls) {
+            refreshedMediaUrls = true;
+            const refreshedValues = await refreshMediaUrls(lastError);
+            (Array.isArray(refreshedValues) ? refreshedValues : []).forEach((item) => addCandidate(item));
+            if (mediaDiagnosticTrace) mediaDiagnosticTrace.mediaCandidateCount = getCandidates().length;
+            if (getCandidates().some((item) => !processedCandidateUrls.has(item.url))) continue;
+          }
+          break;
+        }
+        processedCandidateUrls.add(candidate.url);
         throwIfAborted(signal);
         try {
           const candidateUrl = candidate.url;
@@ -25481,7 +25570,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             url,
             platform,
             mediaUrl: candidateUrl,
-            mediaUrls: candidates.map((candidate2) => candidate2.url),
+            mediaUrls: getCandidates().map((item) => item.url),
             subtitleUrl,
             transcription: result.transcription,
             transcriptionStatus: "success",
@@ -25507,6 +25596,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         } catch (candidateError) {
           if (isAbortError(candidateError)) throw candidateError;
           lastError = candidateError;
+          const candidateStatus = getTransportErrorDiagnostic(candidateError).status;
+          if ([401, 403, 412].includes(candidateStatus)) shouldRefreshMediaUrls = true;
         }
       }
       throw lastError || new Error("未能完成音视频转写");
@@ -25553,10 +25644,77 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       socialMetrics: extractSocialMetricsFromHtml(html)
     });
   }
-  async fetchBilibiliSubtitleTextFromUrls(subtitleUrls) {
+  async requestBilibiliResourceViaNode(url, headers = {}, options = {}) {
+    return requestJsonViaNode({
+      url,
+      method: "GET",
+      headers,
+      timeout: options.timeout || 2e4,
+      signal: options.signal || null
+    });
+  }
+  async requestBilibiliResource(url, stage, diagnostic, options = {}) {
+    const headers = getSocialRequestHeaders(options.referer || url);
+    let requestError = null;
+    try {
+      const response = await requestUrl({ url, method: "GET", headers, throw: false });
+      const responseError = getBilibiliResponseFailure(response, stage);
+      if (responseError) throw responseError;
+      appendBilibiliDiagnosticStage(diagnostic, {
+        stage,
+        transport: "obsidian-requestUrl",
+        url,
+        ok: true
+      });
+      return response;
+    } catch (error) {
+      requestError = error;
+      appendBilibiliDiagnosticStage(diagnostic, {
+        stage,
+        transport: "obsidian-requestUrl",
+        url,
+        ok: false,
+        error
+      });
+    }
+    const requestStatus = getTransportErrorDiagnostic(requestError).status;
+    if (requestStatus !== 412 && !isRequestUrlTransportError(requestError && requestError.message)) {
+      throw requestError;
+    }
+    try {
+      const response = await this.requestBilibiliResourceViaNode(url, headers, options);
+      const responseError = getBilibiliResponseFailure(response, stage);
+      if (responseError) throw responseError;
+      appendBilibiliDiagnosticStage(diagnostic, {
+        stage,
+        transport: "node-http",
+        url,
+        ok: true
+      });
+      return response;
+    } catch (error) {
+      appendBilibiliDiagnosticStage(diagnostic, {
+        stage,
+        transport: "node-http",
+        url,
+        ok: false,
+        error
+      });
+      throw error;
+    }
+  }
+  async fetchBilibiliSubtitleTextFromUrls(subtitleUrls, diagnostic = null, attemptedUrls = null) {
+    const attempted = attemptedUrls instanceof Set ? attemptedUrls : /* @__PURE__ */ new Set();
     for (const subtitleUrl of subtitleUrls || []) {
+      if (attempted.has(subtitleUrl)) continue;
+      attempted.add(subtitleUrl);
       try {
-        const response = await requestUrl({ url: subtitleUrl, method: "GET", headers: getSocialRequestHeaders("https://www.bilibili.com/") });
+        const response = await this.requestBilibiliResource(
+          subtitleUrl,
+          "subtitle-fetch",
+          diagnostic,
+          { referer: "https://www.bilibili.com/" }
+        );
         const transcription = parseBilibiliSubtitlePayload(response.json || response.text);
         if (transcription) {
           return {
@@ -25573,27 +25731,62 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     };
   }
   async hydrateBilibiliTranscript(record, url, binding = null, title = "") {
-    const resolvedUrl = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrl(url) : url;
+    const redirectResult = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrlWithDiagnostics(url) : { url, diagnostic: null };
+    const resolvedUrl = redirectResult.url || url;
     const requestedPageNumber = extractBilibiliPageNumber(resolvedUrl || url);
-    const response = await requestUrl({ url: resolvedUrl, method: "GET", headers: getSocialRequestHeaders(resolvedUrl) });
-    const html = response.text || "";
-    let markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, resolvedUrl);
-    const pageMetadata = extractWebpageMetadataFromHtml(html, resolvedUrl);
-    let sourceTitle = pageMetadata.title;
-    let bilibiliSocialMetrics = extractSocialMetricsFromHtml(html);
-    const htmlSubtitleUrls = extractBilibiliSubtitleUrlsFromHtml(html);
-    let subtitleUrls = requestedPageNumber === 1 ? htmlSubtitleUrls : [];
-    let bvid = extractBilibiliBvid(resolvedUrl) || extractBilibiliBvid(url) || extractBilibiliBvid(html);
+    const diagnostic = {
+      source: getSafeUrlDiagnostic(url),
+      resolved: getSafeUrlDiagnostic(resolvedUrl),
+      platform: "bilibili",
+      requestedPageNumber,
+      stages: [],
+      mediaCandidateCount: 0
+    };
+    let html = "";
+    let pageMetadata = {};
+    let pageRequested = false;
+    let pageError = null;
+    let markdown = "";
+    let sourceTitle = "";
+    let bilibiliSocialMetrics = {};
+    let subtitleUrls = [];
+    let bvid = extractBilibiliBvid(resolvedUrl) || extractBilibiliBvid(url);
     let cid = "";
-    let playurlAudioUrl = "";
-    let progressiveVideoUrl = "";
+    let audioUrls = [];
+    let progressiveVideoUrls = [];
+    const loadOptionalPage = /* @__PURE__ */ __name(async () => {
+      if (pageRequested) return;
+      pageRequested = true;
+      try {
+        const response = await this.requestBilibiliResource(resolvedUrl, "page-fetch", diagnostic);
+        html = response.text || "";
+        pageMetadata = extractWebpageMetadataFromHtml(html, resolvedUrl);
+        const pageMarkdown = buildSocialMediaSupplementalMarkdownFromHtml(html, resolvedUrl);
+        if (!markdown) markdown = pageMarkdown;
+        sourceTitle = sourceTitle || pageMetadata.title || "";
+        if (!hasSocialMetrics(bilibiliSocialMetrics)) {
+          bilibiliSocialMetrics = extractSocialMetricsFromHtml(html);
+        }
+        if (requestedPageNumber === 1) {
+          subtitleUrls = Array.from(/* @__PURE__ */ new Set([
+            ...subtitleUrls,
+            ...extractBilibiliSubtitleUrlsFromHtml(html)
+          ]));
+        }
+        bvid = bvid || extractBilibiliBvid(html);
+      } catch (error) {
+        pageError = error;
+      }
+    }, "loadOptionalPage");
+    if (!bvid) await loadOptionalPage();
     if (bvid) {
       try {
-        const viewResponse = await requestUrl({
-          url: `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
-          method: "GET",
-          headers: getSocialRequestHeaders(resolvedUrl)
-        });
+        const viewResponse = await this.requestBilibiliResource(
+          `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
+          "view-api",
+          diagnostic,
+          { referer: resolvedUrl }
+        );
         const viewPayload = viewResponse.json || tryParseJson(viewResponse.text) || {};
         const viewData = viewPayload && viewPayload.data && typeof viewPayload.data === "object" ? viewPayload.data : {};
         const apiTitle = cleanSocialDescription(viewData.title || "");
@@ -25603,8 +25796,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (apiTitle || apiDescription || apiCoverUrl) {
           markdown = buildSocialMediaSupplementalMarkdown({
             title: sourceTitle,
-            description: apiDescription || pageMetadata.description,
-            tags: pageMetadata.keywords,
+            description: apiDescription || pageMetadata.description || "",
+            tags: pageMetadata.keywords || [],
             imageUrls: [
               apiCoverUrl,
               extractMetaContent(html, ["og:image", "twitter:image"])
@@ -25613,42 +25806,52 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         cid = extractBilibiliCidFromPayload(viewPayload, requestedPageNumber);
         bilibiliSocialMetrics = hasSocialMetrics(buildSocialMetrics(viewPayload)) ? buildSocialMetrics(viewPayload) : bilibiliSocialMetrics;
-        if (cid && (!subtitleUrls.length || requestedPageNumber > 1)) {
-          const playerResponse = await requestUrl({
-            url: `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
-            method: "GET",
-            headers: getSocialRequestHeaders(resolvedUrl)
-          });
-          const selectedPageSubtitleUrls = extractBilibiliSubtitleUrlsFromHtml(JSON.stringify(playerResponse.json || tryParseJson(playerResponse.text) || {}));
-          if (selectedPageSubtitleUrls.length) subtitleUrls = selectedPageSubtitleUrls;
-        }
-        if (cid) {
-          const playurlResponse = await requestUrl({
-            url: `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&fnval=16&fourk=1`,
-            method: "GET",
-            headers: getSocialRequestHeaders(resolvedUrl)
-          });
-          playurlAudioUrl = extractBilibiliAudioUrlFromPlayurlPayload(playurlResponse.json || playurlResponse.text);
-          try {
-            const progressiveResponse = await requestUrl({
-              url: `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&fnval=0&fourk=0`,
-              method: "GET",
-              headers: getSocialRequestHeaders(resolvedUrl)
-            });
-            progressiveVideoUrl = extractBilibiliProgressiveVideoUrlFromPlayurlPayload(progressiveResponse.json || progressiveResponse.text);
-          } catch (progressiveError) {
-          }
-        }
       } catch (error) {
       }
+      if (cid && (!subtitleUrls.length || requestedPageNumber > 1)) {
+        try {
+          const playerResponse = await this.requestBilibiliResource(
+            `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`,
+            "player-api",
+            diagnostic,
+            { referer: resolvedUrl }
+          );
+          const selectedPageSubtitleUrls = extractBilibiliSubtitleUrlsFromHtml(JSON.stringify(playerResponse.json || tryParseJson(playerResponse.text) || {}));
+          if (selectedPageSubtitleUrls.length) subtitleUrls = selectedPageSubtitleUrls;
+        } catch (error) {
+        }
+      }
     }
-    const subtitle = await this.fetchBilibiliSubtitleTextFromUrls(subtitleUrls);
+    const attemptedSubtitleUrls = /* @__PURE__ */ new Set();
+    let subtitle = await this.fetchBilibiliSubtitleTextFromUrls(subtitleUrls, diagnostic, attemptedSubtitleUrls);
+    if (!subtitle.transcription) {
+      await loadOptionalPage();
+      subtitle = await this.fetchBilibiliSubtitleTextFromUrls(subtitleUrls, diagnostic, attemptedSubtitleUrls);
+    }
+    const fetchProgressiveVideoUrls = /* @__PURE__ */ __name(async (stage = "progressive-playurl-api") => {
+      if (!bvid || !cid) return [];
+      try {
+        const response = await this.requestBilibiliResource(
+          `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&fnval=0&fourk=0`,
+          stage,
+          diagnostic,
+          { referer: resolvedUrl }
+        );
+        return extractBilibiliProgressiveVideoUrlsFromPlayurlPayload(response.json || response.text);
+      } catch (error) {
+        return [];
+      }
+    }, "fetchProgressiveVideoUrls");
     if (subtitle.transcription) {
+      if (this.settings.saveOriginalMediaEnabled === true) {
+        progressiveVideoUrls = await fetchProgressiveVideoUrls();
+      }
+      diagnostic.mediaCandidateCount = progressiveVideoUrls.length;
       return this.buildTranscriptRecordFromMedia(record, {
         url,
         platform: "B站",
-        mediaUrl: progressiveVideoUrl,
-        mediaUrls: progressiveVideoUrl ? [progressiveVideoUrl] : [],
+        mediaUrl: progressiveVideoUrls[0] || "",
+        mediaUrls: progressiveVideoUrls,
         subtitleText: subtitle.transcription,
         subtitleUrl: subtitle.subtitleUrl,
         source: "bilibili-subtitle",
@@ -25656,21 +25859,59 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         binding,
         title,
         sourceTitle,
-        socialMetrics: bilibiliSocialMetrics
+        socialMetrics: bilibiliSocialMetrics,
+        mediaResolutionDiagnostic: diagnostic
       });
     }
+    if (bvid && cid) {
+      try {
+        const playurlResponse = await this.requestBilibiliResource(
+          `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&fnval=16&fourk=1`,
+          "audio-playurl-api",
+          diagnostic,
+          { referer: resolvedUrl }
+        );
+        audioUrls = extractBilibiliAudioUrlsFromPlayurlPayload(playurlResponse.json || playurlResponse.text);
+      } catch (error) {
+      }
+      if (this.settings.saveOriginalMediaEnabled === true) {
+        progressiveVideoUrls = await fetchProgressiveVideoUrls();
+      }
+    }
     const htmlFallbackMediaUrl = requestedPageNumber === 1 ? extractBilibiliAudioUrlFromHtml(html) || extractSocialMediaUrlFromHtml(html) : "";
+    const mediaUrls = Array.from(new Set([
+      ...progressiveVideoUrls,
+      ...audioUrls,
+      htmlFallbackMediaUrl
+    ].filter(Boolean)));
+    diagnostic.mediaCandidateCount = mediaUrls.length;
+    const refreshMediaUrls = bvid && cid ? async () => {
+      try {
+        const refreshResponse = await this.requestBilibiliResource(
+          `https://api.bilibili.com/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}&fnval=16&fourk=1`,
+          "audio-playurl-refresh",
+          diagnostic,
+          { referer: resolvedUrl }
+        );
+        return extractBilibiliAudioUrlsFromPlayurlPayload(refreshResponse.json || refreshResponse.text);
+      } catch (error) {
+        return [];
+      }
+    } : null;
     return this.buildTranscriptRecordFromMedia(record, {
       url,
       platform: "B站",
-      mediaUrl: playurlAudioUrl || htmlFallbackMediaUrl,
-      mediaUrls: [progressiveVideoUrl, playurlAudioUrl].filter(Boolean),
+      mediaUrl: audioUrls[0] || htmlFallbackMediaUrl,
+      mediaUrls,
       source: "audio",
+      noMediaError: pageError ? "这条 B站内容暂时未能获取，已保留为可重试状态。其他内容同步不受影响。" : "",
       markdown,
       binding,
       title,
       sourceTitle,
-      socialMetrics: bilibiliSocialMetrics
+      socialMetrics: bilibiliSocialMetrics,
+      mediaResolutionDiagnostic: diagnostic,
+      refreshMediaUrls
     });
   }
   async prepareWechatChannelsMedia(record, url, binding = null, title = "") {
@@ -27470,9 +27711,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   }
   async findExistingRecordNotePath(record) {
     const normalizedRecordId = String(getRecordId(record) || "").trim();
-    const metadata = record && record.metadata || {};
-    const normalizedRecordUrl = normalizeRecordUrlForCompare(getRecordUrl(record || {}, metadata));
-    if (!normalizedRecordId && !normalizedRecordUrl || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== "function") {
+    if (!normalizedRecordId || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== "function") {
       return "";
     }
     const inboxDir = normalizeVaultPath(this.settings.inboxDir);
@@ -27489,17 +27728,30 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         } else if (this.app.vault.adapter && typeof this.app.vault.adapter.read === "function") {
           markdown = await this.app.vault.adapter.read(file.path);
         }
-        const matchesRecordId = Boolean(normalizedRecordId && hasRecordIdInFrontmatter(markdown, normalizedRecordId));
-        const matchesRecordUrl = Boolean(normalizedRecordUrl && hasRecordUrlInFrontmatter(markdown, normalizedRecordUrl));
-        if (matchesRecordId || matchesRecordUrl) {
+        const matchesRecordId = hasRecordIdInFrontmatter(markdown, normalizedRecordId);
+        if (matchesRecordId) {
           if (!isExistingLocalNoteDeliverable(record, markdown)) {
             continue;
           }
+          const metadata = record && record.metadata || {};
+          const normalizedRecordUrl = normalizeRecordUrlForCompare(getRecordUrl(record || {}, metadata));
           if (normalizedRecordUrl && isFeishuUrl(normalizedRecordUrl) && shouldRefreshFeishuMarkdownFromSource(normalizedRecordUrl, { markdown })) {
             continue;
           }
-          if (shouldBypassExistingLocalNoteDedupe(record) && !matchesRecordId && matchesRecordUrl) {
-            continue;
+          if (String(record && record.type || "").trim().toLowerCase() === "file") {
+            const attachmentPaths = getLocalFileAttachmentPaths(markdown).map(normalizeVaultPath);
+            const adapter = this.app.vault.adapter;
+            if (!attachmentPaths.length || !adapter || typeof adapter.exists !== "function") {
+              continue;
+            }
+            let hasExistingAttachment = false;
+            for (const attachmentPath of attachmentPaths) {
+              if (attachmentPath && await adapter.exists(attachmentPath)) {
+                hasExistingAttachment = true;
+                break;
+              }
+            }
+            if (!hasExistingAttachment) continue;
           }
           return file.path || filePath;
         }
@@ -27988,7 +28240,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           });
         }
         const completedReceipt = this.findCompletedSyncReceipt(binding, recordId);
-        if (completedReceipt) {
+        const mustValidateAttachment = String(record && record.type || "").trim().toLowerCase() === "file";
+        let existingFilePath = "";
+        if (!completedReceipt || mustValidateAttachment) {
+          existingFilePath = await this.findExistingRecordNotePath(record);
+        }
+        if (completedReceipt && (!mustValidateAttachment || existingFilePath)) {
           localCommitFact = {
             recordId,
             title: completedReceipt.noteTitle || "",
@@ -28026,7 +28283,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
           continue;
         }
-        const existingFilePath = await this.findExistingRecordNotePath(record);
         if (existingFilePath) {
           localCommitFact = { recordId, filePath: existingFilePath };
           skipped.push({
@@ -28940,7 +29196,9 @@ WechatObsidianInboxPlugin.__test = {
   extractBilibiliPageNumber,
   extractBilibiliCidFromPayload,
   parseBilibiliSubtitlePayload,
+  extractBilibiliAudioUrlsFromPlayurlPayload,
   extractBilibiliAudioUrlFromPlayurlPayload,
+  extractBilibiliProgressiveVideoUrlsFromPlayurlPayload,
   extractBilibiliProgressiveVideoUrlFromPlayurlPayload,
   hasVideoTrackInMediaBuffer,
   isImageAttachmentExt,

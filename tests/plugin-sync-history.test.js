@@ -221,7 +221,11 @@ assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
 assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
   type: 'file',
   metadata: { fileExt: 'zip' },
-}, '---\nid: file-1\n---\n![[附件.zip]]'), true);
+}, '---\nid: file-1\n---\n本地附件：[[临时收集/文件附件/附件.zip]]'), true);
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable({
+  type: 'file',
+  metadata: { fileExt: 'png' },
+}, '---\nid: file-2\n---\n文件名：截图.png\n\n图片已保存成功。'), false);
 const douyinFailureReceipt = helpers.buildDouyinFallbackMarkdown(
   'https://v.douyin.com/example',
   '未找到可转写的视频资源',
@@ -685,6 +689,7 @@ async function runCompletionReportFailurePreservesLocalWriteTest() {
 async function runCompletedReceiptPreventsRepeatWriteTest() {
   const plugin = createPlugin();
   const binding = { token: 'ABC-123', label: 'test binding' };
+  plugin.findExistingRecordNotePath = async () => 'Inbox/previously saved note.md';
   plugin.settings.completedSyncReceipts = helpers.normalizeCompletedSyncReceipts([{
     recordId: 'history-repeat-record',
     bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint(binding.token),
