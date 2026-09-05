@@ -60,8 +60,6 @@ jobs:
           node tests/plugin-release-candidate.test.js
           node tests/plugin-main-ai.test.js
           node tests/plugin-audio-repeat-local-dedupe.test.js
-          node tests/plugin-bilibili-412.test.js
-          node tests/plugin-file-local-recovery.test.js
           node tests/plugin-local-candidate-regressions.test.js
           node tests/plugin-review-pending-notice.test.js
           node tests/plugin-social-media-transcript-context.test.js
@@ -148,6 +146,8 @@ jobs:
           node tests/plugin-build-foundation.test.js
           node tests/release-governance.test.js
           node tests/plugin-audio-repeat-local-dedupe.test.js
+          node tests/plugin-bilibili-412.test.js
+          node tests/plugin-file-local-recovery.test.js
           node tests/plugin-local-candidate-regressions.test.js
           node tests/plugin-review-pending-notice.test.js
           node tests/plugin-social-media-transcript-context.test.js
