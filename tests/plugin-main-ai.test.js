@@ -9642,8 +9642,7 @@ async function runAsyncHydrationTests() {
     assert.strictEqual(bilibiliPartRecord.metadata.transcriptionStatus, 'success');
     assert.strictEqual(bilibiliPartRecord.metadata.transcription, '正确的第三集字幕');
     assert.ok(bilibiliPartRequests.includes('https://api.bilibili.com/x/player/v2?bvid=BVMULTI123&cid=333'));
-    assert.ok(bilibiliPartRequests.includes('https://api.bilibili.com/x/player/playurl?bvid=BVMULTI123&cid=333&fnval=16&fourk=1'));
-    assert.ok(bilibiliPartRequests.includes('https://api.bilibili.com/x/player/playurl?bvid=BVMULTI123&cid=333&fnval=0&fourk=0'));
+    assert.strictEqual(bilibiliPartRequests.some((requestedUrl) => requestedUrl.includes('/x/player/playurl')), false);
     assert.strictEqual(bilibiliPartRequests.some((requestedUrl) => requestedUrl.includes('cid=111')), false);
     assert.strictEqual(bilibiliPartRequests.includes('https://subtitle.example.com/bilibili-part-1.json'), false);
 

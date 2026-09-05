@@ -105,15 +105,11 @@ const helpers = PluginClass.__test;
     label: 'test binding',
   }, false);
 
-  assert.deepStrictEqual(writeCalls, ['new-xhs-record']);
+  assert.deepStrictEqual(writeCalls, ['new-xhs-record', 'new-ordinary-record']);
   assert.deepStrictEqual(result.skipped, [{
     recordId: 'old-xhs-record',
     reason: 'already-synced-local',
     filePath: 'Inbox/2026-08-07/old-xhs-note.md',
-  }, {
-    recordId: 'new-ordinary-record',
-    reason: 'already-synced-local',
-    filePath: 'Inbox/2026-08-07/old-ordinary-page.md',
   }]);
   assert.deepStrictEqual(result.failed, []);
   assert.deepStrictEqual(calls, [[
@@ -134,7 +130,7 @@ const helpers = PluginClass.__test;
   ], [
     '/records/new-ordinary-record/synced',
     'POST',
-    { noteTitle: 'old-ordinary-page' },
+    { noteTitle: '重复保存的小红书笔记' },
     'ABC-123',
   ]]);
 

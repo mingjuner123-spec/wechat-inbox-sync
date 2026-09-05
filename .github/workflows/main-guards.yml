@@ -41,6 +41,8 @@ jobs:
           node tests/plugin-feishu-markdown-utils.test.js
           node tests/plugin-media-file-utils.test.js
           node tests/plugin-sync-history.test.js
+          node tests/plugin-bilibili-412.test.js
+          node tests/plugin-file-local-recovery.test.js
           node tests/plugin-wechat-article-image-localization.test.js
           node tests/plugin-wechat-channels-decrypt-utils.test.js
           node tests/plugin-wechat-channels-media-prepare.test.js
@@ -144,6 +146,8 @@ jobs:
           node tests/plugin-build-foundation.test.js
           node tests/release-governance.test.js
           node tests/plugin-audio-repeat-local-dedupe.test.js
+          node tests/plugin-bilibili-412.test.js
+          node tests/plugin-file-local-recovery.test.js
           node tests/plugin-local-candidate-regressions.test.js
           node tests/plugin-review-pending-notice.test.js
           node tests/plugin-social-media-transcript-context.test.js
