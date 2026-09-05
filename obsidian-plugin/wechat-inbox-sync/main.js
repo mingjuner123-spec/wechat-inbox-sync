@@ -28218,11 +28218,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         ...progress,
         signal: processingAbortController.signal
       };
+      let processingTitle = recordId || String(record && record.type || "unknown");
+      try {
+        processingTitle = buildRecordTitleBase(record);
+      } catch (error) {
+      }
       this.currentProcessingAbortController = processingAbortController;
       this.currentProcessingContext = {
         recordId,
         binding: binding ? { ...binding } : null,
-        title: buildRecordTitleBase(record)
+        title: processingTitle
       };
       this.setTranscriptionStopAvailable(true);
       try {
