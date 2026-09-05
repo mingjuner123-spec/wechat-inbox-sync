@@ -52,11 +52,19 @@ helpers.installXiaohongshuLoginWindowGuards({
   },
 });
 assert.strictEqual(typeof windowOpenHandler, 'function');
-assert.deepStrictEqual(
-  windowOpenHandler({ url: 'https://www.xiaohongshu.com/explore/another-note' }),
-  { action: 'deny' },
-  'the visible login window must not let the page spawn more Xiaohongshu windows',
+const allowedLoginPopup = windowOpenHandler({
+  url: 'https://www.xiaohongshu.com/explore/another-note',
+});
+assert.strictEqual(
+  allowedLoginPopup.action,
+  'allow',
+  'the visible login window must allow a Xiaohongshu-owned authentication popup',
 );
+assert.deepStrictEqual(allowedLoginPopup.overrideBrowserWindowOptions.webPreferences, {
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: true,
+});
 assert.deepStrictEqual(
   windowOpenHandler({ url: 'https://example.com/' }),
   { action: 'deny' },
