@@ -44,6 +44,7 @@ const expectedModules = [
   'wechat-article-pipeline',
   'wechat-article-utils',
   'wechat-channels-decrypt-utils',
+  'wechat-image-post-utils',
   'xiaohongshu-markdown-utils',
 ].sort();
 
