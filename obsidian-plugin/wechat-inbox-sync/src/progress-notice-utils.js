@@ -4,12 +4,26 @@ function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
 }
 
-function buildSyncResultNotice(written = [], skipped = [], conversionWarnings = [], failed = []) {
+function buildSyncResultNotice(
+  written = [],
+  skipped = [],
+  conversionWarnings = [],
+  failed = [],
+  outstandingFailed = [],
+) {
   const writtenCount = Array.isArray(written) ? written.length : 0;
-  const failedItems = Array.isArray(failed) ? failed : [];
-  let message = !writtenCount && failedItems.length
-    ? `同步失败：${failedItems.length} 条内容未同步：${failedItems[0].message}`
-    : buildSyncNotice(writtenCount);
+  const currentFailedItems = Array.isArray(failed) ? failed : [];
+  const outstandingFailedItems = Array.isArray(outstandingFailed) ? outstandingFailed : [];
+  const failedItems = currentFailedItems.length ? currentFailedItems : outstandingFailedItems;
+  let message = buildSyncNotice(writtenCount);
+  if (!writtenCount && currentFailedItems.length) {
+    message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
+  } else if (!writtenCount && outstandingFailedItems.length) {
+    message = `同步失败：仍有 ${outstandingFailedItems.length} 条内容未同步成功：${outstandingFailedItems[0].message}`;
+    if (!/小程序[\s\S]{0,20}重试/u.test(message)) {
+      message += '请在小程序“同步记录”中点击“重试”后再次同步。';
+    }
+  }
   if (Array.isArray(skipped) && skipped.length) {
     message += buildSkippedSyncNotice(skipped);
   }
@@ -123,6 +137,7 @@ function buildSyncProgressMessage({
   const suffix = title ? `：${title}` : '';
   if (stage === 'fetching') return `${label}正在同步，正在获取待同步内容`;
   if (stage === 'empty') return `${label}没有需要同步的新内容`;
+  if (stage === 'failed') return `${label}同步失败：仍有 ${Math.max(1, Number(total) || 0)} 条内容未同步成功`;
   if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
   if (stage === 'downloading') return `${label}正在下载附件 ${countText}${percentText}${suffix}`;
   if (stage === 'transcribing') {

@@ -766,6 +766,235 @@ async function runCompletionWarningIsVisibleTest() {
   }]);
 }
 
+async function runOutstandingFailureRemainsVisibleWhenInboxIsEmptyTest() {
+  notices.splice(0, notices.length);
+  const plugin = createPlugin();
+  plugin.settings.recentSyncFailures = [{
+    recordId: 'wechat-image-post-retry',
+    bindingToken: 'ABC-123',
+    bindingLabel: '微信 1',
+    message: '微信公众号暂未返回正文，已保留待同步记录，将在后续同步时自动重试。',
+    failedAt: '2026-09-09T13:20:00.000Z',
+  }];
+  plugin.getActiveBindings = () => [{ token: 'ABC-123', label: '微信 1' }];
+  plugin.syncBinding = async () => ({
+    written: [],
+    failed: [],
+    skipped: [],
+    conversionWarnings: [],
+    completionWarnings: [],
+    pendingReview: {},
+  });
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await plugin.runSyncInboxOnce(true);
+
+  assert.ok(notices.some((message) => message.includes('同步失败：仍有 1 条内容未同步成功')));
+  assert.strictEqual(notices.some((message) => message === '没有需要同步的新内容'), false);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'failed');
+  assert.strictEqual(plugin.lastSyncDiagnostic.total, 1);
+  assert.match(plugin.lastSyncDiagnostic.error, /wechat-image-post-retry/);
+}
+
+async function runInactiveBindingFailureDoesNotPolluteActiveSyncTest() {
+  notices.splice(0, notices.length);
+  const plugin = createPlugin();
+  plugin.settings.token = 'ACT-123';
+  plugin.settings.bindings = [{
+    token: 'ACT-123',
+    label: '活动微信',
+    enabled: true,
+    status: 'bound',
+  }, {
+    token: 'PAU-456',
+    label: '暂停微信',
+    enabled: false,
+    status: 'paused',
+  }];
+  plugin.settings.recentSyncFailures = [{
+    recordId: 'paused-old-failure',
+    bindingToken: 'PAU-456',
+    bindingLabel: '暂停微信',
+    message: '旧失败',
+  }];
+  plugin.syncBinding = async (binding) => {
+    assert.strictEqual(binding.token, 'ACT-123');
+    return {
+      written: [],
+      failed: [],
+      skipped: [],
+      conversionWarnings: [],
+      completionWarnings: [],
+      pendingReview: {},
+    };
+  };
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await plugin.runSyncInboxOnce(true);
+
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'success');
+  assert.strictEqual(plugin.lastSyncDiagnostic.total, 0);
+  assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
+  assert.strictEqual(notices.some((message) => message.includes('同步失败')), false);
+  assert.ok(notices.some((message) => message === '没有需要同步的新内容'));
+  assert.strictEqual(plugin.getRecentSyncFailures().length, 1);
+  assert.strictEqual(plugin.getRecentSyncFailures()[0].bindingToken, 'PAU-456');
+}
+async function runExistingLocalNoteClearsStoredFailureTest() {
+  notices.splice(0, notices.length);
+  const plugin = createPlugin();
+  plugin.settings.recentSyncFailures = [{
+    recordId: 'wechat-image-post-now-saved',
+    bindingToken: 'ABC-123',
+    bindingLabel: '微信 1',
+    message: '微信公众号暂未返回正文，已保留待同步记录，将在后续同步时自动重试。',
+    failedAt: '2026-09-09T13:20:00.000Z',
+  }];
+  plugin.getActiveBindings = () => [{ token: 'ABC-123', label: '微信 1' }];
+  plugin.syncBinding = async () => ({
+    written: [],
+    failed: [],
+    skipped: [{
+      recordId: 'wechat-image-post-now-saved',
+      reason: 'already-synced-local',
+      filePath: '临时收集/公众号-已经成功同步.md',
+    }],
+    conversionWarnings: [],
+    completionWarnings: [],
+    pendingReview: {},
+  });
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await plugin.runSyncInboxOnce(true);
+
+  assert.deepStrictEqual(plugin.getRecentSyncFailures(), []);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'success');
+  assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
+  assert.strictEqual(notices.some((message) => message.includes('同步失败')), false);
+}
+
+async function runSuccessfulWriteClearsStoredFailureTest() {
+  notices.splice(0, notices.length);
+  const plugin = createPlugin();
+  plugin.settings.recentSyncFailures = [{
+    recordId: 'wechat-image-post-written-successfully',
+    bindingToken: 'ABC-123',
+    bindingLabel: '微信 1',
+    message: '旧的贴图失败信息',
+  }];
+  plugin.getActiveBindings = () => [{ token: 'ABC-123', label: '微信 1' }];
+  plugin.syncBinding = async () => ({
+    written: [{ recordId: 'wechat-image-post-written-successfully', title: '成功贴图' }],
+    failed: [],
+    skipped: [],
+    conversionWarnings: [],
+    completionWarnings: [],
+    pendingReview: {},
+  });
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await plugin.runSyncInboxOnce(true);
+
+  assert.deepStrictEqual(plugin.getRecentSyncFailures(), []);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'success');
+  assert.strictEqual(plugin.lastSyncDiagnostic.current, 1);
+}
+
+async function runStoredFailureReconcilesAgainstExistingNoteTest() {
+  notices.splice(0, notices.length);
+  const plugin = createPlugin();
+  plugin.settings.recentSyncFailures = [{
+    recordId: 'wechat-image-post-stale-local-failure',
+    bindingToken: 'ABC-123',
+    bindingLabel: '微信 1',
+    message: '旧的贴图失败信息',
+  }];
+  plugin.getActiveBindings = () => [{ token: 'ABC-123', label: '微信 1' }];
+  plugin.syncBinding = async () => ({
+    written: [],
+    failed: [],
+    skipped: [],
+    conversionWarnings: [],
+    completionWarnings: [],
+    pendingReview: {},
+  });
+  plugin.findExistingRecordNotePath = async (record) => (
+    record._id === 'wechat-image-post-stale-local-failure'
+      ? '临时收集/公众号-已经完整保存.md'
+      : ''
+  );
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await plugin.runSyncInboxOnce(true);
+
+  assert.deepStrictEqual(plugin.getRecentSyncFailures(), []);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'success');
+  assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
+}
+
+async function runOutstandingFailureDoesNotBorrowSuccessfulDiagnosticTest() {
+  notices.splice(0, notices.length);
+  const plugin = createPlugin();
+  plugin.settings.recentSyncFailures = [{
+    recordId: 'different-stored-failure',
+    bindingToken: 'ABC-123',
+    bindingLabel: '微信 1',
+    message: '另一条内容仍未同步成功',
+    failedAt: '2026-09-09T13:20:00.000Z',
+  }];
+  plugin.getActiveBindings = () => [{ token: 'ABC-123', label: '微信 1' }];
+  plugin.syncBinding = async () => ({
+    written: [{
+      recordId: 'new-successful-record',
+      title: '已成功同步的贴图',
+      conversionDiagnostic: { finalState: 'complete', imageCount: 3 },
+    }],
+    failed: [],
+    skipped: [],
+    conversionWarnings: [],
+    completionWarnings: [],
+    pendingReview: {},
+  });
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await plugin.runSyncInboxOnce(true);
+
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'failed');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(plugin.lastSyncDiagnostic, 'diagnostic'), false);
+  assert.match(plugin.lastSyncDiagnostic.error, /different-stored-failure/);
+}
+
+async function runEmptyPendingWithKnownFailureShowsFailureProgressTest() {
+  const plugin = createPlugin();
+  const progressEvents = [];
+  plugin.settings.recentSyncFailures = [{
+    recordId: 'wechat-image-post-failed-progress',
+    bindingToken: 'ABC-123',
+    bindingLabel: '微信 1',
+    message: '贴图提取失败',
+  }];
+  plugin.showSyncProgress = (progress) => progressEvents.push(progress);
+  plugin.requestJson = async (path) => {
+    if (path === '/records?status=pending') {
+      return { success: true, data: [], meta: { syncLifecycleStatus: true } };
+    }
+    throw new Error(`unexpected request ${path}`);
+  };
+
+  const result = await plugin.syncBinding({ token: 'ABC-123', label: '微信 1' }, false);
+
+  assert.strictEqual(result.written.length, 0);
+  assert.strictEqual(result.failed.length, 0);
+  assert.ok(progressEvents.some((item) => item.stage === 'failed' && item.total === 1));
+  assert.strictEqual(progressEvents.some((item) => item.stage === 'empty'), false);
+}
+
 
 async function runRequestJsonPreservesHttpStatusTest() {
   const plugin = createPlugin();
@@ -1017,6 +1246,13 @@ Promise.resolve()
   .then(runCompletionReportFailurePreservesLocalWriteTest)
   .then(runCompletedReceiptPreventsRepeatWriteTest)
   .then(runCompletionWarningIsVisibleTest)
+  .then(runOutstandingFailureRemainsVisibleWhenInboxIsEmptyTest)
+  .then(runInactiveBindingFailureDoesNotPolluteActiveSyncTest)
+  .then(runExistingLocalNoteClearsStoredFailureTest)
+  .then(runSuccessfulWriteClearsStoredFailureTest)
+  .then(runStoredFailureReconcilesAgainstExistingNoteTest)
+  .then(runOutstandingFailureDoesNotBorrowSuccessfulDiagnosticTest)
+  .then(runEmptyPendingWithKnownFailureShowsFailureProgressTest)
   .then(runRequestJsonPreservesHttpStatusTest)
   .then(runFailedReceiptDoesNotTriggerLocalDedupeTest)
   .then(runDeliverableExistingNoteTriggersLocalDedupeTest)

@@ -39,6 +39,16 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.buildSyncResultNotice(
+    [],
+    [],
+    [],
+    [],
+    [{ message: '微信公众号暂未返回正文，后续同步将自动重试。' }],
+  ),
+  '同步失败：仍有 1 条内容未同步成功：微信公众号暂未返回正文，后续同步将自动重试。请在小程序“同步记录”中点击“重试”后再次同步。',
+);
+assert.strictEqual(
+  helpers.buildSyncResultNotice(
     [{ id: '1' }],
     [{ reason: 'cloud-transcription-processing' }],
     ['飞书图片有 1 张未保存'],
@@ -108,6 +118,10 @@ assert.match(
 assert.strictEqual(
   helpers.buildSyncProgressMessage({ bindingLabel: '微信 1', stage: 'fetching' }),
   '微信 1：正在同步，正在获取待同步内容',
+);
+assert.strictEqual(
+  helpers.buildSyncProgressMessage({ bindingLabel: '微信 1', stage: 'failed', total: 1 }),
+  '微信 1：同步失败：仍有 1 条内容未同步成功',
 );
 assert.strictEqual(
   helpers.buildSyncProgressMessage({

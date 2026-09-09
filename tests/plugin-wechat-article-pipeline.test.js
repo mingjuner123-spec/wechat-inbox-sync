@@ -11,6 +11,8 @@ const {
   isWechatEmptyShellHtml,
   buildWechatArticleFallbackMarkdown,
   isWechatArticleUrl,
+  isWechatImagePostHtml,
+  isWechatImagePostUrl,
   normalizeWechatArticleUrl,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-utils');
 const {
@@ -19,6 +21,12 @@ const {
   redactDiagnosticText,
   runWechatArticlePipeline,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
+const {
+  collectWechatImagePostStructuredAssets,
+  dedupeWechatImagePostAssets,
+  getWechatImageAssetIdentity,
+  normalizeWechatImagePostMarkdown,
+} = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-image-post-utils');
 
 const articleHtml = [
   '<html><head><title>Real article title</title></head><body>',
@@ -43,6 +51,78 @@ const genericGuideHtml = [
 const unavailableHtml = '<p>\u5185\u5bb9\u4e0d\u5b58\u5728\uff0c\u8be5\u6587\u7ae0\u5df2\u88ab\u5220\u9664\u3002</p>';
 const captchaHtml = '<p>\u73af\u5883\u5f02\u5e38\uff0c\u5b8c\u6210\u9a8c\u8bc1\u540e\u5373\u53ef\u7ee7\u7eed\u8bbf\u95ee\u3002</p>';
 const emptyShellHtml = '<html><body><div class="rich_media"><div class="toolbar">\u89c6\u9891 \u5c0f\u7a0b\u5e8f \u5728\u770b</div></div></body></html>';
+const imagePostHtml = [
+  '<html><head><title>公众号贴图短链</title></head><body>',
+  '<script>window.cgiData={article_type:"newspic",image_list:[{"url":"https://mmbiz.qpic.cn/mmbiz_jpg/one/0"}]};</script>',
+  '<div id="js_content">这是贴图短文案，不能因为存在文字就当成普通文章完成。</div>',
+  '<div class="image-detail-swiper"><img src="https://mmbiz.qpic.cn/mmbiz_jpg/one/0"></div>',
+  '</body></html>',
+].join('');
+
+const structuredImagePostAssets = collectWechatImagePostStructuredAssets({
+  picture_page_info_list: [
+    {
+      cdn_url: 'http://mmbiz.qpic.cn/mmbiz_png/page-one/0?wx_fmt=png',
+      width: '1080',
+      height: '1440',
+      watermark_info: { cdn_url: 'https://mmbiz.qpic.cn/sz_mmbiz_png/watermark/0' },
+      share_cover: { cdn_url: 'https://mmbiz.qpic.cn/sz_mmbiz_jpg/share-cover/0' },
+    },
+    { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/page-two/0?wx_fmt=png' },
+    { cdn_url: '//mmbiz.qpic.cn/sz_mmbiz_jpg/page-three/0?wx_fmt=jpeg' },
+    { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/page-one/0?from=appmsg&wxfrom=12&tp=webp' },
+  ],
+  cgiDataNew: {
+    picture_page_info_list: [
+      { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/page-one/0?wx_fmt=png' },
+      { cdn_url: 'https://example.com/not-wechat-content.jpg' },
+    ],
+  },
+});
+assert.deepStrictEqual(
+  structuredImagePostAssets.map((asset) => asset.src.replace(/^http:/, 'https:')),
+  [
+    'https://mmbiz.qpic.cn/mmbiz_png/page-one/0?wx_fmt=png',
+    'https://mmbiz.qpic.cn/mmbiz_png/page-two/0?wx_fmt=png',
+    'https://mmbiz.qpic.cn/sz_mmbiz_jpg/page-three/0?wx_fmt=jpeg',
+  ],
+);
+assert.strictEqual(structuredImagePostAssets[0].width, 1080);
+assert.strictEqual(structuredImagePostAssets[0].height, 1440);
+assert.strictEqual(
+  getWechatImageAssetIdentity('http://mmbiz.qpic.cn/mmbiz_png/page-one/0?wx_fmt=png'),
+  'https://mmbiz.qpic.cn/mmbiz_png/page-one/0',
+);
+assert.deepStrictEqual(
+  dedupeWechatImagePostAssets([
+    { src: 'https://mmbiz.qpic.cn/mmbiz_png/cover/0?wx_fmt=png', alt: '贴图 1', localIndex: 1 },
+    { src: 'https://mmbiz.qpic.cn/mmbiz_png/page-two/0?wx_fmt=png', alt: '贴图 2', localIndex: 2 },
+    { src: 'https://mmbiz.qpic.cn/mmbiz_png/cover/0?from=appmsg&tp=webp', alt: '贴图 3', localIndex: 3 },
+  ]).map((asset) => ({ alt: asset.alt, localIndex: asset.localIndex })),
+  [
+    { alt: '贴图 1', localIndex: 1 },
+    { alt: '贴图 2', localIndex: 2 },
+  ],
+);
+assert.strictEqual(
+  normalizeWechatImagePostMarkdown([
+    '这是一个很长的贴图正文，末尾的这个汉字与下一行开头属于同一个段落，虽然现',
+    '在全民 AI 时代，正文不应该留下页面软换行。',
+    '',
+    '![贴图 1](https://mmbiz.qpic.cn/mmbiz_png/cover/0?wx_fmt=png&from=appmsg)',
+    '',
+    '![贴图 2](https://mmbiz.qpic.cn/mmbiz_png/page-two/0?wx_fmt=png)',
+    '',
+    '![贴图 3](https://mmbiz.qpic.cn/mmbiz_png/cover/0?from=appmsg&wxfrom=12&tp=webp)',
+  ].join('\n')),
+  [
+    '这是一个很长的贴图正文，末尾的这个汉字与下一行开头属于同一个段落，虽然现在全民 AI 时代，正文不应该留下页面软换行。',
+    '',
+    '![贴图 1](https://mmbiz.qpic.cn/mmbiz_png/cover/0?wx_fmt=png&from=appmsg)',
+    '',
+    '![贴图 2](https://mmbiz.qpic.cn/mmbiz_png/page-two/0?wx_fmt=png)',
+  ].join('\n'),
+);
 
 assert.strictEqual(classifyWechatArticleHtml(articleHtml), 'article');
 assert.strictEqual(
@@ -63,6 +143,9 @@ assert.strictEqual(
 );
 assert.strictEqual(isWechatEmptyShellHtml(emptyShellHtml), true);
 assert.strictEqual(diagnoseWechatArticleHtml(emptyShellHtml).pageKind, 'empty-shell');
+assert.strictEqual(isWechatImagePostHtml(imagePostHtml), true);
+assert.strictEqual(classifyWechatArticleHtml(imagePostHtml), 'image-post');
+assert.strictEqual(diagnoseWechatArticleHtml(imagePostHtml).markers.imagePost, true);
 const imageStats = getWechatArticleBodyStats('<div id="js_content"><p>Body</p><img data-src="//mmbiz.qpic.cn/image.jpg"></div>');
 assert.strictEqual(imageStats.hasJsContent, true);
 assert.strictEqual(imageStats.bodyTextChars, 4);
@@ -92,6 +175,22 @@ assert.strictEqual(
 );
 assert.strictEqual(normalizeWechatArticleUrl('https://mp.weixin.qq.com.evil.example/s?__biz=test'), '');
 
+const imagePostUrl = 'https://mp.weixin.qq.com/s?t=pages/image_detail&scene=1&__biz=image-post-biz&mid=2247487525&idx=1&sn=image-post-signature&from_masonry=1&sharer_shareinfo=private-share#wechat_redirect';
+const normalizedImagePostUrl = normalizeWechatArticleUrl(imagePostUrl);
+const normalizedImagePost = new URL(normalizedImagePostUrl);
+assert.strictEqual(isWechatImagePostUrl(imagePostUrl), true);
+assert.strictEqual(isWechatImagePostUrl('https://mp.weixin.qq.com/s?__biz=image-post-biz&mid=1'), false);
+assert.strictEqual(normalizedImagePost.searchParams.get('t'), 'pages/image_detail');
+assert.strictEqual(normalizedImagePost.searchParams.get('__biz'), 'image-post-biz');
+assert.strictEqual(normalizedImagePost.searchParams.get('mid'), '2247487525');
+assert.strictEqual(normalizedImagePost.searchParams.has('from_masonry'), false);
+assert.strictEqual(normalizedImagePost.searchParams.has('sharer_shareinfo'), false);
+assert.strictEqual(new URL(normalizedImagePostUrl).hash, '');
+const imagePostProfiles = buildWechatArticleRequestProfiles(imagePostUrl);
+assert.strictEqual(imagePostProfiles[0].urlShape.contentKind, 'image-post');
+assert.strictEqual(imagePostProfiles[1].urlShape.contentKind, 'image-post');
+assert.strictEqual(new URL(imagePostProfiles[1].url).searchParams.get('t'), 'pages/image_detail');
+
 const requestProfiles = buildWechatArticleRequestProfiles(
   'https://mp.weixin.qq.com/s/recovered?scene=1&pass_ticket=secret#rd',
 );
@@ -120,6 +219,25 @@ const pluginMainSource = fs.readFileSync(
 assert.match(pluginMainSource, /redactDiagnosticText\(details\.error/);
 assert.match(pluginMainSource, /sanitizeDiagnosticValue\(details\.diagnostic\)/);
 assert.match(pluginMainSource, /redactDiagnosticText\(source\.message/);
+
+const generatedPluginMainSource = fs.readFileSync(
+  require.resolve('../obsidian-plugin/wechat-inbox-sync/main.js'),
+  'utf8',
+);
+const bundledCollectorMatch = /function (collectWechatImagePostStructuredAssets\w*)\(pageWindow\) \{[\s\S]*?\n\s*\}\n\s*__name\(\1,/.exec(generatedPluginMainSource);
+assert.ok(bundledCollectorMatch, 'bundled WeChat image-post collector must be present');
+const bundledCollectorSource = bundledCollectorMatch[0].slice(
+  0,
+  bundledCollectorMatch[0].lastIndexOf('\n    __name('),
+).trim();
+assert.doesNotMatch(bundledCollectorSource, /\b__name\b/);
+const bundledCollector = Function(`return (${bundledCollectorSource});`)();
+assert.strictEqual(bundledCollector({
+  picture_page_info_list: [
+    { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/bundled-page-one/0' },
+    { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/bundled-page-two/0' },
+  ],
+}).length, 2);
 
 async function runPipelineTests() {
   let invalidFetchCalls = 0;
@@ -175,6 +293,51 @@ async function runPipelineTests() {
   assert.strictEqual(recovered.diagnostic.browser.pageKind, 'article');
   assert.strictEqual(recovered.diagnostic.selectedProfile.profile, 'original-desktop');
   assert.doesNotMatch(JSON.stringify(recovered.diagnostic), /secret/);
+
+  let imagePostBrowserCalls = 0;
+  const recoveredImagePost = await runWechatArticlePipeline({
+    url: imagePostUrl,
+    // A picture-post page may put only its caption inside #js_content. This
+    // must not short-circuit the browser carousel extractor.
+    fetchStatic: async () => articleHtml,
+    renderBrowser: async (targetUrl) => {
+      imagePostBrowserCalls += 1;
+      assert.strictEqual(isWechatImagePostUrl(targetUrl), true);
+      return {
+        title: '公众号贴图测试',
+        markdown: '贴图短文案\n\n![贴图 1](https://mmbiz.qpic.cn/mmbiz_jpg/image-post/0)',
+        assets: [{ src: 'https://mmbiz.qpic.cn/mmbiz_jpg/image-post/0', alt: '贴图 1', localIndex: 1 }],
+        bodyFound: true,
+        imageCount: 1,
+        imageCandidateCount: 3,
+        diagnostic: { contentKind: 'image-post' },
+      };
+    },
+  });
+  assert.strictEqual(imagePostBrowserCalls, 1);
+  assert.strictEqual(recoveredImagePost.kind, 'article');
+  assert.strictEqual(recoveredImagePost.source, 'browser');
+  assert.strictEqual(recoveredImagePost.assets.length, 1);
+  assert.strictEqual(recoveredImagePost.diagnostic.selectedProfile.contentKind, 'image-post');
+
+  let slugImagePostBrowserCalls = 0;
+  const recoveredSlugImagePost = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/oH-HPRVNP1s1__C85xHyqA',
+    fetchStatic: async () => imagePostHtml,
+    renderBrowser: async () => {
+      slugImagePostBrowserCalls += 1;
+      return {
+        title: 'Obsidian常用的5个插件',
+        markdown: '贴图短文案\n\n![贴图 1](https://mmbiz.qpic.cn/mmbiz_jpg/slug-image-post/0)',
+        assets: [{ src: 'https://mmbiz.qpic.cn/mmbiz_jpg/slug-image-post/0', alt: '贴图 1', localIndex: 1 }],
+        bodyFound: true,
+        diagnostic: { contentKind: 'image-post' },
+      };
+    },
+  });
+  assert.strictEqual(slugImagePostBrowserCalls, 1);
+  assert.strictEqual(recoveredSlugImagePost.kind, 'article');
+  assert.strictEqual(recoveredSlugImagePost.source, 'browser');
 
   const profileSensitive = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/profile-sensitive?scene=1&pass_ticket=private-value',

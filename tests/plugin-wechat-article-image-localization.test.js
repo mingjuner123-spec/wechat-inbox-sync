@@ -451,6 +451,117 @@ async function run() {
   assert.strictEqual(browserRecovered.metadata.title, '浏览器恢复标题');
   assert.strictEqual(browserRecoveryCase.writes.length, 1);
 
+  const imagePostCase = createPlugin();
+  imagePostCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
+  const imagePostUrl = 'https://mp.weixin.qq.com/s?t=pages/image_detail&scene=1&__biz=image-post-biz&mid=2&idx=1&sn=image-post-signature&from_masonry=1#wechat_redirect';
+  const imagePostSources = [
+    'https://mmbiz.qpic.cn/mmbiz_jpg/image-post-first/0?wx_fmt=jpeg',
+    'https://mmbiz.qpic.cn/mmbiz_png/image-post-second/0?wx_fmt=png',
+  ];
+  requestUrlMock = async () => ({ text: guideHtml });
+  imagePostCase.plugin.downloadWebpageHtmlViaNode = async () => guideHtml;
+  imagePostCase.plugin.downloadWechatArticleHtmlViaSession = async () => guideHtml;
+  imagePostCase.plugin.renderWechatArticleWithElectron = async (targetUrl) => {
+    assert.strictEqual(new URL(targetUrl).searchParams.get('t'), 'pages/image_detail');
+    return {
+      title: '公众号贴图转存测试',
+      markdown: [
+        '贴图短文案',
+        `![贴图 1](${imagePostSources[0]})`,
+        `![贴图 2](${imagePostSources[1]})`,
+      ].join('\n\n'),
+      assets: imagePostSources.map((src, index) => ({ src, alt: `贴图 ${index + 1}`, localIndex: index + 1 })),
+      bodyFound: true,
+      imageCount: 2,
+      imageCandidateCount: 4,
+      diagnostic: { contentKind: 'image-post' },
+    };
+  };
+  const localizedImagePost = await imagePostCase.plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: imagePostUrl,
+    metadata: { url: imagePostUrl },
+  }, '临时收集', '2026-09-09', '公众号贴图转存测试');
+  assert.strictEqual(localizedImagePost.metadata.conversionStatus, 'success');
+  assert.strictEqual(localizedImagePost.metadata.contentCategory, '贴图');
+  assert.strictEqual(localizedImagePost.metadata.conversionDiagnostic.source, 'wechat-image-post');
+  assert.strictEqual(imagePostCase.downloads.length, 2);
+  assert.strictEqual(imagePostCase.writes.length, 2);
+  assert.strictEqual((localizedImagePost.metadata.markdown.match(/!\[\[/g) || []).length, 2);
+  assert.ok(localizedImagePost.metadata.markdown.includes('贴图短文案'));
+  assert.strictEqual(localizedImagePost.metadata.markdown.includes('mmbiz.qpic.cn'), false);
+  assert.strictEqual(new URL(localizedImagePost.metadata.url).searchParams.get('t'), 'pages/image_detail');
+
+  const slugImagePostCase = createPlugin();
+  slugImagePostCase.plugin.settings = { socialArticleImageStorageMode: 'local' };
+  const slugImagePostUrl = 'https://mp.weixin.qq.com/s/oH-HPRVNP1s1__C85xHyqA';
+  const slugImagePostHtml = [
+    '<html><head><title>Obsidian常用的5个插件</title></head><body>',
+    '<script>window.cgiData={article_type:"newspic",image_list:[{"url":"https://mmbiz.qpic.cn/mmbiz_jpg/slug-first/0"}]};</script>',
+    '<div id="js_content">贴图短文案</div>',
+    '<div class="image-detail-swiper"><img src="https://mmbiz.qpic.cn/mmbiz_jpg/slug-first/0"></div>',
+    '</body></html>',
+  ].join('');
+  requestUrlMock = async () => ({ text: slugImagePostHtml });
+  slugImagePostCase.plugin.renderWechatArticleWithElectron = async () => ({
+    title: 'Obsidian常用的5个插件',
+    markdown: [
+      '贴图短文案',
+      `![贴图 1](${imagePostSources[0]})`,
+      `![贴图 2](${imagePostSources[1]})`,
+    ].join('\n\n'),
+    assets: imagePostSources.map((src, index) => ({ src, alt: `贴图 ${index + 1}`, localIndex: index + 1 })),
+    bodyFound: true,
+    imageCount: 2,
+    imageCandidateCount: 4,
+    diagnostic: { contentKind: 'image-post' },
+  });
+  const localizedSlugImagePost = await slugImagePostCase.plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: slugImagePostUrl,
+    metadata: { url: slugImagePostUrl },
+  }, '临时收集', '2026-09-09', 'Obsidian常用的5个插件');
+  assert.strictEqual(localizedSlugImagePost.metadata.conversionStatus, 'success');
+  assert.strictEqual(localizedSlugImagePost.metadata.contentCategory, '贴图');
+  assert.strictEqual(localizedSlugImagePost.metadata.conversionDiagnostic.source, 'wechat-image-post');
+  assert.strictEqual(slugImagePostCase.downloads.length, 2);
+  assert.strictEqual(slugImagePostCase.writes.length, 2);
+  assert.strictEqual((localizedSlugImagePost.metadata.markdown.match(/!\[\[/g) || []).length, 2);
+  assert.ok(localizedSlugImagePost.metadata.markdown.includes(`原始链接：${slugImagePostUrl}`));
+  assert.strictEqual(localizedSlugImagePost.metadata.markdown.includes('mmbiz.qpic.cn'), false);
+
+  const remoteImagePostCase = createPlugin();
+  remoteImagePostCase.plugin.settings = { socialArticleImageStorageMode: 'remote' };
+  requestUrlMock = async () => ({ text: slugImagePostHtml });
+  remoteImagePostCase.plugin.renderWechatArticleWithElectron = async () => ({
+    title: '远程链接贴图测试',
+    markdown: [
+      '贴图短文案',
+      `![贴图 1](${imagePostSources[0]})`,
+      `![贴图 2](${imagePostSources[1]})`,
+    ].join('\n\n'),
+    assets: imagePostSources.map((src, index) => ({ src, alt: `贴图 ${index + 1}`, localIndex: index + 1 })),
+    bodyFound: true,
+    imageCount: 2,
+    imageCandidateCount: 4,
+    diagnostic: { contentKind: 'image-post' },
+  });
+  const remoteImagePost = await remoteImagePostCase.plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: slugImagePostUrl,
+    metadata: { url: slugImagePostUrl },
+  }, '临时收集', '2026-09-09', '远程链接贴图测试');
+  assert.strictEqual(remoteImagePost.metadata.conversionStatus, 'success');
+  assert.strictEqual(remoteImagePostCase.downloads.length, 0);
+  assert.strictEqual(remoteImagePostCase.writes.length, 0);
+  assert.deepStrictEqual(remoteImagePost.metadata.conversionDiagnostic.imageCompleteness, {
+    candidateCount: 2,
+    savedCount: 2,
+    failedCount: 0,
+    missingSourceCount: 0,
+    mode: 'remote-links',
+  });
+
   const partialGuideCase = createPlugin();
   let partialGuideBrowserCalls = 0;
   partialGuideCase.plugin.renderWechatArticleWithElectron = async () => {

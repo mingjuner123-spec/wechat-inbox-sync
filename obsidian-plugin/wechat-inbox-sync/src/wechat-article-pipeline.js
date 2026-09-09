@@ -5,6 +5,8 @@ const {
   buildWechatArticleRequestProfiles,
   diagnoseWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
+  isWechatImagePostHtml,
+  isWechatImagePostUrl,
   normalizeWechatArticleUrl,
 } = require('./wechat-article-utils');
 
@@ -143,6 +145,7 @@ function getSafeProfileDiagnostic(profile = {}) {
     inputKind: String(profile.inputKind || ''),
     userAgentProfile: String(profile.userAgentProfile || ''),
     pathKind: String(shape.pathKind || ''),
+    contentKind: String(shape.contentKind || ''),
     parameterNames: Array.isArray(shape.parameterNames) ? shape.parameterNames.slice(0, 30) : [],
     retainedParameterNames: Array.isArray(shape.retainedParameterNames) ? shape.retainedParameterNames.slice(0, 30) : [],
     strippedParameterNames: Array.isArray(shape.strippedParameterNames) ? shape.strippedParameterNames.slice(0, 30) : [],
@@ -260,6 +263,7 @@ async function runWechatArticlePipeline({
   if (typeof fetchStatic !== 'function') throw new Error('fetchStatic is required');
   const normalizedUrl = normalizeWechatArticleUrl(url);
   const requestProfiles = buildWechatArticleRequestProfiles(url);
+  const isImagePost = isWechatImagePostUrl(url);
   if (!normalizedUrl || !requestProfiles.length) return buildFallbackResult({ url: '', state: 'unknown', html: '' });
 
   const previousFailure = getFailureCacheInfo(normalizedUrl);
@@ -275,6 +279,7 @@ async function runWechatArticlePipeline({
       const staticResult = normalizeStaticResult(await fetchStatic(profile.url, profile));
       const staticDiagnostic = diagnoseWechatArticleHtml(staticResult.html);
       const staticState = staticDiagnostic.pageKind;
+      const staticIsImagePost = isWechatImagePostHtml(staticResult.html);
       lastStaticState = staticState;
       lastStaticDiagnostic = staticDiagnostic;
       attempts.push({
@@ -291,7 +296,11 @@ async function runWechatArticlePipeline({
           ? { transportDiagnostic: sanitizeDiagnosticValue(staticResult.diagnostic) }
           : {}),
       });
-      if (staticState === 'article') {
+      // A picture post can expose its short caption through #js_content while
+      // keeping the actual carousel elsewhere in the hydrated page. Do not
+      // accept that text-only shell as a complete article; let the browser
+      // renderer collect the ordered picture set.
+      if (staticState === 'article' && !isImagePost && !staticIsImagePost) {
         clearFailure(normalizedUrl);
         return {
           kind: 'article',

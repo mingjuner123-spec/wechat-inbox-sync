@@ -2,6 +2,7 @@
 
 const WECHAT_ARTICLE_HOST = 'mp.weixin.qq.com';
 const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn', 'chksm', 'scene'];
+const WECHAT_IMAGE_POST_PAGE = 'pages/image_detail';
 
 function isWechatArticleUrl(value) {
   try {
@@ -13,13 +14,39 @@ function isWechatArticleUrl(value) {
   }
 }
 
+function isWechatImagePostUrl(value) {
+  if (!isWechatArticleUrl(value)) return false;
+  try {
+    const parsed = new URL(String(value || '').trim());
+    return String(parsed.searchParams.get('t') || '').toLowerCase() === WECHAT_IMAGE_POST_PAGE;
+  } catch (_) {
+    return false;
+  }
+}
+
+function isWechatImagePostHtml(html) {
+  const source = String(html || '');
+  if (!source) return false;
+  return /pages(?:\\\/|\/|%2f)image_detail/i.test(source)
+    || /(?:article_type|appmsg_type)\s*["']?\s*[:=]\s*["']newspic["']/i.test(source)
+    || /["']image_list["']\s*:/i.test(source)
+    || /\bfrom_masonry\b/i.test(source)
+    || /class=["'][^"']*(?:image[_-]?detail|image[_-]?list|pic[_-]?album|newspic|swiper)[^"']*["']/i.test(source);
+}
+
+function getWechatRetainedParameterNames(value) {
+  return isWechatImagePostUrl(value)
+    ? ['t', ...WECHAT_ARTICLE_ID_PARAMS]
+    : WECHAT_ARTICLE_ID_PARAMS;
+}
+
 function normalizeWechatArticleUrl(value) {
   if (!isWechatArticleUrl(value)) return '';
   const parsed = new URL(String(value || '').trim());
   const pathname = String(parsed.pathname || '').replace(/\/+$/, '') || '/s';
   const normalized = new URL(`https://${WECHAT_ARTICLE_HOST}${pathname}`);
-  if (pathname === '/s') {
-    WECHAT_ARTICLE_ID_PARAMS.forEach((key) => {
+  if (pathname === '/s' || isWechatImagePostUrl(value)) {
+    getWechatRetainedParameterNames(value).forEach((key) => {
       const parameter = parsed.searchParams.get(key);
       if (parameter) normalized.searchParams.set(key, parameter);
     });
@@ -33,10 +60,12 @@ function getWechatArticleUrlShape(value) {
   const parameterNames = Array.from(new Set(Array.from(parsed.searchParams.keys())))
     .filter(Boolean)
     .sort();
-  const retainedParameterNames = parameterNames.filter((name) => WECHAT_ARTICLE_ID_PARAMS.includes(name));
-  const strippedParameterNames = parameterNames.filter((name) => !WECHAT_ARTICLE_ID_PARAMS.includes(name));
+  const retainedNames = getWechatRetainedParameterNames(value);
+  const retainedParameterNames = parameterNames.filter((name) => retainedNames.includes(name));
+  const strippedParameterNames = parameterNames.filter((name) => !retainedNames.includes(name));
   return {
     pathKind: parsed.pathname === '/s' ? 'query-id' : 'slug',
+    contentKind: isWechatImagePostUrl(value) ? 'image-post' : 'article',
     parameterNames,
     retainedParameterNames,
     strippedParameterNames,
@@ -221,6 +250,7 @@ function diagnoseWechatArticleHtml(html) {
     guide: classifiedState === 'guide',
     emptyShell: isWechatEmptyShellHtml(source),
     shellToolbar: /\u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e|\u5728\u770b|\u89c6\u9891|\u5c0f\u7a0b\u5e8f/i.test(text),
+    imagePost: isWechatImagePostHtml(source),
   };
   let pageKind = classifiedState;
   if (markers.emptyShell && !markers.captcha && !markers.unavailable) {
@@ -244,6 +274,7 @@ function diagnoseWechatArticleHtml(html) {
 function classifyWechatArticleHtml(html) {
   const text = stripHtml(html);
   if (/环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return 'captcha';
+  if (isWechatImagePostHtml(html)) return 'image-post';
   // Full article pages can contain hidden QR/app guide text outside #js_content.
   // Preserve the legacy successful behavior: substantive #js_content wins.
   if (hasWechatArticleBody(html)) return 'article';
@@ -295,6 +326,8 @@ module.exports = {
   getWechatArticleUrlShape,
   hasWechatArticleBody,
   isWechatArticleUrl,
+  isWechatImagePostHtml,
+  isWechatImagePostUrl,
   isWechatEmptyShellHtml,
   isGenericWechatMetadata,
   isTrustedCoverUrl,
