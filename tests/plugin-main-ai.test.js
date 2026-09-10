@@ -1,3 +1,4 @@
+require('./plugin-wechat-hidden-navigation.test');
 const assert = require('assert');
 const dns = require('dns');
 const http = require('http');
@@ -1239,7 +1240,7 @@ assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
 assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
   manifestVersion: currentPluginVersion,
   runtimeVersion: currentPluginVersion,
-  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1',
+  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
@@ -11208,7 +11209,31 @@ async function runCompletedReceiptClearsStaleFailureTest() {
     crossBindingPlugin.getRecentSyncFailures().map((item) => [item.recordId, item.bindingToken]),
     [[recordId, otherBinding.token]],
   );
-  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'failed');
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.total, 0);
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.error, '');
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.historicalFailureCount, 1);
+  crossBindingPlugin.syncBinding = async () => ({
+    written: [{ recordId: 'new-success', title: '本轮成功的公众号文章' }],
+    failed: [], skipped: [], conversionWarnings: [], completionWarnings: [], pendingReview: {},
+  });
+  crossBindingPlugin.getActiveBindings = () => [otherBinding];
+  await crossBindingPlugin.runSyncInboxOnce(false);
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.total, 1);
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.current, 1);
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.error, '');
+  assert.match(crossBindingPlugin.lastSyncDiagnostic.message, /本轮同步成功，另有 1 条历史失败待处理/);
+  assert.strictEqual(crossBindingPlugin.getRecentSyncFailures().length, 1);
+  const emptyProgress = [];
+  const originalSyncBinding = PluginClass.prototype.syncBinding;
+  crossBindingPlugin.replayPendingSyncLifecycleAttempts = async () => {};
+  crossBindingPlugin.requestJson = async () => ({ data: [] });
+  crossBindingPlugin.showSyncProgress = (value) => emptyProgress.push(value);
+  await originalSyncBinding.call(crossBindingPlugin, otherBinding, false);
+  assert.strictEqual(emptyProgress.at(-1).stage, 'empty');
+  assert.strictEqual(emptyProgress.at(-1).total, 0);
+  assert.strictEqual(crossBindingPlugin.getRecentSyncFailures().length, 1);
 
   const currentFailurePlugin = new PluginClass();
   currentFailurePlugin.settings = helpers.mergeSettings({
@@ -11526,7 +11551,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
       runtime: {
         manifestVersion: currentPluginVersion,
         runtimeVersion: currentPluginVersion,
-        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1',
+        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2',
         matchesManifest: true,
       },
       request: {
