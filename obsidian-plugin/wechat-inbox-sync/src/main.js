@@ -1,8 +1,10 @@
 const crypto = require('crypto');
 const childProcess = require('child_process');
+const dns = require('dns');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const EMBEDDED_LOCAL_ASR_WINDOWS_INSTALLER_SOURCE = require('../local-asr/install-local-asr.ps1');
@@ -240,13 +242,55 @@ const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; 
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 const PLUGIN_RUNTIME_VERSION = '1.3.138';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
 ];
 const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
 const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+const OFFICIAL_SYNC_API_HOSTS = new Set([
+  new URL(OFFICIAL_SYNC_API_BASE).hostname,
+  new URL(FEISHU_OAUTH_SYNC_API_BASE).hostname,
+]);
+const DNS_RECOVERY_DOH_URL = 'https://cloudflare-dns.com/dns-query';
+const DNS_RECOVERY_DOH_BOOTSTRAP_IPV4 = Object.freeze(['1.1.1.1', '1.0.0.1']);
+const DNS_RECOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
+const officialDnsRecoveryCache = new Map();
+
+function clearOfficialDnsRecoveryCache() {
+  officialDnsRecoveryCache.clear();
+}
+
+function getCachedOfficialDnsRecovery(url) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(url || ''));
+  } catch (error) {
+    return null;
+  }
+  const hostname = parsedUrl.hostname.toLowerCase();
+  if (parsedUrl.protocol !== 'https:' || !OFFICIAL_SYNC_API_HOSTS.has(hostname)) return null;
+  const cached = officialDnsRecoveryCache.get(hostname);
+  if (!cached || cached.expiresAt <= Date.now() || !isSafePublicIpv4Address(cached.address)) {
+    officialDnsRecoveryCache.delete(hostname);
+    return null;
+  }
+  return {
+    hostname,
+    address: cached.address,
+    lookup: createPinnedIpv4Lookup(cached.address),
+  };
+}
+
+function cacheOfficialDnsRecoveryAddress(hostname, address) {
+  const normalizedHostname = String(hostname || '').trim().toLowerCase();
+  if (!OFFICIAL_SYNC_API_HOSTS.has(normalizedHostname) || !isSafePublicIpv4Address(address)) return;
+  officialDnsRecoveryCache.set(normalizedHostname, {
+    address,
+    expiresAt: Date.now() + DNS_RECOVERY_CACHE_TTL_MS,
+  });
+}
 const FEISHU_TUTORIAL_URL = 'https://my.feishu.cn/wiki/Lm5kw8QXdiQE96kaDUYcnIsVnAd?from=from_copylink';
 const FEISHU_OFFICIAL_API_TUTORIAL_URL = 'https://my.feishu.cn/wiki/LZBlwhqBCi880Bk00yOcB2dKn1g?from=from_copylink';
 const MAX_PLUGIN_BINDINGS = 3;
@@ -3252,8 +3296,10 @@ function isRequestUrlTransportError(message) {
   return text.includes('net::ERR_')
     || text.includes('ERR_CONNECTION_')
     || text.includes('ECONNRESET')
+    || text.includes('ECONNREFUSED')
     || text.includes('ETIMEDOUT')
     || text.includes('socket hang up')
+    || /before secure TLS connection was established/i.test(text)
     || text.includes('NetworkError')
     || /Request failed,\s*status\s+5\d\d/i.test(text);
 }
@@ -3334,6 +3380,7 @@ function requestJsonViaNode(options) {
       method: options.method || 'GET',
       headers,
       timeout: options.timeout || 20000,
+      ...(typeof options.lookup === 'function' ? { lookup: options.lookup } : {}),
     }, (response) => {
       const chunks = [];
       let receivedBytes = 0;
@@ -3387,6 +3434,126 @@ function requestJsonViaNode(options) {
     if (body) request.write(body);
     request.end();
   });
+}
+
+function isClashFakeIpv4Address(value) {
+  const parts = String(value || '').trim().split('.').map((part) => Number(part));
+  return parts.length === 4
+    && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    && parts[0] === 198
+    && (parts[1] === 18 || parts[1] === 19);
+}
+
+function isSafePublicIpv4Address(value) {
+  const address = String(value || '').trim();
+  if (net.isIP(address) !== 4 || isClashFakeIpv4Address(address)) return false;
+  const parts = address.split('.').map((part) => Number(part));
+  const [first, second] = parts;
+  if (first === 0 || first === 10 || first === 127 || first >= 224) return false;
+  if (first === 100 && second >= 64 && second <= 127) return false;
+  if (first === 169 && second === 254) return false;
+  if (first === 172 && second >= 16 && second <= 31) return false;
+  if (first === 192 && second === 0) return false;
+  if (first === 192 && second === 168) return false;
+  if (first === 198 && second === 51 && parts[2] === 100) return false;
+  if (first === 203 && second === 0 && parts[2] === 113) return false;
+  return true;
+}
+
+function createPinnedIpv4Lookup(address) {
+  const normalizedAddress = String(address || '').trim();
+  if (!isSafePublicIpv4Address(normalizedAddress)) {
+    throw new Error('DNS recovery returned an unsafe IPv4 address');
+  }
+  return (hostname, options, callback) => {
+    let lookupOptions = options;
+    let done = callback;
+    if (typeof lookupOptions === 'function') {
+      done = lookupOptions;
+      lookupOptions = {};
+    }
+    if (lookupOptions && lookupOptions.all) {
+      done(null, [{ address: normalizedAddress, family: 4 }]);
+      return;
+    }
+    done(null, normalizedAddress, 4);
+  };
+}
+
+async function resolveHostnameViaDoh(hostname, requestJson = requestJsonViaNode, options = {}) {
+  const normalizedHostname = String(hostname || '').trim().toLowerCase();
+  if (!OFFICIAL_SYNC_API_HOSTS.has(normalizedHostname)) {
+    throw new Error('DNS recovery is limited to official sync API hosts');
+  }
+  throwIfAborted(options.signal);
+  let response = null;
+  let lastError = null;
+  for (const bootstrapAddress of DNS_RECOVERY_DOH_BOOTSTRAP_IPV4) {
+    try {
+      response = await requestJson({
+        url: `${DNS_RECOVERY_DOH_URL}?name=${encodeURIComponent(normalizedHostname)}&type=A`,
+        method: 'GET',
+        headers: {
+          Accept: 'application/dns-json',
+          'User-Agent': 'WeChat-Inbox-Sync-DNS-Recovery/1.0',
+        },
+        timeout: 15000,
+        maxBytes: 256 * 1024,
+        signal: options.signal || null,
+        lookup: createPinnedIpv4Lookup(bootstrapAddress),
+      });
+      break;
+    } catch (error) {
+      if (isAbortError(error) || (options.signal && options.signal.aborted)) throw createAbortError();
+      lastError = error;
+    }
+  }
+  if (!response && lastError) throw lastError;
+  if (!response || Number(response.status) < 200 || Number(response.status) >= 300) {
+    throw new Error(`DNS recovery request failed with HTTP ${Number(response && response.status) || 0}`);
+  }
+  const payload = response.json || tryParseJson(response.text || '');
+  const address = (Array.isArray(payload && payload.Answer) ? payload.Answer : [])
+    .filter((answer) => Number(answer && answer.type) === 1)
+    .map((answer) => String(answer && answer.data || '').trim())
+    .find(isSafePublicIpv4Address);
+  if (!address) throw new Error('DNS recovery did not return a safe public IPv4 address');
+  return address;
+}
+
+async function getOfficialSyncApiDnsRecovery(url, dependencies = {}) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(url || ''));
+  } catch (error) {
+    return null;
+  }
+  const hostname = parsedUrl.hostname.toLowerCase();
+  if (parsedUrl.protocol !== 'https:' || !OFFICIAL_SYNC_API_HOSTS.has(hostname)) return null;
+  throwIfAborted(dependencies.signal);
+  const lookupHost = dependencies.lookupHost || dns.promises.lookup.bind(dns.promises);
+  const resolveHost = dependencies.resolveHost || ((targetHostname) => (
+    resolveHostnameViaDoh(targetHostname, requestJsonViaNode, { signal: dependencies.signal || null })
+  ));
+  let systemAddresses;
+  try {
+    systemAddresses = await lookupHost(hostname, { all: true, family: 4 });
+  } catch (error) {
+    return null;
+  }
+  throwIfAborted(dependencies.signal);
+  const addresses = (Array.isArray(systemAddresses) ? systemAddresses : [systemAddresses])
+    .map((entry) => String(entry && entry.address || entry || '').trim())
+    .filter(Boolean);
+  if (!addresses.length || addresses.some((address) => !isClashFakeIpv4Address(address))) return null;
+  const cached = getCachedOfficialDnsRecovery(url);
+  if (cached) return cached;
+  const address = await resolveHost(hostname);
+  return {
+    hostname,
+    address,
+    lookup: createPinnedIpv4Lookup(address),
+  };
 }
 
 function createAbortError(message = '当前转写已停止') {
@@ -15847,12 +16014,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
 
     let response;
+    const cachedDnsRecovery = getCachedOfficialDnsRecovery(requestOptions.url);
     try {
-      response = signal
-        ? await requestJsonViaNode(requestOptions)
-        : await requestUrl(requestOptions);
+      response = cachedDnsRecovery
+        ? await requestJsonViaNode({ ...requestOptions, lookup: cachedDnsRecovery.lookup })
+        : (signal
+          ? await requestJsonViaNode(requestOptions)
+          : await requestUrl(requestOptions));
     } catch (error) {
       if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
+      if (cachedDnsRecovery) officialDnsRecoveryCache.delete(cachedDnsRecovery.hostname);
       const message = error && error.message ? error.message : String(error || '');
       const shouldReadBindErrorBody = path !== '/unbind-self'
         && /request failed|status\s*(?:4|5)\d\d|http\s*(?:4|5)\d\d/i.test(message);
@@ -15863,7 +16034,26 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (isAbortError(fallbackError) || (signal && signal.aborted)) throw createAbortError();
           if (shouldReadBindErrorBody) throw error;
           const fallbackMessage = fallbackError && fallbackError.message ? fallbackError.message : String(fallbackError || '');
-          throw new Error(`网络连接失败：${fallbackMessage || message}`);
+          let dnsRecovery = null;
+          if (/before secure TLS connection was established/i.test(fallbackMessage)) {
+            try {
+              dnsRecovery = await getOfficialSyncApiDnsRecovery(requestOptions.url, { signal });
+            } catch (dnsRecoveryError) {
+              if (isAbortError(dnsRecoveryError) || (signal && signal.aborted)) throw createAbortError();
+              dnsRecovery = null;
+            }
+          }
+          if (!dnsRecovery) throw new Error(`网络连接失败：${fallbackMessage || message}`);
+          try {
+            response = await requestJsonViaNode({ ...requestOptions, lookup: dnsRecovery.lookup });
+            cacheOfficialDnsRecoveryAddress(dnsRecovery.hostname, dnsRecovery.address);
+          } catch (dnsRecoveryError) {
+            if (isAbortError(dnsRecoveryError) || (signal && signal.aborted)) throw createAbortError();
+            const recoveryMessage = dnsRecoveryError && dnsRecoveryError.message
+              ? dnsRecoveryError.message
+              : String(dnsRecoveryError || '');
+            throw new Error(`网络连接失败：${recoveryMessage || fallbackMessage || message}`);
+          }
         }
       } else {
         throw error;
@@ -23726,6 +23916,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         const failureKey = `${bindingToken}:${recordId}`;
         if (!recordId || !bindingToken || !activeBindingTokens.has(bindingToken)
           || currentFailureKeys.has(failureKey) || resolvedFailureKeys.has(failureKey)) continue;
+        const storedFailureBinding = bindings.find((binding) => (
+          normalizeBindCodeInput(binding && binding.token) === bindingToken
+        ));
+        if (storedFailureBinding && this.findCompletedSyncReceipt(storedFailureBinding, recordId)) {
+          recentResolvedEntries.push({ recordId, bindingToken });
+          resolvedFailureKeys.add(failureKey);
+          continue;
+        }
         try {
           // A deliverable note bearing this record id is stronger evidence than a
           // stale local failure cache, even when the cloud no longer returns it.
@@ -24778,6 +24976,12 @@ WechatObsidianInboxPlugin.__test = {
   resolveRedirectUrl,
   isRequestUrlTransportError,
   requestJsonViaNode,
+  isClashFakeIpv4Address,
+  isSafePublicIpv4Address,
+  createPinnedIpv4Lookup,
+  resolveHostnameViaDoh,
+  getOfficialSyncApiDnsRecovery,
+  clearOfficialDnsRecoveryCache,
   isBindingInvalidMessage,
   validateSettings,
   mergeSettings,

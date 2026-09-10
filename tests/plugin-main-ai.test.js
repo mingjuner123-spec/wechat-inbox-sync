@@ -1,4 +1,5 @@
 const assert = require('assert');
+const dns = require('dns');
 const http = require('http');
 const https = require('https');
 const childProcess = require('child_process');
@@ -1238,7 +1239,7 @@ assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
 assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
   manifestVersion: currentPluginVersion,
   runtimeVersion: currentPluginVersion,
-  buildMarker: 'clipboard-link-path-v1',
+  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
@@ -4389,6 +4390,12 @@ assert.strictEqual(typeof helpers.cleanPdfExtractedText, 'function');
 assert.strictEqual(typeof helpers.resolveRedirectUrl, 'function');
 assert.strictEqual(typeof helpers.isRequestUrlTransportError, 'function');
 assert.strictEqual(typeof helpers.requestJsonViaNode, 'function');
+assert.strictEqual(typeof helpers.isClashFakeIpv4Address, 'function');
+assert.strictEqual(typeof helpers.isSafePublicIpv4Address, 'function');
+assert.strictEqual(typeof helpers.createPinnedIpv4Lookup, 'function');
+assert.strictEqual(typeof helpers.resolveHostnameViaDoh, 'function');
+assert.strictEqual(typeof helpers.getOfficialSyncApiDnsRecovery, 'function');
+assert.strictEqual(typeof helpers.clearOfficialDnsRecoveryCache, 'function');
 
 const chineseBookPdfText = helpers.extractPdfMarkdown(createUtf16BePdfBuffer([
   '如果目标是实现10倍增长，那么这个过程通常并不会比10%的增长难上100倍，回报却可能是10%增长的100倍。',
@@ -10281,6 +10288,197 @@ async function runCloudRequestFallbackTests() {
   }
 }
 
+async function runOfficialSyncApiDnsRecoveryTests() {
+  helpers.clearOfficialDnsRecoveryCache();
+  const shortHost = 'he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com';
+  const longHost = 'he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com';
+  assert.strictEqual(helpers.isClashFakeIpv4Address('198.18.0.111'), true);
+  assert.strictEqual(helpers.isClashFakeIpv4Address('198.19.255.255'), true);
+  assert.strictEqual(helpers.isClashFakeIpv4Address('198.20.0.1'), false);
+  assert.strictEqual(helpers.isSafePublicIpv4Address('110.40.162.120'), true);
+  assert.strictEqual(helpers.isSafePublicIpv4Address('198.18.0.111'), false);
+  assert.strictEqual(helpers.isSafePublicIpv4Address('127.0.0.1'), false);
+  assert.strictEqual(helpers.isSafePublicIpv4Address('192.0.2.1'), false);
+  assert.strictEqual(helpers.isSafePublicIpv4Address('198.51.100.1'), false);
+  assert.strictEqual(helpers.isSafePublicIpv4Address('203.0.113.1'), false);
+  assert.strictEqual(
+    helpers.isRequestUrlTransportError('Client network socket disconnected before secure TLS connection was established'),
+    true,
+  );
+
+  let resolvedHost = '';
+  const recovery = await helpers.getOfficialSyncApiDnsRecovery(
+    `https://${shortHost}/sync/records?status=pending`,
+    {
+      lookupHost: async () => [{ address: '198.18.0.111', family: 4 }],
+      resolveHost: async (hostname) => {
+        resolvedHost = hostname;
+        return '110.40.162.120';
+      },
+    },
+  );
+  assert.strictEqual(resolvedHost, shortHost);
+  assert.strictEqual(recovery.address, '110.40.162.120');
+  const pinned = await new Promise((resolve, reject) => {
+    recovery.lookup(shortHost, { all: true }, (error, addresses) => {
+      if (error) reject(error);
+      else resolve(addresses);
+    });
+  });
+  assert.deepStrictEqual(pinned, [{ address: '110.40.162.120', family: 4 }]);
+
+  const realDnsResult = await helpers.getOfficialSyncApiDnsRecovery(
+    `https://${shortHost}/sync`,
+    {
+      lookupHost: async () => [{ address: '110.40.162.120', family: 4 }],
+      resolveHost: async () => {
+        throw new Error('DoH should not run for a normal public DNS answer');
+      },
+    },
+  );
+  assert.strictEqual(realDnsResult, null);
+  const customApiResult = await helpers.getOfficialSyncApiDnsRecovery(
+    'https://example.com/sync',
+    {
+      lookupHost: async () => [{ address: '198.18.0.10', family: 4 }],
+      resolveHost: async () => '93.184.216.34',
+    },
+  );
+  assert.strictEqual(customApiResult, null);
+
+  const dohAddress = await helpers.resolveHostnameViaDoh(shortHost, async (options) => {
+    assert.ok(options.url.includes(encodeURIComponent(shortHost)));
+    assert.strictEqual(options.headers.Accept, 'application/dns-json');
+    assert.strictEqual(typeof options.lookup, 'function');
+    const bootstrapAddress = await new Promise((resolve, reject) => {
+      options.lookup('cloudflare-dns.com', {}, (error, address) => {
+        if (error) reject(error);
+        else resolve(address);
+      });
+    });
+    assert.strictEqual(bootstrapAddress, '1.1.1.1');
+    return {
+      status: 200,
+      json: {
+        Status: 0,
+        Answer: [
+          { type: 1, data: '198.18.0.111' },
+          { type: 1, data: '111.231.184.212' },
+        ],
+      },
+    };
+  });
+  assert.strictEqual(dohAddress, '111.231.184.212');
+  await assert.rejects(
+    () => helpers.resolveHostnameViaDoh(longHost, async () => ({
+      status: 200,
+      json: { Status: 0, Answer: [{ type: 1, data: '127.0.0.1' }] },
+    })),
+    /safe public IPv4 address/,
+  );
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(
+    () => helpers.resolveHostnameViaDoh(longHost, async () => {
+      throw new Error('aborted DoH must not start');
+    }, { signal: aborted.signal }),
+    /停止/,
+  );
+}
+
+async function runCloudRequestDnsRecoveryFallbackTest() {
+  helpers.clearOfficialDnsRecoveryCache();
+  const officialHost = 'he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com';
+  const previousRequestUrlMock = requestUrlMock;
+  const originalHttpsRequest = https.request;
+  const originalDnsLookup = dns.promises.lookup;
+  const requests = [];
+  let failCachedPinnedOnce = false;
+  requestUrlMock = async () => {
+    throw new Error('net::ERR_CONNECTION_CLOSED');
+  };
+  dns.promises.lookup = async (hostname) => {
+    assert.strictEqual(hostname, officialHost);
+    return [{ address: '198.18.0.111', family: 4 }];
+  };
+  https.request = (url, options, onResponse) => {
+    const target = url instanceof URL ? url : new URL(String(url));
+    const request = new EventEmitter();
+    request.write = () => {};
+    request.destroy = (error) => {
+      if (error) process.nextTick(() => request.emit('error', error));
+    };
+    request.end = () => {
+      requests.push({ hostname: target.hostname, pinned: typeof options.lookup === 'function' });
+      process.nextTick(() => {
+        if (target.hostname === officialHost && typeof options.lookup === 'function' && failCachedPinnedOnce) {
+          failCachedPinnedOnce = false;
+          const error = new Error('Client network socket disconnected before secure TLS connection was established');
+          error.code = 'ECONNRESET';
+          request.emit('error', error);
+          return;
+        }
+        if (target.hostname === officialHost && typeof options.lookup !== 'function') {
+          const error = new Error('Client network socket disconnected before secure TLS connection was established');
+          error.code = 'ECONNRESET';
+          request.emit('error', error);
+          return;
+        }
+        const response = new EventEmitter();
+        response.statusCode = 200;
+        response.headers = { 'content-type': 'application/json' };
+        onResponse(response);
+        const payload = target.hostname === 'cloudflare-dns.com'
+          ? { Status: 0, Answer: [{ type: 1, data: '110.40.162.120' }] }
+          : { success: true, data: { records: [] } };
+        response.emit('data', Buffer.from(JSON.stringify(payload)));
+        response.emit('end');
+      });
+    };
+    return request;
+  };
+
+  const plugin = new PluginClass();
+  plugin.settings = {
+    apiBase: `https://${officialHost}/sync`,
+    token: 'TEST-CODE',
+    clientId: 'test-client',
+  };
+  try {
+    const payload = await plugin.requestJson('/records?status=pending', 'GET', {});
+    assert.deepStrictEqual(payload, { success: true, data: { records: [] } });
+    assert.deepStrictEqual(requests, [
+      { hostname: officialHost, pinned: false },
+      { hostname: 'cloudflare-dns.com', pinned: true },
+      { hostname: officialHost, pinned: true },
+    ]);
+
+    const cachedPayload = await plugin.requestJson('/records?status=pending', 'GET', {});
+    assert.deepStrictEqual(cachedPayload, { success: true, data: { records: [] } });
+    assert.deepStrictEqual(requests, [
+      { hostname: officialHost, pinned: false },
+      { hostname: 'cloudflare-dns.com', pinned: true },
+      { hostname: officialHost, pinned: true },
+      { hostname: officialHost, pinned: true },
+    ]);
+
+    failCachedPinnedOnce = true;
+    const refreshedPayload = await plugin.requestJson('/records?status=pending', 'GET', {});
+    assert.deepStrictEqual(refreshedPayload, { success: true, data: { records: [] } });
+    assert.deepStrictEqual(requests.slice(4), [
+      { hostname: officialHost, pinned: true },
+      { hostname: officialHost, pinned: false },
+      { hostname: 'cloudflare-dns.com', pinned: true },
+      { hostname: officialHost, pinned: true },
+    ]);
+  } finally {
+    helpers.clearOfficialDnsRecoveryCache();
+    requestUrlMock = previousRequestUrlMock;
+    dns.promises.lookup = originalDnsLookup;
+    https.request = originalHttpsRequest;
+  }
+}
+
 async function runMissingClientIdRequestTest() {
   const previousRequestUrlMock = requestUrlMock;
   requestUrlMock = async () => ({
@@ -10929,6 +11127,123 @@ async function runRecentSyncFailureCleanupTests() {
     '/records/record-route-fallback/synced',
   ]);}
 
+async function runCompletedReceiptClearsStaleFailureTest() {
+  const binding = { token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' };
+  const recordId = 'completed-image-post-with-stale-failure';
+  const plugin = new PluginClass();
+  plugin.settings = helpers.mergeSettings({
+    bindings: [binding],
+    token: binding.token,
+    recentSyncFailures: [{
+      recordId,
+      bindingToken: binding.token,
+      bindingLabel: binding.label,
+      message: '微信公众号暂未返回正文，已保留待同步记录，将在后续同步时自动重试。',
+      failedAt: '2026-09-09T13:20:04.000Z',
+    }],
+    completedSyncReceipts: [{
+      recordId,
+      bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint(binding.token),
+      noteTitle: '公众号-已经成功同步的贴图',
+      completedAt: '2026-09-09T13:33:15.000Z',
+    }],
+  });
+  plugin.saveData = async () => {};
+  plugin.getActiveBindings = () => [binding];
+  plugin.syncBinding = async () => ({
+    written: [
+      { recordId: 'new-record-1', title: '新内容 1' },
+      { recordId: 'new-record-2', title: '新内容 2' },
+    ],
+    failed: [],
+    skipped: [],
+    conversionWarnings: [],
+    completionWarnings: [],
+    pendingReview: {},
+  });
+  plugin.findExistingRecordNotePath = async () => {
+    throw new Error('a completed receipt must reconcile before scanning note content');
+  };
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await plugin.runSyncInboxOnce(false);
+
+  assert.deepStrictEqual(plugin.getRecentSyncFailures(), []);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'success');
+  assert.strictEqual(plugin.lastSyncDiagnostic.current, 2);
+  assert.strictEqual(plugin.lastSyncDiagnostic.total, 2);
+  assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
+
+  const otherBinding = { token: 'OTHER-456', label: '微信 2', enabled: true, status: 'bound' };
+  const crossBindingPlugin = new PluginClass();
+  crossBindingPlugin.settings = helpers.mergeSettings({
+    bindings: [binding, otherBinding],
+    token: binding.token,
+    recentSyncFailures: [{
+      recordId,
+      bindingToken: otherBinding.token,
+      bindingLabel: otherBinding.label,
+      message: '另一绑定的真实失败',
+    }],
+    completedSyncReceipts: [{
+      recordId,
+      bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint(binding.token),
+      noteTitle: '仅属于微信 1 的成功回执',
+      completedAt: '2026-09-09T13:33:15.000Z',
+    }],
+  });
+  crossBindingPlugin.saveData = async () => {};
+  crossBindingPlugin.getActiveBindings = () => [binding, otherBinding];
+  crossBindingPlugin.syncBinding = async () => ({
+    written: [], failed: [], skipped: [], conversionWarnings: [], completionWarnings: [], pendingReview: {},
+  });
+  crossBindingPlugin.findExistingRecordNotePath = async () => '';
+  crossBindingPlugin.clearSyncProgressNotice = () => {};
+  crossBindingPlugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await crossBindingPlugin.runSyncInboxOnce(false);
+
+  assert.deepStrictEqual(
+    crossBindingPlugin.getRecentSyncFailures().map((item) => [item.recordId, item.bindingToken]),
+    [[recordId, otherBinding.token]],
+  );
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'failed');
+
+  const currentFailurePlugin = new PluginClass();
+  currentFailurePlugin.settings = helpers.mergeSettings({
+    bindings: [binding],
+    token: binding.token,
+    completedSyncReceipts: [{
+      recordId,
+      bindingFingerprint: helpers.getSyncLifecycleBindingFingerprint(binding.token),
+      noteTitle: '旧成功回执',
+      completedAt: '2026-09-09T13:33:15.000Z',
+    }],
+  });
+  currentFailurePlugin.saveData = async () => {};
+  currentFailurePlugin.getActiveBindings = () => [binding];
+  currentFailurePlugin.syncBinding = async () => ({
+    written: [],
+    failed: [{ recordId, message: '本轮仍然真实失败' }],
+    skipped: [],
+    conversionWarnings: [],
+    completionWarnings: [],
+    pendingReview: {},
+  });
+  currentFailurePlugin.clearSyncProgressNotice = () => {};
+  currentFailurePlugin.getConfiguredLocalAsrInstallRoot = () => '';
+
+  await currentFailurePlugin.runSyncInboxOnce(false);
+
+  assert.strictEqual(currentFailurePlugin.lastSyncDiagnostic.status, 'failed');
+  assert.match(currentFailurePlugin.lastSyncDiagnostic.error, /本轮仍然真实失败/);
+  assert.deepStrictEqual(
+    currentFailurePlugin.getRecentSyncFailures().map((item) => item.recordId),
+    [recordId],
+  );
+}
+
 async function runStoppedTranscriptionDeleteUsesShortBusinessEndpointTest() {
   const previousRequestUrlMock = requestUrlMock;
   const plugin = new PluginClass();
@@ -11211,7 +11526,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
       runtime: {
         manifestVersion: currentPluginVersion,
         runtimeVersion: currentPluginVersion,
-        buildMarker: 'clipboard-link-path-v1',
+        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1',
         matchesManifest: true,
       },
       request: {
@@ -13824,7 +14139,7 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText();
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion} / clipboard-link-path-v1`));
+    assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion} / clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1`));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
     assert.ok(diagnostic.includes('图片文字识别 OCR'));
     assert.ok(diagnostic.includes('最近权限查询失败'));
@@ -15764,6 +16079,8 @@ async function main() {
   await runLocalTranscriptionQualityFallbackTests();
   await runOpenExternalUrlTests();
   await runCloudRequestFallbackTests();
+  await runOfficialSyncApiDnsRecoveryTests();
+  await runCloudRequestDnsRecoveryFallbackTest();
   await runMissingClientIdRequestTest();
   await runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest();
   await runRequestJsonRoutesFeishuExtractToOAuthApiBaseTest();
@@ -15778,6 +16095,7 @@ async function main() {
   await runTranscriptionPreferenceSyncTest();
   await runStopCurrentTranscriptionDeletesCurrentRecordTest();
   await runRecentSyncFailureCleanupTests();
+  await runCompletedReceiptClearsStaleFailureTest();
   await runStoppedTranscriptionDeleteUsesShortBusinessEndpointTest();
   await runStopCurrentTranscriptionWithoutCurrentRecordDoesNotDeleteTest();
   await runStopCurrentTranscriptionWithoutActiveProcessDoesNotDeleteTest();
