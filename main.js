@@ -3300,12 +3300,11 @@ var require_progress_notice_utils = __commonJS({
       const writtenCount = Array.isArray(written) ? written.length : 0;
       const currentFailedItems = Array.isArray(failed) ? failed : [];
       const outstandingFailedItems = Array.isArray(outstandingFailed) ? outstandingFailed : [];
-      const failedItems = currentFailedItems.length ? currentFailedItems : outstandingFailedItems;
       let message = buildSyncNotice2(writtenCount);
       if (!writtenCount && currentFailedItems.length) {
         message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
       } else if (!writtenCount && outstandingFailedItems.length) {
-        message = `同步失败：仍有 ${outstandingFailedItems.length} 条内容未同步成功：${outstandingFailedItems[0].message}`;
+        message = `本轮没有需要同步的新内容；另有 ${outstandingFailedItems.length} 条历史失败待处理：${outstandingFailedItems[0].message}`;
         if (!/小程序[\s\S]{0,20}重试/u.test(message)) {
           message += "请在小程序“同步记录”中点击“重试”后再次同步。";
         }
@@ -3316,8 +3315,11 @@ var require_progress_notice_utils = __commonJS({
       message += buildConversionWarningsNotice2(
         Array.isArray(conversionWarnings) ? conversionWarnings : []
       );
-      if (writtenCount && failedItems.length) {
-        message += `，${failedItems.length} 条失败：${failedItems[0].message}`;
+      if (writtenCount && currentFailedItems.length) {
+        message += `，${currentFailedItems.length} 条失败：${currentFailedItems[0].message}`;
+      }
+      if (writtenCount && !currentFailedItems.length && outstandingFailedItems.length) {
+        message += `；本轮同步成功，另有 ${outstandingFailedItems.length} 条历史失败待处理，请在小程序“同步记录”中查看并重试。`;
       }
       return message;
     }
@@ -8352,8 +8354,8 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.139";
-var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1";
+var PLUGIN_RUNTIME_VERSION = "1.3.140";
+var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
@@ -12730,6 +12732,27 @@ function installExternalAppNavigationGuards(webContents) {
   }
 }
 __name(installExternalAppNavigationGuards, "installExternalAppNavigationGuards");
+function installWechatArticleNavigationGuards(webContents) {
+  if (!webContents || typeof webContents.removeAllListeners !== "function") {
+    throw new Error("无法隔离公众号提取窗口的跳转处理");
+  }
+  webContents.removeAllListeners("will-navigate");
+  installExternalAppNavigationGuards(webContents);
+  const restrictArticleNavigation = /* @__PURE__ */ __name((event, navigation) => {
+    const value = typeof navigation === "string" ? navigation : navigation && navigation.url || event && event.url;
+    let allowed = false;
+    try {
+      const target = new URL(String(value || ""));
+      allowed = target.protocol === "https:" && target.hostname === "mp.weixin.qq.com" && !target.username && !target.password && !target.port;
+    } catch (_) {
+    }
+    if (!allowed && event && typeof event.preventDefault === "function") event.preventDefault();
+  }, "restrictArticleNavigation");
+  webContents.on("will-navigate", restrictArticleNavigation);
+  webContents.on("will-frame-navigate", restrictArticleNavigation);
+  webContents.on("will-redirect", restrictArticleNavigation);
+}
+__name(installWechatArticleNavigationGuards, "installWechatArticleNavigationGuards");
 function createXiaohongshuBrowserDiagnostic() {
   return {
     source: "xiaohongshu-browser",
@@ -18154,16 +18177,11 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
       sandbox: true
     }
   });
-  installExternalAppNavigationGuards(win.webContents);
-  if (win && typeof win.on === "function") {
-    win.on("ready-to-show", () => {
-      try {
-        if (typeof win.isDestroyed !== "function" || !win.isDestroyed()) win.hide();
-      } catch (_) {
-      }
-    });
-  }
+  let cleanupHiddenWindow = /* @__PURE__ */ __name(() => {
+  }, "cleanupHiddenWindow");
   try {
+    installWechatArticleNavigationGuards(win.webContents);
+    cleanupHiddenWindow = installHiddenBrowserWindowGuards(win);
     if (win.webContents && typeof win.webContents.setUserAgent === "function") {
       win.webContents.setUserAgent(userAgent);
     }
@@ -18497,6 +18515,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
     };
     return result;
   } finally {
+    cleanupHiddenWindow();
     if (win && typeof win.destroy === "function" && (typeof win.isDestroyed !== "function" || !win.isDestroyed())) win.destroy();
   }
 }
@@ -28842,11 +28861,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const completionWarnings = [];
     const syncedAt = (/* @__PURE__ */ new Date()).toISOString();
     if (!records.length) {
-      const outstandingFailureCount = this.getRecentSyncFailures().filter((item) => item && item.bindingToken === binding.token).length;
       this.showSyncProgress({
         bindingLabel,
-        stage: outstandingFailureCount ? "failed" : "empty",
-        total: outstandingFailureCount
+        stage: "empty",
+        total: 0
       });
     }
     for (let index = 0; index < records.length; index += 1) {
@@ -29254,7 +29272,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const outstandingFailures = this.getRecentSyncFailures().filter((item) => activeBindingTokens.has(
         normalizeBindCodeInput(item && item.bindingToken)
       ));
-      const displayedFailures = failed.length ? failed : outstandingFailures;
+      const historicalFailures = outstandingFailures.filter((item) => !currentFailureKeys.has(
+        `${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || "").trim()}`
+      ));
+      const displayedFailures = failed;
       let finalMessage = buildSyncResultNotice(
         written,
         skipped,
@@ -29297,12 +29318,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         };
       }).filter(Boolean).slice(0, 100);
       this.lastSyncDiagnostic = {
-        status: displayedFailures.length ? "failed" : completionWarnings.length ? "warning" : "success",
+        status: displayedFailures.length ? "failed" : completionWarnings.length || historicalFailures.length ? "warning" : "success",
         stage: "finished",
         current: written.length,
         total: written.length + displayedFailures.length + skipped.length,
         message: finalMessage,
         error: displayedFailures.length ? displayedFailures.map((item) => `${item.recordId}: ${item.message}`).join("\n") : "",
+        historicalFailureCount: historicalFailures.length,
+        historicalFailures: historicalFailures.map((item) => ({
+          recordId: item.recordId,
+          message: item.message
+        })),
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? "COMPLETION_REPORT_FAILED" : "",
         ...completionWarningDetails.length ? { completionWarningDetails } : {},

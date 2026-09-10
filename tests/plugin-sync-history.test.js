@@ -790,11 +790,13 @@ async function runOutstandingFailureRemainsVisibleWhenInboxIsEmptyTest() {
 
   await plugin.runSyncInboxOnce(true);
 
-  assert.ok(notices.some((message) => message.includes('同步失败：仍有 1 条内容未同步成功')));
+  assert.ok(notices.some((message) => message.includes('另有 1 条历史失败待处理')));
   assert.strictEqual(notices.some((message) => message === '没有需要同步的新内容'), false);
-  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'failed');
-  assert.strictEqual(plugin.lastSyncDiagnostic.total, 1);
-  assert.match(plugin.lastSyncDiagnostic.error, /wechat-image-post-retry/);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(plugin.lastSyncDiagnostic.total, 0);
+  assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
+  assert.strictEqual(plugin.lastSyncDiagnostic.historicalFailureCount, 1);
+  assert.strictEqual(plugin.lastSyncDiagnostic.historicalFailures[0].recordId, 'wechat-image-post-retry');
 }
 
 async function runInactiveBindingFailureDoesNotPolluteActiveSyncTest() {
@@ -965,9 +967,11 @@ async function runOutstandingFailureDoesNotBorrowSuccessfulDiagnosticTest() {
 
   await plugin.runSyncInboxOnce(true);
 
-  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'failed');
-  assert.strictEqual(Object.prototype.hasOwnProperty.call(plugin.lastSyncDiagnostic, 'diagnostic'), false);
-  assert.match(plugin.lastSyncDiagnostic.error, /different-stored-failure/);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(plugin.lastSyncDiagnostic.diagnostic.finalState, 'complete');
+  assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
+  assert.strictEqual(plugin.lastSyncDiagnostic.historicalFailures[0].recordId, 'different-stored-failure');
+  assert.strictEqual(plugin.getRecentSyncFailures().length, 1);
 }
 
 async function runEmptyPendingWithKnownFailureShowsFailureProgressTest() {
@@ -991,8 +995,8 @@ async function runEmptyPendingWithKnownFailureShowsFailureProgressTest() {
 
   assert.strictEqual(result.written.length, 0);
   assert.strictEqual(result.failed.length, 0);
-  assert.ok(progressEvents.some((item) => item.stage === 'failed' && item.total === 1));
-  assert.strictEqual(progressEvents.some((item) => item.stage === 'empty'), false);
+  assert.ok(progressEvents.some((item) => item.stage === 'empty' && item.total === 0));
+  assert.strictEqual(progressEvents.some((item) => item.stage === 'failed'), false);
 }
 
 

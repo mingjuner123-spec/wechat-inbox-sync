@@ -14,12 +14,11 @@ function buildSyncResultNotice(
   const writtenCount = Array.isArray(written) ? written.length : 0;
   const currentFailedItems = Array.isArray(failed) ? failed : [];
   const outstandingFailedItems = Array.isArray(outstandingFailed) ? outstandingFailed : [];
-  const failedItems = currentFailedItems.length ? currentFailedItems : outstandingFailedItems;
   let message = buildSyncNotice(writtenCount);
   if (!writtenCount && currentFailedItems.length) {
     message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
   } else if (!writtenCount && outstandingFailedItems.length) {
-    message = `同步失败：仍有 ${outstandingFailedItems.length} 条内容未同步成功：${outstandingFailedItems[0].message}`;
+    message = `本轮没有需要同步的新内容；另有 ${outstandingFailedItems.length} 条历史失败待处理：${outstandingFailedItems[0].message}`;
     if (!/小程序[\s\S]{0,20}重试/u.test(message)) {
       message += '请在小程序“同步记录”中点击“重试”后再次同步。';
     }
@@ -30,8 +29,11 @@ function buildSyncResultNotice(
   message += buildConversionWarningsNotice(
     Array.isArray(conversionWarnings) ? conversionWarnings : [],
   );
-  if (writtenCount && failedItems.length) {
-    message += `，${failedItems.length} 条失败：${failedItems[0].message}`;
+  if (writtenCount && currentFailedItems.length) {
+    message += `，${currentFailedItems.length} 条失败：${currentFailedItems[0].message}`;
+  }
+  if (writtenCount && !currentFailedItems.length && outstandingFailedItems.length) {
+    message += `；本轮同步成功，另有 ${outstandingFailedItems.length} 条历史失败待处理，请在小程序“同步记录”中查看并重试。`;
   }
   return message;
 }
