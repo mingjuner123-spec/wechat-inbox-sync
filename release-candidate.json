@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "pluginId": "wechat-inbox-sync",
-  "pluginVersion": "1.3.141",
+  "pluginVersion": "1.3.142",
   "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
-  "candidateId": "1.3.141-24382d0bf8380776",
-  "aggregateSha256": "24382d0bf83807768f48a3db44533dbc638fc9e379b88b9ac3983f3df655c026",
+  "candidateId": "1.3.142-53889d4bd257e14d",
+  "aggregateSha256": "53889d4bd257e14d8d98d3a962289cb2e099d6dde0a6707fe71a8c78b2aa6a42",
   "looseAssets": [
     "main.js",
     "manifest.json",
@@ -29,8 +29,8 @@
     },
     {
       "path": "local-asr/install-local-asr-macos.sh",
-      "bytes": 36949,
-      "sha256": "1c7c1e1898183193a1bb191b5a0bd322be049b53fc9a50f5ae9d3e94dfba9ff1"
+      "bytes": 37118,
+      "sha256": "343f32fbb4e2ae2bd42cb785c3425de35769cd331c627581c6e92d483bc3bbb8"
     },
     {
       "path": "local-asr/install-local-asr.ps1",
@@ -49,13 +49,13 @@
     },
     {
       "path": "local-ocr/install-local-ocr-macos.sh",
-      "bytes": 14736,
-      "sha256": "03bd44b0872e06234756eaaceca0028cd16d4eeb36096ec2bc276e0923956823"
+      "bytes": 14656,
+      "sha256": "08c7edf5f91653b825694d1ffc8c82d31d6ddb32e5f8689012fc5698062be432"
     },
     {
       "path": "local-ocr/install-local-ocr.ps1",
-      "bytes": 33738,
-      "sha256": "c6efec45d13e557b9f0feccbcd22d1249145b3d817d0c3fe2f98f847c470251b"
+      "bytes": 33805,
+      "sha256": "7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c"
     },
     {
       "path": "local-ocr/ocr_image.py",
@@ -64,13 +64,13 @@
     },
     {
       "path": "main.js",
-      "bytes": 2577383,
-      "sha256": "1309dcbf7bb39aaaedd574150065f46f6a039fe9b7ff3bc9ead662dc32092844"
+      "bytes": 2592633,
+      "sha256": "07be13831197a632f62ff75b5542c492d76e42a5fd14ca630dfa98e5c8cde839"
     },
     {
       "path": "manifest.json",
       "bytes": 410,
-      "sha256": "2546c6bd2be003982112483a784f7358254b1fa6f47fe8285cc5f5cff247f691"
+      "sha256": "5f20f92f7bc4affbb2dcf599ea1dad88937a6b41d9c68630d539fbeaf4ed97a6"
     },
     {
       "path": "styles.css",
@@ -79,8 +79,8 @@
     },
     {
       "path": "versions.json",
-      "bytes": 5788,
-      "sha256": "0c569ec6857c9a7ef9553306e474b7e129c429d544378d757cf2166c0fc4e9d5"
+      "bytes": 5810,
+      "sha256": "c089de9a7d502d3dc02704b707ebf93ecdb78de1660e71a086b04b2c5204bb6b"
     }
   ]
 }

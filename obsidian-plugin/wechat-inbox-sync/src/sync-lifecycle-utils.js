@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 
 const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
   UNSUPPORTED_PLATFORM: '\u6682\u4e0d\u652f\u6301\u6b64\u5e73\u53f0',
@@ -29,6 +30,7 @@ function getSyncNoteTitleFromPath(filePath) {
 function categorizeSyncFailure(error) {
   const code = String(error && error.code || '').trim().toUpperCase();
   const message = String(error && error.message || error || '').trim().toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
   if (code === 'UNSUPPORTED_PLATFORM'
     || /UNSUPPORTED_(?:PLATFORM|RECORD_TYPE|SITE)/.test(code)
     || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)/.test(message)
@@ -264,8 +266,10 @@ function getSyncLifecycleOutcomeError(record) {
   const hasDeclaredFailureState = ['failed', 'link_saved', 'wechat_captcha'].includes(conversionStatus)
     || transcriptionStatus === 'failed';
 
+  const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
+  if (channelsOutcome && transcriptionStatus === 'failed') return createSyncLifecycleOutcomeError(channelsOutcome.code, channelsOutcome.message, channelsOutcome.diagnostic);
   if (transcriptionStatus === 'failed' && !transcription) {
-    return createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', declaredError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
+    return createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', metadata.transcriptionError || metadata.conversionError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
   }
   if (/UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError)
     && (hasDeclaredFailureState || !hasUsableOutput)) {
