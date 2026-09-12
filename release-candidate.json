@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "pluginId": "wechat-inbox-sync",
-  "pluginVersion": "1.3.140",
+  "pluginVersion": "1.3.141",
   "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
-  "candidateId": "1.3.140-f7ae0f00d7d2b0f2",
-  "aggregateSha256": "f7ae0f00d7d2b0f299154e07d3a4b4d921351006868fb71fc00fae02ea3cee4d",
+  "candidateId": "1.3.141-24382d0bf8380776",
+  "aggregateSha256": "24382d0bf83807768f48a3db44533dbc638fc9e379b88b9ac3983f3df655c026",
   "looseAssets": [
     "main.js",
     "manifest.json",
@@ -19,8 +19,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 7354,
-      "sha256": "db70f37d228e4df37c082d3d9f8c70e7ee0db7108fd43ad6660aef1ddcc52c12"
+      "bytes": 8119,
+      "sha256": "e6115c517abb7d3bb31dcd648874a619000165764262050199c0a7bdbe72d678"
     },
     {
       "path": "local-asr/README.md",
@@ -29,8 +29,8 @@
     },
     {
       "path": "local-asr/install-local-asr-macos.sh",
-      "bytes": 35763,
-      "sha256": "a16f8b2a078b8803646110ab1c904c7a24867cbaa6a9146f5a877d6e75c8e62a"
+      "bytes": 36949,
+      "sha256": "1c7c1e1898183193a1bb191b5a0bd322be049b53fc9a50f5ae9d3e94dfba9ff1"
     },
     {
       "path": "local-asr/install-local-asr.ps1",
@@ -64,13 +64,13 @@
     },
     {
       "path": "main.js",
-      "bytes": 2543315,
-      "sha256": "82faef74f6583dba1fa4786a2c5d27f1f26bd37c40711bedfd18c30e2686c152"
+      "bytes": 2577383,
+      "sha256": "1309dcbf7bb39aaaedd574150065f46f6a039fe9b7ff3bc9ead662dc32092844"
     },
     {
       "path": "manifest.json",
       "bytes": 410,
-      "sha256": "70f647b495ff1b263a1c9a243fda77278b3b3ae8fbdda30ddb434c777ccdc1a7"
+      "sha256": "2546c6bd2be003982112483a784f7358254b1fa6f47fe8285cc5f5cff247f691"
     },
     {
       "path": "styles.css",
@@ -79,8 +79,8 @@
     },
     {
       "path": "versions.json",
-      "bytes": 5766,
-      "sha256": "61cdf628f3ae311b2db6d7d8ed9eab6d910f95a3f6a8113f20745bed546f0614"
+      "bytes": 5788,
+      "sha256": "0c569ec6857c9a7ef9553306e474b7e129c429d544378d757cf2166c0fc4e9d5"
     }
   ]
 }

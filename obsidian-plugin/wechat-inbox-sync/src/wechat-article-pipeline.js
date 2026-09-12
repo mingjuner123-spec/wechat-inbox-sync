@@ -1,4 +1,5 @@
 'use strict';
+const { isWechatAccessPaused, buildWechatAccessPausedResult } = require('./wechat-request-gate');
 
 const {
   buildWechatArticleFallbackMarkdown,
@@ -322,11 +323,15 @@ async function runWechatArticlePipeline({
           },
         };
       }
-      if (staticState === 'captcha' || staticState === 'unavailable') {
+      if (staticState === 'captcha') return buildWechatAccessPausedResult({ reason: 'wechat-verification-required' }, attempts);
+      if (staticState === 'image-post' || (isImagePost && staticState !== 'unavailable')) break; // One static response is enough; render the actual carousel.
+      if (staticState === 'unavailable') {
         terminalState = terminalState || staticState;
         terminalHtml = terminalHtml || staticResult.html;
       }
     } catch (staticError) {
+      if (staticError?.name === 'AbortError') throw staticError;
+      if (isWechatAccessPaused(staticError)) return buildWechatAccessPausedResult(staticError, attempts);
       attempts.push({
         channel: 'static',
         ...safeProfile,
@@ -345,7 +350,7 @@ async function runWechatArticlePipeline({
         const browser = normalizeBrowserResult(await renderBrowser(profile.url, profile));
         const browserHtml = browser.html || browser.markdown;
         const browserDiagnostic = diagnoseWechatArticleHtml(browserHtml);
-        if (browser.bodyFound && browserDiagnostic.pageKind === 'unknown') {
+        if (browser.bodyFound && (!browser.html || browserDiagnostic.pageKind === 'unknown')) {
           browserDiagnostic.pageKind = 'article';
           browserDiagnostic.classifiedState = 'article';
         }
@@ -408,11 +413,15 @@ async function runWechatArticlePipeline({
             },
           };
         }
-        if (browserDiagnostic.pageKind === 'captcha' || browserDiagnostic.pageKind === 'unavailable') {
+        if (browserDiagnostic.pageKind === 'captcha') return buildWechatAccessPausedResult({ reason: 'wechat-verification-required' }, attempts);
+        if (browserDiagnostic.pageKind === 'unavailable') {
           terminalState = terminalState || browserDiagnostic.pageKind;
           terminalHtml = terminalHtml || browser.html || browser.markdown;
         }
       } catch (browserError) {
+        if (browserError?.name === 'AbortError') throw browserError;
+        if (isWechatAccessPaused(browserError)) return buildWechatAccessPausedResult(browserError, attempts);
+        if (browserError?.wechatArticleDiagnostic?.verificationMarker) return buildWechatAccessPausedResult({ reason: 'wechat-verification-required' }, attempts);
         lastBrowserError = browserError;
         const renderDiagnostic = browserError && browserError.wechatArticleDiagnostic
           && typeof browserError.wechatArticleDiagnostic === 'object'

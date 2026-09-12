@@ -264,13 +264,13 @@ function getSyncLifecycleOutcomeError(record) {
   const hasDeclaredFailureState = ['failed', 'link_saved', 'wechat_captcha'].includes(conversionStatus)
     || transcriptionStatus === 'failed';
 
-  if ((/weixin\.qq\.com\/sph\//.test(url)
-      && (['failed', 'link_saved'].includes(conversionStatus) || transcriptionStatus === 'failed'))
-    || (/UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError)
-      && (hasDeclaredFailureState || !hasUsableOutput))) {
+  if (transcriptionStatus === 'failed' && !transcription) {
+    return createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', declaredError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
+  }
+  if (/UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError)
+    && (hasDeclaredFailureState || !hasUsableOutput)) {
     return createSyncLifecycleOutcomeError('UNSUPPORTED_PLATFORM', '暂不支持此平台');
   }
-
   if (conversionStatus === 'wechat_captcha') {
     return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信安全验证拦截');
   }

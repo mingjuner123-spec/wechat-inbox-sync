@@ -1,0 +1,41 @@
+'use strict';
+const assert=require('assert'),fs=require('fs'),path=require('path'),os=require('os'),cp=require('child_process');
+const h=require('../obsidian-plugin/wechat-inbox-sync/src/asr-recovery-utils');
+const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'asr-diagnostic-test-'));
+try {
+  const file=path.join(scratch,'bounded.log');fs.writeFileSync(file,'HEAD\n'+'.'.repeat(300000)+'\nTAIL');const bounded=h.boundedRead(file,1000);assert.ok(bounded.startsWith('HEAD'));assert.ok(bounded.endsWith('TAIL'));assert.ok(bounded.includes('TRUNCATED'));assert.ok(bounded.length<1200);
+  fs.writeFileSync(file, 'HEAD\n' + '[00:00:01.000 --> 00:00:02.000] ' + 'PRIVATE_SENTENCE '.repeat(30000) + '\nnativeExit=139');
+  const splitText=h.diagnosticRedact(h.boundedRead(file,1000));assert.ok(!splitText.includes('PRIVATE_SENTENCE'));assert.ok(splitText.includes('nativeExit=139'));
+  fs.writeFileSync(file, 'status=failed\n'+'diagnostic header\n'.repeat(18000)+'--- stdout ---\n'+'PRIVATE_MULTILINE_SPEECH\n'.repeat(18000)+'--- stderr ---\nSegmentation fault: 11');
+  const truncatedStdout=h.diagnosticRedact(h.readDiagnosticLog(file));assert.ok(!truncatedStdout.includes('PRIVATE_MULTILINE_SPEECH'));assert.ok(truncatedStdout.includes('Segmentation fault'));
+  const legacyRun=path.join(scratch,'transcribe-last.log');
+  fs.writeFileSync(legacyRun,'status=success\nPRIVATE_UNMARKED_SUCCESS_SPEECH\n--- stderr ---\nmetal backend ready\n--- error ---\n--- plugin wrapper ---\nstatus=failed\n--- error ---\nmedia timeout');
+  const legacy=h.readDiagnosticLog(legacyRun);assert.ok(!legacy.includes('PRIVATE_UNMARKED_SUCCESS_SPEECH'));assert.ok(legacy.includes('media timeout'));assert.ok(legacy.includes('status=success'));
+  const secret='fixture-sensitive-token';const text=h.diagnosticRedact(`inputPath=/Users/alice/private.mp4\nhttps://example.test/file?token=secret\n[00:00:01.000 --> 00:00:02.000] 私密语音内容\n--- stdout ---\nprivate transcript\n--- stderr ---\nSegmentation fault: 11\n${secret}`,{aliApiKey:secret});
+  for(const item of ['alice','private.mp4','example.test','私密语音','private transcript',secret])assert.ok(!text.includes(item),item);assert.ok(text.includes('Segmentation fault'));
+  const session={platform:'darwin',startedAt:'2026-09-12T08:58:00.000Z',finishedAt:'2026-09-12T08:59:00.000Z',runtime:{binary:'/Users/alice/bin/whisper-cli'},attempts:[{nativePids:[123],runLog:'[00:00:01.000 --> 00:00:02.000] 私密语音\nprogressPid=123',error:secret}]};
+  h.saveSession(scratch,session,{token:secret});const saved=JSON.parse(fs.readFileSync(path.join(scratch,'asr-diagnostic-last.json'),'utf8'));assert.equal(saved.attempts[0].error,'[REDACTED]');assert.ok(!saved.attempts[0].runLog.includes('私密语音'));assert.equal(saved.attempts[0].nativePids[0],123);
+  const reports=path.join(scratch,'reports');fs.mkdirSync(reports);
+  function report(name,body){const p=path.join(reports,name);fs.writeFileSync(p,JSON.stringify({app_name:'whisper-cli'})+'\n'+JSON.stringify(body));fs.utimesSync(p,new Date('2026-09-12T08:58:30Z'),new Date('2026-09-12T08:58:30Z'));}
+  report('whisper-cli-matching.ips',{pid:123,procName:'whisper-cli',captureTime:'2026-09-12T08:58:30Z',exception:{type:'EXC_BAD_ACCESS'},faultingThread:0,threads:[{frames:[{symbol:'ggml_compute',imageOffset:5}]}],privateField:'do-not-export'});
+  report('whisper-cli-unrelated.ips',{pid:999,procName:'whisper-cli',captureTime:'2026-09-12T08:58:30Z',exception:{type:'UNRELATED'}});
+  const summary=h.readMatchingCrashSummary(session,{directory:reports});assert.ok(summary.includes('EXC_BAD_ACCESS'));assert.ok(summary.includes('ggml_compute'));assert.ok(!summary.includes('do-not-export'));assert.ok(!summary.includes('UNRELATED'));
+  assert.ok(h.readMatchingCrashSummary({...session,attempts:[{nativePids:[888]}]},{directory:reports}).includes('unavailable'));
+  const mainBinary='/Users/alice/venv/bin/main';
+  const mainSession={...session,runtime:{binary:mainBinary,binaryPathSha256:require('crypto').createHash('sha256').update(mainBinary).digest('hex')},attempts:[{nativePids:[321]}]};
+  report('main-match.ips',{pid:321,procName:'main',procPath:mainBinary,captureTime:'2026-09-12T08:58:30Z',exception:{type:'MAIN_MATCH'}});
+  h.saveSession(scratch,mainSession,{});const savedMain=JSON.parse(fs.readFileSync(path.join(scratch,'asr-diagnostic-last.json'),'utf8'));
+  assert.ok(h.readMatchingCrashSummary(savedMain,{directory:reports}).includes('MAIN_MATCH'));
+  const current=fs.readFileSync(path.resolve(__dirname,'../obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh'),'utf8');
+  const previous=cp.execFileSync('git',['show','ae1796ad31efc31f1e75b8e8b6e7cfd91626e634:obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh'],{encoding:'utf8'});
+  const mark='cat > "$INSTALL_ROOT/transcribe.sh" <<\'SCRIPT\'\n';const from=previous.indexOf(mark)+mark.length;const old=previous.slice(from,previous.indexOf('\nSCRIPT',from))+'\n';
+  const script=path.join(scratch,'transcribe.sh');fs.writeFileSync(script,old);assert.equal(h.ensureManagedMacScript(scratch,current),true);assert.ok(fs.readFileSync(script,'utf8').includes('macos-cpu-recovery-v1'));assert.equal(fs.readFileSync(script+'.before-macos-cpu-recovery-v1','utf8'),old);assert.equal(h.ensureManagedMacScript(scratch,current),true);
+  fs.writeFileSync(script,old+'\n# user customization\n');assert.equal(h.ensureManagedMacScript(scratch,current),false);assert.ok(fs.readFileSync(script,'utf8').includes('user customization'));
+  fs.writeFileSync(path.join(scratch,'install.log'),'engine fixture v1\nmodel fixture\nhttps://host.test/?signature=secret');
+  fs.writeFileSync(path.join(scratch,'transcribe-last.log'),'status=failed\n'+'progressStage=transcribing\n'.repeat(200)+'Segmentation fault: 11');
+  const detailed=h.detailedDiagnostic(scratch,{token:secret});assert.ok(detailed.includes('engine fixture v1'));assert.ok(detailed.includes('Segmentation fault'));assert.ok(detailed.includes('totalMemoryBytes'));assert.ok(!detailed.includes('signature=secret'));
+  const life=require('../obsidian-plugin/wechat-inbox-sync/src/sync-lifecycle-utils');
+  const result=life.getSyncLifecycleOutcomeError({type:'webpage',content:'https://weixin.qq.com/sph/fixture',metadata:{transcriptionStatus:'failed',transcriptionError:'Segmentation fault: 11',conversionStatus:'link_saved'}});assert.equal(result.code,'TRANSCRIPTION_FAILED');assert.ok(result.message.includes('Segmentation fault'));
+  assert.equal(life.getSyncLifecycleOutcomeError({type:'webpage',metadata:{conversionStatus:'failed',conversionError:'Unsupported platform'}}).code,'UNSUPPORTED_PLATFORM');
+  console.log('PASS: bounded diagnostics, credentials/transcript redaction, matching crash summaries, exact legacy migration/custom protection, error classification');
+}finally{if(!scratch.startsWith(path.join(os.tmpdir(),'asr-diagnostic-test-')))throw Error('unsafe cleanup');fs.rmSync(scratch,{recursive:true,force:true});}

@@ -423,16 +423,17 @@ async function runPipelineTests() {
     fetchStatic: async () => captchaHtml,
     renderBrowser: async () => { browserCalls += 1; return { html: articleHtml }; },
   });
-  assert.strictEqual(browserCalls, 1);
-  assert.strictEqual(captcha.kind, 'article');
+  assert.strictEqual(browserCalls, 0);
+  assert.strictEqual(captcha.kind, 'retryable');
+  assert.strictEqual(captcha.state, 'access_paused');
 
   const terminalCaptcha = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/terminal-captcha',
     fetchStatic: async () => captchaHtml,
     renderBrowser: async () => ({ html: captchaHtml }),
   });
-  assert.strictEqual(terminalCaptcha.kind, 'fallback');
-  assert.strictEqual(terminalCaptcha.state, 'captcha');
+  assert.strictEqual(terminalCaptcha.kind, 'retryable');
+  assert.strictEqual(terminalCaptcha.state, 'access_paused');
   assert.strictEqual(terminalCaptcha.diagnostic.failureCategory, 'wechat-verification-required');
 
   const unavailable = await runWechatArticlePipeline({

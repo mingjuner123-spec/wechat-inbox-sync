@@ -1,4 +1,5 @@
 'use strict';
+const { detectWechatImagePostDocument } = require('./wechat-image-post-utils');
 
 const WECHAT_ARTICLE_HOST = 'mp.weixin.qq.com';
 const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn', 'chksm', 'scene'];
@@ -25,13 +26,8 @@ function isWechatImagePostUrl(value) {
 }
 
 function isWechatImagePostHtml(html) {
-  const source = String(html || '');
-  if (!source) return false;
-  return /pages(?:\\\/|\/|%2f)image_detail/i.test(source)
-    || /(?:article_type|appmsg_type)\s*["']?\s*[:=]\s*["']newspic["']/i.test(source)
-    || /["']image_list["']\s*:/i.test(source)
-    || /\bfrom_masonry\b/i.test(source)
-    || /class=["'][^"']*(?:image[_-]?detail|image[_-]?list|pic[_-]?album|newspic|swiper)[^"']*["']/i.test(source);
+  const bodyHtml = extractWechatArticleBodyHtml(html);
+  return detectWechatImagePostDocument({ html, bodyText: stripHtml(bodyHtml), hasBody: Boolean(bodyHtml) });
 }
 
 function getWechatRetainedParameterNames(value) {
@@ -110,7 +106,7 @@ function decodeHtmlEntities(value) {
 }
 
 function stripHtml(value) {
-  return decodeHtmlEntities(String(value || '').replace(/<[^>]*>/g, ' '))
+  return decodeHtmlEntities(String(value || '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ').replace(/<[^>]*>/g, ' '))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -273,7 +269,8 @@ function diagnoseWechatArticleHtml(html) {
 
 function classifyWechatArticleHtml(html) {
   const text = stripHtml(html);
-  if (/环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return 'captcha';
+  if (!hasWechatArticleBody(html) && /环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return 'captcha';
+  if (!hasWechatArticleBody(html) && /访问(?:过于)?频繁|操作(?:过于)?频繁|请稍后再(?:试|访问)/.test(text)) return 'captcha';
   if (isWechatImagePostHtml(html)) return 'image-post';
   // Full article pages can contain hidden QR/app guide text outside #js_content.
   // Preserve the legacy successful behavior: substantive #js_content wins.

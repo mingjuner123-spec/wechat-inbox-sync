@@ -4,6 +4,15 @@
 
 WeChat Inbox Sync follows a "send now, organize later" workflow: the mini program captures content, and the plugin writes it into the local vault as Markdown notes and attachments.
 
+## 1.3.141 更新
+
+- 修复部分普通公众号被误判为贴图的问题；已取得完整正文时不再重复请求。
+- 公众号页面抓取依次进行，间隔至少 1.5 秒；遇到验证或访问限制时暂停 10 分钟，减少连续重试。微信自身限制仍可能导致失败。
+- Mac 本地转写遇到支持的原生崩溃时，保留诊断并关闭 GPU 重试一次；取消或超时不会触发该重试。
+- “复制同步/安装失败诊断”补充组件、内存采样、退出状态和两轮日志，并脱敏；转写失败保留实际原因。
+
+更新后完全退出并重开 Obsidian，再在小程序同步记录中重试原失败条目。无需重新绑定。CPU 兼容模式可能更慢，实际效果需在故障设备复测。
+
 ## Features
 
 - Sync text snippets and raw links into dated inbox notes.

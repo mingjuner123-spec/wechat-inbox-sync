@@ -793,7 +793,7 @@ assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.indexOf('Package index ASR install failed; retrying authorized wheelhouse.') < macInstaller.lastIndexOf('install_asr_packages_from_wheelhouse'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.13"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.14"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=65536'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=30'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));

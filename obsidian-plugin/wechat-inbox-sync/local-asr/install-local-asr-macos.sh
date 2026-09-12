@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.13"
+INSTALLER_SCRIPT_VERSION="1.3.14"
 DOWNLOAD_LOW_SPEED_LIMIT=65536
 DOWNLOAD_LOW_SPEED_TIME=30
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -859,6 +859,11 @@ WHISPER="$ROOT/bin/whisper-cli"
 FFMPEG="$ROOT/bin/ffmpeg"
 MODEL="$ROOT/models/ggml-small.bin"
 TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"
+ASR_RECOVERY_VERSION="macos-cpu-recovery-v1"
+WHISPER_EXTRA_ARGS=()
+if [ "${WECHAT_INBOX_ASR_CPU_ONLY:-0}" = "1" ]; then
+  WHISPER_EXTRA_ARGS+=(--no-gpu)
+fi
 
 if [ ! -x "$WHISPER" ]; then
   echo "whisper-cli not found. Please rerun install-local-asr-macos.sh." >&2
@@ -931,6 +936,10 @@ mkdir -p "$TEMP_WORK_DIR"
 {
   echo "time=$(date '+%Y-%m-%dT%H:%M:%S%z')"
   echo "status=pending"
+  echo "recoveryVersion=$ASR_RECOVERY_VERSION"
+  sysctl hw.model hw.memsize 2>/dev/null || echo "hardwareProbe=unavailable"
+  echo "cpuOnlyRequested=${WECHAT_INBOX_ASR_CPU_ONLY:-0}"
+  echo "nativeHelpHeader=$("$WHISPER" --help 2>&1 | head -n 2 || true)"
   echo "inputPath=$INPUT_PATH"
   echo "outputPath=$OUTPUT_PATH"
   echo "tempWorkDir=$TEMP_WORK_DIR"
@@ -974,6 +983,20 @@ write_progress() {
   } >> "$RUN_LOG"
 }
 
+sample_native_resources() {
+  local pid="$1"
+  echo "resourceSampleTime=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$RUN_LOG"
+  local rss
+  rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  echo "nativeRssKiB=${rss:-unavailable}" >> "$RUN_LOG"
+  if command -v vm_stat >/dev/null 2>&1; then
+    vm_stat 2>/dev/null | head -n 18 >> "$RUN_LOG" || true
+  fi
+  if command -v sysctl >/dev/null 2>&1; then
+    sysctl vm.swapusage kern.memorystatus_vm_pressure_level 2>/dev/null >> "$RUN_LOG" || true
+  fi
+}
+
 run_with_heartbeat() {
   local stage="$1"
   local current="$2"
@@ -981,17 +1004,22 @@ run_with_heartbeat() {
   shift 3
   "$@" >> "$RUN_LOG" 2>&1 &
   local native_pid=$!
+  write_progress "$stage" "$current" "$total" "$native_pid"
   local last_heartbeat=0
   while kill -0 "$native_pid" 2>/dev/null; do
     local now_epoch
     now_epoch="$(date +%s)"
     if [ "$last_heartbeat" -eq 0 ] || [ $((now_epoch - last_heartbeat)) -ge 5 ]; then
       write_progress "$stage" "$current" "$total" "$native_pid"
+      sample_native_resources "$native_pid"
       last_heartbeat="$now_epoch"
     fi
     sleep 1
   done
-  wait "$native_pid"
+  local native_exit=0
+  wait "$native_pid" || native_exit=$?
+  echo "nativeExit=$native_exit" >> "$RUN_LOG"
+  return "$native_exit"
 }
 
 write_progress segmenting 0 0 0
@@ -1019,7 +1047,7 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   {
     echo "--- $(basename "$chunk") ---"
   } >> "$RUN_LOG"
-  run_with_heartbeat transcribing "$chunk_index" "$chunk_count" "$WHISPER" -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base"
+  run_with_heartbeat transcribing "$chunk_index" "$chunk_count" "$WHISPER" ${WHISPER_EXTRA_ARGS[@]+"${WHISPER_EXTRA_ARGS[@]}"} -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base"
   if [ ! -f "$chunk_txt" ]; then
     echo "Whisper did not generate transcript: $chunk_txt" >&2
     echo "status=failed" >> "$RUN_LOG"
