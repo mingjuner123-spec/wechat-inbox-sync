@@ -114,7 +114,23 @@ function collectWechatImagePostStructuredAssets(pageWindow) {
   return assets;
 }
 
+
+// Shared between static extraction and the isolated browser. Generic bundle
+// strings (from_masonry/image_list/swiper) are not page identity.
+function detectWechatImagePostDocument({ html = '', url = '', bodyText = '', hasBody = false, structuredCount = 0 } = {}) {
+  try { if (new URL(url).searchParams.get('t') === 'pages/image_detail') return true; } catch (_) {}
+  const source = String(html || '');
+  const explicitType = /(?:\b(?:var|let|const)\s+(?:article_type|appmsg_type)|(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\.(?:article_type|appmsg_type))\s*=\s*["']newspic["']/i.test(source)
+    || /(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\s*=\s*\{[^{}]{0,4096}\b(?:article_type|appmsg_type)["']?\s*:\s*["']newspic["']/i.test(source);
+  if (explicitType || structuredCount > 0) return true;
+  if (hasBody && String(bodyText).replace(/\s+/g, '').length >= 200) return false;
+  const visibleMarkup = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<!--[\s\S]*?-->/g, '');
+  return /class=["'][^"']*(?:image[_-]detail|pic[_-]album|newspic)[^"']*["']/i.test(visibleMarkup)
+    && /<img\b[^>]*(?:data-src|src)=["'](?:https?:)?\/\/mmbiz\.qpic\.cn\//i.test(visibleMarkup);
+}
+
 module.exports = {
+  detectWechatImagePostDocument,
   collectWechatImagePostStructuredAssets,
   dedupeWechatImagePostAssets,
   getWechatImageAssetIdentity,

@@ -39,7 +39,7 @@ assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
   content: 'https://weixin.qq.com/sph/At8GEKn0cY',
   metadata: { conversionStatus: 'link_saved', transcriptionStatus: 'failed' },
-}).code, 'UNSUPPORTED_PLATFORM');
+}).code, 'TRANSCRIPTION_FAILED');
 assert.strictEqual(helpers.getSyncLifecycleOutcomeError({
   type: 'webpage',
   metadata: {

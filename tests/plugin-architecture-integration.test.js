@@ -15,6 +15,7 @@ const versionsPath = path.join(pluginRoot, 'versions.json');
 const expectedModules = [
   'ai-metadata-error-utils',
   'ai-metadata-utils',
+  'asr-recovery-utils',
   'cloud-transcription-response-utils',
   'date-utils',
   'diagnostic-redaction-utils',
@@ -45,6 +46,7 @@ const expectedModules = [
   'wechat-article-utils',
   'wechat-channels-decrypt-utils',
   'wechat-image-post-utils',
+  'wechat-request-gate',
   'xiaohongshu-markdown-utils',
 ].sort();
 

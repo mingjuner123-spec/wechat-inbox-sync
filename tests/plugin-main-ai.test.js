@@ -589,7 +589,7 @@ const copyModelWindowsAsrInstallerSource = windowsAsrInstallerSource
     'Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force',
   );
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.13"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.14"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
@@ -1240,7 +1240,7 @@ assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
 assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
   manifestVersion: currentPluginVersion,
   runtimeVersion: currentPluginVersion,
-  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2',
+  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
@@ -11551,7 +11551,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
       runtime: {
         manifestVersion: currentPluginVersion,
         runtimeVersion: currentPluginVersion,
-        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2',
+        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1',
         matchesManifest: true,
       },
       request: {
@@ -14172,7 +14172,7 @@ async function runDiagnosticFailureLogFilteringTests() {
     assert.ok(diagnostic.includes('2026-07-15T06:30:00.000Z'));
     assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
     assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
-    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false);
+    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), true, 'detailed diagnostics retain installation provenance even when installation succeeded');
     assert.strictEqual(diagnostic.includes('ABC-123'), false);
 
     helpers.appendLocalAsrRunLog({

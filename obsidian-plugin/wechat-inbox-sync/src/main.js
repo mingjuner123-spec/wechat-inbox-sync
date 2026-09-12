@@ -1,4 +1,7 @@
 const crypto = require('crypto');
+const asrRecovery = require('./asr-recovery-utils');
+const { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require('./wechat-request-gate');
+const sharedWechatArticleGate = createWechatArticleRequestGate();
 const childProcess = require('child_process');
 const dns = require('dns');
 const fs = require('fs');
@@ -152,6 +155,7 @@ const {
   normalizeWechatArticleUrl,
 } = require('./wechat-article-utils');
 const {
+  detectWechatImagePostDocument,
   collectWechatImagePostStructuredAssets,
   dedupeWechatImagePostAssets,
   normalizeWechatImagePostMarkdown,
@@ -241,8 +245,8 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.140';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2';
+const PLUGIN_RUNTIME_VERSION = '1.3.141';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -1397,6 +1401,7 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
 
 function explainLocalAsrExitCode(value) {
   const text = String(value || '');
+  if (asrRecovery.isMacNativeCrash({ message: text })) return '本地转写引擎崩溃；请复制详细诊断联系支持，不能仅凭此错误判断内存不足。';
   if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
     return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
   }
@@ -2455,8 +2460,9 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     return hasMinimumInstallerVersion(
       source,
       /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
-      [1, 3, 13],
+      [1, 3, 14],
     )
+      && source.includes('ASR_RECOVERY_VERSION="macos-cpu-recovery-v1"')
       && !source.includes('SIMPLIFIED_PROMPT')
       && !source.includes('--prompt')
       && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"')
@@ -2837,6 +2843,7 @@ function isRetryableXiaohongshuContentError(error) {
 
 function createRetryableWechatArticleContentError(diagnostic = {}) {
   const error = new Error('\u5fae\u4fe1\u516c\u4f17\u53f7\u5185\u5bb9\u63d0\u53d6\u5931\u8d25\uff0c\u5df2\u4fdd\u7559\u8bb0\u5f55\u3002\u8bf7\u5728\u5c0f\u7a0b\u5e8f\u201c\u540c\u6b65\u8bb0\u5f55\u201d\u4e2d\u70b9\u51fb\u201c\u91cd\u8bd5\u201d\uff0c\u518d\u56de\u5230 Obsidian \u540c\u6b65\u3002');
+  if (diagnostic.reason === 'wechat-access-paused') error.message = '微信要求验证或限制访问，已暂停公众号抓取。请稍后在微信中确认可正常打开，再到同步记录重试；请勿连续重试。';
   error.retryable = true;
   error.code = 'WECHAT_ARTICLE_BODY_MISSING';
   error.diagnostic = redactSensitiveObject(
@@ -11642,6 +11649,7 @@ async function settleRenderedPage(webContents) {
 }
 
 async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
+  throwIfAborted(options.signal);
   const isImagePost = isWechatImagePostUrl(url);
   const userAgentProfile = options.userAgentProfile === 'desktop' ? 'desktop' : 'mobile';
   const userAgent = userAgentProfile === 'desktop'
@@ -11664,6 +11672,10 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
     },
   });
   let cleanupHiddenWindow = () => {};
+  const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
+  let mainResponse = null;
+  const onMainResponse = (_event, finalUrl, status) => { mainResponse = { url: finalUrl, status }; };
+  win.webContents.on('did-navigate', onMainResponse);
   try {
     installWechatArticleNavigationGuards(win.webContents);
     cleanupHiddenWindow = installHiddenBrowserWindowGuards(win);
@@ -11673,34 +11685,14 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
     const loaded = waitForWebContents(win.webContents);
     await win.loadURL(url, { userAgent });
     await loaded;
+    throwIfAborted(options.signal);
+    assertWechatTransportResponse(mainResponse);
     // Some public-account pages hydrate js_content after the initial load.
     // Wait for the actual body rather than treating the surrounding shell as content.
     const bodyReady = await win.webContents.executeJavaScript(`
       (async () => {
         const collectStructuredAssets = ${collectWechatImagePostStructuredAssets.toString()};
-        const detectImagePost = () => {
-          let queryMarker = false;
-          try {
-            queryMarker = String(new URL(window.location.href).searchParams.get('t') || '').toLowerCase() === 'pages/image_detail';
-          } catch (_) {}
-          const markup = String(document.documentElement && document.documentElement.innerHTML || '');
-          const structureMarker = Boolean(document.querySelector([
-            '[class*="image-detail"]',
-            '[class*="image_detail"]',
-            '[class*="image-list"]',
-            '[class*="image_list"]',
-            '[class*="pic-album"]',
-            '[class*="pic_album"]',
-            '[class*="newspic"]',
-            '[class*="swiper"]'
-          ].join(',')));
-          return ${isImagePost ? 'true' : 'false'}
-            || queryMarker
-            || structureMarker
-            || /(?:article_type|appmsg_type)\\s*["']?\\s*[:=]\\s*["']newspic["']/i.test(markup)
-            || /["']image_list["']\\s*:/i.test(markup)
-            || /\\bfrom_masonry\\b/i.test(markup);
-        };
+        const detectImagePost = () => ${isImagePost ? 'true' : 'false'} || (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyText: document.querySelector('#js_content')?.textContent || '', structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const imageSource = (image) => String(image && (
           image.getAttribute('data-src')
@@ -11792,6 +11784,8 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         return false;
       })()
     `);
+    throwIfAborted(options.signal);
+    assertWechatTransportResponse(mainResponse);
     if (!bodyReady) {
       const failureDiagnostic = await win.webContents.executeJavaScript(`
         (() => {
@@ -11800,12 +11794,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
           try {
             queryMarker = String(new URL(window.location.href).searchParams.get('t') || '').toLowerCase() === 'pages/image_detail';
           } catch (_) {}
-          const imagePost = ${isImagePost ? 'true' : 'false'}
-            || queryMarker
-            || Boolean(document.querySelector('[class*="image-detail"],[class*="image_detail"],[class*="image-list"],[class*="image_list"],[class*="pic-album"],[class*="pic_album"],[class*="newspic"],[class*="swiper"]'))
-            || /(?:article_type|appmsg_type)\\s*["']?\\s*[:=]\\s*["']newspic["']/i.test(markup)
-            || /["']image_list["']\\s*:/i.test(markup)
-            || /\\bfrom_masonry\\b/i.test(markup);
+          const imagePost = ${isImagePost ? 'true' : 'false'} || (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyText: document.querySelector('#js_content')?.textContent || '', structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
           const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
           const bodyText = clean(document.body && (document.body.innerText || document.body.textContent) || '');
           const root = imagePost ? document.body : document.querySelector('#js_content');
@@ -11838,12 +11827,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         try {
           queryMarker = String(new URL(window.location.href).searchParams.get('t') || '').toLowerCase() === 'pages/image_detail';
         } catch (_) {}
-        const imagePost = ${isImagePost ? 'true' : 'false'}
-          || queryMarker
-          || Boolean(document.querySelector('[class*="image-detail"],[class*="image_detail"],[class*="image-list"],[class*="image_list"],[class*="pic-album"],[class*="pic_album"],[class*="newspic"],[class*="swiper"]'))
-          || /(?:article_type|appmsg_type)\\s*["']?\\s*[:=]\\s*["']newspic["']/i.test(markup)
-          || /["']image_list["']\\s*:/i.test(markup)
-          || /\\bfrom_masonry\\b/i.test(markup);
+        const imagePost = ${isImagePost ? 'true' : 'false'} || (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyText: document.querySelector('#js_content')?.textContent || '', structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
         const clean = (value) => String(value || '')
           .replace(/\\u00a0/g, ' ')
           .replace(/[ \\t]+\\n/g, '\\n')
@@ -12002,6 +11986,8 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
     };
     return result;
   } finally {
+    cleanupAbort();
+    win.webContents.removeListener('did-navigate', onMainResponse);
     cleanupHiddenWindow();
     if (win && typeof win.destroy === 'function'
       && (typeof win.isDestroyed !== 'function' || !win.isDestroyed())) win.destroy();
@@ -17619,7 +17605,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
     const status = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
     const logText = readLocalAsrInstallLog(installRoot);
-    const runLogText = readLocalAsrRunLog(installRoot);
+    const runLogText = asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(installRoot));
     const syncLogText = readSyncDiagnosticLog(installRoot);
     const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : '';
     const diagnosticText = [
@@ -17655,7 +17641,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       '最近安装日志：',
       logText || '暂无 install.log',
     ].join('\n');
-    return redactKnownCredentials(diagnosticText, this.settings);
+    return asrRecovery.diagnosticRedact(diagnosticText, this.settings);
   }
 
   getSyncDiagnosticText() {
@@ -17672,7 +17658,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       ? this.getLocalOcrInstallStatus()
       : getLocalOcrInstallStatus(ocrRoot, fs.existsSync, platform);
     const asrInstallLog = readLocalAsrInstallLog(asrRoot);
-    const asrRunLog = readLocalAsrRunLog(asrRoot);
+    const asrRunLog = asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(asrRoot));
     const ocrInstallLog = readLocalAsrInstallLog(ocrRoot);
     const syncLogText = readSyncDiagnosticLog(asrRoot);
     const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : syncLogText;
@@ -17692,7 +17678,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const appendFailedLog = (lines, title, text, detector = hasFailureSignal) => {
       const source = String(text || '').trim();
       if (!source || !detector(source)) return false;
-      lines.push(title, tailLog(source));
+      lines.push(title, tailLog(asrRecovery.diagnosticRedact(source, this.settings)));
       return true;
     };
     const formatMissingReasons = (status) => (
@@ -17756,7 +17742,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     } else {
       lines.push('', '已省略成功日志，只保留失败相关信息。');
     }
-    return redactKnownCredentials(lines.join('\n'), this.settings);
+    lines.push('', asrRecovery.detailedDiagnostic(asrRoot, this.settings));
+    return asrRecovery.diagnosticRedact(lines.join('\n'), this.settings);
   }
 
   async copyTextToClipboard(text) {
@@ -18674,6 +18661,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     const platform = this.getConfiguredLocalAsrPlatform();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
     const status = this.getLocalAsrInstallStatus();
+    if (platform === 'darwin' && asrRecovery.isMacNativeCrash({ message: readLocalAsrRunLog(installRoot) })) {
+      const migrated = asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
+      new Notice(migrated ? 'Mac 兼容恢复已就绪，请重试原内容；若崩溃将自动 CPU 重试一次。' : '当前脚本无法安全原位更新，请点击安装/更新本地转写组件后重试。', 8000);
+      return { action: migrated ? 'macos-recovery' : 'update-required' };
+    }
     const action = getLocalAsrRepairAction({
       platform,
       installRoot,
@@ -18864,13 +18856,36 @@ class WechatObsidianInboxPlugin extends Plugin {
     return renderWechatArticleToMarkdownWithElectron(url, options);
   }
 
-  async downloadWechatArticleHtmlViaSession(url, headers = {}) {
+  async downloadWechatArticleHtmlViaSession(url, headers = {}, options = {}) {
     const session = getWechatSession();
-    return readSessionFetchText(session, url, {
-      ...headers,
-      'User-Agent': headers['User-Agent'] || headers['user-agent'] || WECHAT_ARTICLE_MOBILE_USER_AGENT,
-      Referer: 'https://mp.weixin.qq.com/',
-    }, 15000);
+    throwIfAborted(options.signal);
+    if (!session || typeof session.fetch !== 'function') return '';
+    // This Electron session cannot accept Node-realm AbortSignal. Keep its full
+    // fetch/body lifetime in the request gate, even if the caller stops waiting.
+    const pending = (async () => {
+      const response = await session.fetch(url, {
+        method: 'GET', credentials: 'include', redirect: 'follow',
+        headers: {
+          ...headers,
+          'User-Agent': headers['User-Agent'] || headers['user-agent'] || WECHAT_ARTICLE_MOBILE_USER_AGENT,
+          Referer: 'https://mp.weixin.qq.com/',
+        },
+      });
+      let riskError = null;
+      try { assertWechatTransportResponse(response); } catch (error) { riskError = error; }
+      try {
+        const text = response && typeof response.text === 'function' ? await response.text() : '';
+        if (riskError) throw riskError;
+        return text;
+      } catch (error) { throw riskError || error; }
+    })();
+    if (typeof options.onPendingRequest === 'function') options.onPendingRequest(pending);
+    let timer;
+    try {
+      return await waitForPromiseWithAbort(Promise.race([pending, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Electron Session request timed out after 15000ms')), 15000);
+      })]), options.signal);
+    } finally { if (timer) clearTimeout(timer); }
   }
 
   async renderFeishuDocumentWithElectron(url) {
@@ -19122,6 +19137,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error('未配置本地转写命令');
     }
 
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const managed = platform === 'darwin'
+      && ((commandTemplate === getDefaultLocalTranscriptionCommand('darwin') && installRoot === getLocalAsrInstallRoot(os.homedir(), 'default', 'darwin'))
+        || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot)
+      && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
+    const runtime = platform === 'darwin' ? asrRecovery.runtimeIdentity(installRoot) : {};
+    const runtimeFingerprint = asrRecovery.fingerprint(runtime);
+    const session = { startedAt: new Date().toISOString(), platform, recordId: options.recordId || '', runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
     const progressTitle = options.title || '';
     const abortController = new AbortController();
     this.currentTranscriptionAbortController = abortController;
@@ -19203,36 +19226,46 @@ class WechatObsidianInboxPlugin extends Plugin {
           .replace(/\{input\}/g, quote(inputPath))
           .replace(/\{output\}/g, quote(outputPath))
         : `${commandTemplate} ${quote(inputPath)}`;
-      const { stdout, stderr } = await new Promise((resolve, reject) => {
-        emitLocalProgress(0);
-        progressTimer = setInterval(() => emitLocalProgress(), 1000);
-        if (progressTimer && typeof progressTimer.unref === 'function') {
-          progressTimer.unref();
-        }
-        const child = childProcess.exec(command, {
-          timeout: 2 * 60 * 60 * 1000,
-          maxBuffer: 50 * 1024 * 1024,
-          windowsHide: true,
-          detached: process.platform === 'darwin',
-        }, (error, stdout, stderr) => {
-          stopProgressPolling();
-          this.currentTranscriptionProcess = null;
-          if (abortController.signal.aborted) {
-            reject(createAbortError());
-            return;
+      const { stdout, stderr, cpu } = await asrRecovery.executeWithMacRecovery({
+        platform, managed, signal: abortController.signal,
+        cpuPreferred: asrRecovery.cpuPreference(installRoot, runtimeFingerprint),
+        onAttempt: ({ attempt, cpu, status, error }) => {
+          const log = asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(installRoot));
+          session.attempts.push({ attempt, cpu, status, at: new Date().toISOString(), exitCode: error?.exitCode ?? null, signal: error?.signal || '', error: error?.message || '',
+            nativePids: [...log.matchAll(/^progressPid=(\d+)$/gm)].map(m => Number(m[1])),
+            peakRssKiB: Math.max(0, ...[...log.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(m => Number(m[1]))) || null,
+            runLog: asrRecovery.diagnosticRedact(log, this.settings), freeMemoryBytesAfter: os.freemem() });
+          asrRecovery.saveSession(installRoot, session, this.settings);
+        },
+        execute: ({ cpu, attempt }) => new Promise((resolve, reject) => {
+          throwIfAborted(abortController.signal);
+          if (attempt > 1) {
+            new Notice('本地转写引擎崩溃，正在用 CPU 兼容模式重试一次。', 6000);
+            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
           }
-          if (error) {
-            const wrapped = new Error(stderr || error.message || String(error));
-            wrapped.stdout = stdout;
-            wrapped.stderr = stderr;
-            reject(wrapped);
-            return;
-          }
-          emitLocalProgress(100);
-          resolve({ stdout, stderr });
-        });
-        this.currentTranscriptionProcess = child;
-        this.currentTranscriptionProcessDetached = process.platform === 'darwin';
+          emitLocalProgress(0);
+          progressTimer = setInterval(() => emitLocalProgress(), 1000);
+          if (progressTimer && typeof progressTimer.unref === 'function') progressTimer.unref();
+          const child = childProcess.exec(command, {
+            timeout: 2 * 60 * 60 * 1000, maxBuffer: 50 * 1024 * 1024,
+            windowsHide: true, detached: process.platform === 'darwin',
+            env: { ...process.env, WECHAT_INBOX_ASR_CPU_ONLY: cpu ? '1' : '0' },
+          }, (error, stdout, stderr) => {
+            stopProgressPolling();
+            this.currentTranscriptionProcess = null;
+            if (abortController.signal.aborted) { reject(createAbortError()); return; }
+            if (error) {
+              const wrapped = new Error(stderr || error.message || String(error));
+              wrapped.stdout = stdout; wrapped.stderr = stderr;
+              wrapped.exitCode = error.code; wrapped.signal = error.signal;
+              wrapped.asrStage = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))?.stage || 'unknown';
+              reject(wrapped); return;
+            }
+            emitLocalProgress(100); resolve({ stdout, stderr });
+          });
+          this.currentTranscriptionProcess = child;
+          this.currentTranscriptionProcessDetached = process.platform === 'darwin';
+        }),
       });
 
       const outputText = fs.existsSync(outputPath)
@@ -19242,7 +19275,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         cleanTrailingTranscriptionHallucinations(String(outputText || '').trim()),
         '本地转写',
       );
-      writeLocalAsrRunLog({
+      session.status = 'success';
+      if (managed && cpu) asrRecovery.saveCpuPreference(installRoot, runtimeFingerprint);
+      appendLocalAsrRunLog({
         installRoot,
         status: 'success',
         command,
@@ -19253,6 +19288,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       return transcription;
     } catch (error) {
+      session.status = isAbortError(error) ? 'cancelled' : 'failed';
+      if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? '，CPU 兼容重试仍失败' : ''}；请复制详细诊断。${error.message}`;
       if (isAbortError(error)) {
         throw createRetryableTranscriptionError('用户已停止当前转写');
       }
@@ -19268,6 +19305,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       throw error;
     } finally {
+      session.finishedAt = new Date().toISOString();
+      session.freeMemoryBytesAfter = os.freemem();
+      asrRecovery.saveSession(installRoot, session, this.settings);
       stopProgressPolling();
       this.currentTranscriptionAbortController = null;
       this.currentTranscriptionProcess = null;
@@ -22387,6 +22427,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isWechatArticleUrl(url)) {
+        const requestGate = this.wechatArticleRequestGate || sharedWechatArticleGate;
+        const pacedRequestUrl = requestOptions => requestGate.run(() => requestUrl(requestOptions), { signal: options.signal });
+        const pacedNodeHtml = (...args) => requestGate.run(() => this.downloadWebpageHtmlViaNode(...args), { signal: options.signal });
+        const pacedSessionHtml = (targetUrl, headers) => requestGate.run(({ holdUntil }) => this.downloadWechatArticleHtmlViaSession(targetUrl, headers, { signal: options.signal, onPendingRequest: holdUntil }), { signal: options.signal });
+        const pacedBrowser = (targetUrl, renderOptions) => requestGate.run(() => this.renderWechatArticleWithElectron(targetUrl, { ...renderOptions, signal: options.signal }), { signal: options.signal });
         const originalWechatArticleUrl = String(url || '').trim();
         const isWechatImagePostSource = isWechatImagePostUrl(originalWechatArticleUrl);
         const wechatArticleUrl = normalizeWechatArticleUrl(originalWechatArticleUrl);
@@ -22448,7 +22493,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             };
             try {
-              const staticResponse = await requestUrl({
+              const staticResponse = await pacedRequestUrl({
                 url: targetUrl,
                 method: 'GET',
                 headers: articleHeaders,
@@ -22472,7 +22517,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               if (staticState !== 'guide' && staticState !== 'unknown' && staticState !== 'empty-shell') return staticHtml;
               const tryWechatSession = async () => {
                 try {
-                  const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || '');
+                  const sessionHtml = String(await pacedSessionHtml(targetUrl, articleHeaders) || '');
                   const sessionDiagnosis = diagnoseWechatArticleHtml(sessionHtml);
                   const sessionState = sessionDiagnosis.pageKind;
                   addWechatArticleStage('wechat-session', {
@@ -22488,6 +22533,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                     return sessionHtml;
                   }
                 } catch (sessionError) {
+                if (isAbortError(sessionError) || options.signal?.aborted) throw createAbortError();
+                if (isWechatAccessPaused(sessionError)) throw sessionError;
                   addWechatArticleStage('wechat-session', {
                     outcome: 'error',
                     error: sessionError && (sessionError.message || sessionError),
@@ -22498,7 +22545,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               };
               try {
                 usedNodeFallback = true;
-                const nodeHtml = await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders);
+                const nodeHtml = await pacedNodeHtml(targetUrl, articleHeaders);
                 const nodeDiagnosis = diagnoseWechatArticleHtml(nodeHtml);
                 const nodeState = nodeDiagnosis.pageKind;
                 addWechatArticleStage('node-fallback', {
@@ -22512,6 +22559,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (nodeState === 'article') return nodeHtml;
                 return (await tryWechatSession()) || staticHtml;
               } catch (nodeError) {
+                if (isAbortError(nodeError) || options.signal?.aborted) throw createAbortError();
+                if (isWechatAccessPaused(nodeError)) throw nodeError;
                 addWechatArticleStage('node-fallback', {
                   outcome: 'error',
                   error: nodeError && (nodeError.message || nodeError),
@@ -22519,6 +22568,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 return (await tryWechatSession()) || staticHtml;
               }
             } catch (requestError) {
+                if (isAbortError(requestError) || options.signal?.aborted) throw createAbortError();
+                if (isWechatAccessPaused(requestError)) throw requestError;
               addWechatArticleStage('obsidian-request', {
                 outcome: 'error',
                 error: requestError && (requestError.message || requestError),
@@ -22526,7 +22577,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               let nodeHtml = '';
               try {
                 usedNodeFallback = true;
-                nodeHtml = String(await this.downloadWebpageHtmlViaNode(targetUrl, articleHeaders) || '');
+                nodeHtml = String(await pacedNodeHtml(targetUrl, articleHeaders) || '');
                 const nodeDiagnosis = diagnoseWechatArticleHtml(nodeHtml);
                 const nodeState = nodeDiagnosis.pageKind;
                 addWechatArticleStage('node-fallback', {
@@ -22539,6 +22590,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                 });
                 if (nodeState === 'article') return nodeHtml;
               } catch (nodeError) {
+                if (isAbortError(nodeError) || options.signal?.aborted) throw createAbortError();
+                if (isWechatAccessPaused(nodeError)) throw nodeError;
                 addWechatArticleStage('node-fallback', {
                   outcome: 'error',
                   error: nodeError && (nodeError.message || nodeError),
@@ -22546,7 +22599,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 // Continue to the persistent WeChat session below.
               }
               try {
-                const sessionHtml = String(await this.downloadWechatArticleHtmlViaSession(targetUrl, articleHeaders) || '');
+                const sessionHtml = String(await pacedSessionHtml(targetUrl, articleHeaders) || '');
                 const sessionDiagnosis = diagnoseWechatArticleHtml(sessionHtml);
                 const sessionState = sessionDiagnosis.pageKind;
                 addWechatArticleStage('wechat-session', {
@@ -22562,6 +22615,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                   return sessionHtml;
                 }
               } catch (sessionError) {
+                if (isAbortError(sessionError) || options.signal?.aborted) throw createAbortError();
+                if (isWechatAccessPaused(sessionError)) throw sessionError;
                 addWechatArticleStage('wechat-session', {
                   outcome: 'error',
                   error: sessionError && (sessionError.message || sessionError),
@@ -22579,7 +22634,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             };
             let rendered;
             try {
-              rendered = await this.renderWechatArticleWithElectron(targetUrl, {
+              rendered = await pacedBrowser(targetUrl, {
                 profile: profile.id,
                 userAgentProfile: profile.userAgentProfile,
               });
@@ -22600,6 +22655,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                   : diagnoseWechatArticleHtml(renderedText),
               });
             } catch (browserError) {
+                if (isAbortError(browserError) || options.signal?.aborted) throw createAbortError();
+                if (isWechatAccessPaused(browserError)) throw browserError;
               addWechatArticleStage('hidden-browser', {
                 outcome: 'error',
                 error: browserError && (browserError.message || browserError),
@@ -22639,6 +22696,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             finalState: extracted.state,
             finalSource: extracted.source,
             ...(extracted.diagnostic || {}),
+            requestPolicy: requestGate.snapshot(),
           });
         }
 
@@ -22787,6 +22845,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               finalState: extracted.state,
               finalSource: extracted.source,
               imageCompleteness,
+              requestPolicy: requestGate.snapshot(),
             },
             imageLocalizationFailedCount: imageLocalizationErrors.length,
             imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
