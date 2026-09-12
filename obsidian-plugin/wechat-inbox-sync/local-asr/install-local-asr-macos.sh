@@ -404,18 +404,20 @@ install_asr_packages_from_wheelhouse() {
 
 install_asr_packages() {
   local python_bin="$1"
+  export PIP_DISABLE_PIP_VERSION_CHECK=1
   "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  "$python_bin" -m pip install --upgrade pip \
-    -i "$TENCENT_PIP_INDEX_URL" \
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
-  if "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
-    -i "$TENCENT_PIP_INDEX_URL" \
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+  echo "Component download policy: tencent-authorized-first-v1"
+  if install_asr_packages_from_wheelhouse "$python_bin"; then
     return 0
   fi
-
-  echo "Package index ASR install failed; retrying authorized wheelhouse." >&2
-  install_asr_packages_from_wheelhouse "$python_bin"
+  echo "Authorized ASR wheelhouse unavailable; trying Tencent PyPI mirror."
+  if "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
+    -i "$TENCENT_PIP_INDEX_URL" --timeout 30 --retries 2 2>&1; then
+    return 0
+  fi
+  echo "Tencent PyPI mirror install failed; retrying with PyPI only."
+  "$python_bin" -m pip install --upgrade "${ASR_PACKAGE_REQUIREMENTS[@]}" \
+    -i "$PYPI_FALLBACK_INDEX_URL" --timeout 30 --retries 2 2>&1
 }
 
 setup_python_and_packages() {

@@ -45,6 +45,7 @@ const expectedModules = [
   'wechat-article-pipeline',
   'wechat-article-utils',
   'wechat-channels-decrypt-utils',
+  'wechat-channels-diagnostic-utils',
   'wechat-image-post-utils',
   'wechat-request-gate',
   'xiaohongshu-markdown-utils',

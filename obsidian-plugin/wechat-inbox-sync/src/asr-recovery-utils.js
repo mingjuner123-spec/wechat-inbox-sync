@@ -109,7 +109,12 @@ function packageVersions(root) {
     return versions.length ? versions : 'unavailable';
   } catch (_) { return 'unavailable'; }
 }
-function runtimeIdentity(root) {
+function runtimeIdentity(root, platform = os.platform(), status = {}) {
+  if (platform === 'win32') {
+    const candidates = ['bin/whisper-cli.exe', 'bin/main.exe', 'whisper/whisper-cli.exe', 'whisper/main.exe'].map(name => path.join(root, name));
+    const binary = status.whisperPath || candidates.find(file => fs.existsSync(file)) || candidates[0];
+    return { platform, pythonPackages: 'not-used-by-native-windows-asr', nativeBuildVersion: 'binary SHA identifies exact build', binaryPathSha256: crypto.createHash('sha256').update(binary).digest('hex'), scriptSha256: digestFile(path.join(root, 'transcribe.ps1')), wrapperSha256: digestFile(path.join(root, 'transcribe.ps1')), binarySha256: digestFile(binary), binary };
+  }
   const wrapper = boundedRead(path.join(root, 'bin', 'whisper-cli'), 16384);
   const match = wrapper.match(/^WHISPER_CPP_BIN="([^"\r\n]+)"$/m);
   const binary = match ? match[1] : path.join(root, 'bin', 'whisper-cli');

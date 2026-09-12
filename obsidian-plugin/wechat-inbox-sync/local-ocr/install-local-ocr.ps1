@@ -787,25 +787,26 @@ function Install-OcrPackagesFromWheelhouse {
 
 function Install-OcrPackagesWithPip {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
-  Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "pip", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl) | Out-Null
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
-  if ($exitCode -eq 0) {
-    return $true
+  $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+  Write-InstallLog "Component download policy: tencent-authorized-first-v1"
+  try {
+    if (Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath) { return $true }
+  } catch {
+    Write-InstallLog "Authorized OCR wheelhouse download, validation or installation failed."
   }
+  Write-InstallLog "Authorized OCR wheelhouse unavailable; trying Tencent PyPI mirror."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--timeout", "30", "--retries", "2"))
+  if ($exitCode -eq 0) { return $true }
   Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl))
-  if ($exitCode -eq 0) {
-    return $true
-  }
-  Write-InstallLog "Package index OCR install failed; retrying authorized wheelhouse."
-  return Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl, "--timeout", "30", "--retries", "2"))
+  return $exitCode -eq 0
 }
 
 function Install-OcrCompatibilityPackages {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
   Write-InstallLog "Installing the pinned OCR Windows compatibility stack."
   $commonArguments = @("-m", "pip", "install", "--upgrade", "--force-reinstall") + $OcrCompatibilityPackageRequirements
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $TencentPipIndexUrl, "--timeout", "30", "--retries", "2"))
   if ($exitCode -eq 0) {
     return $true
   }

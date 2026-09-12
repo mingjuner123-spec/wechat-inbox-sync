@@ -190,6 +190,84 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/wechat-channels-diagnostic-utils.js
+var require_wechat_channels_diagnostic_utils = __commonJS({
+  "src/wechat-channels-diagnostic-utils.js"(exports2, module2) {
+    "use strict";
+    var stages = /* @__PURE__ */ new Set(["prepare", "download", "decrypt", "transcribe", "local-component", "cancelled", "finished"]);
+    var text = /* @__PURE__ */ __name((v) => String(v || "").replace(/https?:\/\/[^\s<>"']+/gi, "[URL]").replace(/(?:[A-Za-z]:[\\/]|\/(?:Users|home|var|tmp)\/)[^\s"']+/g, "[PATH]").replace(/(?:bearer\s+)[\w.-]+/gi, "Bearer [REDACTED]").replace(/((?:["']?)(?:[\w-]*(?:token|secret|signature|password)|api[_-]?key|authorization|cookie|bindingCode|decodeKey|decryptKey)["']?\s*[=:]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi, "$1[REDACTED]").replace(/(cookie\s*[:=]\s*)[^\r\n]*/gi, "$1[REDACTED]").replace(/[\r\n]+/g, " ").slice(0, 400), "text");
+    function redactCredentials(value, settings) {
+      var _a;
+      const secrets = [];
+      const collect = /* @__PURE__ */ __name((item, key = "") => {
+        if (typeof item === "string" && /token|secret|password|api[_-]?key|authorization|cookie|(?:binding|redeem)code|decodeKey|decryptKey/i.test(key) && item.trim()) secrets.push(item.trim());
+        else if (item && typeof item === "object") for (const [k, v] of Object.entries(item)) collect(v, k);
+      }, "collect");
+      collect(settings);
+      if ((_a = settings.localTranscriptionEntitlementStatus) == null ? void 0 : _a.code) secrets.push(settings.localTranscriptionEntitlementStatus.code);
+      secrets.sort((a, b) => b.length - a.length);
+      const clean = /* @__PURE__ */ __name((v) => typeof v === "string" ? secrets.reduce((s, secret) => s.split(secret).join("[REDACTED]"), v) : Array.isArray(v) ? v.map(clean) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clean(x)])) : v, "clean");
+      return clean(value);
+    }
+    __name(redactCredentials, "redactCredentials");
+    var code = /* @__PURE__ */ __name((v) => /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(String(v || "")) ? String(v).toUpperCase() : "", "code");
+    var num = /* @__PURE__ */ __name((v) => Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0, "num");
+    function endpoint(url) {
+      try {
+        const u = new URL(url);
+        return { host: u.hostname, kind: u.pathname.startsWith("/sph/") ? "sph" : u.pathname.includes("finder") ? "finder" : "other" };
+      } catch (_) {
+        return { host: "", kind: "other" };
+      }
+    }
+    __name(endpoint, "endpoint");
+    function reason(error) {
+      const value = String((error == null ? void 0 : error.message) || error || "");
+      if (/[{}<>]/.test(value)) return "上游返回异常响应（正文已省略）";
+      if (/不支持.*平台|unsupported.*(?:platform|site)/i.test(value)) return "视频号解析或转写失败，旧平台提示已忽略";
+      return text(value) || "未返回具体错误";
+    }
+    __name(reason, "reason");
+    function fault(error, stage) {
+      var _a, _b;
+      const status = num((error == null ? void 0 : error.status) || (error == null ? void 0 : error.statusCode) || ((_a = error == null ? void 0 : error.response) == null ? void 0 : _a.status) || ((_b = String((error == null ? void 0 : error.message) || "").match(/(?:HTTP|status)\s*[:=]?\s*(\d{3})/i)) == null ? void 0 : _b[1]));
+      return { stage: stages.has(stage) ? stage : "transcribe", code: code(error == null ? void 0 : error.code) || code(error == null ? void 0 : error.serverCode) || "CHANNELS_OPERATION_FAILED", status: status >= 100 && status <= 599 ? status : 0, exitCode: typeof (error == null ? void 0 : error.exitCode) === "number" ? error.exitCode : null, signal: code(error == null ? void 0 : error.signal), requestId: code(error == null ? void 0 : error.requestId), message: reason(error) };
+    }
+    __name(fault, "fault");
+    function sanitize(trace, settings = {}) {
+      if (!trace || trace.source !== "wechat-channels") return null;
+      trace = redactCredentials(trace, settings);
+      return { schemaVersion: 1, source: "wechat-channels", stage: stages.has(trace.stage) ? trace.stage : "prepare", startedAt: /^\d{4}-\d{2}-\d{2}T/.test(trace.startedAt || "") ? String(trace.startedAt).slice(0, 30) : "", elapsedMs: num(trace.elapsedMs), platform: ["win32", "darwin"].includes(trace.platform) ? trace.platform : "other", arch: ["x64", "arm64"].includes(trace.arch) ? trace.arch : "other", sourceHost: endpoint("https://" + String(trace.sourceHost || "")).host, sourceKind: ["sph", "finder", "other"].includes(trace.sourceKind) ? trace.sourceKind : "other", mediaHost: endpoint("https://" + String(trace.mediaHost || "")).host, mediaCandidateCount: Math.min(24, num(trace.mediaCandidateCount)), refreshCount: Math.min(1, num(trace.refreshCount)), finalOutcome: text(trace.finalOutcome), ...trace.failure ? { failure: fault(trace.failure, trace.failure.stage) } : {}, attempts: (Array.isArray(trace.attempts) ? trace.attempts : []).slice(-8).map((a) => ({ ...fault(a, a.stage), elapsedMs: num(a.elapsedMs) })), downloadAttempts: (Array.isArray(trace.downloadAttempts) ? trace.downloadAttempts : []).slice(-8).map((a) => {
+        var _a, _b;
+        return { transport: code(a.transport), status: num(a.status || ((_a = a.error) == null ? void 0 : _a.status)), code: code(a.code || ((_b = a.error) == null ? void 0 : _b.code)), ok: a.ok === true, refreshed: a.refreshed === true, bytes: num(a.bytes || a.byteLength || a.downloadedBytes), elapsedMs: num(a.elapsedMs ?? a.durationMs), ...a.error ? { error: fault(a.error, "download") } : {} };
+      }) };
+    }
+    __name(sanitize, "sanitize");
+    function create(url, platform, arch) {
+      const e = endpoint(url);
+      return { source: "wechat-channels", schemaVersion: 1, stage: "prepare", startedAt: (/* @__PURE__ */ new Date()).toISOString(), platform, arch, sourceHost: e.host, sourceKind: e.kind, attempts: [], downloadAttempts: [], refreshCount: 0 };
+    }
+    __name(create, "create");
+    function noteFailure(trace, error, stage) {
+      trace.stage = stage;
+      trace.elapsedMs = Date.now() - Date.parse(trace.startedAt);
+      trace.failure = fault(error, stage);
+      trace.attempts.push({ ...trace.failure, elapsedMs: trace.elapsedMs });
+      return sanitize(trace);
+    }
+    __name(noteFailure, "noteFailure");
+    function outcome(trace) {
+      const t = sanitize(trace);
+      if (!(t == null ? void 0 : t.failure)) return null;
+      const s = t.failure.stage;
+      const labels = { prepare: "视频号媒体解析失败", download: "视频号媒体下载失败", decrypt: "视频号媒体解密失败", transcribe: "视频号本地转写失败", "local-component": "本地转写组件不可用", cancelled: "视频号处理已取消" };
+      return { code: s === "local-component" ? "LOCAL_COMPONENT_UNAVAILABLE" : ["prepare", "download", "decrypt"].includes(s) ? "EXTRACTION_FAILED" : "TRANSCRIPTION_FAILED", message: (labels[s] || "视频号处理失败") + "：" + t.failure.message, diagnostic: t };
+    }
+    __name(outcome, "outcome");
+    module2.exports = { create, sanitize, fault, noteFailure, outcome, endpoint };
+  }
+});
+
 // src/diagnostic-redaction-utils.js
 var require_diagnostic_redaction_utils = __commonJS({
   "src/diagnostic-redaction-utils.js"(exports2, module2) {
@@ -375,7 +453,12 @@ ${safeTail}`;
       }
     }
     __name(packageVersions, "packageVersions");
-    function runtimeIdentity(root) {
+    function runtimeIdentity(root, platform = os2.platform(), status = {}) {
+      if (platform === "win32") {
+        const candidates = ["bin/whisper-cli.exe", "bin/main.exe", "whisper/whisper-cli.exe", "whisper/main.exe"].map((name) => path2.join(root, name));
+        const binary2 = status.whisperPath || candidates.find((file) => fs2.existsSync(file)) || candidates[0];
+        return { platform, pythonPackages: "not-used-by-native-windows-asr", nativeBuildVersion: "binary SHA identifies exact build", binaryPathSha256: crypto2.createHash("sha256").update(binary2).digest("hex"), scriptSha256: digestFile(path2.join(root, "transcribe.ps1")), wrapperSha256: digestFile(path2.join(root, "transcribe.ps1")), binarySha256: digestFile(binary2), binary: binary2 };
+      }
       const wrapper = boundedRead(path2.join(root, "bin", "whisper-cli"), 16384);
       const match = wrapper.match(/^WHISPER_CPP_BIN="([^"\r\n]+)"$/m);
       const binary = match ? match[1] : path2.join(root, "bin", "whisper-cli");
@@ -1489,18 +1572,20 @@ install_asr_packages_from_wheelhouse() {
 
 install_asr_packages() {
   local python_bin="$1"
+  export PIP_DISABLE_PIP_VERSION_CHECK=1
   "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  "$python_bin" -m pip install --upgrade pip \\
-    -i "$TENCENT_PIP_INDEX_URL" \\
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true
-  if "$python_bin" -m pip install --upgrade "\${ASR_PACKAGE_REQUIREMENTS[@]}" \\
-    -i "$TENCENT_PIP_INDEX_URL" \\
-    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then
+  echo "Component download policy: tencent-authorized-first-v1"
+  if install_asr_packages_from_wheelhouse "$python_bin"; then
     return 0
   fi
-
-  echo "Package index ASR install failed; retrying authorized wheelhouse." >&2
-  install_asr_packages_from_wheelhouse "$python_bin"
+  echo "Authorized ASR wheelhouse unavailable; trying Tencent PyPI mirror."
+  if "$python_bin" -m pip install --upgrade "\${ASR_PACKAGE_REQUIREMENTS[@]}" \\
+    -i "$TENCENT_PIP_INDEX_URL" --timeout 30 --retries 2 2>&1; then
+    return 0
+  fi
+  echo "Tencent PyPI mirror install failed; retrying with PyPI only."
+  "$python_bin" -m pip install --upgrade "\${ASR_PACKAGE_REQUIREMENTS[@]}" \\
+    -i "$PYPI_FALLBACK_INDEX_URL" --timeout 30 --retries 2 2>&1
 }
 
 setup_python_and_packages() {
@@ -2976,25 +3061,26 @@ function Install-OcrPackagesFromWheelhouse {
 
 function Install-OcrPackagesWithPip {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
-  Invoke-NativeCommand -FilePath $PythonPath -Arguments @("-m", "pip", "install", "--upgrade", "pip", "-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl) | Out-Null
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
-  if ($exitCode -eq 0) {
-    return $true
+  $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+  Write-InstallLog "Component download policy: tencent-authorized-first-v1"
+  try {
+    if (Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath) { return $true }
+  } catch {
+    Write-InstallLog "Authorized OCR wheelhouse download, validation or installation failed."
   }
+  Write-InstallLog "Authorized OCR wheelhouse unavailable; trying Tencent PyPI mirror."
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $TencentPipIndexUrl, "--timeout", "30", "--retries", "2"))
+  if ($exitCode -eq 0) { return $true }
   Write-InstallLog "Tencent PyPI mirror install failed; retrying with PyPI only."
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl))
-  if ($exitCode -eq 0) {
-    return $true
-  }
-  Write-InstallLog "Package index OCR install failed; retrying authorized wheelhouse."
-  return Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments (@("-m", "pip", "install", "--upgrade") + $OcrPackageRequirements + @("-i", $PypiFallbackIndexUrl, "--timeout", "30", "--retries", "2"))
+  return $exitCode -eq 0
 }
 
 function Install-OcrCompatibilityPackages {
   param([Parameter(Mandatory = $true)][string]$PythonPath)
   Write-InstallLog "Installing the pinned OCR Windows compatibility stack."
   $commonArguments = @("-m", "pip", "install", "--upgrade", "--force-reinstall") + $OcrCompatibilityPackageRequirements
-  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $TencentPipIndexUrl, "--extra-index-url", $PypiFallbackIndexUrl))
+  $exitCode = Invoke-NativeCommand -FilePath $PythonPath -Arguments ($commonArguments + @("-i", $TencentPipIndexUrl, "--timeout", "30", "--retries", "2"))
   if ($exitCode -eq 0) {
     return $true
   }
@@ -3069,7 +3155,7 @@ Write-Host "Script: $RuntimeScript"
 // local-ocr/install-local-ocr-macos.sh
 var require_install_local_ocr_macos = __commonJS({
   "local-ocr/install-local-ocr-macos.sh"(exports2, module2) {
-    module2.exports = '#!/usr/bin/env bash\nset -euo pipefail\n\nINSTALL_ROOT="${HOME}/.wechat-inbox-local-ocr"\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nPYTHON_SCRIPT="${SCRIPT_DIR}/ocr_image.py"\nVENV_DIR="${INSTALL_ROOT}/venv"\nPYTHON_RUNTIME_DIR="${INSTALL_ROOT}/python-runtime"\nCACHE_DIR="${INSTALL_ROOT}/cache"\nRUNTIME_SCRIPT="${INSTALL_ROOT}/ocr_image.py"\nLOG_PATH="${INSTALL_ROOT}/install.log"\n\nPUBLIC_CLOUDBASE_CDN_DISABLED="${WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN:-1}"\nAUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL:-}"\nAUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_OCR_WHEELHOUSE_URL:-}"\nGITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"\nTENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"\nPYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"\n\nDOWNLOAD_LOW_SPEED_LIMIT=65536\nDOWNLOAD_LOW_SPEED_TIME=30\nPYTHON_BUILD_STANDALONE_BUILD="20260623"\nPYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"\nPYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"\nPYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"\nPORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python3"\nOCR_PACKAGE_REQUIREMENTS=("rapidocr-onnxruntime==1.4.4" "pillow==12.3.0")\n\nmkdir -p "$INSTALL_ROOT" "$CACHE_DIR"\n: > "$LOG_PATH"\n\nlog() {\n  echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") $*" | tee -a "$LOG_PATH"\n}\n\n# ── Downloads ───────────────────────────────────────────────────────────────\n\ncurl_supports_retry_all_errors() {\n  command -v curl >/dev/null 2>&1 && curl --help all 2>/dev/null | grep -q -- \'--retry-all-errors\'\n}\n\ndownload_with_curl() {\n  local url="$1"\n  local out_file="$2"\n  local max_time="${3:-300}"\n  if curl_supports_retry_all_errors; then\n    curl -fL --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors \\\n      --connect-timeout 30 \\\n      --max-time "$max_time" \\\n      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\\n      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\\n      -o "$out_file" "$url"\n  else\n    curl -fL --silent --show-error --retry 5 --retry-delay 2 \\\n      --connect-timeout 30 \\\n      --max-time "$max_time" \\\n      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\\n      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\\n      -o "$out_file" "$url"\n  fi\n}\n\ndownload_with_retry() {\n  local url="$1"\n  local out_file="$2"\n  local label="${3:-file}"\n  local max_time="${4:-300}"\n  local attempt\n  for attempt in 1 2 3; do\n    log "Downloading ${label} (attempt ${attempt}/3): ${url}"\n    rm -f "$out_file"\n    if command -v curl >/dev/null 2>&1; then\n      if download_with_curl "$url" "$out_file" "$max_time" && [ -s "$out_file" ]; then\n        return 0\n      fi\n    elif command -v wget >/dev/null 2>&1; then\n      if wget -q --tries=3 --timeout=30 -O "$out_file" "$url" && [ -s "$out_file" ]; then\n        return 0\n      fi\n    else\n      log "ERROR: Neither curl nor wget is available."\n      return 1\n    fi\n    rm -f "$out_file"\n    sleep $((attempt * 2))\n  done\n  log "ERROR: Download failed for ${label}: ${url}"\n  return 1\n}\n\nis_python_usable() {\n  local python_bin="$1"\n  [ -n "$python_bin" ] || return 1\n  if [ ! -x "$python_bin" ]; then\n    python_bin="$(command -v "$python_bin" 2>/dev/null || true)"\n    [ -n "$python_bin" ] || return 1\n  fi\n  "$python_bin" -c \'import sys, venv; raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 13) else 1)\' >/dev/null 2>&1\n}\n\nfind_existing_python() {\n  local candidates=(\n    "${HOME}/.wechat-inbox-local-asr/python-venv/bin/python"\n    "${HOME}/.wechat-inbox-local-asr/venv/bin/python"\n    "${HOME}/.wechat-inbox-local-asr/.venv/bin/python"\n    "/opt/homebrew/bin/python3"\n    "/usr/local/bin/python3"\n  )\n  local candidate\n  for candidate in "${candidates[@]}"; do\n    if is_python_usable "$candidate"; then\n      echo "$candidate"\n      return 0\n    fi\n  done\n  candidate="$(command -v python3 2>/dev/null || true)"\n  if [ -n "$candidate" ] && is_python_usable "$candidate"; then\n    echo "$candidate"\n    return 0\n  fi\n  return 1\n}\n\nvalidate_ocr_python() {\n  local python_bin="$1"\n  "$python_bin" -c "from rapidocr_onnxruntime import RapidOCR; print(\'rapidocr-ready\')" 2>&1\n}\n\ndetect_ocr_wheel_platform() {\n  local arch\n  arch="$(uname -m)"\n  case "$arch" in\n    arm64)  echo "macosx_11_0_arm64" ;;\n    x86_64) echo "macosx_11_0_x86_64" ;;\n    *)\n      log "ERROR: Unsupported macOS wheelhouse architecture: $arch"\n      return 1\n      ;;\n  esac\n}\n\nocr_wheelhouse_url() {\n  [ -n "$AUTHORIZED_WHEELHOUSE_URL" ] || return 1\n  echo "$AUTHORIZED_WHEELHOUSE_URL"\n}\n\nRESOLVED_OCR_WHEELHOUSE_LOCATION=""\nresolve_ocr_wheelhouse_location() {\n  local wheelhouse_url expected_sha256 archive_path extract_dir\n  RESOLVED_OCR_WHEELHOUSE_LOCATION=""\n  wheelhouse_url="$(ocr_wheelhouse_url)" || return 1\n  case "$wheelhouse_url" in\n    *.zip|*.zip\\?*) ;;\n    *) RESOLVED_OCR_WHEELHOUSE_LOCATION="$wheelhouse_url"; return 0 ;;\n  esac\n  expected_sha256="$(printf \'%s\' "$wheelhouse_url" | sed -nE \'s#.*\\/by-sha256\\/([A-Fa-f0-9]{64})\\/.*#\\1#p\' | tr \'[:lower:]\' \'[:upper:]\')"\n  [ -n "$expected_sha256" ] || { log "ERROR: Authorized OCR wheelhouse ZIP URL is not content-addressed."; return 1; }\n  archive_path="$CACHE_DIR/authorized-ocr-wheelhouse-$(printf \'%s\' "$expected_sha256" | tr \'[:upper:]\' \'[:lower:]\').zip"\n  extract_dir="$CACHE_DIR/authorized-ocr-wheelhouse-$(printf \'%s\' "$expected_sha256" | tr \'[:upper:]\' \'[:lower:]\')"\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    rm -f "$archive_path"\n    download_with_retry "$wheelhouse_url" "$archive_path" "authorized OCR wheelhouse" 1200 || return 1\n  fi\n  verify_sha256 "$archive_path" "$expected_sha256" || { log "ERROR: Authorized OCR wheelhouse ZIP SHA256 validation failed."; return 1; }\n  if ! find "$extract_dir" -maxdepth 1 -type f -name \'*.whl\' -print -quit 2>/dev/null | grep -q .; then\n    rm -rf "$extract_dir"\n    mkdir -p "$extract_dir"\n    if command -v ditto >/dev/null 2>&1; then\n      ditto -x -k "$archive_path" "$extract_dir"\n    elif command -v unzip >/dev/null 2>&1; then\n      unzip -q "$archive_path" -d "$extract_dir"\n    else\n      log "ERROR: Neither ditto nor unzip is available for the authorized OCR wheelhouse."\n      return 1\n    fi\n  fi\n  find "$extract_dir" -maxdepth 1 -type f -name \'*.whl\' -print -quit | grep -q . || return 1\n  RESOLVED_OCR_WHEELHOUSE_LOCATION="$extract_dir"\n}\n\ninstall_ocr_packages_from_wheelhouse() {\n  local installer="$1"\n  shift\n  local wheelhouse_location\n  resolve_ocr_wheelhouse_location || return 1\n  wheelhouse_location="$RESOLVED_OCR_WHEELHOUSE_LOCATION"\n  log "Installing OCR packages from an authorized wheelhouse."\n  "$installer" "$@" install --upgrade \\\n    --no-index \\\n    --find-links "$wheelhouse_location" \\\n    "${OCR_PACKAGE_REQUIREMENTS[@]}" 2>&1\n}\n\ninstall_ocr_packages_with_python() {\n  local python_bin="$1"\n  export PIP_DISABLE_PIP_VERSION_CHECK=1\n  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true\n  "$python_bin" -m pip install --upgrade pip \\\n    -i "$TENCENT_PIP_INDEX_URL" \\\n    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1 || true\n  if "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \\\n    -i "$TENCENT_PIP_INDEX_URL" \\\n    --extra-index-url "$PYPI_FALLBACK_INDEX_URL" 2>&1; then\n    return 0\n  fi\n  log "Tencent PyPI mirror install failed; retrying with PyPI only."\n  if "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \\\n    -i "$PYPI_FALLBACK_INDEX_URL" 2>&1; then\n    return 0\n  fi\n  log "Package index OCR install failed; retrying authorized wheelhouse."\n  install_ocr_packages_from_wheelhouse "$python_bin" -m pip\n}\n\npython_runtime_file_name() {\n  local arch\n  arch="$(uname -m)"\n  case "$arch" in\n    arm64)  echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;\n    x86_64) echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-x86_64-apple-darwin-install_only.tar.gz" ;;\n    *)\n      log "ERROR: Unsupported macOS architecture: $arch"\n      return 1\n      ;;\n  esac\n}\n\npython_runtime_sha256() {\n  case "$(uname -m)" in\n    arm64) echo "$PYTHON_RUNTIME_SHA256_ARM64" ;;\n    x86_64) echo "$PYTHON_RUNTIME_SHA256_X64" ;;\n    *) return 1 ;;\n  esac\n}\n\nfile_sha256() {\n  shasum -a 256 "$1" | awk \'{ print toupper($1) }\'\n}\n\nverify_sha256() {\n  local file_path="$1"\n  local expected_sha256="$2"\n  [ -s "$file_path" ] || return 1\n  [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]\n}\n\ninstall_portable_python() {\n  if is_python_usable "$PORTABLE_PYTHON"; then\n    log "Pinned portable Python is already ready: $PORTABLE_PYTHON"\n    return 0\n  fi\n\n  local file_name expected_sha256 archive_path runtime_url stage_dir staged_python\n  local runtime_urls=()\n  file_name="$(python_runtime_file_name)" || return 1\n  expected_sha256="$(python_runtime_sha256)" || return 1\n  archive_path="${CACHE_DIR}/${file_name}"\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    rm -f "$archive_path"\n    if [ -n "$AUTHORIZED_PYTHON_RUNTIME_URL" ]; then runtime_urls+=("$AUTHORIZED_PYTHON_RUNTIME_URL"); fi\n    runtime_urls+=("${GITHUB_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}")\n    for runtime_url in "${runtime_urls[@]}"; do\n      rm -f "$archive_path"\n      if download_with_retry "$runtime_url" "$archive_path" "pinned Python runtime" 1200 \\\n        && verify_sha256 "$archive_path" "$expected_sha256"; then\n        break\n      fi\n      log "Pinned Python runtime source failed or did not match SHA256."\n    done\n  fi\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    log "ERROR: Pinned Python runtime SHA256 validation failed."\n    return 1\n  fi\n\n  stage_dir="$(mktemp -d "${INSTALL_ROOT}/.python-runtime-stage.XXXXXX")"\n  if ! tar -xzf "$archive_path" -C "$stage_dir"; then\n    rm -rf "$stage_dir"\n    log "ERROR: Pinned Python runtime extraction failed."\n    return 1\n  fi\n  staged_python="${stage_dir}/python/bin/python3"\n  if ! is_python_usable "$staged_python"; then\n    rm -rf "$stage_dir"\n    log "ERROR: Pinned Python runtime validation failed after extraction."\n    return 1\n  fi\n\n  rm -rf "$PYTHON_RUNTIME_DIR"\n  mv "$stage_dir" "$PYTHON_RUNTIME_DIR"\n  if ! is_python_usable "$PORTABLE_PYTHON"; then\n    log "ERROR: Pinned portable Python was not installed correctly."\n    return 1\n  fi\n  log "Pinned portable Python installed: $PORTABLE_PYTHON"\n  return 0\n}\n\n# ── Python venv via pinned portable runtime ─────────────────────────────────\n\nsetup_python_venv() {\n  # If venv already exists and works, skip.\n  local venv_python="${VENV_DIR}/bin/python"\n  if [ -x "$venv_python" ] && validate_ocr_python "$venv_python" >/dev/null 2>&1; then\n    log "OCR Python environment is already ready."\n    return 0\n  fi\n\n  local existing_python\n  existing_python="$(find_existing_python || true)"\n  if [ -n "$existing_python" ]; then\n    log "Reusing existing Python for OCR environment: $existing_python"\n    rm -rf "$VENV_DIR"\n    if "$existing_python" -m venv "$VENV_DIR" 2>&1 \\\n      && [ -x "$venv_python" ] \\\n      && install_ocr_packages_with_python "$venv_python" \\\n      && validate_ocr_python "$venv_python" >/dev/null 2>&1; then\n      log "Python OCR environment ready via existing Python."\n      return 0\n    fi\n    log "Existing Python OCR setup failed; falling back to pinned portable Python."\n    rm -rf "$VENV_DIR"\n  fi\n\n  install_portable_python || return 1\n  log "Creating an isolated OCR environment with pinned Python 3.12."\n  rm -rf "$VENV_DIR"\n  if ! "$PORTABLE_PYTHON" -m venv "$VENV_DIR" 2>&1; then\n    log "ERROR: Pinned Python 3.12 failed to create the OCR virtual environment."\n    return 1\n  fi\n\n  if [ ! -x "$venv_python" ]; then\n    log "ERROR: Python venv was not created at $venv_python"\n    return 1\n  fi\n\n  log "Installing rapidocr-onnxruntime and pillow..."\n  if ! install_ocr_packages_with_python "$venv_python"; then\n    log "ERROR: rapidocr-onnxruntime / pillow 安装失败。请检查网络连接后重试。"\n    return 1\n  fi\n\n  # Validate.\n  if ! validate_ocr_python "$venv_python"; then\n    log "ERROR: rapidocr-onnxruntime 导入验证失败。"\n    return 1\n  fi\n\n  log "Python OCR environment ready."\n  return 0\n}\n\n# ── OCR script ──────────────────────────────────────────────────────────────\n\ndownload_text_file() {\n  local url="$1"\n  local out_file="$2"\n  download_with_retry "$url" "$out_file" "ocr script" 180\n  test -s "$out_file" || {\n    log "ERROR: Downloaded file is empty or invalid: $url"\n    return 1\n  }\n}\n\ninstall_ocr_script() {\n  local source_script=""\n  local downloaded_script="${INSTALL_ROOT}/ocr_image.downloaded.py"\n  local staged_script="${INSTALL_ROOT}/.ocr_image.py.tmp.$$"\n\n  is_valid_ocr_script() {\n    local candidate="$1"\n    [ -s "$candidate" ] \\\n      && grep -q \'RapidOCR\' "$candidate" \\\n      && grep -q -- \'--input\' "$candidate" \\\n      && grep -q -- \'--output\' "$candidate"\n  }\n\n  if is_valid_ocr_script "$RUNTIME_SCRIPT"; then\n    log "OCR script is already ready."\n    return 0\n  fi\n\n  # The signed component manifest only provides large runtime assets. The\n  # executable OCR script itself must come from the verified plugin package.\n  if is_valid_ocr_script "$PYTHON_SCRIPT"; then\n    source_script="$PYTHON_SCRIPT"\n    log "Using bundled OCR script."\n  fi\n\n  if [ -z "$source_script" ]; then\n    log "ERROR: 无法获取有效的 OCR 脚本。请检查网络连接后重试。"\n    return 1\n  fi\n\n  rm -f "$staged_script"\n  cp "$source_script" "$staged_script"\n  if ! is_valid_ocr_script "$staged_script"; then\n    rm -f "$staged_script"\n    log "ERROR: OCR 脚本校验失败。"\n    return 1\n  fi\n  mv -f "$staged_script" "$RUNTIME_SCRIPT"\n  log "OCR script installed atomically."\n  return 0\n}\n\n# ── Main ────────────────────────────────────────────────────────────────────\n\nlog "Installing local OCR component into $INSTALL_ROOT"\n\ninstall_ocr_script || {\n  log "status=failed"\n  log "stage=ocr_script"\n  log "OCR component installation failed at script download step."\n  exit 1\n}\n\nsetup_python_venv || {\n  log "status=failed"\n  log "stage=python_environment"\n  log "OCR component installation failed at Python environment step."\n  exit 1\n}\n\nlog "status=success"\nlog "stage=complete"\nlog "Local OCR component installed."\necho "Python: ${VENV_DIR}/bin/python"\necho "Script: $RUNTIME_SCRIPT"\n';
+    module2.exports = '#!/usr/bin/env bash\nset -euo pipefail\n\nINSTALL_ROOT="${HOME}/.wechat-inbox-local-ocr"\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nPYTHON_SCRIPT="${SCRIPT_DIR}/ocr_image.py"\nVENV_DIR="${INSTALL_ROOT}/venv"\nPYTHON_RUNTIME_DIR="${INSTALL_ROOT}/python-runtime"\nCACHE_DIR="${INSTALL_ROOT}/cache"\nRUNTIME_SCRIPT="${INSTALL_ROOT}/ocr_image.py"\nLOG_PATH="${INSTALL_ROOT}/install.log"\n\nPUBLIC_CLOUDBASE_CDN_DISABLED="${WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN:-1}"\nAUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL:-}"\nAUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_OCR_WHEELHOUSE_URL:-}"\nGITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"\nTENCENT_PIP_INDEX_URL="https://mirrors.cloud.tencent.com/pypi/simple"\nPYPI_FALLBACK_INDEX_URL="https://pypi.org/simple"\n\nDOWNLOAD_LOW_SPEED_LIMIT=65536\nDOWNLOAD_LOW_SPEED_TIME=30\nPYTHON_BUILD_STANDALONE_BUILD="20260623"\nPYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"\nPYTHON_RUNTIME_SHA256_ARM64="3724AA4DAFB5F7B6C2CF98E89914E4248DC6BD2FE40407DF4A2D73DE99615F16"\nPYTHON_RUNTIME_SHA256_X64="7C57FDD1FA675190093700EB0D8E7117E1F9EAE7C30A46DEA5F8D5266BCFC791"\nPORTABLE_PYTHON="${PYTHON_RUNTIME_DIR}/python/bin/python3"\nOCR_PACKAGE_REQUIREMENTS=("rapidocr-onnxruntime==1.4.4" "pillow==12.3.0")\n\nmkdir -p "$INSTALL_ROOT" "$CACHE_DIR"\n: > "$LOG_PATH"\n\nlog() {\n  echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") $*" | tee -a "$LOG_PATH"\n}\n\n# ── Downloads ───────────────────────────────────────────────────────────────\n\ncurl_supports_retry_all_errors() {\n  command -v curl >/dev/null 2>&1 && curl --help all 2>/dev/null | grep -q -- \'--retry-all-errors\'\n}\n\ndownload_with_curl() {\n  local url="$1"\n  local out_file="$2"\n  local max_time="${3:-300}"\n  if curl_supports_retry_all_errors; then\n    curl -fL --silent --show-error --retry 5 --retry-delay 2 --retry-all-errors \\\n      --connect-timeout 30 \\\n      --max-time "$max_time" \\\n      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\\n      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\\n      -o "$out_file" "$url"\n  else\n    curl -fL --silent --show-error --retry 5 --retry-delay 2 \\\n      --connect-timeout 30 \\\n      --max-time "$max_time" \\\n      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\\n      --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\\n      -o "$out_file" "$url"\n  fi\n}\n\ndownload_with_retry() {\n  local url="$1"\n  local out_file="$2"\n  local label="${3:-file}"\n  local max_time="${4:-300}"\n  local attempt\n  for attempt in 1 2 3; do\n    log "Downloading ${label} (attempt ${attempt}/3): ${url}"\n    rm -f "$out_file"\n    if command -v curl >/dev/null 2>&1; then\n      if download_with_curl "$url" "$out_file" "$max_time" && [ -s "$out_file" ]; then\n        return 0\n      fi\n    elif command -v wget >/dev/null 2>&1; then\n      if wget -q --tries=3 --timeout=30 -O "$out_file" "$url" && [ -s "$out_file" ]; then\n        return 0\n      fi\n    else\n      log "ERROR: Neither curl nor wget is available."\n      return 1\n    fi\n    rm -f "$out_file"\n    sleep $((attempt * 2))\n  done\n  log "ERROR: Download failed for ${label}: ${url}"\n  return 1\n}\n\nis_python_usable() {\n  local python_bin="$1"\n  [ -n "$python_bin" ] || return 1\n  if [ ! -x "$python_bin" ]; then\n    python_bin="$(command -v "$python_bin" 2>/dev/null || true)"\n    [ -n "$python_bin" ] || return 1\n  fi\n  "$python_bin" -c \'import sys, venv; raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 13) else 1)\' >/dev/null 2>&1\n}\n\nfind_existing_python() {\n  local candidates=(\n    "${HOME}/.wechat-inbox-local-asr/python-venv/bin/python"\n    "${HOME}/.wechat-inbox-local-asr/venv/bin/python"\n    "${HOME}/.wechat-inbox-local-asr/.venv/bin/python"\n    "/opt/homebrew/bin/python3"\n    "/usr/local/bin/python3"\n  )\n  local candidate\n  for candidate in "${candidates[@]}"; do\n    if is_python_usable "$candidate"; then\n      echo "$candidate"\n      return 0\n    fi\n  done\n  candidate="$(command -v python3 2>/dev/null || true)"\n  if [ -n "$candidate" ] && is_python_usable "$candidate"; then\n    echo "$candidate"\n    return 0\n  fi\n  return 1\n}\n\nvalidate_ocr_python() {\n  local python_bin="$1"\n  "$python_bin" -c "from rapidocr_onnxruntime import RapidOCR; print(\'rapidocr-ready\')" 2>&1\n}\n\ndetect_ocr_wheel_platform() {\n  local arch\n  arch="$(uname -m)"\n  case "$arch" in\n    arm64)  echo "macosx_11_0_arm64" ;;\n    x86_64) echo "macosx_11_0_x86_64" ;;\n    *)\n      log "ERROR: Unsupported macOS wheelhouse architecture: $arch"\n      return 1\n      ;;\n  esac\n}\n\nocr_wheelhouse_url() {\n  [ -n "$AUTHORIZED_WHEELHOUSE_URL" ] || return 1\n  echo "$AUTHORIZED_WHEELHOUSE_URL"\n}\n\nRESOLVED_OCR_WHEELHOUSE_LOCATION=""\nresolve_ocr_wheelhouse_location() {\n  local wheelhouse_url expected_sha256 archive_path extract_dir\n  RESOLVED_OCR_WHEELHOUSE_LOCATION=""\n  wheelhouse_url="$(ocr_wheelhouse_url)" || return 1\n  case "$wheelhouse_url" in\n    *.zip|*.zip\\?*) ;;\n    *) RESOLVED_OCR_WHEELHOUSE_LOCATION="$wheelhouse_url"; return 0 ;;\n  esac\n  expected_sha256="$(printf \'%s\' "$wheelhouse_url" | sed -nE \'s#.*\\/by-sha256\\/([A-Fa-f0-9]{64})\\/.*#\\1#p\' | tr \'[:lower:]\' \'[:upper:]\')"\n  [ -n "$expected_sha256" ] || { log "ERROR: Authorized OCR wheelhouse ZIP URL is not content-addressed."; return 1; }\n  archive_path="$CACHE_DIR/authorized-ocr-wheelhouse-$(printf \'%s\' "$expected_sha256" | tr \'[:upper:]\' \'[:lower:]\').zip"\n  extract_dir="$CACHE_DIR/authorized-ocr-wheelhouse-$(printf \'%s\' "$expected_sha256" | tr \'[:upper:]\' \'[:lower:]\')"\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    rm -f "$archive_path"\n    download_with_retry "$wheelhouse_url" "$archive_path" "authorized OCR wheelhouse" 1200 || return 1\n  fi\n  verify_sha256 "$archive_path" "$expected_sha256" || { log "ERROR: Authorized OCR wheelhouse ZIP SHA256 validation failed."; return 1; }\n  if ! find "$extract_dir" -maxdepth 1 -type f -name \'*.whl\' -print -quit 2>/dev/null | grep -q .; then\n    rm -rf "$extract_dir"\n    mkdir -p "$extract_dir"\n    if command -v ditto >/dev/null 2>&1; then\n      ditto -x -k "$archive_path" "$extract_dir"\n    elif command -v unzip >/dev/null 2>&1; then\n      unzip -q "$archive_path" -d "$extract_dir"\n    else\n      log "ERROR: Neither ditto nor unzip is available for the authorized OCR wheelhouse."\n      return 1\n    fi\n  fi\n  find "$extract_dir" -maxdepth 1 -type f -name \'*.whl\' -print -quit | grep -q . || return 1\n  RESOLVED_OCR_WHEELHOUSE_LOCATION="$extract_dir"\n}\n\ninstall_ocr_packages_from_wheelhouse() {\n  local installer="$1"\n  shift\n  local wheelhouse_location\n  resolve_ocr_wheelhouse_location || return 1\n  wheelhouse_location="$RESOLVED_OCR_WHEELHOUSE_LOCATION"\n  log "Installing OCR packages from an authorized wheelhouse."\n  "$installer" "$@" install --upgrade \\\n    --no-index \\\n    --find-links "$wheelhouse_location" \\\n    "${OCR_PACKAGE_REQUIREMENTS[@]}" 2>&1\n}\n\ninstall_ocr_packages_with_python() {\n  local python_bin="$1"\n  export PIP_DISABLE_PIP_VERSION_CHECK=1\n  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true\n  log "Component download policy: tencent-authorized-first-v1"\n  if install_ocr_packages_from_wheelhouse "$python_bin" -m pip; then\n    return 0\n  fi\n  log "Authorized OCR wheelhouse unavailable; trying Tencent PyPI mirror."\n  if "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \\\n    -i "$TENCENT_PIP_INDEX_URL" --timeout 30 --retries 2 2>&1; then\n    return 0\n  fi\n  log "Tencent PyPI mirror install failed; retrying with PyPI only."\n  "$python_bin" -m pip install --upgrade "${OCR_PACKAGE_REQUIREMENTS[@]}" \\\n    -i "$PYPI_FALLBACK_INDEX_URL" --timeout 30 --retries 2 2>&1\n}\n\npython_runtime_file_name() {\n  local arch\n  arch="$(uname -m)"\n  case "$arch" in\n    arm64)  echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-aarch64-apple-darwin-install_only.tar.gz" ;;\n    x86_64) echo "cpython-${PYTHON_BUILD_STANDALONE_VERSION}-x86_64-apple-darwin-install_only.tar.gz" ;;\n    *)\n      log "ERROR: Unsupported macOS architecture: $arch"\n      return 1\n      ;;\n  esac\n}\n\npython_runtime_sha256() {\n  case "$(uname -m)" in\n    arm64) echo "$PYTHON_RUNTIME_SHA256_ARM64" ;;\n    x86_64) echo "$PYTHON_RUNTIME_SHA256_X64" ;;\n    *) return 1 ;;\n  esac\n}\n\nfile_sha256() {\n  shasum -a 256 "$1" | awk \'{ print toupper($1) }\'\n}\n\nverify_sha256() {\n  local file_path="$1"\n  local expected_sha256="$2"\n  [ -s "$file_path" ] || return 1\n  [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]\n}\n\ninstall_portable_python() {\n  if is_python_usable "$PORTABLE_PYTHON"; then\n    log "Pinned portable Python is already ready: $PORTABLE_PYTHON"\n    return 0\n  fi\n\n  local file_name expected_sha256 archive_path runtime_url stage_dir staged_python\n  local runtime_urls=()\n  file_name="$(python_runtime_file_name)" || return 1\n  expected_sha256="$(python_runtime_sha256)" || return 1\n  archive_path="${CACHE_DIR}/${file_name}"\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    rm -f "$archive_path"\n    if [ -n "$AUTHORIZED_PYTHON_RUNTIME_URL" ]; then runtime_urls+=("$AUTHORIZED_PYTHON_RUNTIME_URL"); fi\n    runtime_urls+=("${GITHUB_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}")\n    for runtime_url in "${runtime_urls[@]}"; do\n      rm -f "$archive_path"\n      if download_with_retry "$runtime_url" "$archive_path" "pinned Python runtime" 1200 \\\n        && verify_sha256 "$archive_path" "$expected_sha256"; then\n        break\n      fi\n      log "Pinned Python runtime source failed or did not match SHA256."\n    done\n  fi\n  if ! verify_sha256 "$archive_path" "$expected_sha256"; then\n    log "ERROR: Pinned Python runtime SHA256 validation failed."\n    return 1\n  fi\n\n  stage_dir="$(mktemp -d "${INSTALL_ROOT}/.python-runtime-stage.XXXXXX")"\n  if ! tar -xzf "$archive_path" -C "$stage_dir"; then\n    rm -rf "$stage_dir"\n    log "ERROR: Pinned Python runtime extraction failed."\n    return 1\n  fi\n  staged_python="${stage_dir}/python/bin/python3"\n  if ! is_python_usable "$staged_python"; then\n    rm -rf "$stage_dir"\n    log "ERROR: Pinned Python runtime validation failed after extraction."\n    return 1\n  fi\n\n  rm -rf "$PYTHON_RUNTIME_DIR"\n  mv "$stage_dir" "$PYTHON_RUNTIME_DIR"\n  if ! is_python_usable "$PORTABLE_PYTHON"; then\n    log "ERROR: Pinned portable Python was not installed correctly."\n    return 1\n  fi\n  log "Pinned portable Python installed: $PORTABLE_PYTHON"\n  return 0\n}\n\n# ── Python venv via pinned portable runtime ─────────────────────────────────\n\nsetup_python_venv() {\n  # If venv already exists and works, skip.\n  local venv_python="${VENV_DIR}/bin/python"\n  if [ -x "$venv_python" ] && validate_ocr_python "$venv_python" >/dev/null 2>&1; then\n    log "OCR Python environment is already ready."\n    return 0\n  fi\n\n  local existing_python\n  existing_python="$(find_existing_python || true)"\n  if [ -n "$existing_python" ]; then\n    log "Reusing existing Python for OCR environment: $existing_python"\n    rm -rf "$VENV_DIR"\n    if "$existing_python" -m venv "$VENV_DIR" 2>&1 \\\n      && [ -x "$venv_python" ] \\\n      && install_ocr_packages_with_python "$venv_python" \\\n      && validate_ocr_python "$venv_python" >/dev/null 2>&1; then\n      log "Python OCR environment ready via existing Python."\n      return 0\n    fi\n    log "Existing Python OCR setup failed; falling back to pinned portable Python."\n    rm -rf "$VENV_DIR"\n  fi\n\n  install_portable_python || return 1\n  log "Creating an isolated OCR environment with pinned Python 3.12."\n  rm -rf "$VENV_DIR"\n  if ! "$PORTABLE_PYTHON" -m venv "$VENV_DIR" 2>&1; then\n    log "ERROR: Pinned Python 3.12 failed to create the OCR virtual environment."\n    return 1\n  fi\n\n  if [ ! -x "$venv_python" ]; then\n    log "ERROR: Python venv was not created at $venv_python"\n    return 1\n  fi\n\n  log "Installing rapidocr-onnxruntime and pillow..."\n  if ! install_ocr_packages_with_python "$venv_python"; then\n    log "ERROR: rapidocr-onnxruntime / pillow 安装失败。请检查网络连接后重试。"\n    return 1\n  fi\n\n  # Validate.\n  if ! validate_ocr_python "$venv_python"; then\n    log "ERROR: rapidocr-onnxruntime 导入验证失败。"\n    return 1\n  fi\n\n  log "Python OCR environment ready."\n  return 0\n}\n\n# ── OCR script ──────────────────────────────────────────────────────────────\n\ndownload_text_file() {\n  local url="$1"\n  local out_file="$2"\n  download_with_retry "$url" "$out_file" "ocr script" 180\n  test -s "$out_file" || {\n    log "ERROR: Downloaded file is empty or invalid: $url"\n    return 1\n  }\n}\n\ninstall_ocr_script() {\n  local source_script=""\n  local downloaded_script="${INSTALL_ROOT}/ocr_image.downloaded.py"\n  local staged_script="${INSTALL_ROOT}/.ocr_image.py.tmp.$$"\n\n  is_valid_ocr_script() {\n    local candidate="$1"\n    [ -s "$candidate" ] \\\n      && grep -q \'RapidOCR\' "$candidate" \\\n      && grep -q -- \'--input\' "$candidate" \\\n      && grep -q -- \'--output\' "$candidate"\n  }\n\n  if is_valid_ocr_script "$RUNTIME_SCRIPT"; then\n    log "OCR script is already ready."\n    return 0\n  fi\n\n  # The signed component manifest only provides large runtime assets. The\n  # executable OCR script itself must come from the verified plugin package.\n  if is_valid_ocr_script "$PYTHON_SCRIPT"; then\n    source_script="$PYTHON_SCRIPT"\n    log "Using bundled OCR script."\n  fi\n\n  if [ -z "$source_script" ]; then\n    log "ERROR: 无法获取有效的 OCR 脚本。请检查网络连接后重试。"\n    return 1\n  fi\n\n  rm -f "$staged_script"\n  cp "$source_script" "$staged_script"\n  if ! is_valid_ocr_script "$staged_script"; then\n    rm -f "$staged_script"\n    log "ERROR: OCR 脚本校验失败。"\n    return 1\n  fi\n  mv -f "$staged_script" "$RUNTIME_SCRIPT"\n  log "OCR script installed atomically."\n  return 0\n}\n\n# ── Main ────────────────────────────────────────────────────────────────────\n\nlog "Installing local OCR component into $INSTALL_ROOT"\n\ninstall_ocr_script || {\n  log "status=failed"\n  log "stage=ocr_script"\n  log "OCR component installation failed at script download step."\n  exit 1\n}\n\nsetup_python_venv || {\n  log "status=failed"\n  log "stage=python_environment"\n  log "OCR component installation failed at Python environment step."\n  exit 1\n}\n\nlog "status=success"\nlog "stage=complete"\nlog "Local OCR component installed."\necho "Python: ${VENV_DIR}/bin/python"\necho "Script: $RUNTIME_SCRIPT"\n';
   }
 });
 
@@ -4700,6 +4786,7 @@ var require_sync_lifecycle_utils = __commonJS({
   "src/sync-lifecycle-utils.js"(exports2, module2) {
     "use strict";
     var crypto2 = require("node:crypto");
+    var channelsDiagnostic2 = require_wechat_channels_diagnostic_utils();
     var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
       UNSUPPORTED_PLATFORM: "暂不支持此平台",
       NETWORK_FAILED: "网络连接失败，请稍后重新同步",
@@ -4725,6 +4812,7 @@ var require_sync_lifecycle_utils = __commonJS({
     function categorizeSyncFailure2(error) {
       const code = String(error && error.code || "").trim().toUpperCase();
       const message = String(error && error.message || error || "").trim().toUpperCase();
+      if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
       if (code === "UNSUPPORTED_PLATFORM" || /UNSUPPORTED_(?:PLATFORM|RECORD_TYPE|SITE)/.test(code) || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)/.test(message) || /\u6682\u4e0d\u652f\u6301\u6b64\u5e73\u53f0|\u4e0d\u652f\u6301(?:\u6b64|\u8be5)?\u5e73\u53f0/.test(message)) {
         return "UNSUPPORTED_PLATFORM";
       }
@@ -4928,8 +5016,10 @@ var require_sync_lifecycle_utils = __commonJS({
       const meaningfulLength = getMeaningfulMarkdownLength(markdown);
       const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20;
       const hasDeclaredFailureState = ["failed", "link_saved", "wechat_captcha"].includes(conversionStatus) || transcriptionStatus === "failed";
+      const channelsOutcome = channelsDiagnostic2.outcome(metadata.mediaResolutionDiagnostic);
+      if (channelsOutcome && transcriptionStatus === "failed") return createSyncLifecycleOutcomeError(channelsOutcome.code, channelsOutcome.message, channelsOutcome.diagnostic);
       if (transcriptionStatus === "failed" && !transcription) {
-        return createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", declaredError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
+        return createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", metadata.transcriptionError || metadata.conversionError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
       }
       if (/UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError) && (hasDeclaredFailureState || !hasUsableOutput)) {
         return createSyncLifecycleOutcomeError("UNSUPPORTED_PLATFORM", "暂不支持此平台");
@@ -8562,6 +8652,7 @@ var require_transcription_note_title_utils = __commonJS({
 });
 
 // src/main.js
+var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
 var { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require_wechat_request_gate();
@@ -8803,8 +8894,8 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.141";
-var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1";
+var PLUGIN_RUNTIME_VERSION = "1.3.142";
+var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
@@ -8873,8 +8964,8 @@ var LOCAL_COMPONENT_MANIFEST_PATH = "/local-components/manifest";
 var LOCAL_COMPONENT_DOWNLOAD_HOST = "wechat-inbox-components-1428610652.cos.ap-shanghai.myqcloud.com";
 var LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 var LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 9e4;
-var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "c6efec45d13e557b9f0feccbcd22d1249145b3d817d0c3fe2f98f847c470251b";
-var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "03bd44b0872e06234756eaaceca0028cd16d4eeb36096ec2bc276e0923956823";
+var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c";
+var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "08c7edf5f91653b825694d1ffc8c82d31d6ddb32e5f8689012fc5698062be432";
 var LOCAL_COMPONENT_ASSET_ENV_KEYS = Object.freeze({
   asr: Object.freeze({
     model: "WECHAT_INBOX_ASR_MODEL_URL",
@@ -9047,7 +9138,7 @@ var ALIYUN_TRANSCRIPTION_PROMPT = "请逐字转写这段音频，只输出转写
 var LOCAL_ASR_HOME = ".wechat-inbox-local-asr";
 var LOCAL_ASR_SAFE_HOME = "wechat-inbox-local-asr";
 var LOCAL_OCR_HOME = ".wechat-inbox-local-ocr";
-var LOCAL_OCR_INSTALL_TIMEOUT_MS = 10 * 60 * 1e3;
+var LOCAL_OCR_INSTALL_TIMEOUT_MS = 30 * 60 * 1e3;
 var LOCAL_OCR_RUN_TIMEOUT_MS = 90 * 1e3;
 var LOCAL_OCR_BATCH_RUN_TIMEOUT_MS = 6 * 60 * 1e3;
 var LOCAL_OCR_BATCH_RUNNER_VERSION = "xiaohongshu-batch-v1";
@@ -9834,7 +9925,8 @@ function writeLocalAsrInstallLog({
   stdout = "",
   stderr = "",
   error = "",
-  status = ""
+  status = "",
+  downloadDiagnostic = ""
 } = {}) {
   try {
     fs.mkdirSync(installRoot, { recursive: true });
@@ -9851,6 +9943,7 @@ function writeLocalAsrInstallLog({
       String(stderr || ""),
       "--- error ---",
       String(error || ""),
+      ...downloadDiagnostic ? [String(downloadDiagnostic)] : [],
       ""
     ];
     fs.writeFileSync(logPath, lines.join("\n"), "utf8");
@@ -10647,7 +10740,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       source,
       /INSTALLER_SCRIPT_VERSION=["'](\d+)\.(\d+)\.(\d+)["']/,
       [1, 3, 14]
-    ) && source.includes('ASR_RECOVERY_VERSION="macos-cpu-recovery-v1"') && !source.includes("SIMPLIFIED_PROMPT") && !source.includes("--prompt") && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"') && source.includes("CHUNK_SECONDS=120") && source.includes("choose_chunk_seconds") && source.includes("find_metal_resources_dir") && source.includes("GGML_METAL_PATH_RESOURCES") && source.includes("metalAcceleration=failed") && source.includes("transcribe-last.log") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes("run_with_heartbeat segmenting") && source.includes("validate_local_asr_inference") && source.includes("PUBLIC_CLOUDBASE_CDN_DISABLED=") && source.includes('AUTHORIZED_MODEL_URL="${WECHAT_INBOX_ASR_MODEL_URL:-}"') && source.includes("MODEL_URLS=()") && source.includes("bootstrap_uv") && source.includes("detect_uv_arch") && source.includes("setup_python_and_packages") && source.includes("resolve_asr_wheelhouse_location") && source.includes("Authorized ASR wheelhouse ZIP SHA256 validation failed.") && source.includes("UV_PYTHON_DOWNLOADS=automatic") && source.includes("UV_PYTHON_PREFERENCE=managed") && source.includes("PYTHON_BUILD_STANDALONE_BUILD=") && source.includes("PYTHON_BUILD_STANDALONE_VERSION=") && source.includes("PYTHON_RUNTIME_VERSION=") && source.includes("PYTHON_RUNTIME_SHA256_ARM64=") && source.includes("PYTHON_RUNTIME_SHA256_X64=") && source.includes('AUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_ASR_PYTHON_RUNTIME_URL:-}"') && source.includes('GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"') && source.includes('runtime_urls+=("${GITHUB_PYTHON_DOWNLOAD_BASE%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}")') && source.includes("DOWNLOAD_LOW_SPEED_LIMIT=65536") && source.includes("DOWNLOAD_LOW_SPEED_TIME=30") && source.includes("PORTABLE_PYTHON=") && source.includes("install_portable_python") && source.indexOf("Package index ASR install failed; retrying authorized wheelhouse.") >= 0 && source.indexOf("Package index ASR install failed; retrying authorized wheelhouse.") < source.lastIndexOf("install_asr_packages_from_wheelhouse") && source.includes("python_runtime_sha256") && source.includes('verify_sha256 "$archive_path" "$expected_sha256"') && source.includes("sys.version.split()[0] == sys.argv[1]") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes('"$UV_BIN" python install 3.12') && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python') && source.includes('mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && !source.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && portablePythonIndex >= 0 && uvManagedPythonIndex > portablePythonIndex;
+    ) && source.includes('ASR_RECOVERY_VERSION="macos-cpu-recovery-v1"') && !source.includes("SIMPLIFIED_PROMPT") && !source.includes("--prompt") && source.includes('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"') && source.includes("CHUNK_SECONDS=120") && source.includes("choose_chunk_seconds") && source.includes("find_metal_resources_dir") && source.includes("GGML_METAL_PATH_RESOURCES") && source.includes("metalAcceleration=failed") && source.includes("transcribe-last.log") && source.includes("progressHeartbeatAt") && source.includes("progressPid") && source.includes("run_with_heartbeat segmenting") && source.includes("validate_local_asr_inference") && source.includes("PUBLIC_CLOUDBASE_CDN_DISABLED=") && source.includes('AUTHORIZED_MODEL_URL="${WECHAT_INBOX_ASR_MODEL_URL:-}"') && source.includes("MODEL_URLS=()") && source.includes("bootstrap_uv") && source.includes("detect_uv_arch") && source.includes("setup_python_and_packages") && source.includes("resolve_asr_wheelhouse_location") && source.includes("Authorized ASR wheelhouse ZIP SHA256 validation failed.") && source.includes("UV_PYTHON_DOWNLOADS=automatic") && source.includes("UV_PYTHON_PREFERENCE=managed") && source.includes("PYTHON_BUILD_STANDALONE_BUILD=") && source.includes("PYTHON_BUILD_STANDALONE_VERSION=") && source.includes("PYTHON_RUNTIME_VERSION=") && source.includes("PYTHON_RUNTIME_SHA256_ARM64=") && source.includes("PYTHON_RUNTIME_SHA256_X64=") && source.includes('AUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_ASR_PYTHON_RUNTIME_URL:-}"') && source.includes('GITHUB_PYTHON_DOWNLOAD_BASE="https://github.com/astral-sh/python-build-standalone/releases/download"') && source.includes('runtime_urls+=("${GITHUB_PYTHON_DOWNLOAD_BASE%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}")') && source.includes("DOWNLOAD_LOW_SPEED_LIMIT=65536") && source.includes("DOWNLOAD_LOW_SPEED_TIME=30") && source.includes("PORTABLE_PYTHON=") && source.includes("install_portable_python") && source.includes("tencent-authorized-first-v1") && source.includes('if install_asr_packages_from_wheelhouse "$python_bin"') && source.includes("python_runtime_sha256") && source.includes('verify_sha256 "$archive_path" "$expected_sha256"') && source.includes("sys.version.split()[0] == sys.argv[1]") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes('"$UV_BIN" python install 3.12') && source.includes('"$UV_BIN" venv "$VENV_DIR" --python 3.12 --managed-python') && source.includes('mv -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && !source.includes('cp -f "$CACHE_ROOT/ggml-small.bin" "$MODEL_PATH"') && portablePythonIndex >= 0 && uvManagedPythonIndex > portablePythonIndex;
   }
   return hasMinimumInstallerVersion(
     source,
@@ -10662,9 +10755,9 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
   if (!source.includes("rapidocr-onnxruntime==1.4.4")) return false;
   if (!source.includes("pillow==12.3.0")) return false;
   if (isMac) {
-    return source.includes("PUBLIC_CLOUDBASE_CDN_DISABLED=") && source.includes('AUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL:-}"') && source.includes('AUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_OCR_WHEELHOUSE_URL:-}"') && source.includes("TENCENT_PIP_INDEX_URL") && source.includes('GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"') && source.includes('runtime_urls+=("${GITHUB_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}")') && source.includes("DOWNLOAD_LOW_SPEED_LIMIT=65536") && source.includes("DOWNLOAD_LOW_SPEED_TIME=30") && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"') && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"') && source.includes("PORTABLE_PYTHON=") && source.includes("download_with_retry") && source.includes("find_existing_python") && source.includes("install_portable_python") && source.includes("resolve_ocr_wheelhouse_location") && source.includes("Authorized OCR wheelhouse ZIP SHA256 validation failed.") && source.indexOf("Package index OCR install failed; retrying authorized wheelhouse.") >= 0 && source.indexOf("Package index OCR install failed; retrying authorized wheelhouse.") < source.lastIndexOf("install_ocr_packages_from_wheelhouse") && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes(".wechat-inbox-local-asr/python-venv/bin/python");
+    return source.includes("PUBLIC_CLOUDBASE_CDN_DISABLED=") && source.includes('AUTHORIZED_PYTHON_RUNTIME_URL="${WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL:-}"') && source.includes('AUTHORIZED_WHEELHOUSE_URL="${WECHAT_INBOX_OCR_WHEELHOUSE_URL:-}"') && source.includes("TENCENT_PIP_INDEX_URL") && source.includes('GITHUB_PYTHON_INSTALL_MIRROR="https://github.com/astral-sh/python-build-standalone/releases/download"') && source.includes('runtime_urls+=("${GITHUB_PYTHON_INSTALL_MIRROR%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${file_name}")') && source.includes("DOWNLOAD_LOW_SPEED_LIMIT=65536") && source.includes("DOWNLOAD_LOW_SPEED_TIME=30") && source.includes('PYTHON_BUILD_STANDALONE_BUILD="20260623"') && source.includes('PYTHON_BUILD_STANDALONE_VERSION="3.12.13+20260623"') && source.includes("PORTABLE_PYTHON=") && source.includes("download_with_retry") && source.includes("find_existing_python") && source.includes("install_portable_python") && source.includes("resolve_ocr_wheelhouse_location") && source.includes("Authorized OCR wheelhouse ZIP SHA256 validation failed.") && source.includes("tencent-authorized-first-v1") && source.includes('if install_ocr_packages_from_wheelhouse "$python_bin"') && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"') && source.includes(".wechat-inbox-local-asr/python-venv/bin/python");
   }
-  return source.includes("$PublicCloudBaseCdnDisabled") && source.includes("$AuthorizedPythonRuntimeUrl = $env:WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL") && source.includes("$AuthorizedWheelhouseUrl = $env:WECHAT_INBOX_OCR_WHEELHOUSE_URL") && source.includes("$TencentPipIndexUrl") && source.includes('$PythonBuildStandaloneBuild = "20260623"') && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"') && source.includes("$PortablePython") && source.includes("$PythonRuntimeFallbackMirrors") && source.includes("function Get-PythonRuntimeUrls") && source.includes("$bases = @($PythonRuntimeFallbackMirrors)") && source.includes("Invoke-DownloadFile -Urls") && source.includes("Download-TextFile") && source.includes("function Install-PortablePython") && source.includes("function Resolve-OcrWheelhouseLocation") && source.includes("Authorized OCR wheelhouse ZIP SHA256 validation failed.") && source.includes("function Expand-TarGzArchiveWithPowerShell") && source.includes("Package index OCR install failed; retrying authorized wheelhouse.") && source.includes("unique-staging-transaction-v2") && source.includes("$python = Install-PortablePython") && source.includes("Invoke-Python -PythonCommand $python -m venv $VenvDir");
+  return source.includes("$PublicCloudBaseCdnDisabled") && source.includes("$AuthorizedPythonRuntimeUrl = $env:WECHAT_INBOX_OCR_PYTHON_RUNTIME_URL") && source.includes("$AuthorizedWheelhouseUrl = $env:WECHAT_INBOX_OCR_WHEELHOUSE_URL") && source.includes("$TencentPipIndexUrl") && source.includes('$PythonBuildStandaloneBuild = "20260623"') && source.includes('$PythonBuildStandaloneVersion = "3.12.13+20260623"') && source.includes("$PortablePython") && source.includes("$PythonRuntimeFallbackMirrors") && source.includes("function Get-PythonRuntimeUrls") && source.includes("$bases = @($PythonRuntimeFallbackMirrors)") && source.includes("Invoke-DownloadFile -Urls") && source.includes("Download-TextFile") && source.includes("function Install-PortablePython") && source.includes("function Resolve-OcrWheelhouseLocation") && source.includes("Authorized OCR wheelhouse ZIP SHA256 validation failed.") && source.includes("function Expand-TarGzArchiveWithPowerShell") && source.includes("tencent-authorized-first-v1") && source.includes("if (Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath)") && source.includes("unique-staging-transaction-v2") && source.includes("$python = Install-PortablePython") && source.includes("Invoke-Python -PythonCommand $python -m venv $VenvDir");
 }
 __name(isLocalOcrInstallerCurrent, "isLocalOcrInstallerCurrent");
 function isTrustedLocalOcrInstallerSource(scriptText, expectedSha256, isMac = false) {
@@ -11048,7 +11141,7 @@ function normalizeLocallyQuarantinedRecordIds(value) {
   )].slice(0, 200);
 }
 __name(normalizeLocallyQuarantinedRecordIds, "normalizeLocallyQuarantinedRecordIds");
-function normalizeRecentSyncFailures(value) {
+function normalizeRecentSyncFailures(value, settings = {}) {
   const unique = /* @__PURE__ */ new Map();
   (Array.isArray(value) ? value : []).forEach((item) => {
     const recordId = String(item && item.recordId || "").trim();
@@ -11060,7 +11153,8 @@ function normalizeRecentSyncFailures(value) {
       bindingToken,
       bindingLabel: String(item && item.bindingLabel || "").trim(),
       message: String(item && item.message || "").trim().slice(0, 500),
-      failedAt: String(item && item.failedAt || "").trim()
+      failedAt: String(item && item.failedAt || "").trim(),
+      ...channelsDiagnostic.sanitize(item && item.diagnostic, settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, settings) } : {}
     });
   });
   return [...unique.values()].slice(-200);
@@ -11198,7 +11292,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
     merged.locallyQuarantinedRecordIds
   );
-  merged.recentSyncFailures = normalizeRecentSyncFailures(merged.recentSyncFailures);
+  merged.recentSyncFailures = normalizeRecentSyncFailures(merged.recentSyncFailures, merged);
   merged.recentSyncFailureCleanupErrors = normalizeRecentSyncFailureCleanupErrors(
     merged.recentSyncFailureCleanupErrors
   );
@@ -23417,7 +23511,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     return await this.deleteCloudRecord(context.recordId, context.binding || null);
   }
   getRecentSyncFailures() {
-    return normalizeRecentSyncFailures(this.settings && this.settings.recentSyncFailures);
+    return normalizeRecentSyncFailures(this.settings && this.settings.recentSyncFailures, this.settings);
   }
   getRecentSyncFailureCleanupErrors() {
     return normalizeRecentSyncFailureCleanupErrors(
@@ -23443,10 +23537,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         bindingToken,
         bindingLabel: String(item.bindingLabel || "").trim(),
         message: String(item.message || "").trim().slice(0, 500),
-        failedAt: (/* @__PURE__ */ new Date()).toISOString()
+        failedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        ...channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}
       });
     });
-    const nextFailures = normalizeRecentSyncFailures([...entries.values()]);
+    const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
     await this.saveSettings({
       ...this.settings,
       recentSyncFailures: nextFailures
@@ -23819,6 +23914,14 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     const authorizedManifest = await this.getAuthorizedLocalComponentManifest("ocr");
     const componentProcessEnv = buildAuthorizedLocalComponentProcessEnv(process.env, authorizedManifest);
+    const authorizedAssetIds = new Set((authorizedManifest && authorizedManifest.assets || []).map((asset) => asset.id));
+    const downloadDiagnostic = [
+      "ocrDownloadPolicy=tencent-authorized-first-v1",
+      "ocrAuthorizedManifest=" + Boolean(authorizedManifest),
+      "ocrAuthorizedPython=" + authorizedAssetIds.has("python-runtime"),
+      "ocrAuthorizedWheelhouse=" + authorizedAssetIds.has("wheelhouse"),
+      "ocrInstallTimeoutMinutes=" + LOCAL_OCR_INSTALL_TIMEOUT_MS / 6e4
+    ].join("\n");
     const installerPath = await this.getAvailableLocalOcrInstallerPath();
     if (!fs.existsSync(installerPath)) {
       throw new Error(`本地转写组件的图片文字识别安装器不存在：${installerPath}`);
@@ -23834,7 +23937,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }, (error, stdout, stderr) => {
         if (error) {
           const timedOut = error.killed || error.signal === "SIGTERM" || /timed out|timeout/i.test(error.message || "");
-          const errorText = timedOut ? "本地转写组件安装超时：图片文字识别模块安装超过 10 分钟仍未完成。通常是 Python 或依赖下载源访问过慢，安装已中止。" : stderr || stdout || error.message || String(error);
+          const errorText = timedOut ? "本地转写组件安装超时：图片文字识别模块安装超过 30 分钟仍未完成。通常是 Python 或依赖下载源访问过慢，安装已中止。" : stderr || stdout || error.message || String(error);
           writeLocalAsrInstallLog({
             installRoot,
             platform,
@@ -23843,7 +23946,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
             stdout,
             stderr,
             error: errorText,
-            status: "failed"
+            status: "failed",
+            downloadDiagnostic
           });
           reject(new Error(errorText));
           return;
@@ -23867,7 +23971,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         stdout: installResult && installResult.stdout,
         stderr: installResult && installResult.stderr,
         error: missingText,
-        status: "failed"
+        status: "failed",
+        downloadDiagnostic
       });
       throw new Error(`本地转写组件安装不完整：${missingText}`);
     }
@@ -25470,6 +25575,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
   }
   async runLocalTranscription(audioUrl, options = {}) {
+    var _a, _b, _c, _d;
+    throwIfAborted(options.signal);
     await this.ensureLocalComponentReadyForUse("音视频转写", {
       reason: "first-use",
       requireAsr: true,
@@ -25487,11 +25594,31 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const platform = this.getConfiguredLocalAsrPlatform();
     const managed = platform === "darwin" && (commandTemplate === getDefaultLocalTranscriptionCommand("darwin") && installRoot === getLocalAsrInstallRoot(os.homedir(), "default", "darwin") || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot) && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
-    const runtime = platform === "darwin" ? asrRecovery.runtimeIdentity(installRoot) : {};
+    const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
     const session = { startedAt: (/* @__PURE__ */ new Date()).toISOString(), platform, recordId: options.recordId || "", runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
     const progressTitle = options.title || "";
     const abortController = new AbortController();
+    let ownedChild = null;
+    const cancelLocal = /* @__PURE__ */ __name(() => {
+      abortController.abort();
+      const child = ownedChild;
+      if (!child || child.killed) return;
+      try {
+        if (process.platform === "win32" && Number.isInteger(child.pid) && child.pid > 0) {
+          childProcess.spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+        } else if (process.platform === "darwin" && Number.isInteger(child.pid) && child.pid > 0) {
+          process.kill(-child.pid, "SIGTERM");
+        }
+      } catch (_) {
+      }
+      try {
+        child.kill();
+      } catch (_) {
+      }
+    }, "cancelLocal");
+    (_a = options.signal) == null ? void 0 : _a.addEventListener("abort", cancelLocal, { once: true });
+    if ((_b = options.signal) == null ? void 0 : _b.aborted) cancelLocal();
     this.currentTranscriptionAbortController = abortController;
     this.currentTranscriptionContext = {
       recordId: options.recordId || "",
@@ -25535,6 +25662,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let inputPath = "";
     let outputPath = "";
     let command = "";
+    let channelsStage = "download";
     try {
       this.showSyncProgress({
         ...options,
@@ -25559,6 +25687,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }, "onProgress")
       });
       throwIfAborted(abortController.signal);
+      channelsStage = "transcribe";
       outputPath = `${inputPath}.txt`;
       const quote = /* @__PURE__ */ __name((value) => `"${String(value).replace(/"/g, '\\"')}"`, "quote");
       command = commandTemplate.includes("{input}") ? commandTemplate.replace(/\{input\}/g, quote(inputPath)).replace(/\{output\}/g, quote(outputPath)) : `${commandTemplate} ${quote(inputPath)}`;
@@ -25585,6 +25714,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           asrRecovery.saveSession(installRoot, session, this.settings);
         }, "onAttempt"),
         execute: /* @__PURE__ */ __name(({ cpu: cpu2, attempt }) => new Promise((resolve, reject) => {
+          var _a2;
           throwIfAborted(abortController.signal);
           if (attempt > 1) {
             new Notice("本地转写引擎崩溃，正在用 CPU 兼容模式重试一次。", 6e3);
@@ -25600,8 +25730,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             detached: process.platform === "darwin",
             env: { ...process.env, WECHAT_INBOX_ASR_CPU_ONLY: cpu2 ? "1" : "0" }
           }, (error, stdout2, stderr2) => {
-            var _a;
+            var _a3;
             stopProgressPolling();
+            ownedChild = null;
             this.currentTranscriptionProcess = null;
             if (abortController.signal.aborted) {
               reject(createAbortError());
@@ -25613,14 +25744,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               wrapped.stderr = stderr2;
               wrapped.exitCode = error.code;
               wrapped.signal = error.signal;
-              wrapped.asrStage = ((_a = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))) == null ? void 0 : _a.stage) || "unknown";
+              wrapped.asrStage = ((_a3 = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))) == null ? void 0 : _a3.stage) || "unknown";
               reject(wrapped);
               return;
             }
             emitLocalProgress(100);
             resolve({ stdout: stdout2, stderr: stderr2 });
           });
+          ownedChild = child;
           this.currentTranscriptionProcess = child;
+          if ((_a2 = options.signal) == null ? void 0 : _a2.aborted) cancelLocal();
           this.currentTranscriptionProcessDetached = process.platform === "darwin";
         }), "execute")
       });
@@ -25642,9 +25775,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       });
       return transcription;
     } catch (error) {
+      error.channelsStage = error.channelsStage || channelsStage;
       session.status = isAbortError(error) ? "cancelled" : "failed";
       if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? "，CPU 兼容重试仍失败" : ""}；请复制详细诊断。${error.message}`;
       if (isAbortError(error)) {
+        if ((_c = options.signal) == null ? void 0 : _c.aborted) throw createAbortError();
         throw createRetryableTranscriptionError("用户已停止当前转写");
       }
       appendLocalAsrRunLog({
@@ -25659,6 +25794,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       });
       throw error;
     } finally {
+      (_d = options.signal) == null ? void 0 : _d.removeEventListener("abort", cancelLocal);
       session.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
       session.freeMemoryBytesAfter = os.freemem();
       asrRecovery.saveSession(installRoot, session, this.settings);
@@ -25798,10 +25934,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const downloadedBuffer = Buffer.from(downloadedArrayBuffer);
     throwIfAborted(options.signal);
-    const buffer = options.decryptKey ? decryptWechatChannelsMediaBuffer(downloadedBuffer, options.decryptKey) : downloadedBuffer;
+    let buffer = downloadedBuffer;
+    if (options.decryptKey) {
+      try {
+        buffer = decryptWechatChannelsMediaBuffer(downloadedBuffer, options.decryptKey);
+      } catch (error) {
+        error.channelsStage = "decrypt";
+        error.code = error.code || "MEDIA_DECRYPT_FAILED";
+        throw error;
+      }
+    }
     const invalidReason = getInvalidDownloadedMediaReason(buffer);
     if (invalidReason) {
-      throw new Error(`${invalidReason}：${cleanDisplayUrl(downloadedUrl || audioUrl)}`);
+      throw Object.assign(new Error(`${invalidReason}：${cleanDisplayUrl(downloadedUrl || audioUrl)}`), {
+        channelsStage: options.decryptKey ? "decrypt" : "download",
+        code: options.decryptKey ? "MEDIA_DECRYPT_INVALID" : "MEDIA_DOWNLOAD_INVALID"
+      });
     }
     const ext = getAudioFormatFromUrl(downloadedUrl || audioUrl);
     const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString("hex")}.${ext}`);
@@ -26576,6 +26724,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     sourceTitle = "",
     mediaResolutionDiagnostic = null,
     refreshMediaUrls = null,
+    preparedMedia = false,
     signal = null
   }) {
     throwIfAborted(signal);
@@ -26592,9 +26741,18 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       mediaDiagnosticTrace.downloadAttempts.push(attempt);
       mediaDiagnosticTrace.downloadAttempts = mediaDiagnosticTrace.downloadAttempts.slice(-24);
     }, "reportMediaDownloadAttempt");
-    const getMediaResolutionDiagnostic = /* @__PURE__ */ __name((finalOutcome) => mediaDiagnosticTrace ? { ...mediaDiagnosticTrace, finalOutcome: String(finalOutcome || mediaDiagnosticTrace.finalOutcome || "") } : null, "getMediaResolutionDiagnostic");
+    const getMediaResolutionDiagnostic = /* @__PURE__ */ __name((finalOutcome) => {
+      if (!mediaDiagnosticTrace) return null;
+      const value = { ...mediaDiagnosticTrace, finalOutcome: String(finalOutcome || mediaDiagnosticTrace.finalOutcome || ""), elapsedMs: Date.now() - Date.parse(mediaDiagnosticTrace.startedAt || (/* @__PURE__ */ new Date()).toISOString()) };
+      if (value.source === "wechat-channels" && ["subtitle-ready", "transcription-ready"].includes(finalOutcome)) {
+        delete value.failure;
+        value.stage = "finished";
+      }
+      return value.source === "wechat-channels" ? channelsDiagnostic.sanitize(value, this.settings) : value;
+    }, "getMediaResolutionDiagnostic");
     const metadataWithSocialMetrics = {
       ...metadata,
+      conversionError: "",
       contentCategory: metadata.contentCategory || "音视频",
       ...hasSocialMetrics(socialMetrics) ? { socialMetrics: withCapturedSocialMetrics(socialMetrics, (/* @__PURE__ */ new Date()).toISOString()) } : {},
       ...normalizedSourceTitle ? { sourceTitle: normalizedSourceTitle } : {}
@@ -26630,7 +26788,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         candidateMetadata = { ...value, ...extra };
       }
       const normalizedUrl = normalizeExtractedUrl(candidateUrl);
-      if (!/^https?:\/\//i.test(normalizedUrl) || !isLikelyMediaUrl(normalizedUrl)) return;
+      if (!/^https?:\/\//i.test(normalizedUrl) || !preparedMedia && !isLikelyMediaUrl(normalizedUrl)) return;
       const existing = candidateMap.get(normalizedUrl) || { url: normalizedUrl };
       const decryptKey = String(
         candidateMetadata.decryptKey || candidateMetadata.decodeKey || candidateMetadata.decode_key || candidateMetadata.wechatChannelsDecodeKey || existing.decryptKey || existing.decodeKey || ""
@@ -26646,7 +26804,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     addCandidate(mediaUrl);
     (Array.isArray(mediaUrls) ? mediaUrls : []).forEach((item) => addCandidate(item));
     (Array.isArray(mediaItems) ? mediaItems : []).forEach((item) => addCandidate(item));
-    const getCandidates = /* @__PURE__ */ __name(() => sortMediaUrlsForTranscription(Array.from(candidateMap.keys())).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
+    const getCandidates = /* @__PURE__ */ __name(() => (preparedMedia ? Array.from(candidateMap.keys()) : sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
     const candidates = getCandidates();
     if (!candidates.length) {
       return {
@@ -26740,15 +26898,21 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             }
           };
         } catch (candidateError) {
-          if (isAbortError(candidateError)) throw candidateError;
+          if (isAbortError(candidateError) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
           lastError = candidateError;
+          const candidateStage = candidateError.channelsStage || (/LOCAL_COMPONENT/.test(candidateError.code || "") || /组件|未配置.*命令|脚本过旧/.test(candidateError.message || "") ? "local-component" : "transcribe");
+          if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "wechat-channels") {
+            channelsDiagnostic.noteFailure(mediaDiagnosticTrace, candidateError, candidateStage);
+          }
           const candidateStatus = getTransportErrorDiagnostic(candidateError).status;
-          if ([401, 403, 412].includes(candidateStatus)) shouldRefreshMediaUrls = true;
+          if ([401, 403, 412].includes(candidateStatus) && ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) !== "wechat-channels" || candidateStage === "download")) shouldRefreshMediaUrls = true;
         }
       }
       throw lastError || new Error("未能完成音视频转写");
     } catch (error) {
+      if (isAbortError(error)) throw error;
       if (isRetryableTranscriptionError(error)) {
+        if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "wechat-channels") error.diagnostic = channelsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
         throw error;
       }
       return {
@@ -27060,18 +27224,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       refreshMediaUrls
     });
   }
-  async prepareWechatChannelsMedia(record, url, binding = null, title = "") {
+  async prepareWechatChannelsMedia(record, url, binding = null, title = "", options = {}) {
     var _a;
+    throwIfAborted(options.signal);
     const response = await this.requestJson("/media/prepare", "POST", {
       url,
       recordId: getRecordId(record),
       source: "wechat-channels-local-transcription",
       title: title || ((_a = record == null ? void 0 : record.metadata) == null ? void 0 : _a.title) || ""
-    }, binding, { noCache: true });
+    }, binding, { noCache: true, ...options.signal ? { signal: options.signal } : {} });
+    throwIfAborted(options.signal);
     const data = (response == null ? void 0 : response.data) || {};
     const mediaUrl = String(data.mediaUrl || data.audioUrl || "").trim();
     if (!/^https?:\/\//i.test(mediaUrl)) {
-      throw new Error("视频号云端解析未返回可下载的媒体地址");
+      throw Object.assign(new Error("视频号云端解析未返回可下载的媒体地址"), { code: "MEDIA_PREPARE_EMPTY" });
     }
     return {
       mediaUrl,
@@ -27117,13 +27283,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     return normalizeWechatChannelsFeedPayload(body);
   }
-  async hydrateWechatChannelsTranscript(record, url, binding = null, title = "") {
-    const metadata = record.metadata || {};
+  async hydrateWechatChannelsTranscript(record, url, binding = null, title = "", options = {}) {
+    var _a;
+    throwIfAborted(options.signal);
+    const metadata = { ...record.metadata || {}, conversionError: "" };
+    record = { ...record, metadata };
+    const trace = channelsDiagnostic.create(url, os.platform(), os.arch());
     let feed = {};
     let preparedMedia = null;
     let resolutionError = "";
     try {
-      preparedMedia = await this.prepareWechatChannelsMedia(record, url, binding, title);
+      preparedMedia = await this.prepareWechatChannelsMedia(record, url, binding, title, options);
+      throwIfAborted(options.signal);
+      trace.mediaHost = channelsDiagnostic.endpoint(preparedMedia.mediaUrl).host;
+      trace.mediaCandidateCount = 1;
       feed = {
         title: preparedMedia.title,
         author: preparedMedia.author,
@@ -27132,7 +27305,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         coverUrl: preparedMedia.coverUrl
       };
     } catch (error) {
-      resolutionError = String((error == null ? void 0 : error.message) || error || "视频号云端解析失败");
+      if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
+      const diagnostic = channelsDiagnostic.noteFailure(trace, error, "prepare");
+      resolutionError = channelsDiagnostic.outcome(diagnostic).message;
     }
     const mediaUrl = (preparedMedia == null ? void 0 : preparedMedia.mediaUrl) || "";
     if (mediaUrl) {
@@ -27143,6 +27318,23 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         mediaUrls: [mediaUrl],
         mediaItems: [{ url: mediaUrl }],
         source: preparedMedia.source || "wechat-channels-media-prepare",
+        preparedMedia: true,
+        signal: options.signal || null,
+        mediaResolutionDiagnostic: trace,
+        refreshMediaUrls: /* @__PURE__ */ __name(async () => {
+          var _a2;
+          throwIfAborted(options.signal);
+          trace.refreshCount = 1;
+          try {
+            const fresh = await this.prepareWechatChannelsMedia(record, url, binding, title, options);
+            trace.mediaHost = channelsDiagnostic.endpoint(fresh.mediaUrl).host;
+            return [fresh.mediaUrl];
+          } catch (error) {
+            if (isAbortError(error) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
+            channelsDiagnostic.noteFailure(trace, error, "prepare");
+            throw error;
+          }
+        }, "refreshMediaUrls"),
         markdown: buildWechatChannelsSourceMarkdown(feed),
         binding,
         title,
@@ -27187,6 +27379,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionStatus: "failed",
           transcriptionSource: "wechat-channels-private-resolver",
           transcriptionError: finalError,
+          mediaResolutionDiagnostic: channelsDiagnostic.sanitize(trace, this.settings),
           conversionStatus: "link_saved"
         }),
         markdown: buildWechatChannelsUnavailableMarkdown(url, feed, finalError),
@@ -27221,12 +27414,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const isFeishuLink = isFeishuUrl(url);
     const feishuCloudOAuthStatus = isFeishuLink ? await this.getFeishuCloudOAuthStatus(binding) : null;
-    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
+    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && (!isWechatChannelsUrl(url) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim()) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       return record;
     }
     try {
       if (isWechatChannelsUrl(url)) {
-        return await this.hydrateWechatChannelsTranscript(record, url, binding, title);
+        return await this.hydrateWechatChannelsTranscript(record, url, binding, title, { signal });
       }
       if (isFeishuLink) {
         let openApiError = null;
@@ -29022,7 +29215,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || "pending";
-      const transcriptionError = createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
+      const transcriptionError = channelsOutcome ? Object.assign(new Error(channelsOutcome.message), channelsOutcome) : createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
       if (metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === "object") {
         transcriptionError.diagnostic = metadata.mediaResolutionDiagnostic;
       }
@@ -29607,7 +29801,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             };
           }
         }
-        const diagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? redactSensitiveObject(error.diagnostic) : null;
+        const diagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? error.diagnostic.source === "wechat-channels" ? channelsDiagnostic.sanitize(error.diagnostic, this.settings) : redactSensitiveObject(error.diagnostic) : null;
         let failedTitle = "小红书内容";
         if (!isXiaohongshuUrl(getRecordUrl(record))) {
           try {
@@ -29703,7 +29897,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               recordId,
               bindingToken: binding.token,
               bindingLabel: binding.label,
-              message: item.message
+              message: item.message,
+              ...channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}
             });
           });
           if (result.skipped && result.skipped.length) {
@@ -29833,8 +30028,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         historicalFailureCount: historicalFailures.length,
         historicalFailures: historicalFailures.map((item) => ({
           recordId: item.recordId,
-          message: item.message
+          message: item.message,
+          failedAt: item.failedAt,
+          ...channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}
         })),
+        failureDetails: displayedFailures.slice(0, 20).map((item) => ({ recordId: item.recordId, message: item.message, ...item.diagnostic ? { diagnostic: item.diagnostic } : {} })),
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? "COMPLETION_REPORT_FAILED" : "",
         ...completionWarningDetails.length ? { completionWarningDetails } : {},

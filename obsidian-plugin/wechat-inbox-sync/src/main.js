@@ -1,3 +1,4 @@
+const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
 const { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require('./wechat-request-gate');
@@ -245,8 +246,8 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.141';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1';
+const PLUGIN_RUNTIME_VERSION = '1.3.142';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -316,8 +317,8 @@ const LOCAL_COMPONENT_MANIFEST_PATH = '/local-components/manifest';
 const LOCAL_COMPONENT_DOWNLOAD_HOST = 'wechat-inbox-components-1428610652.cos.ap-shanghai.myqcloud.com';
 const LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest';
 const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
-const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = 'c6efec45d13e557b9f0feccbcd22d1249145b3d817d0c3fe2f98f847c470251b';
-const LOCAL_OCR_MACOS_INSTALLER_SHA256 = '03bd44b0872e06234756eaaceca0028cd16d4eeb36096ec2bc276e0923956823';
+const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c';
+const LOCAL_OCR_MACOS_INSTALLER_SHA256 = '08c7edf5f91653b825694d1ffc8c82d31d6ddb32e5f8689012fc5698062be432';
 const LOCAL_COMPONENT_ASSET_ENV_KEYS = Object.freeze({
   asr: Object.freeze({
     model: 'WECHAT_INBOX_ASR_MODEL_URL',
@@ -500,7 +501,7 @@ const ALIYUN_TRANSCRIPTION_PROMPT = '请逐字转写这段音频，只输出转�
 const LOCAL_ASR_HOME = '.wechat-inbox-local-asr';
 const LOCAL_ASR_SAFE_HOME = 'wechat-inbox-local-asr';
 const LOCAL_OCR_HOME = '.wechat-inbox-local-ocr';
-const LOCAL_OCR_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const LOCAL_OCR_INSTALL_TIMEOUT_MS = 30 * 60 * 1000;
 const LOCAL_OCR_RUN_TIMEOUT_MS = 90 * 1000;
 const LOCAL_OCR_BATCH_RUN_TIMEOUT_MS = 6 * 60 * 1000;
 const LOCAL_OCR_BATCH_RUNNER_VERSION = 'xiaohongshu-batch-v1';
@@ -1585,6 +1586,7 @@ function writeLocalAsrInstallLog({
   stderr = '',
   error = '',
   status = '',
+  downloadDiagnostic = '',
 } = {}) {
   try {
     fs.mkdirSync(installRoot, { recursive: true });
@@ -1601,6 +1603,7 @@ function writeLocalAsrInstallLog({
       String(stderr || ''),
       '--- error ---',
       String(error || ''),
+      ...(downloadDiagnostic ? [String(downloadDiagnostic)] : []),
       '',
     ];
     fs.writeFileSync(logPath, lines.join('\n'), 'utf8');
@@ -2498,8 +2501,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('DOWNLOAD_LOW_SPEED_TIME=30')
       && source.includes('PORTABLE_PYTHON=')
       && source.includes('install_portable_python')
-      && source.indexOf('Package index ASR install failed; retrying authorized wheelhouse.') >= 0
-      && source.indexOf('Package index ASR install failed; retrying authorized wheelhouse.') < source.lastIndexOf('install_asr_packages_from_wheelhouse')
+      && source.includes('tencent-authorized-first-v1')
+      && source.includes('if install_asr_packages_from_wheelhouse "$python_bin"')
       && source.includes('python_runtime_sha256')
       && source.includes('verify_sha256 "$archive_path" "$expected_sha256"')
       && source.includes('sys.version.split()[0] == sys.argv[1]')
@@ -2591,8 +2594,8 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('install_portable_python')
       && source.includes('resolve_ocr_wheelhouse_location')
       && source.includes('Authorized OCR wheelhouse ZIP SHA256 validation failed.')
-      && source.indexOf('Package index OCR install failed; retrying authorized wheelhouse.') >= 0
-      && source.indexOf('Package index OCR install failed; retrying authorized wheelhouse.') < source.lastIndexOf('install_ocr_packages_from_wheelhouse')
+      && source.includes('tencent-authorized-first-v1')
+      && source.includes('if install_ocr_packages_from_wheelhouse "$python_bin"')
       && source.includes('"$PORTABLE_PYTHON" -m venv "$VENV_DIR"')
       && source.includes('.wechat-inbox-local-asr/python-venv/bin/python');
   }
@@ -2612,7 +2615,8 @@ function isLocalOcrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('function Resolve-OcrWheelhouseLocation')
     && source.includes('Authorized OCR wheelhouse ZIP SHA256 validation failed.')
     && source.includes('function Expand-TarGzArchiveWithPowerShell')
-    && source.includes('Package index OCR install failed; retrying authorized wheelhouse.')
+    && source.includes('tencent-authorized-first-v1')
+    && source.includes('if (Install-OcrPackagesFromWheelhouse -PythonPath $PythonPath)')
     && source.includes('unique-staging-transaction-v2')
     && source.includes('$python = Install-PortablePython')
     && source.includes('Invoke-Python -PythonCommand $python -m venv $VenvDir');
@@ -3082,7 +3086,7 @@ function normalizeLocallyQuarantinedRecordIds(value) {
   )].slice(0, 200);
 }
 
-function normalizeRecentSyncFailures(value) {
+function normalizeRecentSyncFailures(value, settings = {}) {
   const unique = new Map();
   (Array.isArray(value) ? value : []).forEach((item) => {
     const recordId = String(item && item.recordId || '').trim();
@@ -3095,6 +3099,7 @@ function normalizeRecentSyncFailures(value) {
       bindingLabel: String(item && item.bindingLabel || '').trim(),
       message: String(item && item.message || '').trim().slice(0, 500),
       failedAt: String(item && item.failedAt || '').trim(),
+      ...(channelsDiagnostic.sanitize(item && item.diagnostic, settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, settings) } : {}),
     });
   });
   return [...unique.values()].slice(-200);
@@ -3260,7 +3265,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.locallyQuarantinedRecordIds = normalizeLocallyQuarantinedRecordIds(
     merged.locallyQuarantinedRecordIds,
   );
-  merged.recentSyncFailures = normalizeRecentSyncFailures(merged.recentSyncFailures);
+  merged.recentSyncFailures = normalizeRecentSyncFailures(merged.recentSyncFailures, merged);
   merged.recentSyncFailureCleanupErrors = normalizeRecentSyncFailureCleanupErrors(
     merged.recentSyncFailureCleanupErrors,
   );
@@ -16849,7 +16854,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   getRecentSyncFailures() {
-    return normalizeRecentSyncFailures(this.settings && this.settings.recentSyncFailures);
+    return normalizeRecentSyncFailures(this.settings && this.settings.recentSyncFailures, this.settings);
   }
   getRecentSyncFailureCleanupErrors() {
     return normalizeRecentSyncFailureCleanupErrors(
@@ -16877,9 +16882,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         bindingLabel: String(item.bindingLabel || '').trim(),
         message: String(item.message || '').trim().slice(0, 500),
         failedAt: new Date().toISOString(),
+        ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
       });
     });
-    const nextFailures = normalizeRecentSyncFailures([...entries.values()]);
+    const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
     await this.saveSettings({
       ...this.settings,
       recentSyncFailures: nextFailures,
@@ -17301,6 +17307,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     const authorizedManifest = await this.getAuthorizedLocalComponentManifest('ocr');
     const componentProcessEnv = buildAuthorizedLocalComponentProcessEnv(process.env, authorizedManifest);
+    const authorizedAssetIds = new Set((authorizedManifest && authorizedManifest.assets || []).map((asset) => asset.id));
+    // Only capability flags go into diagnostics; signed URLs stay in the child environment.
+    const downloadDiagnostic = [
+      'ocrDownloadPolicy=tencent-authorized-first-v1',
+      'ocrAuthorizedManifest=' + Boolean(authorizedManifest),
+      'ocrAuthorizedPython=' + authorizedAssetIds.has('python-runtime'),
+      'ocrAuthorizedWheelhouse=' + authorizedAssetIds.has('wheelhouse'),
+      'ocrInstallTimeoutMinutes=' + (LOCAL_OCR_INSTALL_TIMEOUT_MS / 60000),
+    ].join('\n');
     const installerPath = await this.getAvailableLocalOcrInstallerPath();
     if (!fs.existsSync(installerPath)) {
       throw new Error(`本地转写组件的图片文字识别安装器不存在：${installerPath}`);
@@ -17317,7 +17332,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (error) {
           const timedOut = error.killed || error.signal === 'SIGTERM' || /timed out|timeout/i.test(error.message || '');
           const errorText = timedOut
-            ? '本地转写组件安装超时：图片文字识别模块安装超过 10 分钟仍未完成。通常是 Python 或依赖下载源访问过慢，安装已中止。'
+            ? '本地转写组件安装超时：图片文字识别模块安装超过 30 分钟仍未完成。通常是 Python 或依赖下载源访问过慢，安装已中止。'
             : (stderr || stdout || error.message || String(error));
           writeLocalAsrInstallLog({
             installRoot,
@@ -17328,6 +17343,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             stderr,
             error: errorText,
             status: 'failed',
+            downloadDiagnostic,
           });
           reject(new Error(errorText));
           return;
@@ -17354,6 +17370,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         stderr: installResult && installResult.stderr,
         error: missingText,
         status: 'failed',
+        downloadDiagnostic,
       });
       throw new Error(`本地转写组件安装不完整：${missingText}`);
     }
@@ -19121,6 +19138,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async runLocalTranscription(audioUrl, options = {}) {
+    throwIfAborted(options.signal);
     await this.ensureLocalComponentReadyForUse('音视频转写', {
       reason: 'first-use',
       requireAsr: true,
@@ -19142,11 +19160,27 @@ class WechatObsidianInboxPlugin extends Plugin {
       && ((commandTemplate === getDefaultLocalTranscriptionCommand('darwin') && installRoot === getLocalAsrInstallRoot(os.homedir(), 'default', 'darwin'))
         || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot)
       && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
-    const runtime = platform === 'darwin' ? asrRecovery.runtimeIdentity(installRoot) : {};
+    const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
     const session = { startedAt: new Date().toISOString(), platform, recordId: options.recordId || '', runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
     const progressTitle = options.title || '';
     const abortController = new AbortController();
+    let ownedChild = null;
+    const cancelLocal = () => {
+      abortController.abort();
+      const child = ownedChild;
+      if (!child || child.killed) return;
+      try {
+        if (process.platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
+          childProcess.spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+        } else if (process.platform === 'darwin' && Number.isInteger(child.pid) && child.pid > 0) {
+          process.kill(-child.pid, 'SIGTERM');
+        }
+      } catch (_) { /* Still attempt to stop the owned shell below. */ }
+      try { child.kill(); } catch (_) { /* Process may already have exited. */ }
+    };
+    options.signal?.addEventListener('abort', cancelLocal, { once: true });
+    if (options.signal?.aborted) cancelLocal();
     this.currentTranscriptionAbortController = abortController;
     this.currentTranscriptionContext = {
       recordId: options.recordId || '',
@@ -19195,6 +19229,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     let inputPath = '';
     let outputPath = '';
     let command = '';
+    let channelsStage = 'download';
     try {
       this.showSyncProgress({
         ...options,
@@ -19219,6 +19254,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       });
       throwIfAborted(abortController.signal);
+      channelsStage = 'transcribe';
       outputPath = `${inputPath}.txt`;
       const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
       command = commandTemplate.includes('{input}')
@@ -19252,6 +19288,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             env: { ...process.env, WECHAT_INBOX_ASR_CPU_ONLY: cpu ? '1' : '0' },
           }, (error, stdout, stderr) => {
             stopProgressPolling();
+            ownedChild = null;
             this.currentTranscriptionProcess = null;
             if (abortController.signal.aborted) { reject(createAbortError()); return; }
             if (error) {
@@ -19263,7 +19300,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
             emitLocalProgress(100); resolve({ stdout, stderr });
           });
+          ownedChild = child;
           this.currentTranscriptionProcess = child;
+          if (options.signal?.aborted) cancelLocal();
           this.currentTranscriptionProcessDetached = process.platform === 'darwin';
         }),
       });
@@ -19288,9 +19327,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       return transcription;
     } catch (error) {
+      error.channelsStage = error.channelsStage || channelsStage;
       session.status = isAbortError(error) ? 'cancelled' : 'failed';
       if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? '，CPU 兼容重试仍失败' : ''}；请复制详细诊断。${error.message}`;
       if (isAbortError(error)) {
+        if (options.signal?.aborted) throw createAbortError();
         throw createRetryableTranscriptionError('用户已停止当前转写');
       }
       appendLocalAsrRunLog({
@@ -19305,6 +19346,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       throw error;
     } finally {
+      options.signal?.removeEventListener('abort', cancelLocal);
       session.finishedAt = new Date().toISOString();
       session.freeMemoryBytesAfter = os.freemem();
       asrRecovery.saveSession(installRoot, session, this.settings);
@@ -19449,12 +19491,17 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     const downloadedBuffer = Buffer.from(downloadedArrayBuffer);
     throwIfAborted(options.signal);
-    const buffer = options.decryptKey
-      ? decryptWechatChannelsMediaBuffer(downloadedBuffer, options.decryptKey)
-      : downloadedBuffer;
+    let buffer = downloadedBuffer;
+    if (options.decryptKey) {
+      try { buffer = decryptWechatChannelsMediaBuffer(downloadedBuffer, options.decryptKey); }
+      catch (error) { error.channelsStage = 'decrypt'; error.code = error.code || 'MEDIA_DECRYPT_FAILED'; throw error; }
+    }
     const invalidReason = getInvalidDownloadedMediaReason(buffer);
     if (invalidReason) {
-      throw new Error(`${invalidReason}：${cleanDisplayUrl(downloadedUrl || audioUrl)}`);
+      throw Object.assign(new Error(`${invalidReason}：${cleanDisplayUrl(downloadedUrl || audioUrl)}`), {
+        channelsStage: options.decryptKey ? 'decrypt' : 'download',
+        code: options.decryptKey ? 'MEDIA_DECRYPT_INVALID' : 'MEDIA_DOWNLOAD_INVALID',
+      });
     }
     const ext = getAudioFormatFromUrl(downloadedUrl || audioUrl);
     const filePath = path.join(os.tmpdir(), `wechat-inbox-sync-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`);
@@ -20345,6 +20392,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     sourceTitle = '',
     mediaResolutionDiagnostic = null,
     refreshMediaUrls = null,
+    preparedMedia = false,
     signal = null,
   }) {
     throwIfAborted(signal);
@@ -20363,11 +20411,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       mediaDiagnosticTrace.downloadAttempts.push(attempt);
       mediaDiagnosticTrace.downloadAttempts = mediaDiagnosticTrace.downloadAttempts.slice(-24);
     };
-    const getMediaResolutionDiagnostic = (finalOutcome) => (mediaDiagnosticTrace
-      ? { ...mediaDiagnosticTrace, finalOutcome: String(finalOutcome || mediaDiagnosticTrace.finalOutcome || '') }
-      : null);
+    const getMediaResolutionDiagnostic = (finalOutcome) => {
+      if (!mediaDiagnosticTrace) return null;
+      const value = { ...mediaDiagnosticTrace, finalOutcome: String(finalOutcome || mediaDiagnosticTrace.finalOutcome || ''), elapsedMs: Date.now() - Date.parse(mediaDiagnosticTrace.startedAt || new Date().toISOString()) };
+      if (value.source === 'wechat-channels' && ['subtitle-ready', 'transcription-ready'].includes(finalOutcome)) { delete value.failure; value.stage = 'finished'; }
+      return value.source === 'wechat-channels' ? channelsDiagnostic.sanitize(value, this.settings) : value;
+    };
     const metadataWithSocialMetrics = {
       ...metadata,
+      conversionError: '',
       contentCategory: metadata.contentCategory || '音视频',
       ...(hasSocialMetrics(socialMetrics)
         ? { socialMetrics: withCapturedSocialMetrics(socialMetrics, new Date().toISOString()) }
@@ -20407,7 +20459,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         candidateMetadata = { ...value, ...extra };
       }
       const normalizedUrl = normalizeExtractedUrl(candidateUrl);
-      if (!/^https?:\/\//i.test(normalizedUrl) || !isLikelyMediaUrl(normalizedUrl)) return;
+      if (!/^https?:\/\//i.test(normalizedUrl) || (!preparedMedia && !isLikelyMediaUrl(normalizedUrl))) return;
       const existing = candidateMap.get(normalizedUrl) || { url: normalizedUrl };
       const decryptKey = String(
         candidateMetadata.decryptKey
@@ -20430,7 +20482,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     addCandidate(mediaUrl);
     (Array.isArray(mediaUrls) ? mediaUrls : []).forEach((item) => addCandidate(item));
     (Array.isArray(mediaItems) ? mediaItems : []).forEach((item) => addCandidate(item));
-    const getCandidates = () => sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))
+    const getCandidates = () => (preparedMedia ? Array.from(candidateMap.keys()) : sortMediaUrlsForTranscription(Array.from(candidateMap.keys())))
       .map((candidateUrl) => candidateMap.get(candidateUrl))
       .filter(Boolean);
     const candidates = getCandidates();
@@ -20535,15 +20587,21 @@ class WechatObsidianInboxPlugin extends Plugin {
             },
           };
         } catch (candidateError) {
-          if (isAbortError(candidateError)) throw candidateError;
+          if (isAbortError(candidateError) || signal?.aborted) throw createAbortError();
           lastError = candidateError;
+          const candidateStage = candidateError.channelsStage || (/LOCAL_COMPONENT/.test(candidateError.code || '') || /组件|未配置.*命令|脚本过旧/.test(candidateError.message || '') ? 'local-component' : 'transcribe');
+          if (mediaDiagnosticTrace?.source === 'wechat-channels') {
+            channelsDiagnostic.noteFailure(mediaDiagnosticTrace, candidateError, candidateStage);
+          }
           const candidateStatus = getTransportErrorDiagnostic(candidateError).status;
-          if ([401, 403, 412].includes(candidateStatus)) shouldRefreshMediaUrls = true;
+          if ([401, 403, 412].includes(candidateStatus) && (mediaDiagnosticTrace?.source !== 'wechat-channels' || candidateStage === 'download')) shouldRefreshMediaUrls = true;
         }
       }
       throw lastError || new Error('未能完成音视频转写');
     } catch (error) {
+      if (isAbortError(error)) throw error;
       if (isRetryableTranscriptionError(error)) {
+        if (mediaDiagnosticTrace?.source === 'wechat-channels') error.diagnostic = channelsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
         throw error;
       }
       return {
@@ -20888,17 +20946,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
 
-  async prepareWechatChannelsMedia(record, url, binding = null, title = '') {
+  async prepareWechatChannelsMedia(record, url, binding = null, title = '', options = {}) {
+    throwIfAborted(options.signal);
     const response = await this.requestJson('/media/prepare', 'POST', {
       url,
       recordId: getRecordId(record),
       source: 'wechat-channels-local-transcription',
       title: title || record?.metadata?.title || '',
-    }, binding, { noCache: true });
+    }, binding, { noCache: true, ...(options.signal ? { signal: options.signal } : {}) });
+    throwIfAborted(options.signal);
     const data = response?.data || {};
     const mediaUrl = String(data.mediaUrl || data.audioUrl || '').trim();
     if (!/^https?:\/\//i.test(mediaUrl)) {
-      throw new Error('视频号云端解析未返回可下载的媒体地址');
+      throw Object.assign(new Error('视频号云端解析未返回可下载的媒体地址'), { code: 'MEDIA_PREPARE_EMPTY' });
     }
     return {
       mediaUrl,
@@ -20950,14 +21010,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     return normalizeWechatChannelsFeedPayload(body);
   }
 
-  async hydrateWechatChannelsTranscript(record, url, binding = null, title = '') {
-    const metadata = record.metadata || {};
+  async hydrateWechatChannelsTranscript(record, url, binding = null, title = '', options = {}) {
+    throwIfAborted(options.signal);
+    const metadata = { ...(record.metadata || {}), conversionError: '' };
+    record = { ...record, metadata };
+    const trace = channelsDiagnostic.create(url, os.platform(), os.arch());
     let feed = {};
     let preparedMedia = null;
     let resolutionError = '';
 
     try {
-      preparedMedia = await this.prepareWechatChannelsMedia(record, url, binding, title);
+      preparedMedia = await this.prepareWechatChannelsMedia(record, url, binding, title, options);
+      throwIfAborted(options.signal);
+      trace.mediaHost = channelsDiagnostic.endpoint(preparedMedia.mediaUrl).host;
+      trace.mediaCandidateCount = 1;
       feed = {
         title: preparedMedia.title,
         author: preparedMedia.author,
@@ -20966,7 +21032,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         coverUrl: preparedMedia.coverUrl,
       };
     } catch (error) {
-      resolutionError = String(error?.message || error || '视频号云端解析失败');
+      if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
+      const diagnostic = channelsDiagnostic.noteFailure(trace, error, 'prepare');
+      resolutionError = channelsDiagnostic.outcome(diagnostic).message;
     }
 
     const mediaUrl = preparedMedia?.mediaUrl || '';
@@ -20978,6 +21046,22 @@ class WechatObsidianInboxPlugin extends Plugin {
         mediaUrls: [mediaUrl],
         mediaItems: [{ url: mediaUrl }],
         source: preparedMedia.source || 'wechat-channels-media-prepare',
+        preparedMedia: true,
+        signal: options.signal || null,
+        mediaResolutionDiagnostic: trace,
+        refreshMediaUrls: async () => {
+          throwIfAborted(options.signal);
+          trace.refreshCount = 1;
+          try {
+            const fresh = await this.prepareWechatChannelsMedia(record, url, binding, title, options);
+            trace.mediaHost = channelsDiagnostic.endpoint(fresh.mediaUrl).host;
+            return [fresh.mediaUrl];
+          } catch (error) {
+            if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
+            channelsDiagnostic.noteFailure(trace, error, 'prepare');
+            throw error;
+          }
+        },
         markdown: buildWechatChannelsSourceMarkdown(feed),
         binding,
         title,
@@ -21033,6 +21117,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionStatus: 'failed',
           transcriptionSource: 'wechat-channels-private-resolver',
           transcriptionError: finalError,
+          mediaResolutionDiagnostic: channelsDiagnostic.sanitize(trace, this.settings),
           conversionStatus: 'link_saved',
         }),
         markdown: buildWechatChannelsUnavailableMarkdown(url, feed, finalError),
@@ -21075,13 +21160,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       : null;
     if (!feishuCloudOAuthStatus?.connected
       && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot)
+      && (!isWechatChannelsUrl(url) || (metadata.transcriptionStatus === 'success' && String(metadata.transcription || '').trim()))
       && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       return record;
     }
 
     try {
       if (isWechatChannelsUrl(url)) {
-        return await this.hydrateWechatChannelsTranscript(record, url, binding, title);
+        return await this.hydrateWechatChannelsTranscript(record, url, binding, title, { signal });
       }
       if (isFeishuLink) {
         let openApiError = null;
@@ -23173,7 +23259,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown)) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || 'pending';
-      const transcriptionError = createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
+      const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
+      const transcriptionError = channelsOutcome
+        ? Object.assign(new Error(channelsOutcome.message), channelsOutcome)
+        : createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
       if (metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === 'object') {
         transcriptionError.diagnostic = metadata.mediaResolutionDiagnostic;
       }
@@ -23831,7 +23920,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
 
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
-          ? redactSensitiveObject(error.diagnostic)
+          ? (error.diagnostic.source === 'wechat-channels' ? channelsDiagnostic.sanitize(error.diagnostic, this.settings) : redactSensitiveObject(error.diagnostic))
           : null;
         let failedTitle = '小红书内容';
         if (!isXiaohongshuUrl(getRecordUrl(record))) {
@@ -23935,6 +24024,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               bindingToken: binding.token,
               bindingLabel: binding.label,
               message: item.message,
+              ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
             });
           });
           if (result.skipped && result.skipped.length) {
@@ -24101,7 +24191,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         historicalFailures: historicalFailures.map((item) => ({
           recordId: item.recordId,
           message: item.message,
+          failedAt: item.failedAt,
+          ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
         })),
+        failureDetails: displayedFailures.slice(0, 20).map((item) => ({ recordId: item.recordId, message: item.message, ...(item.diagnostic ? { diagnostic: item.diagnostic } : {}) })),
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? 'COMPLETION_REPORT_FAILED' : '',
         ...(completionWarningDetails.length ? { completionWarningDetails } : {}),
