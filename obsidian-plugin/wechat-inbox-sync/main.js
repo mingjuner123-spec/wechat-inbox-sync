@@ -268,6 +268,247 @@ var require_wechat_channels_diagnostic_utils = __commonJS({
   }
 });
 
+// src/feishu-image-display.js
+var require_feishu_image_display = __commonJS({
+  "src/feishu-image-display.js"(exports2, module2) {
+    "use strict";
+    var MAX_IMAGE_BYTES2 = 4 * 1024 * 1024;
+    var SAFE_QUERY_KEYS = /* @__PURE__ */ new Set(["width", "height", "policy", "fallback_source", "mount_node_token", "mount_point", "preview_type", "image_type"]);
+    function parseFeishuImageUrl2(value) {
+      try {
+        const url = new URL(String(value || "").replace(/&amp;/g, "&"));
+        if (url.protocol !== "https:" || url.username || url.password || url.port || !/(?:^|\.)(?:feishu\.cn|feishu\.net|larksuite\.com|larkoffice\.com)$/.test(url.hostname)) return null;
+        const match = url.pathname.match(/^\/space\/api\/box\/stream\/download\/(?:v2\/cover|preview)\/([a-zA-Z0-9_-]{6,200})\/?$/);
+        if (!match || [...url.searchParams.keys()].some((key) => !SAFE_QUERY_KEYS.has(key))) return null;
+        return { url: url.href, token: match[1] };
+      } catch (_) {
+        return null;
+      }
+    }
+    __name(parseFeishuImageUrl2, "parseFeishuImageUrl");
+    function decodeDisplayImage(value) {
+      let bytes;
+      if (typeof value === "string") {
+        const match = value.match(/^data:image\/(?:png|jpe?g|gif|webp|avif|bmp);base64,([A-Za-z0-9+/=\r\n]+)$/i);
+        if (!match || match[1].length > Math.ceil(MAX_IMAGE_BYTES2 / 3) * 4 + 8) throw new Error("invalid_image");
+        bytes = Buffer.from(match[1], "base64");
+      } else {
+        bytes = Buffer.from(value || []);
+      }
+      if (!bytes.length || bytes.length > MAX_IMAGE_BYTES2) throw new Error("image_size_limit");
+      let mime = "";
+      if (bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) mime = "image/png";
+      else if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) mime = "image/jpeg";
+      else if (bytes.length >= 10 && /^GIF8[79]a$/.test(bytes.toString("ascii", 0, 6))) mime = "image/gif";
+      else if (bytes.length >= 16 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") mime = "image/webp";
+      else if (bytes.length >= 16 && bytes.toString("ascii", 4, 8) === "ftyp" && /^(?:avif|avis)$/.test(bytes.toString("ascii", 8, 12))) mime = "image/avif";
+      else if (bytes.length >= 26 && bytes.toString("ascii", 0, 2) === "BM") mime = "image/bmp";
+      if (!mime) throw new Error("invalid_image");
+      return { bytes, mime };
+    }
+    __name(decodeDisplayImage, "decodeDisplayImage");
+    function safeFailureCode(error) {
+      const message = String(error && error.message || "");
+      if (/401|403|授权|权限|登录|绑定/.test(message)) return "authorization_required";
+      if (/timeout|timed out|超时/i.test(message)) return "timeout";
+      if (/invalid_image|image_size_limit/.test(message)) return "invalid_image";
+      return "load_failed";
+    }
+    __name(safeFailureCode, "safeFailureCode");
+    function createFeishuImageDisplay2(options) {
+      const root = options.root;
+      const states = /* @__PURE__ */ new Map();
+      const jobs = [];
+      const inflight = /* @__PURE__ */ new Map();
+      const createUrl = options.createObjectURL || ((blob) => URL.createObjectURL(blob));
+      const revokeUrl = options.revokeObjectURL || ((url) => URL.revokeObjectURL(url));
+      let running = 0;
+      let stopped = false;
+      let paused = false;
+      let scheduled = false;
+      let notified = false;
+      let observer;
+      const stats = { detected: 0, shown: 0, failed: 0, lastErrorCode: "" };
+      function revoke(state) {
+        if (state.displayUrl && !state.revoked) {
+          revokeUrl(state.displayUrl);
+          state.revoked = true;
+        }
+      }
+      __name(revoke, "revoke");
+      function showStatus(img, state, message, failed = false) {
+        if (!state.message) {
+          state.message = img.ownerDocument.createElement("span");
+          state.message.setAttribute("role", "status");
+          img.after(state.message);
+        }
+        state.message.className = failed ? "wechat-inbox-feishu-image-error" : "wechat-inbox-feishu-image-loading";
+        state.message.textContent = message;
+      }
+      __name(showStatus, "showStatus");
+      function cleanup(img, state, restore = true) {
+        state.cancelled = true;
+        if (state.onLoad) img.removeEventListener("load", state.onLoad);
+        if (state.onError) img.removeEventListener("error", state.onError);
+        if (state.message) state.message.remove();
+        revoke(state);
+        if (restore && img.getAttribute("src") === state.displayUrl) {
+          img.setAttribute("src", state.original);
+          if (state.srcset !== null) img.setAttribute("srcset", state.srcset);
+        }
+        states.delete(img);
+      }
+      __name(cleanup, "cleanup");
+      function fail(img, state, error) {
+        if (stopped || state.cancelled || !img.isConnected || state.failed) return;
+        state.failed = true;
+        revoke(state);
+        stats.failed += 1;
+        stats.lastErrorCode = safeFailureCode(error);
+        const message = stats.lastErrorCode === "timeout" ? "飞书图片加载超时，后续图片已暂停；可运行“重新加载飞书图片”重试。" : stats.lastErrorCode === "authorization_required" ? "飞书图片未能加载，请检查插件设置中的飞书连接与图片访问权限。" : "飞书图片加载失败，可运行“重新加载飞书图片”重试；详细状态见插件诊断。";
+        showStatus(img, state, message, true);
+        if (!notified && options.notify) {
+          notified = true;
+          options.notify(message);
+        }
+      }
+      __name(fail, "fail");
+      async function pump() {
+        while (!stopped && !paused && running < 3 && jobs.length) {
+          const { img, state } = jobs.shift();
+          if (state.cancelled || !img.isConnected) continue;
+          running += 1;
+          showStatus(img, state, "飞书图片加载中…");
+          const key = state.resource.url;
+          let job = inflight.get(key);
+          if (!job) {
+            const controller = new AbortController();
+            job = { controller };
+            let abort;
+            const timeout = setTimeout(() => {
+              job.timedOut = true;
+              controller.abort();
+            }, Math.max(1, Number(options.timeoutMs) || 2e4));
+            const aborted = new Promise((_, reject) => {
+              abort = /* @__PURE__ */ __name(() => reject(new Error(job.timedOut ? "timeout" : "cancelled")), "abort");
+              controller.signal.addEventListener("abort", abort, { once: true });
+            });
+            job.promise = Promise.race([
+              Promise.resolve().then(() => options.loadImage({ ...state.resource, signal: controller.signal })),
+              aborted
+            ]).then(decodeDisplayImage).finally(() => {
+              clearTimeout(timeout);
+              controller.signal.removeEventListener("abort", abort);
+              inflight.delete(key);
+            });
+            inflight.set(key, job);
+          }
+          job.promise.then(({ bytes, mime }) => {
+            if (stopped || state.cancelled || !img.isConnected || img.getAttribute("src") !== state.original) return;
+            state.displayUrl = createUrl(new Blob([bytes], { type: mime }));
+            state.onLoad = () => {
+              if (state.cancelled || state.failed) return;
+              if (!state.loaded) {
+                state.loaded = true;
+                stats.shown += 1;
+              }
+              if (state.message) {
+                state.message.remove();
+                state.message = null;
+              }
+              revoke(state);
+            };
+            state.onError = () => fail(img, state, new Error("invalid_image"));
+            img.addEventListener("load", state.onLoad);
+            img.addEventListener("error", state.onError);
+            img.removeAttribute("srcset");
+            img.setAttribute("src", state.displayUrl);
+          }).catch((error) => {
+            if (job.timedOut) {
+              paused = true;
+              for (const pending of jobs) {
+                if (!pending.state.cancelled && pending.img.isConnected) {
+                  showStatus(pending.img, pending.state, "飞书图片加载已暂停，可运行“重新加载飞书图片”继续。");
+                }
+              }
+            }
+            fail(img, state, error);
+          }).finally(() => {
+            running -= 1;
+            pump();
+          });
+        }
+      }
+      __name(pump, "pump");
+      function scan(container = root, sourcePath = "") {
+        if (stopped || !container) return;
+        for (const [img, state] of states) {
+          if (!img.isConnected) cleanup(img, state);
+          else if (img.getAttribute("src") !== state.original && img.getAttribute("src") !== state.displayUrl) cleanup(img, state, false);
+        }
+        const images = [...container.querySelectorAll ? container.querySelectorAll("img") : []];
+        if (container.tagName === "IMG") images.unshift(container);
+        for (const img of images) {
+          if (states.has(img) || !img.isConnected) continue;
+          const original = img.getAttribute("src");
+          const resource = parseFeishuImageUrl2(original);
+          if (!resource || !options.canDisplay(img, sourcePath)) continue;
+          if (img.complete && img.naturalWidth > 0) continue;
+          const state = { original, resource, srcset: img.getAttribute("srcset") };
+          states.set(img, state);
+          stats.detected += 1;
+          jobs.push({ img, state });
+          showStatus(img, state, paused ? "飞书图片加载已暂停，可运行“重新加载飞书图片”继续。" : "等待加载飞书图片…");
+        }
+        pump();
+      }
+      __name(scan, "scan");
+      const schedule = /* @__PURE__ */ __name(() => {
+        if (scheduled || stopped) return;
+        scheduled = true;
+        Promise.resolve().then(() => {
+          scheduled = false;
+          scan();
+        });
+      }, "schedule");
+      const Observer = options.MutationObserver || (typeof MutationObserver !== "undefined" ? MutationObserver : null);
+      if (Observer && root) {
+        observer = new Observer(schedule);
+        observer.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "srcset"] });
+      }
+      return {
+        scan,
+        retry() {
+          paused = false;
+          notified = false;
+          stats.lastErrorCode = "";
+          for (const [img, state] of states) if (state.failed) cleanup(img, state);
+          scan();
+        },
+        diagnostic: /* @__PURE__ */ __name(() => ({
+          attempts: stats.detected,
+          detected: states.size,
+          shown: [...states.values()].filter((state) => state.loaded && !state.failed).length,
+          failed: [...states.values()].filter((state) => state.failed).length,
+          lastErrorCode: stats.lastErrorCode,
+          paused,
+          pending: jobs.filter((item) => !item.state.cancelled).length,
+          active: running
+        }), "diagnostic"),
+        stop() {
+          stopped = true;
+          if (observer) observer.disconnect();
+          jobs.length = 0;
+          for (const job of inflight.values()) job.controller.abort();
+          for (const [img, state] of states) cleanup(img, state);
+        }
+      };
+    }
+    __name(createFeishuImageDisplay2, "createFeishuImageDisplay");
+    module2.exports = { MAX_IMAGE_BYTES: MAX_IMAGE_BYTES2, parseFeishuImageUrl: parseFeishuImageUrl2, decodeDisplayImage, createFeishuImageDisplay: createFeishuImageDisplay2 };
+  }
+});
+
 // src/diagnostic-redaction-utils.js
 var require_diagnostic_redaction_utils = __commonJS({
   "src/diagnostic-redaction-utils.js"(exports2, module2) {
@@ -8653,6 +8894,7 @@ var require_transcription_note_title_utils = __commonJS({
 
 // src/main.js
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
+var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
 var { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require_wechat_request_gate();
@@ -8894,7 +9136,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.142";
+var PLUGIN_RUNTIME_VERSION = "1.3.143";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -22318,6 +22560,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.currentProcessingContext = null;
     this.pendingStoppedTranscriptionDeletes = /* @__PURE__ */ new Map();
     this.syncInboxPromise = null;
+    this.startFeishuImageDisplay();
     if (this.getConfiguredLocalAsrPlatform() === "win32") {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -22374,6 +22617,97 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   async saveSettings(nextSettings) {
     this.settings = mergeSettings(nextSettings);
     await this.saveData(this.settings);
+  }
+  startFeishuImageDisplay() {
+    const workspace = this.app && this.app.workspace;
+    if (!workspace || !workspace.containerEl || typeof this.registerMarkdownPostProcessor !== "function") return;
+    const sourcePaths = /* @__PURE__ */ new WeakMap();
+    const canDisplay = /* @__PURE__ */ __name((img, sourcePath) => {
+      if (sourcePath) sourcePaths.set(img, sourcePath);
+      let notePath = sourcePaths.get(img);
+      if (!notePath && typeof workspace.getLeavesOfType === "function") {
+        const leaf = workspace.getLeavesOfType("markdown").find((item) => item.view && item.view.containerEl && item.view.containerEl.contains(img));
+        notePath = leaf && leaf.view.file && leaf.view.file.path;
+      }
+      const cache = notePath && this.app.metadataCache.getCache(notePath);
+      return Boolean(cache && cache.frontmatter && isFeishuUrl(cache.frontmatter.url));
+    }, "canDisplay");
+    this.feishuImageDisplay = createFeishuImageDisplay({
+      root: workspace.containerEl,
+      canDisplay,
+      loadImage: /* @__PURE__ */ __name((resource) => this.loadFeishuDisplayImage(resource), "loadImage"),
+      notify: /* @__PURE__ */ __name((message) => new Notice(message, 8e3), "notify")
+    });
+    this.register(() => this.feishuImageDisplay.stop());
+    this.registerMarkdownPostProcessor((el, context) => this.feishuImageDisplay.scan(el, context.sourcePath));
+    this.registerEvent(workspace.on("layout-change", () => this.feishuImageDisplay.scan()));
+    this.registerEvent(this.app.metadataCache.on("changed", () => this.feishuImageDisplay.scan()));
+    workspace.onLayoutReady(() => this.feishuImageDisplay.scan());
+    this.addCommand({
+      id: "reload-feishu-note-images",
+      name: "重新加载飞书图片",
+      callback: /* @__PURE__ */ __name(() => this.feishuImageDisplay.retry(), "callback")
+    });
+  }
+  async loadFeishuDisplayImage({ url, token, signal }) {
+    const resource = parseFeishuImageUrl(url);
+    if (!resource || resource.token !== token) throw new Error("invalid_image");
+    throwIfAborted(signal);
+    let officialError = null;
+    if (this.settings.feishuOAuthStatus && this.settings.feishuOAuthStatus.connected) {
+      const activeBindings = this.getActiveBindings();
+      const cached = this.feishuImageDisplayBinding;
+      const candidates = cached && activeBindings.some((item) => item.token === cached.token) ? [cached, ...activeBindings.filter((item) => item.token !== cached.token)] : activeBindings;
+      for (const binding of candidates.length ? candidates : [null]) {
+        throwIfAborted(signal);
+        try {
+          const media = await this.fetchFeishuCloudMediaDataUrl(token, binding, { signal, preserveSettings: true });
+          this.feishuImageDisplayBinding = binding;
+          return media.dataUrl;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          officialError = error;
+        }
+      }
+    }
+    try {
+      const response = await fetchWithElectronSession(getWechatSession(), resource.url, {
+        method: "GET",
+        credentials: "include",
+        redirect: "error"
+      }, { signal, timeoutMs: 15e3 });
+      if (!response || !response.ok) throw new Error(`HTTP ${response && response.status || 0}`);
+      if (/text\/html/i.test(String(response.headers && response.headers.get("content-type") || ""))) {
+        throw new Error("飞书图片返回网页，请检查登录权限");
+      }
+      if (Number(response.headers && response.headers.get("content-length")) > MAX_IMAGE_BYTES) throw new Error("image_size_limit");
+      const reader = response.body && response.body.getReader && response.body.getReader();
+      if (!reader) throw new Error("invalid_image");
+      const cancel = /* @__PURE__ */ __name(() => {
+        Promise.resolve(reader.cancel()).catch(() => {
+        });
+      }, "cancel");
+      signal.addEventListener("abort", cancel, { once: true });
+      try {
+        const chunks = [];
+        let total = 0;
+        while (true) {
+          throwIfAborted(signal);
+          const next = await reader.read();
+          throwIfAborted(signal);
+          if (next.done) break;
+          total += next.value.byteLength;
+          if (total > MAX_IMAGE_BYTES) throw new Error("image_size_limit");
+          chunks.push(Buffer.from(next.value));
+        }
+        return Buffer.concat(chunks, total);
+      } finally {
+        signal.removeEventListener("abort", cancel);
+        cancel();
+      }
+    } catch (error) {
+      throw officialError || error;
+    }
   }
   setTranscriptionStopAvailable(available) {
     if (!this.transcriptionStopRibbon || !this.transcriptionStopRibbon.style) return;
@@ -22743,6 +23077,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (!shouldRetry || currentApiBase === officialApiBase) {
         return null;
       }
+      if (options.preserveSettings === true) return null;
       await this.saveSettings({
         ...this.settings,
         apiBase: OFFICIAL_SYNC_API_BASE
@@ -22915,14 +23250,15 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       imageDownloadError: String(data && data.imageDownloadError || "").trim()
     };
   }
-  async fetchFeishuCloudMediaDataUrl(fileToken, binding = null) {
+  async fetchFeishuCloudMediaDataUrl(fileToken, binding = null, options = {}) {
     const token = String(fileToken || "").trim();
     if (!token) throw new Error("飞书图片标识为空");
     const payload = await this.requestJson(
       "/feishu/media",
       "POST",
       this.withFeishuCustomAppConfig({ fileToken: token }),
-      binding || void 0
+      binding || void 0,
+      options
     );
     const data = payload && payload.data ? payload.data : payload;
     const dataUrl = String(data && data.dataUrl || "").trim();
@@ -24279,6 +24615,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `OCR 安装日志：${getLocalAsrInstallLogPath(ocrRoot)}`,
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`
     ];
+    if (this.feishuImageDisplay) {
+      lines.push("", "飞书图片显示：", JSON.stringify(this.feishuImageDisplay.diagnostic()));
+    }
     if (lastSyncText && (hasFailureSignal(lastSyncText) || this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic)) {
       lines.push("", "最近同步失败状态：", lastSyncText);
     }

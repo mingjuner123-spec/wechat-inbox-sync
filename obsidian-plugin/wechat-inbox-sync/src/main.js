@@ -1,4 +1,5 @@
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
+const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
 const { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require('./wechat-request-gate');
@@ -246,7 +247,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.142';
+const PLUGIN_RUNTIME_VERSION = '1.3.143';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -15524,6 +15525,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.currentProcessingContext = null;
     this.pendingStoppedTranscriptionDeletes = new Map();
     this.syncInboxPromise = null;
+    this.startFeishuImageDisplay();
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -15588,6 +15590,99 @@ class WechatObsidianInboxPlugin extends Plugin {
   async saveSettings(nextSettings) {
     this.settings = mergeSettings(nextSettings);
     await this.saveData(this.settings);
+  }
+
+  startFeishuImageDisplay() {
+    const workspace = this.app && this.app.workspace;
+    if (!workspace || !workspace.containerEl || typeof this.registerMarkdownPostProcessor !== 'function') return;
+    const sourcePaths = new WeakMap();
+    const canDisplay = (img, sourcePath) => {
+      if (sourcePath) sourcePaths.set(img, sourcePath);
+      let notePath = sourcePaths.get(img);
+      if (!notePath && typeof workspace.getLeavesOfType === 'function') {
+        const leaf = workspace.getLeavesOfType('markdown').find(item => (
+          item.view && item.view.containerEl && item.view.containerEl.contains(img)
+        ));
+        notePath = leaf && leaf.view.file && leaf.view.file.path;
+      }
+      const cache = notePath && this.app.metadataCache.getCache(notePath);
+      return Boolean(cache && cache.frontmatter && isFeishuUrl(cache.frontmatter.url));
+    };
+    this.feishuImageDisplay = createFeishuImageDisplay({
+      root: workspace.containerEl,
+      canDisplay,
+      loadImage: resource => this.loadFeishuDisplayImage(resource),
+      notify: message => new Notice(message, 8000),
+    });
+    this.register(() => this.feishuImageDisplay.stop());
+    this.registerMarkdownPostProcessor((el, context) => this.feishuImageDisplay.scan(el, context.sourcePath));
+    this.registerEvent(workspace.on('layout-change', () => this.feishuImageDisplay.scan()));
+    this.registerEvent(this.app.metadataCache.on('changed', () => this.feishuImageDisplay.scan()));
+    workspace.onLayoutReady(() => this.feishuImageDisplay.scan());
+    this.addCommand({
+      id: 'reload-feishu-note-images',
+      name: '重新加载飞书图片',
+      callback: () => this.feishuImageDisplay.retry(),
+    });
+  }
+
+  async loadFeishuDisplayImage({url, token, signal}) {
+    const resource = parseFeishuImageUrl(url);
+    if (!resource || resource.token !== token) throw new Error('invalid_image');
+    throwIfAborted(signal);
+    let officialError = null;
+    if (this.settings.feishuOAuthStatus && this.settings.feishuOAuthStatus.connected) {
+      const activeBindings = this.getActiveBindings();
+      const cached = this.feishuImageDisplayBinding;
+      const candidates = cached && activeBindings.some(item => item.token === cached.token)
+        ? [cached, ...activeBindings.filter(item => item.token !== cached.token)]
+        : activeBindings;
+      for (const binding of (candidates.length ? candidates : [null])) {
+        throwIfAborted(signal);
+        try {
+          const media = await this.fetchFeishuCloudMediaDataUrl(token, binding, {signal, preserveSettings: true});
+          this.feishuImageDisplayBinding = binding;
+          return media.dataUrl;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          officialError = error;
+        }
+      }
+    }
+    // Reuse only the established browser session. Never copy Cookie/Authorization
+    // headers into URLs or arbitrary fetches, and never follow a cross-site redirect.
+    try {
+      const response = await fetchWithElectronSession(getWechatSession(), resource.url, {
+        method: 'GET', credentials: 'include', redirect: 'error',
+      }, {signal, timeoutMs: 15000});
+      if (!response || !response.ok) throw new Error(`HTTP ${response && response.status || 0}`);
+      if (/text\/html/i.test(String(response.headers && response.headers.get('content-type') || ''))) {
+        throw new Error('飞书图片返回网页，请检查登录权限');
+      }
+      if (Number(response.headers && response.headers.get('content-length')) > MAX_IMAGE_BYTES) throw new Error('image_size_limit');
+      const reader = response.body && response.body.getReader && response.body.getReader();
+      if (!reader) throw new Error('invalid_image');
+      const cancel = () => { Promise.resolve(reader.cancel()).catch(() => {}); };
+      signal.addEventListener('abort', cancel, {once: true});
+      try {
+        const chunks = []; let total = 0;
+        while (true) {
+          throwIfAborted(signal);
+          const next = await reader.read();
+          throwIfAborted(signal);
+          if (next.done) break;
+          total += next.value.byteLength;
+          if (total > MAX_IMAGE_BYTES) throw new Error('image_size_limit');
+          chunks.push(Buffer.from(next.value));
+        }
+        return Buffer.concat(chunks, total);
+      } finally {
+        signal.removeEventListener('abort', cancel);
+        cancel();
+      }
+    } catch (error) {
+      throw officialError || error;
+    }
   }
 
   setTranscriptionStopAvailable(available) {
@@ -15993,6 +16088,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!shouldRetry || currentApiBase === officialApiBase) {
         return null;
       }
+      if (options.preserveSettings === true) return null;
       await this.saveSettings({
         ...this.settings,
         apiBase: OFFICIAL_SYNC_API_BASE,
@@ -16185,7 +16281,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async fetchFeishuCloudMediaDataUrl(fileToken, binding = null) {
+  async fetchFeishuCloudMediaDataUrl(fileToken, binding = null, options = {}) {
     const token = String(fileToken || '').trim();
     if (!token) throw new Error('飞书图片标识为空');
     const payload = await this.requestJson(
@@ -16193,6 +16289,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       'POST',
       this.withFeishuCustomAppConfig({ fileToken: token }),
       binding || undefined,
+      options,
     );
     const data = payload && payload.data ? payload.data : payload;
     const dataUrl = String(data && data.dataUrl || '').trim();
@@ -17728,6 +17825,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`,
     ];
 
+    if (this.feishuImageDisplay) {
+      lines.push('', '飞书图片显示：', JSON.stringify(this.feishuImageDisplay.diagnostic()));
+    }
     if (lastSyncText && (hasFailureSignal(lastSyncText) || (this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic))) {
       lines.push('', '最近同步失败状态：', lastSyncText);
     }

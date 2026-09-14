@@ -198,6 +198,7 @@ for (const workflowPath of [mainWorkflowPath, releaseWorkflowPath]) {
     `${path.basename(workflowPath)} must verify the committed bundle before candidate preparation`);
 
   for (const moduleTestName of [
+    'plugin-feishu-image-display.test.js',
     'plugin-ai-metadata-error-utils.test.js',
     'plugin-date-utils.test.js',
     'plugin-diagnostic-redaction-utils.test.js',

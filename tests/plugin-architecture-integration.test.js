@@ -21,6 +21,7 @@ const expectedModules = [
   'diagnostic-redaction-utils',
   'document-text-extraction-utils',
   'douyin-media-utils',
+  'feishu-image-display',
   'feishu-markdown-utils',
   'feishu-media-utils',
   'input-normalization-utils',

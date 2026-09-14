@@ -39,6 +39,7 @@ jobs:
           node tests/plugin-cloud-transcription-response-utils.test.js
           node tests/plugin-document-text-extraction.test.js
           node tests/plugin-feishu-markdown-utils.test.js
+          node tests/plugin-feishu-image-display.test.js
           node tests/plugin-media-file-utils.test.js
           node tests/plugin-sync-history.test.js
           node tests/plugin-bilibili-412.test.js
