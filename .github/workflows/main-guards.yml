@@ -60,6 +60,7 @@ jobs:
           node tests/plugin-vault-path-utils.test.js
           node tests/release-governance.test.js
           node tests/plugin-release-candidate.test.js
+          node tests/plugin-xhs-comment-diagnostics.test.js
           node tests/plugin-main-ai.test.js
           node tests/plugin-audio-repeat-local-dedupe.test.js
           node tests/plugin-local-candidate-regressions.test.js
