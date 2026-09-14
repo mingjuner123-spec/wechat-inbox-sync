@@ -34,3 +34,11 @@
   font-size: 12px;
   line-height: 1.5;
 }
+.wechat-inbox-feishu-image-loading,
+.wechat-inbox-feishu-image-error {
+  display: block;
+  padding: 8px 0;
+  color: var(--text-muted);
+  font-size: var(--font-smallest);
+  line-height: 1.5;
+}
