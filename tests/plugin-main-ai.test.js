@@ -1240,7 +1240,7 @@ assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
 assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
   manifestVersion: currentPluginVersion,
   runtimeVersion: currentPluginVersion,
-  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1',
+  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
@@ -11551,7 +11551,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
       runtime: {
         manifestVersion: currentPluginVersion,
         runtimeVersion: currentPluginVersion,
-        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1',
+        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1',
         matchesManifest: true,
       },
       request: {
