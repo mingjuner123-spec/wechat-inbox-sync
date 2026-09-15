@@ -2,6 +2,7 @@ const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
+const xhsDiagnostic = require('./xiaohongshu-diagnostic-utils');
 const { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require('./wechat-request-gate');
 const sharedWechatArticleGate = createWechatArticleRequestGate();
 const childProcess = require('child_process');
@@ -250,8 +251,8 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.145';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1';
+const PLUGIN_RUNTIME_VERSION = '1.3.146';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -1528,6 +1529,7 @@ function buildSyncDiagnosticLogText({
   error = '',
   diagnostic = null,
   xiaohongshuComments = [],
+  xiaohongshuBrowserResults = [],
 } = {}) {
   const lines = [
     `time=${time}`,
@@ -1550,6 +1552,9 @@ function buildSyncDiagnosticLogText({
   }
   if (Array.isArray(xiaohongshuComments) && xiaohongshuComments.length) {
     lines.push('--- xhs-comments ---', JSON.stringify(xiaohongshuComments.slice(-5).map(sanitizeXiaohongshuCommentResult)));
+  }
+  if (Array.isArray(xiaohongshuBrowserResults) && xiaohongshuBrowserResults.length) {
+    lines.push('--- xhs-tasks ---', JSON.stringify(xiaohongshuBrowserResults.slice(-5).map(item => xhsDiagnostic.sanitize(item))));
   }
   return lines.join('\n');
 }
@@ -5518,9 +5523,16 @@ function installWechatArticleNavigationGuards(webContents) {
   webContents.on('will-redirect', restrictArticleNavigation);
 }
 
-function createXiaohongshuBrowserDiagnostic() {
+function createXiaohongshuBrowserDiagnostic(record = null) {
   return {
     source: 'xiaohongshu-browser',
+    schema: 2,
+    attemptId: crypto.randomBytes(8).toString('hex'),
+    recordRef: xhsDiagnostic.recordRef(getRecordId(record || {})),
+    startedAt: new Date().toISOString(),
+    runtimeVersion: PLUGIN_RUNTIME_VERSION,
+    transcriptionStarted: false,
+    mediaCandidateCount: 0,
     loginCookiePresent: null,
     commentAccess: 'not_checked',
     stages: [],
@@ -5548,6 +5560,9 @@ function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
         .slice(0, 64),
     } : {}),
   };
+  for (const key of ['exception', 'message', 'status', 'durationMs', 'mediaCandidateCount']) {
+    if (entry[key] !== undefined) safeEntry[key] = entry[key];
+  }
   const host = getSafeUrlDiagnostic(entry.url || '').host;
   if (host) safeEntry.host = host;
   if (type === 'login_cookie_checked') {
@@ -5563,9 +5578,10 @@ function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
     };
   }
   const bucket = type === 'stage' ? diagnostic.stages : diagnostic.events;
-  const key = JSON.stringify(safeEntry);
+  const safeDetails = xhsDiagnostic.safeStage(safeEntry, options.diagnosticSettings);
+  const key = JSON.stringify(safeDetails);
   if (Object.keys(safeEntry).length && !bucket.some((item) => JSON.stringify(item) === key)) {
-    bucket.push(safeEntry);
+    bucket.push(safeDetails);
     if (bucket.length > 24) bucket.splice(0, bucket.length - 24);
   }
   return diagnostic;
@@ -5580,6 +5596,7 @@ function getXiaohongshuBrowserFailureCode(error) {
   if (explicitCode) return explicitCode;
   const message = String(error && error.message || error || '');
   if (/timed?\s*out|timeout/i.test(message)) return 'BROWSER_TASK_TIMEOUT';
+  if (['SyntaxError', 'ReferenceError', 'TypeError'].includes(error && error.name)) return 'BROWSER_SCRIPT_ERROR';
   if (/load|navigation|ERR_/i.test(message)) return 'BROWSER_LOAD_FAILED';
   return 'BROWSER_EXTRACTION_FAILED';
 }
@@ -5590,6 +5607,7 @@ function appendXiaohongshuBrowserFailure(options = {}, stage = '', error = null)
     stage,
     outcome: isAbortError(error) ? 'aborted' : 'failed',
     failureKind: getXiaohongshuBrowserFailureCode(error),
+    ...xhsDiagnostic.errorDetails(error, options.diagnosticSettings),
   });
 }
 
@@ -11171,16 +11189,29 @@ async function probeXiaohongshuLoginStatus(targetUrl = '', options = {}) {
         const hasLoginWall = /登录后|请登录|登录小红书|手机号登录|验证码登录|扫码登录|未登录/.test(text);
         const hasUserSignal = Boolean(document.querySelector('[href*="/user/profile"], [class*="avatar"], [class*="user-info"], [class*="userInfo"]'));
         let hasAccountApiSignal = false;
+        let accountStatus = 0;
+        let accountResult = 'unknown';
+        let accountRejected = false;
+        const controller = new AbortController();
+        let deadline;
         try {
+          await Promise.race([(async () => {
           const response = await fetch('https://edith.xiaohongshu.com/api/sns/web/v1/user/selfinfo', {
             credentials: 'include',
+            signal: controller.signal,
             headers: { accept: 'application/json, text/plain, */*' },
           });
-          const payload = await response.clone().json().catch(async () => ({ text: await response.text().catch(() => '') }));
+          accountStatus = response.status;
+          accountRejected = [401, 403].includes(response.status);
+          const payload = await response.json();
+          accountRejected = accountRejected || Number(payload && payload.code) === -100;
+          accountResult = accountRejected ? 'rejected' : 'response';
           const payloadText = JSON.stringify(payload || {});
           hasAccountApiSignal = response.ok && /user_?id|nickname|red_?id|avatar/i.test(payloadText) && !/login|登录|unauthorized|forbidden/i.test(payloadText);
-        } catch (error) {}
-        return { hasLoginWall, hasUserSignal, hasAccountApiSignal, text: text.slice(0, 500) };
+          })(), new Promise(resolve => { deadline = setTimeout(() => { accountResult = 'timeout'; controller.abort(); resolve(); }, 4000); })]);
+        } catch (error) { accountResult = accountRejected ? 'rejected' : controller.signal.aborted ? 'timeout' : 'request_failed'; }
+        finally { clearTimeout(deadline); controller.abort(); }
+        return { hasLoginWall, hasUserSignal, hasAccountApiSignal, accountStatus, accountResult, accountRejected, text: text.slice(0, 500) };
       })()
       `),
       XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS,
@@ -11191,7 +11222,8 @@ async function probeXiaohongshuLoginStatus(targetUrl = '', options = {}) {
         : state && state.hasUserSignal ? 'page_signal' : 'none';
     }
     recordXiaohongshuSecurityRestriction(options, state && state.text, 'login_check');
-    if (state && state.hasLoginWall) return false;
+    appendXiaohongshuBrowserDiagnostic(options, { type: 'stage', stage: 'account_probe', outcome: state && state.accountResult || 'unknown', status: state && state.accountStatus || 0 });
+    if (state && (state.hasLoginWall || state.accountRejected)) return false;
     const hasCookieAfterProbe = await checkXiaohongshuLoginStatus();
     const loggedIn = Boolean(hasCookieAfterProbe && state && (state.hasAccountApiSignal || state.hasUserSignal));
     appendXiaohongshuBrowserDiagnostic(options, {
@@ -12576,6 +12608,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
 }
 
 async function renderSocialMediaUrlsWithElectron(url, options = {}) {
+  const mediaStartedAt = Date.now();
   throwIfAborted(options.signal);
   if (isDouyinUrl(url) && options.__douyinSessionLockHeld !== true) {
     return await runWithDouyinBrowserSessionLock(() => renderSocialMediaUrlsWithElectron(url, {
@@ -12671,6 +12704,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   let debuggerAttached = false;
   let debuggerMessageHandler = null;
   const captureWebRequestDetails = (details) => {
+    if (isXiaohongshuExtractionWindow && Number(details && details.statusCode) >= 400) {
+      appendXiaohongshuBrowserDiagnostic(options, { type: 'network', stage: 'media_extraction', outcome: 'http_failed', url: details.url, status: Number(details.statusCode) });
+    }
     if (capturedRequests.length >= BROWSER_MEDIA_CAPTURE_MAX_REQUESTS) return;
     capturedRequests.push({
       url: details && details.url,
@@ -12700,6 +12736,11 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   });
   installWebRequestHandler('onBeforeRedirect', captureWebRequestDetails);
   installWebRequestHandler('onCompleted', captureWebRequestDetails);
+  if (isXiaohongshuExtractionWindow) {
+    installWebRequestHandler('onErrorOccurred', details => {
+      appendXiaohongshuBrowserDiagnostic(options, { type: 'network', stage: 'media_extraction', outcome: 'request_failed', url: details && details.url, message: details && details.error });
+    });
+  }
   if (isXiaohongshuExtractionWindow) {
     installXiaohongshuNavigationGuards(win.webContents, xiaohongshuHiddenWindowOptions);
   } else {
@@ -12883,13 +12924,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
             const paceEntries = Array.isArray(self.__pace_f) ? self.__pace_f.slice(-320) : [];
             douyinPaceState = paceEntries
               .map((entry) => 'self.__pace_f.push(' + JSON.stringify(entry) + ');')
-              .join('\n')
+              .join('\\n')
               .slice(-800000);
             if (!douyinPaceState) {
               douyinPaceState = Array.from(document.scripts)
                 .map((node) => String(node.textContent || ''))
                 .filter((text) => text.includes('__pace_f') || text.includes('videoDetail'))
-                .join('\n')
+                .join('\\n')
                 .slice(0, 800000);
             }
           } catch (error) {}
@@ -12923,6 +12964,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         type: 'stage',
         stage: 'media_extraction',
         outcome: 'completed',
+        durationMs: Date.now() - mediaStartedAt,
       });
     }
 
@@ -12957,6 +12999,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   } catch (error) {
     if (isXiaohongshuExtractionWindow) {
       appendXiaohongshuBrowserFailure(options, 'media_extraction', error);
+      appendXiaohongshuBrowserDiagnostic(options, { type: 'stage', stage: 'media_extraction', outcome: 'stopped', durationMs: Date.now() - mediaStartedAt });
     }
     throw error;
   } finally {
@@ -16886,7 +16929,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       status: progress.stage === 'empty' ? 'empty' : 'running',
       time: new Date().toISOString(),
     };
-    writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+    writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
       this.syncStatusBar.setText(message);
     }
@@ -17790,6 +17833,17 @@ class WechatObsidianInboxPlugin extends Plugin {
     return asrRecovery.diagnosticRedact(diagnosticText, this.settings);
   }
 
+  getRecentXiaohongshuBrowserResults() {
+    if (!Array.isArray(this.lastXiaohongshuBrowserResults)) {
+      const log = readSyncDiagnosticLog(this.getConfiguredLocalAsrInstallRoot());
+      try {
+        const saved = JSON.parse((log.match(/--- xhs-tasks ---\r?\n([^\r\n]+)/) || [])[1] || '[]');
+        this.lastXiaohongshuBrowserResults = Array.isArray(saved) ? saved.slice(-5).map(item => xhsDiagnostic.sanitize(item, this.settings)) : [];
+      } catch (_) { this.lastXiaohongshuBrowserResults = []; }
+    }
+    return this.lastXiaohongshuBrowserResults;
+  }
+
   getRecentXiaohongshuCommentResults() {
     if (!Array.isArray(this.lastXiaohongshuCommentResults)) {
       // Load before any new progress log can overwrite the previous run.
@@ -17869,6 +17923,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`,
     ];
 
+    const taskResults = this.getRecentXiaohongshuBrowserResults().map(item => xhsDiagnostic.sanitize(item, this.settings));
+    lines.push('', '最近小红书任务诊断（最多 5 次；每项 attemptId 独立，不代表其他条目）：');
+    lines.push(taskResults.length ? JSON.stringify(taskResults, null, 2) : '暂无新版任务诊断；历史日志无法补回原始异常。');
     const commentResults = this.getRecentXiaohongshuCommentResults();
     lines.push('', '最近小红书评论诊断（最多 5 次，按时间排列）：');
     if (Array.isArray(commentResults) && commentResults.length) {
@@ -17912,7 +17969,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     } else {
       lines.push('', '已省略成功日志，只保留失败相关信息。');
     }
-    lines.push('', asrRecovery.detailedDiagnostic(asrRoot, this.settings));
+    lines.push('', asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
     return asrRecovery.diagnosticRedact(lines.join('\n'), this.settings);
   }
 
@@ -19315,7 +19372,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
     const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
-    const session = { startedAt: new Date().toISOString(), platform, recordId: options.recordId || '', runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
+    const session = { startedAt: new Date().toISOString(), platform, recordId: options.recordId || '', diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || '') ? options.diagnosticAttemptId : '', runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
     const progressTitle = options.title || '';
     const abortController = new AbortController();
     let ownedChild = null;
@@ -20568,6 +20625,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!mediaDiagnosticTrace) return null;
       const value = { ...mediaDiagnosticTrace, finalOutcome: String(finalOutcome || mediaDiagnosticTrace.finalOutcome || ''), elapsedMs: Date.now() - Date.parse(mediaDiagnosticTrace.startedAt || new Date().toISOString()) };
       if (value.source === 'wechat-channels' && ['subtitle-ready', 'transcription-ready'].includes(finalOutcome)) { delete value.failure; value.stage = 'finished'; }
+      if (value.source === 'xiaohongshu-browser') {
+        Object.assign(mediaDiagnosticTrace, { finalOutcome: value.finalOutcome, finishedAt: new Date().toISOString() });
+        return xhsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
+      }
       return value.source === 'wechat-channels' ? channelsDiagnostic.sanitize(value, this.settings) : value;
     };
     const metadataWithSocialMetrics = {
@@ -20639,6 +20700,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       .map((candidateUrl) => candidateMap.get(candidateUrl))
       .filter(Boolean);
     const candidates = getCandidates();
+    if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
 
     if (!candidates.length) {
       return {
@@ -20689,6 +20751,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             metadata.transcriptionMode === 'cloud'
             || metadata.cloudTranscriptionRequested === true
           );
+          if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') mediaDiagnosticTrace.transcriptionStarted = true;
           const result = useCloudForWebpage
              ? await this.runCloudFallbackTranscription(candidateUrl, {
               binding,
@@ -20706,6 +20769,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               sourceUrl: url,
               binding,
               recordId: getRecordId(record),
+              diagnosticAttemptId: mediaDiagnosticTrace?.source === 'xiaohongshu-browser' ? mediaDiagnosticTrace.attemptId : '',
               decryptKey: candidateDecryptKey,
               forceLocal: metadata.transcriptionMode === 'local',
               signal,
@@ -20743,6 +20807,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (isAbortError(candidateError) || signal?.aborted) throw createAbortError();
           lastError = candidateError;
           const candidateStage = candidateError.channelsStage || (/LOCAL_COMPONENT/.test(candidateError.code || '') || /组件|未配置.*命令|脚本过旧/.test(candidateError.message || '') ? 'local-component' : 'transcribe');
+          if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') {
+            appendXiaohongshuBrowserFailure({ xiaohongshuBrowserDiagnostic: mediaDiagnosticTrace, diagnosticSettings: this.settings }, candidateError.asrStage || 'transcription', candidateError);
+            Object.assign(mediaDiagnosticTrace, { finalOutcome: 'transcription-failed', finishedAt: new Date().toISOString() });
+            candidateError.diagnostic = xhsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
+          }
           if (mediaDiagnosticTrace?.source === 'wechat-channels') {
             channelsDiagnostic.noteFailure(mediaDiagnosticTrace, candidateError, candidateStage);
           }
@@ -21289,10 +21358,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
     const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(url)
-      ? createXiaohongshuBrowserDiagnostic()
+      ? createXiaohongshuBrowserDiagnostic(record)
       : null;
     if (xiaohongshuBrowserDiagnostic) {
       this.lastXiaohongshuBrowserDiagnostic = xiaohongshuBrowserDiagnostic;
+      this.lastXiaohongshuBrowserResults = [...this.getRecentXiaohongshuBrowserResults().slice(-4), xiaohongshuBrowserDiagnostic];
     }
     let xiaohongshuCommentResult = null;
     const updateCommentResult = (patch = {}) => {
@@ -21308,9 +21378,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       xiaohongshuBrowserDiagnostic.commentResult = xiaohongshuCommentResult;
     };
     updateCommentResult({ status: 'not_attempted', reason: 'content_pending', stage: 'content',
-      attemptId: crypto.randomBytes(4).toString('hex') });
+      attemptId: xiaohongshuBrowserDiagnostic ? xiaohongshuBrowserDiagnostic.attemptId : crypto.randomBytes(4).toString('hex') });
     const xiaohongshuBrowserOptions = xiaohongshuBrowserDiagnostic
-      ? { xiaohongshuBrowserDiagnostic }
+      ? { xiaohongshuBrowserDiagnostic, diagnosticSettings: this.settings }
       : {};
     let xiaohongshuRedirectDiagnostic = null;
     let xiaohongshuResolvedUrl = url || '';
@@ -21328,9 +21398,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       : null;
     if (!feishuCloudOAuthStatus?.connected
       && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot)
+      && !(isXiaohongshuUrl(url) && (metadata.webpageMediaType === 'audio_video' || metadata.contentCategory === '视频' || metadata.videoUrl)
+        && !String(metadata.transcription || '').trim())
       && (!isWechatChannelsUrl(url) || (metadata.transcriptionStatus === 'success' && String(metadata.transcription || '').trim()))
       && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       updateCommentResult({ status: 'skipped', reason: 'existing_content' });
+      if (xiaohongshuBrowserDiagnostic) Object.assign(xiaohongshuBrowserDiagnostic, { finalOutcome: 'existing-content', finishedAt: new Date().toISOString() });
       return xiaohongshuCommentResult ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } } : record;
     }
 
@@ -22616,6 +22689,16 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = '';
           }
         }
+        if (!mediaUrl && isXiaohongshuUrl(url) && (isVideoIntent || (extractedXiaohongshu && extractedXiaohongshu.isVideoNote === true))) {
+          Object.assign(xiaohongshuBrowserDiagnostic, { finalOutcome: 'no-media-candidate', mediaCandidateCount: 0, transcriptionStarted: false, finishedAt: new Date().toISOString() });
+          if (pendingXiaohongshuFailureDiagnostic) {
+            pendingXiaohongshuFailureDiagnostic.browser = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
+            throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
+          }
+          const error = createRetryableTranscriptionError('小红书视频未转写：未获取到可用的视频资源。请复制诊断信息；原记录保留供重试。');
+          error.diagnostic = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
+          throw error;
+        }
         if (pendingXiaohongshuFailureDiagnostic && !mediaUrl) {
           if (xiaohongshuBrowserDiagnostic) {
             pendingXiaohongshuFailureDiagnostic.browser = redactSensitiveObject(
@@ -22661,7 +22744,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             noMediaError: isUnavailableXhs
               ? '小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。'
               : '',
-            mediaResolutionDiagnostic: douyinResolutionDiagnostic,
+            mediaResolutionDiagnostic: xiaohongshuBrowserDiagnostic || douyinResolutionDiagnostic,
             signal,
           });
         }
@@ -24149,7 +24232,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           ...(lifecycleReportError ? { lifecycleReportError } : {}),
           time: new Date().toISOString(),
         };
-        writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+        writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
         failed.push({
           recordId: getRecordId(record),
           message,
@@ -24386,7 +24469,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         .filter(Boolean)
         .slice(0, 100);
       this.lastSyncDiagnostic = {
-        status: displayedFailures.length ? 'failed' : ((completionWarnings.length || historicalFailures.length) ? 'warning' : 'success'),
+        status: displayedFailures.length ? 'failed' : ((conversionWarnings.length || completionWarnings.length || historicalFailures.length) ? 'warning' : 'success'),
         stage: 'finished',
         current: written.length,
         total: written.length + displayedFailures.length + skipped.length,
@@ -24413,7 +24496,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...(syncSnapshots.length ? { syncSnapshots } : {}),
         time: new Date().toISOString(),
       };
-      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
     } catch (error) {
       this.lastSyncDiagnostic = {
@@ -24423,7 +24506,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         error: error.message || String(error),
         time: new Date().toISOString(),
       };
-      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
       new Notice(`同步失败：${error.message || error}`);
     }

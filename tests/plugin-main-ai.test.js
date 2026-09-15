@@ -1240,7 +1240,7 @@ assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
 assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
   manifestVersion: currentPluginVersion,
   runtimeVersion: currentPluginVersion,
-  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1',
+  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
@@ -2075,10 +2075,10 @@ assert.deepStrictEqual(
 }
 {
   const failedBrowserDiagnostic = helpers.createXiaohongshuBrowserDiagnostic();
-  const timeoutError = new Error('sensitive page script timed out');
+  const timeoutError = new Error('page script timed out https://example.test/?token=URL_SECRET sensitive-page-secret');
   timeoutError.code = 'BROWSER_TASK_TIMEOUT';
   helpers.appendXiaohongshuBrowserFailure(
-    { xiaohongshuBrowserDiagnostic: failedBrowserDiagnostic },
+    { xiaohongshuBrowserDiagnostic: failedBrowserDiagnostic, diagnosticSettings: { token: 'sensitive-page-secret' } },
     'media_extraction',
     timeoutError,
   );
@@ -2088,10 +2088,11 @@ assert.deepStrictEqual(
       && stage.failureKind === 'BROWSER_TASK_TIMEOUT'
   )));
   assert.strictEqual(
-    JSON.stringify(failedBrowserDiagnostic).includes('sensitive page script'),
+    /URL_SECRET|sensitive-page-secret/.test(JSON.stringify(failedBrowserDiagnostic)),
     false,
-    '浏览器失败诊断不能保存原始异常正文',
+    '浏览器失败诊断必须脱敏链接和已知凭据',
   );
+  assert.ok(JSON.stringify(failedBrowserDiagnostic).includes('page script timed out'), '保留定位所需的技术异常');
 }
 {
   const automaticFailure = helpers.createAutomaticWebpageExtractionError(
@@ -11551,7 +11552,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
       runtime: {
         manifestVersion: currentPluginVersion,
         runtimeVersion: currentPluginVersion,
-        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1',
+        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2',
         matchesManifest: true,
       },
       request: {
