@@ -2512,11 +2512,11 @@ assert.strictEqual(helpers.LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_beta')
 assert.strictEqual(helpers.LOCAL_COMPONENT_MANIFEST_PATH, '/local-components/manifest');
 assert.strictEqual(
   helpers.LOCAL_COMPONENT_DOWNLOAD_HOST,
-  'wechat-inbox-components-1428610652.cos.ap-shanghai.myqcloud.com',
+  '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la',
 );
-const authorizedModelUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'a'.repeat(64)}/ggml-small.bin?q-signature=temporary&x-cos-security-token=role-token`;
+const authorizedModelUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'a'.repeat(64)}/ggml-small.bin?sign=temporary&t=1789480000`;
 const authorizedEncodedFileName = 'cpython-3.12.13+20260623-x86_64-pc-windows-msvc-install_only.tar.gz';
-const authorizedEncodedUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'b'.repeat(64)}/${authorizedEncodedFileName.replace('+', '%2B')}?q-signature=temporary&x-cos-security-token=role-token`;
+const authorizedEncodedUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'b'.repeat(64)}/${authorizedEncodedFileName.replace('+', '%2B')}?sign=temporary&t=1789480000`;
 assert.strictEqual(
   helpers.isAuthorizedLocalComponentDownloadUrl(
     authorizedEncodedUrl,
@@ -2527,7 +2527,7 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.isAuthorizedLocalComponentDownloadUrl(
-    `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/prefix/local-components/by-sha256/${'b'.repeat(64)}/${authorizedEncodedFileName.replace('+', '%2B')}?q-signature=temporary&x-cos-security-token=role-token`,
+    `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/prefix/local-components/by-sha256/${'b'.repeat(64)}/${authorizedEncodedFileName.replace('+', '%2B')}?sign=temporary&t=1789480000`,
     'b'.repeat(64),
     authorizedEncodedFileName,
   ),
@@ -2540,6 +2540,7 @@ const authorizedComponentManifest = helpers.normalizeAuthorizedLocalComponentMan
     platform: 'win32',
     arch: 'x64',
     version: 'secure-test-v1',
+    deliveryProtocol: 'cloudbase-v1',
     expiresAt: '2036-08-27T00:10:00.000Z',
     assets: [{
       id: 'model',
@@ -2568,13 +2569,14 @@ assert.throws(() => helpers.normalizeAuthorizedLocalComponentManifest({
     platform: 'win32',
     arch: 'x64',
     version: 'secure-test-v1',
+    deliveryProtocol: 'cloudbase-v1',
     expiresAt: '2036-08-27T00:10:00.000Z',
     assets: [{
       id: 'model',
       fileName: 'ggml-small.bin',
       sha256: 'a'.repeat(64),
       byteLength: 487601967,
-      downloadUrl: 'https://attacker.example.com/model?q-signature=temporary&x-cos-security-token=role-token',
+      downloadUrl: 'https://attacker.example.com/model?sign=temporary&t=1789480000',
     }],
   },
 }, { component: 'asr', platform: 'win32', arch: 'x64' }, Date.parse('2036-08-27T00:00:00.000Z')));

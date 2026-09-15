@@ -69,6 +69,7 @@ jobs:
       - name: Run release governance and plugin regressions
         run: |
           node tests/plugin-ai-metadata-error-utils.test.js
+          node tests/plugin-component-cloudbase.test.js
           node tests/plugin-architecture-integration.test.js
           node tests/plugin-cloud-transcription-response-utils.test.js
           node tests/plugin-document-text-extraction.test.js
