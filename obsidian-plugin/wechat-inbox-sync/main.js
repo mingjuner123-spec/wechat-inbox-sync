@@ -655,7 +655,7 @@ ${safeTail}`;
       }, "visit");
       visit(settings);
       for (const secret of secrets.sort((a, b) => b.length - a.length)) text = String(text).split(secret).join("[REDACTED]");
-      return redactKnownCredentials2(String(text || ""), settings).replace(/https?:\/\/[^\s<>"']+/gi, "[URL REDACTED]").replace(/(?:\/Users\/|\/home\/)[^\s/"']+/g, "/Users/[USER]").replace(/[A-Z]:[\\/]Users[\\/][^\s\\/"']+/gi, "C:/Users/[USER]").replace(/((?:bindingToken|token|secret|authorization|cookie|api[_-]?key|password)\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/^[\t ]*\[\d\d:\d\d:[\d.,]+\s*-->[^\n]*$/gm, "[TRANSCRIPT OMITTED]").replace(/^(inputPath|outputPath|tempWorkDir|command)=.*$/gm, "$1=[LOCAL PATH/COMMAND OMITTED]").replace(/--- stdout ---[\s\S]*?(?=--- stderr ---|$)/g, "--- stdout ---\n[OMITTED: may contain transcript]\n");
+      return redactKnownCredentials2(String(text || ""), settings).replace(/https?:\/\/[^\s<>"']+/gi, "[URL REDACTED]").replace(/(?:\/Users\/|\/home\/)[^\s/"']+/g, "/Users/[USER]").replace(/[A-Z]:[\\/]+Users[\\/]+[^\s\\/"']+/gi, "C:/Users/[USER]").replace(/((?:bindingToken|token|secret|authorization|cookie|api[_-]?key|password)\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/^[\t ]*\[\d\d:\d\d:[\d.,]+\s*-->[^\n]*$/gm, "[TRANSCRIPT OMITTED]").replace(/^(inputPath|outputPath|tempWorkDir|command)=.*$/gm, "$1=[LOCAL PATH/COMMAND OMITTED]").replace(/--- stdout ---[\s\S]*?(?=--- stderr ---|$)/g, "--- stdout ---\n[OMITTED: may contain transcript]\n");
     }
     __name(diagnosticRedact, "diagnosticRedact");
     function digestFile(file) {
@@ -782,7 +782,7 @@ ${safeTail}`;
       }
     }
     __name(saveSession, "saveSession");
-    function detailedDiagnostic(root, settings = {}) {
+    function detailedDiagnostic(root, settings = {}, currentTask = null) {
       var _a;
       const stored = boundedRead(path2.join(root, "asr-diagnostic-last.json"), 768 * 1024);
       let session;
@@ -790,12 +790,15 @@ ${safeTail}`;
         session = JSON.parse(stored);
       } catch (_) {
       }
+      const sessionRef = session && session.recordId ? crypto2.createHash("sha256").update(String(session.recordId)).digest("hex").slice(0, 16) : "";
+      const sameAttempt = Boolean(currentTask && currentTask.transcriptionStarted === true && currentTask.attemptId && session && session.diagnosticAttemptId === currentTask.attemptId && currentTask.recordRef && sessionRef === currentTask.recordRef && Date.parse(session.startedAt) >= Date.parse(currentTask.startedAt) && (!currentTask.finishedAt || Date.parse(session.startedAt) <= Date.parse(currentTask.finishedAt)));
       const identity = runtimeIdentity(root);
       const sections = [
         "详细 ASR 诊断 v1（本地生成；未自动上传）",
         "日志每项最多 256 KiB；超出明确标记；stdout/识别文本不导出。",
         JSON.stringify({ platform: os2.platform(), arch: os2.arch(), release: os2.release(), cpu: (_a = os2.cpus()[0]) == null ? void 0 : _a.model, logicalCpus: os2.cpus().length, totalMemoryBytes: os2.totalmem(), freeMemoryBytesNow: os2.freemem(), memoryNote: "当前空闲内存不能单独判断转写时内存不足", runtime: identity, modelSha256: digestFile(path2.join(root, "models", "ggml-small.bin")) }, null, 2),
-        "--- 本次任务及尝试 ---",
+        sameAttempt ? "--- 与当前小红书任务匹配的 ASR 尝试 ---" : "--- 最近一次 ASR 历史任务（不代表当前同步已转写）---",
+        JSON.stringify({ relation: sameAttempt ? "same_attempt" : "historical_or_unconfirmed", recordRef: sessionRef, startedAt: session && session.startedAt || "", currentAttemptId: currentTask && currentTask.attemptId || "", currentTranscriptionStarted: currentTask ? currentTask.transcriptionStarted === true : null }),
         stored,
         "--- 转写日志（首尾有界） ---",
         session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path2.join(root, "transcribe-last.log"))) ? readDiagnosticLog(path2.join(root, "transcribe-last.log")) : "[旧成功日志省略]",
@@ -834,6 +837,62 @@ ${safeTail}`;
     }
     __name(ensureManagedMacScript, "ensureManagedMacScript");
     module2.exports.ensureManagedMacScript = ensureManagedMacScript;
+  }
+});
+
+// src/xiaohongshu-diagnostic-utils.js
+var require_xiaohongshu_diagnostic_utils = __commonJS({
+  "src/xiaohongshu-diagnostic-utils.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var { diagnosticRedact } = require_asr_recovery_utils();
+    function recordRef(value) {
+      return value ? crypto2.createHash("sha256").update(String(value)).digest("hex").slice(0, 16) : "";
+    }
+    __name(recordRef, "recordRef");
+    function technicalText(value, settings = {}) {
+      const text = String(value || "");
+      if (text.length > 16384) return "[oversized error message omitted]";
+      return diagnosticRedact(text, settings).replace(/Bearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]").replace(/(["']?(?:token|bindingToken|xsec_token|access_token|refresh_token|web_session|a1|authorization|cookie|password|secret|api[_-]?key)["']?\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[EMAIL REDACTED]").replace(/\s+/g, " ").slice(0, 480);
+    }
+    __name(technicalText, "technicalText");
+    function safeStage(value = {}, settings = {}) {
+      const result = {};
+      for (const key of ["type", "stage", "outcome", "action", "code", "failureKind", "exception", "host"]) {
+        if (value[key]) result[key] = technicalText(value[key], settings).slice(0, 64);
+      }
+      if (value.message) result.message = technicalText(value.message, settings);
+      for (const key of ["status", "durationMs", "mediaCandidateCount"]) {
+        const number = Number(value[key]);
+        if (Number.isFinite(number) && number >= 0) result[key] = Math.min(36e5, Math.round(number));
+      }
+      return result;
+    }
+    __name(safeStage, "safeStage");
+    function errorDetails(error, settings = {}) {
+      return safeStage({
+        exception: ["Error", "SyntaxError", "ReferenceError", "TypeError", "RangeError", "AbortError"].includes(error && error.name) ? error.name : "Error",
+        message: String(error && error.message || error || "Unknown browser error"),
+        status: Number(error && (error.status || error.statusCode)) || 0
+      }, settings);
+    }
+    __name(errorDetails, "errorDetails");
+    function sanitize(value, settings = {}) {
+      const input = value && typeof value === "object" ? value : {};
+      const result = { source: "xiaohongshu-browser", schema: 2 };
+      for (const key of ["attemptId", "recordRef"]) result[key] = /^[a-f0-9]{8,32}$/.test(input[key] || "") ? input[key] : "";
+      for (const key of ["startedAt", "finishedAt"]) if (Number.isFinite(Date.parse(input[key]))) result[key] = new Date(input[key]).toISOString();
+      if (/^\d+\.\d+\.\d+$/.test(input.runtimeVersion || "")) result.runtimeVersion = input.runtimeVersion;
+      for (const key of ["finalOutcome", "loginEvidence", "commentAccess"]) if (input[key]) result[key] = technicalText(input[key], settings).slice(0, 64);
+      result.loginCookiePresent = typeof input.loginCookiePresent === "boolean" ? input.loginCookiePresent : null;
+      result.transcriptionStarted = input.transcriptionStarted === true;
+      result.mediaCandidateCount = Number.isFinite(input.mediaCandidateCount) ? Math.max(0, Math.min(1e3, input.mediaCandidateCount)) : 0;
+      for (const key of ["stages", "events"]) result[key] = (Array.isArray(input[key]) ? input[key] : []).slice(-24).map((item) => safeStage(item || {}, settings));
+      result.downloadAttempts = (Array.isArray(input.downloadAttempts) ? input.downloadAttempts : []).slice(-12).map((item) => safeStage({ stage: item.transport || item.stage, outcome: typeof item.ok === "boolean" ? item.ok ? "success" : "failed" : item.outcome, status: item.status, code: item.code, durationMs: item.durationMs }, settings));
+      return result;
+    }
+    __name(sanitize, "sanitize");
+    module2.exports = { recordRef, technicalText, errorDetails, safeStage, sanitize };
   }
 });
 
@@ -8616,7 +8675,7 @@ var require_xiaohongshu_markdown_utils = __commonJS({
       ].includes(value) ? value : "unknown", "token");
       return {
         schema: 1,
-        attemptId: /^[0-9a-f]{8}$/.test(input.attemptId || "") ? input.attemptId : "",
+        attemptId: /^(?:[0-9a-f]{8}|[0-9a-f]{16})$/.test(input.attemptId || "") ? input.attemptId : "",
         loginCookiePresent: typeof input.loginCookiePresent === "boolean" ? input.loginCookiePresent : null,
         loginEvidence: pick(input.loginEvidence, ["account_signal", "page_signal", "cookie_only", "none", "unknown"], "unknown"),
         time: /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(input.time || "") ? input.time : "",
@@ -8988,6 +9047,7 @@ var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
+var xhsDiagnostic = require_xiaohongshu_diagnostic_utils();
 var { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require_wechat_request_gate();
 var sharedWechatArticleGate = createWechatArticleRequestGate();
 var childProcess = require("child_process");
@@ -9230,8 +9290,8 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.145";
-var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1";
+var PLUGIN_RUNTIME_VERSION = "1.3.146";
+var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
@@ -10199,7 +10259,8 @@ function buildSyncDiagnosticLogText({
   recordId = "",
   error = "",
   diagnostic = null,
-  xiaohongshuComments = []
+  xiaohongshuComments = [],
+  xiaohongshuBrowserResults = []
 } = {}) {
   const lines = [
     `time=${time}`,
@@ -10222,6 +10283,9 @@ function buildSyncDiagnosticLogText({
   }
   if (Array.isArray(xiaohongshuComments) && xiaohongshuComments.length) {
     lines.push("--- xhs-comments ---", JSON.stringify(xiaohongshuComments.slice(-5).map(sanitizeXiaohongshuCommentResult)));
+  }
+  if (Array.isArray(xiaohongshuBrowserResults) && xiaohongshuBrowserResults.length) {
+    lines.push("--- xhs-tasks ---", JSON.stringify(xiaohongshuBrowserResults.slice(-5).map((item) => xhsDiagnostic.sanitize(item))));
   }
   return lines.join("\n");
 }
@@ -13610,9 +13674,16 @@ function installWechatArticleNavigationGuards(webContents) {
   webContents.on("will-redirect", restrictArticleNavigation);
 }
 __name(installWechatArticleNavigationGuards, "installWechatArticleNavigationGuards");
-function createXiaohongshuBrowserDiagnostic() {
+function createXiaohongshuBrowserDiagnostic(record = null) {
   return {
     source: "xiaohongshu-browser",
+    schema: 2,
+    attemptId: crypto.randomBytes(8).toString("hex"),
+    recordRef: xhsDiagnostic.recordRef(getRecordId(record || {})),
+    startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    runtimeVersion: PLUGIN_RUNTIME_VERSION,
+    transcriptionStarted: false,
+    mediaCandidateCount: 0,
     loginCookiePresent: null,
     commentAccess: "not_checked",
     stages: [],
@@ -13636,6 +13707,9 @@ function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
       failureKind: String(entry.failureKind).trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 64)
     } : {}
   };
+  for (const key2 of ["exception", "message", "status", "durationMs", "mediaCandidateCount"]) {
+    if (entry[key2] !== void 0) safeEntry[key2] = entry[key2];
+  }
   const host = getSafeUrlDiagnostic(entry.url || "").host;
   if (host) safeEntry.host = host;
   if (type === "login_cookie_checked") {
@@ -13651,9 +13725,10 @@ function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
     };
   }
   const bucket = type === "stage" ? diagnostic.stages : diagnostic.events;
-  const key = JSON.stringify(safeEntry);
+  const safeDetails = xhsDiagnostic.safeStage(safeEntry, options.diagnosticSettings);
+  const key = JSON.stringify(safeDetails);
   if (Object.keys(safeEntry).length && !bucket.some((item) => JSON.stringify(item) === key)) {
-    bucket.push(safeEntry);
+    bucket.push(safeDetails);
     if (bucket.length > 24) bucket.splice(0, bucket.length - 24);
   }
   return diagnostic;
@@ -13664,6 +13739,7 @@ function getXiaohongshuBrowserFailureCode(error) {
   if (explicitCode) return explicitCode;
   const message = String(error && error.message || error || "");
   if (/timed?\s*out|timeout/i.test(message)) return "BROWSER_TASK_TIMEOUT";
+  if (["SyntaxError", "ReferenceError", "TypeError"].includes(error && error.name)) return "BROWSER_SCRIPT_ERROR";
   if (/load|navigation|ERR_/i.test(message)) return "BROWSER_LOAD_FAILED";
   return "BROWSER_EXTRACTION_FAILED";
 }
@@ -13673,7 +13749,8 @@ function appendXiaohongshuBrowserFailure(options = {}, stage = "", error = null)
     type: "stage",
     stage,
     outcome: isAbortError(error) ? "aborted" : "failed",
-    failureKind: getXiaohongshuBrowserFailureCode(error)
+    failureKind: getXiaohongshuBrowserFailureCode(error),
+    ...xhsDiagnostic.errorDetails(error, options.diagnosticSettings)
   });
 }
 __name(appendXiaohongshuBrowserFailure, "appendXiaohongshuBrowserFailure");
@@ -18593,16 +18670,29 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
         const hasLoginWall = /登录后|请登录|登录小红书|手机号登录|验证码登录|扫码登录|未登录/.test(text);
         const hasUserSignal = Boolean(document.querySelector('[href*="/user/profile"], [class*="avatar"], [class*="user-info"], [class*="userInfo"]'));
         let hasAccountApiSignal = false;
+        let accountStatus = 0;
+        let accountResult = 'unknown';
+        let accountRejected = false;
+        const controller = new AbortController();
+        let deadline;
         try {
+          await Promise.race([(async () => {
           const response = await fetch('https://edith.xiaohongshu.com/api/sns/web/v1/user/selfinfo', {
             credentials: 'include',
+            signal: controller.signal,
             headers: { accept: 'application/json, text/plain, */*' },
           });
-          const payload = await response.clone().json().catch(async () => ({ text: await response.text().catch(() => '') }));
+          accountStatus = response.status;
+          accountRejected = [401, 403].includes(response.status);
+          const payload = await response.json();
+          accountRejected = accountRejected || Number(payload && payload.code) === -100;
+          accountResult = accountRejected ? 'rejected' : 'response';
           const payloadText = JSON.stringify(payload || {});
           hasAccountApiSignal = response.ok && /user_?id|nickname|red_?id|avatar/i.test(payloadText) && !/login|登录|unauthorized|forbidden/i.test(payloadText);
-        } catch (error) {}
-        return { hasLoginWall, hasUserSignal, hasAccountApiSignal, text: text.slice(0, 500) };
+          })(), new Promise(resolve => { deadline = setTimeout(() => { accountResult = 'timeout'; controller.abort(); resolve(); }, 4000); })]);
+        } catch (error) { accountResult = accountRejected ? 'rejected' : controller.signal.aborted ? 'timeout' : 'request_failed'; }
+        finally { clearTimeout(deadline); controller.abort(); }
+        return { hasLoginWall, hasUserSignal, hasAccountApiSignal, accountStatus, accountResult, accountRejected, text: text.slice(0, 500) };
       })()
       `),
       XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS,
@@ -18612,7 +18702,8 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
       options.xiaohongshuBrowserDiagnostic.loginEvidence = state && state.hasAccountApiSignal ? "account_signal" : state && state.hasUserSignal ? "page_signal" : "none";
     }
     recordXiaohongshuSecurityRestriction(options, state && state.text, "login_check");
-    if (state && state.hasLoginWall) return false;
+    appendXiaohongshuBrowserDiagnostic(options, { type: "stage", stage: "account_probe", outcome: state && state.accountResult || "unknown", status: state && state.accountStatus || 0 });
+    if (state && (state.hasLoginWall || state.accountRejected)) return false;
     const hasCookieAfterProbe = await checkXiaohongshuLoginStatus();
     const loggedIn = Boolean(hasCookieAfterProbe && state && (state.hasAccountApiSignal || state.hasUserSignal));
     appendXiaohongshuBrowserDiagnostic(options, {
@@ -19918,6 +20009,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
 }
 __name(renderFeishuUrlToSimpleMarkdownWithElectron, "renderFeishuUrlToSimpleMarkdownWithElectron");
 async function renderSocialMediaUrlsWithElectron(url, options = {}) {
+  const mediaStartedAt = Date.now();
   throwIfAborted(options.signal);
   if (isDouyinUrl(url) && options.__douyinSessionLockHeld !== true) {
     return await runWithDouyinBrowserSessionLock(() => renderSocialMediaUrlsWithElectron(url, {
@@ -20009,6 +20101,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   let debuggerAttached = false;
   let debuggerMessageHandler = null;
   const captureWebRequestDetails = /* @__PURE__ */ __name((details) => {
+    if (isXiaohongshuExtractionWindow && Number(details && details.statusCode) >= 400) {
+      appendXiaohongshuBrowserDiagnostic(options, { type: "network", stage: "media_extraction", outcome: "http_failed", url: details.url, status: Number(details.statusCode) });
+    }
     if (capturedRequests.length >= BROWSER_MEDIA_CAPTURE_MAX_REQUESTS) return;
     capturedRequests.push({
       url: details && details.url,
@@ -20034,6 +20129,11 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   });
   installWebRequestHandler("onBeforeRedirect", captureWebRequestDetails);
   installWebRequestHandler("onCompleted", captureWebRequestDetails);
+  if (isXiaohongshuExtractionWindow) {
+    installWebRequestHandler("onErrorOccurred", (details) => {
+      appendXiaohongshuBrowserDiagnostic(options, { type: "network", stage: "media_extraction", outcome: "request_failed", url: details && details.url, message: details && details.error });
+    });
+  }
   if (isXiaohongshuExtractionWindow) {
     installXiaohongshuNavigationGuards(win.webContents, xiaohongshuHiddenWindowOptions);
   } else {
@@ -20206,15 +20306,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
             const paceEntries = Array.isArray(self.__pace_f) ? self.__pace_f.slice(-320) : [];
             douyinPaceState = paceEntries
               .map((entry) => 'self.__pace_f.push(' + JSON.stringify(entry) + ');')
-              .join('
-')
+              .join('\\n')
               .slice(-800000);
             if (!douyinPaceState) {
               douyinPaceState = Array.from(document.scripts)
                 .map((node) => String(node.textContent || ''))
                 .filter((text) => text.includes('__pace_f') || text.includes('videoDetail'))
-                .join('
-')
+                .join('\\n')
                 .slice(0, 800000);
             }
           } catch (error) {}
@@ -20244,7 +20342,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       appendXiaohongshuBrowserDiagnostic(options, {
         type: "stage",
         stage: "media_extraction",
-        outcome: "completed"
+        outcome: "completed",
+        durationMs: Date.now() - mediaStartedAt
       });
     }
     throwIfAborted(options.signal);
@@ -20276,6 +20375,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   } catch (error) {
     if (isXiaohongshuExtractionWindow) {
       appendXiaohongshuBrowserFailure(options, "media_extraction", error);
+      appendXiaohongshuBrowserDiagnostic(options, { type: "stage", stage: "media_extraction", outcome: "stopped", durationMs: Date.now() - mediaStartedAt });
     }
     throw error;
   } finally {
@@ -23884,7 +23984,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       status: progress.stage === "empty" ? "empty" : "running",
       time: (/* @__PURE__ */ new Date()).toISOString()
     };
-    writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+    writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === "function") {
       this.syncStatusBar.setText(message);
     }
@@ -24684,6 +24784,18 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     ].join("\n");
     return asrRecovery.diagnosticRedact(diagnosticText, this.settings);
   }
+  getRecentXiaohongshuBrowserResults() {
+    if (!Array.isArray(this.lastXiaohongshuBrowserResults)) {
+      const log = readSyncDiagnosticLog(this.getConfiguredLocalAsrInstallRoot());
+      try {
+        const saved = JSON.parse((log.match(/--- xhs-tasks ---\r?\n([^\r\n]+)/) || [])[1] || "[]");
+        this.lastXiaohongshuBrowserResults = Array.isArray(saved) ? saved.slice(-5).map((item) => xhsDiagnostic.sanitize(item, this.settings)) : [];
+      } catch (_) {
+        this.lastXiaohongshuBrowserResults = [];
+      }
+    }
+    return this.lastXiaohongshuBrowserResults;
+  }
   getRecentXiaohongshuCommentResults() {
     if (!Array.isArray(this.lastXiaohongshuCommentResults)) {
       const log = readSyncDiagnosticLog(this.getConfiguredLocalAsrInstallRoot());
@@ -24747,6 +24859,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `OCR 安装日志：${getLocalAsrInstallLogPath(ocrRoot)}`,
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`
     ];
+    const taskResults = this.getRecentXiaohongshuBrowserResults().map((item) => xhsDiagnostic.sanitize(item, this.settings));
+    lines.push("", "最近小红书任务诊断（最多 5 次；每项 attemptId 独立，不代表其他条目）：");
+    lines.push(taskResults.length ? JSON.stringify(taskResults, null, 2) : "暂无新版任务诊断；历史日志无法补回原始异常。");
     const commentResults = this.getRecentXiaohongshuCommentResults();
     lines.push("", "最近小红书评论诊断（最多 5 次，按时间排列）：");
     if (Array.isArray(commentResults) && commentResults.length) {
@@ -24790,7 +24905,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     } else {
       lines.push("", "已省略成功日志，只保留失败相关信息。");
     }
-    lines.push("", asrRecovery.detailedDiagnostic(asrRoot, this.settings));
+    lines.push("", asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
     return asrRecovery.diagnosticRedact(lines.join("\n"), this.settings);
   }
   async copyTextToClipboard(text) {
@@ -26076,7 +26191,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const managed = platform === "darwin" && (commandTemplate === getDefaultLocalTranscriptionCommand("darwin") && installRoot === getLocalAsrInstallRoot(os.homedir(), "default", "darwin") || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot) && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
     const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
-    const session = { startedAt: (/* @__PURE__ */ new Date()).toISOString(), platform, recordId: options.recordId || "", runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
+    const session = { startedAt: (/* @__PURE__ */ new Date()).toISOString(), platform, recordId: options.recordId || "", diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || "") ? options.diagnosticAttemptId : "", runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
     const progressTitle = options.title || "";
     const abortController = new AbortController();
     let ownedChild = null;
@@ -27228,6 +27343,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         delete value.failure;
         value.stage = "finished";
       }
+      if (value.source === "xiaohongshu-browser") {
+        Object.assign(mediaDiagnosticTrace, { finalOutcome: value.finalOutcome, finishedAt: (/* @__PURE__ */ new Date()).toISOString() });
+        return xhsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
+      }
       return value.source === "wechat-channels" ? channelsDiagnostic.sanitize(value, this.settings) : value;
     }, "getMediaResolutionDiagnostic");
     const metadataWithSocialMetrics = {
@@ -27286,6 +27405,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     (Array.isArray(mediaItems) ? mediaItems : []).forEach((item) => addCandidate(item));
     const getCandidates = /* @__PURE__ */ __name(() => (preparedMedia ? Array.from(candidateMap.keys()) : sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
     const candidates = getCandidates();
+    if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
     if (!candidates.length) {
       return {
         ...record,
@@ -27329,6 +27449,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           const candidateUrl = candidate.url;
           const candidateDecryptKey = String(candidate.decryptKey || candidate.decodeKey || "").trim();
           const useCloudForWebpage = !candidateDecryptKey && (metadata.transcriptionMode === "cloud" || metadata.cloudTranscriptionRequested === true);
+          if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.transcriptionStarted = true;
           const result = useCloudForWebpage ? await this.runCloudFallbackTranscription(candidateUrl, {
             binding,
             title: title || metadata.title || "",
@@ -27344,6 +27465,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             sourceUrl: url,
             binding,
             recordId: getRecordId(record),
+            diagnosticAttemptId: (mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser" ? mediaDiagnosticTrace.attemptId : "",
             decryptKey: candidateDecryptKey,
             forceLocal: metadata.transcriptionMode === "local",
             signal,
@@ -27381,6 +27503,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           if (isAbortError(candidateError) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
           lastError = candidateError;
           const candidateStage = candidateError.channelsStage || (/LOCAL_COMPONENT/.test(candidateError.code || "") || /组件|未配置.*命令|脚本过旧/.test(candidateError.message || "") ? "local-component" : "transcribe");
+          if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") {
+            appendXiaohongshuBrowserFailure({ xiaohongshuBrowserDiagnostic: mediaDiagnosticTrace, diagnosticSettings: this.settings }, candidateError.asrStage || "transcription", candidateError);
+            Object.assign(mediaDiagnosticTrace, { finalOutcome: "transcription-failed", finishedAt: (/* @__PURE__ */ new Date()).toISOString() });
+            candidateError.diagnostic = xhsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
+          }
           if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "wechat-channels") {
             channelsDiagnostic.noteFailure(mediaDiagnosticTrace, candidateError, candidateStage);
           }
@@ -27877,9 +28004,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
-    const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(url) ? createXiaohongshuBrowserDiagnostic() : null;
+    const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(url) ? createXiaohongshuBrowserDiagnostic(record) : null;
     if (xiaohongshuBrowserDiagnostic) {
       this.lastXiaohongshuBrowserDiagnostic = xiaohongshuBrowserDiagnostic;
+      this.lastXiaohongshuBrowserResults = [...this.getRecentXiaohongshuBrowserResults().slice(-4), xiaohongshuBrowserDiagnostic];
     }
     let xiaohongshuCommentResult = null;
     const updateCommentResult = /* @__PURE__ */ __name((patch = {}) => {
@@ -27900,9 +28028,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       status: "not_attempted",
       reason: "content_pending",
       stage: "content",
-      attemptId: crypto.randomBytes(4).toString("hex")
+      attemptId: xiaohongshuBrowserDiagnostic ? xiaohongshuBrowserDiagnostic.attemptId : crypto.randomBytes(4).toString("hex")
     });
-    const xiaohongshuBrowserOptions = xiaohongshuBrowserDiagnostic ? { xiaohongshuBrowserDiagnostic } : {};
+    const xiaohongshuBrowserOptions = xiaohongshuBrowserDiagnostic ? { xiaohongshuBrowserDiagnostic, diagnosticSettings: this.settings } : {};
     let xiaohongshuRedirectDiagnostic = null;
     let xiaohongshuResolvedUrl = url || "";
     let xiaohongshuResponseStatus = 0;
@@ -27915,8 +28043,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const isFeishuLink = isFeishuUrl(url);
     const feishuCloudOAuthStatus = isFeishuLink ? await this.getFeishuCloudOAuthStatus(binding) : null;
-    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && (!isWechatChannelsUrl(url) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim()) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
+    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && !(isXiaohongshuUrl(url) && (metadata.webpageMediaType === "audio_video" || metadata.contentCategory === "视频" || metadata.videoUrl) && !String(metadata.transcription || "").trim()) && (!isWechatChannelsUrl(url) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim()) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       updateCommentResult({ status: "skipped", reason: "existing_content" });
+      if (xiaohongshuBrowserDiagnostic) Object.assign(xiaohongshuBrowserDiagnostic, { finalOutcome: "existing-content", finishedAt: (/* @__PURE__ */ new Date()).toISOString() });
       return xiaohongshuCommentResult ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } } : record;
     }
     try {
@@ -29002,6 +29131,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             mediaUrl = "";
           }
         }
+        if (!mediaUrl && isXiaohongshuUrl(url) && (isVideoIntent || extractedXiaohongshu && extractedXiaohongshu.isVideoNote === true)) {
+          Object.assign(xiaohongshuBrowserDiagnostic, { finalOutcome: "no-media-candidate", mediaCandidateCount: 0, transcriptionStarted: false, finishedAt: (/* @__PURE__ */ new Date()).toISOString() });
+          if (pendingXiaohongshuFailureDiagnostic) {
+            pendingXiaohongshuFailureDiagnostic.browser = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
+            throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
+          }
+          const error = createRetryableTranscriptionError("小红书视频未转写：未获取到可用的视频资源。请复制诊断信息；原记录保留供重试。");
+          error.diagnostic = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
+          throw error;
+        }
         if (pendingXiaohongshuFailureDiagnostic && !mediaUrl) {
           if (xiaohongshuBrowserDiagnostic) {
             pendingXiaohongshuFailureDiagnostic.browser = redactSensitiveObject(
@@ -29029,7 +29168,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             socialMetrics: isXiaohongshuUrl(url) ? extractedXiaohongshu && extractedXiaohongshu.socialMetrics : douyinStructuredContent && hasSocialMetrics(douyinStructuredContent.socialMetrics) ? douyinStructuredContent.socialMetrics : hasSocialMetrics(douyinSocialMetrics) ? douyinSocialMetrics : extractSocialMetricsFromHtml(html2),
             sourceTitle: isXiaohongshuUrl(url) ? getPreferredXiaohongshuTitle(metadata.title, extractedXiaohongshu && extractedXiaohongshu.title, "小红书") : douyinStructuredContent && douyinStructuredContent.title || extractWebpageMetadataFromHtml(html2, resolvedUrl).title,
             noMediaError: isUnavailableXhs ? "小红书网页端未返回可转写的视频资源。这通常是该分享链接在电脑网页端不可访问、笔记失效或需要小红书登录环境。请让用户重新复制小红书链接；如果仍失败，建议从手机相册或文件导入视频。" : "",
-            mediaResolutionDiagnostic: douyinResolutionDiagnostic,
+            mediaResolutionDiagnostic: xiaohongshuBrowserDiagnostic || douyinResolutionDiagnostic,
             signal
           });
         }
@@ -30361,7 +30500,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           ...lifecycleReportError ? { lifecycleReportError } : {},
           time: (/* @__PURE__ */ new Date()).toISOString()
         };
-        writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+        writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
         failed.push({
           recordId: getRecordId(record),
           message,
@@ -30558,7 +30697,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         };
       }).filter(Boolean).slice(0, 100);
       this.lastSyncDiagnostic = {
-        status: displayedFailures.length ? "failed" : completionWarnings.length || historicalFailures.length ? "warning" : "success",
+        status: displayedFailures.length ? "failed" : conversionWarnings.length || completionWarnings.length || historicalFailures.length ? "warning" : "success",
         stage: "finished",
         current: written.length,
         total: written.length + displayedFailures.length + skipped.length,
@@ -30579,7 +30718,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         ...syncSnapshots.length ? { syncSnapshots } : {},
         time: (/* @__PURE__ */ new Date()).toISOString()
       };
-      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
     } catch (error) {
       this.lastSyncDiagnostic = {
@@ -30589,7 +30728,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         error: error.message || String(error),
         time: (/* @__PURE__ */ new Date()).toISOString()
       };
-      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults() }, this.getConfiguredLocalAsrInstallRoot());
+      writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
       new Notice(`同步失败：${error.message || error}`);
     }

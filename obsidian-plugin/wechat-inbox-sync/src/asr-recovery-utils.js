@@ -80,7 +80,7 @@ function diagnosticRedact(text, settings = {}) {
   return redactKnownCredentials(String(text || ''), settings)
     .replace(/https?:\/\/[^\s<>"']+/gi, '[URL REDACTED]')
     .replace(/(?:\/Users\/|\/home\/)[^\s/"']+/g, '/Users/[USER]')
-    .replace(/[A-Z]:[\\/]Users[\\/][^\s\\/"']+/gi, 'C:/Users/[USER]')
+    .replace(/[A-Z]:[\\/]+Users[\\/]+[^\s\\/"']+/gi, 'C:/Users/[USER]')
     .replace(/((?:bindingToken|token|secret|authorization|cookie|api[_-]?key|password)\s*[=:]\s*)[^\r\n]+/gi, '$1[REDACTED]')
     .replace(/^[\t ]*\[\d\d:\d\d:[\d.,]+\s*-->[^\n]*$/gm, '[TRANSCRIPT OMITTED]')
     .replace(/^(inputPath|outputPath|tempWorkDir|command)=.*$/gm, '$1=[LOCAL PATH/COMMAND OMITTED]')
@@ -162,15 +162,23 @@ function saveSession(root, session, settings) {
   const redact = value => typeof value === 'string' ? diagnosticRedact(value, settings) : Array.isArray(value) ? value.map(redact) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k,v]) => [k,redact(v)])) : value;
   try { fs.writeFileSync(path.join(root, 'asr-diagnostic-last.json'), JSON.stringify(redact(session), null, 2), { mode: 0o600 }); } catch (_) {}
 }
-function detailedDiagnostic(root, settings = {}) {
+function detailedDiagnostic(root, settings = {}, currentTask = null) {
   const stored = boundedRead(path.join(root, 'asr-diagnostic-last.json'), 768 * 1024);
   let session; try { session = JSON.parse(stored); } catch (_) {}
+  const sessionRef = session && session.recordId ? crypto.createHash('sha256').update(String(session.recordId)).digest('hex').slice(0, 16) : '';
+  const sameAttempt = Boolean(currentTask && currentTask.transcriptionStarted === true
+    && currentTask.attemptId && session && session.diagnosticAttemptId === currentTask.attemptId
+    && currentTask.recordRef && sessionRef === currentTask.recordRef
+    && Date.parse(session.startedAt) >= Date.parse(currentTask.startedAt)
+    && (!currentTask.finishedAt || Date.parse(session.startedAt) <= Date.parse(currentTask.finishedAt)));
   const identity = runtimeIdentity(root);
   const sections = [
     '详细 ASR 诊断 v1（本地生成；未自动上传）',
     '日志每项最多 256 KiB；超出明确标记；stdout/识别文本不导出。',
     JSON.stringify({ platform: os.platform(), arch: os.arch(), release: os.release(), cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length, totalMemoryBytes: os.totalmem(), freeMemoryBytesNow: os.freemem(), memoryNote: '当前空闲内存不能单独判断转写时内存不足', runtime: identity, modelSha256: digestFile(path.join(root, 'models', 'ggml-small.bin')) }, null, 2),
-    '--- 本次任务及尝试 ---', stored,
+    sameAttempt ? '--- 与当前小红书任务匹配的 ASR 尝试 ---' : '--- 最近一次 ASR 历史任务（不代表当前同步已转写）---',
+    JSON.stringify({ relation: sameAttempt ? 'same_attempt' : 'historical_or_unconfirmed', recordRef: sessionRef, startedAt: session && session.startedAt || '', currentAttemptId: currentTask && currentTask.attemptId || '', currentTranscriptionStarted: currentTask ? currentTask.transcriptionStarted === true : null }),
+    stored,
     '--- 转写日志（首尾有界） ---', session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path.join(root, 'transcribe-last.log'))) ? readDiagnosticLog(path.join(root, 'transcribe-last.log')) : '[旧成功日志省略]',
     '--- 安装日志（首尾有界） ---', readDiagnosticLog(path.join(root, 'install.log')),
     '--- 匹配的系统崩溃摘要 ---', readMatchingCrashSummary(session),

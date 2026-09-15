@@ -152,7 +152,7 @@ function sanitizeXiaohongshuCommentResult(input = {}) {
   ].includes(value) ? value : 'unknown';
   return {
     schema: 1,
-    attemptId: /^[0-9a-f]{8}$/.test(input.attemptId || '') ? input.attemptId : '',
+    attemptId: /^(?:[0-9a-f]{8}|[0-9a-f]{16})$/.test(input.attemptId || '') ? input.attemptId : '',
     loginCookiePresent: typeof input.loginCookiePresent === 'boolean' ? input.loginCookiePresent : null,
     loginEvidence: pick(input.loginEvidence, ['account_signal', 'page_signal', 'cookie_only', 'none', 'unknown'], 'unknown'),
     time: /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(input.time || '') ? input.time : '',

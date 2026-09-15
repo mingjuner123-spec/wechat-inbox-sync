@@ -49,6 +49,7 @@ const expectedModules = [
   'wechat-channels-diagnostic-utils',
   'wechat-image-post-utils',
   'wechat-request-gate',
+  'xiaohongshu-diagnostic-utils',
   'xiaohongshu-markdown-utils',
 ].sort();
 
