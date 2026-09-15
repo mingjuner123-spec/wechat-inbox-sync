@@ -19,6 +19,7 @@ const WORKFLOW_FILES = Object.freeze([
   path.join(REPO_ROOT, '.github', 'workflows', 'component-integrity.yml'),
 ]);
 const PUBLIC_CLOUDBASE_HOST_PATTERN = /(?:tcloudbaseapp\.com|tcb\.qcloud\.la)/i;
+const AUTHORIZED_HOST_DECLARATION = /^(?:const|var) LOCAL_COMPONENT_DOWNLOAD_HOST = (['"])6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479\.tcb\.qcloud\.la\1;\r?$/gm;
 const RETIRED_PUBLIC_CHECK_PATTERN = /node\s+scripts\/check-local-(?:components|ocr)-cdn\.js/i;
 
 function readRequiredFile(filePath) {
@@ -30,12 +31,17 @@ function assertContains(source, pattern, label) {
   if (!pattern.test(source)) throw new Error(`${label}: required secure-download marker is missing`);
 }
 
+function assertNoPublicHost(source, allowAuthorizedDeclaration = false) {
+  const checked = allowAuthorizedDeclaration ? source.replace(AUTHORIZED_HOST_DECLARATION, '') : source;
+  if (PUBLIC_CLOUDBASE_HOST_PATTERN.test(checked)) throw new Error('public CloudBase static host is forbidden');
+}
+
 function checkAccessPolicy({ runtimeFiles = RUNTIME_FILES, workflowFiles = WORKFLOW_FILES } = {}) {
   for (const filePath of runtimeFiles) {
     const source = readRequiredFile(filePath);
-    if (PUBLIC_CLOUDBASE_HOST_PATTERN.test(source)) {
-      throw new Error(`${path.relative(REPO_ROOT, filePath)}: public CloudBase static host is forbidden`);
-    }
+    const pluginFile = filePath === path.join(PLUGIN_ROOT, 'src', 'main.js') || filePath === path.join(PLUGIN_ROOT, 'main.js');
+    try { assertNoPublicHost(source, pluginFile); }
+    catch (error) { throw new Error(`${path.relative(REPO_ROOT, filePath)}: ${error.message}`); }
   }
 
   const pluginSource = readRequiredFile(path.join(PLUGIN_ROOT, 'src', 'main.js'));
@@ -44,6 +50,9 @@ function checkAccessPolicy({ runtimeFiles = RUNTIME_FILES, workflowFiles = WORKF
     assertContains(source, /LOCAL_COMPONENT_MANIFEST_PATH\s*=\s*['"]\/local-components\/manifest['"]/, label);
     assertContains(source, /WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN/, label);
     assertContains(source, /getAuthorizedLocalComponentManifest/, label);
+    assertContains(source, /LOCAL_COMPONENT_DELIVERY_PROTOCOL\s*=\s*['"]cloudbase-v1['"]/, label);
+    assertContains(source, /searchParams\.getAll\(['"]sign['"]\)\.length === 1/, label);
+    assertContains(source, /searchParams\.getAll\(['"]t['"]\)\.length === 1/, label);
   }
 
   for (const filePath of workflowFiles) {
@@ -81,5 +90,6 @@ module.exports = {
   RUNTIME_FILES,
   WORKFLOW_FILES,
   checkAccessPolicy,
+  assertNoPublicHost,
   runCli,
 };

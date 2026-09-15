@@ -18,6 +18,15 @@ function plugin(Klass,platform='win32'){
 }
 function payload(component,platform,arch){return {success:true,data:{schemaVersion:2,deliveryProtocol:'cloudbase-v1',component,platform,arch,version:'fixture-v1',expiresAt:new Date(Date.now()+3600000).toISOString(),assets:[{id:'python-runtime',fileName:'python.tar.gz',sha256:'a'.repeat(64),byteLength:1234,downloadUrl:`https://${NewPlugin.__test.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'a'.repeat(64)}/python.tar.gz?sign=fixture&t=123`}]}};}
 async function run(){
+  const {assertNoPublicHost,checkAccessPolicy}=require('../scripts/check-local-component-access-policy');
+  const declaration="const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';";
+  assert.doesNotThrow(()=>assertNoPublicHost(declaration,true));
+  assert.doesNotThrow(()=>assertNoPublicHost(declaration+'\r\n',true));
+  assert.throws(()=>assertNoPublicHost(declaration,false));
+  assert.throws(()=>assertNoPublicHost(declaration.replace('1357443479','1111111111'),true));
+  assert.throws(()=>assertNoPublicHost(declaration+"\nconst publicUrl='https://6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la/local-components/package.zip';",true));
+  assert.throws(()=>assertNoPublicHost("https://old.tcloudbaseapp.com/local-asr/file.zip",true));
+  checkAccessPolicy();
   for(const Klass of [OldPlugin,NewPlugin]){
     calls=0;notices=0;response={status:403,json:{success:false,errCode:'COMPONENT_CLIENT_UPGRADE_REQUIRED',errMsg:'组件下载服务已迁移，请先更新 WeChat Inbox Sync，再安装或修复组件。'}};
     await assert.rejects(plugin(Klass).getAuthorizedLocalComponentManifest('ocr'),e=>e.status===403&&e.code==='COMPONENT_CLIENT_UPGRADE_REQUIRED'&&e.message.includes('请先更新'));
