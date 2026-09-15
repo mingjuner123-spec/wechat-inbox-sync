@@ -9290,7 +9290,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.146";
+var PLUGIN_RUNTIME_VERSION = "1.3.147";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -9357,7 +9357,8 @@ var DOUYIN_MOBILE_SHARE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; 22041211AC
 var LOCAL_TRANSCRIPTION_PLAN = "local_transcription_beta";
 var LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ["local_transcription_trial"];
 var LOCAL_COMPONENT_MANIFEST_PATH = "/local-components/manifest";
-var LOCAL_COMPONENT_DOWNLOAD_HOST = "wechat-inbox-components-1428610652.cos.ap-shanghai.myqcloud.com";
+var LOCAL_COMPONENT_DOWNLOAD_HOST = "6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la";
+var LOCAL_COMPONENT_DELIVERY_PROTOCOL = "cloudbase-v1";
 var LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 var LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 9e4;
 var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c";
@@ -11057,7 +11058,7 @@ function isAuthorizedLocalComponentDownloadUrl(downloadUrl, sha256, fileName) {
     const parsed = new URL(String(downloadUrl || ""));
     const expectedPath = `/local-components/by-sha256/${sha256}/${fileName}`;
     const decodedPathname = decodeURIComponent(parsed.pathname);
-    return parsed.protocol === "https:" && parsed.hostname === LOCAL_COMPONENT_DOWNLOAD_HOST && !parsed.port && !parsed.username && !parsed.password && decodedPathname === expectedPath && parsed.searchParams.has("q-signature") && parsed.searchParams.has("x-cos-security-token");
+    return parsed.protocol === "https:" && parsed.hostname === LOCAL_COMPONENT_DOWNLOAD_HOST && !parsed.port && !parsed.username && !parsed.password && decodedPathname === expectedPath && !parsed.hash && parsed.searchParams.getAll("sign").length === 1 && Boolean(parsed.searchParams.get("sign")) && parsed.searchParams.getAll("t").length === 1 && Boolean(parsed.searchParams.get("t")) && [...parsed.searchParams.keys()].every((key) => key === "sign" || key === "t");
   } catch (error) {
     return false;
   }
@@ -11071,7 +11072,7 @@ function normalizeAuthorizedLocalComponentManifest(payload, expected = {}, now =
   const version = String(manifest && manifest.version || "").trim();
   const expiresAt = String(manifest && manifest.expiresAt || "").trim();
   const expiresAtMs = Date.parse(expiresAt);
-  if (Number(manifest && manifest.schemaVersion) !== 2 || component !== String(expected.component || "").trim().toLowerCase() || platform !== String(expected.platform || "").trim().toLowerCase() || arch !== String(expected.arch || "").trim().toLowerCase() || !version || !Number.isFinite(expiresAtMs) || expiresAtMs <= Number(now) + 30 * 1e3) {
+  if (Number(manifest && manifest.schemaVersion) !== 2 || manifest.deliveryProtocol !== LOCAL_COMPONENT_DELIVERY_PROTOCOL || component !== String(expected.component || "").trim().toLowerCase() || platform !== String(expected.platform || "").trim().toLowerCase() || arch !== String(expected.arch || "").trim().toLowerCase() || !version || !Number.isFinite(expiresAtMs) || expiresAtMs <= Number(now) + 30 * 1e3) {
     throw new Error("授权组件清单无效或已经过期");
   }
   const envKeys = LOCAL_COMPONENT_ASSET_ENV_KEYS[component] || {};
@@ -24358,7 +24359,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const arch = platform === "win32" ? "x64" : os.arch() === "arm64" ? "arm64" : "x64";
     try {
       const payload = await this.requestJson(
-        `${LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}`,
+        `${LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}`,
         "GET",
         {},
         binding,
