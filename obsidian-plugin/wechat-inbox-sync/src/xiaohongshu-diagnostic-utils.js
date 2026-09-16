@@ -30,10 +30,37 @@ function safeStage(value = {}, settings = {}) {
 }
 
 function errorDetails(error, settings = {}) {
+  // Electron can reject with a plain object (including a nested error/cause).
+  // Read only diagnostic fields, never stringify response bodies or headers.
+  const read = (value, key) => {
+    try { return value && value[key]; } catch (_) { return undefined; }
+  };
+  const nodes = [error];
+  for (let index = 0; index < nodes.length && nodes.length < 5; index += 1) {
+    for (const key of ['error', 'cause']) {
+      const child = read(nodes[index], key);
+      if (child && !nodes.includes(child) && nodes.length < 5) nodes.push(child);
+    }
+  }
+  const textField = keys => {
+    for (const node of nodes) {
+      for (const key of keys) {
+        const value = read(node, key);
+        if ((typeof value === 'string' || typeof value === 'number') && String(value).trim()) return String(value);
+      }
+    }
+    return '';
+  };
+  const name = textField(['name']);
+  const message = textField(['message', 'errorMessage', 'errorDescription', 'msg'])
+    || nodes.find(value => typeof value === 'string' && value.trim())
+    || (error && typeof error === 'object' ? 'Browser rejected with an object without a diagnostic message' : String(error || 'Unknown browser error'));
+  const code = textField(['code', 'errorCode']);
   return safeStage({
-    exception: ['Error', 'SyntaxError', 'ReferenceError', 'TypeError', 'RangeError', 'AbortError'].includes(error && error.name) ? error.name : 'Error',
-    message: String(error && error.message || error || 'Unknown browser error'),
-    status: Number(error && (error.status || error.statusCode)) || 0,
+    exception: ['Error', 'SyntaxError', 'ReferenceError', 'TypeError', 'RangeError', 'AbortError'].includes(name) ? name : 'Error',
+    message,
+    code: /^(?:[A-Z][A-Z0-9_]{1,63}|-?\d{1,6})$/.test(code) ? code : '',
+    status: Number(textField(['status', 'statusCode'])) || 0,
   }, settings);
 }
 

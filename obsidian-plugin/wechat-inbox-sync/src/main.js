@@ -251,8 +251,8 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.147';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2';
+const PLUGIN_RUNTIME_VERSION = '1.3.148';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -5594,15 +5594,16 @@ function appendXiaohongshuBrowserDiagnostic(options = {}, entry = {}) {
 }
 
 function getXiaohongshuBrowserFailureCode(error) {
-  const explicitCode = String(error && error.code || '')
+  const details = xhsDiagnostic.errorDetails(error);
+  const explicitCode = String(details.code || '')
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9_]/g, '')
     .slice(0, 32);
   if (explicitCode) return explicitCode;
-  const message = String(error && error.message || error || '');
+  const message = details.message || '';
   if (/timed?\s*out|timeout/i.test(message)) return 'BROWSER_TASK_TIMEOUT';
-  if (['SyntaxError', 'ReferenceError', 'TypeError'].includes(error && error.name)) return 'BROWSER_SCRIPT_ERROR';
+  if (['SyntaxError', 'ReferenceError', 'TypeError'].includes(details.exception)) return 'BROWSER_SCRIPT_ERROR';
   if (/load|navigation|ERR_/i.test(message)) return 'BROWSER_LOAD_FAILED';
   return 'BROWSER_EXTRACTION_FAILED';
 }
@@ -12731,13 +12732,18 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   installWebRequestHandler('onBeforeRequest', (details, callback) => {
     captureWebRequestDetails(details);
     if (typeof callback === 'function') {
-      callback(
-        (isXiaohongshuUrl(url) && shouldBlockXiaohongshuBrowserNavigationRequest(details))
-          || (blockXiaohongshuCommentRequests && isXiaohongshuCommentApiUrl(details && details.url))
-          || shouldBlockExternalAppUrl(details && details.url)
-          ? { cancel: true }
-          : {},
-      );
+      const blockReason = isXiaohongshuUrl(url) && shouldBlockXiaohongshuBrowserNavigationRequest(details)
+        ? 'UNTRUSTED_NAVIGATION'
+        : blockXiaohongshuCommentRequests && isXiaohongshuCommentApiUrl(details && details.url)
+          ? 'COMMENTS_DISABLED_FOR_MEDIA'
+          : shouldBlockExternalAppUrl(details && details.url) ? 'EXTERNAL_PROTOCOL' : '';
+      if (isXiaohongshuExtractionWindow && blockReason) {
+        appendXiaohongshuBrowserDiagnostic(options, {
+          type: 'network', stage: 'media_extraction', outcome: 'plugin_blocked',
+          code: blockReason, url: details && details.url,
+        });
+      }
+      callback(blockReason ? { cancel: true } : {});
     }
   });
   installWebRequestHandler('onBeforeRedirect', captureWebRequestDetails);
@@ -18930,20 +18936,38 @@ class WechatObsidianInboxPlugin extends Plugin {
     return await renderXiaohongshuPageWithElectron(url, options);
   }
 
-  async requestXiaohongshuStaticPage(url) {
+  async requestXiaohongshuStaticPage(url, options = {}) {
     const sourceUrl = String(url || '').trim();
     if (!isTrustedXiaohongshuTransportUrl(sourceUrl)) {
       throw new Error('小红书静态抓取地址不是可信的官方 HTTPS 地址');
     }
-    const response = await requestPublicWebpageText(sourceUrl, {
-      // Static public-note extraction never needs login cookies. Logged-in
-      // comments stay inside the isolated BrowserWindow / strict API path.
-      headers: getSocialRequestHeaders(sourceUrl),
-      allowedRedirectUrl: (redirectUrl) => isTrustedXiaohongshuTransportUrl(redirectUrl),
-    });
+    appendXiaohongshuBrowserDiagnostic(options, { type: 'stage', stage: 'static_content', outcome: 'started' });
+    let response;
+    try {
+      response = await requestPublicWebpageText(sourceUrl, {
+        // Static public-note extraction never needs login cookies. Logged-in
+        // comments stay inside the isolated BrowserWindow / strict API path.
+        // This is a document navigation. A wildcard Accept can negotiate a login
+        // landing page even when the exact public note is available as HTML.
+        headers: { ...getSocialRequestHeaders(sourceUrl), Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+        allowedRedirectUrl: (redirectUrl) => isTrustedXiaohongshuTransportUrl(redirectUrl),
+      });
+    } catch (error) {
+      appendXiaohongshuBrowserFailure(options, 'static_content', error);
+      throw error;
+    }
     if (!response || !isTrustedXiaohongshuCookieUrl(response.url)) {
       throw new Error('小红书正文抓取的最终地址无法确认为官方 HTTPS 内容页');
     }
+    const extracted = extractXiaohongshuMarkdownFromHtml(response.text, response.url, '', { includeComments: false });
+    const loginLanding = /^\/login(?:\/|$)/i.test(new URL(response.url).pathname);
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: 'stage', stage: 'static_content',
+      outcome: Number(response.status) >= 400 ? 'http_failed'
+        : loginLanding ? 'login_landing' : classifyXiaohongshuPage({ html: response.text, resolvedUrl: response.url, extracted }),
+      status: response.status,
+      mediaCandidateCount: extracted.xiaohongshuPrimaryNoteMatched && extracted.videoUrl ? 1 : 0,
+    });
     return response;
   }
 
@@ -21934,7 +21958,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         let response;
         try {
           response = isXiaohongshuUrl(url)
-            ? await this.requestXiaohongshuStaticPage(resolvedUrl)
+            ? await this.requestXiaohongshuStaticPage(resolvedUrl, xiaohongshuBrowserOptions)
             : (metadata.automaticWebpageExtraction
               ? await requestPublicWebpageText(resolvedUrl, { headers })
               : await requestUrl({ url: resolvedUrl, method: 'GET', headers }));
@@ -22672,6 +22696,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           : { signal };
         if (!hasUsableDouyinMedia
           && isVideoIntent
+          && (!isXiaohongshuUrl(url) || !mediaUrl)
           && typeof this.renderSocialMediaUrls === 'function') {
           try {
             mediaUrls = sortMediaUrlsForTranscription([

@@ -52,6 +52,7 @@ class BrowserWindow extends EventEmitter {
   loadURL() {
     setImmediate(() => {
       if (networkStatus) {
+        requestHandlers.onBeforeRequest?.({ url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?xsec_token=BLOCK_SECRET', resourceType: 'xhr' }, result => assert.deepStrictEqual(result, { cancel: true }));
         requestHandlers.onCompleted?.({ url: noteUrl + '?xsec_token=NETWORK_SECRET', statusCode: networkStatus });
         requestHandlers.onErrorOccurred?.({ url: noteUrl, error: 'net::ERR_CONNECTION_RESET' });
       }
@@ -105,6 +106,8 @@ async function run() {
   assert.ok(!JSON.stringify(trace).includes('NETWORK_SECRET'));
   assert.ok(trace.events.some(item => item.status === 429 && item.host === 'xiaohongshu.com'), JSON.stringify(trace.events));
   assert.ok(trace.events.some(item => item.message === 'net::ERR_CONNECTION_RESET'));
+  assert.ok(trace.events.some(item => item.outcome === 'plugin_blocked' && item.code === 'COMMENTS_DISABLED_FOR_MEDIA'));
+  assert.ok(!JSON.stringify(trace).includes('BLOCK_SECRET'));
   injectedError = null;
   networkStatus = 0;
 
