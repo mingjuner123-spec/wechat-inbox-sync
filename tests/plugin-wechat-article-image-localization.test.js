@@ -41,6 +41,9 @@ function createPlugin() {
   const downloads = [];
   const plugin = new PluginClass();
   plugin.settings = { socialArticleImageStorageMode: 'local' };
+  // Request pacing has its own integration suite. Keep these isolated storage
+  // tests deterministic while exercising the real hydration and write paths.
+  plugin.wechatArticleRequestGate = { run: fn => fn({}), snapshot: () => ({}) };
   plugin.app = {
     vault: {
       adapter: {
@@ -275,6 +278,7 @@ async function run() {
       ...record.metadata,
       title: '公众号-最终标题',
       markdown: `![[${writeRecordSourceFolder}/${imageDirectory}/cover.jpg]]`,
+      conversionStatus: 'success',
     },
   });
   writeRecordCase.plugin.saveSourceMediaAttachment = async (record) => record;
@@ -474,7 +478,7 @@ async function run() {
       bodyFound: true,
       imageCount: 2,
       imageCandidateCount: 4,
-      diagnostic: { contentKind: 'image-post' },
+      diagnostic: { contentKind: 'image-post', contentImageCandidateCount: 2 },
     };
   };
   const localizedImagePost = await imagePostCase.plugin.hydrateWebpageMarkdown({
@@ -514,7 +518,7 @@ async function run() {
     bodyFound: true,
     imageCount: 2,
     imageCandidateCount: 4,
-    diagnostic: { contentKind: 'image-post' },
+    diagnostic: { contentKind: 'image-post', contentImageCandidateCount: 2 },
   });
   const localizedSlugImagePost = await slugImagePostCase.plugin.hydrateWebpageMarkdown({
     type: 'webpage',
@@ -544,7 +548,7 @@ async function run() {
     bodyFound: true,
     imageCount: 2,
     imageCandidateCount: 4,
-    diagnostic: { contentKind: 'image-post' },
+    diagnostic: { contentKind: 'image-post', contentImageCandidateCount: 2 },
   });
   const remoteImagePost = await remoteImagePostCase.plugin.hydrateWebpageMarkdown({
     type: 'webpage',
@@ -561,6 +565,113 @@ async function run() {
     missingSourceCount: 0,
     mode: 'remote-links',
   });
+
+  // No caption is required. Exercise classification -> localization -> actual
+  // write -> existing-note reconciliation for both old and current MP formats.
+  for (const storageMode of ['local', 'remote']) {
+    for (const pictureType of ['9', 'newspic', 'article', 'structured', 'future']) {
+    const pictureCase = createPlugin();
+    pictureCase.plugin.settings.socialArticleImageStorageMode = storageMode;
+    const sources = [1, 2, 3].map(index => `https://mmbiz.qpic.cn/mmbiz_jpg/numeric-picture-${index}/0?wx_fmt=jpeg`);
+    pictureCase.plugin.downloadArrayBuffer = async (url, headers) => {
+      pictureCase.downloads.push({ url, headers });
+      return ['structured', 'future'].includes(pictureType) && url === sources[0]
+        ? createPngHeader(124, 124)
+        : createPngHeader(1000 + sources.indexOf(url), 1200);
+    };
+    const hasStructuredData = ['structured', 'future'].includes(pictureType);
+    const pictureHtml = `<script>var appmsg_type = "${pictureType === 'article' ? '1' : pictureType}";</script>`
+      + (hasStructuredData ? '<script>window.cgiDataNew = ' + JSON.stringify({ title: '纯贴图', picture_page_info_list: [...sources, sources[0]].map(cdn_url => ({ cdn_url })) }) + ';</script>' : '')
+      + '<div id="js_content">' + (hasStructuredData ? sources.slice(0, 1) : sources).map(src => `<img data-src="${src}">`).join('') + '</div>';
+    requestUrlMock = async () => ({ text: pictureHtml });
+    let rendered = 0;
+    pictureCase.plugin.hydrateWechatChannelsTranscript = async () => { throw new Error('MP picture routed to Channels'); };
+    pictureCase.plugin.renderWechatArticleWithElectron = async () => {
+      rendered += 1;
+      return { title: '纯贴图', bodyFound: true, bodyTextChars: 0,
+        markdown: sources.map((src, index) => `![贴图 ${index + 1}](${src})`).join('\n\n'),
+        assets: sources.map((src, index) => ({ src, alt: `贴图 ${index + 1}`, localIndex: index + 1 })),
+        imageCount: 3, imageCandidateCount: 3, diagnostic: { contentKind: 'image-post' } };
+    };
+    const result = await pictureCase.plugin.hydrateWebpageMarkdown({
+      type: 'webpage', content: slugImagePostUrl, metadata: { url: slugImagePostUrl },
+    }, '临时收集', '2026-09-16', '纯贴图');
+    assert.strictEqual(rendered, pictureType === 'article' || hasStructuredData ? 0 : 1);
+    assert.strictEqual(result.metadata.contentCategory, pictureType === 'article' ? '图文' : '贴图');
+    assert.strictEqual(result.metadata.platform, '公众号');
+    assert.strictEqual(result.metadata.conversionDiagnostic.static.pageKind, pictureType === 'article' ? 'article' : 'image-post');
+    assert.strictEqual(result.metadata.conversionDiagnostic.static.bodyTextChars, 0);
+    assert.strictEqual(result.metadata.conversionDiagnostic.imageCompleteness.savedCount, 3);
+    assert.strictEqual((result.metadata.markdown.match(/!\[/g) || []).length, 3);
+    assert.strictEqual(pictureCase.downloads.length, storageMode === 'local' ? 3 : 0);
+    assert.strictEqual(PluginClass.__test.getSyncLifecycleOutcomeError(result), null);
+    assert.strictEqual(PluginClass.__test.isExistingLocalNoteDeliverable(result, result.metadata.markdown), true);
+
+    const files = new Map();
+    const plugin = pictureCase.plugin;
+    Object.assign(plugin.settings, { inboxDir: '临时收集', noteSaveMode: 'date', notePropertyFields: [] });
+    plugin.showSyncProgress = () => {};
+    plugin.nextRecordTitle = async () => '无文字图集';
+    plugin.saveSourceMediaAttachment = async record => record;
+    plugin.enrichRecordMetadataWithAi = async record => record;
+    Object.assign(plugin.app.vault.adapter, {
+      exists: async path => files.has(path),
+      write: async (path, content) => files.set(path, content),
+      remove: async path => files.delete(path),
+    });
+    plugin.app.vault.create = async (path, content) => {
+      assert.strictEqual(files.has(path), false);
+      files.set(path, content);
+    };
+    plugin.app.vault.getMarkdownFiles = () => [...files.keys()].filter(path => path.endsWith('.md')).map(path => ({ path }));
+    plugin.app.vault.cachedRead = async file => files.get(file.path);
+    const input = { id: `picture-${storageMode}-${pictureType}`, type: 'webpage', content: slugImagePostUrl,
+      createdAt: '2026-09-16T01:00:00.000Z', metadata: { url: slugImagePostUrl } };
+    const written = await plugin.writeRecord(input, '2026-09-16T01:01:00.000Z');
+    assert.strictEqual(written.committed, true);
+    assert.strictEqual((files.get(written.filePath).match(/!\[/g) || []).length, 3);
+    assert.strictEqual(files.size, 1, 'only the final note remains after atomic write');
+    assert.strictEqual(await plugin.findExistingRecordNotePath(input), written.filePath,
+      'a retry must recognize the image-only note as delivered');
+    if (hasStructuredData) {
+      const staleHintInput = { ...input, metadata: { url: slugImagePostUrl, platform: '视频号',
+        contentCategory: '视频', webpageMediaType: 'audio_video', transcriptOnly: true } };
+      assert.strictEqual(await plugin.findExistingRecordNotePath(staleHintInput), written.filePath,
+        'a stale media hint must not cause a second note after a verified picture-post commit');
+      assert.strictEqual(await plugin.findExistingRecordNotePath({ ...staleHintInput, id: 'different-record' }), '');
+      assert.strictEqual(await plugin.findExistingRecordNotePath({ ...staleHintInput,
+        metadata: { ...staleHintInput.metadata, transcriptionStatus: 'failed' } }), '',
+      'a real transcription failure cannot be completed by a picture note');
+      const verifiedNote = files.get(written.filePath);
+      const withoutMarker = verifiedNote.replace('<!-- wechat-inbox-content-kind: image-post -->', '');
+      files.set(written.filePath, withoutMarker);
+      assert.strictEqual(await plugin.findExistingRecordNotePath(staleHintInput), '',
+        'unverified images and generated headings cannot satisfy a media record');
+      files.set(written.filePath, withoutMarker + '\n<!-- wechat-inbox-content-kind: image-post -->');
+      assert.strictEqual(await plugin.findExistingRecordNotePath(staleHintInput), '',
+        'a marker copied into the body cannot authorize reconciliation');
+      files.set(written.filePath, verifiedNote);
+      const corrected = await plugin.hydrateWebpageMarkdown({ ...input, metadata: { url: slugImagePostUrl,
+        snapshot: '旧的占位简介，不是转写结果', conversionStatus: 'success',
+        platform: '视频号', contentCategory: '视频', webpageMediaType: 'audio_video', transcriptOnly: true } },
+      '临时收集', '2026-09-16', '修正错误标签');
+      assert.strictEqual(corrected.metadata.platform, '公众号');
+      assert.strictEqual(corrected.metadata.contentCategory, '贴图');
+      assert.strictEqual(corrected.metadata.transcriptOnly, false);
+      assert.strictEqual(corrected.metadata.webpageMediaType, '');
+      assert.strictEqual(corrected.metadata.conversionDiagnostic.correctedMediaHint, true);
+      assert.strictEqual((corrected.metadata.markdown.match(/!\[/g) || []).length, 3);
+      const recovered = await plugin.hydrateWebpageMarkdown({ ...input, metadata: { url: slugImagePostUrl,
+        markdown: '旧的失败占位内容', conversionStatus: 'failed' } }, '临时收集', '2026-09-16', '重提取');
+      assert.strictEqual(recovered.metadata.conversionStatus, 'success');
+      assert.strictEqual((recovered.metadata.markdown.match(/!\[/g) || []).length, 3);
+      const failed = await plugin.hydrateWebpageMarkdown({ ...input, metadata: { url: slugImagePostUrl,
+        transcriptionStatus: 'failed', transcriptionError: 'ASR process failed', webpageMediaType: 'audio_video' } },
+      '临时收集', '2026-09-16', '保留转写失败');
+      assert.strictEqual(PluginClass.__test.getSyncLifecycleOutcomeError(failed).code, 'TRANSCRIPTION_FAILED');
+    }
+    }
+  }
 
   const partialGuideCase = createPlugin();
   let partialGuideBrowserCalls = 0;

@@ -23,6 +23,7 @@ const {
 } = require('../obsidian-plugin/wechat-inbox-sync/src/wechat-article-pipeline');
 const {
   collectWechatImagePostStructuredAssets,
+  readWechatImagePostHtmlData,
   dedupeWechatImagePostAssets,
   getWechatImageAssetIdentity,
   normalizeWechatImagePostMarkdown,
@@ -146,6 +147,15 @@ assert.strictEqual(diagnoseWechatArticleHtml(emptyShellHtml).pageKind, 'empty-sh
 assert.strictEqual(isWechatImagePostHtml(imagePostHtml), true);
 assert.strictEqual(classifyWechatArticleHtml(imagePostHtml), 'image-post');
 assert.strictEqual(diagnoseWechatArticleHtml(imagePostHtml).markers.imagePost, true);
+const numericImagePostHtml = '<script>var appmsg_type = "9";</script><div id="js_content"><img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/picture-only/0"></div>';
+assert.strictEqual(diagnoseWechatArticleHtml(numericImagePostHtml).pageKind, 'image-post');
+assert.strictEqual(diagnoseWechatArticleHtml('<script>var appmsg_type = "9";</script>').pageKind, 'image-post');
+for (const type of ['9', '"9"', "'9'"]) {
+  assert.strictEqual(isWechatImagePostHtml(`<script>\nvar appmsg_type = ${type};</script>`), true);
+}
+for (const code of ['var appmsg_type = "1";', 'var appmsg_type = "99";', 'const example = \'var appmsg_type = "9";\';']) {
+  assert.strictEqual(isWechatImagePostHtml(`<script>${code}</script>${articleHtml}`), false);
+}
 const imageStats = getWechatArticleBodyStats('<div id="js_content"><p>Body</p><img data-src="//mmbiz.qpic.cn/image.jpg"></div>');
 assert.strictEqual(imageStats.hasJsContent, true);
 assert.strictEqual(imageStats.bodyTextChars, 4);
@@ -224,7 +234,7 @@ const generatedPluginMainSource = fs.readFileSync(
   require.resolve('../obsidian-plugin/wechat-inbox-sync/main.js'),
   'utf8',
 );
-const bundledCollectorMatch = /function (collectWechatImagePostStructuredAssets\w*)\(pageWindow\) \{[\s\S]*?\n\s*\}\n\s*__name\(\1,/.exec(generatedPluginMainSource);
+const bundledCollectorMatch = /function (collectWechatImagePostStructuredAssets\w*)\(pageWindow, withEvidence = false\) \{[\s\S]*?\n\s*\}\n\s*__name\(\1,/.exec(generatedPluginMainSource);
 assert.ok(bundledCollectorMatch, 'bundled WeChat image-post collector must be present');
 const bundledCollectorSource = bundledCollectorMatch[0].slice(
   0,
@@ -240,6 +250,111 @@ assert.strictEqual(bundledCollector({
 }).length, 2);
 
 async function runPipelineTests() {
+  const structuredUrls = [1, 2, 3].map(i => `https://mmbiz.qpic.cn/mmbiz_jpg/ordered-${i}/0?secret=private-${i}`);
+  const makeStructured = (list, extra = '') => '<script>\nwindow.cgiDataNew = '
+    + JSON.stringify({ title: 'fixture', picture_page_info_list: list }) + ';</script>' + extra;
+  const list = structuredUrls.map(cdn_url => ({ cdn_url, watermark_info: { cdn_url: 'https://mmbiz.qpic.cn/mmbiz_png/not-content/0' } }));
+  list.push({ cdn_url: structuredUrls[0].replace('https:', 'http:').replace('secret=private-1', 'from=cover') });
+  const fixture = makeStructured(list, '<script>var appmsg_type = "future-type";</script>');
+  assert.strictEqual(readWechatImagePostHtmlData(fixture).assets.length, 3);
+  assert.strictEqual(readWechatImagePostHtmlData('<script>window.cgiDataNew={picture_page_info_list: getRemoteList()};</script>').parsed, false);
+  globalThis.__wechatParserExecuted = false;
+  assert.strictEqual(readWechatImagePostHtmlData('<script>window.cgiDataNew={picture_page_info_list: (globalThis.__wechatParserExecuted=true,[])};</script>').parsed, false);
+  assert.strictEqual(globalThis.__wechatParserExecuted, false);
+  delete globalThis.__wechatParserExecuted;
+  const escapedData = "<script>\nwindow.cgiDataNew={picture_page_info_list:[{cdn_url:'https://mmbiz.qpic.cn/mmbiz_png/literal/0?x=1\\x26amp;y=2',width:'1080' * 1,height:1440,},],};</script>";
+  const literal = readWechatImagePostHtmlData(escapedData);
+  assert.strictEqual(literal.assets[0].width, 1080);
+  assert.ok(literal.assets[0].src.endsWith('?x=1&y=2'));
+  let strategyCalls = [];
+  const structured = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/future-picture',
+    fetchStatic: async () => { strategyCalls.push('static'); return fixture; },
+    renderBrowser: async () => { strategyCalls.push('browser'); throw Error('complete static content must not refetch'); },
+  });
+  assert.deepStrictEqual(strategyCalls, ['static']);
+  assert.strictEqual(structured.diagnostic.contentDecision.contentKind, 'image-post');
+  assert.strictEqual(structured.diagnostic.contentDecision.extractor, 'structured-images');
+  assert.strictEqual((structured.html.match(/<img /g) || []).length, 3);
+  assert.ok(structured.html.indexOf('ordered-1') < structured.html.indexOf('ordered-2'));
+  assert.doesNotMatch(JSON.stringify(structured.diagnostic), /private-|secret=|mmbiz\.qpic/);
+
+  const wrongHintUrl = 'https://mp.weixin.qq.com/s?t=pages/image_detail&__biz=fixture&mid=1&idx=1&sn=fixture';
+  const fullArticle = '<div id="js_content">' + '这是完整的文章正文，保留给本次提取失败后的备用策略。'.repeat(20) + '</div>';
+  strategyCalls = [];
+  const reused = await runWechatArticlePipeline({ url: wrongHintUrl,
+    fetchStatic: async () => { strategyCalls.push('static'); return fullArticle; },
+    renderBrowser: async () => { strategyCalls.push('browser'); throw Error('selector failed ?token=private-value'); },
+  });
+  assert.deepStrictEqual(strategyCalls, ['static', 'browser']);
+  assert.strictEqual(reused.diagnostic.contentDecision.selectedStrategy, 'cached-article-body');
+  assert.strictEqual(reused.diagnostic.contentDecision.contentKind, 'article');
+  assert.strictEqual(reused.html, fullArticle);
+  assert.doesNotMatch(JSON.stringify(reused.diagnostic), /private-value/);
+  for (const error of [Object.assign(Error('cancel'), { name: 'AbortError' }), Object.assign(Error('verify'), { wechatArticleDiagnostic: { verificationMarker: true } })]) {
+    const promise = runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => fullArticle, renderBrowser: async () => { throw error; } });
+    if (error.name === 'AbortError') await assert.rejects(promise, { name: 'AbortError' });
+    else assert.strictEqual((await promise).state, 'access_paused');
+  }
+  const noPicture = await runWechatArticlePipeline({ url: 'https://mp.weixin.qq.com/s/missing-pictures',
+    fetchStatic: async () => makeStructured([...list, { cdn_url: '' }], '<div id="js_content">caption only</div>'),
+    renderBrowser: async () => ({ bodyFound: true, markdown: 'caption only', diagnostic: { contentKind: 'image-post' } }),
+    isUsableBrowserArticle: () => true,
+  });
+  assert.strictEqual(noPicture.kind, 'retryable');
+  assert.strictEqual(noPicture.diagnostic.failureCategory, 'picture-content-incomplete');
+  assert.strictEqual(noPicture.diagnostic.contentDecision.complete, false);
+  const imageSource = '<div id="js_content"><picture><source type="image/webp" srcset="https://mmbiz.qpic.cn/mmbiz_png/body/0"><img src="https://mmbiz.qpic.cn/mmbiz_png/body/0"></picture></div>';
+  assert.strictEqual(getWechatArticleBodyStats(imageSource).mediaCount, 0);
+  assert.strictEqual(getWechatArticleBodyStats('<div id="js_content"><video><source src="clip.mp4"></video></div>').mediaCount, 1);
+  const mediaHtml = fullArticle.replace('</div>', '<video src="clip.mp4"></video></div>');
+  const mediaRequired = await runWechatArticlePipeline({ url: 'https://mp.weixin.qq.com/s/media',
+    requiresTranscription: true, fetchStatic: async () => mediaHtml,
+    renderBrowser: async () => ({ bodyFound: true, markdown: '已有封面和长简介'.repeat(30), diagnostic: { mediaCount: 1 } }),
+    isUsableBrowserArticle: () => true,
+  });
+  assert.strictEqual(mediaRequired.kind, 'retryable');
+  // Reading a normal long article with an embedded video still preserves its
+  // article body when transcription was not requested.
+  const mixedArticle = await runWechatArticlePipeline({ url: 'https://mp.weixin.qq.com/s/mixed', fetchStatic: async () => mediaHtml });
+  assert.strictEqual(mixedArticle.kind, 'article');
+  assert.strictEqual(mixedArticle.diagnostic.contentDecision.mediaCount, 1);
+  for (const renderBrowser of [
+    async () => ({ bodyFound: true, markdown: '封面说明', diagnostic: { contentKind: 'image-post', mediaCount: 1 } }),
+    async () => { throw Object.assign(Error('media seen, extraction failed'), { wechatArticleDiagnostic: { mediaCount: 1 } }); },
+  ]) {
+    const mediaFallback = await runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => fullArticle,
+      renderBrowser, isUsableBrowserArticle: () => true });
+    assert.strictEqual(mediaFallback.kind, 'retryable', 'actual media must block cached article fallback');
+  }
+  const pausedFallback = await runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => fullArticle,
+    renderBrowser: async () => { throw Object.assign(Error('HTTP 429'), { code: 'WECHAT_ACCESS_PAUSED', reason: 'wechat-rate-limited' }); } });
+  assert.strictEqual(pausedFallback.state, 'access_paused');
+  const browserMissingPictures = await runWechatArticlePipeline({ url: 'https://mp.weixin.qq.com/s/browser-incomplete',
+    fetchStatic: async () => numericImagePostHtml,
+    renderBrowser: async () => ({ bodyFound: true, markdown: `![仅一张](${structuredUrls[0]})`,
+      imageCandidateCount: 8, diagnostic: { contentKind: 'image-post', contentImageCandidateCount: 3 } }),
+    isUsableBrowserArticle: () => true });
+  assert.strictEqual(browserMissingPictures.kind, 'retryable');
+  assert.strictEqual(browserMissingPictures.diagnostic.failureCategory, 'picture-content-incomplete');
+  const counts = collectWechatImagePostStructuredAssets({ picture_page_info_list: [...list, { cdn_url: '' }] }, true);
+  assert.strictEqual(counts.assets.length, 3);
+  assert.strictEqual(counts.expectedImageCount, 4, 'duplicate cover is deduped, missing picture remains required');
+  let numericBrowserCalls = 0;
+  const numericResult = await runWechatArticlePipeline({
+    url: 'https://mp.weixin.qq.com/s/numeric-picture-post',
+    fetchStatic: async () => numericImagePostHtml,
+    renderBrowser: async () => {
+      numericBrowserCalls += 1;
+      return { markdown: '![贴图](https://mmbiz.qpic.cn/mmbiz_jpg/picture-only/0)', bodyFound: true,
+        assets: [{ src: 'https://mmbiz.qpic.cn/mmbiz_jpg/picture-only/0' }], diagnostic: { contentKind: 'image-post' } };
+    },
+    isUsableBrowserArticle: value => value.bodyFound && Boolean(value.markdown),
+  });
+  assert.strictEqual(numericBrowserCalls, 1);
+  assert.strictEqual(numericResult.diagnostic.static.pageKind, 'image-post');
+  assert.strictEqual(numericResult.source, 'browser');
+  assert.strictEqual(numericResult.assets.length, 1);
   let invalidFetchCalls = 0;
   const invalidUrl = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/example/extra?pass_ticket=secret',
@@ -310,7 +425,7 @@ async function runPipelineTests() {
         bodyFound: true,
         imageCount: 1,
         imageCandidateCount: 3,
-        diagnostic: { contentKind: 'image-post' },
+        diagnostic: { contentKind: 'image-post', contentImageCandidateCount: 1 },
       };
     },
   });

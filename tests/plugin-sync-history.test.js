@@ -28,6 +28,35 @@ const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
 Module._load = originalLoad;
 
 const helpers = PluginClass.__test;
+// Picture posts and image-only MP articles have no prose. They are still
+// writable and must remain recognized when reconciling an existing note.
+for (const markdown of [
+  '![图片](https://mmbiz.qpic.cn/mmbiz_jpg/picture-only/0?wx_fmt=jpeg)',
+  '![[临时收集/附件/图片.jpg]]',
+  '![[临时收集/附件/图片.png|500]]',
+  '![图片](<临时收集/图片 附件/图片.webp>)',
+]) {
+  const record = { type: 'webpage', content: 'https://mp.weixin.qq.com/s/picture-only', metadata: { conversionStatus: 'success', markdown } };
+  assert.strictEqual(helpers.getSyncLifecycleOutcomeError(record), null);
+  assert.strictEqual(helpers.getSyncLifecycleOutcomeError({ ...record, metadata: { ...record.metadata, conversionError: '旧错误：暂不支持此平台' } }), null);
+  assert.strictEqual(helpers.getSyncLifecycleOutcomeError({ ...record, metadata: { ...record.metadata, conversionStatus: 'failed' } }).code, 'EXTRACTION_FAILED');
+  assert.strictEqual(helpers.isExistingLocalNoteDeliverable(record, `---\ntitle: 贴图\n---\n${markdown}`), true);
+  for (const flags of [{ webpageMediaType: 'audio_video' }, { transcriptOnly: true }, { contentCategory: '视频' }]) {
+    assert.strictEqual(helpers.getSyncLifecycleOutcomeError({ ...record, metadata: { ...record.metadata, ...flags } }).code, 'EXTRACTION_FAILED');
+  }
+}
+for (const markdown of ['', 'https://mp.weixin.qq.com/s/picture-only', '![](javascript:alert)', '![[not-a-picture.md]]', '![](https://mmbiz.qpic.cn.evil.example/image.jpg)']) {
+  const record = { type: 'webpage', content: 'https://mp.weixin.qq.com/s/picture-only', metadata: { conversionStatus: 'success', markdown } };
+  assert.strictEqual(helpers.getSyncLifecycleOutcomeError(record).code, 'EXTRACTION_FAILED');
+  assert.strictEqual(helpers.isExistingLocalNoteDeliverable(record, markdown), false);
+}
+for (const url of ['https://weixin.qq.com/sph/example', 'https://channels.weixin.qq.com/example', 'https://mp.weixin.qq.com.evil.example/s/fake']) {
+  const record = { type: 'webpage', content: url, metadata: { conversionStatus: 'success', markdown: '![封面](https://mmbiz.qpic.cn/mmbiz_jpg/cover/0)' } };
+  assert.strictEqual(helpers.getSyncLifecycleOutcomeError(record).code, 'EXTRACTION_FAILED');
+}
+const imageGuide = { type: 'webpage', content: 'https://mp.weixin.qq.com/s/guide', metadata: { conversionStatus: 'success', markdown: '微信扫一扫可打开此内容\n使用完整服务\n![二维码](https://mmbiz.qpic.cn/mmbiz_jpg/qr/0)' } };
+assert.strictEqual(helpers.getSyncLifecycleOutcomeError(imageGuide).code, 'EXTRACTION_FAILED');
+assert.strictEqual(helpers.isExistingLocalNoteDeliverable(imageGuide, imageGuide.metadata.markdown), false);
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'EXTRACTION_FAILED' }), 'EXTRACTION_FAILED');
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'TRANSCRIPTION_FAILED' }), 'TRANSCRIPTION_FAILED');
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'WRITE_FAILED' }), 'WRITE_FAILED');
