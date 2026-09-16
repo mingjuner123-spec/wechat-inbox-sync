@@ -1900,7 +1900,7 @@ function Download-File {
     }
     Start-Sleep -Seconds 1
   }
-}\r
+}
 
 function Assert-DownloadedFile {
   param(
