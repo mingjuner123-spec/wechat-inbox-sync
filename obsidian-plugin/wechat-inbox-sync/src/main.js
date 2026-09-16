@@ -252,7 +252,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.154';
+const PLUGIN_RUNTIME_VERSION = '1.3.155';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -6987,6 +6987,7 @@ function extractXiaohongshuPrimaryNotePayload(html, url = '') {
     targetNoteIdPresent: Boolean(targetNoteId),
     matched: false,
     structuredIdentityMismatch: false,
+    primaryIdentityMismatch: false,
     title: '',
     description: '',
     tags: [],
@@ -7011,6 +7012,7 @@ function extractXiaohongshuPrimaryNotePayload(html, url = '') {
   }).filter((block) => /noteDetailMap|note_?id|displayTitle|imageList|image_list/i.test(block));
   const traversalBudget = { nodes: 0, maxNodes: 30000 };
   let structuredIdentityMismatch = false;
+  let primaryIdentityMismatch = false;
 
   const visit = (value, path = [], seen = new Set(), depth = 0) => {
     if (!value
@@ -7041,6 +7043,7 @@ function extractXiaohongshuPrimaryNotePayload(html, url = '') {
       && objectNoteIds.length
       && !objectNoteIds.includes(normalizedTargetId)) {
       structuredIdentityMismatch = true;
+      if (!insideExcludedTree) primaryIdentityMismatch = true;
     }
     const targetPathIndex = normalizedPath.lastIndexOf(normalizedTargetId);
     const targetPathSuffix = targetPathIndex >= 0
@@ -7131,6 +7134,7 @@ function extractXiaohongshuPrimaryNotePayload(html, url = '') {
   if (!candidates.length) return {
     ...empty,
     structuredIdentityMismatch,
+    primaryIdentityMismatch,
   };
   candidates.sort((left, right) => (
     (String(right.title || '').length ? 1000 : 0)
@@ -7243,6 +7247,45 @@ function installXiaohongshuIdentityObserver(webContents, onIdentity) {
     active = false;
     webContents.removeListener('will-navigate', observeNavigation);
     webContents.removeListener('will-redirect', observeRedirect);
+  };
+}
+
+// A missing serialized note is not proof of a different note. Only the
+// API lane may use route identity; DOM comments still require primary content.
+function classifyXiaohongshuCommentPage(snapshot = {}, expectedUrl = '') {
+  const html = String(snapshot.html || '');
+  const url = String(snapshot.url || '');
+  const expectedId = getXiaohongshuTargetNoteId(expectedUrl).toLowerCase();
+  const actualId = getXiaohongshuTargetNoteId(url).toLowerCase();
+  const failure = (failureKind, stopReason, errorCode) => ({
+    allowed: false, domMatched: false, failureKind, stopReason, errorCode,
+  });
+  if (snapshot.accessWall || /\/(?:login|verify|captcha)(?:[/?#]|$)/i.test(url)) {
+    return failure('ACCESS_WALL', 'page_access_wall', 'PAGE_ACCESS_WALL');
+  }
+  if (!isTrustedXiaohongshuCookieUrl(url)) {
+    return failure('UNTRUSTED_PAGE', 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH');
+  }
+  if (isUnavailableXiaohongshuPage(html, url)) {
+    return failure('PAGE_UNAVAILABLE', 'page_unavailable', 'PAGE_UNAVAILABLE');
+  }
+  if (!expectedId || !actualId) {
+    return failure('PAGE_NOTE_ID_ABSENT', 'target_identity_unconfirmed', 'TARGET_IDENTITY_UNCONFIRMED');
+  }
+  if (actualId !== expectedId) {
+    return failure('PAGE_NOTE_ID_DIFFERS', 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH');
+  }
+  const canonicalId = getXiaohongshuTargetNoteId(getXiaohongshuCanonicalUrlFromHtml(html)).toLowerCase();
+  if (canonicalId && canonicalId !== expectedId) {
+    return failure('CANONICAL_NOTE_ID_DIFFERS', 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH');
+  }
+  const primary = extractXiaohongshuPrimaryNotePayload(html, expectedUrl);
+  if (!primary.matched && primary.primaryIdentityMismatch) {
+    return failure('STRUCTURED_NOTE_ID_DIFFERS', 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH');
+  }
+  return {
+    allowed: true, domMatched: primary.matched === true,
+    failureKind: primary.matched ? 'PRIMARY_NOTE_MATCHED' : 'ROUTE_MATCHED_HTML_STATE_ABSENT',
   };
 }
 
@@ -13451,7 +13494,8 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     if (!BrowserWindow) {
       throw new Error('Current Obsidian environment does not support hidden browser rendering');
     }
-    const deadlineAt = Date.now() + XIAOHONGSHU_COMMENT_TIMEOUT_MS;
+    const finalIdentityDeadlineAt = Date.now() + XIAOHONGSHU_COMMENT_TIMEOUT_MS;
+    const deadlineAt = finalIdentityDeadlineAt - 2500;
     const getCommentBudget = (totalCount = 0) => getXiaohongshuCommentBudgetState({
     deadlineAt,
     totalCount,
@@ -13654,51 +13698,49 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     await waitForPromiseWithAbort(loaded, options.signal);
     throwIfAborted(options.signal);
     let identitySnapshot = null;
+    let pageIdentity = null;
     for (let index = 0; index < 12; index += 1) {
       throwIfAborted(options.signal);
       const identityBudget = getCommentBudget(0);
       if (identityBudget.shouldStop) break;
-      const current = await runBrowserTaskWithTimeout(
+      identitySnapshot = await runBrowserTaskWithTimeout(
         win.webContents.executeJavaScript(`
           (() => ({
             html: document.documentElement ? document.documentElement.outerHTML : '',
             url: String(location.href || ''),
+            accessWall: ${getXiaohongshuAccessWallScript()},
           }))()
         `),
         Math.min(XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS, identityBudget.remainingMs),
         'xiaohongshu-comment-identity-snapshot',
       );
-      identitySnapshot = selectXiaohongshuBrowserSnapshot(
-        identitySnapshot,
-        current,
-        expectedIdentityUrl,
-      );
+      pageIdentity = classifyXiaohongshuCommentPage(identitySnapshot, expectedIdentityUrl);
       throwIfAborted(options.signal);
-      if (identitySnapshot.matched) break;
+      if (pageIdentity.domMatched || pageIdentity.stopReason === 'page_access_wall') break;
       await waitForPromiseWithAbort(
         new Promise((resolve) => setTimeout(resolve, Math.min(500, identityBudget.remainingMs))),
         options.signal,
       );
     }
-    if (!identitySnapshot || !identitySnapshot.matched) {
-      recordXiaohongshuSecurityRestriction(
-        options,
-        identitySnapshot && identitySnapshot.html,
-        'comment_extraction',
-      );
+    // Use the latest page, never the largest earlier HTML snapshot after a redirect.
+    pageIdentity = pageIdentity || {allowed: false, stopReason: 'target_identity_unconfirmed',
+      errorCode: 'TARGET_IDENTITY_UNCONFIRMED', failureKind: 'PAGE_SNAPSHOT_ABSENT'};
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: 'stage', stage: 'comment_identity',
+      outcome: pageIdentity.allowed ? (pageIdentity.domMatched ? 'primary_matched' : 'scoped_api_only') : pageIdentity.stopReason,
+      failureKind: pageIdentity.failureKind,
+    });
+    if (!pageIdentity.allowed) {
+      recordXiaohongshuSecurityRestriction(options, identitySnapshot && identitySnapshot.html, 'comment_extraction');
       appendXiaohongshuBrowserDiagnostic(options, {
-        type: 'stage', stage: 'comment_extraction', outcome: 'target_identity_mismatch',
+        type: 'stage', stage: 'comment_extraction', outcome: pageIdentity.stopReason,
       });
       return {
-        html: String(identitySnapshot && identitySnapshot.html || ''),
-        comments: [],
+        html: String(identitySnapshot && identitySnapshot.html || ''), comments: [],
         identityUrl: expectedIdentityUrl,
         commentDiagnosticDetails: {
-          source: 'disabled',
-          stopReason: 'target_identity_mismatch',
-          errorCode: 'TARGET_IDENTITY_MISMATCH',
-          failureStage: 'comment_extraction',
-          partial: true,
+          source: 'disabled', stopReason: pageIdentity.stopReason,
+          errorCode: pageIdentity.errorCode, failureStage: 'comment_extraction', partial: true,
         },
       };
     }
@@ -14085,6 +14127,7 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
           replyRequestCount,
           replySettlingRounds,
           collectionStopReason,
+          accessWall: ${getXiaohongshuAccessWallScript()},
         };
       })()
     `)).then((value) => {
@@ -14121,13 +14164,10 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       ? String(renderedPayload.html || '')
       : String(renderedPayload || '');
     const renderedUrl = String(renderedPayload && renderedPayload.url || '');
-    const renderedUrlNoteId = getXiaohongshuTargetNoteId(renderedUrl);
-    const renderedPageMatchesTarget = extractXiaohongshuPrimaryNotePayload(
-      renderedHtml,
-      expectedIdentityUrl,
-    ).matched === true
-      && (!renderedUrlNoteId
-        || renderedUrlNoteId.toLowerCase() === String(expectedNoteId).toLowerCase());
+    const renderedIdentity = classifyXiaohongshuCommentPage({
+      html: renderedHtml, url: renderedUrl, accessWall: renderedPayload && renderedPayload.accessWall,
+    }, expectedIdentityUrl);
+    const renderedPageMatchesTarget = renderedIdentity.allowed && renderedIdentity.domMatched;
     const inlineDomComments = renderedPageMatchesTarget
       && renderedPayload
       && typeof renderedPayload === 'object'
@@ -14179,6 +14219,28 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       candidateNetworkComments,
       XIAOHONGSHU_ROOT_COMMENT_LIMIT,
     );
+    const closingSnapshot = await waitForPromiseWithAbort(Promise.resolve().then(() => runBrowserTaskWithTimeout(
+      win.webContents.executeJavaScript(`(() => ({
+        html: document.documentElement ? document.documentElement.outerHTML : '',
+        url: String(location.href || ''), accessWall: ${getXiaohongshuAccessWallScript()},
+      }))()`), Math.max(1, Math.min(2500, finalIdentityDeadlineAt - Date.now())), 'xiaohongshu-comment-final-identity',
+    )), options.signal);
+    throwIfAborted(options.signal);
+    const closingIdentity = classifyXiaohongshuCommentPage(closingSnapshot, expectedIdentityUrl);
+    if (!closingIdentity.allowed) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: 'stage', stage: 'comment_identity', outcome: closingIdentity.stopReason,
+        failureKind: closingIdentity.failureKind,
+      });
+      return {html: '', comments: [], identityUrl: expectedIdentityUrl, commentDiagnosticDetails: {
+        source: 'page-api', stopReason: closingIdentity.stopReason, errorCode: closingIdentity.errorCode,
+        rootRequestCount: Math.max(Number(pageApiPayload && pageApiPayload.diagnostic && pageApiPayload.diagnostic.rootRequestCount || 0),
+          commentApiRequests.filter(request => !isXiaohongshuSubCommentApiUrl(request.url)).length),
+        replyRequestCount: Math.max(Number(pageApiPayload && pageApiPayload.diagnostic && pageApiPayload.diagnostic.replyRequestCount || 0),
+          commentApiRequests.filter(request => isXiaohongshuSubCommentApiUrl(request.url)).length),
+        failureStage: 'comment_extraction', partial: true,
+      }};
+    }
     const mergedCommentSources = mergeXiaohongshuCommentSources({
       networkComments,
       deferredReplyGroups: [...browserNetworkResult.deferredReplyGroups, ...replayDeferredReplyGroups],
@@ -21639,7 +21701,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           : hasComments ? (details.partial || details.errorCode ? 'partial' : 'captured')
             : (details.errorCode ? 'failed' : 'empty_unconfirmed'),
         reason: details.errorCode ? (details.stopReason || 'capture_error')
-          : ['target_identity_missing', 'target_identity_mismatch', 'skipped_no_login_cookie'].includes(details.stopReason)
+          : ['target_identity_missing', 'target_identity_mismatch', 'target_identity_unconfirmed', 'page_access_wall', 'page_unavailable', 'skipped_no_login_cookie'].includes(details.stopReason)
           ? details.stopReason : hasComments ? 'capture_returned' : 'empty_result',
         ...stats, pageCount: details.pageCount, stopReason: details.stopReason,
         rootRequestCount: details.rootRequestCount, replyRequestCount: details.replyRequestCount,
@@ -25573,6 +25635,7 @@ WechatObsidianInboxPlugin.__test = {
   rememberXiaohongshuObservedIdentity,
   installXiaohongshuIdentityObserver,
   selectXiaohongshuBrowserSnapshot,
+  classifyXiaohongshuCommentPage,
   extractSocialCommentsFromHtml,
   collectXiaohongshuCommentPages,
   mergeXiaohongshuReplyPages,
