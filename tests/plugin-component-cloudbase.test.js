@@ -16,7 +16,7 @@ function plugin(Klass,platform='win32'){
   p.getActiveBindings=()=>[{token:'component-test-only'}];p.getConfiguredLocalAsrPlatform=()=>platform;
   return p;
 }
-function payload(component,platform,arch){return {success:true,data:{schemaVersion:2,deliveryProtocol:'cloudbase-v1',component,platform,arch,version:'fixture-v1',expiresAt:new Date(Date.now()+3600000).toISOString(),assets:[{id:'python-runtime',fileName:'python.tar.gz',sha256:'a'.repeat(64),byteLength:1234,downloadUrl:`https://${NewPlugin.__test.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'a'.repeat(64)}/python.tar.gz?sign=fixture&t=123`}]}};}
+function payload(component,platform,arch){const ids=component==='asr'&&platform==='win32'?['model','ffmpeg','whisper','whisper-compat']:['python-runtime'];return {success:true,data:{schemaVersion:2,deliveryProtocol:'cloudbase-v1',component,platform,arch,version:'fixture-v1',expiresAt:new Date(Date.now()+3600000).toISOString(),assets:ids.map(id=>({id,fileName:id+'.zip',sha256:'a'.repeat(64),byteLength:1234,downloadUrl:'https://'+NewPlugin.__test.LOCAL_COMPONENT_DOWNLOAD_HOST+'/local-components/by-sha256/'+'a'.repeat(64)+'/'+id+'.zip?sign=fixture&t=123'}))}};}
 async function run(){
   const {assertNoPublicHost,checkAccessPolicy}=require('../scripts/check-local-component-access-policy');
   const declaration="const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';";

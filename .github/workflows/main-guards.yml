@@ -149,6 +149,7 @@ jobs:
 
       - name: Run Windows deployer and native process regressions
         run: |
+          node tests/asr-download-resume.test.js
           node tests/plugin-build-foundation.test.js
           node tests/release-governance.test.js
           node tests/plugin-audio-repeat-local-dedupe.test.js
