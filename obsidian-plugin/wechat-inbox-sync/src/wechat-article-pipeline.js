@@ -1,13 +1,14 @@
 'use strict';
 const { isWechatAccessPaused, buildWechatAccessPausedResult } = require('./wechat-request-gate');
+const { collectWechatImagePostStructuredAssets } = require('./wechat-image-post-utils');
 
 const {
   buildWechatArticleFallbackMarkdown,
   buildWechatArticleRequestProfiles,
   diagnoseWechatArticleHtml,
   extractWechatArticleFallbackMetadata,
-  isWechatImagePostHtml,
   isWechatImagePostUrl,
+  inspectWechatArticleContent,
   normalizeWechatArticleUrl,
 } = require('./wechat-article-utils');
 
@@ -171,6 +172,7 @@ function getResponseSignature(diagnostic = {}) {
 
 function inferWechatArticleFailureCategory(attempts = []) {
   const browserAttempts = attempts.filter((attempt) => attempt.channel === 'browser');
+  if (browserAttempts.some(attempt => attempt.failureCategory === 'picture-content-incomplete')) return 'picture-content-incomplete';
   if (browserAttempts.some((attempt) => attempt.failureCategory === 'extractor-selector-mismatch')) {
     return 'extractor-selector-mismatch';
   }
@@ -240,6 +242,12 @@ function buildRetryableBodyMissingResult({
     attemptedProfiles: Array.from(new Set(attempts.map((attempt) => attempt.profile).filter(Boolean))),
     retryable: failureCategory !== 'article-unavailable',
     previousFailure: previousFailure || null,
+    contentDecision: {
+      ...(staticDiagnostic && staticDiagnostic.contentDecision || { contentKind: 'unknown', evidence: 'no-body' }),
+      complete: false,
+      selectedStrategy: 'none',
+      fallbackUsed: attempts.some(attempt => attempt.channel === 'browser'),
+    },
     completeness: {
       articleBodyFound: false,
       imageCandidates: attempts.reduce((sum, attempt) => sum + (Number(attempt.imageCandidateCount) || 0), 0),
@@ -260,6 +268,7 @@ async function runWechatArticlePipeline({
   fetchStatic,
   renderBrowser,
   isUsableBrowserArticle,
+  requiresTranscription = false,
 } = {}) {
   if (typeof fetchStatic !== 'function') throw new Error('fetchStatic is required');
   const normalizedUrl = normalizeWechatArticleUrl(url);
@@ -273,14 +282,33 @@ async function runWechatArticlePipeline({
   let lastStaticDiagnostic = null;
   let terminalState = '';
   let terminalHtml = '';
+  let cachedBodyFallback = null;
+  let lastContentDecision = null;
+  let observedBrowserMedia = false;
 
   for (const profile of requestProfiles) {
     const safeProfile = getSafeProfileDiagnostic(profile);
     try {
       const staticResult = normalizeStaticResult(await fetchStatic(profile.url, profile));
       const staticDiagnostic = diagnoseWechatArticleHtml(staticResult.html);
-      const staticState = staticDiagnostic.pageKind;
-      const staticIsImagePost = isWechatImagePostHtml(staticResult.html);
+      let staticState = staticDiagnostic.pageKind;
+      if (staticState === 'captcha') {
+        attempts.push({ channel: 'static', ...safeProfile, outcome: staticState, state: staticState });
+        return buildWechatAccessPausedResult({ reason: 'wechat-verification-required' }, attempts);
+      }
+      const candidate = inspectWechatArticleContent(staticResult.html, profile.url);
+      if (requiresTranscription && candidate.diagnostic.mediaCount > 0) {
+        candidate.complete = candidate.diagnostic.complete = false;
+        candidate.diagnostic.reason = 'media-transcription-required';
+      }
+      lastContentDecision = candidate.diagnostic;
+      if (candidate.diagnostic.evidence === 'structured-picture-list' && staticState !== 'unavailable') {
+        staticState = staticDiagnostic.pageKind = 'image-post';
+        staticDiagnostic.markers.imagePost = true;
+        staticDiagnostic.imageCandidateCount = candidate.diagnostic.imageCandidateCount;
+      }
+      staticDiagnostic.contentDecision = candidate.diagnostic;
+      if (candidate.fallbackComplete && staticState !== 'unavailable') cachedBodyFallback = { candidate, staticDiagnostic, safeProfile };
       lastStaticState = staticState;
       lastStaticDiagnostic = staticDiagnostic;
       attempts.push({
@@ -292,6 +320,7 @@ async function runWechatArticlePipeline({
         bodyTextChars: staticDiagnostic.bodyTextChars,
         imageCandidateCount: staticDiagnostic.imageCandidateCount,
         hasJsContent: staticDiagnostic.hasJsContent,
+        contentDecision: candidate.diagnostic,
         responseSignature: getResponseSignature(staticDiagnostic),
         ...(Object.keys(staticResult.diagnostic).length
           ? { transportDiagnostic: sanitizeDiagnosticValue(staticResult.diagnostic) }
@@ -301,16 +330,17 @@ async function runWechatArticlePipeline({
       // keeping the actual carousel elsewhere in the hydrated page. Do not
       // accept that text-only shell as a complete article; let the browser
       // renderer collect the ordered picture set.
-      if (staticState === 'article' && !isImagePost && !staticIsImagePost) {
+      if (candidate.complete && staticState !== 'unavailable') {
         clearFailure(normalizedUrl);
         return {
           kind: 'article',
           state: 'complete',
           source: 'static',
-          html: staticResult.html,
-          title: '',
-          assets: [],
+          html: candidate.html,
+          title: candidate.title,
+          assets: candidate.assets,
           diagnostic: {
+            contentDecision: { ...candidate.diagnostic, selectedStrategy: 'static', fallbackUsed: false },
             static: staticDiagnostic,
             selectedProfile: safeProfile,
             attempts,
@@ -362,6 +392,8 @@ async function runWechatArticlePipeline({
         browserDiagnostic.bodyTextChars = browserBodyTextChars;
         lastBrowserState = browserDiagnostic.pageKind;
         const visibleTextChars = Number(browser.diagnostic && browser.diagnostic.visibleTextChars) || 0;
+        const browserMediaCount = Math.max(Number(browser.diagnostic.mediaCount) || 0, browserDiagnostic.mediaCount || 0);
+        if (browserMediaCount > 0) observedBrowserMedia = true;
         const failureCategory = !browserDiagnostic.hasJsContent && visibleTextChars >= 200
           ? 'extractor-selector-mismatch'
           : browserDiagnostic.pageKind === 'captcha'
@@ -379,6 +411,7 @@ async function runWechatArticlePipeline({
           imageCount: browserImageCount,
           imageCandidateCount: browserImageCandidateCount,
           assetCount: browser.assets.length,
+          mediaCount: browserMediaCount,
           hasJsContent: browserDiagnostic.hasJsContent,
           responseSignature: getResponseSignature(browserDiagnostic),
           ...(failureCategory ? { failureCategory } : {}),
@@ -386,9 +419,25 @@ async function runWechatArticlePipeline({
             ? { renderDiagnostic: sanitizeDiagnosticValue(browser.diagnostic) }
             : {}),
         });
-        const hasBrowserArticle = typeof isUsableBrowserArticle === 'function'
+        if (browserDiagnostic.pageKind === 'captcha') return buildWechatAccessPausedResult({ reason: 'wechat-verification-required' }, attempts);
+        let hasBrowserArticle = typeof isUsableBrowserArticle === 'function'
           ? Boolean(isUsableBrowserArticle(browser))
           : browserDiagnostic.pageKind === 'article';
+        const imagePost = browser.diagnostic.contentKind === 'image-post'
+          || lastContentDecision && lastContentDecision.contentKind === 'image-post';
+        const retainedImages = collectWechatImagePostStructuredAssets({ picture_page_info_list:
+          Array.from(browser.markdown.matchAll(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g), match => match[1]) }).length;
+        const expectedImages = Math.max(
+          Number(lastContentDecision && lastContentDecision.structuredImageCount || 0)
+            + Number(lastContentDecision && lastContentDecision.invalidImageCount || 0),
+          Number(browser.diagnostic.contentImageCandidateCount) || Number(browser.imageCandidateCount) || 0,
+        );
+        if (imagePost && (!retainedImages || retainedImages < expectedImages || Number(browser.diagnostic.mediaCount) > 0)) {
+          hasBrowserArticle = false;
+          attempts[attempts.length - 1].failureCategory = 'picture-content-incomplete';
+        }
+        if (['unavailable', 'guide', 'empty-shell'].includes(browserDiagnostic.pageKind)) hasBrowserArticle = false;
+        if (requiresTranscription && browserMediaCount > 0) hasBrowserArticle = false;
         if (hasBrowserArticle) {
           clearFailure(normalizedUrl);
           return {
@@ -400,6 +449,17 @@ async function runWechatArticlePipeline({
             assets: browser.assets,
             ...(browser.markdown ? { markdown: browser.markdown } : {}),
             diagnostic: {
+              contentDecision: {
+                contentKind: imagePost ? 'image-post' : 'article',
+                evidence: imagePost ? 'rendered-picture-content' : 'rendered-article-body',
+                selectedStrategy: 'browser',
+                fallbackUsed: true,
+                complete: true,
+                bodyTextChars: browserBodyTextChars,
+                imageCandidateCount: browserImageCandidateCount,
+                retainedImageCount: retainedImages,
+                mediaCount: Number.isFinite(browser.diagnostic.mediaCount) ? browser.diagnostic.mediaCount : null,
+              },
               static: lastStaticDiagnostic,
               browser: browserDiagnostic,
               selectedProfile: safeProfile,
@@ -427,6 +487,7 @@ async function runWechatArticlePipeline({
           && typeof browserError.wechatArticleDiagnostic === 'object'
           ? browserError.wechatArticleDiagnostic
           : {};
+        if (Number(renderDiagnostic.mediaCount) > 0) observedBrowserMedia = true;
         attempts.push({
           channel: 'browser',
           ...safeProfile,
@@ -439,6 +500,23 @@ async function runWechatArticlePipeline({
             ? { failureCategory: 'extractor-selector-mismatch' }
             : {}),
         });
+      }
+      // Reuse the already fetched article only after the preferred image
+      // strategy failed, and only when the URL was the sole picture hint.
+      if (cachedBodyFallback && !observedBrowserMedia && lastBrowserState !== 'unavailable') {
+        const { candidate, staticDiagnostic, safeProfile } = cachedBodyFallback;
+        clearFailure(normalizedUrl);
+        return {
+          kind: 'article', state: 'complete', source: 'static', html: candidate.html,
+          title: candidate.title, assets: [],
+          diagnostic: {
+            static: staticDiagnostic, selectedProfile: safeProfile, attempts,
+            contentDecision: { ...candidate.diagnostic, complete: true, selectedStrategy: 'cached-article-body', fallbackUsed: true,
+              fallbackReason: 'preferred-extractor-no-deliverable-content' },
+            completeness: { articleBodyFound: true, imageCandidates: staticDiagnostic.imageCandidateCount,
+              successfulChannels: 1, failedChannels: attempts.filter(entry => entry.outcome === 'error').length },
+          },
+        };
       }
     }
   }

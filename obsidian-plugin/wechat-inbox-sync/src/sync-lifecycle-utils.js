@@ -215,6 +215,30 @@ function isKnownFailureReceiptMarkdown(markdown) {
   return /^原始链接[：:]\s*https?:\/\/\S+[\s\S]*?##\s*视频号口播文案[\s\S]*?未能提取视频号口播文案[。.!！]?/i.test(body);
 }
 
+function hasWechatImageBody(record, markdown) {
+  const metadata = record && record.metadata || {};
+  // A video cover is not a transcript. This exemption only applies to MP
+  // image content, and must not change the video/voice completion rules.
+  if (metadata.webpageMediaType === 'audio_video' || metadata.transcriptOnly === true
+    || metadata.contentCategory === '视频') return false;
+  try {
+    const url = new URL(String(metadata.url || record && record.content || ''));
+    if (!/^https?:$/.test(url.protocol) || url.hostname !== 'mp.weixin.qq.com') return false;
+  } catch (_) { return false; }
+  const body = getMarkdownBody(markdown);
+  const targets = [];
+  for (const match of body.matchAll(/!\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+"[^"\n]*")?\s*\)|!\[\[([^\]\n]+)\]\]/g)) {
+    targets.push(String(match[1] || match[2] || '').replace(/^<|>$/g, '').split('|')[0].trim());
+  }
+  return targets.some((target) => {
+    if (/^https?:\/\//i.test(target)) {
+      try { return new URL(target).hostname === 'mmbiz.qpic.cn'; } catch (_) { return false; }
+    }
+    return !/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/i.test(target)
+      && /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)(?:[?#].*)?$/i.test(target);
+  });
+}
+
 function isExistingLocalNoteDeliverable(record, markdown) {
   const source = record && typeof record === 'object' ? record : {};
   const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
@@ -223,12 +247,26 @@ function isExistingLocalNoteDeliverable(record, markdown) {
   const url = String(metadata.url || source.content || '').trim();
   const body = getMarkdownBody(markdown);
   if (isKnownFailureReceiptMarkdown(body)) return false;
+  if (metadata.transcriptionStatus === 'failed' && !String(metadata.transcription || '').trim()) return false;
   const hasEmbeddedAttachment = /!\[\[[^\]]+\]\]/.test(body);
   const contentOnlyBody = body
     .replace(/^\s*(?:原始链接|来源链接|source\s*url)\s*[：:]\s*https?:\/\/\S+\s*$/gim, '')
     .replace(/^\s*>?\s*⚠️.*$/gim, '')
+    .replace(/^\s*##\s+(?:Markdown 内容|口播\/音频文案|视频号口播文案|原始音视频)\s*$/gm, '')
     .trim();
   const meaningfulLength = getMeaningfulMarkdownLength(contentOnlyBody);
+
+  // A committed image-post note carries a fixed evidence marker. The same
+  // source record may still have its old video hint on retry. This check is
+  // only used after the caller has matched the note's record identity.
+  if (['webpage', 'link', 'text'].includes(recordType)
+    && /^<!-- wechat-inbox-content-kind: image-post -->\s*<!--\s*wechat-inbox-record-id:/.test(
+      String(markdown || '').replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '').trimStart())
+    && metadata.transcriptionStatus !== 'failed' && !metadata.videoUrl && !metadata.audioUrl
+    && !metadata.transcriptionSource && !metadata.mediaResolutionDiagnostic
+    && !isLikelyWebpageShell(url, body)
+    && hasWechatImageBody({ ...source, metadata: { ...metadata,
+      webpageMediaType: '', transcriptOnly: false, contentCategory: '贴图' } }, contentOnlyBody)) return true;
 
   if (recordType === 'text') return meaningfulLength > 0;
   if (recordType === 'file') {
@@ -241,7 +279,7 @@ function isExistingLocalNoteDeliverable(record, markdown) {
   }
   if (['webpage', 'link'].includes(recordType) || /^https?:\/\//i.test(url)) {
     if (isLikelyWebpageShell(url, body)) return false;
-    return meaningfulLength >= 8;
+    return meaningfulLength >= 8 || hasWechatImageBody(source, contentOnlyBody);
   }
   return meaningfulLength > 0 || hasEmbeddedAttachment;
 }
@@ -262,7 +300,8 @@ function getSyncLifecycleOutcomeError(record) {
   ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
   const declaredError = `${metadata.conversionError || ''} ${metadata.transcriptionError || ''}`.trim();
   const meaningfulLength = getMeaningfulMarkdownLength(markdown);
-  const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20;
+  const hasUsableImages = hasWechatImageBody(source, markdown);
+  const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20 || hasUsableImages;
   const hasDeclaredFailureState = ['failed', 'link_saved', 'wechat_captcha'].includes(conversionStatus)
     || transcriptionStatus === 'failed';
 
@@ -294,7 +333,8 @@ function getSyncLifecycleOutcomeError(record) {
   if (isWebpageRecord
     && conversionStatus === 'success'
     && !transcription
-    && meaningfulLength === 0) {
+    && meaningfulLength === 0
+    && !hasUsableImages) {
     return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败：没有获得可写入的正文');
   }
 

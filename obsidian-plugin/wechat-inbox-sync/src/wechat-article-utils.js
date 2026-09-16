@@ -1,5 +1,5 @@
 'use strict';
-const { detectWechatImagePostDocument } = require('./wechat-image-post-utils');
+const { detectWechatImagePostDocument, readWechatImagePostHtmlData } = require('./wechat-image-post-utils');
 
 const WECHAT_ARTICLE_HOST = 'mp.weixin.qq.com';
 const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn', 'chksm', 'scene'];
@@ -215,7 +215,7 @@ function getWechatArticleBodyStats(html) {
   const bodyHtml = extractWechatArticleBodyHtml(source);
   const bodyText = stripHtml(bodyHtml);
   const imageCandidates = collectWechatArticleImageCandidates(source);
-  const mediaCount = (bodyHtml.match(/<(?:video|audio|source)\b/gi) || []).length;
+  const mediaCount = (bodyHtml.match(/<(?:video|audio)\b|<source\b[^>]*\btype=["'](?:video|audio)\//gi) || []).length;
   return {
     hasJsContent: /<div\b(?=[^>]*\bid=["']js_content["'])/i.test(source),
     bodyHtmlChars: bodyHtml.length,
@@ -224,6 +224,51 @@ function getWechatArticleBodyStats(html) {
     mediaCount,
     imageCandidates,
     hasSubstantiveBody: bodyText.length >= 50 || imageCandidates.length > 0 || mediaCount > 0,
+  };
+}
+
+function inspectWechatArticleContent(html, url = '') {
+  const source = String(html || '');
+  const stats = getWechatArticleBodyStats(source);
+  const data = readWechatImagePostHtmlData(source);
+  const explicitPicture = isWechatImagePostHtml(source);
+  const pictureHint = isWechatImagePostUrl(url);
+  const pictureEvidence = explicitPicture || data.parsed;
+  const bodyUsable = stats.hasJsContent && (stats.bodyTextChars > 0 || stats.imageCount > 0);
+  const structuredComplete = data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
+  const complete = structuredComplete || (bodyUsable && !pictureEvidence && !pictureHint && (!stats.mediaCount || stats.bodyTextChars > 0));
+  // A URL hint alone may be stale. Keep a complete long article as an alternate
+  // candidate, but never replace a declared carousel with its caption/cover.
+  const fallbackComplete = bodyUsable && !pictureEvidence && !stats.mediaCount && stats.bodyTextChars >= 200;
+  const contentKind = pictureEvidence ? 'image-post' : bodyUsable ? 'article' : 'unknown';
+  const escape = value => String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const body = extractWechatArticleBodyHtml(source).replace(/<img\b[^>]*>/gi, '');
+  const reconstructed = structuredComplete
+    ? `<html><head><title>${escape(data.title || getHtmlTitle(source))}</title></head><body><div id="js_content">`
+      + (stripHtml(body) ? body : `<p>${escape(data.description)}</p>`)
+      + data.assets.map((asset, index) => `<img src="${escape(asset.src)}" alt="贴图 ${index + 1}">`).join('')
+      + '</div></body></html>'
+    : source;
+  return {
+    html: reconstructed,
+    assets: structuredComplete ? data.assets : [],
+    title: data.title,
+    complete,
+    fallbackComplete,
+    diagnostic: {
+      contentKind,
+      typeHint: pictureHint ? 'image-post' : 'unspecified',
+      evidence: data.parsed ? 'structured-picture-list' : explicitPicture ? 'page-picture-type' : bodyUsable ? 'article-body' : 'no-body',
+      extractor: structuredComplete ? 'structured-images' : bodyUsable ? 'article-body' : 'none',
+      complete,
+      bodyTextChars: stats.bodyTextChars,
+      bodyImageCount: stats.imageCount,
+      structuredImageCount: data.assets.length,
+      structuredDataState: data.parseState,
+      invalidImageCount: data.invalidImageCount,
+      imageCandidateCount: structuredComplete ? data.assets.length : stats.imageCount,
+      mediaCount: stats.mediaCount,
+    },
   };
 }
 
@@ -249,7 +294,7 @@ function diagnoseWechatArticleHtml(html) {
     imagePost: isWechatImagePostHtml(source),
   };
   let pageKind = classifiedState;
-  if (markers.emptyShell && !markers.captcha && !markers.unavailable) {
+  if (markers.emptyShell && !markers.captcha && !markers.unavailable && !markers.imagePost) {
    pageKind = 'empty-shell';
  }
   return {
@@ -312,6 +357,7 @@ function buildWechatArticleFallbackMarkdown({
 }
 
 module.exports = {
+  inspectWechatArticleContent,
   buildWechatArticleFallbackMarkdown,
   buildWechatArticleRequestProfiles,
   classifyWechatArticleHtml,
