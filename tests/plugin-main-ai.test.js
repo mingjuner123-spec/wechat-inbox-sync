@@ -5939,7 +5939,7 @@ assert.strictEqual(xiaohongshuRendererSource.includes('await win.loadURL(url)'),
 assert.match(xiaohongshuRendererSource, /XIAOHONGSHU_COMMENT_TIMEOUT_MS/);
 assert.match(xiaohongshuRendererSource, /getXiaohongshuCommentBudgetState/);
 assert.match(xiaohongshuRendererSource, /waitForBrowserTasksWithin\(pending, remainingMs\)/);
-assert.match(xiaohongshuRendererSource, /deferredReplyGroups:\s*browserNetworkResult\.deferredReplyGroups/);
+assert.match(xiaohongshuRendererSource, /deferredReplyGroups:\s*\[\.\.\.browserNetworkResult\.deferredReplyGroups,\s*\.\.\.replayDeferredReplyGroups\]/);
 assert.match(xiaohongshuRendererSource, /preserveXiaohongshuPrimaryCommentTree/);
 assert.strictEqual(xiaohongshuRendererSource.includes('const commentBonus = /comment|reply/i.test(marker)'), false);
 assert.strictEqual(xiaohongshuRendererSource.includes('for (let index = 0; index < 24; index += 1)'), false);

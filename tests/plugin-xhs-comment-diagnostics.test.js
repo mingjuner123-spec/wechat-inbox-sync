@@ -64,9 +64,38 @@ async function runPager(response) {
   return vm.runInNewContext(helpers.getXiaohongshuCommentPaginationScript(url), {
     URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
     location: {href: url}, window: {},
-    fetch: async request => typeof response === 'function' ? response(request) : ({ok: true, status: 200, text: async () => JSON.stringify(response)}),
+    fetch: async (request, options) => {
+      assert.strictEqual(new URL(request).origin, 'https://edith.xiaohongshu.com');
+      assert.strictEqual(new URL(request).searchParams.get('note_id'), helpers.getXiaohongshuTargetNoteId(url));
+      assert.strictEqual(options.credentials, 'include');
+      assert.ok(!options.headers['X-Requested-With'], 'avoid an unnecessary cross-origin preflight');
+      return typeof response === 'function' ? response(request) : ({ok: true, status: 200, text: async () => JSON.stringify(response)});
+    },
   });
 }
+
+// Reproduce Electron's request event order, without real user credentials.
+function testRequestHeaderCollection() {
+  const id = helpers.getXiaohongshuTargetNoteId(url);
+  const requestUrl = 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=' + id;
+  const collector = helpers.createXiaohongshuCommentRequestCollector(id);
+  collector.capture({id: 1, url: requestUrl, method: 'GET'});
+  collector.capture({id: 1, url: requestUrl, method: 'GET', requestHeaders: {'X-S': 'synthetic-signature', 'X-T': '1'}});
+  assert.strictEqual(collector.requests.length, 1);
+  assert.strictEqual(collector.requests[0].requestHeaders['X-S'], 'synthetic-signature');
+  collector.capture({id: 2, url: requestUrl, requestHeaders: {'X-S': 'synthetic-new'}});
+  assert.strictEqual(collector.requests.length, 2, 'distinct requests must retain their own headers');
+  const post = requestUrl.split('?')[0];
+  collector.capture({id: 3, url: post, method: 'POST', uploadData: [{bytes: Buffer.from(JSON.stringify({note_id: id}))}]});
+  collector.capture({id: 3, url: post, method: 'POST', requestHeaders: {'X-S': 'synthetic-post'}});
+  assert.strictEqual(collector.requests[2].requestHeaders['X-S'], 'synthetic-post');
+  assert.ok(collector.requests[2].body.includes(id));
+  collector.capture({id: 1, url: requestUrl.replace(id, 'other-note'), requestHeaders: {'X-S': 'wrong-note'}});
+  collector.capture({id: 4, url: requestUrl.replace('edith.xiaohongshu.com', 'untrusted.example'), requestHeaders: {'X-S': 'untrusted'}});
+  assert.strictEqual(collector.requests.length, 3);
+  assert.strictEqual(collector.requests[0].requestHeaders['X-S'], 'synthetic-signature');
+}
+testRequestHeaderCollection();
 
 // Exercise the production renderer and session queue; only Electron is simulated.
 async function testIdentityRendering() {
@@ -77,6 +106,27 @@ async function testIdentityRendering() {
   }}) + '</script></html>';
   const windows = [];
   let pages = [], pagerCalls = 0, cookie = true, fastPageTimeout = false;
+  const https = require('https'), savedRequest = https.request;
+  let replayResponse = {}, sentReplayHeaders = [];
+  https.request = (target, options, callback) => {
+    assert.strictEqual(target.hostname, 'edith.xiaohongshu.com', 'test must never send a real network request');
+    assert.strictEqual(options.headers['X-S'], 'synthetic-signed-request', 'final browser headers must reach the real replay transport');
+    sentReplayHeaders.push(options.headers);
+    const request = new EventEmitter();
+    request.destroy = error => { if (error) request.emit('error', error); };
+    request.write = () => {};
+    request.end = () => setImmediate(() => {
+      const response = new EventEmitter();
+      response.statusCode = replayResponse.status || 200;
+      response.headers = {};
+      callback(response);
+      response.emit('data', Buffer.from(JSON.stringify(replayResponse.payload || {success: true, data: {
+        comments: [{id: 'replayed-root', content: '浏览器请求重试恢复评论', user_info: {nickname: '测试'}}], has_more: false,
+      }})));
+      response.emit('end');
+    });
+    return request;
+  };
   const listeners = {};
   const session = {
     cookies: {get: async () => cookie ? [{name: 'web_session', value: 'synthetic-test-cookie'}] : []},
@@ -107,7 +157,7 @@ async function testIdentityRendering() {
               }}),
           });
         }
-        if (script.includes('html: document.documentElement ?')) {
+        if (script.includes('html: document.documentElement ?') && !script.includes('collectionStopReason')) {
           if (this.page.onSnapshot) return this.page.onSnapshot();
           if (this.page.pagerTimeout) fastPageTimeout = true;
           return vm.runInNewContext(script, {
@@ -117,6 +167,8 @@ async function testIdentityRendering() {
           });
         }
         if (script.includes('replyPayloadGroups')) {
+          const deadline = Number(script.match(/const deadlineAt = ([0-9]+)/)[1]);
+          assert.ok(deadline <= Date.now() + 20000, 'active pagination must reserve time for the fallback');
           pagerCalls++;
           if (this.page.pagerError) throw Error('synthetic script failure');
           if (this.page.pagerTimeout) {
@@ -128,13 +180,21 @@ async function testIdentityRendering() {
           }}], replyPayloadGroups: [], diagnostic: {source: 'page-api', stopReason: 'exhausted', pageCount: 1}};
         }
         assert.ok(script.includes('collectionStopReason'), 'unexpected browser script');
-        if (this.page.pagerTimeout) await new Promise(resolve => savedTimer(resolve, 30));
-        return {html: noteHtml, url, comments: [], rootRequestCount: 1, collectionStopReason: 'root_idle'};
+        if (this.page.pagerTimeout) {
+          fastPageTimeout = false;
+          await new Promise(resolve => savedTimer(resolve, 30));
+        }
+        return {html: noteHtml, url, comments: this.page.domComments || [], rootRequestCount: 0, collectionStopReason: 'root_idle'};
       };
       windows.push(this);
     }
     loadURL(value) {
       this.loadedUrl = value;
+      if (this.page.signedReplay) {
+        const details = {id: 701, method: 'GET', url: 'https://edith.xiaohongshu.com/api/sns/web/v2/comment/' + (this.page.replyOnly ? 'sub/page?root_comment_id=root&' : 'page?') + 'note_id=' + noteId};
+        listeners.request(details, () => {});
+        listeners.headers({...details, requestHeaders: {'X-S': 'synthetic-signed-request'}}, () => {});
+      }
       if (this.page.redirect) this.webContents.emit('will-redirect', {
         url: this.page.redirect, isMainFrame: true, preventDefault() {},
       });
@@ -154,6 +214,7 @@ async function testIdentityRendering() {
   global.setTimeout = (fn, ms, ...args) => savedTimer(fn, fastPageTimeout && ms >= 10000 ? 2 : ms <= 1200 ? 0 : ms, ...args);
   async function render(input, fixtures, extra = {}) {
     pages = fixtures;
+    replayResponse = fixtures[fixtures.length - 1] && fixtures[fixtures.length - 1].replayResponse || {};
     const before = windows.length, beforeCalls = pagerCalls;
     const diagnostic = {};
     const result = await helpers.renderXiaohongshuPageWithElectron(input, {
@@ -174,7 +235,7 @@ async function testIdentityRendering() {
     assert.strictEqual(known.apiCalls, 1);
     for (const [flag, stopReason, errorCode] of [
       ['pagerError', 'page_script_failed', 'REQUEST_FAILED'],
-      ['pagerTimeout', 'time_budget_exceeded', 'TIMEOUT'],
+      ['pagerTimeout', 'page_api_timeout', 'TIMEOUT'],
       ['wrongIdentity', 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH'],
     ]) {
       const failed = await render(url, [{url, html: noteHtml, [flag]: true}]);
@@ -183,6 +244,26 @@ async function testIdentityRendering() {
       assert.strictEqual(failed.result.commentDiagnosticDetails.errorCode, errorCode);
       fastPageTimeout = false;
     }
+    const replayed = await render(url, [{url, html: noteHtml, pagerError: true, signedReplay: true}]);
+    assert.strictEqual(replayed.result.comments[0].content, '浏览器请求重试恢复评论');
+    assert.strictEqual(sentReplayHeaders.length, 1);
+    assert.strictEqual(replayed.result.commentDiagnosticDetails.rootRequestCount, 1);
+    const repliesOnly = await render(url, [{url, html: noteHtml, signedReplay: true, replyOnly: true,
+      replayResponse: {payload: {success: true, data: {comments: [{id: 'replayed-reply', content: '仅重试取得的回复', user_info: {nickname: '测试'}}], has_more: false}}}}]);
+    assert.strictEqual(repliesOnly.result.comments.length, 1);
+    assert.strictEqual(repliesOnly.result.comments[0].id, 'root');
+    assert.strictEqual(repliesOnly.result.comments[0].replies[0].id, 'replayed-reply');
+    assert.strictEqual(repliesOnly.result.commentDiagnosticDetails.finalReplyCount, 1);
+    const denied = await render(url, [{url, html: noteHtml, pagerError: true, signedReplay: true,
+      replayResponse: {status: 406, payload: {success: false, code: -100, message: 'SYNTHETIC_PRIVATE_BODY'}}}]);
+    assert.strictEqual(denied.result.commentDiagnosticDetails.errorCode, 'HTTP_406');
+    assert.strictEqual(denied.result.commentDiagnosticDetails.failureStage, 'root_request');
+    assert.ok(!JSON.stringify(denied.result).includes('SYNTHETIC_PRIVATE_BODY'));
+    const fallback = await render(url, [{url, html: noteHtml, pagerTimeout: true,
+      domComments: [{id: 'dom-root', author: '测试', content: '分页超时后页面仍能提取评论', domRole: 'root'}]}]);
+    assert.ok(fallback.result.comments.some(comment => comment.content === '分页超时后页面仍能提取评论'));
+    assert.strictEqual(fallback.result.commentDiagnosticDetails.pageApiStopReason, 'page_api_timeout');
+    fastPageTimeout = false;
     for (const page of [
       {url: 'https://www.xiaohongshu.com/', html: noteHtml}, // State alone is not identity evidence.
       {url: 'https://www.xiaohongshu.com/login', html: noteHtml, redirect: url},
@@ -241,6 +322,7 @@ async function testIdentityRendering() {
     }
     assert.ok(windows.every(win => win.destroyed));
   } finally {
+    https.request = savedRequest;
     Module._load = savedLoad;
     global.window = savedWindow;
     global.setTimeout = savedTimer;

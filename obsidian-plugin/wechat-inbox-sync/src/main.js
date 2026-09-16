@@ -251,7 +251,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.151';
+const PLUGIN_RUNTIME_VERSION = '1.3.152';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -10192,11 +10192,11 @@ function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), Math.max(1, Math.min(requestTimeoutMs, remainingMs)));
         try {
-          const response = await fetch(path + '?' + query.toString(), {
+          const response = await fetch('https://edith.xiaohongshu.com' + path + '?' + query.toString(), {
             method: 'GET',
             credentials: 'include',
             signal: controller.signal,
-            headers: { Accept: 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest' },
+            headers: { Accept: 'application/json, text/plain, */*' },
           });
           if (!response.ok) throw new Error('http_' + response.status);
           const payload = JSON.parse(await response.text());
@@ -10212,7 +10212,7 @@ function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
           clearTimeout(timer);
         }
       };
-      const diagnostic = { source: 'page-api', rootCount: 0, replyCount: 0, pageCount: 0, stopReason: 'unknown' };
+      const diagnostic = { source: 'page-api', rootCount: 0, replyCount: 0, pageCount: 0, rootRequestCount: 0, replyRequestCount: 0, stopReason: 'unknown' };
       const rootPayloads = [];
       const replyPayloadGroups = [];
       if (!noteId) {
@@ -10230,6 +10230,7 @@ function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
         }
         let payload;
         try {
+          diagnostic.rootRequestCount += 1;
           payload = await requestJson('/api/sns/web/v2/comment/page', { ...baseParams, cursor, top_comment_id: '' });
         } catch (error) {
           diagnostic.failureStage = 'root_request';
@@ -10286,6 +10287,7 @@ function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
           }
           let payload;
           try {
+            diagnostic.replyRequestCount += 1;
             payload = await requestJson('/api/sns/web/v2/comment/sub/page', { ...baseParams, root_comment_id: rootCommentId, cursor: replyCursor, num: 20 });
           } catch (error) {
             diagnostic.failureStage = 'reply_request';
@@ -10486,6 +10488,44 @@ function classifyXiaohongshuCommentRequestIdentity(request = {}, expectedNoteId 
   return 'matched';
 }
 
+// Electron supplies upload data before it supplies the final request headers.
+// Merge the two events by request id so a retry keeps both identity and headers.
+function createXiaohongshuCommentRequestCollector(expectedNoteId) {
+  const requests = [];
+  const byRequest = new Map();
+  const capture = (details = {}) => {
+    const url = String(details.url || '').trim();
+    if (!isXiaohongshuCommentApiUrl(url)) return;
+    const method = String(details.method || 'GET').toUpperCase();
+    const eventBody = getXiaohongshuCapturedRequestBody(details);
+    const key = details.id !== undefined ? String(details.id) : method + '|' + url + '|' + eventBody;
+    const previous = byRequest.get(key);
+    const body = eventBody || (previous && previous.url === url && previous.method === method ? previous.body : '');
+    if (classifyXiaohongshuCommentRequestIdentity({ url, body }, expectedNoteId) !== 'matched') return;
+    if (previous && (previous.url !== url || previous.method !== method)) return;
+    if (previous) {
+      previous.body = body;
+      previous.requestHeaders = { ...previous.requestHeaders, ...(details.requestHeaders || {}) };
+      return;
+    }
+    const request = { url, method, body, requestHeaders: { ...(details.requestHeaders || {}) } };
+    byRequest.set(key, request);
+    requests.push(request);
+  };
+  return { requests, capture };
+}
+
+function getXiaohongshuCommentResponseFailure(url, status, payload) {
+  let errorCode = '';
+  if (Number(status) >= 400 && Number(status) <= 599) errorCode = 'HTTP_' + Math.floor(Number(status));
+  else if (!payload || typeof payload !== 'object') errorCode = 'INVALID_RESPONSE';
+  else if (payload.success === false || (payload.code !== undefined && Number(payload.code) !== 0)) {
+    const code = String(payload.code);
+    errorCode = /^-?[0-9]{1,10}$/.test(code) ? 'BUSINESS_' + code : 'INVALID_RESPONSE';
+  }
+  return errorCode ? { errorCode, failureStage: isXiaohongshuSubCommentApiUrl(url) ? 'reply_request' : 'root_request' } : null;
+}
+
 async function fetchXiaohongshuCommentsFromCapturedRequests(
   commentApiRequests = [],
   limit = XIAOHONGSHU_ROOT_COMMENT_LIMIT,
@@ -10493,19 +10533,19 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
 ) {
   throwIfAborted(options.signal);
   const comments = [];
-  const seen = new Set();
+  const replayedPayloads = [];
   const deadlineAt = Number(options && options.deadlineAt) || (Date.now() + XIAOHONGSHU_COMMENT_TIMEOUT_MS);
   const totalLimit = Math.max(1, Math.min(
     Number(options && options.totalLimit) || XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
     XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
   ));
   const expectedNoteId = String(options && options.expectedNoteId || '').trim();
-  if (!expectedNoteId) return [];
+  if (!expectedNoteId) return {comments: [], deferredReplyGroups: []};
   const cookieHeader = await getXiaohongshuCookieHeader();
   throwIfAborted(options.signal);
   const uniqueRequests = [];
   const seenRequests = new Set();
-  (commentApiRequests || []).forEach((request) => {
+  [...(commentApiRequests || [])].reverse().forEach((request) => {
     const url = String(request && request.url || '').trim();
     const method = String(request && request.method || 'GET').toUpperCase();
     const body = String(request && request.body || '');
@@ -10516,7 +10556,7 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
     seenRequests.add(key);
     uniqueRequests.push(request);
   });
-  for (const request of uniqueRequests.slice(-8)) {
+  for (const request of uniqueRequests.slice(0, 8)) {
     throwIfAborted(options.signal);
     const budget = getXiaohongshuCommentBudgetState({
       deadlineAt,
@@ -10535,26 +10575,19 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
         signal: options.signal,
       });
       throwIfAborted(options.signal);
-      if (!response || response.status < 200 || response.status >= 300) continue;
-      if (response.json) {
-        if (classifyXiaohongshuCommentRequestIdentity({
-          url: request.url,
-          body: request.body,
-          payload: response.json,
-        }, expectedNoteId) !== 'matched') continue;
-        extractCommentsFromObject(response.json, comments, seen, limit);
-      } else if (response.text) {
-        collectJsonObjectCandidates(response.text).forEach((candidate) => {
-          const payload = parseLooseJsonCandidate(candidate);
-          if (classifyXiaohongshuCommentRequestIdentity({
-            url: request.url,
-            body: request.body,
-            payload,
-          }, expectedNoteId) === 'matched') {
-            extractCommentsFromObject(payload, comments, seen, limit);
-          }
-        });
+      const failure = getXiaohongshuCommentResponseFailure(request.url, response && response.status, response && response.json);
+      if (failure) {
+        if (typeof options.onFailure === 'function') options.onFailure(failure);
+        continue;
       }
+      if (!response || response.status < 200 || response.status >= 300) continue;
+      if (classifyXiaohongshuCommentRequestIdentity({
+        url: request.url, body: request.body, payload: response.json,
+      }, expectedNoteId) !== 'matched') continue;
+      replayedPayloads.push({url: request.url, body: request.body, payload: response.json});
+      const replayed = mergeXiaohongshuCapturedCommentPayloads(replayedPayloads, limit, {expectedNoteId});
+      comments.splice(0, comments.length, ...replayed.comments);
+
     } catch (error) {
       if (isAbortError(error) || (options.signal && options.signal.aborted)) {
         throw createAbortError();
@@ -10562,7 +10595,7 @@ async function fetchXiaohongshuCommentsFromCapturedRequests(
     }
   }
   throwIfAborted(options.signal);
-  return comments.slice(0, limit);
+  return mergeXiaohongshuCapturedCommentPayloads(replayedPayloads, limit, {expectedNoteId});
 }
 
 function extractHtmlTitle(html) {
@@ -13425,28 +13458,11 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     outcome: 'started',
   });
 
-  const commentApiRequests = [];
+  const commentRequestCollector = createXiaohongshuCommentRequestCollector(expectedNoteId);
+  const commentApiRequests = commentRequestCollector.requests;
   const browserSession = (win.webContents && win.webContents.session) || wechatSession;
-  const seenCommentApiRequests = new Set();
-  const captureCommentApiRequest = (details) => {
-    const requestUrl = String(details && details.url || '').trim();
-    if (!isXiaohongshuCommentApiUrl(requestUrl)) return;
-    const method = String(details && details.method || 'GET').toUpperCase();
-    const body = getXiaohongshuCapturedRequestBody(details);
-    if (classifyXiaohongshuCommentRequestIdentity({
-      url: requestUrl,
-      body,
-    }, expectedNoteId) !== 'matched') return;
-    const key = `${method}|${requestUrl}|${body}`;
-    if (seenCommentApiRequests.has(key)) return;
-    seenCommentApiRequests.add(key);
-    commentApiRequests.push({
-      url: requestUrl,
-      method,
-      body,
-      requestHeaders: details && details.requestHeaders ? { ...details.requestHeaders } : {},
-    });
-  };
+  const captureCommentApiRequest = commentRequestCollector.capture;
+
   try {
     if (browserSession && browserSession.webRequest && typeof browserSession.webRequest.onBeforeSendHeaders === 'function') {
       browserSession.webRequest.onBeforeSendHeaders({ urls: ['*://*.xiaohongshu.com/*'] }, (details, callback) => {
@@ -13466,6 +13482,8 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     }
   } catch (error) {}
 
+  let browserCommentFailure = null;
+  const recordCommentFailure = (failure) => { if (failure) browserCommentFailure = failure; };
   const debuggerComments = [];
   const debuggerCommentPayloads = [];
   const debuggerSeen = new Set();
@@ -13521,7 +13539,10 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         if (payload && typeof payload === 'object') payloads.push(payload);
       });
     }
+    if (!payloads.length) recordCommentFailure(getXiaohongshuCommentResponseFailure(requestUrl, requestDetails.status, null));
     payloads.forEach((payload) => {
+      const failure = getXiaohongshuCommentResponseFailure(requestUrl, requestDetails.status, payload);
+      if (failure) { recordCommentFailure(failure); return; }
       if (classifyXiaohongshuCommentRequestIdentity({
         url: requestUrl,
         body: requestBody,
@@ -13533,7 +13554,9 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         payload,
         sequence,
       });
-      extractCommentsFromObject(payload, debuggerComments, debuggerSeen, XIAOHONGSHU_ROOT_COMMENT_LIMIT);
+      if (!isXiaohongshuSubCommentApiUrl(requestUrl)) {
+        extractCommentsFromObject(getXiaohongshuCommentPageItems(payload), debuggerComments, debuggerSeen, XIAOHONGSHU_ROOT_COMMENT_LIMIT);
+      }
     });
   };
   try {
@@ -13571,8 +13594,12 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
               && isXiaohongshuCommentApiUrl(responseUrl)
               && classifyXiaohongshuCommentRequestIdentity(capturedRequest, expectedNoteId) === 'matched') {
               debuggerResponseSequence += 1;
+              if (Number(params.response && params.response.status) >= 400) {
+                recordCommentFailure(getXiaohongshuCommentResponseFailure(responseUrl, params.response.status, null));
+              }
               debuggerRequestUrls.set(params.requestId, {
                 ...capturedRequest,
+                status: Number(params.response && params.response.status || 0),
                 sequence: debuggerResponseSequence,
               });
             } else if (params.requestId) {
@@ -13658,9 +13685,12 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     };
     const pageApiBudget = getCommentBudget(debuggerComments.length);
     if (!pageApiBudget.shouldStop) {
+      // Bound active pagination so the page/DOM fallback still gets time to run.
+      const pageApiTimeoutMs = Math.max(1, Math.min(20000, pageApiBudget.remainingMs - 15000));
+      const pageApiDeadlineAt = Math.min(deadlineAt, Date.now() + pageApiTimeoutMs);
       let pageApiSettled = false;
       const pageApiTask = Promise.resolve().then(() => win.webContents.executeJavaScript(getXiaohongshuCommentPaginationScript(expectedIdentityUrl, {
-        deadlineAt,
+        deadlineAt: pageApiDeadlineAt,
         totalLimit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
       }))).then((value) => {
         if (!pageApiSettled) pageApiPayload = value;
@@ -13675,7 +13705,7 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         };
       });
       const pageApiWaitStatus = await waitForPromiseWithAbort(
-        waitForBrowserTasksWithin([pageApiTask], pageApiBudget.remainingMs),
+        waitForBrowserTasksWithin([pageApiTask], pageApiTimeoutMs),
         options.signal,
       );
       throwIfAborted(options.signal);
@@ -13684,9 +13714,15 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         pageApiPayload = {
           rootPayloads: [],
           replyPayloadGroups: [],
-          diagnostic: { source: 'page-api', stopReason: 'time_budget_exceeded', errorCode: 'TIMEOUT', failureStage: 'comment_extraction' },
+          diagnostic: { source: 'page-api', stopReason: 'page_api_timeout', errorCode: 'TIMEOUT', failureStage: 'comment_extraction' },
         };
       }
+    }
+    if (pageApiPayload && pageApiPayload.diagnostic
+      && pageApiPayload.diagnostic.stopReason === 'time_budget_exceeded'
+      && Date.now() < deadlineAt) {
+      pageApiPayload.diagnostic.stopReason = 'page_api_timeout';
+      pageApiPayload.diagnostic.errorCode = 'TIMEOUT';
     }
     if (String(pageApiPayload && pageApiPayload.identityNoteId || '').trim().toLowerCase()
       !== String(expectedNoteId).trim().toLowerCase()) {
@@ -14080,11 +14116,12 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       pagedComments = mergeXiaohongshuReplyPages(pagedComments, group && group.rootCommentId, group && group.payloads);
     });
     let apiComments = [];
+    let replayDeferredReplyGroups = [];
     const signedReplayBudget = getCommentBudget(
       debuggerComments.length + getSocialCommentTreeStats(pagedComments).rootCount + getSocialCommentTreeStats(pagedComments).replyCount,
     );
     if (!signedReplayBudget.shouldStop) {
-      apiComments = await fetchXiaohongshuCommentsFromCapturedRequests(
+      const replayResult = await fetchXiaohongshuCommentsFromCapturedRequests(
         commentApiRequests,
         XIAOHONGSHU_ROOT_COMMENT_LIMIT,
         {
@@ -14092,8 +14129,11 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
           totalLimit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
           expectedNoteId,
           signal: options.signal,
+          onFailure: recordCommentFailure,
         },
       );
+      apiComments = replayResult.comments;
+      replayDeferredReplyGroups = replayResult.deferredReplyGroups;
       throwIfAborted(options.signal);
     }
     const browserNetworkResult = mergeXiaohongshuCapturedCommentPayloads(
@@ -14117,7 +14157,7 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     );
     const mergedCommentSources = mergeXiaohongshuCommentSources({
       networkComments,
-      deferredReplyGroups: browserNetworkResult.deferredReplyGroups,
+      deferredReplyGroups: [...browserNetworkResult.deferredReplyGroups, ...replayDeferredReplyGroups],
       fallbackGroups: [
       inlineDomComments,
       domComments,
@@ -14152,8 +14192,8 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       pageCount: hasBrowserNetworkPayload ? browserNetworkResult.pageCount : (capturedDiagnostic.pageCount || pagedRootResult.pageCount),
       rootPageCount: hasBrowserNetworkPayload ? browserNetworkResult.rootPageCount : pagedRootResult.pageCount,
       replyPageCount: hasBrowserNetworkPayload ? browserNetworkResult.replyPageCount : Math.max(0, Number(capturedDiagnostic.pageCount || 0) - pagedRootResult.pageCount),
-      rootRequestCount: Number(renderedPayload && renderedPayload.rootRequestCount || 0),
-      replyRequestCount: Number(renderedPayload && renderedPayload.replyRequestCount || 0),
+      rootRequestCount: Math.max(Number(renderedPayload && renderedPayload.rootRequestCount || 0), Number(capturedDiagnostic.rootRequestCount || 0), commentApiRequests.filter(request => !isXiaohongshuSubCommentApiUrl(request.url)).length),
+      replyRequestCount: Math.max(Number(renderedPayload && renderedPayload.replyRequestCount || 0), Number(capturedDiagnostic.replyRequestCount || 0), commentApiRequests.filter(request => isXiaohongshuSubCommentApiUrl(request.url)).length),
       mergedRootCount: finalCommentStats.rootCount,
       mergedReplyCount: finalCommentStats.replyCount,
       restoredRootCount: mergedCommentSources.restoredRootCount,
@@ -14169,8 +14209,8 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       invalidPayloadCount: browserNetworkResult.invalidPayloadCount,
       scrollMode: renderedPayload && renderedPayload.scrollMode,
       pageApiStopReason: capturedDiagnostic.stopReason || (hasBrowserNetworkPayload ? 'network_primary' : ''),
-      errorCode: capturedDiagnostic.errorCode || '',
-      failureStage: capturedDiagnostic.failureStage || '',
+      errorCode: (!comments.length && browserCommentFailure ? browserCommentFailure.errorCode : capturedDiagnostic.errorCode) || '',
+      failureStage: (!comments.length && browserCommentFailure ? browserCommentFailure.failureStage : capturedDiagnostic.failureStage) || '',
       stopReason: explicitBudgetStopReason
         || (hasBrowserNetworkPayload ? browserStopReason : (capturedDiagnostic.stopReason || pagedRootResult.stopReason)),
     };
@@ -25505,6 +25545,8 @@ WechatObsidianInboxPlugin.__test = {
   buildXiaohongshuCommentDiagnostic,
   appendXiaohongshuCommentDiagnostic,
   getXiaohongshuCommentPaginationScript,
+  createXiaohongshuCommentRequestCollector,
+  getXiaohongshuCommentResponseFailure,
   buildSocialCommentsMarkdown,
   getSocialCommentTreeStats,
   limitSocialCommentTreeTotal,
