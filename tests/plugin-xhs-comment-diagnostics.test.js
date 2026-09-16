@@ -162,6 +162,11 @@ async function testIdentityRendering() {
         if (script.includes('html: document.documentElement ?') && !script.includes('collectionStopReason')) {
           if (this.page.onSnapshot) return this.page.onSnapshot();
           this.snapshotCount = (this.snapshotCount || 0) + 1;
+          if (this.page.navigateAfterFirst && this.snapshotCount > 1) {
+            this.page.url = this.page.navigateAfterFirst.url;
+            this.page.html = this.page.navigateAfterFirst.html;
+            this.page.walls = this.page.navigateAfterFirst.walls || [];
+          }
           if (this.page.finalAbort && this.snapshotCount > 1) { this.page.finalAbort.abort(); throw Error('frame disposed'); }
           if (this.page.finalSnapshotTimeout && this.snapshotCount > 1) {
             fastFinalTimeout = true;
@@ -257,6 +262,52 @@ async function testIdentityRendering() {
     assert.strictEqual(noState.result.comments[0].id, 'root');
     assert.ok(noState.diagnostic.stages.some(stage => stage.outcome === 'scoped_api_only'));
     const recommended = noStateHtml + '<script>' + JSON.stringify({recommend: [{noteId: '111111111111111111111111', desc: '推荐其他笔记'}]}) + '</script>';
+    const otherId = '111111111111111111111111';
+    const otherNote = {noteId: otherId, desc: '缓存其他笔记正文'};
+    const cacheHtml = state => '<html><head><link rel="canonical" href="' + url + '"></head><body><script>' + JSON.stringify(state) + '</script></body></html>';
+    for (const mapKey of ['noteDetailMap', 'note_detail_map']) {
+      for (const targetEntry of [null, {note: {noteId, desc: '', imageList: []}}]) {
+        const map = {[otherId]: {note: otherNote}, ...(targetEntry ? {[noteId]: targetEntry} : {})};
+        const cache = cacheHtml({note: {[mapKey]: map}});
+        const cached = await render(url, [{url, html: cache,
+          domComments: [{id: 'cache-dom', content: '未确认身份的页面评论', domRole: 'root'}]}]);
+        assert.strictEqual(cached.apiCalls, 1, 'other cached notes must not block target-scoped API');
+        assert.strictEqual(cached.result.comments.length, 1);
+        assert.strictEqual(cached.result.comments[0].id, 'root');
+        const replay = await render(url, [{url, html: cache, pagerError: true, signedReplay: true}]);
+        assert.strictEqual(replay.result.comments[0].id, 'replayed-root', 'signed target request remains available with unrelated cache');
+      }
+      const explicitConflict = await render(url, [{url, html: cacheHtml({noteId: otherId, desc: '当前主笔记明确是B',
+        [mapKey]: {[noteId]: {note: {noteId, desc: '缓存A完整正文'}}}}), pagerError: true,
+        domComments: [{id: 'foreign-B-dom', content: '错误笔记B的页面评论', domRole: 'root'}]}]);
+      assert.strictEqual(explicitConflict.apiCalls, 0, 'cached target content cannot override explicit current-note conflict');
+      assert.strictEqual(explicitConflict.result.comments.length, 0);
+      assert.strictEqual(explicitConflict.result.commentDiagnosticDetails.errorCode, 'TARGET_IDENTITY_MISMATCH');
+      const conflict = await render(url, [{url, html: cacheHtml({note: {[mapKey]: {[noteId]: {note: otherNote}}}})}]);
+      assert.strictEqual(conflict.apiCalls, 0, 'a contradictory ID under the target cache key must still be rejected');
+      assert.strictEqual(conflict.result.commentDiagnosticDetails.errorCode, 'TARGET_IDENTITY_MISMATCH');
+    }
+    const shortWithoutState = await render(shortUrl, [{url, html: noStateHtml, redirect: url}, {url, html: noStateHtml}]);
+    assert.strictEqual(shortWithoutState.apiCalls, 1, 'shortlink and direct URL have the same route-only API policy');
+    assert.strictEqual(shortWithoutState.result.comments[0].id, 'root');
+    for (const landing of [
+      {url: url.replace(noteId, otherId), html: '<html>B</html>'},
+      {url: 'https://www.xiaohongshu.com/login', html: '<html>登录</html>'},
+      {url, html: '<html>A</html>', walls: [{innerText: '安全验证', getClientRects: () => [1]}]},
+    ]) {
+      const stale = await render(shortUrl, [{url, html: noStateHtml.repeat(10), redirect: url, navigateAfterFirst: landing}]);
+      assert.strictEqual(stale.windowCount, 1, 'larger earlier HTML must not replace the actual landing snapshot');
+      assert.strictEqual(stale.apiCalls, 0);
+      assert.strictEqual(stale.result.comments.length, 0);
+    }
+    const mixedCache = '<script>' + JSON.stringify({noteDetailMap: {
+      [noteId]: {note: {noteId, desc: '旧目标完整正文'}}, [otherId]: {note: otherNote},
+    }}) + '</script>';
+    const redirectConflict = await render(shortUrl, [{url: url.replace(noteId, otherId), html: mixedCache, redirect: url}]);
+    assert.strictEqual(redirectConflict.windowCount, 1, 'do not open the earlier observed note after a different final landing');
+    assert.strictEqual(redirectConflict.apiCalls, 0);
+    assert.strictEqual(redirectConflict.result.comments.length, 0);
+    assert.ok(redirectConflict.diagnostic.stages.some(stage => stage.failureKind === 'FINAL_NOTE_ID_DIFFERS'));
     const recommendations = await render(url, [{url, html: recommended}]);
     assert.strictEqual(recommendations.apiCalls, 1, 'recommendation identities must not reject the current route');
     for (const [page, reason, code, detail] of [
@@ -266,7 +317,7 @@ async function testIdentityRendering() {
       [{url: 'https://www.xiaohongshu.com/', html: noteHtml}, 'target_identity_unconfirmed', 'TARGET_IDENTITY_UNCONFIRMED', 'PAGE_NOTE_ID_ABSENT'],
       [{url: 'https://untrusted.example/', html: noteHtml}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'UNTRUSTED_PAGE'],
       [{url, html: '<html>当前笔记暂时无法浏览</html>'}, 'page_unavailable', 'PAGE_UNAVAILABLE', 'PAGE_UNAVAILABLE'],
-      [{url, html: noteHtml.replaceAll(noteId, '111111111111111111111111')}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'STRUCTURED_NOTE_ID_DIFFERS'],
+      [{url, html: '<script>' + JSON.stringify({note: {noteId: '111111111111111111111111', desc: '错误主笔记'}}) + '</script>'}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'STRUCTURED_NOTE_ID_DIFFERS'],
       [{url, html: noStateHtml + '<link rel="canonical" href="' + url.replace(noteId, '111111111111111111111111') + '">'}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'CANONICAL_NOTE_ID_DIFFERS'],
       [{url: url.replace(noteId, '111111111111111111111111'), html: noteHtml}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'PAGE_NOTE_ID_DIFFERS'],
     ]) {
@@ -309,9 +360,10 @@ async function testIdentityRendering() {
       assert.strictEqual(failed.result.commentDiagnosticDetails.errorCode, errorCode);
       fastPageTimeout = false;
     }
+    const replayHeadersBefore = sentReplayHeaders.length;
     const replayed = await render(url, [{url, html: noteHtml, pagerError: true, signedReplay: true}]);
     assert.strictEqual(replayed.result.comments[0].content, '浏览器请求重试恢复评论');
-    assert.strictEqual(sentReplayHeaders.length, 1);
+    assert.strictEqual(sentReplayHeaders.length, replayHeadersBefore + 1);
     assert.strictEqual(replayed.result.commentDiagnosticDetails.rootRequestCount, 1);
     const repliesOnly = await render(url, [{url, html: noteHtml, signedReplay: true, replyOnly: true,
       replayResponse: {payload: {success: true, data: {comments: [{id: 'replayed-reply', content: '仅重试取得的回复', user_info: {nickname: '测试'}}], has_more: false}}}}]);
@@ -333,7 +385,7 @@ async function testIdentityRendering() {
       {url: 'https://www.xiaohongshu.com/', html: noteHtml}, // State alone is not identity evidence.
       {url: 'https://www.xiaohongshu.com/login', html: noteHtml, redirect: url},
       {url: 'https://untrusted.example/', html: noteHtml, redirect: url},
-      {url, html: '<html>页面不存在</html>'},
+      {url, html: '<html>当前笔记暂时无法浏览</html>'},
       {url, html: noteHtml, walls: [{innerText: '请完成安全验证，拖动滑块完成验证', getClientRects: () => [1]}]},
       {url, html: noteHtml, walls: [{innerText: '手机号登录，登录后查看完整内容', getClientRects: () => [1]}]},
     ]) {
