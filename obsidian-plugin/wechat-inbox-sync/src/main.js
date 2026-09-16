@@ -251,8 +251,8 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.150';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1';
+const PLUGIN_RUNTIME_VERSION = '1.3.151';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -10172,15 +10172,7 @@ function getXiaohongshuCommentPaginationScript(url = '', options = {}) {
       const pageSource = () => {
         try { return JSON.stringify(window.__INITIAL_STATE__ || {}) + '\\n' + JSON.stringify(window.__APOLLO_STATE__ || {}); } catch (error) { return ''; }
       };
-      const noteId = (() => {
-        for (const parsed of [safeUrl(inputUrl)].filter(Boolean)) {
-          const match = parsed.pathname.match(/\\/(?:explore|discovery\\/item|item)\\/([0-9a-zA-Z]+)/i);
-          if (match && match[1]) return match[1];
-          const value = parsed.searchParams.get('note_id') || parsed.searchParams.get('noteId');
-          if (value) return value;
-        }
-        return '';
-      })();
+      const noteId = ${JSON.stringify(getXiaohongshuTargetNoteId(url))};
       const xsecToken = (() => {
         for (const parsed of [safeUrl(location.href), safeUrl(inputUrl)].filter(Boolean)) {
           const value = parsed.searchParams.get('xsec_token') || parsed.searchParams.get('xsecToken');
@@ -11162,6 +11154,17 @@ async function checkXiaohongshuLoginStatus() {
   return hasXiaohongshuLoginCookies(cookies);
 }
 
+function getXiaohongshuAccessWallScript() {
+  return `Array.from(document.querySelectorAll(
+    '[role="dialog"], .login-container, #login-container, .login-modal, [class*="captcha"], [class*="verify-modal"], [class*="verify-container"]'
+  )).some((element) => {
+    const style = getComputedStyle(element);
+    return element.getClientRects().length > 0
+      && style.display !== 'none' && style.visibility !== 'hidden'
+      && /手机号登录|验证码登录|扫码登录|登录后查看|请完成.*验证|拖动.*滑块|安全验证/.test(element.innerText || '');
+  })`;
+}
+
 async function probeXiaohongshuLoginStatus(targetUrl = '', options = {}) {
   throwIfAborted(options.signal);
   const hasLoginCookie = await checkXiaohongshuLoginStatus();
@@ -11234,7 +11237,7 @@ async function probeXiaohongshuLoginStatus(targetUrl = '', options = {}) {
       win.webContents.executeJavaScript(`
       (async () => {
         const text = String(document.body && (document.body.innerText || document.body.textContent) || '').replace(/\\s+/g, ' ').trim();
-        const hasLoginWall = /登录后|请登录|登录小红书|手机号登录|验证码登录|扫码登录|未登录/.test(text);
+        const hasLoginWall = ${getXiaohongshuAccessWallScript()};
         const hasUserSignal = Boolean(document.querySelector('[href*="/user/profile"], [class*="avatar"], [class*="user-info"], [class*="userInfo"]'));
         let hasAccountApiSignal = false;
         let accountStatus = 0;
@@ -13169,9 +13172,10 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
     if (!beginBestEffortBrowserLoad(win, url)) {
       throw new Error('隐藏浏览器未能开始加载小红书页面');
     }
-    await loaded;
+    await waitForPromiseWithAbort(loaded, options.signal);
     throwIfAborted(options.signal);
     let payload = null;
+    let accessWall = false;
     for (let index = 0; index < 12; index += 1) {
       throwIfAborted(options.signal);
       const remainingMs = deadlineAt - Date.now();
@@ -13182,15 +13186,17 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         );
       }
       const current = await runBrowserTaskWithTimeout(
-        win.webContents.executeJavaScript(`
+        waitForPromiseWithAbort(win.webContents.executeJavaScript(`
           (() => ({
             html: document.documentElement ? document.documentElement.outerHTML : '',
             url: String(location.href || ''),
+            accessWall: ${getXiaohongshuAccessWallScript()},
           }))()
-        `),
+        `), options.signal),
         Math.min(XIAOHONGSHU_BROWSER_SCRIPT_TIMEOUT_MS, remainingMs),
         'xiaohongshu-content-snapshot',
       );
+      accessWall = Boolean(current && current.accessWall);
       payload = selectXiaohongshuBrowserSnapshot(
         payload,
         current,
@@ -13204,7 +13210,10 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
           XIAOHONGSHU_CONTENT_DEADLINE_MS,
         );
       }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(500, remainingAfterSnapshotMs)));
+      await waitForPromiseWithAbort(
+        new Promise((resolve) => setTimeout(resolve, Math.min(500, remainingAfterSnapshotMs))),
+        options.signal,
+      );
     }
     throwIfAborted(options.signal);
     recordXiaohongshuSecurityRestriction(options, payload && payload.html, 'content_extraction');
@@ -13217,6 +13226,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       html: String(payload && payload.html || ''),
       url: String(payload && payload.url || (win.webContents && win.webContents.getURL && win.webContents.getURL()) || url),
       identityUrl: String(payload && payload.identityUrl || ''),
+      accessWall,
       comments: [],
       commentDiagnosticDetails: {
         source: 'disabled',
@@ -13324,12 +13334,49 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         },
       };
     }
-    const expectedIdentityUrl = resolveXiaohongshuIdentityUrl([
+    let expectedIdentityUrl = resolveXiaohongshuIdentityUrl([
       options.expectedUrl,
       url,
     ]);
-    const expectedNoteId = getXiaohongshuTargetNoteId(expectedIdentityUrl);
+    let expectedNoteId = getXiaohongshuTargetNoteId(expectedIdentityUrl);
+    if (!expectedNoteId && isTrustedXiaohongshuTransportUrl(url)) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: 'stage', stage: 'comment_extraction', outcome: 'identity_discovery_started',
+      });
+      try {
+        // This function already owns the session lock. Discover only once with
+        // the unlocked content renderer, which blocks comment requests.
+        const discovered = await renderXiaohongshuContentWithElectron(url, {
+          ...options, includeComments: false,
+        });
+        throwIfAborted(options.signal);
+        const identity = resolveXiaohongshuIdentityUrl([discovered.identityUrl, discovered.url]);
+        if (isTrustedXiaohongshuCookieUrl(discovered.url)
+          && !discovered.accessWall
+          && !isUnavailableXiaohongshuPage(discovered.html, discovered.url)
+          && !/\/(?:login|verify|captcha)(?:[/?#]|$)/i.test(discovered.url)
+          && !detectXiaohongshuSecurityRestriction(discovered.html)
+          && identity
+          && shouldStopWaitingForXiaohongshuContent(discovered.html, identity)) {
+          expectedIdentityUrl = identity;
+          expectedNoteId = getXiaohongshuTargetNoteId(identity);
+          url = identity;
+          appendXiaohongshuBrowserDiagnostic(options, {
+            type: 'stage', stage: 'comment_extraction', outcome: 'identity_resolved',
+          });
+        }
+      } catch (error) {
+        appendXiaohongshuBrowserDiagnostic(options, {
+          type: 'stage', stage: 'comment_extraction',
+          outcome: isAbortError(error) ? 'identity_discovery_aborted' : 'identity_discovery_failed',
+        });
+        throw error;
+      }
+    }
     if (!expectedNoteId) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: 'stage', stage: 'comment_extraction', outcome: 'target_identity_missing',
+      });
       return {
         html: '',
         comments: [],
@@ -13337,6 +13384,8 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         commentDiagnosticDetails: {
           source: 'disabled',
           stopReason: 'target_identity_missing',
+          errorCode: 'TARGET_IDENTITY_MISSING',
+          failureStage: 'comment_extraction',
           partial: true,
         },
       };
@@ -13586,6 +13635,9 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         identitySnapshot && identitySnapshot.html,
         'comment_extraction',
       );
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: 'stage', stage: 'comment_extraction', outcome: 'target_identity_mismatch',
+      });
       return {
         html: String(identitySnapshot && identitySnapshot.html || ''),
         comments: [],
@@ -13593,6 +13645,8 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         commentDiagnosticDetails: {
           source: 'disabled',
           stopReason: 'target_identity_mismatch',
+          errorCode: 'TARGET_IDENTITY_MISMATCH',
+          failureStage: 'comment_extraction',
           partial: true,
         },
       };
@@ -13604,19 +13658,20 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
     };
     const pageApiBudget = getCommentBudget(debuggerComments.length);
     if (!pageApiBudget.shouldStop) {
-      const pageApiTask = Promise.resolve(win.webContents.executeJavaScript(getXiaohongshuCommentPaginationScript(expectedIdentityUrl, {
+      let pageApiSettled = false;
+      const pageApiTask = Promise.resolve().then(() => win.webContents.executeJavaScript(getXiaohongshuCommentPaginationScript(expectedIdentityUrl, {
         deadlineAt,
         totalLimit: XIAOHONGSHU_TOTAL_COMMENT_LIMIT,
       }))).then((value) => {
-        pageApiPayload = value;
+        if (!pageApiSettled) pageApiPayload = value;
       }).catch((error) => {
         if (isAbortError(error) || (options.signal && options.signal.aborted)) {
           throw createAbortError();
         }
-        pageApiPayload = {
+        if (!pageApiSettled) pageApiPayload = {
           rootPayloads: [],
           replyPayloadGroups: [],
-          diagnostic: { source: 'page-api', stopReason: 'page_script_failed' },
+          diagnostic: { source: 'page-api', stopReason: 'page_script_failed', errorCode: getXiaohongshuCommentErrorCode(error), failureStage: 'comment_extraction' },
         };
       });
       const pageApiWaitStatus = await waitForPromiseWithAbort(
@@ -13624,21 +13679,25 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         options.signal,
       );
       throwIfAborted(options.signal);
+      pageApiSettled = true;
       if (pageApiWaitStatus === 'timeout') {
         pageApiPayload = {
           rootPayloads: [],
           replyPayloadGroups: [],
-          diagnostic: { source: 'page-api', stopReason: 'time_budget_exceeded' },
+          diagnostic: { source: 'page-api', stopReason: 'time_budget_exceeded', errorCode: 'TIMEOUT', failureStage: 'comment_extraction' },
         };
       }
     }
     if (String(pageApiPayload && pageApiPayload.identityNoteId || '').trim().toLowerCase()
       !== String(expectedNoteId).trim().toLowerCase()) {
+      const failure = pageApiPayload && pageApiPayload.diagnostic;
       pageApiPayload = {
         rootPayloads: [],
         replyPayloadGroups: [],
         identityNoteId: '',
-        diagnostic: { source: 'page-api', stopReason: 'target_identity_mismatch' },
+        diagnostic: failure && failure.errorCode ? failure : {
+          source: 'page-api', stopReason: 'target_identity_mismatch', errorCode: 'TARGET_IDENTITY_MISMATCH', failureStage: 'comment_extraction',
+        },
       };
     } else {
       const rootRequestUrl = `https://www.xiaohongshu.com/api/sns/web/v2/comment/page?note_id=${encodeURIComponent(expectedNoteId)}`;
@@ -21491,6 +21550,23 @@ class WechatObsidianInboxPlugin extends Plugin {
     const xiaohongshuBrowserOptions = xiaohongshuBrowserDiagnostic
       ? { xiaohongshuBrowserDiagnostic, diagnosticSettings: this.settings }
       : {};
+    const updateCapturedCommentResult = (finalized) => {
+      const details = finalized.diagnosticDetails;
+      const stats = finalized.markdownStats;
+      const hasComments = stats.rootCount + stats.replyCount > 0;
+      updateCommentResult({
+        status: details.stopReason === 'skipped_no_login_cookie' ? 'skipped'
+          : hasComments ? (details.partial || details.errorCode ? 'partial' : 'captured')
+            : (details.errorCode ? 'failed' : 'empty_unconfirmed'),
+        reason: details.errorCode ? (details.stopReason || 'capture_error')
+          : ['target_identity_missing', 'target_identity_mismatch', 'skipped_no_login_cookie'].includes(details.stopReason)
+          ? details.stopReason : hasComments ? 'capture_returned' : 'empty_result',
+        ...stats, pageCount: details.pageCount, stopReason: details.stopReason,
+        rootRequestCount: details.rootRequestCount, replyRequestCount: details.replyRequestCount,
+        invalidPayloadCount: details.invalidPayloadCount,
+        errorCode: details.errorCode, stage: details.failureStage || 'comment_extraction',
+      });
+    };
     let xiaohongshuRedirectDiagnostic = null;
     let xiaohongshuResolvedUrl = url || '';
     let xiaohongshuResponseStatus = 0;
@@ -21514,6 +21590,86 @@ class WechatObsidianInboxPlugin extends Plugin {
         && (!(metadata.webpageMediaType === 'audio_video' || metadata.transcriptOnly)
           || (metadata.transcriptionStatus === 'success' && String(metadata.transcription || '').trim()))))
       && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
+      if (xiaohongshuBrowserDiagnostic) {
+        const prior = metadata.xiaohongshuCommentResult;
+        let savedMarkdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || '');
+        try {
+          if (prior && prior.status === 'captured') {
+            updateCommentResult(prior);
+          } else if (this.settings.xiaohongshuCommentsEnabled === false) {
+            updateCommentResult({ status: 'skipped', reason: 'disabled' });
+          } else if (!(await this.hasProFeatureAccess())) {
+            updateCommentResult({ status: 'skipped', reason: 'pro_not_confirmed', proAccess: false });
+          } else {
+            updateCommentResult({ proAccess: true, stage: 'login_check' });
+            const loggedIn = await this.checkXiaohongshuLogin({ signal, ...xiaohongshuBrowserOptions });
+            updateCommentResult({
+              loginCheck: loggedIn ? 'passed' : 'unconfirmed',
+              status: loggedIn ? 'running' : 'skipped',
+              reason: loggedIn ? 'capture_started' : 'login_unconfirmed',
+              stage: loggedIn ? 'comment_extraction' : 'login_check',
+            });
+            if (loggedIn) {
+              const page = await this.renderXiaohongshuPage(url, {
+                includeComments: true, expectedUrl: resolveXiaohongshuIdentityUrl([url]),
+                signal, ...xiaohongshuBrowserOptions,
+              });
+              throwIfAborted(signal);
+              const finalized = finalizeXiaohongshuComments({
+                // Generate only the comments. Cached body headings are user
+                // content and must never be stripped by a heading-name match.
+                baseMarkdown: '',
+                renderedComments: Array.isArray(page && page.comments) ? page.comments : [],
+                diagnosticDetails: page && page.commentDiagnosticDetails || {},
+                limit: XIAOHONGSHU_ROOT_COMMENT_LIMIT,
+              });
+              updateCapturedCommentResult(finalized);
+              const isInsideFence = (position) => {
+                let fence = '';
+                for (const match of savedMarkdown.slice(0, position).matchAll(/^ {0,3}(`{3,}|~{3,})([^\n]*)$/gm)) {
+                  if (!fence) fence = match[1];
+                  else if (match[1][0] === fence[0] && match[1].length >= fence.length && !match[2].trim()) fence = '';
+                }
+                return Boolean(fence);
+              };
+              const managedPattern = /^<!-- xhs-comments:start -->\r?\n[\s\S]*?^<!-- xhs-comments:end -->[ \t]*$/gm;
+              const managedMatches = [...savedMarkdown.matchAll(managedPattern)].filter(match => !isInsideFence(match.index));
+              const candidateSection = managedMatches.length === 1 ? managedMatches[0] : null;
+              const candidateStats = candidateSection ? getSocialCommentMarkdownStats(candidateSection[0]) : {};
+              const managed = candidateSection && prior
+                && candidateStats.rootCount + candidateStats.replyCount > 0
+                && Number(prior.rootCount) === candidateStats.rootCount && Number(prior.replyCount) === candidateStats.replyCount
+                && /<!-- xhs-comment-diag:/.test(candidateSection[0])
+                && !savedMarkdown.slice(candidateSection.index + candidateSection[0].length).trim()
+                ? candidateSection : null;
+              const oldStats = managed ? getSocialCommentMarkdownStats(managed[0])
+                : { rootCount: Number(prior && prior.rootCount) || 0, replyCount: Number(prior && prior.replyCount) || 0 };
+              const hadComments = oldStats.rootCount + oldStats.replyCount > 0;
+              const hasNewComments = finalized.markdownStats.rootCount + finalized.markdownStats.replyCount > 0;
+              // Preserve previously saved comments when a retry is incomplete.
+              // Only a complete capture may replace an existing comment section.
+              if (hasNewComments && (!hadComments || xiaohongshuCommentResult.status === 'captured')) {
+                const section = `<!-- xhs-comments:start -->\n${finalized.markdown}\n<!-- xhs-comments:end -->`;
+                const legacyHeadings = [...savedMarkdown.matchAll(/^##\s+评论区\s*$/gm)].filter(match => !isInsideFence(match.index));
+                const hasLegacySection = !managed && hadComments && legacyHeadings.length === 1
+                  && !/^#{1,2}\s/m.test(savedMarkdown.slice(legacyHeadings[0].index + legacyHeadings[0][0].length))
+                  && /<!-- xhs-comment-diag:[\s\S]*?-->\s*$/.test(savedMarkdown);
+                if (managed) savedMarkdown = savedMarkdown.slice(0, managed.index) + section;
+                else if (hasLegacySection) savedMarkdown = savedMarkdown.slice(0, legacyHeadings[0].index) + section;
+                else if (!hadComments && !isInsideFence(savedMarkdown.length)) savedMarkdown += '\n\n' + section;
+                else updateCommentResult({ status: 'partial', ...oldStats });
+              } else if (hadComments) {
+                updateCommentResult({ status: 'partial', ...oldStats });
+              }
+            }
+          }
+        } catch (error) {
+          updateCommentResult({ status: isAbortError(error) ? 'aborted' : 'failed', reason: 'capture_error', errorCode: getXiaohongshuCommentErrorCode(error) });
+          if (isAbortError(error)) throw error;
+        }
+        Object.assign(xiaohongshuBrowserDiagnostic, { finalOutcome: 'existing-content', finishedAt: new Date().toISOString() });
+        return { ...record, metadata: { ...metadata, markdown: savedMarkdown, xiaohongshuCommentResult } };
+      }
       updateCommentResult({ status: 'skipped', reason: 'existing_content' });
       if (xiaohongshuBrowserDiagnostic) Object.assign(xiaohongshuBrowserDiagnostic, { finalOutcome: 'existing-content', finishedAt: new Date().toISOString() });
       return xiaohongshuCommentResult ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } } : record;
@@ -22648,18 +22804,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 diagnosticDetails: renderedDiagnosticDetails,
                 limit: XIAOHONGSHU_ROOT_COMMENT_LIMIT,
               });
-              const finalDetails = finalizedXiaohongshuComments.diagnosticDetails;
-              const finalStats = finalizedXiaohongshuComments.markdownStats;
-              const hasComments = finalStats.rootCount + finalStats.replyCount > 0;
-              updateCommentResult({
-                status: hasComments ? (finalDetails.partial || finalDetails.errorCode ? 'partial' : 'captured')
-                  : (finalDetails.errorCode ? 'failed' : 'empty_unconfirmed'),
-                reason: hasComments ? 'capture_returned' : 'empty_result',
-                ...finalStats, pageCount: finalDetails.pageCount, stopReason: finalDetails.stopReason,
-                rootRequestCount: finalDetails.rootRequestCount, replyRequestCount: finalDetails.replyRequestCount,
-                invalidPayloadCount: finalDetails.invalidPayloadCount,
-                errorCode: finalDetails.errorCode, stage: finalDetails.failureStage || 'comment_extraction',
-              });
+              updateCapturedCommentResult(finalizedXiaohongshuComments);
               extractedXiaohongshu = {
                 ...extractedXiaohongshu,
                 comments: finalizedXiaohongshuComments.comments,
