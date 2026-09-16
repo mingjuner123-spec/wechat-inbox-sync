@@ -190,6 +190,178 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/douyin-browser-safety.js
+var require_douyin_browser_safety = __commonJS({
+  "src/douyin-browser-safety.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var crypto2 = require("crypto");
+    var LIMITS = Object.freeze({ timeoutMs: 45e3, responses: 24, concurrent: 3, responseBytes: 1024 * 1024, totalBytes: 8 * 1024 * 1024 });
+    var STAGES = /* @__PURE__ */ new Set(["created", "loading", "page-load", "page-validation", "media-extraction", "response-extraction", "finished"]);
+    var OUTCOMES = /* @__PURE__ */ new Set(["running", "success", "failed", "cancelled"]);
+    var REASONS = /* @__PURE__ */ new Set(["clean-exit", "abnormal-exit", "killed", "crashed", "oom", "launch-failed", "integrity-failure", "memory-eviction", "unknown"]);
+    var number = /* @__PURE__ */ __name((value) => Number.isFinite(value) ? Math.max(0, Math.min(1e12, Math.round(value))) : 0, "number");
+    var version = /* @__PURE__ */ __name((value) => /^\d+(?:\.\d+){1,3}$/.test(value || "") ? value : "", "version");
+    function sanitize(value = {}) {
+      const result = { source: "douyin-browser", schema: 1 };
+      for (const key of ["attemptId", "recordRef"]) result[key] = /^[a-f0-9]{16,32}$/.test(value[key] || "") ? value[key] : "";
+      for (const key of ["startedAt", "updatedAt", "finishedAt"]) if (Number.isFinite(Date.parse(value[key]))) result[key] = new Date(value[key]).toISOString();
+      result.stage = STAGES.has(value.stage) ? value.stage : "created";
+      result.outcome = OUTCOMES.has(value.outcome) ? value.outcome : "running";
+      result.browserCode = /^DOUYIN_BROWSER_[A-Z_]{1,40}$/.test(value.browserCode || "") ? value.browserCode : "";
+      result.reason = REASONS.has(value.reason) ? value.reason : "";
+      result.exitCode = Number.isInteger(value.exitCode) ? value.exitCode : null;
+      result.electron = version(value.electron);
+      result.chromium = version(value.chromium);
+      result.runtimeVersion = version(value.runtimeVersion);
+      for (const key of ["durationMs", "blockedMedia", "responseReads", "responseBytes", "droppedResponses", "freeMemoryBytesBefore"]) result[key] = number(value[key]);
+      return result;
+    }
+    __name(sanitize, "sanitize");
+    function readAttempts(root) {
+      try {
+        const file = path2.join(root, "douyin-browser-diagnostic.json");
+        if (fs2.statSync(file).size > 64 * 1024) return [];
+        const rows = JSON.parse(fs2.readFileSync(file, "utf8"));
+        return Array.isArray(rows) ? rows.slice(-5).map(sanitize) : [];
+      } catch (_) {
+        return [];
+      }
+    }
+    __name(readAttempts, "readAttempts");
+    function createAttempt(root, input, versions = {}) {
+      const began = Date.now();
+      let value = sanitize({ ...versions, attemptId: crypto2.randomBytes(8).toString("hex"), recordRef: crypto2.createHash("sha256").update(String(input)).digest("hex").slice(0, 16), startedAt: new Date(began).toISOString(), stage: "created", outcome: "running" });
+      const update = /* @__PURE__ */ __name((event) => {
+        value = sanitize({ ...value, ...event, durationMs: Date.now() - began, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+        try {
+          fs2.mkdirSync(root, { recursive: true });
+          const rows = readAttempts(root).filter((row) => row.attemptId !== value.attemptId);
+          const file = path2.join(root, "douyin-browser-diagnostic.json");
+          const temp = file + ".tmp";
+          fs2.writeFileSync(temp, JSON.stringify([...rows, value].slice(-5)), "utf8");
+          fs2.renameSync(temp, file);
+        } catch (_) {
+        }
+        return value;
+      }, "update");
+      update({});
+      return { update, finish(error) {
+        return update({ outcome: error ? error.name === "AbortError" ? "cancelled" : "failed" : "success", ...error ? { browserCode: error.browserCode || value.browserCode } : { stage: "finished" }, finishedAt: (/* @__PURE__ */ new Date()).toISOString() });
+      } };
+    }
+    __name(createAttempt, "createAttempt");
+    function ownsRequest(details, contents) {
+      var _a;
+      return Boolean(contents && Number.isInteger(contents.id) && ((details == null ? void 0 : details.webContentsId) === contents.id || ((_a = details == null ? void 0 : details.webContents) == null ? void 0 : _a.id) === contents.id));
+    }
+    __name(ownsRequest, "ownsRequest");
+    function isMediaRequest(details) {
+      if ((details == null ? void 0 : details.resourceType) === "media") return true;
+      try {
+        const url = new URL(details == null ? void 0 : details.url);
+        return /\.(?:mp4|m4a|mp3|webm|m3u8|ts)(?:$|[?#])/i.test(url.pathname) || /(^|\.)douyinvod\.com$/.test(url.hostname) || /\/aweme\/v\d+\/play\//.test(url.pathname);
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isMediaRequest, "isMediaRequest");
+    function mediaResponse(details) {
+      return Object.entries((details == null ? void 0 : details.responseHeaders) || {}).some(([key, values]) => key.toLowerCase() === "content-type" && (Array.isArray(values) ? values : [values]).some((value) => /^(?:audio|video)\/|application\/(?:vnd\.apple\.mpegurl|x-mpegurl)/i.test(String(value))));
+    }
+    __name(mediaResponse, "mediaResponse");
+    function attachGuard(win, { signal, onDiagnostic = /* @__PURE__ */ __name(() => {
+    }, "onDiagnostic"), timeoutMs = LIMITS.timeoutMs } = {}) {
+      var _a;
+      const contents = win.webContents;
+      let failure, rejectFailure, closed = false;
+      const failed = new Promise((_, reject) => {
+        rejectFailure = reject;
+      });
+      failed.catch(() => {
+      });
+      const emit = /* @__PURE__ */ __name((event) => {
+        try {
+          onDiagnostic(event);
+        } catch (_) {
+        }
+      }, "emit");
+      const fail = /* @__PURE__ */ __name((browserCode, message, detail = {}) => {
+        if (failure || closed) return;
+        failure = Object.assign(new Error(message), { code: "EXTRACTION_FAILED", browserCode });
+        emit({ ...detail, browserCode });
+        rejectFailure(failure);
+      }, "fail");
+      const onGone = /* @__PURE__ */ __name((_event, details = {}) => fail("DOUYIN_BROWSER_RENDERER_GONE", "抖音网页解析进程异常退出，尚未完成视频地址提取", { reason: REASONS.has(details.reason) ? details.reason : "unknown", exitCode: Number.isInteger(details.exitCode) ? details.exitCode : null }), "onGone");
+      const onDestroyed = /* @__PURE__ */ __name(() => fail("DOUYIN_BROWSER_CLOSED", "抖音解析窗口提前关闭"), "onDestroyed");
+      const onAbort = /* @__PURE__ */ __name(() => {
+        if (failure || closed) return;
+        failure = Object.assign(new Error("抖音解析已取消"), { name: "AbortError", code: "ABORT_ERR", browserCode: "DOUYIN_BROWSER_CANCELLED" });
+        emit({ browserCode: failure.browserCode });
+        rejectFailure(failure);
+      }, "onAbort");
+      contents.on("render-process-gone", onGone);
+      contents.on("destroyed", onDestroyed);
+      if (typeof contents.setAudioMuted === "function") contents.setAudioMuted(true);
+      signal == null ? void 0 : signal.addEventListener("abort", onAbort, { once: true });
+      if (signal == null ? void 0 : signal.aborted) onAbort();
+      const timer = setTimeout(() => fail("DOUYIN_BROWSER_TIMEOUT", "抖音网页解析超时，已停止本次隐藏网页任务"), timeoutMs);
+      (_a = timer.unref) == null ? void 0 : _a.call(timer);
+      return {
+        emit,
+        async run(task, stage) {
+          const started = Promise.resolve(task);
+          started.catch(() => {
+          });
+          if (failure) throw failure;
+          emit({ stage });
+          return Promise.race([started, failed]);
+        },
+        close() {
+          closed = true;
+          clearTimeout(timer);
+          signal == null ? void 0 : signal.removeEventListener("abort", onAbort);
+          contents.removeListener("render-process-gone", onGone);
+          contents.removeListener("destroyed", onDestroyed);
+        }
+      };
+    }
+    __name(attachGuard, "attachGuard");
+    function createResponseBudget() {
+      let reads = 0, active = 0, bytes = 0, dropped = 0;
+      return {
+        reserve(encodedBytes = 0) {
+          if (reads >= LIMITS.responses || active >= LIMITS.concurrent || bytes >= LIMITS.totalBytes || encodedBytes > LIMITS.responseBytes) {
+            dropped++;
+            return false;
+          }
+          reads++;
+          active++;
+          return true;
+        },
+        accept(body) {
+          const size = Buffer.byteLength(String((body == null ? void 0 : body.body) || ""), "utf8");
+          if (size > LIMITS.responseBytes * ((body == null ? void 0 : body.base64Encoded) ? 1.4 : 1) || bytes + size > LIMITS.totalBytes) {
+            dropped++;
+            return false;
+          }
+          bytes += size;
+          return true;
+        },
+        release() {
+          active = Math.max(0, active - 1);
+        },
+        snapshot() {
+          return { responseReads: reads, responseBytes: bytes, droppedResponses: dropped };
+        }
+      };
+    }
+    __name(createResponseBudget, "createResponseBudget");
+    module2.exports = { LIMITS, sanitize, readAttempts, createAttempt, ownsRequest, isMediaRequest, mediaResponse, attachGuard, createResponseBudget };
+  }
+});
+
 // src/wechat-channels-diagnostic-utils.js
 var require_wechat_channels_diagnostic_utils = __commonJS({
   "src/wechat-channels-diagnostic-utils.js"(exports2, module2) {
@@ -11215,6 +11387,7 @@ var require_transcription_note_title_utils = __commonJS({
 });
 
 // src/main.js
+var douyinBrowserSafety = require_douyin_browser_safety();
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var crypto = require("crypto");
@@ -22301,9 +22474,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: !isXiaohongshuUrl(url)
+      backgroundThrottling: !isXiaohongshuUrl(url),
+      ...isDouyinUrl(url) ? { autoplayPolicy: "user-gesture-required", webgl: false } : {}
     }
   });
+  const douyinGuard = isDouyinUrl(url) ? douyinBrowserSafety.attachGuard(win, { signal: options.signal, onDiagnostic: options.onDouyinBrowserDiagnostic }) : null;
+  const responseBudget = douyinBrowserSafety.createResponseBudget();
+  let blockedMedia = 0;
   const isXiaohongshuExtractionWindow = isXiaohongshuUrl(url);
   if (isXiaohongshuExtractionWindow) {
     trackXiaohongshuBrowserWindow(win);
@@ -22362,6 +22539,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   let debuggerAttached = false;
   let debuggerMessageHandler = null;
   const captureWebRequestDetails = /* @__PURE__ */ __name((details) => {
+    if (captureDouyinState && !douyinBrowserSafety.ownsRequest(details, win.webContents)) return;
     if (isXiaohongshuExtractionWindow && Number(details && details.statusCode) >= 400) {
       appendXiaohongshuBrowserDiagnostic(options, { type: "network", stage: "media_extraction", outcome: "http_failed", url: details.url, status: Number(details.statusCode) });
     }
@@ -22381,7 +22559,16 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     }
   }, "installWebRequestHandler");
   installWebRequestHandler("onBeforeRequest", (details, callback) => {
+    if (captureDouyinState && !douyinBrowserSafety.ownsRequest(details, win.webContents)) {
+      callback({});
+      return;
+    }
     captureWebRequestDetails(details);
+    if (captureDouyinState && douyinBrowserSafety.isMediaRequest(details)) {
+      blockedMedia++;
+      callback({ cancel: true });
+      return;
+    }
     if (typeof callback === "function") {
       const blockReason = isXiaohongshuUrl(url) && shouldBlockXiaohongshuBrowserNavigationRequest(details) ? "UNTRUSTED_NAVIGATION" : blockXiaohongshuCommentRequests && isXiaohongshuCommentApiUrl(details && details.url) ? "COMMENTS_DISABLED_FOR_MEDIA" : shouldBlockExternalAppUrl(details && details.url) ? "EXTERNAL_PROTOCOL" : "";
       if (isXiaohongshuExtractionWindow && blockReason) {
@@ -22396,6 +22583,17 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       callback(blockReason ? { cancel: true } : {});
     }
   });
+  if (captureDouyinState) {
+    installWebRequestHandler("onHeadersReceived", (details, callback) => {
+      if (douyinBrowserSafety.ownsRequest(details, win.webContents) && douyinBrowserSafety.mediaResponse(details)) {
+        captureWebRequestDetails(details);
+        blockedMedia++;
+        callback({ cancel: true });
+        return;
+      }
+      callback({});
+    });
+  }
   installWebRequestHandler("onBeforeRedirect", captureWebRequestDetails);
   installWebRequestHandler("onCompleted", captureWebRequestDetails);
   if (isXiaohongshuExtractionWindow) {
@@ -22414,7 +22612,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         debuggerApi.attach("1.3");
         debuggerAttached = true;
       }
-      enableDebuggerNetworkCapture(debuggerApi);
+      const enabled = debuggerApi.sendCommand("Network.enable", { maxTotalBufferSize: douyinBrowserSafety.LIMITS.totalBytes, maxResourceBufferSize: douyinBrowserSafety.LIMITS.responseBytes });
+      await douyinGuard.run(enabled, "loading");
       debuggerMessageHandler = /* @__PURE__ */ __name((_event, method, params = {}) => {
         try {
           if (method === "Network.responseReceived") {
@@ -22423,19 +22622,23 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
             const responseType = String(params.type || "").toLowerCase();
             const mimeType = String(response.mimeType || "").toLowerCase();
             const isJsonCandidate = responseType === "xhr" || responseType === "fetch" || mimeType.includes("json") || /\/aweme\/|\/feed(?:[/?]|$)|\/detail(?:[/?]|$)/i.test(responseUrl);
-            if (params.requestId && isDouyinUrl(responseUrl) && isJsonCandidate && debuggerResponseRequests.size < 120) {
+            if (params.requestId && isDouyinUrl(responseUrl) && isJsonCandidate && debuggerResponseRequests.size < douyinBrowserSafety.LIMITS.responses) {
               debuggerResponseRequests.set(params.requestId, responseUrl);
             }
           }
           if (method === "Network.loadingFinished" && debuggerResponseRequests.has(params.requestId)) {
             const requestId = params.requestId;
             debuggerResponseRequests.delete(requestId);
+            if (!responseBudget.reserve(Number(params.encodedDataLength) || 0)) return;
             debuggerBodyTasks.push((async () => {
               try {
                 const body = await debuggerApi.sendCommand("Network.getResponseBody", { requestId });
+                if (!responseBudget.accept(body)) return;
                 const text = body && body.base64Encoded ? Buffer.from(String(body.body || ""), "base64").toString("utf8") : String(body && body.body || "");
                 extractDouyinMediaUrlsForAweme(text, targetDouyinAwemeId).forEach((mediaUrl) => pushUniqueMediaUrl(debuggerMediaUrls, mediaUrl));
               } catch (error) {
+              } finally {
+                responseBudget.release();
               }
             })());
           }
@@ -22455,13 +22658,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     if (!beginBestEffortBrowserLoad(win, url)) {
       throw new Error("隐藏浏览器未能开始加载抖音页面");
     }
-    await loaded;
+    await (douyinGuard ? douyinGuard.run(loaded, "page-load") : loaded);
     throwIfAborted(options.signal);
     if (captureDouyinState) {
-      const challengeDetected = await waitAndRetryDouyinChallengePage(win.webContents, {
+      const challengeDetected = await douyinGuard.run(waitAndRetryDouyinChallengePage(win.webContents, {
         signal: options.signal,
         retryAllowed: options.retryDouyinChallenge !== false
-      });
+      }), "page-validation");
       if (challengeDetected) {
         const error = new Error("抖音当前会话需要安全验证");
         error.code = "DOUYIN_CHALLENGE";
@@ -22486,7 +22689,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         const collect = () => {
           document.querySelectorAll('video, audio, source').forEach((node) => {
             try {
-              if (node.tagName && node.tagName.toLowerCase() === 'video' && typeof node.play === 'function') {
+              if (${captureDouyinState ? "false" : "true"} && node.tagName && node.tagName.toLowerCase() === 'video' && typeof node.play === 'function') {
                 node.muted = true;
                 node.play().catch(() => {});
               }
@@ -22554,7 +22757,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
           };
         }).filter((candidate) => candidate.urls.length);
         const canonicalNode = document.querySelector('link[rel=canonical]');
-        const ogUrlNode = document.querySelector('meta[property=og:url]');
+        const ogUrlNode = document.querySelector('meta[property="og:url"]');
         const pageIdentityIds = [];
         const seenPageIdentityIds = new Set();
         const addPageIdentityIds = (values) => {
@@ -22605,7 +22808,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       mediaExtractionTask,
       XIAOHONGSHU_CONTENT_DEADLINE_MS,
       "xiaohongshu-media-extraction"
-    ) : await mediaExtractionTask;
+    ) : douyinGuard ? await douyinGuard.run(mediaExtractionTask, "media-extraction") : await mediaExtractionTask;
     if (isXiaohongshuExtractionWindow) {
       recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
       appendXiaohongshuBrowserDiagnostic(options, {
@@ -22616,7 +22819,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       });
     }
     throwIfAborted(options.signal);
-    await waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
+    const bodiesReady = waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
+    await (douyinGuard ? douyinGuard.run(bodiesReady, "response-extraction") : bodiesReady);
     throwIfAborted(options.signal);
     const paceStateResolution = captureDouyinState ? resolveDouyinMediaFromShareHtml(payload && payload.douyinPaceState, targetDouyinAwemeId) : { exactUrls: [], primaryUrls: [] };
     if (paceStateResolution.exactUrls.length) return paceStateResolution.exactUrls;
@@ -22648,6 +22852,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     }
     throw error;
   } finally {
+    if (douyinGuard) {
+      douyinGuard.emit({ blockedMedia, ...responseBudget.snapshot() });
+      douyinGuard.close();
+    }
     cleanupAbort();
     cleanupHiddenChildWindowGuards();
     cleanupXiaohongshuHiddenWindowGuards();
@@ -27219,6 +27427,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`
     ];
     lines.push("", "最近 ASR 下载诊断（请核对 time 是否属于本次安装）：", JSON.stringify(readLocalAsrDownloadDiagnostic(asrRoot), null, 2));
+    const douyinAttempts = douyinBrowserSafety.readAttempts(asrRoot);
+    lines.push("", "最近抖音隐藏网页诊断（最多 5 次；running 表示未记录结束，可能仍在运行或被中断）：", douyinAttempts.length ? JSON.stringify(douyinAttempts, null, 2) : "暂无抖音隐藏网页尝试记录");
     const taskResults = this.getRecentXiaohongshuBrowserResults().map((item) => xhsDiagnostic.sanitize(item, this.settings));
     lines.push("", "最近小红书任务诊断（最多 5 次；每项 attemptId 独立，不代表其他条目）：");
     lines.push(taskResults.length ? JSON.stringify(taskResults, null, 2) : "暂无新版任务诊断；历史日志无法补回原始异常。");
@@ -28417,10 +28627,28 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     return sortMediaUrlsForTranscription(candidates);
   }
   async renderSocialMediaUrls(url, options = {}) {
+    throwIfAborted(options.signal);
     if (Object.prototype.hasOwnProperty.call(this, "renderSocialMediaUrl") && !Object.prototype.hasOwnProperty.call(this, "renderSocialMediaUrls")) {
       return sortMediaUrlsForTranscription([await this.renderSocialMediaUrl(url, options)]);
     }
-    return renderSocialMediaUrlsWithElectron(url, options);
+    if (!isDouyinUrl(url)) return renderSocialMediaUrlsWithElectron(url, options);
+    if (this.douyinBrowserRetryAfter > Date.now()) {
+      throw Object.assign(new Error("抖音网页解析刚发生异常，已暂停隐藏网页重试 60 秒；请复制诊断"), { code: "EXTRACTION_FAILED", browserCode: "DOUYIN_BROWSER_COOLDOWN" });
+    }
+    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, { runtimeVersion: PLUGIN_RUNTIME_VERSION, electron: process.versions.electron, chromium: process.versions.chrome, freeMemoryBytesBefore: os.freemem() });
+    try {
+      const result = await renderSocialMediaUrlsWithElectron(url, { ...options, onDouyinBrowserDiagnostic: /* @__PURE__ */ __name((event) => {
+        var _a;
+        attempt.update(event);
+        (_a = options.onDouyinBrowserDiagnostic) == null ? void 0 : _a.call(options, event);
+      }, "onDouyinBrowserDiagnostic") });
+      attempt.finish();
+      return result;
+    } catch (error) {
+      attempt.finish(error);
+      if (/^DOUYIN_BROWSER_(?:RENDERER_GONE|TIMEOUT|CLOSED)$/.test(error.browserCode || "")) this.douyinBrowserRetryAfter = Date.now() + 6e4;
+      throw error;
+    }
   }
   async runConfiguredTranscription(audioUrl, options = {}) {
     const provider = this.settings.aiProvider;
