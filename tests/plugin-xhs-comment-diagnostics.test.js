@@ -106,6 +106,8 @@ async function testIdentityRendering() {
   }}) + '</script></html>';
   const windows = [];
   let pages = [], pagerCalls = 0, cookie = true, fastPageTimeout = false;
+  let fastFinalTimeout = false, simulatedTime = 0;
+  const savedNow = Date.now;
   const https = require('https'), savedRequest = https.request;
   let replayResponse = {}, sentReplayHeaders = [];
   https.request = (target, options, callback) => {
@@ -159,6 +161,13 @@ async function testIdentityRendering() {
         }
         if (script.includes('html: document.documentElement ?') && !script.includes('collectionStopReason')) {
           if (this.page.onSnapshot) return this.page.onSnapshot();
+          this.snapshotCount = (this.snapshotCount || 0) + 1;
+          if (this.page.finalAbort && this.snapshotCount > 1) { this.page.finalAbort.abort(); throw Error('frame disposed'); }
+          if (this.page.finalSnapshotTimeout && this.snapshotCount > 1) {
+            fastFinalTimeout = true;
+            return new Promise(() => {});
+          }
+          if (this.page.exhaustBudget && this.snapshotCount > 1) await new Promise(resolve => savedTimer(resolve, 30));
           if (this.page.pagerTimeout) fastPageTimeout = true;
           return vm.runInNewContext(script, {
             location: {href: this.page.url},
@@ -177,14 +186,19 @@ async function testIdentityRendering() {
           }
           return {identityNoteId: this.page.wrongIdentity ? '111111111111111111111111' : noteId, rootPayloads: [{success: true, data: {
             comments: [{id: 'root', content: '已恢复目标评论', user_info: {nickname: '测试'}}], has_more: false,
-          }}], replyPayloadGroups: [], diagnostic: {source: 'page-api', stopReason: 'exhausted', pageCount: 1}};
+          }}], replyPayloadGroups: [], diagnostic: {source: 'page-api', stopReason: 'exhausted', pageCount: 1, rootRequestCount: 1}};
         }
         assert.ok(script.includes('collectionStopReason'), 'unexpected browser script');
         if (this.page.pagerTimeout) {
           fastPageTimeout = false;
           await new Promise(resolve => savedTimer(resolve, 30));
         }
-        return {html: noteHtml, url, comments: this.page.domComments || [], rootRequestCount: 0, collectionStopReason: 'root_idle'};
+        if (this.page.exhaustBudget) simulatedTime += 87500;
+        const result = {html: this.page.html, url: this.page.url, comments: this.page.domComments || [],
+          accessWall: Boolean(this.page.finalWall), rootRequestCount: 0, collectionStopReason: 'root_idle'};
+        if (this.page.finalUrl) this.page.url = this.page.finalUrl;
+        if (this.page.finalWall) this.page.walls = [{innerText: '手机号登录', getClientRects: () => [1]}];
+        return result;
       };
       windows.push(this);
     }
@@ -211,8 +225,10 @@ async function testIdentityRendering() {
     return savedLoad.call(this, request, parent, isMain);
   };
   global.window = {setTimeout: (fn, ms) => savedTimer(fn, ms === 2500 ? 0 : ms), clearTimeout};
-  global.setTimeout = (fn, ms, ...args) => savedTimer(fn, fastPageTimeout && ms >= 10000 ? 2 : ms <= 1200 ? 0 : ms, ...args);
+  Date.now = () => savedNow() + simulatedTime;
+  global.setTimeout = (fn, ms, ...args) => savedTimer(fn, fastFinalTimeout && ms <= 2500 ? 2 : fastPageTimeout && ms >= 10000 ? 2 : ms <= 1200 ? 0 : ms, ...args);
   async function render(input, fixtures, extra = {}) {
+    simulatedTime = 0;
     pages = fixtures;
     replayResponse = fixtures[fixtures.length - 1] && fixtures[fixtures.length - 1].replayResponse || {};
     const before = windows.length, beforeCalls = pagerCalls;
@@ -233,6 +249,55 @@ async function testIdentityRendering() {
     const known = await render(url, [{url, html: noteHtml}]);
     assert.strictEqual(known.windowCount, 1, 'known identities must not rediscover');
     assert.strictEqual(known.apiCalls, 1);
+    const noStateHtml = '<html><body><article>网页已显示正文，但没有初始状态脚本</article></body></html>';
+    const noState = await render(url, [{url, html: noStateHtml,
+      domComments: [{id: 'untrusted-dom', content: '无身份DOM不能被采信', domRole: 'root'}]}]);
+    assert.strictEqual(noState.apiCalls, 1, 'exact route without serialized state must reach scoped API');
+    assert.strictEqual(noState.result.comments.length, 1);
+    assert.strictEqual(noState.result.comments[0].id, 'root');
+    assert.ok(noState.diagnostic.stages.some(stage => stage.outcome === 'scoped_api_only'));
+    const recommended = noStateHtml + '<script>' + JSON.stringify({recommend: [{noteId: '111111111111111111111111', desc: '推荐其他笔记'}]}) + '</script>';
+    const recommendations = await render(url, [{url, html: recommended}]);
+    assert.strictEqual(recommendations.apiCalls, 1, 'recommendation identities must not reject the current route');
+    for (const [page, reason, code, detail] of [
+      [{url, html: noStateHtml, walls: [{innerText: '手机号登录', getClientRects: () => [1]}]}, 'page_access_wall', 'PAGE_ACCESS_WALL', 'ACCESS_WALL'],
+      [{url, html: noteHtml, walls: [{innerText: '安全验证', getClientRects: () => [1]}]}, 'page_access_wall', 'PAGE_ACCESS_WALL', 'ACCESS_WALL'],
+      [{url: 'https://www.xiaohongshu.com/login', html: noteHtml}, 'page_access_wall', 'PAGE_ACCESS_WALL', 'ACCESS_WALL'],
+      [{url: 'https://www.xiaohongshu.com/', html: noteHtml}, 'target_identity_unconfirmed', 'TARGET_IDENTITY_UNCONFIRMED', 'PAGE_NOTE_ID_ABSENT'],
+      [{url: 'https://untrusted.example/', html: noteHtml}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'UNTRUSTED_PAGE'],
+      [{url, html: '<html>当前笔记暂时无法浏览</html>'}, 'page_unavailable', 'PAGE_UNAVAILABLE', 'PAGE_UNAVAILABLE'],
+      [{url, html: noteHtml.replaceAll(noteId, '111111111111111111111111')}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'STRUCTURED_NOTE_ID_DIFFERS'],
+      [{url, html: noStateHtml + '<link rel="canonical" href="' + url.replace(noteId, '111111111111111111111111') + '">'}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'CANONICAL_NOTE_ID_DIFFERS'],
+      [{url: url.replace(noteId, '111111111111111111111111'), html: noteHtml}, 'target_identity_mismatch', 'TARGET_IDENTITY_MISMATCH', 'PAGE_NOTE_ID_DIFFERS'],
+    ]) {
+      const blocked = await render(url, [page]);
+      assert.strictEqual(blocked.apiCalls, 0, detail);
+      assert.strictEqual(blocked.result.commentDiagnosticDetails.stopReason, reason, detail);
+      assert.strictEqual(blocked.result.commentDiagnosticDetails.errorCode, code, detail);
+      assert.ok(blocked.diagnostic.stages.some(stage => stage.failureKind === detail), detail);
+      const copied = sanitizeXiaohongshuCommentResult({...blocked.result.commentDiagnosticDetails, status: 'failed'});
+      assert.strictEqual(copied.errorCode, code);
+      assert.strictEqual(copied.stopReason, reason);
+      assert.ok(!JSON.stringify(blocked.diagnostic).includes('xiaohongshu.com'));
+    }
+    for (const late of [{finalUrl: url.replace(noteId, '111111111111111111111111')}, {finalWall: true}]) {
+      const navigated = await render(url, [{url, html: noteHtml, ...late}]);
+      assert.strictEqual(navigated.apiCalls, 1);
+      assert.strictEqual(navigated.result.comments.length, 0, 'navigation/access-wall after collection must discard late results');
+      assert.ok(navigated.result.commentDiagnosticDetails.errorCode);
+      assert.strictEqual(navigated.result.commentDiagnosticDetails.rootRequestCount, 1);
+    }
+    const budgetPartial = await render(url, [{url, html: noteHtml, exhaustBudget: true}]);
+    assert.strictEqual(budgetPartial.result.comments[0].id, 'root', 'reserved final-check time must preserve captured comments');
+    assert.strictEqual(budgetPartial.result.commentDiagnosticDetails.partial, true);
+    assert.strictEqual(budgetPartial.result.commentDiagnosticDetails.stopReason, 'time_budget_exceeded');
+    await assert.rejects(() => render(url, [{url, html: noteHtml, finalSnapshotTimeout: true}]), /final-identity timed out/);
+    fastFinalTimeout = false;
+    const finalAbort = new AbortController();
+    await assert.rejects(() => render(url, [{url, html: noteHtml, finalAbort}], {signal: finalAbort.signal}), error => error.name === 'AbortError');
+    const hiddenWall = await render(url, [{url, html: noStateHtml,
+      walls: [{innerText: '手机号登录', getClientRects: () => []}]}]);
+    assert.strictEqual(hiddenWall.apiCalls, 1);
     for (const [flag, stopReason, errorCode] of [
       ['pagerError', 'page_script_failed', 'REQUEST_FAILED'],
       ['pagerTimeout', 'page_api_timeout', 'TIMEOUT'],
@@ -326,6 +391,7 @@ async function testIdentityRendering() {
     Module._load = savedLoad;
     global.window = savedWindow;
     global.setTimeout = savedTimer;
+    Date.now = savedNow;
   }
 }
 
