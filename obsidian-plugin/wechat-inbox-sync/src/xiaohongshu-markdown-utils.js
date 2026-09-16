@@ -149,6 +149,8 @@ function sanitizeXiaohongshuCommentResult(input = {}) {
     'total_limit_reached', 'limit_reached', 'reply_limit_reached', 'note_id_missing',
     'network_root_idle', 'network_source_exhausted', 'network_root_cursor_missing',
     'network_root_request_failed', 'network_root_unavailable', 'max_rounds', 'root_idle',
+    'target_identity_missing', 'target_identity_mismatch', 'skipped_no_login_cookie',
+    'page_script_failed', 'page_script_skipped',
   ].includes(value) ? value : 'unknown';
   return {
     schema: 1,
@@ -169,7 +171,7 @@ function sanitizeXiaohongshuCommentResult(input = {}) {
     replyRequestCount: count(input.replyRequestCount),
     invalidPayloadCount: count(input.invalidPayloadCount),
     stopReason: token(input.stopReason),
-    errorCode: /^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|TIMEOUT|REQUEST_FAILED|INVALID_RESPONSE|SECURITY_RESTRICTION|BROWSER_UNAVAILABLE)$/.test(input.errorCode || '') ? input.errorCode : '',
+    errorCode: /^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|TIMEOUT|REQUEST_FAILED|INVALID_RESPONSE|SECURITY_RESTRICTION|BROWSER_UNAVAILABLE|TARGET_IDENTITY_MISSING|TARGET_IDENTITY_MISMATCH)$/.test(input.errorCode || '') ? input.errorCode : '',
   };
 }
 
@@ -190,11 +192,14 @@ function formatXiaohongshuCommentResult(input, diagnostic = false) {
     running: '小红书评论提取尚未结束',
     skipped: result.reason === 'disabled' ? '小红书评论提取已关闭'
       : result.reason === 'pro_not_confirmed' ? '小红书评论未提取：未确认 Pro 权限'
-        : result.reason === 'existing_content' ? '本次复用了已保存正文，未重新提取小红书评论'
+      : result.reason === 'existing_content' ? '本次复用了已保存正文，未重新提取小红书评论'
+        : result.reason === 'skipped_no_login_cookie' ? '小红书评论未提取：提取前登录凭据已不可用，请重新检测登录状态'
           : '小红书评论未提取：登录预检未通过，尚不能确定是登录失效还是检测失败',
     captured: `小红书评论已提取 ${count} 条（主评论 ${result.rootCount} 条，回复 ${result.replyCount} 条）`,
     partial: `小红书评论可能不完整：已提取 ${count} 条（主评论 ${result.rootCount} 条，回复 ${result.replyCount} 条）`,
-    failed: `小红书评论提取失败${result.loginCheck === 'passed' ? '（登录预检已通过）' : ''}`,
+    failed: result.stopReason === 'target_identity_missing' ? '小红书评论未提取：未能识别目标笔记编号'
+      : result.stopReason === 'target_identity_mismatch' ? '小红书评论未提取：打开的页面与目标笔记不一致，可能是登录、验证或跳转页'
+        : `小红书评论提取失败${result.loginCheck === 'passed' ? '（登录预检已通过）' : ''}`,
     empty_unconfirmed: '小红书评论未获取到，无法确认原笔记是否没有评论',
     aborted: '小红书评论提取已取消',
   };
