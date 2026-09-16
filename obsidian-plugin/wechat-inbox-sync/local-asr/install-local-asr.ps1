@@ -8,7 +8,13 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.31"
+$InstallerScriptVersion = "1.2.32"
+$DownloadResumeVersion = "asr-resume-v1"
+$script:DownloadEvents = @()
+$script:AuthorizedDownloadAssets = @()
+if ($env:WECHAT_INBOX_ASR_DOWNLOAD_ASSETS) {
+  $script:AuthorizedDownloadAssets = ConvertFrom-Json -InputObject $env:WECHAT_INBOX_ASR_DOWNLOAD_ASSETS
+}
 $NativeProcessRunnerVersion = "diagnostics-process-v2"
 $DownloadLowSpeedLimitBytesPerSecond = 65536
 $DownloadLowSpeedTimeoutSeconds = 30
@@ -112,9 +118,7 @@ function Prepare-ZipForExtraction {
     if (-not $FallbackUrl) {
       throw
     }
-    Write-Host "$Label cache package is locked or unreadable; downloading a fresh temporary package."
-    Download-File -Url $FallbackUrl -OutFile $extractZipPath -Resume
-    return $extractZipPath
+    throw "$Label cache package is locked or unreadable; cached bytes were preserved. Close other installers before retrying."
   }
 }
 
@@ -135,72 +139,109 @@ function Download-ZipToCacheOrTemp {
     [Parameter(Mandatory = $true)][string]$CachePath,
     [Parameter(Mandatory = $true)][string]$TempPath
   )
+  Download-File -Url $Url -OutFile $CachePath -Resume
+  return $CachePath
+}
+
+function Get-DownloadSpec {
+  param([string]$Url)
+  $uri = [Uri]$Url
+  $resource = $uri.GetLeftPart([UriPartial]::Path)
+  $spec = @($script:AuthorizedDownloadAssets | Where-Object { $_.url -eq $resource }) | Select-Object -First 1
+  if ($spec) {
+    if ($spec.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or [Int64]$spec.byteLength -le 0) { throw 'Invalid authorized download metadata' }
+    return $spec
+  }
+  $authorizedUrls = @($WhisperWindowsAuthorizedUrls) + @($WhisperWindowsCompatibilityUrls) + @($FfmpegAuthorizedUrls) + @($ModelAuthorizedUrls)
+  if ($authorizedUrls -contains $Url) { throw 'Authorized ASR asset metadata missing' }
+  return $null
+}
+
+function Write-DownloadStatus {
+  param([string]$Url, [string]$Stage, [Int64]$Bytes = 0, [int]$Attempt = 0, [int]$CurlCode = 0, [double]$Seconds = 0)
   try {
-    Download-File -Url $Url -OutFile $CachePath -Resume
-    return $CachePath
-  } catch {
-    Write-Host "Cache download failed or cache is busy; downloading to a temporary package."
-    Download-File -Url $Url -OutFile $TempPath -Resume
-    return $TempPath
+    $uri = [Uri]$Url
+    $spec = Get-DownloadSpec -Url $Url
+    $name = [IO.Path]::GetFileName($uri.AbsolutePath)
+    if ($name -notmatch '^[a-zA-Z0-9._+-]{1,160}$') { $name = 'asset' }
+    $entry = [ordered]@{ time = [DateTime]::UtcNow.ToString('o'); stage = $Stage; file = $name; host = $uri.DnsSafeHost; bytes = $Bytes; expectedBytes = $(if ($spec) { [Int64]$spec.byteLength } else { 0 }); attempt = $Attempt; curlCode = $CurlCode; seconds = [Math]::Round($Seconds, 3) }
+    $script:DownloadEvents = @($script:DownloadEvents + [pscustomobject]$entry | Select-Object -Last 24)
+    $statusPath = Join-Path $InstallRoot 'download-status.json'
+    $json = ConvertTo-Json -InputObject @($script:DownloadEvents) -Depth 3 -Compress
+    [IO.File]::WriteAllText($statusPath, $json, (New-Object Text.UTF8Encoding($false)))
+    Write-Host ("Download {0}: {1}, {2} bytes, attempt {3}" -f $Stage, $name, $Bytes, $Attempt)
+  } catch { Write-Host 'Download diagnostic unavailable' }
+}
+
+function Preserve-UnverifiedDownload {
+  param([string]$Path)
+  if (Test-Path -LiteralPath $Path) {
+    Move-Item -LiteralPath $Path -Destination ($Path + '.unverified-' + [Guid]::NewGuid().ToString('N'))
   }
 }
 
+function Test-DownloadComplete {
+  param([string]$Path, $Spec)
+  if (-not $Spec -or -not (Test-Path -LiteralPath $Path)) { return $false }
+  if ((Get-Item -LiteralPath $Path).Length -ne [Int64]$Spec.byteLength) { return $false }
+  $stream = [IO.File]::OpenRead($Path)
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  try { return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '') -eq $Spec.sha256 }
+  finally { $hasher.Dispose(); $stream.Dispose() }
+}
+
 function Download-File {
-  param(
-    [Parameter(Mandatory = $true)][string]$Url,
-    [Parameter(Mandatory = $true)][string]$OutFile,
-    [switch]$Resume
-  )
+  param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$OutFile, [switch]$Resume)
   $outDir = Split-Path -Parent $OutFile
-  if ($outDir) {
-    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+  if ($outDir) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
+  $spec = Get-DownloadSpec -Url $Url
+  $identityText = if ($spec) { 'sha256:' + $spec.sha256.ToLowerInvariant() } else { $Url }
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  try { $identity = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($identityText))).Replace('-', '').ToLowerInvariant() } finally { $hasher.Dispose() }
+  $metaPath = $OutFile + '.download.json'
+  $previousIdentity = ''
+  try { $previousIdentity = (Get-Content -LiteralPath $metaPath -Raw | ConvertFrom-Json).identity } catch {}
+  if (Test-DownloadComplete -Path $OutFile -Spec $spec) {
+    Write-DownloadStatus -Url $Url -Stage 'cached' -Bytes ([Int64]$spec.byteLength)
+    return
   }
-  Write-Host "Downloading $Url"
+  if (Test-Path -LiteralPath $OutFile) {
+    $length = (Get-Item -LiteralPath $OutFile).Length
+    if ($previousIdentity -ne $identity -or ($spec -and $length -ge [Int64]$spec.byteLength)) {
+      Preserve-UnverifiedDownload -Path $OutFile
+    }
+  }
+  [IO.File]::WriteAllText($metaPath, (ConvertTo-Json -Compress -InputObject @{ identity = $identity }), (New-Object Text.UTF8Encoding($false)))
   $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-  if ($Resume -and $curl) {
-    & $curl.Source `
-      -L `
-      --fail `
-      --silent `
-      --show-error `
-      --retry 2 `
-      --retry-delay 2 `
-      --connect-timeout 30 `
-      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
-      --speed-time $DownloadLowSpeedTimeoutSeconds `
-      --max-time $DownloadTimeoutSeconds `
-      -C - `
-      -o $OutFile `
-      $Url
-    if ($LASTEXITCODE -eq 0) {
+  if (-not $curl) { throw 'curl.exe is required for resumable Windows ASR downloads; cached progress was preserved.' }
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    $offset = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+    Write-DownloadStatus -Url $Url -Stage 'downloading' -Bytes $offset -Attempt $attempt
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $sizeArgs = @()
+    if ($spec) { $sizeArgs = @('--max-filesize', [string]$spec.byteLength) }
+    & $curl.Source @sizeArgs -L --fail --silent --show-error --retry 0 --connect-timeout 30 --speed-limit $DownloadLowSpeedLimitBytesPerSecond --speed-time $DownloadLowSpeedTimeoutSeconds --max-time $DownloadTimeoutSeconds -C - -o $OutFile $Url
+    $exitCode = $LASTEXITCODE
+    $bytes = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+    if ($exitCode -eq 0) {
+      if ($spec -and -not (Test-DownloadComplete -Path $OutFile -Spec $spec)) {
+        Write-DownloadStatus -Url $Url -Stage 'integrity-failed' -Bytes $bytes -Attempt $attempt -Seconds $timer.Elapsed.TotalSeconds
+        Preserve-UnverifiedDownload -Path $OutFile
+        throw 'Authorized ASR download size or SHA256 mismatch; package was not installed.'
+      }
+      Write-DownloadStatus -Url $Url -Stage 'complete' -Bytes $bytes -Attempt $attempt -Seconds $timer.Elapsed.TotalSeconds
       return
     }
-    Write-Host "curl resumable download failed with exit code $LASTEXITCODE; retrying with PowerShell."
-  }
-  try {
-    Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $Headers -TimeoutSec $DownloadTimeoutSeconds
-  } catch {
-    Write-Host "PowerShell download failed, retrying with curl."
-    if (-not $curl) {
-      throw
+    # A transfer can deliver all bytes and still report a connection close error.
+    if (Test-DownloadComplete -Path $OutFile -Spec $spec) {
+      Write-DownloadStatus -Url $Url -Stage 'complete' -Bytes $bytes -Attempt $attempt -CurlCode $exitCode -Seconds $timer.Elapsed.TotalSeconds
+      return
     }
-    & $curl.Source `
-      -L `
-      --fail `
-      --silent `
-      --show-error `
-      --retry 2 `
-      --retry-delay 2 `
-      --connect-timeout 30 `
-      --speed-limit $DownloadLowSpeedLimitBytesPerSecond `
-      --speed-time $DownloadLowSpeedTimeoutSeconds `
-      --max-time $DownloadTimeoutSeconds `
-      -C - `
-      -o $OutFile `
-      $Url
-    if ($LASTEXITCODE -ne 0) {
-      throw "curl download failed with exit code $LASTEXITCODE"
+    Write-DownloadStatus -Url $Url -Stage 'interrupted' -Bytes $bytes -Attempt $attempt -CurlCode $exitCode -Seconds $timer.Elapsed.TotalSeconds
+    if ($exitCode -notin @(5, 6, 7, 18, 28, 35, 52, 55, 56, 92) -or $attempt -eq 3) {
+      throw "ASR download interrupted (curl $exitCode); downloaded bytes preserved. Retry installation to resume."
     }
+    Start-Sleep -Seconds 1
   }
 }
 
@@ -604,7 +645,8 @@ function Get-EnabledAssetUrls {
     }
     $enabledPrimaryUrls += $trimmed
   }
-  return @($enabledPrimaryUrls + $FallbackUrls)
+  if ($enabledPrimaryUrls.Count -gt 0) { return @($enabledPrimaryUrls) }
+  return @($FallbackUrls)
 }
 
 function Install-ZipPackage {
@@ -621,28 +663,19 @@ function Install-ZipPackage {
     try {
       New-CleanDirectory -Path $StageDir
       $cacheFile = $ZipPath
-      if ((Test-Path -LiteralPath $cacheFile) -and ((Get-Item -LiteralPath $cacheFile).Length -ge $MinBytes)) {
-        Write-Host "Using cached $Label package: $cacheFile"
-        $extractZipPath = Prepare-ZipForExtraction -ZipPath $cacheFile -TempRoot $TempRoot -Label $Label -FallbackUrl $url
-      } else {
-        if (Test-Path -LiteralPath $cacheFile) {
-          Write-Host "Resuming partial cached $Label package: $cacheFile"
-        }
-        $downloadTempPath = Join-Path $TempRoot ("download-" + [guid]::NewGuid().ToString("N") + ".zip")
-        $zipForExtraction = Download-ZipToCacheOrTemp -Url $url -CachePath $cacheFile -TempPath $downloadTempPath
-        $extractZipPath = Prepare-ZipForExtraction -ZipPath $zipForExtraction -TempRoot $TempRoot -Label $Label -FallbackUrl $url
-      }
+      Download-File -Url $url -OutFile $cacheFile -Resume
+      $extractZipPath = Prepare-ZipForExtraction -ZipPath $cacheFile -TempRoot $TempRoot -Label $Label
       Assert-DownloadedFile -Path $extractZipPath -MinBytes $MinBytes -Label $Label | Out-Null
       Expand-Archive -LiteralPath $extractZipPath -DestinationPath $StageDir -Force
       return Assert-InstalledFile -Root $StageDir -Names $ExpectedFiles -Label $Label
     } catch {
       $lastError = $_
-      Write-Host "$Label source failed: $url"
+      Write-Host "$Label source failed; downloaded bytes were preserved."
       Write-Host ($_.Exception.Message)
       if (Test-Path -LiteralPath $ZipPath) {
         $cachedZip = Get-Item -LiteralPath $ZipPath
         if ($cachedZip.Length -ge $MinBytes) {
-          Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
+          Write-Host "Keeping downloaded $Label bytes for verified retry: $ZipPath"
         } else {
           Write-Host "Keeping partial $Label package for retry: $ZipPath"
         }
@@ -714,24 +747,17 @@ function Install-ModelPackage {
   $lastError = $null
   foreach ($url in $Urls) {
     try {
-      if (Test-Path -LiteralPath $OutFile) {
-        if ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes) {
-          Write-Host "Using cached $Label package: $OutFile"
-          return $OutFile
-        }
-        Write-Host "Resuming partial cached $Label package: $OutFile"
-      }
       Download-File -Url $url -OutFile $OutFile -Resume
       Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null
       return $OutFile
     } catch {
       $lastError = $_
-      Write-Host "$Label source failed: $url"
+      Write-Host "$Label source failed; downloaded bytes were preserved."
       Write-Host ($_.Exception.Message)
       if (Test-Path -LiteralPath $OutFile) {
         $cachedFile = Get-Item -LiteralPath $OutFile
         if ($cachedFile.Length -ge $MinBytes) {
-          Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+          Write-Host "Keeping downloaded $Label bytes for verified retry: $OutFile"
         } else {
           Write-Host "Keeping partial $Label package for retry: $OutFile"
         }
@@ -1009,9 +1035,7 @@ try {
     Remove-Item -LiteralPath $modelPath -Force
   }
   if (-not (Test-Path -LiteralPath $modelPath)) {
-    if ((Test-Path -LiteralPath $cachedModelPath) -and ((Get-Item -LiteralPath $cachedModelPath).Length -lt 400MB)) {
-      Remove-Item -LiteralPath $cachedModelPath -Force
-    }
+    # Retain partial model cache; Download-File resumes only a matching asset identity.
     Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }

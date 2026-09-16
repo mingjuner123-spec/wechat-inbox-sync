@@ -251,8 +251,8 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.149';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1';
+const PLUGIN_RUNTIME_VERSION = '1.3.150';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -1392,6 +1392,36 @@ function getLocalAsrInstallLogPath(installRoot = getLocalAsrInstallRoot()) {
   return path.join(installRoot, 'install.log');
 }
 
+function writeLocalAsrSourceStatus(installRoot, status) {
+  try {
+    fs.mkdirSync(installRoot, { recursive: true });
+    fs.writeFileSync(path.join(installRoot, 'download-source.json'), JSON.stringify(status), 'utf8');
+  } catch (_) { /* Diagnostic failure must not change installation. */ }
+}
+
+function readLocalAsrDownloadDiagnostic(installRoot, fileSystem = fs) {
+  const read = name => {
+    try {
+      const file = path.join(installRoot, name), stat = fileSystem.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return [];
+      const data = JSON.parse(fileSystem.readFileSync(file, 'utf8'));
+      return (Array.isArray(data) ? data : [data]).slice(-24).map(item => {
+        const safe = {};
+        for (const key of ['time', 'status', 'stage', 'file', 'host', 'component', 'platform', 'code']) {
+          const value = String(item && item[key] || '');
+          if (value && value.length <= 180 && /^[a-zA-Z0-9._:+-]+$/.test(value)) safe[key] = value;
+        }
+        for (const key of ['bytes', 'expectedBytes', 'attempt', 'curlCode', 'seconds']) {
+          const value = item && item[key];
+          if (typeof value === 'number' && Number.isFinite(value) && value >= 0) safe[key] = value;
+        }
+        return safe;
+      });
+    } catch (_) { return []; }
+  };
+  return { source: read('download-source.json'), downloads: read('download-status.json') };
+}
+
 function readLocalAsrInstallLog(installRoot = getLocalAsrInstallRoot()) {
   const logPath = getLocalAsrInstallLogPath(installRoot);
   try {
@@ -2434,6 +2464,10 @@ function normalizeAuthorizedLocalComponentManifest(payload, expected = {}, now =
     assets.push({ id, fileName, sha256, byteLength, downloadUrl });
   }
   if (!assets.length || assets.length > 64) throw new Error('授权组件清单没有可用资产');
+  if (component === 'asr' && platform === 'win32'
+    && ['model', 'ffmpeg', 'whisper', 'whisper-compat'].some(id => !ids.has(id))) {
+    throw new Error('Windows ASR 授权组件清单缺少必要安装包');
+  }
   return {
     schemaVersion: 2,
     component,
@@ -2454,6 +2488,12 @@ function buildAuthorizedLocalComponentProcessEnv(baseEnv = {}, manifest = null) 
   for (const asset of manifest.assets || []) {
     const envKey = envKeys[asset.id];
     if (envKey) result[envKey] = asset.downloadUrl;
+  }
+  if (manifest.component === 'asr') {
+    result.WECHAT_INBOX_ASR_DOWNLOAD_ASSETS = JSON.stringify(manifest.assets.map(asset => {
+      const url = new URL(asset.downloadUrl);
+      return { url: url.origin + url.pathname, sha256: asset.sha256, byteLength: asset.byteLength };
+    }));
   }
   result.WECHAT_INBOX_COMPONENT_MANIFEST_VERSION = String(manifest.version || '');
   return result;
@@ -2584,6 +2624,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('INSTALLER FAILED')
     && source.includes('$DownloadLowSpeedLimitBytesPerSecond = 65536')
     && source.includes('$DownloadLowSpeedTimeoutSeconds = 30')
+    && source.includes('$DownloadResumeVersion = "asr-resume-v1"')
     && source.includes('$DownloadTimeoutSeconds = 1200')
     && source.includes('--max-time $DownloadTimeoutSeconds')
     && source.includes('System.Text.UTF8Encoding')
@@ -17375,6 +17416,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!binding) throw new Error('请先绑定小程序后再安装本地组件');
     const platform = this.getConfiguredLocalAsrPlatform();
     const arch = platform === 'win32' ? 'x64' : (os.arch() === 'arm64' ? 'arm64' : 'x64');
+    const requireFastWindowsSource = normalizedComponent === 'asr' && platform === 'win32';
+    const maxAttempts = requireFastWindowsSource ? 2 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const payload = await this.requestJson(
         `${LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}`,
@@ -17390,6 +17434,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
       this.lastLocalComponentManifestStatus = {
         status: 'authorized',
+        time: new Date().toISOString(),
+        attempt,
         component: normalizedComponent,
         platform,
         arch,
@@ -17406,6 +17452,17 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (error && (error.code === 'PRO_REQUIRED' || Number(error.status || error.statusCode) === 403)) {
         throw error;
       }
+      if (requireFastWindowsSource) {
+        if (attempt < maxAttempts) continue;
+        this.lastLocalComponentManifestStatus = {
+          status: 'unavailable', time: new Date().toISOString(), component: normalizedComponent,
+          platform, arch, attempt,
+          code: /^[A-Z0-9_]{1,80}$/.test(String(error && error.code || '')) ? error.code : 'MANIFEST_UNAVAILABLE',
+        };
+        const failure = new Error('长环境组件下载暂时不可用，已保留本地下载进度。请稍后点击“安装/修复/更新”；若仍失败，请复制新的同步/安装失败诊断。');
+        failure.code = 'ASR_SOURCE_UNAVAILABLE';
+        throw failure;
+      }
       this.lastLocalComponentManifestStatus = {
         status: 'official-fallback',
         component: normalizedComponent,
@@ -17415,6 +17472,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
       new Notice('安全下载源暂不可用，将改用 GitHub/Hugging Face/PyPI 官方源；不会访问腾讯公开静态链接。', 8000);
       return null;
+    }
     }
   }
 
@@ -17945,6 +18003,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`,
     ];
 
+    lines.push('', '最近 ASR 下载诊断（请核对 time 是否属于本次安装）：', JSON.stringify(readLocalAsrDownloadDiagnostic(asrRoot), null, 2));
     const taskResults = this.getRecentXiaohongshuBrowserResults().map(item => xhsDiagnostic.sanitize(item, this.settings));
     lines.push('', '最近小红书任务诊断（最多 5 次；每项 attemptId 独立，不代表其他条目）：');
     lines.push(taskResults.length ? JSON.stringify(taskResults, null, 2) : '暂无新版任务诊断；历史日志无法补回原始异常。');
@@ -18813,7 +18872,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
     }
-    const authorizedManifest = await this.getAuthorizedLocalComponentManifest('asr');
+    let authorizedManifest;
+    writeLocalAsrSourceStatus(installRoot, { time: new Date().toISOString(), stage: 'manifest', status: 'requesting', component: 'asr', platform });
+    try {
+      authorizedManifest = await this.getAuthorizedLocalComponentManifest('asr');
+      writeLocalAsrSourceStatus(installRoot, { time: new Date().toISOString(), stage: 'manifest', status: authorizedManifest ? 'authorized' : 'official-fallback', component: 'asr', platform });
+    } catch (error) {
+      const code = /^[A-Z0-9_]{1,80}$/.test(String(error && error.code || '')) ? error.code : 'MANIFEST_UNAVAILABLE';
+      writeLocalAsrSourceStatus(installRoot, { time: new Date().toISOString(), stage: 'manifest', status: 'failed', component: 'asr', platform, code });
+      writeLocalAsrInstallLog({ installRoot, platform, status: 'failed', error: 'ASR download source unavailable (' + code + '); no installer started.' });
+      throw error;
+    }
     const componentProcessEnv = buildAuthorizedLocalComponentProcessEnv(process.env, authorizedManifest);
     const installerPath = await this.getAvailableLocalAsrInstallerPath();
     const command = buildLocalAsrInstallCommand(installerPath, platform, platform === 'win32' ? installRoot : '');
@@ -25456,6 +25525,7 @@ WechatObsidianInboxPlugin.__test = {
   clearLocalAsrInstallLock,
   getLocalAsrInstallProgressSnapshot,
   readLocalAsrInstallLogState,
+  readLocalAsrDownloadDiagnostic,
   isWindowsLocalAsrInstallerCommand,
   isProcessAlive,
   waitForExistingWindowsLocalAsrInstall,
