@@ -150,7 +150,7 @@ function sanitizeXiaohongshuCommentResult(input = {}) {
     'network_root_idle', 'network_source_exhausted', 'network_root_cursor_missing',
     'network_root_request_failed', 'network_root_unavailable', 'max_rounds', 'root_idle',
     'target_identity_missing', 'target_identity_mismatch', 'skipped_no_login_cookie',
-    'page_script_failed', 'page_script_skipped',
+    'page_script_failed', 'page_script_skipped', 'page_api_timeout',
   ].includes(value) ? value : 'unknown';
   return {
     schema: 1,
