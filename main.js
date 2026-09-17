@@ -10142,6 +10142,180 @@ var require_local_douyin_resolver_utils = __commonJS({
   "src/local-douyin-resolver-utils.js"(exports2, module2) {
     "use strict";
     var path2 = require("path");
+    var fs2 = require("fs");
+    var crypto2 = require("crypto");
+    var os2 = require("os");
+    var { execFile } = require("child_process");
+    var MAX_RESOLVER_BYTES2 = 100 * 1024 * 1024;
+    function resolverError2(code, stage, source, url = "") {
+      let host = "";
+      try {
+        host = new URL(url).hostname;
+      } catch {
+      }
+      const safeCode = /^[A-Z0-9_]{1,80}$/.test(String(code || "")) ? code : "DOWNLOAD_FAILED";
+      const error = new Error(`抖音解析组件：${stage}失败（${source}，${host || "未连接"}，${safeCode}）`);
+      return Object.assign(error, { code: safeCode, stage, source, host });
+    }
+    __name(resolverError2, "resolverError");
+    function isResolverAuthorizationError2(error) {
+      return [401, 403, 429].includes(Number(error && (error.status || error.statusCode))) || /^(PRO_REQUIRED|UNAUTHORIZED|FORBIDDEN|COMPONENT_DOWNLOAD_RATE_LIMITED|COMPONENT_CLIENT_UPGRADE_REQUIRED)$/.test(String(error && error.code || ""));
+    }
+    __name(isResolverAuthorizationError2, "isResolverAuthorizationError");
+    function resolverReceiptPath(executablePath) {
+      return `${executablePath}.verified.json`;
+    }
+    __name(resolverReceiptPath, "resolverReceiptPath");
+    function getVerifiedResolverStatus2(executablePath, platform, arch) {
+      try {
+        if (fs2.statSync(resolverReceiptPath(executablePath)).size > 4096) return { ready: false };
+        const receipt = JSON.parse(fs2.readFileSync(resolverReceiptPath(executablePath), "utf8"));
+        const stat = fs2.statSync(executablePath);
+        if (receipt.schema !== 1 || receipt.platform !== platform || receipt.arch !== arch || !isValidSha256(receipt.sha256) || !stat.isFile() || stat.size <= 0 || stat.size > MAX_RESOLVER_BYTES2 || stat.size !== receipt.byteLength) return { ready: false };
+        const sha256 = crypto2.createHash("sha256").update(fs2.readFileSync(executablePath)).digest("hex");
+        return { ready: sha256 === receipt.sha256, executablePath, version: receipt.version };
+      } catch {
+        return { ready: false };
+      }
+    }
+    __name(getVerifiedResolverStatus2, "getVerifiedResolverStatus");
+    function downloadResolverViaSystem2(url) {
+      return new Promise((resolve, reject) => {
+        if (!/^https:\/\//.test(url)) return reject(resolverError2("HTTPS_REQUIRED", "download", "system"));
+        const directory = fs2.mkdtempSync(path2.join(os2.tmpdir(), "wechat-resolver-"));
+        const output = path2.join(directory, "download.bin");
+        const command = process.platform === "win32" ? path2.join(process.env.SystemRoot || "C:\\Windows", "System32", "curl.exe") : "/usr/bin/curl";
+        execFile(
+          command,
+          [
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-redirs",
+            "5",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "120",
+            "--max-filesize",
+            String(MAX_RESOLVER_BYTES2),
+            "--write-out",
+            "%{http_code}",
+            "--output",
+            output,
+            url
+          ],
+          { windowsHide: true, timeout: 125e3, maxBuffer: 16384 },
+          (error, stdout) => {
+            try {
+              const status = Number(String(stdout || "").trim());
+              if ([401, 403, 429].includes(status)) throw Object.assign(resolverError2("HTTP_" + status, "download", "system", url), { status });
+              if (error) throw resolverError2(Number(error.code) === 60 ? "TLS_CERTIFICATE_FAILED" : "SYSTEM_DOWNLOAD_FAILED", "download", "system", url);
+              const stat = fs2.statSync(output);
+              if (stat.size <= 0 || stat.size > MAX_RESOLVER_BYTES2) throw resolverError2("INVALID_SIZE", "download", "system", url);
+              resolve(fs2.readFileSync(output));
+            } catch (failure) {
+              reject(failure);
+            } finally {
+              try {
+                fs2.unlinkSync(output);
+              } catch {
+              }
+              try {
+                fs2.rmdirSync(directory);
+              } catch {
+              }
+            }
+          }
+        );
+      });
+    }
+    __name(downloadResolverViaSystem2, "downloadResolverViaSystem");
+    async function downloadVerifiedResolverAsset2(asset, dependencies) {
+      const { download, systemDownload = downloadResolverViaSystem2, onStage = /* @__PURE__ */ __name(() => {
+      }, "onStage") } = dependencies;
+      const source = asset.source;
+      for (const [transport, run] of [["app", download], ["system", systemDownload]]) {
+        onStage({ stage: "download", source, transport, status: "running", host: new URL(asset.url).hostname });
+        try {
+          const bytes = Buffer.from(await run(asset.url));
+          if (!bytes.length || bytes.length > MAX_RESOLVER_BYTES2 || asset.byteLength && bytes.length !== asset.byteLength) {
+            throw resolverError2("INVALID_SIZE", "verify", source, asset.url);
+          }
+          const actual = crypto2.createHash("sha256").update(bytes).digest("hex");
+          if (actual !== asset.sha256.toLowerCase()) throw resolverError2("HASH_MISMATCH", "verify", source, asset.url);
+          return bytes;
+        } catch (error) {
+          onStage({
+            stage: error.stage || "download",
+            source,
+            transport,
+            status: "failed",
+            host: new URL(asset.url).hostname,
+            code: /^[A-Z0-9_]{1,80}$/.test(error.code || "") ? error.code : "DOWNLOAD_FAILED"
+          });
+          if (isResolverAuthorizationError2(error) || transport === "system" || ["HASH_MISMATCH", "INVALID_SIZE"].includes(error.code)) throw error;
+        }
+      }
+    }
+    __name(downloadVerifiedResolverAsset2, "downloadVerifiedResolverAsset");
+    function commitVerifiedResolver2(executablePath, bytes, asset, platform, arch) {
+      if (crypto2.createHash("sha256").update(bytes).digest("hex") !== asset.sha256.toLowerCase()) throw resolverError2("HASH_MISMATCH", "verify", asset.source);
+      fs2.mkdirSync(path2.dirname(executablePath), { recursive: true });
+      const suffix = `.${process.pid}.${crypto2.randomBytes(6).toString("hex")}`;
+      const temporary = executablePath + suffix + ".tmp";
+      const receipt = resolverReceiptPath(executablePath);
+      const receiptTemporary = receipt + suffix + ".tmp";
+      const backup = executablePath + suffix + ".backup";
+      let backedUp = false;
+      let replaced = false;
+      try {
+        fs2.writeFileSync(temporary, bytes, { mode: 448 });
+        fs2.writeFileSync(receiptTemporary, JSON.stringify({
+          schema: 1,
+          platform,
+          arch,
+          version: asset.version,
+          sha256: asset.sha256.toLowerCase(),
+          byteLength: bytes.length
+        }), { mode: 384 });
+        if (fs2.existsSync(executablePath)) {
+          fs2.renameSync(executablePath, backup);
+          backedUp = true;
+        }
+        fs2.renameSync(temporary, executablePath);
+        replaced = true;
+        fs2.renameSync(receiptTemporary, receipt);
+        if (backedUp) {
+          try {
+            fs2.unlinkSync(backup);
+          } catch {
+          }
+        }
+      } catch (error) {
+        if (replaced) {
+          try {
+            fs2.unlinkSync(executablePath);
+          } catch {
+          }
+        }
+        if (backedUp && fs2.existsSync(backup)) fs2.renameSync(backup, executablePath);
+        throw resolverError2(error.code, "install", asset.source);
+      } finally {
+        for (const file of [temporary, receiptTemporary]) {
+          try {
+            fs2.unlinkSync(file);
+          } catch {
+          }
+        }
+      }
+    }
+    __name(commitVerifiedResolver2, "commitVerifiedResolver");
     function isValidSha256(value) {
       return /^[a-f0-9]{64}$/i.test(String(value || ""));
     }
@@ -10240,6 +10414,13 @@ var require_local_douyin_resolver_utils = __commonJS({
     }
     __name(extractLocalDouyinResolverMediaUrls2, "extractLocalDouyinResolverMediaUrls");
     module2.exports = {
+      MAX_RESOLVER_BYTES: MAX_RESOLVER_BYTES2,
+      resolverError: resolverError2,
+      isResolverAuthorizationError: isResolverAuthorizationError2,
+      getVerifiedResolverStatus: getVerifiedResolverStatus2,
+      downloadResolverViaSystem: downloadResolverViaSystem2,
+      downloadVerifiedResolverAsset: downloadVerifiedResolverAsset2,
+      commitVerifiedResolver: commitVerifiedResolver2,
       isValidSha256,
       selectLocalDouyinResolverAsset: selectLocalDouyinResolverAsset2,
       parseOfficialChecksums,
@@ -11591,6 +11772,13 @@ var {
 var { createDouyinStructuredContentBuilder } = require_social_platform_content_utils();
 var { createDouyinMediaResolutionDiagnosticBuilder } = require_social_media_diagnostic_utils();
 var {
+  resolverError,
+  isResolverAuthorizationError,
+  getVerifiedResolverStatus,
+  downloadResolverViaSystem,
+  downloadVerifiedResolverAsset,
+  commitVerifiedResolver,
+  MAX_RESOLVER_BYTES,
   selectLocalDouyinResolverAsset,
   buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
@@ -11638,7 +11826,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.156";
+var PLUGIN_RUNTIME_VERSION = "1.3.157";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -11712,6 +11900,7 @@ var LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 9e4;
 var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c";
 var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "08c7edf5f91653b825694d1ffc8c82d31d6ddb32e5f8689012fc5698062be432";
 var LOCAL_COMPONENT_ASSET_ENV_KEYS = Object.freeze({
+  douyin: Object.freeze({ resolver: "WECHAT_INBOX_DOUYIN_RESOLVER_URL" }),
   asr: Object.freeze({
     model: "WECHAT_INBOX_ASR_MODEL_URL",
     ffmpeg: "WECHAT_INBOX_ASR_FFMPEG_URL",
@@ -12057,6 +12246,7 @@ function getLocalOcrInstallStatus(installRoot = getLocalOcrInstallRoot(), exists
 }
 __name(getLocalOcrInstallStatus, "getLocalOcrInstallStatus");
 function buildLocalComponentRefreshPlan(readiness = {}, options = {}) {
+  var _a;
   const includeOptionalUpdates = options.includeOptionalUpdates === true;
   const asrStatus = readiness && readiness.asrStatus ? readiness.asrStatus : {};
   const ocrStatus = readiness && readiness.ocrStatus ? readiness.ocrStatus : {};
@@ -12066,8 +12256,10 @@ function buildLocalComponentRefreshPlan(readiness = {}, options = {}) {
   }, "ensureMissing");
   const asrMissing = !asrStatus.ready;
   const ocrMissing = !ocrStatus.ready;
+  const resolverMissing = Boolean(readiness.resolverStatus && !readiness.resolverStatus.ready);
   if (asrMissing) ensureMissing("音视频转写");
   if (ocrMissing) ensureMissing("图片文字识别 OCR");
+  if (resolverMissing) ensureMissing("抖音解析");
   const updateComponents = [];
   const ensureUpdate = /* @__PURE__ */ __name((name) => {
     if (!updateComponents.includes(name)) updateComponents.push(name);
@@ -12076,9 +12268,13 @@ function buildLocalComponentRefreshPlan(readiness = {}, options = {}) {
   const ocrUpdateRecommended = Boolean(includeOptionalUpdates && !ocrMissing && ocrStatus.upgradeRecommended);
   if (asrUpdateRecommended) ensureUpdate("音视频转写");
   if (ocrUpdateRecommended) ensureUpdate("图片文字识别 OCR");
+  const checkResolverUpdates = Boolean(options.checkResolverUpdates && ((_a = readiness.resolverStatus) == null ? void 0 : _a.ready) && !missingComponents.length);
+  if (checkResolverUpdates) ensureUpdate("抖音解析（检查更新，相同文件不重复下载）");
   return {
     requireAsr: asrMissing || asrUpdateRecommended,
     requireOcr: ocrMissing || ocrUpdateRecommended,
+    requireResolver: resolverMissing || checkResolverUpdates,
+    forceResolver: checkResolverUpdates,
     forceAsr: asrUpdateRecommended,
     forceOcr: ocrUpdateRecommended,
     missingComponents,
@@ -12093,7 +12289,8 @@ function normalizeLocalComponentAutoPromptedIssues(value) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return {
     ...source.asr === true ? { asr: true } : {},
-    ...source.ocr === true ? { ocr: true } : {}
+    ...source.ocr === true ? { ocr: true } : {},
+    ...source.resolver === true ? { resolver: true } : {}
   };
 }
 __name(normalizeLocalComponentAutoPromptedIssues, "normalizeLocalComponentAutoPromptedIssues");
@@ -12102,7 +12299,8 @@ function getLocalComponentRequiredIssueState(readiness = {}) {
   const ocrStatus = readiness && readiness.ocrStatus ? readiness.ocrStatus : {};
   return {
     asr: asrStatus.ready !== true,
-    ocr: ocrStatus.ready !== true
+    ocr: ocrStatus.ready !== true,
+    resolver: Boolean(readiness.resolverStatus && readiness.resolverStatus.ready !== true)
   };
 }
 __name(getLocalComponentRequiredIssueState, "getLocalComponentRequiredIssueState");
@@ -12110,12 +12308,15 @@ function buildLocalComponentAutomaticRepairPlan(refreshPlan = {}, componentKeys 
   const selected = new Set(Array.isArray(componentKeys) ? componentKeys : []);
   const requireAsr = selected.has("asr") && refreshPlan.requireAsr === true;
   const requireOcr = selected.has("ocr") && refreshPlan.requireOcr === true;
+  const requireResolver = selected.has("resolver") && refreshPlan.requireResolver === true;
   const missingComponents = [];
   if (requireAsr) missingComponents.push("音视频转写");
   if (requireOcr) missingComponents.push("图片文字识别 OCR");
+  if (requireResolver) missingComponents.push("抖音解析");
   return {
     requireAsr,
     requireOcr,
+    requireResolver,
     forceAsr: false,
     forceOcr: false,
     missingComponents,
@@ -13134,7 +13335,7 @@ function runWindowsLocalAsrInstaller(installerPath, installRoot, processEnv, opt
       }
       if (now() - lastProgressAt < stallTimeoutMs) return;
       stopping = true;
-      const stalledError = new Error("本地转写组件安装已连续 10 分钟没有进展，插件已自动结束卡住的安装；请点击“安装/修复/更新”重新安装。");
+      const stalledError = new Error("本地转写组件安装已连续 10 分钟没有进展，插件已自动结束卡住的安装；请点击“安装／更新本地组件”重新安装。");
       stalledError.localAsrInstallStalled = true;
       if (!child || !Number.isInteger(child.pid) || child.pid <= 0) {
         finish(stalledError, stdoutBuffer, stderrBuffer);
@@ -13241,8 +13442,9 @@ function formatRedeemAccessError(error, mode = "redeem") {
   return message || "兑换码验证失败，请稍后重试。";
 }
 __name(formatRedeemAccessError, "formatRedeemAccessError");
-function downloadTextViaNode(url, requestHeaders = {}) {
+function downloadTextViaNode(url, requestHeaders = {}, redirectCount = 0) {
   return new Promise((resolve, reject) => {
+    if (redirectCount > 5 || !/^https:\/\//.test(String(url))) return reject(new Error("invalid manifest redirect"));
     let parsed;
     try {
       parsed = new URL(String(url || ""));
@@ -13261,11 +13463,18 @@ function downloadTextViaNode(url, requestHeaders = {}) {
       }
     }, (response) => {
       const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
+      let size = 0;
+      response.on("error", reject);
+      response.on("aborted", () => reject(new Error("manifest download aborted")));
+      response.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > 2 * 1024 * 1024) request.destroy(new Error("manifest too large"));
+        else chunks.push(chunk);
+      });
       response.on("end", () => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
           try {
-            downloadTextViaNode(new URL(response.headers.location, url).toString(), requestHeaders).then(resolve, reject);
+            downloadTextViaNode(new URL(response.headers.location, url).toString(), requestHeaders, redirectCount + 1).then(resolve, reject);
           } catch (error) {
             reject(error);
           }
@@ -13279,6 +13488,8 @@ function downloadTextViaNode(url, requestHeaders = {}) {
         resolve(text);
       });
     });
+    const deadline = setTimeout(() => request.destroy(new Error("manifest timeout")), 3e4);
+    request.on("close", () => clearTimeout(deadline));
     request.setTimeout(3e4, () => {
       request.destroy(new Error("download timeout"));
     });
@@ -13289,10 +13500,27 @@ function downloadTextViaNode(url, requestHeaders = {}) {
 __name(downloadTextViaNode, "downloadTextViaNode");
 async function downloadTextWithFallback(url, requestHeaders = {}) {
   try {
-    const response = await requestUrl({ url, method: "GET", headers: requestHeaders });
-    return response.text || "";
+    let timer;
+    try {
+      const response = await Promise.race([
+        requestUrl({ url, method: "GET", headers: requestHeaders }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("manifest timeout")), 3e4);
+        })
+      ]);
+      if (Buffer.byteLength(response.text || "") > 2 * 1024 * 1024) throw new Error("manifest too large");
+      return response.text || "";
+    } finally {
+      clearTimeout(timer);
+    }
   } catch (error) {
-    return downloadTextViaNode(url, requestHeaders);
+    try {
+      return await downloadTextViaNode(url, requestHeaders);
+    } catch {
+      const bytes = await downloadResolverViaSystem(url);
+      if (bytes.length > 2 * 1024 * 1024) throw resolverError("INVALID_SIZE", "manifest", "github", url);
+      return bytes.toString("utf8");
+    }
   }
 }
 __name(downloadTextWithFallback, "downloadTextWithFallback");
@@ -13316,12 +13544,16 @@ async function fetchLocalDouyinResolverManifest() {
     if (!manifest) throw new Error("GitHub release metadata or checksums are invalid");
     return { manifest, source: "github" };
   } catch (error) {
-    throw new Error(`GitHub 组件清单不可用：${error.message || error}`);
+    throw resolverError(error.code, "manifest", "github", LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL);
   }
 }
 __name(fetchLocalDouyinResolverManifest, "fetchLocalDouyinResolverManifest");
-function downloadBinaryViaNode(url) {
+function downloadBinaryViaNode(url, redirectCount = 0) {
   return new Promise((resolve, reject) => {
+    if (redirectCount > 5 || !/^https:\/\//.test(String(url))) {
+      reject(resolverError("INVALID_REDIRECT", "download", "node"));
+      return;
+    }
     let parsed;
     try {
       parsed = new URL(String(url || ""));
@@ -13338,11 +13570,18 @@ function downloadBinaryViaNode(url) {
       }
     }, (response) => {
       const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
+      let size = 0;
+      response.on("error", reject);
+      response.on("aborted", () => reject(new Error("download aborted")));
+      response.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > MAX_RESOLVER_BYTES) request.destroy(new Error("download too large"));
+        else chunks.push(chunk);
+      });
       response.on("end", () => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
           try {
-            downloadBinaryViaNode(new URL(response.headers.location, url).toString()).then(resolve, reject);
+            downloadBinaryViaNode(new URL(response.headers.location, url).toString(), redirectCount + 1).then(resolve, reject);
           } catch (error) {
             reject(error);
           }
@@ -13350,13 +13589,15 @@ function downloadBinaryViaNode(url) {
         }
         const bytes = Buffer.concat(chunks);
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new Error(`HTTP ${response.statusCode}: resolver download failed`));
+          reject(Object.assign(resolverError("HTTP_" + response.statusCode, "download", "app", url), { status: response.statusCode }));
           return;
         }
         resolve(bytes);
       });
     });
-    request.setTimeout(6e4, () => request.destroy(new Error("resolver download timeout")));
+    const deadline = setTimeout(() => request.destroy(new Error("resolver download timeout")), 6e4);
+    request.on("close", () => clearTimeout(deadline));
+    request.setTimeout(3e4, () => request.destroy(new Error("resolver download idle timeout")));
     request.on("error", reject);
     request.end();
   });
@@ -13477,6 +13718,9 @@ function normalizeAuthorizedLocalComponentManifest(payload, expected = {}, now =
     assets.push({ id, fileName, sha256, byteLength, downloadUrl });
   }
   if (!assets.length || assets.length > 64) throw new Error("授权组件清单没有可用资产");
+  if (component === "douyin" && (assets.length !== 1 || !ids.has("resolver") || totalBytes > MAX_RESOLVER_BYTES)) {
+    throw new Error("抖音解析授权清单必须包含一个有效解析程序");
+  }
   if (component === "asr" && platform === "win32" && ["model", "ffmpeg", "whisper", "whisper-compat"].some((id) => !ids.has(id))) {
     throw new Error("Windows ASR 授权组件清单缺少必要安装包");
   }
@@ -25393,7 +25637,7 @@ function getKnownLocalComponentInstallFailureReason(rawMessage) {
     return "磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。";
   }
   if (/Local ASR installer download returned outdated or invalid content/i.test(message)) {
-    return "本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装/修复/更新”重试。若仍失败，请复制诊断信息联系开发者。";
+    return "本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍失败，请复制诊断信息联系开发者。";
   }
   if (/Copy-Item[\s\S]{0,240}System\.IO\.IOException|System\.IO\.IOException[\s\S]{0,240}CopyItemCommand/i.test(message) && /ggml-small|cachedModelPath|modelPath|Whisper model|wechat-inbox-local-asr/i.test(message)) {
     return "复制 Whisper 模型失败：通常是安装目录所在磁盘空间不足。请释放 Windows 默认 C: 盘空间后重试，建议至少预留 3GB，最好 5GB 以上。";
@@ -27043,9 +27287,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         return manifest;
       } catch (error) {
         if (error && error.code === "COMPONENT_DOWNLOAD_RATE_LIMITED") {
-          throw new Error("今天的组件安全下载次数已达到上限。请不要反复点击安装；如确需修复，请明天再试或联系支持。");
+          throw Object.assign(new Error("今天的组件安全下载次数已达到上限。请不要反复点击安装；如确需修复，请明天再试或联系支持。"), { code: "COMPONENT_DOWNLOAD_RATE_LIMITED" });
         }
-        if (error && (error.code === "PRO_REQUIRED" || Number(error.status || error.statusCode) === 403)) {
+        if (isResolverAuthorizationError(error)) {
           throw error;
         }
         if (requireFastWindowsSource) {
@@ -27059,7 +27303,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
             attempt,
             code: /^[A-Z0-9_]{1,80}$/.test(String(error && error.code || "")) ? error.code : "MANIFEST_UNAVAILABLE"
           };
-          const failure = new Error("长环境组件下载暂时不可用，已保留本地下载进度。请稍后点击“安装/修复/更新”；若仍失败，请复制新的同步/安装失败诊断。");
+          const failure = new Error("长环境组件下载暂时不可用，已保留本地下载进度。请稍后点击“安装／更新本地组件”；若仍失败，请复制新的同步/安装失败诊断。");
           failure.code = "ASR_SOURCE_UNAVAILABLE";
           throw failure;
         }
@@ -27070,7 +27314,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
           arch,
           reason: String(error && (error.code || error.message) || "manifest-unavailable").slice(0, 160)
         };
-        new Notice("安全下载源暂不可用，将改用 GitHub/Hugging Face/PyPI 官方源；不会访问腾讯公开静态链接。", 8e3);
+        new Notice("腾讯云授权下载暂不可用，将尝试官方备用源。", 8e3);
         return null;
       }
     }
@@ -27528,6 +27772,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `最近权限查询失败：${this.settings.proEntitlementLastError ? `${this.settings.proEntitlementLastErrorAt || "时间未知"} ${this.settings.proEntitlementLastError}` : "无"}`,
       "",
       "组件状态：",
+      "抖音解析：" + (this.getLocalDouyinResolverInstallStatus().ready ? "可用（已校验）" : "需安装或修复"),
       `音视频转写 ASR：${asrStatus.ready ? "可用" : "不可用"}`,
       `ASR 安装目录：${asrStatus.installRoot || asrRoot}`,
       `ASR 缺失项：${formatMissingReasons(asrStatus)}`,
@@ -27537,6 +27782,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`
     ];
     lines.push("", "最近 ASR 下载诊断（请核对 time 是否属于本次安装）：", JSON.stringify(readLocalAsrDownloadDiagnostic(asrRoot), null, 2));
+    lines.push("", "最近抖音解析组件安装诊断：", JSON.stringify(this.getLocalDouyinResolverInstallDiagnostic(), null, 2));
     const douyinAttempts = douyinBrowserSafety.readAttempts(asrRoot);
     lines.push("", "最近抖音隐藏网页诊断（最多 5 次；running 表示未记录结束，可能仍在运行或被中断）：", douyinAttempts.length ? JSON.stringify(douyinAttempts, null, 2) : "暂无抖音隐藏网页尝试记录");
     const taskResults = this.getRecentXiaohongshuBrowserResults().map((item) => xhsDiagnostic.sanitize(item, this.settings));
@@ -27858,11 +28104,13 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   getLocalTranscriptionComponentReadiness() {
     const asrStatus = this.getLocalAsrInstallStatus();
     const ocrStatus = this.getLocalOcrInstallStatus();
+    const resolverStatus = this.getLocalDouyinResolverInstallStatus();
     const platform = this.getConfiguredLocalAsrPlatform();
     const missingComponents = [];
     const updateComponents = [];
     if (!asrStatus.ready) missingComponents.push("音视频转写");
     if (!ocrStatus.ready) missingComponents.push("图片文字识别 OCR");
+    if (!resolverStatus.ready) missingComponents.push("抖音解析");
     if (asrStatus.ready && asrStatus.upgradeRecommended) updateComponents.push("音视频转写");
     if (ocrStatus.ready && ocrStatus.upgradeRecommended) updateComponents.push("图片文字识别 OCR");
     return {
@@ -27873,7 +28121,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       updateComponents,
       updateRecommended: updateComponents.length > 0,
       asrStatus,
-      ocrStatus
+      ocrStatus,
+      resolverStatus
     };
   }
   isLocalComponentInstallPromptSnoozed(reason = "") {
@@ -27903,6 +28152,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const next = { ...previous };
     if (readiness.asrStatus && readiness.asrStatus.ready === true) delete next.asr;
     if (readiness.ocrStatus && readiness.ocrStatus.ready === true) delete next.ocr;
+    if (readiness.resolverStatus && readiness.resolverStatus.ready === true) delete next.resolver;
     if (JSON.stringify(next) !== JSON.stringify(previous)) {
       await this.saveSettings({
         ...this.settings,
@@ -27920,7 +28170,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     );
     const next = { ...previous };
     for (const key of componentKeys) {
-      if (key === "asr" || key === "ocr") next[key] = true;
+      if (["asr", "ocr", "resolver"].includes(key)) next[key] = true;
     }
     if (JSON.stringify(next) !== JSON.stringify(previous)) {
       await this.saveSettings({
@@ -27973,7 +28223,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       const isManualRefresh = reason === "manual-refresh";
       let readiness = this.getLocalTranscriptionComponentReadiness();
       let refreshPlan = buildLocalComponentRefreshPlan(readiness, {
-        includeOptionalUpdates: isManualRefresh
+        includeOptionalUpdates: isManualRefresh,
+        checkResolverUpdates: isManualRefresh
       });
       readiness = {
         ...readiness,
@@ -27989,7 +28240,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       const promptedIssues = await this.reconcileLocalComponentAutoPromptedIssues(readiness);
       const currentIssues = getLocalComponentRequiredIssueState(readiness);
       const automaticPromptReason = reason === "settings-open" || reason === "bind";
-      const automaticComponentKeys = automaticPromptReason ? ["asr", "ocr"].filter((key) => currentIssues[key] && promptedIssues[key] !== true) : [];
+      const automaticComponentKeys = automaticPromptReason ? ["asr", "ocr", "resolver"].filter((key) => currentIssues[key] && promptedIssues[key] !== true) : [];
       const automaticRepairPlan = buildLocalComponentAutomaticRepairPlan(
         refreshPlan,
         automaticComponentKeys
@@ -27999,7 +28250,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       const manifestVersion = this.manifest && this.manifest.version ? String(this.manifest.version).trim() : "";
       const runtimeIdentity = manifestVersion ? getPluginRuntimeIdentity(manifestVersion) : null;
       if (shouldOfferComponentChanges && runtimeIdentity && !runtimeIdentity.matchesManifest) {
-        new Notice("插件文件没有更新完整。请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装/修复/更新”处理本地转写组件。", 12e3);
+        new Notice("插件文件没有更新完整。请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”处理本地转写组件。", 12e3);
         return {
           ...status,
           localComponentInstallSkipped: {
@@ -28026,7 +28277,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         }
         const promptReadiness = {
           ...readiness,
-          missingComponents: installPlan.missingComponents,
+          missingComponents: refreshPlan.missingComponents,
           updateComponents: installPlan.updateComponents,
           updateRecommended: installPlan.updateComponents.length > 0
         };
@@ -28049,8 +28300,10 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
             readiness: promptReadiness,
             requireAsr: installPlan.requireAsr,
             requireOcr: installPlan.requireOcr,
+            requireResolver: installPlan.requireResolver,
             forceAsr: installPlan.forceAsr,
-            forceOcr: installPlan.forceOcr
+            forceOcr: installPlan.forceOcr,
+            forceResolver: installPlan.forceResolver
           });
           readiness = installResult && installResult.readiness ? installResult.readiness : this.getLocalTranscriptionComponentReadiness();
           refreshPlan = buildLocalComponentRefreshPlan(readiness, {
@@ -28093,7 +28346,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const hasMissing = missingComponents.length > 0;
     const hasUpdates = updateComponents.length > 0;
     const fallbackComponentText = missingText || updateText || "本地转写组件";
-    const reasonText = reason === "first-use" ? "当前操作需要使用本地转写组件。" : reason === "manual-refresh" && hasMissing ? "检测到本地转写组件确实缺失或损坏。请确认插件已更新，并完全退出后重新打开 Obsidian，再继续修复。" : hasMissing ? "检测到你已开通 Pro，但本地转写组件还没有准备完整。" : hasUpdates ? "检测到本地转写组件可以正常使用，但低于当前插件内置标准。" : "检测到本地转写组件需要确认。";
+    const reasonText = reason === "first-use" ? "当前操作需要使用本地转写组件。" : reason === "manual-refresh" && hasMissing ? "检测到本地转写组件确实缺失或损坏。请确认插件已更新，并完全退出后重新打开 Obsidian，再继续修复。" : hasMissing ? "检测到你已开通 Pro，但本地转写组件还没有准备完整。" : hasUpdates ? "本地组件可以正常使用，将检查或安装以下组件的更新。" : "检测到本地转写组件需要确认。";
     const actionText = hasMissing && hasUpdates ? "修复/更新" : hasUpdates ? "更新" : "安装/修复";
     const messageLines = [reasonText];
     if (hasMissing) messageLines.push(`需要修复：${missingText}`);
@@ -28101,7 +28354,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     messageLines.push(
       `当前电脑：${readiness.platformName || "当前系统"}`,
       "本次只会处理上面列出的组件，已经可用且无需更新的部分不会下载。",
-      "这个组件用于音视频转写和小红书图片文字识别，图片会在本机识别，不上传到云端。",
+      "一次检查并补齐音视频转写、图片文字识别和抖音解析；图片识别在本机完成。",
       `现在开始${actionText}吗？`
     );
     const message = messageLines.join("\n");
@@ -28144,59 +28397,62 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。`, 12e3);
   }
   async doInstallLocalTranscriptionComponents(options = {}) {
-    const requireAsr = options.requireAsr === true;
-    const requireOcr = options.requireOcr === true;
-    const forceAsr = options.forceAsr === true;
-    const forceOcr = options.forceOcr === true;
-    if (!requireAsr && !requireOcr) {
-      return {
-        installed: false,
-        skipped: true,
-        reason: options.reason || ""
-      };
+    if (!options.requireAsr && !options.requireOcr && !options.requireResolver && !options.allComponents) {
+      return { installed: false, skipped: true, reason: options.reason || "" };
     }
-    await this.ensureProFeatureAccess("本地转写组件安装");
-    const readiness = options.readiness || this.getLocalTranscriptionComponentReadiness();
+    await this.ensureProFeatureAccess("本地组件安装");
+    const readiness = this.getLocalTranscriptionComponentReadiness();
     const failures = [];
-    const shouldInstallAsr = requireAsr && (forceAsr || !readiness.asrStatus || !readiness.asrStatus.ready);
-    if (shouldInstallAsr) {
-      try {
-        await this.installLocalAsr({
-          installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode),
-          reason: options.reason,
-          force: forceAsr
-        });
-      } catch (error) {
-        failures.push({
-          component: "音视频转写 ASR",
-          error
-        });
+    const results = [];
+    const components = [
+      {
+        key: "asr",
+        name: "音视频转写 ASR",
+        ready: readiness.asrStatus && readiness.asrStatus.ready,
+        force: options.forceAsr === true,
+        run: /* @__PURE__ */ __name(() => this.installLocalAsr({ installMode: normalizeLocalAsrInstallMode(this.settings.localAsrInstallMode), reason: options.reason, force: options.forceAsr === true }), "run")
+      },
+      {
+        key: "ocr",
+        name: "图片文字识别 OCR",
+        ready: readiness.ocrStatus && readiness.ocrStatus.ready,
+        force: options.forceOcr === true,
+        run: /* @__PURE__ */ __name(() => this.installLocalOcr({ reason: options.reason, force: options.forceOcr === true }), "run")
+      },
+      {
+        key: "resolver",
+        name: "抖音解析",
+        ready: readiness.resolverStatus && readiness.resolverStatus.ready,
+        force: options.forceResolver === true,
+        run: /* @__PURE__ */ __name(() => this.ensureLocalDouyinResolver({ force: options.forceResolver === true }), "run")
       }
-    }
-    const ocrStatus = this.getLocalOcrInstallStatus();
-    const shouldInstallOcr = requireOcr && (forceOcr || !ocrStatus.ready);
-    if (shouldInstallOcr) {
+    ];
+    for (const component of components) {
+      if (component.ready && !component.force) {
+        results.push({ component: component.key, status: "skipped" });
+        continue;
+      }
+      new Notice("正在准备本地组件：" + component.name);
       try {
-        await this.installLocalOcr({
-          reason: options.reason,
-          force: forceOcr
-        });
+        await component.run();
+        results.push({ component: component.key, status: "installed" });
       } catch (error) {
-        failures.push({
-          component: "图片文字识别 OCR",
-          error
-        });
+        failures.push({ component: component.name, error });
+        results.push({ component: component.key, status: "failed" });
+        if (isResolverAuthorizationError(error)) break;
       }
     }
     if (failures.length) {
-      const message = failures.map((item) => `${item.component}：${item.error && item.error.message ? item.error.message : item.error}`).join("\n");
-      throw new Error(message);
+      const error = new Error(failures.map((item) => item.component + "：" + (item.error.message || item.error)).join("\n") + "\n已成功准备的组件会保留；再次点击仅补齐未完成项。");
+      error.componentResults = results;
+      throw error;
     }
     return {
-      installed: shouldInstallAsr || shouldInstallOcr,
-      skipped: !(shouldInstallAsr || shouldInstallOcr),
+      installed: results.some((item) => item.status === "installed"),
+      skipped: results.every((item) => item.status === "skipped"),
       reason: options.reason || "",
-      readiness: this.getLocalTranscriptionComponentReadiness()
+      readiness: this.getLocalTranscriptionComponentReadiness(),
+      componentResults: results
     };
   }
   async ensureLocalComponentReadyForUse(featureName = "该功能", options = {}) {
@@ -28213,11 +28469,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const requiredReadiness = {
       ...readiness,
       ready: false,
-      missingComponents
+      missingComponents: buildLocalComponentRefreshPlan(readiness).missingComponents
     };
     const promptReason = options.reason || "first-use";
     if (this.isLocalComponentInstallPromptSnoozed(promptReason)) {
-      throw new Error(`${featureName}需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“安装/修复/更新”。`);
+      throw new Error(`${featureName}需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“安装／更新本地组件”。`);
     }
     const accepted = await this.confirmLocalComponentInstall(status, promptReason, requiredReadiness);
     if (!accepted) {
@@ -28257,7 +28513,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }, "onWaiting")
     });
     if (result.status === "unverified-running") {
-      throw new Error("检测到 ASR 安装进程仍在运行，但 Windows 未返回可核对的命令行。为避免结束其他程序，本次没有强制结束它；请稍后再次点击“安装/修复/更新”。");
+      throw new Error("检测到 ASR 安装进程仍在运行，但 Windows 未返回可核对的命令行。为避免结束其他程序，本次没有强制结束它；请稍后再次点击“安装／更新本地组件”。");
     }
     if (result.status === "stopped-after-failure") {
       new Notice("已自动结束上次报错后仍未退出的 ASR 安装进程，现在可以重新安装。", 8e3);
@@ -28494,76 +28750,118 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const asrRoot = typeof this.getConfiguredLocalAsrInstallRoot === "function" ? this.getConfiguredLocalAsrInstallRoot() : getLocalAsrInstallRoot();
     return path.join(asrRoot, "tools", "yt-dlp");
   }
-  getInstalledLocalDouyinResolver() {
+  getLocalDouyinResolverInstallStatus() {
     const platform = this.getConfiguredLocalAsrPlatform();
-    if (!["win32", "darwin"].includes(platform)) return null;
+    const arch = platform === "win32" ? "x64" : os.arch() === "arm64" ? "arm64" : "x64";
     const executablePath = getLocalDouyinResolverExecutablePath(this.getLocalDouyinResolverRoot(), platform);
-    return fs.existsSync(executablePath) ? { executablePath, platform } : null;
+    return getVerifiedResolverStatus(executablePath, platform, arch);
   }
-  async ensureLocalDouyinResolver() {
-    if (this.localDouyinResolverInstallPromise) return await this.localDouyinResolverInstallPromise;
-    const platform = this.getConfiguredLocalAsrPlatform();
-    if (!["win32", "darwin"].includes(platform)) {
-      throw new Error("当前系统暂不支持本地抖音解析组件");
-    }
-    const installRoot = this.getLocalDouyinResolverRoot();
-    const executablePath = getLocalDouyinResolverExecutablePath(installRoot, platform);
-    const hasCachedExecutable = fs.existsSync(executablePath);
-    this.localDouyinResolverInstallPromise = (async () => {
+  getInstalledLocalDouyinResolver() {
+    const status = this.getLocalDouyinResolverInstallStatus();
+    return status.ready ? { executablePath: status.executablePath, platform: this.getConfiguredLocalAsrPlatform() } : null;
+  }
+  getLocalDouyinResolverInstallDiagnostic() {
+    let entries = this.localResolverInstallDiagnostic;
+    if (!entries) {
       try {
-        const { manifest, source: manifestSource } = await fetchLocalDouyinResolverManifest();
-        const asset = selectLocalDouyinResolverAsset(manifest, platform, process.arch);
-        if (!asset) {
-          throw new Error(`本地抖音解析组件暂未提供 ${platform}-${process.arch} 安装包`);
-        }
-        if (hasCachedExecutable) {
-          try {
-            const installedSha256 = calculateFileSha256(fs.readFileSync(executablePath));
-            if (installedSha256.toLowerCase() === String(asset.sha256).toLowerCase()) {
-              return { executablePath, updated: false, source: "verified-cache" };
-            }
-          } catch (error) {
-          }
-        }
-        const bytes = await downloadBinaryViaNode(asset.url);
-        if (calculateFileSha256(bytes).toLowerCase() !== String(asset.sha256).toLowerCase()) {
-          throw new Error("本地抖音解析组件校验失败，已拒绝安装");
-        }
-        fs.mkdirSync(installRoot, { recursive: true });
-        const temporaryPath = `${executablePath}.${process.pid}.${Date.now()}.tmp`;
-        try {
-          fs.writeFileSync(temporaryPath, bytes, { mode: 448 });
-          if (platform !== "win32") fs.chmodSync(temporaryPath, 448);
-          fs.renameSync(temporaryPath, executablePath);
-        } finally {
-          try {
-            fs.rmSync(temporaryPath, { force: true });
-          } catch (error) {
-          }
-        }
-        return { executablePath, updated: true, source: manifestSource };
-      } catch (error) {
-        if (hasCachedExecutable && fs.existsSync(executablePath)) {
-          return { executablePath, updated: false, source: "stale-cache" };
-        }
-        throw error;
+        const file = path.join(this.getLocalDouyinResolverRoot(), "install-diagnostic.json");
+        if (fs.statSync(file).size <= 65536) entries = JSON.parse(fs.readFileSync(file, "utf8"));
+      } catch {
       }
-    })();
+    }
+    return (Array.isArray(entries) ? entries : []).slice(-30).map((entry) => {
+      const clean = {};
+      for (const key of ["time", "attemptId", "runtimeVersion", "platform", "stage", "source", "transport", "status", "host", "code"]) {
+        const value = String(entry && entry[key] || "");
+        if (/^[A-Za-z0-9_.:+-]{1,100}$/.test(value)) clean[key] = value;
+      }
+      return clean;
+    });
+  }
+  recordLocalDouyinResolverInstallStage(entry) {
+    this.localResolverInstallDiagnostic = [...this.getLocalDouyinResolverInstallDiagnostic(), {
+      time: (/* @__PURE__ */ new Date()).toISOString(),
+      runtimeVersion: PLUGIN_RUNTIME_VERSION,
+      platform: this.getConfiguredLocalAsrPlatform(),
+      ...entry
+    }].slice(-30);
+    const root = this.getLocalDouyinResolverRoot();
+    try {
+      fs.mkdirSync(root, { recursive: true });
+      const target = path.join(root, "install-diagnostic.json");
+      fs.writeFileSync(target + ".tmp", JSON.stringify(this.getLocalDouyinResolverInstallDiagnostic()), { mode: 384 });
+      fs.renameSync(target + ".tmp", target);
+    } catch {
+    }
+  }
+  async downloadLocalDouyinResolverAsset(asset, onStage) {
+    return downloadVerifiedResolverAsset(asset, { download: downloadBinaryViaNode, onStage });
+  }
+  async getOfficialLocalDouyinResolverManifest() {
+    return fetchLocalDouyinResolverManifest();
+  }
+  async ensureLocalDouyinResolver(options = {}) {
+    if (this.localDouyinResolverInstallPromise) return await this.localDouyinResolverInstallPromise;
+    this.localDouyinResolverInstallPromise = this.doInstallLocalDouyinResolver(options);
     try {
       return await this.localDouyinResolverInstallPromise;
     } finally {
       this.localDouyinResolverInstallPromise = null;
     }
   }
-  async installOrUpdateLocalDouyinResolver() {
-    try {
-      const resolver = await this.ensureLocalDouyinResolver();
-      new Notice(resolver.updated ? "抖音增强解析组件已安装。" : "抖音增强解析组件已是当前版本。");
-      return resolver;
-    } catch (error) {
-      new Notice(`抖音增强解析组件安装失败：${error.message || error}`);
-      return null;
+  async doInstallLocalDouyinResolver(options = {}) {
+    await this.ensureProFeatureAccess("本地组件安装");
+    const platform = this.getConfiguredLocalAsrPlatform();
+    if (!["win32", "darwin"].includes(platform)) throw new Error("当前系统暂不支持本地抖音解析组件");
+    const arch = platform === "win32" ? "x64" : os.arch() === "arm64" ? "arm64" : "x64";
+    const executablePath = getLocalDouyinResolverExecutablePath(this.getLocalDouyinResolverRoot(), platform);
+    const attemptId = crypto.randomBytes(8).toString("hex");
+    const onStage = /* @__PURE__ */ __name((entry) => this.recordLocalDouyinResolverInstallStage({ attemptId, ...entry }), "onStage");
+    const installed = this.getLocalDouyinResolverInstallStatus();
+    if (installed.ready && options.force !== true) {
+      onStage({ stage: "verify-cache", status: "complete", source: "local" });
+      return { executablePath, updated: false, source: "verified-cache" };
     }
+    let lastError;
+    for (const source of ["cloudbase", "github"]) {
+      let stage = "manifest";
+      onStage({ stage, source, status: "running" });
+      try {
+        let asset;
+        if (source === "cloudbase") {
+          const manifest = await this.getAuthorizedLocalComponentManifest("douyin");
+          if (!manifest) throw resolverError("MANIFEST_UNAVAILABLE", stage, source);
+          const item = manifest.assets.find((item2) => item2.id === "resolver");
+          if (!item) throw resolverError("INVALID_MANIFEST", stage, source);
+          asset = { ...item, url: item.downloadUrl, version: manifest.version, source };
+        } else {
+          const { manifest } = await this.getOfficialLocalDouyinResolverManifest();
+          asset = { ...selectLocalDouyinResolverAsset(manifest, platform, arch), version: manifest.version, source };
+          if (!asset.url || !asset.sha256) throw resolverError("INVALID_MANIFEST", stage, source);
+        }
+        let bytes;
+        if (fs.existsSync(executablePath)) {
+          const stat = fs.statSync(executablePath);
+          if (stat.isFile() && stat.size > 0 && stat.size <= MAX_RESOLVER_BYTES) {
+            const cached = fs.readFileSync(executablePath);
+            if (calculateFileSha256(cached).toLowerCase() === asset.sha256.toLowerCase()) bytes = cached;
+          }
+        }
+        const reused = Boolean(bytes);
+        stage = "download";
+        if (!bytes) bytes = await this.downloadLocalDouyinResolverAsset(asset, onStage);
+        stage = "install";
+        commitVerifiedResolver(executablePath, bytes, asset, platform, arch);
+        onStage({ stage: "finished", source, status: "complete" });
+        return { executablePath, updated: !reused, source: reused ? "verified-cache" : source };
+      } catch (error) {
+        const failure = resolverError(error.code, error.stage || stage, source);
+        onStage({ stage: failure.stage, source, status: "failed", code: failure.code });
+        if (isResolverAuthorizationError(error) || ["HASH_MISMATCH", "INVALID_SIZE"].includes(error.code)) throw error;
+        lastError = failure;
+      }
+    }
+    throw lastError;
   }
   async resolveDouyinMediaWithLocalResolver(pageUrl) {
     const result = { mediaUrls: [], used: false, loginRequired: false, notInstalled: false, error: null };
@@ -31976,7 +32274,7 @@ ${finalized.markdown}
           });
         }
         if (isVideoIntent && isDouyinRecord) {
-          const noMediaError = douyinChallengeDetected || douyinLocalResolverLoginRequired ? hasPluginDouyinLogin ? "抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。" : "抖音要求安全验证，请在插件设置中登录抖音后再同步。" : douyinLocalResolverNotInstalled && hasPluginDouyinLogin ? "插件内抖音已登录，但仍未获取到媒体地址。可在插件设置的“登录抖音转写”中按需安装“抖音增强解析组件”后重试。" : "未能从抖音作品页获取到可用的音频或视频地址";
+          const noMediaError = douyinChallengeDetected || douyinLocalResolverLoginRequired ? hasPluginDouyinLogin ? "抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。" : "抖音要求安全验证，请在插件设置中登录抖音后再同步。" : douyinLocalResolverNotInstalled && hasPluginDouyinLogin ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : "未能从抖音作品页获取到可用的音频或视频地址";
           return {
             ...record,
             metadata: {
@@ -33773,7 +34071,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；本地组件缺失或损坏时会提示一次，兼容可用时保持静默。${proStatusText}`,
       cls: "wechat-inbox-sync-muted"
     });
-    new Setting(proPanel).setName("本地转写组件").setDesc(this.plugin.settings.pendingRedeemCode ? `兑换码：${this.plugin.settings.pendingRedeemCode}` : "点击后会先刷新 Pro 权益，再检查本地组件；缺失则安装，损坏或不兼容则修复，有新版时提示更新。").addButton((button) => button.setButtonText("安装/修复/更新").setCta().onClick(async () => {
+    new Setting(proPanel).setName("本地转写组件").setDesc(this.plugin.settings.pendingRedeemCode ? `兑换码：${this.plugin.settings.pendingRedeemCode}` : "点击后会先刷新 Pro 权益，再检查本地组件；缺失则安装，损坏或不兼容则修复，有新版时提示更新。").addButton((button) => button.setButtonText("安装／更新本地组件").setCta().onClick(async () => {
       try {
         const status2 = await this.plugin.refreshProAndMaybePromptLocalComponentInstall({
           reason: "manual-refresh",
@@ -33856,7 +34154,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     const proComponentReadiness = this.plugin.getLocalTranscriptionComponentReadiness();
     const proComponentStatusText = this.plugin.localComponentInstallPromise ? "准备中" : proComponentReadiness.ready ? "已安装" : `需修复：${proComponentReadiness.missingComponents.join("、")}`;
     proPanel.createDiv({
-      text: `本地转写组件：${proComponentStatusText}；当前系统：${proComponentReadiness.platformName || "自动识别"}`,
+      text: `本地组件（ASR、OCR、抖音解析）：${proComponentStatusText}；当前系统：${proComponentReadiness.platformName || "自动识别"}`,
       cls: "wechat-inbox-sync-muted"
     });
     const extraBindingsPanel = containerEl.createEl("details", { cls: "wechat-inbox-sync-advanced-panel" });
@@ -33908,11 +34206,6 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     this.plugin.checkDouyinLogin().then((loggedIn) => {
       douyinLoginSetting.setDesc(loggedIn ? "已登录：同步抖音链接时会自动复用插件内会话。" : "未登录或登录已过期：请打开抖音登录后再同步。");
     });
-    new Setting(douyinPanel).setName("抖音增强解析组件（可选）").setDesc("仅当插件内已登录抖音、但仍无法转写时按需安装。不会自动下载、不会后台检查或更新。").addButton((button) => button.setButtonText("安装/更新组件").onClick(async () => {
-      button.setButtonText("处理中…").setDisabled(true);
-      await this.plugin.installOrUpdateLocalDouyinResolver();
-      this.display();
-    }));
     const socialPanel = containerEl.createEl("details", { cls: "wechat-inbox-sync-advanced-panel" });
     socialPanel.createEl("summary", { text: "登录小红书评论区" });
     socialPanel.createDiv({
