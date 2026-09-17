@@ -69,6 +69,10 @@ Open the plugin settings and fill in:
 
 ### Local ASR helper
 
+插件设置中的 **安装／更新本地组件** 会统一检查 ASR、图片 OCR 和抖音解析组件，补齐缺失或损坏的部分。已就绪的组件会保留；一项失败不会丢弃其他已完成项，再次操作补齐未完成项。三项均已就绪时，手动操作也会检查抖音解析器更新，相同文件不会重复下载。
+
+三项组件优先使用腾讯云授权下载。抖音解析器在网络不可用时尝试官方备用源；Windows ASR 无法取得可信下载清单时会保留进度并提示稍后重试。权限不足或下载次数受限会提示真实原因。抖音解析器会校验文件 SHA-256，应用内证书链失败时尝试系统 HTTPS 下载，并继续验证证书与文件。安装失败后可复制诊断，查看来源、阶段及错误码。
+
 If you do not want to use a cloud speech API, use the local helper:
 
 - Windows: `local-asr/install-local-asr.ps1`

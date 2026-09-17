@@ -23,6 +23,8 @@ const pluginMainPath = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.join(__dirname, '..', 'obsidian-plugin', 'wechat-inbox-sync', 'main.js');
 const PluginClass = require(pluginMainPath);
+// Existing fixtures assume the optional resolver is already verified; dedicated unified tests cover it.
+PluginClass.prototype.getLocalDouyinResolverInstallStatus = () => ({ ready: true });
 Module._load = originalLoad;
 const helpers = PluginClass.__test;
 
@@ -419,7 +421,7 @@ function verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested() {
   assert.deepStrictEqual(manualPlan.updateComponents, ['音视频转写']);
 }
 
-async function verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr, requireOcr }) {
+async function verifyFirstUseRepairsAllMissingComponents({ requireAsr, requireOcr }) {
   const plugin = createPlugin();
   let asrReady = false;
   let ocrReady = false;
@@ -450,9 +452,9 @@ async function verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr, requir
 
   assert.strictEqual(prompts.length, 1);
   assert.strictEqual(prompts[0].reason, 'first-use');
-  assert.strictEqual(prompts[0].readiness.missingComponents.length, 1);
-  assert.strictEqual(asrInstalls, requireAsr ? 1 : 0);
-  assert.strictEqual(ocrInstalls, requireOcr ? 1 : 0);
+  assert.strictEqual(prompts[0].readiness.missingComponents.length, 2);
+  assert.strictEqual(asrInstalls, 1);
+  assert.strictEqual(ocrInstalls, 1);
 }
 
 async function verifyImplicitInstallIsNoOp() {
@@ -476,8 +478,8 @@ async function verifyImplicitInstallIsNoOp() {
   await verifyManualRefreshRequiresReloadWhenPluginFilesDoNotMatch();
   await verifyManualRefreshIgnoresPromptSnoozeAndClearsItAfterInstall();
   verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested();
-  await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: true, requireOcr: false });
-  await verifyFirstUseInstallsOnlyRequestedComponent({ requireAsr: false, requireOcr: true });
+  await verifyFirstUseRepairsAllMissingComponents({ requireAsr: true, requireOcr: false });
+  await verifyFirstUseRepairsAllMissingComponents({ requireAsr: false, requireOcr: true });
   await verifyImplicitInstallIsNoOp();
   process.stdout.write('plugin local component on-demand tests passed\n');
 })().catch((error) => {

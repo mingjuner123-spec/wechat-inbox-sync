@@ -382,6 +382,8 @@ Module._load = function mockObsidian(request, parent, isMain) {
 };
 
 const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
+// Existing fixtures assume the optional resolver is already verified; dedicated unified tests cover it.
+PluginClass.prototype.getLocalDouyinResolverInstallStatus = () => ({ ready: true });
 Module._load = originalLoad;
 
 const helpers = PluginClass.__test;
@@ -2928,12 +2930,12 @@ assert.strictEqual(pluginMainSource.includes("text: '音视频转写组件安装
 assert.strictEqual(pluginMainSource.includes("text: '本地转写组件'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('手动安装 / 修复本地组件')"), false);
 assert.ok(pluginMainSource.includes(".setName('本地转写组件')"));
-assert.ok(pluginMainSource.includes(".setButtonText('安装/修复/更新')"));
+assert.ok(pluginMainSource.includes(".setButtonText('安装／更新本地组件')"));
 assert.strictEqual(pluginMainSource.includes('const localAsrPanel = containerEl.createEl'), false);
 assert.strictEqual(pluginMainSource.includes('runLocalAsrButtonTask(button'), false);
 assert.strictEqual(pluginMainSource.includes('button.setButtonText(runningText)'), false);
 assert.strictEqual(pluginMainSource.includes('button.setButtonText(originalText)'), false);
-assert.ok(pluginMainSource.includes('本地转写组件：'));
+assert.ok(pluginMainSource.includes('本地组件（ASR、OCR、抖音解析）：'));
 assert.ok(pluginMainSource.includes('wechat-inbox-sync-section-spacer'));
 assert.ok(pluginMainSource.indexOf("text: '使用教程'") < pluginMainSource.indexOf("text: '绑定小程序'"));
 assert.ok(pluginMainSource.indexOf("text: '绑定小程序'") < pluginMainSource.indexOf("text: '登录设置'"));
@@ -2982,7 +2984,7 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.formatLocalComponentInstallFailureReason('Local ASR installer download returned outdated or invalid content'),
-  '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装/修复/更新”重试。若仍失败，请复制诊断信息联系开发者。',
+  '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍失败，请复制诊断信息联系开发者。',
 );
 assert.ok(pluginMainSource.includes('/transcriptions/cloud'));
 assert.ok(pluginMainSource.includes('runCloudFallbackTranscription'));
@@ -12947,7 +12949,7 @@ async function runLocalTranscriptionEntitlementTests() {
   });
   ocrOnlyPlugin.installLocalAsr = async () => {
     ocrOnlyAsrCalls += 1;
-    throw new Error('OCR-only install should not install ASR');
+    // One accepted installation also prepares the missing ASR component.
   };
   ocrOnlyPlugin.installLocalOcr = async () => {
     ocrOnlyOcrCalls += 1;
@@ -12958,7 +12960,7 @@ async function runLocalTranscriptionEntitlementTests() {
     requireAsr: false,
     requireOcr: true,
   });
-  assert.strictEqual(ocrOnlyAsrCalls, 0);
+  assert.strictEqual(ocrOnlyAsrCalls, 1);
   assert.strictEqual(ocrOnlyOcrCalls, 1);
 
   const installAllPlugin = new PluginClass();
@@ -13105,7 +13107,7 @@ async function runLocalTranscriptionEntitlementTests() {
       reason: 'first-use',
       ...requested,
     });
-    assert.strictEqual(promptReadiness.missingComponents.length, 1);
+    assert.strictEqual(promptReadiness.missingComponents.length, 2);
   }
 
   const freeSetupPlugin = new PluginClass();
