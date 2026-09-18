@@ -27,10 +27,15 @@ function fixture(platform) {
   p.getLocalDouyinResolverRoot = () => path.join(root, platform);
   p.recoverExistingLocalAsrInstall = async () => ({ status: 'none' });
   p.showLocalComponentInstallFailure = async () => {};
-  const state = { bytes: Buffer.from('resolver v1'), requests: 0, downloads: 0, prompts: 0, accepted: true };
+  const state = { bytes: Buffer.from('resolver v1'), requests: 0, versionChecks: 0, downloads: 0, prompts: 0, accepted: true };
   const asset = () => ({ id: 'resolver', downloadUrl: 'https://example.invalid/resolver',
     sha256: crypto.createHash('sha256').update(state.bytes).digest('hex'), byteLength: state.bytes.length });
-  p.getAuthorizedLocalComponentManifest = async () => {
+  p.getAuthorizedLocalComponentManifest = async (component, options = {}) => {
+    if (options.metadataOnly) {
+      state.versionChecks++;
+      const { downloadUrl, ...metadata } = asset();
+      return { version: 'fixture', assets: [metadata] };
+    }
     state.requests++;
     return { version: 'fixture', expiresAt: new Date(Date.now() + 3600000).toISOString(), assets: [asset()] };
   };
@@ -50,12 +55,14 @@ async function run() {
     const installed = await p.ensureLocalDouyinResolver();
     const originalBytes = fs.readFileSync(installed.executablePath);
     state.downloads = 0;
+    state.requests = 0;
     for (let i = 0; i < 2; i++) {
       const status = await p.refreshProAndMaybePromptLocalComponentInstall({ reason: 'manual-refresh', force: true });
       assert.equal(status.localComponentsUpToDate, true);
       assert.equal(status.localComponentRefreshPlan.hasRequiredChanges, false);
       assert.equal(state.prompts, 0);
       assert.equal(state.downloads, 0);
+      assert.equal(state.requests, 0);
       checks++;
     }
 
@@ -70,7 +77,7 @@ async function run() {
     assert.deepEqual(fs.readFileSync(installed.executablePath), originalBytes);
     checks++;
 
-    // Accepting reuses the checked manifest instead of spending a second request.
+    // Version checks have no grant; accepting requests exactly one download grant.
     state.accepted = true;
     state.requests = 0;
     status = await p.refreshProAndMaybePromptLocalComponentInstall({ reason: 'manual-refresh', force: true });
