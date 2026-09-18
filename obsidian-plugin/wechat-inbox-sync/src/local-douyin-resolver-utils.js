@@ -39,23 +39,32 @@ function getVerifiedResolverStatus(executablePath, platform, arch) {
 // Uses the OS HTTPS trust store; certificate verification is never disabled.
 function downloadResolverViaSystem(url) {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     if (!/^https:\/\//.test(url)) return reject(resolverError('HTTPS_REQUIRED', 'download', 'system'));
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-resolver-'));
     const output = path.join(directory, 'download.bin');
     const command = process.platform === 'win32'
       ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe') : '/usr/bin/curl';
     execFile(command, ['--fail', '--silent', '--show-error', '--location', '--max-redirs', '5',
-      '--proto', '=https', '--proto-redir', '=https', '--connect-timeout', '20', '--max-time', '120',
+      '--proto', '=https', '--proto-redir', '=https', '--connect-timeout', '20', '--max-time', '600',
+      '--speed-limit', '1024', '--speed-time', '60',
       '--max-filesize', String(MAX_RESOLVER_BYTES), '--write-out', '%{http_code}', '--output', output, url],
-    { windowsHide: true, timeout: 125000, maxBuffer: 16384 }, (error, stdout) => {
+    { windowsHide: true, timeout: 605000, maxBuffer: 16384 }, (error, stdout) => {
+      const status = Number(String(stdout || '').trim());
       try {
-        const status = Number(String(stdout || '').trim());
         if ([401, 403, 429].includes(status)) throw Object.assign(resolverError('HTTP_' + status, 'download', 'system', url), { status });
-        if (error) throw resolverError(Number(error.code) === 60 ? 'TLS_CERTIFICATE_FAILED' : 'SYSTEM_DOWNLOAD_FAILED', 'download', 'system', url);
+        if (error) {
+          const code = ({ 6: 'DNS_LOOKUP_FAILED', 7: 'CONNECTION_FAILED', 18: 'DOWNLOAD_INCOMPLETE', 28: 'DOWNLOAD_TIMEOUT', 35: 'TLS_CONNECTION_FAILED', 60: 'TLS_CERTIFICATE_FAILED' })[Number(error.code)] || 'SYSTEM_DOWNLOAD_FAILED';
+          throw Object.assign(resolverError(code, 'download', 'system', url), { curlExitCode: Number.isInteger(error.code) ? error.code : undefined });
+        }
         const stat = fs.statSync(output);
         if (stat.size <= 0 || stat.size > MAX_RESOLVER_BYTES) throw resolverError('INVALID_SIZE', 'download', 'system', url);
         resolve(fs.readFileSync(output));
-      } catch (failure) { reject(failure); }
+      } catch (failure) {
+        let receivedBytes = 0;
+        try { receivedBytes = fs.statSync(output).size; } catch {}
+        reject(Object.assign(failure, { receivedBytes, elapsedMs: Date.now() - startedAt, httpStatus: Number.isInteger(status) ? status : 0 }));
+      }
       finally {
         try { fs.unlinkSync(output); } catch {}
         try { fs.rmdirSync(directory); } catch {}
@@ -78,8 +87,12 @@ async function downloadVerifiedResolverAsset(asset, dependencies) {
       if (actual !== asset.sha256.toLowerCase()) throw resolverError('HASH_MISMATCH', 'verify', source, asset.url);
       return bytes;
     } catch (error) {
+      const detail = {};
+      for (const key of ['receivedBytes', 'totalBytes', 'elapsedMs', 'curlExitCode', 'httpStatus']) {
+        if (Number.isSafeInteger(error[key]) && error[key] >= 0) detail[key] = error[key];
+      }
       onStage({ stage: error.stage || 'download', source, transport, status: 'failed',
-        host: new URL(asset.url).hostname, code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'DOWNLOAD_FAILED' });
+        host: new URL(asset.url).hostname, code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'DOWNLOAD_FAILED', ...detail });
       if (isResolverAuthorizationError(error) || transport === 'system' || ['HASH_MISMATCH', 'INVALID_SIZE'].includes(error.code)) throw error;
     }
   }

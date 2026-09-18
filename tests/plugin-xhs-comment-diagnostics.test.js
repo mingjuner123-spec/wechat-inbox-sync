@@ -53,7 +53,7 @@ async function capture({pro = true, login = true, enabled = true, error, comment
   assert.ok(record.metadata.markdown.includes(existing ? '已保存正文' : '公开正文'));
   let copied = '';
   plugin.copyDiagnosticText = async text => { copied = text; return true; };
-  await plugin.copySyncDiagnosticText();
+  await plugin.copySyncDiagnosticText({ detailed: true });
   const diagnostic = record.metadata.xiaohongshuCommentResult;
   assert.ok(diagnostic, 'saved body must carry its own comment result: '+JSON.stringify(record.metadata));
   assert.ok(copied.includes(JSON.stringify(diagnostic)), 'actual copy entry must include even successful-body diagnostics');
@@ -624,11 +624,11 @@ async function run() {
   const restarted = pluginFixture();
   restarted.showSyncProgress({stage: 'empty'});
   assert.ok(fs.readFileSync(logPath, 'utf8').includes('TIMEOUT'), 'empty auto-sync after restart must preserve previous diagnostics');
-  assert.ok(restarted.getSyncDiagnosticText().includes('TIMEOUT'));
-  assert.ok(restarted.getSyncDiagnosticText().includes('network_root_idle'));
-  assert.ok(restarted.getSyncDiagnosticText().includes('TARGET_IDENTITY_MISSING'));
-  assert.ok(restarted.getSyncDiagnosticText().includes('TARGET_IDENTITY_MISMATCH'));
-  assert.ok(restarted.getSyncDiagnosticText().includes('page_script_failed'));
+  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('TIMEOUT'));
+  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('network_root_idle'));
+  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('TARGET_IDENTITY_MISSING'));
+  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('TARGET_IDENTITY_MISMATCH'));
+  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('page_script_failed'));
   for (let attempt = 0; attempt < 6; attempt++) {
     await restarted.hydrateWebpageMarkdown({type: 'webpage', content: url, metadata: {url, markdown: '已保存正文'}}, '', '', '重复');
   }

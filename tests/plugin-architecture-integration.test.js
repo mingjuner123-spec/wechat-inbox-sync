@@ -18,6 +18,7 @@ const expectedModules = [
   'ai-metadata-utils',
   'asr-recovery-utils',
   'cloud-transcription-response-utils',
+  'component-diagnostic-summary',
   'date-utils',
   'diagnostic-redaction-utils',
   'document-text-extraction-utils',

@@ -2953,7 +2953,8 @@ assert.ok(pluginMainSource.includes("setButtonText('复制诊断信息')"));
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制同步诊断')"), false);
 assert.ok(pluginMainSource.includes('同步/安装失败诊断'));
 assert.strictEqual(pluginMainSource.includes(".setName('同步失败诊断')"), false);
-assert.ok(pluginMainSource.includes('发给开发者张张（微信：heyhmjx）'));
+assert.ok(pluginMainSource.includes('默认复制精简诊断，仅包含有记录的相关功能'));
+assert.ok(pluginMainSource.includes("setButtonText('复制详细诊断')"));
 assert.ok(pluginMainSource.includes('本地转写组件安装失败'));
 assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制诊断信息」'));
 assert.strictEqual(
@@ -14167,7 +14168,7 @@ async function runDiagnosticFailureLogFilteringTests() {
       missingReasons: ['Python OCR 运行环境未找到'],
     });
 
-    const diagnostic = plugin.getSyncDiagnosticText();
+    const diagnostic = plugin.getSyncDiagnosticText({ detailed: true });
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
     assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion} / clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1`));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));

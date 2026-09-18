@@ -1012,6 +1012,40 @@ ${safeTail}`;
   }
 });
 
+// src/component-diagnostic-summary.js
+var require_component_diagnostic_summary = __commonJS({
+  "src/component-diagnostic-summary.js"(exports2, module2) {
+    "use strict";
+    function summarizeResolverAttempts2(entries = []) {
+      if (!entries.length) return "";
+      const latest = entries.at(-1);
+      const selected = /* @__PURE__ */ new Map();
+      for (const entry of entries) {
+        if (entry.status === "failed" && entry.transport) selected.set(`${entry.source}/${entry.transport}`, entry);
+      }
+      const format = /* @__PURE__ */ __name((entry) => [
+        entry.time,
+        entry.source,
+        entry.transport,
+        entry.stage,
+        entry.code || entry.status,
+        Number.isSafeInteger(entry.receivedBytes) ? `已收 ${entry.receivedBytes} 字节` : "",
+        entry.totalBytes > 0 ? `共 ${entry.totalBytes} 字节` : "",
+        Number.isSafeInteger(entry.elapsedMs) ? `耗时 ${entry.elapsedMs} ms` : "",
+        Number.isSafeInteger(entry.curlExitCode) ? `curl=${entry.curlExitCode}` : "",
+        entry.httpStatus > 0 ? `HTTP=${entry.httpStatus}` : ""
+      ].filter(Boolean).join(" | "), "format");
+      return ["最近结果：" + format(latest), ...[...selected.values()].slice(-4).map((e) => (e.attemptId === latest.attemptId ? "本次下载：" : "之前下载失败（非本次）：") + format(e))].join("\n");
+    }
+    __name(summarizeResolverAttempts2, "summarizeResolverAttempts");
+    function hasFeishuActivity2(value = {}) {
+      return ["detected", "shown", "failed", "pending", "active"].some((key) => Number(value[key]) > 0) || Boolean(value.lastErrorCode);
+    }
+    __name(hasFeishuActivity2, "hasFeishuActivity");
+    module2.exports = { summarizeResolverAttempts: summarizeResolverAttempts2, hasFeishuActivity: hasFeishuActivity2 };
+  }
+});
+
 // src/xiaohongshu-diagnostic-utils.js
 var require_xiaohongshu_diagnostic_utils = __commonJS({
   "src/xiaohongshu-diagnostic-utils.js"(exports2, module2) {
@@ -10181,6 +10215,7 @@ var require_local_douyin_resolver_utils = __commonJS({
     __name(getVerifiedResolverStatus2, "getVerifiedResolverStatus");
     function downloadResolverViaSystem2(url) {
       return new Promise((resolve, reject) => {
+        const startedAt = Date.now();
         if (!/^https:\/\//.test(url)) return reject(resolverError2("HTTPS_REQUIRED", "download", "system"));
         const directory = fs2.mkdtempSync(path2.join(os2.tmpdir(), "wechat-resolver-"));
         const output = path2.join(directory, "download.bin");
@@ -10201,7 +10236,11 @@ var require_local_douyin_resolver_utils = __commonJS({
             "--connect-timeout",
             "20",
             "--max-time",
-            "120",
+            "600",
+            "--speed-limit",
+            "1024",
+            "--speed-time",
+            "60",
             "--max-filesize",
             String(MAX_RESOLVER_BYTES2),
             "--write-out",
@@ -10210,17 +10249,25 @@ var require_local_douyin_resolver_utils = __commonJS({
             output,
             url
           ],
-          { windowsHide: true, timeout: 125e3, maxBuffer: 16384 },
+          { windowsHide: true, timeout: 605e3, maxBuffer: 16384 },
           (error, stdout) => {
+            const status = Number(String(stdout || "").trim());
             try {
-              const status = Number(String(stdout || "").trim());
               if ([401, 403, 429].includes(status)) throw Object.assign(resolverError2("HTTP_" + status, "download", "system", url), { status });
-              if (error) throw resolverError2(Number(error.code) === 60 ? "TLS_CERTIFICATE_FAILED" : "SYSTEM_DOWNLOAD_FAILED", "download", "system", url);
+              if (error) {
+                const code = { 6: "DNS_LOOKUP_FAILED", 7: "CONNECTION_FAILED", 18: "DOWNLOAD_INCOMPLETE", 28: "DOWNLOAD_TIMEOUT", 35: "TLS_CONNECTION_FAILED", 60: "TLS_CERTIFICATE_FAILED" }[Number(error.code)] || "SYSTEM_DOWNLOAD_FAILED";
+                throw Object.assign(resolverError2(code, "download", "system", url), { curlExitCode: Number.isInteger(error.code) ? error.code : void 0 });
+              }
               const stat = fs2.statSync(output);
               if (stat.size <= 0 || stat.size > MAX_RESOLVER_BYTES2) throw resolverError2("INVALID_SIZE", "download", "system", url);
               resolve(fs2.readFileSync(output));
             } catch (failure) {
-              reject(failure);
+              let receivedBytes = 0;
+              try {
+                receivedBytes = fs2.statSync(output).size;
+              } catch {
+              }
+              reject(Object.assign(failure, { receivedBytes, elapsedMs: Date.now() - startedAt, httpStatus: Number.isInteger(status) ? status : 0 }));
             } finally {
               try {
                 fs2.unlinkSync(output);
@@ -10251,13 +10298,18 @@ var require_local_douyin_resolver_utils = __commonJS({
           if (actual !== asset.sha256.toLowerCase()) throw resolverError2("HASH_MISMATCH", "verify", source, asset.url);
           return bytes;
         } catch (error) {
+          const detail = {};
+          for (const key of ["receivedBytes", "totalBytes", "elapsedMs", "curlExitCode", "httpStatus"]) {
+            if (Number.isSafeInteger(error[key]) && error[key] >= 0) detail[key] = error[key];
+          }
           onStage({
             stage: error.stage || "download",
             source,
             transport,
             status: "failed",
             host: new URL(asset.url).hostname,
-            code: /^[A-Z0-9_]{1,80}$/.test(error.code || "") ? error.code : "DOWNLOAD_FAILED"
+            code: /^[A-Z0-9_]{1,80}$/.test(error.code || "") ? error.code : "DOWNLOAD_FAILED",
+            ...detail
           });
           if (isResolverAuthorizationError2(error) || transport === "system" || ["HASH_MISMATCH", "INVALID_SIZE"].includes(error.code)) throw error;
         }
@@ -11576,6 +11628,7 @@ var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
+var { summarizeResolverAttempts, hasFeishuActivity } = require_component_diagnostic_summary();
 var xhsDiagnostic = require_xiaohongshu_diagnostic_utils();
 var { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require_wechat_request_gate();
 var sharedWechatArticleGate = createWechatArticleRequestGate();
@@ -11826,7 +11879,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.158";
+var PLUGIN_RUNTIME_VERSION = "1.3.159";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -13548,8 +13601,11 @@ async function fetchLocalDouyinResolverManifest() {
   }
 }
 __name(fetchLocalDouyinResolverManifest, "fetchLocalDouyinResolverManifest");
-function downloadBinaryViaNode(url, redirectCount = 0) {
+function downloadBinaryViaNode(url, redirectCount = 0, startedAt = Date.now()) {
   return new Promise((resolve, reject) => {
+    let size = 0;
+    let totalBytes = 0;
+    const fail = /* @__PURE__ */ __name((error) => reject(Object.assign(error, { receivedBytes: size, totalBytes, elapsedMs: Date.now() - startedAt })), "fail");
     if (redirectCount > 5 || !/^https:\/\//.test(String(url))) {
       reject(resolverError("INVALID_REDIRECT", "download", "node"));
       return;
@@ -13570,18 +13626,18 @@ function downloadBinaryViaNode(url, redirectCount = 0) {
       }
     }, (response) => {
       const chunks = [];
-      let size = 0;
-      response.on("error", reject);
-      response.on("aborted", () => reject(new Error("download aborted")));
+      totalBytes = Number(response.headers["content-length"]) || 0;
+      response.on("error", fail);
+      response.on("aborted", () => fail(resolverError("DOWNLOAD_ABORTED", "download", "app", url)));
       response.on("data", (chunk) => {
         size += chunk.length;
-        if (size > MAX_RESOLVER_BYTES) request.destroy(new Error("download too large"));
+        if (size > MAX_RESOLVER_BYTES) request.destroy(resolverError("INVALID_SIZE", "download", "app", url));
         else chunks.push(chunk);
       });
       response.on("end", () => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
           try {
-            downloadBinaryViaNode(new URL(response.headers.location, url).toString(), redirectCount + 1).then(resolve, reject);
+            downloadBinaryViaNode(new URL(response.headers.location, url).toString(), redirectCount + 1, startedAt).then(resolve, reject);
           } catch (error) {
             reject(error);
           }
@@ -13595,10 +13651,10 @@ function downloadBinaryViaNode(url, redirectCount = 0) {
         resolve(bytes);
       });
     });
-    const deadline = setTimeout(() => request.destroy(new Error("resolver download timeout")), 6e4);
+    const deadline = setTimeout(() => request.destroy(resolverError("DOWNLOAD_TIMEOUT", "download", "app", url)), Math.max(1, 6e5 - (Date.now() - startedAt)));
     request.on("close", () => clearTimeout(deadline));
-    request.setTimeout(3e4, () => request.destroy(new Error("resolver download idle timeout")));
-    request.on("error", reject);
+    request.setTimeout(6e4, () => request.destroy(resolverError("DOWNLOAD_STALLED", "download", "app", url)));
+    request.on("error", fail);
     request.end();
   });
 }
@@ -13686,6 +13742,18 @@ function isAuthorizedLocalComponentDownloadUrl(downloadUrl, sha256, fileName) {
   }
 }
 __name(isAuthorizedLocalComponentDownloadUrl, "isAuthorizedLocalComponentDownloadUrl");
+function normalizeLocalComponentVersionResponse(payload, expected = {}) {
+  const data = payload && payload.success === true && payload.data;
+  if (!data || data.metadataOnly !== true || data.schemaVersion !== 1 || data.component !== expected.component || data.platform !== expected.platform || data.arch !== expected.arch || typeof data.version !== "string" || !data.version || !Array.isArray(data.assets) || data.assets.length !== 1) {
+    throw resolverError("INVALID_MANIFEST", "check-update", "cloudbase");
+  }
+  const asset = data.assets[0];
+  if (asset.id !== "resolver" || !/^[a-f0-9]{64}$/i.test(asset.sha256 || "") || !Number.isSafeInteger(asset.byteLength) || asset.byteLength <= 0 || asset.byteLength > MAX_RESOLVER_BYTES) {
+    throw resolverError("INVALID_MANIFEST", "check-update", "cloudbase");
+  }
+  return { version: data.version, assets: [{ id: asset.id, sha256: asset.sha256.toLowerCase(), byteLength: asset.byteLength }] };
+}
+__name(normalizeLocalComponentVersionResponse, "normalizeLocalComponentVersionResponse");
 function normalizeAuthorizedLocalComponentManifest(payload, expected = {}, now = Date.now()) {
   const manifest = payload && payload.data ? payload.data : payload;
   const component = String(manifest && manifest.component || "").trim().toLowerCase();
@@ -27244,7 +27312,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     return __dirname;
   }
-  async getAuthorizedLocalComponentManifest(component) {
+  async getAuthorizedLocalComponentManifest(component, options = {}) {
     const normalizedComponent = String(component || "").trim().toLowerCase();
     if (!Object.prototype.hasOwnProperty.call(LOCAL_COMPONENT_ASSET_ENV_KEYS, normalizedComponent)) {
       throw new Error("不支持的本地组件下载请求");
@@ -27261,12 +27329,17 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const payload = await this.requestJson(
-          `${LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}`,
+          `${options.metadataOnly ? "/local-components/version" : LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}`,
           "GET",
           {},
           binding,
           { noCache: true }
         );
+        if (options.metadataOnly) return normalizeLocalComponentVersionResponse(payload, {
+          component: normalizedComponent,
+          platform,
+          arch
+        });
         const manifest = normalizeAuthorizedLocalComponentManifest(payload, {
           component: normalizedComponent,
           platform,
@@ -27287,7 +27360,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         return manifest;
       } catch (error) {
         if (error && error.code === "COMPONENT_DOWNLOAD_RATE_LIMITED") {
-          throw Object.assign(new Error("今天的组件安全下载次数已达到上限。请不要反复点击安装；如确需修复，请明天再试或联系支持。"), { code: "COMPONENT_DOWNLOAD_RATE_LIMITED" });
+          throw Object.assign(new Error("今日新下载授权已达到 10 次上限，北京时间次日 00:00 恢复；已有可用组件仍可使用。"), { code: "COMPONENT_DOWNLOAD_RATE_LIMITED" });
         }
         if (isResolverAuthorizationError(error)) {
           throw error;
@@ -27729,7 +27802,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     return this.lastXiaohongshuCommentResults;
   }
-  getSyncDiagnosticText() {
+  getSyncDiagnosticText(options = {}) {
+    const detailed = options.detailed === true;
     const platform = this.getConfiguredLocalAsrPlatform();
     const runtimeIdentity = getPluginRuntimeIdentity(
       this.manifest && this.manifest.version ? this.manifest.version : ""
@@ -27754,14 +27828,14 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const appendFailedLog = /* @__PURE__ */ __name((lines2, title, text, detector = hasFailureSignal) => {
       const source = String(text || "").trim();
       if (!source || !detector(source)) return false;
-      lines2.push(title, tailLog(asrRecovery.diagnosticRedact(source, this.settings)));
+      lines2.push(title, tailLog(asrRecovery.diagnosticRedact(source, this.settings), detailed ? 50 : 12));
       return true;
     }, "appendFailedLog");
     const formatMissingReasons = /* @__PURE__ */ __name((status) => status && Array.isArray(status.missingReasons) && status.missingReasons.length ? status.missingReasons.join("；") : "无", "formatMissingReasons");
     const lines = [
       "WeChat Inbox Sync 同步/安装失败诊断",
       `插件版本：${runtimeIdentity.manifestVersion}`,
-      `运行 Bundle：${runtimeIdentity.runtimeVersion} / ${runtimeIdentity.buildMarker}`,
+      `运行 Bundle：${runtimeIdentity.runtimeVersion}${detailed ? " / " + runtimeIdentity.buildMarker : ""}`,
       `版本身份一致：${runtimeIdentity.matchesManifest ? "是" : "否（请完全退出并重新打开 Obsidian）"}`,
       `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
       `手动选择系统：${this.settings.localAsrPlatform || "auto"}`,
@@ -27781,22 +27855,23 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       `OCR 安装日志：${getLocalAsrInstallLogPath(ocrRoot)}`,
       `OCR 缺失项：${formatMissingReasons(ocrStatus)}`
     ];
-    lines.push("", "最近 ASR 下载诊断（请核对 time 是否属于本次安装）：", JSON.stringify(readLocalAsrDownloadDiagnostic(asrRoot), null, 2));
-    lines.push("", "最近抖音解析组件安装诊断：", JSON.stringify(this.getLocalDouyinResolverInstallDiagnostic(), null, 2));
+    const asrDownload = readLocalAsrDownloadDiagnostic(asrRoot);
+    if (detailed || [...asrDownload.source || [], ...asrDownload.downloads || []].some((entry) => entry.status === "failed")) {
+      lines.push("", "最近 ASR 下载诊断（请核对 time 是否属于本次安装）：", JSON.stringify(asrDownload, null, detailed ? 2 : 0));
+    }
+    const resolverAttempts = this.getLocalDouyinResolverInstallDiagnostic();
+    if (resolverAttempts.length) lines.push("", "最近抖音解析组件安装诊断：", detailed ? JSON.stringify(resolverAttempts, null, 2) : summarizeResolverAttempts(resolverAttempts));
     const douyinAttempts = douyinBrowserSafety.readAttempts(asrRoot);
-    lines.push("", "最近抖音隐藏网页诊断（最多 5 次；running 表示未记录结束，可能仍在运行或被中断）：", douyinAttempts.length ? JSON.stringify(douyinAttempts, null, 2) : "暂无抖音隐藏网页尝试记录");
+    if (douyinAttempts.length) lines.push("", "最近抖音隐藏网页诊断：", JSON.stringify(detailed ? douyinAttempts : douyinAttempts.slice(-1), null, detailed ? 2 : 0));
     const taskResults = this.getRecentXiaohongshuBrowserResults().map((item) => xhsDiagnostic.sanitize(item, this.settings));
-    lines.push("", "最近小红书任务诊断（最多 5 次；每项 attemptId 独立，不代表其他条目）：");
-    lines.push(taskResults.length ? JSON.stringify(taskResults, null, 2) : "暂无新版任务诊断；历史日志无法补回原始异常。");
+    if (taskResults.length) lines.push("", "最近小红书任务诊断：", JSON.stringify(detailed ? taskResults : taskResults.slice(-1), null, detailed ? 2 : 0));
     const commentResults = this.getRecentXiaohongshuCommentResults();
-    lines.push("", "最近小红书评论诊断（最多 5 次，按时间排列）：");
     if (Array.isArray(commentResults) && commentResults.length) {
-      lines.push(...commentResults.slice(-5).map((result) => formatXiaohongshuCommentResult(result, true)));
-    } else {
-      lines.push("暂无新版评论诊断；更新后重新抓取一条小红书链接才会生成。");
+      lines.push("", "最近小红书评论诊断：", ...commentResults.slice(detailed ? -5 : -1).map((result) => formatXiaohongshuCommentResult(result, detailed)));
     }
     if (this.feishuImageDisplay) {
-      lines.push("", "飞书图片显示：", JSON.stringify(this.feishuImageDisplay.diagnostic()));
+      const feishu = this.feishuImageDisplay.diagnostic();
+      if (hasFeishuActivity(feishu)) lines.push("", "飞书图片显示：", JSON.stringify(feishu));
     }
     if (lastSyncText && (hasFailureSignal(lastSyncText) || this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic)) {
       lines.push("", "最近同步失败状态：", lastSyncText);
@@ -27831,7 +27906,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     } else {
       lines.push("", "已省略成功日志，只保留失败相关信息。");
     }
-    lines.push("", asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
+    if (detailed) lines.push("", asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
+    else lines.push("", "这是精简诊断；需要完整阶段与历史日志时，请使用“复制详细诊断”。");
     return asrRecovery.diagnosticRedact(lines.join("\n"), this.settings);
   }
   async copyTextToClipboard(text) {
@@ -27872,8 +27948,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   async copyLocalAsrDiagnosticText() {
     return this.copyDiagnosticText(this.getLocalAsrDiagnosticText(), "local-asr-diagnostic.txt");
   }
-  async copySyncDiagnosticText() {
-    return this.copyDiagnosticText(this.getSyncDiagnosticText(), "sync-diagnostic.txt");
+  async copySyncDiagnosticText(options = {}) {
+    return this.copyDiagnosticText(this.getSyncDiagnosticText(options), options.detailed ? "sync-diagnostic-detailed.txt" : "sync-diagnostic.txt");
   }
   async getLocalTranscriptionEntitlementStatus(options = {}) {
     const bindings = this.getActiveBindings();
@@ -28788,6 +28864,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         const value = String(entry && entry[key] || "");
         if (/^[A-Za-z0-9_.:+-]{1,100}$/.test(value)) clean[key] = value;
       }
+      for (const key of ["receivedBytes", "totalBytes", "elapsedMs", "curlExitCode", "httpStatus"]) {
+        const value = entry && entry[key];
+        if (Number.isSafeInteger(value) && value >= 0) clean[key] = value;
+      }
       return clean;
     });
   }
@@ -28847,7 +28927,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (canReuseCheckedAsset) {
           asset = options.checkedAsset;
         } else if (source === "cloudbase") {
-          const manifest = await this.getAuthorizedLocalComponentManifest("douyin");
+          const manifest = await this.getAuthorizedLocalComponentManifest("douyin", { metadataOnly: options.checkOnly === true });
           if (!manifest) throw resolverError("MANIFEST_UNAVAILABLE", stage, source);
           const item = manifest.assets.find((item2) => item2.id === "resolver");
           if (!item) throw resolverError("INVALID_MANIFEST", stage, source);
@@ -34064,12 +34144,19 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         }
       });
     });
-    new Setting(containerEl).setName("同步/安装失败诊断").setDesc("同步失败、转写失败、下载卡住时，点这里复制诊断信息发给开发者张张（微信：heyhmjx）。里面包含最近同步阶段、转写日志和安装日志。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
+    new Setting(containerEl).setName("同步/安装失败诊断").setDesc("默认复制精简诊断，仅包含有记录的相关功能；需要完整历史和设备信息时再复制详细诊断。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
       try {
         await this.plugin.copySyncDiagnosticText();
         new Notice("诊断信息已复制");
       } catch (error) {
         new Notice(`复制诊断信息失败：${error.message || error}`);
+      }
+    })).addButton((button) => button.setButtonText("复制详细诊断").onClick(async () => {
+      try {
+        await this.plugin.copySyncDiagnosticText({ detailed: true });
+        new Notice("详细诊断已复制");
+      } catch (error) {
+        new Notice(`复制详细诊断失败：${error.message || error}`);
       }
     }));
     containerEl.createEl("h3", {
@@ -34300,6 +34387,7 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_ASR_INSTALL_STALL_TIMEOUT_MS,
   isAuthorizedLocalComponentDownloadUrl,
   normalizeAuthorizedLocalComponentManifest,
+  normalizeLocalComponentVersionResponse,
   buildAuthorizedLocalComponentProcessEnv,
   LOCAL_OCR_BATCH_RUNNER_VERSION,
   LOCAL_OCR_BATCH_RUNNER_SOURCE,
