@@ -64,7 +64,7 @@ Open the plugin settings and fill in:
 - **Inbox directory**: the root folder for generated notes. The default is `临时收集`.
 - **Note save mode**: choose whether notes are saved under a daily subfolder or directly into the inbox directory.
 - **Note property fields**: leave blank for the default YAML properties, or enter a comma-separated field list such as `type,title,url,created_at`.
-- **Auto sync on load**: optionally pull new records after Obsidian starts.
+- **Automatic sync**: enabled by default. While Obsidian runs, check bound inboxes every minute after activity; consecutive empty checks slow down to 2, 5 and 10 minutes. Disable this option to use manual sync only. Returning to the window can wake a check, subject to throttling.
 - **Speech transcription provider**: optional. Supported providers currently include Tencent Cloud ASR, Alibaba Cloud Bailian/Qwen-Omni, Doubao ASR, and a local transcription command.
 
 ### Local ASR helper
@@ -80,6 +80,12 @@ If you do not want to use a cloud speech API, use the local helper:
 
 It installs whisper.cpp, ffmpeg, and a small Whisper model into `.wechat-inbox-local-asr` under the current user home directory. On macOS, the installer first uses an isolated local Python environment and bundled wheel binaries, so it does not depend on Homebrew for ffmpeg.
 Then choose **Local transcription** in the plugin settings and click **One-click install**.
+
+## 自动同步与进度
+
+完成绑定后，在小程序收集内容，保持 Obsidian 打开并联网，插件会自动同步到设置中的收件箱目录（默认 `临时收集`）。空检查不弹提示；实际下载、转写和保存会显示进度。任务运行时不用再次点击同步，可在插件设置关闭自动同步。音视频转写仍需要已就绪的本地组件或已配置的转写服务。
+
+抖音后台提取页面保持隐藏，页面跳转不会主动打开系统浏览器；需要登录时仍可使用插件提供的登录入口。
 
 ## Data Flow
 

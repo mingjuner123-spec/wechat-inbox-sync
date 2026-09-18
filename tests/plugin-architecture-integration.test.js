@@ -17,6 +17,7 @@ const expectedModules = [
   'ai-metadata-error-utils',
   'ai-metadata-utils',
   'asr-recovery-utils',
+  'auto-sync-controller',
   'cloud-transcription-response-utils',
   'component-diagnostic-summary',
   'date-utils',

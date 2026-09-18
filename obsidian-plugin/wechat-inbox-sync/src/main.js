@@ -1,4 +1,5 @@
 const douyinBrowserSafety = require('./douyin-browser-safety');
+const { createAutoSyncController } = require('./auto-sync-controller');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
 const crypto = require('crypto');
@@ -260,7 +261,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.159';
+const PLUGIN_RUNTIME_VERSION = '1.3.160';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -425,6 +426,8 @@ const DEFAULT_SETTINGS = {
   noteSaveMode: 'date',
   notePropertyFields: DEFAULT_NOTE_PROPERTY_FIELDS,
   autoSyncOnLoad: true,
+  autoSyncEnabled: true,
+  autoSyncStoppedRecords: [],
   aiProvider: 'off',
   aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
@@ -3321,6 +3324,10 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.noteSaveMode = normalizeNoteSaveMode(merged.noteSaveMode);
   merged.notePropertyFields = DEFAULT_NOTE_PROPERTY_FIELDS;
   merged.autoSyncOnLoad = true;
+  merged.autoSyncEnabled = merged.autoSyncEnabled !== false;
+  merged.autoSyncStoppedRecords = Array.isArray(merged.autoSyncStoppedRecords)
+    ? [...new Set(merged.autoSyncStoppedRecords.filter((key) => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)))]
+    : [];
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
   merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
   merged.aiMetadataEnabled = true;
@@ -5631,6 +5638,38 @@ function installWechatArticleNavigationGuards(webContents) {
   webContents.on('will-navigate', restrictArticleNavigation);
   webContents.on('will-frame-navigate', restrictArticleNavigation);
   webContents.on('will-redirect', restrictArticleNavigation);
+}
+
+function installDouyinExtractionNavigationGuards(webContents, initialUrl) {
+  // Only for our newly created, unloaded extraction window. Obsidian's inherited
+  // navigation handler can open redirects in the OS browser even while hidden.
+  if (!webContents || typeof webContents.removeAllListeners !== 'function'
+    || typeof webContents.on !== 'function' || typeof webContents.setWindowOpenHandler !== 'function') {
+    throw new Error('无法隔离抖音提取窗口的跳转处理');
+  }
+  const isAllowedNavigation = (value) => {
+    try {
+      const target = new URL(value);
+      return target.protocol === 'https:' && !target.username && !target.password
+        && (!target.port || target.port === '443')
+        && ['douyin.com', 'iesdouyin.com', 'amemv.com'].some(domain =>
+          target.hostname === domain || target.hostname.endsWith('.' + domain));
+    } catch (_) { return false; }
+  };
+  // Programmatic loadURL does not emit will-navigate: validate the first URL too.
+  if (!isAllowedNavigation(initialUrl)) throw new Error('抖音提取仅允许官方 HTTPS 页面');
+  for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+    webContents.removeAllListeners(eventName);
+  }
+  const restrictNavigation = (event, navigation) => {
+    const value = typeof navigation === 'string' ? navigation
+      : (navigation && navigation.url) || (event && event.url);
+    if (!isAllowedNavigation(value) && event && typeof event.preventDefault === 'function') event.preventDefault();
+  };
+  for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+    webContents.on(eventName, restrictNavigation);
+  }
+  webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 }
 
 function createXiaohongshuBrowserDiagnostic(record = null) {
@@ -12971,7 +13010,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   }
   if (isXiaohongshuExtractionWindow) {
     installXiaohongshuNavigationGuards(win.webContents, xiaohongshuHiddenWindowOptions);
-  } else {
+  } else if (!isDouyinExtractionWindow) {
     installExternalAppNavigationGuards(win.webContents);
   }
 
@@ -13029,6 +13068,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
 
   try {
     throwIfAborted(options.signal);
+    if (isDouyinExtractionWindow) {
+      installDouyinExtractionNavigationGuards(win.webContents, url);
+    }
     const loaded = waitForWebContents(win.webContents, 18000, {
       rejectOnFailure: isDouyinUrl(url),
     });
@@ -15988,14 +16030,66 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
 
-    if (this.settings.autoSyncOnLoad) {
-      window.setTimeout(() => this.syncInbox(false), 1000);
-    }
+    this.startAutoSync();
   }
 
   async saveSettings(nextSettings) {
     this.settings = mergeSettings(nextSettings);
+    if (this.autoSyncController) this.autoSyncController.setEnabled(this.settings.autoSyncEnabled);
     await this.saveData(this.settings);
+  }
+
+  startAutoSync() {
+    if (this.autoSyncController) this.autoSyncController.dispose();
+    this.autoSyncDisposed = false;
+    this.autoSyncController = createAutoSyncController({
+      run: () => this.syncInbox(false, { automatic: true }),
+      canRun: () => !this.autoSyncDisposed && this.settings.autoSyncEnabled !== false
+        && Boolean(this.settings.apiBase)
+        && this.getAutoSyncBindings().length > 0
+        && (typeof navigator === 'undefined' || navigator.onLine !== false),
+      isBusy: () => Boolean(this.syncInboxPromise),
+    });
+    const controller = this.autoSyncController;
+    this.register(() => {
+      this.autoSyncDisposed = true;
+      controller.dispose();
+      if (this.currentProcessingAbortController) this.currentProcessingAbortController.abort();
+      if (this.currentTranscriptionAbortController) this.currentTranscriptionAbortController.abort();
+      this.clearSyncProgressNotice();
+    });
+    if (typeof window !== 'undefined' && typeof this.registerDomEvent === 'function') {
+      this.registerDomEvent(window, 'focus', () => controller.wake());
+      this.registerDomEvent(window, 'online', () => controller.wake());
+    }
+    controller.setEnabled(this.settings.autoSyncEnabled !== false);
+  }
+
+  getAutoSyncRecordKey(binding, recordId) {
+    return crypto.createHash('sha256')
+      .update(`${getSyncLifecycleBindingFingerprint(binding && binding.token)}:${String(recordId || '')}`)
+      .digest('hex');
+  }
+
+  getAutoSyncBindings() {
+    // Unlike the legacy manual fallback, explicitly paused bindings must never
+    // be resurrected through the old top-level token field in background runs.
+    return normalizeBindings(this.settings).filter((binding) => binding.token
+      && binding.enabled !== false && !['paused', 'unbound', 'needs_rebind'].includes(binding.status));
+  }
+
+  async rememberAutoSyncStoppedRecord(binding, recordId) {
+    const key = this.getAutoSyncRecordKey(binding, recordId);
+    if (this.autoSyncController) this.autoSyncController.stopped(key);
+    const stopped = (this.settings && this.settings.autoSyncStoppedRecords) || [];
+    if (stopped.includes(key)) return;
+    this.settings = { ...(this.settings || {}), autoSyncStoppedRecords: [...stopped, key] };
+    try {
+      if (typeof this.saveData === 'function') await this.saveData(this.settings);
+    } catch (_) {
+      // Still suppress the record in this session if local persistence fails.
+      new Notice('当前内容已停止；暂停记录保存失败，重启前请关闭自动同步。');
+    }
   }
 
   startFeishuImageDisplay() {
@@ -17019,6 +17113,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         bindings: nextBindings,
       });
       new Notice('绑定成功');
+      if (this.autoSyncController) this.autoSyncController.wake();
       this.refreshProAndMaybePromptLocalComponentInstall({ reason: 'bind', force: true }).catch((error) => {
         new Notice(`Pro 组件检查失败：${error.message || error}`);
       });
@@ -17252,6 +17347,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   showSyncProgress(progress = {}) {
+    if (this.autoSyncDisposed) return;
+    if (this.backgroundSyncActive && ['fetching', 'empty'].includes(progress.stage)) return;
     const message = buildSyncProgressMessage(progress);
     if (!message) return;
     this.lastSyncDiagnostic = {
@@ -17264,6 +17361,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.syncStatusBar && typeof this.syncStatusBar.setText === 'function') {
       this.syncStatusBar.setText(message);
     }
+    // Only empty polling is silent; real work needs visible progress even
+    // when the scheduler started it automatically.
     if (!this.syncProgressNotice) {
       this.syncProgressNotice = new Notice(message, 0);
       return;
@@ -17538,7 +17637,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     const pendingDeletes = this.getPendingStoppedTranscriptionDeletes();
     let deletePromise = pendingDeletes.get(String(context.recordId));
     if (!deletePromise) {
-      deletePromise = this.deleteCurrentTranscriptionRecord(context)
+      // Register the whole operation before yielding: the aborted sync must
+      // wait for persistence AND deletion before deciding whether it failed.
+      deletePromise = (async () => {
+        await this.rememberAutoSyncStoppedRecord(context.binding, context.recordId);
+        return await this.deleteCurrentTranscriptionRecord(context);
+      })()
         .catch((error) => ({
           deleted: false,
           recordId: context.recordId,
@@ -24395,6 +24499,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       .filter((item) => item.bindingFingerprint === bindingFingerprint);
     let replayed = 0;
     for (const item of attempts) {
+      if (this.autoSyncDisposed || (this.backgroundSyncActive && this.settings.autoSyncEnabled === false)) break;
+      const retryKey = `completion:${this.getAutoSyncRecordKey(binding, item.recordId)}`;
+      if (this.backgroundSyncActive && this.autoSyncController && !this.autoSyncController.canRetry(retryKey)) continue;
       try {
         if (item.stage === 'committed') {
           await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || '', binding, {
@@ -24413,6 +24520,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }, binding);
         }
         await this.clearPendingSyncLifecycleAttempt(binding, item.recordId);
+        if (this.autoSyncController) this.autoSyncController.succeeded(retryKey);
         replayed += 1;
       } catch (error) {
         if (isRecordNotFoundError(error)
@@ -24423,6 +24531,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           } catch (clearError) {
             // Preserve the marker when local persistence is temporarily unavailable.
           }
+        } else if (this.autoSyncController) {
+          this.autoSyncController.failed(retryKey, true);
         }
       }
     }
@@ -24483,11 +24593,14 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async reportSyncRecordCompletionBestEffort(recordId, noteTitle, binding, lifecycle = {}) {
+    const retryKey = `completion:${this.getAutoSyncRecordKey(binding, recordId)}`;
     try {
       await this.reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle);
+      if (this.autoSyncController) this.autoSyncController.succeeded(retryKey);
       return null;
     } catch (error) {
       if (isRecordNotFoundError(error)) return null;
+      if (this.autoSyncController) this.autoSyncController.failed(retryKey, true);
       const details = getSyncCompletionWarningDetails(error);
       const reason = details.status
         ? `HTTP ${details.status}`
@@ -24533,8 +24646,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
 
     for (let index = 0; index < records.length; index += 1) {
+      if (this.autoSyncDisposed || (this.backgroundSyncActive && this.settings.autoSyncEnabled === false)) break;
+      if (this.backgroundSyncActive && !this.getAutoSyncBindings().some((item) => item.token === binding.token)) break;
       const record = records[index];
       const recordId = getRecordId(record);
+      const autoRetryKey = this.getAutoSyncRecordKey(binding, recordId);
+      if (this.backgroundSyncActive && (
+        (this.settings.autoSyncStoppedRecords || []).includes(autoRetryKey)
+        || (this.autoSyncController && (!this.autoSyncController.canRetry(autoRetryKey)
+          || !this.autoSyncController.canRetry(`completion:${autoRetryKey}`)))
+      )) {
+        skipped.push({ recordId, reason: 'automatic-retry-deferred' });
+        continue;
+      }
       const progress = {
         bindingLabel,
         current: index + 1,
@@ -24554,7 +24678,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId,
           reason: 'cloud-transcription-processing',
         });
-        this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
+        if (!this.backgroundSyncActive) {
+          this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
+        }
         continue;
       }
       const processingAbortController = new AbortController();
@@ -24675,6 +24801,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           throw createAbortError();
         }
         localCommitFact = item;
+        if (this.autoSyncController) this.autoSyncController.succeeded(autoRetryKey);
         written.push(item);
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
@@ -24796,6 +24923,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           time: new Date().toISOString(),
         };
         writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
+        if (this.autoSyncController) this.autoSyncController.failed(autoRetryKey);
         failed.push({
           recordId: getRecordId(record),
           message,
@@ -24819,13 +24947,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview, syncSnapshot };
   }
 
-  async syncInbox(showNotice = true) {
+  async syncInbox(showNotice = true, options = {}) {
+    if (this.autoSyncDisposed) return { pollFailed: false, written: 0 };
     if (this.syncInboxPromise) {
       if (showNotice) {
-        new Notice('同步正在进行中，请等待当前任务完成。', 2500);
+        const currentMessage = this.lastSyncDiagnostic && this.lastSyncDiagnostic.status === 'running'
+          ? this.lastSyncDiagnostic.message : '';
+        new Notice(currentMessage
+          ? `${currentMessage}\n任务会自动继续，无需再次点击同步。`
+          : '同步正在进行中，请等待当前任务完成。', 2500);
       }
       return await this.syncInboxPromise;
     }
+    if (showNotice && this.autoSyncController) this.autoSyncController.retryFailures();
+    this.backgroundSyncActive = options.automatic === true;
     const syncTask = this.runSyncInboxOnce(showNotice);
     this.syncInboxPromise = syncTask;
     try {
@@ -24833,6 +24968,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     } finally {
       if (this.syncInboxPromise === syncTask) {
         this.syncInboxPromise = null;
+        this.backgroundSyncActive = false;
       }
     }
   }
@@ -24840,13 +24976,13 @@ class WechatObsidianInboxPlugin extends Plugin {
   async runSyncInboxOnce(showNotice = true) {
     const errors = validateSettings(this.settings);
     if (errors.length) {
-      new Notice(errors[0]);
-      return;
+      if (showNotice) new Notice(errors[0]);
+      return { pollFailed: true, written: 0 };
     }
 
     try {
       this.lastXiaohongshuBrowserDiagnostic = null;
-      const bindings = this.getActiveBindings();
+      const bindings = this.backgroundSyncActive ? this.getAutoSyncBindings() : this.getActiveBindings();
       const shouldPrefixTitle = bindings.length > 1;
       const written = [];
       const failed = [];
@@ -24857,10 +24993,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       const syncSnapshots = [];
       const recentFailureEntries = [];
       const recentResolvedEntries = [];
+      let pollFailed = false;
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: 'fetching' });
 
       for (const binding of bindings) {
+        if (this.autoSyncDisposed || (this.backgroundSyncActive && this.settings.autoSyncEnabled === false)) break;
+        if (this.backgroundSyncActive && binding.status === 'needs_rebind') continue;
         try {
           const result = await this.syncBinding(binding, shouldPrefixTitle);
           written.push(...result.written);
@@ -24908,6 +25047,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
         } catch (error) {
           const message = error.message || String(error);
+          pollFailed = true;
           if (isBindingInvalidMessage(message)) {
             // eslint-disable-next-line no-await-in-loop
             const actionMessage = await this.markBindingNeedsRebind(binding, message);
@@ -24987,10 +25127,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         finalMessage += `；${pendingReviewNotice}`;
       }
       if (completionWarnings.length) {
-        finalMessage += `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
+        finalMessage += this.backgroundSyncActive
+          ? `；本地笔记已保存，${completionWarnings.length} 条状态回报暂未成功，将自动补报`
+          : `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
       }
 
-      if (showNotice || written.length) {
+      if (!this.autoSyncDisposed && (showNotice || written.length)) {
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
@@ -25061,6 +25203,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
       writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
+      if (this.backgroundSyncActive && !this.autoSyncDisposed && this.syncStatusBar
+        && typeof this.syncStatusBar.setText === 'function' && (failed.length || historicalFailures.length || conversionWarnings.length)) {
+        this.syncStatusBar.setText('自动同步有未完成内容，可在插件设置查看并手动重试');
+      }
+      return { pollFailed, written: written.length, failed: failed.length };
     } catch (error) {
       this.lastSyncDiagnostic = {
         status: 'failed',
@@ -25071,7 +25218,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
       writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
-      new Notice(`同步失败：${error.message || error}`);
+      if (showNotice && !this.autoSyncDisposed) new Notice(`同步失败：${error.message || error}`);
+      return { pollFailed: true, written: 0 };
     }
   }
 }
@@ -25361,6 +25509,15 @@ class WechatInboxSettingTab extends PluginSettingTab {
             });
           });
       });
+
+    new Setting(containerEl)
+      .setName('自动同步')
+      .setDesc('默认开启。保持 Obsidian 运行，小程序收集的新内容会自动进入当前知识库。关闭后不再接收新任务，正在处理的这一条会继续完成。')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.autoSyncEnabled !== false)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({ ...this.plugin.settings, autoSyncEnabled: value });
+        }));
 
     new Setting(containerEl)
       .setName('立即同步')
