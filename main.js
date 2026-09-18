@@ -11826,7 +11826,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.157";
+var PLUGIN_RUNTIME_VERSION = "1.3.158";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -12268,8 +12268,8 @@ function buildLocalComponentRefreshPlan(readiness = {}, options = {}) {
   const ocrUpdateRecommended = Boolean(includeOptionalUpdates && !ocrMissing && ocrStatus.upgradeRecommended);
   if (asrUpdateRecommended) ensureUpdate("音视频转写");
   if (ocrUpdateRecommended) ensureUpdate("图片文字识别 OCR");
-  const checkResolverUpdates = Boolean(options.checkResolverUpdates && ((_a = readiness.resolverStatus) == null ? void 0 : _a.ready) && !missingComponents.length);
-  if (checkResolverUpdates) ensureUpdate("抖音解析（检查更新，相同文件不重复下载）");
+  const checkResolverUpdates = Boolean(options.resolverUpdateAvailable === true && ((_a = readiness.resolverStatus) == null ? void 0 : _a.ready));
+  if (checkResolverUpdates) ensureUpdate("抖音解析");
   return {
     requireAsr: asrMissing || asrUpdateRecommended,
     requireOcr: ocrMissing || ocrUpdateRecommended,
@@ -28181,6 +28181,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     return next;
   }
   async refreshProAndMaybePromptLocalComponentInstall(options = {}) {
+    var _a;
     const reason = options.reason || "settings-open";
     const now = Date.now();
     const lastCheckedAt = Date.parse(this.settings.proSetupLastCheckedAt || "");
@@ -28222,9 +28223,18 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }
       const isManualRefresh = reason === "manual-refresh";
       let readiness = this.getLocalTranscriptionComponentReadiness();
+      let resolverUpdate = null;
+      let resolverUpdateCheckError = "";
+      if (isManualRefresh && ((_a = readiness.resolverStatus) == null ? void 0 : _a.ready)) {
+        try {
+          resolverUpdate = await this.doInstallLocalDouyinResolver({ checkOnly: true });
+        } catch (error) {
+          resolverUpdateCheckError = formatLocalComponentInstallFailureReason(error);
+        }
+      }
       let refreshPlan = buildLocalComponentRefreshPlan(readiness, {
         includeOptionalUpdates: isManualRefresh,
-        checkResolverUpdates: isManualRefresh
+        resolverUpdateAvailable: (resolverUpdate == null ? void 0 : resolverUpdate.updateAvailable) === true
       });
       readiness = {
         ...readiness,
@@ -28235,7 +28245,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       status = {
         ...status,
         localComponentReadiness: readiness,
-        localComponentRefreshPlan: refreshPlan
+        localComponentRefreshPlan: refreshPlan,
+        localComponentUpdateCheckError: resolverUpdateCheckError,
+        localComponentsUpToDate: isManualRefresh && (resolverUpdate == null ? void 0 : resolverUpdate.updateAvailable) === false && !refreshPlan.hasRequiredChanges
       };
       const promptedIssues = await this.reconcileLocalComponentAutoPromptedIssues(readiness);
       const currentIssues = getLocalComponentRequiredIssueState(readiness);
@@ -28303,7 +28315,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
             requireResolver: installPlan.requireResolver,
             forceAsr: installPlan.forceAsr,
             forceOcr: installPlan.forceOcr,
-            forceResolver: installPlan.forceResolver
+            forceResolver: installPlan.forceResolver,
+            resolverUpdateAsset: resolverUpdate == null ? void 0 : resolverUpdate.asset
           });
           readiness = installResult && installResult.readiness ? installResult.readiness : this.getLocalTranscriptionComponentReadiness();
           refreshPlan = buildLocalComponentRefreshPlan(readiness, {
@@ -28424,7 +28437,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         name: "抖音解析",
         ready: readiness.resolverStatus && readiness.resolverStatus.ready,
         force: options.forceResolver === true,
-        run: /* @__PURE__ */ __name(() => this.ensureLocalDouyinResolver({ force: options.forceResolver === true }), "run")
+        run: /* @__PURE__ */ __name(() => this.ensureLocalDouyinResolver({ force: options.forceResolver === true, checkedAsset: options.resolverUpdateAsset }), "run")
       }
     ];
     for (const component of components) {
@@ -28810,6 +28823,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
   }
   async doInstallLocalDouyinResolver(options = {}) {
+    var _a, _b, _c;
     await this.ensureProFeatureAccess("本地组件安装");
     const platform = this.getConfiguredLocalAsrPlatform();
     if (!["win32", "darwin"].includes(platform)) throw new Error("当前系统暂不支持本地抖音解析组件");
@@ -28818,22 +28832,26 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const attemptId = crypto.randomBytes(8).toString("hex");
     const onStage = /* @__PURE__ */ __name((entry) => this.recordLocalDouyinResolverInstallStage({ attemptId, ...entry }), "onStage");
     const installed = this.getLocalDouyinResolverInstallStatus();
-    if (installed.ready && options.force !== true) {
+    if (installed.ready && options.force !== true && options.checkOnly !== true) {
       onStage({ stage: "verify-cache", status: "complete", source: "local" });
       return { executablePath, updated: false, source: "verified-cache" };
     }
     let lastError;
-    for (const source of ["cloudbase", "github"]) {
+    for (const source of ((_a = options.checkedAsset) == null ? void 0 : _a.source) === "github" ? ["github"] : ["cloudbase", "github"]) {
       let stage = "manifest";
       onStage({ stage, source, status: "running" });
       try {
         let asset;
-        if (source === "cloudbase") {
+        const checkedAssetExpiresAt = Date.parse(((_b = options.checkedAsset) == null ? void 0 : _b.expiresAt) || "");
+        const canReuseCheckedAsset = ((_c = options.checkedAsset) == null ? void 0 : _c.source) === source && (source !== "cloudbase" || Number.isFinite(checkedAssetExpiresAt) && checkedAssetExpiresAt > Date.now() + 3e4);
+        if (canReuseCheckedAsset) {
+          asset = options.checkedAsset;
+        } else if (source === "cloudbase") {
           const manifest = await this.getAuthorizedLocalComponentManifest("douyin");
           if (!manifest) throw resolverError("MANIFEST_UNAVAILABLE", stage, source);
           const item = manifest.assets.find((item2) => item2.id === "resolver");
           if (!item) throw resolverError("INVALID_MANIFEST", stage, source);
-          asset = { ...item, url: item.downloadUrl, version: manifest.version, source };
+          asset = { ...item, url: item.downloadUrl, version: manifest.version, expiresAt: manifest.expiresAt, source };
         } else {
           const { manifest } = await this.getOfficialLocalDouyinResolverManifest();
           asset = { ...selectLocalDouyinResolverAsset(manifest, platform, arch), version: manifest.version, source };
@@ -28848,6 +28866,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
         }
         const reused = Boolean(bytes);
+        if (options.checkOnly === true) {
+          onStage({ stage: "check-update", source, status: "complete" });
+          return { updateAvailable: !reused, asset };
+        }
         stage = "download";
         if (!bytes) bytes = await this.downloadLocalDouyinResolverAsset(asset, onStage);
         stage = "install";
@@ -34081,10 +34103,14 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
           const proAccessNotice = `Pro 权限有效${status2.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status2.expiresAt)}` : ""}`;
           if (status2.localComponentInstallError) {
             new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8e3);
+          } else if (status2.localComponentUpdateCheckError) {
+            new Notice(`${proAccessNotice}；抖音组件更新检查未完成：${status2.localComponentUpdateCheckError}。已有可用组件保留。`, 1e4);
           } else if (status2.localComponentInstallSkipped && status2.localComponentInstallSkipped.reason === "user-declined") {
             new Notice(`${proAccessNotice}；已取消本地转写组件更新/修复。`, 8e3);
           } else if (status2.localComponentInstallResult && status2.localComponentInstallResult.installed) {
             new Notice(`${proAccessNotice}；本地转写组件已安装/修复/更新。`, 8e3);
+          } else if (status2.localComponentsUpToDate) {
+            new Notice(`${proAccessNotice}；本地组件已就绪，抖音解析组件已是最新版本。`, 8e3);
           } else {
             new Notice(proAccessNotice);
           }

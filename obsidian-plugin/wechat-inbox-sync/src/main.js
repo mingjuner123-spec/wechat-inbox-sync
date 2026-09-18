@@ -259,7 +259,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.157';
+const PLUGIN_RUNTIME_VERSION = '1.3.158';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -732,8 +732,8 @@ function buildLocalComponentRefreshPlan(readiness = {}, options = {}) {
   const ocrUpdateRecommended = Boolean(includeOptionalUpdates && !ocrMissing && ocrStatus.upgradeRecommended);
   if (asrUpdateRecommended) ensureUpdate('音视频转写');
   if (ocrUpdateRecommended) ensureUpdate('图片文字识别 OCR');
-  const checkResolverUpdates = Boolean(options.checkResolverUpdates && readiness.resolverStatus?.ready && !missingComponents.length);
-  if (checkResolverUpdates) ensureUpdate('抖音解析（检查更新，相同文件不重复下载）');
+  const checkResolverUpdates = Boolean(options.resolverUpdateAvailable === true && readiness.resolverStatus?.ready);
+  if (checkResolverUpdates) ensureUpdate('抖音解析');
 
   return {
     requireAsr: asrMissing || asrUpdateRecommended,
@@ -18728,9 +18728,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       const isManualRefresh = reason === 'manual-refresh';
       let readiness = this.getLocalTranscriptionComponentReadiness();
+      let resolverUpdate = null;
+      let resolverUpdateCheckError = '';
+      if (isManualRefresh && readiness.resolverStatus?.ready) {
+        try {
+          resolverUpdate = await this.doInstallLocalDouyinResolver({ checkOnly: true });
+        } catch (error) {
+          resolverUpdateCheckError = formatLocalComponentInstallFailureReason(error);
+        }
+      }
       let refreshPlan = buildLocalComponentRefreshPlan(readiness, {
         includeOptionalUpdates: isManualRefresh,
-        checkResolverUpdates: isManualRefresh,
+        resolverUpdateAvailable: resolverUpdate?.updateAvailable === true,
       });
       readiness = {
         ...readiness,
@@ -18742,6 +18751,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...status,
         localComponentReadiness: readiness,
         localComponentRefreshPlan: refreshPlan,
+        localComponentUpdateCheckError: resolverUpdateCheckError,
+        localComponentsUpToDate: isManualRefresh && resolverUpdate?.updateAvailable === false && !refreshPlan.hasRequiredChanges,
       };
       const promptedIssues = await this.reconcileLocalComponentAutoPromptedIssues(readiness);
       const currentIssues = getLocalComponentRequiredIssueState(readiness);
@@ -18820,6 +18831,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             forceAsr: installPlan.forceAsr,
             forceOcr: installPlan.forceOcr,
             forceResolver: installPlan.forceResolver,
+            resolverUpdateAsset: resolverUpdate?.asset,
           });
           readiness = installResult && installResult.readiness
             ? installResult.readiness
@@ -18949,7 +18961,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       { key: 'ocr', name: '图片文字识别 OCR', ready: readiness.ocrStatus && readiness.ocrStatus.ready,
         force: options.forceOcr === true, run: () => this.installLocalOcr({ reason: options.reason, force: options.forceOcr === true }) },
       { key: 'resolver', name: '抖音解析', ready: readiness.resolverStatus && readiness.resolverStatus.ready,
-        force: options.forceResolver === true, run: () => this.ensureLocalDouyinResolver({ force: options.forceResolver === true }) },
+        force: options.forceResolver === true, run: () => this.ensureLocalDouyinResolver({ force: options.forceResolver === true, checkedAsset: options.resolverUpdateAsset }) },
     ];
     for (const component of components) {
       if (component.ready && !component.force) { results.push({ component: component.key, status: 'skipped' }); continue; }
@@ -19358,22 +19370,27 @@ class WechatObsidianInboxPlugin extends Plugin {
     const attemptId = crypto.randomBytes(8).toString('hex');
     const onStage = entry => this.recordLocalDouyinResolverInstallStage({ attemptId, ...entry });
     const installed = this.getLocalDouyinResolverInstallStatus();
-    if (installed.ready && options.force !== true) {
+    if (installed.ready && options.force !== true && options.checkOnly !== true) {
       onStage({ stage: 'verify-cache', status: 'complete', source: 'local' });
       return { executablePath, updated: false, source: 'verified-cache' };
     }
     let lastError;
-    for (const source of ['cloudbase', 'github']) {
+    for (const source of (options.checkedAsset?.source === 'github' ? ['github'] : ['cloudbase', 'github'])) {
       let stage = 'manifest';
       onStage({ stage, source, status: 'running' });
       try {
         let asset;
-        if (source === 'cloudbase') {
+        const checkedAssetExpiresAt = Date.parse(options.checkedAsset?.expiresAt || '');
+        const canReuseCheckedAsset = options.checkedAsset?.source === source
+          && (source !== 'cloudbase' || (Number.isFinite(checkedAssetExpiresAt) && checkedAssetExpiresAt > Date.now() + 30000));
+        if (canReuseCheckedAsset) {
+          asset = options.checkedAsset;
+        } else if (source === 'cloudbase') {
           const manifest = await this.getAuthorizedLocalComponentManifest('douyin');
           if (!manifest) throw resolverError('MANIFEST_UNAVAILABLE', stage, source);
           const item = manifest.assets.find(item => item.id === 'resolver');
           if (!item) throw resolverError('INVALID_MANIFEST', stage, source);
-          asset = { ...item, url: item.downloadUrl, version: manifest.version, source };
+          asset = { ...item, url: item.downloadUrl, version: manifest.version, expiresAt: manifest.expiresAt, source };
         } else {
           const { manifest } = await this.getOfficialLocalDouyinResolverManifest();
           asset = { ...selectLocalDouyinResolverAsset(manifest, platform, arch), version: manifest.version, source };
@@ -19388,6 +19405,10 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
         }
         const reused = Boolean(bytes);
+        if (options.checkOnly === true) {
+          onStage({ stage: 'check-update', source, status: 'complete' });
+          return { updateAvailable: !reused, asset };
+        }
         stage = 'download';
         if (!bytes) bytes = await this.downloadLocalDouyinResolverAsset(asset, onStage);
         stage = 'install';
@@ -25409,10 +25430,14 @@ class WechatInboxSettingTab extends PluginSettingTab {
               const proAccessNotice = `Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`;
               if (status.localComponentInstallError) {
                 new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8000);
+              } else if (status.localComponentUpdateCheckError) {
+                new Notice(`${proAccessNotice}；抖音组件更新检查未完成：${status.localComponentUpdateCheckError}。已有可用组件保留。`, 10000);
               } else if (status.localComponentInstallSkipped && status.localComponentInstallSkipped.reason === 'user-declined') {
                 new Notice(`${proAccessNotice}；已取消本地转写组件更新/修复。`, 8000);
               } else if (status.localComponentInstallResult && status.localComponentInstallResult.installed) {
                 new Notice(`${proAccessNotice}；本地转写组件已安装/修复/更新。`, 8000);
+              } else if (status.localComponentsUpToDate) {
+                new Notice(`${proAccessNotice}；本地组件已就绪，抖音解析组件已是最新版本。`, 8000);
               } else {
                 new Notice(proAccessNotice);
               }
