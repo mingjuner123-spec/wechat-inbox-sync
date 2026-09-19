@@ -1,3 +1,4 @@
+const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils');
 const douyinBrowserSafety = require('./douyin-browser-safety');
 const { createAutoSyncController } = require('./auto-sync-controller');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
@@ -261,7 +262,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.160';
+const PLUGIN_RUNTIME_VERSION = '1.3.161';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -15992,6 +15993,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'recover-wechat-article-placeholder',
+      name: '重新提取当前失败的公众号笔记',
+      callback: () => this.recoverCurrentWechatArticlePlaceholder(),
+    });
+
+    this.addCommand({
       id: 'stop-current-transcription',
       name: '停止当前转写',
       callback: async () => this.stopCurrentTranscription(),
@@ -24061,6 +24068,71 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
 
+  async recoverCurrentWechatArticlePlaceholder() {
+    if (this.syncInboxPromise || this.autoSyncDisposed) {
+      new Notice('请等待当前同步完成后再重新提取。');
+      return null;
+    }
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== 'md') {
+      new Notice('请先打开需要恢复的公众号失败笔记。');
+      return null;
+    }
+    const controller = new AbortController();
+    this.currentProcessingAbortController = controller;
+    this.currentProcessingContext = null;
+    this.setTranscriptionStopAvailable(true);
+    const task = Promise.resolve().then(async () => {
+      const markdown = await this.app.vault.read(file);
+      throwIfAborted(controller.signal);
+      const url = getWechatPlaceholderRecoveryUrl(markdown);
+      const sourceRecordId = getRecordIdFromMarkdown(markdown);
+      if (!url || !sourceRecordId) {
+        new Notice('当前笔记不是可恢复的公众号失败占位，或原始链接不明确。');
+        return null;
+      }
+      const now = new Date().toISOString();
+      const record = { id: 'local-recovery-' + crypto.createHash('sha256').update(sourceRecordId + '\n' + url).digest('hex'),
+        type: 'webpage', content: url, createdAt: now,
+        metadata: { url, recoveredFromRecordId: sourceRecordId, title: file.basename + '（重新提取）', conversionStatus: 'pending' } };
+      try {
+        const existing = await this.findExistingRecordNotePath(record);
+        throwIfAborted(controller.signal);
+        if (existing) {
+          this.lastSyncDiagnostic = { status: 'success', stage: 'finished', current: 1, total: 1,
+            message: '已复用该公众号的完整恢复笔记', time: new Date().toISOString() };
+          new Notice('这条公众号内容已有重新提取的完整笔记：' + existing, 8000);
+          return { filePath: existing, reused: true };
+        }
+        const result = await this.writeRecord(record, now, null, false,
+          { signal: controller.signal, current: 1, total: 1, skipAi: true });
+        this.lastSyncDiagnostic = { status: 'success', stage: 'finished', current: 1, total: 1,
+          message: '公众号已重新提取并另存，原笔记已保留', time: new Date().toISOString() };
+        new Notice(this.lastSyncDiagnostic.message, 8000);
+        return result;
+      } catch (error) {
+        this.lastSyncDiagnostic = { status: isAbortError(error) ? 'cancelled' : 'failed', stage: 'processing',
+          current: 1, total: 1, message: '公众号重新提取未完成，原笔记已保留',
+          error: redactDiagnosticText(error.message || String(error)),
+          diagnostic: error.diagnostic ? redactSensitiveObject(error.diagnostic) : null,
+          time: new Date().toISOString() };
+        new Notice(this.lastSyncDiagnostic.message + '：' + this.lastSyncDiagnostic.error, 10000);
+        return null;
+      } finally {
+        if (this.lastSyncDiagnostic) writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
+      }
+    });
+    this.syncInboxPromise = task;
+    try { return await task; }
+    catch (error) { new Notice('无法读取失败笔记：' + redactDiagnosticText(error.message || String(error))); return null; }
+    finally {
+      if (this.syncInboxPromise === task) this.syncInboxPromise = null;
+      if (this.currentProcessingAbortController === controller) this.currentProcessingAbortController = null;
+      this.setTranscriptionStopAvailable(false);
+      this.clearSyncProgressNotice();
+    }
+  }
+
   async findExistingRecordNotePath(record) {
     const normalizedRecordId = String(getRecordId(record) || '').trim();
     if (!normalizedRecordId || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== 'function') {
@@ -24243,7 +24315,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       throw lifecycleOutcomeError;
     }
-    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
+    if (!progress.skipAi) recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
       fallbackTitle: title,
