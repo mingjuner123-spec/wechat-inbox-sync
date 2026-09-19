@@ -1,3 +1,4 @@
+require('./plugin-wechat-placeholder.test');
 'use strict';
 
 const assert = require('assert');

@@ -190,6 +190,658 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/wechat-image-post-utils.js
+var require_wechat_image_post_utils = __commonJS({
+  "src/wechat-image-post-utils.js"(exports2, module2) {
+    "use strict";
+    function getWechatImageAssetIdentity(value) {
+      let src = String(value || "").replace(/\\x26amp;/gi, "&").replace(/&amp;/gi, "&").trim();
+      if (src.startsWith("//")) src = `https:${src}`;
+      src = src.replace(/^http:/i, "https:");
+      try {
+        const parsed = new URL(src);
+        if (parsed.hostname.toLowerCase() === "mmbiz.qpic.cn") {
+          return `https://mmbiz.qpic.cn${parsed.pathname}`;
+        }
+      } catch (_) {
+      }
+      return src.replace(/#.*$/, "");
+    }
+    __name(getWechatImageAssetIdentity, "getWechatImageAssetIdentity");
+    function dedupeWechatImagePostAssets2(assets) {
+      const unique = [];
+      const seen = /* @__PURE__ */ new Set();
+      (Array.isArray(assets) ? assets : []).forEach((asset) => {
+        const identity = getWechatImageAssetIdentity(asset && asset.src);
+        if (!identity || seen.has(identity)) return;
+        seen.add(identity);
+        const localIndex = unique.length + 1;
+        const alt = String(asset && asset.alt || "").trim();
+        unique.push({
+          ...asset,
+          alt: /^贴图\s+\d+$/.test(alt) ? `贴图 ${localIndex}` : alt,
+          localIndex
+        });
+      });
+      return unique;
+    }
+    __name(dedupeWechatImagePostAssets2, "dedupeWechatImagePostAssets");
+    function normalizeWechatImagePostMarkdown2(markdown) {
+      const seen = /* @__PURE__ */ new Set();
+      let imageIndex = 0;
+      const deduped = String(markdown || "").replace(
+        /!\[([^\]]*)\]\((https?:\/\/mmbiz\.qpic\.cn\/[^)\s]+)\)/gi,
+        (whole, alt, src) => {
+          const identity = getWechatImageAssetIdentity(src);
+          if (!identity || seen.has(identity)) return "";
+          seen.add(identity);
+          imageIndex += 1;
+          const nextAlt = /^贴图\s+\d+$/.test(String(alt || "").trim()) ? `贴图 ${imageIndex}` : alt;
+          return `![${nextAlt}](${src})`;
+        }
+      );
+      const lines = deduped.replace(/\r\n?/g, "\n").split("\n");
+      const merged = [];
+      lines.forEach((line) => {
+        const previous = merged.length ? merged[merged.length - 1] : "";
+        const current = String(line || "");
+        const joinsWrappedChineseProse = previous && current && previous.trim().length >= 30 && /[\u3400-\u9fff]$/.test(previous) && /^[\u3400-\u9fff]/.test(current) && !/^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|>|!\[)/.test(current);
+        if (joinsWrappedChineseProse) {
+          merged[merged.length - 1] = previous + current.trimStart();
+        } else {
+          merged.push(current);
+        }
+      });
+      return merged.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    }
+    __name(normalizeWechatImagePostMarkdown2, "normalizeWechatImagePostMarkdown");
+    function collectWechatImagePostStructuredAssets2(pageWindow, withEvidence = false) {
+      const root = pageWindow && typeof pageWindow === "object" ? pageWindow : {};
+      const lists = [];
+      const candidates = [];
+      try {
+        candidates.push(root.picture_page_info_list);
+      } catch (_) {
+        candidates.push(null);
+      }
+      try {
+        candidates.push(root.cgiDataNew && root.cgiDataNew.picture_page_info_list);
+      } catch (_) {
+        candidates.push(null);
+      }
+      try {
+        candidates.push(root.cgiData && root.cgiData.picture_page_info_list);
+      } catch (_) {
+        candidates.push(null);
+      }
+      try {
+        candidates.push(root.__QMTPL_SSR_DATA__ && root.__QMTPL_SSR_DATA__.picture_page_info_list);
+      } catch (_) {
+        candidates.push(null);
+      }
+      for (let index = 0; index < candidates.length; index += 1) {
+        const value = candidates[index];
+        if (Array.isArray(value) && value.length && !lists.includes(value)) lists.push(value);
+      }
+      const assets = [];
+      const seen = /* @__PURE__ */ new Set();
+      let missingImageCount = 0;
+      lists.forEach((list) => {
+        missingImageCount += Math.max(0, list.length - 100);
+        list.slice(0, 100).forEach((item) => {
+          const value = typeof item === "string" ? item : item && (item.cdn_url || item.url || item.image_url || item.src);
+          let src = String(typeof value === "string" ? value : "").replace(/\\x26amp;/gi, "&").replace(/&amp;/gi, "&").trim();
+          if (src.startsWith("//")) src = `https:${src}`;
+          if (!/^https?:\/\/mmbiz\.qpic\.cn\/(?:mmbiz|sz_mmbiz)(?:_|\/)/i.test(src)) {
+            missingImageCount += 1;
+            return;
+          }
+          let identity = src.replace(/^http:/i, "https:");
+          try {
+            const parsed = new URL(identity);
+            if (parsed.hostname.toLowerCase() === "mmbiz.qpic.cn") {
+              identity = `https://mmbiz.qpic.cn${parsed.pathname}`;
+            }
+          } catch (_) {
+          }
+          if (seen.has(identity)) return;
+          seen.add(identity);
+          const alt = item && (item.alt || item.title || item.description);
+          const width = item && ["number", "string"].includes(typeof item.width) ? Number(item.width) : 0;
+          const height = item && ["number", "string"].includes(typeof item.height) ? Number(item.height) : 0;
+          assets.push({
+            src,
+            alt: typeof alt === "string" ? alt.trim() : "",
+            width: Number.isFinite(width) ? width : 0,
+            height: Number.isFinite(height) ? height : 0
+          });
+        });
+      });
+      return withEvidence ? { assets, expectedImageCount: assets.length + missingImageCount } : assets;
+    }
+    __name(collectWechatImagePostStructuredAssets2, "collectWechatImagePostStructuredAssets");
+    function detectWechatImagePostDocument2({ html = "", url = "", bodyText = "", hasBody = false, structuredCount = 0 } = {}) {
+      try {
+        if (new URL(url).searchParams.get("t") === "pages/image_detail") return true;
+      } catch (_) {
+      }
+      const source = String(html || "");
+      const numericPictureType = Array.from(source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)).some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+appmsg_type\s*=\s*(?:"9"|'9'|9)(?=\s*(?:[;,\n]|$))/.test(match[1]));
+      const explicitType = /(?:\b(?:var|let|const)\s+(?:article_type|appmsg_type)|(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\.(?:article_type|appmsg_type))\s*=\s*["']newspic["']/i.test(source) || /(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\s*=\s*\{[^{}]{0,4096}\b(?:article_type|appmsg_type)["']?\s*:\s*["']newspic["']/i.test(source);
+      if (explicitType || numericPictureType || structuredCount > 0) return true;
+      if (hasBody && String(bodyText).replace(/\s+/g, "").length >= 200) return false;
+      const visibleMarkup = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "").replace(/<!--[\s\S]*?-->/g, "");
+      return /class=["'][^"']*(?:image[_-]detail|pic[_-]album|newspic)[^"']*["']/i.test(visibleMarkup) && /<img\b[^>]*(?:data-src|src)=["'](?:https?:)?\/\/mmbiz\.qpic\.cn\//i.test(visibleMarkup);
+    }
+    __name(detectWechatImagePostDocument2, "detectWechatImagePostDocument");
+    function readWechatImagePostHtmlData(html) {
+      const source = String(html || "");
+      const empty = { assets: [], invalidImageCount: 0, parsed: false, parseState: "absent", title: "", description: "" };
+      if (source.length > 8 * 1024 * 1024) return { ...empty, parseState: "limit" };
+      let nodes = 0;
+      let readFailures = 0;
+      function readLiteral(text, start) {
+        let pos = start;
+        const limit = Math.min(text.length, start + 512 * 1024);
+        const skip = /* @__PURE__ */ __name(() => {
+          while (pos < limit && /\s/.test(text[pos])) pos += 1;
+        }, "skip");
+        function value(depth = 0) {
+          if (depth > 30 || ++nodes > 3e4 || pos >= limit) throw new Error("data limit");
+          skip();
+          const ch = text[pos];
+          let result2;
+          if (ch === '"' || ch === "'") {
+            pos += 1;
+            result2 = "";
+            let closed = false;
+            while (pos < limit) {
+              let next = text[pos++];
+              if (next === ch) {
+                closed = true;
+                break;
+              }
+              if (next === "\\") {
+                next = text[pos++];
+                if (next === "x" || next === "u") {
+                  const size = next === "x" ? 2 : 4;
+                  const hex = text.slice(pos, pos + size);
+                  if (!new RegExp(`^[a-fA-F0-9]{${size}}$`).test(hex)) throw new Error("invalid escape");
+                  result2 += String.fromCharCode(parseInt(hex, 16));
+                  pos += size;
+                } else {
+                  const escapes = { n: "\n", r: "\r", t: "	", b: "\b", f: "\f", v: "\v", "0": "\0" };
+                  result2 += Object.prototype.hasOwnProperty.call(escapes, next) ? escapes[next] : next;
+                }
+              } else result2 += next;
+            }
+            if (!closed) throw new Error("unterminated string");
+          } else if (ch === "{" || ch === "[") {
+            const object = ch === "{";
+            const end = object ? "}" : "]";
+            result2 = object ? /* @__PURE__ */ Object.create(null) : [];
+            pos += 1;
+            skip();
+            while (pos < limit && text[pos] !== end) {
+              let key;
+              if (object) {
+                if (text[pos] === '"' || text[pos] === "'") key = value(depth + 1);
+                else {
+                  const identifier = /^[A-Za-z_$][\w$]*/.exec(text.slice(pos));
+                  if (!identifier) throw new Error("invalid key");
+                  key = identifier[0];
+                  pos += key.length;
+                }
+                skip();
+                if (text[pos++] !== ":") throw new Error("expected colon");
+              }
+              const entry = value(depth + 1);
+              if (object) result2[key] = entry;
+              else result2.push(entry);
+              skip();
+              if (text[pos] === end) break;
+              if (text[pos++] !== ",") throw new Error("expected comma");
+              skip();
+            }
+            if (text[pos++] !== end) throw new Error("unterminated data");
+          } else {
+            const primitive = /^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(pos));
+            if (!primitive) throw new Error("unsupported expression");
+            result2 = JSON.parse(primitive[0]);
+            pos += primitive[0].length;
+          }
+          skip();
+          if (text.slice(pos, pos + 1) === "*" && /^[*]\s*1\b/.test(text.slice(pos))) {
+            const multiply = /^[*]\s*1\b/.exec(text.slice(pos))[0];
+            if (!["number", "string"].includes(typeof result2) || !Number.isFinite(Number(result2))) throw new Error("invalid number");
+            result2 = Number(result2);
+            pos += multiply.length;
+            skip();
+          }
+          return result2;
+        }
+        __name(value, "value");
+        const result = value();
+        if (!/[;,\n}\s]/.test(text[pos] || ";")) throw new Error("unsupported expression suffix");
+        return result;
+      }
+      __name(readLiteral, "readLiteral");
+      const roots = [];
+      for (const script of source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
+        const assignment = /(?:^|[;\n])\s*(?:(?:var|let|const)\s+)?(?:window\.)?(cgiDataNew|cgiData|__QMTPL_SSR_DATA__|picture_page_info_list)\s*=\s*(?=[{[])/g;
+        for (const match of script[1].matchAll(assignment)) {
+          try {
+            const data = readLiteral(script[1], match.index + match[0].length);
+            const root = match[1] === "picture_page_info_list" ? { picture_page_info_list: data } : data;
+            if (root && Array.isArray(root.picture_page_info_list) && root.picture_page_info_list.length) roots.push(root);
+          } catch (_) {
+            readFailures += 1;
+          }
+          if (roots.length >= 8 || nodes > 3e4) break;
+        }
+        if (roots.length >= 8 || nodes > 3e4) break;
+      }
+      if (!roots.length) return { ...empty, parseState: readFailures ? "unsupported-literal" : "absent" };
+      const assets = dedupeWechatImagePostAssets2(roots.flatMap((root) => collectWechatImagePostStructuredAssets2(root)));
+      const invalidImageCount = roots.reduce((count, root) => count + root.picture_page_info_list.filter((item) => !collectWechatImagePostStructuredAssets2({ picture_page_info_list: [item] }).length).length + Math.max(0, root.picture_page_info_list.length - 100), 0);
+      return {
+        assets,
+        invalidImageCount,
+        parsed: true,
+        parseState: "parsed",
+        title: typeof roots[0].title === "string" ? roots[0].title.slice(0, 500) : "",
+        description: typeof roots[0].desc === "string" ? roots[0].desc.slice(0, 2e4) : ""
+      };
+    }
+    __name(readWechatImagePostHtmlData, "readWechatImagePostHtmlData");
+    module2.exports = {
+      readWechatImagePostHtmlData,
+      detectWechatImagePostDocument: detectWechatImagePostDocument2,
+      collectWechatImagePostStructuredAssets: collectWechatImagePostStructuredAssets2,
+      dedupeWechatImagePostAssets: dedupeWechatImagePostAssets2,
+      getWechatImageAssetIdentity,
+      normalizeWechatImagePostMarkdown: normalizeWechatImagePostMarkdown2
+    };
+  }
+});
+
+// src/wechat-article-utils.js
+var require_wechat_article_utils = __commonJS({
+  "src/wechat-article-utils.js"(exports2, module2) {
+    "use strict";
+    var { detectWechatImagePostDocument: detectWechatImagePostDocument2, readWechatImagePostHtmlData } = require_wechat_image_post_utils();
+    var WECHAT_ARTICLE_HOST = "mp.weixin.qq.com";
+    var WECHAT_ARTICLE_ID_PARAMS = ["__biz", "mid", "idx", "sn", "chksm", "scene"];
+    var WECHAT_IMAGE_POST_PAGE = "pages/image_detail";
+    function isWechatArticleUrl2(value) {
+      try {
+        const parsed = new URL(String(value || "").trim());
+        return parsed.hostname.toLowerCase() === WECHAT_ARTICLE_HOST && (/^\/s$/.test(parsed.pathname || "") || /^\/s\/[^/]+$/.test(parsed.pathname || ""));
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isWechatArticleUrl2, "isWechatArticleUrl");
+    function isWechatImagePostUrl2(value) {
+      if (!isWechatArticleUrl2(value)) return false;
+      try {
+        const parsed = new URL(String(value || "").trim());
+        return String(parsed.searchParams.get("t") || "").toLowerCase() === WECHAT_IMAGE_POST_PAGE;
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isWechatImagePostUrl2, "isWechatImagePostUrl");
+    function isWechatImagePostHtml(html) {
+      const bodyHtml = extractWechatArticleBodyHtml(html);
+      return detectWechatImagePostDocument2({ html, bodyText: stripHtml(bodyHtml), hasBody: Boolean(bodyHtml) });
+    }
+    __name(isWechatImagePostHtml, "isWechatImagePostHtml");
+    function getWechatRetainedParameterNames(value) {
+      return isWechatImagePostUrl2(value) ? ["t", ...WECHAT_ARTICLE_ID_PARAMS] : WECHAT_ARTICLE_ID_PARAMS;
+    }
+    __name(getWechatRetainedParameterNames, "getWechatRetainedParameterNames");
+    function normalizeWechatArticleUrl2(value) {
+      if (!isWechatArticleUrl2(value)) return "";
+      const parsed = new URL(String(value || "").trim());
+      const pathname = String(parsed.pathname || "").replace(/\/+$/, "") || "/s";
+      const normalized = new URL(`https://${WECHAT_ARTICLE_HOST}${pathname}`);
+      if (pathname === "/s" || isWechatImagePostUrl2(value)) {
+        getWechatRetainedParameterNames(value).forEach((key) => {
+          const parameter = parsed.searchParams.get(key);
+          if (parameter) normalized.searchParams.set(key, parameter);
+        });
+      }
+      return normalized.toString();
+    }
+    __name(normalizeWechatArticleUrl2, "normalizeWechatArticleUrl");
+    function getWechatArticleUrlShape(value) {
+      if (!isWechatArticleUrl2(value)) return null;
+      const parsed = new URL(String(value || "").trim());
+      const parameterNames = Array.from(new Set(Array.from(parsed.searchParams.keys()))).filter(Boolean).sort();
+      const retainedNames = getWechatRetainedParameterNames(value);
+      const retainedParameterNames = parameterNames.filter((name) => retainedNames.includes(name));
+      const strippedParameterNames = parameterNames.filter((name) => !retainedNames.includes(name));
+      return {
+        pathKind: parsed.pathname === "/s" ? "query-id" : "slug",
+        contentKind: isWechatImagePostUrl2(value) ? "image-post" : "article",
+        parameterNames,
+        retainedParameterNames,
+        strippedParameterNames,
+        hasFragment: Boolean(parsed.hash)
+      };
+    }
+    __name(getWechatArticleUrlShape, "getWechatArticleUrlShape");
+    function buildWechatArticleRequestProfiles2(value) {
+      const originalUrl = String(value || "").trim();
+      const normalizedUrl = normalizeWechatArticleUrl2(originalUrl);
+      if (!normalizedUrl) return [];
+      const originalShape = getWechatArticleUrlShape(originalUrl);
+      const normalizedShape = getWechatArticleUrlShape(normalizedUrl);
+      return [
+        {
+          id: "original-desktop",
+          inputKind: "original-url",
+          userAgentProfile: "desktop",
+          url: originalUrl,
+          urlShape: originalShape,
+          normalizedChanged: originalUrl !== normalizedUrl
+        },
+        {
+          id: "canonical-mobile",
+          inputKind: "canonical-url",
+          userAgentProfile: "mobile",
+          url: normalizedUrl,
+          urlShape: normalizedShape,
+          normalizedChanged: originalUrl !== normalizedUrl
+        }
+      ];
+    }
+    __name(buildWechatArticleRequestProfiles2, "buildWechatArticleRequestProfiles");
+    function decodeHtmlEntities2(value) {
+      return String(value || "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/g, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
+    }
+    __name(decodeHtmlEntities2, "decodeHtmlEntities");
+    function stripHtml(value) {
+      return decodeHtmlEntities2(String(value || "").replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+    }
+    __name(stripHtml, "stripHtml");
+    function getMetaContent(html, key) {
+      const source = String(html || "");
+      const escapedKey = String(key || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(`<meta\\b(?=[^>]*(?:name|property)=["']${escapedKey}["'])[^>]*\\bcontent=["']([^"']*)["'][^>]*>`, "i");
+      const reversedPattern = new RegExp(`<meta\\b(?=[^>]*\\bcontent=["']([^"']*)["'])[^>]*(?:name|property)=["']${escapedKey}["'][^>]*>`, "i");
+      const match = source.match(pattern) || source.match(reversedPattern);
+      return match && match[1] ? decodeHtmlEntities2(match[1]).trim() : "";
+    }
+    __name(getMetaContent, "getMetaContent");
+    function getHtmlTitle(html) {
+      const source = String(html || "");
+      return getMetaContent(source, "og:title") || stripHtml((source.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1]);
+    }
+    __name(getHtmlTitle, "getHtmlTitle");
+    function isGenericWechatMetadata(value) {
+      const text = String(value || "").replace(/\s+/g, "").trim();
+      return !text || /^(微信公众平台|微信|微信公众号|WeChatOfficialAccountsPlatform)$/i.test(text) || /微信扫一扫可打开此内容|使用完整服务|使用小程序/.test(text);
+    }
+    __name(isGenericWechatMetadata, "isGenericWechatMetadata");
+    function isTrustedCoverUrl(value) {
+      try {
+        const parsed = new URL(String(value || "").trim());
+        return parsed.protocol === "https:" && Boolean(parsed.hostname);
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isTrustedCoverUrl, "isTrustedCoverUrl");
+    function extractWechatArticleBodyHtml(html) {
+      const source = String(html || "");
+      const opening = /<div\b(?=[^>]*\sid=["']js_content["'])[^>]*>/i.exec(source);
+      if (!opening) return "";
+      const tagName = "div";
+      const tagPattern = new RegExp(`<\\/?${tagName}\\b[^>]*>`, "gi");
+      tagPattern.lastIndex = opening.index + opening[0].length;
+      let depth = 1;
+      let closingIndex = source.length;
+      let tagMatch;
+      while (tagMatch = tagPattern.exec(source)) {
+        if (/^<\//.test(tagMatch[0])) depth -= 1;
+        else if (!/\/\s*>$/.test(tagMatch[0])) depth += 1;
+        if (depth === 0) {
+          closingIndex = tagMatch.index;
+          break;
+        }
+      }
+      return source.slice(opening.index + opening[0].length, closingIndex);
+    }
+    __name(extractWechatArticleBodyHtml, "extractWechatArticleBodyHtml");
+    function hasWechatArticleBody(html) {
+      const bodyHtml = extractWechatArticleBodyHtml(html);
+      return Boolean(stripHtml(bodyHtml)) || /<img\b[^>]+(?:data-src|src)=/i.test(bodyHtml) || /<(?:video|audio)\b/i.test(bodyHtml);
+    }
+    __name(hasWechatArticleBody, "hasWechatArticleBody");
+    function getHtmlAttribute2(attributes, name) {
+      const source = String(attributes || "");
+      const escapedName = String(name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = source.match(new RegExp(`\\b${escapedName}\\s*=\\s*(?:["']([^"']*)["']|([^\\s>]+))`, "i"));
+      return decodeHtmlEntities2(match && (match[1] || match[2]) || "").trim();
+    }
+    __name(getHtmlAttribute2, "getHtmlAttribute");
+    function normalizeWechatImageCandidate(value) {
+      const source = decodeHtmlEntities2(String(value || "").trim());
+      if (!source || /^data:image\/gif/i.test(source) || /^javascript:/i.test(source)) return "";
+      if (/^\/\//.test(source)) return `https:${source}`;
+      if (/^https?:\/\//i.test(source)) return source;
+      return "";
+    }
+    __name(normalizeWechatImageCandidate, "normalizeWechatImageCandidate");
+    function collectWechatArticleImageCandidates(html) {
+      const bodyHtml = extractWechatArticleBodyHtml(html);
+      if (!bodyHtml) return [];
+      const candidates = [];
+      const seen = /* @__PURE__ */ new Set();
+      const imagePattern = /<img\b([^>]*)>/gi;
+      let match;
+      while (match = imagePattern.exec(bodyHtml)) {
+        const attributes = match[1] || "";
+        const candidate = [
+          getHtmlAttribute2(attributes, "data-src"),
+          getHtmlAttribute2(attributes, "data-original"),
+          getHtmlAttribute2(attributes, "data-lazy-src"),
+          getHtmlAttribute2(attributes, "src"),
+          getHtmlAttribute2(attributes, "data-fail")
+        ].map(normalizeWechatImageCandidate).find(Boolean) || "";
+        if (!candidate || seen.has(candidate)) continue;
+        seen.add(candidate);
+        candidates.push(candidate);
+      }
+      return candidates;
+    }
+    __name(collectWechatArticleImageCandidates, "collectWechatArticleImageCandidates");
+    function getWechatArticleBodyStats(html) {
+      const source = String(html || "");
+      const bodyHtml = extractWechatArticleBodyHtml(source);
+      const bodyText = stripHtml(bodyHtml);
+      const imageCandidates = collectWechatArticleImageCandidates(source);
+      const mediaCount = (bodyHtml.match(/<(?:video|audio)\b|<source\b[^>]*\btype=["'](?:video|audio)\//gi) || []).length;
+      return {
+        hasJsContent: /<div\b(?=[^>]*\bid=["']js_content["'])/i.test(source),
+        bodyHtmlChars: bodyHtml.length,
+        bodyTextChars: bodyText.length,
+        imageCount: imageCandidates.length,
+        mediaCount,
+        imageCandidates,
+        hasSubstantiveBody: bodyText.length >= 50 || imageCandidates.length > 0 || mediaCount > 0
+      };
+    }
+    __name(getWechatArticleBodyStats, "getWechatArticleBodyStats");
+    function inspectWechatArticleContent(html, url = "") {
+      const source = String(html || "");
+      const stats = getWechatArticleBodyStats(source);
+      const data = readWechatImagePostHtmlData(source);
+      const explicitPicture = isWechatImagePostHtml(source);
+      const pictureHint = isWechatImagePostUrl2(url);
+      const pictureEvidence = explicitPicture || data.parsed;
+      const bodyUsable = stats.hasJsContent && (stats.bodyTextChars > 0 || stats.imageCount > 0);
+      const structuredComplete = data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
+      const complete = structuredComplete || bodyUsable && !pictureEvidence && !pictureHint && (!stats.mediaCount || stats.bodyTextChars > 0);
+      const fallbackComplete = bodyUsable && !pictureEvidence && !stats.mediaCount && stats.bodyTextChars >= 200;
+      const contentKind = pictureEvidence ? "image-post" : bodyUsable ? "article" : "unknown";
+      const escape = /* @__PURE__ */ __name((value) => String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"), "escape");
+      const body = extractWechatArticleBodyHtml(source).replace(/<img\b[^>]*>/gi, "");
+      const reconstructed = structuredComplete ? `<html><head><title>${escape(data.title || getHtmlTitle(source))}</title></head><body><div id="js_content">` + (stripHtml(body) ? body : `<p>${escape(data.description)}</p>`) + data.assets.map((asset, index) => `<img src="${escape(asset.src)}" alt="贴图 ${index + 1}">`).join("") + "</div></body></html>" : source;
+      return {
+        html: reconstructed,
+        assets: structuredComplete ? data.assets : [],
+        title: data.title,
+        complete,
+        fallbackComplete,
+        diagnostic: {
+          contentKind,
+          typeHint: pictureHint ? "image-post" : "unspecified",
+          evidence: data.parsed ? "structured-picture-list" : explicitPicture ? "page-picture-type" : bodyUsable ? "article-body" : "no-body",
+          extractor: structuredComplete ? "structured-images" : bodyUsable ? "article-body" : "none",
+          complete,
+          bodyTextChars: stats.bodyTextChars,
+          bodyImageCount: stats.imageCount,
+          structuredImageCount: data.assets.length,
+          structuredDataState: data.parseState,
+          invalidImageCount: data.invalidImageCount,
+          imageCandidateCount: structuredComplete ? data.assets.length : stats.imageCount,
+          mediaCount: stats.mediaCount
+        }
+      };
+    }
+    __name(inspectWechatArticleContent, "inspectWechatArticleContent");
+    function isWechatEmptyShellHtml(html) {
+      const source = String(html || "");
+      const stats = getWechatArticleBodyStats(source);
+      if (!/mp\.weixin\.qq\.com|rich_media|js_content|\u89c6\u9891|\u5c0f\u7a0b\u5e8f|\u8f7b\u70b9\u4e24\u4e0b/i.test(source)) return false;
+      return !stats.hasJsContent || !stats.hasSubstantiveBody && stats.bodyTextChars < 50;
+    }
+    __name(isWechatEmptyShellHtml, "isWechatEmptyShellHtml");
+    function diagnoseWechatArticleHtml2(html) {
+      const source = String(html || "");
+      const stats = getWechatArticleBodyStats(source);
+      const classifiedState = classifyWechatArticleHtml(source);
+      const text = stripHtml(source);
+      const markers = {
+        captcha: classifiedState === "captcha",
+        unavailable: classifiedState === "unavailable",
+        guide: classifiedState === "guide",
+        emptyShell: isWechatEmptyShellHtml(source),
+        shellToolbar: /\u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e|\u5728\u770b|\u89c6\u9891|\u5c0f\u7a0b\u5e8f/i.test(text),
+        imagePost: isWechatImagePostHtml(source)
+      };
+      let pageKind = classifiedState;
+      if (markers.emptyShell && !markers.captcha && !markers.unavailable && !markers.imagePost) {
+        pageKind = "empty-shell";
+      }
+      return {
+        pageKind,
+        classifiedState,
+        hasHtml: Boolean(source.trim()),
+        htmlChars: source.length,
+        hasJsContent: stats.hasJsContent,
+        bodyHtmlChars: stats.bodyHtmlChars,
+        bodyTextChars: stats.bodyTextChars,
+        imageCount: stats.imageCount,
+        mediaCount: stats.mediaCount,
+        imageCandidateCount: stats.imageCandidates.length,
+        markers
+      };
+    }
+    __name(diagnoseWechatArticleHtml2, "diagnoseWechatArticleHtml");
+    function classifyWechatArticleHtml(html) {
+      const text = stripHtml(html);
+      if (!hasWechatArticleBody(html) && /环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return "captcha";
+      if (!hasWechatArticleBody(html) && /访问(?:过于)?频繁|操作(?:过于)?频繁|请稍后再(?:试|访问)/.test(text)) return "captcha";
+      if (isWechatImagePostHtml(html)) return "image-post";
+      if (hasWechatArticleBody(html)) return "article";
+      if (/微信扫一扫可打开此内容/.test(text) && /使用完整服务|使用小程序/.test(text)) return "guide";
+      if (/内容不存在|已删除|暂时无法查看|加载失败/.test(text)) return "unavailable";
+      return "unknown";
+    }
+    __name(classifyWechatArticleHtml, "classifyWechatArticleHtml");
+    function extractWechatArticleFallbackMetadata(html) {
+      const title = getHtmlTitle(html);
+      const description = getMetaContent(html, "og:description") || getMetaContent(html, "description");
+      const coverUrl = getMetaContent(html, "og:image");
+      return {
+        title: isGenericWechatMetadata(title) ? "" : title,
+        description: isGenericWechatMetadata(description) ? "" : description,
+        coverUrl: isTrustedCoverUrl(coverUrl) ? coverUrl : ""
+      };
+    }
+    __name(extractWechatArticleFallbackMetadata, "extractWechatArticleFallbackMetadata");
+    function buildWechatArticleFallbackMarkdown({
+      url = "",
+      state = "guide",
+      title = "",
+      description = "",
+      coverUrl = ""
+    } = {}) {
+      const statusText = state === "captcha" ? "公众号文章触发了微信安全验证，插件不能自动绕过验证。" : state === "unavailable" ? "公众号文章暂时不可访问，未能取得正文。" : "微信公众号未返回正文，已保存原始链接和可用线索；可在微信内打开后重试。";
+      const lines = [statusText, ""];
+      if (title) lines.push(`标题：${title}`, "");
+      if (description) lines.push(description, "");
+      if (coverUrl) lines.push(`![封面](${coverUrl})`, "");
+      if (url) lines.push(`原始链接：${url}`, "");
+      return lines.join("\n").trim();
+    }
+    __name(buildWechatArticleFallbackMarkdown, "buildWechatArticleFallbackMarkdown");
+    module2.exports = {
+      inspectWechatArticleContent,
+      buildWechatArticleFallbackMarkdown,
+      buildWechatArticleRequestProfiles: buildWechatArticleRequestProfiles2,
+      classifyWechatArticleHtml,
+      collectWechatArticleImageCandidates,
+      diagnoseWechatArticleHtml: diagnoseWechatArticleHtml2,
+      extractWechatArticleFallbackMetadata,
+      extractWechatArticleBodyHtml,
+      getWechatArticleBodyStats,
+      getWechatArticleUrlShape,
+      hasWechatArticleBody,
+      isWechatArticleUrl: isWechatArticleUrl2,
+      isWechatImagePostHtml,
+      isWechatImagePostUrl: isWechatImagePostUrl2,
+      isWechatEmptyShellHtml,
+      isGenericWechatMetadata,
+      isTrustedCoverUrl,
+      normalizeWechatArticleUrl: normalizeWechatArticleUrl2
+    };
+  }
+});
+
+// src/wechat-placeholder-utils.js
+var require_wechat_placeholder_utils = __commonJS({
+  "src/wechat-placeholder-utils.js"(exports2, module2) {
+    "use strict";
+    var { isWechatArticleUrl: isWechatArticleUrl2 } = require_wechat_article_utils();
+    var MESSAGES = [
+      "微信公众号未返回正文，已保存原始链接和可用线索；可在微信内打开后重试。",
+      "公众号文章暂时不可访问，未能取得正文。",
+      "公众号文章触发了微信安全验证，插件不能自动绕过验证。"
+    ];
+    function isWechatArticleFailurePlaceholder(markdown) {
+      const body = String(markdown || "").replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").replace(/^\s*<!--\s*wechat-inbox-(?:record-id|content-kind):[^>]*-->\s*/g, "").trimStart().replace(/^#{1,2}\s+Markdown 内容\s*\r?\n/, "").trimStart();
+      if (![...body.matchAll(/^原始链接[：:]\s*(https?:\/\/[^\s<>]+)\s*$/gm)].some((match) => isWechatArticleUrl2(match[1]))) return false;
+      return MESSAGES.some((message) => body === message || body.startsWith(message + "\n") || body.startsWith(message + "\r\n"));
+    }
+    __name(isWechatArticleFailurePlaceholder, "isWechatArticleFailurePlaceholder");
+    function getWechatPlaceholderRecoveryUrl2(markdown) {
+      if (!isWechatArticleFailurePlaceholder(markdown)) return "";
+      const urls = [...String(markdown).matchAll(/^原始链接[：:]\s*(https?:\/\/[^\s<>]+)\s*$/gm)].map((match) => match[1]);
+      const unique = [...new Set(urls)];
+      if (unique.length !== 1 || !isWechatArticleUrl2(unique[0])) return "";
+      const parsed = new URL(unique[0]);
+      return parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.port ? unique[0] : "";
+    }
+    __name(getWechatPlaceholderRecoveryUrl2, "getWechatPlaceholderRecoveryUrl");
+    module2.exports = { isWechatArticleFailurePlaceholder, getWechatPlaceholderRecoveryUrl: getWechatPlaceholderRecoveryUrl2 };
+  }
+});
+
 // src/douyin-browser-safety.js
 var require_douyin_browser_safety = __commonJS({
   "src/douyin-browser-safety.js"(exports2, module2) {
@@ -1269,629 +1921,6 @@ var require_xiaohongshu_diagnostic_utils = __commonJS({
     }
     __name(sanitize, "sanitize");
     module2.exports = { recordRef, technicalText, errorDetails, safeStage, sanitize };
-  }
-});
-
-// src/wechat-image-post-utils.js
-var require_wechat_image_post_utils = __commonJS({
-  "src/wechat-image-post-utils.js"(exports2, module2) {
-    "use strict";
-    function getWechatImageAssetIdentity(value) {
-      let src = String(value || "").replace(/\\x26amp;/gi, "&").replace(/&amp;/gi, "&").trim();
-      if (src.startsWith("//")) src = `https:${src}`;
-      src = src.replace(/^http:/i, "https:");
-      try {
-        const parsed = new URL(src);
-        if (parsed.hostname.toLowerCase() === "mmbiz.qpic.cn") {
-          return `https://mmbiz.qpic.cn${parsed.pathname}`;
-        }
-      } catch (_) {
-      }
-      return src.replace(/#.*$/, "");
-    }
-    __name(getWechatImageAssetIdentity, "getWechatImageAssetIdentity");
-    function dedupeWechatImagePostAssets2(assets) {
-      const unique = [];
-      const seen = /* @__PURE__ */ new Set();
-      (Array.isArray(assets) ? assets : []).forEach((asset) => {
-        const identity = getWechatImageAssetIdentity(asset && asset.src);
-        if (!identity || seen.has(identity)) return;
-        seen.add(identity);
-        const localIndex = unique.length + 1;
-        const alt = String(asset && asset.alt || "").trim();
-        unique.push({
-          ...asset,
-          alt: /^贴图\s+\d+$/.test(alt) ? `贴图 ${localIndex}` : alt,
-          localIndex
-        });
-      });
-      return unique;
-    }
-    __name(dedupeWechatImagePostAssets2, "dedupeWechatImagePostAssets");
-    function normalizeWechatImagePostMarkdown2(markdown) {
-      const seen = /* @__PURE__ */ new Set();
-      let imageIndex = 0;
-      const deduped = String(markdown || "").replace(
-        /!\[([^\]]*)\]\((https?:\/\/mmbiz\.qpic\.cn\/[^)\s]+)\)/gi,
-        (whole, alt, src) => {
-          const identity = getWechatImageAssetIdentity(src);
-          if (!identity || seen.has(identity)) return "";
-          seen.add(identity);
-          imageIndex += 1;
-          const nextAlt = /^贴图\s+\d+$/.test(String(alt || "").trim()) ? `贴图 ${imageIndex}` : alt;
-          return `![${nextAlt}](${src})`;
-        }
-      );
-      const lines = deduped.replace(/\r\n?/g, "\n").split("\n");
-      const merged = [];
-      lines.forEach((line) => {
-        const previous = merged.length ? merged[merged.length - 1] : "";
-        const current = String(line || "");
-        const joinsWrappedChineseProse = previous && current && previous.trim().length >= 30 && /[\u3400-\u9fff]$/.test(previous) && /^[\u3400-\u9fff]/.test(current) && !/^\s*(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|>|!\[)/.test(current);
-        if (joinsWrappedChineseProse) {
-          merged[merged.length - 1] = previous + current.trimStart();
-        } else {
-          merged.push(current);
-        }
-      });
-      return merged.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-    }
-    __name(normalizeWechatImagePostMarkdown2, "normalizeWechatImagePostMarkdown");
-    function collectWechatImagePostStructuredAssets2(pageWindow, withEvidence = false) {
-      const root = pageWindow && typeof pageWindow === "object" ? pageWindow : {};
-      const lists = [];
-      const candidates = [];
-      try {
-        candidates.push(root.picture_page_info_list);
-      } catch (_) {
-        candidates.push(null);
-      }
-      try {
-        candidates.push(root.cgiDataNew && root.cgiDataNew.picture_page_info_list);
-      } catch (_) {
-        candidates.push(null);
-      }
-      try {
-        candidates.push(root.cgiData && root.cgiData.picture_page_info_list);
-      } catch (_) {
-        candidates.push(null);
-      }
-      try {
-        candidates.push(root.__QMTPL_SSR_DATA__ && root.__QMTPL_SSR_DATA__.picture_page_info_list);
-      } catch (_) {
-        candidates.push(null);
-      }
-      for (let index = 0; index < candidates.length; index += 1) {
-        const value = candidates[index];
-        if (Array.isArray(value) && value.length && !lists.includes(value)) lists.push(value);
-      }
-      const assets = [];
-      const seen = /* @__PURE__ */ new Set();
-      let missingImageCount = 0;
-      lists.forEach((list) => {
-        missingImageCount += Math.max(0, list.length - 100);
-        list.slice(0, 100).forEach((item) => {
-          const value = typeof item === "string" ? item : item && (item.cdn_url || item.url || item.image_url || item.src);
-          let src = String(typeof value === "string" ? value : "").replace(/\\x26amp;/gi, "&").replace(/&amp;/gi, "&").trim();
-          if (src.startsWith("//")) src = `https:${src}`;
-          if (!/^https?:\/\/mmbiz\.qpic\.cn\/(?:mmbiz|sz_mmbiz)(?:_|\/)/i.test(src)) {
-            missingImageCount += 1;
-            return;
-          }
-          let identity = src.replace(/^http:/i, "https:");
-          try {
-            const parsed = new URL(identity);
-            if (parsed.hostname.toLowerCase() === "mmbiz.qpic.cn") {
-              identity = `https://mmbiz.qpic.cn${parsed.pathname}`;
-            }
-          } catch (_) {
-          }
-          if (seen.has(identity)) return;
-          seen.add(identity);
-          const alt = item && (item.alt || item.title || item.description);
-          const width = item && ["number", "string"].includes(typeof item.width) ? Number(item.width) : 0;
-          const height = item && ["number", "string"].includes(typeof item.height) ? Number(item.height) : 0;
-          assets.push({
-            src,
-            alt: typeof alt === "string" ? alt.trim() : "",
-            width: Number.isFinite(width) ? width : 0,
-            height: Number.isFinite(height) ? height : 0
-          });
-        });
-      });
-      return withEvidence ? { assets, expectedImageCount: assets.length + missingImageCount } : assets;
-    }
-    __name(collectWechatImagePostStructuredAssets2, "collectWechatImagePostStructuredAssets");
-    function detectWechatImagePostDocument2({ html = "", url = "", bodyText = "", hasBody = false, structuredCount = 0 } = {}) {
-      try {
-        if (new URL(url).searchParams.get("t") === "pages/image_detail") return true;
-      } catch (_) {
-      }
-      const source = String(html || "");
-      const numericPictureType = Array.from(source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)).some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+appmsg_type\s*=\s*(?:"9"|'9'|9)(?=\s*(?:[;,\n]|$))/.test(match[1]));
-      const explicitType = /(?:\b(?:var|let|const)\s+(?:article_type|appmsg_type)|(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\.(?:article_type|appmsg_type))\s*=\s*["']newspic["']/i.test(source) || /(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\s*=\s*\{[^{}]{0,4096}\b(?:article_type|appmsg_type)["']?\s*:\s*["']newspic["']/i.test(source);
-      if (explicitType || numericPictureType || structuredCount > 0) return true;
-      if (hasBody && String(bodyText).replace(/\s+/g, "").length >= 200) return false;
-      const visibleMarkup = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "").replace(/<!--[\s\S]*?-->/g, "");
-      return /class=["'][^"']*(?:image[_-]detail|pic[_-]album|newspic)[^"']*["']/i.test(visibleMarkup) && /<img\b[^>]*(?:data-src|src)=["'](?:https?:)?\/\/mmbiz\.qpic\.cn\//i.test(visibleMarkup);
-    }
-    __name(detectWechatImagePostDocument2, "detectWechatImagePostDocument");
-    function readWechatImagePostHtmlData(html) {
-      const source = String(html || "");
-      const empty = { assets: [], invalidImageCount: 0, parsed: false, parseState: "absent", title: "", description: "" };
-      if (source.length > 8 * 1024 * 1024) return { ...empty, parseState: "limit" };
-      let nodes = 0;
-      let readFailures = 0;
-      function readLiteral(text, start) {
-        let pos = start;
-        const limit = Math.min(text.length, start + 512 * 1024);
-        const skip = /* @__PURE__ */ __name(() => {
-          while (pos < limit && /\s/.test(text[pos])) pos += 1;
-        }, "skip");
-        function value(depth = 0) {
-          if (depth > 30 || ++nodes > 3e4 || pos >= limit) throw new Error("data limit");
-          skip();
-          const ch = text[pos];
-          let result2;
-          if (ch === '"' || ch === "'") {
-            pos += 1;
-            result2 = "";
-            let closed = false;
-            while (pos < limit) {
-              let next = text[pos++];
-              if (next === ch) {
-                closed = true;
-                break;
-              }
-              if (next === "\\") {
-                next = text[pos++];
-                if (next === "x" || next === "u") {
-                  const size = next === "x" ? 2 : 4;
-                  const hex = text.slice(pos, pos + size);
-                  if (!new RegExp(`^[a-fA-F0-9]{${size}}$`).test(hex)) throw new Error("invalid escape");
-                  result2 += String.fromCharCode(parseInt(hex, 16));
-                  pos += size;
-                } else {
-                  const escapes = { n: "\n", r: "\r", t: "	", b: "\b", f: "\f", v: "\v", "0": "\0" };
-                  result2 += Object.prototype.hasOwnProperty.call(escapes, next) ? escapes[next] : next;
-                }
-              } else result2 += next;
-            }
-            if (!closed) throw new Error("unterminated string");
-          } else if (ch === "{" || ch === "[") {
-            const object = ch === "{";
-            const end = object ? "}" : "]";
-            result2 = object ? /* @__PURE__ */ Object.create(null) : [];
-            pos += 1;
-            skip();
-            while (pos < limit && text[pos] !== end) {
-              let key;
-              if (object) {
-                if (text[pos] === '"' || text[pos] === "'") key = value(depth + 1);
-                else {
-                  const identifier = /^[A-Za-z_$][\w$]*/.exec(text.slice(pos));
-                  if (!identifier) throw new Error("invalid key");
-                  key = identifier[0];
-                  pos += key.length;
-                }
-                skip();
-                if (text[pos++] !== ":") throw new Error("expected colon");
-              }
-              const entry = value(depth + 1);
-              if (object) result2[key] = entry;
-              else result2.push(entry);
-              skip();
-              if (text[pos] === end) break;
-              if (text[pos++] !== ",") throw new Error("expected comma");
-              skip();
-            }
-            if (text[pos++] !== end) throw new Error("unterminated data");
-          } else {
-            const primitive = /^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/.exec(text.slice(pos));
-            if (!primitive) throw new Error("unsupported expression");
-            result2 = JSON.parse(primitive[0]);
-            pos += primitive[0].length;
-          }
-          skip();
-          if (text.slice(pos, pos + 1) === "*" && /^[*]\s*1\b/.test(text.slice(pos))) {
-            const multiply = /^[*]\s*1\b/.exec(text.slice(pos))[0];
-            if (!["number", "string"].includes(typeof result2) || !Number.isFinite(Number(result2))) throw new Error("invalid number");
-            result2 = Number(result2);
-            pos += multiply.length;
-            skip();
-          }
-          return result2;
-        }
-        __name(value, "value");
-        const result = value();
-        if (!/[;,\n}\s]/.test(text[pos] || ";")) throw new Error("unsupported expression suffix");
-        return result;
-      }
-      __name(readLiteral, "readLiteral");
-      const roots = [];
-      for (const script of source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)) {
-        const assignment = /(?:^|[;\n])\s*(?:(?:var|let|const)\s+)?(?:window\.)?(cgiDataNew|cgiData|__QMTPL_SSR_DATA__|picture_page_info_list)\s*=\s*(?=[{[])/g;
-        for (const match of script[1].matchAll(assignment)) {
-          try {
-            const data = readLiteral(script[1], match.index + match[0].length);
-            const root = match[1] === "picture_page_info_list" ? { picture_page_info_list: data } : data;
-            if (root && Array.isArray(root.picture_page_info_list) && root.picture_page_info_list.length) roots.push(root);
-          } catch (_) {
-            readFailures += 1;
-          }
-          if (roots.length >= 8 || nodes > 3e4) break;
-        }
-        if (roots.length >= 8 || nodes > 3e4) break;
-      }
-      if (!roots.length) return { ...empty, parseState: readFailures ? "unsupported-literal" : "absent" };
-      const assets = dedupeWechatImagePostAssets2(roots.flatMap((root) => collectWechatImagePostStructuredAssets2(root)));
-      const invalidImageCount = roots.reduce((count, root) => count + root.picture_page_info_list.filter((item) => !collectWechatImagePostStructuredAssets2({ picture_page_info_list: [item] }).length).length + Math.max(0, root.picture_page_info_list.length - 100), 0);
-      return {
-        assets,
-        invalidImageCount,
-        parsed: true,
-        parseState: "parsed",
-        title: typeof roots[0].title === "string" ? roots[0].title.slice(0, 500) : "",
-        description: typeof roots[0].desc === "string" ? roots[0].desc.slice(0, 2e4) : ""
-      };
-    }
-    __name(readWechatImagePostHtmlData, "readWechatImagePostHtmlData");
-    module2.exports = {
-      readWechatImagePostHtmlData,
-      detectWechatImagePostDocument: detectWechatImagePostDocument2,
-      collectWechatImagePostStructuredAssets: collectWechatImagePostStructuredAssets2,
-      dedupeWechatImagePostAssets: dedupeWechatImagePostAssets2,
-      getWechatImageAssetIdentity,
-      normalizeWechatImagePostMarkdown: normalizeWechatImagePostMarkdown2
-    };
-  }
-});
-
-// src/wechat-article-utils.js
-var require_wechat_article_utils = __commonJS({
-  "src/wechat-article-utils.js"(exports2, module2) {
-    "use strict";
-    var { detectWechatImagePostDocument: detectWechatImagePostDocument2, readWechatImagePostHtmlData } = require_wechat_image_post_utils();
-    var WECHAT_ARTICLE_HOST = "mp.weixin.qq.com";
-    var WECHAT_ARTICLE_ID_PARAMS = ["__biz", "mid", "idx", "sn", "chksm", "scene"];
-    var WECHAT_IMAGE_POST_PAGE = "pages/image_detail";
-    function isWechatArticleUrl2(value) {
-      try {
-        const parsed = new URL(String(value || "").trim());
-        return parsed.hostname.toLowerCase() === WECHAT_ARTICLE_HOST && (/^\/s$/.test(parsed.pathname || "") || /^\/s\/[^/]+$/.test(parsed.pathname || ""));
-      } catch (_) {
-        return false;
-      }
-    }
-    __name(isWechatArticleUrl2, "isWechatArticleUrl");
-    function isWechatImagePostUrl2(value) {
-      if (!isWechatArticleUrl2(value)) return false;
-      try {
-        const parsed = new URL(String(value || "").trim());
-        return String(parsed.searchParams.get("t") || "").toLowerCase() === WECHAT_IMAGE_POST_PAGE;
-      } catch (_) {
-        return false;
-      }
-    }
-    __name(isWechatImagePostUrl2, "isWechatImagePostUrl");
-    function isWechatImagePostHtml(html) {
-      const bodyHtml = extractWechatArticleBodyHtml(html);
-      return detectWechatImagePostDocument2({ html, bodyText: stripHtml(bodyHtml), hasBody: Boolean(bodyHtml) });
-    }
-    __name(isWechatImagePostHtml, "isWechatImagePostHtml");
-    function getWechatRetainedParameterNames(value) {
-      return isWechatImagePostUrl2(value) ? ["t", ...WECHAT_ARTICLE_ID_PARAMS] : WECHAT_ARTICLE_ID_PARAMS;
-    }
-    __name(getWechatRetainedParameterNames, "getWechatRetainedParameterNames");
-    function normalizeWechatArticleUrl2(value) {
-      if (!isWechatArticleUrl2(value)) return "";
-      const parsed = new URL(String(value || "").trim());
-      const pathname = String(parsed.pathname || "").replace(/\/+$/, "") || "/s";
-      const normalized = new URL(`https://${WECHAT_ARTICLE_HOST}${pathname}`);
-      if (pathname === "/s" || isWechatImagePostUrl2(value)) {
-        getWechatRetainedParameterNames(value).forEach((key) => {
-          const parameter = parsed.searchParams.get(key);
-          if (parameter) normalized.searchParams.set(key, parameter);
-        });
-      }
-      return normalized.toString();
-    }
-    __name(normalizeWechatArticleUrl2, "normalizeWechatArticleUrl");
-    function getWechatArticleUrlShape(value) {
-      if (!isWechatArticleUrl2(value)) return null;
-      const parsed = new URL(String(value || "").trim());
-      const parameterNames = Array.from(new Set(Array.from(parsed.searchParams.keys()))).filter(Boolean).sort();
-      const retainedNames = getWechatRetainedParameterNames(value);
-      const retainedParameterNames = parameterNames.filter((name) => retainedNames.includes(name));
-      const strippedParameterNames = parameterNames.filter((name) => !retainedNames.includes(name));
-      return {
-        pathKind: parsed.pathname === "/s" ? "query-id" : "slug",
-        contentKind: isWechatImagePostUrl2(value) ? "image-post" : "article",
-        parameterNames,
-        retainedParameterNames,
-        strippedParameterNames,
-        hasFragment: Boolean(parsed.hash)
-      };
-    }
-    __name(getWechatArticleUrlShape, "getWechatArticleUrlShape");
-    function buildWechatArticleRequestProfiles2(value) {
-      const originalUrl = String(value || "").trim();
-      const normalizedUrl = normalizeWechatArticleUrl2(originalUrl);
-      if (!normalizedUrl) return [];
-      const originalShape = getWechatArticleUrlShape(originalUrl);
-      const normalizedShape = getWechatArticleUrlShape(normalizedUrl);
-      return [
-        {
-          id: "original-desktop",
-          inputKind: "original-url",
-          userAgentProfile: "desktop",
-          url: originalUrl,
-          urlShape: originalShape,
-          normalizedChanged: originalUrl !== normalizedUrl
-        },
-        {
-          id: "canonical-mobile",
-          inputKind: "canonical-url",
-          userAgentProfile: "mobile",
-          url: normalizedUrl,
-          urlShape: normalizedShape,
-          normalizedChanged: originalUrl !== normalizedUrl
-        }
-      ];
-    }
-    __name(buildWechatArticleRequestProfiles2, "buildWechatArticleRequestProfiles");
-    function decodeHtmlEntities2(value) {
-      return String(value || "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;/g, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
-    }
-    __name(decodeHtmlEntities2, "decodeHtmlEntities");
-    function stripHtml(value) {
-      return decodeHtmlEntities2(String(value || "").replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
-    }
-    __name(stripHtml, "stripHtml");
-    function getMetaContent(html, key) {
-      const source = String(html || "");
-      const escapedKey = String(key || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const pattern = new RegExp(`<meta\\b(?=[^>]*(?:name|property)=["']${escapedKey}["'])[^>]*\\bcontent=["']([^"']*)["'][^>]*>`, "i");
-      const reversedPattern = new RegExp(`<meta\\b(?=[^>]*\\bcontent=["']([^"']*)["'])[^>]*(?:name|property)=["']${escapedKey}["'][^>]*>`, "i");
-      const match = source.match(pattern) || source.match(reversedPattern);
-      return match && match[1] ? decodeHtmlEntities2(match[1]).trim() : "";
-    }
-    __name(getMetaContent, "getMetaContent");
-    function getHtmlTitle(html) {
-      const source = String(html || "");
-      return getMetaContent(source, "og:title") || stripHtml((source.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1]);
-    }
-    __name(getHtmlTitle, "getHtmlTitle");
-    function isGenericWechatMetadata(value) {
-      const text = String(value || "").replace(/\s+/g, "").trim();
-      return !text || /^(微信公众平台|微信|微信公众号|WeChatOfficialAccountsPlatform)$/i.test(text) || /微信扫一扫可打开此内容|使用完整服务|使用小程序/.test(text);
-    }
-    __name(isGenericWechatMetadata, "isGenericWechatMetadata");
-    function isTrustedCoverUrl(value) {
-      try {
-        const parsed = new URL(String(value || "").trim());
-        return parsed.protocol === "https:" && Boolean(parsed.hostname);
-      } catch (_) {
-        return false;
-      }
-    }
-    __name(isTrustedCoverUrl, "isTrustedCoverUrl");
-    function extractWechatArticleBodyHtml(html) {
-      const source = String(html || "");
-      const opening = /<div\b(?=[^>]*\sid=["']js_content["'])[^>]*>/i.exec(source);
-      if (!opening) return "";
-      const tagName = "div";
-      const tagPattern = new RegExp(`<\\/?${tagName}\\b[^>]*>`, "gi");
-      tagPattern.lastIndex = opening.index + opening[0].length;
-      let depth = 1;
-      let closingIndex = source.length;
-      let tagMatch;
-      while (tagMatch = tagPattern.exec(source)) {
-        if (/^<\//.test(tagMatch[0])) depth -= 1;
-        else if (!/\/\s*>$/.test(tagMatch[0])) depth += 1;
-        if (depth === 0) {
-          closingIndex = tagMatch.index;
-          break;
-        }
-      }
-      return source.slice(opening.index + opening[0].length, closingIndex);
-    }
-    __name(extractWechatArticleBodyHtml, "extractWechatArticleBodyHtml");
-    function hasWechatArticleBody(html) {
-      const bodyHtml = extractWechatArticleBodyHtml(html);
-      return Boolean(stripHtml(bodyHtml)) || /<img\b[^>]+(?:data-src|src)=/i.test(bodyHtml) || /<(?:video|audio)\b/i.test(bodyHtml);
-    }
-    __name(hasWechatArticleBody, "hasWechatArticleBody");
-    function getHtmlAttribute2(attributes, name) {
-      const source = String(attributes || "");
-      const escapedName = String(name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const match = source.match(new RegExp(`\\b${escapedName}\\s*=\\s*(?:["']([^"']*)["']|([^\\s>]+))`, "i"));
-      return decodeHtmlEntities2(match && (match[1] || match[2]) || "").trim();
-    }
-    __name(getHtmlAttribute2, "getHtmlAttribute");
-    function normalizeWechatImageCandidate(value) {
-      const source = decodeHtmlEntities2(String(value || "").trim());
-      if (!source || /^data:image\/gif/i.test(source) || /^javascript:/i.test(source)) return "";
-      if (/^\/\//.test(source)) return `https:${source}`;
-      if (/^https?:\/\//i.test(source)) return source;
-      return "";
-    }
-    __name(normalizeWechatImageCandidate, "normalizeWechatImageCandidate");
-    function collectWechatArticleImageCandidates(html) {
-      const bodyHtml = extractWechatArticleBodyHtml(html);
-      if (!bodyHtml) return [];
-      const candidates = [];
-      const seen = /* @__PURE__ */ new Set();
-      const imagePattern = /<img\b([^>]*)>/gi;
-      let match;
-      while (match = imagePattern.exec(bodyHtml)) {
-        const attributes = match[1] || "";
-        const candidate = [
-          getHtmlAttribute2(attributes, "data-src"),
-          getHtmlAttribute2(attributes, "data-original"),
-          getHtmlAttribute2(attributes, "data-lazy-src"),
-          getHtmlAttribute2(attributes, "src"),
-          getHtmlAttribute2(attributes, "data-fail")
-        ].map(normalizeWechatImageCandidate).find(Boolean) || "";
-        if (!candidate || seen.has(candidate)) continue;
-        seen.add(candidate);
-        candidates.push(candidate);
-      }
-      return candidates;
-    }
-    __name(collectWechatArticleImageCandidates, "collectWechatArticleImageCandidates");
-    function getWechatArticleBodyStats(html) {
-      const source = String(html || "");
-      const bodyHtml = extractWechatArticleBodyHtml(source);
-      const bodyText = stripHtml(bodyHtml);
-      const imageCandidates = collectWechatArticleImageCandidates(source);
-      const mediaCount = (bodyHtml.match(/<(?:video|audio)\b|<source\b[^>]*\btype=["'](?:video|audio)\//gi) || []).length;
-      return {
-        hasJsContent: /<div\b(?=[^>]*\bid=["']js_content["'])/i.test(source),
-        bodyHtmlChars: bodyHtml.length,
-        bodyTextChars: bodyText.length,
-        imageCount: imageCandidates.length,
-        mediaCount,
-        imageCandidates,
-        hasSubstantiveBody: bodyText.length >= 50 || imageCandidates.length > 0 || mediaCount > 0
-      };
-    }
-    __name(getWechatArticleBodyStats, "getWechatArticleBodyStats");
-    function inspectWechatArticleContent(html, url = "") {
-      const source = String(html || "");
-      const stats = getWechatArticleBodyStats(source);
-      const data = readWechatImagePostHtmlData(source);
-      const explicitPicture = isWechatImagePostHtml(source);
-      const pictureHint = isWechatImagePostUrl2(url);
-      const pictureEvidence = explicitPicture || data.parsed;
-      const bodyUsable = stats.hasJsContent && (stats.bodyTextChars > 0 || stats.imageCount > 0);
-      const structuredComplete = data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
-      const complete = structuredComplete || bodyUsable && !pictureEvidence && !pictureHint && (!stats.mediaCount || stats.bodyTextChars > 0);
-      const fallbackComplete = bodyUsable && !pictureEvidence && !stats.mediaCount && stats.bodyTextChars >= 200;
-      const contentKind = pictureEvidence ? "image-post" : bodyUsable ? "article" : "unknown";
-      const escape = /* @__PURE__ */ __name((value) => String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"), "escape");
-      const body = extractWechatArticleBodyHtml(source).replace(/<img\b[^>]*>/gi, "");
-      const reconstructed = structuredComplete ? `<html><head><title>${escape(data.title || getHtmlTitle(source))}</title></head><body><div id="js_content">` + (stripHtml(body) ? body : `<p>${escape(data.description)}</p>`) + data.assets.map((asset, index) => `<img src="${escape(asset.src)}" alt="贴图 ${index + 1}">`).join("") + "</div></body></html>" : source;
-      return {
-        html: reconstructed,
-        assets: structuredComplete ? data.assets : [],
-        title: data.title,
-        complete,
-        fallbackComplete,
-        diagnostic: {
-          contentKind,
-          typeHint: pictureHint ? "image-post" : "unspecified",
-          evidence: data.parsed ? "structured-picture-list" : explicitPicture ? "page-picture-type" : bodyUsable ? "article-body" : "no-body",
-          extractor: structuredComplete ? "structured-images" : bodyUsable ? "article-body" : "none",
-          complete,
-          bodyTextChars: stats.bodyTextChars,
-          bodyImageCount: stats.imageCount,
-          structuredImageCount: data.assets.length,
-          structuredDataState: data.parseState,
-          invalidImageCount: data.invalidImageCount,
-          imageCandidateCount: structuredComplete ? data.assets.length : stats.imageCount,
-          mediaCount: stats.mediaCount
-        }
-      };
-    }
-    __name(inspectWechatArticleContent, "inspectWechatArticleContent");
-    function isWechatEmptyShellHtml(html) {
-      const source = String(html || "");
-      const stats = getWechatArticleBodyStats(source);
-      if (!/mp\.weixin\.qq\.com|rich_media|js_content|\u89c6\u9891|\u5c0f\u7a0b\u5e8f|\u8f7b\u70b9\u4e24\u4e0b/i.test(source)) return false;
-      return !stats.hasJsContent || !stats.hasSubstantiveBody && stats.bodyTextChars < 50;
-    }
-    __name(isWechatEmptyShellHtml, "isWechatEmptyShellHtml");
-    function diagnoseWechatArticleHtml2(html) {
-      const source = String(html || "");
-      const stats = getWechatArticleBodyStats(source);
-      const classifiedState = classifyWechatArticleHtml(source);
-      const text = stripHtml(source);
-      const markers = {
-        captcha: classifiedState === "captcha",
-        unavailable: classifiedState === "unavailable",
-        guide: classifiedState === "guide",
-        emptyShell: isWechatEmptyShellHtml(source),
-        shellToolbar: /\u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e|\u5728\u770b|\u89c6\u9891|\u5c0f\u7a0b\u5e8f/i.test(text),
-        imagePost: isWechatImagePostHtml(source)
-      };
-      let pageKind = classifiedState;
-      if (markers.emptyShell && !markers.captcha && !markers.unavailable && !markers.imagePost) {
-        pageKind = "empty-shell";
-      }
-      return {
-        pageKind,
-        classifiedState,
-        hasHtml: Boolean(source.trim()),
-        htmlChars: source.length,
-        hasJsContent: stats.hasJsContent,
-        bodyHtmlChars: stats.bodyHtmlChars,
-        bodyTextChars: stats.bodyTextChars,
-        imageCount: stats.imageCount,
-        mediaCount: stats.mediaCount,
-        imageCandidateCount: stats.imageCandidates.length,
-        markers
-      };
-    }
-    __name(diagnoseWechatArticleHtml2, "diagnoseWechatArticleHtml");
-    function classifyWechatArticleHtml(html) {
-      const text = stripHtml(html);
-      if (!hasWechatArticleBody(html) && /环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return "captcha";
-      if (!hasWechatArticleBody(html) && /访问(?:过于)?频繁|操作(?:过于)?频繁|请稍后再(?:试|访问)/.test(text)) return "captcha";
-      if (isWechatImagePostHtml(html)) return "image-post";
-      if (hasWechatArticleBody(html)) return "article";
-      if (/微信扫一扫可打开此内容/.test(text) && /使用完整服务|使用小程序/.test(text)) return "guide";
-      if (/内容不存在|已删除|暂时无法查看|加载失败/.test(text)) return "unavailable";
-      return "unknown";
-    }
-    __name(classifyWechatArticleHtml, "classifyWechatArticleHtml");
-    function extractWechatArticleFallbackMetadata(html) {
-      const title = getHtmlTitle(html);
-      const description = getMetaContent(html, "og:description") || getMetaContent(html, "description");
-      const coverUrl = getMetaContent(html, "og:image");
-      return {
-        title: isGenericWechatMetadata(title) ? "" : title,
-        description: isGenericWechatMetadata(description) ? "" : description,
-        coverUrl: isTrustedCoverUrl(coverUrl) ? coverUrl : ""
-      };
-    }
-    __name(extractWechatArticleFallbackMetadata, "extractWechatArticleFallbackMetadata");
-    function buildWechatArticleFallbackMarkdown({
-      url = "",
-      state = "guide",
-      title = "",
-      description = "",
-      coverUrl = ""
-    } = {}) {
-      const statusText = state === "captcha" ? "公众号文章触发了微信安全验证，插件不能自动绕过验证。" : state === "unavailable" ? "公众号文章暂时不可访问，未能取得正文。" : "微信公众号未返回正文，已保存原始链接和可用线索；可在微信内打开后重试。";
-      const lines = [statusText, ""];
-      if (title) lines.push(`标题：${title}`, "");
-      if (description) lines.push(description, "");
-      if (coverUrl) lines.push(`![封面](${coverUrl})`, "");
-      if (url) lines.push(`原始链接：${url}`, "");
-      return lines.join("\n").trim();
-    }
-    __name(buildWechatArticleFallbackMarkdown, "buildWechatArticleFallbackMarkdown");
-    module2.exports = {
-      inspectWechatArticleContent,
-      buildWechatArticleFallbackMarkdown,
-      buildWechatArticleRequestProfiles: buildWechatArticleRequestProfiles2,
-      classifyWechatArticleHtml,
-      collectWechatArticleImageCandidates,
-      diagnoseWechatArticleHtml: diagnoseWechatArticleHtml2,
-      extractWechatArticleFallbackMetadata,
-      extractWechatArticleBodyHtml,
-      getWechatArticleBodyStats,
-      getWechatArticleUrlShape,
-      hasWechatArticleBody,
-      isWechatArticleUrl: isWechatArticleUrl2,
-      isWechatImagePostHtml,
-      isWechatImagePostUrl: isWechatImagePostUrl2,
-      isWechatEmptyShellHtml,
-      isGenericWechatMetadata,
-      isTrustedCoverUrl,
-      normalizeWechatArticleUrl: normalizeWechatArticleUrl2
-    };
   }
 });
 
@@ -7476,6 +7505,7 @@ var require_record_identity_utils = __commonJS({
 var require_sync_lifecycle_utils = __commonJS({
   "src/sync-lifecycle-utils.js"(exports2, module2) {
     "use strict";
+    var { isWechatArticleFailurePlaceholder } = require_wechat_placeholder_utils();
     var crypto2 = require("node:crypto");
     var channelsDiagnostic2 = require_wechat_channels_diagnostic_utils();
     var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
@@ -7618,6 +7648,7 @@ var require_sync_lifecycle_utils = __commonJS({
     function isLikelyWebpageShell(url, markdown) {
       if (!/^https?:\/\//i.test(String(url || ""))) return false;
       const text = String(markdown || "");
+      if (/^https?:\/\/mp\.weixin\.qq\.com\//i.test(String(url || "")) && isWechatArticleFailurePlaceholder(text)) return true;
       if (/微信扫一扫可打开此内容|当前已为你保存原始链接|仅保存原始链接/.test(text)) {
         return true;
       }
@@ -7659,6 +7690,7 @@ var require_sync_lifecycle_utils = __commonJS({
     function isKnownFailureReceiptMarkdown(markdown) {
       const body = getMarkdownBody(markdown);
       if (!body) return false;
+      if (isWechatArticleFailurePlaceholder(body)) return true;
       const startsWithSavedPlatformLink = /^(?:小红书|抖音|飞书)链接已保存[。.!！]?/i.test(body);
       if (startsWithSavedPlatformLink) return true;
       return /^原始链接[：:]\s*https?:\/\/\S+[\s\S]*?##\s*视频号口播文案[\s\S]*?未能提取视频号口播文案[。.!！]?/i.test(body);
@@ -7756,6 +7788,9 @@ var require_sync_lifecycle_utils = __commonJS({
       }
       if (/mp\.weixin\.qq\.com\//.test(url) && /微信扫一扫可打开此内容/.test(markdown) && /使用完整服务|使用小程序/.test(markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信仅返回打开引导页");
+      }
+      if (/^https?:\/\/mp\.weixin\.qq\.com\//i.test(url) && isWechatArticleFailurePlaceholder(markdown)) {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：仅保存了标题、简介或封面，需要重新提取");
       }
       if (isLikelyWebpageShell(url, markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：仅获取到打开或登录引导页");
@@ -11766,6 +11801,7 @@ var require_transcription_note_title_utils = __commonJS({
 });
 
 // src/main.js
+var { getWechatPlaceholderRecoveryUrl } = require_wechat_placeholder_utils();
 var douyinBrowserSafety = require_douyin_browser_safety();
 var { createAutoSyncController } = require_auto_sync_controller();
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
@@ -12023,7 +12059,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.160";
+var PLUGIN_RUNTIME_VERSION = "1.3.161";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -25942,6 +25978,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       callback: /* @__PURE__ */ __name(() => this.syncInbox(), "callback")
     });
     this.addCommand({
+      id: "recover-wechat-article-placeholder",
+      name: "重新提取当前失败的公众号笔记",
+      callback: /* @__PURE__ */ __name(() => this.recoverCurrentWechatArticlePlaceholder(), "callback")
+    });
+    this.addCommand({
       id: "stop-current-transcription",
       name: "停止当前转写",
       callback: /* @__PURE__ */ __name(async () => this.stopCurrentTranscription(), "callback")
@@ -33192,6 +33233,99 @@ ${finalized.markdown}
     const baseTitle = buildRecordTitleBase(record);
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
+  async recoverCurrentWechatArticlePlaceholder() {
+    if (this.syncInboxPromise || this.autoSyncDisposed) {
+      new Notice("请等待当前同步完成后再重新提取。");
+      return null;
+    }
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== "md") {
+      new Notice("请先打开需要恢复的公众号失败笔记。");
+      return null;
+    }
+    const controller = new AbortController();
+    this.currentProcessingAbortController = controller;
+    this.currentProcessingContext = null;
+    this.setTranscriptionStopAvailable(true);
+    const task = Promise.resolve().then(async () => {
+      const markdown = await this.app.vault.read(file);
+      throwIfAborted(controller.signal);
+      const url = getWechatPlaceholderRecoveryUrl(markdown);
+      const sourceRecordId = getRecordIdFromMarkdown(markdown);
+      if (!url || !sourceRecordId) {
+        new Notice("当前笔记不是可恢复的公众号失败占位，或原始链接不明确。");
+        return null;
+      }
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const record = {
+        id: "local-recovery-" + crypto.createHash("sha256").update(sourceRecordId + "\n" + url).digest("hex"),
+        type: "webpage",
+        content: url,
+        createdAt: now,
+        metadata: { url, recoveredFromRecordId: sourceRecordId, title: file.basename + "（重新提取）", conversionStatus: "pending" }
+      };
+      try {
+        const existing = await this.findExistingRecordNotePath(record);
+        throwIfAborted(controller.signal);
+        if (existing) {
+          this.lastSyncDiagnostic = {
+            status: "success",
+            stage: "finished",
+            current: 1,
+            total: 1,
+            message: "已复用该公众号的完整恢复笔记",
+            time: (/* @__PURE__ */ new Date()).toISOString()
+          };
+          new Notice("这条公众号内容已有重新提取的完整笔记：" + existing, 8e3);
+          return { filePath: existing, reused: true };
+        }
+        const result = await this.writeRecord(
+          record,
+          now,
+          null,
+          false,
+          { signal: controller.signal, current: 1, total: 1, skipAi: true }
+        );
+        this.lastSyncDiagnostic = {
+          status: "success",
+          stage: "finished",
+          current: 1,
+          total: 1,
+          message: "公众号已重新提取并另存，原笔记已保留",
+          time: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        new Notice(this.lastSyncDiagnostic.message, 8e3);
+        return result;
+      } catch (error) {
+        this.lastSyncDiagnostic = {
+          status: isAbortError(error) ? "cancelled" : "failed",
+          stage: "processing",
+          current: 1,
+          total: 1,
+          message: "公众号重新提取未完成，原笔记已保留",
+          error: redactDiagnosticText(error.message || String(error)),
+          diagnostic: error.diagnostic ? redactSensitiveObject(error.diagnostic) : null,
+          time: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        new Notice(this.lastSyncDiagnostic.message + "：" + this.lastSyncDiagnostic.error, 1e4);
+        return null;
+      } finally {
+        if (this.lastSyncDiagnostic) writeSyncDiagnosticLog(this.lastSyncDiagnostic, this.getConfiguredLocalAsrInstallRoot());
+      }
+    });
+    this.syncInboxPromise = task;
+    try {
+      return await task;
+    } catch (error) {
+      new Notice("无法读取失败笔记：" + redactDiagnosticText(error.message || String(error)));
+      return null;
+    } finally {
+      if (this.syncInboxPromise === task) this.syncInboxPromise = null;
+      if (this.currentProcessingAbortController === controller) this.currentProcessingAbortController = null;
+      this.setTranscriptionStopAvailable(false);
+      this.clearSyncProgressNotice();
+    }
+  }
   async findExistingRecordNotePath(record) {
     const normalizedRecordId = String(getRecordId(record) || "").trim();
     if (!normalizedRecordId || !this.app || !this.app.vault || typeof this.app.vault.getMarkdownFiles !== "function") {
@@ -33350,7 +33484,7 @@ ${finalized.markdown}
       }
       throw lifecycleOutcomeError;
     }
-    recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
+    if (!progress.skipAi) recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
       fallbackTitle: title,

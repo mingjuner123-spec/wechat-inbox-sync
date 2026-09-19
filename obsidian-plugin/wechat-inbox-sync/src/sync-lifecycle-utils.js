@@ -1,4 +1,5 @@
 'use strict';
+const { isWechatArticleFailurePlaceholder } = require('./wechat-placeholder-utils');
 
 const crypto = require('node:crypto');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
@@ -165,6 +166,7 @@ function getMeaningfulMarkdownLength(markdown) {
 function isLikelyWebpageShell(url, markdown) {
   if (!/^https?:\/\//i.test(String(url || ''))) return false;
   const text = String(markdown || '');
+  if (/^https?:\/\/mp\.weixin\.qq\.com\//i.test(String(url || '')) && isWechatArticleFailurePlaceholder(text)) return true;
   if (/微信扫一扫可打开此内容|当前已为你保存原始链接|仅保存原始链接/.test(text)) {
     return true;
   }
@@ -210,6 +212,7 @@ function getLocalFileAttachmentPaths(markdown) {
 function isKnownFailureReceiptMarkdown(markdown) {
   const body = getMarkdownBody(markdown);
   if (!body) return false;
+  if (isWechatArticleFailurePlaceholder(body)) return true;
   const startsWithSavedPlatformLink = /^(?:小红书|抖音|飞书)链接已保存[。.!！]?/i.test(body);
   if (startsWithSavedPlatformLink) return true;
   return /^原始链接[：:]\s*https?:\/\/\S+[\s\S]*?##\s*视频号口播文案[\s\S]*?未能提取视频号口播文案[。.!！]?/i.test(body);
@@ -322,6 +325,10 @@ function getSyncLifecycleOutcomeError(record) {
     && /微信扫一扫可打开此内容/.test(markdown)
     && /使用完整服务|使用小程序/.test(markdown)) {
     return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信仅返回打开引导页');
+  }
+
+  if (/^https?:\/\/mp\.weixin\.qq\.com\//i.test(url) && isWechatArticleFailurePlaceholder(markdown)) {
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：仅保存了标题、简介或封面，需要重新提取');
   }
 
   if (isLikelyWebpageShell(url, markdown)) {
