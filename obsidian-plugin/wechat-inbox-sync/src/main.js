@@ -262,7 +262,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.161';
+const PLUGIN_RUNTIME_VERSION = '1.3.162';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -17495,10 +17495,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
     });
     const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
-    await this.saveSettings({
-      ...this.settings,
-      recentSyncFailures: nextFailures,
-    });
+    const previousFailures = this.settings.recentSyncFailures;
+    try {
+      await this.saveSettings({ ...this.settings, recentSyncFailures: nextFailures });
+    } catch (error) {
+      this.settings = { ...this.settings, recentSyncFailures: previousFailures };
+      throw error;
+    }
     return nextFailures;
   }
 
@@ -18353,7 +18356,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     const appendFailedLog = (lines, title, text, detector = hasFailureSignal) => {
       const source = String(text || '').trim();
       if (!source || !detector(source)) return false;
-      lines.push(title, tailLog(asrRecovery.diagnosticRedact(source, this.settings), detailed ? 50 : 12));
+      const identity = source.split(/\r?\n/).filter(line => /^(?:time|status)=/.test(line)).slice(0, 2).join('\n');
+      lines.push(title, identity, tailLog(asrRecovery.diagnosticRedact(source, this.settings), detailed ? 50 : 12));
       return true;
     };
     const formatMissingReasons = (status) => (
@@ -18417,12 +18421,13 @@ class WechatObsidianInboxPlugin extends Plugin {
         ...recentCleanupErrors.map((item) => `${item.bindingLabel || '未知设备'} / ${item.recordId}: ${item.reason}`),
       );
     }
-    if (!asrStatus.ready) {
-      appendFailedLog(lines, 'ASR 最近安装失败日志：', asrInstallLog);
-      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog, hasAsrRunFailureSignal);
-    } else {
-      appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog, hasAsrRunFailureSignal);
+    if (/INSTALLER_CLEANUP_WARNING/i.test(asrInstallLog)) {
+      const stages = [...new Set([...asrInstallLog.matchAll(/INSTALLER_CLEANUP_WARNING stage=(temporary-directory|release-lock)/g)].map(match => match[1]))];
+      lines.push('ASR 安装清理提示：INSTALLER_CLEANUP_WARNING；' + stages.join(', ') + '；请结合安装时间和结果判断，清理提示不代表组件不可用。');
     }
+    appendFailedLog(lines, 'ASR 最近安装异常（组件当前可用也保留）：', asrInstallLog,
+      text => /INSTALLER_CLEANUP_WARNING/i.test(text) || hasAsrRunFailureSignal(text));
+    appendFailedLog(lines, 'ASR 最近转写失败日志：', asrRunLog, hasAsrRunFailureSignal);
     if (!ocrStatus.ready) {
       const appendedOcrLog = appendFailedLog(lines, 'OCR 最近安装失败日志：', ocrInstallLog);
       if (ocrStatus.hasPython && !ocrStatus.hasScript) {
@@ -24068,6 +24073,50 @@ class WechatObsidianInboxPlugin extends Plugin {
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
 
+  async findRecoveredWechatArticleNotePath(recordId) {
+    const files = this.app && this.app.vault && this.app.vault.getMarkdownFiles
+      ? this.app.vault.getMarkdownFiles() : [];
+    const root = normalizeVaultPath(this.settings.inboxDir);
+    const urls = new Set();
+    for (const file of files) {
+      const name = normalizeVaultPath(file.path);
+      if (root && !name.startsWith(root + '/')) continue;
+      try {
+        const text = await this.app.vault.read(file);
+        if (getRecordIdFromMarkdown(text) !== recordId) continue;
+        const url = getWechatPlaceholderRecoveryUrl(text);
+        if (url) urls.add(url);
+      } catch (_) { /* Unreadable notes cannot prove recovery. */ }
+    }
+    if (urls.size !== 1) return '';
+    const url = [...urls][0];
+    return this.findExistingRecordNotePath({
+      id: 'local-recovery-' + crypto.createHash('sha256').update(recordId + '\n' + url).digest('hex'),
+      type: 'webpage', content: url, metadata: { url },
+    });
+  }
+
+  async reconcileRecoveredWechatArticleFailure(recordId, recoveredRecord = null, committedResult = null) {
+    const failures = this.getRecentSyncFailures().filter(item => item.recordId === recordId);
+    // A local note has no binding identity. Never resolve an ambiguous match.
+    if (failures.length !== 1) return failures.length === 0;
+    try {
+      let verified = false;
+      if (recoveredRecord && committedResult && committedResult.committed === true
+        && committedResult.recordId === getRecordId(recoveredRecord)) {
+        const root = normalizeVaultPath(this.settings.inboxDir);
+        const filePath = normalizeVaultPath(committedResult.filePath || '');
+        if (!filePath || (root && !filePath.startsWith(root + '/'))) return false;
+        const text = await this.app.vault.adapter.read(filePath);
+        verified = hasRecordIdInFrontmatter(text, getRecordId(recoveredRecord))
+          && isExistingLocalNoteDeliverable(recoveredRecord, text);
+      } else verified = Boolean(await this.findRecoveredWechatArticleNotePath(recordId));
+      if (!verified) return false;
+      await this.updateRecentSyncFailures({ resolved: [failures[0]] });
+      return true;
+    } catch (_) { return false; } // Retry reconciliation on the next sync; the note is already committed.
+  }
+
   async recoverCurrentWechatArticlePlaceholder() {
     if (this.syncInboxPromise || this.autoSyncDisposed) {
       new Notice('请等待当前同步完成后再重新提取。');
@@ -24099,15 +24148,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         const existing = await this.findExistingRecordNotePath(record);
         throwIfAborted(controller.signal);
         if (existing) {
+          const reconciled = await this.reconcileRecoveredWechatArticleFailure(sourceRecordId);
           this.lastSyncDiagnostic = { status: 'success', stage: 'finished', current: 1, total: 1,
-            message: '已复用该公众号的完整恢复笔记', time: new Date().toISOString() };
+            message: reconciled ? '已复用该公众号的完整恢复笔记' : '已复用完整恢复笔记，历史失败状态尚待核对', time: new Date().toISOString() };
           new Notice('这条公众号内容已有重新提取的完整笔记：' + existing, 8000);
           return { filePath: existing, reused: true };
         }
         const result = await this.writeRecord(record, now, null, false,
           { signal: controller.signal, current: 1, total: 1, skipAi: true });
+        const reconciled = await this.reconcileRecoveredWechatArticleFailure(sourceRecordId, record, result);
         this.lastSyncDiagnostic = { status: 'success', stage: 'finished', current: 1, total: 1,
-          message: '公众号已重新提取并另存，原笔记已保留', time: new Date().toISOString() };
+          message: reconciled ? '公众号已重新提取并另存，原笔记已保留' : '公众号已另存，历史失败状态尚待核对；原笔记已保留', time: new Date().toISOString() };
         new Notice(this.lastSyncDiagnostic.message, 8000);
         return result;
       } catch (error) {
@@ -25159,7 +25210,10 @@ class WechatObsidianInboxPlugin extends Plugin {
           // stale local failure cache, even when the cloud no longer returns it.
           // eslint-disable-next-line no-await-in-loop
           const existingFilePath = await this.findExistingRecordNotePath({ _id: recordId });
-          if (existingFilePath) {
+          const sameIdFailures = this.getRecentSyncFailures().filter(item => item.recordId === recordId);
+          const recoveredFilePath = !existingFilePath && sameIdFailures.length === 1
+            ? await this.findRecoveredWechatArticleNotePath(recordId) : '';
+          if (existingFilePath || recoveredFilePath) {
             recentResolvedEntries.push({ recordId, bindingToken });
             resolvedFailureKeys.add(failureKey);
           }

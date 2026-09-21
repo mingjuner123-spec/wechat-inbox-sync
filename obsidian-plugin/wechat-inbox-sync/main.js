@@ -2113,6 +2113,31 @@ function Release-InstallLock {
   Remove-Item -LiteralPath $InstallLockPath -Force -ErrorAction SilentlyContinue
 }
 
+function Complete-InstallerCleanup {
+  param([string]$TemporaryRoot, [AllowNull()]$Mutex)
+  try {
+    $resolvedRoot = [IO.Path]::GetFullPath($TemporaryRoot)
+    $expectedParent = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')
+    if ([IO.Path]::GetDirectoryName($resolvedRoot).TrimEnd('\\') -ine $expectedParent -or
+        [IO.Path]::GetFileName($resolvedRoot) -notmatch '^wechat-inbox-local-asr-install-[a-f0-9]{32}$') {
+      throw 'Cleanup path is outside the owned installer temporary directory'
+    }
+    if (Test-Path -LiteralPath $resolvedRoot) {
+      $item = Get-Item -LiteralPath $resolvedRoot -Force
+      if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cleanup directory is a reparse point' }
+      for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try { Remove-Item -LiteralPath $resolvedRoot -Recurse -Force -ErrorAction Stop; break }
+        catch { if ($attempt -eq 3) { throw }; Start-Sleep -Milliseconds 150 }
+      }
+    }
+  } catch {
+    Write-Warning -WarningAction Continue ("INSTALLER_CLEANUP_WARNING stage=temporary-directory path={0} reason={1}" -f $TemporaryRoot, $_.Exception.Message)
+  } finally {
+    try { Release-InstallLock -Mutex $Mutex }
+    catch { Write-Warning -WarningAction Continue ("INSTALLER_CLEANUP_WARNING stage=release-lock reason={0}" -f $_.Exception.Message) }
+  }
+}
+
 function Copy-FileWithRetry {
   param(
     [Parameter(Mandatory = $true)][string]$SourcePath,
@@ -3868,16 +3893,15 @@ try {
   Write-Host "Use this Obsidian plugin command:"
   Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File \`"$InstallRoot\\transcribe.ps1\`" -InputPath {input} -OutputPath {output}"
 } catch {
-  Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate
+  $originalInstallError = $_
+  try { Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate }
+  catch { Write-Warning -WarningAction Continue ("INSTALLER_ROLLBACK_WARNING reason={0}" -f $_.Exception.Message) }
   Write-Host ""
   Write-Host "INSTALLER FAILED"
-  Write-Host ($_ | Out-String)
-  throw
+  Write-Host ($originalInstallError | Out-String)
+  throw $originalInstallError
 } finally {
-  if (Test-Path -LiteralPath $TempRoot) {
-    Remove-Item -LiteralPath $TempRoot -Recurse -Force
-  }
-  Release-InstallLock -Mutex $installMutex
+  Complete-InstallerCleanup -TemporaryRoot $TempRoot -Mutex $installMutex
 }
 `;
   }
@@ -12059,7 +12083,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.161";
+var PLUGIN_RUNTIME_VERSION = "1.3.162";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -27326,10 +27350,13 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       });
     });
     const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
-    await this.saveSettings({
-      ...this.settings,
-      recentSyncFailures: nextFailures
-    });
+    const previousFailures = this.settings.recentSyncFailures;
+    try {
+      await this.saveSettings({ ...this.settings, recentSyncFailures: nextFailures });
+    } catch (error) {
+      this.settings = { ...this.settings, recentSyncFailures: previousFailures };
+      throw error;
+    }
     return nextFailures;
   }
   async clearRecentSyncFailures() {
@@ -28091,7 +28118,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const appendFailedLog = /* @__PURE__ */ __name((lines2, title, text, detector = hasFailureSignal) => {
       const source = String(text || "").trim();
       if (!source || !detector(source)) return false;
-      lines2.push(title, tailLog(asrRecovery.diagnosticRedact(source, this.settings), detailed ? 50 : 12));
+      const identity = source.split(/\r?\n/).filter((line) => /^(?:time|status)=/.test(line)).slice(0, 2).join("\n");
+      lines2.push(title, identity, tailLog(asrRecovery.diagnosticRedact(source, this.settings), detailed ? 50 : 12));
       return true;
     }, "appendFailedLog");
     const formatMissingReasons = /* @__PURE__ */ __name((status) => status && Array.isArray(status.missingReasons) && status.missingReasons.length ? status.missingReasons.join("；") : "无", "formatMissingReasons");
@@ -28147,12 +28175,17 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         ...recentCleanupErrors.map((item) => `${item.bindingLabel || "未知设备"} / ${item.recordId}: ${item.reason}`)
       );
     }
-    if (!asrStatus.ready) {
-      appendFailedLog(lines, "ASR 最近安装失败日志：", asrInstallLog);
-      appendFailedLog(lines, "ASR 最近转写失败日志：", asrRunLog, hasAsrRunFailureSignal);
-    } else {
-      appendFailedLog(lines, "ASR 最近转写失败日志：", asrRunLog, hasAsrRunFailureSignal);
+    if (/INSTALLER_CLEANUP_WARNING/i.test(asrInstallLog)) {
+      const stages = [...new Set([...asrInstallLog.matchAll(/INSTALLER_CLEANUP_WARNING stage=(temporary-directory|release-lock)/g)].map((match) => match[1]))];
+      lines.push("ASR 安装清理提示：INSTALLER_CLEANUP_WARNING；" + stages.join(", ") + "；请结合安装时间和结果判断，清理提示不代表组件不可用。");
     }
+    appendFailedLog(
+      lines,
+      "ASR 最近安装异常（组件当前可用也保留）：",
+      asrInstallLog,
+      (text) => /INSTALLER_CLEANUP_WARNING/i.test(text) || hasAsrRunFailureSignal(text)
+    );
+    appendFailedLog(lines, "ASR 最近转写失败日志：", asrRunLog, hasAsrRunFailureSignal);
     if (!ocrStatus.ready) {
       const appendedOcrLog = appendFailedLog(lines, "OCR 最近安装失败日志：", ocrInstallLog);
       if (ocrStatus.hasPython && !ocrStatus.hasScript) {
@@ -33233,6 +33266,49 @@ ${finalized.markdown}
     const baseTitle = buildRecordTitleBase(record);
     return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
   }
+  async findRecoveredWechatArticleNotePath(recordId) {
+    const files = this.app && this.app.vault && this.app.vault.getMarkdownFiles ? this.app.vault.getMarkdownFiles() : [];
+    const root = normalizeVaultPath(this.settings.inboxDir);
+    const urls = /* @__PURE__ */ new Set();
+    for (const file of files) {
+      const name = normalizeVaultPath(file.path);
+      if (root && !name.startsWith(root + "/")) continue;
+      try {
+        const text = await this.app.vault.read(file);
+        if (getRecordIdFromMarkdown(text) !== recordId) continue;
+        const url2 = getWechatPlaceholderRecoveryUrl(text);
+        if (url2) urls.add(url2);
+      } catch (_) {
+      }
+    }
+    if (urls.size !== 1) return "";
+    const url = [...urls][0];
+    return this.findExistingRecordNotePath({
+      id: "local-recovery-" + crypto.createHash("sha256").update(recordId + "\n" + url).digest("hex"),
+      type: "webpage",
+      content: url,
+      metadata: { url }
+    });
+  }
+  async reconcileRecoveredWechatArticleFailure(recordId, recoveredRecord = null, committedResult = null) {
+    const failures = this.getRecentSyncFailures().filter((item) => item.recordId === recordId);
+    if (failures.length !== 1) return failures.length === 0;
+    try {
+      let verified = false;
+      if (recoveredRecord && committedResult && committedResult.committed === true && committedResult.recordId === getRecordId(recoveredRecord)) {
+        const root = normalizeVaultPath(this.settings.inboxDir);
+        const filePath = normalizeVaultPath(committedResult.filePath || "");
+        if (!filePath || root && !filePath.startsWith(root + "/")) return false;
+        const text = await this.app.vault.adapter.read(filePath);
+        verified = hasRecordIdInFrontmatter(text, getRecordId(recoveredRecord)) && isExistingLocalNoteDeliverable(recoveredRecord, text);
+      } else verified = Boolean(await this.findRecoveredWechatArticleNotePath(recordId));
+      if (!verified) return false;
+      await this.updateRecentSyncFailures({ resolved: [failures[0]] });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
   async recoverCurrentWechatArticlePlaceholder() {
     if (this.syncInboxPromise || this.autoSyncDisposed) {
       new Notice("请等待当前同步完成后再重新提取。");
@@ -33268,12 +33344,13 @@ ${finalized.markdown}
         const existing = await this.findExistingRecordNotePath(record);
         throwIfAborted(controller.signal);
         if (existing) {
+          const reconciled2 = await this.reconcileRecoveredWechatArticleFailure(sourceRecordId);
           this.lastSyncDiagnostic = {
             status: "success",
             stage: "finished",
             current: 1,
             total: 1,
-            message: "已复用该公众号的完整恢复笔记",
+            message: reconciled2 ? "已复用该公众号的完整恢复笔记" : "已复用完整恢复笔记，历史失败状态尚待核对",
             time: (/* @__PURE__ */ new Date()).toISOString()
           };
           new Notice("这条公众号内容已有重新提取的完整笔记：" + existing, 8e3);
@@ -33286,12 +33363,13 @@ ${finalized.markdown}
           false,
           { signal: controller.signal, current: 1, total: 1, skipAi: true }
         );
+        const reconciled = await this.reconcileRecoveredWechatArticleFailure(sourceRecordId, record, result);
         this.lastSyncDiagnostic = {
           status: "success",
           stage: "finished",
           current: 1,
           total: 1,
-          message: "公众号已重新提取并另存，原笔记已保留",
+          message: reconciled ? "公众号已重新提取并另存，原笔记已保留" : "公众号已另存，历史失败状态尚待核对；原笔记已保留",
           time: (/* @__PURE__ */ new Date()).toISOString()
         };
         new Notice(this.lastSyncDiagnostic.message, 8e3);
@@ -34238,7 +34316,9 @@ ${finalized.markdown}
         }
         try {
           const existingFilePath = await this.findExistingRecordNotePath({ _id: recordId });
-          if (existingFilePath) {
+          const sameIdFailures = this.getRecentSyncFailures().filter((item) => item.recordId === recordId);
+          const recoveredFilePath = !existingFilePath && sameIdFailures.length === 1 ? await this.findRecoveredWechatArticleNotePath(recordId) : "";
+          if (existingFilePath || recoveredFilePath) {
             recentResolvedEntries.push({ recordId, bindingToken });
             resolvedFailureKeys.add(failureKey);
           }

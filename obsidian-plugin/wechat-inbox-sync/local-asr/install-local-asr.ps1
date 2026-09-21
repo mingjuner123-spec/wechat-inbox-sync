@@ -78,6 +78,31 @@ function Release-InstallLock {
   Remove-Item -LiteralPath $InstallLockPath -Force -ErrorAction SilentlyContinue
 }
 
+function Complete-InstallerCleanup {
+  param([string]$TemporaryRoot, [AllowNull()]$Mutex)
+  try {
+    $resolvedRoot = [IO.Path]::GetFullPath($TemporaryRoot)
+    $expectedParent = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')
+    if ([IO.Path]::GetDirectoryName($resolvedRoot).TrimEnd('\') -ine $expectedParent -or
+        [IO.Path]::GetFileName($resolvedRoot) -notmatch '^wechat-inbox-local-asr-install-[a-f0-9]{32}$') {
+      throw 'Cleanup path is outside the owned installer temporary directory'
+    }
+    if (Test-Path -LiteralPath $resolvedRoot) {
+      $item = Get-Item -LiteralPath $resolvedRoot -Force
+      if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cleanup directory is a reparse point' }
+      for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try { Remove-Item -LiteralPath $resolvedRoot -Recurse -Force -ErrorAction Stop; break }
+        catch { if ($attempt -eq 3) { throw }; Start-Sleep -Milliseconds 150 }
+      }
+    }
+  } catch {
+    Write-Warning -WarningAction Continue ("INSTALLER_CLEANUP_WARNING stage=temporary-directory path={0} reason={1}" -f $TemporaryRoot, $_.Exception.Message)
+  } finally {
+    try { Release-InstallLock -Mutex $Mutex }
+    catch { Write-Warning -WarningAction Continue ("INSTALLER_CLEANUP_WARNING stage=release-lock reason={0}" -f $_.Exception.Message) }
+  }
+}
+
 function Copy-FileWithRetry {
   param(
     [Parameter(Mandatory = $true)][string]$SourcePath,
@@ -1833,14 +1858,13 @@ try {
   Write-Host "Use this Obsidian plugin command:"
   Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
 } catch {
-  Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate
+  $originalInstallError = $_
+  try { Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate }
+  catch { Write-Warning -WarningAction Continue ("INSTALLER_ROLLBACK_WARNING reason={0}" -f $_.Exception.Message) }
   Write-Host ""
   Write-Host "INSTALLER FAILED"
-  Write-Host ($_ | Out-String)
-  throw
+  Write-Host ($originalInstallError | Out-String)
+  throw $originalInstallError
 } finally {
-  if (Test-Path -LiteralPath $TempRoot) {
-    Remove-Item -LiteralPath $TempRoot -Recurse -Force
-  }
-  Release-InstallLock -Mutex $installMutex
+  Complete-InstallerCleanup -TemporaryRoot $TempRoot -Mutex $installMutex
 }
