@@ -125,13 +125,16 @@ function collectWechatImagePostStructuredAssets(pageWindow, withEvidence = false
 function detectWechatImagePostDocument({ html = '', url = '', bodyText = '', hasBody = false, structuredCount = 0 } = {}) {
   try { if (new URL(url).searchParams.get('t') === 'pages/image_detail') return true; } catch (_) {}
   const source = String(html || '');
-  // Current /s/<slug> picture posts declare appmsg_type=9, without a
-  // newspic marker or image_detail URL. Only accept a page-level declaration,
-  // not a matching string inside a shared JavaScript bundle.
+  // appmsg_type=9 also occurs on ordinary rich articles. Page-level layout
+  // identity plus a readable body takes precedence over that ambiguous type.
+  // Ignore matching strings embedded in shared bundles or examples.
   const numericPictureType = Array.from(source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi))
     .some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+appmsg_type\s*=\s*(?:"9"|'9'|9)(?=\s*(?:[;,\n]|$))/.test(match[1]));
   const explicitType = /(?:\b(?:var|let|const)\s+(?:article_type|appmsg_type)|(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\.(?:article_type|appmsg_type))\s*=\s*["']newspic["']/i.test(source)
     || /(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\s*=\s*\{[^{}]{0,4096}\b(?:article_type|appmsg_type)["']?\s*:\s*["']newspic["']/i.test(source);
+  const ordinaryArticleType = Array.from(source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi))
+    .some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+item_show_type\s*=\s*(?:"0"|'0'|0)(?=\s*(?:[;,\n]|$))/.test(match[1]));
+  if (!explicitType && ordinaryArticleType && hasBody && String(bodyText).replace(/\s+/g, '').length >= 50) return false;
   if (explicitType || numericPictureType || structuredCount > 0) return true;
   if (hasBody && String(bodyText).replace(/\s+/g, '').length >= 200) return false;
   const visibleMarkup = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<!--[\s\S]*?-->/g, '');

@@ -328,6 +328,8 @@ var require_wechat_image_post_utils = __commonJS({
       const source = String(html || "");
       const numericPictureType = Array.from(source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)).some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+appmsg_type\s*=\s*(?:"9"|'9'|9)(?=\s*(?:[;,\n]|$))/.test(match[1]));
       const explicitType = /(?:\b(?:var|let|const)\s+(?:article_type|appmsg_type)|(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\.(?:article_type|appmsg_type))\s*=\s*["']newspic["']/i.test(source) || /(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\s*=\s*\{[^{}]{0,4096}\b(?:article_type|appmsg_type)["']?\s*:\s*["']newspic["']/i.test(source);
+      const ordinaryArticleType = Array.from(source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)).some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+item_show_type\s*=\s*(?:"0"|'0'|0)(?=\s*(?:[;,\n]|$))/.test(match[1]));
+      if (!explicitType && ordinaryArticleType && hasBody && String(bodyText).replace(/\s+/g, "").length >= 50) return false;
       if (explicitType || numericPictureType || structuredCount > 0) return true;
       if (hasBody && String(bodyText).replace(/\s+/g, "").length >= 200) return false;
       const visibleMarkup = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "").replace(/<!--[\s\S]*?-->/g, "");
@@ -681,9 +683,14 @@ var require_wechat_article_utils = __commonJS({
       const data = readWechatImagePostHtmlData(source);
       const explicitPicture = isWechatImagePostHtml(source);
       const pictureHint = isWechatImagePostUrl2(url);
-      const pictureEvidence = explicitPicture || data.parsed;
+      const pictureEvidence = detectWechatImagePostDocument2({
+        html: source,
+        hasBody: stats.hasJsContent,
+        bodyText: stripHtml(extractWechatArticleBodyHtml(source)),
+        structuredCount: data.parsed ? Math.max(1, data.assets.length) : 0
+      });
       const bodyUsable = stats.hasJsContent && (stats.bodyTextChars > 0 || stats.imageCount > 0);
-      const structuredComplete = data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
+      const structuredComplete = pictureEvidence && data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
       const complete = structuredComplete || bodyUsable && !pictureEvidence && !pictureHint && (!stats.mediaCount || stats.bodyTextChars > 0);
       const fallbackComplete = bodyUsable && !pictureEvidence && !stats.mediaCount && stats.bodyTextChars >= 200;
       const contentKind = pictureEvidence ? "image-post" : bodyUsable ? "article" : "unknown";
@@ -693,13 +700,13 @@ var require_wechat_article_utils = __commonJS({
       return {
         html: reconstructed,
         assets: structuredComplete ? data.assets : [],
-        title: data.title,
+        title: structuredComplete ? data.title : "",
         complete,
         fallbackComplete,
         diagnostic: {
           contentKind,
           typeHint: pictureHint ? "image-post" : "unspecified",
-          evidence: data.parsed ? "structured-picture-list" : explicitPicture ? "page-picture-type" : bodyUsable ? "article-body" : "no-body",
+          evidence: pictureEvidence && data.parsed ? "structured-picture-list" : explicitPicture ? "page-picture-type" : bodyUsable ? "article-body" : "no-body",
           extractor: structuredComplete ? "structured-images" : bodyUsable ? "article-body" : "none",
           complete,
           bodyTextChars: stats.bodyTextChars,
@@ -21288,7 +21295,7 @@ function restoreFlattenedSarBandTables(lines) {
 __name(restoreFlattenedSarBandTables, "restoreFlattenedSarBandTables");
 function htmlToMarkdown(html) {
   const sourceHtml = String(html || "");
-  let readable = selectReadableHtml(sourceHtml).replace(/<[^>]+id=["']js_cmt_area["'][^>]*>[\s\S]*?(?=<script\b|<\/body>|$)/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<noscript[\s\S]*?<\/noscript>/gi, "").replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code)).replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => htmlTableToMarkdown(table)).replace(/<img\b[^>]*>/gi, imageTagToMarkdown).replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, "\n# $1\n").replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, "\n## $1\n").replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, "\n### $1\n").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n\n").replace(/<\/div>/gi, "\n").replace(/<li[^>]*>/gi, "\n- ").replace(/<\/li>/gi, "").replace(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
+  let readable = selectReadableHtml(sourceHtml).replace(/<[^>]+id=["']js_cmt_area["'][^>]*>[\s\S]*?(?=<script\b|<\/body>|$)/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<noscript[\s\S]*?<\/noscript>/gi, "").replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code)).replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => htmlTableToMarkdown(table)).replace(/<img\b[^>]*>/gi, imageTagToMarkdown).replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level, content) => stripHtmlTags(content).trim() ? "\n" + "#".repeat(Number(level)) + " " + content + "\n" : "\n").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n\n").replace(/<\/div>/gi, "\n").replace(/<li[^>]*>/gi, "\n- ").replace(/<\/li>/gi, "").replace(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
     const text = stripHtmlTags(label);
     return text ? `[${text}](${decodeHtmlEntities(href)})` : decodeHtmlEntities(href);
   });
@@ -22439,25 +22446,18 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         const clone = root.cloneNode(true);
         const assets = [];
         clone.querySelectorAll('script,style,noscript,iframe,form').forEach((node) => node.remove());
-        clone.querySelectorAll('br').forEach((node) => node.replaceWith(document.createTextNode('\\n')));
         clone.querySelectorAll('img').forEach((image) => {
-          const src = String(image.currentSrc || image.getAttribute('data-src') || image.getAttribute('src') || '').trim();
+          const src = String(image.getAttribute('data-src') || image.getAttribute('data-original')
+            || image.getAttribute('data-lazy-src') || image.currentSrc || image.getAttribute('src') || '').trim();
           const alt = clean(image.getAttribute('alt') || image.getAttribute('data-alt') || '图片');
-          if (!src || /^data:image\\/gif/i.test(src)) {
-            image.remove();
-            return;
-          }
+          if (!src || /^data:image\\/gif/i.test(src)) { image.remove(); return; }
           assets.push({ src, alt });
-          image.replaceWith(document.createTextNode('\\n\\n![' + alt + '](' + src + ')\\n\\n'));
-        });
-        clone.querySelectorAll('p,div,section,article,li,blockquote,h1,h2,h3,h4,h5,h6').forEach((node) => {
-          if (node.parentElement === clone || node.children.length === 0) {
-            node.appendChild(document.createTextNode('\\n\\n'));
-          }
+          image.setAttribute('src', src);
         });
         return {
           title,
-          markdown: clean(clone.innerText || clone.textContent || ''),
+          html: clone.outerHTML,
+          markdown: '',
           assets,
           stateText,
           bodyTextChars: clean(root.innerText || root.textContent || '').replace(/\\s+/g, '').length,
@@ -22474,6 +22474,9 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         };
       })()
     `);
+    if (result && result.html && result.diagnostic && result.diagnostic.contentKind === "article") {
+      result.markdown = htmlToMarkdown(result.html);
+    }
     if (!result || !String(result.markdown || "").trim() && !(result.assets && result.assets.length)) {
       throw new Error("微信公众号页面未返回 #js_content 正文");
     }

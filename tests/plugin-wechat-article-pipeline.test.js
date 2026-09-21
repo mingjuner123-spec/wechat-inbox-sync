@@ -1,3 +1,4 @@
+require('./plugin-wechat-article-layout.test');
 require('./plugin-installer-finalization.test');
 require('./plugin-recovery-reconcile.test');
 require('./plugin-wechat-placeholder.test');

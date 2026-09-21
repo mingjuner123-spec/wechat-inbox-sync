@@ -233,9 +233,13 @@ function inspectWechatArticleContent(html, url = '') {
   const data = readWechatImagePostHtmlData(source);
   const explicitPicture = isWechatImagePostHtml(source);
   const pictureHint = isWechatImagePostUrl(url);
-  const pictureEvidence = explicitPicture || data.parsed;
+  const pictureEvidence = detectWechatImagePostDocument({
+    html: source, hasBody: stats.hasJsContent,
+    bodyText: stripHtml(extractWechatArticleBodyHtml(source)),
+    structuredCount: data.parsed ? Math.max(1, data.assets.length) : 0,
+  });
   const bodyUsable = stats.hasJsContent && (stats.bodyTextChars > 0 || stats.imageCount > 0);
-  const structuredComplete = data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
+  const structuredComplete = pictureEvidence && data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
   const complete = structuredComplete || (bodyUsable && !pictureEvidence && !pictureHint && (!stats.mediaCount || stats.bodyTextChars > 0));
   // A URL hint alone may be stale. Keep a complete long article as an alternate
   // candidate, but never replace a declared carousel with its caption/cover.
@@ -252,13 +256,13 @@ function inspectWechatArticleContent(html, url = '') {
   return {
     html: reconstructed,
     assets: structuredComplete ? data.assets : [],
-    title: data.title,
+    title: structuredComplete ? data.title : '',
     complete,
     fallbackComplete,
     diagnostic: {
       contentKind,
       typeHint: pictureHint ? 'image-post' : 'unspecified',
-      evidence: data.parsed ? 'structured-picture-list' : explicitPicture ? 'page-picture-type' : bodyUsable ? 'article-body' : 'no-body',
+      evidence: pictureEvidence && data.parsed ? 'structured-picture-list' : explicitPicture ? 'page-picture-type' : bodyUsable ? 'article-body' : 'no-body',
       extractor: structuredComplete ? 'structured-images' : bodyUsable ? 'article-body' : 'none',
       complete,
       bodyTextChars: stats.bodyTextChars,

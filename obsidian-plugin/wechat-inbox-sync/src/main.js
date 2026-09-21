@@ -10992,9 +10992,9 @@ function htmlToMarkdown(html) {
     .replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code))
     .replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => htmlTableToMarkdown(table))
     .replace(/<img\b[^>]*>/gi, imageTagToMarkdown)
-    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
-    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
-    .replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n')
+    .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level, content) => (
+      stripHtmlTags(content).trim() ? '\n' + '#'.repeat(Number(level)) + ' ' + content + '\n' : '\n'
+    ))
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
     .replace(/<\/div>/gi, '\n')
@@ -12246,25 +12246,18 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         const clone = root.cloneNode(true);
         const assets = [];
         clone.querySelectorAll('script,style,noscript,iframe,form').forEach((node) => node.remove());
-        clone.querySelectorAll('br').forEach((node) => node.replaceWith(document.createTextNode('\\n')));
         clone.querySelectorAll('img').forEach((image) => {
-          const src = String(image.currentSrc || image.getAttribute('data-src') || image.getAttribute('src') || '').trim();
+          const src = String(image.getAttribute('data-src') || image.getAttribute('data-original')
+            || image.getAttribute('data-lazy-src') || image.currentSrc || image.getAttribute('src') || '').trim();
           const alt = clean(image.getAttribute('alt') || image.getAttribute('data-alt') || '图片');
-          if (!src || /^data:image\\/gif/i.test(src)) {
-            image.remove();
-            return;
-          }
+          if (!src || /^data:image\\/gif/i.test(src)) { image.remove(); return; }
           assets.push({ src, alt });
-          image.replaceWith(document.createTextNode('\\n\\n![' + alt + '](' + src + ')\\n\\n'));
-        });
-        clone.querySelectorAll('p,div,section,article,li,blockquote,h1,h2,h3,h4,h5,h6').forEach((node) => {
-          if (node.parentElement === clone || node.children.length === 0) {
-            node.appendChild(document.createTextNode('\\n\\n'));
-          }
+          image.setAttribute('src', src);
         });
         return {
           title,
-          markdown: clean(clone.innerText || clone.textContent || ''),
+          html: clone.outerHTML,
+          markdown: '',
           assets,
           stateText,
           bodyTextChars: clean(root.innerText || root.textContent || '').replace(/\\s+/g, '').length,
@@ -12281,6 +12274,10 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         };
       })()
     `);
+    // Keep browser and static extraction on the same structural converter.
+    if (result && result.html && result.diagnostic && result.diagnostic.contentKind === 'article') {
+      result.markdown = htmlToMarkdown(result.html);
+    }
     if (!result || (!String(result.markdown || '').trim() && !(result.assets && result.assets.length))) {
       throw new Error('微信公众号页面未返回 #js_content 正文');
     }
