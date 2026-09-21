@@ -1,3 +1,5 @@
+require('./plugin-installer-finalization.test');
+require('./plugin-recovery-reconcile.test');
 require('./plugin-wechat-placeholder.test');
 'use strict';
 
