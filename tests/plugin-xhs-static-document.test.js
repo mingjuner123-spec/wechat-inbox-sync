@@ -97,6 +97,17 @@ async function main() {
   assert.ok(networkTrace.stages.some(row => row.outcome === 'failed' && row.message === 'net::ERR_CONNECTION_RESET'));
   assert.deepStrictEqual(diagnostics.sanitize(diagnostics.sanitize(deniedTrace)), diagnostics.sanitize(deniedTrace));
 
+  // Reproduce TLS reset followed by an unusable browser document: terminal evidence must survive.
+  plugin.renderXiaohongshuPage = async () => ({ url: noteUrl, html: '<title>小红书</title><body>登录</body>', comments: [] });
+  plugin.renderSocialMediaUrls = async () => [];
+  await assert.rejects(plugin.hydrateWebpageMarkdown({ _id: 'reset-empty', type: 'webpage', content: noteUrl, metadata: {url:noteUrl} }, '', '', '测试'), error => error.retryable === true);
+  const ended = plugin.getRecentXiaohongshuBrowserResults().at(-1);
+  assert.equal(ended.finalOutcome, 'content-failed');
+  assert.ok(Number.isFinite(Date.parse(ended.finishedAt)));
+  assert.ok(ended.stages.some(row => row.stage === 'content_result' && row.outcome === 'failed'));
+  assert.ok(ended.stages.some(row => row.stage === 'static_content' && row.outcome === 'failed'));
+  assert.ok(!JSON.stringify(ended).includes('SYNTHETIC_SHARE_TOKEN'));
+
   const plain = { error: { name: 'TypeError', errorDescription: 'failed to read media https://private.example/?xsec_token=HIDDEN cookie=COOKIE_SECRET', errorCode: 'ERR_SCRIPT_FAILED', statusCode: 406 }, body: 'PRIVATE_BODY', headers: { authorization: 'HEADER_SECRET' } };
   plain.cause = plain;
   const detail = diagnostics.errorDetails(plain);

@@ -424,7 +424,7 @@ async function runWechatArticlePipeline({
           ? Boolean(isUsableBrowserArticle(browser))
           : browserDiagnostic.pageKind === 'article';
         const imagePost = browser.diagnostic.contentKind === 'image-post'
-          || lastContentDecision && lastContentDecision.contentKind === 'image-post';
+          || !browser.diagnostic.contentKind && lastContentDecision && lastContentDecision.contentKind === 'image-post';
         const retainedImages = collectWechatImagePostStructuredAssets({ picture_page_info_list:
           Array.from(browser.markdown.matchAll(/!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g), match => match[1]) }).length;
         const expectedImages = Math.max(
@@ -435,6 +435,10 @@ async function runWechatArticlePipeline({
         if (imagePost && (!retainedImages || retainedImages < expectedImages || Number(browser.diagnostic.mediaCount) > 0)) {
           hasBrowserArticle = false;
           attempts[attempts.length - 1].failureCategory = 'picture-content-incomplete';
+        }
+        if (!imagePost && browserImageCandidateCount > browserImageCount) {
+          hasBrowserArticle = false;
+          attempts[attempts.length - 1].failureCategory = 'article-images-incomplete';
         }
         if (['unavailable', 'guide', 'empty-shell'].includes(browserDiagnostic.pageKind)) hasBrowserArticle = false;
         if (requiresTranscription && browserMediaCount > 0) hasBrowserArticle = false;

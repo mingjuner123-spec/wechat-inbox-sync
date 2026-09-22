@@ -27,7 +27,8 @@ function isWechatImagePostUrl(value) {
 
 function isWechatImagePostHtml(html) {
   const bodyHtml = extractWechatArticleBodyHtml(html);
-  return detectWechatImagePostDocument({ html, bodyText: stripHtml(bodyHtml), hasBody: Boolean(bodyHtml) });
+  const data = readWechatImagePostHtmlData(html);
+  return detectWechatImagePostDocument({ html, structuredAssets: data.assets, structuredCount: data.parsed ? Math.max(1, data.assets.length) : 0, bodyHtml, bodyText: stripHtml(bodyHtml), hasBody: Boolean(bodyHtml) });
 }
 
 function getWechatRetainedParameterNames(value) {
@@ -215,12 +216,15 @@ function getWechatArticleBodyStats(html) {
   const bodyHtml = extractWechatArticleBodyHtml(source);
   const bodyText = stripHtml(bodyHtml);
   const imageCandidates = collectWechatArticleImageCandidates(source);
+  const unresolvedImageCount = Array.from(bodyHtml.matchAll(/<img\b([^>]*)>/gi)).filter(match =>
+    !['data-src', 'data-original', 'data-lazy-src', 'src', 'data-fail'].some(key => normalizeWechatImageCandidate(getHtmlAttribute(match[1], key)))).length;
   const mediaCount = (bodyHtml.match(/<(?:video|audio)\b|<source\b[^>]*\btype=["'](?:video|audio)\//gi) || []).length;
   return {
     hasJsContent: /<div\b(?=[^>]*\bid=["']js_content["'])/i.test(source),
     bodyHtmlChars: bodyHtml.length,
     bodyTextChars: bodyText.length,
     imageCount: imageCandidates.length,
+    unresolvedImageCount,
     mediaCount,
     imageCandidates,
     hasSubstantiveBody: bodyText.length >= 50 || imageCandidates.length > 0 || mediaCount > 0,
@@ -233,13 +237,20 @@ function inspectWechatArticleContent(html, url = '') {
   const data = readWechatImagePostHtmlData(source);
   const explicitPicture = isWechatImagePostHtml(source);
   const pictureHint = isWechatImagePostUrl(url);
-  const pictureEvidence = explicitPicture || data.parsed;
+  const pictureEvidence = detectWechatImagePostDocument({
+    html: source, bodyHtml: extractWechatArticleBodyHtml(source), hasBody: stats.hasJsContent,
+    bodyText: stripHtml(extractWechatArticleBodyHtml(source)),
+    structuredAssets: data.assets,
+    structuredCount: data.parsed ? Math.max(1, data.assets.length) : 0,
+  });
+  const hintRequiresBrowser = pictureHint && detectWechatImagePostDocument({ html: source, url,
+    bodyHtml: extractWechatArticleBodyHtml(source), bodyText: stripHtml(extractWechatArticleBodyHtml(source)), hasBody: stats.hasJsContent });
   const bodyUsable = stats.hasJsContent && (stats.bodyTextChars > 0 || stats.imageCount > 0);
-  const structuredComplete = data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
-  const complete = structuredComplete || (bodyUsable && !pictureEvidence && !pictureHint && (!stats.mediaCount || stats.bodyTextChars > 0));
+  const structuredComplete = pictureEvidence && data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
+  const complete = structuredComplete || (bodyUsable && !pictureEvidence && !hintRequiresBrowser && !stats.unresolvedImageCount && (!stats.mediaCount || stats.bodyTextChars > 0));
   // A URL hint alone may be stale. Keep a complete long article as an alternate
   // candidate, but never replace a declared carousel with its caption/cover.
-  const fallbackComplete = bodyUsable && !pictureEvidence && !stats.mediaCount && stats.bodyTextChars >= 200;
+  const fallbackComplete = bodyUsable && !pictureEvidence && !stats.unresolvedImageCount && !stats.mediaCount && stats.bodyTextChars >= 200;
   const contentKind = pictureEvidence ? 'image-post' : bodyUsable ? 'article' : 'unknown';
   const escape = value => String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const body = extractWechatArticleBodyHtml(source).replace(/<img\b[^>]*>/gi, '');
@@ -252,21 +263,22 @@ function inspectWechatArticleContent(html, url = '') {
   return {
     html: reconstructed,
     assets: structuredComplete ? data.assets : [],
-    title: data.title,
+    title: structuredComplete ? data.title : '',
     complete,
     fallbackComplete,
     diagnostic: {
       contentKind,
       typeHint: pictureHint ? 'image-post' : 'unspecified',
-      evidence: data.parsed ? 'structured-picture-list' : explicitPicture ? 'page-picture-type' : bodyUsable ? 'article-body' : 'no-body',
+      evidence: pictureEvidence && data.parsed ? 'structured-picture-list' : explicitPicture ? 'page-picture-type' : bodyUsable ? 'article-body' : 'no-body',
       extractor: structuredComplete ? 'structured-images' : bodyUsable ? 'article-body' : 'none',
       complete,
       bodyTextChars: stats.bodyTextChars,
       bodyImageCount: stats.imageCount,
+      unresolvedImageCount: stats.unresolvedImageCount,
       structuredImageCount: data.assets.length,
       structuredDataState: data.parseState,
       invalidImageCount: data.invalidImageCount,
-      imageCandidateCount: structuredComplete ? data.assets.length : stats.imageCount,
+      imageCandidateCount: structuredComplete ? data.assets.length : stats.imageCount + stats.unresolvedImageCount,
       mediaCount: stats.mediaCount,
     },
   };

@@ -1,3 +1,4 @@
+require('./plugin-wechat-article-layout.test');
 require('./plugin-installer-finalization.test');
 require('./plugin-recovery-reconcile.test');
 require('./plugin-wechat-placeholder.test');
@@ -289,13 +290,13 @@ async function runPipelineTests() {
     fetchStatic: async () => { strategyCalls.push('static'); return fullArticle; },
     renderBrowser: async () => { strategyCalls.push('browser'); throw Error('selector failed ?token=private-value'); },
   });
-  assert.deepStrictEqual(strategyCalls, ['static', 'browser']);
-  assert.strictEqual(reused.diagnostic.contentDecision.selectedStrategy, 'cached-article-body');
+  assert.deepStrictEqual(strategyCalls, ['static']);
+  assert.strictEqual(reused.source, 'static');
   assert.strictEqual(reused.diagnostic.contentDecision.contentKind, 'article');
   assert.strictEqual(reused.html, fullArticle);
   assert.doesNotMatch(JSON.stringify(reused.diagnostic), /private-value/);
   for (const error of [Object.assign(Error('cancel'), { name: 'AbortError' }), Object.assign(Error('verify'), { wechatArticleDiagnostic: { verificationMarker: true } })]) {
-    const promise = runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => fullArticle, renderBrowser: async () => { throw error; } });
+    const promise = runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => '<div id="js_content"></div>', renderBrowser: async () => { throw error; } });
     if (error.name === 'AbortError') await assert.rejects(promise, { name: 'AbortError' });
     else assert.strictEqual((await promise).state, 'access_paused');
   }
@@ -326,11 +327,11 @@ async function runPipelineTests() {
     async () => ({ bodyFound: true, markdown: '封面说明', diagnostic: { contentKind: 'image-post', mediaCount: 1 } }),
     async () => { throw Object.assign(Error('media seen, extraction failed'), { wechatArticleDiagnostic: { mediaCount: 1 } }); },
   ]) {
-    const mediaFallback = await runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => fullArticle,
+    const mediaFallback = await runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => '<div id="js_content"></div>',
       renderBrowser, isUsableBrowserArticle: () => true });
     assert.strictEqual(mediaFallback.kind, 'retryable', 'actual media must block cached article fallback');
   }
-  const pausedFallback = await runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => fullArticle,
+  const pausedFallback = await runWechatArticlePipeline({ url: wrongHintUrl, fetchStatic: async () => '<div id="js_content"></div>',
     renderBrowser: async () => { throw Object.assign(Error('HTTP 429'), { code: 'WECHAT_ACCESS_PAUSED', reason: 'wechat-rate-limited' }); } });
   assert.strictEqual(pausedFallback.state, 'access_paused');
   const browserMissingPictures = await runWechatArticlePipeline({ url: 'https://mp.weixin.qq.com/s/browser-incomplete',

@@ -54,7 +54,8 @@ async function main(){
   const proseGate=createWechatArticleRequestGate({gapMs:0});await proseGate.run(async()=>({bodyFound:true,markdown:'本文解释环境异常、去验证、访问频繁等提示的含义。'}));
   let calls=[];let result=await runWechatArticlePipeline({url:'https://mp.weixin.qq.com/s/fixture-long',fetchStatic:async()=>{calls.push('static');return article;},renderBrowser:async()=>{calls.push('browser');throw Error('unnecessary browser');}});assert.equal(result.kind,'article');assert.deepEqual(calls,['static']);
   for(const weak of ['from_masonry','"image_list":[]','pages/image_detail','<div class="swiper"></div>']){const html=`<div id="js_content">短文章正文</div><script>${weak}</script>`;assert.equal(isWechatImagePostHtml(html),false);}
-  assert.equal(detectWechatImagePostDocument({url:'https://mp.weixin.qq.com/s?__biz=x&t=pages/image_detail',html:article,bodyText:text,hasBody:true}),true);
+  assert.equal(detectWechatImagePostDocument({url:'https://mp.weixin.qq.com/s?__biz=x&t=pages/image_detail',html:article,bodyHtml:article,bodyText:text,hasBody:true}),false);
+  assert.equal(detectWechatImagePostDocument({url:'https://mp.weixin.qq.com/s?t=pages/image_detail',bodyText:'短贴图',hasBody:true}),true);
   assert.equal(isWechatImagePostHtml('<script>window.cgiData={article_type:"newspic"};</script><div id="js_content">短贴图文案</div>'),true);
   assert.equal(detectWechatImagePostDocument({structuredCount:3,bodyText:'图集说明',hasBody:true}),true);
   // Browser uses exactly the same serializable detector, with no module dependencies.
