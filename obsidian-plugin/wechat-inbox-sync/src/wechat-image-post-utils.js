@@ -122,8 +122,7 @@ function collectWechatImagePostStructuredAssets(pageWindow, withEvidence = false
 
 // Shared between static extraction and the isolated browser. Generic bundle
 // strings (from_masonry/image_list/swiper) are not page identity.
-function detectWechatImagePostDocument({ html = '', url = '', bodyText = '', hasBody = false, structuredCount = 0 } = {}) {
-  try { if (new URL(url).searchParams.get('t') === 'pages/image_detail') return true; } catch (_) {}
+function detectWechatImagePostDocument({ html = '', url = '', bodyText = '', bodyHtml = '', hasBody = false, structuredCount = 0, structuredAssets = [] } = {}) {
   const source = String(html || '');
   // appmsg_type=9 also occurs on ordinary rich articles. Page-level layout
   // identity plus a readable body takes precedence over that ambiguous type.
@@ -132,11 +131,24 @@ function detectWechatImagePostDocument({ html = '', url = '', bodyText = '', has
     .some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+appmsg_type\s*=\s*(?:"9"|'9'|9)(?=\s*(?:[;,\n]|$))/.test(match[1]));
   const explicitType = /(?:\b(?:var|let|const)\s+(?:article_type|appmsg_type)|(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\.(?:article_type|appmsg_type))\s*=\s*["']newspic["']/i.test(source)
     || /(?:window\.)?(?:cgiDataNew|cgiData|__QMTPL_SSR_DATA__)\s*=\s*\{[^{}]{0,4096}\b(?:article_type|appmsg_type)["']?\s*:\s*["']newspic["']/i.test(source);
-  const ordinaryArticleType = Array.from(source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi))
-    .some((match) => /(?:^|[;\n])\s*(?:var|let|const)\s+item_show_type\s*=\s*(?:"0"|'0'|0)(?=\s*(?:[;,\n]|$))/.test(match[1]));
-  if (!explicitType && ordinaryArticleType && hasBody && String(bodyText).replace(/\s+/g, '').length >= 50) return false;
-  if (explicitType || numericPictureType || structuredCount > 0) return true;
+  // Inline body sections outrank URL/type hints; a caption and cover do not.
+  const cleanBody = String(bodyHtml || '').replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<!--[\s\S]*?-->/g, '');
+  const imageParts = cleanBody.split(/<img\b[^>]*>/gi);
+  const bodyImages = Array.from(cleanBody.matchAll(/<img\b[^>]*>/gi)).flatMap(match =>
+    Array.from(match[0].matchAll(/(?:data-src|data-original|data-lazy-src|src)=["']([^"']+)["']/gi), entry => entry[1].replace(/\\x26amp;/gi, '&').replace(/&amp;/gi, '&').trim().replace(/^\/\//, 'https://').replace(/^http:/i, 'https:').replace(/[?#].*$/, '')));
+  const declaredImages = structuredAssets.map(asset => String(asset.src || '').replace(/\\x26amp;/gi, '&').replace(/&amp;/gi, '&').trim().replace(/^\/\//, 'https://').replace(/^http:/i, 'https:').replace(/[?#].*$/, ''));
+  // A cover inside a caption cannot stand in for the rest of its declared album.
+  const partTexts = imageParts.map(part => part.replace(/<[^>]*>/g, '').replace(/&(?:nbsp|#160);|\s+/g, ''));
+  const inlineLayout = hasBody && imageParts.length > 1 && imageParts.some((part, index) =>
+    index > 0 && partTexts[index].length >= 20 && partTexts.slice(0, index).some(before => before.length >= 20));
+  // Multiple body images separated by prose form an article even when page data also lists a cover.
+  if (inlineLayout && partTexts.slice(1, -1).some(part => part.length >= 20)) return false;
+  if (declaredImages.some(src => bodyImages.includes(src)) && declaredImages.some(src => !bodyImages.includes(src))) return true;
+  if (inlineLayout) return false;
+  if (explicitType || structuredCount > 0) return true;
   if (hasBody && String(bodyText).replace(/\s+/g, '').length >= 200) return false;
+  try { if (new URL(url).searchParams.get('t') === 'pages/image_detail') return true; } catch (_) {}
+  if (numericPictureType) return true;
   const visibleMarkup = source.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '').replace(/<!--[\s\S]*?-->/g, '');
   return /class=["'][^"']*(?:image[_-]detail|pic[_-]album|newspic)[^"']*["']/i.test(visibleMarkup)
     && /<img\b[^>]*(?:data-src|src)=["'](?:https?:)?\/\/mmbiz\.qpic\.cn\//i.test(visibleMarkup);

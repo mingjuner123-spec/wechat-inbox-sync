@@ -262,7 +262,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.162';
+const PLUGIN_RUNTIME_VERSION = '1.3.163';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -11995,7 +11995,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
     const bodyReady = await win.webContents.executeJavaScript(`
       (async () => {
         const collectStructuredAssets = ${collectWechatImagePostStructuredAssets.toString()};
-        const detectImagePost = () => ${isImagePost ? 'true' : 'false'} || (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyText: document.querySelector('#js_content')?.textContent || '', structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
+        const detectImagePost = () => (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyHtml: document.querySelector('#js_content')?.innerHTML || '', bodyText: document.querySelector('#js_content')?.textContent || '', structuredAssets: (${collectWechatImagePostStructuredAssets.toString()})(window), structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const imageSource = (image) => String(image && (
           image.getAttribute('data-src')
@@ -12097,7 +12097,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
           try {
             queryMarker = String(new URL(window.location.href).searchParams.get('t') || '').toLowerCase() === 'pages/image_detail';
           } catch (_) {}
-          const imagePost = ${isImagePost ? 'true' : 'false'} || (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyText: document.querySelector('#js_content')?.textContent || '', structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
+          const imagePost = (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyHtml: document.querySelector('#js_content')?.innerHTML || '', bodyText: document.querySelector('#js_content')?.textContent || '', structuredAssets: (${collectWechatImagePostStructuredAssets.toString()})(window), structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
           const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
           const bodyText = clean(document.body && (document.body.innerText || document.body.textContent) || '');
           const root = imagePost ? document.body : document.querySelector('#js_content');
@@ -12130,7 +12130,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         try {
           queryMarker = String(new URL(window.location.href).searchParams.get('t') || '').toLowerCase() === 'pages/image_detail';
         } catch (_) {}
-        const imagePost = ${isImagePost ? 'true' : 'false'} || (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyText: document.querySelector('#js_content')?.textContent || '', structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
+        const imagePost = (${detectWechatImagePostDocument.toString()})({ html: document.documentElement && document.documentElement.innerHTML || '', url: window.location.href, hasBody: Boolean(document.querySelector('#js_content')), bodyHtml: document.querySelector('#js_content')?.innerHTML || '', bodyText: document.querySelector('#js_content')?.textContent || '', structuredAssets: (${collectWechatImagePostStructuredAssets.toString()})(window), structuredCount: (${collectWechatImagePostStructuredAssets.toString()})(window).length });
         const clean = (value) => String(value || '')
           .replace(/\\u00a0/g, ' ')
           .replace(/[ \\t]+\\n/g, '\\n')
@@ -13433,6 +13433,10 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       type: 'stage',
       stage: 'content_extraction',
       outcome: 'completed',
+    });
+    appendXiaohongshuBrowserDiagnostic(options, {
+      type: 'stage', stage: 'content_validation',
+      outcome: payload && payload.matched ? 'matched' : accessWall ? 'access_wall' : 'no_matching_content',
     });
     return {
       html: String(payload && payload.html || ''),
@@ -23692,6 +23696,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               throw browserError;
             }
             return {
+              html: rendered.html,
               markdown: rendered.markdown,
               title: rendered.title,
               assets: rendered.assets,
@@ -23997,6 +24002,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       };
     } catch (error) {
+      if (xiaohongshuBrowserDiagnostic) {
+        appendXiaohongshuBrowserFailure({ xiaohongshuBrowserDiagnostic, diagnosticSettings: this.settings }, 'content_result', error);
+        xiaohongshuBrowserDiagnostic.finalOutcome = isAbortError(error) ? 'aborted'
+          : xiaohongshuBrowserDiagnostic.finalOutcome || 'content-failed';
+        xiaohongshuBrowserDiagnostic.finishedAt = new Date().toISOString();
+      }
       if (xiaohongshuCommentResult && ['not_attempted', 'running'].includes(xiaohongshuCommentResult.status)) {
         updateCommentResult({ status: isAbortError(error) ? 'aborted' : 'not_attempted', reason: 'content_failed', errorCode: getXiaohongshuCommentErrorCode(error) });
       }

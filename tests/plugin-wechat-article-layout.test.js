@@ -22,6 +22,12 @@ try {
   Plugin = require('../obsidian-plugin/wechat-inbox-sync/main.js');
 } finally { Module._load = originalLoad; }
 const { htmlToMarkdown } = Plugin.__test;
+const built = fs.readFileSync(require.resolve('../obsidian-plugin/wechat-inbox-sync/main.js'), 'utf8');
+const detectorStart = built.search(/function detectWechatImagePostDocument\d*\(/);
+const detectorEnd = built.indexOf('function readWechatImagePostHtmlData(', detectorStart);
+const builtDetector = built.slice(detectorStart, detectorEnd).replace(/__name\(detectWechatImagePostDocument[^;]+;/g, '').replace(/function detectWechatImagePostDocument\d*/, 'function detectWechatImagePostDocument');
+const builtContext = {URL}; vm.createContext(builtContext); vm.runInContext(builtDetector, builtContext);
+assert.equal(builtContext.detectWechatImagePostDocument({html,bodyHtml:body,bodyText:prose,hasBody:true}), false);
 function assertLayout(markdown) {
   const tokens = ['## 安装插件', image(1), '### 绑定账号', image(2), '结束标记'];
   const positions = tokens.map(token => markdown.indexOf(token));
@@ -48,17 +54,50 @@ async function run() {
   assert.equal(decision.title, '', 'unrelated picture data must not override article title');
   assert.equal(decision.html, withList);
   assertLayout(htmlToMarkdown(decision.html));
+  const overlappingList = html.replace('</body>', '<script>window.cgiDataNew={picture_page_info_list:['+[1,2,99].map(n => JSON.stringify({cdn_url:image(n)})).join(',')+']};</script></body>');
+  const overlapDecision = article.inspectWechatArticleContent(overlappingList, url);
+  assert.equal(overlapDecision.diagnostic.contentKind, 'article'); assertLayout(htmlToMarkdown(overlapDecision.html));
   let browserCalls = 0;
   const result = await runWechatArticlePipeline({ url, fetchStatic: async () => withList, renderBrowser: async () => { browserCalls++; throw Error('unexpected'); } });
   assert.equal(browserCalls, 0);
   assert.equal(result.diagnostic.contentDecision.contentKind, 'article');
   assertLayout(htmlToMarkdown(result.html));
   // Keep true carousels, short/empty shells and strings in shared bundles safe.
-  assert.equal(article.classifyWechatArticleHtml(html.replace('var item_show_type = "0";', '')), 'image-post');
+  assert.equal(article.classifyWechatArticleHtml(html.replace('var item_show_type = "0";', '')), 'article');
   assert.equal(article.classifyWechatArticleHtml(html.replace(body, '<div id="js_content">短说明</div>')), 'image-post');
-  assert.equal(article.classifyWechatArticleHtml(html.replace('var item_show_type = "0";', "const example = 'var item_show_type = 0;';")), 'image-post');
-  assert.equal(article.classifyWechatArticleHtml(html.replace('var item_show_type = "0";', 'var item_show_type = 0; var article_type = "newspic";')), 'image-post');
-  assert.equal(pictures.detectWechatImagePostDocument({ html, url: url+'?t=pages/image_detail', hasBody: true, bodyText: prose }), true);
+  assert.equal(article.classifyWechatArticleHtml(html.replace('var item_show_type = "0";', "const example = 'var item_show_type = 0;';")), 'article');
+  assert.equal(article.classifyWechatArticleHtml(html.replace('var item_show_type = "0";', 'var item_show_type = 0; var article_type = "newspic";')), 'article');
+  assert.equal(pictures.detectWechatImagePostDocument({ html, url: url+'?t=pages/image_detail', hasBody: true, bodyHtml: body, bodyText: prose }), false);
+
+  const hinted = await runWechatArticlePipeline({ url: url+'?t=pages/image_detail', fetchStatic: async () => html,
+    renderBrowser: async () => { throw Error('strong article layout must not fall back to a caption'); } });
+  assert.equal(hinted.source, 'static'); assertLayout(htmlToMarkdown(hinted.html));
+  const gallery = '<script>var appmsg_type=9; var item_show_type=0; window.cgiDataNew={picture_page_info_list:['
+    + [1,2,3].map(n => JSON.stringify({cdn_url:image(n)})).join(',') + ']};</script><div id="js_content"><p>'+prose+'</p><img data-src="'+image(1)+'"></div>';
+  const galleryResult = article.inspectWechatArticleContent(gallery, url);
+  assert.equal(galleryResult.diagnostic.contentKind, 'image-post'); assert.equal(galleryResult.assets.length, 3);
+  for (const prefix of ['https:', 'http:', '']) {
+    const galleryWithFooter = article.inspectWechatArticleContent(gallery.replace('<img data-src="https:', '<img data-src="'+prefix).replace('</div>', '<p>'+prose+'</p></div>'), url);
+    assert.equal(galleryWithFooter.diagnostic.contentKind, 'image-post'); assert.equal(galleryWithFooter.assets.length, 3);
+  }
+  const twoCovers = gallery.replace('</div>', '<img data-src="'+image(2)+'"><p>'+prose+'</p></div>');
+  const twoCoversDecision = article.inspectWechatArticleContent(twoCovers, url);
+  assert.equal(twoCoversDecision.diagnostic.contentKind, 'image-post'); assert.equal(twoCoversDecision.assets.length, 3);
+  for (const tail of ['', '<img data-src="'+image(1)+'">']) {
+    const longArticle = '<script>var appmsg_type=9;</script><div id="js_content"><h2>标题</h2><p>'+prose.repeat(4)+'</p>'+tail+'</div>';
+    for (const link of [url, url+'?t=pages/image_detail']) {
+      assert.equal(article.inspectWechatArticleContent(longArticle, link).diagnostic.contentKind, 'article');
+      assert.equal(article.inspectWechatArticleContent(longArticle, link).complete, true);
+    }
+  }
+  const incomplete = body.replace(image(2), '');
+  assert.equal(article.inspectWechatArticleContent(incomplete, url).complete, false);
+  assert.equal(article.inspectWechatArticleContent(incomplete, url).fallbackComplete, false);
+  assert.equal(article.inspectWechatArticleContent(incomplete, url).diagnostic.unresolvedImageCount, 1);
+  const missing = await runWechatArticlePipeline({url, fetchStatic: async () => incomplete,
+    renderBrowser: async () => ({ bodyFound:true, markdown:'正文\n![图]('+image(1)+')', imageCount:1, imageCandidateCount:2, diagnostic:{contentKind:'article'} }),
+    isUsableBrowserArticle: () => true });
+  assert.equal(missing.kind, 'retryable');
 
   // Execute the actual emitted browser extraction, then the real shared converter.
   const source = fs.readFileSync(require.resolve('../obsidian-plugin/wechat-inbox-sync/src/main.js'), 'utf8');
@@ -66,7 +105,7 @@ async function run() {
   let destroyed = false, scriptCalls = 0;
   const images = [1, 2].map(n => ({ getAttribute: key => key === 'data-src' ? image(n) : '', setAttribute() {}, remove() {} }));
   const clone = { outerHTML: body, querySelectorAll: selector => selector === 'img' ? images : [] };
-  const root = { textContent: prose.repeat(2), innerText: prose.repeat(2), cloneNode: () => clone, querySelectorAll: selector => selector.startsWith('img') ? images : [] };
+  const root = { innerHTML: body, textContent: prose.repeat(2), innerText: prose.repeat(2), cloneNode: () => clone, querySelectorAll: selector => selector.startsWith('img') ? images : [] };
   const doc = { documentElement: { innerHTML: html }, body: { textContent: prose }, title: '图文教程标题', querySelector: selector => selector === '#js_content' ? root : selector === '#activity-name, h1' ? { textContent: '图文教程标题' } : null };
   class BrowserWindow {
     constructor() {
@@ -93,7 +132,7 @@ async function run() {
     assertWechatTransportResponse: noop, getSafeUrlDiagnostic: () => ({ host: 'mp.weixin.qq.com' }),
     WECHAT_ARTICLE_DESKTOP_USER_AGENT: 'fixture', WECHAT_ARTICLE_MOBILE_USER_AGENT: 'fixture' };
   vm.createContext(context); vm.runInContext(renderer, context);
-  const rendered = await context.renderWechatArticleToMarkdownWithElectron(url);
+  const rendered = await context.renderWechatArticleToMarkdownWithElectron(url+'?t=pages/image_detail');
   assert.equal(rendered.diagnostic.contentKind, 'article');
   assert.equal(rendered.title, '图文教程标题');
   assert.equal(rendered.assets.length, 2);
