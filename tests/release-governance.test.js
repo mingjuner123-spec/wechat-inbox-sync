@@ -1455,6 +1455,7 @@ test('release source guard accepts a current version tag at current remote main'
   assert.deepEqual(validateTagState({
     statusOutput: '',
     headOutput: `${currentCommit}\n`,
+    tagTypeOutput: 'tag\n',
     tagOutput: `${currentCommit}\n`,
     remoteMainOutput: remoteMainOutput(),
     tag: '1.3.48',
@@ -1466,6 +1467,20 @@ test('release source guard accepts a current version tag at current remote main'
     remoteMain: currentCommit,
     version: '1.3.48',
   });
+});
+
+test('release source guard requires an annotated tag object', () => {
+  const { parseAnnotatedTagTypeOutput } = loadReleaseSourceGuardCore();
+
+  assert.equal(parseAnnotatedTagTypeOutput('tag\n'), 'tag');
+  assert.throws(
+    () => parseAnnotatedTagTypeOutput('commit\n'),
+    /annotated Git tag/i,
+  );
+  assert.throws(
+    () => parseAnnotatedTagTypeOutput(''),
+    /annotated Git tag/i,
+  );
 });
 
 test('release source guard fails closed on malformed or empty Git output', async (t) => {
@@ -1578,6 +1593,20 @@ test('release source guard CLI integrates with real local Git repositories', asy
     assertNormalExit(result, 'fixture tag guard');
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     assert.match(result.stdout, /Tag source guard passed/i);
+  });
+
+  await t.test('lightweight tag is rejected before a release can be published', (t) => {
+    const fixture = createReleaseGuardFixture(t);
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['tag', currentReleaseVersion],
+      'create fixture lightweight tag',
+    );
+    const result = runFixtureGuard(fixture, ['--tag', currentReleaseVersion]);
+
+    assertNormalExit(result, 'fixture lightweight tag guard');
+    assert.notEqual(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(`${result.stdout}${result.stderr}`, /annotated Git tag/i);
   });
 
   await t.test('stale remote main failure', (t) => {

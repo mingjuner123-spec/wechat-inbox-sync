@@ -138,6 +138,10 @@ function probeTagSnapshot(tag, baseSnapshot) {
   const state = validateTagState({
     statusOutput: '',
     headOutput: `${baseSnapshot.head}\n`,
+    tagTypeOutput: runGit(
+      ['cat-file', '-t', `refs/tags/${tag}`],
+      `tag ${tag} type`,
+    ),
     tagOutput: runGit(
       ['rev-parse', `refs/tags/${tag}^{}`],
       `tag ${tag} commit`,

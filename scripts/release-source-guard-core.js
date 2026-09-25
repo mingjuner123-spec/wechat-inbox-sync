@@ -27,6 +27,14 @@ function parseCommitOutput(output, label = 'Git commit') {
   return match[1];
 }
 
+function parseAnnotatedTagTypeOutput(output) {
+  requireString(output, 'local tag type');
+  if (output !== 'tag\n' && output !== 'tag\r\n') {
+    throw new Error('local release tag must be an annotated Git tag object');
+  }
+  return 'tag';
+}
+
 function parseRemoteMainOutput(output) {
   requireString(output, 'remote origin/main');
   const match = output.match(
@@ -121,6 +129,7 @@ function validateDeployState({
 function validateTagState({
   statusOutput,
   headOutput,
+  tagTypeOutput,
   tagOutput,
   remoteMainOutput,
   tag,
@@ -130,6 +139,7 @@ function validateTagState({
   assertCleanStatus(statusOutput);
   const version = validateVersionTag(tag);
   const head = parseCommitOutput(headOutput, 'local HEAD');
+  parseAnnotatedTagTypeOutput(tagTypeOutput);
   const tagCommit = parseCommitOutput(tagOutput, `tag ${version} commit`);
   const remoteMain = parseRemoteMainOutput(remoteMainOutput);
   assertTagMatchesHead(tagCommit, head);
@@ -150,6 +160,7 @@ module.exports = {
   assertTagMatchesHead,
   assertTagMatchesRemote,
   parseCommitOutput,
+  parseAnnotatedTagTypeOutput,
   parseRemoteMainOutput,
   validateDeployState,
   validateReleaseVersions,
