@@ -9,7 +9,7 @@ const safety = require('../obsidian-plugin/wechat-inbox-sync/src/douyin-browser-
 
 const url = 'https://www.douyin.com/video/7685198123559390506';
 const media = 'https://v3.douyinvod.com/fixture.mp4';
-let mode = 'success', windowId = 20, extractionEntered, lastWindow, capturedScript = '', attempts = 0;
+let mode = 'success', debuggerHang = false, windowId = 20, extractionEntered, lastWindow, capturedScript = '', attempts = 0;
 const handlers = {};
 const session = { webRequest: {}, cookies: { async get() { return []; } } };
 for (const name of ['onBeforeRequest', 'onHeadersReceived', 'onBeforeRedirect', 'onCompleted', 'onBeforeSendHeaders', 'onErrorOccurred']) session.webRequest[name] = (_filter, fn) => { handlers[name] = fn; };
@@ -26,6 +26,13 @@ class Window extends EventEmitter {
         return { pageUrl: url, canonicalUrl: url, pageIdentityIds: ['7685198123559390506'], urls: [{ url: media, resourceType: 'media' }], domMediaCandidates: [{ urls: [media], identityIds: ['7685198123559390506'], visible: true, intersectsViewport: true, area: 100000, isPlaying: false }], douyinPaceState: '' };
       },
     });
+    if (debuggerHang) {
+      let attached = false;
+      this.webContents.debugger = Object.assign(new EventEmitter(), {
+        isAttached: () => attached, attach: () => { attached = true; },
+        detach: () => { attached = false; }, sendCommand: () => new Promise(() => {}),
+      });
+    }
   }
   hide() {}
   isDestroyed() { return this.destroyed; }
@@ -77,6 +84,14 @@ async function run() {
       } },
     });
     assert.equal(domPayload.canonicalUrl, url); cases++;
+    debuggerHang = true;
+    assert.ok((await bounded(plugin.renderSocialMediaUrls(url, { diagnosticAttemptId: 'abcdef0123456789' }))).includes(media));
+    const fallback = safety.readAttempts(scratch).at(-1);
+    assert.equal(fallback.debuggerStatus, 'timeout');
+    assert.equal(fallback.pageLoaded, true);
+    assert.equal(fallback.resolutionAttemptId, 'abcdef0123456789');
+    assert.equal(lastWindow.webContents.debugger.isAttached(), false);
+    debuggerHang = false; cases++;
     const c = new AbortController(); mode = 'hang'; extractionEntered = () => setImmediate(() => c.abort());
     await assert.rejects(bounded(plugin.renderSocialMediaUrls(url, { signal: c.signal })), { name: 'AbortError' });
     assert.equal(lastWindow.destroyed, true); assert.equal(safety.readAttempts(scratch).at(-1).outcome, 'cancelled'); cases++;
@@ -94,6 +109,17 @@ async function run() {
       if (timeoutOrGone === 'destroyed') win.webContents.emit('destroyed');
       await assert.rejects(bounded(pending), e => e.browserCode === (timeoutOrGone === 'timeout' ? 'DOUYIN_BROWSER_TIMEOUT' : 'DOUYIN_BROWSER_CLOSED'));
       g.close(); assert.equal(win.webContents.listenerCount('render-process-gone'), 0); cases++;
+    }
+    {
+      const win = new Window(), events = [];
+      const guard = safety.attachGuard(win, { onDiagnostic: e => events.push(e) });
+      win.webContents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', url, false);
+      win.webContents.emit('did-fail-load', {}, -3, 'ERR_ABORTED', url, true);
+      assert.equal(await guard.run(Promise.resolve('ok'), 'page-load'), 'ok');
+      win.webContents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', url, true);
+      await assert.rejects(guard.run(Promise.resolve(), 'page-load'), e => e.browserCode === 'DOUYIN_BROWSER_LOAD_FAILED');
+      assert.equal(events.at(-1).networkCode, 'ERR_NAME_NOT_RESOLVED');
+      guard.close(); assert.equal(win.webContents.listenerCount('did-fail-load'), 0); cases++;
     }
     const rejected = []; const onUnhandled = error => rejected.push(error); process.on('unhandledRejection', onUnhandled);
     try {

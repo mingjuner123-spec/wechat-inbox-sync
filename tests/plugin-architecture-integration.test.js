@@ -14,6 +14,7 @@ const versionsPath = path.join(pluginRoot, 'versions.json');
 
 const expectedModules = [
   'douyin-browser-safety',
+  'douyin-diagnostic-utils',
   'ai-metadata-error-utils',
   'ai-metadata-utils',
   'asr-recovery-utils',
