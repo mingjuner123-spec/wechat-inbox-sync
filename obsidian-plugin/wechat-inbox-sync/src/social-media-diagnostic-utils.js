@@ -21,6 +21,8 @@ function createDouyinMediaResolutionDiagnosticBuilder(dependencies = {}) {
     if (code) safe.code = code;
     const status = normalizeInteger(diagnostic.status, 999);
     if (status) safe.status = status;
+    if (error.browserCode) safe.browserCode = normalizeCode(error.browserCode);
+    if (Number.isInteger(error.exitCode)) safe.exitCode = error.exitCode;
     return Object.keys(safe).length ? safe : undefined;
   };
 

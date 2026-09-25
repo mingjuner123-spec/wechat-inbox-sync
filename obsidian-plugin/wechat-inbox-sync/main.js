@@ -610,7 +610,7 @@ var require_douyin_browser_safety = __commonJS({
     var path2 = require("path");
     var crypto2 = require("crypto");
     var LIMITS = Object.freeze({ timeoutMs: 45e3, responses: 24, concurrent: 3, responseBytes: 1024 * 1024, totalBytes: 8 * 1024 * 1024 });
-    var STAGES = /* @__PURE__ */ new Set(["created", "loading", "page-load", "page-validation", "media-extraction", "response-extraction", "finished"]);
+    var STAGES = /* @__PURE__ */ new Set(["created", "loading", "debugger-setup", "page-load", "page-validation", "media-extraction", "response-extraction", "finished"]);
     var OUTCOMES = /* @__PURE__ */ new Set(["running", "success", "failed", "cancelled"]);
     var REASONS = /* @__PURE__ */ new Set(["clean-exit", "abnormal-exit", "killed", "crashed", "oom", "launch-failed", "integrity-failure", "memory-eviction", "unknown"]);
     var number = /* @__PURE__ */ __name((value) => Number.isFinite(value) ? Math.max(0, Math.min(1e12, Math.round(value))) : 0, "number");
@@ -618,6 +618,13 @@ var require_douyin_browser_safety = __commonJS({
     function sanitize(value = {}) {
       const result = { source: "douyin-browser", schema: 1 };
       for (const key of ["attemptId", "recordRef"]) result[key] = /^[a-f0-9]{16,32}$/.test(value[key] || "") ? value[key] : "";
+      result.resolutionAttemptId = /^[a-f0-9]{16,32}$/.test(value.resolutionAttemptId || "") ? value.resolutionAttemptId : "";
+      result.debuggerStatus = ["ready", "unavailable", "timeout", "failed"].includes(value.debuggerStatus) ? value.debuggerStatus : "";
+      result.pageEvent = ["dom-ready", "did-finish-load", "did-fail-load", "did-navigate", "did-redirect-navigation"].includes(value.pageEvent) ? value.pageEvent : "";
+      result.networkCode = /^ERR_[A-Z_]{1,60}$/.test(value.networkCode || "") ? value.networkCode : "";
+      result.httpStatus = number(value.httpStatus);
+      result.domReady = value.domReady === true;
+      result.pageLoaded = value.pageLoaded === true;
       for (const key of ["startedAt", "updatedAt", "finishedAt"]) if (Number.isFinite(Date.parse(value[key]))) result[key] = new Date(value[key]).toISOString();
       result.stage = STAGES.has(value.stage) ? value.stage : "created";
       result.outcome = OUTCOMES.has(value.outcome) ? value.outcome : "running";
@@ -707,6 +714,14 @@ var require_douyin_browser_safety = __commonJS({
       }, "fail");
       const onGone = /* @__PURE__ */ __name((_event, details = {}) => fail("DOUYIN_BROWSER_RENDERER_GONE", "抖音网页解析进程异常退出，尚未完成视频地址提取", { reason: REASONS.has(details.reason) ? details.reason : "unknown", exitCode: Number.isInteger(details.exitCode) ? details.exitCode : null }), "onGone");
       const onDestroyed = /* @__PURE__ */ __name(() => fail("DOUYIN_BROWSER_CLOSED", "抖音解析窗口提前关闭"), "onDestroyed");
+      const onDomReady = /* @__PURE__ */ __name(() => emit({ pageEvent: "dom-ready", domReady: true }), "onDomReady");
+      const onLoad = /* @__PURE__ */ __name(() => emit({ pageEvent: "did-finish-load", pageLoaded: true }), "onLoad");
+      const onNavigate = /* @__PURE__ */ __name((_event, _url, status) => emit({ pageEvent: "did-navigate", httpStatus: Number.isInteger(status) ? status : 0 }), "onNavigate");
+      const onLoadFailed = /* @__PURE__ */ __name((_event, code, description, _url, mainFrame) => {
+        if (mainFrame === false || code === -3) return;
+        const networkCode = String(description || "").replace(/^net::/, "");
+        fail("DOUYIN_BROWSER_LOAD_FAILED", "抖音主页面加载失败", { pageEvent: "did-fail-load", networkCode });
+      }, "onLoadFailed");
       const onAbort = /* @__PURE__ */ __name(() => {
         if (failure || closed) return;
         failure = Object.assign(new Error("抖音解析已取消"), { name: "AbortError", code: "ABORT_ERR", browserCode: "DOUYIN_BROWSER_CANCELLED" });
@@ -715,6 +730,10 @@ var require_douyin_browser_safety = __commonJS({
       }, "onAbort");
       contents.on("render-process-gone", onGone);
       contents.on("destroyed", onDestroyed);
+      contents.on("dom-ready", onDomReady);
+      contents.on("did-finish-load", onLoad);
+      contents.on("did-navigate", onNavigate);
+      contents.on("did-fail-load", onLoadFailed);
       if (typeof contents.setAudioMuted === "function") contents.setAudioMuted(true);
       signal == null ? void 0 : signal.addEventListener("abort", onAbort, { once: true });
       if (signal == null ? void 0 : signal.aborted) onAbort();
@@ -722,6 +741,17 @@ var require_douyin_browser_safety = __commonJS({
       (_a = timer.unref) == null ? void 0 : _a.call(timer);
       return {
         emit,
+        async optional(task, timeoutMs2 = 1500) {
+          let timer2;
+          const timed = new Promise((_, reject) => {
+            timer2 = setTimeout(() => reject(Object.assign(new Error("Optional response capture timed out"), { code: "DOUYIN_DEBUGGER_TIMEOUT" })), timeoutMs2);
+          });
+          try {
+            return await this.run(Promise.race([Promise.resolve(task), timed]), "debugger-setup");
+          } finally {
+            clearTimeout(timer2);
+          }
+        },
         async run(task, stage) {
           const started = Promise.resolve(task);
           started.catch(() => {
@@ -736,6 +766,10 @@ var require_douyin_browser_safety = __commonJS({
           signal == null ? void 0 : signal.removeEventListener("abort", onAbort);
           contents.removeListener("render-process-gone", onGone);
           contents.removeListener("destroyed", onDestroyed);
+          contents.removeListener("dom-ready", onDomReady);
+          contents.removeListener("did-finish-load", onLoad);
+          contents.removeListener("did-navigate", onNavigate);
+          contents.removeListener("did-fail-load", onLoadFailed);
         }
       };
     }
@@ -1564,6 +1598,88 @@ ${safeTail}`;
     }
     __name(ensureManagedMacScript, "ensureManagedMacScript");
     module2.exports.ensureManagedMacScript = ensureManagedMacScript;
+  }
+});
+
+// src/douyin-diagnostic-utils.js
+var require_douyin_diagnostic_utils = __commonJS({
+  "src/douyin-diagnostic-utils.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var crypto2 = require("crypto");
+    var { diagnosticRedact } = require_asr_recovery_utils();
+    function safeErrorText(value, settings = {}) {
+      const text = String(value || "");
+      if (text.length > 16384) return "[oversized error omitted]";
+      return diagnosticRedact(text, settings).replace(/(["']?(?:sessionid(?:_ss)?|sid_guard|ttwid|msToken|cookie|authorization|token|password|secret|api[_-]?key)["']?\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/Bearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]").replace(/\s+/g, " ").slice(0, 480);
+    }
+    __name(safeErrorText, "safeErrorText");
+    var CODES = /* @__PURE__ */ new Set(["DOUYIN_CANCELLED", "DOUYIN_FETCH_FAILED", "DOUYIN_CHALLENGE", "DOUYIN_COOKIE_REFRESH_REQUIRED", "DOUYIN_LOGIN_REQUIRED", "DOUYIN_RESOLVER_NETWORK", "DOUYIN_RESOLVER_FAILED", "DOUYIN_NO_MEDIA", "DOUYIN_BROWSER_TIMEOUT", "DOUYIN_BROWSER_RENDERER_GONE", "DOUYIN_BROWSER_CLOSED", "DOUYIN_BROWSER_COOLDOWN", "DOUYIN_BROWSER_LOAD_FAILED"]);
+    function classifyResolverError(error) {
+      const text = String(error && error.message || error || "");
+      const code = /captcha|安全验证|请完成验证|risk[-_ ]control/i.test(text) ? "DOUYIN_CHALLENGE" : /fresh cookies|cookies are needed/i.test(text) ? "DOUYIN_COOKIE_REFRESH_REQUIRED" : /login required|sign in|authentication required/i.test(text) ? "DOUYIN_LOGIN_REQUIRED" : /timed? ?out|timeout|ENOTFOUND|ECONN|certificate|HTTP Error [45]\d\d/i.test(text) ? "DOUYIN_RESOLVER_NETWORK" : "DOUYIN_RESOLVER_FAILED";
+      return { code, exitCode: Number.isInteger(error && error.exitCode) ? error.exitCode : null };
+    }
+    __name(classifyResolverError, "classifyResolverError");
+    function failureCode(stages = []) {
+      const codes = stages.filter((s) => s && s.ok === false).map((s) => s.error && (s.error.browserCode || s.error.code)).filter(Boolean);
+      return ["DOUYIN_CHALLENGE", "DOUYIN_LOGIN_REQUIRED", "DOUYIN_BROWSER_RENDERER_GONE", "DOUYIN_BROWSER_LOAD_FAILED", "DOUYIN_BROWSER_TIMEOUT", "DOUYIN_COOKIE_REFRESH_REQUIRED", "DOUYIN_RESOLVER_NETWORK", "DOUYIN_BROWSER_CLOSED", "DOUYIN_BROWSER_COOLDOWN", "DOUYIN_RESOLVER_FAILED"].find((code) => codes.includes(code)) || "DOUYIN_NO_MEDIA";
+    }
+    __name(failureCode, "failureCode");
+    function failureMessage(code) {
+      return {
+        DOUYIN_CHALLENGE: "抖音解析返回安全验证要求，请打开插件内抖音窗口完成验证后重试。",
+        DOUYIN_COOKIE_REFRESH_REQUIRED: "抖音解析器要求更新 Cookie，尚不能确认登录失效或验证码；请在插件内打开抖音确认访问状态。",
+        DOUYIN_LOGIN_REQUIRED: "抖音解析器返回登录要求，请在插件内确认登录后重试。",
+        DOUYIN_BROWSER_TIMEOUT: "抖音隐藏网页处理超时，尚未获取视频地址；请复制诊断查看停滞阶段。",
+        DOUYIN_BROWSER_LOAD_FAILED: "抖音网页加载失败，网络错误已记录；请复制诊断查看原因。",
+        DOUYIN_BROWSER_RENDERER_GONE: "抖音网页解析进程异常退出，已记录退出原因；请重启 Obsidian 后重试。",
+        DOUYIN_BROWSER_CLOSED: "抖音解析窗口提前关闭，请重试。",
+        DOUYIN_BROWSER_COOLDOWN: "抖音网页刚发生异常，正在短暂冷却，请稍后重试。",
+        DOUYIN_RESOLVER_NETWORK: "抖音解析器网络访问失败，已保留分阶段诊断。",
+        DOUYIN_RESOLVER_FAILED: "抖音本地解析器失败，暂未确认具体原因，请复制详细诊断。"
+      }[code] || "未能从抖音作品页获取到可用的音频或视频地址，请复制诊断查看各解析路径结果。";
+    }
+    __name(failureMessage, "failureMessage");
+    var token = /* @__PURE__ */ __name((value) => /^[a-zA-Z0-9_.:-]{1,80}$/.test(value || "") ? value : "", "token");
+    var integer = /* @__PURE__ */ __name((value) => Number.isSafeInteger(value) ? Math.max(0, Math.min(value, 1e12)) : 0, "integer");
+    function sanitize(value = {}) {
+      const result = { source: "douyin-resolution", schema: 1 };
+      for (const key of ["attemptId", "recordRef"]) result[key] = /^[a-f0-9]{16,32}$/.test(value[key] || "") ? value[key] : "";
+      for (const key of ["startedAt", "finishedAt"]) if (Number.isFinite(Date.parse(value[key]))) result[key] = new Date(value[key]).toISOString();
+      result.outcome = ["success", "cancelled"].includes(value.outcome) ? value.outcome : "failed";
+      result.failureCode = CODES.has(value.failureCode) ? value.failureCode : "";
+      result.cookieState = value.pluginDouyinLogin === true || value.cookieState === "saved-unverified" ? "saved-unverified" : "not-found";
+      result.stages = (Array.isArray(value.stages) ? value.stages : []).filter((s) => s && typeof s === "object").slice(-16).map((s) => ({ stage: token(s.stage), inputKind: token(s.inputKind), attempted: s.attempted !== false, ok: s.ok === true, mediaCount: integer(s.mediaCount), durationMs: integer(s.durationMs), rejectionReason: token(s.rejectionReason), error: s.error ? { code: token(s.error.code), browserCode: token(s.error.browserCode), status: integer(s.error.status), exitCode: Number.isInteger(s.error.exitCode) ? s.error.exitCode : null, message: safeErrorText(s.error.message) } : void 0 }));
+      return result;
+    }
+    __name(sanitize, "sanitize");
+    function read(root) {
+      try {
+        const file = path2.join(root, "douyin-resolution-diagnostic.json");
+        if (fs2.statSync(file).size > 128 * 1024) return [];
+        const rows = JSON.parse(fs2.readFileSync(file, "utf8"));
+        return Array.isArray(rows) ? rows.slice(-5).map(sanitize) : [];
+      } catch (_) {
+        return [];
+      }
+    }
+    __name(read, "read");
+    function save(root, value) {
+      const row = sanitize(value);
+      try {
+        fs2.mkdirSync(root, { recursive: true });
+        const file = path2.join(root, "douyin-resolution-diagnostic.json");
+        const temp = file + "." + crypto2.randomBytes(6).toString("hex") + ".tmp";
+        fs2.writeFileSync(temp, JSON.stringify([...read(root).filter((x) => x.attemptId !== row.attemptId), row].slice(-5)));
+        fs2.renameSync(temp, file);
+      } catch (_) {
+      }
+      return row;
+    }
+    __name(save, "save");
+    module2.exports = { classifyResolverError, failureCode, failureMessage, sanitize, read, save, safeErrorText };
   }
 });
 
@@ -10201,6 +10317,8 @@ var require_social_media_diagnostic_utils = __commonJS({
         if (code) safe.code = code;
         const status = normalizeInteger(diagnostic.status, 999);
         if (status) safe.status = status;
+        if (error.browserCode) safe.browserCode = normalizeCode(error.browserCode);
+        if (Number.isInteger(error.exitCode)) safe.exitCode = error.exitCode;
         return Object.keys(safe).length ? safe : void 0;
       }, "normalizeError");
       return ({
@@ -11721,6 +11839,7 @@ var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
+var douyinDiagnostic = require_douyin_diagnostic_utils();
 var { summarizeResolverAttempts, hasFeishuActivity } = require_component_diagnostic_summary();
 var xhsDiagnostic = require_xiaohongshu_diagnostic_utils();
 var { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require_wechat_request_gate();
@@ -11965,7 +12084,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.164";
+var PLUGIN_RUNTIME_VERSION = "1.3.165";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -13768,7 +13887,7 @@ function runLocalDouyinResolver(executablePath, args, timeoutMs = LOCAL_DOUYIN_R
     }, (error, stdout, stderr) => {
       if (error) {
         const message = String(stderr || error.message || "yt-dlp failed").slice(0, 600);
-        reject(new Error(message));
+        reject(Object.assign(new Error(message), { exitCode: Number.isInteger(error.code) ? error.code : null }));
         return;
       }
       resolve(String(stdout || ""));
@@ -14373,6 +14492,23 @@ function normalizeRecentSyncFailureCleanupErrors(value) {
   return [...unique.values()].slice(-50);
 }
 __name(normalizeRecentSyncFailureCleanupErrors, "normalizeRecentSyncFailureCleanupErrors");
+function getDurablyResolvedFailureRecordIds(recordIds, response) {
+  const requested = [...new Set((Array.isArray(recordIds) ? recordIds : []).map((recordId) => String(recordId || "").trim()).filter((recordId) => /^[A-Za-z0-9_-]{1,128}$/.test(recordId)))];
+  if (!response || response.success !== true || !response.data || Number(response.data.schemaVersion) !== 1) return [];
+  const records = response.data.records;
+  if (!requested.length || !Array.isArray(records) || records.length !== requested.length) return [];
+  const requestedSet = new Set(requested);
+  const byId = /* @__PURE__ */ new Map();
+  for (const item of records) {
+    const recordId = String(item && item.recordId || "").trim();
+    const status = String(item && item.status || "").trim().toLowerCase();
+    if (!requestedSet.has(recordId) || byId.has(recordId) || !status) return [];
+    byId.set(recordId, status);
+  }
+  if (byId.size !== requested.length) return [];
+  return requested.filter((recordId) => byId.get(recordId) === "synced" || byId.get(recordId) === "synced-via-content-identity");
+}
+__name(getDurablyResolvedFailureRecordIds, "getDurablyResolvedFailureRecordIds");
 function mergeSettings(savedSettings, platform = os.platform()) {
   const sourceSettings = savedSettings && typeof savedSettings === "object" ? savedSettings : {};
   const savedSettingsVersion = Number(sourceSettings.settingsVersion) || 0;
@@ -21401,6 +21537,7 @@ function hasDouyinLoginCookies(cookies = []) {
     const name = String(cookie && cookie.name || "").trim().toLowerCase();
     const value = String(cookie && cookie.value || "").trim();
     if (!["sessionid", "sessionid_ss", "sid_guard"].includes(name)) return false;
+    if (Number(cookie.expirationDate) > 0 && Number(cookie.expirationDate) * 1e3 <= Date.now()) return false;
     return value.length >= 8 && !/^(?:null|undefined|deleted|expired)$/i.test(value);
   });
 }
@@ -21987,7 +22124,7 @@ async function isCurrentDouyinChallengePage(webContents) {
 __name(isCurrentDouyinChallengePage, "isCurrentDouyinChallengePage");
 async function waitAndRetryDouyinChallengePage(webContents, {
   signal = null,
-  retryAllowed = true
+  retryAllowed = false
 } = {}) {
   const challengeDetected = await isCurrentDouyinChallengePage(webContents);
   if (!shouldRetryDouyinChallengePage({ challengeDetected, retryAllowed })) return challengeDetected;
@@ -22929,7 +23066,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         debuggerAttached = true;
       }
       const enabled = debuggerApi.sendCommand("Network.enable", { maxTotalBufferSize: douyinBrowserSafety.LIMITS.totalBytes, maxResourceBufferSize: douyinBrowserSafety.LIMITS.responseBytes });
-      await douyinGuard.run(enabled, "loading");
+      await douyinGuard.optional(enabled);
+      douyinGuard.emit({ debuggerStatus: "ready" });
       debuggerMessageHandler = /* @__PURE__ */ __name((_event, method, params = {}) => {
         try {
           if (method === "Network.responseReceived") {
@@ -22964,7 +23102,17 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       debuggerApi.on("message", debuggerMessageHandler);
     } catch (error) {
       debuggerMessageHandler = null;
+      douyinGuard.emit({ debuggerStatus: error.code === "DOUYIN_DEBUGGER_TIMEOUT" ? "timeout" : "failed" });
+      if (debuggerAttached) {
+        try {
+          debuggerApi.detach();
+        } catch (_) {
+        }
+        debuggerAttached = false;
+      }
     }
+  } else if (douyinGuard) {
+    douyinGuard.emit({ debuggerStatus: "unavailable" });
   }
   try {
     throwIfAborted(options.signal);
@@ -22982,7 +23130,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     if (captureDouyinState) {
       const challengeDetected = await douyinGuard.run(waitAndRetryDouyinChallengePage(win.webContents, {
         signal: options.signal,
-        retryAllowed: options.retryDouyinChallenge !== false
+        retryAllowed: options.retryDouyinChallenge === true
       }), "page-validation");
       if (challengeDetected) {
         const error = new Error("抖音当前会话需要安全验证");
@@ -27074,11 +27222,23 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       });
     });
     const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
-    const previousFailures = this.settings.recentSyncFailures;
+    const resolvedKeys = new Set(resolved.map((item) => {
+      const recordId = String(item && item.recordId || "").trim();
+      const bindingToken = normalizeBindCodeInput(item && item.bindingToken);
+      return recordId && bindingToken ? `${bindingToken}:${recordId}` : "";
+    }).filter(Boolean));
+    const nextCleanupErrors = normalizeRecentSyncFailureCleanupErrors(
+      this.getRecentSyncFailureCleanupErrors().filter((item) => !resolvedKeys.has(`${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || "").trim()}`))
+    );
+    const previousSettings = this.settings;
     try {
-      await this.saveSettings({ ...this.settings, recentSyncFailures: nextFailures });
+      await this.saveSettings({
+        ...this.settings,
+        recentSyncFailures: nextFailures,
+        recentSyncFailureCleanupErrors: nextCleanupErrors
+      });
     } catch (error) {
-      this.settings = { ...this.settings, recentSyncFailures: previousFailures };
+      this.settings = previousSettings;
       throw error;
     }
     return nextFailures;
@@ -27877,6 +28037,24 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const resolverAttempts = this.getLocalDouyinResolverInstallDiagnostic();
     if (resolverAttempts.length) lines.push("", "最近抖音解析组件安装诊断：", detailed ? JSON.stringify(resolverAttempts, null, 2) : summarizeResolverAttempts(resolverAttempts));
     const douyinAttempts = douyinBrowserSafety.readAttempts(asrRoot);
+    const douyinResolutions = douyinDiagnostic.read(asrRoot);
+    if (douyinResolutions.length) {
+      const selected = detailed ? douyinResolutions : douyinResolutions.slice(-1).map((row) => ({
+        attemptId: row.attemptId,
+        finishedAt: row.finishedAt,
+        outcome: row.outcome,
+        failureCode: row.failureCode,
+        cookieState: row.cookieState,
+        stages: row.stages.map((stage) => ({
+          stage: stage.stage,
+          ok: stage.ok,
+          durationMs: stage.durationMs,
+          rejectionReason: stage.rejectionReason,
+          ...stage.error ? { error: stage.error } : {}
+        }))
+      }));
+      lines.push("", detailed ? "最近抖音完整解析链：" : "最近抖音解析结果（详细诊断保留历史）：", JSON.stringify(selected, null, detailed ? 2 : 0));
+    }
     if (douyinAttempts.length) lines.push("", "最近抖音隐藏网页诊断：", JSON.stringify(detailed ? douyinAttempts : douyinAttempts.slice(-1), null, detailed ? 2 : 0));
     const taskResults = this.getRecentXiaohongshuBrowserResults().map((item) => xhsDiagnostic.sanitize(item, this.settings));
     if (taskResults.length) lines.push("", "最近小红书任务诊断：", JSON.stringify(detailed ? taskResults : taskResults.slice(-1), null, detailed ? 2 : 0));
@@ -27921,7 +28099,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     if (Array.isArray(commentResults) && commentResults.length) {
       lines.push("", "已保留小红书评论诊断；其他组件仅显示失败相关日志。");
-    } else if (!lines.some((line) => /失败日志|失败状态/.test(line))) {
+    } else if (!douyinAttempts.some((row) => row.outcome === "failed") && !douyinResolutions.some((row) => row.outcome === "failed") && !resolverAttempts.some((row) => row.status === "failed") && !lines.some((line) => /失败日志|失败状态|安装异常/.test(line))) {
       lines.push("", "未检测到失败日志；已省略成功日志。");
     } else {
       lines.push("", "已省略成功日志，只保留失败相关信息。");
@@ -29014,8 +29192,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       if (!result.used) result.error = "本地解析组件未返回可用媒体地址";
     } catch (error) {
       const message = String(error && error.message || error || "本地抖音解析失败");
-      result.loginRequired = /fresh cookies|cookies are needed|login required|captcha|risk-control|sec_sdk/i.test(message);
-      result.error = result.loginRequired ? "抖音需要在插件内完成一次登录后再同步" : message.slice(0, 240);
+      const failure = douyinDiagnostic.classifyResolverError(error);
+      result.code = failure.code;
+      result.exitCode = failure.exitCode;
+      result.technicalMessage = douyinDiagnostic.safeErrorText(message, this.settings);
+      result.loginRequired = failure.code === "DOUYIN_LOGIN_REQUIRED";
+      result.error = douyinDiagnostic.failureMessage(failure.code);
     } finally {
       if (cookiePath) {
         try {
@@ -29165,7 +29347,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (this.douyinBrowserRetryAfter > Date.now()) {
       throw Object.assign(new Error("抖音网页解析刚发生异常，已暂停隐藏网页重试 60 秒；请复制诊断"), { code: "EXTRACTION_FAILED", browserCode: "DOUYIN_BROWSER_COOLDOWN" });
     }
-    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, { runtimeVersion: PLUGIN_RUNTIME_VERSION, electron: process.versions.electron, chromium: process.versions.chrome, freeMemoryBytesBefore: os.freemem() });
+    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, { resolutionAttemptId: options.diagnosticAttemptId, runtimeVersion: PLUGIN_RUNTIME_VERSION, electron: process.versions.electron, chromium: process.versions.chrome, freeMemoryBytesBefore: os.freemem() });
     try {
       const result = await renderSocialMediaUrlsWithElectron(url, { ...options, onDouyinBrowserDiagnostic: /* @__PURE__ */ __name((event) => {
         var _a;
@@ -31201,6 +31383,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let douyinResolutionStages = [];
     let douyinSelectedStage = "";
     let douyinResolutionDiagnostic = null;
+    const douyinAttemptId = crypto.randomBytes(8).toString("hex");
+    const douyinStartedAt = (/* @__PURE__ */ new Date()).toISOString();
     if (!url) {
       return record;
     }
@@ -31966,6 +32150,7 @@ ${finalized.markdown}
               }
             } catch (sessionError) {
               sessionStage.error = sessionError;
+              if (isAbortError(sessionError)) throw sessionError;
             } finally {
               if (!sessionStage.ok) sessionStage.rejectionReason = sessionStage.error ? "transport-error" : "no-target-bound-media";
               sessionStage.durationMs = Date.now() - sessionStage.startedAt;
@@ -31977,6 +32162,7 @@ ${finalized.markdown}
             const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl, douyinAwemeId);
             for (const browserRequest of browserRequests) {
               if (hasUsableDouyinMedia) break;
+              if (douyinResolutionStages.some((stage) => isDouyinChallengeError(stage.error) || /^DOUYIN_BROWSER_(TIMEOUT|RENDERER_GONE|CLOSED|LOAD_FAILED|COOLDOWN)$/.test(stage.error && stage.error.browserCode || ""))) break;
               const browserStage = {
                 stage: "targeted-browser",
                 attempted: true,
@@ -31990,7 +32176,8 @@ ${finalized.markdown}
                 const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
                   signal,
                   strictDouyinTarget: browserRequest.strictDouyinTarget,
-                  retryDouyinChallenge: browserRequest.inputKind === "original-page"
+                  retryDouyinChallenge: false,
+                  diagnosticAttemptId: douyinAttemptId
                 });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
@@ -32002,8 +32189,8 @@ ${finalized.markdown}
                   browserStage.identityOutcome = "primary-player-fallback";
                 }
               } catch (browserError) {
-                if (isAbortError(browserError)) throw browserError;
                 browserStage.error = browserError;
+                if (isAbortError(browserError)) throw browserError;
               } finally {
                 if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? "transport-error" : "no-target-bound-media";
                 browserStage.durationMs = Date.now() - browserStage.startedAt;
@@ -32011,7 +32198,7 @@ ${finalized.markdown}
                 douyinResolutionStages.push(browserStage);
               }
             }
-            if (!hasUsableDouyinMedia && typeof this.resolveDouyinMediaWithLocalResolver === "function") {
+            if (!hasUsableDouyinMedia && !douyinResolutionStages.some((stage) => isDouyinChallengeError(stage.error)) && typeof this.resolveDouyinMediaWithLocalResolver === "function") {
               const localResolverStage = {
                 stage: "local-yt-dlp",
                 attempted: true,
@@ -32037,13 +32224,17 @@ ${finalized.markdown}
                   douyinLocalResolverNotInstalled = Boolean(localResolution && localResolution.notInstalled);
                   localResolverStage.attempted = !douyinLocalResolverNotInstalled;
                   localResolverStage.rejectionReason = douyinLocalResolverNotInstalled ? "not-installed" : douyinLocalResolverLoginRequired ? "login-required" : "resolver-no-media";
-                  if (localResolution && localResolution.error) {
-                    localResolverStage.error = new Error(localResolution.error);
+                  if (localResolution && localResolution.error && !douyinLocalResolverNotInstalled) {
+                    localResolverStage.error = Object.assign(new Error(localResolution.error), {
+                      code: localResolution.code || (localResolution.loginRequired ? "DOUYIN_LOGIN_REQUIRED" : "DOUYIN_RESOLVER_FAILED"),
+                      exitCode: localResolution.exitCode
+                    });
+                    localResolverStage.error.message = localResolution.technicalMessage || localResolution.error;
                   }
                 }
               } catch (localResolverError) {
-                if (isAbortError(localResolverError)) throw localResolverError;
                 localResolverStage.error = localResolverError;
+                if (isAbortError(localResolverError)) throw localResolverError;
               } finally {
                 if (!localResolverStage.ok && !localResolverStage.rejectionReason) {
                   localResolverStage.rejectionReason = localResolverStage.error ? "resolver-error" : "resolver-no-media";
@@ -32058,6 +32249,7 @@ ${finalized.markdown}
         const isDouyinRecord = isDouyinUrl(url) || isDouyinUrl(resolvedUrl);
         const douyinChallengeDetected = douyinResolutionStages.some((stage) => isDouyinChallengeError(stage && stage.error));
         const hasPluginDouyinLogin = isDouyinRecord ? await this.checkDouyinLogin() : false;
+        const douyinFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages);
         if (isDouyinRecord) {
           douyinResolutionDiagnostic = buildDouyinMediaResolutionDiagnostic({
             sourceUrl: url,
@@ -32071,6 +32263,22 @@ ${finalized.markdown}
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true,
             pluginDouyinLogin: hasPluginDouyinLogin,
             challengeDetected: douyinChallengeDetected
+          });
+          douyinResolutionDiagnostic.attemptId = douyinAttemptId;
+          douyinResolutionDiagnostic.failureCode = hasUsableDouyinMedia ? "" : douyinFailureCode;
+          douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
+            ...douyinResolutionDiagnostic,
+            attemptId: douyinAttemptId,
+            recordRef: crypto.createHash("sha256").update(String(record.id || record._id || url)).digest("hex").slice(0, 16),
+            startedAt: douyinStartedAt,
+            finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            outcome: hasUsableDouyinMedia ? "success" : "failed",
+            stages: douyinResolutionStages.map((stage) => ({ ...stage, error: stage.error ? {
+              ...getTransportErrorDiagnostic(stage.error),
+              browserCode: stage.error.browserCode,
+              exitCode: stage.error.exitCode,
+              message: douyinDiagnostic.safeErrorText(stage.error.message, this.settings)
+            } : void 0 }))
           });
         }
         const isUnavailableXhs = isXiaohongshuUrl(url) && isUnavailableXiaohongshuPage(html2, resolvedUrl);
@@ -32334,7 +32542,7 @@ ${finalized.markdown}
           }
         }
         const socialMediaRenderOptions = isXiaohongshuUrl(url) ? { includeComments: false, signal, ...xiaohongshuBrowserOptions } : { signal };
-        if (!hasUsableDouyinMedia && isVideoIntent && (!isXiaohongshuUrl(url) || !mediaUrl) && typeof this.renderSocialMediaUrls === "function") {
+        if (!isDouyinRecord && !hasUsableDouyinMedia && isVideoIntent && (!isXiaohongshuUrl(url) || !mediaUrl) && typeof this.renderSocialMediaUrls === "function") {
           try {
             mediaUrls = sortMediaUrlsForTranscription([
               ...mediaUrls,
@@ -32345,7 +32553,7 @@ ${finalized.markdown}
             if (isAbortError(renderError)) throw renderError;
             mediaUrl = mediaUrl || "";
           }
-        } else if (!hasUsableDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === "function") {
+        } else if (!isDouyinRecord && !hasUsableDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === "function") {
           try {
             mediaUrl = await this.renderSocialMediaUrl(primarySocialMediaBrowserUrl, socialMediaRenderOptions);
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
@@ -32396,7 +32604,7 @@ ${finalized.markdown}
           });
         }
         if (isVideoIntent && isDouyinRecord) {
-          const noMediaError = douyinChallengeDetected || douyinLocalResolverLoginRequired ? hasPluginDouyinLogin ? "抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。" : "抖音要求安全验证，请在插件设置中登录抖音后再同步。" : douyinLocalResolverNotInstalled && hasPluginDouyinLogin ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : "未能从抖音作品页获取到可用的音频或视频地址";
+          const noMediaError = douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === "DOUYIN_NO_MEDIA" ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : douyinDiagnostic.failureMessage(douyinFailureCode);
           return {
             ...record,
             metadata: {
@@ -32912,6 +33120,25 @@ ${finalized.markdown}
         }
       };
     } catch (error) {
+      if (isDouyinUrl(url) && !douyinResolutionDiagnostic) {
+        douyinResolutionDiagnostic = douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
+          attemptId: douyinAttemptId,
+          recordRef: crypto.createHash("sha256").update(String(record.id || record._id || url)).digest("hex").slice(0, 16),
+          startedAt: douyinStartedAt,
+          finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          outcome: isAbortError(error) ? "cancelled" : "failed",
+          failureCode: isAbortError(error) ? "DOUYIN_CANCELLED" : douyinDiagnostic.failureCode(douyinResolutionStages) === "DOUYIN_NO_MEDIA" ? "DOUYIN_FETCH_FAILED" : douyinDiagnostic.failureCode(douyinResolutionStages),
+          stages: [...douyinResolutionStages, { stage: isAbortError(error) ? "cancelled" : "platform-fetch", ok: false, error }].map((stage) => ({
+            ...stage,
+            error: stage.error ? {
+              ...getTransportErrorDiagnostic(stage.error),
+              browserCode: stage.error.browserCode,
+              exitCode: stage.error.exitCode,
+              message: douyinDiagnostic.safeErrorText(stage.error.message, this.settings)
+            } : void 0
+          }))
+        });
+      }
       if (xiaohongshuBrowserDiagnostic) {
         appendXiaohongshuBrowserFailure({ xiaohongshuBrowserDiagnostic, diagnosticSettings: this.settings }, "content_result", error);
         xiaohongshuBrowserDiagnostic.finalOutcome = isAbortError(error) ? "aborted" : xiaohongshuBrowserDiagnostic.finalOutcome || "content-failed";
@@ -34016,11 +34243,39 @@ ${finalized.markdown}
       const currentFailureKeys = new Set(recentFailureEntries.map((item) => `${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || "").trim()}`));
       const resolvedFailureKeys = new Set(recentResolvedEntries.map((item) => `${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || "").trim()}`));
       const activeBindingTokens = new Set(bindings.map((binding) => normalizeBindCodeInput(binding && binding.token)));
+      const remotelyResolvedFailureKeys = /* @__PURE__ */ new Set();
+      const unresolvedByBinding = /* @__PURE__ */ new Map();
       for (const storedFailure of this.getRecentSyncFailures()) {
         const recordId = String(storedFailure && storedFailure.recordId || "").trim();
         const bindingToken = normalizeBindCodeInput(storedFailure && storedFailure.bindingToken);
         const failureKey = `${bindingToken}:${recordId}`;
         if (!recordId || !bindingToken || !activeBindingTokens.has(bindingToken) || currentFailureKeys.has(failureKey) || resolvedFailureKeys.has(failureKey)) continue;
+        if (!unresolvedByBinding.has(bindingToken)) unresolvedByBinding.set(bindingToken, []);
+        unresolvedByBinding.get(bindingToken).push(recordId);
+      }
+      for (const [bindingToken, recordIds] of unresolvedByBinding) {
+        const binding = bindings.find((candidate) => normalizeBindCodeInput(candidate && candidate.token) === bindingToken);
+        if (!binding) continue;
+        try {
+          const response = await this.requestJson("/records/failure-states", "POST", {
+            recordIds: [...new Set(recordIds)].slice(0, 200)
+          }, binding);
+          getDurablyResolvedFailureRecordIds(recordIds, response).forEach((recordId) => {
+            remotelyResolvedFailureKeys.add(`${bindingToken}:${recordId}`);
+          });
+        } catch (error) {
+        }
+      }
+      for (const storedFailure of this.getRecentSyncFailures()) {
+        const recordId = String(storedFailure && storedFailure.recordId || "").trim();
+        const bindingToken = normalizeBindCodeInput(storedFailure && storedFailure.bindingToken);
+        const failureKey = `${bindingToken}:${recordId}`;
+        if (!recordId || !bindingToken || !activeBindingTokens.has(bindingToken) || currentFailureKeys.has(failureKey) || resolvedFailureKeys.has(failureKey)) continue;
+        if (remotelyResolvedFailureKeys.has(failureKey)) {
+          recentResolvedEntries.push({ recordId, bindingToken });
+          resolvedFailureKeys.add(failureKey);
+          continue;
+        }
         const storedFailureBinding = bindings.find((binding) => normalizeBindCodeInput(binding && binding.token) === bindingToken);
         if (storedFailureBinding && this.findCompletedSyncReceipt(storedFailureBinding, recordId)) {
           recentResolvedEntries.push({ recordId, bindingToken });
@@ -34498,13 +34753,13 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       this.display();
     })).addButton((button) => button.setButtonText("刷新状态").onClick(async () => {
       const loggedIn = await this.plugin.checkDouyinLogin();
-      douyinLoginSetting.setDesc(loggedIn ? "已登录：同步抖音链接时会自动复用插件内会话。" : "未登录或登录已过期：请打开抖音登录后再同步。");
+      douyinLoginSetting.setDesc(loggedIn ? "已保存登录 Cookie；尚未验证当前会话能否访问作品。同步时会记录实际访问结果。" : "未登录或登录已过期：请打开抖音登录后再同步。");
     })).addButton((button) => button.setButtonText("退出登录").onClick(async () => {
       await this.plugin.clearDouyinLogin();
       this.display();
     }));
     this.plugin.checkDouyinLogin().then((loggedIn) => {
-      douyinLoginSetting.setDesc(loggedIn ? "已登录：同步抖音链接时会自动复用插件内会话。" : "未登录或登录已过期：请打开抖音登录后再同步。");
+      douyinLoginSetting.setDesc(loggedIn ? "已保存登录 Cookie；尚未验证当前会话能否访问作品。同步时会记录实际访问结果。" : "未登录或登录已过期：请打开抖音登录后再同步。");
     });
     const socialPanel = containerEl.createEl("details", { cls: "wechat-inbox-sync-advanced-panel" });
     socialPanel.createEl("summary", { text: "登录小红书评论区" });
@@ -34549,6 +34804,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
 __name(_WechatInboxSettingTab, "WechatInboxSettingTab");
 var WechatInboxSettingTab = _WechatInboxSettingTab;
 WechatObsidianInboxPlugin.__test = {
+  getDurablyResolvedFailureRecordIds,
   buildDouyinFallbackMarkdown,
   buildXiaohongshuFallbackMarkdown,
   buildWechatChannelsUnavailableMarkdown,

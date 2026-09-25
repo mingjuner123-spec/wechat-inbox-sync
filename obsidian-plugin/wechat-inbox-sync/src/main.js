@@ -5,6 +5,7 @@ const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
+const douyinDiagnostic = require('./douyin-diagnostic-utils');
 const { summarizeResolverAttempts, hasFeishuActivity } = require('./component-diagnostic-summary');
 const xhsDiagnostic = require('./xiaohongshu-diagnostic-utils');
 const { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require('./wechat-request-gate');
@@ -255,7 +256,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.164';
+const PLUGIN_RUNTIME_VERSION = '1.3.165';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -2378,7 +2379,7 @@ function runLocalDouyinResolver(executablePath, args, timeoutMs = LOCAL_DOUYIN_R
     }, (error, stdout, stderr) => {
       if (error) {
         const message = String(stderr || error.message || 'yt-dlp failed').slice(0, 600);
-        reject(new Error(message));
+        reject(Object.assign(new Error(message), { exitCode: Number.isInteger(error.code) ? error.code : null }));
         return;
       }
       resolve(String(stdout || ''));
@@ -3241,6 +3242,29 @@ function normalizeRecentSyncFailureCleanupErrors(value) {
     });
   });
   return [...unique.values()].slice(-50);
+}
+
+function getDurablyResolvedFailureRecordIds(recordIds, response) {
+  const requested = [...new Set((Array.isArray(recordIds) ? recordIds : [])
+    .map((recordId) => String(recordId || '').trim())
+    .filter((recordId) => /^[A-Za-z0-9_-]{1,128}$/.test(recordId)))];
+  if (!response || response.success !== true || !response.data
+    || Number(response.data.schemaVersion) !== 1) return [];
+  const records = response.data.records;
+  if (!requested.length || !Array.isArray(records) || records.length !== requested.length) return [];
+  const requestedSet = new Set(requested);
+  const byId = new Map();
+  for (const item of records) {
+    const recordId = String(item && item.recordId || '').trim();
+    const status = String(item && item.status || '').trim().toLowerCase();
+    if (!requestedSet.has(recordId) || byId.has(recordId) || !status) return [];
+    byId.set(recordId, status);
+  }
+  if (byId.size !== requested.length) return [];
+  return requested.filter((recordId) => (
+    byId.get(recordId) === 'synced'
+    || byId.get(recordId) === 'synced-via-content-identity'
+  ));
 }
 function mergeSettings(savedSettings, platform = os.platform()) {
   const sourceSettings = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
@@ -11248,6 +11272,7 @@ function hasDouyinLoginCookies(cookies = []) {
     const name = String(cookie && cookie.name || '').trim().toLowerCase();
     const value = String(cookie && cookie.value || '').trim();
     if (!['sessionid', 'sessionid_ss', 'sid_guard'].includes(name)) return false;
+    if (Number(cookie.expirationDate) > 0 && Number(cookie.expirationDate) * 1000 <= Date.now()) return false;
     return value.length >= 8 && !/^(?:null|undefined|deleted|expired)$/i.test(value);
   });
 }
@@ -11871,7 +11896,7 @@ async function isCurrentDouyinChallengePage(webContents) {
 
 async function waitAndRetryDouyinChallengePage(webContents, {
   signal = null,
-  retryAllowed = true,
+  retryAllowed = false,
 } = {}) {
   const challengeDetected = await isCurrentDouyinChallengePage(webContents);
   if (!shouldRetryDouyinChallengePage({ challengeDetected, retryAllowed })) return challengeDetected;
@@ -12858,7 +12883,8 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         debuggerAttached = true;
       }
       const enabled = debuggerApi.sendCommand('Network.enable', { maxTotalBufferSize: douyinBrowserSafety.LIMITS.totalBytes, maxResourceBufferSize: douyinBrowserSafety.LIMITS.responseBytes });
-      await douyinGuard.run(enabled, 'loading');
+      await douyinGuard.optional(enabled);
+      douyinGuard.emit({ debuggerStatus: 'ready' });
       debuggerMessageHandler = (_event, method, params = {}) => {
         try {
           if (method === 'Network.responseReceived') {
@@ -12900,7 +12926,11 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       debuggerApi.on('message', debuggerMessageHandler);
     } catch (error) {
       debuggerMessageHandler = null;
+      douyinGuard.emit({ debuggerStatus: error.code === 'DOUYIN_DEBUGGER_TIMEOUT' ? 'timeout' : 'failed' });
+      if (debuggerAttached) { try { debuggerApi.detach(); } catch (_) {} debuggerAttached = false; }
     }
+  } else if (douyinGuard) {
+    douyinGuard.emit({ debuggerStatus: 'unavailable' });
   }
 
   try {
@@ -12919,7 +12949,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     if (captureDouyinState) {
       const challengeDetected = await douyinGuard.run(waitAndRetryDouyinChallengePage(win.webContents, {
         signal: options.signal,
-        retryAllowed: options.retryDouyinChallenge !== false,
+        retryAllowed: options.retryDouyinChallenge === true,
       }), 'page-validation');
       if (challengeDetected) {
         const error = new Error('抖音当前会话需要安全验证');
@@ -17335,11 +17365,25 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
     });
     const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
-    const previousFailures = this.settings.recentSyncFailures;
+    const resolvedKeys = new Set(resolved.map((item) => {
+      const recordId = String(item && item.recordId || '').trim();
+      const bindingToken = normalizeBindCodeInput(item && item.bindingToken);
+      return recordId && bindingToken ? `${bindingToken}:${recordId}` : '';
+    }).filter(Boolean));
+    const nextCleanupErrors = normalizeRecentSyncFailureCleanupErrors(
+      this.getRecentSyncFailureCleanupErrors().filter((item) => (
+        !resolvedKeys.has(`${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || '').trim()}`)
+      )),
+    );
+    const previousSettings = this.settings;
     try {
-      await this.saveSettings({ ...this.settings, recentSyncFailures: nextFailures });
+      await this.saveSettings({
+        ...this.settings,
+        recentSyncFailures: nextFailures,
+        recentSyncFailureCleanupErrors: nextCleanupErrors,
+      });
     } catch (error) {
-      this.settings = { ...this.settings, recentSyncFailures: previousFailures };
+      this.settings = previousSettings;
       throw error;
     }
     return nextFailures;
@@ -18239,6 +18283,18 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (resolverAttempts.length) lines.push('', '最近抖音解析组件安装诊断：', detailed
       ? JSON.stringify(resolverAttempts, null, 2) : summarizeResolverAttempts(resolverAttempts));
     const douyinAttempts = douyinBrowserSafety.readAttempts(asrRoot);
+    const douyinResolutions = douyinDiagnostic.read(asrRoot);
+    if (douyinResolutions.length) {
+      const selected = detailed ? douyinResolutions : douyinResolutions.slice(-1).map(row => ({
+        attemptId: row.attemptId, finishedAt: row.finishedAt, outcome: row.outcome,
+        failureCode: row.failureCode, cookieState: row.cookieState,
+        stages: row.stages.map(stage => ({ stage: stage.stage, ok: stage.ok,
+          durationMs: stage.durationMs, rejectionReason: stage.rejectionReason,
+          ...(stage.error ? { error: stage.error } : {}),
+        })),
+      }));
+      lines.push('', detailed ? '最近抖音完整解析链：' : '最近抖音解析结果（详细诊断保留历史）：', JSON.stringify(selected, null, detailed ? 2 : 0));
+    }
     if (douyinAttempts.length) lines.push('', '最近抖音隐藏网页诊断：', JSON.stringify(detailed ? douyinAttempts : douyinAttempts.slice(-1), null, detailed ? 2 : 0));
     const taskResults = this.getRecentXiaohongshuBrowserResults().map(item => xhsDiagnostic.sanitize(item, this.settings));
     if (taskResults.length) lines.push('', '最近小红书任务诊断：', JSON.stringify(detailed ? taskResults : taskResults.slice(-1), null, detailed ? 2 : 0));
@@ -18279,7 +18335,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (Array.isArray(commentResults) && commentResults.length) {
       lines.push('', '已保留小红书评论诊断；其他组件仅显示失败相关日志。');
-    } else if (!lines.some((line) => /失败日志|失败状态/.test(line))) {
+    } else if (!douyinAttempts.some(row => row.outcome === 'failed')
+      && !douyinResolutions.some(row => row.outcome === 'failed')
+      && !resolverAttempts.some(row => row.status === 'failed')
+      && !lines.some((line) => /失败日志|失败状态|安装异常/.test(line))) {
       lines.push('', '未检测到失败日志；已省略成功日志。');
     } else {
       lines.push('', '已省略成功日志，只保留失败相关信息。');
@@ -19440,10 +19499,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (!result.used) result.error = '本地解析组件未返回可用媒体地址';
     } catch (error) {
       const message = String(error && error.message || error || '本地抖音解析失败');
-      result.loginRequired = /fresh cookies|cookies are needed|login required|captcha|risk-control|sec_sdk/i.test(message);
-      result.error = result.loginRequired
-        ? '抖音需要在插件内完成一次登录后再同步'
-        : message.slice(0, 240);
+      const failure = douyinDiagnostic.classifyResolverError(error);
+      result.code = failure.code;
+      result.exitCode = failure.exitCode;
+      result.technicalMessage = douyinDiagnostic.safeErrorText(message, this.settings);
+      result.loginRequired = failure.code === 'DOUYIN_LOGIN_REQUIRED';
+      result.error = douyinDiagnostic.failureMessage(failure.code);
     } finally {
       if (cookiePath) {
         try { fs.rmSync(cookiePath, { force: true }); } catch (error) {}
@@ -19596,7 +19657,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.douyinBrowserRetryAfter > Date.now()) {
       throw Object.assign(new Error('抖音网页解析刚发生异常，已暂停隐藏网页重试 60 秒；请复制诊断'), { code: 'EXTRACTION_FAILED', browserCode: 'DOUYIN_BROWSER_COOLDOWN' });
     }
-    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, { runtimeVersion: PLUGIN_RUNTIME_VERSION, electron: process.versions.electron, chromium: process.versions.chrome, freeMemoryBytesBefore: os.freemem() });
+    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, { resolutionAttemptId: options.diagnosticAttemptId, runtimeVersion: PLUGIN_RUNTIME_VERSION, electron: process.versions.electron, chromium: process.versions.chrome, freeMemoryBytesBefore: os.freemem() });
     try {
       const result = await renderSocialMediaUrlsWithElectron(url, { ...options, onDouyinBrowserDiagnostic: event => { attempt.update(event); options.onDouyinBrowserDiagnostic?.(event); } });
       attempt.finish();
@@ -21812,6 +21873,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     let douyinResolutionStages = [];
     let douyinSelectedStage = '';
     let douyinResolutionDiagnostic = null;
+    const douyinAttemptId = crypto.randomBytes(8).toString('hex');
+    const douyinStartedAt = new Date().toISOString();
     if (!url) {
       return record;
     }
@@ -22732,6 +22795,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               }
             } catch (sessionError) {
               sessionStage.error = sessionError;
+              if (isAbortError(sessionError)) throw sessionError;
               // Fall back to hidden browser rendering below.
             } finally {
               if (!sessionStage.ok) sessionStage.rejectionReason = sessionStage.error ? 'transport-error' : 'no-target-bound-media';
@@ -22745,6 +22809,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl, douyinAwemeId);
             for (const browserRequest of browserRequests) {
               if (hasUsableDouyinMedia) break;
+              if (douyinResolutionStages.some(stage => isDouyinChallengeError(stage.error)
+                || /^DOUYIN_BROWSER_(TIMEOUT|RENDERER_GONE|CLOSED|LOAD_FAILED|COOLDOWN)$/.test(stage.error && stage.error.browserCode || ''))) break;
               const browserStage = {
                 stage: 'targeted-browser',
                 attempted: true,
@@ -22758,7 +22824,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
               signal,
               strictDouyinTarget: browserRequest.strictDouyinTarget,
-              retryDouyinChallenge: browserRequest.inputKind === 'original-page',
+              retryDouyinChallenge: false,
+              diagnosticAttemptId: douyinAttemptId,
             });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
@@ -22770,8 +22837,8 @@ class WechatObsidianInboxPlugin extends Plugin {
                   browserStage.identityOutcome = 'primary-player-fallback';
                 }
               } catch (browserError) {
-                if (isAbortError(browserError)) throw browserError;
                 browserStage.error = browserError;
+                if (isAbortError(browserError)) throw browserError;
               } finally {
                 if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? 'transport-error' : 'no-target-bound-media';
                 browserStage.durationMs = Date.now() - browserStage.startedAt;
@@ -22780,6 +22847,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
           }
           if (!hasUsableDouyinMedia
+            && !douyinResolutionStages.some(stage => isDouyinChallengeError(stage.error))
             && typeof this.resolveDouyinMediaWithLocalResolver === 'function') {
             const localResolverStage = {
               stage: 'local-yt-dlp',
@@ -22812,13 +22880,17 @@ class WechatObsidianInboxPlugin extends Plugin {
                   : (douyinLocalResolverLoginRequired
                   ? 'login-required'
                   : 'resolver-no-media');
-                if (localResolution && localResolution.error) {
-                  localResolverStage.error = new Error(localResolution.error);
+                if (localResolution && localResolution.error && !douyinLocalResolverNotInstalled) {
+                  localResolverStage.error = Object.assign(new Error(localResolution.error), {
+                    code: localResolution.code || (localResolution.loginRequired ? 'DOUYIN_LOGIN_REQUIRED' : 'DOUYIN_RESOLVER_FAILED'),
+                    exitCode: localResolution.exitCode,
+                  });
+                  localResolverStage.error.message = localResolution.technicalMessage || localResolution.error;
                 }
               }
             } catch (localResolverError) {
-              if (isAbortError(localResolverError)) throw localResolverError;
               localResolverStage.error = localResolverError;
+              if (isAbortError(localResolverError)) throw localResolverError;
             } finally {
               if (!localResolverStage.ok && !localResolverStage.rejectionReason) {
                 localResolverStage.rejectionReason = localResolverStage.error
@@ -22835,6 +22907,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const isDouyinRecord = isDouyinUrl(url) || isDouyinUrl(resolvedUrl);
         const douyinChallengeDetected = douyinResolutionStages.some((stage) => isDouyinChallengeError(stage && stage.error));
         const hasPluginDouyinLogin = isDouyinRecord ? await this.checkDouyinLogin() : false;
+        const douyinFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages);
         if (isDouyinRecord) {
           douyinResolutionDiagnostic = buildDouyinMediaResolutionDiagnostic({
             sourceUrl: url,
@@ -22850,6 +22923,19 @@ class WechatObsidianInboxPlugin extends Plugin {
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true,
             pluginDouyinLogin: hasPluginDouyinLogin,
             challengeDetected: douyinChallengeDetected,
+          });
+          douyinResolutionDiagnostic.attemptId = douyinAttemptId;
+          douyinResolutionDiagnostic.failureCode = hasUsableDouyinMedia ? '' : douyinFailureCode;
+          douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
+            ...douyinResolutionDiagnostic, attemptId: douyinAttemptId,
+            recordRef: crypto.createHash('sha256').update(String(record.id || record._id || url)).digest('hex').slice(0, 16),
+            startedAt: douyinStartedAt, finishedAt: new Date().toISOString(),
+            outcome: hasUsableDouyinMedia ? 'success' : 'failed',
+            stages: douyinResolutionStages.map(stage => ({ ...stage, error: stage.error ? {
+              ...getTransportErrorDiagnostic(stage.error), browserCode: stage.error.browserCode,
+              exitCode: stage.error.exitCode,
+              message: douyinDiagnostic.safeErrorText(stage.error.message, this.settings),
+            } : undefined })),
           });
         }
         const isUnavailableXhs = isXiaohongshuUrl(url)
@@ -23159,7 +23245,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         const socialMediaRenderOptions = isXiaohongshuUrl(url)
           ? { includeComments: false, signal, ...xiaohongshuBrowserOptions }
           : { signal };
-        if (!hasUsableDouyinMedia
+        // Douyin has already exhausted its correlated, target-bound paths above.
+        // Re-entering the generic browser fallback would repeat a timeout/challenge
+        // and could overwrite the evidence with an unrelated browser attempt.
+        if (!isDouyinRecord && !hasUsableDouyinMedia
           && isVideoIntent
           && (!isXiaohongshuUrl(url) || !mediaUrl)
           && typeof this.renderSocialMediaUrls === 'function') {
@@ -23173,7 +23262,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             if (isAbortError(renderError)) throw renderError;
             mediaUrl = mediaUrl || '';
           }
-        } else if (!hasUsableDouyinMedia
+        } else if (!isDouyinRecord && !hasUsableDouyinMedia
           && !mediaUrl
           && isVideoIntent
           && typeof this.renderSocialMediaUrl === 'function') {
@@ -23245,13 +23334,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
         }
         if (isVideoIntent && isDouyinRecord) {
-          const noMediaError = (douyinChallengeDetected || douyinLocalResolverLoginRequired)
-            ? (hasPluginDouyinLogin
-              ? '抖音当前会话要求安全验证，请在插件设置中重新登录抖音后再同步。'
-              : '抖音要求安全验证，请在插件设置中登录抖音后再同步。')
-            : (douyinLocalResolverNotInstalled && hasPluginDouyinLogin
+          const noMediaError = (douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === 'DOUYIN_NO_MEDIA'
               ? '插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。'
-            : '未能从抖音作品页获取到可用的音频或视频地址');
+            : douyinDiagnostic.failureMessage(douyinFailureCode));
           return {
             ...record,
             metadata: {
@@ -23812,6 +23897,22 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       };
     } catch (error) {
+      if (isDouyinUrl(url) && !douyinResolutionDiagnostic) {
+        douyinResolutionDiagnostic = douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
+          attemptId: douyinAttemptId,
+          recordRef: crypto.createHash('sha256').update(String(record.id || record._id || url)).digest('hex').slice(0, 16),
+          startedAt: douyinStartedAt, finishedAt: new Date().toISOString(),
+          outcome: isAbortError(error) ? 'cancelled' : 'failed',
+          failureCode: isAbortError(error) ? 'DOUYIN_CANCELLED'
+            : douyinDiagnostic.failureCode(douyinResolutionStages) === 'DOUYIN_NO_MEDIA'
+              ? 'DOUYIN_FETCH_FAILED' : douyinDiagnostic.failureCode(douyinResolutionStages),
+          stages: [...douyinResolutionStages, { stage: isAbortError(error) ? 'cancelled' : 'platform-fetch', ok: false, error }].map(stage => ({
+            ...stage, error: stage.error ? { ...getTransportErrorDiagnostic(stage.error),
+              browserCode: stage.error.browserCode, exitCode: stage.error.exitCode,
+              message: douyinDiagnostic.safeErrorText(stage.error.message, this.settings) } : undefined,
+          })),
+        });
+      }
       if (xiaohongshuBrowserDiagnostic) {
         appendXiaohongshuBrowserFailure({ xiaohongshuBrowserDiagnostic, diagnosticSettings: this.settings }, 'content_result', error);
         xiaohongshuBrowserDiagnostic.finalOutcome = isAbortError(error) ? 'aborted'
@@ -25001,12 +25102,48 @@ class WechatObsidianInboxPlugin extends Plugin {
         `${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || '').trim()}`
       )));
       const activeBindingTokens = new Set(bindings.map((binding) => normalizeBindCodeInput(binding && binding.token)));
+      const remotelyResolvedFailureKeys = new Set();
+      const unresolvedByBinding = new Map();
       for (const storedFailure of this.getRecentSyncFailures()) {
         const recordId = String(storedFailure && storedFailure.recordId || '').trim();
         const bindingToken = normalizeBindCodeInput(storedFailure && storedFailure.bindingToken);
         const failureKey = `${bindingToken}:${recordId}`;
         if (!recordId || !bindingToken || !activeBindingTokens.has(bindingToken)
           || currentFailureKeys.has(failureKey) || resolvedFailureKeys.has(failureKey)) continue;
+        if (!unresolvedByBinding.has(bindingToken)) unresolvedByBinding.set(bindingToken, []);
+        unresolvedByBinding.get(bindingToken).push(recordId);
+      }
+      for (const [bindingToken, recordIds] of unresolvedByBinding) {
+        const binding = bindings.find((candidate) => (
+          normalizeBindCodeInput(candidate && candidate.token) === bindingToken
+        ));
+        if (!binding) continue;
+        try {
+          // The server scopes this read to the authenticated owner + clientId and
+          // returns success only for a durable synced receipt. Incomplete, stale,
+          // or failed responses remain unresolved and fall through to local checks.
+          // eslint-disable-next-line no-await-in-loop
+          const response = await this.requestJson('/records/failure-states', 'POST', {
+            recordIds: [...new Set(recordIds)].slice(0, 200),
+          }, binding);
+          getDurablyResolvedFailureRecordIds(recordIds, response).forEach((recordId) => {
+            remotelyResolvedFailureKeys.add(`${bindingToken}:${recordId}`);
+          });
+        } catch (error) {
+          // A missing endpoint or network failure is not evidence of success.
+        }
+      }
+      for (const storedFailure of this.getRecentSyncFailures()) {
+        const recordId = String(storedFailure && storedFailure.recordId || '').trim();
+        const bindingToken = normalizeBindCodeInput(storedFailure && storedFailure.bindingToken);
+        const failureKey = `${bindingToken}:${recordId}`;
+        if (!recordId || !bindingToken || !activeBindingTokens.has(bindingToken)
+          || currentFailureKeys.has(failureKey) || resolvedFailureKeys.has(failureKey)) continue;
+        if (remotelyResolvedFailureKeys.has(failureKey)) {
+          recentResolvedEntries.push({ recordId, bindingToken });
+          resolvedFailureKeys.add(failureKey);
+          continue;
+        }
         const storedFailureBinding = bindings.find((binding) => (
           normalizeBindCodeInput(binding && binding.token) === bindingToken
         ));
@@ -25724,7 +25861,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .onClick(async () => {
           const loggedIn = await this.plugin.checkDouyinLogin();
           douyinLoginSetting.setDesc(loggedIn
-            ? '已登录：同步抖音链接时会自动复用插件内会话。'
+            ? '已保存登录 Cookie；尚未验证当前会话能否访问作品。同步时会记录实际访问结果。'
             : '未登录或登录已过期：请打开抖音登录后再同步。');
         }))
       .addButton((button) => button
@@ -25735,7 +25872,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
         }));
     this.plugin.checkDouyinLogin().then((loggedIn) => {
       douyinLoginSetting.setDesc(loggedIn
-        ? '已登录：同步抖音链接时会自动复用插件内会话。'
+        ? '已保存登录 Cookie；尚未验证当前会话能否访问作品。同步时会记录实际访问结果。'
         : '未登录或登录已过期：请打开抖音登录后再同步。');
     });
 
@@ -25795,6 +25932,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  getDurablyResolvedFailureRecordIds,
   buildDouyinFallbackMarkdown,
   buildXiaohongshuFallbackMarkdown,
   buildWechatChannelsUnavailableMarkdown,

@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const LIMITS = Object.freeze({ timeoutMs: 45000, responses: 24, concurrent: 3, responseBytes: 1024 * 1024, totalBytes: 8 * 1024 * 1024 });
-const STAGES = new Set(['created', 'loading', 'page-load', 'page-validation', 'media-extraction', 'response-extraction', 'finished']);
+const STAGES = new Set(['created', 'loading', 'debugger-setup', 'page-load', 'page-validation', 'media-extraction', 'response-extraction', 'finished']);
 const OUTCOMES = new Set(['running', 'success', 'failed', 'cancelled']);
 const REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction', 'unknown']);
 const number = value => Number.isFinite(value) ? Math.max(0, Math.min(1e12, Math.round(value))) : 0;
@@ -13,6 +13,13 @@ const version = value => /^\d+(?:\.\d+){1,3}$/.test(value || '') ? value : '';
 function sanitize(value = {}) {
   const result = { source: 'douyin-browser', schema: 1 };
   for (const key of ['attemptId', 'recordRef']) result[key] = /^[a-f0-9]{16,32}$/.test(value[key] || '') ? value[key] : '';
+  result.resolutionAttemptId = /^[a-f0-9]{16,32}$/.test(value.resolutionAttemptId || '') ? value.resolutionAttemptId : '';
+  result.debuggerStatus = ['ready', 'unavailable', 'timeout', 'failed'].includes(value.debuggerStatus) ? value.debuggerStatus : '';
+  result.pageEvent = ['dom-ready', 'did-finish-load', 'did-fail-load', 'did-navigate', 'did-redirect-navigation'].includes(value.pageEvent) ? value.pageEvent : '';
+  result.networkCode = /^ERR_[A-Z_]{1,60}$/.test(value.networkCode || '') ? value.networkCode : '';
+  result.httpStatus = number(value.httpStatus);
+  result.domReady = value.domReady === true;
+  result.pageLoaded = value.pageLoaded === true;
   for (const key of ['startedAt', 'updatedAt', 'finishedAt']) if (Number.isFinite(Date.parse(value[key]))) result[key] = new Date(value[key]).toISOString();
   result.stage = STAGES.has(value.stage) ? value.stage : 'created';
   result.outcome = OUTCOMES.has(value.outcome) ? value.outcome : 'running';
@@ -87,6 +94,14 @@ function attachGuard(win, { signal, onDiagnostic = () => {}, timeoutMs = LIMITS.
   };
   const onGone = (_event, details = {}) => fail('DOUYIN_BROWSER_RENDERER_GONE', '抖音网页解析进程异常退出，尚未完成视频地址提取', { reason: REASONS.has(details.reason) ? details.reason : 'unknown', exitCode: Number.isInteger(details.exitCode) ? details.exitCode : null });
   const onDestroyed = () => fail('DOUYIN_BROWSER_CLOSED', '抖音解析窗口提前关闭');
+  const onDomReady = () => emit({ pageEvent: 'dom-ready', domReady: true });
+  const onLoad = () => emit({ pageEvent: 'did-finish-load', pageLoaded: true });
+  const onNavigate = (_event, _url, status) => emit({ pageEvent: 'did-navigate', httpStatus: Number.isInteger(status) ? status : 0 });
+  const onLoadFailed = (_event, code, description, _url, mainFrame) => {
+    if (mainFrame === false || code === -3) return;
+    const networkCode = String(description || '').replace(/^net::/, '');
+    fail('DOUYIN_BROWSER_LOAD_FAILED', '抖音主页面加载失败', { pageEvent: 'did-fail-load', networkCode });
+  };
   const onAbort = () => {
     if (failure || closed) return;
     failure = Object.assign(new Error('抖音解析已取消'), { name: 'AbortError', code: 'ABORT_ERR', browserCode: 'DOUYIN_BROWSER_CANCELLED' });
@@ -94,6 +109,10 @@ function attachGuard(win, { signal, onDiagnostic = () => {}, timeoutMs = LIMITS.
   };
   contents.on('render-process-gone', onGone);
   contents.on('destroyed', onDestroyed);
+  contents.on('dom-ready', onDomReady);
+  contents.on('did-finish-load', onLoad);
+  contents.on('did-navigate', onNavigate);
+  contents.on('did-fail-load', onLoadFailed);
   // Window-level mute is installed before loadURL, covering autoplay before DOM injection.
   if (typeof contents.setAudioMuted === 'function') contents.setAudioMuted(true);
   signal?.addEventListener('abort', onAbort, { once: true });
@@ -102,6 +121,12 @@ function attachGuard(win, { signal, onDiagnostic = () => {}, timeoutMs = LIMITS.
   timer.unref?.();
   return {
     emit,
+    async optional(task, timeoutMs = 1500) {
+      let timer;
+      const timed = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('Optional response capture timed out'), { code: 'DOUYIN_DEBUGGER_TIMEOUT' })), timeoutMs); });
+      try { return await this.run(Promise.race([Promise.resolve(task), timed]), 'debugger-setup'); }
+      finally { clearTimeout(timer); }
+    },
     async run(task, stage) {
       const started = Promise.resolve(task);
       started.catch(() => {});
@@ -115,6 +140,10 @@ function attachGuard(win, { signal, onDiagnostic = () => {}, timeoutMs = LIMITS.
       signal?.removeEventListener('abort', onAbort);
       contents.removeListener('render-process-gone', onGone);
       contents.removeListener('destroyed', onDestroyed);
+      contents.removeListener('dom-ready', onDomReady);
+      contents.removeListener('did-finish-load', onLoad);
+      contents.removeListener('did-navigate', onNavigate);
+      contents.removeListener('did-fail-load', onLoadFailed);
     },
   };
 }
