@@ -256,7 +256,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.164';
+const PLUGIN_RUNTIME_VERSION = '1.3.165';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3242,6 +3242,29 @@ function normalizeRecentSyncFailureCleanupErrors(value) {
     });
   });
   return [...unique.values()].slice(-50);
+}
+
+function getDurablyResolvedFailureRecordIds(recordIds, response) {
+  const requested = [...new Set((Array.isArray(recordIds) ? recordIds : [])
+    .map((recordId) => String(recordId || '').trim())
+    .filter((recordId) => /^[A-Za-z0-9_-]{1,128}$/.test(recordId)))];
+  if (!response || response.success !== true || !response.data
+    || Number(response.data.schemaVersion) !== 1) return [];
+  const records = response.data.records;
+  if (!requested.length || !Array.isArray(records) || records.length !== requested.length) return [];
+  const requestedSet = new Set(requested);
+  const byId = new Map();
+  for (const item of records) {
+    const recordId = String(item && item.recordId || '').trim();
+    const status = String(item && item.status || '').trim().toLowerCase();
+    if (!requestedSet.has(recordId) || byId.has(recordId) || !status) return [];
+    byId.set(recordId, status);
+  }
+  if (byId.size !== requested.length) return [];
+  return requested.filter((recordId) => (
+    byId.get(recordId) === 'synced'
+    || byId.get(recordId) === 'synced-via-content-identity'
+  ));
 }
 function mergeSettings(savedSettings, platform = os.platform()) {
   const sourceSettings = savedSettings && typeof savedSettings === 'object' ? savedSettings : {};
@@ -17342,11 +17365,25 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
     });
     const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
-    const previousFailures = this.settings.recentSyncFailures;
+    const resolvedKeys = new Set(resolved.map((item) => {
+      const recordId = String(item && item.recordId || '').trim();
+      const bindingToken = normalizeBindCodeInput(item && item.bindingToken);
+      return recordId && bindingToken ? `${bindingToken}:${recordId}` : '';
+    }).filter(Boolean));
+    const nextCleanupErrors = normalizeRecentSyncFailureCleanupErrors(
+      this.getRecentSyncFailureCleanupErrors().filter((item) => (
+        !resolvedKeys.has(`${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || '').trim()}`)
+      )),
+    );
+    const previousSettings = this.settings;
     try {
-      await this.saveSettings({ ...this.settings, recentSyncFailures: nextFailures });
+      await this.saveSettings({
+        ...this.settings,
+        recentSyncFailures: nextFailures,
+        recentSyncFailureCleanupErrors: nextCleanupErrors,
+      });
     } catch (error) {
-      this.settings = { ...this.settings, recentSyncFailures: previousFailures };
+      this.settings = previousSettings;
       throw error;
     }
     return nextFailures;
@@ -25065,12 +25102,48 @@ class WechatObsidianInboxPlugin extends Plugin {
         `${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || '').trim()}`
       )));
       const activeBindingTokens = new Set(bindings.map((binding) => normalizeBindCodeInput(binding && binding.token)));
+      const remotelyResolvedFailureKeys = new Set();
+      const unresolvedByBinding = new Map();
       for (const storedFailure of this.getRecentSyncFailures()) {
         const recordId = String(storedFailure && storedFailure.recordId || '').trim();
         const bindingToken = normalizeBindCodeInput(storedFailure && storedFailure.bindingToken);
         const failureKey = `${bindingToken}:${recordId}`;
         if (!recordId || !bindingToken || !activeBindingTokens.has(bindingToken)
           || currentFailureKeys.has(failureKey) || resolvedFailureKeys.has(failureKey)) continue;
+        if (!unresolvedByBinding.has(bindingToken)) unresolvedByBinding.set(bindingToken, []);
+        unresolvedByBinding.get(bindingToken).push(recordId);
+      }
+      for (const [bindingToken, recordIds] of unresolvedByBinding) {
+        const binding = bindings.find((candidate) => (
+          normalizeBindCodeInput(candidate && candidate.token) === bindingToken
+        ));
+        if (!binding) continue;
+        try {
+          // The server scopes this read to the authenticated owner + clientId and
+          // returns success only for a durable synced receipt. Incomplete, stale,
+          // or failed responses remain unresolved and fall through to local checks.
+          // eslint-disable-next-line no-await-in-loop
+          const response = await this.requestJson('/records/failure-states', 'POST', {
+            recordIds: [...new Set(recordIds)].slice(0, 200),
+          }, binding);
+          getDurablyResolvedFailureRecordIds(recordIds, response).forEach((recordId) => {
+            remotelyResolvedFailureKeys.add(`${bindingToken}:${recordId}`);
+          });
+        } catch (error) {
+          // A missing endpoint or network failure is not evidence of success.
+        }
+      }
+      for (const storedFailure of this.getRecentSyncFailures()) {
+        const recordId = String(storedFailure && storedFailure.recordId || '').trim();
+        const bindingToken = normalizeBindCodeInput(storedFailure && storedFailure.bindingToken);
+        const failureKey = `${bindingToken}:${recordId}`;
+        if (!recordId || !bindingToken || !activeBindingTokens.has(bindingToken)
+          || currentFailureKeys.has(failureKey) || resolvedFailureKeys.has(failureKey)) continue;
+        if (remotelyResolvedFailureKeys.has(failureKey)) {
+          recentResolvedEntries.push({ recordId, bindingToken });
+          resolvedFailureKeys.add(failureKey);
+          continue;
+        }
         const storedFailureBinding = bindings.find((binding) => (
           normalizeBindCodeInput(binding && binding.token) === bindingToken
         ));
@@ -25859,6 +25932,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  getDurablyResolvedFailureRecordIds,
   buildDouyinFallbackMarkdown,
   buildXiaohongshuFallbackMarkdown,
   buildWechatChannelsUnavailableMarkdown,
