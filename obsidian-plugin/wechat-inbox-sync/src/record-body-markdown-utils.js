@@ -1,5 +1,7 @@
 'use strict';
 
+const { toSimplifiedChinese } = require('./transcription-quality-utils');
+
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
     throw new TypeError(`record body markdown dependency is required: ${name}`);
@@ -34,7 +36,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     const status = String(transcriptionStatus || '').toLowerCase();
     const isCloudPending = ['queued', 'processing'].includes(status)
       && String(transcriptionSource || '').includes('cloud');
-    const content = String(transcription || '').trim()
+    const content = toSimplifiedChinese(transcription).trim()
       || (status === 'failed'
         ? `转写失败。${transcriptionError || '未能提取到视频/音频文案。'}`
         : isCloudPending
@@ -67,7 +69,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     transcription = '',
     title = '',
   } = {}) {
-    const text = helpers.cleanMarkdownForStorage(helpers.stripMarkdownCodeBlocks(String(transcription || '')))
+    const text = helpers.cleanMarkdownForStorage(helpers.stripMarkdownCodeBlocks(toSimplifiedChinese(String(transcription || ''))))
       .replace(/\s+/g, ' ')
       .trim();
     if (!text) {
@@ -134,7 +136,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       audioUrl: mediaUrl,
       mediaUrls: normalizedMediaUrls,
       subtitleUrl,
-      transcription,
+      transcription: toSimplifiedChinese(transcription),
       transcriptionStatus,
       transcriptionSource,
       transcriptionError,
@@ -292,7 +294,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     const status = metadata.conversionStatus || 'pending';
     const errorText = metadata.conversionError || '';
     const transcriptionStatus = String(metadata.transcriptionStatus || '').toLowerCase();
-    const transcription = String(metadata.transcription || '').trim();
+    const transcription = toSimplifiedChinese(metadata.transcription || '').trim();
     if (transcriptionStatus || transcription) {
       const transcriptionError = metadata.transcriptionError || '';
       const content = transcription || (transcriptionStatus === 'failed'

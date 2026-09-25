@@ -1,9 +1,7 @@
 'use strict';
-const { detectWechatImagePostDocument, readWechatImagePostHtmlData } = require('./wechat-image-post-utils');
 
 const WECHAT_ARTICLE_HOST = 'mp.weixin.qq.com';
 const WECHAT_ARTICLE_ID_PARAMS = ['__biz', 'mid', 'idx', 'sn', 'chksm', 'scene'];
-const WECHAT_IMAGE_POST_PAGE = 'pages/image_detail';
 
 function isWechatArticleUrl(value) {
   try {
@@ -15,35 +13,13 @@ function isWechatArticleUrl(value) {
   }
 }
 
-function isWechatImagePostUrl(value) {
-  if (!isWechatArticleUrl(value)) return false;
-  try {
-    const parsed = new URL(String(value || '').trim());
-    return String(parsed.searchParams.get('t') || '').toLowerCase() === WECHAT_IMAGE_POST_PAGE;
-  } catch (_) {
-    return false;
-  }
-}
-
-function isWechatImagePostHtml(html) {
-  const bodyHtml = extractWechatArticleBodyHtml(html);
-  const data = readWechatImagePostHtmlData(html);
-  return detectWechatImagePostDocument({ html, structuredAssets: data.assets, structuredCount: data.parsed ? Math.max(1, data.assets.length) : 0, bodyHtml, bodyText: stripHtml(bodyHtml), hasBody: Boolean(bodyHtml) });
-}
-
-function getWechatRetainedParameterNames(value) {
-  return isWechatImagePostUrl(value)
-    ? ['t', ...WECHAT_ARTICLE_ID_PARAMS]
-    : WECHAT_ARTICLE_ID_PARAMS;
-}
-
 function normalizeWechatArticleUrl(value) {
   if (!isWechatArticleUrl(value)) return '';
   const parsed = new URL(String(value || '').trim());
   const pathname = String(parsed.pathname || '').replace(/\/+$/, '') || '/s';
   const normalized = new URL(`https://${WECHAT_ARTICLE_HOST}${pathname}`);
-  if (pathname === '/s' || isWechatImagePostUrl(value)) {
-    getWechatRetainedParameterNames(value).forEach((key) => {
+  if (pathname === '/s') {
+    WECHAT_ARTICLE_ID_PARAMS.forEach((key) => {
       const parameter = parsed.searchParams.get(key);
       if (parameter) normalized.searchParams.set(key, parameter);
     });
@@ -57,12 +33,10 @@ function getWechatArticleUrlShape(value) {
   const parameterNames = Array.from(new Set(Array.from(parsed.searchParams.keys())))
     .filter(Boolean)
     .sort();
-  const retainedNames = getWechatRetainedParameterNames(value);
-  const retainedParameterNames = parameterNames.filter((name) => retainedNames.includes(name));
-  const strippedParameterNames = parameterNames.filter((name) => !retainedNames.includes(name));
+  const retainedParameterNames = parameterNames.filter((name) => WECHAT_ARTICLE_ID_PARAMS.includes(name));
+  const strippedParameterNames = parameterNames.filter((name) => !WECHAT_ARTICLE_ID_PARAMS.includes(name));
   return {
     pathKind: parsed.pathname === '/s' ? 'query-id' : 'slug',
-    contentKind: isWechatImagePostUrl(value) ? 'image-post' : 'article',
     parameterNames,
     retainedParameterNames,
     strippedParameterNames,
@@ -107,7 +81,7 @@ function decodeHtmlEntities(value) {
 }
 
 function stripHtml(value) {
-  return decodeHtmlEntities(String(value || '').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ').replace(/<[^>]*>/g, ' '))
+  return decodeHtmlEntities(String(value || '').replace(/<[^>]*>/g, ' '))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -216,71 +190,15 @@ function getWechatArticleBodyStats(html) {
   const bodyHtml = extractWechatArticleBodyHtml(source);
   const bodyText = stripHtml(bodyHtml);
   const imageCandidates = collectWechatArticleImageCandidates(source);
-  const unresolvedImageCount = Array.from(bodyHtml.matchAll(/<img\b([^>]*)>/gi)).filter(match =>
-    !['data-src', 'data-original', 'data-lazy-src', 'src', 'data-fail'].some(key => normalizeWechatImageCandidate(getHtmlAttribute(match[1], key)))).length;
-  const mediaCount = (bodyHtml.match(/<(?:video|audio)\b|<source\b[^>]*\btype=["'](?:video|audio)\//gi) || []).length;
+  const mediaCount = (bodyHtml.match(/<(?:video|audio|source)\b/gi) || []).length;
   return {
     hasJsContent: /<div\b(?=[^>]*\bid=["']js_content["'])/i.test(source),
     bodyHtmlChars: bodyHtml.length,
     bodyTextChars: bodyText.length,
     imageCount: imageCandidates.length,
-    unresolvedImageCount,
     mediaCount,
     imageCandidates,
     hasSubstantiveBody: bodyText.length >= 50 || imageCandidates.length > 0 || mediaCount > 0,
-  };
-}
-
-function inspectWechatArticleContent(html, url = '') {
-  const source = String(html || '');
-  const stats = getWechatArticleBodyStats(source);
-  const data = readWechatImagePostHtmlData(source);
-  const explicitPicture = isWechatImagePostHtml(source);
-  const pictureHint = isWechatImagePostUrl(url);
-  const pictureEvidence = detectWechatImagePostDocument({
-    html: source, bodyHtml: extractWechatArticleBodyHtml(source), hasBody: stats.hasJsContent,
-    bodyText: stripHtml(extractWechatArticleBodyHtml(source)),
-    structuredAssets: data.assets,
-    structuredCount: data.parsed ? Math.max(1, data.assets.length) : 0,
-  });
-  const hintRequiresBrowser = pictureHint && detectWechatImagePostDocument({ html: source, url,
-    bodyHtml: extractWechatArticleBodyHtml(source), bodyText: stripHtml(extractWechatArticleBodyHtml(source)), hasBody: stats.hasJsContent });
-  const bodyUsable = stats.hasJsContent && (stats.bodyTextChars > 0 || stats.imageCount > 0);
-  const structuredComplete = pictureEvidence && data.parsed && data.assets.length > 0 && !data.invalidImageCount && !stats.mediaCount;
-  const complete = structuredComplete || (bodyUsable && !pictureEvidence && !hintRequiresBrowser && !stats.unresolvedImageCount && (!stats.mediaCount || stats.bodyTextChars > 0));
-  // A URL hint alone may be stale. Keep a complete long article as an alternate
-  // candidate, but never replace a declared carousel with its caption/cover.
-  const fallbackComplete = bodyUsable && !pictureEvidence && !stats.unresolvedImageCount && !stats.mediaCount && stats.bodyTextChars >= 200;
-  const contentKind = pictureEvidence ? 'image-post' : bodyUsable ? 'article' : 'unknown';
-  const escape = value => String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const body = extractWechatArticleBodyHtml(source).replace(/<img\b[^>]*>/gi, '');
-  const reconstructed = structuredComplete
-    ? `<html><head><title>${escape(data.title || getHtmlTitle(source))}</title></head><body><div id="js_content">`
-      + (stripHtml(body) ? body : `<p>${escape(data.description)}</p>`)
-      + data.assets.map((asset, index) => `<img src="${escape(asset.src)}" alt="贴图 ${index + 1}">`).join('')
-      + '</div></body></html>'
-    : source;
-  return {
-    html: reconstructed,
-    assets: structuredComplete ? data.assets : [],
-    title: structuredComplete ? data.title : '',
-    complete,
-    fallbackComplete,
-    diagnostic: {
-      contentKind,
-      typeHint: pictureHint ? 'image-post' : 'unspecified',
-      evidence: pictureEvidence && data.parsed ? 'structured-picture-list' : explicitPicture ? 'page-picture-type' : bodyUsable ? 'article-body' : 'no-body',
-      extractor: structuredComplete ? 'structured-images' : bodyUsable ? 'article-body' : 'none',
-      complete,
-      bodyTextChars: stats.bodyTextChars,
-      bodyImageCount: stats.imageCount,
-      unresolvedImageCount: stats.unresolvedImageCount,
-      structuredImageCount: data.assets.length,
-      structuredDataState: data.parseState,
-      invalidImageCount: data.invalidImageCount,
-      imageCandidateCount: structuredComplete ? data.assets.length : stats.imageCount + stats.unresolvedImageCount,
-      mediaCount: stats.mediaCount,
-    },
   };
 }
 
@@ -303,10 +221,9 @@ function diagnoseWechatArticleHtml(html) {
     guide: classifiedState === 'guide',
     emptyShell: isWechatEmptyShellHtml(source),
     shellToolbar: /\u8f7b\u70b9\u4e24\u4e0b\u53d6\u6d88\u8d5e|\u5728\u770b|\u89c6\u9891|\u5c0f\u7a0b\u5e8f/i.test(text),
-    imagePost: isWechatImagePostHtml(source),
   };
   let pageKind = classifiedState;
-  if (markers.emptyShell && !markers.captcha && !markers.unavailable && !markers.imagePost) {
+  if (markers.emptyShell && !markers.captcha && !markers.unavailable) {
    pageKind = 'empty-shell';
  }
   return {
@@ -326,12 +243,11 @@ function diagnoseWechatArticleHtml(html) {
 
 function classifyWechatArticleHtml(html) {
   const text = stripHtml(html);
-  if (!hasWechatArticleBody(html) && /环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return 'captcha';
-  if (!hasWechatArticleBody(html) && /访问(?:过于)?频繁|操作(?:过于)?频繁|请稍后再(?:试|访问)/.test(text)) return 'captcha';
-  if (isWechatImagePostHtml(html)) return 'image-post';
-  // Full article pages can contain hidden QR/app guide text outside #js_content.
-  // Preserve the legacy successful behavior: substantive #js_content wins.
-  if (hasWechatArticleBody(html)) return 'article';
+  const hasBody = hasWechatArticleBody(html);
+  if (!hasBody && /环境异常/.test(text) && /完成验证后即可继续访问|去验证/.test(text)) return 'captcha';
+  if (!hasBody && /访问(?:过于)?频繁|操作(?:过于)?频繁|请稍后再(?:试|访问)/.test(text)) return 'captcha';
+  // Valid article content wins over hidden verification or app-guide copy outside #js_content.
+  if (hasBody) return 'article';
   if (/微信扫一扫可打开此内容/.test(text) && /使用完整服务|使用小程序/.test(text)) return 'guide';
   if (/内容不存在|已删除|暂时无法查看|加载失败/.test(text)) return 'unavailable';
   return 'unknown';
@@ -369,7 +285,6 @@ function buildWechatArticleFallbackMarkdown({
 }
 
 module.exports = {
-  inspectWechatArticleContent,
   buildWechatArticleFallbackMarkdown,
   buildWechatArticleRequestProfiles,
   classifyWechatArticleHtml,
@@ -381,8 +296,6 @@ module.exports = {
   getWechatArticleUrlShape,
   hasWechatArticleBody,
   isWechatArticleUrl,
-  isWechatImagePostHtml,
-  isWechatImagePostUrl,
   isWechatEmptyShellHtml,
   isGenericWechatMetadata,
   isTrustedCoverUrl,

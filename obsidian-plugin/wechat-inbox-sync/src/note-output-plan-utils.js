@@ -1,5 +1,7 @@
 'use strict';
 
+const { toSimplifiedChinese } = require('./transcription-quality-utils');
+
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
     throw new TypeError(`note output dependency is required: ${name}`);
@@ -183,7 +185,7 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
       body = helpers.buildWebpageMarkdownBody(record, title);
     } else if (type === 'voice') {
       const errorText = metadata.transcriptionError || metadata.aiError || '';
-      const transcription = metadata.transcription
+      const transcription = toSimplifiedChinese(metadata.transcription || '')
         || (metadata.transcriptionStatus === 'failed' ? `语音转写失败。${errorText}` : '未开启语音转写。');
       body = ['## 转写全文', '', transcription, '', '## 录音文件', '', `![[${audioFileName}]]`, ''].join('\n');
     } else if (type === 'file') {

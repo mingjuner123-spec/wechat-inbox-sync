@@ -17,8 +17,31 @@ const PDFJS_MODULE_PATH = path.join(
   'build',
   'pdf.mjs',
 );
+const OPENCC_PACKAGE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'opencc-js', 'package.json');
+const OPENCC_LICENSE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'opencc-js', 'LICENSE');
+const OPENCC_APACHE_LICENSE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'opencc-js', 'LICENSES', 'Apache-2.0.txt');
+const OPENCC_THIRD_PARTY_LICENSES_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'opencc-js', 'THIRD_PARTY_LICENSES.md');
 
-function getPdfJsLicenseBanner() {
+function getOpenCCLicenseBanner() {
+  const packageMetadata = JSON.parse(fs.readFileSync(OPENCC_PACKAGE_PATH, 'utf8'));
+  const licenseText = fs.readFileSync(OPENCC_LICENSE_PATH, 'utf8').trim();
+  const apacheText = fs.readFileSync(OPENCC_APACHE_LICENSE_PATH, 'utf8').trim();
+  const thirdPartyLicensesText = fs.readFileSync(OPENCC_THIRD_PARTY_LICENSES_PATH, 'utf8')
+    .split('A copy of the Apache License, Version 2.0 is reproduced below.')[0]
+    .trim();
+  return [
+    '/*!',
+    ` * Bundled dependency: opencc-js ${packageMetadata.version}`,
+    ` * License: ${packageMetadata.license}`,
+    ' * MIT License',
+    ...licenseText.split(/\r?\n/).map((line) => (line ? ` * ${line}` : ' *')),
+    ' * Third-party data attribution',
+    ...thirdPartyLicensesText.split(/\r?\n/).map((line) => (line ? ` * ${line}` : ' *')),
+    ' * Apache License 2.0',
+    ...apacheText.split(/\r?\n/).map((line) => (line ? ` * ${line}` : ' *')),
+    ' */',
+  ].join('\n');
+}function getPdfJsLicenseBanner() {
   const packageMetadata = JSON.parse(fs.readFileSync(PDFJS_PACKAGE_PATH, 'utf8'));
   const licenseText = fs.readFileSync(PDFJS_LICENSE_PATH, 'utf8').trim();
   return [
@@ -102,7 +125,7 @@ function getPluginBuildBytes({
   const result = esbuild.buildSync({
     absWorkingDir: PLUGIN_ROOT,
     banner: {
-      js: getPdfJsLicenseBanner(),
+      js: [getPdfJsLicenseBanner(), getOpenCCLicenseBanner()].join('\n'),
     },
     bundle: true,
     charset: 'utf8',
