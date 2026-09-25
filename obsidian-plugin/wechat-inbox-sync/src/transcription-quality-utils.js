@@ -1,5 +1,12 @@
 'use strict';
 
+const { Converter } = require('opencc-js/t2cn');
+const toSimplifiedConverter = Converter({ from: 't', to: 'cn' });
+
+function toSimplifiedChinese(text) {
+  return toSimplifiedConverter(String(text || ''));
+}
+
 function dedupeRepeatedTranscriptionLines(text) {
   const lines = String(text || '')
     .split(/\r?\n/)
@@ -94,7 +101,7 @@ function createTranscriptionQualityError(text, source = '转写') {
 }
 
 function assertUsableTranscription(text, source = '转写') {
-  const transcription = String(text || '').trim();
+  const transcription = toSimplifiedChinese(text).trim();
   if (!transcription) {
     throw new Error(`${source}命令没有返回文本`);
   }
@@ -110,4 +117,5 @@ module.exports = {
   getTranscriptionQualityIssue,
   getTranscriptionQualityUnits,
   normalizeTranscriptionQualityUnit,
+  toSimplifiedChinese,
 };

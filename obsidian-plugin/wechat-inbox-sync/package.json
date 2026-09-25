@@ -10,6 +10,7 @@
     "esbuild": "0.28.1"
   },
   "dependencies": {
+    "opencc-js": "1.4.2",
     "pdfjs-dist": "4.2.67"
   }
 }

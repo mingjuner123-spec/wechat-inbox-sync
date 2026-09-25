@@ -1,5 +1,7 @@
 'use strict';
 
+const { toSimplifiedChinese } = require('./transcription-quality-utils');
+
 const MAX_SEMANTIC_TITLE_LENGTH = 36;
 const GENERIC_TRANSCRIPTION_TITLE = /^(?:抖音|视频号|B站|哔哩哔哩|小宇宙|网页|音频|视频|录音|文件)?[-\s]*(?:口播文案|音频文案|视频文案|转写文案|转写内容)$/i;
 const SHORT_GREETING = /^(?:大家好|你好|您好|哈喽|hello|嗨|嗯+|啊+|呃+)$/i;
@@ -80,7 +82,7 @@ function getTranscriptionSourcePrefix(record) {
 }
 
 function getMeaningfulTranscriptSentence(transcription) {
-  const sentences = String(transcription || '')
+  const sentences = toSimplifiedChinese(transcription || '')
     .replace(/\s+/g, ' ')
     .split(/[。！？!?；;\n]+/)
     .map((item) => cleanTitlePart(item))

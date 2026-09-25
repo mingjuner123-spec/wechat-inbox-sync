@@ -1065,6 +1065,7 @@ assert.strictEqual(
     code: 'OBTRYTEST1',
   }),
 );
+assert.ok(generatedPluginMainSource.includes('opencc-data'), 'bundled OpenCC dictionary attribution must ship with the plugin');
 assert.strictEqual(pluginMainSource.includes('selectors.flatMap'), false);
 assert.strictEqual(pluginMainSource.includes("querySelectorAll('*')"), false);
 assert.ok(pluginMainSource.includes('async function renderFeishuUrlToSimpleMarkdownWithElectron'));
@@ -1168,6 +1169,27 @@ assert.strictEqual(typeof helpers.parseDoubaoAsrResult, 'function');
 assert.strictEqual(typeof helpers.parseDoubaoAsrTaskState, 'function');
 assert.strictEqual(typeof helpers.getTranscriptionQualityIssue, 'function');
 assert.strictEqual(typeof helpers.assertUsableTranscription, 'function');
+const traditionalTranscriptSample = '這是一段繁體中文語音辨識測試。';
+const simplifiedTranscriptSample = '这是一段繁体中文语音辨识测试。';
+assert.strictEqual(helpers.assertUsableTranscription(traditionalTranscriptSample, '测试转写'), simplifiedTranscriptSample);
+assert.ok(helpers.buildFileMarkdownBody({
+  type: 'file',
+  content: 'speech.mp3',
+  metadata: { transcriptionStatus: 'success', transcription: traditionalTranscriptSample },
+}).includes(simplifiedTranscriptSample), '文件转写正文应统一为简体');
+assert.ok(helpers.buildMarkdownForRecord({
+  record: { type: 'voice', content: 'speech.mp3', metadata: { transcriptionStatus: 'success', transcription: traditionalTranscriptSample } },
+  title: '语音转写',
+  syncedAt: '2026-09-24T00:00:00.000Z',
+}).includes(simplifiedTranscriptSample), '录音笔记正文应统一为简体');
+assert.strictEqual(
+  require('../obsidian-plugin/wechat-inbox-sync/src/transcription-note-title-utils').buildTranscriptionNoteIdentity({
+    type: 'voice',
+    metadata: { transcriptionStatus: 'success', transcription: traditionalTranscriptSample },
+  }).displayTitle,
+  '这是一段繁体中文语音辨识测试',
+  '从转写提取的笔记标题也应统一为简体',
+);
 assert.strictEqual(
   helpers.getTranscriptionQualityIssue(Array(12).fill('我们现在就来看看我们的临化设备').join('\n')),
   'repeated-lines',
@@ -6836,6 +6858,21 @@ const transcriptMarkdown = helpers.buildAudioTranscriptMarkdown({
 });
 assert.ok(transcriptMarkdown.includes('## 口播/音频文案'));
 assert.ok(transcriptMarkdown.includes('这是视频里真正说出来的内容。'));
+assert.strictEqual(
+  helpers.assertUsableTranscription('這是一段繁體中文語音辨識測試。'),
+  '这是一段繁体中文语音辨识测试。',
+);
+const traditionalTranscriptMetadata = helpers.buildTranscriptOnlyMetadata({}, {
+  transcription: '這是一段繁體中文語音辨識測試。',
+});
+assert.strictEqual(traditionalTranscriptMetadata.transcription, '这是一段繁体中文语音辨识测试。');
+const traditionalTranscriptMarkdown = helpers.buildAudioTranscriptMarkdown({
+  url: 'https://www.bilibili.com/video/BV123',
+  transcription: '這是一段繁體中文語音辨識測試。',
+  transcriptionStatus: 'success',
+});
+assert.ok(traditionalTranscriptMarkdown.includes('这是一段繁体中文语音辨识测试。'));
+assert.strictEqual(traditionalTranscriptMarkdown.includes('這'), false);
 assert.strictEqual(transcriptMarkdown.includes('## 标题'), false);
 assert.strictEqual(transcriptMarkdown.includes('## 标签'), false);
 assert.strictEqual(transcriptMarkdown.includes('原始链接：'), false);
