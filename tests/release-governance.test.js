@@ -1472,6 +1472,7 @@ test('release source guard accepts a current version tag at current remote main'
 test('release source guard requires an annotated tag object', () => {
   const { parseAnnotatedTagTypeOutput } = loadReleaseSourceGuardCore();
 
+  assert.equal(parseAnnotatedTagTypeOutput('tag'), 'tag');
   assert.equal(parseAnnotatedTagTypeOutput('tag\n'), 'tag');
   assert.throws(
     () => parseAnnotatedTagTypeOutput('commit\n'),
@@ -1591,6 +1592,47 @@ test('release source guard CLI integrates with real local Git repositories', asy
     const result = runFixtureGuard(fixture, ['--tag', currentReleaseVersion]);
 
     assertNormalExit(result, 'fixture tag guard');
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /Tag source guard passed/i);
+  });
+
+  await t.test('release workflow can restore an annotated tag ref after checkout peels it', (t) => {
+    const fixture = createReleaseGuardFixture(t);
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['tag', '--annotate', currentReleaseVersion, '--message', 'fixture annotated release'],
+      'create fixture annotated tag for fetch restoration',
+    );
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['push', 'origin', `refs/tags/${currentReleaseVersion}`],
+      'push fixture annotated tag',
+    );
+    const peeledCommit = runFixtureGit(
+      fixture.repositoryPath,
+      ['rev-parse', `${currentReleaseVersion}^{}`],
+      'resolve fixture annotated tag commit',
+    ).stdout.trim();
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['update-ref', `refs/tags/${currentReleaseVersion}`, peeledCommit],
+      'simulate checkout peeling the local tag ref',
+    );
+    assert.equal(
+      runFixtureGit(fixture.repositoryPath, ['cat-file', '-t', `refs/tags/${currentReleaseVersion}`], 'inspect peeled local ref').stdout.trim(),
+      'commit',
+    );
+    runFixtureGit(
+      fixture.repositoryPath,
+      ['fetch', '--force', '--no-tags', 'origin', `refs/tags/${currentReleaseVersion}:refs/tags/${currentReleaseVersion}`],
+      'restore exact remote annotated tag ref',
+    );
+    assert.equal(
+      runFixtureGit(fixture.repositoryPath, ['cat-file', '-t', `refs/tags/${currentReleaseVersion}`], 'inspect restored tag ref').stdout.trim(),
+      'tag',
+    );
+    const result = runFixtureGuard(fixture, ['--tag', currentReleaseVersion]);
+    assertNormalExit(result, 'fixture restored annotated tag guard');
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     assert.match(result.stdout, /Tag source guard passed/i);
   });
@@ -1807,6 +1849,10 @@ test('tag releases enforce all governance gates before publication', () => {
   const identifyIndex = runs.findIndex((run) => (
     /\bgit rev-parse\b/.test(run) && /refs\/remotes\/origin\/main|origin\/main/.test(run)
   ));
+  const restoreTagIndex = runs.findIndex((run) => (
+    /\bgit fetch --force --no-tags origin/.test(run)
+      && /refs\/tags\/\$TAG_NAME:refs\/tags\/\$TAG_NAME/.test(run)
+  ));
   const guardIndex = runs.findIndex((run) => (
     executableCommandPattern('node scripts/release-source-guard.js --tag "$TAG_NAME"').test(run)
   ));
@@ -1821,12 +1867,15 @@ test('tag releases enforce all governance gates before publication', () => {
   const publishIndex = runs.findIndex((run) => /\bgh release (?:create|upload)\b/.test(run));
   assert.notEqual(fetchIndex, -1, 'release workflow must fetch origin/main explicitly');
   assert.notEqual(identifyIndex, -1, 'release workflow must identify fetched origin/main');
+  assert.notEqual(restoreTagIndex, -1, 'release workflow must restore the exact remote tag object after checkout');
   assert.notEqual(guardIndex, -1, 'release workflow must execute the main-equality release-source guard');
   assert.notEqual(accessPolicyIndex, -1, 'release workflow must execute the component access-policy verifier');
   assert.notEqual(packageIndex, -1, 'release workflow must preserve the complete plugin release package');
   assert.notEqual(publishIndex, -1, 'release workflow must contain a GitHub Release publication step');
   assert.ok(fetchIndex < identifyIndex, 'origin/main must be fetched before it is identified');
   assert.ok(identifyIndex < guardIndex, 'origin/main must be identified before the release-source guard');
+  assert.ok(identifyIndex < restoreTagIndex, 'the current main and remote release tag must be fetched before validation');
+  assert.ok(restoreTagIndex < guardIndex, 'the exact remote release tag object must be restored before validation');
   assert.ok(guardIndex < publishIndex, 'release-source guard must execute before GitHub Release publication');
   assert.ok(accessPolicyIndex < publishIndex, 'component access-policy verification must execute before GitHub Release publication');
   assert.ok(packageIndex < publishIndex, 'release assets must be packaged before GitHub Release publication');

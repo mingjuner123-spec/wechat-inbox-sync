@@ -29,7 +29,7 @@ function parseCommitOutput(output, label = 'Git commit') {
 
 function parseAnnotatedTagTypeOutput(output) {
   requireString(output, 'local tag type');
-  if (output !== 'tag\n' && output !== 'tag\r\n') {
+  if (output !== 'tag' && output !== 'tag\n' && output !== 'tag\r\n') {
     throw new Error('local release tag must be an annotated Git tag object');
   }
   return 'tag';
