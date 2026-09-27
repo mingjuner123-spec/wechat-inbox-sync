@@ -28,4 +28,18 @@ for (const failure of [empty, wrong]) {
 }
 assert.equal(result.remainingWindows, 1, 'only the local harness host may remain');
 assert.deepEqual(visible.urls, valid.urls, 'hidden timer throttling must not delay media requests beyond the extraction budget');
+const [hydrated, challenge, iframeChallenge, sessionFallback, harmlessFrames] = result.hydration;
+assert.equal(hydrated.transcriptionCalls, 1, 'complete hydrate entry must reach transcription without poisoning the shared session');
+assert.equal(hydrated.state.warmups, 0, 'no API document warmup before or after browser success');
+assert.equal(hydrated.metadata.transcriptionStatus, 'success');
+assert.equal(challenge.transcriptionCalls, 0);
+assert.equal(challenge.localResolverCalls, 0, 'known verification pages must not continue to yt-dlp');
+assert.equal(challenge.state.warmups, 0);
+assert.equal(challenge.metadata.mediaResolutionDiagnostic.challengeDetected, true);
+assert.equal(iframeChallenge.transcriptionCalls, 0, 'visible trusted verification iframe is a challenge even without a challenge title');
+assert.equal(iframeChallenge.localResolverCalls, 0);
+assert.equal(iframeChallenge.metadata.mediaResolutionDiagnostic.challengeDetected, true);
+assert.equal(sessionFallback.transcriptionCalls, 1, 'a safe session API fallback remains available after a browser returns no media');
+assert.equal(sessionFallback.state.warmups, 0);
+assert.equal(harmlessFrames.transcriptionCalls, 1, 'invisible trusted frames and visible untrusted frames must not block ordinary videos');
 console.log('PASS: real remote network-only media, HTTP 200 empty body, wrong target, delayed timer request, window cleanup');

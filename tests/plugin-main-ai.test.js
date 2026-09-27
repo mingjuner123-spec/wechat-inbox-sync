@@ -7488,7 +7488,8 @@ async function runAsyncHydrationTests() {
     'https://v11-weba.douyinvod.com/session-target/?mime_type=video_mp4',
   ]);
   assert.strictEqual(sessionFetchCalls[0].options.credentials, 'include');
-  assert.strictEqual(sessionFetchCalls.length, 3);
+  assert.strictEqual(sessionFetchCalls.length, 2);
+  assert.ok(sessionFetchCalls.every(call => call.url.includes('/aweme/v1/web/aweme/detail/')), 'never warm browser cookies with a document API request');
 
   const sessionResolutionFetchCalls = [];
   const sessionResolution = await helpers.fetchDouyinMediaResolutionWithSession({
@@ -7546,7 +7547,7 @@ async function runAsyncHydrationTests() {
   );
   assert.strictEqual(sessionResolution.detail.statistics.digg_count, 12);
   assert.strictEqual(sessionResolution.detail.statistics.collect_count, 5);
-  assert.strictEqual(sessionResolutionFetchCalls.length, 3);
+  assert.strictEqual(sessionResolutionFetchCalls.length, 2);
 
   const mismatchedSessionMedia = await helpers.fetchDouyinMediaUrlsWithSession({
     pageUrl: 'https://www.douyin.com/video/7644238277092174409',
@@ -8185,17 +8186,21 @@ async function runAsyncHydrationTests() {
   assert.match(preciseDouyinRecord.metadata.markdown, /#萨普神山/);
   assert.strictEqual(preciseDouyinRenderCalled, false);
 
+  assert.strictEqual(helpers.isDouyinChallengeSnapshot({ title: '验证码中间页', text: '加载中' }), true);
+  assert.strictEqual(helpers.isDouyinChallengeSnapshot({ title: '视频', text: '验证码怎么填写教程' }), false);
+  assert.strictEqual(helpers.isDouyinChallengeSnapshot({ verificationFrame: true }), true);
   const sessionFirstPlugin = new PluginClass();
   sessionFirstPlugin.settings = { aiProvider: 'off' };
-  let sessionFirstRenderCalls = 0;
+  let sessionFirstRenderCalls = 0, sessionFirstFetchCalls = 0;
   sessionFirstPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
+    sessionFirstFetchCalls++;
     assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644238277092174409');
     assert.strictEqual(awemeId, '7644238277092174409');
     return ['https://v11-weba.douyinvod.com/session-first/?mime_type=video_mp4'];
   };
   sessionFirstPlugin.renderSocialMediaUrls = async () => {
     sessionFirstRenderCalls += 1;
-    return ['https://v11-weba.douyinvod.com/rendered-recommendation/?mime_type=video_mp4'];
+    return ['https://v11-weba.douyinvod.com/rendered-target/?mime_type=video_mp4'];
   };
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.douyin.com/video/7644238277092174409') return { text: '<html></html>' };
@@ -8220,8 +8225,9 @@ async function runAsyncHydrationTests() {
     content: 'https://www.douyin.com/video/7644238277092174409',
     metadata: { url: 'https://www.douyin.com/video/7644238277092174409' },
   }, '', '', 'Session 优先抖音');
-  assert.strictEqual(sessionFirstRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/session-first/?mime_type=video_mp4');
-  assert.strictEqual(sessionFirstRenderCalls, 0);
+  assert.strictEqual(sessionFirstRecord.metadata.mediaUrl, 'https://v11-weba.douyinvod.com/rendered-target/?mime_type=video_mp4');
+  assert.strictEqual(sessionFirstRenderCalls, 1);
+  assert.strictEqual(sessionFirstFetchCalls, 0, 'successful browser must not prewarm or enrich through shared-session APIs');
 
   const sessionFallbackPlugin = new PluginClass();
   sessionFallbackPlugin.settings = { aiProvider: 'off' };
