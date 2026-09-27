@@ -290,6 +290,108 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/xiaohongshu-runtime-snapshot.js
+var require_xiaohongshu_runtime_snapshot = __commonJS({
+  "src/xiaohongshu-runtime-snapshot.js"(exports2, module2) {
+    "use strict";
+    var READ_TARGET_STATE = String.raw`(function (expectedId) {
+  try {
+    var page = new URL(String(location.href || ''));
+    if (page.protocol !== 'https:' || page.username || page.password
+      || (page.port && page.port !== '443')
+      || !/(^|\.)xiaohongshu\.com$/i.test(page.hostname)
+      || /\/(?:login|verify|captcha)(?:\/|$)/i.test(page.pathname)) return '';
+    var route = page.pathname.match(/\/(?:explore|discovery\/item|item)\/([0-9a-z_-]{6,})(?:\/|$)/i);
+    var actualId = route ? route[1] : '';
+    if (!actualId) {
+      for (var queryKey of ['note_id', 'noteId', 'item_id', 'itemId']) {
+        var queryId = page.searchParams.get(queryKey) || '';
+        if (/^[0-9a-z_-]{6,}$/i.test(queryId)) { actualId = queryId; break; }
+      }
+    }
+    var targetId = String(expectedId || actualId).toLowerCase();
+    if (!targetId || (actualId && targetId !== actualId.toLowerCase())
+      || (!actualId && page.pathname !== '/')) return '';
+    // A shortlink/SPA may finish at the official root. In that case the caller
+    // must already know the note identity and the map below must match it.
+    var state = window.__INITIAL_STATE__;
+    if (!state || typeof state !== 'object') return '';
+    var noteState = state.note;
+    var maps = [noteState && noteState.noteDetailMap, state.noteDetailMap];
+    var note = null;
+    for (var map of maps) {
+      if (!map || typeof map !== 'object') continue;
+      var entry = map[actualId] || map[targetId];
+      if (entry && typeof entry === 'object') {
+        note = entry.note || entry;
+        break;
+      }
+    }
+    if (!note && noteState && typeof noteState === 'object') {
+      var directId = String(noteState.noteId || noteState.note_id || '').toLowerCase();
+      if (directId === targetId) note = noteState;
+    }
+    if (!note || typeof note !== 'object') return '';
+    for (var idKey of ['noteId', 'note_id']) {
+      if (note[idKey] && String(note[idKey]).toLowerCase() !== targetId) return '';
+    }
+    // Export only content of this note, never the account/session or feed trees.
+    var fields = ['noteId', 'note_id', 'title', 'displayTitle', 'display_title',
+      'desc', 'description', 'noteContent', 'note_content', 'content',
+      'type', 'noteType', 'note_type', 'contentType', 'content_type',
+      'video', 'videoInfo', 'video_info', 'videoUrl', 'video_url',
+      'imageList', 'image_list', 'tagList', 'tag_list', 'interactInfo', 'interact_info'];
+    var nodes = 0;
+    var characters = 0;
+    var seen = new Set();
+    var copy = function (value, depth) {
+      if (++nodes > 4000 || depth > 12) throw new Error('state budget');
+      if (typeof value === 'string') {
+        characters += value.length;
+        if (value.length > 100000 || characters > 500000) throw new Error('state budget');
+        return value;
+      }
+      if (value === null || typeof value === 'boolean') return value;
+      if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+      if (!value || typeof value !== 'object' || seen.has(value)) return undefined;
+      seen.add(value);
+      var output = Array.isArray(value) ? [] : Object.create(null);
+      var keys = Object.keys(value);
+      if (keys.length > 1000) throw new Error('state budget');
+      for (var key of keys) {
+        if (/^(?:__proto__|constructor|prototype|toJSON|user|userInfo|account|session|cookie|authorization|token|xsec_token|xsecToken|access_token|refresh_token|password|secret)$/i.test(key)) continue;
+        var child = copy(value[key], depth + 1);
+        if (child !== undefined) output[key] = child;
+      }
+      seen.delete(value);
+      return output;
+    };
+    var selected = Object.create(null);
+    for (var field of fields) {
+      var copied = copy(note[field], 0);
+      if (copied !== undefined) selected[field] = copied;
+    }
+    var author = note.user || note.userInfo;
+    if (author && typeof author === 'object') {
+      selected.user = { nickname: copy(author.nickname || author.nickName || author.userName || '', 0) };
+    }
+    var detailMap = Object.create(null);
+    detailMap[targetId] = { note: selected };
+    var json = JSON.stringify({ note: { noteDetailMap: detailMap } });
+    if (json.length > 600000) return '';
+    return '<script type="application/json" data-wechat-inbox-runtime="note">'
+      + json.replace(/</g, '\\u003c') + '</script>';
+  } catch (_) { return ''; }
+})`;
+    function getXiaohongshuRuntimeSnapshotExpression2(expectedId = "") {
+      const id = String(expectedId || "");
+      return `${READ_TARGET_STATE}(${JSON.stringify(id)})`;
+    }
+    __name(getXiaohongshuRuntimeSnapshotExpression2, "getXiaohongshuRuntimeSnapshotExpression");
+    module2.exports = { getXiaohongshuRuntimeSnapshotExpression: getXiaohongshuRuntimeSnapshotExpression2 };
+  }
+});
+
 // src/wechat-article-utils.js
 var require_wechat_article_utils = __commonJS({
   "src/wechat-article-utils.js"(exports2, module2) {
@@ -11832,6 +11934,7 @@ var require_transcription_note_title_utils = __commonJS({
 });
 
 // src/main.js
+var { getXiaohongshuRuntimeSnapshotExpression } = require_xiaohongshu_runtime_snapshot();
 var { getWechatPlaceholderRecoveryUrl } = require_wechat_placeholder_utils();
 var douyinBrowserSafety = require_douyin_browser_safety();
 var { createAutoSyncController } = require_auto_sync_controller();
@@ -12084,7 +12187,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.169";
+var PLUGIN_RUNTIME_VERSION = "1.3.170";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -17991,6 +18094,7 @@ function extractXiaohongshuPrimaryNotePayload(html, url = "") {
           imageUrls,
           videoUrl,
           isVideoNote,
+          declaredNoteType: String(value.noteType || value.note_type || value.type || value.contentType || value.content_type || "").trim().toLowerCase(),
           author,
           socialMetrics: buildSocialMetrics(value)
         });
@@ -18137,14 +18241,23 @@ __name(classifyXiaohongshuCommentPage, "classifyXiaohongshuCommentPage");
 function selectXiaohongshuBrowserSnapshot(previous = null, current = null, expectedUrl = "") {
   const prior = previous && typeof previous === "object" ? previous : {};
   const candidate = current && typeof current === "object" ? current : {};
-  const currentHtml = String(candidate.html || "");
+  let currentHtml = String(candidate.html || "");
   const currentUrl = String(candidate.url || "");
   const identityUrl = resolveXiaohongshuIdentityUrl([
     expectedUrl,
     prior.identityUrl,
     currentUrl
   ], currentHtml);
-  const matched = isTrustedXiaohongshuCookieUrl(currentUrl) && Boolean(identityUrl) && shouldStopWaitingForXiaohongshuContent(currentHtml, identityUrl);
+  const runtimeHtml = String(candidate.runtimeHtml || "");
+  const expectedId = getXiaohongshuTargetNoteId(identityUrl).toLowerCase();
+  const currentId = getXiaohongshuTargetNoteId(currentUrl).toLowerCase();
+  const runtimeRouteMatches = currentId ? currentId === expectedId : isTrustedXiaohongshuCookieUrl(currentUrl) && new URL(currentUrl).pathname === "/";
+  const runtimePrimary = extractXiaohongshuPrimaryNotePayload(runtimeHtml, identityUrl);
+  const staticPrimary = extractXiaohongshuPrimaryNotePayload(currentHtml, identityUrl);
+  if (!candidate.accessWall && expectedId && runtimeRouteMatches && runtimePrimary.matched && (runtimePrimary.videoUrl || !staticPrimary.videoUrl)) {
+    currentHtml = runtimeHtml;
+  }
+  const matched = !candidate.accessWall && isTrustedXiaohongshuCookieUrl(currentUrl) && Boolean(identityUrl) && shouldStopWaitingForXiaohongshuContent(currentHtml, identityUrl);
   if (matched) {
     return {
       html: currentHtml,
@@ -23529,6 +23642,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         waitForPromiseWithAbort(win.webContents.executeJavaScript(`
           (() => ({
             html: document.documentElement ? document.documentElement.outerHTML : '',
+            runtimeHtml: ${getXiaohongshuRuntimeSnapshotExpression(getXiaohongshuTargetNoteId(observedIdentityUrl || options.expectedUrl || url))},
             url: String(location.href || ''),
             accessWall: ${getXiaohongshuAccessWallScript()},
           }))()
@@ -23543,7 +23657,10 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         current,
         observedIdentityUrl || options.expectedUrl || url
       );
-      if (payload.matched) break;
+      if (payload.matched) {
+        const primary = extractXiaohongshuPrimaryNotePayload(payload.html, payload.identityUrl);
+        if (primary.videoUrl || !primary.isVideoNote && primary.declaredNoteType === "normal") break;
+      }
       const remainingAfterSnapshotMs = deadlineAt - Date.now();
       if (remainingAfterSnapshotMs <= 0) {
         throw createBrowserTaskTimeoutError(
