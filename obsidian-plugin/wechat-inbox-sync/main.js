@@ -12084,7 +12084,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.168";
+var PLUGIN_RUNTIME_VERSION = "1.3.169";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -17091,6 +17091,9 @@ function installXiaohongshuLoginWindowGuards(webContents) {
 }
 __name(installXiaohongshuLoginWindowGuards, "installXiaohongshuLoginWindowGuards");
 function installDouyinLoginWindowGuards(webContents) {
+  if (webContents && typeof webContents.removeAllListeners === "function") {
+    for (const name of ["will-navigate", "will-frame-navigate", "will-redirect"]) webContents.removeAllListeners(name);
+  }
   installSocialLoginWindowGuards(webContents, "douyin");
 }
 __name(installDouyinLoginWindowGuards, "installDouyinLoginWindowGuards");
@@ -23024,7 +23027,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   };
   const capturedRequests = [];
   const captureDouyinState = isDouyinUrl(url);
-  const targetDouyinAwemeId = isDouyinUrl(url) ? extractDouyinAwemeId(url) : "";
+  const targetDouyinAwemeId = isDouyinUrl(url) ? extractDouyinAwemeId(url) || (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || "")) ? String(options.targetDouyinAwemeId) : "") : "";
   const blockXiaohongshuCommentRequests = isXiaohongshuUrl(url) && options.includeComments === false;
   const browserSession = win.webContents && win.webContents.session || wechatSession;
   const installedWebRequestHandlers = [];
@@ -23032,8 +23035,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   const debuggerResponseRequests = /* @__PURE__ */ new Map();
   const debuggerBodyTasks = [];
   const debuggerMediaUrls = [];
+  let resolveVerifiedDouyinMedia;
+  const verifiedDouyinMedia = new Promise((resolve) => {
+    resolveVerifiedDouyinMedia = resolve;
+  });
   let debuggerAttached = false;
   let debuggerMessageHandler = null;
+  let debuggerSetup = Promise.resolve();
   const captureWebRequestDetails = /* @__PURE__ */ __name((details) => {
     if (captureDouyinState && !douyinBrowserSafety.ownsRequest(details, win.webContents)) return;
     if (isXiaohongshuExtractionWindow && Number(details && details.statusCode) >= 400) {
@@ -23108,9 +23116,6 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         debuggerApi.attach("1.3");
         debuggerAttached = true;
       }
-      const enabled = debuggerApi.sendCommand("Network.enable", { maxTotalBufferSize: douyinBrowserSafety.LIMITS.totalBytes, maxResourceBufferSize: douyinBrowserSafety.LIMITS.responseBytes });
-      await douyinGuard.optional(enabled);
-      douyinGuard.emit({ debuggerStatus: "ready" });
       debuggerMessageHandler = /* @__PURE__ */ __name((_event, method, params = {}) => {
         try {
           if (method === "Network.responseReceived") {
@@ -23133,6 +23138,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
                 if (!responseBudget.accept(body)) return;
                 const text = body && body.base64Encoded ? Buffer.from(String(body.body || ""), "base64").toString("utf8") : String(body && body.body || "");
                 extractDouyinMediaUrlsForAweme(text, targetDouyinAwemeId).forEach((mediaUrl) => pushUniqueMediaUrl(debuggerMediaUrls, mediaUrl));
+                if (debuggerMediaUrls.length) resolveVerifiedDouyinMedia();
               } catch (error) {
               } finally {
                 responseBudget.release();
@@ -23143,7 +23149,33 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         }
       }, "debuggerMessageHandler");
       debuggerApi.on("message", debuggerMessageHandler);
+      const enabled = debuggerApi.sendCommand("Network.enable", { maxTotalBufferSize: douyinBrowserSafety.LIMITS.totalBytes, maxResourceBufferSize: douyinBrowserSafety.LIMITS.responseBytes });
+      debuggerSetup = douyinGuard.optional(enabled).then(() => {
+        douyinGuard.emit({ debuggerStatus: "ready" });
+      }, (error) => {
+        douyinGuard.emit({ debuggerStatus: error.code === "DOUYIN_DEBUGGER_TIMEOUT" ? "timeout" : "failed" });
+        if (debuggerMessageHandler) {
+          try {
+            debuggerApi.removeListener("message", debuggerMessageHandler);
+          } catch (_) {
+          }
+        }
+        debuggerMessageHandler = null;
+        if (debuggerAttached) {
+          try {
+            debuggerApi.detach();
+          } catch (_) {
+          }
+          debuggerAttached = false;
+        }
+      });
     } catch (error) {
+      if (debuggerMessageHandler) {
+        try {
+          debuggerApi.removeListener("message", debuggerMessageHandler);
+        } catch (_) {
+        }
+      }
       debuggerMessageHandler = null;
       douyinGuard.emit({ debuggerStatus: error.code === "DOUYIN_DEBUGGER_TIMEOUT" ? "timeout" : "failed" });
       if (debuggerAttached) {
@@ -23168,13 +23200,23 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     if (!beginBestEffortBrowserLoad(win, url)) {
       throw new Error("隐藏浏览器未能开始加载抖音页面");
     }
-    await (douyinGuard ? douyinGuard.run(loaded, "page-load") : loaded);
+    await (douyinGuard ? douyinGuard.run(Promise.all([loaded, debuggerSetup]), "page-load") : loaded);
     throwIfAborted(options.signal);
+    if (captureDouyinState && targetDouyinAwemeId) {
+      await douyinGuard.run(waitForBrowserTasksWithin(debuggerBodyTasks, 1500), "response-extraction");
+      throwIfAborted(options.signal);
+      if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
+    }
     if (captureDouyinState) {
-      const challengeDetected = await douyinGuard.run(waitAndRetryDouyinChallengePage(win.webContents, {
-        signal: options.signal,
-        retryAllowed: options.retryDouyinChallenge === true
-      }), "page-validation");
+      const challengeDetected = await douyinGuard.run(Promise.race([
+        waitAndRetryDouyinChallengePage(win.webContents, {
+          signal: options.signal,
+          retryAllowed: options.retryDouyinChallenge === true
+        }),
+        verifiedDouyinMedia.then(() => false)
+      ]), "page-validation");
+      throwIfAborted(options.signal);
+      if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
       if (challengeDetected) {
         const error = new Error("抖音当前会话需要安全验证");
         error.code = "DOUYIN_CHALLENGE";
@@ -23318,7 +23360,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       mediaExtractionTask,
       XIAOHONGSHU_CONTENT_DEADLINE_MS,
       "xiaohongshu-media-extraction"
-    ) : douyinGuard ? await douyinGuard.run(mediaExtractionTask, "media-extraction") : await mediaExtractionTask;
+    ) : douyinGuard ? await douyinGuard.run(Promise.race([mediaExtractionTask, verifiedDouyinMedia.then(() => null)]), "media-extraction") : await mediaExtractionTask;
+    throwIfAborted(options.signal);
+    if (captureDouyinState && debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
     if (isXiaohongshuExtractionWindow) {
       recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
       appendXiaohongshuBrowserDiagnostic(options, {
@@ -29373,7 +29417,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         try {
           candidates.push(...await this.renderSocialMediaUrls(fallbackRequest.url, {
             timeoutMs: 18e3,
-            strictDouyinTarget: fallbackRequest.strictDouyinTarget
+            strictDouyinTarget: fallbackRequest.strictDouyinTarget,
+            targetDouyinAwemeId: browserRequest.awemeId
           }));
         } catch (error) {
         }
@@ -29397,6 +29442,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         attempt.update(event);
         (_a = options.onDouyinBrowserDiagnostic) == null ? void 0 : _a.call(options, event);
       }, "onDouyinBrowserDiagnostic") });
+      if (!Array.isArray(result) || result.length === 0) {
+        throw Object.assign(new Error("抖音网页已加载，但未获取到目标作品的音视频地址"), { code: "DOUYIN_NO_MEDIA" });
+      }
       attempt.finish();
       return result;
     } catch (error) {
@@ -32220,7 +32268,8 @@ ${finalized.markdown}
                   signal,
                   strictDouyinTarget: browserRequest.strictDouyinTarget,
                   retryDouyinChallenge: false,
-                  diagnosticAttemptId: douyinAttemptId
+                  diagnosticAttemptId: douyinAttemptId,
+                  targetDouyinAwemeId: douyinAwemeId
                 });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
