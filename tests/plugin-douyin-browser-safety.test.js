@@ -38,7 +38,7 @@ class Window extends EventEmitter {
         isAttached: () => attached, attach: () => { attached = true; }, detach: () => { attached = false; },
         sendCommand: (command) => {
           if (command === 'Network.enable') {
-            assert.equal(api.listenerCount('message'), 1, 'listener precedes enabling capture');
+            assert.equal(api.listenerCount('message'), 2, 'capture and diagnostic listeners precede enabling capture');
             if (rejectEnable) return Promise.reject(Error('enable rejected'));
             return new Promise(resolve => { this.enableAfterNavigation = resolve; if (earlyResponse) this.emitNetwork(); });
           }

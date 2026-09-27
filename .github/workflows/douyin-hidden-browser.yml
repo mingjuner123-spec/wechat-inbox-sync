@@ -1,0 +1,39 @@
+name: Douyin hidden browser regression
+
+on:
+  pull_request:
+    paths:
+      - 'obsidian-plugin/wechat-inbox-sync/**'
+      - 'tests/plugin-douyin-remote-integration.test.js'
+      - 'tests/fixtures/douyin-remote/**'
+      - '.github/workflows/douyin-hidden-browser.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'obsidian-plugin/wechat-inbox-sync/**'
+      - 'tests/plugin-douyin-remote-integration.test.js'
+      - 'tests/fixtures/douyin-remote/**'
+      - '.github/workflows/douyin-hidden-browser.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  renderer-remote:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned isolated browser test runtime
+        shell: pwsh
+        run: npm install --prefix .artifacts/douyin-remote-runtime electron@39.8.3 @electron/remote@2.1.3 --no-save --no-audit --no-fund
+      - name: Exercise the packaged plugin through real renderer IPC
+        shell: pwsh
+        run: |
+          $env:DOUYIN_TEST_ELECTRON = (Resolve-Path .artifacts/douyin-remote-runtime/node_modules/electron/dist/electron.exe).Path
+          $env:DOUYIN_TEST_REMOTE = (Resolve-Path .artifacts/douyin-remote-runtime/node_modules/@electron/remote).Path
+          node tests/plugin-douyin-remote-integration.test.js

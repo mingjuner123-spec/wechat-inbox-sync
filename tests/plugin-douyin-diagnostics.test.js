@@ -29,6 +29,35 @@ function fixture() {
 async function run() {
   let cases = 0;
   try {
+    {
+      const { EventEmitter } = require('node:events');
+      const safety = require('../obsidian-plugin/wechat-inbox-sync/src/douyin-browser-safety');
+      const contents = new EventEmitter(), debuggerApi = new EventEmitter(), events = [];
+      let throttled = true;
+      contents.debugger = debuggerApi;
+      contents.setBackgroundThrottling = value => { throttled = value; };
+      contents.setAudioMuted = value => { assert.equal(value, true); };
+      const guard = safety.attachGuard({ webContents: contents }, { onDiagnostic: event => events.push(event) });
+      assert.equal(throttled, false);
+      debuggerApi.emit('message', {}, 'Network.responseReceived', { type: 'Document', response: { url: 'https://private.invalid/secret', body: 'private' } });
+      debuggerApi.emit('message', {}, 'Network.loadingFinished', { requestId: 'private-id' });
+      debuggerApi.emit('message', {}, 'Network.loadingFailed', { errorText: 'private-error' });
+      assert.equal(events.length, 0, 'network events must not cause per-event disk persistence');
+      guard.close(); guard.close();
+      assert.equal(events.length, 1);
+      assert.equal(debuggerApi.listenerCount('message'), 0);
+      assert.equal(contents.listenerCount('did-fail-load'), 0);
+      const clean = safety.sanitize(events[0]);
+      assert.equal(clean.debuggerMessages, 3);
+      assert.equal(clean.responseEvents, 1);
+      assert.equal(clean.documentResponses, 1);
+      assert.equal(clean.loadingFinishedEvents, 1);
+      assert.equal(clean.loadingFailedEvents, 1);
+      assert.equal(clean.responseReads, 0, 'raw events are distinct from response body reads');
+      assert.equal(clean.backgroundThrottlingDisabled, true);
+      assert.doesNotMatch(JSON.stringify(clean), /private|secret/);
+      cases++;
+    }
     for (const [text, code] of [
       ['Fresh cookies (not necessarily logged in) are needed', 'DOUYIN_COOKIE_REFRESH_REQUIRED'],
       ['captcha required', 'DOUYIN_CHALLENGE'], ['login required', 'DOUYIN_LOGIN_REQUIRED'],

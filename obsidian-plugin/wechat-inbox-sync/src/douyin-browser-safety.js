@@ -20,6 +20,7 @@ function sanitize(value = {}) {
   result.httpStatus = number(value.httpStatus);
   result.domReady = value.domReady === true;
   result.pageLoaded = value.pageLoaded === true;
+  result.backgroundThrottlingDisabled = value.backgroundThrottlingDisabled === true;
   for (const key of ['startedAt', 'updatedAt', 'finishedAt']) if (Number.isFinite(Date.parse(value[key]))) result[key] = new Date(value[key]).toISOString();
   result.stage = STAGES.has(value.stage) ? value.stage : 'created';
   result.outcome = OUTCOMES.has(value.outcome) ? value.outcome : 'running';
@@ -29,7 +30,7 @@ function sanitize(value = {}) {
   result.electron = version(value.electron);
   result.chromium = version(value.chromium);
   result.runtimeVersion = version(value.runtimeVersion);
-  for (const key of ['durationMs', 'blockedMedia', 'responseReads', 'responseBytes', 'droppedResponses', 'freeMemoryBytesBefore']) result[key] = number(value[key]);
+  for (const key of ['durationMs', 'blockedMedia', 'responseReads', 'responseBytes', 'droppedResponses', 'freeMemoryBytesBefore', 'debuggerMessages', 'responseEvents', 'documentResponses', 'loadingFinishedEvents', 'loadingFailedEvents']) result[key] = number(value[key]);
   return result;
 }
 
@@ -82,6 +83,28 @@ function mediaResponse(details) {
 
 function attachGuard(win, { signal, onDiagnostic = () => {}, timeoutMs = LIMITS.timeoutMs } = {}) {
   const contents = win.webContents;
+  // This is a dedicated, short-lived extraction window. A hidden document must
+  // still schedule its timers within the extraction deadline.
+  // Audio mute, media-byte blocking and the task deadline remain independent.
+  let backgroundThrottlingDisabled = false;
+  try {
+    if (typeof contents.setBackgroundThrottling === 'function') {
+      contents.setBackgroundThrottling(false);
+      backgroundThrottlingDisabled = true;
+    }
+  } catch (_) { /* Older hosts retain bounded extraction and report the capability. */ }
+  const network = { debuggerMessages: 0, responseEvents: 0, documentResponses: 0, loadingFinishedEvents: 0, loadingFailedEvents: 0 };
+  const onDebuggerMessage = (_event, method, params = {}) => {
+    network.debuggerMessages++;
+    if (method === 'Network.responseReceived') {
+      network.responseEvents++;
+      if (params && params.type === 'Document') network.documentResponses++;
+    }
+    if (method === 'Network.loadingFinished') network.loadingFinishedEvents++;
+    if (method === 'Network.loadingFailed') network.loadingFailedEvents++;
+  };
+  const debuggerApi = contents.debugger;
+  try { if (debuggerApi && typeof debuggerApi.on === 'function') debuggerApi.on('message', onDebuggerMessage); } catch (_) {}
   let failure, rejectFailure, closed = false;
   const failed = new Promise((_, reject) => { rejectFailure = reject; });
   failed.catch(() => {});
@@ -135,8 +158,13 @@ function attachGuard(win, { signal, onDiagnostic = () => {}, timeoutMs = LIMITS.
       return Promise.race([started, failed]);
     },
     close() {
+      if (closed) return;
       closed = true;
+      // One summary only: onDiagnostic persists synchronously. Do not write once
+      // per CDP event or retain URLs, headers, response bodies or request ids.
+      emit({ backgroundThrottlingDisabled, ...network });
       clearTimeout(timer);
+      try { if (debuggerApi && typeof debuggerApi.removeListener === 'function') debuggerApi.removeListener('message', onDebuggerMessage); } catch (_) {}
       signal?.removeEventListener('abort', onAbort);
       contents.removeListener('render-process-gone', onGone);
       contents.removeListener('destroyed', onDestroyed);
