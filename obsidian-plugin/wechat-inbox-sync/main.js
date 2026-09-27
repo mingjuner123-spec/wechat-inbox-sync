@@ -727,6 +727,7 @@ var require_douyin_browser_safety = __commonJS({
       result.httpStatus = number(value.httpStatus);
       result.domReady = value.domReady === true;
       result.pageLoaded = value.pageLoaded === true;
+      result.backgroundThrottlingDisabled = value.backgroundThrottlingDisabled === true;
       for (const key of ["startedAt", "updatedAt", "finishedAt"]) if (Number.isFinite(Date.parse(value[key]))) result[key] = new Date(value[key]).toISOString();
       result.stage = STAGES.has(value.stage) ? value.stage : "created";
       result.outcome = OUTCOMES.has(value.outcome) ? value.outcome : "running";
@@ -736,7 +737,7 @@ var require_douyin_browser_safety = __commonJS({
       result.electron = version(value.electron);
       result.chromium = version(value.chromium);
       result.runtimeVersion = version(value.runtimeVersion);
-      for (const key of ["durationMs", "blockedMedia", "responseReads", "responseBytes", "droppedResponses", "freeMemoryBytesBefore"]) result[key] = number(value[key]);
+      for (const key of ["durationMs", "blockedMedia", "responseReads", "responseBytes", "droppedResponses", "freeMemoryBytesBefore", "debuggerMessages", "responseEvents", "documentResponses", "loadingFinishedEvents", "loadingFailedEvents"]) result[key] = number(value[key]);
       return result;
     }
     __name(sanitize, "sanitize");
@@ -796,6 +797,29 @@ var require_douyin_browser_safety = __commonJS({
     }, "onDiagnostic"), timeoutMs = LIMITS.timeoutMs } = {}) {
       var _a;
       const contents = win.webContents;
+      let backgroundThrottlingDisabled = false;
+      try {
+        if (typeof contents.setBackgroundThrottling === "function") {
+          contents.setBackgroundThrottling(false);
+          backgroundThrottlingDisabled = true;
+        }
+      } catch (_) {
+      }
+      const network = { debuggerMessages: 0, responseEvents: 0, documentResponses: 0, loadingFinishedEvents: 0, loadingFailedEvents: 0 };
+      const onDebuggerMessage = /* @__PURE__ */ __name((_event, method, params = {}) => {
+        network.debuggerMessages++;
+        if (method === "Network.responseReceived") {
+          network.responseEvents++;
+          if (params && params.type === "Document") network.documentResponses++;
+        }
+        if (method === "Network.loadingFinished") network.loadingFinishedEvents++;
+        if (method === "Network.loadingFailed") network.loadingFailedEvents++;
+      }, "onDebuggerMessage");
+      const debuggerApi = contents.debugger;
+      try {
+        if (debuggerApi && typeof debuggerApi.on === "function") debuggerApi.on("message", onDebuggerMessage);
+      } catch (_) {
+      }
       let failure, rejectFailure, closed = false;
       const failed = new Promise((_, reject) => {
         rejectFailure = reject;
@@ -863,8 +887,14 @@ var require_douyin_browser_safety = __commonJS({
           return Promise.race([started, failed]);
         },
         close() {
+          if (closed) return;
           closed = true;
+          emit({ backgroundThrottlingDisabled, ...network });
           clearTimeout(timer);
+          try {
+            if (debuggerApi && typeof debuggerApi.removeListener === "function") debuggerApi.removeListener("message", onDebuggerMessage);
+          } catch (_) {
+          }
           signal == null ? void 0 : signal.removeEventListener("abort", onAbort);
           contents.removeListener("render-process-gone", onGone);
           contents.removeListener("destroyed", onDestroyed);
@@ -12187,7 +12217,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.170";
+var PLUGIN_RUNTIME_VERSION = "1.3.171";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
