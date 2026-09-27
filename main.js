@@ -12217,7 +12217,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.171";
+var PLUGIN_RUNTIME_VERSION = "1.3.172";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -21670,10 +21670,6 @@ async function fetchDouyinMediaResolutionWithSession({
   if (!session || typeof session.fetch !== "function" || !id || !target.url) {
     return { mediaUrls: [], detail: null };
   }
-  try {
-    await readSessionFetchText(session, target.url, getSocialRequestHeaders(target.url), requestTimeoutMs);
-  } catch (error) {
-  }
   let mediaUrls = [];
   let detail = null;
   for (const detailUrl of getDouyinAwemeDetailUrls(id)) {
@@ -22297,13 +22293,31 @@ function shouldRetryDouyinChallengePage({ challengeDetected = false, retryAllowe
   return challengeDetected === true && retryAllowed === true;
 }
 __name(shouldRetryDouyinChallengePage, "shouldRetryDouyinChallengePage");
+function isDouyinChallengeSnapshot({ title = "", text = "", verificationFrame = false } = {}) {
+  return /^(?:验证码中间页|安全验证|请完成验证|Verification|CAPTCHA)$/i.test(String(title).trim()) || verificationFrame === true || isDouyinChallengePageText(text);
+}
+__name(isDouyinChallengeSnapshot, "isDouyinChallengeSnapshot");
 async function isCurrentDouyinChallengePage(webContents) {
   const detectorSource = isDouyinChallengePageText.toString();
+  const snapshotSource = isDouyinChallengeSnapshot.toString();
   return await runBrowserTaskWithTimeout(
     webContents.executeJavaScript(`
       (() => {
-        const isChallenge = ${detectorSource};
-        return isChallenge(String(document.documentElement && document.documentElement.innerText || ''));
+        const isDouyinChallengePageText = ${detectorSource};
+        const isChallenge = ${snapshotSource};
+        const verificationFrame = Array.from(document.querySelectorAll('iframe')).some(frame => {
+          try {
+            const target = new URL(frame.src, location.href);
+            const trusted = target.protocol === 'https:' && ['rmc.bytedance.com', 'verify.snssdk.com'].includes(target.hostname);
+            let visible = frame.getBoundingClientRect().width > 0 && frame.getBoundingClientRect().height > 0;
+            for (let node = frame; visible && node; node = node.parentElement) {
+              const style = getComputedStyle(node);
+              if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) visible = false;
+            }
+            return trusted && visible && /(?:captcha|verifycenter)/i.test(target.pathname);
+          } catch (_) { return false; }
+        });
+        return isChallenge({ title: document.title, text: String(document.documentElement && document.documentElement.innerText || ''), verificationFrame });
       })()
     `),
     3e3,
@@ -29548,15 +29562,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const browserRequest = buildDouyinBrowserFallbackRequest(originalUrl, resolvedUrl);
     const candidates = [];
-    if (browserRequest.awemeId) {
-      try {
-        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(
-          browserRequest.url,
-          browserRequest.awemeId
-        ));
-      } catch (error) {
-      }
-    }
     if (!candidates.length) {
       const browserRequests = buildDouyinBrowserFallbackRequests(originalUrl, resolvedUrl);
       for (const fallbackRequest of browserRequests) {
@@ -29568,7 +29573,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             targetDouyinAwemeId: browserRequest.awemeId
           }));
         } catch (error) {
+          if (isDouyinChallengeError(error) || isAbortError(error)) throw error;
         }
+      }
+    }
+    if (!candidates.length && browserRequest.awemeId) {
+      try {
+        candidates.push(...await this.fetchDouyinMediaUrlsWithSession(
+          browserRequest.url,
+          browserRequest.awemeId
+        ));
+      } catch (error) {
       }
     }
     return sortMediaUrlsForTranscription(candidates);
@@ -32346,56 +32361,6 @@ ${finalized.markdown}
               }
             }
           }
-          if (douyinAwemeId && (!hasUsableDouyinMedia || !douyinStructuredContent || !hasSocialMetrics(douyinSocialMetrics))) {
-            const sessionStage = { stage: "authenticated-session", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
-            try {
-              const hasLegacyInstanceResolver = Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaUrlsWithSession") && !Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaResolutionWithSession");
-              const sessionResolution = !hasLegacyInstanceResolver && typeof this.fetchDouyinMediaResolutionWithSession === "function" ? await this.fetchDouyinMediaResolutionWithSession(resolvedUrl, douyinAwemeId) : {
-                mediaUrls: typeof this.fetchDouyinMediaUrlsWithSession === "function" ? await this.fetchDouyinMediaUrlsWithSession(resolvedUrl, douyinAwemeId) : [],
-                detail: null
-              };
-              const sessionUrls = Array.isArray(sessionResolution && sessionResolution.mediaUrls) ? sessionResolution.mediaUrls : [];
-              const sessionDetail = sessionResolution && sessionResolution.detail;
-              sessionStage.mediaCount = sessionUrls.length;
-              sessionStage.detailFound = Boolean(sessionDetail);
-              if (sessionDetail) {
-                const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
-                douyinStructuredContent = buildDouyinStructuredContent(sessionDetail, {
-                  title: douyinStructuredContent && douyinStructuredContent.title || detailPageMetadata.title,
-                  description: douyinStructuredContent && douyinStructuredContent.description || detailPageMetadata.description,
-                  tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(detailPageMetadata.description, html2),
-                  coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(html2, ["og:image", "twitter:image"])),
-                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
-                });
-                socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
-                  title: douyinStructuredContent.title,
-                  description: douyinStructuredContent.description,
-                  tags: douyinStructuredContent.tags,
-                  imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean)
-                });
-                if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
-                  douyinSocialMetrics = douyinStructuredContent.socialMetrics;
-                }
-              }
-              if (sessionUrls.length) {
-                mediaUrls = sortMediaUrlsForTranscription([...sessionUrls, ...mediaUrls]);
-                mediaUrl = mediaUrls[0] || mediaUrl;
-                hasPreciseDouyinMedia = true;
-                hasUsableDouyinMedia = true;
-                douyinSelectedStage = douyinSelectedStage || sessionStage.stage;
-                sessionStage.ok = true;
-                sessionStage.identityOutcome = "target-id-matched";
-              }
-            } catch (sessionError) {
-              sessionStage.error = sessionError;
-              if (isAbortError(sessionError)) throw sessionError;
-            } finally {
-              if (!sessionStage.ok) sessionStage.rejectionReason = sessionStage.error ? "transport-error" : "no-target-bound-media";
-              sessionStage.durationMs = Date.now() - sessionStage.startedAt;
-              delete sessionStage.startedAt;
-              douyinResolutionStages.push(sessionStage);
-            }
-          }
           if (!hasUsableDouyinMedia && typeof this.renderSocialMediaUrls === "function") {
             const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl, douyinAwemeId);
             for (const browserRequest of browserRequests) {
@@ -32435,6 +32400,56 @@ ${finalized.markdown}
                 browserStage.durationMs = Date.now() - browserStage.startedAt;
                 delete browserStage.startedAt;
                 douyinResolutionStages.push(browserStage);
+              }
+            }
+            if (douyinAwemeId && !hasUsableDouyinMedia && !douyinResolutionStages.some((stage) => isDouyinChallengeError(stage.error))) {
+              const sessionStage = { stage: "authenticated-session", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
+              try {
+                const hasLegacyInstanceResolver = Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaUrlsWithSession") && !Object.prototype.hasOwnProperty.call(this, "fetchDouyinMediaResolutionWithSession");
+                const sessionResolution = !hasLegacyInstanceResolver && typeof this.fetchDouyinMediaResolutionWithSession === "function" ? await this.fetchDouyinMediaResolutionWithSession(resolvedUrl, douyinAwemeId) : {
+                  mediaUrls: typeof this.fetchDouyinMediaUrlsWithSession === "function" ? await this.fetchDouyinMediaUrlsWithSession(resolvedUrl, douyinAwemeId) : [],
+                  detail: null
+                };
+                const sessionUrls = Array.isArray(sessionResolution && sessionResolution.mediaUrls) ? sessionResolution.mediaUrls : [];
+                const sessionDetail = sessionResolution && sessionResolution.detail;
+                sessionStage.mediaCount = sessionUrls.length;
+                sessionStage.detailFound = Boolean(sessionDetail);
+                if (sessionDetail) {
+                  const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
+                  douyinStructuredContent = buildDouyinStructuredContent(sessionDetail, {
+                    title: douyinStructuredContent && douyinStructuredContent.title || detailPageMetadata.title,
+                    description: douyinStructuredContent && douyinStructuredContent.description || detailPageMetadata.description,
+                    tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(detailPageMetadata.description, html2),
+                    coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(html2, ["og:image", "twitter:image"])),
+                    socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
+                  });
+                  socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+                    title: douyinStructuredContent.title,
+                    description: douyinStructuredContent.description,
+                    tags: douyinStructuredContent.tags,
+                    imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean)
+                  });
+                  if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+                    douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+                  }
+                }
+                if (sessionUrls.length) {
+                  mediaUrls = sortMediaUrlsForTranscription([...sessionUrls, ...mediaUrls]);
+                  mediaUrl = mediaUrls[0] || mediaUrl;
+                  hasPreciseDouyinMedia = true;
+                  hasUsableDouyinMedia = true;
+                  douyinSelectedStage = douyinSelectedStage || sessionStage.stage;
+                  sessionStage.ok = true;
+                  sessionStage.identityOutcome = "target-id-matched";
+                }
+              } catch (sessionError) {
+                sessionStage.error = sessionError;
+                if (isAbortError(sessionError)) throw sessionError;
+              } finally {
+                if (!sessionStage.ok) sessionStage.rejectionReason = sessionStage.error ? "transport-error" : "no-target-bound-media";
+                sessionStage.durationMs = Date.now() - sessionStage.startedAt;
+                delete sessionStage.startedAt;
+                douyinResolutionStages.push(sessionStage);
               }
             }
             if (!hasUsableDouyinMedia && !douyinResolutionStages.some((stage) => isDouyinChallengeError(stage.error)) && typeof this.resolveDouyinMediaWithLocalResolver === "function") {
@@ -35309,6 +35324,7 @@ WechatObsidianInboxPlugin.__test = {
   normalizeInstallerScriptText,
   getSocialRequestHeaders,
   isDouyinChallengePageText,
+  isDouyinChallengeSnapshot,
   shouldRetryDouyinChallengePage,
   buildDouyinLoginPageConfig,
   buildXiaohongshuLoginPageConfig,
