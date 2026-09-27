@@ -12084,7 +12084,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.167";
+var PLUGIN_RUNTIME_VERSION = "1.3.168";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -14161,11 +14161,35 @@ function isXiaohongshuShareBoilerplateOnly(extracted) {
   return hasShareInstruction && (hasShareLink || source.replace(/\s+/g, "").length <= 80);
 }
 __name(isXiaohongshuShareBoilerplateOnly, "isXiaohongshuShareBoilerplateOnly");
+function isXiaohongshuLoginLanding(html, url = "", extracted = null) {
+  const source = String(html || "");
+  try {
+    if (/^\/login(?:\/|$)/i.test(new URL(String(url || "")).pathname)) return true;
+  } catch {
+  }
+  if (extracted && extracted.xiaohongshuPrimaryNoteMatched === true) return false;
+  const title = String(extractHtmlTitle(source) || "").trim();
+  const normalizedTitle = title.toLowerCase().replace(/\s+/g, "").replace(/[|｜:：]/g, "-").replace(/[—_]/g, "-");
+  if (/^(?:登录(?:页|中心)?|手机号登录|验证码登录|扫码登录)(?:-*(?:小红书|red))?$|^(?:小红书|red)-*(?:登录|登录页|登录中心)$/.test(normalizedTitle)) return true;
+  const genericTitle = !normalizedTitle || /^(?:小红书|red)(?:-*(?:你的生活兴趣社区|yourlifecommunity))?$/.test(normalizedTitle);
+  if (!genericTitle) return false;
+  const readableText = cleanSocialDescription(stripHtmlTags(stripScriptAndStyleBlocks(selectReadableHtml(source))));
+  const authMethods = [
+    /手机号登录|手机登录/.test(readableText),
+    /验证码登录/.test(readableText),
+    /扫码登录/.test(readableText),
+    /密码登录/.test(readableText)
+  ].filter(Boolean).length;
+  const hasLoginConsent = /(?:用户协议.{0,20}隐私政策|隐私政策.{0,20}用户协议|同意.{0,20}(?:用户协议|隐私政策))/.test(readableText);
+  return authMethods >= 2 || authMethods >= 1 && hasLoginConsent;
+}
+__name(isXiaohongshuLoginLanding, "isXiaohongshuLoginLanding");
 function classifyXiaohongshuPage({ html = "", resolvedUrl = "", extracted = null } = {}) {
   const finalHost = getSafeUrlDiagnostic(resolvedUrl).host;
   if (finalHost && finalHost !== "xiaohongshu.com" && !finalHost.endsWith(".xiaohongshu.com")) {
     return "unexpected-host";
   }
+  if (isXiaohongshuLoginLanding(html, resolvedUrl, extracted)) return "xiaohongshu-generic-landing";
   if (isUnavailableXiaohongshuPage(html, resolvedUrl)) return "xiaohongshu-unavailable";
   if (isGenericXiaohongshuLandingExtraction(extracted) || isXiaohongshuShareBoilerplateOnly(extracted)) {
     return "xiaohongshu-generic-landing";
@@ -18151,11 +18175,11 @@ function getPreferredXiaohongshuTitle(existingTitle, extractedTitle, fallback = 
 }
 __name(getPreferredXiaohongshuTitle, "getPreferredXiaohongshuTitle");
 function hasReadableXiaohongshuGraphicContent(extracted, html, url = "") {
-  if (!extracted || !isTrustedXiaohongshuCookieUrl(url) || isUnavailableXiaohongshuPage(html, url)) return false;
+  if (!extracted || !isTrustedXiaohongshuCookieUrl(url) || isXiaohongshuLoginLanding(html, url, extracted) || isUnavailableXiaohongshuPage(html, url)) return false;
   const hasImages = Array.isArray(extracted.imageUrls) && extracted.imageUrls.length > 0;
   if (hasImages) return true;
   if (isXiaohongshuShareBoilerplateOnly(extracted)) return false;
-  const description = String(extracted.description || "").trim();
+  const description = String(extracted.pageDescription !== void 0 ? extracted.pageDescription : extracted.descriptionSource === "share_text" ? "" : extracted.description || "").trim();
   if (/分享口令/.test(description)) return false;
   if (!description || description.length < 20) return false;
   if (/^(?:短链落地页|当前笔记暂时无法浏览|你访问的页面不见了|页面未直接暴露正文)/.test(description)) return false;
@@ -18442,8 +18466,7 @@ function collectXiaohongshuNoteContentValues(source) {
   return values;
 }
 __name(collectXiaohongshuNoteContentValues, "collectXiaohongshuNoteContentValues");
-function extractXiaohongshuDescription(html, fallbackText = "") {
-  var _a;
+function extractXiaohongshuDescriptionEvidence(html, fallbackText = "", url = "") {
   const source = String(html || "");
   const jsonCandidates = [
     ...collectJsonStringValues(source, [
@@ -18459,16 +18482,24 @@ function extractXiaohongshuDescription(html, fallbackText = "") {
     }),
     ...collectXiaohongshuNoteContentValues(source)
   ];
-  const candidates = [
-    { text: cleanSocialDescription(fallbackText), weight: 100 },
-    { text: cleanSocialDescription(extractMetaContent(source, ["description", "og:description", "twitter:description"])), weight: 300 },
-    ...jsonCandidates.map((text) => ({ text: cleanSocialDescription(text), weight: 800 })),
-    { text: cleanSocialDescription(stripHtmlTags(stripScriptAndStyleBlocks(selectReadableHtml(source)))), weight: 0 }
-  ].filter((item) => item.text && !/^https?:\/\//i.test(item.text) && !isNoisyXiaohongshuDescription(item.text));
-  candidates.sort((a, b) => scoreXiaohongshuDescriptionCandidate(b) - scoreXiaohongshuDescriptionCandidate(a));
-  return ((_a = candidates[0]) == null ? void 0 : _a.text) || "";
+  const isUsable = /* @__PURE__ */ __name((item) => item.text && !/^https?:\/\//i.test(item.text) && !isNoisyXiaohongshuDescription(item.text), "isUsable");
+  const loginLanding = isXiaohongshuLoginLanding(source, url, { xiaohongshuPrimaryNoteMatched: false });
+  const pageCandidates = loginLanding ? [] : [
+    { text: cleanSocialDescription(extractMetaContent(source, ["description", "og:description", "twitter:description"])), weight: 300, source: "meta" },
+    ...jsonCandidates.map((text) => ({ text: cleanSocialDescription(text), weight: 800, source: "structured_json" })),
+    { text: cleanSocialDescription(stripHtmlTags(stripScriptAndStyleBlocks(selectReadableHtml(source)))), weight: 0, source: "body" }
+  ].filter(isUsable);
+  pageCandidates.sort((a, b) => scoreXiaohongshuDescriptionCandidate(b) - scoreXiaohongshuDescriptionCandidate(a));
+  const pageCandidate = pageCandidates[0] || null;
+  const fallback = cleanSocialDescription(fallbackText);
+  const fallbackCandidate = fallback && !/^https?:\/\//i.test(fallback) && !isNoisyXiaohongshuDescription(fallback) ? { text: fallback, source: "share_text" } : null;
+  return {
+    description: (pageCandidate == null ? void 0 : pageCandidate.text) || (fallbackCandidate == null ? void 0 : fallbackCandidate.text) || "",
+    pageDescription: (pageCandidate == null ? void 0 : pageCandidate.text) || "",
+    descriptionSource: (pageCandidate == null ? void 0 : pageCandidate.source) || (fallbackCandidate ? "share_text" : "none")
+  };
 }
-__name(extractXiaohongshuDescription, "extractXiaohongshuDescription");
+__name(extractXiaohongshuDescriptionEvidence, "extractXiaohongshuDescriptionEvidence");
 function extractXiaohongshuAuthor(html) {
   const source = String(html || "");
   const candidates = collectJsonStringValues(source, [
@@ -18494,7 +18525,12 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = "", option
   const primaryNote = extractXiaohongshuPrimaryNotePayload(source, url);
   const pageTitle = extractMetaContent(source, ["og:title", "twitter:title"]) || extractHtmlTitle(source) || "小红书笔记";
   const title = primaryNote.matched ? primaryNote.title || "小红书笔记" : pageTitle;
-  const description = primaryNote.matched ? primaryNote.description : extractXiaohongshuDescription(source, fallbackText);
+  const descriptionEvidence = primaryNote.matched ? {
+    description: primaryNote.description,
+    pageDescription: primaryNote.description,
+    descriptionSource: "primary_note"
+  } : extractXiaohongshuDescriptionEvidence(source, fallbackText, url);
+  const description = descriptionEvidence.description;
   const tags = primaryNote.matched ? primaryNote.tags : extractTagsFromText(description, source);
   const images = primaryNote.matched ? primaryNote.imageUrls : collectXiaohongshuNoteImageUrls(source);
   const videoUrl = primaryNote.matched ? primaryNote.videoUrl : extractVideoUrlFromHtml(source);
@@ -18504,6 +18540,8 @@ function extractXiaohongshuMarkdownFromHtml(html, url, fallbackText = "", option
     title,
     author: primaryNote.matched ? primaryNote.author : extractXiaohongshuAuthor(source),
     description,
+    pageDescription: descriptionEvidence.pageDescription,
+    descriptionSource: descriptionEvidence.descriptionSource,
     tags,
     markdown: buildXiaohongshuMarkdown({
       title,
@@ -18554,10 +18592,13 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
     const text = String(value || "").trim();
     return text && !/^(小红书笔记|小红书|发现精彩|登录后查看更多)$/i.test(text);
   }, "isUsableTitle");
+  const pageDescriptions = sources.map((item) => String(item.pageDescription !== void 0 ? item.pageDescription : item.descriptionSource === "share_text" ? "" : item.description || "").trim()).filter(Boolean);
   const descriptions = sources.map((item) => String(item.description || "").trim()).filter(Boolean);
   const title = String((sources.find((item) => isUsableTitle(item.title)) || {}).title || (selectedPreferred == null ? void 0 : selectedPreferred.title) || "小红书笔记").trim();
   const author = String((sources.find((item) => String(item.author || "").trim()) || {}).author || "").trim();
-  const description = descriptions.sort((a, b) => b.length - a.length)[0] || String((selectedPreferred == null ? void 0 : selectedPreferred.description) || "").trim();
+  const pageDescription = pageDescriptions.sort((a, b) => b.length - a.length)[0] || "";
+  const selectedDescriptionSource = sources.find((item) => item.pageDescription === pageDescription && pageDescription) || sources.find((item) => item.descriptionSource && item.descriptionSource !== "share_text") || sources.find((item) => item.descriptionSource === "share_text");
+  const description = pageDescription || descriptions.sort((a, b) => b.length - a.length)[0] || String((selectedPreferred == null ? void 0 : selectedPreferred.description) || "").trim();
   const tags = [];
   const comments = [];
   const addUniqueText = /* @__PURE__ */ __name((target, value) => {
@@ -18597,6 +18638,8 @@ function mergeXiaohongshuExtractions(extractions = [], preferred = null) {
     title,
     author,
     description,
+    pageDescription,
+    descriptionSource: pageDescription ? (selectedDescriptionSource == null ? void 0 : selectedDescriptionSource.descriptionSource) && selectedDescriptionSource.descriptionSource !== "share_text" ? selectedDescriptionSource.descriptionSource : "page" : (selectedDescriptionSource == null ? void 0 : selectedDescriptionSource.descriptionSource) === "share_text" || description ? "share_text" : "none",
     tags,
     imageUrls: mergedImageUrls,
     videoUrl,
