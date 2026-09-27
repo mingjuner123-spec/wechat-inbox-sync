@@ -9,6 +9,9 @@ const safety = require('../obsidian-plugin/wechat-inbox-sync/src/douyin-browser-
 
 const url = 'https://www.douyin.com/video/7685198123559390506';
 const media = 'https://v3.douyinvod.com/fixture.mp4';
+let lateMediaStage = '', cancelOnMedia = null;
+let domMustNotRun = false;
+let networkOnly = false, wrongTarget = false, earlyResponse = false, failLoad = false, rejectEnable = false;
 let mode = 'success', debuggerHang = false, windowId = 20, extractionEntered, lastWindow, capturedScript = '', attempts = 0;
 const handlers = {};
 const session = { webRequest: {}, cookies: { async get() { return []; } } };
@@ -19,13 +22,38 @@ class Window extends EventEmitter {
     this.webContents = Object.assign(new EventEmitter(), {
       id: ++windowId, session, setAudioMuted: muted => { this.muted = muted; }, setWindowOpenHandler() {}, setUserAgent() {}, getURL: () => url,
       executeJavaScript: async script => {
+        if (networkOnly && ((lateMediaStage === 'probe' && !script.includes('const collect =')) || (lateMediaStage === 'dom' && script.includes('const collect =')))) { setTimeout(() => this.emitNetwork(), 10); return new Promise(() => {}); }
+        if (domMustNotRun) throw Error('DOM must not block verified media');
         if (!script.includes('const collect =')) return false;
         capturedScript = script;
         extractionEntered?.(this);
         if (mode !== 'success') return new Promise(() => {});
+        if (networkOnly) return { pageUrl: url, canonicalUrl: url, urls: [], domMediaCandidates: [], pageIdentityIds: [], douyinPaceState: '' };
         return { pageUrl: url, canonicalUrl: url, pageIdentityIds: ['7685198123559390506'], urls: [{ url: media, resourceType: 'media' }], domMediaCandidates: [{ urls: [media], identityIds: ['7685198123559390506'], visible: true, intersectsViewport: true, area: 100000, isPlaying: false }], douyinPaceState: '' };
       },
     });
+    if (networkOnly) {
+      let attached = false;
+      const api = Object.assign(new EventEmitter(), {
+        isAttached: () => attached, attach: () => { attached = true; }, detach: () => { attached = false; },
+        sendCommand: (command) => {
+          if (command === 'Network.enable') {
+            assert.equal(api.listenerCount('message'), 1, 'listener precedes enabling capture');
+            if (rejectEnable) return Promise.reject(Error('enable rejected'));
+            return new Promise(resolve => { this.enableAfterNavigation = resolve; if (earlyResponse) this.emitNetwork(); });
+          }
+          if (command === 'Network.getResponseBody') return Promise.resolve({ body: JSON.stringify({ aweme_detail: { aweme_id: wrongTarget ? '1111111111111111111' : '7685198123559390506', video: { play_addr: { url_list: [media] } } } }) });
+          throw Error('unexpected command');
+        },
+      });
+      this.emitNetwork = () => {
+        if (!attached) return;
+        api.emit('message', {}, 'Network.responseReceived', { requestId: 'target', type: 'XHR', response: { url: 'https://www.douyin.com/aweme/v1/web/aweme/detail/', mimeType: 'application/json' } });
+        api.emit('message', {}, 'Network.loadingFinished', { requestId: 'target', encodedDataLength: 500 });
+        cancelOnMedia?.abort();
+      };
+      this.webContents.debugger = api;
+    }
     if (debuggerHang) {
       let attached = false;
       this.webContents.debugger = Object.assign(new EventEmitter(), {
@@ -48,6 +76,9 @@ class Window extends EventEmitter {
     assert.notEqual(response.cancel, true, 'other login/page media must remain unaffected');
     handlers.onHeadersReceived({ webContentsId: this.webContents.id, url: 'https://example.test/opaque', responseHeaders: { 'Content-Type': ['video/mp4'] } }, r => { response = r; });
     assert.equal(response.cancel, true, 'opaque fetch media is blocked based on MIME');
+    this.enableAfterNavigation?.({});
+    if (networkOnly && !rejectEnable && !lateMediaStage) this.emitNetwork();
+    if (failLoad) { this.webContents.emit('did-fail-load', {}, -105, 'ERR_NAME_NOT_RESOLVED', url, true); return; }
     setImmediate(() => this.webContents.emit('did-finish-load'));
   }
 }
@@ -92,6 +123,39 @@ async function run() {
     assert.equal(fallback.resolutionAttemptId, 'abcdef0123456789');
     assert.equal(lastWindow.webContents.debugger.isAttached(), false);
     debuggerHang = false; cases++;
+    networkOnly = true; domMustNotRun = true;
+    for (const loggedIn of [false, true]) {
+      session.cookies.get = async () => loggedIn ? [{ name: 'sessionid', value: 'fixture-only', domain: '.douyin.com' }] : [];
+      for (const shortLink of [false, true]) {
+        const result = await bounded(plugin.renderSocialMediaUrls(shortLink ? 'https://v.douyin.com/fixture/' : url, { targetDouyinAwemeId: '7685198123559390506', strictDouyinTarget: true }));
+        assert.deepEqual(result, [media]);
+        const diag = safety.readAttempts(scratch).at(-1);
+        assert.equal(diag.debuggerStatus, 'ready'); assert.ok(diag.responseReads >= 1);
+        assert.equal(lastWindow.webContents.debugger.isAttached(), false);
+        assert.equal(lastWindow.webContents.debugger.listenerCount('message'), 0); cases++;
+      }
+    }
+    earlyResponse = true;
+    assert.deepEqual(await bounded(plugin.renderSocialMediaUrls(url)), [media]); cases++;
+    earlyResponse = false; domMustNotRun = false;
+    for (const stage of ['probe', 'dom']) {
+      lateMediaStage = stage;
+      assert.deepEqual(await bounded(plugin.renderSocialMediaUrls(url, { strictDouyinTarget: true })), [media]);
+      assert.equal(lastWindow.destroyed, true); cases++;
+    }
+    lateMediaStage = ''; cancelOnMedia = new AbortController();
+    await assert.rejects(bounded(plugin.renderSocialMediaUrls(url, { signal: cancelOnMedia.signal })), { name: 'AbortError' });
+    assert.equal(safety.readAttempts(scratch).at(-1).outcome, 'cancelled'); cases++;
+    cancelOnMedia = null; wrongTarget = true;
+    await assert.rejects(bounded(plugin.renderSocialMediaUrls(url, { strictDouyinTarget: true })), { code: 'DOUYIN_NO_MEDIA' });
+    assert.equal(safety.readAttempts(scratch).at(-1).outcome, 'failed'); cases++;
+    wrongTarget = false; rejectEnable = true;
+    await assert.rejects(bounded(plugin.renderSocialMediaUrls(url, { strictDouyinTarget: true })), { code: 'DOUYIN_NO_MEDIA' });
+    assert.equal(safety.readAttempts(scratch).at(-1).debuggerStatus, 'failed'); cases++;
+    rejectEnable = false; failLoad = true;
+    await assert.rejects(bounded(plugin.renderSocialMediaUrls(url)), { browserCode: 'DOUYIN_BROWSER_LOAD_FAILED' });
+    assert.equal(lastWindow.destroyed, true); cases++;
+    failLoad = false; networkOnly = false;
     const c = new AbortController(); mode = 'hang'; extractionEntered = () => setImmediate(() => c.abort());
     await assert.rejects(bounded(plugin.renderSocialMediaUrls(url, { signal: c.signal })), { name: 'AbortError' });
     assert.equal(lastWindow.destroyed, true); assert.equal(safety.readAttempts(scratch).at(-1).outcome, 'cancelled'); cases++;
