@@ -1,3 +1,4 @@
+const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runtime-snapshot');
 const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils');
 const douyinBrowserSafety = require('./douyin-browser-safety');
 const { createAutoSyncController } = require('./auto-sync-controller');
@@ -256,7 +257,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.169';
+const PLUGIN_RUNTIME_VERSION = '1.3.170';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -7271,6 +7272,7 @@ function extractXiaohongshuPrimaryNotePayload(html, url = '') {
           imageUrls,
           videoUrl,
           isVideoNote,
+          declaredNoteType: String(value.noteType || value.note_type || value.type || value.contentType || value.content_type || '').trim().toLowerCase(),
           author,
           socialMetrics: buildSocialMetrics(value),
         });
@@ -7450,14 +7452,27 @@ function classifyXiaohongshuCommentPage(snapshot = {}, expectedUrl = '') {
 function selectXiaohongshuBrowserSnapshot(previous = null, current = null, expectedUrl = '') {
   const prior = previous && typeof previous === 'object' ? previous : {};
   const candidate = current && typeof current === 'object' ? current : {};
-  const currentHtml = String(candidate.html || '');
+  let currentHtml = String(candidate.html || '');
   const currentUrl = String(candidate.url || '');
   const identityUrl = resolveXiaohongshuIdentityUrl([
     expectedUrl,
     prior.identityUrl,
     currentUrl,
   ], currentHtml);
-  const matched = isTrustedXiaohongshuCookieUrl(currentUrl)
+  const runtimeHtml = String(candidate.runtimeHtml || '');
+  const expectedId = getXiaohongshuTargetNoteId(identityUrl).toLowerCase();
+  const currentId = getXiaohongshuTargetNoteId(currentUrl).toLowerCase();
+  const runtimeRouteMatches = currentId ? currentId === expectedId
+    : isTrustedXiaohongshuCookieUrl(currentUrl) && new URL(currentUrl).pathname === '/';
+  const runtimePrimary = extractXiaohongshuPrimaryNotePayload(runtimeHtml, identityUrl);
+  const staticPrimary = extractXiaohongshuPrimaryNotePayload(currentHtml, identityUrl);
+  if (!candidate.accessWall && expectedId
+    && runtimeRouteMatches
+    && runtimePrimary.matched
+    && (runtimePrimary.videoUrl || !staticPrimary.videoUrl)) {
+    currentHtml = runtimeHtml;
+  }
+  const matched = !candidate.accessWall && isTrustedXiaohongshuCookieUrl(currentUrl)
     && Boolean(identityUrl)
     && shouldStopWaitingForXiaohongshuContent(currentHtml, identityUrl);
   if (matched) {
@@ -13367,6 +13382,7 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         waitForPromiseWithAbort(win.webContents.executeJavaScript(`
           (() => ({
             html: document.documentElement ? document.documentElement.outerHTML : '',
+            runtimeHtml: ${getXiaohongshuRuntimeSnapshotExpression(getXiaohongshuTargetNoteId(observedIdentityUrl || options.expectedUrl || url))},
             url: String(location.href || ''),
             accessWall: ${getXiaohongshuAccessWallScript()},
           }))()
@@ -13381,7 +13397,13 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
         current,
         observedIdentityUrl || options.expectedUrl || url,
       );
-      if (payload.matched) break;
+      if (payload.matched) {
+        const primary = extractXiaohongshuPrimaryNotePayload(payload.html, payload.identityUrl);
+        // A title/cover can hydrate before video metadata. Only stop early for
+        // usable video or an explicitly declared graphic note; unknown types
+        // keep the existing bounded polling window.
+        if (primary.videoUrl || (!primary.isVideoNote && primary.declaredNoteType === 'normal')) break;
+      }
       const remainingAfterSnapshotMs = deadlineAt - Date.now();
       if (remainingAfterSnapshotMs <= 0) {
         throw createBrowserTaskTimeoutError(

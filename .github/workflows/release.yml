@@ -104,6 +104,7 @@ jobs:
           node tests/plugin-xhs-comment-diagnostics.test.js
           node tests/plugin-xhs-video-diagnostics.test.js
           node tests/plugin-xhs-static-document.test.js
+          node tests/plugin-xhs-runtime-snapshot.test.js
           node tests/plugin-main-ai.test.js
           node tests/plugin-sync-failure-reconcile.test.js
           node tests/plugin-douyin-browser-safety.test.js

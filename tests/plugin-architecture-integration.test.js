@@ -55,6 +55,7 @@ const expectedModules = [
   'wechat-request-gate',
   'xiaohongshu-diagnostic-utils',
   'xiaohongshu-markdown-utils',
+  'xiaohongshu-runtime-snapshot',
 ].sort();
 
 const source = fs.readFileSync(sourcePath, 'utf8');
