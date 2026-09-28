@@ -3,6 +3,10 @@ const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils'
 const douyinBrowserSafety = require('./douyin-browser-safety');
 const { createAutoSyncController } = require('./auto-sync-controller');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
+const bilibiliDiagnostic = require('./bilibili-diagnostic-utils');
+function retainedSyncFailureDiagnostic(value, settings) {
+  return channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value);
+}
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
@@ -259,7 +263,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.173';
+const PLUGIN_RUNTIME_VERSION = '1.3.174';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3250,7 +3254,7 @@ function normalizeRecentSyncFailures(value, settings = {}) {
       message: String(item && item.message || '').trim().slice(0, 500),
       failedAt: String(item && item.failedAt || '').trim(),
       retryCount: Math.max(0, Math.floor(Number(item && item.retryCount) || 0)),
-      ...(channelsDiagnostic.sanitize(item && item.diagnostic, settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, settings) } : {}),
+      ...(retainedSyncFailureDiagnostic(item && item.diagnostic, settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, settings) } : {}),
     });
   });
   return [...unique.values()].slice(-200);
@@ -4878,6 +4882,8 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
     || metadata.mediaResolutionDiagnostic
     || metadata.attachmentDiagnostic
     || null;
+  const bilibiliCause = bilibiliDiagnostic.sanitize(cause);
+  if (bilibiliCause) return { source: 'automatic-webpage', stage: 'hydration', cause: bilibiliCause };
   return redactSensitiveObject({
     source: 'automatic-webpage',
     stage: 'hydration',
@@ -4895,10 +4901,10 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
 
 function createAutomaticWebpageExtractionError(url, diagnostic = null) {
   const host = getSafeUrlDiagnostic(url).host || 'unknown-host';
-  const error = new Error(`剪切板链接网页提取失败，已保留待重试：${host}`);
+  const error = new Error(bilibiliDiagnostic.summary(diagnostic) || `剪切板链接网页提取失败，已保留待重试：${host}`);
   error.code = 'AUTOMATIC_WEBPAGE_EXTRACTION_FAILED';
   if (diagnostic && typeof diagnostic === 'object') {
-    error.diagnostic = redactSensitiveObject(diagnostic);
+    error.diagnostic = bilibiliDiagnostic.sanitize(diagnostic) || redactSensitiveObject(diagnostic);
   }
   return error;
 }
@@ -7654,14 +7660,12 @@ function extractBilibiliProgressiveVideoUrlFromPlayurlPayload(payload) {
 
 function createBilibiliHttpError(stage, response = {}, apiCode = 0) {
   const httpStatus = Number(response && response.status) || 0;
-  const normalizedStatus = httpStatus || (Number(apiCode) === -412 ? 412 : 0);
-  const error = new Error(
-    normalizedStatus
-      ? `B站 ${stage} 请求失败：HTTP ${normalizedStatus}`
-      : `B站 ${stage} 请求失败${apiCode ? `：API ${apiCode}` : ''}`,
-  );
-  error.code = normalizedStatus === 412 ? 'BILIBILI_HTTP_412' : 'BILIBILI_REQUEST_FAILED';
-  error.status = normalizedStatus;
+  const businessCode = Number.isInteger(Number(apiCode)) ? Number(apiCode) : 0;
+  const details = [httpStatus ? 'HTTP ' + httpStatus : '', businessCode ? 'API ' + businessCode : ''].filter(Boolean);
+  const error = new Error('B站 ' + stage + ' 请求失败' + (details.length ? '：' + details.join('，') : ''));
+  error.code = httpStatus === 412 || businessCode === -412 ? 'BILIBILI_HTTP_412' : 'BILIBILI_REQUEST_FAILED';
+  error.status = httpStatus;
+  error.apiCode = businessCode;
   return error;
 }
 
@@ -7691,7 +7695,7 @@ function appendBilibiliDiagnosticStage(diagnostic, {
     transport: String(transport || 'unknown').slice(0, 64),
     host: getSafeUrlDiagnostic(url).host || 'unknown-host',
     ok: ok === true,
-    ...(error ? { error: getTransportErrorDiagnostic(error) } : {}),
+    ...(error ? { error: { ...getTransportErrorDiagnostic(error), apiCode: Number.isInteger(error.apiCode) ? error.apiCode : 0 } } : {}),
   });
   diagnostic.stages = diagnostic.stages.slice(-24);
 }
@@ -17502,7 +17506,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         message: String(item.message || '').trim().slice(0, 500),
         failedAt: new Date().toISOString(),
         retryCount: Math.max(0, Math.floor(Number(item.retryCount) || 0)),
-        ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
+        ...(retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}),
       });
     });
     const nextFailures = normalizeRecentSyncFailures([...entries.values()], this.settings);
@@ -18404,6 +18408,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (lastSyncText && (hasFailureSignal(lastSyncText) || (this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic))) {
       lines.push('', '最近同步失败状态：', lastSyncText);
     }
+    const bilibiliFailures = this.getRecentSyncFailures().map(item => {
+      const diagnostic = bilibiliDiagnostic.sanitize(item.diagnostic);
+      return diagnostic ? { recordId: item.recordId, summary: bilibiliDiagnostic.summary(diagnostic), diagnostic } : null;
+    }).filter(Boolean).slice(-20);
+    if (bilibiliFailures.length) lines.push('', '最近B站失败原因：', JSON.stringify(bilibiliFailures, null, 2));
     const recentCleanupErrors = this.getRecentSyncFailureCleanupErrors();
     if (recentCleanupErrors.length) {
       lines.push(
@@ -21198,6 +21207,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         Object.assign(mediaDiagnosticTrace, { finalOutcome: value.finalOutcome, finishedAt: new Date().toISOString() });
         return xhsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
       }
+      if (value.platform === 'bilibili') return bilibiliDiagnostic.sanitize(value);
       return value.source === 'wechat-channels' ? channelsDiagnostic.sanitize(value, this.settings) : value;
     };
     const metadataWithSocialMetrics = {
@@ -21383,6 +21393,12 @@ class WechatObsidianInboxPlugin extends Plugin {
             continue;
           }
           firstRealError = firstRealError || candidateError;
+          if (mediaDiagnosticTrace?.platform === 'bilibili') {
+            appendBilibiliDiagnosticStage(mediaDiagnosticTrace, {
+              stage: candidateError.channelsStage === 'download' ? 'media-download' : 'transcription',
+              transport: 'transcription', ok: false, error: candidateError,
+            });
+          }
           const candidateStage = candidateError.channelsStage || (/LOCAL_COMPONENT/.test(candidateError.code || '') || /组件|未配置.*命令|脚本过旧/.test(candidateError.message || '') ? 'local-component' : 'transcribe');
           if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') {
             appendXiaohongshuBrowserFailure({ xiaohongshuBrowserDiagnostic: mediaDiagnosticTrace, diagnosticSettings: this.settings }, candidateError.asrStage || 'transcription', candidateError);
@@ -21426,7 +21442,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           subtitleUrl,
           transcription: '',
           transcriptionStatus: 'failed',
-          transcriptionError: error.message || String(error),
+          transcriptionError: bilibiliDiagnostic.summary(mediaDiagnosticTrace) || error.message || String(error),
           transcriptionSource: source || this.settings.aiProvider || 'unknown',
           conversionStatus: 'failed',
           markdown,
@@ -21494,7 +21510,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
 
     const requestStatus = getTransportErrorDiagnostic(requestError).status;
-    if (requestStatus !== 412 && !isRequestUrlTransportError(requestError && requestError.message)) {
+    // Preserve the prior API -412 fallback only when no HTTP status was supplied.
+    const apiOnly412 = !requestStatus && requestError?.apiCode === -412;
+    if (requestStatus !== 412 && !apiOnly412 && !isRequestUrlTransportError(requestError && requestError.message)) {
       throw requestError;
     }
 
@@ -21567,7 +21585,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     let html = '';
     let pageMetadata = {};
     let pageRequested = false;
-    let pageError = null;
     let markdown = '';
     let sourceTitle = '';
     let bilibiliSocialMetrics = {};
@@ -21598,7 +21615,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         bvid = bvid || extractBilibiliBvid(html);
       } catch (error) {
-        pageError = error;
+        // The failed page request is already recorded in diagnostic.stages.
       }
     };
 
@@ -21746,9 +21763,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       mediaUrl: audioUrls[0] || htmlFallbackMediaUrl,
       mediaUrls,
       source: 'audio',
-      noMediaError: pageError
-        ? '这条 B站内容暂时未能获取，已保留为可重试状态。其他内容同步不受影响。'
-        : '',
+      noMediaError: bilibiliDiagnostic.summary(diagnostic),
       markdown,
       binding,
       title,
@@ -22887,7 +22902,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
               signal,
               strictDouyinTarget: browserRequest.strictDouyinTarget,
-              retryDouyinChallenge: false,
+              retryDouyinChallenge: true,
               diagnosticAttemptId: douyinAttemptId,
               targetDouyinAwemeId: douyinAwemeId,
             });
@@ -22910,8 +22925,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               douyinResolutionStages.push(browserStage);
             }
           }
-          if (douyinAwemeId && !hasUsableDouyinMedia
-            && !douyinResolutionStages.some(stage => isDouyinChallengeError(stage.error))) {
+          if (douyinAwemeId && !hasUsableDouyinMedia) {
             const sessionStage = { stage: 'authenticated-session', attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
               const hasLegacyInstanceResolver = Object.prototype.hasOwnProperty.call(this, 'fetchDouyinMediaUrlsWithSession')
@@ -22973,7 +22987,6 @@ class WechatObsidianInboxPlugin extends Plugin {
             }
           }
           if (!hasUsableDouyinMedia
-            && !douyinResolutionStages.some(stage => isDouyinChallengeError(stage.error))
             && typeof this.resolveDouyinMediaWithLocalResolver === 'function') {
             const localResolverStage = {
               stage: 'local-yt-dlp',
@@ -25066,7 +25079,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
 
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
-          ? (error.diagnostic.source === 'wechat-channels' ? channelsDiagnostic.sanitize(error.diagnostic, this.settings) : redactSensitiveObject(error.diagnostic))
+          ? (retainedSyncFailureDiagnostic(error.diagnostic, this.settings) || redactSensitiveObject(error.diagnostic))
           : null;
         let failedTitle = '小红书内容';
         if (!isXiaohongshuUrl(getRecordUrl(record))) {
@@ -25193,7 +25206,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               bindingLabel: binding.label,
               message: item.message,
               retryCount: item.retryCount,
-              ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
+              ...(retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}),
             });
           });
           if (result.skipped && result.skipped.length) {
@@ -25402,7 +25415,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId: item.recordId,
           message: item.message,
           failedAt: item.failedAt,
-          ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
+          ...(retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}),
         })),
         failureDetails: displayedFailures.slice(0, 20).map((item) => ({ recordId: item.recordId, message: item.message, ...(item.diagnostic ? { diagnostic: item.diagnostic } : {}) })),
         completionWarningCount: completionWarnings.length,
