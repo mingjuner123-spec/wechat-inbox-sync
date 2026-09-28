@@ -388,7 +388,12 @@ async function pluginTests() {
     assert.equal(state.writes, 2, 'deferred failure does not block fresh content');
     clock.advance(RECORD_RETRY_MS);
     await plugin.syncInbox(false, { automatic: true });
-    assert.equal(state.writes, 3, 'transient failed content is retried after cooldown');
+    assert.equal(state.writes, 2, 'failed content stays paused after cooldown');
+    await plugin.syncInbox(true);
+    assert.equal(state.writes, 2, 'pressing Sync does not resubmit failed content');
+    state.records.find(item => item._id === 'bad').retryCount = 1;
+    await plugin.syncInbox(false, { automatic: true });
+    assert.equal(state.writes, 3, 'mini-program explicit retry resumes content');
   }
   {
     const { plugin, state, clock } = fixture([record('ack-failed')]);

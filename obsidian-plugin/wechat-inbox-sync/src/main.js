@@ -41,6 +41,8 @@ const {
 } = require('./date-utils');
 const {
   assertUsableTranscription,
+  createNoSpeechTranscriptionError,
+  isRecognizedNoSpeechMetadata,
   createTranscriptionQualityError,
   getTranscriptionQualityIssue,
   getTranscriptionQualityUnits,
@@ -257,7 +259,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.172';
+const PLUGIN_RUNTIME_VERSION = '1.3.173';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1458,7 +1460,7 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
 
 function explainLocalAsrExitCode(value) {
   const text = String(value || '');
-  if (asrRecovery.isMacNativeCrash({ message: text })) return '本地转写引擎崩溃；请复制详细诊断联系支持，不能仅凭此错误判断内存不足。';
+  if (asrRecovery.isMacNativeCrash({ message: text })) return '本地转写引擎崩溃；请复制诊断信息联系支持，不能仅凭此错误判断内存不足。';
   if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
     return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
   }
@@ -2980,7 +2982,7 @@ function buildXiaohongshuFailureDiagnostic({
 }
 
 function createRetryableXiaohongshuContentError(diagnostic = {}) {
-  const error = new Error('小红书内容提取失败，已记录诊断，下次同步将重试。');
+  const error = new Error('小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。');
   error.retryable = true;
   error.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
   error.diagnostic = redactSensitiveObject(
@@ -3247,6 +3249,7 @@ function normalizeRecentSyncFailures(value, settings = {}) {
       bindingLabel: String(item && item.bindingLabel || '').trim(),
       message: String(item && item.message || '').trim().slice(0, 500),
       failedAt: String(item && item.failedAt || '').trim(),
+      retryCount: Math.max(0, Math.floor(Number(item && item.retryCount) || 0)),
       ...(channelsDiagnostic.sanitize(item && item.diagnostic, settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, settings) } : {}),
     });
   });
@@ -4855,6 +4858,7 @@ function isAutomaticWebpageHydrationSuccessful(record) {
   const metadata = record && record.metadata || {};
   const conversionStatus = String(metadata.conversionStatus || '').toLowerCase();
   const transcriptionStatus = String(metadata.transcriptionStatus || '').toLowerCase();
+  if (isRecognizedNoSpeechMetadata(metadata)) return true;
   if (['failed', 'link_saved', 'wechat_captcha'].includes(conversionStatus)) return false;
   if (transcriptionStatus === 'failed') return false;
   const hasStoredContent = Boolean(String(
@@ -17497,6 +17501,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         bindingLabel: String(item.bindingLabel || '').trim(),
         message: String(item.message || '').trim().slice(0, 500),
         failedAt: new Date().toISOString(),
+        retryCount: Math.max(0, Math.floor(Number(item.retryCount) || 0)),
         ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
       });
     });
@@ -17523,52 +17528,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw error;
     }
     return nextFailures;
-  }
-
-  async clearRecentSyncFailures() {
-    if (this.syncInboxPromise) {
-      throw new Error('同步正在进行，请等待完成后再清理。');
-    }
-    const activeBindings = this.getActiveBindings();
-    const retained = [];
-    const cleanupErrors = [];
-    let deletedCount = 0;
-    let failedCount = 0;
-    const retainFailure = (item, reason) => {
-      retained.push(item);
-      failedCount += 1;
-      cleanupErrors.push({
-        recordId: item.recordId,
-        bindingToken: item.bindingToken,
-        bindingLabel: item.bindingLabel || '',
-        reason: String(reason || '未知原因').trim().slice(0, 500),
-        attemptedAt: new Date().toISOString(),
-      });
-    };
-    for (const item of this.getRecentSyncFailures()) {
-      const binding = activeBindings.find((candidate) => candidate.token === item.bindingToken);
-      if (!binding) {
-        retainFailure(item, '找不到原绑定设备，无法安全删除该云端记录');
-        continue;
-      }
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        const result = await this.deleteCloudRecord(item.recordId, binding);
-        if (result.deleted) {
-          deletedCount += 1;
-        } else {
-          retainFailure(item, result.reason || '服务端未确认该记录已经删除');
-        }
-      } catch (error) {
-        retainFailure(item, error && error.message ? error.message : String(error || '删除请求失败'));
-      }
-    }
-    await this.saveSettings({
-      ...this.settings,
-      recentSyncFailures: retained,
-      recentSyncFailureCleanupErrors: normalizeRecentSyncFailureCleanupErrors(cleanupErrors),
-    });
-    return { deletedCount, failedCount, remainingCount: retained.length };
   }
 
   async writeExpiredXiaohongshuLinkReceipt(record = {}) {
@@ -18480,7 +18439,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       lines.push('', '已省略成功日志，只保留失败相关信息。');
     }
     if (detailed) lines.push('', asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
-    else lines.push('', '这是精简诊断；需要完整阶段与历史日志时，请使用“复制详细诊断”。');
+    else lines.push('', '已对诊断信息进行脱敏。');
     return asrRecovery.diagnosticRedact(lines.join('\n'), this.settings);
   }
 
@@ -19886,6 +19845,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           source: 'local',
         };
       } catch (error) {
+        if (error.code === 'TRANSCRIPTION_NO_SPEECH') throw error;
         if (isRetryableTranscriptionError(error)) {
           throw error;
         }
@@ -20127,6 +20087,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       const outputText = fs.existsSync(outputPath)
         ? fs.readFileSync(outputPath, 'utf8')
         : stdout;
+      const noSpeechError = createNoSpeechTranscriptionError(outputText);
+      if (noSpeechError) throw noSpeechError;
       const transcription = assertUsableTranscription(
         cleanTrailingTranscriptionHallucinations(String(outputText || '').trim()),
         '本地转写',
@@ -20145,15 +20107,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       return transcription;
     } catch (error) {
       error.channelsStage = error.channelsStage || channelsStage;
-      session.status = isAbortError(error) ? 'cancelled' : 'failed';
-      if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? '，CPU 兼容重试仍失败' : ''}；请复制详细诊断。${error.message}`;
+      session.status = isAbortError(error) ? 'cancelled' : error.code === 'TRANSCRIPTION_NO_SPEECH' ? 'no_speech' : 'failed';
+      if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? '，CPU 兼容重试仍失败' : ''}；请复制诊断信息。${error.message}`;
       if (isAbortError(error)) {
         if (options.signal?.aborted) throw createAbortError();
         throw createRetryableTranscriptionError('用户已停止当前转写');
       }
       appendLocalAsrRunLog({
         installRoot,
-        status: 'failed',
+        status: session.status,
         command,
         inputPath,
         outputPath,
@@ -21331,6 +21293,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
 
     let lastError = null;
+    let firstRealError = null;
+    let noSpeechCount = 0;
     const processedCandidateUrls = new Set();
     let refreshedMediaUrls = false;
     let shouldRefreshMediaUrls = false;
@@ -21413,6 +21377,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         } catch (candidateError) {
           if (isAbortError(candidateError) || signal?.aborted) throw createAbortError();
           lastError = candidateError;
+          if (candidateError.code === 'TRANSCRIPTION_NO_SPEECH'
+            && candidateError.noSpeechEvidence === 'non-speech-markers') {
+            noSpeechCount += 1;
+            continue;
+          }
+          firstRealError = firstRealError || candidateError;
           const candidateStage = candidateError.channelsStage || (/LOCAL_COMPONENT/.test(candidateError.code || '') || /组件|未配置.*命令|脚本过旧/.test(candidateError.message || '') ? 'local-component' : 'transcribe');
           if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') {
             appendXiaohongshuBrowserFailure({ xiaohongshuBrowserDiagnostic: mediaDiagnosticTrace, diagnosticSettings: this.settings }, candidateError.asrStage || 'transcription', candidateError);
@@ -21426,9 +21396,23 @@ class WechatObsidianInboxPlugin extends Plugin {
           if ([401, 403, 412].includes(candidateStatus) && (mediaDiagnosticTrace?.source !== 'wechat-channels' || candidateStage === 'download')) shouldRefreshMediaUrls = true;
         }
       }
-      throw lastError || new Error('未能完成音视频转写');
+      throw (noSpeechCount > 0 ? firstRealError : null) || lastError || new Error('未能完成音视频转写');
     } catch (error) {
       if (isAbortError(error)) throw error;
+      if (error.code === 'TRANSCRIPTION_NO_SPEECH' && noSpeechCount > 0
+        && noSpeechCount === processedCandidateUrls.size && !firstRealError) {
+        return { ...record, metadata: {
+          ...buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
+            url, platform, mediaUrl: [...processedCandidateUrls][0],
+            mediaUrls: getCandidates().map(item => item.url), subtitleUrl,
+            transcription: '', transcriptionStatus: 'no_speech', transcriptionSource: 'local',
+            conversionStatus: 'no_speech', markdown, trailingMarkdown,
+            sourceTitle: normalizedSourceTitle,
+            mediaResolutionDiagnostic: getMediaResolutionDiagnostic('no-speech'),
+          }),
+          noSpeechEvidence: 'non-speech-markers',
+        } };
+      }
       if (isRetryableTranscriptionError(error)) {
         if (mediaDiagnosticTrace?.source === 'wechat-channels') error.diagnostic = channelsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
         throw error;
@@ -24827,6 +24811,31 @@ class WechatObsidianInboxPlugin extends Plugin {
       const record = records[index];
       const recordId = getRecordId(record);
       const autoRetryKey = this.getAutoSyncRecordKey(binding, recordId);
+      const previousFailure = this.getRecentSyncFailures().find((item) => (
+        item.recordId === recordId && item.bindingToken === normalizeBindCodeInput(binding.token)
+      ));
+      // Only an explicit mini-program retry (higher counter), or a new record,
+      // starts another attempt. Restarting or pressing Sync is not a retry.
+      if (previousFailure && (Number(record.retryCount) || 0) <= previousFailure.retryCount
+        && !this.findCompletedSyncReceipt(binding, recordId)) {
+        skipped.push({ recordId, reason: 'failed-awaiting-manual-retry' });
+        continue;
+      }
+      if (previousFailure && (Number(record.retryCount) || 0) > previousFailure.retryCount
+        && this.autoSyncController) {
+        this.autoSyncController.succeeded(autoRetryKey);
+        this.autoSyncController.succeeded(`completion:${autoRetryKey}`);
+      }
+      const pendingAttempt = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts)
+        .find((item) => item.recordId === recordId
+          && item.bindingFingerprint === getSyncLifecycleBindingFingerprint(binding.token)
+          && item.stage !== 'committed');
+      if (pendingAttempt && String(record.syncAttemptId || '') === pendingAttempt.attemptId) {
+        // Failure report could not reach the server. Replay that report without
+        // reclaiming an expired lease and transcribing the same content again.
+        skipped.push({ recordId, reason: 'failure-report-pending' });
+        continue;
+      }
       if (this.backgroundSyncActive && (
         (this.settings.autoSyncStoppedRecords || []).includes(autoRetryKey)
         || (this.autoSyncController && (!this.autoSyncController.canRetry(autoRetryKey)
@@ -25028,25 +25037,6 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
           continue;
         }
-        if (isPermanentlyExpiredXiaohongshuShortlinkRecord(record, error)) {
-          try {
-            const receiptPath = await this.writeExpiredXiaohongshuLinkReceipt(record);
-            const expiredDeleteResult = await this.deleteCurrentTranscriptionRecord({
-              recordId,
-              binding,
-            });
-            if (expiredDeleteResult && expiredDeleteResult.deleted) {
-              skipped.push({
-                recordId,
-                reason: 'deleted-expired-xhs-shortlink',
-                receiptPath,
-              });
-              continue;
-            }
-          } catch (deleteError) {
-            // Keep the original extraction failure retryable if cloud cleanup fails.
-          }
-        }
         let lifecycleReportError = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
           const failureCode = categorizeSyncFailure(error);
@@ -25100,8 +25090,18 @@ class WechatObsidianInboxPlugin extends Plugin {
         };
         writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
         if (this.autoSyncController) this.autoSyncController.failed(autoRetryKey);
+        try {
+          await this.updateRecentSyncFailures({ failed: [{
+            recordId, bindingToken: binding.token, bindingLabel, message,
+            retryCount: Number(record.retryCount) || 0,
+            ...(diagnostic ? { diagnostic } : {}),
+          }] });
+        } catch (persistError) {
+          // The lifecycle marker still protects this attempt when settings persistence fails.
+        }
         failed.push({
           recordId: getRecordId(record),
+          retryCount: Number(record.retryCount) || 0,
           message,
           ...(diagnostic ? { diagnostic } : {}),
           ...(lifecycleReportError ? { lifecycleReportError } : {}),
@@ -25192,6 +25192,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               bindingToken: binding.token,
               bindingLabel: binding.label,
               message: item.message,
+              retryCount: item.retryCount,
               ...(channelsDiagnostic.sanitize(item.diagnostic, this.settings) ? { diagnostic: channelsDiagnostic.sanitize(item.diagnostic, this.settings) } : {}),
             });
           });
@@ -25333,7 +25334,6 @@ class WechatObsidianInboxPlugin extends Plugin {
         skipped,
         conversionWarnings,
         failed,
-        outstandingFailures,
       );
       const pendingReviewNotice = buildPendingReviewNotice(mergePendingReviewSummaries(pendingReviews));
       if (!written.length && !displayedFailures.length && pendingReviewNotice) {
@@ -25347,7 +25347,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           : `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
       }
 
-      if (!this.autoSyncDisposed && (showNotice || written.length)) {
+      if (!this.autoSyncDisposed && (showNotice || written.length || recentFailureEntries.length)) {
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
@@ -25389,7 +25389,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         .filter(Boolean)
         .slice(0, 100);
       this.lastSyncDiagnostic = {
-        status: displayedFailures.length ? 'failed' : ((conversionWarnings.length || completionWarnings.length || historicalFailures.length) ? 'warning' : 'success'),
+        status: displayedFailures.length ? 'failed' : ((conversionWarnings.length || completionWarnings.length) ? 'warning' : 'success'),
         stage: 'finished',
         current: written.length,
         total: written.length + displayedFailures.length + skipped.length,
@@ -25419,8 +25419,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       writeSyncDiagnosticLog({ ...this.lastSyncDiagnostic, xiaohongshuComments: this.getRecentXiaohongshuCommentResults(), xiaohongshuBrowserResults: this.getRecentXiaohongshuBrowserResults() }, this.getConfiguredLocalAsrInstallRoot());
       this.clearSyncProgressNotice();
       if (this.backgroundSyncActive && !this.autoSyncDisposed && this.syncStatusBar
-        && typeof this.syncStatusBar.setText === 'function' && (failed.length || historicalFailures.length || conversionWarnings.length)) {
-        this.syncStatusBar.setText('自动同步有未完成内容，可在插件设置查看并手动重试');
+        && typeof this.syncStatusBar.setText === 'function' && (failed.length || conversionWarnings.length)) {
+        this.syncStatusBar.setText('自动同步有未完成内容，可在小程序“同步记录”中查看并重试');
       }
       return { pollFailed, written: written.length, failed: failed.length };
     } catch (error) {
@@ -25742,62 +25742,22 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .setCta()
         .onClick(() => this.plugin.syncInbox()));
 
-    const recentSyncFailures = this.plugin.getRecentSyncFailures();
     new Setting(containerEl)
-      .setName('清理最近同步失败的内容')
-      .setDesc(recentSyncFailures.length
-        ? `目前有 ${recentSyncFailures.length} 条内容仍未同步成功。清理后会从云端删除，后续不会再拉取；本地笔记不受影响。`
-        : '当前没有仍未同步成功的内容。同步成功的内容会自动从此清单移除。')
-      .addButton((button) => {
-        button.setButtonText(recentSyncFailures.length ? `清理 ${recentSyncFailures.length} 条` : '暂无失败内容');
-        button.setDisabled(!recentSyncFailures.length);
-        button.onClick(async () => {
-          const confirmed = typeof window !== 'undefined'
-            && typeof window.confirm === 'function'
-            && window.confirm(`将从云端删除 ${recentSyncFailures.length} 条最近同步失败的内容。\n\n本地已经保存的笔记不会受到影响；删除后这些内容不会再被同步。`);
-          if (!confirmed) return;
-          button.setDisabled(true);
-          button.setButtonText('清理中…');
-          try {
-            const result = await this.plugin.clearRecentSyncFailures();
-            if (result.deletedCount) {
-              new Notice(`已从云端清理 ${result.deletedCount} 条失败内容，后续不会再拉取。`);
-            }
-            if (result.failedCount) {
-              const firstReason = this.plugin.getRecentSyncFailureCleanupErrors()[0];
-              const reasonText = firstReason && firstReason.reason
-                ? ` 原因：${firstReason.reason}`
-                : '';
-              new Notice(`${result.failedCount} 条内容暂未清理成功，仍会保留在失败清单中。${reasonText}`);
-            }
-          } catch (error) {
-            new Notice(`清理失败内容失败：${error.message || error}`);
-          } finally {
-            this.display();
-          }
-        });
-      });
+      .setName('同步失败记录')
+      .setDesc('失败内容保留在小程序“同步记录”中，不会自动重试或反复提醒。可在近 7 天的记录中点击“重试”，重新加入同步队列。');
 
     new Setting(containerEl)
       .setName('同步/安装失败诊断')
-      .setDesc('默认复制精简诊断，仅包含有记录的相关功能；需要完整历史和设备信息时再复制详细诊断。')
+      .setDesc('复制脱敏诊断，包含相关阶段、历史和设备信息，便于反馈问题。')
       .addButton((button) => button
         .setButtonText('复制诊断信息')
         .onClick(async () => {
           try {
-            await this.plugin.copySyncDiagnosticText();
+            await this.plugin.copySyncDiagnosticText({ detailed: true });
             new Notice('诊断信息已复制');
           } catch (error) {
             new Notice(`复制诊断信息失败：${error.message || error}`);
           }
-        }))
-      .addButton((button) => button
-        .setButtonText('复制详细诊断')
-        .onClick(async () => {
-          try {
-            await this.plugin.copySyncDiagnosticText({ detailed: true });
-            new Notice('详细诊断已复制');
-          } catch (error) { new Notice(`复制详细诊断失败：${error.message || error}`); }
         }));
 
     containerEl.createEl('h3', {

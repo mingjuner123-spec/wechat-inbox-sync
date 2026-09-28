@@ -1,5 +1,6 @@
 'use strict';
 const { isWechatArticleFailurePlaceholder } = require('./wechat-placeholder-utils');
+const { isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
 
 const crypto = require('node:crypto');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
@@ -302,6 +303,10 @@ function getSyncLifecycleOutcomeError(record) {
     metadata.contentSnapshot,
   ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
   const declaredError = `${metadata.conversionError || ''} ${metadata.transcriptionError || ''}`.trim();
+  if (transcriptionStatus === 'no_speech' || conversionStatus === 'no_speech') {
+    if (isRecognizedNoSpeechMetadata(metadata)) return null;
+    return createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', '无语音识别结果缺少有效证据');
+  }
   const meaningfulLength = getMeaningfulMarkdownLength(markdown);
   const hasUsableImages = hasWechatImageBody(source, markdown);
   const hasUsableOutput = meaningfulLength >= 40 || transcription.length >= 20 || hasUsableImages;

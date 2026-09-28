@@ -795,7 +795,7 @@ async function runCompletionWarningIsVisibleTest() {
   }]);
 }
 
-async function runOutstandingFailureRemainsVisibleWhenInboxIsEmptyTest() {
+async function runOutstandingFailureRemainsDiagnosticWithoutNoticeTest() {
   notices.splice(0, notices.length);
   const plugin = createPlugin();
   plugin.settings.recentSyncFailures = [{
@@ -819,9 +819,9 @@ async function runOutstandingFailureRemainsVisibleWhenInboxIsEmptyTest() {
 
   await plugin.runSyncInboxOnce(true);
 
-  assert.ok(notices.some((message) => message.includes('另有 1 条历史失败待处理')));
-  assert.strictEqual(notices.some((message) => message === '没有需要同步的新内容'), false);
-  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(notices.some((message) => message.includes('历史失败')), false);
+  assert.strictEqual(notices.some((message) => message === '没有需要同步的新内容'), true);
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'success');
   assert.strictEqual(plugin.lastSyncDiagnostic.total, 0);
   assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
   assert.strictEqual(plugin.lastSyncDiagnostic.historicalFailureCount, 1);
@@ -996,14 +996,14 @@ async function runOutstandingFailureDoesNotBorrowSuccessfulDiagnosticTest() {
 
   await plugin.runSyncInboxOnce(true);
 
-  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(plugin.lastSyncDiagnostic.status, 'success');
   assert.strictEqual(plugin.lastSyncDiagnostic.diagnostic.finalState, 'complete');
   assert.strictEqual(plugin.lastSyncDiagnostic.error, '');
   assert.strictEqual(plugin.lastSyncDiagnostic.historicalFailures[0].recordId, 'different-stored-failure');
   assert.strictEqual(plugin.getRecentSyncFailures().length, 1);
 }
 
-async function runEmptyPendingWithKnownFailureShowsFailureProgressTest() {
+async function runEmptyPendingWithKnownFailureShowsEmptyProgressTest() {
   const plugin = createPlugin();
   const progressEvents = [];
   plugin.settings.recentSyncFailures = [{
@@ -1279,13 +1279,13 @@ Promise.resolve()
   .then(runCompletionReportFailurePreservesLocalWriteTest)
   .then(runCompletedReceiptPreventsRepeatWriteTest)
   .then(runCompletionWarningIsVisibleTest)
-  .then(runOutstandingFailureRemainsVisibleWhenInboxIsEmptyTest)
+  .then(runOutstandingFailureRemainsDiagnosticWithoutNoticeTest)
   .then(runInactiveBindingFailureDoesNotPolluteActiveSyncTest)
   .then(runExistingLocalNoteClearsStoredFailureTest)
   .then(runSuccessfulWriteClearsStoredFailureTest)
   .then(runStoredFailureReconcilesAgainstExistingNoteTest)
   .then(runOutstandingFailureDoesNotBorrowSuccessfulDiagnosticTest)
-  .then(runEmptyPendingWithKnownFailureShowsFailureProgressTest)
+  .then(runEmptyPendingWithKnownFailureShowsEmptyProgressTest)
   .then(runRequestJsonPreservesHttpStatusTest)
   .then(runFailedReceiptDoesNotTriggerLocalDedupeTest)
   .then(runDeliverableExistingNoteTriggersLocalDedupeTest)

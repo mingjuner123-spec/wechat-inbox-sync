@@ -3,6 +3,24 @@
 const { Converter } = require('opencc-js/t2cn');
 const toSimplifiedConverter = Converter({ from: 't', to: 'cn' });
 
+const NO_SPEECH_MESSAGE = '仅识别到音乐/静音标记，未识别到可转写语音。';
+
+function createNoSpeechTranscriptionError(text) {
+  const lines = String(text || '').trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (!lines.length || !lines.every(line => /^(?:\(\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\)|\[\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\]|（\s*(?:音乐|音樂|静音|靜音|music|silence)\s*）)$/iu.test(line))) return null;
+  return Object.assign(new Error(NO_SPEECH_MESSAGE), {
+    code: 'TRANSCRIPTION_NO_SPEECH', noSpeechEvidence: 'non-speech-markers',
+  });
+}
+
+function isRecognizedNoSpeechMetadata(metadata = {}) {
+  return metadata.transcriptionStatus === 'no_speech'
+    && metadata.conversionStatus === 'no_speech'
+    && metadata.noSpeechEvidence === 'non-speech-markers'
+    && !String(metadata.transcription || '').trim()
+    && !metadata.transcriptionError && !metadata.conversionError;
+}
+
 function toSimplifiedChinese(text) {
   return toSimplifiedConverter(String(text || ''));
 }
@@ -111,6 +129,9 @@ function assertUsableTranscription(text, source = '转写') {
 }
 
 module.exports = {
+  NO_SPEECH_MESSAGE,
+  createNoSpeechTranscriptionError,
+  isRecognizedNoSpeechMetadata,
   assertUsableTranscription,
   createTranscriptionQualityError,
   dedupeRepeatedTranscriptionLines,
