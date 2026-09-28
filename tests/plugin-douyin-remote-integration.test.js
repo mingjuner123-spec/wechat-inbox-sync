@@ -32,13 +32,13 @@ const [hydrated, challenge, iframeChallenge, sessionFallback, harmlessFrames] = 
 assert.equal(hydrated.transcriptionCalls, 1, 'complete hydrate entry must reach transcription without poisoning the shared session');
 assert.equal(hydrated.state.warmups, 0, 'no API document warmup before or after browser success');
 assert.equal(hydrated.metadata.transcriptionStatus, 'success');
-assert.equal(challenge.transcriptionCalls, 0);
-assert.equal(challenge.localResolverCalls, 0, 'known verification pages must not continue to yt-dlp');
+assert.equal(challenge.transcriptionCalls, 1, 'known verification pages should continue through safe fallback and recover target media');
+assert.equal(challenge.localResolverCalls, 0);
 assert.equal(challenge.state.warmups, 0);
-assert.equal(challenge.metadata.mediaResolutionDiagnostic.challengeDetected, true);
-assert.equal(iframeChallenge.transcriptionCalls, 0, 'visible trusted verification iframe is a challenge even without a challenge title');
+assert.equal(challenge.metadata.transcriptionStatus, 'success');
+assert.equal(iframeChallenge.transcriptionCalls, 1, 'visible trusted verification iframe should not poison the session or block fallback recovery');
 assert.equal(iframeChallenge.localResolverCalls, 0);
-assert.equal(iframeChallenge.metadata.mediaResolutionDiagnostic.challengeDetected, true);
+assert.equal(iframeChallenge.metadata.transcriptionStatus, 'success');
 assert.equal(sessionFallback.transcriptionCalls, 1, 'a safe session API fallback remains available after a browser returns no media');
 assert.equal(sessionFallback.state.warmups, 0);
 assert.equal(harmlessFrames.transcriptionCalls, 1, 'invisible trusted frames and visible untrusted frames must not block ordinary videos');

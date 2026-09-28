@@ -7,6 +7,9 @@ const Module = require('module');
 
 const originalLoad = Module._load;
 Module._load = function patchedLoad(request, parent, isMain) {
+  if (/\.(?:ps1|sh|py)$/i.test(String(request || ''))) {
+    return '';
+  }
   if (request === 'obsidian') {
     return {
       App: class {},
