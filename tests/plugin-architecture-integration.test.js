@@ -19,6 +19,7 @@ const expectedModules = [
   'ai-metadata-utils',
   'asr-recovery-utils',
   'auto-sync-controller',
+  'bilibili-diagnostic-utils',
   'cloud-transcription-response-utils',
   'component-diagnostic-summary',
   'date-utils',
