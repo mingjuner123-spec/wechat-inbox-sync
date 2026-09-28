@@ -6065,9 +6065,9 @@ var require_date_utils = __commonJS({
   }
 });
 
-// ../../../bilibili-failure-reason-20260928/obsidian-plugin/wechat-inbox-sync/node_modules/opencc-js/dist/umd/t2cn.js
+// node_modules/opencc-js/dist/umd/t2cn.js
 var require_t2cn = __commonJS({
-  "../../../bilibili-failure-reason-20260928/obsidian-plugin/wechat-inbox-sync/node_modules/opencc-js/dist/umd/t2cn.js"(exports2, module2) {
+  "node_modules/opencc-js/dist/umd/t2cn.js"(exports2, module2) {
     !(function(n, e) {
       "object" == typeof exports2 && "undefined" != typeof module2 ? e(exports2) : "function" == typeof define && define.amd ? define(["exports"], e) : e((n = "undefined" != typeof globalThis ? globalThis : n || self).OpenCC = {});
     })(exports2, function(n) {
