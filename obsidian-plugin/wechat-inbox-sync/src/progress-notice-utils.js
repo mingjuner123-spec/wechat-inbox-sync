@@ -9,19 +9,12 @@ function buildSyncResultNotice(
   skipped = [],
   conversionWarnings = [],
   failed = [],
-  outstandingFailed = [],
 ) {
   const writtenCount = Array.isArray(written) ? written.length : 0;
   const currentFailedItems = Array.isArray(failed) ? failed : [];
-  const outstandingFailedItems = Array.isArray(outstandingFailed) ? outstandingFailed : [];
   let message = buildSyncNotice(writtenCount);
   if (!writtenCount && currentFailedItems.length) {
     message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
-  } else if (!writtenCount && outstandingFailedItems.length) {
-    message = `本轮没有需要同步的新内容；另有 ${outstandingFailedItems.length} 条历史失败待处理：${outstandingFailedItems[0].message}`;
-    if (!/小程序[\s\S]{0,20}重试/u.test(message)) {
-      message += '请在小程序“同步记录”中点击“重试”后再次同步。';
-    }
   }
   if (Array.isArray(skipped) && skipped.length) {
     message += buildSkippedSyncNotice(skipped);
@@ -32,9 +25,6 @@ function buildSyncResultNotice(
   if (writtenCount && currentFailedItems.length) {
     message += `，${currentFailedItems.length} 条失败：${currentFailedItems[0].message}`;
   }
-  if (writtenCount && !currentFailedItems.length && outstandingFailedItems.length) {
-    message += `；本轮同步成功，另有 ${outstandingFailedItems.length} 条历史失败待处理，请在小程序“同步记录”中查看并重试。`;
-  }
   return message;
 }
 
@@ -44,6 +34,8 @@ function buildSkippedSyncNotice(skipped = []) {
   const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === 'deleted-expired-xhs-shortlink').length;
   const otherSkippedCount = skipped.filter((item) => item
     && item.reason !== 'already-synced-local'
+    && item.reason !== 'failed-awaiting-manual-retry'
+    && item.reason !== 'failure-report-pending'
     && item.reason !== 'cloud-transcription-processing'
     && item.reason !== 'locally-quarantined-unrecoverable'
     && item.reason !== 'deleted-expired-xhs-shortlink').length;
@@ -143,9 +135,6 @@ function buildSyncProgressMessage({
   if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
   if (stage === 'downloading') return `${label}正在下载附件 ${countText}${percentText}${suffix}`;
   if (stage === 'transcribing') {
-    if (isProgressHeartbeatStale(localProgressHeartbeatAt, now)) {
-      return `${label}本地转写任务可能无响应，可暂停后重试${suffix}`;
-    }
     const elapsed = formatProgressElapsed(localProgressStartedAt, now);
     const elapsedText = elapsed ? `，已运行 ${elapsed}` : '';
     if (localProgressStage === 'preparing' || localProgressStage === 'segmenting') {

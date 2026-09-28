@@ -45,7 +45,7 @@ assert.strictEqual(
     [],
     [{ message: '微信公众号暂未返回正文，后续同步将自动重试。' }],
   ),
-  '本轮没有需要同步的新内容；另有 1 条历史失败待处理：微信公众号暂未返回正文，后续同步将自动重试。请在小程序“同步记录”中点击“重试”后再次同步。',
+  '没有需要同步的新内容',
 );
 assert.strictEqual(
   helpers.buildSyncResultNotice(
@@ -144,7 +144,7 @@ assert.strictEqual(
     localProgressHeartbeatAt: '2026-07-23T12:00:05.000Z',
     now: fixedNow,
   }),
-  '本地转写任务可能无响应，可暂停后重试：demo.mp3',
+  '正在转写音视频  (0%)：demo.mp3',
 );
 
 const sourceMain = fs.readFileSync(sourceMainPath, 'utf8');

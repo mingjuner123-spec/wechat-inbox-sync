@@ -1,6 +1,6 @@
 'use strict';
 
-const { toSimplifiedChinese } = require('./transcription-quality-utils');
+const { toSimplifiedChinese, NO_SPEECH_MESSAGE, isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
 
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
@@ -218,7 +218,9 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       const trailingMarkdown = helpers.cleanMarkdownForStorage(metadata.trailingMarkdown || '', {
         preserveListIndent: helpers.isXiaohongshuUrl(url),
       });
-      const transcriptMarkdown = buildAudioTranscriptMarkdown({
+      const transcriptMarkdown = isRecognizedNoSpeechMetadata(metadata)
+        ? `## 语音识别结果\n\n${NO_SPEECH_MESSAGE}\n\n已保留视频说明和来源。如原视频中有人声，可重新提交后重试。\n\n来源：${url}`
+        : buildAudioTranscriptMarkdown({
         url,
         transcription: metadata.transcription || '',
         transcriptionStatus: metadata.transcriptionStatus || metadata.conversionStatus || 'pending',

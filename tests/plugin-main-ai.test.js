@@ -1255,9 +1255,9 @@ assert.strictEqual(typeof helpers.buildSyncResultNotice, 'function');
 assert.strictEqual(
   helpers.buildSyncResultNotice([], [], [], [{
     recordId: 'xhs-failed',
-    message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
+    message: '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。',
   }]),
-  '同步失败：1 条内容未同步：小红书内容提取失败，已记录诊断，下次同步将重试。',
+  '同步失败：1 条内容未同步：小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。',
 );
 assert.strictEqual(typeof helpers.extractXiaohongshuMarkdownFromHtml, 'function');
 assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
@@ -2975,8 +2975,9 @@ assert.ok(pluginMainSource.includes("setButtonText('复制诊断信息')"));
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制同步诊断')"), false);
 assert.ok(pluginMainSource.includes('同步/安装失败诊断'));
 assert.strictEqual(pluginMainSource.includes(".setName('同步失败诊断')"), false);
-assert.ok(pluginMainSource.includes('默认复制精简诊断，仅包含有记录的相关功能'));
-assert.ok(pluginMainSource.includes("setButtonText('复制详细诊断')"));
+assert.ok(pluginMainSource.includes('复制脱敏诊断，包含相关阶段、历史和设备信息'));
+assert.strictEqual(pluginMainSource.includes(".setName('清理最近同步失败的内容')"), false);
+assert.strictEqual(pluginMainSource.includes("setButtonText('复制详细诊断')"), false);
 assert.ok(pluginMainSource.includes('本地转写组件安装失败'));
 assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制诊断信息」'));
 assert.strictEqual(
@@ -4243,7 +4244,7 @@ assert.strictEqual(
     localProgressHeartbeatAt: '2026-07-23T12:00:00.000Z',
     now: new Date('2026-07-23T12:00:25.000Z').getTime(),
   }).includes('任务可能无响应，可暂停后重试'),
-  true,
+  false,
 );
 assert.notStrictEqual(
   helpers.buildLocalAsrProgressKey({
@@ -9565,7 +9566,7 @@ async function runAsyncHydrationTests() {
       }, '', '', '不可用图文测试'),
       (error) => error
         && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
-        && error.message === '小红书内容提取失败，已记录诊断，下次同步将重试。'
+        && error.message === '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。'
         && error.diagnostic
         && error.diagnostic.request.pageType === 'xiaohongshu-generic-landing',
     );
@@ -11088,7 +11089,7 @@ async function runStopCurrentTranscriptionDeletesCurrentRecordTest() {
   ]]);
 }
 
-async function runRecentSyncFailureCleanupTests() {
+async function runFailureHistoryPreservationTests() {
   const calls = [];
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({
@@ -11124,58 +11125,9 @@ async function runRecentSyncFailureCleanupTests() {
     plugin.getRecentSyncFailures().map((item) => item.recordId).sort(),
     ['record-delete', 'record-unbound'],
   );
-  plugin.requestJson = async (path, method, body, binding) => {
-    calls.push([path, method, body, binding && binding.token]);
-    return { success: true, data: { id: 'record-delete', status: 'deleted', deleted: true } };
-  };
-  const result = await plugin.clearRecentSyncFailures();
-  assert.deepStrictEqual(result, { deletedCount: 1, failedCount: 1, remainingCount: 1 });
-  assert.deepStrictEqual(calls, [[
-    '/records/record-delete/delete', 'POST', {}, 'ABC-123',
-  ]]);
-  assert.deepStrictEqual(plugin.getRecentSyncFailures().map((item) => item.recordId), ['record-unbound']);  assert.strictEqual(plugin.getRecentSyncFailureCleanupErrors().length, 1);
-
-  const compatibilityPlugin = new PluginClass();
-  compatibilityPlugin.settings = helpers.mergeSettings({
-    bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
-    recentSyncFailures: [{
-      recordId: 'record-legacy-delete',
-      bindingToken: 'ABC-123',
-      bindingLabel: '微信 1',
-      message: 'old failure',
-      failedAt: '2026-08-19T00:00:00.000Z',
-    }],
-  });
-  compatibilityPlugin.saveData = async () => {};
-  compatibilityPlugin.requestJson = async () => ({ success: true, data: { status: 'deleted' } });
-  const compatibilityResult = await compatibilityPlugin.clearRecentSyncFailures();
-  assert.deepStrictEqual(compatibilityResult, { deletedCount: 1, failedCount: 0, remainingCount: 0 });
-
-  const routeFallbackCalls = [];
-  const routeFallbackPlugin = new PluginClass();
-  routeFallbackPlugin.settings = helpers.mergeSettings({
-    bindings: [{ token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' }],
-    recentSyncFailures: [{
-      recordId: 'record-route-fallback',
-      bindingToken: 'ABC-123',
-      bindingLabel: '微信 1',
-      message: 'old production route',
-      failedAt: '2026-08-19T00:00:00.000Z',
-    }],
-  });
-  routeFallbackPlugin.saveData = async () => {};
-  routeFallbackPlugin.requestJson = async (path) => {
-    routeFallbackCalls.push(path);
-    if (path.endsWith('/delete')) throw new Error('Request failed, status 404: Route not found');
-    if (path.endsWith('/synced')) return { success: true, data: { id: 'record-route-fallback', status: 'deleted', deleted: true } };
-    throw new Error(`unexpected compatibility cleanup path: ${path}`);
-  };
-  const routeFallbackResult = await routeFallbackPlugin.clearRecentSyncFailures();
-  assert.deepStrictEqual(routeFallbackResult, { deletedCount: 1, failedCount: 0, remainingCount: 0 });
-  assert.deepStrictEqual(routeFallbackCalls, [
-    '/records/record-route-fallback/delete',
-    '/records/record-route-fallback/synced',
-  ]);}
+  assert.strictEqual(typeof plugin.clearRecentSyncFailures, 'undefined');
+  assert.deepStrictEqual(calls, []);
+}
 
 async function runCompletedReceiptClearsStaleFailureTest() {
   const binding = { token: 'ABC-123', label: '微信 1', enabled: true, status: 'bound' };
@@ -11258,7 +11210,7 @@ async function runCompletedReceiptClearsStaleFailureTest() {
     crossBindingPlugin.getRecentSyncFailures().map((item) => [item.recordId, item.bindingToken]),
     [[recordId, otherBinding.token]],
   );
-  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'success');
   assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.total, 0);
   assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.error, '');
   assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.historicalFailureCount, 1);
@@ -11268,11 +11220,11 @@ async function runCompletedReceiptClearsStaleFailureTest() {
   });
   crossBindingPlugin.getActiveBindings = () => [otherBinding];
   await crossBindingPlugin.runSyncInboxOnce(false);
-  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'warning');
+  assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.status, 'success');
   assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.total, 1);
   assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.current, 1);
   assert.strictEqual(crossBindingPlugin.lastSyncDiagnostic.error, '');
-  assert.match(crossBindingPlugin.lastSyncDiagnostic.message, /本轮同步成功，另有 1 条历史失败待处理/);
+  assert.doesNotMatch(crossBindingPlugin.lastSyncDiagnostic.message, /历史失败/);
   assert.strictEqual(crossBindingPlugin.getRecentSyncFailures().length, 1);
   const emptyProgress = [];
   const originalSyncBinding = PluginClass.prototype.syncBinding;
@@ -11595,7 +11547,8 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   }]);
   assert.deepStrictEqual(result.failed, [{
     recordId: 'xhs-content-unavailable-1',
-    message: '小红书内容提取失败，已记录诊断，下次同步将重试。',
+    retryCount: 0,
+    message: '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。',
     diagnostic: {
       runtime: {
         manifestVersion: currentPluginVersion,
@@ -11638,7 +11591,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   ]]);
 }
 
-async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
+async function runPermanentlyExpiredXiaohongshuShortlinkRetainsHistoryTest() {
   const calls = [];
   const receiptWrites = [];
   const plugin = new PluginClass();
@@ -11718,40 +11671,14 @@ async function runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest() {
   }, false);
 
   assert.deepStrictEqual(result.written, []);
-  assert.deepStrictEqual(result.failed, []);
-  assert.deepStrictEqual(result.skipped, [{
-    recordId: 'expired-xhs-shortlink',
-    reason: 'deleted-expired-xhs-shortlink',
-    receiptPath: '临时收集/2026-07-16/小红书临时链接已失效-expired-shortlink-hortlink.md',
-  }]);
-  assert.deepStrictEqual(calls, [[
-    '/records?status=pending',
-    'GET',
-    {},
-    'ABC-123',
-  ], [
-    '/records/expired-xhs-shortlink/delete',
-    'POST',
-    {},
-    'ABC-123',
-  ]]);
-  const notice = helpers.buildSkippedSyncNotice(result.skipped);
-  assert.ok(notice.includes('临时链接'));
-  assert.ok(notice.includes('已失效'));
-  assert.ok(notice.includes('重新复制'));
-  assert.ok(notice.includes('失效说明文件'));
-  assert.strictEqual(receiptWrites.length, 1);
-  assert.strictEqual(
-    receiptWrites[0].filePath,
-    '临时收集/2026-07-16/小红书临时链接已失效-expired-shortlink-hortlink.md',
-  );
-  assert.ok(receiptWrites[0].markdown.includes('http://xhslink.cn/o/expired-shortlink'));
-  assert.ok(receiptWrites[0].markdown.includes('临时链接'));
-  assert.ok(receiptWrites[0].markdown.includes('已失效'));
-  assert.ok(receiptWrites[0].markdown.includes('重新复制'));
+  assert.strictEqual(result.failed.length, 1);
+  assert.deepStrictEqual(result.skipped, []);
+  assert.deepStrictEqual(calls, [['/records?status=pending', 'GET', {}, 'ABC-123']]);
+  assert.strictEqual(receiptWrites.length, 0);
+
 }
 
-async function runExpiredXiaohongshuShortlinkDeleteFailureRemainsPendingTest() {
+async function runExpiredXiaohongshuShortlinkNeverDeletesTest() {
   const calls = [];
   const receiptWrites = [];
   const plugin = new PluginClass();
@@ -11802,14 +11729,11 @@ async function runExpiredXiaohongshuShortlinkDeleteFailureRemainsPendingTest() {
   assert.deepStrictEqual(result.skipped, []);
   assert.strictEqual(result.failed.length, 1);
   assert.strictEqual(result.failed[0].recordId, 'expired-xhs-delete-failed');
-  assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已记录诊断，下次同步将重试。');
+  assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。');
   assert.deepStrictEqual(calls, [
     '/records?status=pending',
-    '/records/expired-xhs-delete-failed/delete',
   ]);
-  assert.strictEqual(receiptWrites.length, 1);
-  assert.strictEqual(receiptWrites[0].markdown.includes('云端旧记录已清理'), false);
-  assert.ok(receiptWrites[0].markdown.includes('插件会尝试清理云端旧记录'));
+  assert.strictEqual(receiptWrites.length, 0);
 }
 
 async function runLocallyQuarantinedXiaohongshuRecordDoesNotRetryTest() {
@@ -11958,7 +11882,7 @@ async function runXiaohongshuShareOnlyPageRemainsPendingTest() {
     }, false);
     assert.deepStrictEqual(result.written, []);
     assert.strictEqual(result.failed.length, 1);
-    assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已记录诊断，下次同步将重试。');
+    assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。');
     assert.deepStrictEqual(vaultWrites, []);
     assert.deepStrictEqual(requestCalls, [[
       '/records?status=pending',
@@ -16168,7 +16092,7 @@ async function main() {
   await runXiaohongshuRemoteImageLocalizationHeadersTest();
   await runTranscriptionPreferenceSyncTest();
   await runStopCurrentTranscriptionDeletesCurrentRecordTest();
-  await runRecentSyncFailureCleanupTests();
+  await runFailureHistoryPreservationTests();
   await runCompletedReceiptClearsStaleFailureTest();
   await runStoppedTranscriptionDeleteUsesShortBusinessEndpointTest();
   await runStopCurrentTranscriptionWithoutCurrentRecordDoesNotDeleteTest();
@@ -16176,8 +16100,8 @@ async function main() {
   await runStoppedDeletedRecordDoesNotRemainFailedInCurrentSyncTest();
   await runCloudProcessingRecordSkipSyncTest();
   await runXiaohongshuUnavailableRecordRemainsPendingTest();
-  await runPermanentlyExpiredXiaohongshuShortlinkIsDeletedTest();
-  await runExpiredXiaohongshuShortlinkDeleteFailureRemainsPendingTest();
+  await runPermanentlyExpiredXiaohongshuShortlinkRetainsHistoryTest();
+  await runExpiredXiaohongshuShortlinkNeverDeletesTest();
   await runLocallyQuarantinedXiaohongshuRecordDoesNotRetryTest();
   await runXiaohongshuShareOnlyPageRemainsPendingTest();
   await runExistingLocalRecordDedupSyncTest();
