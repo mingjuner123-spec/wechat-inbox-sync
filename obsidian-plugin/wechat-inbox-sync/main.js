@@ -1240,6 +1240,18 @@ var require_bilibili_diagnostic_utils = __commonJS({
       };
     }
     __name(sanitize, "sanitize");
+    function isNetworkEnvironmentFailure(trace) {
+      const latest = /* @__PURE__ */ new Map();
+      for (const item of trace.stages || []) latest.set(item.stage, item);
+      const primaryFailures = ["view-api", "page-fetch"].map((stage) => latest.get(stage)).filter(Boolean);
+      if (primaryFailures.length < 2) return false;
+      return primaryFailures.every((item) => {
+        if (item.ok) return false;
+        const error = item.error || fault();
+        return !error.status && !error.apiCode && (!error.code || error.code === "BILIBILI_REQUEST_FAILED") && ["unknown", "connection", "dns", "certificate", "timeout"].includes(error.reason);
+      });
+    }
+    __name(isNetworkEnvironmentFailure, "isNetworkEnvironmentFailure");
     function summary(input) {
       const sanitized = sanitize(input);
       const trace = (sanitized == null ? void 0 : sanitized.source) === "automatic-webpage" ? sanitized.cause : sanitized;
@@ -1253,7 +1265,8 @@ var require_bilibili_diagnostic_utils = __commonJS({
         if (error.code && !error.code.startsWith("BILIBILI_")) details.push(error.code);
         return `${STAGES[item.stage]}：${details.join("，")}`;
       });
-      return `B站内容获取失败：${reasons.length ? reasons.join("；") : "未获取到可用字幕或音视频地址"}。可在小程序同步记录中重试。`;
+      const action = isNetworkEnvironmentFailure(trace) ? "这通常是本机 VPN、代理、DNS 或网络规则拦截导致：请先关闭 VPN 后重试；如果必须使用 VPN，请把网络从全局代理切换为规则模式/国内站点直连，再在小程序同步记录中重试。" : "可在小程序同步记录中重试。";
+      return `B站内容获取失败：${reasons.length ? reasons.join("；") : "未获取到可用字幕或音视频地址"}。${action}`;
     }
     __name(summary, "summary");
     module2.exports = { sanitize, summary };
@@ -10268,7 +10281,36 @@ var require_social_engagement_utils = __commonJS({
     __name(normalizeMetricCount, "normalizeMetricCount");
     function getMetricContainerCandidates(source) {
       if (!source || typeof source !== "object" || Array.isArray(source)) return [];
-      const nestedKeys = ["statistics", "stats", "interactInfo", "interact_info", "engagement", "data", "stat", "episode", "item", "aweme_detail"];
+      const nestedKeys = [
+        "statistics",
+        "stats",
+        "socialMetrics",
+        "social_metrics",
+        "interactInfo",
+        "interact_info",
+        "engagement",
+        "data",
+        "stat",
+        "episode",
+        "item",
+        "aweme_detail",
+        "awemeDetail",
+        "aweme",
+        "detail",
+        "objectDesc",
+        "object_desc",
+        "object",
+        "objectInfo",
+        "object_info",
+        "finderObject",
+        "finder_object",
+        "feed",
+        "post",
+        "video",
+        "media",
+        "extInfo",
+        "ext_info"
+      ];
       const result = [];
       const seen = /* @__PURE__ */ new Set();
       const visit = /* @__PURE__ */ __name((value, depth = 0) => {
@@ -10295,11 +10337,110 @@ var require_social_engagement_utils = __commonJS({
     function buildSocialMetrics2(source = {}) {
       const containers = getMetricContainerCandidates(source);
       const metrics = {
-        views: readMetric(containers, ["viewCount", "view_count", "playCount", "play_count", "play", "view"]),
-        likes: readMetric(containers, ["likedCount", "liked_count", "likeCount", "like_count", "diggCount", "digg_count", "likes", "like"]),
-        collects: readMetric(containers, ["collectedCount", "collected_count", "collectCount", "collect_count", "favoriteCount", "favorite_count", "collects", "favorite"]),
-        comments: readMetric(containers, ["commentCount", "comment_count", "comments", "reply"]),
-        shares: readMetric(containers, ["shareCount", "share_count", "sharedCount", "shared_count", "shares", "share"]),
+        views: readMetric(containers, [
+          "viewCount",
+          "view_count",
+          "views",
+          "view",
+          "readCount",
+          "read_count",
+          "readNum",
+          "read_num",
+          "browseCount",
+          "browse_count",
+          "watchCount",
+          "watch_count",
+          "watchedCount",
+          "watched_count",
+          "playCount",
+          "play_count",
+          "videoPlayCount",
+          "video_play_count",
+          "awemePlayCount",
+          "aweme_play_count",
+          "playCnt",
+          "play_cnt",
+          "play",
+          "vv"
+        ]),
+        likes: readMetric(containers, [
+          "likedCount",
+          "liked_count",
+          "likeCount",
+          "like_count",
+          "likeCnt",
+          "like_cnt",
+          "likeNum",
+          "like_num",
+          "diggCount",
+          "digg_count",
+          "diggCnt",
+          "digg_cnt",
+          "digg",
+          "likes",
+          "like"
+        ]),
+        collects: readMetric(containers, [
+          "collectedCount",
+          "collected_count",
+          "collectCount",
+          "collect_count",
+          "collectCnt",
+          "collect_cnt",
+          "collectNum",
+          "collect_num",
+          "favoriteCount",
+          "favorite_count",
+          "favouriteCount",
+          "favourite_count",
+          "favCount",
+          "fav_count",
+          "favCnt",
+          "fav_cnt",
+          "collects",
+          "favorite",
+          "favourite",
+          "fav"
+        ]),
+        comments: readMetric(containers, [
+          "commentCount",
+          "comment_count",
+          "commentCnt",
+          "comment_cnt",
+          "commentNum",
+          "comment_num",
+          "comments",
+          "comment",
+          "replyCount",
+          "reply_count",
+          "replyCnt",
+          "reply_cnt",
+          "reply"
+        ]),
+        shares: readMetric(containers, [
+          "shareCount",
+          "share_count",
+          "shareCnt",
+          "share_cnt",
+          "shareNum",
+          "share_num",
+          "sharedCount",
+          "shared_count",
+          "forwardCount",
+          "forward_count",
+          "forwardCnt",
+          "forward_cnt",
+          "forwardNum",
+          "forward_num",
+          "repostCount",
+          "repost_count",
+          "retweetCount",
+          "retweet_count",
+          "shares",
+          "share",
+          "forward",
+          "repost"
+        ]),
         coins: readMetric(containers, ["coinCount", "coin_count", "coins", "coin"])
       };
       return Object.fromEntries(Object.entries(metrics).filter(([, value]) => value !== null));
@@ -10362,7 +10503,21 @@ var require_social_engagement_utils = __commonJS({
           maxBlocks: 20,
           maxBlockCharacters: 1024 * 1024,
           maxTotalCharacters: 2 * 1024 * 1024,
-          requiredTexts: ['"stat"', '"statistics"', '"playCount"', '"viewCount"']
+          requiredTexts: [
+            '"stat"',
+            '"statistics"',
+            '"stats"',
+            '"playCount"',
+            '"play_count"',
+            '"viewCount"',
+            '"readCount"',
+            '"likeCount"',
+            '"digg_count"',
+            '"interactInfo"',
+            '"objectDesc"',
+            '"forwardCount"',
+            '"share_count"'
+          ]
         });
         for (const block of blocks) {
           const metrics = buildSocialMetrics2(tryParseJson2(block));
@@ -12339,7 +12494,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.174";
+var PLUGIN_RUNTIME_VERSION = "1.3.175";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -26187,6 +26342,9 @@ function getKnownLocalComponentInstallFailureReason(rawMessage) {
   if (/磁盘空间不足|No space left on device|not enough (?:disk )?space/i.test(message)) {
     return "磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。";
   }
+  if (/无法下载最新本地转写安装器|download latest local transcription installer|latest local transcription installer/i.test(message) && /HTTP\s*(?:403|404)|\b(?:403|404)\b|forbidden|not found|拒绝访问|未找到/i.test(message)) {
+    return "无法下载最新本地转写安装器：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍提示 HTTP 403/404，请复制诊断信息联系开发者。";
+  }
   if (/Local ASR installer download returned outdated or invalid content/i.test(message)) {
     return "本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍失败，请复制诊断信息联系开发者。";
   }
@@ -31561,6 +31719,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       description: String(data.description || ""),
       tags: Array.isArray(data.tags) ? data.tags.map((item) => String(item || "").trim()).filter(Boolean) : [],
       coverUrl: String(data.coverUrl || ""),
+      socialMetrics: buildSocialMetrics(data),
       durationSeconds: Number(data.durationSeconds || 0) || 0,
       preparedFileID: String(data.preparedFileID || ""),
       mediaPreparedByCloud: Boolean(data.mediaPreparedByCloud || data.cached),
@@ -31616,7 +31775,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         author: preparedMedia.author,
         description: preparedMedia.description,
         tags: preparedMedia.tags,
-        coverUrl: preparedMedia.coverUrl
+        coverUrl: preparedMedia.coverUrl,
+        socialMetrics: preparedMedia.socialMetrics || {}
       };
     } catch (error) {
       if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
@@ -31633,6 +31793,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         mediaItems: [{ url: mediaUrl }],
         source: preparedMedia.source || "wechat-channels-media-prepare",
         preparedMedia: true,
+        socialMetrics: feed.socialMetrics || {},
         signal: options.signal || null,
         mediaResolutionDiagnostic: trace,
         refreshMediaUrls: /* @__PURE__ */ __name(async () => {

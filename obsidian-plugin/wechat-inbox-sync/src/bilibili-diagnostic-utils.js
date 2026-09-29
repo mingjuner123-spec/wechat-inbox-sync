@@ -54,6 +54,20 @@ function sanitize(input) {
         ...(item.error ? { error: fault(item.error) } : {}) })),
   };
 }
+function isNetworkEnvironmentFailure(trace) {
+  const latest = new Map();
+  for (const item of trace.stages || []) latest.set(item.stage, item);
+  const primaryFailures = ['view-api', 'page-fetch']
+    .map(stage => latest.get(stage))
+    .filter(Boolean);
+  if (primaryFailures.length < 2) return false;
+  return primaryFailures.every((item) => {
+    if (item.ok) return false;
+    const error = item.error || fault();
+    return !error.status && !error.apiCode && (!error.code || error.code === 'BILIBILI_REQUEST_FAILED')
+      && ['unknown', 'connection', 'dns', 'certificate', 'timeout'].includes(error.reason);
+  });
+}
 function summary(input) {
   const sanitized = sanitize(input);
   const trace = sanitized?.source === 'automatic-webpage' ? sanitized.cause : sanitized;
@@ -67,6 +81,9 @@ function summary(input) {
     if (error.code && !error.code.startsWith('BILIBILI_')) details.push(error.code);
     return `${STAGES[item.stage]}：${details.join('，')}`;
   });
-  return `B站内容获取失败：${reasons.length ? reasons.join('；') : '未获取到可用字幕或音视频地址'}。可在小程序同步记录中重试。`;
+  const action = isNetworkEnvironmentFailure(trace)
+    ? '这通常是本机 VPN、代理、DNS 或网络规则拦截导致：请先关闭 VPN 后重试；如果必须使用 VPN，请把网络从全局代理切换为规则模式/国内站点直连，再在小程序同步记录中重试。'
+    : '可在小程序同步记录中重试。';
+  return `B站内容获取失败：${reasons.length ? reasons.join('；') : '未获取到可用字幕或音视频地址'}。${action}`;
 }
 module.exports = { sanitize, summary };

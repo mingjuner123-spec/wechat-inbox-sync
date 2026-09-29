@@ -17,7 +17,12 @@ function normalizeMetricCount(value) {
 
 function getMetricContainerCandidates(source) {
   if (!source || typeof source !== 'object' || Array.isArray(source)) return [];
-  const nestedKeys = ['statistics', 'stats', 'interactInfo', 'interact_info', 'engagement', 'data', 'stat', 'episode', 'item', 'aweme_detail'];
+  const nestedKeys = [
+    'statistics', 'stats', 'socialMetrics', 'social_metrics', 'interactInfo', 'interact_info', 'engagement', 'data', 'stat',
+    'episode', 'item', 'aweme_detail', 'awemeDetail', 'aweme', 'detail', 'objectDesc',
+    'object_desc', 'object', 'objectInfo', 'object_info', 'finderObject', 'finder_object',
+    'feed', 'post', 'video', 'media', 'extInfo', 'ext_info',
+  ];
   const result = [];
   const seen = new Set();
   const visit = (value, depth = 0) => {
@@ -44,11 +49,32 @@ function readMetric(containers, aliases) {
 function buildSocialMetrics(source = {}) {
   const containers = getMetricContainerCandidates(source);
   const metrics = {
-    views: readMetric(containers, ['viewCount', 'view_count', 'playCount', 'play_count', 'play', 'view']),
-    likes: readMetric(containers, ['likedCount', 'liked_count', 'likeCount', 'like_count', 'diggCount', 'digg_count', 'likes', 'like']),
-    collects: readMetric(containers, ['collectedCount', 'collected_count', 'collectCount', 'collect_count', 'favoriteCount', 'favorite_count', 'collects', 'favorite']),
-    comments: readMetric(containers, ['commentCount', 'comment_count', 'comments', 'reply']),
-    shares: readMetric(containers, ['shareCount', 'share_count', 'sharedCount', 'shared_count', 'shares', 'share']),
+    views: readMetric(containers, [
+      'viewCount', 'view_count', 'views', 'view', 'readCount', 'read_count', 'readNum', 'read_num',
+      'browseCount', 'browse_count', 'watchCount', 'watch_count', 'watchedCount', 'watched_count',
+      'playCount', 'play_count', 'videoPlayCount', 'video_play_count', 'awemePlayCount',
+      'aweme_play_count', 'playCnt', 'play_cnt', 'play', 'vv',
+    ]),
+    likes: readMetric(containers, [
+      'likedCount', 'liked_count', 'likeCount', 'like_count', 'likeCnt', 'like_cnt', 'likeNum',
+      'like_num', 'diggCount', 'digg_count', 'diggCnt', 'digg_cnt', 'digg', 'likes', 'like',
+    ]),
+    collects: readMetric(containers, [
+      'collectedCount', 'collected_count', 'collectCount', 'collect_count', 'collectCnt',
+      'collect_cnt', 'collectNum', 'collect_num', 'favoriteCount', 'favorite_count',
+      'favouriteCount', 'favourite_count', 'favCount', 'fav_count', 'favCnt', 'fav_cnt',
+      'collects', 'favorite', 'favourite', 'fav',
+    ]),
+    comments: readMetric(containers, [
+      'commentCount', 'comment_count', 'commentCnt', 'comment_cnt', 'commentNum', 'comment_num',
+      'comments', 'comment', 'replyCount', 'reply_count', 'replyCnt', 'reply_cnt', 'reply',
+    ]),
+    shares: readMetric(containers, [
+      'shareCount', 'share_count', 'shareCnt', 'share_cnt', 'shareNum', 'share_num',
+      'sharedCount', 'shared_count', 'forwardCount', 'forward_count', 'forwardCnt',
+      'forward_cnt', 'forwardNum', 'forward_num', 'repostCount', 'repost_count',
+      'retweetCount', 'retweet_count', 'shares', 'share', 'forward', 'repost',
+    ]),
     coins: readMetric(containers, ['coinCount', 'coin_count', 'coins', 'coin']),
   };
   return Object.fromEntries(Object.entries(metrics).filter(([, value]) => value !== null));
@@ -118,7 +144,11 @@ function createSocialMetricsHtmlExtractor(dependencies = {}) {
       maxBlocks: 20,
       maxBlockCharacters: 1024 * 1024,
       maxTotalCharacters: 2 * 1024 * 1024,
-      requiredTexts: ['"stat"', '"statistics"', '"playCount"', '"viewCount"'],
+      requiredTexts: [
+        '"stat"', '"statistics"', '"stats"', '"playCount"', '"play_count"',
+        '"viewCount"', '"readCount"', '"likeCount"', '"digg_count"',
+        '"interactInfo"', '"objectDesc"', '"forwardCount"', '"share_count"',
+      ],
     });
     for (const block of blocks) {
       const metrics = buildSocialMetrics(tryParseJson(block));
@@ -136,3 +166,4 @@ module.exports = {
   normalizeMetricCount,
   withCapturedSocialMetrics,
 };
+

@@ -400,6 +400,24 @@ async function testTimeoutAndEmptyResponses() {
   assert.match(result.metadata.transcriptionError, /语音转写：转写未返回文本/);
   const rejectedFields = bilibiliDiagnostic.sanitize({ platform: 'bilibili', stages: [{ stage: 'page-fetch', transport: 'node-http', error: { status: Infinity, apiCode: 'private-key', code: 'private-code', message: 'private-text' } }] });
   assert.deepStrictEqual(rejectedFields.stages[0].error, { status: 0, apiCode: 0, code: '', reason: 'unknown' });
+  const vpnHint = bilibiliDiagnostic.summary({
+    platform: 'bilibili',
+    mediaCandidateCount: 0,
+    stages: [
+      { stage: 'view-api', transport: 'obsidian-requestUrl', ok: false, error: { reason: 'unknown' } },
+      { stage: 'page-fetch', transport: 'node-http', ok: false, error: { reason: 'unknown' } },
+    ],
+  });
+  assert.match(vpnHint, /VPN|代理|规则模式|国内站点直连/);
+  const api412Hint = bilibiliDiagnostic.summary({
+    platform: 'bilibili',
+    stages: [
+      { stage: 'view-api', transport: 'obsidian-requestUrl', ok: false, error: { apiCode: -412 } },
+      { stage: 'page-fetch', transport: 'node-http', ok: false, error: { status: 412 } },
+    ],
+  });
+  assert.match(api412Hint, /API -412/);
+  assert.ok(!/VPN|代理|规则模式/.test(api412Hint));
 }
 
 async function run() {
