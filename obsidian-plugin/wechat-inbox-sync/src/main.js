@@ -263,7 +263,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.174';
+const PLUGIN_RUNTIME_VERSION = '1.3.175';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -15930,6 +15930,10 @@ function getKnownLocalComponentInstallFailureReason(rawMessage) {
   if (/磁盘空间不足|No space left on device|not enough (?:disk )?space/i.test(message)) {
     return '磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。';
   }
+  if (/无法下载最新本地转写安装器|download latest local transcription installer|latest local transcription installer/i.test(message)
+    && /HTTP\s*(?:403|404)|\b(?:403|404)\b|forbidden|not found|拒绝访问|未找到/i.test(message)) {
+    return '无法下载最新本地转写安装器：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍提示 HTTP 403/404，请复制诊断信息联系开发者。';
+  }
   if (/Local ASR installer download returned outdated or invalid content/i.test(message)) {
     return '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍失败，请复制诊断信息联系开发者。';
   }
@@ -21798,6 +21802,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         ? data.tags.map((item) => String(item || '').trim()).filter(Boolean)
         : [],
       coverUrl: String(data.coverUrl || ''),
+      socialMetrics: buildSocialMetrics(data),
       durationSeconds: Number(data.durationSeconds || 0) || 0,
       preparedFileID: String(data.preparedFileID || ''),
       mediaPreparedByCloud: Boolean(data.mediaPreparedByCloud || data.cached),
@@ -21858,6 +21863,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         description: preparedMedia.description,
         tags: preparedMedia.tags,
         coverUrl: preparedMedia.coverUrl,
+        socialMetrics: preparedMedia.socialMetrics || {},
       };
     } catch (error) {
       if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
@@ -21875,6 +21881,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         mediaItems: [{ url: mediaUrl }],
         source: preparedMedia.source || 'wechat-channels-media-prepare',
         preparedMedia: true,
+        socialMetrics: feed.socialMetrics || {},
         signal: options.signal || null,
         mediaResolutionDiagnostic: trace,
         refreshMediaUrls: async () => {

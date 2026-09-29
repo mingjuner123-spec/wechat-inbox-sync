@@ -45,6 +45,13 @@ async function run() {
         tags: ['#Obsidian', '#Knowledge'],
         coverUrl: 'https://finder.video.qq.com/source-cover.jpg',
         title: '服务端解析的视频号标题',
+        interactInfo: {
+          readCount: '1.2万',
+          likeCount: 56,
+          favCount: 9,
+          commentCount: 7,
+          forwardCount: 8,
+        },
         expiresAt: '2026-09-02T12:00:00.000Z',
       },
     };
@@ -102,6 +109,14 @@ async function run() {
   assert.strictEqual(hydrated.metadata.coverUrl, 'https://finder.video.qq.com/source-cover.jpg');
   assert.strictEqual(hydrated.metadata.aiMetadataSource, 'wechat-channels-feed');
   assert.strictEqual(hydrated.metadata.sourceMetadataComplete, true);
+  assert.deepStrictEqual({ ...hydrated.metadata.socialMetrics, capturedAt: undefined }, {
+    views: 12000,
+    likes: 56,
+    collects: 9,
+    comments: 7,
+    shares: 8,
+    capturedAt: undefined,
+  });
   assert.ok(hydrated.metadata.markdown.includes('## 视频封面'));
   assert.ok(hydrated.metadata.markdown.includes('![视频封面](https://finder.video.qq.com/source-cover.jpg)'));
   assert.ok(hydrated.metadata.markdown.includes('## 发布正文'));

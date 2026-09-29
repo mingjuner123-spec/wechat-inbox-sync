@@ -3007,6 +3007,14 @@ assert.strictEqual(
   '复制 Whisper 模型失败：通常是安装目录所在磁盘空间不足。请释放 Windows 默认 C: 盘空间后重试，建议至少预留 3GB，最好 5GB 以上。',
 );
 assert.strictEqual(
+  helpers.formatLocalComponentInstallFailureReason('无法下载最新本地转写安装器：HTTP 403:'),
+  '无法下载最新本地转写安装器：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍提示 HTTP 403/404，请复制诊断信息联系开发者。',
+);
+assert.strictEqual(
+  helpers.formatLocalComponentInstallFailureReason('download latest local transcription installer failed: HTTP 404'),
+  '无法下载最新本地转写安装器：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍提示 HTTP 403/404，请复制诊断信息联系开发者。',
+);
+assert.strictEqual(
   helpers.formatLocalComponentInstallFailureReason('Local ASR installer download returned outdated or invalid content'),
   '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍失败，请复制诊断信息联系开发者。',
 );

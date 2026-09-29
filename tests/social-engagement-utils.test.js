@@ -31,6 +31,21 @@ function run() {
   });
   assert.deepStrictEqual(buildSocialMetrics({ interactInfo: { likedCount: '31' } }), { likes: 31 });
   assert.deepStrictEqual(buildSocialMetrics({
+    socialMetrics: {
+      readCount: '1.2万',
+      likeCnt: 56,
+      favCount: 9,
+      commentCnt: 7,
+      forwardCount: 8,
+    },
+  }), {
+    views: 12000,
+    likes: 56,
+    collects: 9,
+    comments: 7,
+    shares: 8,
+  }, '视频号/云端准备返回的 socialMetrics 容器和别名必须保留为笔记数据属性');
+  assert.deepStrictEqual(buildSocialMetrics({
     data: {
       stat: {
         view: 2195,
