@@ -44,6 +44,7 @@ const expectedModules = [
   'social-media-context-utils',
   'social-media-diagnostic-utils',
   'social-platform-content-utils',
+  'sync-diagnostic-reporter',
   'sync-lifecycle-utils',
   'transcription-note-title-utils',
   'transcription-quality-utils',
