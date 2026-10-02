@@ -2,6 +2,12 @@ const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runti
 const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils');
 const douyinBrowserSafety = require('./douyin-browser-safety');
 const { createAutoSyncController } = require('./auto-sync-controller');
+const {
+  createDiagnosticId,
+  createSyncDiagnosticReporter,
+  getBindingFingerprint,
+  normalizeOutbox,
+} = require('./sync-diagnostic-reporter');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const bilibiliDiagnostic = require('./bilibili-diagnostic-utils');
 function retainedSyncFailureDiagnostic(value, settings) {
@@ -263,7 +269,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.175';
+const PLUGIN_RUNTIME_VERSION = '1.3.176';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -467,6 +473,7 @@ const DEFAULT_SETTINGS = {
   recentSyncFailures: [],
   pendingSyncLifecycleAttempts: [],
   completedSyncReceipts: [],
+  syncDiagnosticOutbox: [],
 };
 
 const XIAOHONGSHU_OCR_MAX_IMAGES = 18;
@@ -3455,6 +3462,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     merged.pendingSyncLifecycleAttempts,
   );
   merged.completedSyncReceipts = normalizeCompletedSyncReceipts(merged.completedSyncReceipts);
+  merged.syncDiagnosticOutbox = normalizeOutbox(merged.syncDiagnosticOutbox);
 
   return merged;
 }
@@ -3615,7 +3623,9 @@ function requestJsonViaNode(options) {
     });
 
     request.on('timeout', () => {
-      request.destroy(new Error('Node HTTP request timeout'));
+      const timeoutError = new Error('Node HTTP request timeout');
+      timeoutError.code = 'NODE_HTTP_TIMEOUT';
+      request.destroy(timeoutError);
     });
     request.on('error', (error) => settle(reject, error));
     if (signal && typeof signal.addEventListener === 'function') {
@@ -15967,7 +15977,218 @@ function formatLocalComponentInstallFailureReason(error) {
 }
 
 class WechatObsidianInboxPlugin extends Plugin {
+  ensureSerializedSaveData() {
+    if (this.__serializedSaveData || typeof this.saveData !== 'function') return;
+    const rawSaveData = this.saveData.bind(this);
+    this.__serializedSaveData = true;
+    this.syncDiagnosticPersistencePromise = Promise.resolve();
+    this.saveData = (settings) => {
+      let snapshot = settings;
+      try {
+        snapshot = JSON.parse(JSON.stringify(settings));
+      } catch (error) {
+        // Obsidian settings are plain JSON in production. Preserve the
+        // original object if an isolated test supplies a non-JSON fixture.
+      }
+      const previous = this.syncDiagnosticPersistencePromise || Promise.resolve();
+      const next = previous
+        .catch(() => {})
+        .then(() => rawSaveData(snapshot));
+      this.syncDiagnosticPersistencePromise = next;
+      return next;
+    };
+  }
+
+  getSyncDiagnosticReporter() {
+    if (this.syncDiagnosticReporter) return this.syncDiagnosticReporter;
+    this.ensureSerializedSaveData();
+    const currentSettings = this.settings && typeof this.settings === 'object' ? this.settings : {};
+    this.syncDiagnosticReporter = createSyncDiagnosticReporter({
+      initialOutbox: currentSettings.syncDiagnosticOutbox,
+      pluginVersion: PLUGIN_RUNTIME_VERSION,
+      platform: process.platform,
+      getBindings: () => (typeof this.getActiveBindings === 'function' ? this.getActiveBindings() : []),
+      saveOutbox: async (value) => {
+        const syncDiagnosticOutbox = normalizeOutbox(value);
+        this.settings = {
+          ...(this.settings || {}),
+          syncDiagnosticOutbox,
+        };
+        if (typeof this.saveData === 'function') await this.saveData(this.settings);
+      },
+      requestJson: (path, method, body, binding, options) => this.requestJson(
+        path,
+        method,
+        body,
+        binding,
+        options,
+      ),
+    });
+    return this.syncDiagnosticReporter;
+  }
+
+  queueSyncDiagnosticEvent(event, binding) {
+    const attemptId = String(event && event.attemptId || '').trim();
+    // The cloud aggregate uses the server-issued attempt as its denominator.
+    // Legacy lifecycle routes do not provide one, so do not fabricate a
+    // diagnostic event that would look like a measured attempt.
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(attemptId)) {
+      return { queued: false, reason: 'missing-attempt' };
+    }
+    try {
+      return this.getSyncDiagnosticReporter().enqueue(event, binding);
+    } catch (error) {
+      // Diagnostic reporting must never change the sync result or create a
+      // second user-visible failure. The reporter already keeps the raw error
+      // out of its persisted state.
+      return { queued: false, reason: 'reporter-error' };
+    }
+  }
+
+  queueSyncDiagnosticFailure({
+    recordId,
+    attemptId,
+    diagnosticId,
+    binding,
+    error,
+    stage,
+    retryCount,
+  } = {}) {
+    const normalizedRecordId = String(recordId || '').trim();
+    if (!binding || !binding.token) return { queued: false, reason: 'missing-binding' };
+    const errorMessage = String(error && error.message || error || '').toLowerCase();
+    const transportCode = String(error && error.code || '').toUpperCase();
+    const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
+      ? error.diagnostic
+      : {};
+    const diagnosticCode = String(
+      diagnostic.errorCode || diagnostic.failureCode || diagnostic.code || '',
+    ).trim().toUpperCase();
+    const browserCode = String(error && error.browserCode || diagnostic.browserCode || '').trim().toUpperCase();
+    const diagnosticStopReason = String(diagnostic.stopReason || '').trim().toLowerCase();
+    const status = Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
+    const apiCode = Number(error && error.apiCode) || 0;
+    const effectiveHttpStatus = status || (apiCode === -412 ? 412 : 0);
+    const explicitAuthEvidence = status === 401
+      || /AUTH|BINDING|TOKEN/.test(transportCode)
+      || /鉴权|绑定码/.test(errorMessage);
+    const errorCode = explicitAuthEvidence
+      ? 'AUTH_FAILED'
+      : categorizeSyncFailure(error);
+    const evidenceCodes = [];
+    // Timeout evidence is reserved for an actual transport timeout code. A
+    // generic network error message does not establish that a timeout happened.
+    if (/^(?:TIMEOUT|ETIMEDOUT|ECONNABORTED|NETWORK_TIMEOUT|NODE_HTTP_TIMEOUT)$/.test(transportCode)) {
+      evidenceCodes.push('network_timeout');
+    } else if (/^(?:ENOTFOUND|EAI_AGAIN|EAI_FAIL|DNS_ERROR)$/.test(transportCode)) {
+      evidenceCodes.push('dns_error');
+    }
+    if (effectiveHttpStatus === 403 || /^(?:HTTP_403|FORBIDDEN)$/.test(transportCode)) {
+      evidenceCodes.push('http_403');
+    } else if (effectiveHttpStatus === 412 || /^(?:HTTP_412|BILIBILI_HTTP_412)$/.test(transportCode)) {
+      evidenceCodes.push('http_412');
+    } else if (effectiveHttpStatus >= 500 && effectiveHttpStatus <= 599) {
+      evidenceCodes.push('http_5xx');
+    } else if (effectiveHttpStatus >= 400 && effectiveHttpStatus <= 499) {
+      evidenceCodes.push('http_status');
+    }
+    if (explicitAuthEvidence) {
+      evidenceCodes.push('auth_rejected');
+    }
+    if (errorCode === 'WRITE_FAILED') evidenceCodes.push('write_error');
+    if (errorCode === 'LOCAL_COMPONENT_UNAVAILABLE') {
+      if (diagnostic.componentMissing === true
+        || diagnostic.componentStatus === 'missing'
+        || /^(?:COMPONENT_MISSING|LOCAL_COMPONENT_MISSING|ASR_COMPONENT_MISSING|OCR_COMPONENT_MISSING|ENOENT)$/.test(transportCode)) {
+        evidenceCodes.push('component_missing');
+      } else if (diagnostic.componentVersionMismatch === true
+        || diagnostic.componentStatus === 'outdated'
+        || /^(?:COMPONENT_VERSION_MISMATCH|LOCAL_COMPONENT_OUTDATED|COMPONENT_OUTDATED|VERSION_MISMATCH)$/.test(transportCode)) {
+        evidenceCodes.push('component_version');
+      }
+    }
+    if (transportCode === 'DOUYIN_NO_MEDIA'
+      || diagnosticCode === 'DOUYIN_NO_MEDIA'
+      || diagnosticCode === 'PARSER_NO_MEDIA'
+      || diagnostic.parserRejected === true) {
+      evidenceCodes.push('parser_rejected');
+    }
+    if (transportCode === 'DOUYIN_CHALLENGE'
+      || diagnosticCode === 'DOUYIN_CHALLENGE'
+      || browserCode === 'DOUYIN_CHALLENGE'
+      || diagnostic.challengeDetected === true
+      || diagnosticStopReason === 'douyin-challenge') {
+      evidenceCodes.push('challenge_detected');
+    }
+    if (transportCode === 'TRANSCRIPTION_NO_SPEECH'
+      || diagnosticCode === 'TRANSCRIPTION_NO_SPEECH'
+      || diagnostic.noSpeechEvidence === 'non-speech-markers') {
+      evidenceCodes.push('asr_no_speech');
+    }
+    if (['DOUYIN_BROWSER_RENDERER_GONE', 'ASR_PROCESS_CRASH', 'WHISPER_NATIVE_CRASH'].includes(transportCode)
+      || ['DOUYIN_BROWSER_RENDERER_GONE', 'ASR_PROCESS_CRASH', 'WHISPER_NATIVE_CRASH'].includes(diagnosticCode)
+      || ['DOUYIN_BROWSER_RENDERER_GONE', 'ASR_PROCESS_CRASH'].includes(browserCode)
+      || diagnostic.processCrashed === true
+      || [-1073740791, 0xC0000409].includes(Number(error && error.exitCode))) {
+      evidenceCodes.push('process_crashed');
+    }
+    if (transportCode === 'COMPONENT_CRASHED'
+      || transportCode === 'LOCAL_COMPONENT_CRASHED'
+      || diagnosticCode === 'COMPONENT_CRASHED'
+      || diagnostic.componentCrashed === true) {
+      evidenceCodes.push('component_crashed');
+    }
+    if (['COMPONENT_CLIENT_UPGRADE_REQUIRED', 'CLIENT_UPGRADE_REQUIRED', 'EXPLICIT_UPGRADE_REQUIRED', 'UPGRADE_REQUIRED'].includes(transportCode)
+      || ['COMPONENT_CLIENT_UPGRADE_REQUIRED', 'CLIENT_UPGRADE_REQUIRED', 'EXPLICIT_UPGRADE_REQUIRED', 'UPGRADE_REQUIRED'].includes(diagnosticCode)
+      || diagnostic.upgradeRequired === true) {
+      evidenceCodes.push('upgrade_required');
+    }
+    const diagnosticStage = errorCode === 'EXTRACTION_FAILED'
+      ? 'parse'
+      : errorCode === 'TRANSCRIPTION_FAILED'
+        ? 'transcribe'
+        : errorCode === 'OCR_FAILED'
+          ? 'ocr'
+          : errorCode === 'WRITE_FAILED'
+            ? 'write'
+            : stage === 'fetching'
+              ? 'fetch'
+              : 'sync';
+    return this.queueSyncDiagnosticEvent({
+      diagnosticId,
+      attemptId,
+      syncRecordId: normalizedRecordId,
+      errorType: errorCode,
+      errorCode,
+      stage: diagnosticStage,
+      retryCount: Number(retryCount) || 0,
+      outcome: 'failed',
+      evidenceCodes,
+    }, binding);
+  }
+
+  queueSyncDiagnosticSuccess({
+    recordId,
+    attemptId,
+    diagnosticId,
+    binding,
+    retryCount,
+    stage = 'write',
+  } = {}) {
+    if (!binding || !binding.token || !recordId) return { queued: false, reason: 'missing-binding' };
+    return this.queueSyncDiagnosticEvent({
+      diagnosticId,
+      attemptId,
+      syncRecordId: recordId,
+      stage,
+      retryCount: Number(retryCount) || 0,
+      outcome: 'succeeded',
+      evidenceCodes: ['sync_callback'],
+    }, binding);
+  }
+
   async onload() {
+    this.ensureSerializedSaveData();
     const savedSettings = await this.loadData();
     this.settings = mergeSettings(savedSettings);
     if (!savedSettings
@@ -15992,6 +16213,10 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.currentProcessingContext = null;
     this.pendingStoppedTranscriptionDeletes = new Map();
     this.syncInboxPromise = null;
+    this.getSyncDiagnosticReporter();
+    this.register(() => {
+      if (this.syncDiagnosticReporter) this.syncDiagnosticReporter.dispose();
+    });
     this.startFeishuImageDisplay();
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
       try {
@@ -16056,10 +16281,22 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
 
     this.startAutoSync();
+    this.getSyncDiagnosticReporter().kick();
   }
 
   async saveSettings(nextSettings) {
-    this.settings = mergeSettings(nextSettings);
+    this.ensureSerializedSaveData();
+    if (this.syncDiagnosticPersistencePromise) {
+      await this.syncDiagnosticPersistencePromise.catch(() => {});
+    }
+    // A diagnostic enqueue may have persisted a newer outbox while this
+    // settings write was waiting. Keep that latest snapshot so an unrelated
+    // settings update cannot restore an older outbox and lose an event.
+    const latestOutbox = this.settings && this.settings.syncDiagnosticOutbox;
+    this.settings = mergeSettings({
+      ...(nextSettings || {}),
+      ...(Array.isArray(latestOutbox) ? { syncDiagnosticOutbox: latestOutbox } : {}),
+    });
     if (this.autoSyncController) this.autoSyncController.setEnabled(this.settings.autoSyncEnabled);
     await this.saveData(this.settings);
   }
@@ -16642,6 +16879,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       },
       body: method === 'POST' ? JSON.stringify(requestBody || {}) : undefined,
       signal,
+      ...(Number(options.timeoutMs) > 0 ? { timeout: Math.min(Number(options.timeoutMs), 120000) } : {}),
     };
 
     let response;
@@ -24803,6 +25041,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async syncBinding(binding, shouldPrefixTitle) {
+    this.ensureSerializedSaveData();
     const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
     await this.replayPendingSyncLifecycleAttempts(binding);
     this.showSyncProgress({ bindingLabel, stage: 'fetching' });
@@ -24871,6 +25110,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
       let lifecycle = { enabled: false };
       let localCommitFact = null;
+      let diagnosticId = createDiagnosticId({ binding, syncRecordId: recordId });
       if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
         skipped.push({
           recordId,
@@ -24912,6 +25152,11 @@ class WechatObsidianInboxPlugin extends Plugin {
           skipped.push({ recordId, reason: 'record-busy' });
           continue;
         }
+        diagnosticId = createDiagnosticId({
+          binding,
+          syncRecordId: recordId,
+          attemptId: lifecycle.attemptId,
+        });
         if (lifecycle.enabled && lifecycle.attemptId) {
           await this.upsertPendingSyncLifecycleAttempt(binding, {
             recordId,
@@ -25005,7 +25250,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (processingAbortController.signal.aborted && !item.committed) {
           throw createAbortError();
         }
+        const hasExplicitCommitAck = Boolean(item && Object.prototype.hasOwnProperty.call(item, 'committed'));
+        const writeAcknowledged = Boolean(item && (hasExplicitCommitAck ? item.committed === true : item.recordId));
         localCommitFact = item;
+        if (writeAcknowledged) {
+          this.queueSyncDiagnosticSuccess({
+            recordId: item.recordId,
+            attemptId: lifecycle.attemptId,
+            diagnosticId,
+            binding,
+            retryCount: record.retryCount,
+            stage: 'write',
+          });
+        }
         if (this.autoSyncController) this.autoSyncController.succeeded(autoRetryKey);
         written.push(item);
         if (item.conversionWarning) {
@@ -25057,6 +25314,15 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
           continue;
         }
+        this.queueSyncDiagnosticFailure({
+          recordId,
+          attemptId: lifecycle.attemptId,
+          diagnosticId,
+          binding,
+          error,
+          stage: progress.stage || 'processing',
+          retryCount: record.retryCount,
+        });
         let lifecycleReportError = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
           const failureCode = categorizeSyncFailure(error);
@@ -26054,6 +26320,10 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  createDiagnosticId,
+  createSyncDiagnosticReporter,
+  getBindingFingerprint,
+  normalizeOutbox,
   getDurablyResolvedFailureRecordIds,
   buildDouyinFallbackMarkdown,
   buildXiaohongshuFallbackMarkdown,

@@ -1083,6 +1083,548 @@ var require_auto_sync_controller = __commonJS({
   }
 });
 
+// src/sync-diagnostic-reporter.js
+var require_sync_diagnostic_reporter = __commonJS({
+  "src/sync-diagnostic-reporter.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("node:crypto");
+    var DIAGNOSTIC_ENDPOINT = "/diagnostics/events";
+    var MAX_OUTBOX_ITEMS = 100;
+    var OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+    var MAX_BATCH_SIZE = 20;
+    var DEFAULT_RETRY_BASE_MS = 5 * 1e3;
+    var MAX_RETRY_DELAY_MS = 6 * 60 * 60 * 1e3;
+    var DEFAULT_REQUEST_TIMEOUT_MS = 10 * 1e3;
+    var NOT_FOUND_RETRY_BASE_MS = 60 * 60 * 1e3;
+    var ALLOWED_EVENT_FIELDS = Object.freeze([
+      "eventId",
+      "attemptId",
+      "diagnosticId",
+      "syncRecordId",
+      "errorType",
+      "stage",
+      "pluginVersion",
+      "platform",
+      "occurredAt",
+      "retryCount",
+      "outcome",
+      "evidenceCodes",
+      "errorCode"
+    ]);
+    var SAFE_STAGES = /* @__PURE__ */ new Set([
+      "upload",
+      "fetch",
+      "parse",
+      "transcribe",
+      "ocr",
+      "write",
+      "sync",
+      "auth"
+    ]);
+    var SAFE_ERROR_CODES = /* @__PURE__ */ new Set([
+      "AUTH_FAILED",
+      "EXTRACTION_FAILED",
+      "LOCAL_COMPONENT_UNAVAILABLE",
+      "NETWORK_FAILED",
+      "NONE",
+      "OCR_FAILED",
+      "SYNC_FAILED",
+      "TRANSCRIPTION_FAILED",
+      "WRITE_FAILED"
+    ]);
+    var SAFE_EVIDENCE_CODES = /* @__PURE__ */ new Set([
+      "network_timeout",
+      "http_status",
+      "dns_error",
+      "auth_rejected",
+      "http_403",
+      "http_412",
+      "http_5xx",
+      "challenge_detected",
+      "component_missing",
+      "component_version",
+      "parser_rejected",
+      "asr_no_speech",
+      "process_crashed",
+      "component_crashed",
+      "upgrade_required",
+      "write_error",
+      "sync_callback",
+      "user_retry",
+      "trusted_completion",
+      "manual_review",
+      "no_matching_evidence"
+    ]);
+    function asFiniteInteger(value, fallback = 0, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return fallback;
+      return Math.max(min, Math.min(max, Math.floor(number)));
+    }
+    __name(asFiniteInteger, "asFiniteInteger");
+    function normalizeSafeId(value, { min = 8, max = 128 } = {}) {
+      const source = String(value || "").trim();
+      return new RegExp(`^[A-Za-z0-9_-]{${min},${max}}$`).test(source) ? source : "";
+    }
+    __name(normalizeSafeId, "normalizeSafeId");
+    function normalizeRecordId(value) {
+      return normalizeSafeId(value, { min: 1, max: 128 });
+    }
+    __name(normalizeRecordId, "normalizeRecordId");
+    function normalizeTimestamp(value, now = Date.now()) {
+      const source = String(value || "").trim();
+      const timestamp = source ? new Date(source) : new Date(now);
+      return Number.isNaN(timestamp.getTime()) ? new Date(now).toISOString() : timestamp.toISOString();
+    }
+    __name(normalizeTimestamp, "normalizeTimestamp");
+    function normalizePluginVersion(value) {
+      const source = String(value || "").trim();
+      return /^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(source) ? source.slice(0, 64) : "unknown";
+    }
+    __name(normalizePluginVersion, "normalizePluginVersion");
+    function normalizePlatform(value) {
+      const source = String(value || "").trim().toLowerCase();
+      const aliases = {
+        win32: "windows",
+        windows: "windows",
+        darwin: "macos",
+        mac: "macos",
+        macos: "macos",
+        linux: "linux",
+        ios: "ios",
+        android: "android"
+      };
+      return aliases[source] || "unknown";
+    }
+    __name(normalizePlatform, "normalizePlatform");
+    function normalizeOutcome(value) {
+      const source = String(value || "").trim().toLowerCase();
+      if (source === "success" || source === "succeeded") return "succeeded";
+      if (source === "failure" || source === "failed") return "failed";
+      return "failed";
+    }
+    __name(normalizeOutcome, "normalizeOutcome");
+    function normalizeStage(value) {
+      const source = String(value || "").trim().toLowerCase();
+      const aliases = {
+        fetching: "fetch",
+        processing: "sync",
+        writing: "write",
+        marking: "sync",
+        syncinbox: "sync",
+        finished: "sync"
+      };
+      return SAFE_STAGES.has(source) ? source : aliases[source] || "sync";
+    }
+    __name(normalizeStage, "normalizeStage");
+    function normalizeErrorCode(value, fallback = "") {
+      const source = String(value || "").trim().toUpperCase();
+      if (SAFE_ERROR_CODES.has(source)) return source;
+      return SAFE_ERROR_CODES.has(fallback) ? fallback : "";
+    }
+    __name(normalizeErrorCode, "normalizeErrorCode");
+    function normalizeEvidenceCodes(value, outcome, errorCode) {
+      const values = Array.isArray(value) ? value : [];
+      const result = [];
+      for (const item of values) {
+        const code = String(item || "").trim().toLowerCase();
+        if (!SAFE_EVIDENCE_CODES.has(code) || result.includes(code)) continue;
+        result.push(code);
+        if (result.length >= 8) break;
+      }
+      if (outcome === "succeeded" && !result.includes("sync_callback")) result.unshift("sync_callback");
+      if (outcome === "failed" && !result.length) {
+        result.push("no_matching_evidence");
+      }
+      return result.slice(0, 8);
+    }
+    __name(normalizeEvidenceCodes, "normalizeEvidenceCodes");
+    function getBindingFingerprint2(bindingOrToken) {
+      const source = bindingOrToken && typeof bindingOrToken === "object" ? bindingOrToken.bindingFingerprint || bindingOrToken.token : bindingOrToken;
+      const value = String(source || "").trim();
+      if (!value) return "";
+      if (/^[a-f0-9]{16,64}$/i.test(value) && (!bindingOrToken || !bindingOrToken.token)) {
+        return value.toLowerCase();
+      }
+      return crypto2.createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32);
+    }
+    __name(getBindingFingerprint2, "getBindingFingerprint");
+    function hashId(prefix, value) {
+      return `${prefix}_${crypto2.createHash("sha256").update(String(value || ""), "utf8").digest("hex").slice(0, 32)}`;
+    }
+    __name(hashId, "hashId");
+    function createDiagnosticId2({ binding, bindingFingerprint, syncRecordId, attemptId, seed } = {}) {
+      const scope = getBindingFingerprint2(bindingFingerprint || binding);
+      const recordId = normalizeRecordId(syncRecordId);
+      const value = [scope, recordId].join(":");
+      return hashId("diag", value || String(seed || "") || crypto2.randomBytes(16).toString("hex"));
+    }
+    __name(createDiagnosticId2, "createDiagnosticId");
+    function buildEventId(input = {}) {
+      const normalized = {
+        attemptId: normalizeSafeId(input.attemptId),
+        diagnosticId: normalizeSafeId(input.diagnosticId),
+        syncRecordId: normalizeRecordId(input.syncRecordId),
+        outcome: normalizeOutcome(input.outcome),
+        errorType: normalizeErrorCode(input.errorType),
+        errorCode: normalizeErrorCode(input.errorCode),
+        stage: normalizeStage(input.stage),
+        retryCount: asFiniteInteger(input.retryCount)
+      };
+      return hashId("event", JSON.stringify(normalized));
+    }
+    __name(buildEventId, "buildEventId");
+    function normalizeDiagnosticEvent(input = {}, defaults = {}) {
+      const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+      const outcome = normalizeOutcome(source.outcome || defaults.outcome);
+      const errorType = outcome === "failed" ? normalizeErrorCode(source.errorType || source.errorCode, "SYNC_FAILED") : "NONE";
+      const errorCode = outcome === "failed" ? normalizeErrorCode(source.errorCode || source.errorType, errorType) : "NONE";
+      const diagnosticId = normalizeSafeId(source.diagnosticId || defaults.diagnosticId) || createDiagnosticId2({
+        bindingFingerprint: defaults.bindingFingerprint,
+        syncRecordId: source.syncRecordId || defaults.syncRecordId,
+        attemptId: source.attemptId || defaults.attemptId,
+        seed: defaults.seed
+      });
+      const eventId = normalizeSafeId(source.eventId || defaults.eventId) || buildEventId({
+        ...source,
+        attemptId: source.attemptId || defaults.attemptId,
+        syncRecordId: source.syncRecordId || defaults.syncRecordId,
+        stage: source.stage || defaults.stage,
+        retryCount: source.retryCount ?? defaults.retryCount,
+        diagnosticId,
+        outcome,
+        errorType,
+        errorCode
+      });
+      const event = {
+        eventId,
+        pluginVersion: normalizePluginVersion(source.pluginVersion || defaults.pluginVersion),
+        platform: normalizePlatform(source.platform || defaults.platform),
+        occurredAt: normalizeTimestamp(source.occurredAt || defaults.occurredAt, defaults.now || Date.now()),
+        retryCount: asFiniteInteger(source.retryCount ?? defaults.retryCount, 0, { min: 0, max: 100 }),
+        outcome,
+        evidenceCodes: normalizeEvidenceCodes(source.evidenceCodes || defaults.evidenceCodes, outcome, errorCode)
+      };
+      const attemptId = normalizeSafeId(source.attemptId || defaults.attemptId);
+      const syncRecordId = normalizeRecordId(source.syncRecordId || defaults.syncRecordId);
+      if (attemptId) event.attemptId = attemptId;
+      event.diagnosticId = diagnosticId;
+      if (syncRecordId) event.syncRecordId = syncRecordId;
+      const stage = normalizeStage(source.stage || defaults.stage);
+      event.stage = stage;
+      if (outcome === "failed") {
+        event.errorType = errorType;
+        event.errorCode = errorCode;
+      } else {
+        event.errorType = "NONE";
+      }
+      return ALLOWED_EVENT_FIELDS.reduce((result, key) => {
+        if (Object.prototype.hasOwnProperty.call(event, key)) result[key] = event[key];
+        return result;
+      }, {});
+    }
+    __name(normalizeDiagnosticEvent, "normalizeDiagnosticEvent");
+    function normalizeOutbox2(value, { now = Date.now(), maxItems = MAX_OUTBOX_ITEMS } = {}) {
+      const current = Number(now) || Date.now();
+      const byId = /* @__PURE__ */ new Map();
+      for (const item of Array.isArray(value) ? value : []) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const bindingFingerprint = getBindingFingerprint2(item.bindingFingerprint);
+        if (!bindingFingerprint) continue;
+        const createdAt = normalizeTimestamp(item.createdAt, current);
+        const createdAtMs = Date.parse(createdAt);
+        if (!Number.isFinite(createdAtMs) || createdAtMs + OUTBOX_TTL_MS < current) continue;
+        const event = normalizeDiagnosticEvent(item.event && typeof item.event === "object" ? item.event : item, {
+          now: current
+        });
+        if (!event.eventId || !event.attemptId) continue;
+        const nextAttemptAt = Math.max(
+          current,
+          Number.isFinite(Number(item.nextAttemptAt)) ? Number(item.nextAttemptAt) : current
+        );
+        const normalized = {
+          event,
+          bindingFingerprint,
+          createdAt,
+          nextAttemptAt,
+          uploadAttempts: asFiniteInteger(item.uploadAttempts, 0, { min: 0, max: 1e3 })
+        };
+        const key = `${bindingFingerprint}:${event.eventId}`;
+        byId.set(key, normalized);
+      }
+      return [...byId.values()].sort((left, right) => {
+        const leftTime = Date.parse(left.createdAt) || 0;
+        const rightTime = Date.parse(right.createdAt) || 0;
+        return leftTime - rightTime;
+      }).slice(-Math.max(1, asFiniteInteger(maxItems, MAX_OUTBOX_ITEMS, { min: 1, max: 1e3 })));
+    }
+    __name(normalizeOutbox2, "normalizeOutbox");
+    function getRetryDelay(uploadAttempts, retryBaseMs = DEFAULT_RETRY_BASE_MS) {
+      const attempt = asFiniteInteger(uploadAttempts, 0, { min: 0, max: 30 });
+      const base = Math.max(1, asFiniteInteger(retryBaseMs, DEFAULT_RETRY_BASE_MS, { min: 1, max: MAX_RETRY_DELAY_MS }));
+      return Math.min(MAX_RETRY_DELAY_MS, base * 2 ** Math.min(attempt, 16));
+    }
+    __name(getRetryDelay, "getRetryDelay");
+    function getErrorStatus(error) {
+      return Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
+    }
+    __name(getErrorStatus, "getErrorStatus");
+    function withTimeout(promise, timeoutMs, setTimeoutImpl, clearTimeoutImpl) {
+      const limit = Math.max(1, asFiniteInteger(timeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, { min: 1, max: 120 * 1e3 }));
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeoutImpl(() => {
+          if (settled) return;
+          settled = true;
+          const error = new Error("diagnostic report request timed out");
+          error.code = "DIAGNOSTIC_REPORT_TIMEOUT";
+          reject(error);
+        }, limit);
+        Promise.resolve(promise).then((value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeoutImpl(timer);
+          resolve(value);
+        }, (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeoutImpl(timer);
+          reject(error);
+        });
+      });
+    }
+    __name(withTimeout, "withTimeout");
+    function resolveBindingMap(bindings) {
+      const map = /* @__PURE__ */ new Map();
+      for (const binding of Array.isArray(bindings) ? bindings : []) {
+        const fingerprint = getBindingFingerprint2(binding);
+        const token = String(binding && binding.token || "").trim();
+        if (!fingerprint || !token || binding.enabled === false || ["unbound", "needs_rebind", "paused"].includes(binding.status)) continue;
+        map.set(fingerprint, binding);
+      }
+      return map;
+    }
+    __name(resolveBindingMap, "resolveBindingMap");
+    function createSyncDiagnosticReporter2(options = {}) {
+      const now = typeof options.now === "function" ? options.now : () => Date.now();
+      const maxItems = asFiniteInteger(options.maxItems, MAX_OUTBOX_ITEMS, { min: 1, max: 1e3 });
+      const ttlMs = Math.max(1e3, asFiniteInteger(options.ttlMs, OUTBOX_TTL_MS, { min: 1e3, max: 30 * 24 * 60 * 60 * 1e3 }));
+      const retryBaseMs = Math.max(1, asFiniteInteger(options.retryBaseMs, DEFAULT_RETRY_BASE_MS, { min: 1, max: MAX_RETRY_DELAY_MS }));
+      const requestTimeoutMs = Math.max(1, asFiniteInteger(
+        options.requestTimeoutMs,
+        DEFAULT_REQUEST_TIMEOUT_MS,
+        { min: 1, max: 120 * 1e3 }
+      ));
+      const setTimeoutImpl = typeof options.setTimeout === "function" ? options.setTimeout : setTimeout;
+      const clearTimeoutImpl = typeof options.clearTimeout === "function" ? options.clearTimeout : clearTimeout;
+      const getBindings = typeof options.getBindings === "function" ? options.getBindings : () => [];
+      const saveOutbox = typeof options.saveOutbox === "function" ? options.saveOutbox : typeof options.persist === "function" ? options.persist : async () => {
+      };
+      const postEvents = typeof options.postEvents === "function" ? options.postEvents : typeof options.requestJson === "function" ? (events, binding) => options.requestJson(
+        DIAGNOSTIC_ENDPOINT,
+        "POST",
+        { events },
+        binding,
+        { diagnosticReport: true, timeoutMs: requestTimeoutMs }
+      ) : null;
+      let disposed = false;
+      let outbox = normalizeOutbox2(options.initialOutbox || [], { now: now(), maxItems });
+      let timer = null;
+      let flushPromise = null;
+      let persistPromise = Promise.resolve();
+      function currentOutbox() {
+        outbox = normalizeOutbox2(outbox, { now: now(), maxItems });
+        const cutoff = Number(now()) - ttlMs;
+        outbox = outbox.filter((entry) => (Date.parse(entry.createdAt) || 0) >= cutoff);
+        return outbox;
+      }
+      __name(currentOutbox, "currentOutbox");
+      function persistSnapshot() {
+        const snapshot = currentOutbox().map((entry) => ({
+          event: { ...entry.event, evidenceCodes: [...entry.event.evidenceCodes] },
+          bindingFingerprint: entry.bindingFingerprint,
+          createdAt: entry.createdAt,
+          nextAttemptAt: entry.nextAttemptAt,
+          uploadAttempts: entry.uploadAttempts
+        }));
+        persistPromise = persistPromise.catch(() => {
+        }).then(() => saveOutbox(snapshot)).catch(() => {
+        });
+        return persistPromise;
+      }
+      __name(persistSnapshot, "persistSnapshot");
+      function scheduleFlush(delay2 = 0) {
+        if (disposed || !postEvents || timer) return;
+        const wait = Math.max(0, asFiniteInteger(delay2, 0, { min: 0, max: MAX_RETRY_DELAY_MS }));
+        timer = setTimeoutImpl(() => {
+          timer = null;
+          void flush().catch(() => {
+          });
+        }, wait);
+        if (timer && typeof timer.unref === "function") timer.unref();
+      }
+      __name(scheduleFlush, "scheduleFlush");
+      function enqueue(input = {}, bindingOrOptions = null) {
+        if (disposed) return { queued: false, reason: "disposed" };
+        const binding = bindingOrOptions && bindingOrOptions.binding ? bindingOrOptions.binding : bindingOrOptions;
+        const bindingFingerprint = getBindingFingerprint2(binding);
+        if (!bindingFingerprint) return { queued: false, reason: "missing-binding" };
+        const event = normalizeDiagnosticEvent(input, {
+          pluginVersion: options.pluginVersion,
+          platform: options.platform,
+          bindingFingerprint,
+          now: now()
+        });
+        if (!event.attemptId) return { queued: false, reason: "missing-attempt" };
+        const key = `${bindingFingerprint}:${event.eventId}`;
+        const existing = currentOutbox().find((entry) => `${entry.bindingFingerprint}:${entry.event.eventId}` === key);
+        if (existing) {
+          scheduleFlush(0);
+          return { queued: false, duplicate: true, event: { ...existing.event } };
+        }
+        const createdAt = normalizeTimestamp(event.occurredAt, now());
+        outbox = normalizeOutbox2([
+          ...currentOutbox(),
+          {
+            event,
+            bindingFingerprint,
+            createdAt,
+            nextAttemptAt: now(),
+            uploadAttempts: 0
+          }
+        ], { now: now(), maxItems });
+        void persistSnapshot();
+        scheduleFlush(0);
+        return { queued: true, event: { ...event } };
+      }
+      __name(enqueue, "enqueue");
+      async function flush({ binding = null, bindings = null } = {}) {
+        if (disposed || !postEvents) return { sent: 0, retained: currentOutbox().length, failed: 0 };
+        if (flushPromise) return await flushPromise;
+        flushPromise = (async () => {
+          await persistPromise.catch(() => {
+          });
+          if (disposed) return { sent: 0, retained: currentOutbox().length, failed: 0 };
+          const available = resolveBindingMap(bindings || getBindings());
+          const requestedFingerprint = binding ? getBindingFingerprint2(binding) : "";
+          if (requestedFingerprint) {
+            for (const fingerprint of [...available.keys()]) {
+              if (fingerprint !== requestedFingerprint) available.delete(fingerprint);
+            }
+          }
+          const stats = { sent: 0, retained: 0, failed: 0 };
+          const currentTime = Number(now()) || Date.now();
+          const eligible = currentOutbox().filter((entry) => available.has(entry.bindingFingerprint) && entry.nextAttemptAt <= currentTime);
+          for (const [bindingFingerprint, bindingValue] of available) {
+            const entries = eligible.filter((entry) => entry.bindingFingerprint === bindingFingerprint).slice(0, MAX_BATCH_SIZE);
+            if (!entries.length) continue;
+            try {
+              const response = await withTimeout(
+                postEvents(entries.map((entry) => ({ ...entry.event })), bindingValue),
+                requestTimeoutMs,
+                setTimeoutImpl,
+                clearTimeoutImpl
+              );
+              const responseAcceptedEventIds = response && Array.isArray(response.acceptedEventIds) ? response.acceptedEventIds : response && response.data && Array.isArray(response.data.acceptedEventIds) ? response.data.acceptedEventIds : null;
+              const responseSingleEventId = response && typeof response.eventId === "string" ? response.eventId : response && response.data && typeof response.data.eventId === "string" ? response.data.eventId : "";
+              const hasExplicitAck = Array.isArray(responseAcceptedEventIds) || Boolean(responseSingleEventId);
+              const acceptedEventIds = new Set(
+                (Array.isArray(responseAcceptedEventIds) ? responseAcceptedEventIds : [responseSingleEventId]).map((value) => String(value || "").trim()).filter(Boolean)
+              );
+              const sentIds = hasExplicitAck ? new Set(entries.filter((entry) => acceptedEventIds.has(entry.event.eventId)).map((entry) => entry.event.eventId)) : /* @__PURE__ */ new Set();
+              const unackedEntries = entries.filter((entry) => !sentIds.has(entry.event.eventId));
+              outbox = currentOutbox().filter((entry) => !(entry.bindingFingerprint === bindingFingerprint && sentIds.has(entry.event.eventId)));
+              stats.sent += sentIds.size;
+              if (unackedEntries.length) {
+                const attemptedAt = Number(now()) || Date.now();
+                const unackedIds = new Set(unackedEntries.map((entry) => entry.event.eventId));
+                outbox = currentOutbox().map((entry) => {
+                  if (entry.bindingFingerprint !== bindingFingerprint || !unackedIds.has(entry.event.eventId)) return entry;
+                  const uploadAttempts = entry.uploadAttempts + 1;
+                  return {
+                    ...entry,
+                    uploadAttempts,
+                    nextAttemptAt: attemptedAt + getRetryDelay(uploadAttempts, retryBaseMs)
+                  };
+                });
+                stats.failed += unackedEntries.length;
+              }
+              await persistSnapshot();
+            } catch (error) {
+              const attemptedAt = Number(now()) || Date.now();
+              const attemptedIds = new Set(entries.map((entry) => entry.event.eventId));
+              outbox = currentOutbox().map((entry) => {
+                if (entry.bindingFingerprint !== bindingFingerprint || !attemptedIds.has(entry.event.eventId)) return entry;
+                const uploadAttempts = entry.uploadAttempts + 1;
+                const status = getErrorStatus(error);
+                const effectiveBase = status === 404 ? Math.max(retryBaseMs, NOT_FOUND_RETRY_BASE_MS) : retryBaseMs;
+                return {
+                  ...entry,
+                  uploadAttempts,
+                  nextAttemptAt: attemptedAt + getRetryDelay(uploadAttempts, effectiveBase)
+                };
+              });
+              stats.failed += entries.length;
+              await persistSnapshot();
+            }
+          }
+          stats.retained = currentOutbox().length;
+          const nextDue = currentOutbox().filter((entry) => available.has(entry.bindingFingerprint)).reduce((minimum, entry) => Math.min(minimum, entry.nextAttemptAt), Infinity);
+          if (Number.isFinite(nextDue)) scheduleFlush(Math.max(0, nextDue - (Number(now()) || Date.now())));
+          return stats;
+        })().finally(() => {
+          flushPromise = null;
+        });
+        return await flushPromise;
+      }
+      __name(flush, "flush");
+      function dispose() {
+        disposed = true;
+        if (timer) {
+          clearTimeoutImpl(timer);
+          timer = null;
+        }
+      }
+      __name(dispose, "dispose");
+      return {
+        enqueue,
+        flush,
+        dispose,
+        kick: /* @__PURE__ */ __name(() => scheduleFlush(0), "kick"),
+        getOutbox: /* @__PURE__ */ __name(() => currentOutbox().map((entry) => ({
+          event: { ...entry.event, evidenceCodes: [...entry.event.evidenceCodes] },
+          bindingFingerprint: entry.bindingFingerprint,
+          createdAt: entry.createdAt,
+          nextAttemptAt: entry.nextAttemptAt,
+          uploadAttempts: entry.uploadAttempts
+        })), "getOutbox"),
+        getPendingCount: /* @__PURE__ */ __name(() => currentOutbox().length, "getPendingCount"),
+        whenIdle: /* @__PURE__ */ __name(() => persistPromise, "whenIdle"),
+        isDisposed: /* @__PURE__ */ __name(() => disposed, "isDisposed")
+      };
+    }
+    __name(createSyncDiagnosticReporter2, "createSyncDiagnosticReporter");
+    module2.exports = {
+      ALLOWED_EVENT_FIELDS,
+      DIAGNOSTIC_ENDPOINT,
+      DEFAULT_RETRY_BASE_MS,
+      MAX_OUTBOX_ITEMS,
+      OUTBOX_TTL_MS,
+      SAFE_ERROR_CODES,
+      SAFE_EVIDENCE_CODES,
+      buildEventId,
+      createDiagnosticId: createDiagnosticId2,
+      createSyncDiagnosticReporter: createSyncDiagnosticReporter2,
+      getBindingFingerprint: getBindingFingerprint2,
+      getRetryDelay,
+      normalizeDiagnosticEvent,
+      normalizeOutcome,
+      normalizeOutbox: normalizeOutbox2,
+      normalizePlatform,
+      normalizeStage
+    };
+  }
+});
+
 // src/wechat-channels-diagnostic-utils.js
 var require_wechat_channels_diagnostic_utils = __commonJS({
   "src/wechat-channels-diagnostic-utils.js"(exports2, module2) {
@@ -12238,6 +12780,12 @@ var { getXiaohongshuRuntimeSnapshotExpression } = require_xiaohongshu_runtime_sn
 var { getWechatPlaceholderRecoveryUrl } = require_wechat_placeholder_utils();
 var douyinBrowserSafety = require_douyin_browser_safety();
 var { createAutoSyncController } = require_auto_sync_controller();
+var {
+  createDiagnosticId,
+  createSyncDiagnosticReporter,
+  getBindingFingerprint,
+  normalizeOutbox
+} = require_sync_diagnostic_reporter();
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var bilibiliDiagnostic = require_bilibili_diagnostic_utils();
 function retainedSyncFailureDiagnostic(value, settings) {
@@ -12494,7 +13042,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.175";
+var PLUGIN_RUNTIME_VERSION = "1.3.176";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -12691,7 +13239,8 @@ var DEFAULT_SETTINGS = {
   locallyQuarantinedRecordIds: [],
   recentSyncFailures: [],
   pendingSyncLifecycleAttempts: [],
-  completedSyncReceipts: []
+  completedSyncReceipts: [],
+  syncDiagnosticOutbox: []
 };
 var XIAOHONGSHU_OCR_MAX_IMAGES = 18;
 var XIAOHONGSHU_OCR_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -15068,6 +15617,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     merged.pendingSyncLifecycleAttempts
   );
   merged.completedSyncReceipts = normalizeCompletedSyncReceipts(merged.completedSyncReceipts);
+  merged.syncDiagnosticOutbox = normalizeOutbox(merged.syncDiagnosticOutbox);
   return merged;
 }
 __name(mergeSettings, "mergeSettings");
@@ -15189,7 +15739,9 @@ function requestJsonViaNode(options) {
       response.on("error", (error) => settle(reject, error));
     });
     request.on("timeout", () => {
-      request.destroy(new Error("Node HTTP request timeout"));
+      const timeoutError = new Error("Node HTTP request timeout");
+      timeoutError.code = "NODE_HTTP_TIMEOUT";
+      request.destroy(timeoutError);
     });
     request.on("error", (error) => settle(reject, error));
     if (signal && typeof signal.addEventListener === "function") {
@@ -26367,7 +26919,164 @@ function formatLocalComponentInstallFailureReason(error) {
 }
 __name(formatLocalComponentInstallFailureReason, "formatLocalComponentInstallFailureReason");
 var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin {
+  ensureSerializedSaveData() {
+    if (this.__serializedSaveData || typeof this.saveData !== "function") return;
+    const rawSaveData = this.saveData.bind(this);
+    this.__serializedSaveData = true;
+    this.syncDiagnosticPersistencePromise = Promise.resolve();
+    this.saveData = (settings) => {
+      let snapshot = settings;
+      try {
+        snapshot = JSON.parse(JSON.stringify(settings));
+      } catch (error) {
+      }
+      const previous = this.syncDiagnosticPersistencePromise || Promise.resolve();
+      const next = previous.catch(() => {
+      }).then(() => rawSaveData(snapshot));
+      this.syncDiagnosticPersistencePromise = next;
+      return next;
+    };
+  }
+  getSyncDiagnosticReporter() {
+    if (this.syncDiagnosticReporter) return this.syncDiagnosticReporter;
+    this.ensureSerializedSaveData();
+    const currentSettings = this.settings && typeof this.settings === "object" ? this.settings : {};
+    this.syncDiagnosticReporter = createSyncDiagnosticReporter({
+      initialOutbox: currentSettings.syncDiagnosticOutbox,
+      pluginVersion: PLUGIN_RUNTIME_VERSION,
+      platform: process.platform,
+      getBindings: /* @__PURE__ */ __name(() => typeof this.getActiveBindings === "function" ? this.getActiveBindings() : [], "getBindings"),
+      saveOutbox: /* @__PURE__ */ __name(async (value) => {
+        const syncDiagnosticOutbox = normalizeOutbox(value);
+        this.settings = {
+          ...this.settings || {},
+          syncDiagnosticOutbox
+        };
+        if (typeof this.saveData === "function") await this.saveData(this.settings);
+      }, "saveOutbox"),
+      requestJson: /* @__PURE__ */ __name((path2, method, body, binding, options) => this.requestJson(
+        path2,
+        method,
+        body,
+        binding,
+        options
+      ), "requestJson")
+    });
+    return this.syncDiagnosticReporter;
+  }
+  queueSyncDiagnosticEvent(event, binding) {
+    const attemptId = String(event && event.attemptId || "").trim();
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(attemptId)) {
+      return { queued: false, reason: "missing-attempt" };
+    }
+    try {
+      return this.getSyncDiagnosticReporter().enqueue(event, binding);
+    } catch (error) {
+      return { queued: false, reason: "reporter-error" };
+    }
+  }
+  queueSyncDiagnosticFailure({
+    recordId,
+    attemptId,
+    diagnosticId,
+    binding,
+    error,
+    stage,
+    retryCount
+  } = {}) {
+    const normalizedRecordId = String(recordId || "").trim();
+    if (!binding || !binding.token) return { queued: false, reason: "missing-binding" };
+    const errorMessage = String(error && error.message || error || "").toLowerCase();
+    const transportCode = String(error && error.code || "").toUpperCase();
+    const diagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? error.diagnostic : {};
+    const diagnosticCode = String(
+      diagnostic.errorCode || diagnostic.failureCode || diagnostic.code || ""
+    ).trim().toUpperCase();
+    const browserCode = String(error && error.browserCode || diagnostic.browserCode || "").trim().toUpperCase();
+    const diagnosticStopReason = String(diagnostic.stopReason || "").trim().toLowerCase();
+    const status = Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
+    const apiCode = Number(error && error.apiCode) || 0;
+    const effectiveHttpStatus = status || (apiCode === -412 ? 412 : 0);
+    const explicitAuthEvidence = status === 401 || /AUTH|BINDING|TOKEN/.test(transportCode) || /鉴权|绑定码/.test(errorMessage);
+    const errorCode = explicitAuthEvidence ? "AUTH_FAILED" : categorizeSyncFailure(error);
+    const evidenceCodes = [];
+    if (/^(?:TIMEOUT|ETIMEDOUT|ECONNABORTED|NETWORK_TIMEOUT|NODE_HTTP_TIMEOUT)$/.test(transportCode)) {
+      evidenceCodes.push("network_timeout");
+    } else if (/^(?:ENOTFOUND|EAI_AGAIN|EAI_FAIL|DNS_ERROR)$/.test(transportCode)) {
+      evidenceCodes.push("dns_error");
+    }
+    if (effectiveHttpStatus === 403 || /^(?:HTTP_403|FORBIDDEN)$/.test(transportCode)) {
+      evidenceCodes.push("http_403");
+    } else if (effectiveHttpStatus === 412 || /^(?:HTTP_412|BILIBILI_HTTP_412)$/.test(transportCode)) {
+      evidenceCodes.push("http_412");
+    } else if (effectiveHttpStatus >= 500 && effectiveHttpStatus <= 599) {
+      evidenceCodes.push("http_5xx");
+    } else if (effectiveHttpStatus >= 400 && effectiveHttpStatus <= 499) {
+      evidenceCodes.push("http_status");
+    }
+    if (explicitAuthEvidence) {
+      evidenceCodes.push("auth_rejected");
+    }
+    if (errorCode === "WRITE_FAILED") evidenceCodes.push("write_error");
+    if (errorCode === "LOCAL_COMPONENT_UNAVAILABLE") {
+      if (diagnostic.componentMissing === true || diagnostic.componentStatus === "missing" || /^(?:COMPONENT_MISSING|LOCAL_COMPONENT_MISSING|ASR_COMPONENT_MISSING|OCR_COMPONENT_MISSING|ENOENT)$/.test(transportCode)) {
+        evidenceCodes.push("component_missing");
+      } else if (diagnostic.componentVersionMismatch === true || diagnostic.componentStatus === "outdated" || /^(?:COMPONENT_VERSION_MISMATCH|LOCAL_COMPONENT_OUTDATED|COMPONENT_OUTDATED|VERSION_MISMATCH)$/.test(transportCode)) {
+        evidenceCodes.push("component_version");
+      }
+    }
+    if (transportCode === "DOUYIN_NO_MEDIA" || diagnosticCode === "DOUYIN_NO_MEDIA" || diagnosticCode === "PARSER_NO_MEDIA" || diagnostic.parserRejected === true) {
+      evidenceCodes.push("parser_rejected");
+    }
+    if (transportCode === "DOUYIN_CHALLENGE" || diagnosticCode === "DOUYIN_CHALLENGE" || browserCode === "DOUYIN_CHALLENGE" || diagnostic.challengeDetected === true || diagnosticStopReason === "douyin-challenge") {
+      evidenceCodes.push("challenge_detected");
+    }
+    if (transportCode === "TRANSCRIPTION_NO_SPEECH" || diagnosticCode === "TRANSCRIPTION_NO_SPEECH" || diagnostic.noSpeechEvidence === "non-speech-markers") {
+      evidenceCodes.push("asr_no_speech");
+    }
+    if (["DOUYIN_BROWSER_RENDERER_GONE", "ASR_PROCESS_CRASH", "WHISPER_NATIVE_CRASH"].includes(transportCode) || ["DOUYIN_BROWSER_RENDERER_GONE", "ASR_PROCESS_CRASH", "WHISPER_NATIVE_CRASH"].includes(diagnosticCode) || ["DOUYIN_BROWSER_RENDERER_GONE", "ASR_PROCESS_CRASH"].includes(browserCode) || diagnostic.processCrashed === true || [-1073740791, 3221226505].includes(Number(error && error.exitCode))) {
+      evidenceCodes.push("process_crashed");
+    }
+    if (transportCode === "COMPONENT_CRASHED" || transportCode === "LOCAL_COMPONENT_CRASHED" || diagnosticCode === "COMPONENT_CRASHED" || diagnostic.componentCrashed === true) {
+      evidenceCodes.push("component_crashed");
+    }
+    if (["COMPONENT_CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED", "EXPLICIT_UPGRADE_REQUIRED", "UPGRADE_REQUIRED"].includes(transportCode) || ["COMPONENT_CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED", "EXPLICIT_UPGRADE_REQUIRED", "UPGRADE_REQUIRED"].includes(diagnosticCode) || diagnostic.upgradeRequired === true) {
+      evidenceCodes.push("upgrade_required");
+    }
+    const diagnosticStage = errorCode === "EXTRACTION_FAILED" ? "parse" : errorCode === "TRANSCRIPTION_FAILED" ? "transcribe" : errorCode === "OCR_FAILED" ? "ocr" : errorCode === "WRITE_FAILED" ? "write" : stage === "fetching" ? "fetch" : "sync";
+    return this.queueSyncDiagnosticEvent({
+      diagnosticId,
+      attemptId,
+      syncRecordId: normalizedRecordId,
+      errorType: errorCode,
+      errorCode,
+      stage: diagnosticStage,
+      retryCount: Number(retryCount) || 0,
+      outcome: "failed",
+      evidenceCodes
+    }, binding);
+  }
+  queueSyncDiagnosticSuccess({
+    recordId,
+    attemptId,
+    diagnosticId,
+    binding,
+    retryCount,
+    stage = "write"
+  } = {}) {
+    if (!binding || !binding.token || !recordId) return { queued: false, reason: "missing-binding" };
+    return this.queueSyncDiagnosticEvent({
+      diagnosticId,
+      attemptId,
+      syncRecordId: recordId,
+      stage,
+      retryCount: Number(retryCount) || 0,
+      outcome: "succeeded",
+      evidenceCodes: ["sync_callback"]
+    }, binding);
+  }
   async onload() {
+    this.ensureSerializedSaveData();
     const savedSettings = await this.loadData();
     this.settings = mergeSettings(savedSettings);
     if (!savedSettings || !savedSettings.clientId || shouldPersistNormalizedInboxDir(savedSettings, this.settings) || shouldPersistAutoLocalAsrPlatform(savedSettings)) {
@@ -26389,6 +27098,10 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.currentProcessingContext = null;
     this.pendingStoppedTranscriptionDeletes = /* @__PURE__ */ new Map();
     this.syncInboxPromise = null;
+    this.getSyncDiagnosticReporter();
+    this.register(() => {
+      if (this.syncDiagnosticReporter) this.syncDiagnosticReporter.dispose();
+    });
     this.startFeishuImageDisplay();
     if (this.getConfiguredLocalAsrPlatform() === "win32") {
       try {
@@ -26445,9 +27158,19 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.setTranscriptionStopAvailable(false);
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
     this.startAutoSync();
+    this.getSyncDiagnosticReporter().kick();
   }
   async saveSettings(nextSettings) {
-    this.settings = mergeSettings(nextSettings);
+    this.ensureSerializedSaveData();
+    if (this.syncDiagnosticPersistencePromise) {
+      await this.syncDiagnosticPersistencePromise.catch(() => {
+      });
+    }
+    const latestOutbox = this.settings && this.settings.syncDiagnosticOutbox;
+    this.settings = mergeSettings({
+      ...nextSettings || {},
+      ...Array.isArray(latestOutbox) ? { syncDiagnosticOutbox: latestOutbox } : {}
+    });
     if (this.autoSyncController) this.autoSyncController.setEnabled(this.settings.autoSyncEnabled);
     await this.saveData(this.settings);
   }
@@ -26976,7 +27699,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         } : {}
       },
       body: method === "POST" ? JSON.stringify(requestBody || {}) : void 0,
-      signal
+      signal,
+      ...Number(options.timeoutMs) > 0 ? { timeout: Math.min(Number(options.timeoutMs), 12e4) } : {}
     };
     let response;
     const cachedDnsRecovery = getCachedOfficialDnsRecovery(requestOptions.url);
@@ -34366,6 +35090,7 @@ ${finalized.markdown}
     }, binding);
   }
   async syncBinding(binding, shouldPrefixTitle) {
+    this.ensureSerializedSaveData();
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
     await this.replayPendingSyncLifecycleAttempts(binding);
     this.showSyncProgress({ bindingLabel, stage: "fetching" });
@@ -34418,6 +35143,7 @@ ${finalized.markdown}
       };
       let lifecycle = { enabled: false };
       let localCommitFact = null;
+      let diagnosticId = createDiagnosticId({ binding, syncRecordId: recordId });
       if (this.settings.locallyQuarantinedRecordIds.includes(recordId)) {
         skipped.push({
           recordId,
@@ -34459,6 +35185,11 @@ ${finalized.markdown}
           skipped.push({ recordId, reason: "record-busy" });
           continue;
         }
+        diagnosticId = createDiagnosticId({
+          binding,
+          syncRecordId: recordId,
+          attemptId: lifecycle.attemptId
+        });
         if (lifecycle.enabled && lifecycle.attemptId) {
           await this.upsertPendingSyncLifecycleAttempt(binding, {
             recordId,
@@ -34551,7 +35282,19 @@ ${finalized.markdown}
         if (processingAbortController.signal.aborted && !item.committed) {
           throw createAbortError();
         }
+        const hasExplicitCommitAck = Boolean(item && Object.prototype.hasOwnProperty.call(item, "committed"));
+        const writeAcknowledged = Boolean(item && (hasExplicitCommitAck ? item.committed === true : item.recordId));
         localCommitFact = item;
+        if (writeAcknowledged) {
+          this.queueSyncDiagnosticSuccess({
+            recordId: item.recordId,
+            attemptId: lifecycle.attemptId,
+            diagnosticId,
+            binding,
+            retryCount: record.retryCount,
+            stage: "write"
+          });
+        }
         if (this.autoSyncController) this.autoSyncController.succeeded(autoRetryKey);
         written.push(item);
         if (item.conversionWarning) {
@@ -34602,6 +35345,15 @@ ${finalized.markdown}
           });
           continue;
         }
+        this.queueSyncDiagnosticFailure({
+          recordId,
+          attemptId: lifecycle.attemptId,
+          diagnosticId,
+          binding,
+          error,
+          stage: progress.stage || "processing",
+          retryCount: record.retryCount
+        });
         let lifecycleReportError = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
           const failureCode = categorizeSyncFailure(error);
@@ -35319,6 +36071,10 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
 __name(_WechatInboxSettingTab, "WechatInboxSettingTab");
 var WechatInboxSettingTab = _WechatInboxSettingTab;
 WechatObsidianInboxPlugin.__test = {
+  createDiagnosticId,
+  createSyncDiagnosticReporter,
+  getBindingFingerprint,
+  normalizeOutbox,
   getDurablyResolvedFailureRecordIds,
   buildDouyinFallbackMarkdown,
   buildXiaohongshuFallbackMarkdown,
