@@ -71,6 +71,22 @@ assert.strictEqual(
 const builder = require(buildScriptPath);
 const outputBytes = fs.readFileSync(outputPath);
 
+const rebuiltBytes = builder.getPluginBuildBytes();
+if (!outputBytes.equals(rebuiltBytes)) {
+  let offset = 0;
+  while (offset < Math.min(outputBytes.length, rebuiltBytes.length)
+    && outputBytes[offset] === rebuiltBytes[offset]) offset += 1;
+  const crypto = require('node:crypto');
+  console.error('Plugin build mismatch:', JSON.stringify({
+    committedSha256: crypto.createHash('sha256').update(outputBytes).digest('hex'),
+    rebuiltSha256: crypto.createHash('sha256').update(rebuiltBytes).digest('hex'),
+    committedLength: outputBytes.length,
+    rebuiltLength: rebuiltBytes.length,
+    firstDifferentByte: offset,
+    committedContext: outputBytes.subarray(Math.max(0, offset - 160), offset + 320).toString('utf8'),
+    rebuiltContext: rebuiltBytes.subarray(Math.max(0, offset - 160), offset + 320).toString('utf8'),
+  }));
+}
 assert.strictEqual(builder.checkPluginBuild(), true, 'committed bundle must have no source drift');
 assert.deepStrictEqual(
   outputBytes,
