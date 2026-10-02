@@ -71,6 +71,12 @@ assert.strictEqual(
 const builder = require(buildScriptPath);
 const outputBytes = fs.readFileSync(outputPath);
 
+assert.doesNotMatch(
+  outputBytes.toString('utf8'),
+  /(?:\.\.[\\/]){2,}[^\"\r\n]*[\\/]node_modules[\\/]/i,
+  'plugin bundle must not embed a dependency path outside this checkout; run npm ci in the plugin directory',
+);
+
 const rebuiltBytes = builder.getPluginBuildBytes();
 if (!outputBytes.equals(rebuiltBytes)) {
   let offset = 0;
