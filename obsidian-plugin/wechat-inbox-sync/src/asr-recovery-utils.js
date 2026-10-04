@@ -127,8 +127,70 @@ function saveCpuPreference(root, fingerprint) {
   try { fs.writeFileSync(path.join(root, 'asr-cpu-mode.json'), JSON.stringify({ cpu: true, fingerprint }), { mode: 0o600 }); } catch (_) {}
 }
 function fingerprint(identity) { return crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex'); }
+function systemIdentity(platform = os.platform()) {
+  const cpus = os.cpus() || [];
+  return {
+    platform,
+    architecture: os.arch(),
+    release: os.release(),
+    cpuModel: cpus[0]?.model || 'unavailable',
+    logicalCpus: cpus.length || null,
+    totalMemoryBytes: os.totalmem(),
+  };
+}
+function modelIdentity(root, { managed = true } = {}) {
+  if (!managed) return { scope: 'custom_command', modelUsed: 'unknown' };
+  const file = path.join(root, 'models', 'ggml-small.bin');
+  try {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink()) return { scope: 'managed_default_component', fileName: 'ggml-small.bin', status: 'unavailable' };
+    return { scope: 'managed_default_component', modelUsed: 'ggml-small.bin', fileName: 'ggml-small.bin', sizeBytes: st.size, modifiedAt: st.mtime.toISOString() };
+  } catch (_) { return { scope: 'managed_default_component', fileName: 'ggml-small.bin', status: 'unavailable' }; }
+}
+function snapshotDiagnosticLog(file) {
+  try {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink()) return { state: 'unavailable' };
+    const sample = boundedRead(file, 256 * 1024);
+    if (sample.startsWith('[unavailable:')) return { state: 'unavailable' };
+    return {
+      state: 'present', sizeBytes: st.size, modifiedAtMs: st.mtimeMs,
+      fingerprint: crypto.createHash('sha256').update(`${st.size}\n${st.mtimeMs}\n${sample}`).digest('hex'),
+    };
+  } catch (error) {
+    return error && error.code === 'ENOENT' ? { state: 'absent' } : { state: 'unavailable' };
+  }
+}
+function diagnosticLogFreshness(before, after) {
+  if (!after || after.state !== 'present') return 'unavailable';
+  if (before?.state === 'absent') return 'fresh';
+  if (before?.state === 'present' && before.fingerprint !== after.fingerprint) return 'fresh';
+  if (before?.state === 'unavailable') return 'unavailable';
+  return 'stale';
+}
 function matchesBinaryPath(value, session) {
   return Boolean(value && session?.runtime?.binaryPathSha256 && crypto.createHash('sha256').update(String(value).trim()).digest('hex') === session.runtime.binaryPathSha256);
+}
+function parseTimestamp(value) {
+  const parsed = Date.parse(value || '');
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function getCrashAssociation(session, pid, capturedAt) {
+  const attempts = Array.isArray(session?.attempts) ? session.attempts : [];
+  const sameAttempt = attempts.find((attempt) => {
+    if (!(attempt?.nativePids || []).map(Number).includes(Number(pid))) return false;
+    const startedAt = parseTimestamp(attempt.startedAt);
+    const finishedAt = parseTimestamp(attempt.finishedAt || attempt.at);
+    if (startedAt === null || finishedAt === null) return false;
+    return capturedAt >= startedAt - 5000 && capturedAt <= finishedAt + 5000;
+  });
+  return {
+    reliability: sameAttempt ? 'same_attempt_pid_and_time' : 'session_window_pid_and_time',
+    attempt: sameAttempt?.attempt ?? null,
+    pidMatched: true,
+    captureTimeInAttemptWindow: Boolean(sameAttempt),
+    pidReuseRisk: !sameAttempt,
+  };
 }
 function readMatchingCrashSummary(session, { directory = path.join(os.homedir(), 'Library', 'Logs', 'DiagnosticReports'), fileSystem = fs } = {}) {
   if (!session || session.platform !== 'darwin' || !session.startedAt || !session.finishedAt) return '[unavailable: no matching Mac run]';
@@ -147,13 +209,26 @@ function readMatchingCrashSummary(session, { directory = path.join(os.homedir(),
         const captured = Date.parse(report.captureTime || '');
         if (!Number.isFinite(captured) || captured < start || captured > end) continue;
         const thread = report.threads?.[report.faultingThread];
-        return JSON.stringify({ process: report.procName, pid: report.pid, exception: report.exception, termination: report.termination, faultingThread: report.faultingThread, frames: (thread?.frames || []).slice(0, 25).map(f => ({ symbol: f.symbol, imageIndex: f.imageIndex, imageOffset: f.imageOffset })) }, null, 2);
+        return JSON.stringify({
+          process: report.procName,
+          pid: report.pid,
+          captureTime: new Date(captured).toISOString(),
+          associationReliability: getCrashAssociation(session, report.pid, captured),
+          exception: report.exception,
+          termination: report.termination,
+          faultingThread: report.faultingThread,
+          frames: (thread?.frames || []).slice(0, 25).map(f => ({ symbol: f.symbol, imageIndex: f.imageIndex, imageOffset: f.imageOffset })),
+        }, null, 2);
       }
       const proc = text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
       if (!proc || (!/^whisper(?:-cli|-cpp)?$/.test(proc[1]) && !(proc[1] === 'main' && matchesBinaryPath(text.match(/^Path:\s+(.+)$/m)?.[1], session))) || !pids.includes(Number(proc[2]))) continue;
       const crashTime = Date.parse(text.match(/^Date\/Time:\s+(.+)$/m)?.[1] || '');
       if (!Number.isFinite(crashTime) || crashTime < start || crashTime > end) continue;
-      return text.split('\n').filter(line => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:|Thread \d+ Crashed:|\d+\s+\S+\s+0x)/.test(line)).slice(0, 40).join('\n');
+      return [
+        `associationReliability=${JSON.stringify(getCrashAssociation(session, proc[2], crashTime))}`,
+        `captureTime=${new Date(crashTime).toISOString()}`,
+        ...text.split('\n').filter(line => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:|Thread \d+ Crashed:|\d+\s+\S+\s+0x)/.test(line)).slice(0, 40),
+      ].join('\n');
     }
   } catch (_) { return '[unavailable: crash reports not accessible]'; }
   return '[unavailable: no report matching time and native pid]';
@@ -173,19 +248,19 @@ function detailedDiagnostic(root, settings = {}, currentTask = null) {
     && (!currentTask.finishedAt || Date.parse(session.startedAt) <= Date.parse(currentTask.finishedAt)));
   const identity = runtimeIdentity(root);
   const sections = [
-    '详细 ASR 诊断 v1（本地生成；未自动上传）',
+    '详细 ASR 诊断 v2（本地生成；未自动上传）',
     '日志每项最多 256 KiB；超出明确标记；stdout/识别文本不导出。',
-    JSON.stringify({ platform: os.platform(), arch: os.arch(), release: os.release(), cpu: os.cpus()[0]?.model, logicalCpus: os.cpus().length, totalMemoryBytes: os.totalmem(), freeMemoryBytesNow: os.freemem(), memoryNote: '当前空闲内存不能单独判断转写时内存不足', runtime: identity, modelSha256: digestFile(path.join(root, 'models', 'ggml-small.bin')) }, null, 2),
+    JSON.stringify({ system: session?.system || systemIdentity(), freeMemoryBytesNow: os.freemem(), memoryNote: '当前空闲内存不能单独判断转写时内存不足', runtime: session?.runtime || identity, model: session?.model || modelIdentity(root), modelSha256AtReportTime: session?.model?.scope === 'custom_command' ? 'not-collected-custom-model-unknown' : digestFile(path.join(root, 'models', 'ggml-small.bin')) }, null, 2),
     sameAttempt ? '--- 与当前小红书任务匹配的 ASR 尝试 ---' : '--- 最近一次 ASR 历史任务（不代表当前同步已转写）---',
     JSON.stringify({ relation: sameAttempt ? 'same_attempt' : 'historical_or_unconfirmed', recordRef: sessionRef, startedAt: session && session.startedAt || '', currentAttemptId: currentTask && currentTask.attemptId || '', currentTranscriptionStarted: currentTask ? currentTask.transcriptionStarted === true : null }),
     stored,
-    '--- 转写日志（首尾有界） ---', session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path.join(root, 'transcribe-last.log'))) ? readDiagnosticLog(path.join(root, 'transcribe-last.log')) : '[旧成功日志省略]',
+    '--- 转写日志（首尾有界；日志是否属于各次尝试以 session.attempts.logFreshness 为准） ---', session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path.join(root, 'transcribe-last.log'))) ? readDiagnosticLog(path.join(root, 'transcribe-last.log')) : '[旧成功日志省略]',
     '--- 安装日志（首尾有界） ---', readDiagnosticLog(path.join(root, 'install.log')),
     '--- 匹配的系统崩溃摘要 ---', readMatchingCrashSummary(session),
   ];
   return diagnosticRedact(sections.join('\n'), settings);
 }
-module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
+module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
 
 // Only migrate the exact managed 1.3.140 script, preserving a versioned backup.
 function ensureManagedMacScript(root, installerSource) {

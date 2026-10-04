@@ -1,7 +1,31 @@
 const assert = require('assert');
+const { EventEmitter } = require('node:events');
+const https = require('node:https');
 const Module = require('module');
 
 let requestUrlMock = async () => ({ text: '' });
+let mockDouyinShortlinkHead = false;
+const originalHttpsRequest = https.request;
+https.request = function patchedHttpsRequest(options, callback) {
+  const source = typeof options === 'string'
+    ? options
+    : options && (options.href || `${options.protocol || 'https:'}//${options.hostname || ''}${options.path || ''}`);
+  if (!mockDouyinShortlinkHead || !/v\.douyin\.com\/fixture-(?:shortlink|no-target)\//.test(String(source || ''))) {
+    return originalHttpsRequest.apply(this, arguments);
+  }
+  const request = new EventEmitter();
+  const responseCallback = typeof callback === 'function' ? callback : arguments[2];
+  request.setTimeout = () => request;
+  request.destroy = () => {};
+  request.end = () => {
+    const response = new EventEmitter();
+    response.statusCode = 200;
+    response.headers = {};
+    response.resume = () => {};
+    process.nextTick(() => responseCallback(response));
+  };
+  return request;
+};
 const originalLoad = Module._load;
 
 Module._load = function patchedLoad(request, parent, isMain) {
@@ -367,6 +391,7 @@ async function run() {
   const douyinAwemeId = '7530000000000000001';
   const douyinDetail = {
     aweme_id: douyinAwemeId,
+    user: { nickname: '目标作者' },
     desc: '欢迎收看我的 Vlog，我们即将拍婚纱照，今天生意也特别好。',
     statistics: {
       play_count: 3210,
@@ -421,6 +446,7 @@ async function run() {
     metadata: { url: `https://www.douyin.com/video/${douyinAwemeId}` },
   }, '', '', '抖音视频');
   assert.strictEqual(realShapeDouyinRecord.metadata.sourceTitle, douyinDetail.desc);
+  assert.strictEqual(realShapeDouyinRecord.metadata.author, '目标作者');
   assert.match(realShapeDouyinRecord.metadata.markdown, /欢迎收看我的 Vlog/);
   assert.match(realShapeDouyinRecord.metadata.markdown, /#婚纱照/);
   assert.match(realShapeDouyinRecord.metadata.markdown, /https:\/\/p3-sign\.douyinpic\.com\/real-cover\.jpeg/);
@@ -447,10 +473,125 @@ async function run() {
   assert.match(realShapeDouyinMarkdown, /collects:\s*17/);
   assert.match(realShapeDouyinMarkdown, /comments:\s*9/);
   assert.match(realShapeDouyinMarkdown, /shares:\s*3/);
+  assert.match(realShapeDouyinMarkdown, /author:\s*目标作者/);
+
+  const shortlinkAwemeId = '7530000000000000002';
+  const shortlinkUrl = 'https://v.douyin.com/fixture-shortlink/';
+  const shortlinkCanonicalUrl = `https://www.douyin.com/video/${shortlinkAwemeId}`;
+  assert.deepStrictEqual(helpers.normalizeDouyinTargetUrl(shortlinkUrl, ''), {
+    awemeId: '',
+    url: shortlinkUrl,
+  });
+  assert.deepStrictEqual(helpers.normalizeDouyinTargetUrl(shortlinkUrl, shortlinkCanonicalUrl), {
+    awemeId: shortlinkAwemeId,
+    url: shortlinkCanonicalUrl,
+  });
+  const shortlinkDetail = {
+    aweme_id: shortlinkAwemeId,
+    user: { nickname: '短链作者' },
+    desc: '短链最终页面的目标作品',
+    statistics: { play_count: 12, digg_count: 3, collect_count: 0, comment_count: 1, share_count: 0 },
+    video: { play_addr: { url_list: ['https://v.douyinvod.com/shortlink-video.mp4'] } },
+  };
+  requestUrlMock = async (request) => {
+    const requestedUrl = typeof request === 'string' ? request : request && request.url;
+    if (requestedUrl === shortlinkUrl) {
+      return {
+        status: 200,
+        url: shortlinkCanonicalUrl,
+        text: '<html><head><title>抖音短链</title></head></html>',
+      };
+    }
+    if (requestedUrl.includes(`/share/video/${shortlinkAwemeId}/`)) {
+      return {
+        status: 200,
+        url: requestedUrl,
+        text: `<script>window._ROUTER_DATA=${JSON.stringify({ loaderData: { video: { aweme_detail: shortlinkDetail } } })}</script>`,
+      };
+    }
+    if (requestedUrl.includes('/aweme/v1/web/aweme/detail/')) throw new Error('shortlink detail api unavailable');
+    throw new Error(`unexpected shortlink request ${requestedUrl}`);
+  };
+  mockDouyinShortlinkHead = true;
+  const shortlinkRecord = await plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: shortlinkUrl,
+    metadata: { url: shortlinkUrl },
+  }, '', '', '抖音短链');
+  mockDouyinShortlinkHead = false;
+  assert.strictEqual(shortlinkRecord.metadata.author, '短链作者');
+  assert.strictEqual(shortlinkRecord.metadata.sourceTitle, shortlinkDetail.desc);
+  assert.match(shortlinkRecord.metadata.mediaUrl, /shortlink-video/);
+  const shortlinkMarkdown = helpers.buildMarkdownForRecord({
+    record: shortlinkRecord,
+    title: shortlinkRecord.metadata.sourceTitle,
+    syncedAt: '2026-08-07T00:00:00.000Z',
+  });
+  assert.match(shortlinkMarkdown, /author:\s*短链作者/);
+
+  const unverifiedAwemeId = '7530000000000000003';
+  const unrelatedOnlyDetail = {
+    aweme_id: '7530000000000000998',
+    user: { nickname: '推荐作者' },
+    desc: '推荐作品，不应写入目标笔记',
+    statistics: { play_count: 999, digg_count: 99 },
+    video: { play_addr: { url_list: ['https://v.douyinvod.com/unverified-primary.mp4'] } },
+  };
+  requestUrlMock = async (request) => {
+    const requestedUrl = typeof request === 'string' ? request : request && request.url;
+    if (requestedUrl === `https://www.douyin.com/video/${unverifiedAwemeId}`) {
+      return { status: 200, url: requestedUrl, text: '<html><head><title>目标页</title></head></html>' };
+    }
+    if (requestedUrl.includes(`/share/video/${unverifiedAwemeId}/`)) {
+      return {
+        status: 200,
+        url: requestedUrl,
+        text: `<script>window._ROUTER_DATA=${JSON.stringify({ loaderData: { recommendation: { aweme_detail: unrelatedOnlyDetail } } })}</script>`,
+      };
+    }
+    if (requestedUrl.includes('/aweme/v1/web/aweme/detail/')) throw new Error('unverified detail api unavailable');
+    throw new Error(`unexpected unverified request ${requestedUrl}`);
+  };
+  plugin.resolveDouyinMediaWithLocalResolver = async () => ({ mediaUrls: [] });
+  const unverifiedRecord = await plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: `https://www.douyin.com/video/${unverifiedAwemeId}`,
+    metadata: { url: `https://www.douyin.com/video/${unverifiedAwemeId}` },
+  }, '', '', '抖音目标页');
+  assert.equal(unverifiedRecord.metadata.author || '', '');
+  assert.equal(unverifiedRecord.metadata.socialMetrics, undefined);
+
+  const noTargetShortlinkUrl = 'https://v.douyin.com/fixture-no-target/';
+  let localResolverInputUrl = '';
+  requestUrlMock = async (request) => {
+    const requestedUrl = typeof request === 'string' ? request : request && request.url;
+    if (requestedUrl === noTargetShortlinkUrl) {
+      return {
+        status: 200,
+        url: 'https://www.douyin.com/',
+        text: '<html><head><title>抖音首页</title></head></html>',
+      };
+    }
+    throw new Error(`unexpected no-target request ${requestedUrl}`);
+  };
+  plugin.renderSocialMediaUrls = async () => [];
+  plugin.resolveDouyinMediaWithLocalResolver = async (inputUrl) => {
+    localResolverInputUrl = inputUrl;
+    return { mediaUrls: [] };
+  };
+  mockDouyinShortlinkHead = true;
+  await plugin.hydrateWebpageMarkdown({
+    type: 'webpage',
+    content: noTargetShortlinkUrl,
+    metadata: { url: noTargetShortlinkUrl },
+  }, '', '', '无目标短链');
+  mockDouyinShortlinkHead = false;
+  assert.strictEqual(localResolverInputUrl, noTargetShortlinkUrl);
 
   const sessionFallbackAwemeId = '7659778280362429711';
   const sessionFallbackDouyinDetail = {
     aweme_id: sessionFallbackAwemeId,
+    user: { nickname: '会话作者' },
     desc: '全平台内容，一键进 Obsidian #Obsidian #知识管理',
     statistics: {
       play_count: 0,
@@ -506,6 +647,7 @@ async function run() {
   let targetedBrowserOptions = null;
   plugin.renderSocialMediaUrls = async (_url, options) => {
     targetedBrowserOptions = options;
+    options.onDouyinTargetDetail?.(sessionFallbackDouyinDetail);
     return ['https://v.douyinvod.com/targeted-browser-video.mp4'];
   };
   const targetedBrowserDouyinRecord = await plugin.hydrateWebpageMarkdown({
@@ -516,6 +658,7 @@ async function run() {
   // Root-oriented fallback accepts page-player media when Douyin omits work IDs.
   assert.strictEqual(targetedBrowserOptions.strictDouyinTarget, false);
   assert.strictEqual(targetedBrowserDouyinRecord.metadata.transcriptionStatus, 'success');
+  assert.strictEqual(targetedBrowserDouyinRecord.metadata.author, '会话作者');
   assert.match(targetedBrowserDouyinRecord.metadata.mediaUrl, /targeted-browser-video/);
 
   const xhsTrailingRecord = {
@@ -572,9 +715,21 @@ async function run() {
   assert.strictEqual(xhsVideoWithoutStaticMediaRecord.metadata.transcriptionStatus, 'success');
   assert.match(xhsVideoWithoutStaticMediaRecord.metadata.transcription, /小红书视频口播正文/);
   assert.strictEqual(xhsVideoWithoutStaticMediaRecord.metadata.contentCategory, '音视频');
+  console.log('plugin social media transcript context tests passed');
 }
 
-run().catch((error) => {
-  console.error(error);
-  process.exit(1);
+let timeoutHandle;
+const timeout = new Promise((_, reject) => {
+  timeoutHandle = setTimeout(() => reject(new Error('plugin social media transcript context test timed out')), 30000);
 });
+Promise.race([run(), timeout])
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    clearTimeout(timeoutHandle);
+    mockDouyinShortlinkHead = false;
+    https.request = originalHttpsRequest;
+    Module._load = originalLoad;
+  });

@@ -69,8 +69,10 @@ function shellFixture(cpu, nativeExit=0) {
 }
 async function pluginIntegration() {
   const originalLoad=Module._load;
+  const originalExtensions={};
+  for(const ext of ['.ps1','.sh','.py']){originalExtensions[ext]=Module._extensions[ext];Module._extensions[ext]=(mod,file)=>{mod.exports=fs.readFileSync(file,'utf8');};}
   Module._load=function(request,...args){ if(request==='obsidian')return {Plugin:class{},Modal:class{},Notice:class{},PluginSettingTab:class{},Setting:class{},requestUrl:async()=>({})};return originalLoad.call(this,request,...args); };
-  let Plugin;try{Plugin=require(path.join(pluginRoot,'main'));}finally{Module._load=originalLoad;}
+  let Plugin;try{Plugin=require(path.join(pluginRoot,'src/main'));}finally{Module._load=originalLoad;for(const ext of Object.keys(originalExtensions)){if(originalExtensions[ext])Module._extensions[ext]=originalExtensions[ext];else delete Module._extensions[ext];}}
   const root=path.join(scratch,'integration').replace(/\\/g,'/');fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'transcribe.sh'),script);
   const plugin=new Plugin();plugin.settings={};plugin.ensureLocalComponentReadyForUse=async()=>{};plugin.recoverStaleLocalTranscriptionCommand=async()=>{};
   plugin.getConfiguredLocalAsrPlatform=()=> 'darwin';plugin.getConfiguredLocalAsrInstallRoot=()=>root;plugin.getLocalAsrInstallStatus=()=>({ready:true,scriptOutdated:false});
@@ -79,7 +81,7 @@ async function pluginIntegration() {
   plugin.downloadMediaToTempFile=async()=>{const file=path.join(root,'input.mp4');fs.writeFileSync(file,'fixture');return file;};
   const originalExec=cp.exec;const modes=[];
   cp.exec=(command,opts,callback)=>{modes.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{
-    const log=path.join(root,'transcribe-last.log');fs.writeFileSync(log,'progressStage=transcribing\nprogressCurrent=0\nprogressTotal=1\nprogressPercent=0\nprogressPid=1234\nnativeRssKiB=123\n');
+    const log=path.join(root,'transcribe-last.log');fs.writeFileSync(log,`progressStage=transcribing\nprogressCurrent=0\nprogressTotal=1\nprogressPercent=0\nprogressPid=${1234+modes.length}\nnativeRssKiB=123\nnativeExit=${modes.length===1?139:0}\n`);
     if(modes.length===1)callback(Object.assign(new Error('crash'),{code:139}),'','Segmentation fault: 11');
     else {fs.writeFileSync(path.join(root,'input.mp4.txt'),'这是一段完整有效的中文音频转写结果，用来验证兼容恢复。');callback(null,'','');}
   });return {pid:1234};};
@@ -87,12 +89,41 @@ async function pluginIntegration() {
     const text=await plugin.runLocalTranscription('https://example.invalid/test',{recordId:'fixture-record'});assert.ok(text.includes('兼容恢复'));assert.deepEqual(modes,['0','1']);
     const session=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8'));
     assert.equal(session.recordId,'fixture-record');assert.equal(session.attempts.length,2);assert.equal(session.attempts[0].exitCode,139);assert.equal(session.attempts[0].peakRssKiB,123);assert.equal(session.status,'success');
+    assert.ok(session.system.architecture);assert.ok(session.system.cpuModel);assert.equal(session.model.fileName,'ggml-small.bin');assert.equal(session.attempts[0].stage,'transcribing');assert.equal(session.attempts[0].cpu,false);assert.equal(session.attempts[0].requestedMode,'default');assert.equal(session.attempts[0].backendObserved,'unknown');assert.equal(session.attempts[0].nativeExitCode,139);assert.equal(session.attempts[0].nativePids[0],1235);assert.ok(session.attempts[0].logSnapshotAt);assert.ok(session.attempts[0].runLog.includes('nativeExit=139'));assert.equal(session.attempts[1].cpu,true);assert.equal(session.attempts[1].requestedMode,'cpu_compatibility');assert.equal(session.attempts[1].backendObserved,'unknown');assert.equal(session.attempts[1].nativeExitCode,0);assert.equal(session.attempts[1].nativePids[0],1236);assert.ok(session.attempts[1].runLog.includes('nativeExit=0'));assert.ok(!session.attempts[1].runLog.includes('nativeExit=139'));
     await plugin.runLocalTranscription('https://example.invalid/test',{recordId:'second'});assert.deepEqual(modes,['0','1','1']);
+    assert.ok(fs.readFileSync(path.join(root,'transcribe-last.log'),'utf8').includes('nativeExit=0'));
+    cp.exec=(command,opts,callback)=>{setImmediate(()=>callback(Object.assign(new Error('spawn failed'),{code:'ENOENT'}),'',''));return {pid:9876};};
+    await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'spawn-failure'}),/spawn failed/);
+    const spawnFailure=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8')).attempts[0];assert.equal(spawnFailure.logFreshness,'stale');assert.equal(spawnFailure.stage,'unknown');assert.equal(spawnFailure.nativeExitCode,null);assert.deepEqual(spawnFailure.nativePids,[]);assert.ok(spawnFailure.runLog.includes('[stale: prior ASR log omitted]'));assert.ok(!spawnFailure.runLog.includes('nativeExit=0'));assert.ok(!spawnFailure.runLog.includes('1237'));
     fs.unlinkSync(path.join(root,'asr-cpu-mode.json'));
     const stopped=[];
-    cp.exec=(command,opts,callback)=>{stopped.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{plugin.currentTranscriptionAbortController.abort();callback(Object.assign(new Error('stopped'),{code:139}),'','Segmentation fault: 11');});return {pid:1234};};
+    cp.exec=(command,opts,callback)=>{stopped.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{plugin.currentTranscriptionAbortRequest?.('user_stop');callback(Object.assign(new Error('stopped'),{code:139}),'','Segmentation fault: 11');});return {pid:1234};};
     await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'cancelled'}), /用户已停止/);
-    assert.deepEqual(stopped,['0']);assert.equal(JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8')).status,'cancelled');
+    assert.deepEqual(stopped,['0']);
+    const cancelledSession=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8'));
+    assert.equal(cancelledSession.status,'cancelled');
+    assert.equal(cancelledSession.abort.source,'user_stop');
+    assert.ok(cancelledSession.abort.requestedAt);
+    assert.ok(cancelledSession.abort.observedAt);
+    assert.equal(cancelledSession.abort.originalExitCode,139);
+    assert.equal(cancelledSession.abort.originalSignal,'');
+    assert.equal(cancelledSession.abort.nativeCrash,null);
+    assert.equal(cancelledSession.abort.nativeCrashEvidence,'unknown_stale_or_unavailable_log');
+    assert.equal(cancelledSession.attempts.length,1);
+    assert.equal(cancelledSession.attempts[0].exitCode,139);
+    assert.equal(cancelledSession.attempts[0].signal,'');
+    assert.match(cancelledSession.attempts[0].error,/Segmentation fault/);
+    assert.ok(cancelledSession.attempts[0].startedAt);
+    assert.ok(cancelledSession.attempts[0].finishedAt);
+    const unloaded=[];
+    cp.exec=(command,opts,callback)=>{unloaded.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{plugin.currentTranscriptionAbortRequest?.('plugin_unload');callback(Object.assign(new Error('unloaded'),{code:139}),'','Segmentation fault: 11');});return {pid:1234};};
+    await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'unloaded'}), /当前转写已中止/);
+    assert.deepEqual(unloaded,['0']);
+    const unloadedSession=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8'));
+    assert.equal(unloadedSession.status,'cancelled');
+    assert.equal(unloadedSession.abort.source,'plugin_unload');
+    assert.equal(unloadedSession.abort.originalExitCode,139);
+    assert.equal(unloadedSession.attempts.length,1);
     const failed=[];
     cp.exec=(command,opts,callback)=>{failed.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{fs.writeFileSync(path.join(root,'transcribe-last.log'),'progressStage=transcribing\nprogressCurrent=0\nprogressTotal=1\nprogressPercent=0\nprogressPid=1234\n');callback(Object.assign(new Error('crash'),{code:139}),'','Segmentation fault: 11');});return {pid:1234};};
     await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'double-failure'}), /CPU 兼容重试仍失败/);
@@ -110,4 +141,4 @@ async function pluginIntegration() {
 
   } finally {cp.exec=originalExec;}
 }
-(async()=>{try {await matrix();shellFixture(false);shellFixture(true);shellFixture(true,139);await pluginIntegration();console.log('PASS: recovery matrix, actual Bash arguments/exit propagation, built-plugin retry and CPU preference');}finally{if(!scratch.startsWith(path.join(os.tmpdir(),'asr-recovery-test-')))throw Error('unsafe cleanup');fs.rmSync(scratch,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{try {await matrix();shellFixture(false);shellFixture(true);shellFixture(true,139);await pluginIntegration();console.log('PASS: recovery matrix, actual Bash arguments/exit propagation, source-plugin retry and CPU preference');}finally{if(!scratch.startsWith(path.join(os.tmpdir(),'asr-recovery-test-')))throw Error('unsafe cleanup');fs.rmSync(scratch,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});

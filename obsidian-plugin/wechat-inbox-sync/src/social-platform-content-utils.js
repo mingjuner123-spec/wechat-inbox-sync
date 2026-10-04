@@ -18,6 +18,35 @@ function collectDouyinImageUrlList(value, urls) {
   }
 }
 
+function readDouyinAuthor(detail, cleanDescription) {
+  const source = detail && typeof detail === 'object' ? detail : {};
+  const candidates = [
+    source.author,
+    source.authorInfo,
+    source.author_info,
+    source.authorUser,
+    source.author_user,
+    source.authorUserInfo,
+    source.author_user_info,
+    source.user,
+    source.userInfo,
+    source.user_info,
+  ];
+  for (const candidate of candidates) {
+    const values = typeof candidate === 'string'
+      ? [candidate]
+      : candidate && typeof candidate === 'object'
+        ? [candidate.nickname, candidate.nickName, candidate.name, candidate.userName, candidate.username]
+        : [];
+    for (const value of values) {
+      if (typeof value !== 'string') continue;
+      const author = cleanDescription(value);
+      if (author) return author;
+    }
+  }
+  return '';
+}
+
 function createDouyinStructuredContentBuilder(dependencies = {}) {
   const {
     cleanDescription = (value) => String(value || '').trim(),
@@ -84,11 +113,14 @@ function createDouyinStructuredContentBuilder(dependencies = {}) {
       .find(Boolean)
       || normalizeUrl(fallbackSource.coverUrl);
     const socialMetrics = buildMetrics(source);
+    const author = readDouyinAuthor(source, cleanDescription)
+      || cleanDescription(typeof fallbackSource.author === 'string' ? fallbackSource.author : '');
     return {
       title,
       description,
       tags: structuredTags,
       coverUrl,
+      author,
       socialMetrics: hasMetrics(socialMetrics)
         ? socialMetrics
         : (fallbackSource.socialMetrics || {}),

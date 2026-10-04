@@ -9,11 +9,14 @@ const {
   createSyncDiagnosticReporter,
   getBindingFingerprint,
   normalizeDiagnosticEvent,
+  sanitizeSourceLink,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/sync-diagnostic-reporter');
 
 const bindingA = { token: 'binding-a-secret', status: 'bound', enabled: true };
 const bindingB = { token: 'binding-b-secret', status: 'bound', enabled: true };
 const nowValue = Date.parse('2026-10-02T00:00:00.000Z');
+
+const sourceLinkFixture = 'https://v.douyin.com/abc123/?from=copy&modal_id=123456789&token=DO_NOT_STORE&xsec_token=DO_NOT_STORE#private-fragment';
 
 function makeEvent(overrides = {}) {
   return normalizeDiagnosticEvent({
@@ -55,6 +58,48 @@ assert.strictEqual(makeEvent({ errorType: 'UNSUPPORTED_PLATFORM' }).errorType, '
 assert.strictEqual(makeEvent({ platform: 'darwin' }).platform, 'macos');
 assert.strictEqual(makeEvent({ stage: 'writing' }).stage, 'write');
 assert.strictEqual(makeEvent({ retryCount: 9999 }).retryCount, 100);
+assert.strictEqual(
+  sanitizeSourceLink(sourceLinkFixture),
+  'https://v.douyin.com/abc123/?from=copy&modal_id=123456789',
+  'source links retain a public short-link path and work id while dropping token parameters and fragments',
+);
+assert.strictEqual(
+  sanitizeSourceLink('https://www.douyin.com/video/987654321?foo=bar&access-key=SIGNED_VALUE#fragment'),
+  'https://www.douyin.com/video/987654321?foo=bar',
+  'canonical work links retain non-credential query values',
+);
+assert.strictEqual(
+  sanitizeSourceLink('https://fc.example.test/post?id=123'),
+  'https://fc.example.test/post?id=123',
+  'ordinary domains beginning with fc are not treated as private IPv6 hosts',
+);
+for (const unsafeLink of [
+  'file:///private/record.mp4',
+  'http://127.0.0.1:8080/video/123',
+  'https://cdn.example.com/media/clip.mp4?signature=SIGNED_VALUE',
+  'https://user:password@example.com/video/123',
+]) {
+  assert.strictEqual(sanitizeSourceLink(unsafeLink), '', `unsafe source link is rejected: ${unsafeLink}`);
+}
+assert.strictEqual(
+  makeEvent({ sourceLink: sourceLinkFixture }).sourceUrl,
+  'https://v.douyin.com/abc123/?from=copy&modal_id=123456789',
+);
+assert.strictEqual(
+  makeEvent({ sourceUrl: sourceLinkFixture }).sourceUrl,
+  'https://v.douyin.com/abc123/?from=copy&modal_id=123456789',
+  'the canonical server field is accepted directly',
+);
+assert.strictEqual(
+  Object.prototype.hasOwnProperty.call(makeEvent({ sourceLink: sourceLinkFixture }), 'sourceLink'),
+  false,
+  'the client alias is never serialized alongside sourceUrl',
+);
+assert.strictEqual(
+  Object.prototype.hasOwnProperty.call(makeEvent({ outcome: 'success', sourceLink: sourceLinkFixture }), 'sourceLink'),
+  false,
+  'successful sync events never retain a source URL in diagnostics',
+);
 
 const incidentOne = createDiagnosticId({ binding: bindingA, syncRecordId: 'record-1', attemptId: 'attempt-00000001' });
 const incidentTwo = createDiagnosticId({ binding: bindingA, syncRecordId: 'record-1', attemptId: 'attempt-00000002' });
@@ -68,6 +113,32 @@ async function runOutboxTests() {
   let persisted = [];
   const calls = [];
   let mode = 'fail';
+  let filteredSnapshot = null;
+  const legacySuccessReporter = createSyncDiagnosticReporter({
+    initialOutbox: [{
+      event: makeEvent({
+        eventId: 'event-legacy-success-0001',
+        outcome: 'succeeded',
+      }),
+      bindingFingerprint: getBindingFingerprint(bindingA),
+      createdAt: new Date(clock).toISOString(),
+      nextAttemptAt: clock,
+      uploadAttempts: 0,
+    }],
+    now: () => clock,
+    saveOutbox: async (value) => { filteredSnapshot = JSON.parse(JSON.stringify(value)); },
+  });
+  await legacySuccessReporter.whenIdle();
+  assert.deepStrictEqual(filteredSnapshot, [], 'legacy success outbox entries are filtered and persisted');
+  assert.strictEqual(legacySuccessReporter.getPendingCount(), 0);
+  const rejectedSuccess = legacySuccessReporter.enqueue(
+    makeEvent({ eventId: 'event-new-success-0001', outcome: 'success' }),
+    bindingA,
+  );
+  assert.strictEqual(rejectedSuccess.queued, false, 'success outcomes are rejected before enqueue');
+  assert.strictEqual(rejectedSuccess.reason, 'success-outcome-rejected');
+  legacySuccessReporter.dispose();
+
   const reporter = createSyncDiagnosticReporter({
     initialOutbox: [],
     now: () => clock,
@@ -94,12 +165,14 @@ async function runOutboxTests() {
     false,
     'events without a server attempt do not enter the aggregate denominator',
   );
-  const queued = reporter.enqueue(makeEvent(), bindingA);
+  const queued = reporter.enqueue(makeEvent({ sourceLink: sourceLinkFixture }), bindingA);
   assert.strictEqual(queued.queued, true);
+  assert.strictEqual(queued.event.sourceUrl, 'https://v.douyin.com/abc123/?from=copy&modal_id=123456789');
   await reporter.whenIdle();
   assert.strictEqual(persisted.length, 1);
   assert.strictEqual(persisted[0].bindingFingerprint, getBindingFingerprint(bindingA));
   assert.strictEqual(Object.prototype.hasOwnProperty.call(persisted[0], 'token'), false);
+  assert.strictEqual(persisted[0].event.sourceUrl, 'https://v.douyin.com/abc123/?from=copy&modal_id=123456789');
 
   const wrongBindingFlush = await reporter.flush({ bindings: [bindingB] });
   assert.strictEqual(wrongBindingFlush.sent, 0);
@@ -171,6 +244,61 @@ async function runOutboxTests() {
   assert.strictEqual(batchReporter.getPendingCount(), 1, 'unacknowledged batch item remains durable');
   batchReporter.dispose();
 
+  let releaseRaceBindingA;
+  let raceBindingAStarted;
+  const raceBindingAStartedPromise = new Promise((resolve) => { raceBindingAStarted = resolve; });
+  const raceCalls = [];
+  const raceReporter = createSyncDiagnosticReporter({
+    initialOutbox: [
+      {
+        event: makeEvent({
+          eventId: 'event-race-binding-a-0001',
+          attemptId: 'attempt-race-binding-a-1',
+          syncRecordId: 'record-race-a',
+        }),
+        bindingFingerprint: getBindingFingerprint(bindingA),
+        createdAt: new Date(clock).toISOString(),
+        nextAttemptAt: clock,
+        uploadAttempts: 0,
+      },
+      {
+        event: makeEvent({
+          eventId: 'event-race-binding-b-0001',
+          attemptId: 'attempt-race-binding-b-1',
+          syncRecordId: 'record-race-b',
+        }),
+        bindingFingerprint: getBindingFingerprint(bindingB),
+        createdAt: new Date(clock).toISOString(),
+        nextAttemptAt: clock,
+        uploadAttempts: 0,
+      },
+    ],
+    now: () => clock,
+    getBindings: () => [bindingA, bindingB],
+    saveOutbox: async () => {},
+    postEvents: async (events, binding) => {
+      raceCalls.push({ events, binding });
+      if (binding === bindingA) {
+        raceBindingAStarted();
+        await new Promise((resolve) => { releaseRaceBindingA = resolve; });
+      }
+      return { acceptedEventIds: events.map((event) => event.eventId) };
+    },
+  });
+  const raceFlush = raceReporter.flush({ bindings: [bindingA, bindingB] });
+  await raceBindingAStartedPromise;
+  const clearedDuringRace = await raceReporter.clearRecord({
+    binding: bindingB,
+    syncRecordId: 'record-race-b',
+  });
+  assert.strictEqual(clearedDuringRace.cleared, 1);
+  releaseRaceBindingA();
+  const raceResult = await raceFlush;
+  assert.strictEqual(raceResult.sent, 1);
+  assert.deepStrictEqual(raceCalls.map((call) => call.binding), [bindingA], 'a deferred binding does not send a record cleared while A was in flight');
+  assert.strictEqual(raceReporter.getPendingCount(), 0);
+  raceReporter.dispose();
+
   let timedOut = false;
   const timeoutReporter = createSyncDiagnosticReporter({
     initialOutbox: [],
@@ -212,12 +340,12 @@ async function runPluginHookTest() {
   // cannot parse without a test-only text loader.
   const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
   Module._load = originalLoad;
-  function makePlugin(record, sent, writeError = null, writeResult = null) {
+  function makePlugin(record, sent, writeError = null, writeResult = null, initialOutbox = []) {
     const plugin = new PluginClass();
     plugin.settings = PluginClass.__test.mergeSettings({
       bindings: [bindingA],
       token: bindingA.token,
-      syncDiagnosticOutbox: [],
+      syncDiagnosticOutbox: initialOutbox,
     });
     plugin.getActiveBindings = () => [bindingA];
     plugin.getAutoSyncBindings = () => [bindingA];
@@ -264,22 +392,7 @@ async function runPluginHookTest() {
   const directRecord = { _id: 'record-hook-direct' };
   const directSent = [];
   const directPlugin = makePlugin(directRecord, directSent);
-  const directDiagnosticId = createDiagnosticId({ binding: bindingA, syncRecordId: directRecord._id });
-  directPlugin.queueSyncDiagnosticSuccess({
-    recordId: directRecord._id,
-    attemptId: 'attempt-hook-direct-1',
-    diagnosticId: directDiagnosticId,
-    binding: bindingA,
-    retryCount: 0,
-  });
   const directReporter = directPlugin.getSyncDiagnosticReporter();
-  await directReporter.whenIdle();
-  await directReporter.flush({ bindings: [bindingA] });
-  const directDiagnostics = directSent.filter((call) => call.path === '/diagnostics/events');
-  assert.strictEqual(directDiagnostics.length, 1);
-  assert.strictEqual(directDiagnostics[0].method, 'POST');
-  assert.strictEqual(directDiagnostics[0].body.events[0].outcome, 'succeeded');
-  assert.strictEqual(Object.prototype.hasOwnProperty.call(directDiagnostics[0].body.events[0], 'token'), false);
   const controlledEvidenceCases = [
     [{ code: 'DOUYIN_CHALLENGE' }, 'challenge_detected'],
     [{ code: 'DOUYIN_NO_MEDIA' }, 'parser_rejected'],
@@ -376,14 +489,76 @@ async function runPluginHookTest() {
     .flatMap((call) => call.body.events);
   assert.strictEqual(successResult.written.length, 1, 'syncBinding success writes the local record');
   assert.strictEqual(successResult.failed.length, 0, 'syncBinding success has no failed records');
-  assert.strictEqual(successDiagnostics.length, 1, 'actual syncBinding success enqueues one diagnostic');
-  assert.strictEqual(successDiagnostics[0].outcome, 'succeeded');
-  assert.strictEqual(successDiagnostics[0].errorType, 'NONE');
-  assert.strictEqual(successDiagnostics[0].stage, 'write');
-  assert.strictEqual(successDiagnostics[0].attemptId, 'attempt-hook-sync-0001');
-  assert.strictEqual(Object.prototype.hasOwnProperty.call(successDiagnostics[0], 'token'), false);
+  assert.strictEqual(successDiagnostics.length, 0, 'actual syncBinding success does not create a diagnostic event');
+  assert.strictEqual(successReporter.getPendingCount(), 0, 'actual syncBinding success leaves no diagnostic outbox entry');
   assert.strictEqual(successSent.some((call) => /\/synced$/.test(call.path)), true, 'success waits for local write before completion ack');
   successReporter.dispose();
+
+  const cleanupOutbox = [
+    {
+      event: makeEvent({
+        eventId: 'event-stale-binding-a-0001',
+        attemptId: 'attempt-stale-binding-a-1',
+        diagnosticId: createDiagnosticId({ binding: bindingA, syncRecordId: successRecord._id }),
+        syncRecordId: successRecord._id,
+      }),
+      bindingFingerprint: getBindingFingerprint(bindingA),
+      createdAt: new Date(nowValue).toISOString(),
+      nextAttemptAt: nowValue,
+      uploadAttempts: 0,
+    },
+    {
+      event: makeEvent({
+        eventId: 'event-stale-binding-b-0001',
+        attemptId: 'attempt-stale-binding-b-1',
+        diagnosticId: createDiagnosticId({ binding: bindingB, syncRecordId: successRecord._id }),
+        syncRecordId: successRecord._id,
+      }),
+      bindingFingerprint: getBindingFingerprint(bindingB),
+      createdAt: new Date(nowValue).toISOString(),
+      nextAttemptAt: nowValue,
+      uploadAttempts: 0,
+    },
+    {
+      event: makeEvent({
+        eventId: 'event-stale-other-record-0001',
+        attemptId: 'attempt-stale-other-record-1',
+        syncRecordId: 'record-hook-other',
+      }),
+      bindingFingerprint: getBindingFingerprint(bindingA),
+      createdAt: new Date(nowValue).toISOString(),
+      nextAttemptAt: nowValue,
+      uploadAttempts: 0,
+    },
+  ];
+  const cleanupSent = [];
+  const cleanupPlugin = makePlugin(successRecord, cleanupSent, null, null, cleanupOutbox);
+  const cleanupReporter = cleanupPlugin.getSyncDiagnosticReporter();
+  assert.strictEqual(cleanupReporter.getPendingCount(), 3);
+  await cleanupPlugin.syncBinding(bindingA, false);
+  await cleanupReporter.whenIdle();
+  const retainedAfterSuccess = cleanupReporter.getOutbox();
+  assert.strictEqual(
+    retainedAfterSuccess.some((entry) => entry.bindingFingerprint === getBindingFingerprint(bindingA)
+      && entry.event.syncRecordId === successRecord._id),
+    false,
+    'normal completion clears stale failure diagnostics for the committed binding and record',
+  );
+  assert.strictEqual(
+    retainedAfterSuccess.some((entry) => entry.bindingFingerprint === getBindingFingerprint(bindingB)
+      && entry.event.syncRecordId === successRecord._id),
+    true,
+    'normal completion keeps the same record under another binding',
+  );
+  assert.strictEqual(
+    retainedAfterSuccess.some((entry) => entry.bindingFingerprint === getBindingFingerprint(bindingA)
+      && entry.event.syncRecordId === 'record-hook-other'),
+    true,
+    'normal completion keeps other failure records under the same binding',
+  );
+  assert.strictEqual(cleanupSent.some((call) => call.path === '/diagnostics/events'), false);
+  assert.strictEqual(cleanupSent.some((call) => /\/synced$/.test(call.path)), true);
+  cleanupReporter.dispose();
 
   const unacknowledgedRecord = {
     _id: 'record-hook-unacknowledged',
@@ -409,8 +584,8 @@ async function runPluginHookTest() {
 
   const failureRecord = {
     _id: 'record-hook-failure',
-    type: 'text',
-    content: 'safe content',
+    type: 'webpage',
+    metadata: { url: sourceLinkFixture },
     createdAt: '2026-10-02T00:00:00.000Z',
     retryCount: 1,
   };
@@ -430,6 +605,11 @@ async function runPluginHookTest() {
   assert.strictEqual(failureDiagnostics.length, 1, 'actual syncBinding failure enqueues one diagnostic');
   assert.strictEqual(failureDiagnostics[0].outcome, 'failed');
   assert.strictEqual(failureDiagnostics[0].errorType, 'NETWORK_FAILED');
+  assert.strictEqual(
+    failureDiagnostics[0].sourceUrl,
+    'https://v.douyin.com/abc123/?from=copy&modal_id=123456789',
+    'failed sync passes the record page URL through the sanitized sourceUrl field',
+  );
   assert.deepStrictEqual(failureDiagnostics[0].evidenceCodes, ['no_matching_evidence'], 'generic network failure is not mislabeled timeout');
   assert.strictEqual(failureSent.some((call) => /\/synced$/.test(call.path)), false, 'failed sync never reports completion');
   failureReporter.dispose();

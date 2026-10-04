@@ -18,6 +18,7 @@ const ALLOWED_EVENT_FIELDS = Object.freeze([
   'attemptId',
   'diagnosticId',
   'syncRecordId',
+  'sourceUrl',
   'errorType',
   'stage',
   'pluginVersion',
@@ -29,7 +30,7 @@ const ALLOWED_EVENT_FIELDS = Object.freeze([
   'errorCode',
 ]);
 
-const SAFE_OUTCOMES = new Set(['succeeded', 'failed']);
+const SAFE_OUTCOMES = new Set(['failed']);
 const SAFE_STAGES = new Set([
   'upload',
   'fetch',
@@ -75,6 +76,64 @@ const SAFE_EVIDENCE_CODES = new Set([
   'manual_review',
   'no_matching_evidence',
 ]);
+
+const MAX_SOURCE_LINK_LENGTH = 2048;
+const SOURCE_LINK_SECRET_KEY = /(?:^|_)(?:access_key|access_token|authorization|auth|cookie|credential|csrf|nonce|password|secret|session|session_id|sid|signature|sig|token|xsec_source|xsec_token|expires?|expiry|deadline|policy|key_pair_id|hdnts)(?:_|$)/i;
+const SOURCE_LINK_MEDIA_PATH = /\.(?:3gp|aac|avi|flac|m4a|m4s|m3u8|mkv|mov|mp2|mp3|mp4|mpeg|mpg|ogg|opus|ts|wav|webm)(?:$|[/?])/i;
+const SOURCE_LINK_MEDIA_HOST = /(?:^|[.-])(?:bilivideo|byteimg|cloudfront|douyinvod|fbcdn|googlevideo|pstatp)(?:[.-]|$)/i;
+
+function isPrivateSourceLinkHost(hostname) {
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal')) return true;
+  if (host === '::1'
+    || /^(?:fc|fd)[0-9a-f]{2}:/i.test(host)
+    || /^fe[89ab][0-9a-f]:/i.test(host)
+    || /^::ffff:/i.test(host)) return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!ipv4) return false;
+  const octets = ipv4.slice(1).map(Number);
+  if (octets.some((value) => value > 255)) return true;
+  const [first, second] = octets;
+  return first === 0 || first === 10 || first === 127 || first === 169 && second === 254
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && second === 168
+    || first === 100 && second >= 64 && second <= 127;
+}
+
+function isSourceLinkSecretKey(key) {
+  const normalized = String(key || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return SOURCE_LINK_SECRET_KEY.test(normalized);
+}
+
+function looksLikeEmbeddedCredential(value) {
+  return /(?:^|[\s,;&])(?:authorization|bearer|cookie|access[_-]?key|access[_-]?token|credential|password|secret|session|signature|sig|token)\s*=/i.test(String(value || ''));
+}
+
+/**
+ * Keep one authorized public page/share link for reproducing a failed sync.
+ * This is intentionally separate from technical error text: it accepts only
+ * http(s) page URLs, removes credential-like query parameters and fragments,
+ * and rejects obvious media/CDN URLs. It returns no URL for successful events.
+ */
+function sanitizeSourceLink(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > MAX_SOURCE_LINK_LENGTH) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_) {
+    return '';
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return '';
+  if (isPrivateSourceLinkHost(parsed.hostname)) return '';
+  if (SOURCE_LINK_MEDIA_PATH.test(parsed.pathname) || SOURCE_LINK_MEDIA_HOST.test(parsed.hostname)) return '';
+  for (const [key, valuePart] of [...parsed.searchParams.entries()]) {
+    if (isSourceLinkSecretKey(key) || looksLikeEmbeddedCredential(valuePart)) parsed.searchParams.delete(key);
+  }
+  parsed.hash = '';
+  const normalized = parsed.toString();
+  return normalized.length <= MAX_SOURCE_LINK_LENGTH ? normalized : '';
+}
 
 function asFiniteInteger(value, fallback = 0, {min = 0, max = Number.MAX_SAFE_INTEGER} = {}) {
   const number = Number(value);
@@ -246,6 +305,13 @@ function normalizeDiagnosticEvent(input = {}, defaults = {}) {
   if (outcome === 'failed') {
     event.errorType = errorType;
     event.errorCode = errorCode;
+    // Accept the earlier client-side name as an input alias, but serialize one
+    // server-facing field so storage, worker projection, and customer summary
+    // do not split the source URL across two contracts.
+    const sourceUrl = sanitizeSourceLink(
+      source.sourceUrl || source.sourceLink || defaults.sourceUrl || defaults.sourceLink,
+    );
+    if (sourceUrl) event.sourceUrl = sourceUrl;
   } else {
     event.errorType = 'NONE';
   }
@@ -270,6 +336,10 @@ function normalizeOutbox(value, { now = Date.now(), maxItems = MAX_OUTBOX_ITEMS 
     const event = normalizeDiagnosticEvent(item.event && typeof item.event === 'object' ? item.event : item, {
       now: current,
     });
+    // Success is represented by the normal sync completion acknowledgement,
+    // not by a diagnostic event. Drop legacy success entries while loading so
+    // they cannot be uploaded after a restart.
+    if (!SAFE_OUTCOMES.has(event.outcome)) continue;
     // Cloud aggregates count server-issued attempts. Discard legacy or
     // malformed snapshots without one instead of retrying a fabricated
     // denominator forever after restart.
@@ -371,7 +441,9 @@ function createSyncDiagnosticReporter(options = {}) {
       )
       : null;
   let disposed = false;
-  let outbox = normalizeOutbox(options.initialOutbox || [], { now: now(), maxItems });
+  const initialOutbox = Array.isArray(options.initialOutbox) ? options.initialOutbox : [];
+  let outbox = normalizeOutbox(initialOutbox, { now: now(), maxItems });
+  const initialOutboxNeedsPersistence = outbox.length !== initialOutbox.length;
   let timer = null;
   let flushPromise = null;
   let persistPromise = Promise.resolve();
@@ -400,6 +472,11 @@ function createSyncDiagnosticReporter(options = {}) {
     return persistPromise;
   }
 
+  // Persist the canonicalized snapshot when startup removed legacy success
+  // events (or other invalid entries), so they do not return on the next
+  // plugin reload.
+  if (initialOutboxNeedsPersistence) void persistSnapshot();
+
   function scheduleFlush(delay = 0) {
     if (disposed || !postEvents || timer) return;
     const wait = Math.max(0, asFiniteInteger(delay, 0, { min: 0, max: MAX_RETRY_DELAY_MS }));
@@ -423,6 +500,9 @@ function createSyncDiagnosticReporter(options = {}) {
       bindingFingerprint,
       now: now(),
     });
+    if (!SAFE_OUTCOMES.has(event.outcome)) {
+      return { queued: false, reason: 'success-outcome-rejected' };
+    }
     if (!event.attemptId) return { queued: false, reason: 'missing-attempt' };
     const key = `${bindingFingerprint}:${event.eventId}`;
     const existing = currentOutbox().find((entry) => `${entry.bindingFingerprint}:${entry.event.eventId}` === key);
@@ -446,6 +526,22 @@ function createSyncDiagnosticReporter(options = {}) {
     return { queued: true, event: { ...event } };
   }
 
+  async function clearRecord({ binding = null, syncRecordId = '' } = {}) {
+    const bindingFingerprint = getBindingFingerprint(binding);
+    const recordId = normalizeRecordId(syncRecordId);
+    if (!bindingFingerprint || !recordId) return { cleared: 0 };
+    const before = currentOutbox();
+    const remaining = before.filter((entry) => (
+      entry.bindingFingerprint !== bindingFingerprint
+      || entry.event.syncRecordId !== recordId
+    ));
+    const cleared = before.length - remaining.length;
+    if (!cleared) return { cleared: 0 };
+    outbox = remaining;
+    await persistSnapshot();
+    return { cleared };
+  }
+
   async function flush({ binding = null, bindings = null } = {}) {
     if (disposed || !postEvents) return { sent: 0, retained: currentOutbox().length, failed: 0 };
     if (flushPromise) return await flushPromise;
@@ -463,12 +559,16 @@ function createSyncDiagnosticReporter(options = {}) {
         }
       }
       const stats = { sent: 0, retained: 0, failed: 0 };
-      const currentTime = Number(now()) || Date.now();
-      const eligible = currentOutbox().filter((entry) => (
-        available.has(entry.bindingFingerprint)
-        && entry.nextAttemptAt <= currentTime
-      ));
       for (const [bindingFingerprint, bindingValue] of available) {
+        // Re-read the outbox immediately before each binding's request. A
+        // completion callback for another binding may have cleared this
+        // record while the previous request was in flight; a stale eligible
+        // snapshot must not upload it after that clear.
+        const currentTime = Number(now()) || Date.now();
+        const eligible = currentOutbox().filter((entry) => (
+          available.has(entry.bindingFingerprint)
+          && entry.nextAttemptAt <= currentTime
+        ));
         const entries = eligible
           .filter((entry) => entry.bindingFingerprint === bindingFingerprint)
           .slice(0, MAX_BATCH_SIZE);
@@ -565,6 +665,7 @@ function createSyncDiagnosticReporter(options = {}) {
 
   return {
     enqueue,
+    clearRecord,
     flush,
     dispose,
     kick: () => scheduleFlush(0),
@@ -599,4 +700,6 @@ module.exports = {
   normalizeOutbox,
   normalizePlatform,
   normalizeStage,
+  sanitizeSourceUrl: sanitizeSourceLink,
+  sanitizeSourceLink,
 };
