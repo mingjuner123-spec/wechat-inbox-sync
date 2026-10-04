@@ -98,6 +98,28 @@ async function run() {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-browser-safe-'));
   let cases = 0;
   try {
+    const missingTarget = safety.sanitize({
+      debuggerStatus: 'unavailable',
+      sourceKind: 'shortlink',
+      resolvedKind: 'home',
+      targetIdRecognized: false,
+      targetStageEligible: false,
+      debuggerCapability: 'not-eligible',
+      debuggerReason: 'target-id-missing',
+    });
+    assert.equal(missingTarget.sourceKind, 'shortlink');
+    assert.equal(missingTarget.resolvedKind, 'home');
+    assert.equal(missingTarget.targetIdRecognized, false);
+    assert.equal(missingTarget.targetIdState, 'missing');
+    assert.equal(missingTarget.targetStageEligible, false);
+    assert.equal(missingTarget.debuggerCapability, 'not-eligible');
+    assert.equal(missingTarget.debuggerReason, 'target-id-missing');
+    const unknownLegacy = safety.sanitize({ debuggerStatus: 'unavailable' });
+    assert.equal(unknownLegacy.targetIdRecognized, false);
+    assert.equal(unknownLegacy.targetIdState, 'unknown');
+    assert.equal(unknownLegacy.debuggerCapability, 'unknown');
+    assert.equal(unknownLegacy.debuggerReason, 'unknown');
+    cases += 2;
     const plugin = new Plugin(); plugin.settings = {}; plugin.getConfiguredLocalAsrInstallRoot = () => scratch;
     const result = await bounded(plugin.renderSocialMediaUrls(url)); assert.ok(result.includes(media)); cases++;
     assert.equal(safety.readAttempts(scratch).at(-1).outcome, 'success'); assert.ok(safety.readAttempts(scratch).at(-1).blockedMedia >= 2); cases++;

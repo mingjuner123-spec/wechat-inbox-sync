@@ -7,6 +7,7 @@ const {
   createSyncDiagnosticReporter,
   getBindingFingerprint,
   normalizeOutbox,
+  sanitizeSourceLink,
 } = require('./sync-diagnostic-reporter');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const bilibiliDiagnostic = require('./bilibili-diagnostic-utils');
@@ -269,7 +270,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.176';
+const PLUGIN_RUNTIME_VERSION = '1.3.177';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1590,11 +1591,13 @@ function buildSyncDiagnosticLogText({
   total = 0,
   title = '',
   recordId = '',
+  sourceUrl = '',
   error = '',
   diagnostic = null,
   xiaohongshuComments = [],
   xiaohongshuBrowserResults = [],
 } = {}) {
+  const safeSourceUrl = status === 'failed' ? sanitizeSourceLink(sourceUrl) : '';
   const lines = [
     `time=${time}`,
     `status=${status}`,
@@ -1605,6 +1608,7 @@ function buildSyncDiagnosticLogText({
     `total=${total}`,
     `title=${title}`,
     `recordId=${recordId}`,
+    ...(safeSourceUrl ? [`sourceUrl=${safeSourceUrl}`] : []),
     '--- error ---',
     String(error || ''),
   ];
@@ -2445,6 +2449,16 @@ const buildDouyinMediaResolutionDiagnostic = createDouyinMediaResolutionDiagnost
   getSafeUrlDiagnostic,
   getTransportErrorDiagnostic,
 });
+
+function getDouyinDiagnosticUrlKind(value, fallback = '') {
+  const explicit = typeof douyinDiagnostic.normalizeUrlKind === 'function'
+    ? douyinDiagnostic.normalizeUrlKind(value)
+    : 'unknown';
+  if (explicit && explicit !== 'unknown') return explicit;
+  return typeof douyinDiagnostic.urlKind === 'function'
+    ? douyinDiagnostic.urlKind(fallback || value)
+    : 'unknown';
+}
 
 function normalizeInstallerScriptText(scriptText, isMac = false) {
   const source = String(scriptText || '');
@@ -3953,6 +3967,30 @@ function getRecordId(record) {
   return record && (record._id || record.id || record.recordId) || '';
 }
 
+// A failed diagnostic may carry the original public page/share link so the
+// owner can reproduce the failure. Keep this extraction narrow: only URL-like
+// record fields are considered, media/file records are excluded, and the
+// reporter performs the credential/query sanitization before persistence.
+function getDiagnosticSourceUrl(record = {}) {
+  const source = record && typeof record === 'object' ? record : {};
+  const type = String(source.type || source.contentType || '').trim().toLowerCase();
+  if (type === 'voice' || type === 'file') return '';
+  const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
+  const values = [
+    metadata.url,
+    metadata.originalUrl,
+    metadata.shareUrl,
+    metadata.sourceUrl,
+    metadata.noteUrl,
+    source.url,
+    (type === 'link' || type === 'webpage') ? source.content : '',
+  ];
+  return values
+    .map((value) => String(value || '').trim())
+    .map((value) => sanitizeSourceLink(value))
+    .find(Boolean) || '';
+}
+
 function getAttachmentDiagnosticKind(fileExt = '') {
   return isImageAttachmentExt(fileExt) ? 'image' : 'file';
 }
@@ -4546,6 +4584,7 @@ function isTrustedXiaohongshuTransportUrl(url) {
 
 const {
   isDouyinUrl,
+  isTrustedDouyinPageUrl,
   isDouyinMediaUrl,
   extractDouyinAwemeId,
   buildDouyinDomIdentityExtractorScript,
@@ -12931,6 +12970,35 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   const browserSession = (win.webContents && win.webContents.session) || wechatSession;
   const installedWebRequestHandlers = [];
   const debuggerApi = targetDouyinAwemeId && win.webContents && win.webContents.debugger;
+  const targetIdRecognized = Boolean(targetDouyinAwemeId);
+  const targetIdState = options.targetIdState === 'unknown'
+    ? 'unknown'
+    : (targetIdRecognized ? 'recognized' : 'missing');
+  const debuggerCapability = !targetIdRecognized
+    ? 'not-eligible'
+    : !debuggerApi
+      ? 'absent'
+      : typeof debuggerApi.attach === 'function' && typeof debuggerApi.sendCommand === 'function'
+        ? 'present'
+        : 'unsupported';
+  const debuggerReason = !targetIdRecognized
+    ? 'target-id-missing'
+    : !debuggerApi
+      ? 'api-absent'
+      : typeof debuggerApi.attach === 'function' && typeof debuggerApi.sendCommand === 'function'
+        ? 'unknown'
+        : 'api-unsupported';
+  if (douyinGuard) {
+    douyinGuard.emit({
+      sourceKind: getDouyinDiagnosticUrlKind(options.sourceKind, options.sourceUrl || url),
+      resolvedKind: getDouyinDiagnosticUrlKind(options.resolvedKind, options.resolvedUrl || url),
+      targetIdRecognized,
+      targetIdState,
+      targetStageEligible: targetIdState === 'recognized',
+      debuggerCapability,
+      debuggerReason,
+    });
+  }
   const debuggerResponseRequests = new Map();
   const debuggerBodyTasks = [];
   const debuggerMediaUrls = [];
@@ -13036,6 +13104,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
                 const text = body && body.base64Encoded
                   ? Buffer.from(String(body.body || ''), 'base64').toString('utf8')
                   : String(body && body.body || '');
+                const targetDetail = findDouyinDetailForAweme(text, targetDouyinAwemeId);
+                if (targetDetail && typeof options.onDouyinTargetDetail === 'function') {
+                  try { options.onDouyinTargetDetail(targetDetail); } catch (error) {}
+                }
                 extractDouyinMediaUrlsForAweme(text, targetDouyinAwemeId)
                   .forEach((mediaUrl) => pushUniqueMediaUrl(debuggerMediaUrls, mediaUrl));
                 if (debuggerMediaUrls.length) resolveVerifiedDouyinMedia();
@@ -16053,6 +16125,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     error,
     stage,
     retryCount,
+    sourceUrl,
   } = {}) {
     const normalizedRecordId = String(recordId || '').trim();
     if (!binding || !binding.token) return { queued: false, reason: 'missing-binding' };
@@ -16164,37 +16237,26 @@ class WechatObsidianInboxPlugin extends Plugin {
       retryCount: Number(retryCount) || 0,
       outcome: 'failed',
       evidenceCodes,
-    }, binding);
-  }
-
-  queueSyncDiagnosticSuccess({
-    recordId,
-    attemptId,
-    diagnosticId,
-    binding,
-    retryCount,
-    stage = 'write',
-  } = {}) {
-    if (!binding || !binding.token || !recordId) return { queued: false, reason: 'missing-binding' };
-    return this.queueSyncDiagnosticEvent({
-      diagnosticId,
-      attemptId,
-      syncRecordId: recordId,
-      stage,
-      retryCount: Number(retryCount) || 0,
-      outcome: 'succeeded',
-      evidenceCodes: ['sync_callback'],
+      ...(String(sourceUrl || '').trim() ? { sourceUrl: String(sourceUrl).trim() } : {}),
     }, binding);
   }
 
   async onload() {
     this.ensureSerializedSaveData();
     const savedSettings = await this.loadData();
+    const savedDiagnosticOutbox = savedSettings && Array.isArray(savedSettings.syncDiagnosticOutbox)
+      ? savedSettings.syncDiagnosticOutbox
+      : null;
+    const diagnosticOutboxNeedsPersistence = Boolean(
+      savedDiagnosticOutbox
+      && normalizeOutbox(savedDiagnosticOutbox).length !== savedDiagnosticOutbox.length,
+    );
     this.settings = mergeSettings(savedSettings);
     if (!savedSettings
       || !savedSettings.clientId
       || shouldPersistNormalizedInboxDir(savedSettings, this.settings)
-      || shouldPersistAutoLocalAsrPlatform(savedSettings)) {
+      || shouldPersistAutoLocalAsrPlatform(savedSettings)
+      || diagnosticOutboxNeedsPersistence) {
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
@@ -16206,6 +16268,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.localAsrInstallPromise = null;
     this.localOcrInstallPromise = null;
     this.currentTranscriptionAbortController = null;
+    this.currentTranscriptionAbortRequest = null;
     this.currentTranscriptionProcess = null;
     this.currentTranscriptionProcessDetached = false;
     this.currentTranscriptionContext = null;
@@ -16316,8 +16379,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.register(() => {
       this.autoSyncDisposed = true;
       controller.dispose();
+      if (this.currentTranscriptionAbortRequest) this.currentTranscriptionAbortRequest('plugin_unload');
+      else if (this.currentTranscriptionAbortController) this.currentTranscriptionAbortController.abort();
       if (this.currentProcessingAbortController) this.currentProcessingAbortController.abort();
-      if (this.currentTranscriptionAbortController) this.currentTranscriptionAbortController.abort();
       this.clearSyncProgressNotice();
     });
     if (typeof window !== 'undefined' && typeof this.registerDomEvent === 'function') {
@@ -17836,12 +17900,15 @@ class WechatObsidianInboxPlugin extends Plugin {
           : null,
       }
       : null;
-    if (this.currentProcessingAbortController) {
-      this.currentProcessingAbortController.abort();
+    if (this.currentTranscriptionAbortRequest) {
+      this.currentTranscriptionAbortRequest('user_stop');
+      stopped = true;
+    } else if (this.currentTranscriptionAbortController) {
+      this.currentTranscriptionAbortController.abort();
       stopped = true;
     }
-    if (this.currentTranscriptionAbortController) {
-      this.currentTranscriptionAbortController.abort();
+    if (this.currentProcessingAbortController) {
+      this.currentProcessingAbortController.abort();
       stopped = true;
     }
     if (this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
@@ -18565,6 +18632,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     const ocrInstallLog = readLocalAsrInstallLog(ocrRoot);
     const syncLogText = readSyncDiagnosticLog(asrRoot);
     const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : syncLogText;
+    const sourceUrlFromSyncLog = (text) => {
+      const match = String(text || '').match(/^sourceUrl=(https?:\/\/\S+)$/im);
+      return sanitizeSourceLink(match ? match[1] : '');
+    };
+    const lastSyncSourceUrl = this.lastSyncDiagnostic
+      ? (this.lastSyncDiagnostic.status === 'failed' ? sanitizeSourceLink(this.lastSyncDiagnostic.sourceUrl) : '')
+      : sourceUrlFromSyncLog(syncLogText);
     const hasFailureSignal = (text) => /status\s*=\s*failed|failed|failure|error|exception|traceback|curl:\s*\(\d+\)|connection reset|timed out|timeout|not found|permission denied|denied|未找到|失败|错误|异常|超时|缺失|不完整/i.test(String(text || ''));
     const hasAsrRunFailureSignal = (text) => {
       const source = String(text || '');
@@ -18650,6 +18724,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (lastSyncText && (hasFailureSignal(lastSyncText) || (this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic))) {
       lines.push('', '最近同步失败状态：', lastSyncText);
     }
+    if (lastSyncSourceUrl) lines.push('', `最近失败原始分享链接：${lastSyncSourceUrl}`);
     const bilibiliFailures = this.getRecentSyncFailures().map(item => {
       const diagnostic = bilibiliDiagnostic.sanitize(item.diagnostic);
       return diagnostic ? { recordId: item.recordId, summary: bilibiliDiagnostic.summary(diagnostic), diagnostic } : null;
@@ -18691,7 +18766,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (detailed) lines.push('', asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
     else lines.push('', '已对诊断信息进行脱敏。');
-    return asrRecovery.diagnosticRedact(lines.join('\n'), this.settings);
+    const redacted = asrRecovery.diagnosticRedact(lines.join('\n'), this.settings);
+    // diagnosticRedact intentionally hides arbitrary URLs in technical logs.
+    // Re-append only the separately sanitized owner-provided page link so a
+    // failed record remains reproducible without exposing media credentials.
+    return lastSyncSourceUrl
+      ? `${redacted}\n\n最近失败原始分享链接：${lastSyncSourceUrl}`
+      : redacted;
   }
 
   async copyTextToClipboard(text) {
@@ -20004,9 +20085,35 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.douyinBrowserRetryAfter > Date.now()) {
       throw Object.assign(new Error('抖音网页解析刚发生异常，已暂停隐藏网页重试 60 秒；请复制诊断'), { code: 'EXTRACTION_FAILED', browserCode: 'DOUYIN_BROWSER_COOLDOWN' });
     }
-    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, { resolutionAttemptId: options.diagnosticAttemptId, runtimeVersion: PLUGIN_RUNTIME_VERSION, electron: process.versions.electron, chromium: process.versions.chrome, freeMemoryBytesBefore: os.freemem() });
+    const targetId = extractDouyinAwemeId(url)
+      || (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || '')) ? String(options.targetDouyinAwemeId) : '');
+    const targetIdState = options.targetIdState === 'unknown'
+      ? 'unknown'
+      : (targetId ? 'recognized' : 'missing');
+    const sourceKind = getDouyinDiagnosticUrlKind(options.sourceKind, options.sourceUrl || url);
+    const resolvedKind = getDouyinDiagnosticUrlKind(options.resolvedKind, options.resolvedUrl || url);
+    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, {
+      resolutionAttemptId: options.diagnosticAttemptId,
+      runtimeVersion: PLUGIN_RUNTIME_VERSION,
+      electron: process.versions.electron,
+      chromium: process.versions.chrome,
+      freeMemoryBytesBefore: os.freemem(),
+      sourceKind,
+      resolvedKind,
+      targetIdRecognized: targetIdState === 'recognized',
+      targetStageEligible: targetIdState === 'recognized',
+      debuggerCapability: targetIdState === 'recognized' ? 'unknown' : 'not-eligible',
+      debuggerReason: targetIdState === 'recognized' ? 'unknown' : 'target-id-missing',
+    });
     try {
-      const result = await renderSocialMediaUrlsWithElectron(url, { ...options, onDouyinBrowserDiagnostic: event => { attempt.update(event); options.onDouyinBrowserDiagnostic?.(event); } });
+      const result = await renderSocialMediaUrlsWithElectron(url, {
+        ...options,
+        sourceKind,
+        resolvedKind,
+        targetIdState,
+        targetStageEligible: targetIdState === 'recognized',
+        onDouyinBrowserDiagnostic: event => { attempt.update(event); options.onDouyinBrowserDiagnostic?.(event); },
+      });
       if (!Array.isArray(result) || result.length === 0) {
         throw Object.assign(new Error('抖音网页已加载，但未获取到目标作品的音视频地址'), { code: 'DOUYIN_NO_MEDIA' });
       }
@@ -20190,11 +20297,30 @@ class WechatObsidianInboxPlugin extends Plugin {
       && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
     const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
-    const session = { startedAt: new Date().toISOString(), platform, recordId: options.recordId || '', diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || '') ? options.diagnosticAttemptId : '', runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
+    const session = {
+      startedAt: new Date().toISOString(),
+      platform,
+      recordId: options.recordId || '',
+      diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || '') ? options.diagnosticAttemptId : '',
+      runtime,
+      system: asrRecovery.systemIdentity(platform),
+      model: asrRecovery.modelIdentity(installRoot, { managed }),
+      managedRecovery: managed,
+      totalMemoryBytes: os.totalmem(),
+      freeMemoryBytesBefore: os.freemem(),
+      attempts: [],
+      abort: { requestedAt: null, source: null, observedAt: null },
+    };
     const progressTitle = options.title || '';
     const abortController = new AbortController();
     let ownedChild = null;
-    const cancelLocal = () => {
+    const attemptStartedAt = new Map();
+    const attemptLogBaseline = new Map();
+    const requestAbort = (source = 'unknown') => {
+      if (!session.abort.requestedAt) {
+        session.abort.requestedAt = new Date().toISOString();
+        session.abort.source = String(source || 'unknown');
+      }
       abortController.abort();
       const child = ownedChild;
       if (!child || child.killed) return;
@@ -20207,9 +20333,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (_) { /* Still attempt to stop the owned shell below. */ }
       try { child.kill(); } catch (_) { /* Process may already have exited. */ }
     };
+    const cancelLocal = () => requestAbort('upstream_abort');
     options.signal?.addEventListener('abort', cancelLocal, { once: true });
     if (options.signal?.aborted) cancelLocal();
     this.currentTranscriptionAbortController = abortController;
+    this.currentTranscriptionAbortRequest = requestAbort;
     this.currentTranscriptionContext = {
       recordId: options.recordId || '',
       binding: options.binding || null,
@@ -20294,15 +20422,39 @@ class WechatObsidianInboxPlugin extends Plugin {
         platform, managed, signal: abortController.signal,
         cpuPreferred: asrRecovery.cpuPreference(installRoot, runtimeFingerprint),
         onAttempt: ({ attempt, cpu, status, error }) => {
-          const log = asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(installRoot));
-          session.attempts.push({ attempt, cpu, status, at: new Date().toISOString(), exitCode: error?.exitCode ?? null, signal: error?.signal || '', error: error?.message || '',
-            nativePids: [...log.matchAll(/^progressPid=(\d+)$/gm)].map(m => Number(m[1])),
-            peakRssKiB: Math.max(0, ...[...log.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(m => Number(m[1]))) || null,
-            runLog: asrRecovery.diagnosticRedact(log, this.settings), freeMemoryBytesAfter: os.freemem() });
+          const observedAt = new Date().toISOString();
+          if (abortController.signal.aborted) {
+            session.abort.observedAt = session.abort.observedAt || observedAt;
+            session.abort.source = session.abort.source || 'unknown';
+            if (error && session.abort.originalExitCode === undefined) {
+              session.abort.originalExitCode = error.exitCode ?? error.code ?? null;
+              session.abort.originalSignal = error.signal || '';
+            }
+          }
+          const logPath = getLocalAsrRunLogPath(installRoot);
+          const freshnessSnapshot = asrRecovery.snapshotDiagnosticLog(logPath);
+          const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attempt), freshnessSnapshot);
+          const attemptLog = logFreshness === 'fresh' ? asrRecovery.readDiagnosticLog(logPath) : '';
+          const observedStage = status === 'success' ? 'completed' : logFreshness === 'fresh' ? (error?.asrStage || parseLocalAsrProgressLog(attemptLog)?.stage || 'unknown') : 'unknown';
+          if (abortController.signal.aborted && error) {
+            session.abort.nativeCrash = logFreshness === 'fresh' && observedStage !== 'unknown' ? asrRecovery.isMacNativeCrash(error) : null;
+            session.abort.nativeCrashEvidence = logFreshness === 'fresh' ? observedStage : 'unknown_stale_or_unavailable_log';
+          }
+          const nativeExitMatch = attemptLog.match(/^nativeExit=(\d+)$/m);
+          const nativePidList = [...new Set([...attemptLog.matchAll(/^progressPid=(\d+)$/gm)].map(m => Number(m[1])).filter(pid => pid > 0))];
+          session.attempts.push({ attempt, cpu, requestedMode: cpu ? 'cpu_compatibility' : 'default', backendObserved: 'unknown', backendObservationNote: '本机日志未确认引擎实际选择的CPU/GPU后端', status, stage: observedStage, logFreshness, at: observedAt,
+            startedAt: attemptStartedAt.get(attempt) || session.startedAt, finishedAt: observedAt,
+            exitCode: error?.exitCode ?? error?.code ?? null, signal: error?.signal || '', nativeExitCode: nativeExitMatch ? Number(nativeExitMatch[1]) : null,
+            logSnapshotAt: observedAt, error: error?.message || '',
+            nativePids: nativePidList,
+            peakRssKiB: Math.max(0, ...[...attemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(m => Number(m[1]))) || null,
+            runLog: logFreshness === 'fresh' ? asrRecovery.diagnosticRedact(attemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`, freeMemoryBytesAfter: os.freemem() });
           asrRecovery.saveSession(installRoot, session, this.settings);
         },
         execute: ({ cpu, attempt }) => new Promise((resolve, reject) => {
           throwIfAborted(abortController.signal);
+          attemptStartedAt.set(attempt, new Date().toISOString());
+          attemptLogBaseline.set(attempt, asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
           if (attempt > 1) {
             new Notice('本地转写引擎崩溃，正在用 CPU 兼容模式重试一次。', 6000);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
@@ -20318,14 +20470,15 @@ class WechatObsidianInboxPlugin extends Plugin {
             stopProgressPolling();
             ownedChild = null;
             this.currentTranscriptionProcess = null;
-            if (abortController.signal.aborted) { reject(createAbortError()); return; }
             if (error) {
               const wrapped = new Error(stderr || error.message || String(error));
               wrapped.stdout = stdout; wrapped.stderr = stderr;
               wrapped.exitCode = error.code; wrapped.signal = error.signal;
-              wrapped.asrStage = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))?.stage || 'unknown';
+              const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attempt), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
+              wrapped.asrStage = logFreshness === 'fresh' ? parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))?.stage || 'unknown' : 'unknown';
               reject(wrapped); return;
             }
+            if (abortController.signal.aborted) { reject(createAbortError()); return; }
             emitLocalProgress(100); resolve({ stdout, stderr });
           });
           ownedChild = child;
@@ -20362,7 +20515,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? '，CPU 兼容重试仍失败' : ''}；请复制诊断信息。${error.message}`;
       if (isAbortError(error)) {
         if (options.signal?.aborted) throw createAbortError();
-        throw createRetryableTranscriptionError('用户已停止当前转写');
+        if (session.abort.source === 'user_stop') {
+          throw createRetryableTranscriptionError('用户已停止当前转写');
+        }
+        throw createRetryableTranscriptionError('当前转写已中止');
       }
       appendLocalAsrRunLog({
         installRoot,
@@ -20382,6 +20538,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       asrRecovery.saveSession(installRoot, session, this.settings);
       stopProgressPolling();
       this.currentTranscriptionAbortController = null;
+      this.currentTranscriptionAbortRequest = null;
       this.currentTranscriptionProcess = null;
       this.currentTranscriptionProcessDetached = false;
       this.currentTranscriptionContext = null;
@@ -22257,6 +22414,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     let douyinResolutionStages = [];
     let douyinSelectedStage = '';
     let douyinResolutionDiagnostic = null;
+    let douyinLastAwemeId = '';
+    let douyinLastResolvedUrl = url || '';
+    let douyinLastTargetIdState = 'unknown';
+    let douyinDebuggerCapability = 'unknown';
+    let douyinDebuggerReason = 'unknown';
     const douyinAttemptId = crypto.randomBytes(8).toString('hex');
     const douyinStartedAt = new Date().toISOString();
     if (!url) {
@@ -22856,7 +23018,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         const douyinTarget = isDouyinUrl(url) || isDouyinUrl(redirectedUrl)
           ? normalizeDouyinTargetUrl(url, redirectedUrl)
           : { awemeId: '', url: '' };
-        let resolvedUrl = douyinTarget.url || redirectedUrl;
+        const preserveOriginalDouyinShortlink = isDouyinUrl(url)
+          && getDouyinDiagnosticUrlKind('', url) === 'shortlink'
+          && !douyinTarget.awemeId
+          && !extractDouyinAwemeId(redirectedUrl);
+        let resolvedUrl = douyinTarget.url || (preserveOriginalDouyinShortlink ? url : redirectedUrl);
+        douyinLastResolvedUrl = resolvedUrl || douyinLastResolvedUrl;
         let xiaohongshuBrowserCandidates = isXiaohongshuUrl(url)
           ? getXiaohongshuBrowserCandidates(url, targetIdentityUrl, resolvedUrl)
           : [];
@@ -22864,6 +23031,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           ? xiaohongshuBrowserCandidates[0].url
           : resolvedUrl;
         let douyinAwemeId = douyinTarget.awemeId;
+        douyinLastAwemeId = douyinAwemeId;
+        douyinLastTargetIdState = douyinAwemeId ? 'recognized' : 'missing';
         if (shouldBlockExternalAppUrl(resolvedUrl)) {
           throw new Error(`已阻止网页尝试打开外部应用协议：${new URL(resolvedUrl).protocol}`);
         }
@@ -22931,6 +23100,20 @@ class WechatObsidianInboxPlugin extends Plugin {
           primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0]
             ? xiaohongshuBrowserCandidates[0].url
             : resolvedUrl;
+        } else if (isDouyinUrl(url)) {
+          const responseFinalUrl = String(response && response.url || '').trim();
+          if (isTrustedDouyinPageUrl(responseFinalUrl)) {
+            const responseTarget = normalizeDouyinTargetUrl(url, responseFinalUrl);
+            if (responseTarget.awemeId
+              && (!douyinAwemeId || douyinAwemeId === responseTarget.awemeId)) {
+              douyinAwemeId = responseTarget.awemeId;
+              douyinLastAwemeId = douyinAwemeId;
+              douyinLastTargetIdState = 'recognized';
+              resolvedUrl = responseTarget.url;
+              douyinLastResolvedUrl = resolvedUrl;
+              primarySocialMediaBrowserUrl = resolvedUrl;
+            }
+          }
         }
         xiaohongshuResponseStatus = Number(response.status) || 0;
         let html = response.text || '';
@@ -22997,6 +23180,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
+          if (douyinAwemeId) {
+            douyinLastAwemeId = douyinAwemeId;
+            douyinLastTargetIdState = 'recognized';
+          }
           for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
             const shareStage = { stage: 'mobile-share', attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
@@ -23018,9 +23205,14 @@ class WechatObsidianInboxPlugin extends Plugin {
                 ? shareResolution.exactUrls
                 : shareResolution.primaryUrls;
               const shareDetail = shareResolution.detail;
+              const shareDetailIsTargetBound = Boolean(
+                shareDetail
+                && shareResolution.identityOutcome === 'target-id-matched'
+                && getDouyinDetailAwemeId({ aweme_detail: shareDetail }) === douyinAwemeId,
+              );
               shareStage.mediaCount = shareUrls.length;
-              shareStage.detailFound = Boolean(shareDetail);
-              if (shareDetail) {
+              shareStage.detailFound = shareDetailIsTargetBound;
+              if (shareDetailIsTargetBound) {
                 const sharePageMetadata = extractWebpageMetadataFromHtml(shareHtml, resolvedUrl);
                 douyinStructuredContent = buildDouyinStructuredContent(shareDetail, {
                   title: douyinStructuredContent && douyinStructuredContent.title || sharePageMetadata.title,
@@ -23032,6 +23224,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                     || normalizeExtractedUrl(extractMetaContent(shareHtml, ['og:image', 'twitter:image'])),
                   socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics
                     || douyinSocialMetrics,
+                  author: douyinStructuredContent && douyinStructuredContent.author || '',
                 });
                 socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
                   title: douyinStructuredContent.title,
@@ -23045,11 +23238,13 @@ class WechatObsidianInboxPlugin extends Plugin {
               }
               if (shareUrls.length) {
                 html = shareHtml;
-                const structuredShareMetrics = buildSocialMetrics(shareDetail);
-                const shareMetrics = hasSocialMetrics(structuredShareMetrics)
-                  ? structuredShareMetrics
-                  : extractSocialMetricsFromHtml(shareHtml);
-                if (hasSocialMetrics(shareMetrics)) douyinSocialMetrics = shareMetrics;
+                if (shareDetailIsTargetBound) {
+                  const structuredShareMetrics = buildSocialMetrics(shareDetail);
+                  const shareMetrics = hasSocialMetrics(structuredShareMetrics)
+                    ? structuredShareMetrics
+                    : extractSocialMetricsFromHtml(shareHtml);
+                  if (hasSocialMetrics(shareMetrics)) douyinSocialMetrics = shareMetrics;
+                }
                 mediaUrls = sortMediaUrlsForTranscription([...shareUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = shareResolution.exactUrls.length > 0;
@@ -23094,6 +23289,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                     || normalizeExtractedUrl(extractMetaContent(html, ['og:image', 'twitter:image'])),
                   socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics
                     || douyinSocialMetrics,
+                  author: douyinStructuredContent && douyinStructuredContent.author || '',
                 });
                 socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
                   title: douyinStructuredContent.title,
@@ -23127,6 +23323,34 @@ class WechatObsidianInboxPlugin extends Plugin {
               }
             }
           }
+          const applyDouyinTargetDetail = (detail) => {
+            if (!douyinAwemeId || getDouyinDetailAwemeId({ aweme_detail: detail }) !== douyinAwemeId) return false;
+            const detailPageMetadata = extractWebpageMetadataFromHtml(html, resolvedUrl);
+            const previous = douyinStructuredContent || {};
+            douyinStructuredContent = buildDouyinStructuredContent(detail, {
+              title: previous.title || detailPageMetadata.title,
+              description: previous.description || detailPageMetadata.description,
+              tags: previous.tags && previous.tags.length
+                ? previous.tags
+                : extractTagsFromText(detailPageMetadata.description, html),
+              coverUrl: previous.coverUrl
+                || normalizeExtractedUrl(extractMetaContent(html, ['og:image', 'twitter:image'])),
+              author: previous.author || '',
+              socialMetrics: hasSocialMetrics(previous.socialMetrics)
+                ? previous.socialMetrics
+                : douyinSocialMetrics,
+            });
+            socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+              title: douyinStructuredContent.title,
+              description: douyinStructuredContent.description,
+              tags: douyinStructuredContent.tags,
+              imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean),
+            });
+            if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+              douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+            }
+            return true;
+          };
           if (!hasUsableDouyinMedia
             && typeof this.renderSocialMediaUrls === 'function') {
             const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl, douyinAwemeId);
@@ -23144,13 +23368,29 @@ class WechatObsidianInboxPlugin extends Plugin {
                 startedAt: Date.now(),
               };
               try {
-            const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
-              signal,
-              strictDouyinTarget: browserRequest.strictDouyinTarget,
-              retryDouyinChallenge: true,
-              diagnosticAttemptId: douyinAttemptId,
-              targetDouyinAwemeId: douyinAwemeId,
-            });
+                const browserUrls = await this.renderSocialMediaUrls(browserRequest.url, {
+                  signal,
+                  strictDouyinTarget: browserRequest.strictDouyinTarget,
+                  retryDouyinChallenge: true,
+                  diagnosticAttemptId: douyinAttemptId,
+                  targetDouyinAwemeId: douyinAwemeId,
+                  sourceKind: getDouyinDiagnosticUrlKind('', url),
+                  resolvedKind: getDouyinDiagnosticUrlKind('', resolvedUrl),
+                  targetIdState: douyinAwemeId ? 'recognized' : 'missing',
+                  targetStageEligible: Boolean(douyinAwemeId),
+                  onDouyinTargetDetail: (detail) => {
+                    if (applyDouyinTargetDetail(detail)) browserStage.detailFound = true;
+                  },
+                  onDouyinBrowserDiagnostic: (event) => {
+                    if (!event || typeof event !== 'object') return;
+                    if (['present', 'absent', 'unsupported', 'not-eligible', 'unknown'].includes(event.debuggerCapability)) {
+                      douyinDebuggerCapability = event.debuggerCapability;
+                    }
+                    if (['target-id-missing', 'api-absent', 'api-unsupported', 'unknown'].includes(event.debuggerReason)) {
+                      douyinDebuggerReason = event.debuggerReason;
+                    }
+                  },
+                });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
                   mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
@@ -23200,6 +23440,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                   coverUrl: (douyinStructuredContent && douyinStructuredContent.coverUrl)
                     || normalizeExtractedUrl(extractMetaContent(html, ['og:image', 'twitter:image'])),
                   socialMetrics: (douyinStructuredContent && douyinStructuredContent.socialMetrics) || douyinSocialMetrics,
+                  author: (douyinStructuredContent && douyinStructuredContent.author) || '',
                 });
                 socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
                   title: douyinStructuredContent.title,
@@ -23233,16 +23474,23 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (!hasUsableDouyinMedia
             && typeof this.resolveDouyinMediaWithLocalResolver === 'function') {
+            const localResolverInputUrl = getDouyinDiagnosticUrlKind('', url) === 'shortlink'
+              && !extractDouyinAwemeId(resolvedUrl)
+              ? url
+              : (resolvedUrl || url);
             const localResolverStage = {
               stage: 'local-yt-dlp',
               attempted: true,
               ok: false,
               mediaCount: 0,
               detailFound: false,
+              inputKind: localResolverInputUrl === url ? 'original-page' : 'resolved-page',
+              sourceKind: getDouyinDiagnosticUrlKind('', url),
+              resolvedKind: getDouyinDiagnosticUrlKind('', localResolverInputUrl),
               startedAt: Date.now(),
             };
             try {
-              const localResolution = await this.resolveDouyinMediaWithLocalResolver(resolvedUrl || url);
+              const localResolution = await this.resolveDouyinMediaWithLocalResolver(localResolverInputUrl);
               const localUrls = Array.isArray(localResolution && localResolution.mediaUrls)
                 ? localResolution.mediaUrls
                 : [];
@@ -23291,7 +23539,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         const isDouyinRecord = isDouyinUrl(url) || isDouyinUrl(resolvedUrl);
         const douyinChallengeDetected = douyinResolutionStages.some((stage) => isDouyinChallengeError(stage && stage.error));
         const hasPluginDouyinLogin = isDouyinRecord ? await this.checkDouyinLogin() : false;
-        const douyinFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages);
+        const douyinTargetIdState = douyinAwemeId ? 'recognized' : 'missing';
+        if (!douyinAwemeId && douyinDebuggerCapability === 'unknown') douyinDebuggerCapability = 'not-eligible';
+        if (!douyinAwemeId && douyinDebuggerReason === 'unknown') douyinDebuggerReason = 'target-id-missing';
+        const douyinDiagnosticContext = {
+          sourceKind: getDouyinDiagnosticUrlKind('', url),
+          resolvedKind: getDouyinDiagnosticUrlKind('', resolvedUrl),
+          targetIdRecognized: Boolean(douyinAwemeId),
+          targetIdState: douyinTargetIdState,
+          targetStageEligible: Boolean(douyinAwemeId),
+          debuggerCapability: douyinDebuggerCapability,
+          debuggerReason: douyinDebuggerReason,
+        };
+        const douyinFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages, douyinDiagnosticContext);
         if (isDouyinRecord) {
           douyinResolutionDiagnostic = buildDouyinMediaResolutionDiagnostic({
             sourceUrl: url,
@@ -23308,6 +23568,11 @@ class WechatObsidianInboxPlugin extends Plugin {
             pluginDouyinLogin: hasPluginDouyinLogin,
             challengeDetected: douyinChallengeDetected,
           });
+          douyinResolutionDiagnostic = {
+            ...douyinResolutionDiagnostic,
+            ...douyinDiagnosticContext,
+            stages: douyinResolutionDiagnostic.stages.map(stage => ({ ...stage, ...douyinDiagnosticContext })),
+          };
           douyinResolutionDiagnostic.attemptId = douyinAttemptId;
           douyinResolutionDiagnostic.failureCode = hasUsableDouyinMedia ? '' : douyinFailureCode;
           douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
@@ -23315,7 +23580,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             recordRef: crypto.createHash('sha256').update(String(record.id || record._id || url)).digest('hex').slice(0, 16),
             startedAt: douyinStartedAt, finishedAt: new Date().toISOString(),
             outcome: hasUsableDouyinMedia ? 'success' : 'failed',
-            stages: douyinResolutionStages.map(stage => ({ ...stage, error: stage.error ? {
+            ...douyinDiagnosticContext,
+            stages: douyinResolutionStages.map(stage => ({ ...douyinDiagnosticContext, ...stage, error: stage.error ? {
               ...getTransportErrorDiagnostic(stage.error), browserCode: stage.error.browserCode,
               exitCode: stage.error.exitCode,
               message: douyinDiagnostic.safeErrorText(stage.error.message, this.settings),
@@ -23688,8 +23954,17 @@ class WechatObsidianInboxPlugin extends Plugin {
           const supplementalMarkdownParts = isXiaohongshuUrl(url)
             ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown)
             : { markdown: selectedSupplementalMarkdown, trailingMarkdown: '' };
-          return await this.buildTranscriptRecordFromMedia(xiaohongshuCommentResult
-            ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } } : record, {
+          const douyinAuthor = !isXiaohongshuUrl(url)
+            && douyinStructuredContent
+            && typeof douyinStructuredContent.author === 'string'
+            ? douyinStructuredContent.author.trim()
+            : '';
+          const mediaRecord = xiaohongshuCommentResult
+            ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } }
+            : douyinAuthor
+              ? { ...record, metadata: { ...metadata, author: metadata.author || douyinAuthor } }
+              : record;
+          return await this.buildTranscriptRecordFromMedia(mediaRecord, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
             mediaUrl,
@@ -24282,16 +24557,27 @@ class WechatObsidianInboxPlugin extends Plugin {
       };
     } catch (error) {
       if (isDouyinUrl(url) && !douyinResolutionDiagnostic) {
+        const douyinCatchContext = {
+          sourceKind: getDouyinDiagnosticUrlKind('', url),
+          resolvedKind: getDouyinDiagnosticUrlKind('', douyinLastResolvedUrl || url),
+          targetIdRecognized: douyinLastTargetIdState === 'recognized',
+          targetIdState: douyinLastTargetIdState,
+          targetStageEligible: douyinLastTargetIdState === 'recognized',
+          debuggerCapability: douyinLastTargetIdState === 'missing' && douyinDebuggerCapability === 'unknown' ? 'not-eligible' : douyinDebuggerCapability,
+          debuggerReason: douyinLastTargetIdState === 'missing' && douyinDebuggerReason === 'unknown' ? 'target-id-missing' : douyinDebuggerReason,
+        };
+        const douyinCatchFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages, douyinCatchContext);
         douyinResolutionDiagnostic = douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
           attemptId: douyinAttemptId,
           recordRef: crypto.createHash('sha256').update(String(record.id || record._id || url)).digest('hex').slice(0, 16),
           startedAt: douyinStartedAt, finishedAt: new Date().toISOString(),
           outcome: isAbortError(error) ? 'cancelled' : 'failed',
+          ...douyinCatchContext,
           failureCode: isAbortError(error) ? 'DOUYIN_CANCELLED'
-            : douyinDiagnostic.failureCode(douyinResolutionStages) === 'DOUYIN_NO_MEDIA'
-              ? 'DOUYIN_FETCH_FAILED' : douyinDiagnostic.failureCode(douyinResolutionStages),
+            : douyinCatchFailureCode === 'DOUYIN_NO_MEDIA'
+              ? 'DOUYIN_FETCH_FAILED' : douyinCatchFailureCode,
           stages: [...douyinResolutionStages, { stage: isAbortError(error) ? 'cancelled' : 'platform-fetch', ok: false, error }].map(stage => ({
-            ...stage, error: stage.error ? { ...getTransportErrorDiagnostic(stage.error),
+            ...douyinCatchContext, ...stage, error: stage.error ? { ...getTransportErrorDiagnostic(stage.error),
               browserCode: stage.error.browserCode, exitCode: stage.error.exitCode,
               message: douyinDiagnostic.safeErrorText(stage.error.message, this.settings) } : undefined,
           })),
@@ -25015,6 +25301,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       await this.reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle);
       if (this.autoSyncController) this.autoSyncController.succeeded(retryKey);
+      try {
+        await this.getSyncDiagnosticReporter().clearRecord({
+          binding,
+          syncRecordId: recordId,
+        });
+      } catch (_) {
+        // Diagnostic cleanup must never turn a confirmed sync completion into
+        // a user-visible completion failure.
+      }
       return null;
     } catch (error) {
       if (isRecordNotFoundError(error)) return null;
@@ -25250,19 +25545,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (processingAbortController.signal.aborted && !item.committed) {
           throw createAbortError();
         }
-        const hasExplicitCommitAck = Boolean(item && Object.prototype.hasOwnProperty.call(item, 'committed'));
-        const writeAcknowledged = Boolean(item && (hasExplicitCommitAck ? item.committed === true : item.recordId));
         localCommitFact = item;
-        if (writeAcknowledged) {
-          this.queueSyncDiagnosticSuccess({
-            recordId: item.recordId,
-            attemptId: lifecycle.attemptId,
-            diagnosticId,
-            binding,
-            retryCount: record.retryCount,
-            stage: 'write',
-          });
-        }
         if (this.autoSyncController) this.autoSyncController.succeeded(autoRetryKey);
         written.push(item);
         if (item.conversionWarning) {
@@ -25322,6 +25605,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           error,
           stage: progress.stage || 'processing',
           retryCount: record.retryCount,
+        sourceUrl: sanitizeSourceLink(getDiagnosticSourceUrl(record)),
         });
         let lifecycleReportError = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
@@ -25351,9 +25635,10 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
         }
 
-        const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
-          ? (retainedSyncFailureDiagnostic(error.diagnostic, this.settings) || redactSensitiveObject(error.diagnostic))
-          : null;
+    const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
+      ? (retainedSyncFailureDiagnostic(error.diagnostic, this.settings) || redactSensitiveObject(error.diagnostic))
+      : null;
+        const diagnosticSourceUrl = sanitizeSourceLink(getDiagnosticSourceUrl(record));
         let failedTitle = '小红书内容';
         if (!isXiaohongshuUrl(getRecordUrl(record))) {
           try {
@@ -25370,6 +25655,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId: getRecordId(record),
           message: '单条内容同步失败',
           error: message,
+          ...(diagnosticSourceUrl ? { sourceUrl: diagnosticSourceUrl } : {}),
           ...(diagnostic ? { diagnostic } : {}),
           ...(lifecycleReportError ? { lifecycleReportError } : {}),
           time: new Date().toISOString(),
@@ -26520,6 +26806,7 @@ WechatObsidianInboxPlugin.__test = {
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
   buildSyncDiagnosticLogText,
+  getDiagnosticSourceUrl,
   buildSyncResultNotice,
   buildSkippedSyncNotice,
   getRecordConversionWarning,

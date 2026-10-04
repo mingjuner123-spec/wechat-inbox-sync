@@ -35,6 +35,23 @@ function createDouyinMediaHelpers({
     return text.includes('douyin.com') || text.includes('iesdouyin.com') || text.includes('amemv.com');
   }
 
+  function isTrustedDouyinPageUrl(url) {
+    try {
+      const parsed = new URL(String(url || '').trim());
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return false;
+      if (parsed.port && parsed.port !== '443') return false;
+      const hostname = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+      return hostname === 'douyin.com'
+        || hostname.endsWith('.douyin.com')
+        || hostname === 'iesdouyin.com'
+        || hostname.endsWith('.iesdouyin.com')
+        || hostname === 'amemv.com'
+        || hostname.endsWith('.amemv.com');
+    } catch (error) {
+      return false;
+    }
+  }
+
   function isDouyinMediaUrl(url) {
     return /douyinvod\.com|zjcdn\.com\/tos-|snssdk\.com\/aweme\/v1\/play|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ''));
   }
@@ -471,7 +488,12 @@ function createDouyinMediaHelpers({
 
   function findDouyinDetailForAweme(payload, awemeId) {
     const targetId = String(awemeId || '').trim();
-    if (!targetId || !payload || typeof payload !== 'object') return null;
+    if (!targetId || !payload) return null;
+    let root = payload;
+    if (typeof root === 'string') {
+      try { root = JSON.parse(root || '{}'); } catch (error) { return null; }
+    }
+    if (!root || typeof root !== 'object') return null;
     const seen = new Set();
     let matched = null;
     const visit = (value, depth = 0) => {
@@ -488,7 +510,7 @@ function createDouyinMediaHelpers({
       }
       Object.values(value).forEach((item) => visit(item, depth + 1));
     };
-    visit(payload);
+    visit(root);
     return matched;
   }
 
@@ -609,6 +631,7 @@ function createDouyinMediaHelpers({
 
   return {
     isDouyinUrl,
+    isTrustedDouyinPageUrl,
     isDouyinMediaUrl,
     extractDouyinAwemeId,
     buildDouyinDomIdentityExtractorScript,

@@ -7,14 +7,30 @@ const LIMITS = Object.freeze({ timeoutMs: 45000, responses: 24, concurrent: 3, r
 const STAGES = new Set(['created', 'loading', 'debugger-setup', 'page-load', 'page-validation', 'media-extraction', 'response-extraction', 'finished']);
 const OUTCOMES = new Set(['running', 'success', 'failed', 'cancelled']);
 const REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure', 'memory-eviction', 'unknown']);
+const URL_KINDS = new Set(['canonical', 'share', 'shortlink', 'home', 'feed', 'other', 'unknown']);
+const DEBUGGER_CAPABILITIES = new Set(['present', 'absent', 'unsupported', 'not-eligible', 'unknown']);
+const DEBUGGER_REASONS = new Set(['target-id-missing', 'api-absent', 'api-unsupported', 'unknown']);
+const TARGET_ID_STATES = new Set(['recognized', 'missing', 'unknown']);
 const number = value => Number.isFinite(value) ? Math.max(0, Math.min(1e12, Math.round(value))) : 0;
 const version = value => /^\d+(?:\.\d+){1,3}$/.test(value || '') ? value : '';
+const enumValue = (set, value) => set.has(value) ? value : 'unknown';
 
 function sanitize(value = {}) {
   const result = { source: 'douyin-browser', schema: 1 };
   for (const key of ['attemptId', 'recordRef']) result[key] = /^[a-f0-9]{16,32}$/.test(value[key] || '') ? value[key] : '';
   result.resolutionAttemptId = /^[a-f0-9]{16,32}$/.test(value.resolutionAttemptId || '') ? value.resolutionAttemptId : '';
   result.debuggerStatus = ['ready', 'unavailable', 'timeout', 'failed'].includes(value.debuggerStatus) ? value.debuggerStatus : '';
+  result.sourceKind = enumValue(URL_KINDS, value.sourceKind);
+  result.resolvedKind = enumValue(URL_KINDS, value.resolvedKind);
+  result.targetIdRecognized = value.targetIdRecognized === true;
+  result.targetIdState = TARGET_ID_STATES.has(value.targetIdState)
+    ? value.targetIdState
+    : (Object.prototype.hasOwnProperty.call(value, 'targetIdRecognized')
+      ? (value.targetIdRecognized === true ? 'recognized' : 'missing')
+      : 'unknown');
+  result.targetStageEligible = value.targetStageEligible === true;
+  result.debuggerCapability = enumValue(DEBUGGER_CAPABILITIES, value.debuggerCapability);
+  result.debuggerReason = enumValue(DEBUGGER_REASONS, value.debuggerReason);
   result.pageEvent = ['dom-ready', 'did-finish-load', 'did-fail-load', 'did-navigate', 'did-redirect-navigation'].includes(value.pageEvent) ? value.pageEvent : '';
   result.networkCode = /^ERR_[A-Z_]{1,60}$/.test(value.networkCode || '') ? value.networkCode : '';
   result.httpStatus = number(value.httpStatus);

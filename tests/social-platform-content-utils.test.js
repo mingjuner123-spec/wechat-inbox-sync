@@ -28,6 +28,21 @@ function run() {
   assert.strictEqual(structured.coverUrl, 'https://img.example.com/cover.jpg');
   assert.deepStrictEqual(structured.socialMetrics, { likes: 120 });
 
+  const authorFromTargetDetail = buildDouyinStructuredContent({
+    aweme_id: '7644566503081119019',
+    user: { nickname: '目标作者' },
+    metrics: { likes: 0 },
+  });
+  assert.strictEqual(authorFromTargetDetail.author, '目标作者');
+  assert.deepStrictEqual(authorFromTargetDetail.socialMetrics, { likes: 0 });
+
+  const authorDoesNotBecomeObjectText = buildDouyinStructuredContent({
+    aweme_id: '7644566503081119019',
+    user: { nickname: { value: 'not-a-name-string' } },
+  }, { author: '已取得作者' });
+  assert.strictEqual(authorDoesNotBecomeObjectText.author, '已取得作者');
+  assert.doesNotMatch(authorDoesNotBecomeObjectText.author, /Object/);
+
   const previewWins = buildDouyinStructuredContent({
     title: 'Douyin',
     preview_title: 'Original platform title',

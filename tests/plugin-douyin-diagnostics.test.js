@@ -61,10 +61,59 @@ async function run() {
     for (const [text, code] of [
       ['Fresh cookies (not necessarily logged in) are needed', 'DOUYIN_COOKIE_REFRESH_REQUIRED'],
       ['captcha required', 'DOUYIN_CHALLENGE'], ['login required', 'DOUYIN_LOGIN_REQUIRED'],
+      ['ERROR: Unsupported URL: https://www.douyin.com/private?token=SECRET', 'DOUYIN_UNSUPPORTED_URL'],
       ['certificate verify failed', 'DOUYIN_RESOLVER_NETWORK'], ['unrecognized payload', 'DOUYIN_RESOLVER_FAILED'],
     ]) { assert.equal(diagnostic.classifyResolverError(new Error(text)).code, code); cases++; }
+    assert.match(diagnostic.failureMessage('DOUYIN_UNSUPPORTED_URL'), /地址栏复制完整作品链接/);
+    assert.match(diagnostic.failureMessage('DOUYIN_UNSUPPORTED_URL'), /解析组件未识别/);
+    assert.match(diagnostic.failureMessage('DOUYIN_RESOLVER_NETWORK'), /检查网络/);
+    assert.match(diagnostic.failureMessage('DOUYIN_RESOLVER_NETWORK'), /VPN 或代理/);
+    assert.match(diagnostic.failureMessage('DOUYIN_TARGET_ID_MISSING'), /具体作品页地址栏/);
+    assert.equal(diagnostic.urlKind('https://www.douyin.com/video/1234567890123456789'), 'canonical');
+    assert.equal(diagnostic.urlKind('https://www.iesdouyin.com/share/video/1234567890123456789/'), 'share');
+    assert.equal(diagnostic.urlKind('https://v.douyin.com/fixture/'), 'shortlink');
+    assert.equal(diagnostic.urlKind('https://www.douyin.com/feed/'), 'feed');
+    assert.equal(diagnostic.urlKind('https://www.douyin.com/'), 'home');
+    assert.equal(diagnostic.urlKind('https://www.douyin.com/search/fixture'), 'other');
+    assert.equal(diagnostic.urlKind('https://example.invalid/?token=SECRET'), 'unknown');
+    cases += 7;
     const stages = [{ ok: false, error: { browserCode: 'DOUYIN_BROWSER_TIMEOUT' } }, { ok: false, error: { code: 'DOUYIN_COOKIE_REFRESH_REQUIRED' } }];
     assert.equal(diagnostic.failureCode(stages), 'DOUYIN_BROWSER_TIMEOUT'); cases++;
+    assert.equal(diagnostic.failureCode([{ ok: false, error: { code: 'DOUYIN_RESOLVER_FAILED', message: 'Unsupported URL: [URL_REDACTED]' } }]), 'DOUYIN_UNSUPPORTED_URL'); cases++;
+    assert.equal(diagnostic.failureCode([{ ok: false, error: { code: 'DOUYIN_UNSUPPORTED_URL' } }]), 'DOUYIN_UNSUPPORTED_URL'); cases++;
+    assert.equal(diagnostic.failureCode([
+      { ok: false, error: { code: 'DOUYIN_CHALLENGE' } },
+      { ok: false, error: { code: 'DOUYIN_RESOLVER_FAILED', message: 'Unsupported URL: [URL_REDACTED]' } },
+    ]), 'DOUYIN_CHALLENGE'); cases++;
+    assert.equal(diagnostic.failureCode([{ ok: false, error: { code: 'DOUYIN_NO_MEDIA' } }], { targetIdRecognized: false }), 'DOUYIN_TARGET_ID_MISSING'); cases++;
+    assert.equal(diagnostic.failureCode([{ ok: false, error: { code: 'DOUYIN_RESOLVER_FAILED' } }], { targetIdRecognized: false }), 'DOUYIN_TARGET_ID_MISSING'); cases++;
+    assert.equal(diagnostic.failureCode([{ ok: false, error: { code: 'DOUYIN_NO_MEDIA' } }], { targetIdRecognized: true }), 'DOUYIN_NO_MEDIA'); cases++;
+    const legacy = diagnostic.sanitize({ stages: [{ stage: 'targeted-browser', ok: false, error: { code: 'DOUYIN_NO_MEDIA' } }] });
+    assert.equal(legacy.targetIdState, 'unknown');
+    assert.equal(diagnostic.failureCode(legacy.stages, legacy), 'DOUYIN_NO_MEDIA'); cases++;
+    const explicitUnknown = diagnostic.sanitize({ targetIdRecognized: false, targetIdState: 'unknown', stages: [{ targetIdRecognized: false, targetIdState: 'unknown' }] });
+    assert.equal(explicitUnknown.targetIdState, 'unknown');
+    assert.equal(explicitUnknown.stages[0].targetIdState, 'unknown'); cases++;
+    const context = diagnostic.sanitize({
+      attemptId: 'abcdef0123456789',
+      sourceKind: 'shortlink',
+      resolvedKind: 'home',
+      targetIdRecognized: false,
+      targetStageEligible: false,
+      debuggerCapability: 'not-eligible',
+      debuggerReason: 'target-id-missing',
+      stages: [{ stage: 'local-yt-dlp', sourceKind: 'shortlink', resolvedKind: 'home', targetIdRecognized: false, targetStageEligible: false, error: { message: 'Unsupported URL: https://www.douyin.com/video/123?token=SECRET' } }],
+    });
+    assert.equal(context.sourceKind, 'shortlink');
+    assert.equal(context.resolvedKind, 'home');
+    assert.equal(context.targetIdRecognized, false);
+    assert.equal(context.targetStageEligible, false);
+    assert.equal(context.debuggerCapability, 'not-eligible');
+    assert.equal(context.debuggerReason, 'target-id-missing');
+    assert.equal(context.stages[0].sourceKind, 'shortlink');
+    assert.doesNotMatch(JSON.stringify(context), /https?:\/\//);
+    assert.doesNotMatch(JSON.stringify(context), /SECRET/);
+    cases++;
     const saved = diagnostic.save(scratch, { attemptId: 'abcdef0123456789', pluginDouyinLogin: true, outcome: 'failed', failureCode: 'DOUYIN_BROWSER_TIMEOUT', stages: [{ stage: 'local-resolver', error: { message: 'request https://example.test/?secret=PRIVATE\nCookie: sessionid=SECRET', exitCode: 1 } }] });
     assert.equal(diagnostic.read(scratch)[0].cookieState, 'saved-unverified');
     assert.equal(diagnostic.read(scratch)[0].stages[0].error.exitCode, 1);

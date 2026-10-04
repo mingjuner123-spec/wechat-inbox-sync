@@ -715,13 +715,25 @@ var require_douyin_browser_safety = __commonJS({
     var STAGES = /* @__PURE__ */ new Set(["created", "loading", "debugger-setup", "page-load", "page-validation", "media-extraction", "response-extraction", "finished"]);
     var OUTCOMES = /* @__PURE__ */ new Set(["running", "success", "failed", "cancelled"]);
     var REASONS = /* @__PURE__ */ new Set(["clean-exit", "abnormal-exit", "killed", "crashed", "oom", "launch-failed", "integrity-failure", "memory-eviction", "unknown"]);
+    var URL_KINDS = /* @__PURE__ */ new Set(["canonical", "share", "shortlink", "home", "feed", "other", "unknown"]);
+    var DEBUGGER_CAPABILITIES = /* @__PURE__ */ new Set(["present", "absent", "unsupported", "not-eligible", "unknown"]);
+    var DEBUGGER_REASONS = /* @__PURE__ */ new Set(["target-id-missing", "api-absent", "api-unsupported", "unknown"]);
+    var TARGET_ID_STATES = /* @__PURE__ */ new Set(["recognized", "missing", "unknown"]);
     var number = /* @__PURE__ */ __name((value) => Number.isFinite(value) ? Math.max(0, Math.min(1e12, Math.round(value))) : 0, "number");
     var version = /* @__PURE__ */ __name((value) => /^\d+(?:\.\d+){1,3}$/.test(value || "") ? value : "", "version");
+    var enumValue = /* @__PURE__ */ __name((set, value) => set.has(value) ? value : "unknown", "enumValue");
     function sanitize(value = {}) {
       const result = { source: "douyin-browser", schema: 1 };
       for (const key of ["attemptId", "recordRef"]) result[key] = /^[a-f0-9]{16,32}$/.test(value[key] || "") ? value[key] : "";
       result.resolutionAttemptId = /^[a-f0-9]{16,32}$/.test(value.resolutionAttemptId || "") ? value.resolutionAttemptId : "";
       result.debuggerStatus = ["ready", "unavailable", "timeout", "failed"].includes(value.debuggerStatus) ? value.debuggerStatus : "";
+      result.sourceKind = enumValue(URL_KINDS, value.sourceKind);
+      result.resolvedKind = enumValue(URL_KINDS, value.resolvedKind);
+      result.targetIdRecognized = value.targetIdRecognized === true;
+      result.targetIdState = TARGET_ID_STATES.has(value.targetIdState) ? value.targetIdState : Object.prototype.hasOwnProperty.call(value, "targetIdRecognized") ? value.targetIdRecognized === true ? "recognized" : "missing" : "unknown";
+      result.targetStageEligible = value.targetStageEligible === true;
+      result.debuggerCapability = enumValue(DEBUGGER_CAPABILITIES, value.debuggerCapability);
+      result.debuggerReason = enumValue(DEBUGGER_REASONS, value.debuggerReason);
       result.pageEvent = ["dom-ready", "did-finish-load", "did-fail-load", "did-navigate", "did-redirect-navigation"].includes(value.pageEvent) ? value.pageEvent : "";
       result.networkCode = /^ERR_[A-Z_]{1,60}$/.test(value.networkCode || "") ? value.networkCode : "";
       result.httpStatus = number(value.httpStatus);
@@ -1101,6 +1113,7 @@ var require_sync_diagnostic_reporter = __commonJS({
       "attemptId",
       "diagnosticId",
       "syncRecordId",
+      "sourceUrl",
       "errorType",
       "stage",
       "pluginVersion",
@@ -1111,6 +1124,7 @@ var require_sync_diagnostic_reporter = __commonJS({
       "evidenceCodes",
       "errorCode"
     ]);
+    var SAFE_OUTCOMES = /* @__PURE__ */ new Set(["failed"]);
     var SAFE_STAGES = /* @__PURE__ */ new Set([
       "upload",
       "fetch",
@@ -1155,6 +1169,51 @@ var require_sync_diagnostic_reporter = __commonJS({
       "manual_review",
       "no_matching_evidence"
     ]);
+    var MAX_SOURCE_LINK_LENGTH = 2048;
+    var SOURCE_LINK_SECRET_KEY = /(?:^|_)(?:access_key|access_token|authorization|auth|cookie|credential|csrf|nonce|password|secret|session|session_id|sid|signature|sig|token|xsec_source|xsec_token|expires?|expiry|deadline|policy|key_pair_id|hdnts)(?:_|$)/i;
+    var SOURCE_LINK_MEDIA_PATH = /\.(?:3gp|aac|avi|flac|m4a|m4s|m3u8|mkv|mov|mp2|mp3|mp4|mpeg|mpg|ogg|opus|ts|wav|webm)(?:$|[/?])/i;
+    var SOURCE_LINK_MEDIA_HOST = /(?:^|[.-])(?:bilivideo|byteimg|cloudfront|douyinvod|fbcdn|googlevideo|pstatp)(?:[.-]|$)/i;
+    function isPrivateSourceLinkHost(hostname) {
+      const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+      if (!host || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) return true;
+      if (host === "::1" || /^(?:fc|fd)[0-9a-f]{2}:/i.test(host) || /^fe[89ab][0-9a-f]:/i.test(host) || /^::ffff:/i.test(host)) return true;
+      const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+      if (!ipv4) return false;
+      const octets = ipv4.slice(1).map(Number);
+      if (octets.some((value) => value > 255)) return true;
+      const [first, second] = octets;
+      return first === 0 || first === 10 || first === 127 || first === 169 && second === 254 || first === 172 && second >= 16 && second <= 31 || first === 192 && second === 168 || first === 100 && second >= 64 && second <= 127;
+    }
+    __name(isPrivateSourceLinkHost, "isPrivateSourceLinkHost");
+    function isSourceLinkSecretKey(key) {
+      const normalized = String(key || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+      return SOURCE_LINK_SECRET_KEY.test(normalized);
+    }
+    __name(isSourceLinkSecretKey, "isSourceLinkSecretKey");
+    function looksLikeEmbeddedCredential(value) {
+      return /(?:^|[\s,;&])(?:authorization|bearer|cookie|access[_-]?key|access[_-]?token|credential|password|secret|session|signature|sig|token)\s*=/i.test(String(value || ""));
+    }
+    __name(looksLikeEmbeddedCredential, "looksLikeEmbeddedCredential");
+    function sanitizeSourceLink2(value) {
+      const raw = String(value || "").trim();
+      if (!raw || raw.length > MAX_SOURCE_LINK_LENGTH) return "";
+      let parsed;
+      try {
+        parsed = new URL(raw);
+      } catch (_) {
+        return "";
+      }
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return "";
+      if (isPrivateSourceLinkHost(parsed.hostname)) return "";
+      if (SOURCE_LINK_MEDIA_PATH.test(parsed.pathname) || SOURCE_LINK_MEDIA_HOST.test(parsed.hostname)) return "";
+      for (const [key, valuePart] of [...parsed.searchParams.entries()]) {
+        if (isSourceLinkSecretKey(key) || looksLikeEmbeddedCredential(valuePart)) parsed.searchParams.delete(key);
+      }
+      parsed.hash = "";
+      const normalized = parsed.toString();
+      return normalized.length <= MAX_SOURCE_LINK_LENGTH ? normalized : "";
+    }
+    __name(sanitizeSourceLink2, "sanitizeSourceLink");
     function asFiniteInteger(value, fallback = 0, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
       const number = Number(value);
       if (!Number.isFinite(number)) return fallback;
@@ -1314,6 +1373,10 @@ var require_sync_diagnostic_reporter = __commonJS({
       if (outcome === "failed") {
         event.errorType = errorType;
         event.errorCode = errorCode;
+        const sourceUrl = sanitizeSourceLink2(
+          source.sourceUrl || source.sourceLink || defaults.sourceUrl || defaults.sourceLink
+        );
+        if (sourceUrl) event.sourceUrl = sourceUrl;
       } else {
         event.errorType = "NONE";
       }
@@ -1336,6 +1399,7 @@ var require_sync_diagnostic_reporter = __commonJS({
         const event = normalizeDiagnosticEvent(item.event && typeof item.event === "object" ? item.event : item, {
           now: current
         });
+        if (!SAFE_OUTCOMES.has(event.outcome)) continue;
         if (!event.eventId || !event.attemptId) continue;
         const nextAttemptAt = Math.max(
           current,
@@ -1427,7 +1491,9 @@ var require_sync_diagnostic_reporter = __commonJS({
         { diagnosticReport: true, timeoutMs: requestTimeoutMs }
       ) : null;
       let disposed = false;
-      let outbox = normalizeOutbox2(options.initialOutbox || [], { now: now(), maxItems });
+      const initialOutbox = Array.isArray(options.initialOutbox) ? options.initialOutbox : [];
+      let outbox = normalizeOutbox2(initialOutbox, { now: now(), maxItems });
+      const initialOutboxNeedsPersistence = outbox.length !== initialOutbox.length;
       let timer = null;
       let flushPromise = null;
       let persistPromise = Promise.resolve();
@@ -1452,6 +1518,7 @@ var require_sync_diagnostic_reporter = __commonJS({
         return persistPromise;
       }
       __name(persistSnapshot, "persistSnapshot");
+      if (initialOutboxNeedsPersistence) void persistSnapshot();
       function scheduleFlush(delay2 = 0) {
         if (disposed || !postEvents || timer) return;
         const wait = Math.max(0, asFiniteInteger(delay2, 0, { min: 0, max: MAX_RETRY_DELAY_MS }));
@@ -1474,6 +1541,9 @@ var require_sync_diagnostic_reporter = __commonJS({
           bindingFingerprint,
           now: now()
         });
+        if (!SAFE_OUTCOMES.has(event.outcome)) {
+          return { queued: false, reason: "success-outcome-rejected" };
+        }
         if (!event.attemptId) return { queued: false, reason: "missing-attempt" };
         const key = `${bindingFingerprint}:${event.eventId}`;
         const existing = currentOutbox().find((entry) => `${entry.bindingFingerprint}:${entry.event.eventId}` === key);
@@ -1497,6 +1567,19 @@ var require_sync_diagnostic_reporter = __commonJS({
         return { queued: true, event: { ...event } };
       }
       __name(enqueue, "enqueue");
+      async function clearRecord({ binding = null, syncRecordId = "" } = {}) {
+        const bindingFingerprint = getBindingFingerprint2(binding);
+        const recordId = normalizeRecordId(syncRecordId);
+        if (!bindingFingerprint || !recordId) return { cleared: 0 };
+        const before = currentOutbox();
+        const remaining = before.filter((entry) => entry.bindingFingerprint !== bindingFingerprint || entry.event.syncRecordId !== recordId);
+        const cleared = before.length - remaining.length;
+        if (!cleared) return { cleared: 0 };
+        outbox = remaining;
+        await persistSnapshot();
+        return { cleared };
+      }
+      __name(clearRecord, "clearRecord");
       async function flush({ binding = null, bindings = null } = {}) {
         if (disposed || !postEvents) return { sent: 0, retained: currentOutbox().length, failed: 0 };
         if (flushPromise) return await flushPromise;
@@ -1512,9 +1595,9 @@ var require_sync_diagnostic_reporter = __commonJS({
             }
           }
           const stats = { sent: 0, retained: 0, failed: 0 };
-          const currentTime = Number(now()) || Date.now();
-          const eligible = currentOutbox().filter((entry) => available.has(entry.bindingFingerprint) && entry.nextAttemptAt <= currentTime);
           for (const [bindingFingerprint, bindingValue] of available) {
+            const currentTime = Number(now()) || Date.now();
+            const eligible = currentOutbox().filter((entry) => available.has(entry.bindingFingerprint) && entry.nextAttemptAt <= currentTime);
             const entries = eligible.filter((entry) => entry.bindingFingerprint === bindingFingerprint).slice(0, MAX_BATCH_SIZE);
             if (!entries.length) continue;
             try {
@@ -1587,6 +1670,7 @@ var require_sync_diagnostic_reporter = __commonJS({
       __name(dispose, "dispose");
       return {
         enqueue,
+        clearRecord,
         flush,
         dispose,
         kick: /* @__PURE__ */ __name(() => scheduleFlush(0), "kick"),
@@ -1620,7 +1704,9 @@ var require_sync_diagnostic_reporter = __commonJS({
       normalizeOutcome,
       normalizeOutbox: normalizeOutbox2,
       normalizePlatform,
-      normalizeStage
+      normalizeStage,
+      sanitizeSourceUrl: sanitizeSourceLink2,
+      sanitizeSourceLink: sanitizeSourceLink2
     };
   }
 });
@@ -2273,11 +2359,86 @@ ${safeTail}`;
       return crypto2.createHash("sha256").update(JSON.stringify(identity)).digest("hex");
     }
     __name(fingerprint, "fingerprint");
+    function systemIdentity(platform = os2.platform()) {
+      var _a;
+      const cpus = os2.cpus() || [];
+      return {
+        platform,
+        architecture: os2.arch(),
+        release: os2.release(),
+        cpuModel: ((_a = cpus[0]) == null ? void 0 : _a.model) || "unavailable",
+        logicalCpus: cpus.length || null,
+        totalMemoryBytes: os2.totalmem()
+      };
+    }
+    __name(systemIdentity, "systemIdentity");
+    function modelIdentity(root, { managed = true } = {}) {
+      if (!managed) return { scope: "custom_command", modelUsed: "unknown" };
+      const file = path2.join(root, "models", "ggml-small.bin");
+      try {
+        const st = fs2.lstatSync(file);
+        if (!st.isFile() || st.isSymbolicLink()) return { scope: "managed_default_component", fileName: "ggml-small.bin", status: "unavailable" };
+        return { scope: "managed_default_component", modelUsed: "ggml-small.bin", fileName: "ggml-small.bin", sizeBytes: st.size, modifiedAt: st.mtime.toISOString() };
+      } catch (_) {
+        return { scope: "managed_default_component", fileName: "ggml-small.bin", status: "unavailable" };
+      }
+    }
+    __name(modelIdentity, "modelIdentity");
+    function snapshotDiagnosticLog(file) {
+      try {
+        const st = fs2.lstatSync(file);
+        if (!st.isFile() || st.isSymbolicLink()) return { state: "unavailable" };
+        const sample = boundedRead(file, 256 * 1024);
+        if (sample.startsWith("[unavailable:")) return { state: "unavailable" };
+        return {
+          state: "present",
+          sizeBytes: st.size,
+          modifiedAtMs: st.mtimeMs,
+          fingerprint: crypto2.createHash("sha256").update(`${st.size}
+${st.mtimeMs}
+${sample}`).digest("hex")
+        };
+      } catch (error) {
+        return error && error.code === "ENOENT" ? { state: "absent" } : { state: "unavailable" };
+      }
+    }
+    __name(snapshotDiagnosticLog, "snapshotDiagnosticLog");
+    function diagnosticLogFreshness(before, after) {
+      if (!after || after.state !== "present") return "unavailable";
+      if ((before == null ? void 0 : before.state) === "absent") return "fresh";
+      if ((before == null ? void 0 : before.state) === "present" && before.fingerprint !== after.fingerprint) return "fresh";
+      if ((before == null ? void 0 : before.state) === "unavailable") return "unavailable";
+      return "stale";
+    }
+    __name(diagnosticLogFreshness, "diagnosticLogFreshness");
     function matchesBinaryPath(value, session) {
       var _a;
       return Boolean(value && ((_a = session == null ? void 0 : session.runtime) == null ? void 0 : _a.binaryPathSha256) && crypto2.createHash("sha256").update(String(value).trim()).digest("hex") === session.runtime.binaryPathSha256);
     }
     __name(matchesBinaryPath, "matchesBinaryPath");
+    function parseTimestamp(value) {
+      const parsed = Date.parse(value || "");
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    __name(parseTimestamp, "parseTimestamp");
+    function getCrashAssociation(session, pid, capturedAt) {
+      const attempts = Array.isArray(session == null ? void 0 : session.attempts) ? session.attempts : [];
+      const sameAttempt = attempts.find((attempt) => {
+        if (!((attempt == null ? void 0 : attempt.nativePids) || []).map(Number).includes(Number(pid))) return false;
+        const startedAt = parseTimestamp(attempt.startedAt);
+        const finishedAt = parseTimestamp(attempt.finishedAt || attempt.at);
+        if (startedAt === null || finishedAt === null) return false;
+        return capturedAt >= startedAt - 5e3 && capturedAt <= finishedAt + 5e3;
+      });
+      return {
+        reliability: sameAttempt ? "same_attempt_pid_and_time" : "session_window_pid_and_time",
+        attempt: (sameAttempt == null ? void 0 : sameAttempt.attempt) ?? null,
+        pidMatched: true,
+        captureTimeInAttemptWindow: Boolean(sameAttempt),
+        pidReuseRisk: !sameAttempt
+      };
+    }
+    __name(getCrashAssociation, "getCrashAssociation");
     function readMatchingCrashSummary(session, { directory = path2.join(os2.homedir(), "Library", "Logs", "DiagnosticReports"), fileSystem = fs2 } = {}) {
       var _a, _b, _c;
       if (!session || session.platform !== "darwin" || !session.startedAt || !session.finishedAt) return "[unavailable: no matching Mac run]";
@@ -2307,13 +2468,26 @@ ${safeTail}`;
             const captured = Date.parse(report.captureTime || "");
             if (!Number.isFinite(captured) || captured < start || captured > end) continue;
             const thread = (_a = report.threads) == null ? void 0 : _a[report.faultingThread];
-            return JSON.stringify({ process: report.procName, pid: report.pid, exception: report.exception, termination: report.termination, faultingThread: report.faultingThread, frames: ((thread == null ? void 0 : thread.frames) || []).slice(0, 25).map((f) => ({ symbol: f.symbol, imageIndex: f.imageIndex, imageOffset: f.imageOffset })) }, null, 2);
+            return JSON.stringify({
+              process: report.procName,
+              pid: report.pid,
+              captureTime: new Date(captured).toISOString(),
+              associationReliability: getCrashAssociation(session, report.pid, captured),
+              exception: report.exception,
+              termination: report.termination,
+              faultingThread: report.faultingThread,
+              frames: ((thread == null ? void 0 : thread.frames) || []).slice(0, 25).map((f) => ({ symbol: f.symbol, imageIndex: f.imageIndex, imageOffset: f.imageOffset }))
+            }, null, 2);
           }
           const proc = text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
           if (!proc || !/^whisper(?:-cli|-cpp)?$/.test(proc[1]) && !(proc[1] === "main" && matchesBinaryPath((_b = text.match(/^Path:\s+(.+)$/m)) == null ? void 0 : _b[1], session)) || !pids.includes(Number(proc[2]))) continue;
           const crashTime = Date.parse(((_c = text.match(/^Date\/Time:\s+(.+)$/m)) == null ? void 0 : _c[1]) || "");
           if (!Number.isFinite(crashTime) || crashTime < start || crashTime > end) continue;
-          return text.split("\n").filter((line) => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:|Thread \d+ Crashed:|\d+\s+\S+\s+0x)/.test(line)).slice(0, 40).join("\n");
+          return [
+            `associationReliability=${JSON.stringify(getCrashAssociation(session, proc[2], crashTime))}`,
+            `captureTime=${new Date(crashTime).toISOString()}`,
+            ...text.split("\n").filter((line) => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:|Thread \d+ Crashed:|\d+\s+\S+\s+0x)/.test(line)).slice(0, 40)
+          ].join("\n");
         }
       } catch (_) {
         return "[unavailable: crash reports not accessible]";
@@ -2341,13 +2515,13 @@ ${safeTail}`;
       const sameAttempt = Boolean(currentTask && currentTask.transcriptionStarted === true && currentTask.attemptId && session && session.diagnosticAttemptId === currentTask.attemptId && currentTask.recordRef && sessionRef === currentTask.recordRef && Date.parse(session.startedAt) >= Date.parse(currentTask.startedAt) && (!currentTask.finishedAt || Date.parse(session.startedAt) <= Date.parse(currentTask.finishedAt)));
       const identity = runtimeIdentity(root);
       const sections = [
-        "详细 ASR 诊断 v1（本地生成；未自动上传）",
+        "详细 ASR 诊断 v2（本地生成；未自动上传）",
         "日志每项最多 256 KiB；超出明确标记；stdout/识别文本不导出。",
-        JSON.stringify({ platform: os2.platform(), arch: os2.arch(), release: os2.release(), cpu: (_a = os2.cpus()[0]) == null ? void 0 : _a.model, logicalCpus: os2.cpus().length, totalMemoryBytes: os2.totalmem(), freeMemoryBytesNow: os2.freemem(), memoryNote: "当前空闲内存不能单独判断转写时内存不足", runtime: identity, modelSha256: digestFile(path2.join(root, "models", "ggml-small.bin")) }, null, 2),
+        JSON.stringify({ system: (session == null ? void 0 : session.system) || systemIdentity(), freeMemoryBytesNow: os2.freemem(), memoryNote: "当前空闲内存不能单独判断转写时内存不足", runtime: (session == null ? void 0 : session.runtime) || identity, model: (session == null ? void 0 : session.model) || modelIdentity(root), modelSha256AtReportTime: ((_a = session == null ? void 0 : session.model) == null ? void 0 : _a.scope) === "custom_command" ? "not-collected-custom-model-unknown" : digestFile(path2.join(root, "models", "ggml-small.bin")) }, null, 2),
         sameAttempt ? "--- 与当前小红书任务匹配的 ASR 尝试 ---" : "--- 最近一次 ASR 历史任务（不代表当前同步已转写）---",
         JSON.stringify({ relation: sameAttempt ? "same_attempt" : "historical_or_unconfirmed", recordRef: sessionRef, startedAt: session && session.startedAt || "", currentAttemptId: currentTask && currentTask.attemptId || "", currentTranscriptionStarted: currentTask ? currentTask.transcriptionStarted === true : null }),
         stored,
-        "--- 转写日志（首尾有界） ---",
+        "--- 转写日志（首尾有界；日志是否属于各次尝试以 session.attempts.logFreshness 为准） ---",
         session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path2.join(root, "transcribe-last.log"))) ? readDiagnosticLog(path2.join(root, "transcribe-last.log")) : "[旧成功日志省略]",
         "--- 安装日志（首尾有界） ---",
         readDiagnosticLog(path2.join(root, "install.log")),
@@ -2357,7 +2531,7 @@ ${safeTail}`;
       return diagnosticRedact(sections.join("\n"), settings);
     }
     __name(detailedDiagnostic, "detailedDiagnostic");
-    module2.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
+    module2.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
     function ensureManagedMacScript(root, installerSource) {
       const target = path2.join(root, "transcribe.sh");
       try {
@@ -2398,19 +2572,91 @@ var require_douyin_diagnostic_utils = __commonJS({
     function safeErrorText(value, settings = {}) {
       const text = String(value || "");
       if (text.length > 16384) return "[oversized error omitted]";
-      return diagnosticRedact(text, settings).replace(/(["']?(?:sessionid(?:_ss)?|sid_guard|ttwid|msToken|cookie|authorization|token|password|secret|api[_-]?key)["']?\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/Bearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]").replace(/\s+/g, " ").slice(0, 480);
+      return diagnosticRedact(text, settings).replace(/(["']?(?:sessionid(?:_ss)?|sid_guard|ttwid|msToken|cookie|authorization|token|password|secret|api[_-]?key)["']?\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/Bearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s)\]'"<>]+/gi, "[URL_REDACTED]").replace(/\s+/g, " ").slice(0, 480);
     }
     __name(safeErrorText, "safeErrorText");
-    var CODES = /* @__PURE__ */ new Set(["DOUYIN_CANCELLED", "DOUYIN_FETCH_FAILED", "DOUYIN_CHALLENGE", "DOUYIN_COOKIE_REFRESH_REQUIRED", "DOUYIN_LOGIN_REQUIRED", "DOUYIN_RESOLVER_NETWORK", "DOUYIN_RESOLVER_FAILED", "DOUYIN_NO_MEDIA", "DOUYIN_BROWSER_TIMEOUT", "DOUYIN_BROWSER_RENDERER_GONE", "DOUYIN_BROWSER_CLOSED", "DOUYIN_BROWSER_COOLDOWN", "DOUYIN_BROWSER_LOAD_FAILED"]);
+    var CODES = /* @__PURE__ */ new Set([
+      "DOUYIN_CANCELLED",
+      "DOUYIN_FETCH_FAILED",
+      "DOUYIN_CHALLENGE",
+      "DOUYIN_COOKIE_REFRESH_REQUIRED",
+      "DOUYIN_LOGIN_REQUIRED",
+      "DOUYIN_RESOLVER_NETWORK",
+      "DOUYIN_RESOLVER_FAILED",
+      "DOUYIN_UNSUPPORTED_URL",
+      "DOUYIN_TARGET_ID_MISSING",
+      "DOUYIN_NO_MEDIA",
+      "DOUYIN_BROWSER_TIMEOUT",
+      "DOUYIN_BROWSER_RENDERER_GONE",
+      "DOUYIN_BROWSER_CLOSED",
+      "DOUYIN_BROWSER_COOLDOWN",
+      "DOUYIN_BROWSER_LOAD_FAILED"
+    ]);
+    var URL_KINDS = /* @__PURE__ */ new Set(["canonical", "share", "shortlink", "home", "feed", "other", "unknown"]);
+    var INPUT_KINDS = /* @__PURE__ */ new Set(["original-page", "resolved-page", "target-page", "mobile-share", "aweme-detail", "authenticated-session", "targeted-browser", "local-yt-dlp", "local-resolver", "share-page", "detail-api", "session", "platform-fetch", "unknown"]);
+    var DEBUGGER_CAPABILITIES = /* @__PURE__ */ new Set(["present", "absent", "unsupported", "not-eligible", "unknown"]);
+    var DEBUGGER_REASONS = /* @__PURE__ */ new Set(["target-id-missing", "api-absent", "api-unsupported", "unknown"]);
+    function safeUrlKind(value) {
+      return URL_KINDS.has(value) ? value : "unknown";
+    }
+    __name(safeUrlKind, "safeUrlKind");
+    function getDouyinUrlKind(value) {
+      const text = String(value || "").trim();
+      if (URL_KINDS.has(text)) return text;
+      try {
+        const parsed = new URL(text);
+        const host = parsed.hostname.toLowerCase();
+        const pathname = parsed.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+        if (!/(^|\.)douyin\.com$|(^|\.)iesdouyin\.com$|(^|\.)amemv\.com$/.test(host)) return "unknown";
+        if (host === "v.douyin.com" || host === "v.iesdouyin.com") return "shortlink";
+        if (/\/share\/video\/\d{8,}$/.test(pathname) || /\/aweme\/detail\/\d{8,}$/.test(pathname)) return "share";
+        if (/\/video\/\d{8,}$/.test(pathname)) return "canonical";
+        if (/\/feed(?:\/|$)/.test(pathname)) return "feed";
+        if (pathname === "/") return "home";
+        return "other";
+      } catch (_) {
+        return "unknown";
+      }
+    }
+    __name(getDouyinUrlKind, "getDouyinUrlKind");
+    function safeInputKind(value) {
+      return INPUT_KINDS.has(value) ? value : "unknown";
+    }
+    __name(safeInputKind, "safeInputKind");
+    function normalizeTargetIdState(value) {
+      if (["recognized", "missing", "unknown"].includes(value)) return value;
+      if (value === true) return "recognized";
+      if (value === false) return "missing";
+      return "unknown";
+    }
+    __name(normalizeTargetIdState, "normalizeTargetIdState");
+    function safeDebuggerCapability(value) {
+      return DEBUGGER_CAPABILITIES.has(value) ? value : "unknown";
+    }
+    __name(safeDebuggerCapability, "safeDebuggerCapability");
+    function safeDebuggerReason(value) {
+      return DEBUGGER_REASONS.has(value) ? value : "unknown";
+    }
+    __name(safeDebuggerReason, "safeDebuggerReason");
     function classifyResolverError(error) {
       const text = String(error && error.message || error || "");
-      const code = /captcha|安全验证|请完成验证|risk[-_ ]control/i.test(text) ? "DOUYIN_CHALLENGE" : /fresh cookies|cookies are needed/i.test(text) ? "DOUYIN_COOKIE_REFRESH_REQUIRED" : /login required|sign in|authentication required/i.test(text) ? "DOUYIN_LOGIN_REQUIRED" : /timed? ?out|timeout|ENOTFOUND|ECONN|certificate|HTTP Error [45]\d\d/i.test(text) ? "DOUYIN_RESOLVER_NETWORK" : "DOUYIN_RESOLVER_FAILED";
+      const code = error && error.code === "DOUYIN_UNSUPPORTED_URL" ? "DOUYIN_UNSUPPORTED_URL" : error && error.code === "DOUYIN_TARGET_ID_MISSING" ? "DOUYIN_TARGET_ID_MISSING" : /unsupported\s+url/i.test(text) ? "DOUYIN_UNSUPPORTED_URL" : /captcha|安全验证|请完成验证|risk[-_ ]control/i.test(text) ? "DOUYIN_CHALLENGE" : /fresh cookies|cookies are needed/i.test(text) ? "DOUYIN_COOKIE_REFRESH_REQUIRED" : /login required|sign in|authentication required/i.test(text) ? "DOUYIN_LOGIN_REQUIRED" : /timed? ?out|timeout|ENOTFOUND|ECONN|certificate|HTTP Error [45]\d\d/i.test(text) ? "DOUYIN_RESOLVER_NETWORK" : "DOUYIN_RESOLVER_FAILED";
       return { code, exitCode: Number.isInteger(error && error.exitCode) ? error.exitCode : null };
     }
     __name(classifyResolverError, "classifyResolverError");
-    function failureCode(stages = []) {
-      const codes = stages.filter((s) => s && s.ok === false).map((s) => s.error && (s.error.browserCode || s.error.code)).filter(Boolean);
-      return ["DOUYIN_CHALLENGE", "DOUYIN_LOGIN_REQUIRED", "DOUYIN_BROWSER_RENDERER_GONE", "DOUYIN_BROWSER_LOAD_FAILED", "DOUYIN_BROWSER_TIMEOUT", "DOUYIN_COOKIE_REFRESH_REQUIRED", "DOUYIN_RESOLVER_NETWORK", "DOUYIN_BROWSER_CLOSED", "DOUYIN_BROWSER_COOLDOWN", "DOUYIN_RESOLVER_FAILED"].find((code) => codes.includes(code)) || "DOUYIN_NO_MEDIA";
+    function failureCode(stages = [], context = {}) {
+      const failedStages = stages.filter((s) => s && s.ok === false);
+      const codes = failedStages.map((s) => s.error && (s.error.browserCode || s.error.code)).filter(Boolean);
+      const specificCode = ["DOUYIN_CHALLENGE", "DOUYIN_LOGIN_REQUIRED", "DOUYIN_BROWSER_RENDERER_GONE", "DOUYIN_BROWSER_LOAD_FAILED", "DOUYIN_BROWSER_TIMEOUT", "DOUYIN_COOKIE_REFRESH_REQUIRED", "DOUYIN_RESOLVER_NETWORK", "DOUYIN_BROWSER_CLOSED", "DOUYIN_BROWSER_COOLDOWN"].find((code) => codes.includes(code));
+      if (specificCode) return specificCode;
+      if (codes.includes("DOUYIN_UNSUPPORTED_URL") || failedStages.some((stage) => /unsupported\s+url/i.test(String(stage.error && stage.error.message || "")))) {
+        return "DOUYIN_UNSUPPORTED_URL";
+      }
+      if (codes.includes("DOUYIN_TARGET_ID_MISSING")) return "DOUYIN_TARGET_ID_MISSING";
+      const targetIdMissing = context.targetIdState === "missing" || context.targetIdRecognized === false && context.targetIdState !== "unknown";
+      if (targetIdMissing) return "DOUYIN_TARGET_ID_MISSING";
+      if (codes.includes("DOUYIN_RESOLVER_FAILED")) return "DOUYIN_RESOLVER_FAILED";
+      return "DOUYIN_NO_MEDIA";
     }
     __name(failureCode, "failureCode");
     function failureMessage(code) {
@@ -2423,8 +2669,10 @@ var require_douyin_diagnostic_utils = __commonJS({
         DOUYIN_BROWSER_RENDERER_GONE: "抖音网页解析进程异常退出，已记录退出原因；请重启 Obsidian 后重试。",
         DOUYIN_BROWSER_CLOSED: "抖音解析窗口提前关闭，请重试。",
         DOUYIN_BROWSER_COOLDOWN: "抖音网页刚发生异常，正在短暂冷却，请稍后重试。",
-        DOUYIN_RESOLVER_NETWORK: "抖音解析器网络访问失败，已保留分阶段诊断。",
-        DOUYIN_RESOLVER_FAILED: "抖音本地解析器失败，暂未确认具体原因，请复制详细诊断。"
+        DOUYIN_RESOLVER_NETWORK: "抖音解析器网络访问失败，请检查网络；如开启了 VPN 或代理，可暂时关闭或切换规则模式后重试。",
+        DOUYIN_RESOLVER_FAILED: "抖音本地解析器失败，暂未确认具体原因，请复制详细诊断。",
+        DOUYIN_UNSUPPORTED_URL: "抖音解析组件未识别当前链接；请从具体作品页地址栏复制完整作品链接（不要复制主页、搜索页或分享文案）后重试。",
+        DOUYIN_TARGET_ID_MISSING: "未从当前链接或重定向页面识别到具体作品；请从抖音具体作品页地址栏复制完整链接后重试。"
       }[code] || "未能从抖音作品页获取到可用的音频或视频地址，请复制诊断查看各解析路径结果。";
     }
     __name(failureMessage, "failureMessage");
@@ -2437,7 +2685,28 @@ var require_douyin_diagnostic_utils = __commonJS({
       result.outcome = ["success", "cancelled"].includes(value.outcome) ? value.outcome : "failed";
       result.failureCode = CODES.has(value.failureCode) ? value.failureCode : "";
       result.cookieState = value.pluginDouyinLogin === true || value.cookieState === "saved-unverified" ? "saved-unverified" : "not-found";
-      result.stages = (Array.isArray(value.stages) ? value.stages : []).filter((s) => s && typeof s === "object").slice(-16).map((s) => ({ stage: token(s.stage), inputKind: token(s.inputKind), attempted: s.attempted !== false, ok: s.ok === true, mediaCount: integer(s.mediaCount), durationMs: integer(s.durationMs), rejectionReason: token(s.rejectionReason), error: s.error ? { code: token(s.error.code), browserCode: token(s.error.browserCode), status: integer(s.error.status), exitCode: Number.isInteger(s.error.exitCode) ? s.error.exitCode : null, message: safeErrorText(s.error.message) } : void 0 }));
+      result.sourceKind = safeUrlKind(value.sourceKind);
+      result.resolvedKind = safeUrlKind(value.resolvedKind);
+      result.targetIdRecognized = value.targetIdRecognized === true;
+      result.targetIdState = ["recognized", "missing", "unknown"].includes(value.targetIdState) ? value.targetIdState : Object.prototype.hasOwnProperty.call(value, "targetIdRecognized") ? normalizeTargetIdState(value.targetIdRecognized) : "unknown";
+      result.targetStageEligible = value.targetStageEligible === true;
+      result.debuggerCapability = safeDebuggerCapability(value.debuggerCapability);
+      result.debuggerReason = safeDebuggerReason(value.debuggerReason);
+      result.stages = (Array.isArray(value.stages) ? value.stages : []).filter((s) => s && typeof s === "object").slice(-16).map((s) => ({
+        stage: token(s.stage),
+        inputKind: safeInputKind(s.inputKind),
+        sourceKind: safeUrlKind(s.sourceKind),
+        resolvedKind: safeUrlKind(s.resolvedKind),
+        targetIdRecognized: s.targetIdRecognized === true,
+        targetIdState: ["recognized", "missing", "unknown"].includes(s.targetIdState) ? s.targetIdState : Object.prototype.hasOwnProperty.call(s, "targetIdRecognized") ? normalizeTargetIdState(s.targetIdRecognized) : "unknown",
+        targetStageEligible: s.targetStageEligible === true,
+        attempted: s.attempted !== false,
+        ok: s.ok === true,
+        mediaCount: integer(s.mediaCount),
+        durationMs: integer(s.durationMs),
+        rejectionReason: token(s.rejectionReason),
+        error: s.error ? { code: token(s.error.code), browserCode: token(s.error.browserCode), status: integer(s.error.status), exitCode: Number.isInteger(s.error.exitCode) ? s.error.exitCode : null, message: safeErrorText(s.error.message) } : void 0
+      }));
       return result;
     }
     __name(sanitize, "sanitize");
@@ -2465,7 +2734,21 @@ var require_douyin_diagnostic_utils = __commonJS({
       return row;
     }
     __name(save, "save");
-    module2.exports = { classifyResolverError, failureCode, failureMessage, sanitize, read, save, safeErrorText };
+    module2.exports = {
+      classifyResolverError,
+      failureCode,
+      failureMessage,
+      sanitize,
+      read,
+      save,
+      safeErrorText,
+      urlKind: getDouyinUrlKind,
+      normalizeUrlKind: safeUrlKind,
+      normalizeInputKind: safeInputKind,
+      normalizeTargetIdState,
+      normalizeDebuggerCapability: safeDebuggerCapability,
+      normalizeDebuggerReason: safeDebuggerReason
+    };
   }
 });
 
@@ -11167,6 +11450,31 @@ var require_social_platform_content_utils = __commonJS({
       }
     }
     __name(collectDouyinImageUrlList, "collectDouyinImageUrlList");
+    function readDouyinAuthor(detail, cleanDescription) {
+      const source = detail && typeof detail === "object" ? detail : {};
+      const candidates = [
+        source.author,
+        source.authorInfo,
+        source.author_info,
+        source.authorUser,
+        source.author_user,
+        source.authorUserInfo,
+        source.author_user_info,
+        source.user,
+        source.userInfo,
+        source.user_info
+      ];
+      for (const candidate of candidates) {
+        const values = typeof candidate === "string" ? [candidate] : candidate && typeof candidate === "object" ? [candidate.nickname, candidate.nickName, candidate.name, candidate.userName, candidate.username] : [];
+        for (const value of values) {
+          if (typeof value !== "string") continue;
+          const author = cleanDescription(value);
+          if (author) return author;
+        }
+      }
+      return "";
+    }
+    __name(readDouyinAuthor, "readDouyinAuthor");
     function createDouyinStructuredContentBuilder2(dependencies = {}) {
       const {
         cleanDescription = /* @__PURE__ */ __name((value) => String(value || "").trim(), "cleanDescription"),
@@ -11218,11 +11526,13 @@ var require_social_platform_content_utils = __commonJS({
         ].forEach((value) => collectDouyinImageUrlList(value, coverUrls));
         const coverUrl = coverUrls.map((value) => normalizeUrl(value)).find(Boolean) || normalizeUrl(fallbackSource.coverUrl);
         const socialMetrics = buildMetrics(source);
+        const author = readDouyinAuthor(source, cleanDescription) || cleanDescription(typeof fallbackSource.author === "string" ? fallbackSource.author : "");
         return {
           title,
           description,
           tags: structuredTags,
           coverUrl,
+          author,
           socialMetrics: hasMetrics(socialMetrics) ? socialMetrics : fallbackSource.socialMetrics || {}
         };
       };
@@ -11659,6 +11969,18 @@ var require_douyin_media_utils = __commonJS({
         return text.includes("douyin.com") || text.includes("iesdouyin.com") || text.includes("amemv.com");
       }
       __name(isDouyinUrl2, "isDouyinUrl");
+      function isTrustedDouyinPageUrl2(url) {
+        try {
+          const parsed = new URL(String(url || "").trim());
+          if (parsed.protocol !== "https:" || parsed.username || parsed.password) return false;
+          if (parsed.port && parsed.port !== "443") return false;
+          const hostname = String(parsed.hostname || "").toLowerCase().replace(/\.$/, "");
+          return hostname === "douyin.com" || hostname.endsWith(".douyin.com") || hostname === "iesdouyin.com" || hostname.endsWith(".iesdouyin.com") || hostname === "amemv.com" || hostname.endsWith(".amemv.com");
+        } catch (error) {
+          return false;
+        }
+      }
+      __name(isTrustedDouyinPageUrl2, "isTrustedDouyinPageUrl");
       function isDouyinMediaUrl2(url) {
         return /douyinvod\.com|zjcdn\.com\/tos-|snssdk\.com\/aweme\/v1\/play|bytedance[^/]*\.com\/.*(?:tos-|video)|mime_type=video/i.test(String(url || ""));
       }
@@ -12086,7 +12408,16 @@ var require_douyin_media_utils = __commonJS({
       __name(extractDouyinMediaUrlsForAweme2, "extractDouyinMediaUrlsForAweme");
       function findDouyinDetailForAweme2(payload, awemeId) {
         const targetId = String(awemeId || "").trim();
-        if (!targetId || !payload || typeof payload !== "object") return null;
+        if (!targetId || !payload) return null;
+        let root = payload;
+        if (typeof root === "string") {
+          try {
+            root = JSON.parse(root || "{}");
+          } catch (error) {
+            return null;
+          }
+        }
+        if (!root || typeof root !== "object") return null;
         const seen = /* @__PURE__ */ new Set();
         let matched = null;
         const visit = /* @__PURE__ */ __name((value, depth = 0) => {
@@ -12103,7 +12434,7 @@ var require_douyin_media_utils = __commonJS({
           }
           Object.values(value).forEach((item) => visit(item, depth + 1));
         }, "visit");
-        visit(payload);
+        visit(root);
         return matched;
       }
       __name(findDouyinDetailForAweme2, "findDouyinDetailForAweme");
@@ -12221,6 +12552,7 @@ var require_douyin_media_utils = __commonJS({
       __name(extractDouyinDetailFromShareHtml2, "extractDouyinDetailFromShareHtml");
       return {
         isDouyinUrl: isDouyinUrl2,
+        isTrustedDouyinPageUrl: isTrustedDouyinPageUrl2,
         isDouyinMediaUrl: isDouyinMediaUrl2,
         extractDouyinAwemeId: extractDouyinAwemeId2,
         buildDouyinDomIdentityExtractorScript: buildDouyinDomIdentityExtractorScript2,
@@ -12784,7 +13116,8 @@ var {
   createDiagnosticId,
   createSyncDiagnosticReporter,
   getBindingFingerprint,
-  normalizeOutbox
+  normalizeOutbox,
+  sanitizeSourceLink
 } = require_sync_diagnostic_reporter();
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var bilibiliDiagnostic = require_bilibili_diagnostic_utils();
@@ -13042,7 +13375,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.176";
+var PLUGIN_RUNTIME_VERSION = "1.3.177";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -14059,11 +14392,13 @@ function buildSyncDiagnosticLogText({
   total = 0,
   title = "",
   recordId = "",
+  sourceUrl = "",
   error = "",
   diagnostic = null,
   xiaohongshuComments = [],
   xiaohongshuBrowserResults = []
 } = {}) {
+  const safeSourceUrl = status === "failed" ? sanitizeSourceLink(sourceUrl) : "";
   const lines = [
     `time=${time}`,
     `status=${status}`,
@@ -14074,6 +14409,7 @@ function buildSyncDiagnosticLogText({
     `total=${total}`,
     `title=${title}`,
     `recordId=${recordId}`,
+    ...safeSourceUrl ? [`sourceUrl=${safeSourceUrl}`] : [],
     "--- error ---",
     String(error || "")
   ];
@@ -14891,6 +15227,12 @@ var buildDouyinMediaResolutionDiagnostic = createDouyinMediaResolutionDiagnostic
   getSafeUrlDiagnostic,
   getTransportErrorDiagnostic
 });
+function getDouyinDiagnosticUrlKind(value, fallback = "") {
+  const explicit = typeof douyinDiagnostic.normalizeUrlKind === "function" ? douyinDiagnostic.normalizeUrlKind(value) : "unknown";
+  if (explicit && explicit !== "unknown") return explicit;
+  return typeof douyinDiagnostic.urlKind === "function" ? douyinDiagnostic.urlKind(fallback || value) : "unknown";
+}
+__name(getDouyinDiagnosticUrlKind, "getDouyinDiagnosticUrlKind");
 function normalizeInstallerScriptText(scriptText, isMac = false) {
   const source = String(scriptText || "");
   if (!isMac) return source;
@@ -16048,6 +16390,23 @@ function getRecordId(record) {
   return record && (record._id || record.id || record.recordId) || "";
 }
 __name(getRecordId, "getRecordId");
+function getDiagnosticSourceUrl(record = {}) {
+  const source = record && typeof record === "object" ? record : {};
+  const type = String(source.type || source.contentType || "").trim().toLowerCase();
+  if (type === "voice" || type === "file") return "";
+  const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
+  const values = [
+    metadata.url,
+    metadata.originalUrl,
+    metadata.shareUrl,
+    metadata.sourceUrl,
+    metadata.noteUrl,
+    source.url,
+    type === "link" || type === "webpage" ? source.content : ""
+  ];
+  return values.map((value) => String(value || "").trim()).map((value) => sanitizeSourceLink(value)).find(Boolean) || "";
+}
+__name(getDiagnosticSourceUrl, "getDiagnosticSourceUrl");
 function getAttachmentDiagnosticKind(fileExt = "") {
   return isImageAttachmentExt(fileExt) ? "image" : "file";
 }
@@ -16565,6 +16924,7 @@ function isTrustedXiaohongshuTransportUrl(url) {
 __name(isTrustedXiaohongshuTransportUrl, "isTrustedXiaohongshuTransportUrl");
 var {
   isDouyinUrl,
+  isTrustedDouyinPageUrl,
   isDouyinMediaUrl,
   extractDouyinAwemeId,
   buildDouyinDomIdentityExtractorScript,
@@ -24022,6 +24382,21 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   const browserSession = win.webContents && win.webContents.session || wechatSession;
   const installedWebRequestHandlers = [];
   const debuggerApi = targetDouyinAwemeId && win.webContents && win.webContents.debugger;
+  const targetIdRecognized = Boolean(targetDouyinAwemeId);
+  const targetIdState = options.targetIdState === "unknown" ? "unknown" : targetIdRecognized ? "recognized" : "missing";
+  const debuggerCapability = !targetIdRecognized ? "not-eligible" : !debuggerApi ? "absent" : typeof debuggerApi.attach === "function" && typeof debuggerApi.sendCommand === "function" ? "present" : "unsupported";
+  const debuggerReason = !targetIdRecognized ? "target-id-missing" : !debuggerApi ? "api-absent" : typeof debuggerApi.attach === "function" && typeof debuggerApi.sendCommand === "function" ? "unknown" : "api-unsupported";
+  if (douyinGuard) {
+    douyinGuard.emit({
+      sourceKind: getDouyinDiagnosticUrlKind(options.sourceKind, options.sourceUrl || url),
+      resolvedKind: getDouyinDiagnosticUrlKind(options.resolvedKind, options.resolvedUrl || url),
+      targetIdRecognized,
+      targetIdState,
+      targetStageEligible: targetIdState === "recognized",
+      debuggerCapability,
+      debuggerReason
+    });
+  }
   const debuggerResponseRequests = /* @__PURE__ */ new Map();
   const debuggerBodyTasks = [];
   const debuggerMediaUrls = [];
@@ -24127,6 +24502,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
                 const body = await debuggerApi.sendCommand("Network.getResponseBody", { requestId });
                 if (!responseBudget.accept(body)) return;
                 const text = body && body.base64Encoded ? Buffer.from(String(body.body || ""), "base64").toString("utf8") : String(body && body.body || "");
+                const targetDetail = findDouyinDetailForAweme(text, targetDouyinAwemeId);
+                if (targetDetail && typeof options.onDouyinTargetDetail === "function") {
+                  try {
+                    options.onDouyinTargetDetail(targetDetail);
+                  } catch (error) {
+                  }
+                }
                 extractDouyinMediaUrlsForAweme(text, targetDouyinAwemeId).forEach((mediaUrl) => pushUniqueMediaUrl(debuggerMediaUrls, mediaUrl));
                 if (debuggerMediaUrls.length) resolveVerifiedDouyinMedia();
               } catch (error) {
@@ -26982,7 +27364,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     binding,
     error,
     stage,
-    retryCount
+    retryCount,
+    sourceUrl
   } = {}) {
     const normalizedRecordId = String(recordId || "").trim();
     if (!binding || !binding.token) return { queued: false, reason: "missing-binding" };
@@ -27053,33 +27436,19 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       stage: diagnosticStage,
       retryCount: Number(retryCount) || 0,
       outcome: "failed",
-      evidenceCodes
-    }, binding);
-  }
-  queueSyncDiagnosticSuccess({
-    recordId,
-    attemptId,
-    diagnosticId,
-    binding,
-    retryCount,
-    stage = "write"
-  } = {}) {
-    if (!binding || !binding.token || !recordId) return { queued: false, reason: "missing-binding" };
-    return this.queueSyncDiagnosticEvent({
-      diagnosticId,
-      attemptId,
-      syncRecordId: recordId,
-      stage,
-      retryCount: Number(retryCount) || 0,
-      outcome: "succeeded",
-      evidenceCodes: ["sync_callback"]
+      evidenceCodes,
+      ...String(sourceUrl || "").trim() ? { sourceUrl: String(sourceUrl).trim() } : {}
     }, binding);
   }
   async onload() {
     this.ensureSerializedSaveData();
     const savedSettings = await this.loadData();
+    const savedDiagnosticOutbox = savedSettings && Array.isArray(savedSettings.syncDiagnosticOutbox) ? savedSettings.syncDiagnosticOutbox : null;
+    const diagnosticOutboxNeedsPersistence = Boolean(
+      savedDiagnosticOutbox && normalizeOutbox(savedDiagnosticOutbox).length !== savedDiagnosticOutbox.length
+    );
     this.settings = mergeSettings(savedSettings);
-    if (!savedSettings || !savedSettings.clientId || shouldPersistNormalizedInboxDir(savedSettings, this.settings) || shouldPersistAutoLocalAsrPlatform(savedSettings)) {
+    if (!savedSettings || !savedSettings.clientId || shouldPersistNormalizedInboxDir(savedSettings, this.settings) || shouldPersistAutoLocalAsrPlatform(savedSettings) || diagnosticOutboxNeedsPersistence) {
       await this.saveData(this.settings);
     }
     this.lastSyncDiagnostic = null;
@@ -27091,6 +27460,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.localAsrInstallPromise = null;
     this.localOcrInstallPromise = null;
     this.currentTranscriptionAbortController = null;
+    this.currentTranscriptionAbortRequest = null;
     this.currentTranscriptionProcess = null;
     this.currentTranscriptionProcessDetached = false;
     this.currentTranscriptionContext = null;
@@ -27186,8 +27556,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.register(() => {
       this.autoSyncDisposed = true;
       controller.dispose();
+      if (this.currentTranscriptionAbortRequest) this.currentTranscriptionAbortRequest("plugin_unload");
+      else if (this.currentTranscriptionAbortController) this.currentTranscriptionAbortController.abort();
       if (this.currentProcessingAbortController) this.currentProcessingAbortController.abort();
-      if (this.currentTranscriptionAbortController) this.currentTranscriptionAbortController.abort();
       this.clearSyncProgressNotice();
     });
     if (typeof window !== "undefined" && typeof this.registerDomEvent === "function") {
@@ -28548,12 +28919,15 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       ...activeContext,
       binding: activeContext.binding ? { ...activeContext.binding } : null
     } : null;
-    if (this.currentProcessingAbortController) {
-      this.currentProcessingAbortController.abort();
+    if (this.currentTranscriptionAbortRequest) {
+      this.currentTranscriptionAbortRequest("user_stop");
+      stopped = true;
+    } else if (this.currentTranscriptionAbortController) {
+      this.currentTranscriptionAbortController.abort();
       stopped = true;
     }
-    if (this.currentTranscriptionAbortController) {
-      this.currentTranscriptionAbortController.abort();
+    if (this.currentProcessingAbortController) {
+      this.currentProcessingAbortController.abort();
       stopped = true;
     }
     if (this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
@@ -29204,6 +29578,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const ocrInstallLog = readLocalAsrInstallLog(ocrRoot);
     const syncLogText = readSyncDiagnosticLog(asrRoot);
     const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : syncLogText;
+    const sourceUrlFromSyncLog = /* @__PURE__ */ __name((text) => {
+      const match = String(text || "").match(/^sourceUrl=(https?:\/\/\S+)$/im);
+      return sanitizeSourceLink(match ? match[1] : "");
+    }, "sourceUrlFromSyncLog");
+    const lastSyncSourceUrl = this.lastSyncDiagnostic ? this.lastSyncDiagnostic.status === "failed" ? sanitizeSourceLink(this.lastSyncDiagnostic.sourceUrl) : "" : sourceUrlFromSyncLog(syncLogText);
     const hasFailureSignal = /* @__PURE__ */ __name((text) => /status\s*=\s*failed|failed|failure|error|exception|traceback|curl:\s*\(\d+\)|connection reset|timed out|timeout|not found|permission denied|denied|未找到|失败|错误|异常|超时|缺失|不完整/i.test(String(text || "")), "hasFailureSignal");
     const hasAsrRunFailureSignal = /* @__PURE__ */ __name((text) => {
       const source = String(text || "");
@@ -29282,6 +29661,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (lastSyncText && (hasFailureSignal(lastSyncText) || this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic)) {
       lines.push("", "最近同步失败状态：", lastSyncText);
     }
+    if (lastSyncSourceUrl) lines.push("", `最近失败原始分享链接：${lastSyncSourceUrl}`);
     const bilibiliFailures = this.getRecentSyncFailures().map((item) => {
       const diagnostic = bilibiliDiagnostic.sanitize(item.diagnostic);
       return diagnostic ? { recordId: item.recordId, summary: bilibiliDiagnostic.summary(diagnostic), diagnostic } : null;
@@ -29324,7 +29704,10 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     if (detailed) lines.push("", asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
     else lines.push("", "已对诊断信息进行脱敏。");
-    return asrRecovery.diagnosticRedact(lines.join("\n"), this.settings);
+    const redacted = asrRecovery.diagnosticRedact(lines.join("\n"), this.settings);
+    return lastSyncSourceUrl ? `${redacted}
+
+最近失败原始分享链接：${lastSyncSourceUrl}` : redacted;
   }
   async copyTextToClipboard(text) {
     if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
@@ -30567,13 +30950,36 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (this.douyinBrowserRetryAfter > Date.now()) {
       throw Object.assign(new Error("抖音网页解析刚发生异常，已暂停隐藏网页重试 60 秒；请复制诊断"), { code: "EXTRACTION_FAILED", browserCode: "DOUYIN_BROWSER_COOLDOWN" });
     }
-    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, { resolutionAttemptId: options.diagnosticAttemptId, runtimeVersion: PLUGIN_RUNTIME_VERSION, electron: process.versions.electron, chromium: process.versions.chrome, freeMemoryBytesBefore: os.freemem() });
+    const targetId = extractDouyinAwemeId(url) || (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || "")) ? String(options.targetDouyinAwemeId) : "");
+    const targetIdState = options.targetIdState === "unknown" ? "unknown" : targetId ? "recognized" : "missing";
+    const sourceKind = getDouyinDiagnosticUrlKind(options.sourceKind, options.sourceUrl || url);
+    const resolvedKind = getDouyinDiagnosticUrlKind(options.resolvedKind, options.resolvedUrl || url);
+    const attempt = douyinBrowserSafety.createAttempt(this.getConfiguredLocalAsrInstallRoot(), url, {
+      resolutionAttemptId: options.diagnosticAttemptId,
+      runtimeVersion: PLUGIN_RUNTIME_VERSION,
+      electron: process.versions.electron,
+      chromium: process.versions.chrome,
+      freeMemoryBytesBefore: os.freemem(),
+      sourceKind,
+      resolvedKind,
+      targetIdRecognized: targetIdState === "recognized",
+      targetStageEligible: targetIdState === "recognized",
+      debuggerCapability: targetIdState === "recognized" ? "unknown" : "not-eligible",
+      debuggerReason: targetIdState === "recognized" ? "unknown" : "target-id-missing"
+    });
     try {
-      const result = await renderSocialMediaUrlsWithElectron(url, { ...options, onDouyinBrowserDiagnostic: /* @__PURE__ */ __name((event) => {
-        var _a;
-        attempt.update(event);
-        (_a = options.onDouyinBrowserDiagnostic) == null ? void 0 : _a.call(options, event);
-      }, "onDouyinBrowserDiagnostic") });
+      const result = await renderSocialMediaUrlsWithElectron(url, {
+        ...options,
+        sourceKind,
+        resolvedKind,
+        targetIdState,
+        targetStageEligible: targetIdState === "recognized",
+        onDouyinBrowserDiagnostic: /* @__PURE__ */ __name((event) => {
+          var _a;
+          attempt.update(event);
+          (_a = options.onDouyinBrowserDiagnostic) == null ? void 0 : _a.call(options, event);
+        }, "onDouyinBrowserDiagnostic")
+      });
       if (!Array.isArray(result) || result.length === 0) {
         throw Object.assign(new Error("抖音网页已加载，但未获取到目标作品的音视频地址"), { code: "DOUYIN_NO_MEDIA" });
       }
@@ -30743,11 +31149,30 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const managed = platform === "darwin" && (commandTemplate === getDefaultLocalTranscriptionCommand("darwin") && installRoot === getLocalAsrInstallRoot(os.homedir(), "default", "darwin") || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot) && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
     const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
-    const session = { startedAt: (/* @__PURE__ */ new Date()).toISOString(), platform, recordId: options.recordId || "", diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || "") ? options.diagnosticAttemptId : "", runtime, managedRecovery: managed, totalMemoryBytes: os.totalmem(), freeMemoryBytesBefore: os.freemem(), attempts: [] };
+    const session = {
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      platform,
+      recordId: options.recordId || "",
+      diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || "") ? options.diagnosticAttemptId : "",
+      runtime,
+      system: asrRecovery.systemIdentity(platform),
+      model: asrRecovery.modelIdentity(installRoot, { managed }),
+      managedRecovery: managed,
+      totalMemoryBytes: os.totalmem(),
+      freeMemoryBytesBefore: os.freemem(),
+      attempts: [],
+      abort: { requestedAt: null, source: null, observedAt: null }
+    };
     const progressTitle = options.title || "";
     const abortController = new AbortController();
     let ownedChild = null;
-    const cancelLocal = /* @__PURE__ */ __name(() => {
+    const attemptStartedAt = /* @__PURE__ */ new Map();
+    const attemptLogBaseline = /* @__PURE__ */ new Map();
+    const requestAbort = /* @__PURE__ */ __name((source = "unknown") => {
+      if (!session.abort.requestedAt) {
+        session.abort.requestedAt = (/* @__PURE__ */ new Date()).toISOString();
+        session.abort.source = String(source || "unknown");
+      }
       abortController.abort();
       const child = ownedChild;
       if (!child || child.killed) return;
@@ -30763,10 +31188,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         child.kill();
       } catch (_) {
       }
-    }, "cancelLocal");
+    }, "requestAbort");
+    const cancelLocal = /* @__PURE__ */ __name(() => requestAbort("upstream_abort"), "cancelLocal");
     (_a = options.signal) == null ? void 0 : _a.addEventListener("abort", cancelLocal, { once: true });
     if ((_b = options.signal) == null ? void 0 : _b.aborted) cancelLocal();
     this.currentTranscriptionAbortController = abortController;
+    this.currentTranscriptionAbortRequest = requestAbort;
     this.currentTranscriptionContext = {
       recordId: options.recordId || "",
       binding: options.binding || null,
@@ -30844,18 +31271,47 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         signal: abortController.signal,
         cpuPreferred: asrRecovery.cpuPreference(installRoot, runtimeFingerprint),
         onAttempt: /* @__PURE__ */ __name(({ attempt, cpu: cpu2, status, error }) => {
-          const log = asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(installRoot));
+          var _a2;
+          const observedAt = (/* @__PURE__ */ new Date()).toISOString();
+          if (abortController.signal.aborted) {
+            session.abort.observedAt = session.abort.observedAt || observedAt;
+            session.abort.source = session.abort.source || "unknown";
+            if (error && session.abort.originalExitCode === void 0) {
+              session.abort.originalExitCode = error.exitCode ?? error.code ?? null;
+              session.abort.originalSignal = error.signal || "";
+            }
+          }
+          const logPath = getLocalAsrRunLogPath(installRoot);
+          const freshnessSnapshot = asrRecovery.snapshotDiagnosticLog(logPath);
+          const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attempt), freshnessSnapshot);
+          const attemptLog = logFreshness === "fresh" ? asrRecovery.readDiagnosticLog(logPath) : "";
+          const observedStage = status === "success" ? "completed" : logFreshness === "fresh" ? (error == null ? void 0 : error.asrStage) || ((_a2 = parseLocalAsrProgressLog(attemptLog)) == null ? void 0 : _a2.stage) || "unknown" : "unknown";
+          if (abortController.signal.aborted && error) {
+            session.abort.nativeCrash = logFreshness === "fresh" && observedStage !== "unknown" ? asrRecovery.isMacNativeCrash(error) : null;
+            session.abort.nativeCrashEvidence = logFreshness === "fresh" ? observedStage : "unknown_stale_or_unavailable_log";
+          }
+          const nativeExitMatch = attemptLog.match(/^nativeExit=(\d+)$/m);
+          const nativePidList = [...new Set([...attemptLog.matchAll(/^progressPid=(\d+)$/gm)].map((m) => Number(m[1])).filter((pid) => pid > 0))];
           session.attempts.push({
             attempt,
             cpu: cpu2,
+            requestedMode: cpu2 ? "cpu_compatibility" : "default",
+            backendObserved: "unknown",
+            backendObservationNote: "本机日志未确认引擎实际选择的CPU/GPU后端",
             status,
-            at: (/* @__PURE__ */ new Date()).toISOString(),
-            exitCode: (error == null ? void 0 : error.exitCode) ?? null,
+            stage: observedStage,
+            logFreshness,
+            at: observedAt,
+            startedAt: attemptStartedAt.get(attempt) || session.startedAt,
+            finishedAt: observedAt,
+            exitCode: (error == null ? void 0 : error.exitCode) ?? (error == null ? void 0 : error.code) ?? null,
             signal: (error == null ? void 0 : error.signal) || "",
+            nativeExitCode: nativeExitMatch ? Number(nativeExitMatch[1]) : null,
+            logSnapshotAt: observedAt,
             error: (error == null ? void 0 : error.message) || "",
-            nativePids: [...log.matchAll(/^progressPid=(\d+)$/gm)].map((m) => Number(m[1])),
-            peakRssKiB: Math.max(0, ...[...log.matchAll(/^nativeRssKiB=(\d+)$/gm)].map((m) => Number(m[1]))) || null,
-            runLog: asrRecovery.diagnosticRedact(log, this.settings),
+            nativePids: nativePidList,
+            peakRssKiB: Math.max(0, ...[...attemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map((m) => Number(m[1]))) || null,
+            runLog: logFreshness === "fresh" ? asrRecovery.diagnosticRedact(attemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`,
             freeMemoryBytesAfter: os.freemem()
           });
           asrRecovery.saveSession(installRoot, session, this.settings);
@@ -30863,6 +31319,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         execute: /* @__PURE__ */ __name(({ cpu: cpu2, attempt }) => new Promise((resolve, reject) => {
           var _a2;
           throwIfAborted(abortController.signal);
+          attemptStartedAt.set(attempt, (/* @__PURE__ */ new Date()).toISOString());
+          attemptLogBaseline.set(attempt, asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
           if (attempt > 1) {
             new Notice("本地转写引擎崩溃，正在用 CPU 兼容模式重试一次。", 6e3);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
@@ -30881,18 +31339,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             stopProgressPolling();
             ownedChild = null;
             this.currentTranscriptionProcess = null;
-            if (abortController.signal.aborted) {
-              reject(createAbortError());
-              return;
-            }
             if (error) {
               const wrapped = new Error(stderr2 || error.message || String(error));
               wrapped.stdout = stdout2;
               wrapped.stderr = stderr2;
               wrapped.exitCode = error.code;
               wrapped.signal = error.signal;
-              wrapped.asrStage = ((_a3 = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))) == null ? void 0 : _a3.stage) || "unknown";
+              const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attempt), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
+              wrapped.asrStage = logFreshness === "fresh" ? ((_a3 = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))) == null ? void 0 : _a3.stage) || "unknown" : "unknown";
               reject(wrapped);
+              return;
+            }
+            if (abortController.signal.aborted) {
+              reject(createAbortError());
               return;
             }
             emitLocalProgress(100);
@@ -30929,7 +31388,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? "，CPU 兼容重试仍失败" : ""}；请复制诊断信息。${error.message}`;
       if (isAbortError(error)) {
         if ((_c = options.signal) == null ? void 0 : _c.aborted) throw createAbortError();
-        throw createRetryableTranscriptionError("用户已停止当前转写");
+        if (session.abort.source === "user_stop") {
+          throw createRetryableTranscriptionError("用户已停止当前转写");
+        }
+        throw createRetryableTranscriptionError("当前转写已中止");
       }
       appendLocalAsrRunLog({
         installRoot,
@@ -30949,6 +31411,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       asrRecovery.saveSession(installRoot, session, this.settings);
       stopProgressPolling();
       this.currentTranscriptionAbortController = null;
+      this.currentTranscriptionAbortRequest = null;
       this.currentTranscriptionProcess = null;
       this.currentTranscriptionProcessDetached = false;
       this.currentTranscriptionContext = null;
@@ -32647,6 +33110,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let douyinResolutionStages = [];
     let douyinSelectedStage = "";
     let douyinResolutionDiagnostic = null;
+    let douyinLastAwemeId = "";
+    let douyinLastResolvedUrl = url || "";
+    let douyinLastTargetIdState = "unknown";
+    let douyinDebuggerCapability = "unknown";
+    let douyinDebuggerReason = "unknown";
     const douyinAttemptId = crypto.randomBytes(8).toString("hex");
     const douyinStartedAt = (/* @__PURE__ */ new Date()).toISOString();
     if (!url) {
@@ -33141,10 +33609,14 @@ ${finalized.markdown}
         const targetIdentityUrl = isXiaohongshuUrl(url) ? resolveXiaohongshuIdentityUrl([redirectedUrl, url]) : "";
         xiaohongshuResolvedUrl = redirectedUrl;
         const douyinTarget = isDouyinUrl(url) || isDouyinUrl(redirectedUrl) ? normalizeDouyinTargetUrl(url, redirectedUrl) : { awemeId: "", url: "" };
-        let resolvedUrl = douyinTarget.url || redirectedUrl;
+        const preserveOriginalDouyinShortlink = isDouyinUrl(url) && getDouyinDiagnosticUrlKind("", url) === "shortlink" && !douyinTarget.awemeId && !extractDouyinAwemeId(redirectedUrl);
+        let resolvedUrl = douyinTarget.url || (preserveOriginalDouyinShortlink ? url : redirectedUrl);
+        douyinLastResolvedUrl = resolvedUrl || douyinLastResolvedUrl;
         let xiaohongshuBrowserCandidates = isXiaohongshuUrl(url) ? getXiaohongshuBrowserCandidates(url, targetIdentityUrl, resolvedUrl) : [];
         let primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0] ? xiaohongshuBrowserCandidates[0].url : resolvedUrl;
         let douyinAwemeId = douyinTarget.awemeId;
+        douyinLastAwemeId = douyinAwemeId;
+        douyinLastTargetIdState = douyinAwemeId ? "recognized" : "missing";
         if (shouldBlockExternalAppUrl(resolvedUrl)) {
           throw new Error(`已阻止网页尝试打开外部应用协议：${new URL(resolvedUrl).protocol}`);
         }
@@ -33206,6 +33678,19 @@ ${finalized.markdown}
             responseFinalUrl
           );
           primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0] ? xiaohongshuBrowserCandidates[0].url : resolvedUrl;
+        } else if (isDouyinUrl(url)) {
+          const responseFinalUrl = String(response && response.url || "").trim();
+          if (isTrustedDouyinPageUrl(responseFinalUrl)) {
+            const responseTarget = normalizeDouyinTargetUrl(url, responseFinalUrl);
+            if (responseTarget.awemeId && (!douyinAwemeId || douyinAwemeId === responseTarget.awemeId)) {
+              douyinAwemeId = responseTarget.awemeId;
+              douyinLastAwemeId = douyinAwemeId;
+              douyinLastTargetIdState = "recognized";
+              resolvedUrl = responseTarget.url;
+              douyinLastResolvedUrl = resolvedUrl;
+              primarySocialMediaBrowserUrl = resolvedUrl;
+            }
+          }
         }
         xiaohongshuResponseStatus = Number(response.status) || 0;
         let html2 = response.text || "";
@@ -33260,6 +33745,10 @@ ${finalized.markdown}
         let douyinStructuredContent = null;
         if (isDouyinUrl(url) || isDouyinUrl(resolvedUrl)) {
           douyinAwemeId = douyinAwemeId || extractDouyinAwemeId(resolvedUrl) || extractDouyinAwemeId(url);
+          if (douyinAwemeId) {
+            douyinLastAwemeId = douyinAwemeId;
+            douyinLastTargetIdState = "recognized";
+          }
           for (const shareUrl of getDouyinMobileSharePageUrls(douyinAwemeId)) {
             const shareStage = { stage: "mobile-share", attempted: true, ok: false, mediaCount: 0, detailFound: false, startedAt: Date.now() };
             try {
@@ -33277,16 +33766,20 @@ ${finalized.markdown}
               shareStage.primaryMediaCount = shareResolution.primaryUrls.length;
               const shareUrls = shareResolution.exactUrls.length ? shareResolution.exactUrls : shareResolution.primaryUrls;
               const shareDetail = shareResolution.detail;
+              const shareDetailIsTargetBound = Boolean(
+                shareDetail && shareResolution.identityOutcome === "target-id-matched" && getDouyinDetailAwemeId({ aweme_detail: shareDetail }) === douyinAwemeId
+              );
               shareStage.mediaCount = shareUrls.length;
-              shareStage.detailFound = Boolean(shareDetail);
-              if (shareDetail) {
+              shareStage.detailFound = shareDetailIsTargetBound;
+              if (shareDetailIsTargetBound) {
                 const sharePageMetadata = extractWebpageMetadataFromHtml(shareHtml, resolvedUrl);
                 douyinStructuredContent = buildDouyinStructuredContent(shareDetail, {
                   title: douyinStructuredContent && douyinStructuredContent.title || sharePageMetadata.title,
                   description: douyinStructuredContent && douyinStructuredContent.description || sharePageMetadata.description,
                   tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(sharePageMetadata.description, shareHtml),
                   coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(shareHtml, ["og:image", "twitter:image"])),
-                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
+                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics,
+                  author: douyinStructuredContent && douyinStructuredContent.author || ""
                 });
                 socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
                   title: douyinStructuredContent.title,
@@ -33300,9 +33793,11 @@ ${finalized.markdown}
               }
               if (shareUrls.length) {
                 html2 = shareHtml;
-                const structuredShareMetrics = buildSocialMetrics(shareDetail);
-                const shareMetrics = hasSocialMetrics(structuredShareMetrics) ? structuredShareMetrics : extractSocialMetricsFromHtml(shareHtml);
-                if (hasSocialMetrics(shareMetrics)) douyinSocialMetrics = shareMetrics;
+                if (shareDetailIsTargetBound) {
+                  const structuredShareMetrics = buildSocialMetrics(shareDetail);
+                  const shareMetrics = hasSocialMetrics(structuredShareMetrics) ? structuredShareMetrics : extractSocialMetricsFromHtml(shareHtml);
+                  if (hasSocialMetrics(shareMetrics)) douyinSocialMetrics = shareMetrics;
+                }
                 mediaUrls = sortMediaUrlsForTranscription([...shareUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasPreciseDouyinMedia = shareResolution.exactUrls.length > 0;
@@ -33339,7 +33834,8 @@ ${finalized.markdown}
                   description: douyinStructuredContent && douyinStructuredContent.description || detailPageMetadata.description,
                   tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(detailPageMetadata.description, html2),
                   coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(html2, ["og:image", "twitter:image"])),
-                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
+                  socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics,
+                  author: douyinStructuredContent && douyinStructuredContent.author || ""
                 });
                 socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
                   title: douyinStructuredContent.title,
@@ -33372,6 +33868,29 @@ ${finalized.markdown}
               }
             }
           }
+          const applyDouyinTargetDetail = /* @__PURE__ */ __name((detail) => {
+            if (!douyinAwemeId || getDouyinDetailAwemeId({ aweme_detail: detail }) !== douyinAwemeId) return false;
+            const detailPageMetadata = extractWebpageMetadataFromHtml(html2, resolvedUrl);
+            const previous = douyinStructuredContent || {};
+            douyinStructuredContent = buildDouyinStructuredContent(detail, {
+              title: previous.title || detailPageMetadata.title,
+              description: previous.description || detailPageMetadata.description,
+              tags: previous.tags && previous.tags.length ? previous.tags : extractTagsFromText(detailPageMetadata.description, html2),
+              coverUrl: previous.coverUrl || normalizeExtractedUrl(extractMetaContent(html2, ["og:image", "twitter:image"])),
+              author: previous.author || "",
+              socialMetrics: hasSocialMetrics(previous.socialMetrics) ? previous.socialMetrics : douyinSocialMetrics
+            });
+            socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
+              title: douyinStructuredContent.title,
+              description: douyinStructuredContent.description,
+              tags: douyinStructuredContent.tags,
+              imageUrls: [douyinStructuredContent.coverUrl].filter(Boolean)
+            });
+            if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) {
+              douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+            }
+            return true;
+          }, "applyDouyinTargetDetail");
           if (!hasUsableDouyinMedia && typeof this.renderSocialMediaUrls === "function") {
             const browserRequests = buildDouyinBrowserFallbackRequests(url, resolvedUrl, douyinAwemeId);
             for (const browserRequest of browserRequests) {
@@ -33392,7 +33911,23 @@ ${finalized.markdown}
                   strictDouyinTarget: browserRequest.strictDouyinTarget,
                   retryDouyinChallenge: true,
                   diagnosticAttemptId: douyinAttemptId,
-                  targetDouyinAwemeId: douyinAwemeId
+                  targetDouyinAwemeId: douyinAwemeId,
+                  sourceKind: getDouyinDiagnosticUrlKind("", url),
+                  resolvedKind: getDouyinDiagnosticUrlKind("", resolvedUrl),
+                  targetIdState: douyinAwemeId ? "recognized" : "missing",
+                  targetStageEligible: Boolean(douyinAwemeId),
+                  onDouyinTargetDetail: /* @__PURE__ */ __name((detail) => {
+                    if (applyDouyinTargetDetail(detail)) browserStage.detailFound = true;
+                  }, "onDouyinTargetDetail"),
+                  onDouyinBrowserDiagnostic: /* @__PURE__ */ __name((event) => {
+                    if (!event || typeof event !== "object") return;
+                    if (["present", "absent", "unsupported", "not-eligible", "unknown"].includes(event.debuggerCapability)) {
+                      douyinDebuggerCapability = event.debuggerCapability;
+                    }
+                    if (["target-id-missing", "api-absent", "api-unsupported", "unknown"].includes(event.debuggerReason)) {
+                      douyinDebuggerReason = event.debuggerReason;
+                    }
+                  }, "onDouyinBrowserDiagnostic")
                 });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
@@ -33432,7 +33967,8 @@ ${finalized.markdown}
                     description: douyinStructuredContent && douyinStructuredContent.description || detailPageMetadata.description,
                     tags: douyinStructuredContent && douyinStructuredContent.tags && douyinStructuredContent.tags.length ? douyinStructuredContent.tags : extractTagsFromText(detailPageMetadata.description, html2),
                     coverUrl: douyinStructuredContent && douyinStructuredContent.coverUrl || normalizeExtractedUrl(extractMetaContent(html2, ["og:image", "twitter:image"])),
-                    socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics
+                    socialMetrics: douyinStructuredContent && douyinStructuredContent.socialMetrics || douyinSocialMetrics,
+                    author: douyinStructuredContent && douyinStructuredContent.author || ""
                   });
                   socialMediaSupplementalMarkdown = buildSocialMediaSupplementalMarkdown({
                     title: douyinStructuredContent.title,
@@ -33464,16 +34000,20 @@ ${finalized.markdown}
               }
             }
             if (!hasUsableDouyinMedia && typeof this.resolveDouyinMediaWithLocalResolver === "function") {
+              const localResolverInputUrl = getDouyinDiagnosticUrlKind("", url) === "shortlink" && !extractDouyinAwemeId(resolvedUrl) ? url : resolvedUrl || url;
               const localResolverStage = {
                 stage: "local-yt-dlp",
                 attempted: true,
                 ok: false,
                 mediaCount: 0,
                 detailFound: false,
+                inputKind: localResolverInputUrl === url ? "original-page" : "resolved-page",
+                sourceKind: getDouyinDiagnosticUrlKind("", url),
+                resolvedKind: getDouyinDiagnosticUrlKind("", localResolverInputUrl),
                 startedAt: Date.now()
               };
               try {
-                const localResolution = await this.resolveDouyinMediaWithLocalResolver(resolvedUrl || url);
+                const localResolution = await this.resolveDouyinMediaWithLocalResolver(localResolverInputUrl);
                 const localUrls = Array.isArray(localResolution && localResolution.mediaUrls) ? localResolution.mediaUrls : [];
                 localResolverStage.mediaCount = localUrls.length;
                 if (localUrls.length) {
@@ -33514,7 +34054,19 @@ ${finalized.markdown}
         const isDouyinRecord = isDouyinUrl(url) || isDouyinUrl(resolvedUrl);
         const douyinChallengeDetected = douyinResolutionStages.some((stage) => isDouyinChallengeError(stage && stage.error));
         const hasPluginDouyinLogin = isDouyinRecord ? await this.checkDouyinLogin() : false;
-        const douyinFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages);
+        const douyinTargetIdState = douyinAwemeId ? "recognized" : "missing";
+        if (!douyinAwemeId && douyinDebuggerCapability === "unknown") douyinDebuggerCapability = "not-eligible";
+        if (!douyinAwemeId && douyinDebuggerReason === "unknown") douyinDebuggerReason = "target-id-missing";
+        const douyinDiagnosticContext = {
+          sourceKind: getDouyinDiagnosticUrlKind("", url),
+          resolvedKind: getDouyinDiagnosticUrlKind("", resolvedUrl),
+          targetIdRecognized: Boolean(douyinAwemeId),
+          targetIdState: douyinTargetIdState,
+          targetStageEligible: Boolean(douyinAwemeId),
+          debuggerCapability: douyinDebuggerCapability,
+          debuggerReason: douyinDebuggerReason
+        };
+        const douyinFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages, douyinDiagnosticContext);
         if (isDouyinRecord) {
           douyinResolutionDiagnostic = buildDouyinMediaResolutionDiagnostic({
             sourceUrl: url,
@@ -33529,6 +34081,11 @@ ${finalized.markdown}
             pluginDouyinLogin: hasPluginDouyinLogin,
             challengeDetected: douyinChallengeDetected
           });
+          douyinResolutionDiagnostic = {
+            ...douyinResolutionDiagnostic,
+            ...douyinDiagnosticContext,
+            stages: douyinResolutionDiagnostic.stages.map((stage) => ({ ...stage, ...douyinDiagnosticContext }))
+          };
           douyinResolutionDiagnostic.attemptId = douyinAttemptId;
           douyinResolutionDiagnostic.failureCode = hasUsableDouyinMedia ? "" : douyinFailureCode;
           douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
@@ -33538,7 +34095,8 @@ ${finalized.markdown}
             startedAt: douyinStartedAt,
             finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
             outcome: hasUsableDouyinMedia ? "success" : "failed",
-            stages: douyinResolutionStages.map((stage) => ({ ...stage, error: stage.error ? {
+            ...douyinDiagnosticContext,
+            stages: douyinResolutionStages.map((stage) => ({ ...douyinDiagnosticContext, ...stage, error: stage.error ? {
               ...getTransportErrorDiagnostic(stage.error),
               browserCode: stage.error.browserCode,
               exitCode: stage.error.exitCode,
@@ -33851,7 +34409,9 @@ ${finalized.markdown}
           }
           const selectedSupplementalMarkdown = isXiaohongshuUrl(url) && extractedXiaohongshu && String(extractedXiaohongshu.markdown || "").trim() ? extractedXiaohongshu.markdown : socialMediaSupplementalMarkdown;
           const supplementalMarkdownParts = isXiaohongshuUrl(url) ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown) : { markdown: selectedSupplementalMarkdown, trailingMarkdown: "" };
-          return await this.buildTranscriptRecordFromMedia(xiaohongshuCommentResult ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } } : record, {
+          const douyinAuthor = !isXiaohongshuUrl(url) && douyinStructuredContent && typeof douyinStructuredContent.author === "string" ? douyinStructuredContent.author.trim() : "";
+          const mediaRecord = xiaohongshuCommentResult ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } } : douyinAuthor ? { ...record, metadata: { ...metadata, author: metadata.author || douyinAuthor } } : record;
+          return await this.buildTranscriptRecordFromMedia(mediaRecord, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? "抖音" : "小红书",
             mediaUrl,
@@ -34386,14 +34946,26 @@ ${finalized.markdown}
       };
     } catch (error) {
       if (isDouyinUrl(url) && !douyinResolutionDiagnostic) {
+        const douyinCatchContext = {
+          sourceKind: getDouyinDiagnosticUrlKind("", url),
+          resolvedKind: getDouyinDiagnosticUrlKind("", douyinLastResolvedUrl || url),
+          targetIdRecognized: douyinLastTargetIdState === "recognized",
+          targetIdState: douyinLastTargetIdState,
+          targetStageEligible: douyinLastTargetIdState === "recognized",
+          debuggerCapability: douyinLastTargetIdState === "missing" && douyinDebuggerCapability === "unknown" ? "not-eligible" : douyinDebuggerCapability,
+          debuggerReason: douyinLastTargetIdState === "missing" && douyinDebuggerReason === "unknown" ? "target-id-missing" : douyinDebuggerReason
+        };
+        const douyinCatchFailureCode = douyinDiagnostic.failureCode(douyinResolutionStages, douyinCatchContext);
         douyinResolutionDiagnostic = douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), {
           attemptId: douyinAttemptId,
           recordRef: crypto.createHash("sha256").update(String(record.id || record._id || url)).digest("hex").slice(0, 16),
           startedAt: douyinStartedAt,
           finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
           outcome: isAbortError(error) ? "cancelled" : "failed",
-          failureCode: isAbortError(error) ? "DOUYIN_CANCELLED" : douyinDiagnostic.failureCode(douyinResolutionStages) === "DOUYIN_NO_MEDIA" ? "DOUYIN_FETCH_FAILED" : douyinDiagnostic.failureCode(douyinResolutionStages),
+          ...douyinCatchContext,
+          failureCode: isAbortError(error) ? "DOUYIN_CANCELLED" : douyinCatchFailureCode === "DOUYIN_NO_MEDIA" ? "DOUYIN_FETCH_FAILED" : douyinCatchFailureCode,
           stages: [...douyinResolutionStages, { stage: isAbortError(error) ? "cancelled" : "platform-fetch", ok: false, error }].map((stage) => ({
+            ...douyinCatchContext,
             ...stage,
             error: stage.error ? {
               ...getTransportErrorDiagnostic(stage.error),
@@ -35068,6 +35640,13 @@ ${finalized.markdown}
     try {
       await this.reportSyncRecordCompletion(recordId, noteTitle, binding, lifecycle);
       if (this.autoSyncController) this.autoSyncController.succeeded(retryKey);
+      try {
+        await this.getSyncDiagnosticReporter().clearRecord({
+          binding,
+          syncRecordId: recordId
+        });
+      } catch (_) {
+      }
       return null;
     } catch (error) {
       if (isRecordNotFoundError(error)) return null;
@@ -35282,19 +35861,7 @@ ${finalized.markdown}
         if (processingAbortController.signal.aborted && !item.committed) {
           throw createAbortError();
         }
-        const hasExplicitCommitAck = Boolean(item && Object.prototype.hasOwnProperty.call(item, "committed"));
-        const writeAcknowledged = Boolean(item && (hasExplicitCommitAck ? item.committed === true : item.recordId));
         localCommitFact = item;
-        if (writeAcknowledged) {
-          this.queueSyncDiagnosticSuccess({
-            recordId: item.recordId,
-            attemptId: lifecycle.attemptId,
-            diagnosticId,
-            binding,
-            retryCount: record.retryCount,
-            stage: "write"
-          });
-        }
         if (this.autoSyncController) this.autoSyncController.succeeded(autoRetryKey);
         written.push(item);
         if (item.conversionWarning) {
@@ -35352,7 +35919,8 @@ ${finalized.markdown}
           binding,
           error,
           stage: progress.stage || "processing",
-          retryCount: record.retryCount
+          retryCount: record.retryCount,
+          sourceUrl: sanitizeSourceLink(getDiagnosticSourceUrl(record))
         });
         let lifecycleReportError = null;
         if (lifecycle.enabled && lifecycle.attemptId) {
@@ -35380,6 +35948,7 @@ ${finalized.markdown}
           }
         }
         const diagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? retainedSyncFailureDiagnostic(error.diagnostic, this.settings) || redactSensitiveObject(error.diagnostic) : null;
+        const diagnosticSourceUrl = sanitizeSourceLink(getDiagnosticSourceUrl(record));
         let failedTitle = "小红书内容";
         if (!isXiaohongshuUrl(getRecordUrl(record))) {
           try {
@@ -35396,6 +35965,7 @@ ${finalized.markdown}
           recordId: getRecordId(record),
           message: "单条内容同步失败",
           error: message,
+          ...diagnosticSourceUrl ? { sourceUrl: diagnosticSourceUrl } : {},
           ...diagnostic ? { diagnostic } : {},
           ...lifecycleReportError ? { lifecycleReportError } : {},
           time: (/* @__PURE__ */ new Date()).toISOString()
@@ -36271,6 +36841,7 @@ WechatObsidianInboxPlugin.__test = {
   buildTranscriptOnlyMetadata,
   buildSyncProgressMessage,
   buildSyncDiagnosticLogText,
+  getDiagnosticSourceUrl,
   buildSyncResultNotice,
   buildSkippedSyncNotice,
   getRecordConversionWarning,
