@@ -7,6 +7,11 @@ const os = require('os');
 const { execFile } = require('child_process');
 
 const MAX_RESOLVER_BYTES = 100 * 1024 * 1024;
+const MAX_RESOLVER_TITLE_LENGTH = 240;
+const MAX_RESOLVER_DESCRIPTION_LENGTH = 4000;
+const MAX_RESOLVER_TAGS = 32;
+const MAX_RESOLVER_TAG_LENGTH = 64;
+const RESOLVER_SENSITIVE_QUERY_KEY = /(?:token|secret|password|passwd|authorization|cookie|credential|signature|sig|expires?)/i;
 
 function resolverError(code, stage, source, url = '') {
   let host = '';
@@ -231,6 +236,155 @@ function extractLocalDouyinResolverMediaUrls(output) {
     .filter((value) => /^https?:\/\//i.test(value))));
 }
 
+function normalizeResolverText(value, maxLength) {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/((?:bearer|authorization|cookie|password|passwd|secret|token|api[_-]?key)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeResolverThumbnail(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || !parsed.hostname) return '';
+    parsed.hash = '';
+    const safeParams = [];
+    for (const [key, paramValue] of parsed.searchParams.entries()) {
+      if (RESOLVER_SENSITIVE_QUERY_KEY.test(String(key || ''))) continue;
+      safeParams.push([key, paramValue]);
+    }
+    parsed.search = '';
+    safeParams.forEach(([key, paramValue]) => parsed.searchParams.append(key, paramValue));
+    return parsed.toString();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function normalizeResolverTargetId(value) {
+  const normalized = String(value || '').trim();
+  return /^[A-Za-z0-9_-]{1,128}$/.test(normalized) ? normalized : '';
+}
+
+function readResolverTargetId(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return '';
+  for (const key of ['id', 'aweme_id', 'awemeId', 'display_id', 'displayId']) {
+    const candidate = normalizeResolverTargetId(payload[key]);
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
+function readResolverText(payload, keys, maxLength) {
+  for (const key of keys) {
+    const value = payload && payload[key];
+    const normalized = normalizeResolverText(value, maxLength);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function readResolverUploader(payload) {
+  const value = payload && (payload.uploader || payload.author || payload.creator);
+  if (typeof value === 'string') return normalizeResolverText(value, 240);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  return readResolverText(value, ['name', 'nickname', 'nickName', 'username', 'unique_id', 'uniqueId'], 240);
+}
+
+function readResolverTags(payload) {
+  const values = Array.isArray(payload && payload.tags)
+    ? payload.tags
+    : Array.isArray(payload && payload.hashtags)
+      ? payload.hashtags
+      : [];
+  return Array.from(new Set(values.map((item) => {
+    const value = item && typeof item === 'object'
+      ? (item.name || item.title || item.hashtag_name || item.hashtagName)
+      : item;
+    return normalizeResolverText(value, MAX_RESOLVER_TAG_LENGTH).replace(/^#+/, '').trim();
+  }).filter(Boolean))).slice(0, MAX_RESOLVER_TAGS);
+}
+
+function normalizeResolverCount(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  const text = String(value).trim().replace(/,/g, '');
+  if (!/^\d+(?:\.\d+)?$/.test(text)) return undefined;
+  const count = Number(text);
+  return Number.isFinite(count) && count >= 0 ? Math.round(count) : undefined;
+}
+
+function readResolverMetrics(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const statistics = source.statistics && typeof source.statistics === 'object' ? source.statistics : {};
+  const aliases = {
+    views: ['view_count', 'viewCount', 'views', 'play_count', 'playCount'],
+    likes: ['like_count', 'likeCount', 'likes', 'digg_count', 'diggCount'],
+    collects: ['collect_count', 'collectCount', 'collects', 'favorite_count', 'favoriteCount'],
+    comments: ['comment_count', 'commentCount', 'comments'],
+    shares: ['repost_count', 'repostCount', 'share_count', 'shareCount', 'shares'],
+    coins: ['coin_count', 'coinCount', 'coins'],
+  };
+  const metrics = {};
+  for (const [name, keys] of Object.entries(aliases)) {
+    for (const key of keys) {
+      const count = normalizeResolverCount(source[key] !== undefined ? source[key] : statistics[key]);
+      if (count !== undefined) {
+        metrics[name] = count;
+        break;
+      }
+    }
+  }
+  return metrics;
+}
+
+function extractLocalDouyinResolverMetadata(output, expectedTargetId = '') {
+  let payload;
+  try {
+    payload = JSON.parse(String(output || ''));
+  } catch (_error) {
+    return { identityOutcome: 'invalid-json', targetId: '', mediaUrls: [], metadata: {} };
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { identityOutcome: 'invalid-payload', targetId: '', mediaUrls: [], metadata: {} };
+  }
+  const expected = normalizeResolverTargetId(expectedTargetId);
+  const targetId = readResolverTargetId(payload);
+  const identityOutcome = expected
+    ? (targetId ? (targetId === expected ? 'target-id-matched' : 'target-id-mismatch') : 'target-id-missing')
+    : (targetId ? 'target-id-unverified' : 'target-id-missing');
+  const mediaUrls = identityOutcome !== 'target-id-mismatch'
+    ? extractLocalDouyinResolverMediaUrls(JSON.stringify(payload))
+    : [];
+  if (identityOutcome !== 'target-id-matched') {
+    return { identityOutcome, targetId, mediaUrls, metadata: {} };
+  }
+  const thumbnail = normalizeResolverThumbnail(
+    payload.thumbnail
+      || (Array.isArray(payload.thumbnails) && payload.thumbnails[0])
+      || '',
+  );
+  return {
+    identityOutcome,
+    targetId,
+    mediaUrls,
+    metadata: {
+      ...(readResolverText(payload, ['title', 'fulltitle'], MAX_RESOLVER_TITLE_LENGTH) ? { title: readResolverText(payload, ['title', 'fulltitle'], MAX_RESOLVER_TITLE_LENGTH) } : {}),
+      ...(readResolverText(payload, ['description', 'comment'], MAX_RESOLVER_DESCRIPTION_LENGTH) ? { description: readResolverText(payload, ['description', 'comment'], MAX_RESOLVER_DESCRIPTION_LENGTH) } : {}),
+      ...(readResolverTags(payload).length ? { tags: readResolverTags(payload) } : {}),
+      ...(thumbnail ? { thumbnail } : {}),
+      ...(readResolverUploader(payload) ? { uploader: readResolverUploader(payload) } : {}),
+      ...(Object.keys(readResolverMetrics(payload)).length ? { counts: readResolverMetrics(payload) } : {}),
+    },
+  };
+}
+
 module.exports = {
   MAX_RESOLVER_BYTES,
   resolverError,
@@ -247,4 +401,7 @@ module.exports = {
   isDouyinCookieDomain,
   buildNetscapeCookieFile,
   extractLocalDouyinResolverMediaUrls,
+  extractLocalDouyinResolverMetadata,
+  normalizeResolverThumbnail,
+  normalizeResolverTargetId,
 };

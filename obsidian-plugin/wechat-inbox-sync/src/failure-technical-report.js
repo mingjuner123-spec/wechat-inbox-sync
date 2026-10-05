@@ -20,6 +20,7 @@ function nonnegativeInt(value) {
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 function signedInt(value) {
+  if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isSafeInteger(number) ? number : null;
 }
@@ -53,6 +54,183 @@ function truncateUtf8(value, maxBytes = MAX_REPORT_TEXT_BYTES) {
     text: takeUtf8(text, headBytes) + marker + takeUtf8(text, remaining - headBytes, true),
     truncated: true,
   };
+}
+const MEDIA_URL_KINDS = new Set(['canonical', 'share', 'shortlink', 'home', 'feed', 'other', 'unknown']);
+const MEDIA_DIAGNOSTIC_SOURCES = new Set(['douyin-resolution', 'wechat-channels', 'xiaohongshu-browser']);
+const MEDIA_OUTCOMES = new Set(['success', 'failed', 'cancelled']);
+const MEDIA_COOKIE_STATES = new Set(['saved-unverified', 'not-found', 'unknown']);
+const MEDIA_DEBUGGER_CAPABILITIES = new Set(['present', 'absent', 'unsupported', 'not-eligible', 'unknown']);
+const MEDIA_DEBUGGER_REASONS = new Set(['target-id-missing', 'api-absent', 'api-unsupported', 'unknown']);
+function safeDiagnosticEnum(value, allowed) {
+  const text = String(value || '').trim();
+  return allowed.has(text) ? text : 'unknown';
+}
+function safeDiagnosticCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z][A-Z0-9_.-]{0,63}$/.test(code) ? code : '';
+}
+function safeResolverVersion(value) {
+  const version = String(value || '').trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:+-]{0,79}$/.test(version) ? version : 'unknown';
+}
+function safeDiagnosticTextInfo(value, settings = {}, maxBytes = 512) {
+  const redacted = diagnosticRedact(String(value || ''), settings)
+    .replace(/\s+/g, ' ')
+    .trim();
+  const text = takeUtf8(redacted, maxBytes);
+  return { text, truncated: bytes(redacted) > bytes(text), originalBytes: bytes(redacted), omittedBytes: Math.max(0, bytes(redacted) - bytes(text)) };
+}
+function safeDiagnosticText(value, settings = {}, maxBytes = 512) {
+  return safeDiagnosticTextInfo(value, settings, maxBytes).text;
+}
+function safeMediaUrlKind(value) {
+  const kind = String(value || '').trim().toLowerCase();
+  return MEDIA_URL_KINDS.has(kind) ? kind : 'unknown';
+}
+function safeTargetIdState(value) {
+  if (['recognized', 'missing', 'unknown'].includes(value)) return value;
+  if (value === true) return 'recognized';
+  if (value === false) return 'missing';
+  return 'unknown';
+}
+function safeBoundedNumber(value, max = 1000) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? Math.min(number, max) : null;
+}
+function safeMediaError(value, settings = {}) {
+  if (!value || typeof value !== 'object') return undefined;
+  const result = {};
+  const code = safeDiagnosticCode(value.code);
+  const browserCode = safeDiagnosticCode(value.browserCode);
+  const status = safeBoundedNumber(value.status, 599);
+  const exitCode = signedInt(value.exitCode);
+  const messageInfo = safeDiagnosticTextInfo(value.message, settings);
+  const inheritedMessageOmitted = safeBoundedNumber(value.messageOmittedBytes, Number.MAX_SAFE_INTEGER) || 0;
+  const inheritedMessageOriginal = safeBoundedNumber(value.messageOriginalBytes, Number.MAX_SAFE_INTEGER) || 0;
+  const messageOmittedBytes = inheritedMessageOmitted + messageInfo.omittedBytes;
+  const messageTruncated = value.messageTruncated === true || messageOmittedBytes > 0;
+  if (code) result.code = code;
+  if (browserCode) result.browserCode = browserCode;
+  if (status !== null) result.status = status;
+  if (exitCode !== null) result.exitCode = exitCode;
+  if (messageInfo.text) result.message = messageInfo.text;
+  if (messageTruncated) {
+    result.messageTruncated = true;
+    result.messageOriginalBytes = Math.max(inheritedMessageOriginal, messageInfo.originalBytes + inheritedMessageOmitted);
+    result.messageOmittedBytes = messageOmittedBytes;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+function isMediaResolutionDiagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (MEDIA_DIAGNOSTIC_SOURCES.has(String(value.source || ''))) return true;
+  if (value.platform === 'bilibili' && Array.isArray(value.stages)) return true;
+  return Boolean(
+    value.sourceKind || value.resolvedKind || value.targetIdState
+      || value.mediaCandidateCount !== undefined
+      || (Array.isArray(value.stages) && value.stages.some(stage => stage && (stage.mediaCount !== undefined || stage.inputKind))),
+  );
+}
+function getMediaResolutionDiagnostic(error) {
+  if (!error || typeof error !== 'object') return null;
+  if (error.mediaResolutionDiagnostic && typeof error.mediaResolutionDiagnostic === 'object') {
+    return error.mediaResolutionDiagnostic;
+  }
+  const diagnostic = error.diagnostic && typeof error.diagnostic === 'object'
+    ? error.diagnostic
+    : null;
+  if (!diagnostic) return null;
+  if (diagnostic.mediaResolutionDiagnostic && typeof diagnostic.mediaResolutionDiagnostic === 'object') {
+    return diagnostic.mediaResolutionDiagnostic;
+  }
+  return isMediaResolutionDiagnostic(diagnostic) ? diagnostic : null;
+}
+function safeMediaStage(value, settings = {}) {
+  if (!value || typeof value !== 'object') return null;
+  const stage = {};
+  const stageName = safeDiagnosticText(value.stage, settings, 64);
+  const inputKind = safeDiagnosticText(value.inputKind, settings, 64);
+  const sourceKind = safeMediaUrlKind(value.sourceKind);
+  const resolvedKind = safeMediaUrlKind(value.resolvedKind);
+  const targetIdState = safeTargetIdState(value.targetIdState);
+  const rejectionReason = safeDiagnosticText(value.rejectionReason, settings, 96);
+  if (stageName) stage.stage = stageName;
+  stage.resolverVersion = safeResolverVersion(value.resolverVersion);
+  if (inputKind) stage.inputKind = inputKind;
+  stage.sourceKind = sourceKind;
+  stage.resolvedKind = resolvedKind;
+  stage.attempted = value.attempted !== false;
+  stage.ok = value.ok === true;
+  stage.targetIdState = targetIdState;
+  if (typeof value.targetIdRecognized === 'boolean') stage.targetIdRecognized = value.targetIdRecognized;
+  if (typeof value.targetStageEligible === 'boolean') stage.targetStageEligible = value.targetStageEligible;
+  const mediaCount = safeBoundedNumber(value.mediaCount, 100);
+  const durationMs = safeBoundedNumber(value.durationMs, 30 * 60 * 1000);
+  if (mediaCount !== null) stage.mediaCount = mediaCount;
+  if (durationMs !== null) stage.durationMs = durationMs;
+  if (rejectionReason) stage.rejectionReason = rejectionReason;
+  const error = safeMediaError(value.error || (value.code || value.message ? value : null), settings);
+  if (error) stage.error = error;
+  return stage;
+}
+function safeMediaResolutionDiagnostic(error, settings = {}) {
+  const source = getMediaResolutionDiagnostic(error);
+  if (!source) return null;
+  const result = {
+    source: safeDiagnosticText(typeof source.source === 'string' ? source.source : '', settings, 64) || 'unknown',
+    outcome: safeDiagnosticEnum(source.outcome || (source.failureCode ? 'failed' : ''), MEDIA_OUTCOMES),
+    cookieState: safeDiagnosticEnum(source.cookieState || (typeof source.pluginDouyinLogin === 'boolean' ? (source.pluginDouyinLogin ? 'saved-unverified' : 'not-found') : ''), MEDIA_COOKIE_STATES),
+    debuggerCapability: safeDiagnosticEnum(source.debuggerCapability, MEDIA_DEBUGGER_CAPABILITIES),
+    debuggerReason: safeDiagnosticEnum(source.debuggerReason, MEDIA_DEBUGGER_REASONS),
+    resolverVersion: safeResolverVersion(
+      source.resolverVersion
+        || (source.resolver && source.resolver.version)
+        || (Array.isArray(source.stages) && source.stages.find(stage => stage && stage.resolverVersion)?.resolverVersion)
+        || (Array.isArray(source.attempts) && source.attempts.find(stage => stage && stage.resolverVersion)?.resolverVersion),
+    ),
+    sourceKind: safeMediaUrlKind(source.sourceKind),
+    resolvedKind: safeMediaUrlKind(source.resolvedKind),
+    targetIdState: safeTargetIdState(source.targetIdState),
+    targetIdRecognized: typeof source.targetIdRecognized === 'boolean' ? source.targetIdRecognized : null,
+    targetStageEligible: typeof source.targetStageEligible === 'boolean' ? source.targetStageEligible : null,
+    failureCode: safeDiagnosticCode(source.failureCode || source.errorCode || (source.failure && source.failure.code)) || 'UNKNOWN',
+    finalOutcome: safeDiagnosticText(source.finalOutcome, settings, 96) || 'unknown',
+  };
+  const selectedStage = safeDiagnosticText(source.selectedStage, settings, 96);
+  if (selectedStage) result.selectedStage = selectedStage;
+  const redirectCount = safeBoundedNumber(source.redirectCount, 32);
+  if (redirectCount !== null) result.redirectCount = redirectCount;
+  if (typeof source.redirected === 'boolean') result.redirected = source.redirected;
+  const mediaCandidateCount = safeBoundedNumber(source.mediaCandidateCount, 100);
+  if (mediaCandidateCount !== null) result.mediaCandidateCount = mediaCandidateCount;
+  if (typeof source.preciseMediaFound === 'boolean') result.preciseMediaFound = source.preciseMediaFound;
+  const failure = safeMediaError(source.failure, settings);
+  if (failure) {
+    result.failure = {
+      ...failure,
+      stage: safeDiagnosticText(source.failure.stage, settings, 64) || 'unknown',
+    };
+  }
+  const rawStages = Array.isArray(source.stages)
+    ? source.stages
+    : (Array.isArray(source.attempts) ? source.attempts : []);
+  const omittedStages = Math.max(0, rawStages.length - 12);
+  const inheritedOmittedStages = safeBoundedNumber(source.stagesOmittedCount, Number.MAX_SAFE_INTEGER) || 0;
+  const stagesOmittedCount = inheritedOmittedStages + omittedStages;
+  result.stages = rawStages.slice(-12).map(stage => safeMediaStage(stage, settings)).filter(Boolean);
+  if (stagesOmittedCount) result.stagesOmittedCount = stagesOmittedCount;
+  const mediaErrors = [
+    failure,
+    ...result.stages.map(stage => stage.error),
+  ].filter(Boolean);
+  const messageOmittedBytes = Math.max(
+    safeBoundedNumber(source.messageOmittedBytes, Number.MAX_SAFE_INTEGER) || 0,
+    mediaErrors.reduce((total, item) => total + (Number(item.messageOmittedBytes) || 0), 0),
+  );
+  if (messageOmittedBytes) result.messageOmittedBytes = messageOmittedBytes;
+  if (source.truncated === true || stagesOmittedCount || messageOmittedBytes) result.truncated = true;
+  return result;
 }
 function safeReason(value) { return UNAVAILABLE_REASONS.has(value) ? value : 'read_failed'; }
 function unavailableTechnicalReport(reason, now = new Date().toISOString(), originalBytes = 0) {
@@ -120,6 +298,8 @@ function safeError(error, settings = {}) {
     stackFrames: allFrames.slice(0, 16),
     stackFramesOmittedCount: Math.max(0, allFrames.length - 16),
   };
+  const mediaResolutionDiagnostic = safeMediaResolutionDiagnostic(source, settings);
+  if (mediaResolutionDiagnostic) value.mediaResolutionDiagnostic = mediaResolutionDiagnostic;
   return redactTree(value, settings);
 }
 function matchAsrSession(session, { recordId, attemptId, now }) {
@@ -254,7 +434,9 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
     text = JSON.stringify(fallback);
     clipped = true;
   }
-  const fieldsTruncated = Boolean(safeTechnical.failure.messageTruncated || safeTechnical.failure.stackFramesOmittedCount);
+  const mediaDiagnostic = safeTechnical.failure && safeTechnical.failure.mediaResolutionDiagnostic;
+  const mediaDiagnosticTruncated = Boolean(mediaDiagnostic && (mediaDiagnostic.truncated || mediaDiagnostic.stagesOmittedCount || mediaDiagnostic.messageOmittedBytes));
+  const fieldsTruncated = Boolean(safeTechnical.failure.messageTruncated || safeTechnical.failure.stackFramesOmittedCount || mediaDiagnosticTruncated);
   if (clipped || fieldsTruncated) {
     try {
       const finalParsed = JSON.parse(text);

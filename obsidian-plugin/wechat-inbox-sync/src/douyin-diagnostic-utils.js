@@ -3,15 +3,28 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { diagnosticRedact } = require('./asr-recovery-utils');
-function safeErrorText(value, settings = {}) {
-  const text = String(value || '');
-  if (text.length > 16384) return '[oversized error omitted]';
-  return diagnosticRedact(text, settings)
+function byteLength(value) { return Buffer.byteLength(String(value || ''), 'utf8'); }
+function takeUtf8(value, maxBytes) {
+  let result = ''; let used = 0;
+  for (const point of [...String(value || '')]) {
+    const size = byteLength(point);
+    if (used + size > maxBytes) break;
+    result += point; used += size;
+  }
+  return result;
+}
+function safeErrorTextInfo(value, settings = {}) {
+  const raw = String(value || '');
+  if (raw.length > 16384) return { text: '[oversized error omitted]', truncated: true, originalBytes: byteLength(raw), omittedBytes: Math.max(0, byteLength(raw) - byteLength('[oversized error omitted]')) };
+  const redacted = diagnosticRedact(raw, settings)
     .replace(/(["']?(?:sessionid(?:_ss)?|sid_guard|ttwid|msToken|cookie|authorization|token|password|secret|api[_-]?key)["']?\s*[=:]\s*)[^\r\n]+/gi, '$1[REDACTED]')
     .replace(/Bearer\s+[^\s,;"']+/gi, 'Bearer [REDACTED]')
-    .replace(/https?:\/\/[^\s)\]'"<>]+/gi, '[URL_REDACTED]')
-    .replace(/\s+/g, ' ').slice(0, 480);
+    .replace(/https?:\/\/[^\s)\]\'"<>]+/gi, '[URL_REDACTED]')
+    .replace(/\s+/g, ' ').trim();
+  const text = takeUtf8(redacted, 480);
+  return { text, truncated: byteLength(redacted) > byteLength(text), originalBytes: byteLength(redacted), omittedBytes: Math.max(0, byteLength(redacted) - byteLength(text)) };
 }
+function safeErrorText(value, settings = {}) { return safeErrorTextInfo(value, settings).text; }
 const CODES = new Set([
   'DOUYIN_CANCELLED',
   'DOUYIN_FETCH_FAILED',
@@ -122,14 +135,42 @@ function failureMessage(code) {
   })[code] || '未能从抖音作品页获取到可用的音频或视频地址，请复制诊断查看各解析路径结果。';
 }
 const token = value => /^[a-zA-Z0-9_.:-]{1,80}$/.test(value || '') ? value : '';
+const resolverVersion = value => /^[a-zA-Z0-9][a-zA-Z0-9._:+-]{0,79}$/.test(String(value || '')) ? String(value) : 'unknown';
 const integer = value => Number.isSafeInteger(value) ? Math.max(0, Math.min(value, 1e12)) : 0;
+function safeCount(value, max = 1024 * 1024) {
+  if (value === null || value === undefined || value === '') return 0;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? Math.min(number, max) : 0;
+}
+function sanitizeStageError(error) {
+  if (!error || typeof error !== 'object') return undefined;
+  const info = safeErrorTextInfo(error.message);
+  const inheritedOmitted = safeCount(error.messageOmittedBytes);
+  const inheritedOriginal = safeCount(error.messageOriginalBytes);
+  const omittedBytes = inheritedOmitted + info.omittedBytes;
+  const truncated = error.messageTruncated === true || omittedBytes > 0 || info.truncated;
+  const result = {
+    code: token(error.code),
+    browserCode: token(error.browserCode),
+    status: integer(error.status),
+    exitCode: Number.isInteger(error.exitCode) ? error.exitCode : null,
+    message: info.text,
+  };
+  if (truncated) {
+    result.messageTruncated = true;
+    result.messageOriginalBytes = Math.max(inheritedOriginal, info.originalBytes + inheritedOmitted);
+    result.messageOmittedBytes = omittedBytes;
+  }
+  return result;
+}
 function sanitize(value = {}) {
   const result = { source: 'douyin-resolution', schema: 1 };
   for (const key of ['attemptId', 'recordRef']) result[key] = /^[a-f0-9]{16,32}$/.test(value[key] || '') ? value[key] : '';
   for (const key of ['startedAt', 'finishedAt']) if (Number.isFinite(Date.parse(value[key]))) result[key] = new Date(value[key]).toISOString();
   result.outcome = ['success', 'cancelled'].includes(value.outcome) ? value.outcome : 'failed';
+  result.resolverVersion = resolverVersion(value.resolverVersion);
   result.failureCode = CODES.has(value.failureCode) ? value.failureCode : '';
-  result.cookieState = value.pluginDouyinLogin === true || value.cookieState === 'saved-unverified' ? 'saved-unverified' : 'not-found';
+  result.cookieState = value.pluginDouyinLogin === true || value.cookieState === 'saved-unverified' ? 'saved-unverified' : value.cookieState === 'unknown' ? 'unknown' : 'not-found';
   result.sourceKind = safeUrlKind(value.sourceKind);
   result.resolvedKind = safeUrlKind(value.resolvedKind);
   result.targetIdRecognized = value.targetIdRecognized === true;
@@ -141,8 +182,12 @@ function sanitize(value = {}) {
   result.targetStageEligible = value.targetStageEligible === true;
   result.debuggerCapability = safeDebuggerCapability(value.debuggerCapability);
   result.debuggerReason = safeDebuggerReason(value.debuggerReason);
-  result.stages = (Array.isArray(value.stages) ? value.stages : []).filter(s => s && typeof s === 'object').slice(-16).map(s => ({
+  const rawStages = (Array.isArray(value.stages) ? value.stages : []).filter(s => s && typeof s === 'object');
+  const localStagesOmitted = Math.max(0, rawStages.length - 16);
+  const inheritedStagesOmitted = safeCount(value.stagesOmittedCount);
+  result.stages = rawStages.slice(-16).map(s => ({
     stage: token(s.stage),
+    resolverVersion: resolverVersion(s.resolverVersion),
     inputKind: safeInputKind(s.inputKind),
     sourceKind: safeUrlKind(s.sourceKind),
     resolvedKind: safeUrlKind(s.resolvedKind),
@@ -158,8 +203,15 @@ function sanitize(value = {}) {
     mediaCount: integer(s.mediaCount),
     durationMs: integer(s.durationMs),
     rejectionReason: token(s.rejectionReason),
-    error: s.error ? { code: token(s.error.code), browserCode: token(s.error.browserCode), status: integer(s.error.status), exitCode: Number.isInteger(s.error.exitCode) ? s.error.exitCode : null, message: safeErrorText(s.error.message) } : undefined,
+    error: sanitizeStageError(s.error),
   }));
+  const stagesOmittedCount = inheritedStagesOmitted + localStagesOmitted;
+  const sourceMessageOmitted = safeCount(value.messageOmittedBytes);
+  const stageMessageOmitted = result.stages.reduce((total, stage) => total + safeCount(stage.error && stage.error.messageOmittedBytes), 0);
+  const messageOmittedBytes = Math.max(sourceMessageOmitted, stageMessageOmitted);
+  if (stagesOmittedCount) result.stagesOmittedCount = stagesOmittedCount;
+  if (messageOmittedBytes) result.messageOmittedBytes = messageOmittedBytes;
+  if (value.truncated === true || stagesOmittedCount || messageOmittedBytes) result.truncated = true;
   return result;
 }
 function read(root) {

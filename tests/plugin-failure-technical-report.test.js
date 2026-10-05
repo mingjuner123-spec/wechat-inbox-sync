@@ -7,6 +7,8 @@ const Module = require('node:module');
 const report = require('../obsidian-plugin/wechat-inbox-sync/src/failure-technical-report');
 const reporterModule = require('../obsidian-plugin/wechat-inbox-sync/src/sync-diagnostic-reporter');
 const asrUtils = require('../obsidian-plugin/wechat-inbox-sync/src/asr-recovery-utils');
+const { createDouyinMediaResolutionDiagnosticBuilder } = require('../obsidian-plugin/wechat-inbox-sync/src/social-media-diagnostic-utils');
+const douyinDiagnostic = require('../obsidian-plugin/wechat-inbox-sync/src/douyin-diagnostic-utils');
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'failure-technical-report-'));
 const now = '2026-10-05T04:00:00.000Z';
 const sessionPath = path.join(scratch, 'asr-diagnostic-last.json');
@@ -233,6 +235,172 @@ try {
   assert.equal(JSON.parse(queuedEvent.technicalReport.text).asr.attempts[1].nativeExitCode, null);
   assert.ok(mainText.includes("trigger: 'stop_command'"));
   assert.ok(mainText.includes("trigger: 'stop_button'"));
+  plugin.getConfiguredLocalAsrPlatform = () => 'darwin';
+  plugin.getLocalDouyinResolverInstallStatus = () => ({ ready: true, executablePath: 'fixture-resolver', version: '2026.10.05' });
+  assert.equal(plugin.getInstalledLocalDouyinResolver().version, '2026.10.05');
+
+  const mediaDiagnostic = {
+    source: 'douyin-resolution',
+    outcome: 'failed',
+    cookieState: 'saved-unverified',
+    debuggerCapability: 'not-eligible',
+    debuggerReason: 'target-id-missing',
+    sourceKind: 'shortlink',
+    resolvedKind: 'home',
+    redirectCount: 1,
+    redirected: true,
+    targetIdState: 'missing',
+    targetIdRecognized: false,
+    targetStageEligible: false,
+    failureCode: 'DOUYIN_UNSUPPORTED_URL',
+    finalOutcome: 'no-target-bound-media',
+    stages: [{
+      stage: 'local-yt-dlp',
+      inputKind: 'original-page',
+      sourceKind: 'shortlink',
+      resolvedKind: 'home',
+      attempted: true,
+      ok: false,
+      targetIdState: 'missing',
+      rejectionReason: 'resolver-error',
+      error: {
+        code: 'DOUYIN_UNSUPPORTED_URL',
+        status: null,
+        exitCode: null,
+        message: 'Unsupported URL: https://www.douyin.com/video/123?token=SECRET',
+      },
+    }],
+  };
+  const mediaError = Object.assign(new Error('media resolver failed'), {
+    code: 'DOUYIN_UNSUPPORTED_URL',
+    diagnostic: mediaDiagnostic,
+  });
+  let mediaQueuedEvent = null;
+  plugin.queueSyncDiagnosticEvent = eventValue => {
+    mediaQueuedEvent = eventValue;
+    return { queued: true };
+  };
+  const mediaQueueResult = plugin.queueSyncDiagnosticFailure({
+    recordId: 'record-media',
+    attemptId: 'attempt-media',
+    diagnosticId: 'diag-media',
+    binding: { token },
+    error: mediaError,
+    stage: 'fetching',
+    retryCount: 0,
+  });
+  assert.equal(mediaQueueResult.queued, true);
+  const queuedMedia = JSON.parse(mediaQueuedEvent.technicalReport.text);
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.source, 'douyin-resolution');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.outcome, 'failed');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.cookieState, 'saved-unverified');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.debuggerCapability, 'not-eligible');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.debuggerReason, 'target-id-missing');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.resolverVersion, 'unknown');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.sourceKind, 'shortlink');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.resolvedKind, 'home');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.redirectCount, 1);
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.redirected, true);
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.targetIdState, 'missing');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.failureCode, 'DOUYIN_UNSUPPORTED_URL');
+  assert.equal(queuedMedia.failure.mediaResolutionDiagnostic.stages[0].error.code, 'DOUYIN_UNSUPPORTED_URL');
+  assert.notEqual(queuedMedia.failure.mediaResolutionDiagnostic.stages[0].error.exitCode, 0);
+  assert.doesNotMatch(queuedMedia.failure.mediaResolutionDiagnostic.stages[0].error.message, /www\.douyin\.com|SECRET/);
+  assert.ok(!mediaQueuedEvent.technicalReport.text.includes('SECRET'));
+
+  const normalizedMediaEvent = reporterModule.normalizeDiagnosticEvent(mediaQueuedEvent, { now });
+  const normalizedMedia = JSON.parse(normalizedMediaEvent.technicalReport.text);
+  assert.equal(normalizedMedia.failure.mediaResolutionDiagnostic.stages[0].error.code, 'DOUYIN_UNSUPPORTED_URL');
+  let persistedMedia = null;
+  const mediaReporter = reporterModule.createSyncDiagnosticReporter({
+    now: () => Date.parse(now),
+    setTimeout: () => ({ unref() {} }),
+    clearTimeout: () => {},
+    getBindings: () => [{ token: 'active-binding' }],
+    saveOutbox: async value => { persistedMedia = value; },
+    postEvents: async events => ({ acceptedEventIds: events.map(item => item.eventId) }),
+  });
+  mediaReporter.enqueue(mediaQueuedEvent, { token: 'active-binding' });
+  await mediaReporter.whenIdle();
+  const persistedMediaReport = JSON.parse(persistedMedia[0].event.technicalReport.text);
+  assert.equal(persistedMediaReport.failure.mediaResolutionDiagnostic.targetIdState, 'missing');
+  assert.equal(persistedMediaReport.failure.mediaResolutionDiagnostic.resolverVersion, 'unknown');
+  mediaReporter.dispose();
+  const sourceBuilder = createDouyinMediaResolutionDiagnosticBuilder({
+    getTransportErrorDiagnostic: error => ({ code: error.code, message: 'resolver failed [URL REDACTED]' }),
+  });
+  const sourceDiagnostic = sourceBuilder({
+    sourceUrl: 'https://v.douyin.com/fixture/',
+    resolvedUrl: 'https://www.douyin.com/video/1234567890123456789',
+    resolverVersion: '2026.10.05',
+    stages: [{
+      stage: 'local-resolver',
+      resolverVersion: '2026.10.05',
+      attempted: true,
+      ok: false,
+      error: Object.assign(new Error('resolver failed'), { code: 'DOUYIN_RESOLVER_FAILED' }),
+    }],
+  });
+  const sanitizedSourceDiagnostic = douyinDiagnostic.sanitize({
+    ...sourceDiagnostic,
+    outcome: 'failed',
+    sourceKind: 'shortlink',
+    resolvedKind: 'home',
+    targetIdState: 'missing',
+    targetIdRecognized: false,
+    targetStageEligible: false,
+    failureCode: 'DOUYIN_RESOLVER_FAILED',
+    debuggerCapability: 'not-eligible',
+    debuggerReason: 'target-id-missing',
+  });
+  plugin.queueSyncDiagnosticEvent = eventValue => { mediaQueuedEvent = eventValue; return { queued: true }; };
+  const versionedQueueResult = plugin.queueSyncDiagnosticFailure({
+    recordId: 'record-versioned', attemptId: 'attempt-versioned', diagnosticId: 'diag-versioned',
+    binding: { token },
+    error: Object.assign(new Error('versioned media failure'), { code: 'DOUYIN_RESOLVER_FAILED', diagnostic: sanitizedSourceDiagnostic }),
+    stage: 'fetching', retryCount: 0,
+  });
+  assert.equal(versionedQueueResult.queued, true);
+  const versionedMedia = JSON.parse(mediaQueuedEvent.technicalReport.text);
+  assert.equal(versionedMedia.failure.mediaResolutionDiagnostic.resolverVersion, '2026.10.05');
+  assert.equal(versionedMedia.failure.mediaResolutionDiagnostic.stages[0].resolverVersion, '2026.10.05');
+  assert.equal(versionedMedia.failure.mediaResolutionDiagnostic.stages[0].error.message, 'resolver failed [URL REDACTED]');
+  const normalizedVersioned = JSON.parse(reporterModule.normalizeDiagnosticEvent(mediaQueuedEvent, { now }).technicalReport.text);
+  assert.equal(normalizedVersioned.failure.mediaResolutionDiagnostic.resolverVersion, '2026.10.05');
+  assert.equal(normalizedVersioned.failure.mediaResolutionDiagnostic.stages[0].resolverVersion, '2026.10.05');
+  const oversizedMediaStages = Array.from({ length: 24 }, (_, index) => ({
+    stage: 'local-resolver-' + index, resolverVersion: '2026.10.06', attempted: true, ok: false,
+    error: { code: 'DOUYIN_RESOLVER_FAILED', exitCode: null, message: index === 23 ? ('resolver detail '.repeat(80) + '\npassword=fixture-secret') : 'short' },
+  }));
+  const truncationBuilder = createDouyinMediaResolutionDiagnosticBuilder({
+    getTransportErrorDiagnostic: error => ({ code: error.code, message: error.message }),
+  });
+  const builtMediaDiagnostic = truncationBuilder({
+    sourceUrl: 'https://v.douyin.com/fixture/',
+    resolvedUrl: 'https://www.douyin.com/video/1234567890123456789',
+    resolverVersion: '2026.10.06', stages: oversizedMediaStages,
+  });
+  const sanitizedMediaDiagnostic = douyinDiagnostic.sanitize({
+    ...builtMediaDiagnostic, outcome: 'failed', sourceKind: 'shortlink', resolvedKind: 'home',
+    targetIdState: 'missing', targetIdRecognized: false, targetStageEligible: false,
+    failureCode: 'DOUYIN_RESOLVER_FAILED', debuggerCapability: 'not-eligible', debuggerReason: 'target-id-missing',
+  });
+  assert.equal(sanitizedMediaDiagnostic.stagesOmittedCount, 12);
+  assert.equal(sanitizedMediaDiagnostic.truncated, true);
+  const oversizedMediaReport = report.buildFailureTechnicalReport({
+    error: Object.assign(new Error('media diagnostic truncation'), { diagnostic: sanitizedMediaDiagnostic }),
+    recordId: 'record-truncated-media', attemptId: 'attempt-truncated-media', now,
+  });
+  const oversizedMedia = JSON.parse(oversizedMediaReport.text);
+  const oversizedMediaDiagnostic = oversizedMedia.failure.mediaResolutionDiagnostic;
+  assert.equal(oversizedMediaReport.truncated, true);
+  assert.equal(oversizedMedia.truncated, true);
+  assert.equal(oversizedMediaDiagnostic.truncated, true);
+  assert.equal(oversizedMediaDiagnostic.stagesOmittedCount, 12);
+  assert.ok(oversizedMediaDiagnostic.messageOmittedBytes > 0);
+  assert.equal(oversizedMediaDiagnostic.resolverVersion, '2026.10.06');
+  assert.equal(oversizedMediaDiagnostic.stages.at(-1).error.exitCode, undefined);
+  assert.ok(!oversizedMediaReport.text.includes('fixture-secret'));
   console.log('PASS: attempt-bound technical reports, stop attribution, redaction, stale exclusion, UTF-8 cap, durable outbox, explicit ACK, and main wiring');
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

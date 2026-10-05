@@ -235,45 +235,237 @@ function getCrashAssociation(session, pid, capturedAt) {
     pidReuseRisk: !sameAttempt,
   };
 }
-function readMatchingCrashSummary(session, { directory = path.join(os.homedir(), 'Library', 'Logs', 'DiagnosticReports'), fileSystem = fs } = {}) {
-  if (!session || session.platform !== 'darwin' || !session.startedAt || !session.finishedAt) return '[unavailable: no matching Mac run]';
-  const pids = (session.attempts || []).flatMap(a => a.nativePids || []).map(Number).filter(n => n > 0);
-  if (!pids.length) return '[unavailable: native pid not recorded]';
+const CRASH_REPORT_MAX_FILE_BYTES = 8 * 1024 * 1024;
+const CRASH_REPORT_MAX_TOTAL_READ_BYTES = 16 * 1024 * 1024;
+const CRASH_REPORT_BUDGET_UNAVAILABLE = '[unavailable: crash report read budget exceeded]';
+const CRASH_REPORT_NAME_PATTERN = /^(?:whisper(?:-cli|-cpp)?|main)[-_].*\.(?:ips|crash)$/i;
+function defaultCrashReportDirectories() {
+  const userDirectory = path.join(os.homedir(), 'Library', 'Logs', 'DiagnosticReports');
+  const systemDirectory = path.join(path.parse(userDirectory).root, 'Library', 'Logs', 'DiagnosticReports');
+  return [...new Set([userDirectory, systemDirectory])];
+}
+function readCompleteCrashReport(file, stat, fileSystem) {
+  const size = Number(stat && stat.size);
+  if (!Number.isSafeInteger(size) || size < 0 || size > CRASH_REPORT_MAX_FILE_BYTES) {
+    return { status: 'budget' };
+  }
+  let fd;
   try {
-    const start = Date.parse(session.startedAt) - 5000; const end = Date.parse(session.finishedAt) + 300000;
-    const entries = fileSystem.readdirSync(directory).filter(n => /^(?:whisper(?:-cli|-cpp)?|main)[-_].*\.(?:ips|crash)$/i.test(n)).slice(-100);
-    for (const name of entries.reverse()) {
-      const file = path.join(directory, name); const stat = fileSystem.lstatSync(file);
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.mtimeMs < start || stat.mtimeMs > end || stat.size > 1024 * 1024) continue;
-      const text = boundedRead(file, 1024 * 1024, fileSystem);
-      if (name.endsWith('.ips')) {
-        let report; try { report = JSON.parse(text); } catch (_) { try { report = JSON.parse(text.slice(text.indexOf('\n') + 1)); } catch (_) { continue; } }
-        if (!pids.includes(Number(report.pid)) || !/^whisper(?:-cli|-cpp)?$/.test(report.procName || '') && !matchesBinaryPath(report.procPath, session)) continue;
-        const captured = Date.parse(report.captureTime || '');
-        if (!Number.isFinite(captured) || captured < start || captured > end) continue;
-        const thread = report.threads?.[report.faultingThread];
-        return JSON.stringify({
-          process: report.procName,
-          pid: report.pid,
-          captureTime: new Date(captured).toISOString(),
-          associationReliability: getCrashAssociation(session, report.pid, captured),
-          exception: report.exception,
-          termination: report.termination,
-          faultingThread: report.faultingThread,
-          frames: (thread?.frames || []).slice(0, 25).map(f => ({ symbol: f.symbol, imageIndex: f.imageIndex, imageOffset: f.imageOffset })),
-        }, null, 2);
-      }
-      const proc = text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
-      if (!proc || (!/^whisper(?:-cli|-cpp)?$/.test(proc[1]) && !(proc[1] === 'main' && matchesBinaryPath(text.match(/^Path:\s+(.+)$/m)?.[1], session))) || !pids.includes(Number(proc[2]))) continue;
-      const crashTime = Date.parse(text.match(/^Date\/Time:\s+(.+)$/m)?.[1] || '');
-      if (!Number.isFinite(crashTime) || crashTime < start || crashTime > end) continue;
-      return [
-        `associationReliability=${JSON.stringify(getCrashAssociation(session, proc[2], crashTime))}`,
-        `captureTime=${new Date(crashTime).toISOString()}`,
-        ...text.split('\n').filter(line => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:|Thread \d+ Crashed:|\d+\s+\S+\s+0x)/.test(line)).slice(0, 40),
-      ].join('\n');
+    fd = fileSystem.openSync(file, 'r');
+    const bytes = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fileSystem.readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (!Number.isInteger(count) || count <= 0) return { status: 'read_failed' };
+      offset += count;
     }
-  } catch (_) { return '[unavailable: crash reports not accessible]'; }
+    return { status: 'ok', text: bytes.toString('utf8') };
+  } catch (_) {
+    return { status: 'read_failed' };
+  } finally {
+    if (fd !== undefined) {
+      try { fileSystem.closeSync(fd); } catch (_) { /* A failed close cannot change the scan result. */ }
+    }
+  }
+}
+function parseIpsCrashReport(text) {
+  const source = String(text || '');
+  const firstNewline = source.indexOf('\n');
+  const candidates = firstNewline < 0 ? [source] : [source, source.slice(firstNewline + 1)];
+  for (const candidate of candidates) {
+    try {
+      const report = JSON.parse(candidate);
+      if (report && typeof report === 'object' && !Array.isArray(report)) return report;
+    } catch (_) { /* The first line is often a metadata object; try the full body next. */ }
+  }
+  return null;
+}
+function summarizeCrashValue(value, depth = 0) {
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') return value.slice(0, 256);
+  if (!value || typeof value !== 'object' || depth >= 2) return '[truncated]';
+  if (Array.isArray(value)) return value.slice(0, 16).map(item => summarizeCrashValue(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).slice(0, 16).map(([key, item]) => [key.slice(0, 64), summarizeCrashValue(item, depth + 1)]));
+}
+function buildIpsCrashSummary(report, session, captured) {
+  const thread = Array.isArray(report.threads) ? report.threads[report.faultingThread] : null;
+  const safeNumber = value => {
+    if (value === null || value === undefined || value === '') return undefined;
+    const numeric = Number(value);
+    return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : undefined;
+  };
+  const frames = (Array.isArray(thread?.frames) ? thread.frames : [])
+    .filter(frame => frame && typeof frame === 'object' && !Array.isArray(frame))
+    .slice(0, 25)
+    .map(frame => Object.fromEntries(Object.entries({
+      symbol: typeof frame.symbol === 'string' ? frame.symbol.slice(0, 256) : undefined,
+      imageIndex: safeNumber(frame.imageIndex),
+      imageOffset: safeNumber(frame.imageOffset),
+    }).filter(([, value]) => value !== undefined)));
+  const referencedImageIndexes = [...new Set(frames.map(frame => safeNumber(frame.imageIndex)).filter(Number.isSafeInteger))].sort((left, right) => left - right);
+  const normalizeImage = (image, index) => {
+    if (!image || typeof image !== 'object' || Array.isArray(image)) return null;
+    const name = typeof image?.name === 'string'
+      ? image.name.replace(/\\/g, '/').split('/').pop().slice(0, 256)
+      : undefined;
+    const normalized = {
+      index: safeNumber(index),
+      name,
+      uuid: typeof image?.uuid === 'string' ? image.uuid.slice(0, 128) : undefined,
+      arch: typeof image?.arch === 'string' ? image.arch.slice(0, 64) : undefined,
+      base: safeNumber(image?.base),
+      size: safeNumber(image?.size),
+    };
+    return Object.fromEntries(Object.entries(normalized).filter(([, value]) => value !== undefined));
+  };
+  const usedImages = (Array.isArray(report.usedImages) ? referencedImageIndexes : [])
+    .slice(0, 25)
+    .map(index => normalizeImage(report.usedImages[index], index))
+    .filter(image => image && Number.isSafeInteger(image.index));
+  return JSON.stringify({
+    process: typeof report.procName === 'string' ? report.procName.slice(0, 64) : undefined,
+    pid: safeNumber(report.pid),
+    captureTime: new Date(captured).toISOString(),
+    associationReliability: getCrashAssociation(session, report.pid, captured),
+    exception: summarizeCrashValue(report.exception),
+    termination: summarizeCrashValue(report.termination),
+    faultingThread: safeNumber(report.faultingThread),
+    frames,
+    usedImages,
+  }, null, 2);
+}
+function buildTextCrashSummary(text, session, pid, crashTime) {
+  const lines = String(text || '').split('\n');
+  const headers = lines.filter(line => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:)/.test(line)).slice(0, 8).map(line => line.slice(0, 512));
+  const crashedThreadLine = lines.find(line => /^Crashed Thread:\s+\d+/.test(line));
+  const crashedThreadHeader = lines.find(line => /^Thread\s+\d+\s+Crashed\s*:/.test(line));
+  const crashedThread = Number((crashedThreadLine || crashedThreadHeader)?.match(/\d+/)?.[0]);
+  let threadHeader = '';
+  let inCrashedThread = false;
+  const frames = [];
+  for (const line of lines) {
+    const thread = line.match(/^Thread\s+(\d+)(?:\s+Crashed)?\s*:/);
+    if (thread) {
+      const markedCrashed = /\s+Crashed\s*::?/.test(line);
+      if (!inCrashedThread && ((Number.isFinite(crashedThread) && Number(thread[1]) === crashedThread) || (!Number.isFinite(crashedThread) && markedCrashed))) {
+        threadHeader = line.slice(0, 512);
+        inCrashedThread = true;
+      } else if (inCrashedThread) {
+        break;
+      }
+      continue;
+    }
+    if (inCrashedThread && /^\d+\s+\S+\s+0x/.test(line)) {
+      frames.push(line.slice(0, 512));
+      if (frames.length >= 25) break;
+    }
+  }
+  return [
+    'associationReliability=' + JSON.stringify(getCrashAssociation(session, pid, crashTime)),
+    'captureTime=' + new Date(crashTime).toISOString(),
+    ...headers,
+    ...(threadHeader ? [threadHeader] : []),
+    ...frames,
+  ].join('\n');
+}
+function readMatchingCrashSummary(session, options = {}) {
+  const { directory, directories, fileSystem = fs } = options || {};
+  if (!session || session.platform !== 'darwin' || !session.startedAt || !session.finishedAt) {
+    return '[unavailable: no matching Mac run]';
+  }
+  const startedAt = parseTimestamp(session.startedAt);
+  const finishedAt = parseTimestamp(session.finishedAt);
+  if (startedAt === null || finishedAt === null || finishedAt < startedAt) {
+    return '[unavailable: invalid Mac run time]';
+  }
+  const pids = (Array.isArray(session.attempts) ? session.attempts : [])
+    .flatMap(attempt => Array.isArray(attempt?.nativePids) ? attempt.nativePids : [])
+    .map(Number)
+    .filter(pid => Number.isSafeInteger(pid) && pid > 0);
+  if (!pids.length) return '[unavailable: native pid not recorded]';
+
+  const start = startedAt - 5000;
+  const end = finishedAt + 300000;
+  const scanDirectories = Array.isArray(directories)
+    ? directories
+    : directory !== undefined
+      ? [directory]
+      : defaultCrashReportDirectories();
+  const candidates = [];
+  let accessibleDirectory = false;
+  let unreadableCandidate = false;
+  for (const scanDirectory of scanDirectories) {
+    let entries;
+    try {
+      entries = fileSystem.readdirSync(scanDirectory);
+      accessibleDirectory = true;
+    } catch (_) {
+      continue;
+    }
+    for (const name of (Array.isArray(entries) ? entries : [])) {
+      if (typeof name !== 'string' || !CRASH_REPORT_NAME_PATTERN.test(name)) continue;
+      const file = path.join(scanDirectory, name);
+      let stat;
+      try {
+        stat = fileSystem.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+      } catch (_) {
+        unreadableCandidate = true;
+        continue;
+      }
+      const modifiedAt = Number(stat.mtimeMs);
+      if (!Number.isFinite(modifiedAt) || modifiedAt < start || modifiedAt > end) continue;
+      candidates.push({ file, name, stat, modifiedAt });
+    }
+  }
+  candidates.sort((left, right) => right.modifiedAt - left.modifiedAt || left.name.localeCompare(right.name));
+
+  let totalReadBytes = 0;
+  let budgetExceeded = false;
+  for (const candidate of candidates) {
+    const size = Number(candidate.stat.size);
+    if (!Number.isSafeInteger(size) || size < 0 || size > CRASH_REPORT_MAX_FILE_BYTES
+      || totalReadBytes + size > CRASH_REPORT_MAX_TOTAL_READ_BYTES) {
+      budgetExceeded = true;
+      continue;
+    }
+    totalReadBytes += size;
+    const result = readCompleteCrashReport(candidate.file, candidate.stat, fileSystem);
+    if (result.status === 'budget') {
+      budgetExceeded = true;
+      continue;
+    }
+    if (result.status !== 'ok') {
+      unreadableCandidate = true;
+      continue;
+    }
+
+    if (/\.ips$/i.test(candidate.name)) {
+      const report = parseIpsCrashReport(result.text);
+      if (!report) continue;
+      const processName = String(report.procName || '');
+      const processMatched = /^whisper(?:-cli|-cpp)?$/.test(processName)
+        || matchesBinaryPath(report.procPath, session);
+      if (!pids.includes(Number(report.pid)) || !processMatched) continue;
+      const captured = parseTimestamp(report.captureTime);
+      if (captured === null || captured < start || captured > end) continue;
+      return buildIpsCrashSummary(report, session, captured);
+    }
+
+    const proc = result.text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
+    const processMatched = proc && (
+      /^whisper(?:-cli|-cpp)?$/.test(proc[1])
+      || (proc[1] === 'main' && matchesBinaryPath(result.text.match(/^Path:\s+(.+)$/m)?.[1], session))
+    );
+    if (!proc || !processMatched || !pids.includes(Number(proc[2]))) continue;
+    const crashTime = parseTimestamp(result.text.match(/^Date\/Time:\s+(.+)$/m)?.[1]);
+    if (crashTime === null || crashTime < start || crashTime > end) continue;
+    return buildTextCrashSummary(result.text, session, proc[2], crashTime);
+  }
+  if (budgetExceeded) return CRASH_REPORT_BUDGET_UNAVAILABLE;
+  if (unreadableCandidate) return '[unavailable: crash report candidate unreadable]';
+  if (!accessibleDirectory) return '[unavailable: crash reports not accessible]';
   return '[unavailable: no report matching time and native pid]';
 }
 function saveSession(root, session, settings) {
@@ -303,7 +495,7 @@ function detailedDiagnostic(root, settings = {}, currentTask = null) {
   ];
   return diagnosticRedact(sections.join('\n'), settings);
 }
-module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
+module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary, CRASH_REPORT_MAX_FILE_BYTES, CRASH_REPORT_MAX_TOTAL_READ_BYTES };
 
 // Only migrate the exact managed 1.3.140 script, preserving a versioned backup.
 function ensureManagedMacScript(root, installerSource) {
