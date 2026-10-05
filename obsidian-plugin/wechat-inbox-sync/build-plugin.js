@@ -17,6 +17,14 @@ const PDFJS_MODULE_PATH = path.join(
   'build',
   'pdf.mjs',
 );
+const PDFJS_WORKER_MODULE_PATH = path.join(
+  PLUGIN_ROOT,
+  'node_modules',
+  'pdfjs-dist',
+  'legacy',
+  'build',
+  'pdf.worker.mjs',
+);
 const OPENCC_PACKAGE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'opencc-js', 'package.json');
 const OPENCC_LICENSE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'opencc-js', 'LICENSE');
 const OPENCC_APACHE_LICENSE_PATH = path.join(PLUGIN_ROOT, 'node_modules', 'opencc-js', 'LICENSES', 'Apache-2.0.txt');
@@ -56,9 +64,46 @@ function getOpenCCLicenseBanner() {
 
 function getPdfJsDataUrl() {
   const pdfJsSource = fs.readFileSync(PDFJS_MODULE_PATH, 'utf8');
-  const browserRuntimeSource = [
-    'const process = undefined;',
+  const isolatedPdfJsSource = replaceExactlyOnce(
     pdfJsSource,
+    '__webpack_exports__ = globalThis.pdfjsLib = await (globalThis.pdfjsLibPromise = __webpack_exports__);',
+    '__webpack_exports__ = await Promise.resolve(__webpack_exports__);',
+    'PDF.js library global export',
+  );
+  const isolatedPdfJsRuntime = replaceExactlyOnce(
+    isolatedPdfJsSource,
+    'return globalThis.pdfjsWorker?.WorkerMessageHandler || null;',
+    'return null;',
+    'PDF.js global worker lookup',
+  );
+  const browserRuntimeSource = [
+    '/* WeChat Inbox Sync adaptation: browser runtime, module-scoped exports, and isolated worker lookup. */',
+    'const process = undefined;',
+    isolatedPdfJsRuntime,
+  ].join('\n');
+  return `data:text/javascript;base64,${Buffer.from(browserRuntimeSource, 'utf8').toString('base64')}`;
+}
+
+function replaceExactlyOnce(source, search, replacement, label) {
+  const firstIndex = source.indexOf(search);
+  if (firstIndex < 0 || source.indexOf(search, firstIndex + search.length) >= 0) {
+    throw new Error(`PDF.js ${label} anchor changed; refusing an unsafe worker bundle`);
+  }
+  return `${source.slice(0, firstIndex)}${replacement}${source.slice(firstIndex + search.length)}`;
+}
+
+function getPdfJsWorkerDataUrl() {
+  const workerSource = fs.readFileSync(PDFJS_WORKER_MODULE_PATH, 'utf8');
+  const isolatedWorkerSource = replaceExactlyOnce(
+    workerSource,
+    'var __webpack_exports__ = globalThis.pdfjsWorker = {};',
+    'var __webpack_exports__ = {};',
+    'PDF.js worker global export',
+  );
+  const browserRuntimeSource = [
+    '/* WeChat Inbox Sync adaptation: browser runtime and module-scoped worker export. */',
+    'const process = undefined;',
+    isolatedWorkerSource,
   ].join('\n');
   return `data:text/javascript;base64,${Buffer.from(browserRuntimeSource, 'utf8').toString('base64')}`;
 }
@@ -131,6 +176,7 @@ function getPluginBuildBytes({
     charset: 'utf8',
     define: {
       __WECHAT_INBOX_PDFJS_DATA_URL__: JSON.stringify(getPdfJsDataUrl()),
+      __WECHAT_INBOX_PDFJS_WORKER_DATA_URL__: JSON.stringify(getPdfJsWorkerDataUrl()),
     },
     entryPoints: [sourcePath],
     external: ['obsidian'],

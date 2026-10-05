@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -206,6 +207,8 @@ async function run() {
     'raw source must remain loadable before the build replaces the PDF.js token',
   );
   assert.ok(sourceMain.includes('import(PDFJS_MODULE_DATA_URL)'));
+  assert.ok(sourceMain.includes('PDFJS_WORKER_DATA_URL'));
+  assert.ok(sourceMain.includes('pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_DATA_URL'));
   assert.ok(sourceMain.includes('await extractPdfMarkdownWithFallback(nodeBuffer'));
   assert.ok(sourceMain.includes('loadPdfJs: loadPdfJsLibrary'));
   assert.ok(sourceMain.includes('renderPdfPageForLocalOcr'));
@@ -223,17 +226,36 @@ async function run() {
   assert.ok(bundledMain.includes('Apache License'));
   assert.ok(bundledMain.includes('data:text/javascript;base64,'));
 
-  const bundledDataUrlMatch = bundledMain.match(
-    /var PDFJS_MODULE_DATA_URL = (?:true \? )?"(data:text\/javascript;base64,[A-Za-z0-9+/=]+)"(?: : "")?;/,
+  const rendererFixturePath = path.join(repoRoot, 'tests', 'fixtures', 'pdfjs-electron-renderer-smoke.js');
+  const rendererPdf = createValidPdfWithQuoteOperator('Renderer worker recovers this PDF.');
+  const rendererArgs = [
+    rendererFixturePath,
+    path.join(repoRoot, 'obsidian-plugin', 'wechat-inbox-sync', 'main.js'),
+    rendererPdf.toString('base64'),
+  ];
+  const baselineProbe = spawnSync(
+    process.execPath,
+    [...rendererArgs, 'baseline'],
+    { encoding: 'utf8', timeout: 30000, windowsHide: true },
   );
-  assert.ok(bundledDataUrlMatch, 'built plugin must contain the self-contained PDF.js module');
-  const bundledPdfJs = await import(bundledDataUrlMatch[1]);
-  const bundledPdfResult = await helpers.extractPdfMarkdownWithFallback(
-    createValidPdfWithQuoteOperator('Bundled PDF.js recovers this complete sentence.'),
-    { pdfjsLib: bundledPdfJs },
+  assert.ifError(baselineProbe.error);
+  assert.strictEqual(baselineProbe.status, 1, 'renderer baseline must fail with an ordinary PDF.js error');
+  assert.ok(baselineProbe.stderr.includes('GlobalWorkerOptions.workerSrc'), 'baseline must fail because workerSrc is unset');
+  const rendererProbe = spawnSync(
+    process.execPath,
+    [...rendererArgs, 'candidate'],
+    { encoding: 'utf8', timeout: 30000, windowsHide: true },
   );
-  assert.strictEqual(bundledPdfResult.provider, 'pdfjs-text-layer');
-  assert.ok(bundledPdfResult.markdown.includes('Bundled PDF.js recovers'));
+  assert.strictEqual(
+    rendererProbe.status,
+    0,
+    `cold Electron-renderer PDF.js probe failed: ${rendererProbe.stderr || rendererProbe.error || rendererProbe.stdout}`,
+  );
+  assert.deepStrictEqual(JSON.parse(rendererProbe.stdout), {
+    ok: true,
+    renderer: 'electron-test',
+    embeddedWorker: true,
+  });
 
   console.log('plugin PDF stability tests passed');
 }

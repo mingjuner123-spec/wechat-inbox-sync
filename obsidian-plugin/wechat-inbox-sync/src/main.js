@@ -223,6 +223,7 @@ const {
   getLocalDouyinResolverRoot,
   buildNetscapeCookieFile,
   extractLocalDouyinResolverMediaUrls,
+  extractLocalDouyinResolverMetadata,
 } = require('./local-douyin-resolver-utils');
 const { createDouyinMediaHelpers } = require('./douyin-media-utils');
 const {
@@ -256,10 +257,19 @@ const {
 const PDFJS_MODULE_DATA_URL = typeof __WECHAT_INBOX_PDFJS_DATA_URL__ === 'string'
   ? __WECHAT_INBOX_PDFJS_DATA_URL__
   : '';
+const PDFJS_WORKER_DATA_URL = typeof __WECHAT_INBOX_PDFJS_WORKER_DATA_URL__ === 'string'
+  ? __WECHAT_INBOX_PDFJS_WORKER_DATA_URL__
+  : '';
 let cachedPdfJsLibraryPromise = null;
 async function loadPdfJsLibrary() {
   if (!cachedPdfJsLibraryPromise) {
-    cachedPdfJsLibraryPromise = import(PDFJS_MODULE_DATA_URL);
+    cachedPdfJsLibraryPromise = import(PDFJS_MODULE_DATA_URL).then((pdfjsLib) => {
+      if (!PDFJS_WORKER_DATA_URL) {
+        throw new Error('Bundled PDF.js worker is unavailable');
+      }
+      pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_DATA_URL;
+      return pdfjsLib;
+    });
   }
   return cachedPdfJsLibraryPromise;
 }
@@ -271,7 +281,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.178';
+const PLUGIN_RUNTIME_VERSION = '1.3.179';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -4661,6 +4671,65 @@ const buildDouyinStructuredContent = createDouyinStructuredContentBuilder({
   deriveTitle: deriveDouyinTitleFromDescription,
   normalizeUrl: normalizeExtractedUrl,
 });
+
+function mergeDouyinResolverMetadata(structuredContent = {}, resolverMetadata = {}) {
+  const current = structuredContent && typeof structuredContent === 'object' ? structuredContent : {};
+  const local = resolverMetadata && typeof resolverMetadata === 'object' ? resolverMetadata : {};
+  const currentDescription = String(current.description || '').trim();
+  const localDescription = String(local.description || '').trim();
+  const description = currentDescription.length >= localDescription.length ? currentDescription : localDescription;
+  const currentTags = Array.isArray(current.tags) ? current.tags.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  const localTags = Array.isArray(local.tags) ? local.tags.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  const tags = Array.from(new Set([...currentTags, ...localTags])).slice(0, 64);
+  const currentMetrics = current.socialMetrics && typeof current.socialMetrics === 'object' ? current.socialMetrics : {};
+  const localMetrics = local.counts && typeof local.counts === 'object' ? local.counts : {};
+  const metrics = { ...localMetrics, ...currentMetrics };
+  const currentTitle = String(current.title || '').trim();
+  const localTitle = String(local.title || '').trim();
+  const title = currentTitle && !isGenericDouyinTitle(currentTitle) ? currentTitle : localTitle || currentTitle;
+  const coverUrl = String(current.coverUrl || '').trim() || String(local.thumbnail || '').trim();
+  const author = String(current.author || '').trim() || String(local.uploader || '').trim();
+  const detail = {
+    title,
+    desc: description,
+    text_extra: localTags.map((tag) => ({ hashtag_name: tag })),
+    author: author ? { nickname: author } : undefined,
+    statistics: metrics,
+    video: coverUrl ? { origin_cover: { url_list: [coverUrl] } } : undefined,
+  };
+  const merged = buildDouyinStructuredContent(detail, {
+    title,
+    description,
+    tags,
+    coverUrl,
+    author,
+    socialMetrics: metrics,
+  });
+  return {
+    ...merged,
+    ...(Object.keys(local).length ? { sourceMetadata: 'douyin-local-resolver' } : {}),
+  };
+}
+
+function mergeDouyinResolverSupplementalMarkdown(existingMarkdown = '', structuredContent = {}) {
+  const existing = String(existingMarkdown || '').trim();
+  const generated = buildSocialMediaSupplementalMarkdown({
+    title: structuredContent.title,
+    description: structuredContent.description,
+    tags: structuredContent.tags,
+    imageUrls: [structuredContent.coverUrl].filter(Boolean),
+  });
+  if (!existing) return generated;
+  if (!generated) return existing;
+  const headings = new Set(
+    (existing.match(/^##\s+.+$/gm) || []).map((line) => line.trim()),
+  );
+  const missingSections = generated
+    .split(/(?=^##\s+)/m)
+    .map((section) => section.trim())
+    .filter((section) => section && !headings.has((section.match(/^##\s+.+$/m) || [section])[0].trim()));
+  return [existing, ...missingSections].filter(Boolean).join('\n\n').trim();
+}
 
 function shouldResolveMediaDownloadUrl(url) {
   const text = String(url || '').toLowerCase();
@@ -9193,6 +9262,7 @@ function normalizeWechatChannelsFeedPayload(payload) {
     || data.description || data.desc
     || '',
   );
+  const socialMetrics = buildSocialMetrics(root);
   const mediaCandidates = getWechatChannelsMediaCandidates(root);
   const mediaUrls = mediaCandidates.map((candidate) => candidate.url);
   const firstMedia = mediaCandidates[0] || {};
@@ -9214,6 +9284,7 @@ function normalizeWechatChannelsFeedPayload(payload) {
     videoUrl,
     mediaUrls,
     mediaItems: mediaCandidates,
+    socialMetrics,
     decodeKey,
     dynamicExportId: String(sceneInfo.dynamicExportId || sceneInfo.dynamic_export_id || objectInfo.id || objectInfo.exportId || ''),
     errMsg: String(errMsg.title || errMsg.content || root.errMsg || '').trim(),
@@ -16750,6 +16821,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       new Notice('已捕获视频号媒体，开始转写...');
       const now = new Date().toISOString();
       const title = profile.title || buildWechatChannelsTitle(profile.description || '', '视频号口播文案');
+      const feedTags = Array.isArray(profile.tags)
+        ? profile.tags.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+      const feedSocialMetrics = profile.socialMetrics && typeof profile.socialMetrics === 'object'
+        ? profile.socialMetrics
+        : {};
+      const feedMarkdown = buildWechatChannelsSourceMarkdown({
+        title,
+        description: profile.description || '',
+        tags: feedTags,
+        coverUrl: profile.coverUrl || (mediaItems[0] && mediaItems[0].coverUrl) || '',
+      });
       const record = {
         _id: `wechat-channels-local-${crypto.createHash('sha256').update(captureKey).digest('hex').slice(0, 24)}`,
         type: 'webpage',
@@ -16764,6 +16847,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           webpageMediaType: 'audio_video',
           transcriptOnly: true,
           coverUrl: profile.coverUrl || (mediaItems[0] && mediaItems[0].coverUrl) || '',
+          ...(profile.description ? { description: profile.description } : {}),
+          ...(feedTags.length ? { keywords: feedTags } : {}),
           dynamicExportId: profile.dynamicExportId || '',
           wechatChannelsDecodeKey: decryptKey,
           wechatChannelsEncryptedMedia: Boolean(decryptKey),
@@ -16779,6 +16864,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         source: 'wechat-channels-local-capture',
         binding: activeBinding,
         title,
+        sourceTitle: title,
+        markdown: feedMarkdown,
+        socialMetrics: feedSocialMetrics,
         noMediaError: '监听窗口未捕获到可转写的视频号媒体资源',
       });
       const metadata = transcribedRecord.metadata || {};
@@ -19795,7 +19883,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   getInstalledLocalDouyinResolver() {
     const status = this.getLocalDouyinResolverInstallStatus();
-    return status.ready ? { executablePath: status.executablePath, platform: this.getConfiguredLocalAsrPlatform() } : null;
+    return status.ready ? { executablePath: status.executablePath, platform: this.getConfiguredLocalAsrPlatform(), version: status.version || 'unknown' } : null;
   }
 
   getLocalDouyinResolverInstallDiagnostic() {
@@ -19910,8 +19998,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     throw lastError;
   }
 
-  async resolveDouyinMediaWithLocalResolver(pageUrl) {
-    const result = { mediaUrls: [], used: false, loginRequired: false, notInstalled: false, error: null };
+  async resolveDouyinMediaWithLocalResolver(pageUrl, expectedAwemeId = '') {
+    const result = { mediaUrls: [], used: false, loginRequired: false, notInstalled: false, error: null, resolverVersion: 'unknown' };
     let cookiePath = '';
     try {
       const resolver = this.getInstalledLocalDouyinResolver();
@@ -19920,6 +20008,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         result.error = '抖音增强解析组件未安装';
         return result;
       }
+      result.resolverVersion = String(resolver.version || 'unknown');
       const cookies = await getDouyinCookies();
       cookiePath = getLocalDouyinResolverCookiePath(path.dirname(resolver.executablePath));
       fs.writeFileSync(cookiePath, buildNetscapeCookieFile(cookies), { mode: 0o600 });
@@ -19933,6 +20022,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         String(pageUrl || ''),
       ]);
       result.mediaUrls = extractLocalDouyinResolverMediaUrls(output);
+      const expectedTargetId = String(expectedAwemeId || extractDouyinAwemeId(pageUrl) || '').trim();
+      const resolved = extractLocalDouyinResolverMetadata(output, expectedTargetId);
+      result.targetId = resolved.targetId || '';
+      result.identityOutcome = resolved.identityOutcome || 'unknown';
+      if (result.identityOutcome === 'target-id-mismatch') {
+        result.mediaUrls = [];
+        result.code = 'DOUYIN_TARGET_ID_MISMATCH';
+        result.error = '本地解析组件返回了与当前作品不一致的媒体结果';
+      }
+      result.metadata = result.identityOutcome === 'target-id-matched' ? resolved.metadata : {};
       result.used = result.mediaUrls.length > 0;
       if (!result.used) result.error = '本地解析组件未返回可用媒体地址';
     } catch (error) {
@@ -23505,10 +23604,12 @@ class WechatObsidianInboxPlugin extends Plugin {
               inputKind: localResolverInputUrl === url ? 'original-page' : 'resolved-page',
               sourceKind: getDouyinDiagnosticUrlKind('', url),
               resolvedKind: getDouyinDiagnosticUrlKind('', localResolverInputUrl),
+              resolverVersion: 'unknown',
               startedAt: Date.now(),
             };
             try {
-              const localResolution = await this.resolveDouyinMediaWithLocalResolver(localResolverInputUrl);
+              const localResolution = await this.resolveDouyinMediaWithLocalResolver(localResolverInputUrl, douyinAwemeId);
+              localResolverStage.resolverVersion = String(localResolution && localResolution.resolverVersion || 'unknown');
               const localUrls = Array.isArray(localResolution && localResolution.mediaUrls)
                 ? localResolution.mediaUrls
                 : [];
@@ -23520,7 +23621,12 @@ class WechatObsidianInboxPlugin extends Plugin {
                 hasPreciseDouyinMedia = true;
                 douyinSelectedStage = douyinSelectedStage || localResolverStage.stage;
                 localResolverStage.ok = true;
-                localResolverStage.identityOutcome = 'plugin-session-cookie';
+                localResolverStage.identityOutcome = localResolution.identityOutcome || 'target-id-matched';
+                if (localResolution.metadata && Object.keys(localResolution.metadata).length) {
+                  douyinStructuredContent = mergeDouyinResolverMetadata(douyinStructuredContent || {}, localResolution.metadata);
+                  if (hasSocialMetrics(douyinStructuredContent.socialMetrics)) douyinSocialMetrics = douyinStructuredContent.socialMetrics;
+                  socialMediaSupplementalMarkdown = mergeDouyinResolverSupplementalMarkdown(socialMediaSupplementalMarkdown, douyinStructuredContent);
+                }
               } else {
                 douyinLocalResolverLoginRequired = Boolean(localResolution && localResolution.loginRequired);
                 douyinLocalResolverNotInstalled = Boolean(localResolution && localResolution.notInstalled);
@@ -23582,6 +23688,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             finalOutcome: hasUsableDouyinMedia
               ? 'media-selected'
               : (douyinLocalResolverLoginRequired ? 'login-required' : (douyinLocalResolverNotInstalled ? 'resolver-not-installed' : (douyinChallengeDetected ? 'douyin-challenge' : 'no-target-bound-media'))),
+            resolverVersion: (douyinResolutionStages.find(stage => stage && stage.resolverVersion) || {}).resolverVersion || 'unknown',
             saveOriginalMediaEnabled: this.settings.saveOriginalMediaEnabled === true,
             pluginDouyinLogin: hasPluginDouyinLogin,
             challengeDetected: douyinChallengeDetected,
@@ -23972,6 +24079,15 @@ class WechatObsidianInboxPlugin extends Plugin {
           const supplementalMarkdownParts = isXiaohongshuUrl(url)
             ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown)
             : { markdown: selectedSupplementalMarkdown, trailingMarkdown: '' };
+          const hasDouyinResolverMetadata = !isXiaohongshuUrl(url) && douyinStructuredContent && douyinStructuredContent.sourceMetadata === 'douyin-local-resolver';
+          const douyinMetadata = hasDouyinResolverMetadata ? {
+            ...metadata,
+            description: metadata.description || douyinStructuredContent.description || '',
+            keywords: getRecordKeywords(metadata).length ? getRecordKeywords(metadata) : (Array.isArray(douyinStructuredContent.tags) ? douyinStructuredContent.tags : []),
+            coverUrl: metadata.coverUrl || douyinStructuredContent.coverUrl || '',
+            author: metadata.author || douyinStructuredContent.author || '',
+            aiMetadataSource: metadata.aiMetadataSource || 'douyin-local-resolver',
+          } : metadata;
           const douyinAuthor = !isXiaohongshuUrl(url)
             && douyinStructuredContent
             && typeof douyinStructuredContent.author === 'string'
@@ -23979,8 +24095,8 @@ class WechatObsidianInboxPlugin extends Plugin {
             : '';
           const mediaRecord = xiaohongshuCommentResult
             ? { ...record, metadata: { ...metadata, xiaohongshuCommentResult } }
-            : douyinAuthor
-              ? { ...record, metadata: { ...metadata, author: metadata.author || douyinAuthor } }
+            : (hasDouyinResolverMetadata || douyinAuthor)
+              ? { ...record, metadata: { ...douyinMetadata, author: douyinMetadata.author || douyinAuthor } }
               : record;
           return await this.buildTranscriptRecordFromMedia(mediaRecord, {
             url,
@@ -26769,6 +26885,8 @@ WechatObsidianInboxPlugin.__test = {
   fetchDouyinMediaResolutionWithSession,
   fetchDouyinMediaUrlsWithSession,
   buildDouyinStructuredContent,
+  mergeDouyinResolverMetadata,
+  mergeDouyinResolverSupplementalMarkdown,
   isUnavailableXiaohongshuPage,
   normalizeBrowserCapturedMediaUrls,
   shouldBlockExternalAppUrl,
