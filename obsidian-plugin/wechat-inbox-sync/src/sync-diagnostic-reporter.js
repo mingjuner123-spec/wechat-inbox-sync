@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { normalizeTechnicalReport, compactTechnicalReport, unavailableTechnicalReport, bytes } = require('./failure-technical-report');
 
 // Keep this contract deliberately small. The server owns any association with
 // a canonical content identity; the plugin only reports the sync record id.
@@ -8,6 +9,8 @@ const DIAGNOSTIC_ENDPOINT = '/diagnostics/events';
 const MAX_OUTBOX_ITEMS = 100;
 const OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_BATCH_SIZE = 20;
+const MAX_BATCH_BYTES = 256 * 1024;
+const MAX_OUTBOX_BYTES = 2 * 1024 * 1024;
 const DEFAULT_RETRY_BASE_MS = 5 * 1000;
 const MAX_RETRY_DELAY_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10 * 1000;
@@ -28,6 +31,7 @@ const ALLOWED_EVENT_FIELDS = Object.freeze([
   'outcome',
   'evidenceCodes',
   'errorCode',
+  'technicalReport',
 ]);
 
 const SAFE_OUTCOMES = new Set(['failed']);
@@ -315,6 +319,10 @@ function normalizeDiagnosticEvent(input = {}, defaults = {}) {
   } else {
     event.errorType = 'NONE';
   }
+  if (Object.prototype.hasOwnProperty.call(source, 'technicalReport')) {
+    event.technicalReport = normalizeTechnicalReport(source.technicalReport)
+      || unavailableTechnicalReport('read_failed', defaults.now || Date.now());
+  }
   // Rebuild by the explicit allowlist so a caller can never smuggle message,
   // title, body, URL, path, token, stack, or internal outbox fields into JSON.
   return ALLOWED_EVENT_FIELDS.reduce((result, key) => {
@@ -358,13 +366,20 @@ function normalizeOutbox(value, { now = Date.now(), maxItems = MAX_OUTBOX_ITEMS 
     const key = `${bindingFingerprint}:${event.eventId}`;
     byId.set(key, normalized);
   }
-  return [...byId.values()]
+  const result = [...byId.values()]
     .sort((left, right) => {
       const leftTime = Date.parse(left.createdAt) || 0;
       const rightTime = Date.parse(right.createdAt) || 0;
       return leftTime - rightTime;
     })
     .slice(-Math.max(1, asFiniteInteger(maxItems, MAX_OUTBOX_ITEMS, { min: 1, max: 1000 })));
+  const size = () => bytes(JSON.stringify(result));
+  while (size() > MAX_OUTBOX_BYTES) {
+    const candidate = result.find(item => item.event.technicalReport && item.event.technicalReport.text.length > 200);
+    if (!candidate) break;
+    candidate.event.technicalReport = compactTechnicalReport(candidate.event.technicalReport, 'outbox_limit');
+  }
+  return result;
 }
 
 function getRetryDelay(uploadAttempts, retryBaseMs = DEFAULT_RETRY_BASE_MS) {
@@ -459,7 +474,7 @@ function createSyncDiagnosticReporter(options = {}) {
 
   function persistSnapshot() {
     const snapshot = currentOutbox().map((entry) => ({
-      event: { ...entry.event, evidenceCodes: [...entry.event.evidenceCodes] },
+      event: JSON.parse(JSON.stringify(entry.event)),
       bindingFingerprint: entry.bindingFingerprint,
       createdAt: entry.createdAt,
       nextAttemptAt: entry.nextAttemptAt,
@@ -569,9 +584,19 @@ function createSyncDiagnosticReporter(options = {}) {
           available.has(entry.bindingFingerprint)
           && entry.nextAttemptAt <= currentTime
         ));
-        const entries = eligible
-          .filter((entry) => entry.bindingFingerprint === bindingFingerprint)
-          .slice(0, MAX_BATCH_SIZE);
+        const entries = [];
+        let batchBytes = 13;
+        for (const entry of eligible.filter(item => item.bindingFingerprint === bindingFingerprint)) {
+          if (entries.length >= MAX_BATCH_SIZE) break;
+          let eventBytes = bytes(JSON.stringify(entry.event));
+          if (!entries.length && batchBytes + eventBytes > MAX_BATCH_BYTES && entry.event.technicalReport) {
+            entry.event.technicalReport = compactTechnicalReport(entry.event.technicalReport, 'outbox_limit');
+            eventBytes = bytes(JSON.stringify(entry.event));
+          }
+          if (batchBytes + eventBytes + (entries.length ? 1 : 0) > MAX_BATCH_BYTES) break;
+          entries.push(entry);
+          batchBytes += eventBytes + (entries.length > 1 ? 1 : 0);
+        }
         if (!entries.length) continue;
         try {
           const response = await withTimeout(
@@ -670,7 +695,7 @@ function createSyncDiagnosticReporter(options = {}) {
     dispose,
     kick: () => scheduleFlush(0),
     getOutbox: () => currentOutbox().map((entry) => ({
-      event: { ...entry.event, evidenceCodes: [...entry.event.evidenceCodes] },
+      event: JSON.parse(JSON.stringify(entry.event)),
       bindingFingerprint: entry.bindingFingerprint,
       createdAt: entry.createdAt,
       nextAttemptAt: entry.nextAttemptAt,
@@ -687,6 +712,9 @@ module.exports = {
   DIAGNOSTIC_ENDPOINT,
   DEFAULT_RETRY_BASE_MS,
   MAX_OUTBOX_ITEMS,
+  MAX_BATCH_SIZE,
+  MAX_BATCH_BYTES,
+  MAX_OUTBOX_BYTES,
   OUTBOX_TTL_MS,
   SAFE_ERROR_CODES,
   SAFE_EVIDENCE_CODES,

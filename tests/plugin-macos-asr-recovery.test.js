@@ -79,6 +79,12 @@ async function pluginIntegration() {
   plugin.getEffectiveLocalTranscriptionCommand=()=>`/bin/bash "${root}/transcribe.sh" --input {input} --output {output}`;
   plugin.setTranscriptionStopAvailable=()=>{};plugin.showSyncProgress=()=>{};
   plugin.downloadMediaToTempFile=async()=>{const file=path.join(root,'input.mp4');fs.writeFileSync(file,'fixture');return file;};
+  const stopAttribution=[];plugin.currentTranscriptionAbortRequest=(...args)=>stopAttribution.push(args);
+  assert.equal(await plugin.stopCurrentTranscription({trigger:'stop_button',trustedEvent:false}),true);
+  assert.deepEqual(stopAttribution[0],['user_stop',{trigger:'stop_button',trustedEvent:false}]);
+  stopAttribution.length=0;assert.equal(await plugin.stopCurrentTranscription({trigger:'stop_command'}),true);
+  assert.deepEqual(stopAttribution[0],['user_stop',{trigger:'stop_command',trustedEvent:null}]);
+  plugin.currentTranscriptionAbortRequest=null;
   const originalExec=cp.exec;const modes=[];
   cp.exec=(command,opts,callback)=>{modes.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{
     const log=path.join(root,'transcribe-last.log');fs.writeFileSync(log,`progressStage=transcribing\nprogressCurrent=0\nprogressTotal=1\nprogressPercent=0\nprogressPid=${1234+modes.length}\nnativeRssKiB=123\nnativeExit=${modes.length===1?139:0}\n`);
@@ -98,7 +104,7 @@ async function pluginIntegration() {
     fs.unlinkSync(path.join(root,'asr-cpu-mode.json'));
     const stopped=[];
     cp.exec=(command,opts,callback)=>{stopped.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{plugin.currentTranscriptionAbortRequest?.('user_stop');callback(Object.assign(new Error('stopped'),{code:139}),'','Segmentation fault: 11');});return {pid:1234};};
-    await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'cancelled'}), /用户已停止/);
+    await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'cancelled'}), /收到停止转写请求/);
     assert.deepEqual(stopped,['0']);
     const cancelledSession=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8'));
     assert.equal(cancelledSession.status,'cancelled');

@@ -17,6 +17,7 @@ function retainedSyncFailureDiagnostic(value, settings) {
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
+const { buildFailureTechnicalReport, unavailableTechnicalReport } = require('./failure-technical-report');
 const douyinDiagnostic = require('./douyin-diagnostic-utils');
 const { summarizeResolverAttempts, hasFeishuActivity } = require('./component-diagnostic-summary');
 const xhsDiagnostic = require('./xiaohongshu-diagnostic-utils');
@@ -270,7 +271,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.177';
+const PLUGIN_RUNTIME_VERSION = '1.3.178';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -16227,6 +16228,15 @@ class WechatObsidianInboxPlugin extends Plugin {
             : stage === 'fetching'
               ? 'fetch'
               : 'sync';
+    let asrRoot = '';
+    if (errorCode === 'TRANSCRIPTION_FAILED') {
+      try { asrRoot = this.getConfiguredLocalAsrInstallRoot(); } catch (_) { asrRoot = ''; }
+    }
+    let technicalReport;
+    try { technicalReport = buildFailureTechnicalReport({
+      error, recordId: normalizedRecordId, attemptId, stage: diagnosticStage,
+      retryCount: Number(retryCount) || 0, asrRoot, settings: this.settings,
+    }); } catch (_) { technicalReport = unavailableTechnicalReport('read_failed'); }
     return this.queueSyncDiagnosticEvent({
       diagnosticId,
       attemptId,
@@ -16237,6 +16247,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       retryCount: Number(retryCount) || 0,
       outcome: 'failed',
       evidenceCodes,
+      technicalReport,
       ...(String(sourceUrl || '').trim() ? { sourceUrl: String(sourceUrl).trim() } : {}),
     }, binding);
   }
@@ -16307,7 +16318,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.addCommand({
       id: 'stop-current-transcription',
       name: '停止当前转写',
-      callback: async () => this.stopCurrentTranscription(),
+      callback: async () => this.stopCurrentTranscription({ trigger: 'stop_command' }),
     });
 
     this.addCommand({
@@ -16338,7 +16349,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.addRibbonIcon('inbox', '同步微信收集箱', () => {
       this.syncInbox();
     });
-    this.transcriptionStopRibbon = this.addRibbonIcon('square', '暂停当前转写', () => this.stopCurrentTranscription());
+    this.transcriptionStopRibbon = this.addRibbonIcon('square', '暂停当前转写', (event) => this.stopCurrentTranscription({ trigger: 'stop_button', trustedEvent: Boolean(event && event.isTrusted) }));
     this.setTranscriptionStopAvailable(false);
 
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
@@ -17887,7 +17898,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return filePath;
   }
 
-  async stopCurrentTranscription() {
+  async stopCurrentTranscription({ trigger = 'programmatic_or_unknown', trustedEvent = null } = {}) {
     let stopped = false;
     const activeContext = this.currentTranscriptionContext && typeof this.currentTranscriptionContext === 'object'
       ? this.currentTranscriptionContext
@@ -17901,7 +17912,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       : null;
     if (this.currentTranscriptionAbortRequest) {
-      this.currentTranscriptionAbortRequest('user_stop');
+      this.currentTranscriptionAbortRequest('user_stop', { trigger: ['stop_command', 'stop_button', 'programmatic_or_unknown'].includes(trigger) ? trigger : 'programmatic_or_unknown', trustedEvent: typeof trustedEvent === 'boolean' ? trustedEvent : null });
       stopped = true;
     } else if (this.currentTranscriptionAbortController) {
       this.currentTranscriptionAbortController.abort();
@@ -20300,7 +20311,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     const session = {
       startedAt: new Date().toISOString(),
       platform,
-      recordId: options.recordId || '',
+      recordId: options.recordId || (this.currentProcessingContext && this.currentProcessingContext.recordId) || '',
+      syncAttemptId: /^[A-Za-z0-9_-]{8,128}$/.test(options.syncAttemptId || (this.currentProcessingContext && this.currentProcessingContext.attemptId) || '') ? (options.syncAttemptId || (this.currentProcessingContext && this.currentProcessingContext.attemptId)) : '',
       diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || '') ? options.diagnosticAttemptId : '',
       runtime,
       system: asrRecovery.systemIdentity(platform),
@@ -20309,17 +20321,21 @@ class WechatObsidianInboxPlugin extends Plugin {
       totalMemoryBytes: os.totalmem(),
       freeMemoryBytesBefore: os.freemem(),
       attempts: [],
-      abort: { requestedAt: null, source: null, observedAt: null },
+      abort: { requestedAt: null, source: null, trigger: 'programmatic_or_unknown', trustedEvent: null, technicalFrames: [], observedAt: null },
     };
     const progressTitle = options.title || '';
     const abortController = new AbortController();
     let ownedChild = null;
     const attemptStartedAt = new Map();
     const attemptLogBaseline = new Map();
-    const requestAbort = (source = 'unknown') => {
+    const requestAbort = (source = 'unknown', attribution = null) => {
       if (!session.abort.requestedAt) {
         session.abort.requestedAt = new Date().toISOString();
         session.abort.source = String(source || 'unknown');
+        session.abort.trigger = ['stop_command', 'stop_button', 'programmatic_or_unknown'].includes(attribution && attribution.trigger) ? attribution.trigger : 'programmatic_or_unknown';
+        session.abort.trustedEvent = typeof (attribution && attribution.trustedEvent) === 'boolean' ? attribution.trustedEvent : null;
+        const frames = String(new Error().stack || '').split(String.fromCharCode(10)).map(line => line.trim()).filter(line => /^at\s/.test(line)).slice(0, 8);
+        session.abort.technicalFrames = asrRecovery.diagnosticRedact(frames.join(String.fromCharCode(10)), this.settings).split(String.fromCharCode(10)).filter(Boolean);
       }
       abortController.abort();
       const child = ownedChild;
@@ -20339,7 +20355,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.currentTranscriptionAbortController = abortController;
     this.currentTranscriptionAbortRequest = requestAbort;
     this.currentTranscriptionContext = {
-      recordId: options.recordId || '',
+      recordId: options.recordId || (this.currentProcessingContext && this.currentProcessingContext.recordId) || '',
+      syncAttemptId: /^[A-Za-z0-9_-]{8,128}$/.test(options.syncAttemptId || (this.currentProcessingContext && this.currentProcessingContext.attemptId) || '') ? (options.syncAttemptId || (this.currentProcessingContext && this.currentProcessingContext.attemptId)) : '',
       binding: options.binding || null,
       title: progressTitle,
     };
@@ -20440,11 +20457,12 @@ class WechatObsidianInboxPlugin extends Plugin {
             session.abort.nativeCrash = logFreshness === 'fresh' && observedStage !== 'unknown' ? asrRecovery.isMacNativeCrash(error) : null;
             session.abort.nativeCrashEvidence = logFreshness === 'fresh' ? observedStage : 'unknown_stale_or_unavailable_log';
           }
-          const nativeExitMatch = attemptLog.match(/^nativeExit=(\d+)$/m);
+          const nativeExitEvidence = asrRecovery.latestNativeExitForFinalStage(attemptLog, observedStage === 'completed' ? 'unknown' : observedStage);
           const nativePidList = [...new Set([...attemptLog.matchAll(/^progressPid=(\d+)$/gm)].map(m => Number(m[1])).filter(pid => pid > 0))];
           session.attempts.push({ attempt, cpu, requestedMode: cpu ? 'cpu_compatibility' : 'default', backendObserved: 'unknown', backendObservationNote: '本机日志未确认引擎实际选择的CPU/GPU后端', status, stage: observedStage, logFreshness, at: observedAt,
             startedAt: attemptStartedAt.get(attempt) || session.startedAt, finishedAt: observedAt,
-            exitCode: error?.exitCode ?? error?.code ?? null, signal: error?.signal || '', nativeExitCode: nativeExitMatch ? Number(nativeExitMatch[1]) : null,
+            exitCode: error?.exitCode ?? error?.code ?? null, signal: error?.signal || '', nativeExitCode: nativeExitEvidence.nativeExitCode,
+            nativeExitAssociation: nativeExitEvidence.reason,
             logSnapshotAt: observedAt, error: error?.message || '',
             nativePids: nativePidList,
             peakRssKiB: Math.max(0, ...[...attemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(m => Number(m[1]))) || null,
@@ -20516,7 +20534,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isAbortError(error)) {
         if (options.signal?.aborted) throw createAbortError();
         if (session.abort.source === 'user_stop') {
-          throw createRetryableTranscriptionError('用户已停止当前转写');
+          throw createRetryableTranscriptionError('收到停止转写请求');
         }
         throw createRetryableTranscriptionError('当前转写已中止');
       }
@@ -25447,6 +25465,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           skipped.push({ recordId, reason: 'record-busy' });
           continue;
         }
+        if (this.currentProcessingContext && this.currentProcessingContext.recordId === recordId) this.currentProcessingContext.attemptId = lifecycle.attemptId || '';
         diagnosticId = createDiagnosticId({
           binding,
           syncRecordId: recordId,
