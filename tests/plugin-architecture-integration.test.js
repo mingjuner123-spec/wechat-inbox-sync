@@ -29,6 +29,7 @@ const expectedModules = [
   'feishu-image-display',
   'feishu-markdown-utils',
   'feishu-media-utils',
+  'failure-technical-report',
   'input-normalization-utils',
   'local-douyin-resolver-utils',
   'media-file-utils',
