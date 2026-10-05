@@ -74,14 +74,27 @@ function readDiagnosticLog(file) {
 }
 function diagnosticRedact(text, settings = {}) {
   const secrets = [];
-  const visit = (obj) => { if (!obj || typeof obj !== 'object') return; for (const [key, value] of Object.entries(obj)) { if (typeof value === 'string' && /token|secret|api.?key|password|authorization|cookie/i.test(key) && value) secrets.push(value); else if (typeof value === 'object') visit(value); } };
+  const visit = (obj) => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value === 'string'
+        && /token|secret|api.?key|password|authorization|cookie|binding.?code|redeem.?code|activation.?code|license.?code|openid|account.?id/i.test(key)
+        && value) secrets.push(value);
+      else if (value && typeof value === 'object') visit(value);
+    }
+  };
   visit(settings);
-  for (const secret of secrets.sort((a,b) => b.length-a.length)) text = String(text).split(secret).join('[REDACTED]');
-  return redactKnownCredentials(String(text || ''), settings)
+  let result = String(text || '');
+  for (const secret of secrets.sort((a, b) => b.length - a.length)) result = result.split(secret).join('[REDACTED]');
+  return redactKnownCredentials(result, settings)
+    .replace(/(?:\\\\|\/\/)[^\\/\s]+[\\/][^\s"'<>|)]+/g, '[LOCAL PATH REDACTED]')
+    .replace(/\\(?:Users|home)\\[^\s"'<>|)]+/g, '[LOCAL PATH REDACTED]')
+    .replace(/(["']?(?:password|passphrase|cookie|set-cookie|authorization|token|secret|api[_-]?key|bindingCode|redeemCode|activationCode|licenseCode)["']\s*:\s*["'])[^"']*(["'])/gi, '$1[REDACTED]$2')
     .replace(/https?:\/\/[^\s<>"']+/gi, '[URL REDACTED]')
-    .replace(/(?:\/Users\/|\/home\/)[^\s/"']+/g, '/Users/[USER]')
-    .replace(/[A-Z]:[\\/]+Users[\\/]+[^\s\\/"']+/gi, 'C:/Users/[USER]')
-    .replace(/((?:bindingToken|token|secret|authorization|cookie|api[_-]?key|password)\s*[=:]\s*)[^\r\n]+/gi, '$1[REDACTED]')
+    .replace(/\b[A-Z]:[\\/](?:[^\s"'<>|]+[\\/])*[^\s"'<>|]*/gi, '[LOCAL PATH REDACTED]')
+    .replace(/\/(?:Users|home)\/[^\s"'<>|)]+/g, '[LOCAL PATH REDACTED]')
+    .replace(/((?:bindingToken|bindingCode|redeemCode|activationCode|licenseCode|token|secret|authorization|cookie|api[_-]?key|password)\s*[=:]\s*)[^\r\n]*/gi, '$1[REDACTED]')
+    .replace(/(?:^|\n)(?:set-cookie|cookie)\s*:\s*[^\r\n]*/gi, '[COOKIE REDACTED]')
     .replace(/^[\t ]*\[\d\d:\d\d:[\d.,]+\s*-->[^\n]*$/gm, '[TRANSCRIPT OMITTED]')
     .replace(/^(inputPath|outputPath|tempWorkDir|command)=.*$/gm, '$1=[LOCAL PATH/COMMAND OMITTED]')
     .replace(/--- stdout ---[\s\S]*?(?=--- stderr ---|$)/g, '--- stdout ---\n[OMITTED: may contain transcript]\n');
@@ -168,6 +181,36 @@ function diagnosticLogFreshness(before, after) {
   if (before?.state === 'unavailable') return 'unavailable';
   return 'stale';
 }
+function latestNativeExitForFinalStage(text, expectedStage = '') {
+  let currentStage = '';
+  let activePid = null;
+  let activeStage = '';
+  let latest = null;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const stage = line.match(/^progressStage=([A-Za-z0-9_-]+)$/);
+    if (stage) currentStage = stage[1];
+    const pid = line.match(/^progressPid=(\d+)$/);
+    if (pid) {
+      const value = Number(pid[1]);
+      activePid = value > 0 ? value : null;
+      activeStage = activePid ? currentStage : '';
+      continue;
+    }
+    const exit = line.match(/^nativeExit=(-?\d+)$/);
+    if (exit && activePid) {
+      latest = { nativeExitCode: Number(exit[1]), nativePid: activePid, stage: activeStage };
+      activePid = null;
+      activeStage = '';
+    }
+  }
+  if (activePid) return { nativeExitCode: null, nativePid: activePid, stage: activeStage, reason: 'incomplete_native_process' };
+  if (!latest) return { nativeExitCode: null, nativePid: null, stage: '', reason: 'no_matched_native_exit' };
+  if (expectedStage && expectedStage !== 'unknown' && latest.stage !== expectedStage) {
+    return { nativeExitCode: null, nativePid: latest.nativePid, stage: latest.stage, reason: 'stage_mismatch' };
+  }
+  return { ...latest, reason: 'matched' };
+}
+
 function matchesBinaryPath(value, session) {
   return Boolean(value && session?.runtime?.binaryPathSha256 && crypto.createHash('sha256').update(String(value).trim()).digest('hex') === session.runtime.binaryPathSha256);
 }
@@ -260,7 +303,7 @@ function detailedDiagnostic(root, settings = {}, currentTask = null) {
   ];
   return diagnosticRedact(sections.join('\n'), settings);
 }
-module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
+module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
 
 // Only migrate the exact managed 1.3.140 script, preserving a versioned backup.
 function ensureManagedMacScript(root, installerSource) {

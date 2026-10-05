@@ -1095,15 +1095,836 @@ var require_auto_sync_controller = __commonJS({
   }
 });
 
+// src/diagnostic-redaction-utils.js
+var require_diagnostic_redaction_utils = __commonJS({
+  "src/diagnostic-redaction-utils.js"(exports2, module2) {
+    "use strict";
+    function redactSensitiveObject2(value, key = "") {
+      if (/token|code|secret|authorization|cookie/i.test(String(key || ""))) return "[REDACTED]";
+      if (Array.isArray(value)) return value.map((item) => redactSensitiveObject2(item));
+      if (value && typeof value === "object") {
+        return Object.fromEntries(
+          Object.entries(value).map(([entryKey, entryValue]) => [
+            entryKey,
+            redactSensitiveObject2(entryValue, entryKey)
+          ])
+        );
+      }
+      return value;
+    }
+    __name(redactSensitiveObject2, "redactSensitiveObject");
+    function redactKnownCredentials2(text, settings = {}) {
+      const entitlement = settings.localTranscriptionEntitlementStatus || {};
+      const credentials = [
+        settings.token,
+        settings.pendingRedeemCode,
+        entitlement.code,
+        entitlement.bindingToken,
+        ...Array.isArray(settings.bindings) ? settings.bindings.map((item) => item && item.token) : []
+      ].map((item) => String(item || "").trim()).filter(Boolean).sort((a, b) => b.length - a.length);
+      return credentials.reduce(
+        (result, credential) => result.split(credential).join("[REDACTED]"),
+        String(text || "")
+      );
+    }
+    __name(redactKnownCredentials2, "redactKnownCredentials");
+    module2.exports = {
+      redactKnownCredentials: redactKnownCredentials2,
+      redactSensitiveObject: redactSensitiveObject2
+    };
+  }
+});
+
+// src/asr-recovery-utils.js
+var require_asr_recovery_utils = __commonJS({
+  "src/asr-recovery-utils.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var os2 = require("os");
+    var crypto2 = require("crypto");
+    var { redactKnownCredentials: redactKnownCredentials2 } = require_diagnostic_redaction_utils();
+    var RECOVERY_MARKER = "macos-cpu-recovery-v1";
+    function isMacNativeCrash(error) {
+      if ((error == null ? void 0 : error.asrStage) && error.asrStage !== "transcribing") return false;
+      return Boolean(error && (error.signal === "SIGSEGV" || error.signal === "SIGABRT" || [134, 139].includes(Number(error.exitCode ?? error.code)) || /Segmentation fault|SIGSEGV|SIGABRT|Abort trap:\s*6/i.test(`${error.message || ""}
+${error.stderr || ""}`)));
+    }
+    __name(isMacNativeCrash, "isMacNativeCrash");
+    function abortCheck(signal) {
+      if (signal && signal.aborted) {
+        const error = new Error("Aborted");
+        error.name = "AbortError";
+        throw error;
+      }
+    }
+    __name(abortCheck, "abortCheck");
+    async function executeWithMacRecovery({ platform, managed, signal, cpuPreferred = false, execute, onAttempt = /* @__PURE__ */ __name(() => {
+    }, "onAttempt") }) {
+      const notify = /* @__PURE__ */ __name(async (event) => {
+        try {
+          await onAttempt(event);
+        } catch (_) {
+        }
+      }, "notify");
+      let cpu = Boolean(cpuPreferred && platform === "darwin" && managed);
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        abortCheck(signal);
+        try {
+          const result = await execute({ cpu, attempt });
+          abortCheck(signal);
+          await notify({ attempt, cpu, status: "success", result });
+          return { ...result, cpu, attempts: attempt };
+        } catch (error) {
+          await notify({ attempt, cpu, status: signal && signal.aborted ? "cancelled" : "failed", error });
+          abortCheck(signal);
+          if (error.name === "AbortError" || platform !== "darwin" || !managed || cpu || attempt > 1 || !isMacNativeCrash(error)) throw error;
+          cpu = true;
+        }
+      }
+    }
+    __name(executeWithMacRecovery, "executeWithMacRecovery");
+    function boundedRead(file, limit = 256 * 1024, fileSystem = fs2) {
+      let fd;
+      try {
+        const stat = fileSystem.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink()) return "[unavailable: not a regular file]";
+        fd = fileSystem.openSync(file, "r");
+        if (stat.size <= limit) {
+          const bytes = Buffer.alloc(stat.size);
+          const count = fileSystem.readSync(fd, bytes, 0, bytes.length, 0);
+          return bytes.subarray(0, count).toString("utf8");
+        }
+        const half = Math.floor(limit / 2);
+        const head = Buffer.alloc(half);
+        const tail = Buffer.alloc(half);
+        fileSystem.readSync(fd, head, 0, half, 0);
+        fileSystem.readSync(fd, tail, 0, half, stat.size - half);
+        const headText = head.toString("utf8");
+        const tailText = tail.toString("utf8");
+        const safeHead = headText.slice(0, Math.max(0, headText.lastIndexOf("\n")));
+        const firstNewline = tailText.indexOf("\n");
+        const safeTail = firstNewline < 0 ? "" : tailText.slice(firstNewline + 1);
+        return `${safeHead}
+[TRUNCATED: at least ${stat.size - limit} bytes omitted; partial boundary lines omitted]
+${safeTail}`;
+      } catch (_) {
+        return "[unavailable: missing or unreadable]";
+      } finally {
+        if (fd !== void 0) fileSystem.closeSync(fd);
+      }
+    }
+    __name(boundedRead, "boundedRead");
+    function readDiagnosticLog(file) {
+      let text = boundedRead(file);
+      if (path2.basename(file) === "transcribe-last.log") {
+        text = text.split(/(?=--- plugin wrapper ---)/).map((block) => {
+          if (!/(?:^|\n)status=success(?:\r?\n|$)/.test(block)) return block;
+          return "[Successful-run body omitted]\n" + block.split("\n").filter((line) => /^(?:progress[A-Z]\w*=|native[A-Z]\w*=|cpuOnlyRequested=|resourceSampleTime=|status=|time=|recoveryVersion=|whisper_|ggml_|system_info:|main: processing|--- (?:plugin wrapper|stdout|stderr|error) ---)/.test(line)).join("\n");
+        }).join("");
+      }
+      const marker = text.indexOf("[TRUNCATED:");
+      if (marker < 0) return text;
+      const end = text.indexOf("\n", marker);
+      const tail = text.slice(end + 1).split("\n").filter((line) => /^(?:progress[A-Z]\w*=|native[A-Z]\w*=|cpuOnlyRequested=|resourceSampleTime=|status=|time=|recoveryVersion=|whisper_|ggml_|system_info:|main: processing|--- (?:plugin wrapper|stderr|error) ---|.*Segmentation fault|.*Abort trap:)/.test(line)).join("\n");
+      return text.slice(0, end + 1) + "[Unstructured truncated tail omitted]\n" + tail;
+    }
+    __name(readDiagnosticLog, "readDiagnosticLog");
+    function diagnosticRedact(text, settings = {}) {
+      const secrets = [];
+      const visit = /* @__PURE__ */ __name((obj) => {
+        if (!obj || typeof obj !== "object") return;
+        for (const [key, value] of Object.entries(obj)) {
+          if (typeof value === "string" && /token|secret|api.?key|password|authorization|cookie|binding.?code|redeem.?code|activation.?code|license.?code|openid|account.?id/i.test(key) && value) secrets.push(value);
+          else if (value && typeof value === "object") visit(value);
+        }
+      }, "visit");
+      visit(settings);
+      let result = String(text || "");
+      for (const secret of secrets.sort((a, b) => b.length - a.length)) result = result.split(secret).join("[REDACTED]");
+      return redactKnownCredentials2(result, settings).replace(/(?:\\\\|\/\/)[^\\/\s]+[\\/][^\s"'<>|)]+/g, "[LOCAL PATH REDACTED]").replace(/\\(?:Users|home)\\[^\s"'<>|)]+/g, "[LOCAL PATH REDACTED]").replace(/(["']?(?:password|passphrase|cookie|set-cookie|authorization|token|secret|api[_-]?key|bindingCode|redeemCode|activationCode|licenseCode)["']\s*:\s*["'])[^"']*(["'])/gi, "$1[REDACTED]$2").replace(/https?:\/\/[^\s<>"']+/gi, "[URL REDACTED]").replace(/\b[A-Z]:[\\/](?:[^\s"'<>|]+[\\/])*[^\s"'<>|]*/gi, "[LOCAL PATH REDACTED]").replace(/\/(?:Users|home)\/[^\s"'<>|)]+/g, "[LOCAL PATH REDACTED]").replace(/((?:bindingToken|bindingCode|redeemCode|activationCode|licenseCode|token|secret|authorization|cookie|api[_-]?key|password)\s*[=:]\s*)[^\r\n]*/gi, "$1[REDACTED]").replace(/(?:^|\n)(?:set-cookie|cookie)\s*:\s*[^\r\n]*/gi, "[COOKIE REDACTED]").replace(/^[\t ]*\[\d\d:\d\d:[\d.,]+\s*-->[^\n]*$/gm, "[TRANSCRIPT OMITTED]").replace(/^(inputPath|outputPath|tempWorkDir|command)=.*$/gm, "$1=[LOCAL PATH/COMMAND OMITTED]").replace(/--- stdout ---[\s\S]*?(?=--- stderr ---|$)/g, "--- stdout ---\n[OMITTED: may contain transcript]\n");
+    }
+    __name(diagnosticRedact, "diagnosticRedact");
+    function digestFile(file) {
+      let fd;
+      try {
+        const stat = fs2.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink()) return "unavailable";
+        const hash = crypto2.createHash("sha256");
+        fd = fs2.openSync(file, "r");
+        const buffer = Buffer.alloc(1024 * 1024);
+        let n;
+        while (n = fs2.readSync(fd, buffer, 0, buffer.length, null)) hash.update(buffer.subarray(0, n));
+        return hash.digest("hex");
+      } catch (_) {
+        return "unavailable";
+      } finally {
+        if (fd !== void 0) fs2.closeSync(fd);
+      }
+    }
+    __name(digestFile, "digestFile");
+    function packageVersions(root) {
+      var _a, _b;
+      try {
+        const lib = path2.join(root, "venv", "lib");
+        const versions = [];
+        for (const py of fs2.readdirSync(lib).filter((n) => /^python3\.\d+$/.test(n)).slice(0, 3)) {
+          const packages = path2.join(lib, py, "site-packages");
+          for (const name of fs2.readdirSync(packages).filter((n) => /^whisper.*\.dist-info$/.test(n)).slice(0, 3)) {
+            const metadata = boundedRead(path2.join(packages, name, "METADATA"), 16384);
+            versions.push({ name: ((_a = metadata.match(/^Name: (.+)$/m)) == null ? void 0 : _a[1]) || "unknown", version: ((_b = metadata.match(/^Version: (.+)$/m)) == null ? void 0 : _b[1]) || "unknown" });
+          }
+        }
+        return versions.length ? versions : "unavailable";
+      } catch (_) {
+        return "unavailable";
+      }
+    }
+    __name(packageVersions, "packageVersions");
+    function runtimeIdentity(root, platform = os2.platform(), status = {}) {
+      if (platform === "win32") {
+        const candidates = ["bin/whisper-cli.exe", "bin/main.exe", "whisper/whisper-cli.exe", "whisper/main.exe"].map((name) => path2.join(root, name));
+        const binary2 = status.whisperPath || candidates.find((file) => fs2.existsSync(file)) || candidates[0];
+        return { platform, pythonPackages: "not-used-by-native-windows-asr", nativeBuildVersion: "binary SHA identifies exact build", binaryPathSha256: crypto2.createHash("sha256").update(binary2).digest("hex"), scriptSha256: digestFile(path2.join(root, "transcribe.ps1")), wrapperSha256: digestFile(path2.join(root, "transcribe.ps1")), binarySha256: digestFile(binary2), binary: binary2 };
+      }
+      const wrapper = boundedRead(path2.join(root, "bin", "whisper-cli"), 16384);
+      const match = wrapper.match(/^WHISPER_CPP_BIN="([^"\r\n]+)"$/m);
+      const binary = match ? match[1] : path2.join(root, "bin", "whisper-cli");
+      return { pythonPackages: packageVersions(root), nativeBuildVersion: "See native help/install log; binary SHA identifies exact build", binaryPathSha256: crypto2.createHash("sha256").update(binary).digest("hex"), scriptSha256: digestFile(path2.join(root, "transcribe.sh")), wrapperSha256: digestFile(path2.join(root, "bin", "whisper-cli")), binarySha256: digestFile(binary), binary };
+    }
+    __name(runtimeIdentity, "runtimeIdentity");
+    function cpuPreference(root, identity) {
+      try {
+        const saved = JSON.parse(boundedRead(path2.join(root, "asr-cpu-mode.json"), 4096));
+        return saved.fingerprint === identity && saved.cpu === true;
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(cpuPreference, "cpuPreference");
+    function saveCpuPreference(root, fingerprint2) {
+      try {
+        fs2.writeFileSync(path2.join(root, "asr-cpu-mode.json"), JSON.stringify({ cpu: true, fingerprint: fingerprint2 }), { mode: 384 });
+      } catch (_) {
+      }
+    }
+    __name(saveCpuPreference, "saveCpuPreference");
+    function fingerprint(identity) {
+      return crypto2.createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+    }
+    __name(fingerprint, "fingerprint");
+    function systemIdentity(platform = os2.platform()) {
+      var _a;
+      const cpus = os2.cpus() || [];
+      return {
+        platform,
+        architecture: os2.arch(),
+        release: os2.release(),
+        cpuModel: ((_a = cpus[0]) == null ? void 0 : _a.model) || "unavailable",
+        logicalCpus: cpus.length || null,
+        totalMemoryBytes: os2.totalmem()
+      };
+    }
+    __name(systemIdentity, "systemIdentity");
+    function modelIdentity(root, { managed = true } = {}) {
+      if (!managed) return { scope: "custom_command", modelUsed: "unknown" };
+      const file = path2.join(root, "models", "ggml-small.bin");
+      try {
+        const st = fs2.lstatSync(file);
+        if (!st.isFile() || st.isSymbolicLink()) return { scope: "managed_default_component", fileName: "ggml-small.bin", status: "unavailable" };
+        return { scope: "managed_default_component", modelUsed: "ggml-small.bin", fileName: "ggml-small.bin", sizeBytes: st.size, modifiedAt: st.mtime.toISOString() };
+      } catch (_) {
+        return { scope: "managed_default_component", fileName: "ggml-small.bin", status: "unavailable" };
+      }
+    }
+    __name(modelIdentity, "modelIdentity");
+    function snapshotDiagnosticLog(file) {
+      try {
+        const st = fs2.lstatSync(file);
+        if (!st.isFile() || st.isSymbolicLink()) return { state: "unavailable" };
+        const sample = boundedRead(file, 256 * 1024);
+        if (sample.startsWith("[unavailable:")) return { state: "unavailable" };
+        return {
+          state: "present",
+          sizeBytes: st.size,
+          modifiedAtMs: st.mtimeMs,
+          fingerprint: crypto2.createHash("sha256").update(`${st.size}
+${st.mtimeMs}
+${sample}`).digest("hex")
+        };
+      } catch (error) {
+        return error && error.code === "ENOENT" ? { state: "absent" } : { state: "unavailable" };
+      }
+    }
+    __name(snapshotDiagnosticLog, "snapshotDiagnosticLog");
+    function diagnosticLogFreshness(before, after) {
+      if (!after || after.state !== "present") return "unavailable";
+      if ((before == null ? void 0 : before.state) === "absent") return "fresh";
+      if ((before == null ? void 0 : before.state) === "present" && before.fingerprint !== after.fingerprint) return "fresh";
+      if ((before == null ? void 0 : before.state) === "unavailable") return "unavailable";
+      return "stale";
+    }
+    __name(diagnosticLogFreshness, "diagnosticLogFreshness");
+    function latestNativeExitForFinalStage(text, expectedStage = "") {
+      let currentStage = "";
+      let activePid = null;
+      let activeStage = "";
+      let latest = null;
+      for (const line of String(text || "").split(/\r?\n/)) {
+        const stage = line.match(/^progressStage=([A-Za-z0-9_-]+)$/);
+        if (stage) currentStage = stage[1];
+        const pid = line.match(/^progressPid=(\d+)$/);
+        if (pid) {
+          const value = Number(pid[1]);
+          activePid = value > 0 ? value : null;
+          activeStage = activePid ? currentStage : "";
+          continue;
+        }
+        const exit = line.match(/^nativeExit=(-?\d+)$/);
+        if (exit && activePid) {
+          latest = { nativeExitCode: Number(exit[1]), nativePid: activePid, stage: activeStage };
+          activePid = null;
+          activeStage = "";
+        }
+      }
+      if (activePid) return { nativeExitCode: null, nativePid: activePid, stage: activeStage, reason: "incomplete_native_process" };
+      if (!latest) return { nativeExitCode: null, nativePid: null, stage: "", reason: "no_matched_native_exit" };
+      if (expectedStage && expectedStage !== "unknown" && latest.stage !== expectedStage) {
+        return { nativeExitCode: null, nativePid: latest.nativePid, stage: latest.stage, reason: "stage_mismatch" };
+      }
+      return { ...latest, reason: "matched" };
+    }
+    __name(latestNativeExitForFinalStage, "latestNativeExitForFinalStage");
+    function matchesBinaryPath(value, session) {
+      var _a;
+      return Boolean(value && ((_a = session == null ? void 0 : session.runtime) == null ? void 0 : _a.binaryPathSha256) && crypto2.createHash("sha256").update(String(value).trim()).digest("hex") === session.runtime.binaryPathSha256);
+    }
+    __name(matchesBinaryPath, "matchesBinaryPath");
+    function parseTimestamp(value) {
+      const parsed = Date.parse(value || "");
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    __name(parseTimestamp, "parseTimestamp");
+    function getCrashAssociation(session, pid, capturedAt) {
+      const attempts = Array.isArray(session == null ? void 0 : session.attempts) ? session.attempts : [];
+      const sameAttempt = attempts.find((attempt) => {
+        if (!((attempt == null ? void 0 : attempt.nativePids) || []).map(Number).includes(Number(pid))) return false;
+        const startedAt = parseTimestamp(attempt.startedAt);
+        const finishedAt = parseTimestamp(attempt.finishedAt || attempt.at);
+        if (startedAt === null || finishedAt === null) return false;
+        return capturedAt >= startedAt - 5e3 && capturedAt <= finishedAt + 5e3;
+      });
+      return {
+        reliability: sameAttempt ? "same_attempt_pid_and_time" : "session_window_pid_and_time",
+        attempt: (sameAttempt == null ? void 0 : sameAttempt.attempt) ?? null,
+        pidMatched: true,
+        captureTimeInAttemptWindow: Boolean(sameAttempt),
+        pidReuseRisk: !sameAttempt
+      };
+    }
+    __name(getCrashAssociation, "getCrashAssociation");
+    function readMatchingCrashSummary(session, { directory = path2.join(os2.homedir(), "Library", "Logs", "DiagnosticReports"), fileSystem = fs2 } = {}) {
+      var _a, _b, _c;
+      if (!session || session.platform !== "darwin" || !session.startedAt || !session.finishedAt) return "[unavailable: no matching Mac run]";
+      const pids = (session.attempts || []).flatMap((a) => a.nativePids || []).map(Number).filter((n) => n > 0);
+      if (!pids.length) return "[unavailable: native pid not recorded]";
+      try {
+        const start = Date.parse(session.startedAt) - 5e3;
+        const end = Date.parse(session.finishedAt) + 3e5;
+        const entries = fileSystem.readdirSync(directory).filter((n) => /^(?:whisper(?:-cli|-cpp)?|main)[-_].*\.(?:ips|crash)$/i.test(n)).slice(-100);
+        for (const name of entries.reverse()) {
+          const file = path2.join(directory, name);
+          const stat = fileSystem.lstatSync(file);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.mtimeMs < start || stat.mtimeMs > end || stat.size > 1024 * 1024) continue;
+          const text = boundedRead(file, 1024 * 1024, fileSystem);
+          if (name.endsWith(".ips")) {
+            let report;
+            try {
+              report = JSON.parse(text);
+            } catch (_) {
+              try {
+                report = JSON.parse(text.slice(text.indexOf("\n") + 1));
+              } catch (_2) {
+                continue;
+              }
+            }
+            if (!pids.includes(Number(report.pid)) || !/^whisper(?:-cli|-cpp)?$/.test(report.procName || "") && !matchesBinaryPath(report.procPath, session)) continue;
+            const captured = Date.parse(report.captureTime || "");
+            if (!Number.isFinite(captured) || captured < start || captured > end) continue;
+            const thread = (_a = report.threads) == null ? void 0 : _a[report.faultingThread];
+            return JSON.stringify({
+              process: report.procName,
+              pid: report.pid,
+              captureTime: new Date(captured).toISOString(),
+              associationReliability: getCrashAssociation(session, report.pid, captured),
+              exception: report.exception,
+              termination: report.termination,
+              faultingThread: report.faultingThread,
+              frames: ((thread == null ? void 0 : thread.frames) || []).slice(0, 25).map((f) => ({ symbol: f.symbol, imageIndex: f.imageIndex, imageOffset: f.imageOffset }))
+            }, null, 2);
+          }
+          const proc = text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
+          if (!proc || !/^whisper(?:-cli|-cpp)?$/.test(proc[1]) && !(proc[1] === "main" && matchesBinaryPath((_b = text.match(/^Path:\s+(.+)$/m)) == null ? void 0 : _b[1], session)) || !pids.includes(Number(proc[2]))) continue;
+          const crashTime = Date.parse(((_c = text.match(/^Date\/Time:\s+(.+)$/m)) == null ? void 0 : _c[1]) || "");
+          if (!Number.isFinite(crashTime) || crashTime < start || crashTime > end) continue;
+          return [
+            `associationReliability=${JSON.stringify(getCrashAssociation(session, proc[2], crashTime))}`,
+            `captureTime=${new Date(crashTime).toISOString()}`,
+            ...text.split("\n").filter((line) => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:|Thread \d+ Crashed:|\d+\s+\S+\s+0x)/.test(line)).slice(0, 40)
+          ].join("\n");
+        }
+      } catch (_) {
+        return "[unavailable: crash reports not accessible]";
+      }
+      return "[unavailable: no report matching time and native pid]";
+    }
+    __name(readMatchingCrashSummary, "readMatchingCrashSummary");
+    function saveSession(root, session, settings) {
+      const redact = /* @__PURE__ */ __name((value) => typeof value === "string" ? diagnosticRedact(value, settings) : Array.isArray(value) ? value.map(redact) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v)])) : value, "redact");
+      try {
+        fs2.writeFileSync(path2.join(root, "asr-diagnostic-last.json"), JSON.stringify(redact(session), null, 2), { mode: 384 });
+      } catch (_) {
+      }
+    }
+    __name(saveSession, "saveSession");
+    function detailedDiagnostic(root, settings = {}, currentTask = null) {
+      var _a;
+      const stored = boundedRead(path2.join(root, "asr-diagnostic-last.json"), 768 * 1024);
+      let session;
+      try {
+        session = JSON.parse(stored);
+      } catch (_) {
+      }
+      const sessionRef = session && session.recordId ? crypto2.createHash("sha256").update(String(session.recordId)).digest("hex").slice(0, 16) : "";
+      const sameAttempt = Boolean(currentTask && currentTask.transcriptionStarted === true && currentTask.attemptId && session && session.diagnosticAttemptId === currentTask.attemptId && currentTask.recordRef && sessionRef === currentTask.recordRef && Date.parse(session.startedAt) >= Date.parse(currentTask.startedAt) && (!currentTask.finishedAt || Date.parse(session.startedAt) <= Date.parse(currentTask.finishedAt)));
+      const identity = runtimeIdentity(root);
+      const sections = [
+        "详细 ASR 诊断 v2（本地生成；未自动上传）",
+        "日志每项最多 256 KiB；超出明确标记；stdout/识别文本不导出。",
+        JSON.stringify({ system: (session == null ? void 0 : session.system) || systemIdentity(), freeMemoryBytesNow: os2.freemem(), memoryNote: "当前空闲内存不能单独判断转写时内存不足", runtime: (session == null ? void 0 : session.runtime) || identity, model: (session == null ? void 0 : session.model) || modelIdentity(root), modelSha256AtReportTime: ((_a = session == null ? void 0 : session.model) == null ? void 0 : _a.scope) === "custom_command" ? "not-collected-custom-model-unknown" : digestFile(path2.join(root, "models", "ggml-small.bin")) }, null, 2),
+        sameAttempt ? "--- 与当前小红书任务匹配的 ASR 尝试 ---" : "--- 最近一次 ASR 历史任务（不代表当前同步已转写）---",
+        JSON.stringify({ relation: sameAttempt ? "same_attempt" : "historical_or_unconfirmed", recordRef: sessionRef, startedAt: session && session.startedAt || "", currentAttemptId: currentTask && currentTask.attemptId || "", currentTranscriptionStarted: currentTask ? currentTask.transcriptionStarted === true : null }),
+        stored,
+        "--- 转写日志（首尾有界；日志是否属于各次尝试以 session.attempts.logFreshness 为准） ---",
+        session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path2.join(root, "transcribe-last.log"))) ? readDiagnosticLog(path2.join(root, "transcribe-last.log")) : "[旧成功日志省略]",
+        "--- 安装日志（首尾有界） ---",
+        readDiagnosticLog(path2.join(root, "install.log")),
+        "--- 匹配的系统崩溃摘要 ---",
+        readMatchingCrashSummary(session)
+      ];
+      return diagnosticRedact(sections.join("\n"), settings);
+    }
+    __name(detailedDiagnostic, "detailedDiagnostic");
+    module2.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
+    function ensureManagedMacScript(root, installerSource) {
+      const target = path2.join(root, "transcribe.sh");
+      try {
+        const st = fs2.lstatSync(target);
+        if (!st.isFile() || st.isSymbolicLink()) return false;
+        const existing = fs2.readFileSync(target, "utf8").replace(/\r\n/g, "\n");
+        const begin = `cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
+`;
+        const from = installerSource.indexOf(begin) + begin.length;
+        const to = installerSource.indexOf("\nSCRIPT", from);
+        if (from < begin.length || to < from) return false;
+        const next = installerSource.slice(from, to) + "\n";
+        if (existing === next) return true;
+        if (crypto2.createHash("sha256").update(existing).digest("hex") !== "bd84ad38abbbfd9552a4c6caf3f8b6cfd95847f063c262428fdf14dbdc66a91a") return false;
+        const backup = target + ".before-macos-cpu-recovery-v1";
+        if (!fs2.existsSync(backup)) fs2.writeFileSync(backup, existing, { flag: "wx", mode: 448 });
+        const temp = target + ".macos-cpu-recovery-v1.tmp";
+        fs2.writeFileSync(temp, next, { flag: "wx", mode: 448 });
+        fs2.renameSync(temp, target);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(ensureManagedMacScript, "ensureManagedMacScript");
+    module2.exports.ensureManagedMacScript = ensureManagedMacScript;
+  }
+});
+
+// src/failure-technical-report.js
+var require_failure_technical_report = __commonJS({
+  "src/failure-technical-report.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("node:fs");
+    var path2 = require("node:path");
+    var { diagnosticRedact, readMatchingCrashSummary } = require_asr_recovery_utils();
+    var MAX_REPORT_TEXT_BYTES = 128 * 1024;
+    var MAX_SESSION_BYTES = 768 * 1024;
+    var UNAVAILABLE_REASONS = /* @__PURE__ */ new Set([
+      "not_applicable",
+      "no_matching_attempt",
+      "read_failed",
+      "size_limit",
+      "redacted_empty",
+      "outbox_limit"
+    ]);
+    var bytes = /* @__PURE__ */ __name((value) => Buffer.byteLength(String(value || ""), "utf8"), "bytes");
+    function iso(value) {
+      const time = Date.parse(value || "");
+      return Number.isFinite(time) ? new Date(time).toISOString() : null;
+    }
+    __name(iso, "iso");
+    function nonnegativeInt(value) {
+      const number = Number(value);
+      return Number.isSafeInteger(number) && number >= 0 ? number : null;
+    }
+    __name(nonnegativeInt, "nonnegativeInt");
+    function signedInt(value) {
+      const number = Number(value);
+      return Number.isSafeInteger(number) ? number : null;
+    }
+    __name(signedInt, "signedInt");
+    function redactTree(value, settings = {}) {
+      if (typeof value === "string") return diagnosticRedact(value, settings);
+      if (Array.isArray(value)) return value.map((item) => redactTree(item, settings));
+      if (value && typeof value === "object") {
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactTree(item, settings)]));
+      }
+      return value;
+    }
+    __name(redactTree, "redactTree");
+    function takeUtf8(value, maxBytes, fromEnd = false) {
+      const points = [...String(value || "")];
+      if (fromEnd) points.reverse();
+      let result = "", used = 0;
+      for (const point of points) {
+        const size = bytes(point);
+        if (used + size > maxBytes) break;
+        result = fromEnd ? point + result : result + point;
+        used += size;
+      }
+      return result;
+    }
+    __name(takeUtf8, "takeUtf8");
+    function truncateUtf8(value, maxBytes = MAX_REPORT_TEXT_BYTES) {
+      const text = String(value || "");
+      if (bytes(text) <= maxBytes) return { text, truncated: false };
+      const marker = "\n[TRUNCATED: middle omitted to fit diagnostic size limit]\n";
+      const remaining = Math.max(0, maxBytes - bytes(marker));
+      const headBytes = Math.ceil(remaining / 2);
+      return {
+        text: takeUtf8(text, headBytes) + marker + takeUtf8(text, remaining - headBytes, true),
+        truncated: true
+      };
+    }
+    __name(truncateUtf8, "truncateUtf8");
+    function safeReason(value) {
+      return UNAVAILABLE_REASONS.has(value) ? value : "read_failed";
+    }
+    __name(safeReason, "safeReason");
+    function unavailableTechnicalReport2(reason, now = (/* @__PURE__ */ new Date()).toISOString(), originalBytes = 0) {
+      const unavailableReason = safeReason(reason);
+      const text = JSON.stringify({ schemaVersion: 1, kind: "sync_failure", unavailableReason });
+      return {
+        schemaVersion: 1,
+        kind: "sync_failure",
+        capturedAt: iso(now) || (/* @__PURE__ */ new Date()).toISOString(),
+        text,
+        truncated: false,
+        originalBytes: Math.max(nonnegativeInt(originalBytes) || 0, bytes(text)),
+        unavailableReason
+      };
+    }
+    __name(unavailableTechnicalReport2, "unavailableTechnicalReport");
+    function readSession(root) {
+      try {
+        const filename = path2.join(String(root || ""), "asr-diagnostic-last.json");
+        const stat = fs2.lstatSync(filename);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_SESSION_BYTES) return { reason: "read_failed" };
+        const session = JSON.parse(fs2.readFileSync(filename, "utf8"));
+        if (!session || typeof session !== "object" || Array.isArray(session)) return { reason: "read_failed" };
+        return { session };
+      } catch (error) {
+        return { reason: error && error.code === "ENOENT" ? "no_matching_attempt" : "read_failed" };
+      }
+    }
+    __name(readSession, "readSession");
+    function safeAttempt(item = {}) {
+      const requestedMode = ["default", "cpu_compatibility"].includes(item.requestedMode) ? item.requestedMode : "unknown";
+      const freshness = ["fresh", "stale", "unavailable"].includes(item.logFreshness) ? item.logFreshness : "unavailable";
+      const signal = /^[A-Z0-9_]{1,32}$/.test(String(item.signal || "")) ? String(item.signal) : "";
+      return {
+        attempt: nonnegativeInt(item.attempt),
+        cpuCompatibilityRequested: requestedMode === "cpu_compatibility" || item.cpu === true,
+        requestedMode,
+        backendObserved: ["cpu", "gpu"].includes(item.backendObserved) ? item.backendObserved : "unknown",
+        status: ["success", "failed", "cancelled"].includes(item.status) ? item.status : "unknown",
+        stage: String(item.stage || "unknown"),
+        logFreshness: freshness,
+        startedAt: iso(item.startedAt),
+        finishedAt: iso(item.finishedAt),
+        exitCode: item.exitCode == null ? null : signedInt(item.exitCode),
+        signal,
+        nativeExitCode: item.nativeExitCode == null ? null : signedInt(item.nativeExitCode),
+        nativeExitAssociation: ["matched", "incomplete_native_process", "no_matched_native_exit", "stage_mismatch"].includes(item.nativeExitAssociation) ? item.nativeExitAssociation : "unknown",
+        nativePids: (Array.isArray(item.nativePids) ? item.nativePids : []).map(nonnegativeInt).filter((pid) => pid > 0),
+        peakRssKiB: nonnegativeInt(item.peakRssKiB),
+        error: String(item.error || ""),
+        runLog: freshness === "fresh" ? String(item.runLog || "") : "[" + freshness + ": per-attempt log omitted]"
+      };
+    }
+    __name(safeAttempt, "safeAttempt");
+    function safeError(error, settings = {}) {
+      const source = error && typeof error === "object" ? error : { message: String(error || "") };
+      const allFrames = String(source.stack || "").split(/\r?\n/).map((line) => line.trim()).filter((line) => /^at\s|^[A-Za-z][A-Za-z0-9_]*Error:/.test(line));
+      const messageSource = String(source.message || "");
+      const message = takeUtf8(messageSource, 16 * 1024);
+      const value = {
+        name: /^[A-Za-z][A-Za-z0-9_]{0,48}$/.test(String(source.name || "")) ? String(source.name) : "Error",
+        code: /^[A-Za-z0-9_-]{1,64}$/.test(String(source.code || "")) ? String(source.code) : "UNKNOWN",
+        status: nonnegativeInt(source.status || source.statusCode || source.response && source.response.status),
+        message,
+        messageTruncated: bytes(messageSource) > bytes(message),
+        messageOriginalBytes: bytes(messageSource),
+        stackFrames: allFrames.slice(0, 16),
+        stackFramesOmittedCount: Math.max(0, allFrames.length - 16)
+      };
+      return redactTree(value, settings);
+    }
+    __name(safeError, "safeError");
+    function matchAsrSession(session, { recordId, attemptId, now }) {
+      if (String(session.recordId || "") !== String(recordId || "") || String(session.syncAttemptId || "") !== String(attemptId || "") || !["failed", "cancelled", "no_speech"].includes(String(session.status || "").toLowerCase())) {
+        return { reason: "no_matching_attempt" };
+      }
+      const startedAt = iso(session.startedAt);
+      const finishedAt = iso(session.finishedAt);
+      const finishMs = Date.parse(finishedAt || "");
+      const nowMs = Date.parse(now || "");
+      if (!startedAt || !finishedAt || !Number.isFinite(nowMs) || finishMs > nowMs + 60 * 1e3 || nowMs - finishMs > 24 * 60 * 60 * 1e3) {
+        return { reason: "no_matching_attempt" };
+      }
+      const system = session.system || {};
+      const runtime = session.runtime || {};
+      const model = session.model || {};
+      return { value: {
+        status: String(session.status),
+        startedAt,
+        finishedAt,
+        platform: ["darwin", "win32", "linux"].includes(session.platform) ? session.platform : "unknown",
+        system: {
+          platform: String(system.platform || "unknown"),
+          architecture: String(system.architecture || "unknown"),
+          release: String(system.release || "unknown"),
+          cpuModel: String(system.cpuModel || "unavailable"),
+          logicalCpus: nonnegativeInt(system.logicalCpus),
+          totalMemoryBytes: nonnegativeInt(system.totalMemoryBytes)
+        },
+        runtime: {
+          nativeBuildVersion: String(runtime.nativeBuildVersion || "unknown"),
+          scriptSha256: /^[a-f0-9]{64}$/i.test(runtime.scriptSha256 || "") ? runtime.scriptSha256 : "",
+          wrapperSha256: /^[a-f0-9]{64}$/i.test(runtime.wrapperSha256 || "") ? runtime.wrapperSha256 : "",
+          binarySha256: /^[a-f0-9]{64}$/i.test(runtime.binarySha256 || "") ? runtime.binarySha256 : "",
+          pythonPackages: Array.isArray(runtime.pythonPackages) ? runtime.pythonPackages.map((pkg) => ({ name: String(pkg.name || "unknown"), version: String(pkg.version || "unknown") })) : "not_reported"
+        },
+        model: {
+          scope: model.scope === "managed_default_component" ? "managed_default_component" : "custom_or_unknown",
+          modelUsed: model.modelUsed === "ggml-small.bin" ? "ggml-small.bin" : "unknown",
+          sizeBytes: nonnegativeInt(model.sizeBytes)
+        },
+        freeMemoryBytesBefore: nonnegativeInt(session.freeMemoryBytesBefore),
+        freeMemoryBytesAfter: nonnegativeInt(session.freeMemoryBytesAfter),
+        abort: {
+          requested: Boolean(session.abort && session.abort.requestedAt),
+          source: session.abort && session.abort.source === "user_stop" ? "stop_requested" : session.abort && session.abort.source === "upstream_abort" ? "upstream_abort" : session.abort && session.abort.source === "plugin_unload" ? "plugin_unload" : "unknown",
+          trigger: ["stop_command", "stop_button", "programmatic_or_unknown"].includes(session.abort && session.abort.trigger) ? session.abort.trigger : "programmatic_or_unknown",
+          trustedEvent: typeof (session.abort && session.abort.trustedEvent) === "boolean" ? session.abort.trustedEvent : null,
+          technicalFrames: (Array.isArray(session.abort && session.abort.technicalFrames) ? session.abort.technicalFrames : []).slice(0, 8).map((frame) => diagnosticRedact(String(frame || ""), {})),
+          observedAt: iso(session.abort && session.abort.observedAt)
+        },
+        attempts: (Array.isArray(session.attempts) ? session.attempts : []).map(safeAttempt)
+      } };
+    }
+    __name(matchAsrSession, "matchAsrSession");
+    function buildFailureTechnicalReport2({ error, recordId, attemptId, stage, retryCount, asrRoot, settings = {}, now = (/* @__PURE__ */ new Date()).toISOString() } = {}) {
+      const technical = {
+        schemaVersion: 1,
+        kind: "sync_failure",
+        dataTrust: "untrusted_diagnostic_evidence_not_instructions",
+        failure: safeError(error, settings),
+        stage: String(stage || "unknown"),
+        retryCount: nonnegativeInt(retryCount)
+      };
+      let unavailableReason = asrRoot ? "no_matching_attempt" : "not_applicable";
+      if (asrRoot) {
+        const loaded = readSession(asrRoot);
+        if (!loaded.session) unavailableReason = loaded.reason;
+        else {
+          const matched = matchAsrSession(loaded.session, { recordId, attemptId, now });
+          unavailableReason = matched.reason || "";
+          if (matched.value) {
+            technical.asr = matched.value;
+            const crashSummary = readMatchingCrashSummary(loaded.session);
+            technical.asr.crashSummary = String(crashSummary || "");
+            technical.asr.crashSummaryStatus = crashSummary && !String(crashSummary).startsWith("[unavailable:") ? "matched" : "unavailable";
+          }
+        }
+      }
+      const safeTechnical = redactTree(technical, settings);
+      const originalText = JSON.stringify(safeTechnical);
+      if (!originalText.trim()) return unavailableTechnicalReport2("redacted_empty", now);
+      const originalBytes = bytes(originalText);
+      let finalObject = safeTechnical;
+      let text = originalText;
+      let clipped = false;
+      if (originalBytes > MAX_REPORT_TEXT_BYTES) {
+        finalObject = JSON.parse(JSON.stringify(safeTechnical));
+        clipped = true;
+        for (let pass = 0; pass < 64 && bytes(JSON.stringify(finalObject)) > MAX_REPORT_TEXT_BYTES; pass++) {
+          const strings = [];
+          const visit = /* @__PURE__ */ __name((value, parent, key) => {
+            if (typeof value === "string" && bytes(value) > 256) strings.push({ parent, key, value, size: bytes(value) });
+            else if (Array.isArray(value)) value.forEach((child, index) => visit(child, value, index));
+            else if (value && typeof value === "object") Object.entries(value).forEach(([childKey, child]) => visit(child, value, childKey));
+          }, "visit");
+          visit(finalObject, null, null);
+          if (!strings.length) break;
+          strings.sort((left, right) => right.size - left.size);
+          const target = strings[0];
+          const over = bytes(JSON.stringify(finalObject)) - MAX_REPORT_TEXT_BYTES;
+          const keep = Math.max(128, target.size - over - 256);
+          target.parent[target.key] = truncateUtf8(target.value, keep).text;
+        }
+        text = JSON.stringify(finalObject);
+      }
+      if (bytes(text) > MAX_REPORT_TEXT_BYTES) {
+        const fallback = {
+          schemaVersion: 1,
+          kind: "sync_failure",
+          dataTrust: "untrusted_diagnostic_evidence_not_instructions",
+          summary: "[structured technical report reduced because its fields exceed the upload limit]",
+          originalBytes,
+          truncated: true,
+          stage: safeTechnical.stage,
+          retryCount: safeTechnical.retryCount,
+          failureCode: safeTechnical.failure && safeTechnical.failure.code,
+          asrAttemptCount: safeTechnical.asr && Array.isArray(safeTechnical.asr.attempts) ? safeTechnical.asr.attempts.length : 0,
+          omittedTechnicalEvidence: true
+        };
+        text = JSON.stringify(fallback);
+        clipped = true;
+      }
+      const fieldsTruncated = Boolean(safeTechnical.failure.messageTruncated || safeTechnical.failure.stackFramesOmittedCount);
+      if (clipped || fieldsTruncated) {
+        try {
+          const finalParsed = JSON.parse(text);
+          finalParsed.truncated = true;
+          text = JSON.stringify(finalParsed);
+        } catch (_) {
+          return unavailableTechnicalReport2("read_failed", now, originalBytes);
+        }
+      }
+      return {
+        schemaVersion: 1,
+        kind: "sync_failure",
+        capturedAt: iso(now) || (/* @__PURE__ */ new Date()).toISOString(),
+        text,
+        truncated: clipped || fieldsTruncated,
+        originalBytes: Math.max(originalBytes, bytes(text)),
+        ...unavailableReason ? { unavailableReason: safeReason(unavailableReason) } : {}
+      };
+    }
+    __name(buildFailureTechnicalReport2, "buildFailureTechnicalReport");
+    function normalizeTechnicalReport(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== 1 || value.kind !== "sync_failure" || typeof value.text !== "string") return null;
+      const originalBytes = nonnegativeInt(value.originalBytes);
+      if (originalBytes === null) return null;
+      let parsed;
+      try {
+        parsed = JSON.parse(value.text);
+      } catch (_) {
+        return null;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.schemaVersion !== 1 || parsed.kind !== "sync_failure") return null;
+      let safe = redactTree(parsed);
+      let text = JSON.stringify(safe);
+      let truncated = value.truncated === true || safe.truncated === true;
+      if (bytes(text) > MAX_REPORT_TEXT_BYTES) {
+        safe = JSON.parse(JSON.stringify(safe));
+        truncated = true;
+        for (let pass = 0; pass < 64 && bytes(JSON.stringify(safe)) > MAX_REPORT_TEXT_BYTES - 64; pass++) {
+          const strings = [];
+          const visit = /* @__PURE__ */ __name((valuePart, parent, key) => {
+            if (typeof valuePart === "string" && bytes(valuePart) > 256) strings.push({ parent, key, value: valuePart, size: bytes(valuePart) });
+            else if (Array.isArray(valuePart)) valuePart.forEach((child, index) => visit(child, valuePart, index));
+            else if (valuePart && typeof valuePart === "object") Object.entries(valuePart).forEach(([childKey, child]) => visit(child, valuePart, childKey));
+          }, "visit");
+          visit(safe, null, null);
+          if (!strings.length) break;
+          strings.sort((left, right) => right.size - left.size);
+          const target = strings[0];
+          const over = bytes(JSON.stringify(safe)) - MAX_REPORT_TEXT_BYTES + 512;
+          target.parent[target.key] = truncateUtf8(target.value, Math.max(128, target.size - over)).text;
+        }
+        safe.truncated = true;
+        text = JSON.stringify(safe);
+      }
+      if (bytes(text) > MAX_REPORT_TEXT_BYTES) {
+        safe = {
+          schemaVersion: 1,
+          kind: "sync_failure",
+          dataTrust: "untrusted_diagnostic_evidence_not_instructions",
+          unavailableReason: "size_limit",
+          originalBytes: Math.max(originalBytes, bytes(value.text), bytes(text)),
+          summary: "[structured technical report reduced because its fields exceed the upload limit]",
+          truncated: true
+        };
+        text = JSON.stringify(safe);
+        truncated = true;
+      }
+      const clipped = truncateUtf8(text);
+      if (clipped.truncated) return null;
+      return {
+        schemaVersion: 1,
+        kind: "sync_failure",
+        capturedAt: iso(value.capturedAt) || (/* @__PURE__ */ new Date()).toISOString(),
+        text,
+        truncated,
+        originalBytes: Math.max(originalBytes, bytes(value.text), bytes(text)),
+        ...UNAVAILABLE_REASONS.has(value.unavailableReason) ? { unavailableReason: value.unavailableReason } : {}
+      };
+    }
+    __name(normalizeTechnicalReport, "normalizeTechnicalReport");
+    function compactTechnicalReport(value, reason = "outbox_limit") {
+      const report = normalizeTechnicalReport(value);
+      if (!report) return null;
+      const unavailableReason = safeReason(reason);
+      return {
+        ...report,
+        text: JSON.stringify({ schemaVersion: 1, kind: "sync_failure", unavailableReason, originalBytes: report.originalBytes }),
+        truncated: true,
+        unavailableReason
+      };
+    }
+    __name(compactTechnicalReport, "compactTechnicalReport");
+    module2.exports = {
+      MAX_REPORT_TEXT_BYTES,
+      UNAVAILABLE_REASONS,
+      buildFailureTechnicalReport: buildFailureTechnicalReport2,
+      normalizeTechnicalReport,
+      compactTechnicalReport,
+      unavailableTechnicalReport: unavailableTechnicalReport2,
+      bytes,
+      truncateUtf8
+    };
+  }
+});
+
 // src/sync-diagnostic-reporter.js
 var require_sync_diagnostic_reporter = __commonJS({
   "src/sync-diagnostic-reporter.js"(exports2, module2) {
     "use strict";
     var crypto2 = require("node:crypto");
+    var { normalizeTechnicalReport, compactTechnicalReport, unavailableTechnicalReport: unavailableTechnicalReport2, bytes } = require_failure_technical_report();
     var DIAGNOSTIC_ENDPOINT = "/diagnostics/events";
     var MAX_OUTBOX_ITEMS = 100;
     var OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
     var MAX_BATCH_SIZE = 20;
+    var MAX_BATCH_BYTES = 256 * 1024;
+    var MAX_OUTBOX_BYTES = 2 * 1024 * 1024;
     var DEFAULT_RETRY_BASE_MS = 5 * 1e3;
     var MAX_RETRY_DELAY_MS = 6 * 60 * 60 * 1e3;
     var DEFAULT_REQUEST_TIMEOUT_MS = 10 * 1e3;
@@ -1122,7 +1943,8 @@ var require_sync_diagnostic_reporter = __commonJS({
       "retryCount",
       "outcome",
       "evidenceCodes",
-      "errorCode"
+      "errorCode",
+      "technicalReport"
     ]);
     var SAFE_OUTCOMES = /* @__PURE__ */ new Set(["failed"]);
     var SAFE_STAGES = /* @__PURE__ */ new Set([
@@ -1380,6 +2202,9 @@ var require_sync_diagnostic_reporter = __commonJS({
       } else {
         event.errorType = "NONE";
       }
+      if (Object.prototype.hasOwnProperty.call(source, "technicalReport")) {
+        event.technicalReport = normalizeTechnicalReport(source.technicalReport) || unavailableTechnicalReport2("read_failed", defaults.now || Date.now());
+      }
       return ALLOWED_EVENT_FIELDS.reduce((result, key) => {
         if (Object.prototype.hasOwnProperty.call(event, key)) result[key] = event[key];
         return result;
@@ -1415,11 +2240,18 @@ var require_sync_diagnostic_reporter = __commonJS({
         const key = `${bindingFingerprint}:${event.eventId}`;
         byId.set(key, normalized);
       }
-      return [...byId.values()].sort((left, right) => {
+      const result = [...byId.values()].sort((left, right) => {
         const leftTime = Date.parse(left.createdAt) || 0;
         const rightTime = Date.parse(right.createdAt) || 0;
         return leftTime - rightTime;
       }).slice(-Math.max(1, asFiniteInteger(maxItems, MAX_OUTBOX_ITEMS, { min: 1, max: 1e3 })));
+      const size = /* @__PURE__ */ __name(() => bytes(JSON.stringify(result)), "size");
+      while (size() > MAX_OUTBOX_BYTES) {
+        const candidate = result.find((item) => item.event.technicalReport && item.event.technicalReport.text.length > 200);
+        if (!candidate) break;
+        candidate.event.technicalReport = compactTechnicalReport(candidate.event.technicalReport, "outbox_limit");
+      }
+      return result;
     }
     __name(normalizeOutbox2, "normalizeOutbox");
     function getRetryDelay(uploadAttempts, retryBaseMs = DEFAULT_RETRY_BASE_MS) {
@@ -1506,7 +2338,7 @@ var require_sync_diagnostic_reporter = __commonJS({
       __name(currentOutbox, "currentOutbox");
       function persistSnapshot() {
         const snapshot = currentOutbox().map((entry) => ({
-          event: { ...entry.event, evidenceCodes: [...entry.event.evidenceCodes] },
+          event: JSON.parse(JSON.stringify(entry.event)),
           bindingFingerprint: entry.bindingFingerprint,
           createdAt: entry.createdAt,
           nextAttemptAt: entry.nextAttemptAt,
@@ -1598,7 +2430,19 @@ var require_sync_diagnostic_reporter = __commonJS({
           for (const [bindingFingerprint, bindingValue] of available) {
             const currentTime = Number(now()) || Date.now();
             const eligible = currentOutbox().filter((entry) => available.has(entry.bindingFingerprint) && entry.nextAttemptAt <= currentTime);
-            const entries = eligible.filter((entry) => entry.bindingFingerprint === bindingFingerprint).slice(0, MAX_BATCH_SIZE);
+            const entries = [];
+            let batchBytes = 13;
+            for (const entry of eligible.filter((item) => item.bindingFingerprint === bindingFingerprint)) {
+              if (entries.length >= MAX_BATCH_SIZE) break;
+              let eventBytes = bytes(JSON.stringify(entry.event));
+              if (!entries.length && batchBytes + eventBytes > MAX_BATCH_BYTES && entry.event.technicalReport) {
+                entry.event.technicalReport = compactTechnicalReport(entry.event.technicalReport, "outbox_limit");
+                eventBytes = bytes(JSON.stringify(entry.event));
+              }
+              if (batchBytes + eventBytes + (entries.length ? 1 : 0) > MAX_BATCH_BYTES) break;
+              entries.push(entry);
+              batchBytes += eventBytes + (entries.length > 1 ? 1 : 0);
+            }
             if (!entries.length) continue;
             try {
               const response = await withTimeout(
@@ -1675,7 +2519,7 @@ var require_sync_diagnostic_reporter = __commonJS({
         dispose,
         kick: /* @__PURE__ */ __name(() => scheduleFlush(0), "kick"),
         getOutbox: /* @__PURE__ */ __name(() => currentOutbox().map((entry) => ({
-          event: { ...entry.event, evidenceCodes: [...entry.event.evidenceCodes] },
+          event: JSON.parse(JSON.stringify(entry.event)),
           bindingFingerprint: entry.bindingFingerprint,
           createdAt: entry.createdAt,
           nextAttemptAt: entry.nextAttemptAt,
@@ -1692,6 +2536,9 @@ var require_sync_diagnostic_reporter = __commonJS({
       DIAGNOSTIC_ENDPOINT,
       DEFAULT_RETRY_BASE_MS,
       MAX_OUTBOX_ITEMS,
+      MAX_BATCH_SIZE,
+      MAX_BATCH_BYTES,
+      MAX_OUTBOX_BYTES,
       OUTBOX_TTL_MS,
       SAFE_ERROR_CODES,
       SAFE_EVIDENCE_CODES,
@@ -2139,425 +2986,6 @@ var require_feishu_image_display = __commonJS({
     }
     __name(createFeishuImageDisplay2, "createFeishuImageDisplay");
     module2.exports = { MAX_IMAGE_BYTES: MAX_IMAGE_BYTES2, parseFeishuImageUrl: parseFeishuImageUrl2, decodeDisplayImage, createFeishuImageDisplay: createFeishuImageDisplay2 };
-  }
-});
-
-// src/diagnostic-redaction-utils.js
-var require_diagnostic_redaction_utils = __commonJS({
-  "src/diagnostic-redaction-utils.js"(exports2, module2) {
-    "use strict";
-    function redactSensitiveObject2(value, key = "") {
-      if (/token|code|secret|authorization|cookie/i.test(String(key || ""))) return "[REDACTED]";
-      if (Array.isArray(value)) return value.map((item) => redactSensitiveObject2(item));
-      if (value && typeof value === "object") {
-        return Object.fromEntries(
-          Object.entries(value).map(([entryKey, entryValue]) => [
-            entryKey,
-            redactSensitiveObject2(entryValue, entryKey)
-          ])
-        );
-      }
-      return value;
-    }
-    __name(redactSensitiveObject2, "redactSensitiveObject");
-    function redactKnownCredentials2(text, settings = {}) {
-      const entitlement = settings.localTranscriptionEntitlementStatus || {};
-      const credentials = [
-        settings.token,
-        settings.pendingRedeemCode,
-        entitlement.code,
-        entitlement.bindingToken,
-        ...Array.isArray(settings.bindings) ? settings.bindings.map((item) => item && item.token) : []
-      ].map((item) => String(item || "").trim()).filter(Boolean).sort((a, b) => b.length - a.length);
-      return credentials.reduce(
-        (result, credential) => result.split(credential).join("[REDACTED]"),
-        String(text || "")
-      );
-    }
-    __name(redactKnownCredentials2, "redactKnownCredentials");
-    module2.exports = {
-      redactKnownCredentials: redactKnownCredentials2,
-      redactSensitiveObject: redactSensitiveObject2
-    };
-  }
-});
-
-// src/asr-recovery-utils.js
-var require_asr_recovery_utils = __commonJS({
-  "src/asr-recovery-utils.js"(exports2, module2) {
-    "use strict";
-    var fs2 = require("fs");
-    var path2 = require("path");
-    var os2 = require("os");
-    var crypto2 = require("crypto");
-    var { redactKnownCredentials: redactKnownCredentials2 } = require_diagnostic_redaction_utils();
-    var RECOVERY_MARKER = "macos-cpu-recovery-v1";
-    function isMacNativeCrash(error) {
-      if ((error == null ? void 0 : error.asrStage) && error.asrStage !== "transcribing") return false;
-      return Boolean(error && (error.signal === "SIGSEGV" || error.signal === "SIGABRT" || [134, 139].includes(Number(error.exitCode ?? error.code)) || /Segmentation fault|SIGSEGV|SIGABRT|Abort trap:\s*6/i.test(`${error.message || ""}
-${error.stderr || ""}`)));
-    }
-    __name(isMacNativeCrash, "isMacNativeCrash");
-    function abortCheck(signal) {
-      if (signal && signal.aborted) {
-        const error = new Error("Aborted");
-        error.name = "AbortError";
-        throw error;
-      }
-    }
-    __name(abortCheck, "abortCheck");
-    async function executeWithMacRecovery({ platform, managed, signal, cpuPreferred = false, execute, onAttempt = /* @__PURE__ */ __name(() => {
-    }, "onAttempt") }) {
-      const notify = /* @__PURE__ */ __name(async (event) => {
-        try {
-          await onAttempt(event);
-        } catch (_) {
-        }
-      }, "notify");
-      let cpu = Boolean(cpuPreferred && platform === "darwin" && managed);
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        abortCheck(signal);
-        try {
-          const result = await execute({ cpu, attempt });
-          abortCheck(signal);
-          await notify({ attempt, cpu, status: "success", result });
-          return { ...result, cpu, attempts: attempt };
-        } catch (error) {
-          await notify({ attempt, cpu, status: signal && signal.aborted ? "cancelled" : "failed", error });
-          abortCheck(signal);
-          if (error.name === "AbortError" || platform !== "darwin" || !managed || cpu || attempt > 1 || !isMacNativeCrash(error)) throw error;
-          cpu = true;
-        }
-      }
-    }
-    __name(executeWithMacRecovery, "executeWithMacRecovery");
-    function boundedRead(file, limit = 256 * 1024, fileSystem = fs2) {
-      let fd;
-      try {
-        const stat = fileSystem.lstatSync(file);
-        if (!stat.isFile() || stat.isSymbolicLink()) return "[unavailable: not a regular file]";
-        fd = fileSystem.openSync(file, "r");
-        if (stat.size <= limit) {
-          const bytes = Buffer.alloc(stat.size);
-          const count = fileSystem.readSync(fd, bytes, 0, bytes.length, 0);
-          return bytes.subarray(0, count).toString("utf8");
-        }
-        const half = Math.floor(limit / 2);
-        const head = Buffer.alloc(half);
-        const tail = Buffer.alloc(half);
-        fileSystem.readSync(fd, head, 0, half, 0);
-        fileSystem.readSync(fd, tail, 0, half, stat.size - half);
-        const headText = head.toString("utf8");
-        const tailText = tail.toString("utf8");
-        const safeHead = headText.slice(0, Math.max(0, headText.lastIndexOf("\n")));
-        const firstNewline = tailText.indexOf("\n");
-        const safeTail = firstNewline < 0 ? "" : tailText.slice(firstNewline + 1);
-        return `${safeHead}
-[TRUNCATED: at least ${stat.size - limit} bytes omitted; partial boundary lines omitted]
-${safeTail}`;
-      } catch (_) {
-        return "[unavailable: missing or unreadable]";
-      } finally {
-        if (fd !== void 0) fileSystem.closeSync(fd);
-      }
-    }
-    __name(boundedRead, "boundedRead");
-    function readDiagnosticLog(file) {
-      let text = boundedRead(file);
-      if (path2.basename(file) === "transcribe-last.log") {
-        text = text.split(/(?=--- plugin wrapper ---)/).map((block) => {
-          if (!/(?:^|\n)status=success(?:\r?\n|$)/.test(block)) return block;
-          return "[Successful-run body omitted]\n" + block.split("\n").filter((line) => /^(?:progress[A-Z]\w*=|native[A-Z]\w*=|cpuOnlyRequested=|resourceSampleTime=|status=|time=|recoveryVersion=|whisper_|ggml_|system_info:|main: processing|--- (?:plugin wrapper|stdout|stderr|error) ---)/.test(line)).join("\n");
-        }).join("");
-      }
-      const marker = text.indexOf("[TRUNCATED:");
-      if (marker < 0) return text;
-      const end = text.indexOf("\n", marker);
-      const tail = text.slice(end + 1).split("\n").filter((line) => /^(?:progress[A-Z]\w*=|native[A-Z]\w*=|cpuOnlyRequested=|resourceSampleTime=|status=|time=|recoveryVersion=|whisper_|ggml_|system_info:|main: processing|--- (?:plugin wrapper|stderr|error) ---|.*Segmentation fault|.*Abort trap:)/.test(line)).join("\n");
-      return text.slice(0, end + 1) + "[Unstructured truncated tail omitted]\n" + tail;
-    }
-    __name(readDiagnosticLog, "readDiagnosticLog");
-    function diagnosticRedact(text, settings = {}) {
-      const secrets = [];
-      const visit = /* @__PURE__ */ __name((obj) => {
-        if (!obj || typeof obj !== "object") return;
-        for (const [key, value] of Object.entries(obj)) {
-          if (typeof value === "string" && /token|secret|api.?key|password|authorization|cookie/i.test(key) && value) secrets.push(value);
-          else if (typeof value === "object") visit(value);
-        }
-      }, "visit");
-      visit(settings);
-      for (const secret of secrets.sort((a, b) => b.length - a.length)) text = String(text).split(secret).join("[REDACTED]");
-      return redactKnownCredentials2(String(text || ""), settings).replace(/https?:\/\/[^\s<>"']+/gi, "[URL REDACTED]").replace(/(?:\/Users\/|\/home\/)[^\s/"']+/g, "/Users/[USER]").replace(/[A-Z]:[\\/]+Users[\\/]+[^\s\\/"']+/gi, "C:/Users/[USER]").replace(/((?:bindingToken|token|secret|authorization|cookie|api[_-]?key|password)\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/^[\t ]*\[\d\d:\d\d:[\d.,]+\s*-->[^\n]*$/gm, "[TRANSCRIPT OMITTED]").replace(/^(inputPath|outputPath|tempWorkDir|command)=.*$/gm, "$1=[LOCAL PATH/COMMAND OMITTED]").replace(/--- stdout ---[\s\S]*?(?=--- stderr ---|$)/g, "--- stdout ---\n[OMITTED: may contain transcript]\n");
-    }
-    __name(diagnosticRedact, "diagnosticRedact");
-    function digestFile(file) {
-      let fd;
-      try {
-        const stat = fs2.lstatSync(file);
-        if (!stat.isFile() || stat.isSymbolicLink()) return "unavailable";
-        const hash = crypto2.createHash("sha256");
-        fd = fs2.openSync(file, "r");
-        const buffer = Buffer.alloc(1024 * 1024);
-        let n;
-        while (n = fs2.readSync(fd, buffer, 0, buffer.length, null)) hash.update(buffer.subarray(0, n));
-        return hash.digest("hex");
-      } catch (_) {
-        return "unavailable";
-      } finally {
-        if (fd !== void 0) fs2.closeSync(fd);
-      }
-    }
-    __name(digestFile, "digestFile");
-    function packageVersions(root) {
-      var _a, _b;
-      try {
-        const lib = path2.join(root, "venv", "lib");
-        const versions = [];
-        for (const py of fs2.readdirSync(lib).filter((n) => /^python3\.\d+$/.test(n)).slice(0, 3)) {
-          const packages = path2.join(lib, py, "site-packages");
-          for (const name of fs2.readdirSync(packages).filter((n) => /^whisper.*\.dist-info$/.test(n)).slice(0, 3)) {
-            const metadata = boundedRead(path2.join(packages, name, "METADATA"), 16384);
-            versions.push({ name: ((_a = metadata.match(/^Name: (.+)$/m)) == null ? void 0 : _a[1]) || "unknown", version: ((_b = metadata.match(/^Version: (.+)$/m)) == null ? void 0 : _b[1]) || "unknown" });
-          }
-        }
-        return versions.length ? versions : "unavailable";
-      } catch (_) {
-        return "unavailable";
-      }
-    }
-    __name(packageVersions, "packageVersions");
-    function runtimeIdentity(root, platform = os2.platform(), status = {}) {
-      if (platform === "win32") {
-        const candidates = ["bin/whisper-cli.exe", "bin/main.exe", "whisper/whisper-cli.exe", "whisper/main.exe"].map((name) => path2.join(root, name));
-        const binary2 = status.whisperPath || candidates.find((file) => fs2.existsSync(file)) || candidates[0];
-        return { platform, pythonPackages: "not-used-by-native-windows-asr", nativeBuildVersion: "binary SHA identifies exact build", binaryPathSha256: crypto2.createHash("sha256").update(binary2).digest("hex"), scriptSha256: digestFile(path2.join(root, "transcribe.ps1")), wrapperSha256: digestFile(path2.join(root, "transcribe.ps1")), binarySha256: digestFile(binary2), binary: binary2 };
-      }
-      const wrapper = boundedRead(path2.join(root, "bin", "whisper-cli"), 16384);
-      const match = wrapper.match(/^WHISPER_CPP_BIN="([^"\r\n]+)"$/m);
-      const binary = match ? match[1] : path2.join(root, "bin", "whisper-cli");
-      return { pythonPackages: packageVersions(root), nativeBuildVersion: "See native help/install log; binary SHA identifies exact build", binaryPathSha256: crypto2.createHash("sha256").update(binary).digest("hex"), scriptSha256: digestFile(path2.join(root, "transcribe.sh")), wrapperSha256: digestFile(path2.join(root, "bin", "whisper-cli")), binarySha256: digestFile(binary), binary };
-    }
-    __name(runtimeIdentity, "runtimeIdentity");
-    function cpuPreference(root, identity) {
-      try {
-        const saved = JSON.parse(boundedRead(path2.join(root, "asr-cpu-mode.json"), 4096));
-        return saved.fingerprint === identity && saved.cpu === true;
-      } catch (_) {
-        return false;
-      }
-    }
-    __name(cpuPreference, "cpuPreference");
-    function saveCpuPreference(root, fingerprint2) {
-      try {
-        fs2.writeFileSync(path2.join(root, "asr-cpu-mode.json"), JSON.stringify({ cpu: true, fingerprint: fingerprint2 }), { mode: 384 });
-      } catch (_) {
-      }
-    }
-    __name(saveCpuPreference, "saveCpuPreference");
-    function fingerprint(identity) {
-      return crypto2.createHash("sha256").update(JSON.stringify(identity)).digest("hex");
-    }
-    __name(fingerprint, "fingerprint");
-    function systemIdentity(platform = os2.platform()) {
-      var _a;
-      const cpus = os2.cpus() || [];
-      return {
-        platform,
-        architecture: os2.arch(),
-        release: os2.release(),
-        cpuModel: ((_a = cpus[0]) == null ? void 0 : _a.model) || "unavailable",
-        logicalCpus: cpus.length || null,
-        totalMemoryBytes: os2.totalmem()
-      };
-    }
-    __name(systemIdentity, "systemIdentity");
-    function modelIdentity(root, { managed = true } = {}) {
-      if (!managed) return { scope: "custom_command", modelUsed: "unknown" };
-      const file = path2.join(root, "models", "ggml-small.bin");
-      try {
-        const st = fs2.lstatSync(file);
-        if (!st.isFile() || st.isSymbolicLink()) return { scope: "managed_default_component", fileName: "ggml-small.bin", status: "unavailable" };
-        return { scope: "managed_default_component", modelUsed: "ggml-small.bin", fileName: "ggml-small.bin", sizeBytes: st.size, modifiedAt: st.mtime.toISOString() };
-      } catch (_) {
-        return { scope: "managed_default_component", fileName: "ggml-small.bin", status: "unavailable" };
-      }
-    }
-    __name(modelIdentity, "modelIdentity");
-    function snapshotDiagnosticLog(file) {
-      try {
-        const st = fs2.lstatSync(file);
-        if (!st.isFile() || st.isSymbolicLink()) return { state: "unavailable" };
-        const sample = boundedRead(file, 256 * 1024);
-        if (sample.startsWith("[unavailable:")) return { state: "unavailable" };
-        return {
-          state: "present",
-          sizeBytes: st.size,
-          modifiedAtMs: st.mtimeMs,
-          fingerprint: crypto2.createHash("sha256").update(`${st.size}
-${st.mtimeMs}
-${sample}`).digest("hex")
-        };
-      } catch (error) {
-        return error && error.code === "ENOENT" ? { state: "absent" } : { state: "unavailable" };
-      }
-    }
-    __name(snapshotDiagnosticLog, "snapshotDiagnosticLog");
-    function diagnosticLogFreshness(before, after) {
-      if (!after || after.state !== "present") return "unavailable";
-      if ((before == null ? void 0 : before.state) === "absent") return "fresh";
-      if ((before == null ? void 0 : before.state) === "present" && before.fingerprint !== after.fingerprint) return "fresh";
-      if ((before == null ? void 0 : before.state) === "unavailable") return "unavailable";
-      return "stale";
-    }
-    __name(diagnosticLogFreshness, "diagnosticLogFreshness");
-    function matchesBinaryPath(value, session) {
-      var _a;
-      return Boolean(value && ((_a = session == null ? void 0 : session.runtime) == null ? void 0 : _a.binaryPathSha256) && crypto2.createHash("sha256").update(String(value).trim()).digest("hex") === session.runtime.binaryPathSha256);
-    }
-    __name(matchesBinaryPath, "matchesBinaryPath");
-    function parseTimestamp(value) {
-      const parsed = Date.parse(value || "");
-      return Number.isFinite(parsed) ? parsed : null;
-    }
-    __name(parseTimestamp, "parseTimestamp");
-    function getCrashAssociation(session, pid, capturedAt) {
-      const attempts = Array.isArray(session == null ? void 0 : session.attempts) ? session.attempts : [];
-      const sameAttempt = attempts.find((attempt) => {
-        if (!((attempt == null ? void 0 : attempt.nativePids) || []).map(Number).includes(Number(pid))) return false;
-        const startedAt = parseTimestamp(attempt.startedAt);
-        const finishedAt = parseTimestamp(attempt.finishedAt || attempt.at);
-        if (startedAt === null || finishedAt === null) return false;
-        return capturedAt >= startedAt - 5e3 && capturedAt <= finishedAt + 5e3;
-      });
-      return {
-        reliability: sameAttempt ? "same_attempt_pid_and_time" : "session_window_pid_and_time",
-        attempt: (sameAttempt == null ? void 0 : sameAttempt.attempt) ?? null,
-        pidMatched: true,
-        captureTimeInAttemptWindow: Boolean(sameAttempt),
-        pidReuseRisk: !sameAttempt
-      };
-    }
-    __name(getCrashAssociation, "getCrashAssociation");
-    function readMatchingCrashSummary(session, { directory = path2.join(os2.homedir(), "Library", "Logs", "DiagnosticReports"), fileSystem = fs2 } = {}) {
-      var _a, _b, _c;
-      if (!session || session.platform !== "darwin" || !session.startedAt || !session.finishedAt) return "[unavailable: no matching Mac run]";
-      const pids = (session.attempts || []).flatMap((a) => a.nativePids || []).map(Number).filter((n) => n > 0);
-      if (!pids.length) return "[unavailable: native pid not recorded]";
-      try {
-        const start = Date.parse(session.startedAt) - 5e3;
-        const end = Date.parse(session.finishedAt) + 3e5;
-        const entries = fileSystem.readdirSync(directory).filter((n) => /^(?:whisper(?:-cli|-cpp)?|main)[-_].*\.(?:ips|crash)$/i.test(n)).slice(-100);
-        for (const name of entries.reverse()) {
-          const file = path2.join(directory, name);
-          const stat = fileSystem.lstatSync(file);
-          if (!stat.isFile() || stat.isSymbolicLink() || stat.mtimeMs < start || stat.mtimeMs > end || stat.size > 1024 * 1024) continue;
-          const text = boundedRead(file, 1024 * 1024, fileSystem);
-          if (name.endsWith(".ips")) {
-            let report;
-            try {
-              report = JSON.parse(text);
-            } catch (_) {
-              try {
-                report = JSON.parse(text.slice(text.indexOf("\n") + 1));
-              } catch (_2) {
-                continue;
-              }
-            }
-            if (!pids.includes(Number(report.pid)) || !/^whisper(?:-cli|-cpp)?$/.test(report.procName || "") && !matchesBinaryPath(report.procPath, session)) continue;
-            const captured = Date.parse(report.captureTime || "");
-            if (!Number.isFinite(captured) || captured < start || captured > end) continue;
-            const thread = (_a = report.threads) == null ? void 0 : _a[report.faultingThread];
-            return JSON.stringify({
-              process: report.procName,
-              pid: report.pid,
-              captureTime: new Date(captured).toISOString(),
-              associationReliability: getCrashAssociation(session, report.pid, captured),
-              exception: report.exception,
-              termination: report.termination,
-              faultingThread: report.faultingThread,
-              frames: ((thread == null ? void 0 : thread.frames) || []).slice(0, 25).map((f) => ({ symbol: f.symbol, imageIndex: f.imageIndex, imageOffset: f.imageOffset }))
-            }, null, 2);
-          }
-          const proc = text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
-          if (!proc || !/^whisper(?:-cli|-cpp)?$/.test(proc[1]) && !(proc[1] === "main" && matchesBinaryPath((_b = text.match(/^Path:\s+(.+)$/m)) == null ? void 0 : _b[1], session)) || !pids.includes(Number(proc[2]))) continue;
-          const crashTime = Date.parse(((_c = text.match(/^Date\/Time:\s+(.+)$/m)) == null ? void 0 : _c[1]) || "");
-          if (!Number.isFinite(crashTime) || crashTime < start || crashTime > end) continue;
-          return [
-            `associationReliability=${JSON.stringify(getCrashAssociation(session, proc[2], crashTime))}`,
-            `captureTime=${new Date(crashTime).toISOString()}`,
-            ...text.split("\n").filter((line) => /^(Process:|Date\/Time:|Exception |Termination |Crashed Thread:|Thread \d+ Crashed:|\d+\s+\S+\s+0x)/.test(line)).slice(0, 40)
-          ].join("\n");
-        }
-      } catch (_) {
-        return "[unavailable: crash reports not accessible]";
-      }
-      return "[unavailable: no report matching time and native pid]";
-    }
-    __name(readMatchingCrashSummary, "readMatchingCrashSummary");
-    function saveSession(root, session, settings) {
-      const redact = /* @__PURE__ */ __name((value) => typeof value === "string" ? diagnosticRedact(value, settings) : Array.isArray(value) ? value.map(redact) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v)])) : value, "redact");
-      try {
-        fs2.writeFileSync(path2.join(root, "asr-diagnostic-last.json"), JSON.stringify(redact(session), null, 2), { mode: 384 });
-      } catch (_) {
-      }
-    }
-    __name(saveSession, "saveSession");
-    function detailedDiagnostic(root, settings = {}, currentTask = null) {
-      var _a;
-      const stored = boundedRead(path2.join(root, "asr-diagnostic-last.json"), 768 * 1024);
-      let session;
-      try {
-        session = JSON.parse(stored);
-      } catch (_) {
-      }
-      const sessionRef = session && session.recordId ? crypto2.createHash("sha256").update(String(session.recordId)).digest("hex").slice(0, 16) : "";
-      const sameAttempt = Boolean(currentTask && currentTask.transcriptionStarted === true && currentTask.attemptId && session && session.diagnosticAttemptId === currentTask.attemptId && currentTask.recordRef && sessionRef === currentTask.recordRef && Date.parse(session.startedAt) >= Date.parse(currentTask.startedAt) && (!currentTask.finishedAt || Date.parse(session.startedAt) <= Date.parse(currentTask.finishedAt)));
-      const identity = runtimeIdentity(root);
-      const sections = [
-        "详细 ASR 诊断 v2（本地生成；未自动上传）",
-        "日志每项最多 256 KiB；超出明确标记；stdout/识别文本不导出。",
-        JSON.stringify({ system: (session == null ? void 0 : session.system) || systemIdentity(), freeMemoryBytesNow: os2.freemem(), memoryNote: "当前空闲内存不能单独判断转写时内存不足", runtime: (session == null ? void 0 : session.runtime) || identity, model: (session == null ? void 0 : session.model) || modelIdentity(root), modelSha256AtReportTime: ((_a = session == null ? void 0 : session.model) == null ? void 0 : _a.scope) === "custom_command" ? "not-collected-custom-model-unknown" : digestFile(path2.join(root, "models", "ggml-small.bin")) }, null, 2),
-        sameAttempt ? "--- 与当前小红书任务匹配的 ASR 尝试 ---" : "--- 最近一次 ASR 历史任务（不代表当前同步已转写）---",
-        JSON.stringify({ relation: sameAttempt ? "same_attempt" : "historical_or_unconfirmed", recordRef: sessionRef, startedAt: session && session.startedAt || "", currentAttemptId: currentTask && currentTask.attemptId || "", currentTranscriptionStarted: currentTask ? currentTask.transcriptionStarted === true : null }),
-        stored,
-        "--- 转写日志（首尾有界；日志是否属于各次尝试以 session.attempts.logFreshness 为准） ---",
-        session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path2.join(root, "transcribe-last.log"))) ? readDiagnosticLog(path2.join(root, "transcribe-last.log")) : "[旧成功日志省略]",
-        "--- 安装日志（首尾有界） ---",
-        readDiagnosticLog(path2.join(root, "install.log")),
-        "--- 匹配的系统崩溃摘要 ---",
-        readMatchingCrashSummary(session)
-      ];
-      return diagnosticRedact(sections.join("\n"), settings);
-    }
-    __name(detailedDiagnostic, "detailedDiagnostic");
-    module2.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary };
-    function ensureManagedMacScript(root, installerSource) {
-      const target = path2.join(root, "transcribe.sh");
-      try {
-        const st = fs2.lstatSync(target);
-        if (!st.isFile() || st.isSymbolicLink()) return false;
-        const existing = fs2.readFileSync(target, "utf8").replace(/\r\n/g, "\n");
-        const begin = `cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
-`;
-        const from = installerSource.indexOf(begin) + begin.length;
-        const to = installerSource.indexOf("\nSCRIPT", from);
-        if (from < begin.length || to < from) return false;
-        const next = installerSource.slice(from, to) + "\n";
-        if (existing === next) return true;
-        if (crypto2.createHash("sha256").update(existing).digest("hex") !== "bd84ad38abbbfd9552a4c6caf3f8b6cfd95847f063c262428fdf14dbdc66a91a") return false;
-        const backup = target + ".before-macos-cpu-recovery-v1";
-        if (!fs2.existsSync(backup)) fs2.writeFileSync(backup, existing, { flag: "wx", mode: 448 });
-        const temp = target + ".macos-cpu-recovery-v1.tmp";
-        fs2.writeFileSync(temp, next, { flag: "wx", mode: 448 });
-        fs2.renameSync(temp, target);
-        return true;
-      } catch (_) {
-        return false;
-      }
-    }
-    __name(ensureManagedMacScript, "ensureManagedMacScript");
-    module2.exports.ensureManagedMacScript = ensureManagedMacScript;
   }
 });
 
@@ -13128,6 +13556,7 @@ __name(retainedSyncFailureDiagnostic, "retainedSyncFailureDiagnostic");
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
+var { buildFailureTechnicalReport, unavailableTechnicalReport } = require_failure_technical_report();
 var douyinDiagnostic = require_douyin_diagnostic_utils();
 var { summarizeResolverAttempts, hasFeishuActivity } = require_component_diagnostic_summary();
 var xhsDiagnostic = require_xiaohongshu_diagnostic_utils();
@@ -13375,7 +13804,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.177";
+var PLUGIN_RUNTIME_VERSION = "1.3.178";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -27427,6 +27856,28 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       evidenceCodes.push("upgrade_required");
     }
     const diagnosticStage = errorCode === "EXTRACTION_FAILED" ? "parse" : errorCode === "TRANSCRIPTION_FAILED" ? "transcribe" : errorCode === "OCR_FAILED" ? "ocr" : errorCode === "WRITE_FAILED" ? "write" : stage === "fetching" ? "fetch" : "sync";
+    let asrRoot = "";
+    if (errorCode === "TRANSCRIPTION_FAILED") {
+      try {
+        asrRoot = this.getConfiguredLocalAsrInstallRoot();
+      } catch (_) {
+        asrRoot = "";
+      }
+    }
+    let technicalReport;
+    try {
+      technicalReport = buildFailureTechnicalReport({
+        error,
+        recordId: normalizedRecordId,
+        attemptId,
+        stage: diagnosticStage,
+        retryCount: Number(retryCount) || 0,
+        asrRoot,
+        settings: this.settings
+      });
+    } catch (_) {
+      technicalReport = unavailableTechnicalReport("read_failed");
+    }
     return this.queueSyncDiagnosticEvent({
       diagnosticId,
       attemptId,
@@ -27437,6 +27888,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       retryCount: Number(retryCount) || 0,
       outcome: "failed",
       evidenceCodes,
+      technicalReport,
       ...String(sourceUrl || "").trim() ? { sourceUrl: String(sourceUrl).trim() } : {}
     }, binding);
   }
@@ -27496,7 +27948,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.addCommand({
       id: "stop-current-transcription",
       name: "停止当前转写",
-      callback: /* @__PURE__ */ __name(async () => this.stopCurrentTranscription(), "callback")
+      callback: /* @__PURE__ */ __name(async () => this.stopCurrentTranscription({ trigger: "stop_command" }), "callback")
     });
     this.addCommand({
       id: "login-xiaohongshu-web",
@@ -27524,7 +27976,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.addRibbonIcon("inbox", "同步微信收集箱", () => {
       this.syncInbox();
     });
-    this.transcriptionStopRibbon = this.addRibbonIcon("square", "暂停当前转写", () => this.stopCurrentTranscription());
+    this.transcriptionStopRibbon = this.addRibbonIcon("square", "暂停当前转写", (event) => this.stopCurrentTranscription({ trigger: "stop_button", trustedEvent: Boolean(event && event.isTrusted) }));
     this.setTranscriptionStopAvailable(false);
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
     this.startAutoSync();
@@ -28912,7 +29364,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     await this.app.vault.adapter.write(filePath, markdown);
     return filePath;
   }
-  async stopCurrentTranscription() {
+  async stopCurrentTranscription({ trigger = "programmatic_or_unknown", trustedEvent = null } = {}) {
     let stopped = false;
     const activeContext = this.currentTranscriptionContext && typeof this.currentTranscriptionContext === "object" ? this.currentTranscriptionContext : this.currentProcessingContext;
     const context = activeContext && typeof activeContext === "object" ? {
@@ -28920,7 +29372,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       binding: activeContext.binding ? { ...activeContext.binding } : null
     } : null;
     if (this.currentTranscriptionAbortRequest) {
-      this.currentTranscriptionAbortRequest("user_stop");
+      this.currentTranscriptionAbortRequest("user_stop", { trigger: ["stop_command", "stop_button", "programmatic_or_unknown"].includes(trigger) ? trigger : "programmatic_or_unknown", trustedEvent: typeof trustedEvent === "boolean" ? trustedEvent : null });
       stopped = true;
     } else if (this.currentTranscriptionAbortController) {
       this.currentTranscriptionAbortController.abort();
@@ -31152,7 +31604,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const session = {
       startedAt: (/* @__PURE__ */ new Date()).toISOString(),
       platform,
-      recordId: options.recordId || "",
+      recordId: options.recordId || this.currentProcessingContext && this.currentProcessingContext.recordId || "",
+      syncAttemptId: /^[A-Za-z0-9_-]{8,128}$/.test(options.syncAttemptId || this.currentProcessingContext && this.currentProcessingContext.attemptId || "") ? options.syncAttemptId || this.currentProcessingContext && this.currentProcessingContext.attemptId : "",
       diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || "") ? options.diagnosticAttemptId : "",
       runtime,
       system: asrRecovery.systemIdentity(platform),
@@ -31161,17 +31614,21 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       totalMemoryBytes: os.totalmem(),
       freeMemoryBytesBefore: os.freemem(),
       attempts: [],
-      abort: { requestedAt: null, source: null, observedAt: null }
+      abort: { requestedAt: null, source: null, trigger: "programmatic_or_unknown", trustedEvent: null, technicalFrames: [], observedAt: null }
     };
     const progressTitle = options.title || "";
     const abortController = new AbortController();
     let ownedChild = null;
     const attemptStartedAt = /* @__PURE__ */ new Map();
     const attemptLogBaseline = /* @__PURE__ */ new Map();
-    const requestAbort = /* @__PURE__ */ __name((source = "unknown") => {
+    const requestAbort = /* @__PURE__ */ __name((source = "unknown", attribution = null) => {
       if (!session.abort.requestedAt) {
         session.abort.requestedAt = (/* @__PURE__ */ new Date()).toISOString();
         session.abort.source = String(source || "unknown");
+        session.abort.trigger = ["stop_command", "stop_button", "programmatic_or_unknown"].includes(attribution && attribution.trigger) ? attribution.trigger : "programmatic_or_unknown";
+        session.abort.trustedEvent = typeof (attribution && attribution.trustedEvent) === "boolean" ? attribution.trustedEvent : null;
+        const frames = String(new Error().stack || "").split(String.fromCharCode(10)).map((line) => line.trim()).filter((line) => /^at\s/.test(line)).slice(0, 8);
+        session.abort.technicalFrames = asrRecovery.diagnosticRedact(frames.join(String.fromCharCode(10)), this.settings).split(String.fromCharCode(10)).filter(Boolean);
       }
       abortController.abort();
       const child = ownedChild;
@@ -31195,7 +31652,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     this.currentTranscriptionAbortController = abortController;
     this.currentTranscriptionAbortRequest = requestAbort;
     this.currentTranscriptionContext = {
-      recordId: options.recordId || "",
+      recordId: options.recordId || this.currentProcessingContext && this.currentProcessingContext.recordId || "",
+      syncAttemptId: /^[A-Za-z0-9_-]{8,128}$/.test(options.syncAttemptId || this.currentProcessingContext && this.currentProcessingContext.attemptId || "") ? options.syncAttemptId || this.currentProcessingContext && this.currentProcessingContext.attemptId : "",
       binding: options.binding || null,
       title: progressTitle
     };
@@ -31290,7 +31748,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             session.abort.nativeCrash = logFreshness === "fresh" && observedStage !== "unknown" ? asrRecovery.isMacNativeCrash(error) : null;
             session.abort.nativeCrashEvidence = logFreshness === "fresh" ? observedStage : "unknown_stale_or_unavailable_log";
           }
-          const nativeExitMatch = attemptLog.match(/^nativeExit=(\d+)$/m);
+          const nativeExitEvidence = asrRecovery.latestNativeExitForFinalStage(attemptLog, observedStage === "completed" ? "unknown" : observedStage);
           const nativePidList = [...new Set([...attemptLog.matchAll(/^progressPid=(\d+)$/gm)].map((m) => Number(m[1])).filter((pid) => pid > 0))];
           session.attempts.push({
             attempt,
@@ -31306,7 +31764,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             finishedAt: observedAt,
             exitCode: (error == null ? void 0 : error.exitCode) ?? (error == null ? void 0 : error.code) ?? null,
             signal: (error == null ? void 0 : error.signal) || "",
-            nativeExitCode: nativeExitMatch ? Number(nativeExitMatch[1]) : null,
+            nativeExitCode: nativeExitEvidence.nativeExitCode,
+            nativeExitAssociation: nativeExitEvidence.reason,
             logSnapshotAt: observedAt,
             error: (error == null ? void 0 : error.message) || "",
             nativePids: nativePidList,
@@ -31389,7 +31848,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       if (isAbortError(error)) {
         if ((_c = options.signal) == null ? void 0 : _c.aborted) throw createAbortError();
         if (session.abort.source === "user_stop") {
-          throw createRetryableTranscriptionError("用户已停止当前转写");
+          throw createRetryableTranscriptionError("收到停止转写请求");
         }
         throw createRetryableTranscriptionError("当前转写已中止");
       }
@@ -35764,6 +36223,7 @@ ${finalized.markdown}
           skipped.push({ recordId, reason: "record-busy" });
           continue;
         }
+        if (this.currentProcessingContext && this.currentProcessingContext.recordId === recordId) this.currentProcessingContext.attemptId = lifecycle.attemptId || "";
         diagnosticId = createDiagnosticId({
           binding,
           syncRecordId: recordId,
