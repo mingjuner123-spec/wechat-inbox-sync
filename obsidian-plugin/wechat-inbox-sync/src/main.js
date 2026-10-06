@@ -222,6 +222,7 @@ const {
   buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
   buildNetscapeCookieFile,
+  dedupeDouyinCookies,
   extractLocalDouyinResolverMediaUrls,
   extractLocalDouyinResolverMetadata,
 } = require('./local-douyin-resolver-utils');
@@ -281,7 +282,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.179';
+const PLUGIN_RUNTIME_VERSION = '1.3.180';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -11469,9 +11470,7 @@ async function getDouyinCookies() {
       session.cookies.get({ domain: '.douyin.com' }),
       session.cookies.get({ domain: 'www.douyin.com' }),
     ]);
-    const seen = new Set();
-    return groups.flat().filter((cookie) => cookie && cookie.name
-      && !seen.has(cookie.name) && seen.add(cookie.name));
+    return dedupeDouyinCookies(groups.flat());
   } catch (error) {
     return [];
   }
@@ -23128,6 +23127,47 @@ class WechatObsidianInboxPlugin extends Plugin {
         throwIfAborted(signal);
         xiaohongshuRedirectDiagnostic = redirectResult.diagnostic;
         const redirectedUrl = redirectResult.url;
+        const douyinNoteRoute = douyinDiagnostic.noteRoute(url) || douyinDiagnostic.noteRoute(redirectedUrl);
+        if (douyinNoteRoute) {
+          const message = douyinDiagnostic.failureMessage('DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
+          const failureDiagnostic = douyinDiagnostic.sanitize({
+            attemptId: douyinAttemptId,
+            recordRef: crypto.createHash('sha256').update(String(record.id || record._id || url)).digest('hex').slice(0, 16),
+            startedAt: douyinStartedAt,
+            finishedAt: new Date().toISOString(),
+            outcome: 'failed',
+            cookieState: 'unknown',
+            failureCode: 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED',
+            sourceKind: getDouyinDiagnosticUrlKind('', url),
+            resolvedKind: 'other',
+            targetIdRecognized: false,
+            targetIdState: 'missing',
+            targetStageEligible: false,
+            stages: [{
+              stage: 'note-route', inputKind: douyinDiagnostic.noteRoute(url) ? 'original-page' : 'resolved-page',
+              attempted: true, ok: false, rejectionReason: 'unsupported-note-transcription',
+              error: { code: 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED', message },
+            }],
+          });
+          douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), failureDiagnostic);
+          return {
+            ...record,
+            metadata: {
+              ...metadata,
+              title: metadata.title || title || '抖音笔记',
+              url,
+              platform: '抖音',
+              contentCategory: '笔记',
+              markdown: ['抖音笔记链接暂不支持转写。', '', `原始链接：${url}`, '', `> ${message}`].join('\n'),
+              transcriptionStatus: 'failed',
+              transcriptionError: message,
+              transcriptionSource: 'video',
+              conversionStatus: 'failed',
+              conversionNote: message,
+              mediaResolutionDiagnostic: failureDiagnostic,
+            },
+          };
+        }
         const targetIdentityUrl = isXiaohongshuUrl(url)
           ? resolveXiaohongshuIdentityUrl([redirectedUrl, url])
           : '';
