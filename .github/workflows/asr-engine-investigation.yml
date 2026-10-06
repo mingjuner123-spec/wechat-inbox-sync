@@ -96,16 +96,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          candidate="$RUNNER_TEMP/asr-fixed-compat/whisper.cpp-v1.5.5-cpu-no-accelerate"
-          test -f "$candidate"
-          echo 'e5ffe7edff2b95eee8454e5a1f2db2d7d320fd8c254138e043226dba6dbba8ea  '"$candidate" | shasum -a 256 --check
-          legacy="$(command -v whisper-cpp)"
-          test "$(shasum -a 256 "$legacy" | awk '{print $1}')" = '08491f7bfa1636ac6f7756c3a6f591225578fa876e6cf97fdc64b7838bc3aa95'
-          ASR_LEGACY_WHEEL_FIXTURE="$legacy" \
-          ASR_COMPAT_CANDIDATE_FIXTURE="$candidate" \
-          ASR_PUBLIC_AUDIO_FIXTURE="$RUNNER_TEMP/asr-fixture/jfk.wav" \
-          ASR_PUBLIC_MODEL_FIXTURE="$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
-            node tests/mac-legacy-asr-compat.test.js
+          {
+            trap 'status=$?; printf "wrapper migration command failed: status=%s line=%s\n" "$status" "$LINENO" >&2; exit "$status"' ERR
+            set -x
+            candidate="$RUNNER_TEMP/asr-fixed-compat/whisper.cpp-v1.5.5-cpu-no-accelerate"
+            test -f "$candidate"
+            echo 'e5ffe7edff2b95eee8454e5a1f2db2d7d320fd8c254138e043226dba6dbba8ea  '"$candidate" | shasum -a 256 --check
+            legacy="$(command -v whisper-cpp)"
+            test "$(shasum -a 256 "$legacy" | awk '{print $1}')" = '08491f7bfa1636ac6f7756c3a6f591225578fa876e6cf97fdc64b7838bc3aa95'
+            ASR_LEGACY_WHEEL_FIXTURE="$legacy" \
+            ASR_COMPAT_CANDIDATE_FIXTURE="$candidate" \
+            ASR_PUBLIC_AUDIO_FIXTURE="$RUNNER_TEMP/asr-fixture/jfk.wav" \
+            ASR_PUBLIC_MODEL_FIXTURE="$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
+              node tests/mac-legacy-asr-compat.test.js
+          } 2>&1 | tee "$RUNNER_TEMP/asr-evidence/wrapper-migration-test.txt"
       - name: Compare wheel and CPU-compatible candidate
         shell: bash
         run: |
