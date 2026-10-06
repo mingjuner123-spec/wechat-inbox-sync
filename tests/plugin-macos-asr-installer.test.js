@@ -49,10 +49,10 @@ function runWrapperHarness({ withMetalResources }) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-inbox-macos-asr-test-'));
   try {
     const harnessPath = path.join(tempRoot, 'harness.sh');
-    const writeWrapperFunction = extractShellFunction(
+    const writeWrapperFunction = extractShellSection(
       installer,
-      'write_whisper_wrapper',
-      'find_homebrew_whisper_command',
+      'render_whisper_wrapper_to_file() {',
+      'find_homebrew_whisper_command() {',
     );
     const metalFixture = withMetalResources
       ? [

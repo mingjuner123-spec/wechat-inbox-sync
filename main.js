@@ -1562,7 +1562,7 @@ ${sample}`).digest("hex")
     __name(buildTextCrashSummary, "buildTextCrashSummary");
     function readMatchingCrashSummary(session, options = {}) {
       var _a, _b;
-      const { directory, directories, fileSystem = fs2 } = options || {};
+      const { directory, directories, fileSystem = fs2, attempt, discoveryGraceMs = 3e5 } = options || {};
       if (!session || session.platform !== "darwin" || !session.startedAt || !session.finishedAt) {
         return "[unavailable: no matching Mac run]";
       }
@@ -1571,10 +1571,17 @@ ${sample}`).digest("hex")
       if (startedAt === null || finishedAt === null || finishedAt < startedAt) {
         return "[unavailable: invalid Mac run time]";
       }
-      const pids = (Array.isArray(session.attempts) ? session.attempts : []).flatMap((attempt) => Array.isArray(attempt == null ? void 0 : attempt.nativePids) ? attempt.nativePids : []).map(Number).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+      const selectedAttempts = attempt ? [attempt] : Array.isArray(session.attempts) ? session.attempts : [];
+      const pids = selectedAttempts.flatMap((attempt2) => Array.isArray(attempt2 == null ? void 0 : attempt2.nativePids) ? attempt2.nativePids : []).map(Number).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
       if (!pids.length) return "[unavailable: native pid not recorded]";
-      const start = startedAt - 5e3;
-      const end = finishedAt + 3e5;
+      const selectedStartedAt = attempt ? parseTimestamp(attempt.startedAt) : startedAt;
+      const selectedFinishedAt = attempt ? parseTimestamp(attempt.finishedAt || attempt.at) : finishedAt;
+      if (selectedStartedAt === null || selectedFinishedAt === null || selectedFinishedAt < selectedStartedAt) {
+        return "[unavailable: invalid attempt time]";
+      }
+      const start = selectedStartedAt - (attempt ? 0 : 5e3);
+      const end = selectedFinishedAt + Math.max(0, Number(discoveryGraceMs) || 0);
+      const exactEnd = selectedFinishedAt + (attempt ? 5e3 : 0);
       const scanDirectories = Array.isArray(directories) ? directories : directory !== void 0 ? [directory] : defaultCrashReportDirectories();
       const candidates = [];
       let accessibleDirectory = false;
@@ -1626,17 +1633,18 @@ ${sample}`).digest("hex")
           const report = parseIpsCrashReport(result.text);
           if (!report) continue;
           const processName = String(report.procName || "");
-          const processMatched2 = /^whisper(?:-cli|-cpp)?$/.test(processName) || matchesBinaryPath(report.procPath, session);
+          const processMatched2 = attempt ? matchesBinaryPath(report.procPath, session) : /^whisper(?:-cli|-cpp)?$/.test(processName) || matchesBinaryPath(report.procPath, session);
           if (!pids.includes(Number(report.pid)) || !processMatched2) continue;
           const captured = parseTimestamp(report.captureTime);
-          if (captured === null || captured < start || captured > end) continue;
+          if (captured === null || captured < start || captured > (attempt ? exactEnd : end)) continue;
           return buildIpsCrashSummary(report, session, captured);
         }
         const proc = result.text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
-        const processMatched = proc && (/^whisper(?:-cli|-cpp)?$/.test(proc[1]) || proc[1] === "main" && matchesBinaryPath((_a = result.text.match(/^Path:\s+(.+)$/m)) == null ? void 0 : _a[1], session));
+        const reportBinaryPath = (_a = result.text.match(/^Path:\s+(.+)$/m)) == null ? void 0 : _a[1];
+        const processMatched = proc && (attempt ? matchesBinaryPath(reportBinaryPath, session) : /^whisper(?:-cli|-cpp)?$/.test(proc[1]) || proc[1] === "main" && matchesBinaryPath(reportBinaryPath, session));
         if (!proc || !processMatched || !pids.includes(Number(proc[2]))) continue;
         const crashTime = parseTimestamp((_b = result.text.match(/^Date\/Time:\s+(.+)$/m)) == null ? void 0 : _b[1]);
-        if (crashTime === null || crashTime < start || crashTime > end) continue;
+        if (crashTime === null || crashTime < start || crashTime > (attempt ? exactEnd : end)) continue;
         return buildTextCrashSummary(result.text, session, proc[2], crashTime);
       }
       if (budgetExceeded) return CRASH_REPORT_BUDGET_UNAVAILABLE;
@@ -1645,6 +1653,31 @@ ${sample}`).digest("hex")
       return "[unavailable: no report matching time and native pid]";
     }
     __name(readMatchingCrashSummary, "readMatchingCrashSummary");
+    var DEFAULT_CRASH_REPORT_RETRY_DELAYS_MS = Object.freeze([0, 500, 1e3, 2e3, 2500]);
+    async function collectMatchingCrashSummary(session, attempt, options = {}) {
+      var _a, _b;
+      const delays = (Array.isArray(options.retryDelaysMs) ? options.retryDelaysMs : DEFAULT_CRASH_REPORT_RETRY_DELAYS_MS).slice(0, 8);
+      const maxWaitMs = Math.min(6e3, Math.max(0, Number(options.maxWaitMs ?? 6e3) || 0));
+      const wait = options.delay || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+      let result = "[unavailable: no report matching time and native pid]";
+      const baseDiscoveryGraceMs = options.discoveryGraceMs === void 0 ? 3e5 : Math.max(0, Number(options.discoveryGraceMs) || 0);
+      let elapsedMs = 0;
+      for (let index = 0; index < delays.length; index++) {
+        if ((_a = options.signal) == null ? void 0 : _a.aborted) return "[unavailable: crash report collection cancelled]";
+        const pauseMs = Math.min(Math.max(0, Number(delays[index]) || 0), Math.max(0, maxWaitMs - elapsedMs));
+        if (pauseMs > 0) await wait(pauseMs);
+        elapsedMs += pauseMs;
+        if ((_b = options.signal) == null ? void 0 : _b.aborted) return "[unavailable: crash report collection cancelled]";
+        result = readMatchingCrashSummary(session, {
+          ...options,
+          attempt,
+          discoveryGraceMs: baseDiscoveryGraceMs + elapsedMs
+        });
+        if (result !== "[unavailable: no report matching time and native pid]" && result !== "[unavailable: crash report candidate unreadable]") return result;
+      }
+      return result === "[unavailable: no report matching time and native pid]" ? "[unavailable: no report matching attempt before deadline]" : result;
+    }
+    __name(collectMatchingCrashSummary, "collectMatchingCrashSummary");
     function saveSession(root, session, settings) {
       const redact = /* @__PURE__ */ __name((value) => typeof value === "string" ? diagnosticRedact(value, settings) : Array.isArray(value) ? value.map(redact) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v)])) : value, "redact");
       try {
@@ -1655,11 +1688,25 @@ ${sample}`).digest("hex")
     __name(saveSession, "saveSession");
     function detailedDiagnostic(root, settings = {}, currentTask = null) {
       var _a;
-      const stored = boundedRead(path2.join(root, "asr-diagnostic-last.json"), 768 * 1024);
+      let stored = boundedRead(path2.join(root, "asr-diagnostic-last.json"), 768 * 1024);
       let session;
       try {
         session = JSON.parse(stored);
       } catch (_) {
+      }
+      const crashAttempts = (["failed", "cancelled"].includes(session == null ? void 0 : session.status) && Array.isArray(session == null ? void 0 : session.attempts) ? session.attempts : []).filter((attempt) => isMacNativeCrash({
+        exitCode: attempt.nativeExitCode ?? attempt.exitCode,
+        signal: attempt.signal,
+        message: attempt.error,
+        asrStage: attempt.stage
+      })).slice(0, 2);
+      const savedCrashSummaries = crashAttempts.map((attempt) => ({
+        attempt: attempt.attempt,
+        summary: typeof attempt.crashSummary === "string" && attempt.crashSummaryStatus === "matched" ? attempt.crashSummary : readMatchingCrashSummary(session, { attempt })
+      }));
+      if (crashAttempts.some((attempt) => typeof attempt.crashSummary === "string")) {
+        const displaySession = { ...session, attempts: session.attempts.map(({ crashSummary, crashSummaryStatus, ...attempt }) => attempt) };
+        stored = JSON.stringify(displaySession, null, 2);
       }
       const sessionRef = session && session.recordId ? crypto2.createHash("sha256").update(String(session.recordId)).digest("hex").slice(0, 16) : "";
       const sameAttempt = Boolean(currentTask && currentTask.transcriptionStarted === true && currentTask.attemptId && session && session.diagnosticAttemptId === currentTask.attemptId && currentTask.recordRef && sessionRef === currentTask.recordRef && Date.parse(session.startedAt) >= Date.parse(currentTask.startedAt) && (!currentTask.finishedAt || Date.parse(session.startedAt) <= Date.parse(currentTask.finishedAt)));
@@ -1676,12 +1723,13 @@ ${sample}`).digest("hex")
         "--- 安装日志（首尾有界） ---",
         readDiagnosticLog(path2.join(root, "install.log")),
         "--- 匹配的系统崩溃摘要 ---",
-        readMatchingCrashSummary(session)
+        savedCrashSummaries.length ? savedCrashSummaries.map((item) => `attempt=${item.attempt}
+${item.summary}`).join("\n\n") : readMatchingCrashSummary(session)
       ];
       return diagnosticRedact(sections.join("\n"), settings);
     }
     __name(detailedDiagnostic, "detailedDiagnostic");
-    module2.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary, CRASH_REPORT_MAX_FILE_BYTES, CRASH_REPORT_MAX_TOTAL_READ_BYTES };
+    module2.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary, collectMatchingCrashSummary, DEFAULT_CRASH_REPORT_RETRY_DELAYS_MS, CRASH_REPORT_MAX_FILE_BYTES, CRASH_REPORT_MAX_TOTAL_READ_BYTES };
     function ensureManagedMacScript(root, installerSource) {
       const target = path2.join(root, "transcribe.sh");
       try {
@@ -3340,6 +3388,350 @@ var require_feishu_image_display = __commonJS({
   }
 });
 
+// src/mac-legacy-asr-compat.js
+var require_mac_legacy_asr_compat = __commonJS({
+  "src/mac-legacy-asr-compat.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var crypto2 = require("crypto");
+    var LEGACY_WHEEL_INTEL_SHA256 = "08491f7bfa1636ac6f7756c3a6f591225578fa876e6cf97fdc64b7838bc3aa95";
+    var COMPAT_INTEL_SHA256 = "e5ffe7edff2b95eee8454e5a1f2db2d7d320fd8c254138e043226dba6dbba8ea";
+    var COMPAT_INTEL_BYTES = 1366840;
+    var COMPAT_RELATIVE_PATH = path2.join("bin", "compat", "v1.5.5", "x64", "whisper-cpp");
+    var WRAPPER_BACKUP_SUFFIX = ".before-macos-legacy-asr-compat-v1";
+    var MACHO_X86_64_MAGIC = Buffer.from([207, 250, 237, 254]);
+    var WHISPER_CPP_MIT_LICENSE = `MIT License
+
+Copyright (c) 2023-2024 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`;
+    function digestBytes(bytes) {
+      return crypto2.createHash("sha256").update(bytes).digest("hex");
+    }
+    __name(digestBytes, "digestBytes");
+    function digestFile(filePath) {
+      const hash = crypto2.createHash("sha256");
+      const fd = fs2.openSync(filePath, "r");
+      try {
+        const buffer = Buffer.alloc(256 * 1024);
+        let count;
+        while ((count = fs2.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count));
+      } finally {
+        fs2.closeSync(fd);
+      }
+      return hash.digest("hex");
+    }
+    __name(digestFile, "digestFile");
+    function digestFileOrEmpty(filePath) {
+      try {
+        const stat = fs2.lstatSync(filePath);
+        return stat.isFile() && !stat.isSymbolicLink() ? digestFile(filePath) : "";
+      } catch (_) {
+        return "";
+      }
+    }
+    __name(digestFileOrEmpty, "digestFileOrEmpty");
+    function macVersionInRange(value) {
+      const match = String(value || "").match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+      if (!match) return false;
+      const major = Number(match[1]);
+      const minor = Number(match[2]);
+      return (major > 12 || major === 12 && minor >= 0) && (major < 13 || major === 13 && minor < 3);
+    }
+    __name(macVersionInRange, "macVersionInRange");
+    function isSafeShellPath(value) {
+      return typeof value === "string" && value.length > 0 && path2.isAbsolute(value) && !/[\"$`\r\n]/.test(value);
+    }
+    __name(isSafeShellPath, "isSafeShellPath");
+    function renderManagedWrapper(binaryPath, metalResourcesPath = "") {
+      if (!isSafeShellPath(binaryPath) || metalResourcesPath && !isSafeShellPath(metalResourcesPath)) throw new Error("unsafe-wrapper-path");
+      return [
+        "#!/usr/bin/env bash",
+        `WHISPER_CPP_BIN="${binaryPath}"`,
+        `GGML_METAL_RESOURCES_DIR="${metalResourcesPath}"`,
+        'if [ -n "$GGML_METAL_RESOURCES_DIR" ] && [ -f "$GGML_METAL_RESOURCES_DIR/ggml-metal.metal" ]; then',
+        '  export GGML_METAL_PATH_RESOURCES="$GGML_METAL_RESOURCES_DIR"',
+        '  exec "$WHISPER_CPP_BIN" "$@"',
+        "fi",
+        'exec "$WHISPER_CPP_BIN" --no-gpu "$@"',
+        ""
+      ].join("\n");
+    }
+    __name(renderManagedWrapper, "renderManagedWrapper");
+    function parseManagedWrapper(text) {
+      const normalized = String(text || "").replace(/\r\n/g, "\n");
+      const match = normalized.match(/^#!\/usr\/bin\/env bash\nWHISPER_CPP_BIN="([^"\r\n]+)"\nGGML_METAL_RESOURCES_DIR="([^"\r\n]*)"\n/);
+      if (!match) return null;
+      try {
+        if (renderManagedWrapper(match[1], match[2]) !== normalized) return null;
+      } catch (_) {
+        return null;
+      }
+      return { binaryPath: match[1], metalResourcesPath: match[2] };
+    }
+    __name(parseManagedWrapper, "parseManagedWrapper");
+    function wrapperPathFor(root) {
+      return path2.join(root, "bin", "whisper-cli");
+    }
+    __name(wrapperPathFor, "wrapperPathFor");
+    function compatPathFor(root) {
+      return path2.join(root, COMPAT_RELATIVE_PATH);
+    }
+    __name(compatPathFor, "compatPathFor");
+    function readManagedWrapper(root) {
+      const wrapperPath = wrapperPathFor(root);
+      try {
+        const stat = fs2.lstatSync(wrapperPath);
+        if (!stat.isFile() || stat.isSymbolicLink()) return null;
+        const text = fs2.readFileSync(wrapperPath, "utf8");
+        const parsed = parseManagedWrapper(text);
+        return parsed ? { wrapperPath, text, ...parsed } : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    __name(readManagedWrapper, "readManagedWrapper");
+    function validateMachOBytes(bytes) {
+      return Buffer.isBuffer(bytes) && bytes.length >= 8 && bytes.subarray(0, 4).equals(MACHO_X86_64_MAGIC) && bytes.readInt32LE(4) === 16777223;
+    }
+    __name(validateMachOBytes, "validateMachOBytes");
+    function ensureCompatLicense(directory) {
+      const target = path2.join(directory, "LICENSE.txt");
+      const contents = Buffer.from(WHISPER_CPP_MIT_LICENSE, "utf8");
+      try {
+        const stat = fs2.lstatSync(target);
+        if (!stat.isFile() || stat.isSymbolicLink()) return false;
+        return fs2.readFileSync(target).equals(contents);
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") return false;
+        try {
+          fs2.writeFileSync(target, contents, { flag: "wx", mode: 384 });
+          return true;
+        } catch (_) {
+          try {
+            const stat = fs2.lstatSync(target);
+            return stat.isFile() && !stat.isSymbolicLink() && fs2.readFileSync(target).equals(contents);
+          } catch (_2) {
+            return false;
+          }
+        }
+      }
+    }
+    __name(ensureCompatLicense, "ensureCompatLicense");
+    function inspectCandidate(candidatePath) {
+      try {
+        const stat = fs2.lstatSync(candidatePath);
+        if (!stat.isFile() || stat.isSymbolicLink() || process.platform === "darwin" && (stat.mode & 73) === 0) return { valid: false, reason: "candidate-not-executable-file" };
+        if (stat.size !== COMPAT_INTEL_BYTES) return { valid: false, reason: "candidate-byte-length-mismatch" };
+        if (digestFile(candidatePath) !== COMPAT_INTEL_SHA256) return { valid: false, reason: "candidate-sha256-mismatch" };
+        const fd = fs2.openSync(candidatePath, "r");
+        let header;
+        try {
+          header = Buffer.alloc(8);
+          fs2.readSync(fd, header, 0, 8, 0);
+        } finally {
+          fs2.closeSync(fd);
+        }
+        if (!validateMachOBytes(header)) return { valid: false, reason: "candidate-not-thin-x86_64-macho" };
+        return { valid: true, reason: "candidate-verified" };
+      } catch (error) {
+        return { valid: false, reason: error && error.code === "ENOENT" ? "candidate-missing" : "candidate-unreadable" };
+      }
+    }
+    __name(inspectCandidate, "inspectCandidate");
+    function inspectMacLegacyAsr(options = {}) {
+      const { platform, arch, macOSVersion, managed, installRoot, runtimeIdentity } = options;
+      const compatPath = installRoot ? compatPathFor(installRoot) : null;
+      const base = {
+        eligible: false,
+        alreadyActive: false,
+        status: "not-applicable",
+        reason: "not-target-runtime",
+        originalBinaryPath: null,
+        compatPath,
+        expectedCompatSha256: COMPAT_INTEL_SHA256,
+        expectedCompatByteLength: COMPAT_INTEL_BYTES
+      };
+      if (platform !== "darwin" || arch !== "x64" || !macVersionInRange(macOSVersion)) return base;
+      if (managed !== true || !installRoot) return { ...base, status: "blocked", reason: "not-managed-install" };
+      if (!isSafeShellPath(path2.resolve(installRoot))) return { ...base, status: "blocked", reason: "unsafe-install-root" };
+      const wrapper = readManagedWrapper(installRoot);
+      const reportedBinary = String(runtimeIdentity && runtimeIdentity.binary || "");
+      if (!wrapper || !path2.isAbsolute(wrapper.binaryPath) || path2.resolve(wrapper.binaryPath) !== path2.resolve(reportedBinary)) {
+        return { ...base, status: "blocked", reason: "unknown-or-custom-wrapper" };
+      }
+      const actualHash = digestFileOrEmpty(wrapper.binaryPath);
+      const reportedHash = String(runtimeIdentity && runtimeIdentity.binarySha256 || "").toLowerCase();
+      if (path2.resolve(wrapper.binaryPath) === path2.resolve(compatPath) && actualHash === COMPAT_INTEL_SHA256) {
+        return { ...base, status: "already-active", alreadyActive: true, reason: "compat-already-active" };
+      }
+      if (!actualHash || actualHash !== LEGACY_WHEEL_INTEL_SHA256 || reportedHash !== actualHash) {
+        return { ...base, status: "blocked", reason: "native-binary-not-known-legacy-wheel", originalBinaryPath: wrapper.binaryPath };
+      }
+      const candidate = inspectCandidate(compatPath);
+      return {
+        ...base,
+        eligible: true,
+        status: candidate.valid ? "ready-to-activate" : "needs-download",
+        reason: candidate.reason,
+        originalBinaryPath: wrapper.binaryPath,
+        originalBinarySha256: actualHash,
+        wrapperPath: wrapper.wrapperPath
+      };
+    }
+    __name(inspectMacLegacyAsr, "inspectMacLegacyAsr");
+    function installMacLegacyAsrCompat(options = {}) {
+      const { installRoot, bytes } = options;
+      if (!installRoot || !isSafeShellPath(path2.resolve(installRoot)) || !Buffer.isBuffer(bytes)) return { installed: false, reason: "invalid-install-input" };
+      if (bytes.length !== COMPAT_INTEL_BYTES) return { installed: false, reason: "candidate-byte-length-mismatch" };
+      if (digestBytes(bytes) !== COMPAT_INTEL_SHA256) return { installed: false, reason: "candidate-sha256-mismatch" };
+      if (!validateMachOBytes(bytes)) return { installed: false, reason: "candidate-not-thin-x86_64-macho" };
+      const candidatePath = compatPathFor(installRoot);
+      const directory = path2.dirname(candidatePath);
+      fs2.mkdirSync(directory, { recursive: true, mode: 448 });
+      const existing = inspectCandidate(candidatePath);
+      if (existing.valid) return ensureCompatLicense(directory) ? { installed: true, reason: "candidate-already-installed", candidatePath } : { installed: false, reason: "compat-license-missing-or-mismatched", candidatePath };
+      if (existing.reason !== "candidate-missing") return { installed: false, reason: "existing-candidate-invalid", candidatePath };
+      const temporary = `${candidatePath}.${process.pid}.${crypto2.randomBytes(5).toString("hex")}.tmp`;
+      let fd;
+      try {
+        fd = fs2.openSync(temporary, "wx", 448);
+        fs2.writeFileSync(fd, bytes);
+        fs2.fsyncSync(fd);
+        fs2.closeSync(fd);
+        fd = void 0;
+        fs2.chmodSync(temporary, 448);
+        const verified = inspectCandidate(temporary);
+        if (!verified.valid) {
+          fs2.unlinkSync(temporary);
+          return { installed: false, reason: verified.reason };
+        }
+        fs2.renameSync(temporary, candidatePath);
+        if (!ensureCompatLicense(directory)) return { installed: false, reason: "compat-license-missing-or-mismatched", candidatePath };
+        return { installed: true, reason: "candidate-installed", candidatePath };
+      } catch (_) {
+        if (fd !== void 0) try {
+          fs2.closeSync(fd);
+        } catch (_2) {
+        }
+        try {
+          fs2.unlinkSync(temporary);
+        } catch (_2) {
+        }
+        return { installed: false, reason: "candidate-atomic-install-failed" };
+      }
+    }
+    __name(installMacLegacyAsrCompat, "installMacLegacyAsrCompat");
+    function restoreWrapper(wrapperPath, contents) {
+      const tempPath = `${wrapperPath}.${process.pid}.${crypto2.randomBytes(5).toString("hex")}.rollback.tmp`;
+      let fd;
+      try {
+        fd = fs2.openSync(tempPath, "wx", 448);
+        fs2.writeFileSync(fd, contents);
+        fs2.fsyncSync(fd);
+        fs2.closeSync(fd);
+        fd = void 0;
+        fs2.chmodSync(tempPath, 448);
+        fs2.renameSync(tempPath, wrapperPath);
+        return true;
+      } catch (_) {
+        if (fd !== void 0) try {
+          fs2.closeSync(fd);
+        } catch (_2) {
+        }
+        try {
+          fs2.unlinkSync(tempPath);
+        } catch (_2) {
+        }
+        return false;
+      }
+    }
+    __name(restoreWrapper, "restoreWrapper");
+    function activateMacLegacyAsrCompat(options = {}) {
+      const { installRoot, candidatePath } = options;
+      if (!installRoot || !isSafeShellPath(path2.resolve(installRoot)) || !candidatePath || path2.resolve(candidatePath) !== path2.resolve(compatPathFor(installRoot))) return { applied: false, reason: "candidate-path-not-managed" };
+      const candidate = inspectCandidate(candidatePath);
+      if (!candidate.valid) return { applied: false, reason: candidate.reason };
+      const wrapper = readManagedWrapper(installRoot);
+      if (!wrapper) return { applied: false, reason: "unknown-or-custom-wrapper" };
+      const oldHash = digestFileOrEmpty(wrapper.binaryPath);
+      if (path2.resolve(wrapper.binaryPath) === path2.resolve(candidatePath) && oldHash === COMPAT_INTEL_SHA256) return { applied: true, reason: "already-active" };
+      if (oldHash !== LEGACY_WHEEL_INTEL_SHA256) return { applied: false, reason: "native-binary-not-known-legacy-wheel" };
+      const backupPath = wrapper.wrapperPath + WRAPPER_BACKUP_SUFFIX;
+      try {
+        if (fs2.existsSync(backupPath)) {
+          const backupStat = fs2.lstatSync(backupPath);
+          if (!backupStat.isFile() || backupStat.isSymbolicLink()) return { applied: false, reason: "wrapper-backup-not-regular-file" };
+          if (fs2.readFileSync(backupPath, "utf8").replace(/\r\n/g, "\n") !== wrapper.text.replace(/\r\n/g, "\n")) return { applied: false, reason: "wrapper-backup-mismatch" };
+        } else fs2.writeFileSync(backupPath, wrapper.text, { flag: "wx", mode: 448 });
+        const currentWrapper = readManagedWrapper(installRoot);
+        if (!currentWrapper || currentWrapper.text !== wrapper.text) return { applied: false, reason: "wrapper-changed-before-switch" };
+        const tempPath = `${wrapper.wrapperPath}.${process.pid}.${crypto2.randomBytes(5).toString("hex")}.tmp`;
+        let fd;
+        try {
+          fd = fs2.openSync(tempPath, "wx", 448);
+          fs2.writeFileSync(fd, renderManagedWrapper(candidatePath, ""));
+          fs2.fsyncSync(fd);
+          fs2.closeSync(fd);
+          fd = void 0;
+          fs2.chmodSync(tempPath, 448);
+          fs2.renameSync(tempPath, wrapper.wrapperPath);
+        } catch (error) {
+          if (fd !== void 0) try {
+            fs2.closeSync(fd);
+          } catch (_) {
+          }
+          try {
+            fs2.unlinkSync(tempPath);
+          } catch (_) {
+          }
+          throw error;
+        }
+        const after = readManagedWrapper(installRoot);
+        if (!after || path2.resolve(after.binaryPath) !== path2.resolve(candidatePath) || digestFileOrEmpty(after.binaryPath) !== COMPAT_INTEL_SHA256) {
+          const rolledBack = restoreWrapper(wrapper.wrapperPath, wrapper.text);
+          return { applied: false, reason: rolledBack ? "post-switch-readback-failed-rolled-back" : "post-switch-readback-and-rollback-failed" };
+        }
+        return { applied: true, reason: "compat-activated", wrapperBackupPath: backupPath, compatPath: candidatePath };
+      } catch (_) {
+        return { applied: false, reason: "atomic-wrapper-switch-failed" };
+      }
+    }
+    __name(activateMacLegacyAsrCompat, "activateMacLegacyAsrCompat");
+    module2.exports = {
+      LEGACY_WHEEL_INTEL_SHA256,
+      COMPAT_INTEL_SHA256,
+      COMPAT_INTEL_BYTES,
+      COMPAT_RELATIVE_PATH,
+      macVersionInRange,
+      isSafeShellPath,
+      renderManagedWrapper,
+      parseManagedWrapper,
+      inspectMacLegacyAsr,
+      installMacLegacyAsrCompat,
+      activateMacLegacyAsrCompat
+    };
+  }
+});
+
 // src/douyin-diagnostic-utils.js
 var require_douyin_diagnostic_utils = __commonJS({
   "src/douyin-diagnostic-utils.js"(exports2, module2) {
@@ -4046,14 +4438,24 @@ function Preserve-UnverifiedDownload {
   }
 }
 
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $stream = [IO.File]::OpenRead($Path)
+  $hasher = $null
+  try {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToUpperInvariant()
+  } finally {
+    if ($hasher) { $hasher.Dispose() }
+    $stream.Dispose()
+  }
+}
+
 function Test-DownloadComplete {
   param([string]$Path, $Spec)
   if (-not $Spec -or -not (Test-Path -LiteralPath $Path)) { return $false }
   if ((Get-Item -LiteralPath $Path).Length -ne [Int64]$Spec.byteLength) { return $false }
-  $stream = [IO.File]::OpenRead($Path)
-  $hasher = [Security.Cryptography.SHA256]::Create()
-  try { return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '') -eq $Spec.sha256 }
-  finally { $hasher.Dispose(); $stream.Dispose() }
+  return (Get-FileSha256 -Path $Path) -eq $Spec.sha256
 }
 
 function Download-File {
@@ -4336,7 +4738,7 @@ function Assert-FileSha256 {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "$Label is missing after download: $Path"
   }
-  $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+  $actualSha256 = Get-FileSha256 -Path $Path
   if ($actualSha256 -ne $ExpectedSha256.ToUpperInvariant()) {
     throw "$Label SHA-256 mismatch (expected $ExpectedSha256, got $actualSha256)."
   }
@@ -6000,14 +6402,14 @@ find_metal_resources_dir() {
 }
 
 extract_whisper_wrapper_target() {
-  local wrapper_path="$1"
-  local target=""
-  if [ -f "$wrapper_path" ]; then
-    target="$(sed -n 's/^WHISPER_CPP_BIN="\\(.*\\)"$/\\1/p' "$wrapper_path" 2>/dev/null | head -n 1 || true)"
-  fi
-  if [ -n "$target" ] && [ -x "$target" ]; then
-    echo "$target"
-  fi
+  local wrapper_path="$1" target="" expected="$TEMP_ROOT/wrapper-check.$$"
+  [ -f "$wrapper_path" ] && [ ! -L "$wrapper_path" ] || return 1
+  target="$(sed -n 's/^WHISPER_CPP_BIN="\\(.*\\)"$/\\1/p' "$wrapper_path" 2>/dev/null | head -n 1 || true)"
+  [ -n "$target" ] && [ -x "$target" ] || return 1
+  render_whisper_wrapper_to_file "$expected" "$target" || return 1
+  if cmp -s "$expected" "$wrapper_path"; then rm -f "$expected"; echo "$target"; return 0; fi
+  rm -f "$expected"
+  return 1
 }
 
 extract_whisper_wrapper_metal_resources() {
@@ -6035,12 +6437,10 @@ resolve_symlink_target() {
   esac
 }
 
-write_whisper_wrapper() {
-  local whisper_target="$1"
-  local metal_resources_dir
+render_whisper_wrapper_to_file() {
+  local output_path="$1" whisper_target="$2" metal_resources_dir
   metal_resources_dir="$(find_metal_resources_dir "$whisper_target" || true)"
-  rm -f "$INSTALL_ROOT/bin/whisper-cli"
-  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
+  cat > "$output_path" <<SCRIPT
 #!/usr/bin/env bash
 WHISPER_CPP_BIN="$whisper_target"
 GGML_METAL_RESOURCES_DIR="$metal_resources_dir"
@@ -6050,9 +6450,102 @@ if [ -n "\\$GGML_METAL_RESOURCES_DIR" ] && [ -f "\\$GGML_METAL_RESOURCES_DIR/ggm
 fi
 exec "\\$WHISPER_CPP_BIN" --no-gpu "\\$@"
 SCRIPT
-  chmod +x "$INSTALL_ROOT/bin/whisper-cli"
 }
 
+write_whisper_wrapper() {
+  local whisper_target="$1" staged_wrapper="$INSTALL_ROOT/bin/whisper-cli.tmp.$$" existing_target=""
+  if [ -e "$INSTALL_ROOT/bin/whisper-cli" ] || [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
+    if [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then echo 'Preserving custom ASR wrapper symlink.' >&2; return 0; fi
+    existing_target="$(extract_whisper_wrapper_target "$INSTALL_ROOT/bin/whisper-cli" || true)"
+    if [ -z "$existing_target" ]; then echo 'Preserving unknown custom ASR wrapper.' >&2; return 0; fi
+  fi
+  render_whisper_wrapper_to_file "$staged_wrapper" "$whisper_target"
+  chmod +x "$staged_wrapper"
+  mv -f "$staged_wrapper" "$INSTALL_ROOT/bin/whisper-cli"
+}
+
+COMPAT_LEGACY_WHEEL_SHA256="08491F7BFA1636AC6F7756C3A6F591225578FA876E6CF97FDC64B7838BC3AA95"
+COMPAT_BINARY_SHA256="E5FFE7EDFF2B95EEE8454E5A1F2DB2D7D320FD8C254138E043226DBA6DBBA8EA"
+COMPAT_BINARY_BYTES=1366840
+COMPAT_BINARY_PATH="$INSTALL_ROOT/bin/compat/v1.5.5/x64/whisper-cpp"
+COMPAT_LICENSE_PATH="$INSTALL_ROOT/bin/compat/v1.5.5/x64/LICENSE.txt"
+
+write_whisper_cpp_mit_license() {
+  local staged="$TEMP_ROOT/whisper-cpp-LICENSE.txt"
+  cat > "$staged" <<'LICENSE'
+MIT License
+
+Copyright (c) 2023-2024 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+LICENSE
+  if [ -e "$COMPAT_LICENSE_PATH" ] || [ -L "$COMPAT_LICENSE_PATH" ]; then
+    [ -f "$COMPAT_LICENSE_PATH" ] && [ ! -L "$COMPAT_LICENSE_PATH" ] && cmp -s "$staged" "$COMPAT_LICENSE_PATH"
+    return
+  fi
+  cp "$staged" "$COMPAT_LICENSE_PATH.tmp.$$" || return 1
+  chmod 600 "$COMPAT_LICENSE_PATH.tmp.$$"
+  if ! mv -n "$COMPAT_LICENSE_PATH.tmp.$$" "$COMPAT_LICENSE_PATH"; then rm -f "$COMPAT_LICENSE_PATH.tmp.$$"; return 1; fi
+  [ -f "$COMPAT_LICENSE_PATH" ] && [ ! -L "$COMPAT_LICENSE_PATH" ] && cmp -s "$staged" "$COMPAT_LICENSE_PATH"
+}
+
+validate_existing_compat_binary() {
+  [ -f "$COMPAT_BINARY_PATH" ] && [ -x "$COMPAT_BINARY_PATH" ] && [ ! -L "$COMPAT_BINARY_PATH" ] || return 1
+  [ "$(wc -c < "$COMPAT_BINARY_PATH" | tr -d ' ')" = "$COMPAT_BINARY_BYTES" ] || return 1
+  [ "$(file_sha256 "$COMPAT_BINARY_PATH")" = "$COMPAT_BINARY_SHA256" ] || return 1
+  file "$COMPAT_BINARY_PATH" | grep -q 'Mach-O 64-bit executable x86_64' || return 1
+  write_whisper_cpp_mit_license
+}
+activate_compat_for_legacy_wrapper() {
+  local original="$1" wrapper="$INSTALL_ROOT/bin/whisper-cli" version major minor sha target="$INSTALL_ROOT/bin/whisper-cli.compat.tmp.$$" expected="$TEMP_ROOT/legacy-wrapper.expected" backup="$INSTALL_ROOT/bin/whisper-cli.before-macos-legacy-asr-compat-v1"
+  [ "$(uname -m)" = x86_64 ] || return 0
+  version="$(sw_vers -productVersion 2>/dev/null || true)"
+  [[ "$version" =~ ^([0-9]+)\\.([0-9]+)(\\.|$) ]] || return 0
+  major="\${BASH_REMATCH[1]}"; minor="\${BASH_REMATCH[2]}"
+  { [ "$major" = 12 ] || { [ "$major" = 13 ] && [ "$minor" -lt 3 ]; }; } || return 0
+  case "$INSTALL_ROOT" in *'"'*|*'$'*|*'\`'*|*$'\\n'*) return 0 ;; esac
+  [ -x "$original" ] && [ -f "$wrapper" ] && [ ! -L "$wrapper" ] || return 0
+  sha="$(file_sha256 "$original" 2>/dev/null || true)"
+  [ "$sha" = "$COMPAT_LEGACY_WHEEL_SHA256" ] || return 0
+  [ "$(extract_whisper_wrapper_target "$wrapper" || true)" = "$original" ] || return 0
+  render_whisper_wrapper_to_file "$expected" "$original"
+  cmp -s "$expected" "$wrapper" || return 0
+  validate_existing_compat_binary || { echo 'Pinned compatibility engine is not installed; retaining the existing ASR engine.' >&2; return 0; }
+  if [ -e "$backup" ] || [ -L "$backup" ]; then
+    [ -f "$backup" ] && [ ! -L "$backup" ] && cmp -s "$wrapper" "$backup" || { echo 'Existing ASR wrapper backup does not match; leaving wrapper unchanged.' >&2; return 0; }
+  else cp -p "$wrapper" "$backup" || return 0
+  fi
+  cmp -s "$expected" "$wrapper" || return 0
+  render_whisper_wrapper_to_file "$target" "$COMPAT_BINARY_PATH"
+  chmod 700 "$target"
+  mv -f "$target" "$wrapper"
+  if [ "$(extract_whisper_wrapper_target "$wrapper" || true)" != "$COMPAT_BINARY_PATH" ] || [ "$(file_sha256 "$COMPAT_BINARY_PATH")" != "$COMPAT_BINARY_SHA256" ]; then
+    if cp "$expected" "$wrapper.rollback.$$" && chmod 700 "$wrapper.rollback.$$" && mv -f "$wrapper.rollback.$$" "$wrapper"; then
+      echo 'ASR compatibility wrapper verification failed; restored the previous wrapper.' >&2
+      return 0
+    fi
+    rm -f "$wrapper.rollback.$$"
+    echo 'ASR compatibility wrapper verification and rollback both failed; the ASR wrapper requires manual repair.' >&2
+    return 1
+  fi
+  echo 'Applied the pinned macOS 12-13.2 Intel ASR compatibility engine; original wheel, model, and user configuration were retained.'
+}
 find_homebrew_whisper_command() {
   local name prefix candidate
   for prefix in /opt/homebrew /usr/local; do
@@ -6513,6 +7006,7 @@ fi
 if [ "$WHISPER_BIN" != "$INSTALL_ROOT/bin/whisper-cli" ] || [ -n "$EXISTING_WHISPER_TARGET" ] || [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
   write_whisper_wrapper "$WHISPER_BIN"
 fi
+activate_compat_for_legacy_wrapper "$WHISPER_BIN"
 if [ "$FFMPEG_BIN" != "$INSTALL_ROOT/bin/ffmpeg" ]; then
   ln -sf "$FFMPEG_BIN" "$INSTALL_ROOT/bin/ffmpeg"
 fi
@@ -7254,16 +7748,29 @@ function Get-OcrImportFailureDetail {
   return ($details -join " ").Trim()
 }
 
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return $null
+  }
+  $stream = [IO.File]::OpenRead($Path)
+  $hasher = $null
+  try {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToUpperInvariant()
+  } finally {
+    if ($hasher) { $hasher.Dispose() }
+    $stream.Dispose()
+  }
+}
+
 function Test-FileSha256 {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$ExpectedSha256
   )
-  if (!(Test-Path -LiteralPath $Path)) {
-    return $false
-  }
-  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant()
-  return $actual -eq $ExpectedSha256.ToUpperInvariant()
+  $actual = Get-FileSha256 -Path $Path
+  return ![string]::IsNullOrWhiteSpace($actual) -and $actual -eq $ExpectedSha256.ToUpperInvariant()
 }
 
 function Read-ExactStreamBytes {
@@ -14181,6 +14688,7 @@ __name(retainedSyncFailureDiagnostic, "retainedSyncFailureDiagnostic");
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
+var macLegacyAsrCompat = require_mac_legacy_asr_compat();
 var { buildFailureTechnicalReport, unavailableTechnicalReport } = require_failure_technical_report();
 var douyinDiagnostic = require_douyin_diagnostic_utils();
 var { summarizeResolverAttempts, hasFeishuActivity } = require_component_diagnostic_summary();
@@ -14438,13 +14946,13 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.180";
+var PLUGIN_RUNTIME_VERSION = "1.3.181";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
 var OFFICIAL_SYNC_API_BASE = "https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync";
-var FEISHU_OAUTH_SYNC_API_BASE = "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync";
+var FEISHU_OAUTH_SYNC_API_BASE = OFFICIAL_SYNC_API_BASE;
 var OFFICIAL_SYNC_API_HOSTS = /* @__PURE__ */ new Set([
   new URL(OFFICIAL_SYNC_API_BASE).hostname,
   new URL(FEISHU_OAUTH_SYNC_API_BASE).hostname
@@ -14505,11 +15013,17 @@ var DOUYIN_MOBILE_SHARE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; 22041211AC
 var LOCAL_TRANSCRIPTION_PLAN = "local_transcription_beta";
 var LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ["local_transcription_trial"];
 var LOCAL_COMPONENT_MANIFEST_PATH = "/local-components/manifest";
-var LOCAL_COMPONENT_DOWNLOAD_HOST = "6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la";
+var LOCAL_COMPONENT_DOWNLOAD_HOST = "6865-he02-d8gebzv050ed6c4ef-1428610652.tcb.qcloud.la";
+var LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST = "6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la";
+var LOCAL_COMPONENT_DOWNLOAD_HOSTS = /* @__PURE__ */ new Set([
+  LOCAL_COMPONENT_DOWNLOAD_HOST,
+  LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST
+]);
 var LOCAL_COMPONENT_DELIVERY_PROTOCOL = "cloudbase-v1";
+var LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY = "short-native-v1";
 var LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 var LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 9e4;
-var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c";
+var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "0a13388b1a022867e78ccaacf45cf53b522e03d0fe5208c804f822516c9270f6";
 var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "08c7edf5f91653b825694d1ffc8c82d31d6ddb32e5f8689012fc5698062be432";
 var LOCAL_COMPONENT_ASSET_ENV_KEYS = Object.freeze({
   douyin: Object.freeze({ resolver: "WECHAT_INBOX_DOUYIN_RESOLVER_URL" }),
@@ -16307,7 +16821,7 @@ function isAuthorizedLocalComponentDownloadUrl(downloadUrl, sha256, fileName) {
     const parsed = new URL(String(downloadUrl || ""));
     const expectedPath = `/local-components/by-sha256/${sha256}/${fileName}`;
     const decodedPathname = decodeURIComponent(parsed.pathname);
-    return parsed.protocol === "https:" && parsed.hostname === LOCAL_COMPONENT_DOWNLOAD_HOST && !parsed.port && !parsed.username && !parsed.password && decodedPathname === expectedPath && !parsed.hash && parsed.searchParams.getAll("sign").length === 1 && Boolean(parsed.searchParams.get("sign")) && parsed.searchParams.getAll("t").length === 1 && Boolean(parsed.searchParams.get("t")) && [...parsed.searchParams.keys()].every((key) => key === "sign" || key === "t");
+    return parsed.protocol === "https:" && LOCAL_COMPONENT_DOWNLOAD_HOSTS.has(parsed.hostname) && !parsed.port && !parsed.username && !parsed.password && decodedPathname === expectedPath && !parsed.hash && parsed.searchParams.getAll("sign").length === 1 && Boolean(parsed.searchParams.get("sign")) && parsed.searchParams.getAll("t").length === 1 && Boolean(parsed.searchParams.get("t")) && [...parsed.searchParams.keys()].every((key) => key === "sign" || key === "t");
   } catch (error) {
     return false;
   }
@@ -30246,7 +30760,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const payload = await this.requestJson(
-          `${options.metadataOnly ? "/local-components/version" : LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}`,
+          `${options.metadataOnly ? "/local-components/version" : LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}${options.metadataOnly ? "" : `&deliveryHost=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY)}`}`,
           "GET",
           {},
           binding,
@@ -30293,7 +30807,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
             attempt,
             code: /^[A-Z0-9_]{1,80}$/.test(String(error && error.code || "")) ? error.code : "MANIFEST_UNAVAILABLE"
           };
-          const failure = new Error("长环境组件下载暂时不可用，已保留本地下载进度。请稍后点击“安装／更新本地组件”；若仍失败，请复制新的同步/安装失败诊断。");
+          const failure = new Error("授权组件下载暂时不可用，已保留本地下载进度。请稍后点击“安装／更新本地组件”；若仍失败，请复制新的同步/安装失败诊断。");
           failure.code = "ASR_SOURCE_UNAVAILABLE";
           throw failure;
         }
@@ -32295,7 +32809,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
   }
   async runLocalTranscription(audioUrl, options = {}) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e, _f;
     throwIfAborted(options.signal);
     await this.ensureLocalComponentReadyForUse("音视频转写", {
       reason: "first-use",
@@ -32314,7 +32828,82 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const platform = this.getConfiguredLocalAsrPlatform();
     const managed = platform === "darwin" && (commandTemplate === getDefaultLocalTranscriptionCommand("darwin") && installRoot === getLocalAsrInstallRoot(os.homedir(), "default", "darwin") || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot) && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
-    const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
+    let compatibility = { status: "not-applicable", reason: "not-target-runtime" };
+    if (platform === "darwin" && managed && os.arch() === "x64") {
+      let macOSVersion = String(this._macOSProductVersion || "");
+      if (!macOSVersion) {
+        try {
+          const versionResult = childProcess.spawnSync("sw_vers", ["-productVersion"], { encoding: "utf8", timeout: 2e3 });
+          if (!versionResult.error && versionResult.status === 0) {
+            macOSVersion = String(versionResult.stdout || "").trim();
+            if (macOSVersion) this._macOSProductVersion = macOSVersion;
+          }
+        } catch (_) {
+        }
+      }
+      const initialRuntime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
+      const plan = macLegacyAsrCompat.inspectMacLegacyAsr({
+        platform,
+        arch: os.arch(),
+        macOSVersion,
+        managed,
+        installRoot,
+        runtimeIdentity: initialRuntime
+      });
+      compatibility = { status: plan.status, reason: plan.reason, macOSVersion };
+      if (plan.alreadyActive) {
+        compatibility = { status: "already-active", reason: plan.reason, macOSVersion, binarySha256: initialRuntime.binarySha256 };
+      } else if (plan.eligible && ["needs-download", "ready-to-activate"].includes(plan.status)) {
+        let candidatePath = plan.compatPath;
+        if (plan.status === "needs-download") {
+          let manifest;
+          try {
+            manifest = await this.getAuthorizedLocalComponentManifest("asr");
+          } catch (error) {
+            if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw error;
+            const reason = String(error && (error.code || error.message) || "authorization-unavailable").slice(0, 120);
+            throw new Error(`macOS 12–13.2 Intel 转写兼容组件尚未就绪（${reason}）；为避免再次调用已确认不兼容的旧引擎，本次转写已停止。请稍后重试；若持续失败，请更新插件后联系支持。`);
+          }
+          const compatAssets = manifest && manifest.component === "asr" && manifest.platform === "darwin" && manifest.arch === "x64" && Array.isArray(manifest.assets) ? manifest.assets.filter((asset) => asset.id === "whisper-compat") : [];
+          if (compatAssets.length !== 1 || compatAssets[0].sha256 !== plan.expectedCompatSha256 || compatAssets[0].byteLength !== plan.expectedCompatByteLength) {
+            throw new Error("macOS 12–13.2 Intel 转写兼容组件未取得唯一且校验匹配的授权资产；原引擎未切换。请稍后重试或联系支持。");
+          }
+          throwIfAborted(options.signal);
+          let response;
+          try {
+            response = await requestUrl({ url: compatAssets[0].downloadUrl, method: "GET" });
+          } catch (error) {
+            if (isAbortError(error) || ((_b = options.signal) == null ? void 0 : _b.aborted)) throw error;
+            throw new Error("macOS Intel 转写兼容组件下载失败；本次转写已停止，未启动旧引擎。请稍后重试；若持续失败，请更新插件后联系支持。");
+          }
+          if (!response || !Number.isInteger(response.status) || response.status < 200 || response.status >= 300 || !response.arrayBuffer) {
+            throw new Error("macOS Intel 转写兼容组件下载失败；本次转写已停止，未启动旧引擎。请稍后重试。");
+          }
+          const candidateBytes = Buffer.from(response.arrayBuffer);
+          const candidateSha256 = crypto.createHash("sha256").update(candidateBytes).digest("hex");
+          if (candidateBytes.length !== plan.expectedCompatByteLength || candidateSha256 !== plan.expectedCompatSha256) {
+            throw new Error("macOS Intel 转写兼容组件校验失败；本次转写已停止，未启动旧引擎。请联系支持。");
+          }
+          throwIfAborted(options.signal);
+          const installed = macLegacyAsrCompat.installMacLegacyAsrCompat({ installRoot, bytes: candidateBytes });
+          if (!installed.installed) throw new Error(`macOS Intel 转写兼容组件安装失败（${installed.reason}）；本次转写已停止，旧引擎未启动。请稍后重试并联系支持。`);
+          candidatePath = installed.candidatePath || candidatePath;
+        }
+        throwIfAborted(options.signal);
+        const activated = macLegacyAsrCompat.activateMacLegacyAsrCompat({ installRoot, candidatePath });
+        if (!activated.applied) {
+          const state = String(activated.reason || "").includes("rollback-failed") ? "兼容切换和原wrapper恢复均失败，请不要再次尝试转写并联系支持" : String(activated.reason || "").includes("rolled-back") ? "兼容切换失败，原wrapper已恢复；请稍后重试并联系支持" : "兼容切换失败，本次转写已停止；请稍后重试并联系支持";
+          throw new Error(`macOS Intel 转写${state}（${activated.reason}）。`);
+        }
+        const activeRuntime = asrRecovery.runtimeIdentity(installRoot, platform, this.getLocalAsrInstallStatus());
+        if (activeRuntime.binarySha256 !== plan.expectedCompatSha256) {
+          throw new Error("macOS Intel 转写兼容切换后的运行身份校验失败；本次转写已停止，请不要继续使用当前组件并联系支持。");
+        }
+        compatibility = { status: "active", reason: activated.reason, macOSVersion, binarySha256: activeRuntime.binarySha256 };
+      }
+    }
+    const runtime = asrRecovery.runtimeIdentity(installRoot, platform, this.getLocalAsrInstallStatus());
+    runtime.macLegacyCompatibility = compatibility;
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
     const session = {
       startedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -32362,8 +32951,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
     }, "requestAbort");
     const cancelLocal = /* @__PURE__ */ __name(() => requestAbort("upstream_abort"), "cancelLocal");
-    (_a = options.signal) == null ? void 0 : _a.addEventListener("abort", cancelLocal, { once: true });
-    if ((_b = options.signal) == null ? void 0 : _b.aborted) cancelLocal();
+    (_c = options.signal) == null ? void 0 : _c.addEventListener("abort", cancelLocal, { once: true });
+    if ((_d = options.signal) == null ? void 0 : _d.aborted) cancelLocal();
     this.currentTranscriptionAbortController = abortController;
     this.currentTranscriptionAbortRequest = requestAbort;
     this.currentTranscriptionContext = {
@@ -32561,7 +33150,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       session.status = isAbortError(error) ? "cancelled" : error.code === "TRANSCRIPTION_NO_SPEECH" ? "no_speech" : "failed";
       if (asrRecovery.isMacNativeCrash(error)) error.message = `本地转写引擎崩溃${session.attempts.length > 1 ? "，CPU 兼容重试仍失败" : ""}；请复制诊断信息。${error.message}`;
       if (isAbortError(error)) {
-        if ((_c = options.signal) == null ? void 0 : _c.aborted) throw createAbortError();
+        if ((_e = options.signal) == null ? void 0 : _e.aborted) throw createAbortError();
         if (session.abort.source === "user_stop") {
           throw createRetryableTranscriptionError("收到停止转写请求");
         }
@@ -32579,23 +33168,53 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       });
       throw error;
     } finally {
-      (_d = options.signal) == null ? void 0 : _d.removeEventListener("abort", cancelLocal);
+      (_f = options.signal) == null ? void 0 : _f.removeEventListener("abort", cancelLocal);
       session.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
       session.freeMemoryBytesAfter = os.freemem();
-      asrRecovery.saveSession(installRoot, session, this.settings);
       stopProgressPolling();
       this.currentTranscriptionAbortController = null;
       this.currentTranscriptionAbortRequest = null;
       this.currentTranscriptionProcess = null;
       this.currentTranscriptionProcessDetached = false;
       this.currentTranscriptionContext = null;
-      this.setTranscriptionStopAvailable(false);
-      [inputPath, outputPath].forEach((filePath) => {
-        try {
-          if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        } catch (error) {
+      try {
+        this.setTranscriptionStopAvailable(false);
+      } catch (_) {
+      }
+      try {
+        if (session.platform === "darwin" && ["failed", "cancelled"].includes(session.status)) {
+          const crashedAttempts = session.attempts.filter((attempt) => asrRecovery.isMacNativeCrash({
+            exitCode: attempt.nativeExitCode ?? attempt.exitCode,
+            signal: attempt.signal,
+            message: attempt.error,
+            asrStage: attempt.stage
+          })).slice(0, 2);
+          const summaries = await Promise.all(crashedAttempts.map(async (attempt) => {
+            try {
+              return await asrRecovery.collectMatchingCrashSummary(session, attempt, { retryDelaysMs: [0, 500, 1e3, 2e3, 2500] });
+            } catch (_) {
+              return "";
+            }
+          }));
+          summaries.forEach((summary, index) => {
+            if (summary && !summary.startsWith("[unavailable:")) {
+              crashedAttempts[index].crashSummaryStatus = "matched";
+              crashedAttempts[index].crashSummary = summary;
+            }
+          });
         }
-      });
+      } catch (_) {
+      }
+      try {
+        asrRecovery.saveSession(installRoot, session, this.settings);
+      } finally {
+        [inputPath, outputPath].forEach((filePath) => {
+          try {
+            if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          } catch (error) {
+          }
+        });
+      }
     }
   }
   async downloadMediaToTempFile(audioUrl, options = {}) {
@@ -37901,6 +38520,8 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_TRANSCRIPTION_PLAN,
   LOCAL_COMPONENT_MANIFEST_PATH,
   LOCAL_COMPONENT_DOWNLOAD_HOST,
+  LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST,
+  LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY,
   LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
   LOCAL_OCR_MACOS_INSTALLER_SHA256,
   LOCAL_COMPONENT_ASSET_ENV_KEYS,

@@ -32,6 +32,7 @@ const expectedModules = [
   'failure-technical-report',
   'input-normalization-utils',
   'local-douyin-resolver-utils',
+  'mac-legacy-asr-compat',
   'media-file-utils',
   'note-output-plan-utils',
   'progress-notice-utils',

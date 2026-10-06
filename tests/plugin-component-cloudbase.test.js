@@ -19,7 +19,7 @@ function plugin(Klass,platform='win32'){
 function payload(component,platform,arch){const ids=component==='asr'&&platform==='win32'?['model','ffmpeg','whisper','whisper-compat']:['python-runtime'];return {success:true,data:{schemaVersion:2,deliveryProtocol:'cloudbase-v1',component,platform,arch,version:'fixture-v1',expiresAt:new Date(Date.now()+3600000).toISOString(),assets:ids.map(id=>({id,fileName:id+'.zip',sha256:'a'.repeat(64),byteLength:1234,downloadUrl:'https://'+NewPlugin.__test.LOCAL_COMPONENT_DOWNLOAD_HOST+'/local-components/by-sha256/'+'a'.repeat(64)+'/'+id+'.zip?sign=fixture&t=123'}))}};}
 async function run(){
   const {assertNoPublicHost,checkAccessPolicy}=require('../scripts/check-local-component-access-policy');
-  const declaration="const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';";
+  const declaration="const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-1428610652.tcb.qcloud.la';\r\nconst LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';";
   assert.doesNotThrow(()=>assertNoPublicHost(declaration,true));
   assert.doesNotThrow(()=>assertNoPublicHost(declaration+'\r\n',true));
   assert.throws(()=>assertNoPublicHost(declaration,false));
@@ -35,7 +35,7 @@ async function run(){
   for(const component of ['asr','ocr'])for(const platform of ['win32','darwin']){
     calls=0;const arch=platform==='win32'?'x64':require('os').arch()==='arm64'?'arm64':'x64';response={status:200,json:payload(component,platform,arch)};
     const p=plugin(NewPlugin,platform),m=await p.getAuthorizedLocalComponentManifest(component);
-    assert.equal(calls,1);assert.ok(lastUrl.includes('deliveryProtocol=cloudbase-v1'));
+    assert.equal(calls,1);assert.ok(lastUrl.includes('deliveryProtocol=cloudbase-v1'));assert.ok(lastUrl.includes('deliveryHost=short-native-v1'));
     assert.ok(m.assets[0].downloadUrl.includes('.tcb.qcloud.la/'));
     const env=NewPlugin.__test.buildAuthorizedLocalComponentProcessEnv({},m);
     assert.equal(env.WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN,'1');
@@ -43,6 +43,9 @@ async function run(){
   const helper=NewPlugin.__test,asset=payload('ocr','win32','x64').data.assets[0],url=asset.downloadUrl;
   for(const bad of [url.replace(helper.LOCAL_COMPONENT_DOWNLOAD_HOST,'wechat-inbox-components-1428610652.cos.ap-shanghai.myqcloud.com'),url.replace('https:','http:'),url+'&sign=again',url+'&other=1',url+'#fragment',url.replace('https://','https://user@')])
     assert.equal(helper.isAuthorizedLocalComponentDownloadUrl(bad,asset.sha256,asset.fileName),false);
+  const legacyUrl=url.replace(helper.LOCAL_COMPONENT_DOWNLOAD_HOST,helper.LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST);
+  assert.equal(helper.isAuthorizedLocalComponentDownloadUrl(legacyUrl,asset.sha256,asset.fileName),true);
+  assert.equal(helper.LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY,'short-native-v1');
   for(const platform of ['win32','darwin'])for(const arch of ['x64','arm64']){
     const d=payload('ocr',platform,arch).data;
     assert.equal(helper.normalizeAuthorizedLocalComponentManifest(d,{component:'ocr',platform,arch}).assets.length,1);

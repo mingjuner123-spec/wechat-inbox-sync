@@ -205,14 +205,24 @@ function Preserve-UnverifiedDownload {
   }
 }
 
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $stream = [IO.File]::OpenRead($Path)
+  $hasher = $null
+  try {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToUpperInvariant()
+  } finally {
+    if ($hasher) { $hasher.Dispose() }
+    $stream.Dispose()
+  }
+}
+
 function Test-DownloadComplete {
   param([string]$Path, $Spec)
   if (-not $Spec -or -not (Test-Path -LiteralPath $Path)) { return $false }
   if ((Get-Item -LiteralPath $Path).Length -ne [Int64]$Spec.byteLength) { return $false }
-  $stream = [IO.File]::OpenRead($Path)
-  $hasher = [Security.Cryptography.SHA256]::Create()
-  try { return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '') -eq $Spec.sha256 }
-  finally { $hasher.Dispose(); $stream.Dispose() }
+  return (Get-FileSha256 -Path $Path) -eq $Spec.sha256
 }
 
 function Download-File {
@@ -495,7 +505,7 @@ function Assert-FileSha256 {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "$Label is missing after download: $Path"
   }
-  $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+  $actualSha256 = Get-FileSha256 -Path $Path
   if ($actualSha256 -ne $ExpectedSha256.ToUpperInvariant()) {
     throw "$Label SHA-256 mismatch (expected $ExpectedSha256, got $actualSha256)."
   }

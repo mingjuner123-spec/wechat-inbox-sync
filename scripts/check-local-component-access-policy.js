@@ -19,7 +19,10 @@ const WORKFLOW_FILES = Object.freeze([
   path.join(REPO_ROOT, '.github', 'workflows', 'component-integrity.yml'),
 ]);
 const PUBLIC_CLOUDBASE_HOST_PATTERN = /(?:tcloudbaseapp\.com|tcb\.qcloud\.la)/i;
-const AUTHORIZED_HOST_DECLARATION = /^(?:const|var) LOCAL_COMPONENT_DOWNLOAD_HOST = (['"])6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479\.tcb\.qcloud\.la\1;\r?$/gm;
+const AUTHORIZED_HOST_DECLARATIONS = Object.freeze([
+  /^(?:const|var) LOCAL_COMPONENT_DOWNLOAD_HOST = (["'])6865-he02-d8gebzv050ed6c4ef-1428610652\.tcb\.qcloud\.la\1;\r?$/gm,
+  /^(?:const|var) LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST = (["'])6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479\.tcb\.qcloud\.la\1;\r?$/gm,
+]);
 const RETIRED_PUBLIC_CHECK_PATTERN = /node\s+scripts\/check-local-(?:components|ocr)-cdn\.js/i;
 
 function readRequiredFile(filePath) {
@@ -32,7 +35,10 @@ function assertContains(source, pattern, label) {
 }
 
 function assertNoPublicHost(source, allowAuthorizedDeclaration = false) {
-  const checked = allowAuthorizedDeclaration ? source.replace(AUTHORIZED_HOST_DECLARATION, '') : source;
+  let checked = source;
+  if (allowAuthorizedDeclaration) {
+    for (const declaration of AUTHORIZED_HOST_DECLARATIONS) checked = checked.replace(declaration, '');
+  }
   if (PUBLIC_CLOUDBASE_HOST_PATTERN.test(checked)) throw new Error('public CloudBase static host is forbidden');
 }
 
@@ -51,6 +57,7 @@ function checkAccessPolicy({ runtimeFiles = RUNTIME_FILES, workflowFiles = WORKF
     assertContains(source, /WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN/, label);
     assertContains(source, /getAuthorizedLocalComponentManifest/, label);
     assertContains(source, /LOCAL_COMPONENT_DELIVERY_PROTOCOL\s*=\s*['"]cloudbase-v1['"]/, label);
+    assertContains(source, /LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY\s*=\s*["']short-native-v1["']/, label);
     assertContains(source, /searchParams\.getAll\(['"]sign['"]\)\.length === 1/, label);
     assertContains(source, /searchParams\.getAll\(['"]t['"]\)\.length === 1/, label);
   }
