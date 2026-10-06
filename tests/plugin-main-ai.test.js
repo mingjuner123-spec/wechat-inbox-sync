@@ -2616,7 +2616,7 @@ assert.ok(pluginMainSource.includes('LOCAL_OCR_WINDOWS_INSTALLER_SHA256'));
 assert.ok(pluginMainSource.includes('LOCAL_OCR_MACOS_INSTALLER_SHA256'));
 assert.ok(pluginMainSource.includes('isTrustedLocalOcrInstallerSource(bundledScriptText, installerSha256, isMac)'));
 assert.ok(pluginMainSource.includes("const OFFICIAL_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';"));
-assert.ok(pluginMainSource.includes("const FEISHU_OAUTH_SYNC_API_BASE = 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';"));
+assert.ok(pluginMainSource.includes("const FEISHU_OAUTH_SYNC_API_BASE = OFFICIAL_SYNC_API_BASE;"));
 assert.ok(pluginMainSource.includes('const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;'));
 assert.ok(pluginMainSource.includes("'X-Wechat-Inbox-Token': token"));
 assert.strictEqual(pluginMainSource.includes('authToken=${encodeURIComponent(token)}'), false);
@@ -10431,16 +10431,22 @@ async function runOfficialSyncApiDnsRecoveryTests() {
   });
   assert.strictEqual(dohAddress, '111.231.184.212');
   await assert.rejects(
-    () => helpers.resolveHostnameViaDoh(longHost, async () => ({
+    () => helpers.resolveHostnameViaDoh(shortHost, async () => ({
       status: 200,
       json: { Status: 0, Answer: [{ type: 1, data: '127.0.0.1' }] },
     })),
     /safe public IPv4 address/,
   );
+  await assert.rejects(
+    () => helpers.resolveHostnameViaDoh(longHost, async () => {
+      throw new Error('Legacy official host must be rejected before DoH');
+    }),
+    /DNS recovery is limited to official sync API hosts/,
+  );
   const aborted = new AbortController();
   aborted.abort();
   await assert.rejects(
-    () => helpers.resolveHostnameViaDoh(longHost, async () => {
+    () => helpers.resolveHostnameViaDoh(shortHost, async () => {
       throw new Error('aborted DoH must not start');
     }, { signal: aborted.signal }),
     /停止/,
@@ -10606,7 +10612,7 @@ async function runRequestJsonUsesActiveBindingWhenLegacyTokenMissingTest() {
     assert.strictEqual(calls.length, 1);
     assert.strictEqual(calls[0].headers.Authorization, 'Bearer ABC-123');
     assert.strictEqual(calls[0].headers['X-Wechat-Inbox-Client-Id'], 'test-client');
-    assert.strictEqual(calls[0].url, 'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync/feishu/oauth/status');
+    assert.strictEqual(calls[0].url, 'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync/feishu/oauth/status');
     assert.strictEqual(calls[0].url.includes('authToken='), false);
     assert.strictEqual(calls[0].url.includes('clientId='), false);
   } finally {
@@ -10649,7 +10655,7 @@ async function runRequestJsonRoutesFeishuExtractToOAuthApiBaseTest() {
     assert.strictEqual(calls.length, 1);
     assert.strictEqual(
       calls[0].url,
-      'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync/feishu/extract',
+      'https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync/feishu/extract',
     );
   } finally {
     requestUrlMock = previousRequestUrlMock;
