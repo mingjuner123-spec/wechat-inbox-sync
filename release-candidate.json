@@ -3,8 +3,8 @@
   "pluginId": "wechat-inbox-sync",
   "pluginVersion": "1.3.181",
   "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
-  "candidateId": "1.3.181-6eca38bf891491be",
-  "aggregateSha256": "6eca38bf891491be8696a94f9228cac90a7871f1cd167f00906d936cd3b191c7",
+  "candidateId": "1.3.181-892d732046550e64",
+  "aggregateSha256": "892d732046550e64c3b96a9b865a8e45b22d63ba00391e43332313d15af7c6dd",
   "looseAssets": [
     "main.js",
     "manifest.json",
@@ -29,8 +29,8 @@
     },
     {
       "path": "local-asr/WHISPER-CPP-LICENSE.txt",
-      "bytes": 1097,
-      "sha256": "ce6a64e6c45edf849001dc4db3cf307bdaaeff7b66bd9000b4a47488d29561ce"
+      "bytes": 1077,
+      "sha256": "56da75134ea97dc17eb841f939794a3d82e71e20269c029c9840475841d63611"
     },
     {
       "path": "local-asr/install-local-asr-macos.sh",
