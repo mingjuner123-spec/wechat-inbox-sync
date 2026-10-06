@@ -37,6 +37,7 @@ function runInstallerCompatActivation(installRoot, legacyBinary, mode = 'activat
   const scriptPath = path.join(tempRoot, 'exercise-installer-compat.sh');
   const script = `
 set -euo pipefail
+set -x
 INSTALL_ROOT="$ASR_INSTALL_ROOT"
 TEMP_ROOT="$INSTALL_ROOT/installer temp"
 find_metal_resources_dir() { return 0; }
@@ -149,11 +150,9 @@ async function run() {
         const wrapperPath = path.join(installerRoot, 'bin', 'whisper-cli');
         fs.mkdirSync(path.dirname(wrapperPath), { recursive: true });
         fs.writeFileSync(wrapperPath, helper.renderManagedWrapper(legacyPath), { mode: 0o700 });
-        const compatPath = path.join(installerRoot, helper.COMPAT_RELATIVE_PATH);
-        fs.mkdirSync(path.dirname(compatPath), { recursive: true });
-        fs.copyFileSync(COMPAT_FIXTURE, compatPath);
-        fs.chmodSync(compatPath, 0o700);
-        fs.copyFileSync(path.resolve(__dirname, '../obsidian-plugin/wechat-inbox-sync/local-asr/WHISPER-CPP-LICENSE.txt'), path.join(path.dirname(compatPath), 'LICENSE.txt'));
+        const candidateInstall = helper.installMacLegacyAsrCompat({ installRoot: installerRoot, bytes: fs.readFileSync(COMPAT_FIXTURE) });
+        assert.strictEqual(candidateInstall.installed, true, 'runtime helper installs the pinned candidate and its exact license bytes');
+        const compatPath = candidateInstall.candidatePath;
         const modelMarker = path.join(installerRoot, 'models', 'user-model-marker');
         fs.mkdirSync(path.dirname(modelMarker), { recursive: true });
         fs.writeFileSync(modelMarker, 'preserve model directory');
@@ -166,8 +165,9 @@ async function run() {
 
         // Reinstall may refresh the old wheel wrapper; exercise the real installer functions to ensure it reselects the pinned candidate.
         fs.writeFileSync(wrapperPath, helper.renderManagedWrapper(legacyPath), { mode: 0o700 });
-        runInstallerCompatActivation(installerRoot, legacyPath);
-        assert.ok(fs.readFileSync(wrapperPath, 'utf8').includes(compatPath), 'installer reuses the already installed candidate instead of leaving the old wheel active');
+        const installerResult = runInstallerCompatActivation(installerRoot, legacyPath);
+        assert.ok(fs.readFileSync(wrapperPath, 'utf8').includes(compatPath),
+          `installer reuses the already installed candidate instead of leaving the old wheel active; stdout:\n${installerResult.stdout || ''}\nstderr:\n${installerResult.stderr || ''}`);
         assert.strictEqual(fs.existsSync(wrapperPath + '.before-macos-legacy-asr-compat-v1'), true);
         assert.strictEqual(digest(legacyPath), helper.LEGACY_WHEEL_INTEL_SHA256, 'installer leaves original wheel bytes unchanged');
         assert.strictEqual(digest(modelMarker), modelMarkerHash, 'installer leaves user model marker unchanged');
