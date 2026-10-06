@@ -430,16 +430,29 @@ function Get-OcrImportFailureDetail {
   return ($details -join " ").Trim()
 }
 
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return $null
+  }
+  $stream = [IO.File]::OpenRead($Path)
+  $hasher = $null
+  try {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToUpperInvariant()
+  } finally {
+    if ($hasher) { $hasher.Dispose() }
+    $stream.Dispose()
+  }
+}
+
 function Test-FileSha256 {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$ExpectedSha256
   )
-  if (!(Test-Path -LiteralPath $Path)) {
-    return $false
-  }
-  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant()
-  return $actual -eq $ExpectedSha256.ToUpperInvariant()
+  $actual = Get-FileSha256 -Path $Path
+  return ![string]::IsNullOrWhiteSpace($actual) -and $actual -eq $ExpectedSha256.ToUpperInvariant()
 }
 
 function Read-ExactStreamBytes {

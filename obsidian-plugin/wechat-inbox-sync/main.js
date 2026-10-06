@@ -4438,14 +4438,24 @@ function Preserve-UnverifiedDownload {
   }
 }
 
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $stream = [IO.File]::OpenRead($Path)
+  $hasher = $null
+  try {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToUpperInvariant()
+  } finally {
+    if ($hasher) { $hasher.Dispose() }
+    $stream.Dispose()
+  }
+}
+
 function Test-DownloadComplete {
   param([string]$Path, $Spec)
   if (-not $Spec -or -not (Test-Path -LiteralPath $Path)) { return $false }
   if ((Get-Item -LiteralPath $Path).Length -ne [Int64]$Spec.byteLength) { return $false }
-  $stream = [IO.File]::OpenRead($Path)
-  $hasher = [Security.Cryptography.SHA256]::Create()
-  try { return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '') -eq $Spec.sha256 }
-  finally { $hasher.Dispose(); $stream.Dispose() }
+  return (Get-FileSha256 -Path $Path) -eq $Spec.sha256
 }
 
 function Download-File {
@@ -4728,7 +4738,7 @@ function Assert-FileSha256 {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "$Label is missing after download: $Path"
   }
-  $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+  $actualSha256 = Get-FileSha256 -Path $Path
   if ($actualSha256 -ne $ExpectedSha256.ToUpperInvariant()) {
     throw "$Label SHA-256 mismatch (expected $ExpectedSha256, got $actualSha256)."
   }
@@ -7738,16 +7748,29 @@ function Get-OcrImportFailureDetail {
   return ($details -join " ").Trim()
 }
 
+function Get-FileSha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return $null
+  }
+  $stream = [IO.File]::OpenRead($Path)
+  $hasher = $null
+  try {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToUpperInvariant()
+  } finally {
+    if ($hasher) { $hasher.Dispose() }
+    $stream.Dispose()
+  }
+}
+
 function Test-FileSha256 {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$ExpectedSha256
   )
-  if (!(Test-Path -LiteralPath $Path)) {
-    return $false
-  }
-  $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant()
-  return $actual -eq $ExpectedSha256.ToUpperInvariant()
+  $actual = Get-FileSha256 -Path $Path
+  return ![string]::IsNullOrWhiteSpace($actual) -and $actual -eq $ExpectedSha256.ToUpperInvariant()
 }
 
 function Read-ExactStreamBytes {
@@ -15000,7 +15023,7 @@ var LOCAL_COMPONENT_DELIVERY_PROTOCOL = "cloudbase-v1";
 var LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY = "short-native-v1";
 var LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 var LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 9e4;
-var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c";
+var LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = "0a13388b1a022867e78ccaacf45cf53b522e03d0fe5208c804f822516c9270f6";
 var LOCAL_OCR_MACOS_INSTALLER_SHA256 = "08c7edf5f91653b825694d1ffc8c82d31d6ddb32e5f8689012fc5698062be432";
 var LOCAL_COMPONENT_ASSET_ENV_KEYS = Object.freeze({
   douyin: Object.freeze({ resolver: "WECHAT_INBOX_DOUYIN_RESOLVER_URL" }),
