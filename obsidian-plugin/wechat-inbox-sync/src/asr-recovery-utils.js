@@ -370,7 +370,7 @@ function buildTextCrashSummary(text, session, pid, crashTime) {
   ].join('\n');
 }
 function readMatchingCrashSummary(session, options = {}) {
-  const { directory, directories, fileSystem = fs } = options || {};
+  const { directory, directories, fileSystem = fs, attempt, discoveryGraceMs = 300000 } = options || {};
   if (!session || session.platform !== 'darwin' || !session.startedAt || !session.finishedAt) {
     return '[unavailable: no matching Mac run]';
   }
@@ -379,14 +379,21 @@ function readMatchingCrashSummary(session, options = {}) {
   if (startedAt === null || finishedAt === null || finishedAt < startedAt) {
     return '[unavailable: invalid Mac run time]';
   }
-  const pids = (Array.isArray(session.attempts) ? session.attempts : [])
+  const selectedAttempts = attempt ? [attempt] : (Array.isArray(session.attempts) ? session.attempts : []);
+  const pids = selectedAttempts
     .flatMap(attempt => Array.isArray(attempt?.nativePids) ? attempt.nativePids : [])
     .map(Number)
     .filter(pid => Number.isSafeInteger(pid) && pid > 0);
   if (!pids.length) return '[unavailable: native pid not recorded]';
 
-  const start = startedAt - 5000;
-  const end = finishedAt + 300000;
+  const selectedStartedAt = attempt ? parseTimestamp(attempt.startedAt) : startedAt;
+  const selectedFinishedAt = attempt ? parseTimestamp(attempt.finishedAt || attempt.at) : finishedAt;
+  if (selectedStartedAt === null || selectedFinishedAt === null || selectedFinishedAt < selectedStartedAt) {
+    return '[unavailable: invalid attempt time]';
+  }
+  const start = selectedStartedAt - (attempt ? 0 : 5000);
+  const end = selectedFinishedAt + Math.max(0, Number(discoveryGraceMs) || 0);
+  const exactEnd = selectedFinishedAt + (attempt ? 5000 : 0);
   const scanDirectories = Array.isArray(directories)
     ? directories
     : directory !== undefined
@@ -445,22 +452,23 @@ function readMatchingCrashSummary(session, options = {}) {
       const report = parseIpsCrashReport(result.text);
       if (!report) continue;
       const processName = String(report.procName || '');
-      const processMatched = /^whisper(?:-cli|-cpp)?$/.test(processName)
-        || matchesBinaryPath(report.procPath, session);
+      const processMatched = attempt
+        ? matchesBinaryPath(report.procPath, session)
+        : /^whisper(?:-cli|-cpp)?$/.test(processName) || matchesBinaryPath(report.procPath, session);
       if (!pids.includes(Number(report.pid)) || !processMatched) continue;
       const captured = parseTimestamp(report.captureTime);
-      if (captured === null || captured < start || captured > end) continue;
+      if (captured === null || captured < start || captured > (attempt ? exactEnd : end)) continue;
       return buildIpsCrashSummary(report, session, captured);
     }
 
     const proc = result.text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
-    const processMatched = proc && (
-      /^whisper(?:-cli|-cpp)?$/.test(proc[1])
-      || (proc[1] === 'main' && matchesBinaryPath(result.text.match(/^Path:\s+(.+)$/m)?.[1], session))
-    );
+    const reportBinaryPath = result.text.match(/^Path:\s+(.+)$/m)?.[1];
+    const processMatched = proc && (attempt
+      ? matchesBinaryPath(reportBinaryPath, session)
+      : /^whisper(?:-cli|-cpp)?$/.test(proc[1]) || (proc[1] === 'main' && matchesBinaryPath(reportBinaryPath, session)));
     if (!proc || !processMatched || !pids.includes(Number(proc[2]))) continue;
     const crashTime = parseTimestamp(result.text.match(/^Date\/Time:\s+(.+)$/m)?.[1]);
-    if (crashTime === null || crashTime < start || crashTime > end) continue;
+    if (crashTime === null || crashTime < start || crashTime > (attempt ? exactEnd : end)) continue;
     return buildTextCrashSummary(result.text, session, proc[2], crashTime);
   }
   if (budgetExceeded) return CRASH_REPORT_BUDGET_UNAVAILABLE;
@@ -468,13 +476,57 @@ function readMatchingCrashSummary(session, options = {}) {
   if (!accessibleDirectory) return '[unavailable: crash reports not accessible]';
   return '[unavailable: no report matching time and native pid]';
 }
+const DEFAULT_CRASH_REPORT_RETRY_DELAYS_MS = Object.freeze([0, 500, 1000, 2000, 2500]);
+async function collectMatchingCrashSummary(session, attempt, options = {}) {
+  const delays = (Array.isArray(options.retryDelaysMs) ? options.retryDelaysMs : DEFAULT_CRASH_REPORT_RETRY_DELAYS_MS).slice(0, 8);
+  const maxWaitMs = Math.min(6000, Math.max(0, Number(options.maxWaitMs ?? 6000) || 0));
+  const wait = options.delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  let result = '[unavailable: no report matching time and native pid]';
+  const baseDiscoveryGraceMs = options.discoveryGraceMs === undefined ? 300000 : Math.max(0, Number(options.discoveryGraceMs) || 0);
+  let elapsedMs = 0;
+  for (let index = 0; index < delays.length; index++) {
+    if (options.signal?.aborted) return '[unavailable: crash report collection cancelled]';
+    const pauseMs = Math.min(Math.max(0, Number(delays[index]) || 0), Math.max(0, maxWaitMs - elapsedMs));
+    if (pauseMs > 0) await wait(pauseMs);
+    elapsedMs += pauseMs;
+    if (options.signal?.aborted) return '[unavailable: crash report collection cancelled]';
+    result = readMatchingCrashSummary(session, {
+      ...options,
+      attempt,
+      discoveryGraceMs: baseDiscoveryGraceMs + elapsedMs,
+    });
+    if (result !== '[unavailable: no report matching time and native pid]'
+      && result !== '[unavailable: crash report candidate unreadable]') return result;
+  }
+  return result === '[unavailable: no report matching time and native pid]'
+    ? '[unavailable: no report matching attempt before deadline]' : result;
+}
+
 function saveSession(root, session, settings) {
   const redact = value => typeof value === 'string' ? diagnosticRedact(value, settings) : Array.isArray(value) ? value.map(redact) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k,v]) => [k,redact(v)])) : value;
   try { fs.writeFileSync(path.join(root, 'asr-diagnostic-last.json'), JSON.stringify(redact(session), null, 2), { mode: 0o600 }); } catch (_) {}
 }
 function detailedDiagnostic(root, settings = {}, currentTask = null) {
-  const stored = boundedRead(path.join(root, 'asr-diagnostic-last.json'), 768 * 1024);
+  let stored = boundedRead(path.join(root, 'asr-diagnostic-last.json'), 768 * 1024);
   let session; try { session = JSON.parse(stored); } catch (_) {}
+  const crashAttempts = (['failed', 'cancelled'].includes(session?.status) && Array.isArray(session?.attempts) ? session.attempts : [])
+    .filter(attempt => isMacNativeCrash({
+      exitCode: attempt.nativeExitCode ?? attempt.exitCode,
+      signal: attempt.signal,
+      message: attempt.error,
+      asrStage: attempt.stage,
+    }))
+    .slice(0, 2);
+  const savedCrashSummaries = crashAttempts.map(attempt => ({
+    attempt: attempt.attempt,
+    summary: typeof attempt.crashSummary === 'string' && attempt.crashSummaryStatus === 'matched'
+      ? attempt.crashSummary
+      : readMatchingCrashSummary(session, { attempt }),
+  }));
+  if (crashAttempts.some(attempt => typeof attempt.crashSummary === 'string')) {
+    const displaySession = { ...session, attempts: session.attempts.map(({ crashSummary, crashSummaryStatus, ...attempt }) => attempt) };
+    stored = JSON.stringify(displaySession, null, 2);
+  }
   const sessionRef = session && session.recordId ? crypto.createHash('sha256').update(String(session.recordId)).digest('hex').slice(0, 16) : '';
   const sameAttempt = Boolean(currentTask && currentTask.transcriptionStarted === true
     && currentTask.attemptId && session && session.diagnosticAttemptId === currentTask.attemptId
@@ -491,11 +543,11 @@ function detailedDiagnostic(root, settings = {}, currentTask = null) {
     stored,
     '--- 转写日志（首尾有界；日志是否属于各次尝试以 session.attempts.logFreshness 为准） ---', session || /status=failed|Segmentation fault|--- error ---/.test(readDiagnosticLog(path.join(root, 'transcribe-last.log'))) ? readDiagnosticLog(path.join(root, 'transcribe-last.log')) : '[旧成功日志省略]',
     '--- 安装日志（首尾有界） ---', readDiagnosticLog(path.join(root, 'install.log')),
-    '--- 匹配的系统崩溃摘要 ---', readMatchingCrashSummary(session),
+    '--- 匹配的系统崩溃摘要 ---', savedCrashSummaries.length ? savedCrashSummaries.map(item => `attempt=${item.attempt}\n${item.summary}`).join('\n\n') : readMatchingCrashSummary(session),
   ];
   return diagnosticRedact(sections.join('\n'), settings);
 }
-module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary, CRASH_REPORT_MAX_FILE_BYTES, CRASH_REPORT_MAX_TOTAL_READ_BYTES };
+module.exports = { RECOVERY_MARKER, isMacNativeCrash, executeWithMacRecovery, boundedRead, readDiagnosticLog, diagnosticRedact, runtimeIdentity, systemIdentity, modelIdentity, snapshotDiagnosticLog, diagnosticLogFreshness, latestNativeExitForFinalStage, fingerprint, cpuPreference, saveCpuPreference, saveSession, detailedDiagnostic, readMatchingCrashSummary, collectMatchingCrashSummary, DEFAULT_CRASH_REPORT_RETRY_DELAYS_MS, CRASH_REPORT_MAX_FILE_BYTES, CRASH_REPORT_MAX_TOTAL_READ_BYTES };
 
 // Only migrate the exact managed 1.3.140 script, preserving a versioned backup.
 function ensureManagedMacScript(root, installerSource) {

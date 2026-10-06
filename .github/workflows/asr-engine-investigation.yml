@@ -110,6 +110,32 @@ jobs:
             ASR_PUBLIC_MODEL_FIXTURE="$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
               node tests/mac-legacy-asr-compat.test.js
           } 2>&1 | tee "$RUNNER_TEMP/asr-evidence/wrapper-migration-test.txt"
+      - name: Install pinned real ffmpeg fixture and record identity
+        if: matrix.runner == 'macos-15-intel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --no-deps imageio-ffmpeg==0.6.0
+          ffmpeg_path="$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+          ffmpeg_version="$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.__version__)')"
+          test -x "$ffmpeg_path"
+          ffmpeg_sha256="$(shasum -a 256 "$ffmpeg_path" | awk '{print $1}')"
+          printf 'package_version=%s\nbinary=%s\nbinary_sha256=%s\n' "$ffmpeg_version" "$(basename "$ffmpeg_path")" "$ffmpeg_sha256" | tee "$RUNNER_TEMP/asr-evidence/ffmpeg-fixture.txt"
+          echo "ASR_FFMPEG_FIXTURE=$ffmpeg_path" >> "$GITHUB_ENV"
+      - name: Exercise plugin compatibility download and real transcription
+        if: matrix.runner == 'macos-15-intel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          legacy="$(command -v whisper-cpp)"
+          candidate="$RUNNER_TEMP/asr-fixed-compat/whisper.cpp-v1.5.5-cpu-no-accelerate"
+          ASR_LEGACY_WHEEL_FIXTURE="$legacy" \
+          ASR_COMPAT_CANDIDATE_FIXTURE="$candidate" \
+          ASR_PUBLIC_AUDIO_FIXTURE="$RUNNER_TEMP/asr-fixture/jfk.wav" \
+          ASR_PUBLIC_MODEL_FIXTURE="$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
+          ASR_FFMPEG_FIXTURE="$ASR_FFMPEG_FIXTURE" \
+          ASR_EVIDENCE_DIR="$RUNNER_TEMP/asr-evidence" \
+            node tests/plugin-macos-compat-transcription.integration.test.js 2>&1 | tee "$RUNNER_TEMP/asr-evidence/plugin-compat-transcription-test.txt"
       - name: Compare wheel and CPU-compatible candidate
         shell: bash
         run: |

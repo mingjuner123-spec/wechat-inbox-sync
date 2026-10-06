@@ -2,10 +2,11 @@
 const assert=require('node:assert/strict'),Module=require('node:module'),cp=require('node:child_process'),path=require('node:path');
 let response,calls=0,notices=0,lastUrl='';
 const originalLoad=Module._load;
-Module._load=function(name,parent,isMain){if(name==='obsidian')return {Plugin:class{},Modal:class{},PluginSettingTab:class{},Setting:class{},Notice:class{constructor(){notices++;}},requestUrl:async options=>{calls++;lastUrl=options.url;return response;}};return originalLoad.call(this,name,parent,isMain);};
-let NewPlugin,OldPlugin;
+Module._load=function(name,parent,isMain){if(name==='obsidian')return {Plugin:class{},Modal:class{},PluginSettingTab:class{},Setting:class{},Notice:class{constructor(){notices++;}},requestUrl:async options=>{calls++;lastUrl=options.url;return response;}};if(/\.(?:ps1|sh|py)$/.test(name)&&parent&&parent.filename)return require('node:fs').readFileSync(path.resolve(path.dirname(parent.filename),name),'utf8');return originalLoad.call(this,name,parent,isMain);};
+let NewPlugin,OldPlugin,SourcePlugin;
 try{
   NewPlugin=require('../obsidian-plugin/wechat-inbox-sync/main');
+  SourcePlugin=require('../obsidian-plugin/wechat-inbox-sync/src/main');
   const oldSource=cp.execFileSync('git',['show','95fa3d16e1e702f160f9c41e78f67cd12d2b4ff5:obsidian-plugin/wechat-inbox-sync/main.js'],{maxBuffer:50*1024*1024,encoding:'utf8',windowsHide:true});
   const oldModule=new Module(path.join(__dirname,'published-1.3.146-fixture.js'),module);
   oldModule.filename=oldModule.id;oldModule.paths=module.paths;oldModule._compile(oldSource,oldModule.filename);OldPlugin=oldModule.exports;
@@ -18,13 +19,47 @@ function plugin(Klass,platform='win32'){
 }
 function payload(component,platform,arch){const ids=component==='asr'&&platform==='win32'?['model','ffmpeg','whisper','whisper-compat']:['python-runtime'];return {success:true,data:{schemaVersion:2,deliveryProtocol:'cloudbase-v1',component,platform,arch,version:'fixture-v1',expiresAt:new Date(Date.now()+3600000).toISOString(),assets:ids.map(id=>({id,fileName:id+'.zip',sha256:'a'.repeat(64),byteLength:1234,downloadUrl:'https://'+NewPlugin.__test.LOCAL_COMPONENT_DOWNLOAD_HOST+'/local-components/by-sha256/'+'a'.repeat(64)+'/'+id+'.zip?sign=fixture&t=123'}))}};}
 async function run(){
+  const sourcePath=path.join(__dirname,'../obsidian-plugin/wechat-inbox-sync/src/main.js');
+  const source=require('node:fs').readFileSync(sourcePath,'utf8').replace(/\r\n/g,'\n');
+  const shortSyncBase='https://he02-d8gebzv050ed6c4ef-1428610652.ap-shanghai.app.tcloudbase.com/sync';
+  assert.ok(source.includes('const FEISHU_OAUTH_SYNC_API_BASE = OFFICIAL_SYNC_API_BASE;'),'Feishu OAuth and extraction must use the official short sync API');
+  assert.ok(source.includes('const apiBaseForRequest = isFeishuCloudRequest\n      ? FEISHU_OAUTH_SYNC_API_BASE\n      : this.settings.apiBase;'),'only Feishu requests should use the fixed Feishu endpoint; ordinary apiBase remains settings-driven');
+  assert.ok(source.includes('const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;'),'the displayed self-built-app callback must match the Feishu API host');
+  assert.ok(source.includes(`const OFFICIAL_SYNC_API_BASE = '${shortSyncBase}';`),'the Feishu endpoint must be the short environment');
+  calls=0;response={status:200,json:{success:true,data:{connected:true}}};
+  const feishuPlugin=plugin(SourcePlugin);feishuPlugin.settings.apiBase='https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync';
+  const beforeBindings=JSON.stringify(feishuPlugin.settings.bindings);
+  const beforeToken=feishuPlugin.settings.token;
+  await feishuPlugin.requestJson('/feishu/oauth/status','GET',{}, {token:'component-test-only'});
+  assert.equal(lastUrl,`${shortSyncBase}/feishu/oauth/status`,'stale settings must not route Feishu calls to the long host');
+  assert.equal(feishuPlugin.settings.apiBase,'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync','Feishu routing must not rewrite the ordinary saved API setting');
+  assert.equal(JSON.stringify(feishuPlugin.settings.bindings),beforeBindings,'Feishu routing must preserve bindings');
+  assert.equal(feishuPlugin.settings.token,beforeToken,'Feishu routing must preserve the legacy binding token');
+  const sha='a'.repeat(64), fileName='fixture.zip';
+  for(const host of [SourcePlugin.__test.LOCAL_COMPONENT_DOWNLOAD_HOST,SourcePlugin.__test.LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST]){
+    const signed=`https://${host}/local-components/by-sha256/${sha}/${fileName}?sign=fixture&t=123`;
+    assert.equal(SourcePlugin.__test.isAuthorizedLocalComponentDownloadUrl(signed,sha,fileName),true,'only the exact short and legacy hosts should be accepted');
+  }
+  const arbitrary=`https://6865-he02-d8gebzv050ed6c4ef-9999999999.tcb.qcloud.la/local-components/by-sha256/${sha}/${fileName}?sign=fixture&t=123`;
+  assert.equal(SourcePlugin.__test.isAuthorizedLocalComponentDownloadUrl(arbitrary,sha,fileName),false,'an unlisted CloudBase host must remain rejected');
+  const sourceComponentPlugin=plugin(SourcePlugin,'win32');
+  const ids=['model','ffmpeg','whisper','whisper-compat'];
+  response={status:200,json:{success:true,data:{schemaVersion:2,deliveryProtocol:'cloudbase-v1',component:'asr',platform:'win32',arch:'x64',version:'fixture-v2',expiresAt:new Date(Date.now()+3600000).toISOString(),assets:ids.map(id=>({id,fileName:`${id}.zip`,sha256:sha,byteLength:1234,downloadUrl:`https://${SourcePlugin.__test.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${sha}/${id}.zip?sign=fixture&t=123`}))}}};
+  calls=0;const sourceManifest=await sourceComponentPlugin.getAuthorizedLocalComponentManifest('asr');
+  assert.equal(sourceManifest.assets.length,4);
+  assert.ok(lastUrl.includes('deliveryProtocol=cloudbase-v1'));
+  assert.ok(lastUrl.includes('deliveryHost=short-native-v1'),'new full manifest requests must declare short-host capability');
+  response={status:200,json:{success:true,data:{metadataOnly:true,schemaVersion:1,component:'asr',platform:'win32',arch:'x64',version:'fixture-v2',assets:[{id:'resolver',sha256:sha,byteLength:1234}]}}};
+  calls=0;await sourceComponentPlugin.getAuthorizedLocalComponentManifest('asr',{metadataOnly:true});
+  assert.equal(lastUrl.includes('deliveryHost='),false,'metadata-only checks retain the existing protocol without capability negotiation');
   const {assertNoPublicHost,checkAccessPolicy}=require('../scripts/check-local-component-access-policy');
-  const declaration="const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';";
-  assert.doesNotThrow(()=>assertNoPublicHost(declaration,true));
-  assert.doesNotThrow(()=>assertNoPublicHost(declaration+'\r\n',true));
-  assert.throws(()=>assertNoPublicHost(declaration,false));
-  assert.throws(()=>assertNoPublicHost(declaration.replace('1357443479','1111111111'),true));
-  assert.throws(()=>assertNoPublicHost(declaration+"\nconst publicUrl='https://6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la/local-components/package.zip';",true));
+  const shortDeclaration="const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-1428610652.tcb.qcloud.la';";
+  const legacyDeclaration="const LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';";
+  assert.doesNotThrow(()=>assertNoPublicHost(shortDeclaration+"\r\n"+legacyDeclaration,true));
+  assert.doesNotThrow(()=>assertNoPublicHost(shortDeclaration+"\r\n",true));
+  assert.throws(()=>assertNoPublicHost(shortDeclaration,false));
+  assert.throws(()=>assertNoPublicHost(shortDeclaration.replace('1428610652','1111111111'),true));
+  assert.throws(()=>assertNoPublicHost(legacyDeclaration+"\nconst publicUrl='https://6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la/local-components/package.zip';",true));
   assert.throws(()=>assertNoPublicHost("https://old.tcloudbaseapp.com/local-asr/file.zip",true));
   checkAccessPolicy();
   for(const Klass of [OldPlugin,NewPlugin]){

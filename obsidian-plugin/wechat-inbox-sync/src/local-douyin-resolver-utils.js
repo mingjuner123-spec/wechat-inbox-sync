@@ -192,6 +192,23 @@ function isDouyinCookieDomain(domain) {
   return /(?:^|\.)douyin\.com$/i.test(String(domain || '').replace(/^\./, ''));
 }
 
+function dedupeDouyinCookies(cookies = []) {
+  const seen = new Set();
+  return (Array.isArray(cookies) ? cookies : []).filter((cookie) => {
+    if (!cookie || !cookie.name) return false;
+    // Keep distinct cookie scopes while removing the same cookie returned by
+    // overlapping Electron domain queries. Preserve first-entry order.
+    const identity = JSON.stringify([
+      String(cookie.domain || '').toLowerCase(),
+      String(cookie.path || '/'),
+      String(cookie.name),
+    ]);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
 function sanitizeCookieField(value) {
   return String(value == null ? '' : value).replace(/[\t\r\n]/g, '');
 }
@@ -399,6 +416,7 @@ module.exports = {
   buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
   isDouyinCookieDomain,
+  dedupeDouyinCookies,
   buildNetscapeCookieFile,
   extractLocalDouyinResolverMediaUrls,
   extractLocalDouyinResolverMetadata,

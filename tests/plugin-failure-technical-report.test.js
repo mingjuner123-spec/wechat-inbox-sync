@@ -10,32 +10,33 @@ const asrUtils = require('../obsidian-plugin/wechat-inbox-sync/src/asr-recovery-
 const { createDouyinMediaResolutionDiagnosticBuilder } = require('../obsidian-plugin/wechat-inbox-sync/src/social-media-diagnostic-utils');
 const douyinDiagnostic = require('../obsidian-plugin/wechat-inbox-sync/src/douyin-diagnostic-utils');
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'failure-technical-report-'));
-const now = '2026-10-05T04:00:00.000Z';
+const now = new Date().toISOString();
+const relativeTime = offsetMs => new Date(Date.parse(now) + offsetMs).toISOString();
 const sessionPath = path.join(scratch, 'asr-diagnostic-last.json');
 function saveSession(overrides = {}) {
   fs.writeFileSync(sessionPath, JSON.stringify({
     recordId: 'record-123',
     syncAttemptId: 'attempt-123',
     status: 'failed',
-    startedAt: '2026-10-05T03:58:00.000Z',
-    finishedAt: '2026-10-05T03:59:00.000Z',
+    startedAt: relativeTime(-120000),
+    finishedAt: relativeTime(-60000),
     platform: 'darwin',
     system: { platform: 'darwin', architecture: 'arm64', cpuModel: 'fixture CPU', logicalCpus: 8 },
     runtime: { nativeBuildVersion: 'fixture-build', binarySha256: 'a'.repeat(64) },
     model: { scope: 'managed_default_component', modelUsed: 'ggml-small.bin' },
     abort: {
-      requestedAt: '2026-10-05T03:58:50.000Z', source: 'user_stop',
+      requestedAt: relativeTime(-70000), source: 'user_stop',
       trigger: 'stop_button', trustedEvent: false,
       technicalFrames: ['at stopCurrentTranscription ([LOCAL PATH REDACTED])'],
-      observedAt: '2026-10-05T03:58:51.000Z',
+      observedAt: relativeTime(-69000),
     },
     attempts: [
       { attempt: 1, requestedMode: 'default', status: 'failed', stage: 'transcribing',
-        logFreshness: 'fresh', startedAt: '2026-10-05T03:58:00.000Z', finishedAt: '2026-10-05T03:58:30.000Z',
+        logFreshness: 'fresh', startedAt: relativeTime(-120000), finishedAt: relativeTime(-90000),
         nativeExitCode: 139, nativeExitAssociation: 'matched', nativePids: [1234],
         runLog: 'progressStage=transcribing\nprogressPid=1234\nnativeExit=139' },
       { attempt: 2, requestedMode: 'cpu_compatibility', status: 'cancelled', stage: 'transcribing',
-        logFreshness: 'fresh', startedAt: '2026-10-05T03:58:31.000Z', finishedAt: '2026-10-05T03:59:00.000Z',
+        logFreshness: 'fresh', startedAt: relativeTime(-89000), finishedAt: relativeTime(-60000),
         nativeExitCode: null, nativeExitAssociation: 'incomplete_native_process', nativePids: [1235],
         runLog: 'progressStage=transcribing\nprogressPid=1235' },
     ],
@@ -94,7 +95,7 @@ try {
     { recordId: 'other-record' },
     { syncAttemptId: 'old-attempt' },
     { status: 'success' },
-    { finishedAt: '2026-10-04T00:00:00Z' },
+    { finishedAt: relativeTime(-26 * 60 * 60 * 1000) },
   ]) {
     saveSession(mismatch);
     const result = report.buildFailureTechnicalReport({
@@ -117,7 +118,7 @@ try {
   const largeAttemptLog = 'diagnosticLine=structured-evidence\n'.repeat(15000);
   saveSession({ attempts: [{
     attempt: 1, requestedMode: 'default', status: 'failed', stage: 'transcribing',
-    logFreshness: 'fresh', startedAt: '2026-10-05T03:58:00.000Z', finishedAt: '2026-10-05T03:58:30.000Z',
+    logFreshness: 'fresh', startedAt: relativeTime(-120000), finishedAt: relativeTime(-90000),
     nativeExitCode: 139, nativeExitAssociation: 'matched', nativePids: [1234], runLog: largeAttemptLog,
   }] });
   const builtOversize = report.buildFailureTechnicalReport({
