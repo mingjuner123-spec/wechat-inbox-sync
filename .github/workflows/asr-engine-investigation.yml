@@ -1,0 +1,105 @@
+name: ASR engine investigation
+on:
+  push:
+    branches: [codex/asr-engine-investigation-20261006]
+permissions:
+  contents: read
+concurrency:
+  group: asr-engine-investigation-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  compare:
+    name: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch fixed public fixtures and sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/asr-fixture" "$RUNNER_TEMP/asr-evidence"
+          git clone --depth 1 --branch v1.5.5 https://github.com/ggml-org/whisper.cpp.git "$RUNNER_TEMP/whisper.cpp"
+          git -C "$RUNNER_TEMP/whisper.cpp" rev-parse HEAD | tee "$RUNNER_TEMP/asr-evidence/whisper-cpp-v1.5.5-commit.txt"
+          cp "$RUNNER_TEMP/whisper.cpp/samples/jfk.wav" "$RUNNER_TEMP/asr-fixture/jfk.wav"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/90a64d80ea254cf67575b41a5971f972c79f7b45/ggml-small.bin
+          echo '1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b  '"$RUNNER_TEMP/asr-fixture/ggml-small.bin" | shasum -a 256 --check
+          shasum -a 256 "$RUNNER_TEMP/asr-fixture/jfk.wav" "$RUNNER_TEMP/asr-fixture/ggml-small.bin" | tee "$RUNNER_TEMP/asr-evidence/fixture-sha256.txt"
+          echo 'Sample: whisper.cpp v1.5.5 checkout samples/jfk.wav' > "$RUNNER_TEMP/asr-evidence/public-source-receipt.txt"
+          echo 'Model: https://huggingface.co/ggerganov/whisper.cpp/resolve/90a64d80ea254cf67575b41a5971f972c79f7b45/ggml-small.bin' >> "$RUNNER_TEMP/asr-evidence/public-source-receipt.txt"
+          echo 'Model SHA-256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b' >> "$RUNNER_TEMP/asr-evidence/public-source-receipt.txt"
+      - name: Build same-version CPU candidate without Accelerate or Metal
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MACOSX_DEPLOYMENT_TARGET=12.0
+          cmake -S "$RUNNER_TEMP/whisper.cpp" -B "$RUNNER_TEMP/whisper.cpp/build" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DBUILD_SHARED_LIBS=OFF -DWHISPER_METAL=OFF -DWHISPER_COREML=OFF \
+            -DWHISPER_NO_ACCELERATE=ON -DWHISPER_NO_AVX512=ON \
+            -DWHISPER_BUILD_TESTS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build "$RUNNER_TEMP/whisper.cpp/build" --config Release --parallel 3
+          binary="$RUNNER_TEMP/whisper.cpp/build/bin/main"
+          cp "$binary" "$RUNNER_TEMP/asr-evidence/whisper.cpp-v1.5.5-cpu-no-accelerate"
+          cp "$RUNNER_TEMP/whisper.cpp/LICENSE" "$RUNNER_TEMP/asr-evidence/whisper.cpp-LICENSE.txt"
+          shasum -a 256 "$binary" | tee "$RUNNER_TEMP/asr-evidence/candidate-binary-sha256.txt"
+          nm -u "$binary" > "$RUNNER_TEMP/asr-evidence/candidate-undefined-symbols.txt"
+          if grep -E 'NEWLAPACK.*ILP64|cblas_sgemm.*NEWLAPACK' "$RUNNER_TEMP/asr-evidence/candidate-undefined-symbols.txt"; then
+            echo 'Candidate still imports the incompatible NEWLAPACK/ILP64 symbol.' >&2; exit 1
+          fi
+          otool -L "$binary" | awk 'NR > 1 {print $1}' | tee "$RUNNER_TEMP/asr-evidence/candidate-linked-libraries.txt"
+          if grep -Ev '^(/usr/lib/|/System/Library/)' "$RUNNER_TEMP/asr-evidence/candidate-linked-libraries.txt"; then
+            echo 'Candidate links a non-system library.' >&2; exit 1
+          fi
+          if grep -E 'Accelerate\.framework|vecLib\.framework' "$RUNNER_TEMP/asr-evidence/candidate-linked-libraries.txt"; then
+            echo 'Candidate still links Accelerate.' >&2; exit 1
+          fi
+          otool -l "$binary" > "$RUNNER_TEMP/asr-evidence/candidate-load-commands.txt"
+          grep -A5 LC_BUILD_VERSION "$RUNNER_TEMP/asr-evidence/candidate-load-commands.txt" | grep -q 'minos 12.0' || { echo 'Deployment minimum is not macOS 12.0.' >&2; exit 1; }
+      - name: Install pinned whisper.cpp-cli 0.0.3 wheel and verify digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip download --no-deps --only-binary=:all: 'whisper.cpp-cli==0.0.3' -d "$RUNNER_TEMP/asr-fixture/wheels"
+          wheel=$(find "$RUNNER_TEMP/asr-fixture/wheels" -name '*.whl' -print -quit)
+          case "$RUNNER_ARCH" in
+            X64) expected='1d85c6ca3dbf907c07a59f8daa620b3d0e3b263356c5220357dd7e06b42bc523' ;;
+            ARM64) expected='6c9cb1d10770da5b7f92c54c2ace29142694b5b392c274db1d95ce1d2f6223d2' ;;
+            *) echo "Unsupported runner architecture: $RUNNER_ARCH" >&2; exit 2 ;;
+          esac
+          actual=$(shasum -a 256 "$wheel" | awk '{print $1}')
+          test "$actual" = "$expected"
+          python -m pip install --no-deps "$wheel"
+          echo "wheel=$wheel sha256=$actual" | tee "$RUNNER_TEMP/asr-evidence/wheel-identity.txt"
+          python -m pip show whisper.cpp-cli > "$RUNNER_TEMP/asr-evidence/wheel-package.txt"
+      - name: Compare wheel and CPU-compatible candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          script=scripts/asr-engine-investigation.py
+          audio="$RUNNER_TEMP/asr-fixture/jfk.wav"; model="$RUNNER_TEMP/asr-fixture/ggml-small.bin"
+          common=(--audio "$audio" --model "$model" --output-dir "$RUNNER_TEMP/asr-evidence" --timeout 240 --symbol-report --ips-wait 60)
+          baseline=0; candidate=0
+          python "$script" "${common[@]}" --engine "$(command -v whisper-cpp)" --label wheel-runner-threads || baseline=1
+          python "$script" "${common[@]}" --engine "$(command -v whisper-cpp)" --label wheel-one-thread --threads 1 || baseline=1
+          python "$script" "${common[@]}" --engine "$RUNNER_TEMP/asr-evidence/whisper.cpp-v1.5.5-cpu-no-accelerate" --label candidate-v1.5.5 || candidate=1
+          printf 'wheel_baseline_failures=%s\ncpu_candidate_failures=%s\n' "$baseline" "$candidate" | tee "$RUNNER_TEMP/asr-evidence/summary.txt"
+          test "$candidate" -eq 0
+      - name: Upload public-fixture evidence and candidate binary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asr-engine-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/asr-evidence/
+          if-no-files-found: warn
+          retention-days: 14
