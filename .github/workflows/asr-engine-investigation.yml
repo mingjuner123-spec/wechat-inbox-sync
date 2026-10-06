@@ -4,6 +4,7 @@ on:
     branches: [codex/asr-engine-investigation-20261006]
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: asr-engine-investigation-${{ github.ref }}
   cancel-in-progress: false
@@ -82,6 +83,29 @@ jobs:
           python -m pip install --no-deps "$wheel"
           echo "wheel=$wheel sha256=$actual" | tee "$RUNNER_TEMP/asr-evidence/wheel-identity.txt"
           python -m pip show whisper.cpp-cli > "$RUNNER_TEMP/asr-evidence/wheel-package.txt"
+      - name: Download the fixed Intel compatibility candidate for wrapper migration validation
+        if: matrix.runner == 'macos-15-intel'
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 37401086226
+          github-token: ${{ github.token }}
+          name: asr-engine-macos-15-intel-37401086226
+          path: ${{ runner.temp }}/asr-fixed-compat
+      - name: Migrate the managed wrapper and transcribe public JFK audio
+        if: matrix.runner == 'macos-15-intel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/asr-fixed-compat/whisper.cpp-v1.5.5-cpu-no-accelerate"
+          test -f "$candidate"
+          echo 'e5ffe7edff2b95eee8454e5a1f2db2d7d320fd8c254138e043226dba6dbba8ea  '"$candidate" | shasum -a 256 --check
+          legacy="$(command -v whisper-cpp)"
+          test "$(shasum -a 256 "$legacy" | awk '{print $1}')" = '08491f7bfa1636ac6f7756c3a6f591225578fa876e6cf97fdc64b7838bc3aa95'
+          ASR_LEGACY_WHEEL_FIXTURE="$legacy" \
+          ASR_COMPAT_CANDIDATE_FIXTURE="$candidate" \
+          ASR_PUBLIC_AUDIO_FIXTURE="$RUNNER_TEMP/asr-fixture/jfk.wav" \
+          ASR_PUBLIC_MODEL_FIXTURE="$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
+            node tests/mac-legacy-asr-compat.test.js
       - name: Compare wheel and CPU-compatible candidate
         shell: bash
         run: |

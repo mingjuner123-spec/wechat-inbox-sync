@@ -25,3 +25,16 @@ The default `en` language and JFK expected phrase apply to the public CI fixture
 ## Offline tests
 
 Run `python tests/asr-engine-investigation.test.py`. These tests mock the child process and use only temporary synthetic files; they cover expected output, empty output, nonzero exit and timeout handling.
+
+## CI result and current evidence
+
+GitHub Actions run [37401086226](https://github.com/mingjuner123-spec/wechat-inbox-sync/actions/runs/37401086226) completed on both `macos-15-intel` and `macos-14` (Apple silicon). All six cases on each runner passed: the pinned 0.0.3 wheel at runner-default threads and one thread, each with default and `--no-gpu`, plus the v1.5.5 CPU/no-Accelerate candidate with both modes. The old wheel also passed on these newer operating systems, so this run did not reproduce the Monterey crash.
+
+The Intel candidate SHA-256 is `e5ffe7edff2b95eee8454e5a1f2db2d7d320fd8c254138e043226dba6dbba8ea`; the Apple-silicon candidate SHA-256 is `633c30cd7af8088f0afa6c50d72acecde6d04f9a70b10404af9ad5ccdb3ea151`. The Intel candidate has no `NEWLAPACK`/ILP64 import, is built with Accelerate and Metal disabled, and passed the public speech cases. The release artifact includes the executable and its build evidence. These results show that the same upstream v1.5.5 source can produce a working CPU candidate on current Intel and Apple-silicon runners; they do not establish operation on the affected user's Mac.
+
+The user-provided Monterey crash report records `EXC_BAD_ACCESS` / `KERN_INVALID_ADDRESS` at address zero and `SIGSEGV`. Its reported return offset is `0x71ba0`; the preceding call at `0x71b9b` resolves through stub offset `0x11d772`, stub index 100, to `_cblas_sgemm$NEWLAPACK$ILP64` in the identified old Intel wheel binary. That symbol is a weak reference in the binary. Apple documents the new Accelerate BLAS/LAPACK interfaces and ILP64 interface in the [macOS Ventura 13.3 release notes](https://developer.apple.com/documentation/macos-release-notes/macos-13_3-release-notes). The missing interface on the affected macOS 12 system is a high-confidence compatibility explanation for this call path, and the CPU candidate removes that dependency.
+
+The crash report lacks `usedImages` identity data, so image index 1 cannot be conclusively mapped and the entire crash is not fully symbolicated. The address-to-stub-to-symbol evidence supports the compatibility explanation but does not prove every frame or the precise runtime resolution outcome. The CI runners use newer macOS releases and are engine comparisons, not a reproduction on the affected MacBookPro13,2 / macOS 12 system. A successful CI result must not be described as a Monterey reproduction or as confirmation that the user's machine is fixed.
+
+
+The Intel-only wrapper migration step in this branch fetches the fixed candidate artifact from run 37401086226; GitHub retains it for 14 days. This artifact reference is for this compatibility acceptance run and must be refreshed or removed before relying on the workflow later. The job runs on macOS 15 Intel and simulates the macOS 12 selector; it is not a Monterey device test.

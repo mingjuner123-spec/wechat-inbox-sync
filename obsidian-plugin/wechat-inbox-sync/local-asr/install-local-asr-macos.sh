@@ -282,14 +282,14 @@ find_metal_resources_dir() {
 }
 
 extract_whisper_wrapper_target() {
-  local wrapper_path="$1"
-  local target=""
-  if [ -f "$wrapper_path" ]; then
-    target="$(sed -n 's/^WHISPER_CPP_BIN="\(.*\)"$/\1/p' "$wrapper_path" 2>/dev/null | head -n 1 || true)"
-  fi
-  if [ -n "$target" ] && [ -x "$target" ]; then
-    echo "$target"
-  fi
+  local wrapper_path="$1" target="" expected="$TEMP_ROOT/wrapper-check.$$"
+  [ -f "$wrapper_path" ] && [ ! -L "$wrapper_path" ] || return 1
+  target="$(sed -n 's/^WHISPER_CPP_BIN="\(.*\)"$/\1/p' "$wrapper_path" 2>/dev/null | head -n 1 || true)"
+  [ -n "$target" ] && [ -x "$target" ] || return 1
+  render_whisper_wrapper_to_file "$expected" "$target" || return 1
+  if cmp -s "$expected" "$wrapper_path"; then rm -f "$expected"; echo "$target"; return 0; fi
+  rm -f "$expected"
+  return 1
 }
 
 extract_whisper_wrapper_metal_resources() {
@@ -317,12 +317,10 @@ resolve_symlink_target() {
   esac
 }
 
-write_whisper_wrapper() {
-  local whisper_target="$1"
-  local metal_resources_dir
+render_whisper_wrapper_to_file() {
+  local output_path="$1" whisper_target="$2" metal_resources_dir
   metal_resources_dir="$(find_metal_resources_dir "$whisper_target" || true)"
-  rm -f "$INSTALL_ROOT/bin/whisper-cli"
-  cat > "$INSTALL_ROOT/bin/whisper-cli" <<SCRIPT
+  cat > "$output_path" <<SCRIPT
 #!/usr/bin/env bash
 WHISPER_CPP_BIN="$whisper_target"
 GGML_METAL_RESOURCES_DIR="$metal_resources_dir"
@@ -332,9 +330,102 @@ if [ -n "\$GGML_METAL_RESOURCES_DIR" ] && [ -f "\$GGML_METAL_RESOURCES_DIR/ggml-
 fi
 exec "\$WHISPER_CPP_BIN" --no-gpu "\$@"
 SCRIPT
-  chmod +x "$INSTALL_ROOT/bin/whisper-cli"
 }
 
+write_whisper_wrapper() {
+  local whisper_target="$1" staged_wrapper="$INSTALL_ROOT/bin/whisper-cli.tmp.$$" existing_target=""
+  if [ -e "$INSTALL_ROOT/bin/whisper-cli" ] || [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
+    if [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then echo 'Preserving custom ASR wrapper symlink.' >&2; return 0; fi
+    existing_target="$(extract_whisper_wrapper_target "$INSTALL_ROOT/bin/whisper-cli" || true)"
+    if [ -z "$existing_target" ]; then echo 'Preserving unknown custom ASR wrapper.' >&2; return 0; fi
+  fi
+  render_whisper_wrapper_to_file "$staged_wrapper" "$whisper_target"
+  chmod +x "$staged_wrapper"
+  mv -f "$staged_wrapper" "$INSTALL_ROOT/bin/whisper-cli"
+}
+
+COMPAT_LEGACY_WHEEL_SHA256="08491F7BFA1636AC6F7756C3A6F591225578FA876E6CF97FDC64B7838BC3AA95"
+COMPAT_BINARY_SHA256="E5FFE7EDFF2B95EEE8454E5A1F2DB2D7D320FD8C254138E043226DBA6DBBA8EA"
+COMPAT_BINARY_BYTES=1366840
+COMPAT_BINARY_PATH="$INSTALL_ROOT/bin/compat/v1.5.5/x64/whisper-cpp"
+COMPAT_LICENSE_PATH="$INSTALL_ROOT/bin/compat/v1.5.5/x64/LICENSE.txt"
+
+write_whisper_cpp_mit_license() {
+  local staged="$TEMP_ROOT/whisper-cpp-LICENSE.txt"
+  cat > "$staged" <<'LICENSE'
+MIT License
+
+Copyright (c) 2023-2024 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+LICENSE
+  if [ -e "$COMPAT_LICENSE_PATH" ] || [ -L "$COMPAT_LICENSE_PATH" ]; then
+    [ -f "$COMPAT_LICENSE_PATH" ] && [ ! -L "$COMPAT_LICENSE_PATH" ] && cmp -s "$staged" "$COMPAT_LICENSE_PATH"
+    return
+  fi
+  cp "$staged" "$COMPAT_LICENSE_PATH.tmp.$$" || return 1
+  chmod 600 "$COMPAT_LICENSE_PATH.tmp.$$"
+  if ! mv -n "$COMPAT_LICENSE_PATH.tmp.$$" "$COMPAT_LICENSE_PATH"; then rm -f "$COMPAT_LICENSE_PATH.tmp.$$"; return 1; fi
+  [ -f "$COMPAT_LICENSE_PATH" ] && [ ! -L "$COMPAT_LICENSE_PATH" ] && cmp -s "$staged" "$COMPAT_LICENSE_PATH"
+}
+
+validate_existing_compat_binary() {
+  [ -f "$COMPAT_BINARY_PATH" ] && [ -x "$COMPAT_BINARY_PATH" ] && [ ! -L "$COMPAT_BINARY_PATH" ] || return 1
+  [ "$(wc -c < "$COMPAT_BINARY_PATH" | tr -d ' ')" = "$COMPAT_BINARY_BYTES" ] || return 1
+  [ "$(file_sha256 "$COMPAT_BINARY_PATH")" = "$COMPAT_BINARY_SHA256" ] || return 1
+  file "$COMPAT_BINARY_PATH" | grep -q 'Mach-O 64-bit executable x86_64' || return 1
+  write_whisper_cpp_mit_license
+}
+activate_compat_for_legacy_wrapper() {
+  local original="$1" wrapper="$INSTALL_ROOT/bin/whisper-cli" version major minor sha target="$INSTALL_ROOT/bin/whisper-cli.compat.tmp.$$" expected="$TEMP_ROOT/legacy-wrapper.expected" backup="$INSTALL_ROOT/bin/whisper-cli.before-macos-legacy-asr-compat-v1"
+  [ "$(uname -m)" = x86_64 ] || return 0
+  version="$(sw_vers -productVersion 2>/dev/null || true)"
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+)(\.|$) ]] || return 0
+  major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
+  { [ "$major" = 12 ] || { [ "$major" = 13 ] && [ "$minor" -lt 3 ]; }; } || return 0
+  case "$INSTALL_ROOT" in *'"'*|*'$'*|*'`'*|*$'\n'*) return 0 ;; esac
+  [ -x "$original" ] && [ -f "$wrapper" ] && [ ! -L "$wrapper" ] || return 0
+  sha="$(file_sha256 "$original" 2>/dev/null || true)"
+  [ "$sha" = "$COMPAT_LEGACY_WHEEL_SHA256" ] || return 0
+  [ "$(extract_whisper_wrapper_target "$wrapper" || true)" = "$original" ] || return 0
+  render_whisper_wrapper_to_file "$expected" "$original"
+  cmp -s "$expected" "$wrapper" || return 0
+  validate_existing_compat_binary || { echo 'Pinned compatibility engine is not installed; retaining the existing ASR engine.' >&2; return 0; }
+  if [ -e "$backup" ] || [ -L "$backup" ]; then
+    [ -f "$backup" ] && [ ! -L "$backup" ] && cmp -s "$wrapper" "$backup" || { echo 'Existing ASR wrapper backup does not match; leaving wrapper unchanged.' >&2; return 0; }
+  else cp -p "$wrapper" "$backup" || return 0
+  fi
+  cmp -s "$expected" "$wrapper" || return 0
+  render_whisper_wrapper_to_file "$target" "$COMPAT_BINARY_PATH"
+  chmod 700 "$target"
+  mv -f "$target" "$wrapper"
+  if [ "$(extract_whisper_wrapper_target "$wrapper" || true)" != "$COMPAT_BINARY_PATH" ] || [ "$(file_sha256 "$COMPAT_BINARY_PATH")" != "$COMPAT_BINARY_SHA256" ]; then
+    if cp "$expected" "$wrapper.rollback.$$" && chmod 700 "$wrapper.rollback.$$" && mv -f "$wrapper.rollback.$$" "$wrapper"; then
+      echo 'ASR compatibility wrapper verification failed; restored the previous wrapper.' >&2
+      return 0
+    fi
+    rm -f "$wrapper.rollback.$$"
+    echo 'ASR compatibility wrapper verification and rollback both failed; the ASR wrapper requires manual repair.' >&2
+    return 1
+  fi
+  echo 'Applied the pinned macOS 12-13.2 Intel ASR compatibility engine; original wheel, model, and user configuration were retained.'
+}
 find_homebrew_whisper_command() {
   local name prefix candidate
   for prefix in /opt/homebrew /usr/local; do
@@ -795,6 +886,7 @@ fi
 if [ "$WHISPER_BIN" != "$INSTALL_ROOT/bin/whisper-cli" ] || [ -n "$EXISTING_WHISPER_TARGET" ] || [ -L "$INSTALL_ROOT/bin/whisper-cli" ]; then
   write_whisper_wrapper "$WHISPER_BIN"
 fi
+activate_compat_for_legacy_wrapper "$WHISPER_BIN"
 if [ "$FFMPEG_BIN" != "$INSTALL_ROOT/bin/ffmpeg" ]; then
   ln -sf "$FFMPEG_BIN" "$INSTALL_ROOT/bin/ffmpeg"
 fi
