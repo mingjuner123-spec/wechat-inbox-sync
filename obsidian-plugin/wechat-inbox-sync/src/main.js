@@ -17,6 +17,7 @@ function retainedSyncFailureDiagnostic(value, settings) {
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
+const macLegacyAsrCompat = require('./mac-legacy-asr-compat');
 const { buildFailureTechnicalReport, unavailableTechnicalReport } = require('./failure-technical-report');
 const douyinDiagnostic = require('./douyin-diagnostic-utils');
 const { summarizeResolverAttempts, hasFeishuActivity } = require('./component-diagnostic-summary');
@@ -350,8 +351,14 @@ const DOUYIN_MOBILE_SHARE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; 22041211
 const LOCAL_TRANSCRIPTION_PLAN = 'local_transcription_beta';
 const LOCAL_TRANSCRIPTION_FALLBACK_PLANS = ['local_transcription_trial'];
 const LOCAL_COMPONENT_MANIFEST_PATH = '/local-components/manifest';
-const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';
+const LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-1428610652.tcb.qcloud.la';
+const LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST = '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la';
+const LOCAL_COMPONENT_DOWNLOAD_HOSTS = new Set([
+  LOCAL_COMPONENT_DOWNLOAD_HOST,
+  LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST,
+]);
 const LOCAL_COMPONENT_DELIVERY_PROTOCOL = 'cloudbase-v1';
+const LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY = 'short-native-v1';
 const LOCAL_DOUYIN_RESOLVER_GITHUB_RELEASE_API_URL = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest';
 const LOCAL_DOUYIN_RESOLVER_TIMEOUT_MS = 90000;
 const LOCAL_OCR_WINDOWS_INSTALLER_SHA256 = '7f2cfd3b443cfe893a9a24d6f8f3f46a33eade23936a93387698d4500257146c';
@@ -2486,7 +2493,7 @@ function isAuthorizedLocalComponentDownloadUrl(downloadUrl, sha256, fileName) {
     const expectedPath = `/local-components/by-sha256/${sha256}/${fileName}`;
     const decodedPathname = decodeURIComponent(parsed.pathname);
     return parsed.protocol === 'https:'
-      && parsed.hostname === LOCAL_COMPONENT_DOWNLOAD_HOST
+      && LOCAL_COMPONENT_DOWNLOAD_HOSTS.has(parsed.hostname)
       && !parsed.port
       && !parsed.username
       && !parsed.password
@@ -18193,7 +18200,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const payload = await this.requestJson(
-        `${options.metadataOnly ? '/local-components/version' : LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}`,
+        `${options.metadataOnly ? '/local-components/version' : LOCAL_COMPONENT_MANIFEST_PATH}?component=${encodeURIComponent(normalizedComponent)}&platform=${encodeURIComponent(platform)}&arch=${encodeURIComponent(arch)}&deliveryProtocol=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_PROTOCOL)}${options.metadataOnly ? "" : `&deliveryHost=${encodeURIComponent(LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY)}`}`,
         'GET',
         {},
         binding,
@@ -18234,7 +18241,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           platform, arch, attempt,
           code: /^[A-Z0-9_]{1,80}$/.test(String(error && error.code || '')) ? error.code : 'MANIFEST_UNAVAILABLE',
         };
-        const failure = new Error('长环境组件下载暂时不可用，已保留本地下载进度。请稍后点击“安装／更新本地组件”；若仍失败，请复制新的同步/安装失败诊断。');
+        const failure = new Error('授权组件下载暂时不可用，已保留本地下载进度。请稍后点击“安装／更新本地组件”；若仍失败，请复制新的同步/安装失败诊断。');
         failure.code = 'ASR_SOURCE_UNAVAILABLE';
         throw failure;
       }
@@ -20404,7 +20411,83 @@ class WechatObsidianInboxPlugin extends Plugin {
       && ((commandTemplate === getDefaultLocalTranscriptionCommand('darwin') && installRoot === getLocalAsrInstallRoot(os.homedir(), 'default', 'darwin'))
         || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot)
       && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
-    const runtime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
+    let compatibility = { status: 'not-applicable', reason: 'not-target-runtime' };
+    if (platform === 'darwin' && managed && os.arch() === 'x64') {
+      let macOSVersion = String(this._macOSProductVersion || '');
+      if (!macOSVersion) {
+        try {
+          const versionResult = childProcess.spawnSync('sw_vers', ['-productVersion'], { encoding: 'utf8', timeout: 2000 });
+          if (!versionResult.error && versionResult.status === 0) {
+            macOSVersion = String(versionResult.stdout || '').trim();
+            if (macOSVersion) this._macOSProductVersion = macOSVersion;
+          }
+        } catch (_) { /* Unknown OS version fails closed without manifest access. */ }
+      }
+      const initialRuntime = asrRecovery.runtimeIdentity(installRoot, platform, installStatus);
+      const plan = macLegacyAsrCompat.inspectMacLegacyAsr({
+        platform, arch: os.arch(), macOSVersion, managed, installRoot, runtimeIdentity: initialRuntime,
+      });
+      compatibility = { status: plan.status, reason: plan.reason, macOSVersion };
+      if (plan.alreadyActive) {
+        compatibility = { status: 'already-active', reason: plan.reason, macOSVersion, binarySha256: initialRuntime.binarySha256 };
+      } else if (plan.eligible && ['needs-download', 'ready-to-activate'].includes(plan.status)) {
+        let candidatePath = plan.compatPath;
+        if (plan.status === 'needs-download') {
+          let manifest;
+          try {
+            manifest = await this.getAuthorizedLocalComponentManifest('asr');
+          } catch (error) {
+            if (isAbortError(error) || options.signal?.aborted) throw error;
+            const reason = String(error && (error.code || error.message) || 'authorization-unavailable').slice(0, 120);
+            throw new Error(`macOS 12–13.2 Intel 转写兼容组件尚未就绪（${reason}）；为避免再次调用已确认不兼容的旧引擎，本次转写已停止。请稍后重试；若持续失败，请更新插件后联系支持。`);
+          }
+          const compatAssets = manifest && manifest.component === 'asr' && manifest.platform === 'darwin' && manifest.arch === 'x64'
+            && Array.isArray(manifest.assets) ? manifest.assets.filter(asset => asset.id === 'whisper-compat') : [];
+          if (compatAssets.length !== 1
+            || compatAssets[0].sha256 !== plan.expectedCompatSha256
+            || compatAssets[0].byteLength !== plan.expectedCompatByteLength) {
+            throw new Error('macOS 12–13.2 Intel 转写兼容组件未取得唯一且校验匹配的授权资产；原引擎未切换。请稍后重试或联系支持。');
+          }
+          throwIfAborted(options.signal);
+          let response;
+          try {
+            response = await requestUrl({ url: compatAssets[0].downloadUrl, method: 'GET' });
+          } catch (error) {
+            if (isAbortError(error) || options.signal?.aborted) throw error;
+            throw new Error('macOS Intel 转写兼容组件下载失败；本次转写已停止，未启动旧引擎。请稍后重试；若持续失败，请更新插件后联系支持。');
+          }
+          if (!response || !Number.isInteger(response.status) || response.status < 200 || response.status >= 300 || !response.arrayBuffer) {
+            throw new Error('macOS Intel 转写兼容组件下载失败；本次转写已停止，未启动旧引擎。请稍后重试。');
+          }
+          const candidateBytes = Buffer.from(response.arrayBuffer);
+          const candidateSha256 = crypto.createHash('sha256').update(candidateBytes).digest('hex');
+          if (candidateBytes.length !== plan.expectedCompatByteLength || candidateSha256 !== plan.expectedCompatSha256) {
+            throw new Error('macOS Intel 转写兼容组件校验失败；本次转写已停止，未启动旧引擎。请联系支持。');
+          }
+          throwIfAborted(options.signal);
+          const installed = macLegacyAsrCompat.installMacLegacyAsrCompat({ installRoot, bytes: candidateBytes });
+          if (!installed.installed) throw new Error(`macOS Intel 转写兼容组件安装失败（${installed.reason}）；本次转写已停止，旧引擎未启动。请稍后重试并联系支持。`);
+          candidatePath = installed.candidatePath || candidatePath;
+        }
+        throwIfAborted(options.signal);
+        const activated = macLegacyAsrCompat.activateMacLegacyAsrCompat({ installRoot, candidatePath });
+        if (!activated.applied) {
+          const state = String(activated.reason || '').includes('rollback-failed')
+            ? '兼容切换和原wrapper恢复均失败，请不要再次尝试转写并联系支持'
+            : String(activated.reason || '').includes('rolled-back')
+              ? '兼容切换失败，原wrapper已恢复；请稍后重试并联系支持'
+              : '兼容切换失败，本次转写已停止；请稍后重试并联系支持';
+          throw new Error(`macOS Intel 转写${state}（${activated.reason}）。`);
+        }
+        const activeRuntime = asrRecovery.runtimeIdentity(installRoot, platform, this.getLocalAsrInstallStatus());
+        if (activeRuntime.binarySha256 !== plan.expectedCompatSha256) {
+          throw new Error('macOS Intel 转写兼容切换后的运行身份校验失败；本次转写已停止，请不要继续使用当前组件并联系支持。');
+        }
+        compatibility = { status: 'active', reason: activated.reason, macOSVersion, binarySha256: activeRuntime.binarySha256 };
+      }
+    }
+    const runtime = asrRecovery.runtimeIdentity(installRoot, platform, this.getLocalAsrInstallStatus());
+    runtime.macLegacyCompatibility = compatibility;
     const runtimeFingerprint = asrRecovery.fingerprint(runtime);
     const session = {
       startedAt: new Date().toISOString(),
@@ -20651,21 +20734,44 @@ class WechatObsidianInboxPlugin extends Plugin {
       options.signal?.removeEventListener('abort', cancelLocal);
       session.finishedAt = new Date().toISOString();
       session.freeMemoryBytesAfter = os.freemem();
-      asrRecovery.saveSession(installRoot, session, this.settings);
       stopProgressPolling();
       this.currentTranscriptionAbortController = null;
       this.currentTranscriptionAbortRequest = null;
       this.currentTranscriptionProcess = null;
       this.currentTranscriptionProcessDetached = false;
       this.currentTranscriptionContext = null;
-      this.setTranscriptionStopAvailable(false);
-      [inputPath, outputPath].forEach((filePath) => {
-        try {
-          if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        } catch (error) {
-          // Ignore temp cleanup failures.
+      try { this.setTranscriptionStopAvailable(false); } catch (_) { /* UI cleanup cannot interrupt temporary-file cleanup. */ }
+      try {
+        if (session.platform === 'darwin' && ['failed', 'cancelled'].includes(session.status)) {
+          const crashedAttempts = session.attempts.filter(attempt => asrRecovery.isMacNativeCrash({
+            exitCode: attempt.nativeExitCode ?? attempt.exitCode,
+            signal: attempt.signal,
+            message: attempt.error,
+            asrStage: attempt.stage,
+          })).slice(0, 2);
+          const summaries = await Promise.all(crashedAttempts.map(async attempt => {
+            try {
+              return await asrRecovery.collectMatchingCrashSummary(session, attempt, { retryDelaysMs: [0, 500, 1000, 2000, 2500] });
+            } catch (_) { return ''; }
+          }));
+          summaries.forEach((summary, index) => {
+            if (summary && !summary.startsWith('[unavailable:')) {
+              crashedAttempts[index].crashSummaryStatus = 'matched';
+              crashedAttempts[index].crashSummary = summary;
+            }
+          });
         }
-      });
+      } catch (_) { /* Evidence collection cannot mask the original result. */ }
+      try { asrRecovery.saveSession(installRoot, session, this.settings); }
+      finally {
+        [inputPath, outputPath].forEach((filePath) => {
+          try {
+            if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          } catch (error) {
+            // Ignore temp cleanup failures.
+          }
+        });
+      }
     }
   }
 
@@ -26805,6 +26911,8 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_TRANSCRIPTION_PLAN,
   LOCAL_COMPONENT_MANIFEST_PATH,
   LOCAL_COMPONENT_DOWNLOAD_HOST,
+  LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST,
+  LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY,
   LOCAL_OCR_WINDOWS_INSTALLER_SHA256,
   LOCAL_OCR_MACOS_INSTALLER_SHA256,
   LOCAL_COMPONENT_ASSET_ENV_KEYS,

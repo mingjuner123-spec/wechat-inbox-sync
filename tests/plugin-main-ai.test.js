@@ -2536,8 +2536,10 @@ assert.strictEqual(helpers.LOCAL_TRANSCRIPTION_PLAN, 'local_transcription_beta')
 assert.strictEqual(helpers.LOCAL_COMPONENT_MANIFEST_PATH, '/local-components/manifest');
 assert.strictEqual(
   helpers.LOCAL_COMPONENT_DOWNLOAD_HOST,
-  '6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la',
+  '6865-he02-d8gebzv050ed6c4ef-1428610652.tcb.qcloud.la',
 );
+assert.strictEqual(helpers.LEGACY_LOCAL_COMPONENT_DOWNLOAD_HOST,'6865-he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.tcb.qcloud.la');
+assert.strictEqual(helpers.LOCAL_COMPONENT_DELIVERY_HOST_CAPABILITY,'short-native-v1');
 const authorizedModelUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'a'.repeat(64)}/ggml-small.bin?sign=temporary&t=1789480000`;
 const authorizedEncodedFileName = 'cpython-3.12.13+20260623-x86_64-pc-windows-msvc-install_only.tar.gz';
 const authorizedEncodedUrl = `https://${helpers.LOCAL_COMPONENT_DOWNLOAD_HOST}/local-components/by-sha256/${'b'.repeat(64)}/${authorizedEncodedFileName.replace('+', '%2B')}?sign=temporary&t=1789480000`;
