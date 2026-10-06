@@ -3385,6 +3385,7 @@ var require_douyin_diagnostic_utils = __commonJS({
       "DOUYIN_RESOLVER_NETWORK",
       "DOUYIN_RESOLVER_FAILED",
       "DOUYIN_UNSUPPORTED_URL",
+      "DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED",
       "DOUYIN_TARGET_ID_MISSING",
       "DOUYIN_NO_MEDIA",
       "DOUYIN_BROWSER_TIMEOUT",
@@ -3420,6 +3421,22 @@ var require_douyin_diagnostic_utils = __commonJS({
       }
     }
     __name(getDouyinUrlKind, "getDouyinUrlKind");
+    function getTrustedDouyinNoteRoute(value) {
+      try {
+        const parsed = new URL(String(value || "").trim());
+        const host = parsed.hostname.toLowerCase();
+        if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port || !/(^|\.)douyin\.com$|(^|\.)iesdouyin\.com$/.test(host)) return null;
+        const match = parsed.pathname.match(/^\/(?:share\/)?note\/(\d{8,30})\/?$/i);
+        if (!match) return null;
+        return {
+          kind: parsed.pathname.toLowerCase().startsWith("/share/") ? "share-note" : "note",
+          idLength: match[1].length
+        };
+      } catch (_) {
+        return null;
+      }
+    }
+    __name(getTrustedDouyinNoteRoute, "getTrustedDouyinNoteRoute");
     function safeInputKind(value) {
       return INPUT_KINDS.has(value) ? value : "unknown";
     }
@@ -3462,8 +3479,9 @@ var require_douyin_diagnostic_utils = __commonJS({
     __name(failureCode, "failureCode");
     function failureMessage(code) {
       return {
+        DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED: "这条链接是抖音笔记页面，当前不支持该类型转写。请分享具体视频作品链接；要保存文字，可复制到小程序后保存。",
         DOUYIN_CHALLENGE: "抖音解析返回安全验证要求，请打开插件内抖音窗口完成验证后重试。",
-        DOUYIN_COOKIE_REFRESH_REQUIRED: "抖音解析器要求更新 Cookie，尚不能确认登录失效或验证码；请在插件内打开抖音确认访问状态。",
+        DOUYIN_COOKIE_REFRESH_REQUIRED: "抖音解析器未能读取作品信息，提示需要更新网页访问校验信息（Cookie）；这不等于未登录。请在插件内打开这条作品，确认能正常播放后再重试；显示已登录不代表作品访问校验已通过。",
         DOUYIN_LOGIN_REQUIRED: "抖音解析器返回登录要求，请在插件内确认登录后重试。",
         DOUYIN_BROWSER_TIMEOUT: "抖音隐藏网页处理超时，尚未获取视频地址；请复制诊断查看停滞阶段。",
         DOUYIN_BROWSER_LOAD_FAILED: "抖音网页加载失败，网络错误已记录；请复制诊断查看原因。",
@@ -3585,6 +3603,7 @@ var require_douyin_diagnostic_utils = __commonJS({
       save,
       safeErrorText,
       urlKind: getDouyinUrlKind,
+      noteRoute: getTrustedDouyinNoteRoute,
       normalizeUrlKind: safeUrlKind,
       normalizeInputKind: safeInputKind,
       normalizeTargetIdState,
@@ -12773,6 +12792,21 @@ var require_local_douyin_resolver_utils = __commonJS({
       return /(?:^|\.)douyin\.com$/i.test(String(domain || "").replace(/^\./, ""));
     }
     __name(isDouyinCookieDomain, "isDouyinCookieDomain");
+    function dedupeDouyinCookies2(cookies = []) {
+      const seen = /* @__PURE__ */ new Set();
+      return (Array.isArray(cookies) ? cookies : []).filter((cookie) => {
+        if (!cookie || !cookie.name) return false;
+        const identity = JSON.stringify([
+          String(cookie.domain || "").toLowerCase(),
+          String(cookie.path || "/"),
+          String(cookie.name)
+        ]);
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+      });
+    }
+    __name(dedupeDouyinCookies2, "dedupeDouyinCookies");
     function sanitizeCookieField(value) {
       return String(value == null ? "" : value).replace(/[\t\r\n]/g, "");
     }
@@ -12956,6 +12990,7 @@ var require_local_douyin_resolver_utils = __commonJS({
       buildLocalDouyinResolverGithubManifest: buildLocalDouyinResolverGithubManifest2,
       getLocalDouyinResolverRoot: getLocalDouyinResolverRoot2,
       isDouyinCookieDomain,
+      dedupeDouyinCookies: dedupeDouyinCookies2,
       buildNetscapeCookieFile: buildNetscapeCookieFile2,
       extractLocalDouyinResolverMediaUrls: extractLocalDouyinResolverMediaUrls2,
       extractLocalDouyinResolverMetadata: extractLocalDouyinResolverMetadata2,
@@ -14351,6 +14386,7 @@ var {
   buildLocalDouyinResolverGithubManifest,
   getLocalDouyinResolverRoot,
   buildNetscapeCookieFile,
+  dedupeDouyinCookies,
   extractLocalDouyinResolverMediaUrls,
   extractLocalDouyinResolverMetadata
 } = require_local_douyin_resolver_utils();
@@ -14402,7 +14438,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.179";
+var PLUGIN_RUNTIME_VERSION = "1.3.180";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -23988,8 +24024,7 @@ async function getDouyinCookies() {
       session.cookies.get({ domain: ".douyin.com" }),
       session.cookies.get({ domain: "www.douyin.com" })
     ]);
-    const seen = /* @__PURE__ */ new Set();
-    return groups.flat().filter((cookie) => cookie && cookie.name && !seen.has(cookie.name) && seen.add(cookie.name));
+    return dedupeDouyinCookies(groups.flat());
   } catch (error) {
     return [];
   }
@@ -34745,6 +34780,50 @@ ${finalized.markdown}
         throwIfAborted(signal);
         xiaohongshuRedirectDiagnostic = redirectResult.diagnostic;
         const redirectedUrl = redirectResult.url;
+        const douyinNoteRoute = douyinDiagnostic.noteRoute(url) || douyinDiagnostic.noteRoute(redirectedUrl);
+        if (douyinNoteRoute) {
+          const message = douyinDiagnostic.failureMessage("DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED");
+          const failureDiagnostic = douyinDiagnostic.sanitize({
+            attemptId: douyinAttemptId,
+            recordRef: crypto.createHash("sha256").update(String(record.id || record._id || url)).digest("hex").slice(0, 16),
+            startedAt: douyinStartedAt,
+            finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            outcome: "failed",
+            cookieState: "unknown",
+            failureCode: "DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED",
+            sourceKind: getDouyinDiagnosticUrlKind("", url),
+            resolvedKind: "other",
+            targetIdRecognized: false,
+            targetIdState: "missing",
+            targetStageEligible: false,
+            stages: [{
+              stage: "note-route",
+              inputKind: douyinDiagnostic.noteRoute(url) ? "original-page" : "resolved-page",
+              attempted: true,
+              ok: false,
+              rejectionReason: "unsupported-note-transcription",
+              error: { code: "DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED", message }
+            }]
+          });
+          douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), failureDiagnostic);
+          return {
+            ...record,
+            metadata: {
+              ...metadata,
+              title: metadata.title || title || "抖音笔记",
+              url,
+              platform: "抖音",
+              contentCategory: "笔记",
+              markdown: ["抖音笔记链接暂不支持转写。", "", `原始链接：${url}`, "", `> ${message}`].join("\n"),
+              transcriptionStatus: "failed",
+              transcriptionError: message,
+              transcriptionSource: "video",
+              conversionStatus: "failed",
+              conversionNote: message,
+              mediaResolutionDiagnostic: failureDiagnostic
+            }
+          };
+        }
         const targetIdentityUrl = isXiaohongshuUrl(url) ? resolveXiaohongshuIdentityUrl([redirectedUrl, url]) : "";
         xiaohongshuResolvedUrl = redirectedUrl;
         const douyinTarget = isDouyinUrl(url) || isDouyinUrl(redirectedUrl) ? normalizeDouyinTargetUrl(url, redirectedUrl) : { awemeId: "", url: "" };

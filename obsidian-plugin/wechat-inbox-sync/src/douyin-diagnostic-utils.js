@@ -34,6 +34,7 @@ const CODES = new Set([
   'DOUYIN_RESOLVER_NETWORK',
   'DOUYIN_RESOLVER_FAILED',
   'DOUYIN_UNSUPPORTED_URL',
+  'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED',
   'DOUYIN_TARGET_ID_MISSING',
   'DOUYIN_NO_MEDIA',
   'DOUYIN_BROWSER_TIMEOUT',
@@ -70,6 +71,22 @@ function getDouyinUrlKind(value) {
   }
 }
 
+function getTrustedDouyinNoteRoute(value) {
+  try {
+    const parsed = new URL(String(value || '').trim());
+    const host = parsed.hostname.toLowerCase();
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port
+      || !/(^|\.)douyin\.com$|(^|\.)iesdouyin\.com$/.test(host)) return null;
+    const match = parsed.pathname.match(/^\/(?:share\/)?note\/(\d{8,30})\/?$/i);
+    if (!match) return null;
+    return {
+      kind: parsed.pathname.toLowerCase().startsWith('/share/') ? 'share-note' : 'note',
+      idLength: match[1].length,
+    };
+  } catch (_) {
+    return null;
+  }
+}
 function safeInputKind(value) {
   return INPUT_KINDS.has(value) ? value : 'unknown';
 }
@@ -120,8 +137,9 @@ function failureCode(stages = [], context = {}) {
 }
 function failureMessage(code) {
   return ({
+    DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED: '这条链接是抖音笔记页面，当前不支持该类型转写。请分享具体视频作品链接；要保存文字，可复制到小程序后保存。',
     DOUYIN_CHALLENGE: '抖音解析返回安全验证要求，请打开插件内抖音窗口完成验证后重试。',
-    DOUYIN_COOKIE_REFRESH_REQUIRED: '抖音解析器要求更新 Cookie，尚不能确认登录失效或验证码；请在插件内打开抖音确认访问状态。',
+    DOUYIN_COOKIE_REFRESH_REQUIRED: '抖音解析器未能读取作品信息，提示需要更新网页访问校验信息（Cookie）；这不等于未登录。请在插件内打开这条作品，确认能正常播放后再重试；显示已登录不代表作品访问校验已通过。',
     DOUYIN_LOGIN_REQUIRED: '抖音解析器返回登录要求，请在插件内确认登录后重试。',
     DOUYIN_BROWSER_TIMEOUT: '抖音隐藏网页处理超时，尚未获取视频地址；请复制诊断查看停滞阶段。',
     DOUYIN_BROWSER_LOAD_FAILED: '抖音网页加载失败，网络错误已记录；请复制诊断查看原因。',
@@ -231,6 +249,7 @@ module.exports = {
   save,
   safeErrorText,
   urlKind: getDouyinUrlKind,
+  noteRoute: getTrustedDouyinNoteRoute,
   normalizeUrlKind: safeUrlKind,
   normalizeInputKind: safeInputKind,
   normalizeTargetIdState,
