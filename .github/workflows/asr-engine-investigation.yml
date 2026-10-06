@@ -127,6 +127,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          npm ci --prefix obsidian-plugin/wechat-inbox-sync
           legacy="$(command -v whisper-cpp)"
           candidate="$RUNNER_TEMP/asr-fixed-compat/whisper.cpp-v1.5.5-cpu-no-accelerate"
           ASR_LEGACY_WHEEL_FIXTURE="$legacy" \
