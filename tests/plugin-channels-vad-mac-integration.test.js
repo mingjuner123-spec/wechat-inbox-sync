@@ -44,6 +44,33 @@ function runFfmpeg(ffmpegPath, args) {
   if (result.error || result.status !== 0) throw new Error('ffmpeg fixture generation failed');
 }
 
+function runDiagnosticAsr(whisperPath, modelPath, audioPath, outputPrefix, threads) {
+  const result = spawnSync(whisperPath, [
+    '-m', modelPath, '-f', audioPath, '-l', 'en', '-t', String(threads), '-ojf', '-of', outputPrefix, '-ng',
+  ], { encoding: 'utf8', windowsHide: true, timeout: 120000 });
+  const segments = result.status === 0 ? readJsonTranscript(outputPrefix) : null;
+  return {
+    exitCode: result.status,
+    signal: result.signal || '',
+    error: result.error ? 'spawn_error' : '',
+    segments: segments || [],
+    text: (segments || []).map((segment) => segment.text).join('\n'),
+  };
+}
+
+function readJsonTranscript(outputPrefix) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(`${outputPrefix}.json`, 'utf8'));
+    if (!Array.isArray(parsed.transcription)) return null;
+    return parsed.transcription.map((segment) => ({
+      text: String(segment && segment.text || '').trim(),
+      tokens: Array.isArray(segment && segment.tokens) ? segment.tokens : [],
+    })).filter((segment) => segment.text);
+  } catch (_error) {
+    return null;
+  }
+}
+
 function countExactPhrase(text, phrase) {
   const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z]/g, '');
   const source = normalize(text);
@@ -137,6 +164,36 @@ async function main() {
       inputAudioPath: jfkPath,
       durationSeconds: readPcmWavDuration(jfkPath),
     });
+    const cropDiagnostics = [];
+    const jfkDuration = readPcmWavDuration(jfkPath);
+    const firstWindow = jfk.windows && jfk.windows[0];
+    if (firstWindow) {
+      const crops = [
+        { label: 'full-input', start: 0, end: jfkDuration },
+        { label: 'vad-exact-window', start: firstWindow.startSeconds, end: firstWindow.endSeconds },
+        {
+          label: 'vad-window-plus-150ms-context',
+          start: Math.max(0, firstWindow.startSeconds - 0.15),
+          end: Math.min(jfkDuration, firstWindow.endSeconds + 0.15),
+        },
+      ];
+      for (const [index, crop] of crops.entries()) {
+        let audioPath = jfkPath;
+        if (crop.label !== 'full-input') {
+          audioPath = path.join(tempDir, `jfk-diagnostic-${index}.wav`);
+          runFfmpeg(ffmpegPath, [
+            '-v', 'error', '-nostdin', '-y', '-ss', crop.start.toFixed(3), '-i', jfkPath,
+            '-t', (crop.end - crop.start).toFixed(3), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audioPath,
+          ]);
+        }
+        cropDiagnostics.push({
+          label: crop.label,
+          startSeconds: crop.start,
+          endSeconds: crop.end,
+          ...runDiagnosticAsr(whisperPath, asrModelPath, audioPath, path.join(tempDir, `jfk-diagnostic-${index}`), threads),
+        });
+      }
+    }
     if (process.env.ASR_EVIDENCE_DIR) {
       fs.mkdirSync(process.env.ASR_EVIDENCE_DIR, { recursive: true });
       fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, 'channels-vad-public-jfk-transcript.txt'), jfk.transcript || '', 'utf8');
@@ -145,6 +202,17 @@ async function main() {
         reason: jfk.reason || '',
         windows: jfk.windows || [],
       }, null, 2) + '\n', 'utf8');
+      fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, 'channels-vad-public-jfk-crop-diagnostics.json'), JSON.stringify({
+        threadCount: threads,
+        audioDurationSeconds: jfkDuration,
+        diagnostics: cropDiagnostics.map(({ segments, ...entry }) => ({
+          ...entry,
+          exactPhraseOccurrences: countExactPhrase(entry.text, 'Ask not what your country can do for you ask what you can do for your country'),
+        })),
+      }, null, 2) + '\n', 'utf8');
+      for (const entry of cropDiagnostics) {
+        fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, `channels-vad-public-jfk-${entry.label}.txt`), entry.text + '\n', 'utf8');
+      }
     }
     assert.equal(jfk.decision, 'recovered', 'natural human-voice JFK must pass the old Mac CLI JSON/token path');
     assert.equal(countExactPhrase(jfk.transcript, 'Ask not what your country can do for you ask what you can do for your country'), 1);
