@@ -76,6 +76,14 @@ curl --fail --location --retry 3 --output "$MODEL" "$VAD_MODEL_URL" \
   >"$RUNNER_TEMP_DIR/vad-model-download.log" 2>&1
 test "$(wc -c <"$MODEL" | tr -d ' ')" -eq "$VAD_MODEL_BYTES"
 printf '%s  %s\n' "$VAD_MODEL_SHA256" "$MODEL" | shasum -a 256 --check
+mkdir -p "$EVIDENCE_DIR/vad-assets/bin" "$EVIDENCE_DIR/vad-assets/models"
+cp "$VAD_BIN" "$EVIDENCE_DIR/whisper-vad-speech-segments"
+cp "$VAD_BIN" "$EVIDENCE_DIR/vad-assets/bin/whisper-vad-speech-segments"
+cp "$MODEL" "$EVIDENCE_DIR/vad-assets/models/ggml-silero-v6.2.0.bin"
+cp "$VAD_ROOT/LICENSE" "$EVIDENCE_DIR/vad-assets/LICENSE-whisper.cpp.txt"
+chmod 755 "$EVIDENCE_DIR/whisper-vad-speech-segments" "$EVIDENCE_DIR/vad-assets/bin/whisper-vad-speech-segments"
+chmod 644 "$EVIDENCE_DIR/vad-assets/models/ggml-silero-v6.2.0.bin"
+chmod 644 "$EVIDENCE_DIR/vad-assets/LICENSE-whisper.cpp.txt"
 
 {
   printf 'runner_arch=%s\n' "$(uname -m)"
@@ -85,6 +93,12 @@ printf '%s  %s\n' "$VAD_MODEL_SHA256" "$MODEL" | shasum -a 256 --check
 } >"$EVIDENCE_DIR/vad-identity.txt"
 VAD_PHASE=dependency_checks
 file "$VAD_BIN" >"$EVIDENCE_DIR/vad-binary-file.txt"
+otool -l "$VAD_BIN" >"$EVIDENCE_DIR/vad-load-commands.txt"
+if ! { grep -A5 'LC_BUILD_VERSION' "$EVIDENCE_DIR/vad-load-commands.txt" | grep -q 'minos 12.0' \
+  || grep -A4 'LC_VERSION_MIN_MACOSX' "$EVIDENCE_DIR/vad-load-commands.txt" | grep -q 'version 12.0'; }; then
+  echo 'VAD binary deployment minimum is not macOS 12.0.' >&2
+  exit 1
+fi
 otool -L "$VAD_BIN" >"$EVIDENCE_DIR/vad-linked-libraries.txt"
 if grep -Eiq 'Metal\.framework|Accelerate\.framework|vecLib\.framework|libomp' \
   "$EVIDENCE_DIR/vad-linked-libraries.txt"; then

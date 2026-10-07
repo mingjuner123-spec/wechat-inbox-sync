@@ -32,10 +32,14 @@ jobs:
           git clone --depth 1 --branch v1.5.5 https://github.com/ggml-org/whisper.cpp.git "$RUNNER_TEMP/whisper.cpp"
           git -C "$RUNNER_TEMP/whisper.cpp" rev-parse HEAD | tee "$RUNNER_TEMP/asr-evidence/whisper-cpp-v1.5.5-commit.txt"
           cp "$RUNNER_TEMP/whisper.cpp/samples/jfk.wav" "$RUNNER_TEMP/asr-fixture/jfk.wav"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/asr-fixture/asr_example_zh.wav" \
+            https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_zh.wav
+          test "$(wc -c <"$RUNNER_TEMP/asr-fixture/asr_example_zh.wav" | tr -d ' ')" -eq 177572
+          echo 'a1bd32dc78493c123f9625a66deee562aed2895f53fbc39f2cca3be7e6f4f20f  '"$RUNNER_TEMP/asr-fixture/asr_example_zh.wav" | shasum -a 256 --check
           curl --fail --location --retry 3 --output "$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
             https://huggingface.co/ggerganov/whisper.cpp/resolve/90a64d80ea254cf67575b41a5971f972c79f7b45/ggml-small.bin
           echo '1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b  '"$RUNNER_TEMP/asr-fixture/ggml-small.bin" | shasum -a 256 --check
-          shasum -a 256 "$RUNNER_TEMP/asr-fixture/jfk.wav" "$RUNNER_TEMP/asr-fixture/ggml-small.bin" | tee "$RUNNER_TEMP/asr-evidence/fixture-sha256.txt"
+          shasum -a 256 "$RUNNER_TEMP/asr-fixture/jfk.wav" "$RUNNER_TEMP/asr-fixture/asr_example_zh.wav" "$RUNNER_TEMP/asr-fixture/ggml-small.bin" | tee "$RUNNER_TEMP/asr-evidence/fixture-sha256.txt"
           echo 'Sample: whisper.cpp v1.5.5 checkout samples/jfk.wav' > "$RUNNER_TEMP/asr-evidence/public-source-receipt.txt"
           echo 'Model: https://huggingface.co/ggerganov/whisper.cpp/resolve/90a64d80ea254cf67575b41a5971f972c79f7b45/ggml-small.bin' >> "$RUNNER_TEMP/asr-evidence/public-source-receipt.txt"
           echo 'Model SHA-256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b' >> "$RUNNER_TEMP/asr-evidence/public-source-receipt.txt"
@@ -121,14 +125,19 @@ jobs:
               receipt.write(f"source=public-whisper.cpp-jfk.wav\nrepeats={repeats}\ndurationSeconds={duration:.3f}\n")
           PY
           cat "$long_audio.meta" >"$RUNNER_TEMP/asr-evidence/thread-sweep/long-fixture.txt"
-          for threads in 1 4; do
+          if [[ "$RUNNER_ARCH" == ARM64 ]]; then
+            long_threads=(1 2 3)
+          else
+            long_threads=(1 4)
+          fi
+          for threads in "${long_threads[@]}"; do
             /usr/bin/time -p python scripts/asr-engine-investigation.py \
               --audio "$long_audio" \
               --model "$model" \
               --engine "$candidate" \
               --label "cpu-candidate-long-threads-${threads}" \
               --output-dir "$RUNNER_TEMP/asr-evidence/thread-sweep" \
-              --timeout 900 \
+              --timeout 360 \
               --threads "$threads" \
               --variants no-gpu \
               2>"$RUNNER_TEMP/asr-evidence/thread-sweep/long-time-${threads}.txt" \
@@ -184,7 +193,6 @@ jobs:
               node tests/mac-legacy-asr-compat.test.js
           } 2>&1 | tee "$RUNNER_TEMP/asr-evidence/wrapper-migration-test.txt"
       - name: Install pinned real ffmpeg fixture and record identity
-        if: matrix.runner == 'macos-15-intel'
         shell: bash
         run: |
           set -euo pipefail
@@ -210,6 +218,19 @@ jobs:
           ASR_FFMPEG_FIXTURE="$ASR_FFMPEG_FIXTURE" \
           ASR_EVIDENCE_DIR="$RUNNER_TEMP/asr-evidence" \
             node tests/plugin-macos-compat-transcription.integration.test.js 2>&1 | tee "$RUNNER_TEMP/asr-evidence/plugin-compat-transcription-test.txt"
+      - name: Exercise Channels VAD and JSON token recovery on macOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHANNELS_ASR_INSTALL_ROOT="$RUNNER_TEMP/asr-evidence/vad-assets" \
+          CHANNELS_FFMPEG="$ASR_FFMPEG_FIXTURE" \
+          CHANNELS_WHISPER_CLI="$RUNNER_TEMP/asr-evidence/whisper.cpp-v1.5.5-cpu-no-accelerate" \
+          CHANNELS_ASR_MODEL="$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
+          CHANNELS_JFK_WAV="$RUNNER_TEMP/asr-fixture/jfk.wav" \
+          CHANNELS_CHINESE_WAV="$RUNNER_TEMP/asr-fixture/asr_example_zh.wav" \
+          CHANNELS_ASR_THREADS=1 \
+            node tests/plugin-channels-vad-mac-integration.test.js \
+            | tee "$RUNNER_TEMP/asr-evidence/plugin-channels-vad-mac-integration.txt"
       - name: Compare wheel and CPU-compatible candidate
         shell: bash
         run: |
