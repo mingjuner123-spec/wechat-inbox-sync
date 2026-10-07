@@ -121,6 +121,12 @@ jobs:
           MAC_ASR_PROBE_MAX_SECONDS=8 \
             bash tests/mac-asr-lifecycle-probe.sh \
             | tee "$RUNNER_TEMP/asr-evidence/mac-lifecycle-probe.txt"
+      - name: Exercise product ASR timeout process-group cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/plugin-asr-timeout-process-group.test.js \
+            | tee "$RUNNER_TEMP/asr-evidence/product-asr-timeout-process-group.txt"
       - name: Complete public ASR CPU thread sweep
         if: ${{ inputs.channels_only != true }}
         shell: bash
