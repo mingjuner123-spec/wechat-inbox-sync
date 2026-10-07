@@ -68,8 +68,13 @@ function fakeDownloader(counter, { corrupt = false, fail = false } = {}) {
   };
 }
 
+async function makeTempRoot(prefix) {
+  const canonicalTempDir = await fs.promises.realpath(os.tmpdir());
+  return fs.promises.mkdtemp(path.join(canonicalTempDir, prefix));
+}
+
 test('validates isolated optional Windows capability and installs a platform bundle with hash cache reuse', async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-vad-assets-'));
+  const root = await makeTempRoot('channels-vad-assets-');
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const manifest = fixtureManifest();
   const counter = { count: 0, manifest };
@@ -145,7 +150,7 @@ test('rejects mismatched targets, unsafe URLs, and non-capability manifests', as
 });
 
 test('download or integrity failures leave the existing ASR installation untouched', async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-vad-failure-'));
+  const root = await makeTempRoot('channels-vad-failure-');
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const asrRoot = path.join(root, 'asr');
   const asrSentinel = path.join(asrRoot, 'whisper-cli.exe');
@@ -180,7 +185,7 @@ test('download or integrity failures leave the existing ASR installation untouch
 });
 
 test('does not install assets when the operation is already aborted', async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-vad-abort-'));
+  const root = await makeTempRoot('channels-vad-abort-');
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const controller = new AbortController();
   controller.abort();
@@ -200,7 +205,7 @@ test('does not install assets when the operation is already aborted', async (t) 
 });
 
 test('rejects symlinked installation roots before invoking the downloader', async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-vad-symlink-'));
+  const root = await makeTempRoot('channels-vad-symlink-');
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const realRoot = path.join(root, 'real-install');
   const installLink = path.join(root, 'install-link');
@@ -226,7 +231,7 @@ test('rejects symlinked installation roots before invoking the downloader', asyn
 });
 
 test('rejects a symlinked SHA cache entry instead of following it', async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-vad-cache-link-'));
+  const root = await makeTempRoot('channels-vad-cache-link-');
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const manifest = fixtureManifest();
   const asset = manifest.assets[0];
@@ -256,7 +261,7 @@ test('rejects a symlinked SHA cache entry instead of following it', async (t) =>
 });
 
 test('Darwin installs an executable segmenter and reuses only a verified path-free receipt', async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-vad-receipt-'));
+  const root = await makeTempRoot('channels-vad-receipt-');
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const manifest = fixtureManifest('darwin', 'arm64');
   const counter = { count: 0, manifest };
@@ -307,7 +312,7 @@ test('Darwin installs an executable segmenter and reuses only a verified path-fr
 });
 
 test('Darwin bundle is unavailable when executable permissions cannot be applied', async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-vad-chmod-'));
+  const root = await makeTempRoot('channels-vad-chmod-');
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const manifest = fixtureManifest('darwin', 'x64');
   const result = await installChannelsVadAssets({
