@@ -13,9 +13,26 @@ VAD_PHASE=init
 mkdir -p "$EVIDENCE_DIR"
 vad_failure_report() {
   local status="$?"
+  local log_file=''
+  local detail='phase_failed'
   if [ "$status" -ne 0 ]; then
-    printf '::error title=VAD control failure::phase=%s exit=%s\n' "$VAD_PHASE" "$status"
-    printf 'phase=%s exitCode=%s\n' "$VAD_PHASE" "$status" >"$EVIDENCE_DIR/vad-failure.txt" 2>/dev/null || true
+    case "$VAD_PHASE" in
+      clone) log_file="$RUNNER_TEMP_DIR/vad-clone.log" ;;
+      configure) log_file="$RUNNER_TEMP_DIR/vad-configure.log" ;;
+      build) log_file="$RUNNER_TEMP_DIR/vad-build.log" ;;
+      binary_and_model) log_file="$RUNNER_TEMP_DIR/vad-model-download.log" ;;
+    esac
+    if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+      detail="$(grep -Ei 'CMake Error|Could NOT find|not found|error:' "$log_file" | tail -n 1 | tr -d '\r' | sed -E 's#/(Users|private|var|tmp)/[^[:space:]]*#<path>#g' | cut -c1-180 || true)"
+      [ -n "$detail" ] || detail='phase_failed'
+      {
+        printf 'phase=%s exitCode=%s detail=%s\n' "$VAD_PHASE" "$status" "$detail"
+        tail -n 12 "$log_file" | sed -E 's#/(Users|private|var|tmp)/[^[:space:]]*#<path>#g' | tr -d '\r'
+      } >"$EVIDENCE_DIR/vad-failure.txt" 2>/dev/null || true
+    else
+      printf 'phase=%s exitCode=%s detail=%s\n' "$VAD_PHASE" "$status" "$detail" >"$EVIDENCE_DIR/vad-failure.txt" 2>/dev/null || true
+    fi
+    printf '::error title=VAD control failure::phase=%s exit=%s detail=%s\n' "$VAD_PHASE" "$status" "$detail"
   fi
 }
 trap vad_failure_report EXIT
