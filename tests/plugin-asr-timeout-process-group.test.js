@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const childProcess = require('child_process');
+const { EventEmitter } = require('events');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -193,6 +194,96 @@ async function testDetachedShellAndChildAreStopped() {
   }
 }
 
+async function testDetachedExecPreservesOutputAndNonzeroError() {
+  if (process.platform === 'win32') return;
+  const command = "printf 'stdout marker'; printf 'stderr marker' >&2; exit 7";
+  const result = await new Promise(resolve => {
+    execWithAsrTimeout(command, { timeout: 2000, detached: true }, (error, stdout, stderr) => {
+      resolve({ error, stdout, stderr });
+    }, { platform: 'darwin' });
+  });
+  assert.equal(result.stdout, 'stdout marker');
+  assert.equal(result.stderr, 'stderr marker');
+  assert.equal(result.error.code, 7);
+  assert.equal(result.error.cmd, command);
+}
+
+async function testDetachedExecEnforcesMaxBuffer() {
+  if (process.platform === 'win32') return;
+  const result = await new Promise(resolve => {
+    execWithAsrTimeout("printf '0123456789'; sleep 5", { timeout: 2000, detached: true, maxBuffer: 4 }, (error, stdout, stderr) => {
+      resolve({ error, stdout, stderr });
+    }, { platform: 'darwin' });
+  });
+  assert.equal(result.error.code, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+  assert.equal(result.stdout, '0123');
+}
+
+function fakeSpawnChild(pid) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.killSignals = [];
+  child.kill = signal => {
+    child.killSignals.push(signal);
+    return true;
+  };
+  return child;
+}
+
+async function testDefaultDarwinPathUsesDetachedSpawnAndExecOutputContract() {
+  const command = 'fixture command';
+  const child = fakeSpawnChild(414);
+  let observed;
+  const result = await new Promise(resolve => {
+    execWithAsrTimeout(command, { timeout: 1000, detached: true }, (error, stdout, stderr) => {
+      resolve({ error, stdout, stderr });
+    }, {
+      platform: 'darwin',
+      spawnImpl(file, args, options) {
+        observed = { file, args, options };
+        setImmediate(() => {
+          child.stdout.emit('data', Buffer.from('stdout'));
+          child.stderr.emit('data', Buffer.from('stderr'));
+          child.emit('close', 9, null);
+        });
+        return child;
+      },
+    });
+  });
+  assert.equal(observed.file, command);
+  assert.deepEqual(observed.args, []);
+  assert.equal(observed.options.shell, true);
+  assert.equal(observed.options.detached, true);
+  assert.equal(observed.options.stdio[1], 'pipe');
+  assert.equal(result.stdout, 'stdout');
+  assert.equal(result.stderr, 'stderr');
+  assert.equal(result.error.code, 9);
+  assert.equal(result.error.cmd, command);
+}
+
+async function testMaxBufferCleanupFailureFallsBackToDirectChild() {
+  const child = fakeSpawnChild(415);
+  const result = await new Promise(resolve => {
+    execWithAsrTimeout('fixture command', { timeout: 1000, detached: true, maxBuffer: 4 }, (error, stdout) => {
+      resolve({ error, stdout });
+    }, {
+      platform: 'darwin',
+      spawnImpl(_file, _args, _options) {
+        setImmediate(() => child.stdout.emit('data', Buffer.from('overflow')));
+        return child;
+      },
+      terminateGroup: async () => { throw Object.assign(new Error('private detail'), { code: 'EPERM' }); },
+    });
+  });
+  assert.equal(result.error.code, 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+  assert.equal(result.error.cleanupStatus, 'direct_child_fallback');
+  assert.equal(result.error.cleanupError, 'EPERM');
+  assert.deepEqual(child.killSignals, ['SIGKILL']);
+  assert.equal(result.stdout, 'over');
+}
+
 async function main() {
   const keepAlive = setInterval(() => {}, 1000);
   try {
@@ -204,7 +295,12 @@ async function main() {
     await testTermThenKillEscalation();
     await testTimeoutDoesNotTriggerNativeCrashRetry();
     await testDetachedShellAndChildAreStopped();
-    console.log('PASS: ASR timeout group cleanup; cases=7');
+    await testDetachedExecPreservesOutputAndNonzeroError();
+    await testDetachedExecEnforcesMaxBuffer();
+    await testDefaultDarwinPathUsesDetachedSpawnAndExecOutputContract();
+    await testMaxBufferCleanupFailureFallsBackToDirectChild();
+    const caseCount = process.platform === 'win32' ? 9 : 12;
+    console.log(`PASS: ASR timeout group cleanup; cases=${caseCount}`);
   } finally {
     clearInterval(keepAlive);
   }
