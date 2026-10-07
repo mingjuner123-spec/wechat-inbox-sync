@@ -203,12 +203,14 @@ jobs:
           ffmpeg_sha256="$(shasum -a 256 "$ffmpeg_path" | awk '{print $1}')"
           printf 'package_version=%s\nbinary=%s\nbinary_sha256=%s\n' "$ffmpeg_version" "$(basename "$ffmpeg_path")" "$ffmpeg_sha256" | tee "$RUNNER_TEMP/asr-evidence/ffmpeg-fixture.txt"
           echo "ASR_FFMPEG_FIXTURE=$ffmpeg_path" >> "$GITHUB_ENV"
+      - name: Install locked plugin dependencies for ASR integration
+        shell: bash
+        run: npm ci --prefix obsidian-plugin/wechat-inbox-sync
       - name: Exercise plugin compatibility download and real transcription
         if: matrix.runner == 'macos-15-intel'
         shell: bash
         run: |
           set -euo pipefail
-          npm ci --prefix obsidian-plugin/wechat-inbox-sync
           legacy="$(command -v whisper-cpp)"
           candidate="$RUNNER_TEMP/asr-fixed-compat/whisper.cpp-v1.5.5-cpu-no-accelerate"
           ASR_LEGACY_WHEEL_FIXTURE="$legacy" \
@@ -229,8 +231,9 @@ jobs:
           CHANNELS_JFK_WAV="$RUNNER_TEMP/asr-fixture/jfk.wav" \
           CHANNELS_CHINESE_WAV="$RUNNER_TEMP/asr-fixture/asr_example_zh.wav" \
           CHANNELS_ASR_THREADS=1 \
+          ASR_EVIDENCE_DIR="$RUNNER_TEMP/asr-evidence" \
             node tests/plugin-channels-vad-mac-integration.test.js \
-            | tee "$RUNNER_TEMP/asr-evidence/plugin-channels-vad-mac-integration.txt"
+            2>&1 | tee "$RUNNER_TEMP/asr-evidence/plugin-channels-vad-mac-integration.txt"
       - name: Compare wheel and CPU-compatible candidate
         shell: bash
         run: |

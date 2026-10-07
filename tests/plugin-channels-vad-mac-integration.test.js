@@ -137,6 +137,15 @@ async function main() {
       inputAudioPath: jfkPath,
       durationSeconds: readPcmWavDuration(jfkPath),
     });
+    if (process.env.ASR_EVIDENCE_DIR) {
+      fs.mkdirSync(process.env.ASR_EVIDENCE_DIR, { recursive: true });
+      fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, 'channels-vad-public-jfk-transcript.txt'), jfk.transcript || '', 'utf8');
+      fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, 'channels-vad-public-jfk-windows.json'), JSON.stringify({
+        decision: jfk.decision,
+        reason: jfk.reason || '',
+        windows: jfk.windows || [],
+      }, null, 2) + '\n', 'utf8');
+    }
     assert.equal(jfk.decision, 'recovered', 'natural human-voice JFK must pass the old Mac CLI JSON/token path');
     assert.equal(countExactPhrase(jfk.transcript, 'Ask not what your country can do for you ask what you can do for your country'), 1);
     assert.ok(jfk.windows.length >= 1);
@@ -168,6 +177,15 @@ async function main() {
       inputAudioPath: repeatedPath,
       durationSeconds: readPcmWavDuration(repeatedPath),
     });
+    if (process.env.ASR_EVIDENCE_DIR) {
+      fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, 'channels-vad-public-jfk-repeat-transcript.txt'), repeated.transcript || '', 'utf8');
+      fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, 'channels-vad-public-jfk-repeat-windows.json'), JSON.stringify({
+        decision: repeated.decision,
+        reason: repeated.reason || '',
+        deduplicated: repeated.deduplicated,
+        windows: repeated.windows || [],
+      }, null, 2) + '\n', 'utf8');
+    }
     assert.equal(repeated.decision, 'recovered', 'repeated natural speech must be a true recovered result, not a warning candidate');
     assert.equal(countExactPhrase(repeated.transcript, 'Ask not what your country can do for you ask what you can do for your country'), 6);
     assert.equal(repeated.deduplicated, false, 'repeated natural speech must never be deduplicated');
