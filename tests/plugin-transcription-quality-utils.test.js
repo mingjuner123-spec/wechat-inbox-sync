@@ -63,6 +63,8 @@ const qualityError = createTranscriptionQualityError(repeatedText, '测试转写
 assert.strictEqual(qualityError.code, 'TRANSCRIPTION_LOW_QUALITY');
 assert.strictEqual(qualityError.qualityIssue, 'repeated-lines');
 assert.match(qualityError.message, /测试转写结果质量异常/);
+assert.match(qualityError.message, /检测到重复句循环/);
+assert.strictEqual(qualityError.message.includes('备用地址'), false);
 
 assert.strictEqual(assertUsableTranscription(' 正常转写结果 ', '测试转写'), '正常转写结果');
 assert.throws(

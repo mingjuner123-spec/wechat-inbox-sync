@@ -61,6 +61,15 @@ const MEDIA_OUTCOMES = new Set(['success', 'failed', 'cancelled']);
 const MEDIA_COOKIE_STATES = new Set(['saved-unverified', 'not-found', 'unknown']);
 const MEDIA_DEBUGGER_CAPABILITIES = new Set(['present', 'absent', 'unsupported', 'not-eligible', 'unknown']);
 const MEDIA_DEBUGGER_REASONS = new Set(['target-id-missing', 'api-absent', 'api-unsupported', 'unknown']);
+const WECHAT_ARTICLE_STAGES = new Set(['obsidian-request', 'node-fallback', 'wechat-session', 'hidden-browser']);
+const WECHAT_ARTICLE_PAGE_STATES = new Set(['article', 'captcha', 'guide', 'unavailable', 'empty-shell', 'unknown']);
+const WECHAT_ARTICLE_FINAL_STATES = new Set([...WECHAT_ARTICLE_PAGE_STATES, 'body_missing']);
+const WECHAT_ARTICLE_OUTCOMES = new Set(['response', 'error', 'unknown']);
+const WECHAT_ARTICLE_FAILURE_CATEGORIES = new Set([
+  'extractor-selector-mismatch', 'wechat-verification-required', 'article-unavailable',
+  'browser-transport-failed', 'request-profile-sensitive-response',
+  'identical-empty-shell-across-request-profiles', 'wechat-empty-shell',
+]);
 function safeDiagnosticEnum(value, allowed) {
   const text = String(value || '').trim();
   return allowed.has(text) ? text : 'unknown';
@@ -97,6 +106,74 @@ function safeBoundedNumber(value, max = 1000) {
   if (value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0 ? Math.min(number, max) : null;
+}
+function safeWechatArticleCount(value, max = 10_000_000) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return null;
+  return Math.min(value, max);
+}
+function safeWechatArticleExtractionDiagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.source !== 'wechat-article') return null;
+  const result = { component: 'wechat-article' };
+  if (value.reason === 'wechat-article-body-missing') result.reasonCode = 'wechat-article-body-missing';
+  if (WECHAT_ARTICLE_FAILURE_CATEGORIES.has(value.failureCategory)) result.failureCategory = value.failureCategory;
+  if (value.finalKind === 'retryable' || value.finalKind === 'fallback') result.finalKind = value.finalKind;
+  if (WECHAT_ARTICLE_FINAL_STATES.has(value.finalState)) result.finalState = value.finalState;
+  if (['static', 'browser', 'fallback'].includes(value.finalSource)) result.finalSource = value.finalSource;
+  if (WECHAT_ARTICLE_PAGE_STATES.has(value.staticState)) result.staticState = value.staticState;
+  if (WECHAT_ARTICLE_PAGE_STATES.has(value.browserState)) result.browserState = value.browserState;
+  if (Array.isArray(value.requestProfiles)) result.requestProfileCount = Math.min(value.requestProfiles.length, 8);
+
+  const stages = Array.isArray(value.stages) ? value.stages : [];
+  result.stages = stages.slice(0, 12).flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || !WECHAT_ARTICLE_STAGES.has(item.stage)) return [];
+    const stage = { stage: item.stage, outcome: WECHAT_ARTICLE_OUTCOMES.has(item.outcome) ? item.outcome : 'unknown' };
+    if (WECHAT_ARTICLE_PAGE_STATES.has(item.state)) stage.state = item.state;
+    const status = safeWechatArticleCount(item.status, 599);
+    if (status !== null && status >= 100) stage.httpStatus = status;
+    if (item.statusSource === 'actual' || item.statusSource === 'inferred-success') stage.statusSource = item.statusSource;
+    for (const key of ['htmlChars', 'markdownChars', 'assetCount', 'bodyTextChars', 'imageCount', 'imageCandidateCount', 'durationMs']) {
+      const count = safeWechatArticleCount(item[key], 10_000_000);
+      if (count !== null) stage[key] = count;
+    }
+    const diagnostic = item.diagnostic && typeof item.diagnostic === 'object' && !Array.isArray(item.diagnostic)
+      ? item.diagnostic : null;
+    if (diagnostic) {
+      const evidence = {};
+      if (WECHAT_ARTICLE_PAGE_STATES.has(diagnostic.pageKind)) evidence.pageKind = diagnostic.pageKind;
+      if (WECHAT_ARTICLE_PAGE_STATES.has(diagnostic.classifiedState)) evidence.classifiedState = diagnostic.classifiedState;
+      for (const key of ['hasHtml', 'hasJsContent']) {
+        if (typeof diagnostic[key] === 'boolean') evidence[key] = diagnostic[key];
+      }
+      for (const key of ['bodyHtmlChars', 'bodyTextChars', 'imageCount', 'mediaCount', 'imageCandidateCount']) {
+        const count = safeWechatArticleCount(diagnostic[key], 10_000_000);
+        if (count !== null) evidence[key] = count;
+      }
+      const markers = diagnostic.markers && typeof diagnostic.markers === 'object' && !Array.isArray(diagnostic.markers)
+        ? diagnostic.markers : null;
+      if (markers) {
+        const safeMarkers = {};
+        for (const key of ['captcha', 'unavailable', 'guide', 'emptyShell']) {
+          if (typeof markers[key] === 'boolean') safeMarkers[key] = markers[key];
+        }
+        if (Object.keys(safeMarkers).length) evidence.markers = safeMarkers;
+      }
+      if (Object.keys(evidence).length) stage.evidence = evidence;
+    }
+    return [stage];
+  });
+
+  const completeness = value.completeness && typeof value.completeness === 'object' && !Array.isArray(value.completeness)
+    ? value.completeness : null;
+  if (completeness) {
+    const safeCompleteness = {};
+    if (typeof completeness.articleBodyFound === 'boolean') safeCompleteness.articleBodyFound = completeness.articleBodyFound;
+    for (const key of ['imageCandidates', 'successfulChannels', 'failedChannels']) {
+      const count = safeWechatArticleCount(completeness[key], 1000);
+      if (count !== null) safeCompleteness[key] = count;
+    }
+    if (Object.keys(safeCompleteness).length) result.completeness = safeCompleteness;
+  }
+  return result;
 }
 function safeMediaError(value, settings = {}) {
   if (!value || typeof value !== 'object') return undefined;
@@ -262,10 +339,16 @@ function safeAttempt(item = {}) {
   const requestedMode = ['default', 'cpu_compatibility'].includes(item.requestedMode) ? item.requestedMode : 'unknown';
   const freshness = ['fresh', 'stale', 'unavailable'].includes(item.logFreshness) ? item.logFreshness : 'unavailable';
   const signal = /^[A-Z0-9_]{1,32}$/.test(String(item.signal || '')) ? String(item.signal) : '';
+  const qualityStatus = ['passed', 'rejected'].includes(item.qualityStatus) ? item.qualityStatus : 'unknown';
+  const qualityIssue = ['repeated-lines', 'prompt-leak'].includes(item.qualityIssue) ? item.qualityIssue : 'unknown';
+  const qualityReason = item.qualityReason === 'quality_guard_rejected' ? item.qualityReason : 'unknown';
   return {
     attempt: nonnegativeInt(item.attempt),
     cpuCompatibilityRequested: requestedMode === 'cpu_compatibility' || item.cpu === true,
     requestedMode,
+    qualityStatus,
+    qualityIssue,
+    qualityReason,
     backendObserved: ['cpu', 'gpu'].includes(item.backendObserved) ? item.backendObserved : 'unknown',
     status: ['success', 'failed', 'cancelled'].includes(item.status) ? item.status : 'unknown',
     stage: String(item.stage || 'unknown'),
@@ -300,6 +383,8 @@ function safeError(error, settings = {}) {
   };
   const mediaResolutionDiagnostic = safeMediaResolutionDiagnostic(source, settings);
   if (mediaResolutionDiagnostic) value.mediaResolutionDiagnostic = mediaResolutionDiagnostic;
+  const extractionDiagnostic = safeWechatArticleExtractionDiagnostic(source.diagnostic);
+  if (extractionDiagnostic) value.extractionDiagnostic = extractionDiagnostic;
   return redactTree(value, settings);
 }
 function matchAsrSession(session, { recordId, attemptId, now }) {

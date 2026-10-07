@@ -4,6 +4,11 @@ const { Converter } = require('opencc-js/t2cn');
 const toSimplifiedConverter = Converter({ from: 't', to: 'cn' });
 
 const NO_SPEECH_MESSAGE = '仅识别到音乐/静音标记，未识别到可转写语音。';
+const NO_SPEECH_SAVED_MESSAGE = '本次未检测到可转写语音，已保存原内容和链接。';
+const RECOGNIZED_NO_SPEECH_EVIDENCE = new Set([
+  'non-speech-markers',
+  'full-decode-and-vad-no-speech-segments',
+]);
 
 function createNoSpeechTranscriptionError(text) {
   const lines = String(text || '').trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -16,7 +21,7 @@ function createNoSpeechTranscriptionError(text) {
 function isRecognizedNoSpeechMetadata(metadata = {}) {
   return metadata.transcriptionStatus === 'no_speech'
     && metadata.conversionStatus === 'no_speech'
-    && metadata.noSpeechEvidence === 'non-speech-markers'
+    && RECOGNIZED_NO_SPEECH_EVIDENCE.has(metadata.noSpeechEvidence)
     && !String(metadata.transcription || '').trim()
     && !metadata.transcriptionError && !metadata.conversionError;
 }
@@ -112,7 +117,7 @@ function createTranscriptionQualityError(text, source = '转写') {
   const issue = getTranscriptionQualityIssue(text);
   if (!issue) return null;
   const reason = issue === 'prompt-leak' ? '检测到提示词泄漏' : '检测到重复句循环';
-  const error = new Error(`${source}结果质量异常：${reason}，已放弃该媒体地址并尝试备用地址。`);
+  const error = new Error(`${source}结果质量异常：${reason}，已拒绝当前转写结果。`);
   error.code = 'TRANSCRIPTION_LOW_QUALITY';
   error.qualityIssue = issue;
   return error;
@@ -130,6 +135,7 @@ function assertUsableTranscription(text, source = '转写') {
 
 module.exports = {
   NO_SPEECH_MESSAGE,
+  NO_SPEECH_SAVED_MESSAGE,
   createNoSpeechTranscriptionError,
   isRecognizedNoSpeechMetadata,
   assertUsableTranscription,
