@@ -9,6 +9,29 @@ concurrency:
   group: asr-engine-investigation-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  windows-vad:
+    name: windows-vad-cpu
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and verify isolated Windows CPU VAD bundle
+        shell: pwsh
+        run: |
+          & .\tests\windows-vad-ci.ps1
+      - name: Upload Windows VAD provenance and fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asr-engine-windows-vad-${{ github.run_id }}
+          path: ${{ runner.temp }}\windows-vad-evidence\
+          if-no-files-found: warn
+          retention-days: 14
   compare:
     name: ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
@@ -224,6 +247,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node --test tests/plugin-channels-vad-optional-assets.test.js tests/plugin-channels-vad-padding.test.js \
+            2>&1 | tee "$RUNNER_TEMP/asr-evidence/plugin-channels-vad-utils-test.txt"
           CHANNELS_ASR_INSTALL_ROOT="$RUNNER_TEMP/asr-evidence/vad-assets" \
           CHANNELS_FFMPEG="$ASR_FFMPEG_FIXTURE" \
           CHANNELS_WHISPER_CLI="$RUNNER_TEMP/asr-evidence/whisper.cpp-v1.5.5-cpu-no-accelerate" \

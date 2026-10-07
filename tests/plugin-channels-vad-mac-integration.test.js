@@ -8,6 +8,7 @@ const { spawnSync } = require('node:child_process');
 const {
   inspectChannelsVadAssets,
   runChannelsQualityRecovery,
+  summarizeTokenProbabilities,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/channels-asr-quality-recovery');
 
 function requiredEnv(name) {
@@ -54,6 +55,8 @@ function runDiagnosticAsr(whisperPath, modelPath, audioPath, outputPrefix, threa
     signal: result.signal || '',
     error: result.error ? 'spawn_error' : '',
     segments: segments || [],
+    segmentCount: (segments || []).length,
+    confidence: summarizeTokenProbabilities((segments || []).flatMap((segment) => segment.tokens)),
     text: (segments || []).map((segment) => segment.text).join('\n'),
   };
 }
@@ -168,13 +171,15 @@ async function main() {
     const jfkDuration = readPcmWavDuration(jfkPath);
     const firstWindow = jfk.windows && jfk.windows[0];
     if (firstWindow) {
+      const vadStartSeconds = firstWindow.vadStartSeconds ?? firstWindow.startSeconds;
+      const vadEndSeconds = firstWindow.vadEndSeconds ?? firstWindow.endSeconds;
       const crops = [
         { label: 'full-input', start: 0, end: jfkDuration },
-        { label: 'vad-exact-window', start: firstWindow.startSeconds, end: firstWindow.endSeconds },
+        { label: 'vad-exact-window', start: vadStartSeconds, end: vadEndSeconds },
         {
           label: 'vad-window-plus-150ms-context',
-          start: Math.max(0, firstWindow.startSeconds - 0.15),
-          end: Math.min(jfkDuration, firstWindow.endSeconds + 0.15),
+          start: firstWindow.startSeconds,
+          end: firstWindow.endSeconds,
         },
       ];
       for (const [index, crop] of crops.entries()) {
@@ -214,11 +219,6 @@ async function main() {
         fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, `channels-vad-public-jfk-${entry.label}.txt`), entry.text + '\n', 'utf8');
       }
     }
-    assert.equal(jfk.decision, 'recovered', 'natural human-voice JFK must pass the old Mac CLI JSON/token path');
-    assert.equal(countExactPhrase(jfk.transcript, 'Ask not what your country can do for you ask what you can do for your country'), 1);
-    assert.ok(jfk.windows.length >= 1);
-    assert.ok(jfk.windows.every((window) => window.tokens >= 5 && window.rerunSimilarity >= 0.85));
-
     const chinese = await runChannelsQualityRecovery({
       ...base,
       language: 'zh',
@@ -226,19 +226,12 @@ async function main() {
       durationSeconds: readPcmWavDuration(chinesePath),
     });
     const chineseMetrics = chineseFidelity(chinese.transcript, '欢迎大家来体验达摩院推出的语音识别模型');
-    assert.equal(chinese.decision, 'recovered', 'natural Chinese speech must pass the old Mac CLI JSON/token path');
-    assert.ok(chineseMetrics.characterCoverage >= 0.9, 'Chinese speech should preserve at least 90% of expected characters');
-    assert.ok(chineseMetrics.characterErrorRate <= 0.1, 'Chinese character error rate must remain within 10%');
 
     const silence = await runChannelsQualityRecovery({
       ...base,
       inputAudioPath: silencePath,
       durationSeconds: readPcmWavDuration(silencePath),
     });
-    assert.equal(silence.decision, 'no_speech');
-    assert.equal(silence.errorCode, 'TRANSCRIPTION_NO_SPEECH');
-    assert.equal(silence.fullAudioProcessed, true);
-    assert.equal(silence.transcript, undefined);
 
     const repeated = await runChannelsQualityRecovery({
       ...base,
@@ -254,10 +247,36 @@ async function main() {
         windows: repeated.windows || [],
       }, null, 2) + '\n', 'utf8');
     }
-    assert.equal(repeated.decision, 'recovered', 'repeated natural speech must be a true recovered result, not a warning candidate');
-    assert.equal(countExactPhrase(repeated.transcript, 'Ask not what your country can do for you ask what you can do for your country'), 6);
-    assert.equal(repeated.deduplicated, false, 'repeated natural speech must never be deduplicated');
-    assert.ok(repeated.windows.every((window) => window.endSeconds - window.startSeconds <= 30));
+
+    if (process.env.ASR_EVIDENCE_DIR) {
+      const cases = { jfk, chinese, silence, repeated };
+      for (const [name, result] of Object.entries(cases)) {
+        fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, `channels-vad-public-${name}-transcript.txt`), result.transcript || '', 'utf8');
+      }
+      fs.writeFileSync(path.join(process.env.ASR_EVIDENCE_DIR, 'channels-vad-public-case-summary.json'), JSON.stringify({
+        jfk: { decision: jfk.decision, reason: jfk.reason || '', windows: jfk.windows || [], phraseOccurrences: countExactPhrase(jfk.transcript, 'Ask not what your country can do for you ask what you can do for your country') },
+        chinese: { decision: chinese.decision, reason: chinese.reason || '', windows: chinese.windows || [], ...chineseMetrics },
+        silence: { decision: silence.decision, reason: silence.reason || '', errorCode: silence.errorCode || '', fullAudioProcessed: silence.fullAudioProcessed, durationSeconds: silence.audioDurationSeconds },
+        repeated: { decision: repeated.decision, reason: repeated.reason || '', windows: repeated.windows || [], phraseOccurrences: countExactPhrase(repeated.transcript, 'Ask not what your country can do for you ask what you can do for your country'), deduplicated: repeated.deduplicated },
+      }, null, 2) + '\n', 'utf8');
+    }
+
+    const jfkWindows = Array.isArray(jfk.windows) ? jfk.windows : [];
+    const repeatedWindows = Array.isArray(repeated.windows) ? repeated.windows : [];
+    const failures = [];
+    if (jfk.decision !== 'recovered') failures.push('JFK result was not recovered');
+    if (countExactPhrase(jfk.transcript, 'Ask not what your country can do for you ask what you can do for your country') !== 1) failures.push('JFK reference sentence was not preserved exactly once');
+    if (!jfkWindows.length || !jfkWindows.every((window) => window.tokens >= 5 && window.rerunSimilarity >= 0.85)) failures.push('JFK evidence window failed confidence or consistency checks');
+    if (chinese.decision !== 'recovered') failures.push('Chinese speech was not recovered');
+    if (chineseMetrics.characterCoverage < 0.9) failures.push('Chinese character coverage fell below 90%');
+    if (chineseMetrics.characterErrorRate > 0.1) failures.push('Chinese character error rate exceeded 10%');
+    if (silence.decision !== 'no_speech' || silence.errorCode !== 'TRANSCRIPTION_NO_SPEECH'
+      || silence.fullAudioProcessed !== true || silence.transcript !== undefined) failures.push('Silence was not classified with complete no-speech evidence');
+    if (repeated.decision !== 'recovered') failures.push('Repeated natural speech was not fully recovered');
+    if (countExactPhrase(repeated.transcript, 'Ask not what your country can do for you ask what you can do for your country') !== 6) failures.push('Repeated natural speech was not preserved six times');
+    if (repeated.deduplicated !== false) failures.push('Repeated natural speech was deduplicated');
+    if (!repeatedWindows.every((window) => window.endSeconds - window.startSeconds <= 30)) failures.push('Repeated speech window exceeded the 30-second bound');
+    if (failures.length) assert.fail(failures.join('; '));
 
     process.stdout.write(JSON.stringify({
       status: 'PASS',
