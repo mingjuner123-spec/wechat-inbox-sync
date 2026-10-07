@@ -1,7 +1,7 @@
 name: ASR engine investigation
 on:
   push:
-    branches: [codex/asr-engine-investigation-20261006, codex/asr-compat-1.3.181-20261006]
+    branches: [codex/asr-engine-investigation-20261006, codex/asr-compat-1.3.181-20261006, codex/asr-mac-vad-ci-20261007]
 permissions:
   contents: read
   actions: read
@@ -67,6 +67,40 @@ jobs:
           fi
           otool -l "$binary" > "$RUNNER_TEMP/asr-evidence/candidate-load-commands.txt"
           grep -A5 LC_BUILD_VERSION "$RUNNER_TEMP/asr-evidence/candidate-load-commands.txt" | grep -q 'minos 12.0' || { echo 'Deployment minimum is not macOS 12.0.' >&2; exit 1; }
+      - name: Build and run CPU-only Silero VAD controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASR_PUBLIC_AUDIO_FIXTURE="$RUNNER_TEMP/asr-fixture/jfk.wav" \
+            bash tests/mac-vad-ci.sh "$RUNNER_TEMP/asr-evidence"
+      - name: Exercise macOS wrapper lifecycle controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAC_ASR_PROBE_MAX_SECONDS=8 \
+            bash tests/mac-asr-lifecycle-probe.sh \
+            | tee "$RUNNER_TEMP/asr-evidence/mac-lifecycle-probe.txt"
+      - name: Complete public ASR CPU thread sweep
+        shell: bash
+        run: |
+          set -euo pipefail
+          audio="$RUNNER_TEMP/asr-fixture/jfk.wav"
+          model="$RUNNER_TEMP/asr-fixture/ggml-small.bin"
+          candidate="$RUNNER_TEMP/asr-evidence/whisper.cpp-v1.5.5-cpu-no-accelerate"
+          mkdir -p "$RUNNER_TEMP/asr-evidence/thread-sweep"
+          for threads in 1 2 4; do
+            /usr/bin/time -p python scripts/asr-engine-investigation.py \
+              --audio "$audio" \
+              --model "$model" \
+              --engine "$candidate" \
+              --label "cpu-candidate-threads-${threads}" \
+              --output-dir "$RUNNER_TEMP/asr-evidence/thread-sweep" \
+              --timeout 240 \
+              --threads "$threads" \
+              --variants no-gpu \
+              2>"$RUNNER_TEMP/asr-evidence/thread-sweep/time-${threads}.txt" \
+              | tee "$RUNNER_TEMP/asr-evidence/thread-sweep/run-${threads}.txt"
+          done
       - name: Install pinned whisper.cpp-cli 0.0.3 wheel and verify digest
         shell: bash
         run: |
