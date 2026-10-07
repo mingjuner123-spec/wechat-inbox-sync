@@ -133,6 +133,12 @@ jobs:
               --variants no-gpu \
               2>"$RUNNER_TEMP/asr-evidence/thread-sweep/long-time-${threads}.txt" \
               | tee "$RUNNER_TEMP/asr-evidence/thread-sweep/long-run-${threads}.txt"
+            python tests/mac-asr-long-coverage.py \
+              --report "$RUNNER_TEMP/asr-evidence/thread-sweep/cpu-candidate-long-threads-${threads}-report.json" \
+              --transcript "$RUNNER_TEMP/asr-evidence/thread-sweep/cpu-candidate-long-threads-${threads}-no-gpu/transcript.txt" \
+              --meta "$long_audio.meta" \
+              --expected-count 11 \
+              | tee "$RUNNER_TEMP/asr-evidence/thread-sweep/long-coverage-${threads}.txt"
           done
       - name: Install pinned whisper.cpp-cli 0.0.3 wheel and verify digest
         shell: bash
