@@ -90,7 +90,7 @@ Copy-Item -LiteralPath $silencePath -Destination $unicodeSilencePath
 Copy-Item -LiteralPath $modelPath -Destination $unicodeModelPath
 
 function Invoke-VadFixture([string]$Name, [string]$AudioPath, [string]$VadModelPath, [string]$ExpectedKind) {
-  $output = & $segmenter -f $AudioPath -vm $VadModelPath -vt 0.35 -np 2>&1
+  $output = & $segmenter -f $AudioPath -vm $VadModelPath -vt 0.35 -t 2 -np 2>&1
   $exitCode = $LASTEXITCODE
   $output | Set-Content -LiteralPath (Join-Path $evidenceRoot "vad-$Name.txt") -Encoding utf8
   if ($exitCode -ne 0) { throw "vad_fixture_exit_failed:$Name`:$exitCode" }
