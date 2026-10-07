@@ -24,6 +24,8 @@ if ($LASTEXITCODE -ne 0) { throw 'source_checkout_failed' }
 $actualCommit = (git -C $sourceRoot rev-parse HEAD).Trim()
 if ($actualCommit -ne $sourceCommit) { throw 'source_commit_mismatch' }
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'samples\jfk.wav') -Destination $jfkPath
+$patchResult = & (Join-Path $PSScriptRoot 'apply-windows-vad-utf8-argv-patch.ps1') -SourceRoot $sourceRoot -EvidenceRoot $evidenceRoot
+if ($patchResult -notcontains 'PASS applied Windows UTF-8 argv patch to pinned VAD example') { throw 'windows_utf8_argv_patch_failed' }
 
 $configureArgs = @(
   '-S', $sourceRoot, '-B', $buildRoot,
@@ -76,28 +78,52 @@ if ($LASTEXITCODE -ne 0) { throw 'silence_fixture_failed' }
 $segmenter = Join-Path $bundleRoot 'bin\whisper-vad-speech-segments.exe'
 $originalPath = $env:PATH
 $env:PATH = "$(Join-Path $bundleRoot 'bin');$env:SystemRoot\System32;$env:SystemRoot"
-try {
-  $speechOutput = & $segmenter -f $jfkPath -vm $modelPath -vt 0.35 -np 2>&1
-  $speechExit = $LASTEXITCODE
-} finally {
-  $env:PATH = $originalPath
-}
-$speechOutput | Set-Content -LiteralPath (Join-Path $evidenceRoot 'jfk-vad-output.txt') -Encoding utf8
-if ($speechExit -ne 0) { throw 'jfk_vad_exit_failed' }
-$speechHeader = ($speechOutput | Select-String -Pattern '^Detected\s+(\d+)\s+speech segments?:?' | Select-Object -First 1).Matches
-if (-not $speechHeader -or [int]$speechHeader[0].Groups[1].Value -le 0) { throw 'jfk_speech_not_detected' }
+$unicodeRoot = Join-Path $tempRoot '中文 与 空格路径'
+$unicodeAudioDir = Join-Path $unicodeRoot '输入 音频'
+$unicodeModelDir = Join-Path $unicodeRoot '模型 文件'
+New-Item -ItemType Directory -Force -Path $unicodeAudioDir, $unicodeModelDir | Out-Null
+$unicodeJfkPath = Join-Path $unicodeAudioDir '公开 JFK 样本.wav'
+$unicodeSilencePath = Join-Path $unicodeAudioDir '静音 对照.wav'
+$unicodeModelPath = Join-Path $unicodeModelDir 'Silero VAD 模型.bin'
+Copy-Item -LiteralPath $jfkPath -Destination $unicodeJfkPath
+Copy-Item -LiteralPath $silencePath -Destination $unicodeSilencePath
+Copy-Item -LiteralPath $modelPath -Destination $unicodeModelPath
 
-$env:PATH = "$(Join-Path $bundleRoot 'bin');$env:SystemRoot\System32;$env:SystemRoot"
+function Invoke-VadFixture([string]$Name, [string]$AudioPath, [string]$VadModelPath, [string]$ExpectedKind) {
+  $output = & $segmenter -f $AudioPath -vm $VadModelPath -vt 0.35 -np 2>&1
+  $exitCode = $LASTEXITCODE
+  $output | Set-Content -LiteralPath (Join-Path $evidenceRoot "vad-$Name.txt") -Encoding utf8
+  if ($exitCode -ne 0) { throw "vad_fixture_exit_failed:$Name`:$exitCode" }
+  $header = ($output | Select-String -Pattern '^Detected\s+(\d+)\s+speech segments?:?' | Select-Object -First 1).Matches
+  if (-not $header) { throw "vad_fixture_output_missing:$Name" }
+  $segments = [int]$header[0].Groups[1].Value
+  if ($ExpectedKind -eq 'speech' -and $segments -le 0) { throw "vad_fixture_speech_not_detected:$Name" }
+  if ($ExpectedKind -eq 'silence' -and $segments -ne 0) { throw "vad_fixture_silence_detected_as_speech:$Name`:$segments" }
+  [ordered]@{ name = $Name; exitCode = $exitCode; speechSegments = $segments; expectedKind = $ExpectedKind }
+}
+
+$vadUtf8Cases = @(
+  @{ name = 'ascii-jfk'; audio = $jfkPath; model = $modelPath; expected = 'speech' },
+  @{ name = 'unicode-model-jfk'; audio = $jfkPath; model = $unicodeModelPath; expected = 'speech' },
+  @{ name = 'unicode-audio-jfk'; audio = $unicodeJfkPath; model = $modelPath; expected = 'speech' },
+  @{ name = 'unicode-both-jfk'; audio = $unicodeJfkPath; model = $unicodeModelPath; expected = 'speech' },
+  @{ name = 'ascii-silence'; audio = $silencePath; model = $modelPath; expected = 'silence' },
+  @{ name = 'unicode-model-silence'; audio = $silencePath; model = $unicodeModelPath; expected = 'silence' },
+  @{ name = 'unicode-audio-silence'; audio = $unicodeSilencePath; model = $modelPath; expected = 'silence' },
+  @{ name = 'unicode-both-silence'; audio = $unicodeSilencePath; model = $unicodeModelPath; expected = 'silence' }
+)
+$utf8Results = @()
 try {
-  $silenceOutput = & $segmenter -f $silencePath -vm $modelPath -vt 0.35 -np 2>&1
-  $silenceExit = $LASTEXITCODE
+  foreach ($case in $vadUtf8Cases) {
+    $utf8Results += Invoke-VadFixture $case.name $case.audio $case.model $case.expected
+  }
 } finally {
   $env:PATH = $originalPath
 }
-$silenceOutput | Set-Content -LiteralPath (Join-Path $evidenceRoot 'silence-vad-output.txt') -Encoding utf8
-if ($silenceExit -ne 0) { throw 'silence_vad_exit_failed' }
-$silenceHeader = ($silenceOutput | Select-String -Pattern '^Detected\s+(\d+)\s+speech segments?:?' | Select-Object -First 1).Matches
-if (-not $silenceHeader -or [int]$silenceHeader[0].Groups[1].Value -ne 0) { throw 'silence_not_rejected' }
+$utf8Results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidenceRoot 'windows-vad-utf8-path-matrix.json') -Encoding utf8
+$jfkResult = $utf8Results | Where-Object { $_.name -eq 'ascii-jfk' } | Select-Object -First 1
+$silenceResult = $utf8Results | Where-Object { $_.name -eq 'ascii-silence' } | Select-Object -First 1
+if (-not $jfkResult -or -not $silenceResult) { throw 'utf8_path_matrix_baselines_missing' }
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $dumpbinPath = ''
@@ -159,13 +185,18 @@ $report = [ordered]@{
   arch = 'x64'
   sourceCommit = $actualCommit
   buildMode = 'shared-cpu-ggml-native-off'
-  jfkSpeechSegments = [int]$speechHeader[0].Groups[1].Value
-  silenceSpeechSegments = [int]$silenceHeader[0].Groups[1].Value
+  jfkSpeechSegments = [int]$jfkResult.speechSegments
+  silenceSpeechSegments = [int]$silenceResult.speechSegments
   vadModelSha256 = $actualModelHash
+  upstreamSourceCommit = $actualCommit
+  sourcePatchSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'apply-windows-vad-utf8-argv-patch.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+  testScriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  workflowCommit = $env:GITHUB_SHA
+  utf8PathMatrix = @($utf8Results)
   files = @($files)
 }
 $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $evidenceRoot 'bundle-manifest.json') -Encoding utf8
 Get-ChildItem -LiteralPath $bundleRoot -File -Recurse | Get-FileHash -Algorithm SHA256 |
   ForEach-Object { "$($_.Hash.ToLowerInvariant())  $($_.Path.Substring($bundleRoot.Length + 1).Replace('\', '/'))" } |
   Set-Content -LiteralPath (Join-Path $evidenceRoot 'bundle-sha256.txt') -Encoding utf8
-Write-Output 'Windows CPU VAD bundle and public speech/silence controls: PASS'
+Write-Output 'Windows CPU VAD bundle and public ASCII/Unicode speech/silence path controls: PASS'
