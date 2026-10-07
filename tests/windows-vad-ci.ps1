@@ -136,8 +136,7 @@ foreach ($binary in $binaries) {
     if ([string]$dependency -match '^\s+([A-Za-z0-9_.+-]+\.dll)\s*$') {
       $name = $Matches[1].ToLowerInvariant()
       $isVCRuntime = $name -match '^(vcruntime|msvcp|concrt)\d*.*\.dll$'
-      $isWindowsSystem = $name -in $windowsSystemDlls -or $name -like 'api-ms-win-*.dll'
-        -or (Test-Path -LiteralPath (Join-Path "$env:SystemRoot\System32" $name) -PathType Leaf)
+      $isWindowsSystem = ($name -in $windowsSystemDlls) -or ($name -like 'api-ms-win-*.dll') -or (Test-Path -LiteralPath (Join-Path "$env:SystemRoot\System32" $name) -PathType Leaf)
       if ($name -notin $bundleDllNames -and ($isVCRuntime -or -not $isWindowsSystem)) {
         throw "unbundled_runtime_dependency:$name"
       }

@@ -2,6 +2,13 @@ name: ASR engine investigation
 on:
   push:
     branches: [codex/asr-engine-investigation-20261006, codex/asr-compat-1.3.181-20261006, codex/asr-mac-vad-ci-20261007]
+  workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Run only the isolated Windows VAD build and fixtures
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
   actions: read
@@ -34,6 +41,7 @@ jobs:
           retention-days: 14
   compare:
     name: ${{ matrix.runner }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.windows_only != true }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
