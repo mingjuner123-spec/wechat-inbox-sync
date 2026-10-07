@@ -382,11 +382,22 @@ Module._load = function mockObsidian(request, parent, isMain) {
 };
 
 const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
+const sourceTextExtensions = ['.ps1', '.sh', '.py'];
+const priorSourceTextLoaders = new Map(sourceTextExtensions.map((extension) => [extension, Module._extensions[extension]]));
+for (const extension of sourceTextExtensions) {
+  Module._extensions[extension] = (module, filename) => { module.exports = require('fs').readFileSync(filename, 'utf8'); };
+}
+const SourcePluginClass = require('../obsidian-plugin/wechat-inbox-sync/src/main');
+for (const [extension, loader] of priorSourceTextLoaders) {
+  if (loader) Module._extensions[extension] = loader;
+  else delete Module._extensions[extension];
+}
 // Existing fixtures assume the optional resolver is already verified; dedicated unified tests cover it.
 PluginClass.prototype.getLocalDouyinResolverInstallStatus = () => ({ ready: true });
 Module._load = originalLoad;
 
 const helpers = PluginClass.__test;
+const sourceHelpers = SourcePluginClass.__test;
 const productionRequestXiaohongshuStaticPage = PluginClass.prototype.requestXiaohongshuStaticPage;
 PluginClass.prototype.requestXiaohongshuStaticPage = async function requestXiaohongshuStaticPageFixture(url) {
   const response = await requestUrlMock({
@@ -2823,7 +2834,8 @@ assert.ok(pluginMainSource.includes(".setName('绑定额外设备')"));
 assert.ok(pluginMainSource.includes("ensureProFeatureAccess('额外绑定设备')"));
 assert.ok(pluginMainSource.includes("new Setting(proPanel)\n      .setName('保存原始音视频到本地')"));
 assert.ok(pluginMainSource.includes('Pro 功能。默认关闭；开启后，新同步且可下载的音频或视频会保存到'));
-assert.ok(pluginMainSource.includes("cleanTrailingTranscriptionHallucinations(String(outputText || '').trim())"));
+assert.ok(pluginMainSource.includes('const cleanedTranscription = cleanTrailingTranscriptionHallucinations(rawTranscription)'));
+assert.ok(pluginMainSource.includes('const rejectedRawQuality = createTranscriptionQualityError(rawTranscription, \'本地转写\')'));
 assert.strictEqual(pluginMainSource.includes("text: '已绑定小程序码'"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('新增绑定码')"), false);
 assert.strictEqual(pluginMainSource.includes(".setButtonText('新增绑定码')"), false);
@@ -2977,7 +2989,7 @@ assert.ok(pluginMainSource.includes("setButtonText('复制诊断信息')"));
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制同步诊断')"), false);
 assert.ok(pluginMainSource.includes('同步/安装失败诊断'));
 assert.strictEqual(pluginMainSource.includes(".setName('同步失败诊断')"), false);
-assert.ok(pluginMainSource.includes('复制脱敏诊断，包含相关阶段、历史和设备信息'));
+assert.ok(pluginMainSource.includes('默认复制本次失败摘要；需要历史和详细日志时，可复制完整诊断。'));
 assert.strictEqual(pluginMainSource.includes(".setName('清理最近同步失败的内容')"), false);
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制详细诊断')"), false);
 assert.ok(pluginMainSource.includes('本地转写组件安装失败'));
@@ -10222,6 +10234,230 @@ async function runAsyncHydrationTests() {
 }
 
 async function runLocalTranscriptionQualityFallbackTests() {
+  const qualityError = sourceHelpers.createTranscriptionQualityError(
+    Array(12).fill('我们现在就来看看我们的临化设备').join('\n'),
+    '本地转写',
+  );
+  assert.strictEqual(sourceHelpers.shouldRetryLocalAsrQualityFailure({
+    enabled: true, error: qualityError, platform: 'darwin', managed: true, cpu: false, attemptCount: 1,
+  }), true);
+  for (const options of [
+    { enabled: false, error: qualityError, platform: 'darwin', managed: true, cpu: false, attemptCount: 1 },
+    { enabled: true, aborted: true, error: qualityError, platform: 'darwin', managed: true, cpu: false, attemptCount: 1 },
+    { enabled: true, error: qualityError, platform: 'darwin', managed: true, cpu: true, attemptCount: 1 },
+    { enabled: true, error: qualityError, platform: 'darwin', managed: true, cpu: false, attemptCount: 2 },
+    { enabled: true, error: qualityError, platform: 'win32', managed: true, cpu: false, attemptCount: 1 },
+    { enabled: true, error: new Error('engine failed'), platform: 'darwin', managed: true, cpu: false, attemptCount: 1 },
+  ]) {
+    assert.strictEqual(sourceHelpers.shouldRetryLocalAsrQualityFailure(options), false);
+  }
+  const acceptableText = '这是一段真实的口播内容。';
+  const retryModes = [];
+  const qualityEvents = [];
+  const retriedTranscription = await sourceHelpers.runLocalAsrWithQualityRetry({
+    enabled: true,
+    platform: 'darwin',
+    managed: true,
+    primaryCpu: false,
+    getAttemptCount: () => retryModes.length,
+    run: async (cpuPreferred) => {
+      retryModes.push(cpuPreferred);
+      return { cpu: cpuPreferred };
+    },
+    validate: (execution) => {
+      if (!execution.cpu) throw qualityError;
+      return acceptableText;
+    },
+    onQualityRejected: (error) => qualityEvents.push(error.qualityIssue),
+  });
+  assert.strictEqual(retriedTranscription.transcription, acceptableText);
+  assert.strictEqual(retriedTranscription.qualityRetried, true);
+  assert.deepStrictEqual(retryModes, [false, true]);
+  assert.deepStrictEqual(qualityEvents, ['repeated-lines']);
+
+  const normalSuccessModes = [];
+  const normalSuccess = await sourceHelpers.runLocalAsrWithQualityRetry({
+    enabled: true,
+    platform: 'darwin',
+    managed: true,
+    primaryCpu: false,
+    run: async (cpuPreferred) => {
+      normalSuccessModes.push(cpuPreferred);
+      return { cpu: cpuPreferred };
+    },
+    validate: () => acceptableText,
+  });
+  assert.strictEqual(normalSuccess.transcription, acceptableText);
+  assert.strictEqual(normalSuccess.qualityRetried, false);
+  assert.deepStrictEqual(normalSuccessModes, [false], 'normal success must not rerun transcription');
+
+  const unmanagedModes = [];
+  await assert.rejects(() => sourceHelpers.runLocalAsrWithQualityRetry({
+    enabled: true,
+    platform: 'darwin',
+    managed: false,
+    primaryCpu: false,
+    run: async (cpuPreferred) => {
+      unmanagedModes.push(cpuPreferred);
+      return { cpu: cpuPreferred };
+    },
+    validate: () => { throw qualityError; },
+  }), (error) => error === qualityError);
+  assert.deepStrictEqual(unmanagedModes, [false], 'unmanaged local scripts cannot receive the CPU retry');
+
+  const stillBadModes = [];
+  await assert.rejects(() => sourceHelpers.runLocalAsrWithQualityRetry({
+    enabled: true,
+    platform: 'darwin',
+    managed: true,
+    primaryCpu: false,
+    getAttemptCount: () => stillBadModes.length,
+    run: async (cpuPreferred) => {
+      stillBadModes.push(cpuPreferred);
+      return { cpu: cpuPreferred };
+    },
+    validate: () => { throw qualityError; },
+  }), (error) => error === qualityError);
+  assert.deepStrictEqual(stillBadModes, [false, true], 'quality rejection can trigger at most one CPU retry');
+
+  let abortRequested = false;
+  const abortedModes = [];
+  await assert.rejects(() => sourceHelpers.runLocalAsrWithQualityRetry({
+    enabled: true,
+    platform: 'darwin',
+    managed: true,
+    primaryCpu: false,
+    isAborted: () => abortRequested,
+    getAttemptCount: () => abortedModes.length,
+    run: async (cpuPreferred) => {
+      abortedModes.push(cpuPreferred);
+      return { cpu: cpuPreferred };
+    },
+    validate: () => {
+      abortRequested = true;
+      throw qualityError;
+    },
+  }), (error) => error === qualityError);
+  assert.deepStrictEqual(abortedModes, [false], 'abort must prevent the quality retry');
+
+  abortRequested = false;
+  const postRetryAbortModes = [];
+  await assert.rejects(() => sourceHelpers.runLocalAsrWithQualityRetry({
+    enabled: true,
+    platform: 'darwin',
+    managed: true,
+    primaryCpu: false,
+    isAborted: () => abortRequested,
+    getAttemptCount: () => postRetryAbortModes.length,
+    run: async (cpuPreferred) => {
+      postRetryAbortModes.push(cpuPreferred);
+      return { cpu: cpuPreferred };
+    },
+    validate: () => { throw qualityError; },
+    onRetry: () => { abortRequested = true; },
+  }), (error) => error.name === 'AbortError');
+  assert.deepStrictEqual(postRetryAbortModes, [false], 'abort during retry notification must stop before starting CPU');
+
+  const localAsrRecovery = require('../obsidian-plugin/wechat-inbox-sync/src/asr-recovery-utils');
+  const localRetryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-channels-cpu-retry-'));
+  const localInputPath = path.join(localRetryRoot, 'same-input.mp4');
+  const localOutputPath = `${localInputPath}.txt`;
+  fs.writeFileSync(localInputPath, 'test media bytes');
+  const managedRoot = path.resolve(localRetryRoot).replace(/\\/g, '/');
+  const managedCommand = `/bin/bash "${path.posix.join(managedRoot, 'transcribe.sh')}" --input {input} --output {output}`;
+  const priorEnsureManagedMacScript = localAsrRecovery.ensureManagedMacScript;
+  const priorSaveCpuPreference = localAsrRecovery.saveCpuPreference;
+  const priorExec = childProcess.exec;
+  const processOptions = [];
+  let localProcessCount = 0;
+  let cpuPreferenceSaveCount = 0;
+  const localRetryPlugin = new SourcePluginClass();
+  localRetryPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
+  localRetryPlugin.ensureLocalComponentReadyForUse = async () => {};
+  localRetryPlugin.recoverStaleLocalTranscriptionCommand = async () => {};
+  localRetryPlugin.getLocalAsrInstallStatus = () => ({ scriptOutdated: false, ready: true });
+  localRetryPlugin.getConfiguredLocalAsrInstallRoot = () => managedRoot;
+  localRetryPlugin.getConfiguredLocalAsrPlatform = () => 'darwin';
+  localRetryPlugin.getEffectiveLocalTranscriptionCommand = () => managedCommand;
+  localRetryPlugin.downloadMediaToTempFile = async () => localInputPath;
+  localRetryPlugin.showSyncProgress = () => {};
+  localRetryPlugin.setTranscriptionStopAvailable = () => {};
+  localAsrRecovery.ensureManagedMacScript = () => true;
+  localAsrRecovery.saveCpuPreference = () => { cpuPreferenceSaveCount += 1; };
+  childProcess.exec = (command, options, callback) => {
+    localProcessCount += 1;
+    processOptions.push({ command, cpuOnly: options.env.WECHAT_INBOX_ASR_CPU_ONLY });
+    assert.ok(command.includes(localInputPath), 'both attempts must reuse the same downloaded media path');
+    const outputMatch = command.match(/--output "([^"]+)"/);
+    assert.ok(outputMatch, 'managed command includes its output path');
+    const actualOutputPath = outputMatch[1];
+    assert.strictEqual(actualOutputPath, localOutputPath);
+    if (localProcessCount === 2) assert.strictEqual(fs.existsSync(actualOutputPath), false, 'CPU retry must remove the rejected output');
+    const child = { pid: 1000 + localProcessCount, killed: false, kill() { this.killed = true; } };
+    setImmediate(() => {
+      fs.writeFileSync(actualOutputPath, localProcessCount === 1
+        ? Array(12).fill('我们现在就来看看我们的临化设备').join('\n')
+        : acceptableText);
+      callback(null, '', '');
+    });
+    return child;
+  };
+  try {
+    let recoveredText;
+    try {
+      recoveredText = await localRetryPlugin.runLocalTranscription('https://media.example.com/channels.mp4', {
+        retryLocalQualityOnce: true,
+      });
+    } catch (error) {
+      throw error;
+    }
+    assert.strictEqual(recoveredText, acceptableText);
+    assert.deepStrictEqual(processOptions.map((item) => item.cpuOnly), ['0', '1']);
+    assert.strictEqual(processOptions[0].command, processOptions[1].command);
+    assert.strictEqual(localProcessCount, 2);
+    assert.strictEqual(cpuPreferenceSaveCount, 0, 'quality recovery must not persist CPU as the global preference');
+  } finally {
+    childProcess.exec = priorExec;
+    localAsrRecovery.ensureManagedMacScript = priorEnsureManagedMacScript;
+    localAsrRecovery.saveCpuPreference = priorSaveCpuPreference;
+    fs.rmSync(localRetryRoot, { recursive: true, force: true });
+  }
+
+  const channelsPlugin = new SourcePluginClass();
+  channelsPlugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
+  const channelsQualityError = sourceHelpers.createTranscriptionQualityError(
+    Array(12).fill('我们现在就来看看我们的临化设备').join('\n'),
+    '本地转写',
+  );
+  let channelCloudFallbackCalls = 0;
+  channelsPlugin.runLocalTranscription = async (_mediaUrl, options) => {
+    assert.strictEqual(options.retryLocalQualityOnce, true);
+    throw channelsQualityError;
+  };
+  channelsPlugin.runCloudFallbackTranscription = async () => {
+    channelCloudFallbackCalls += 1;
+    throw new Error('视频号本地失败不得调用云端转写');
+  };
+  const channelsFailed = await channelsPlugin.buildTranscriptRecordFromMedia({
+    type: 'webpage',
+    content: 'https://channels.weixin.qq.com/platform/abc',
+    metadata: {
+      url: 'https://channels.weixin.qq.com/platform/abc',
+      transcriptionMode: 'cloud',
+      cloudTranscriptionRequested: true,
+    },
+  }, {
+    url: 'https://channels.weixin.qq.com/platform/abc',
+    platform: '视频号',
+    mediaUrl: 'https://media.example.com/channels.mp4',
+    preparedMedia: true,
+    source: 'wechat-channels-media-prepare',
+  });
+  assert.strictEqual(channelCloudFallbackCalls, 0);
+  assert.strictEqual(channelsFailed.metadata.transcriptionStatus, 'failed');
+  assert.strictEqual(channelsFailed.metadata.transcription, '');
+  assert.ok(channelsFailed.metadata.transcriptionError.includes('来源已保存'));
+
   const plugin = new PluginClass();
   plugin.settings = helpers.mergeSettings({ aiProvider: 'local' });
   const calls = [];
@@ -13780,7 +14016,11 @@ async function runSourceMediaAttachmentTests() {
     throw new Error('non-Pro media save must not download');
   };
   const noProRecord = await noProPlugin.saveSourceMediaAttachment(sourceRecord, '临时收集', '2026-07-14', '演示视频');
-  assert.strictEqual(noProRecord, sourceRecord);
+  assert.notStrictEqual(noProRecord, sourceRecord);
+  assert.strictEqual(noProRecord.content, sourceRecord.content);
+  assert.strictEqual(noProRecord.metadata.transcription, sourceRecord.metadata.transcription);
+  assert.strictEqual(noProRecord.metadata.sourceMediaAttachmentPath, '');
+  assert.strictEqual(noProRecord.metadata.sourceMediaAttachmentError, '保存原始音视频到本地需要有效 Pro。');
 
   const failedPlugin = new PluginClass();
   failedPlugin.settings = helpers.mergeSettings({
@@ -16077,6 +16317,303 @@ async function runLocalAsrInstallerRecoveryTests() {
   }
 }
 
+async function runWechatChannelsPartialNoteSyncLifecycleTest() {
+  const partialUtils = require('../obsidian-plugin/wechat-inbox-sync/src/transcription-partial-note-utils');
+  const binding = { token: 'ABC-123', label: '测试微信' };
+  const recordId = 'channels-partial-lifecycle-1';
+  const baseRecord = {
+    _id: recordId,
+    type: 'webpage',
+    content: 'https://channels.weixin.qq.com/feed/partial-lifecycle',
+    createdAt: '2026-10-07T08:00:00.000Z',
+    metadata: {
+      url: 'https://channels.weixin.qq.com/feed/partial-lifecycle',
+      title: '视频号来源标题',
+      platform: '视频号',
+      webpageMediaType: 'audio_video',
+      transcriptionMode: 'local',
+    },
+  };
+  const notes = new Map();
+  const requests = [];
+  const vaultWrites = [];
+  let retryCount = 0;
+  let transcriptionResult = 'failed';
+  let hydrationCount = 0;
+  let downloadFailure = null;
+  let processEditBeforeCallback = '';
+  const processCallbackInputs = [];
+
+  const plugin = new SourcePluginClass();
+  plugin.settings = helpers.mergeSettings({
+    apiBase: 'https://example.com/sync',
+    token: binding.token,
+    inboxDir: '临时收集',
+    noteSaveMode: 'root',
+    aiProvider: 'local',
+  });
+  plugin.saveData = async () => {};
+  plugin.showSyncProgress = () => {};
+  plugin.clearSyncProgressNotice = () => {};
+  plugin.setTranscriptionStopAvailable = () => {};
+  plugin.ensureFolder = async () => {};
+  plugin.nextRecordTitle = async () => '视频号来源标题';
+  plugin.nextTitle = async (_dir, title) => title;
+  plugin.saveSourceMediaAttachment = async (record) => record;
+  plugin.alignSocialArticleImageFolder = async (record) => ({
+    record,
+    sourceImagePath: '',
+    targetImagePath: '',
+    folderName: '',
+  });
+  plugin.enrichRecordMetadataWithAi = async (record) => record;
+  plugin.getConfiguredLocalAsrInstallRoot = () => '';
+  plugin.getActiveBindings = () => [binding];
+  plugin.hydrateWebpageMarkdown = async (record) => {
+    hydrationCount += 1;
+    if (downloadFailure) throw downloadFailure;
+    if (transcriptionResult === 'failed') {
+      return {
+        ...record,
+        metadata: {
+          ...record.metadata,
+          transcriptionStatus: 'failed',
+          transcriptionErrorCode: 'TRANSCRIPTION_LOW_QUALITY',
+          transcriptionQualityStatus: 'rejected',
+          transcriptionError: '本地转写质量未通过检查',
+        },
+      };
+    }
+    return {
+      ...record,
+      metadata: {
+        ...record.metadata,
+        transcriptionStatus: 'success',
+        transcription: '视频号这次重试得到的有效口播转写。',
+      },
+    };
+  };
+
+  plugin.app = {
+    vault: {
+      adapter: {
+        read: async (filePath) => {
+          if (!notes.has(filePath)) throw new Error('missing note: ' + filePath);
+          return notes.get(filePath);
+        },
+        write: async (filePath, markdown) => {
+          notes.set(filePath, markdown);
+          vaultWrites.push({ filePath, markdown, kind: 'adapter.write' });
+        },
+        exists: async (filePath) => notes.has(filePath),
+        remove: async (filePath) => { notes.delete(filePath); },
+      },
+      getMarkdownFiles: () => Array.from(notes.keys())
+        .filter((filePath) => filePath.endsWith('.md'))
+        .map((filePath) => ({ path: filePath })),
+      cachedRead: async (file) => notes.get(file.path),
+      getAbstractFileByPath: (filePath) => notes.has(filePath) ? { path: filePath } : null,
+      process: async (file, callback) => {
+        let current = notes.get(file.path);
+        if (processEditBeforeCallback) {
+          current += String.fromCharCode(10) + String.fromCharCode(10) + '## 转写时的并发编辑' + String.fromCharCode(10) + processEditBeforeCallback;
+          notes.set(file.path, current);
+          processEditBeforeCallback = '';
+        }
+        processCallbackInputs.push(current);
+        const updated = callback(current);
+        if (updated !== current) {
+          notes.set(file.path, updated);
+          vaultWrites.push({ filePath: file.path, markdown: updated, kind: 'vault.process' });
+        }
+        return updated;
+      },
+      create: async (filePath, markdown) => {
+        notes.set(filePath, markdown);
+        vaultWrites.push({ filePath, markdown, kind: 'vault.create' });
+        return { path: filePath };
+      },
+    },
+  };
+  plugin.requestJson = async (endpoint, method, body) => {
+    requests.push({ endpoint, method, body });
+    if (endpoint === '/records?status=pending') {
+      return { success: true, data: [{ ...baseRecord, retryCount }] };
+    }
+    if (endpoint === '/records/' + recordId + '/synced') {
+      return { success: true, data: { id: recordId, status: 'synced' } };
+    }
+    throw new Error('Unexpected request: ' + method + ' ' + endpoint);
+  };
+
+  const initial = await plugin.runSyncInboxOnce(false);
+  assert.equal(initial.failed, 1, 'the first quality rejection remains retryable');
+  assert.equal(initial.written, 0, 'saving a partial source is not a completed sync');
+  const aggregateDiagnosticAfterInitial = JSON.parse(JSON.stringify(plugin.lastSyncDiagnostic));
+  assert.equal(requests.some((item) => item.endpoint.endsWith('/synced')), false, 'initial partial save must not ack');
+  const notePaths = Array.from(notes.keys()).filter((filePath) => filePath.endsWith('.md'));
+  assert.equal(notePaths.length, 1, 'the source note is saved once');
+  const notePath = notePaths[0];
+  assert.equal(partialUtils.getQualityPartialNoteState(notes.get(notePath)), 'partial');
+  const initialMarkdown = notes.get(notePath);
+  assert.ok(initialMarkdown.includes(partialUtils.QUALITY_PARTIAL_MARKER));
+
+  const writesAfterInitial = vaultWrites.length;
+  const duplicateRun = await plugin.syncBinding(binding, false);
+  assert.deepEqual(duplicateRun.written, []);
+  assert.equal(duplicateRun.skipped.some((item) => item.reason === 'failed-awaiting-manual-retry'), true);
+  assert.equal(hydrationCount, 1, 'same retryCount must not rerun transcription');
+  assert.equal(vaultWrites.length, writesAfterInitial);
+  assert.equal(requests.some((item) => item.endpoint.endsWith('/synced')), false);
+
+  notes.set(notePath, initialMarkdown + '\n\n## 我的补充\n保留这段用户编辑。');
+  retryCount = 1;
+  const secondFailure = await plugin.syncBinding(binding, false);
+  assert.equal(secondFailure.failed.length, 1, 'a higher retryCount must start a new attempt');
+  assert.equal(hydrationCount, 2, 'manual retry must reach the transcriber');
+  assert.equal(Array.from(notes.keys()).filter((filePath) => filePath.endsWith('.md')).length, 1,
+    'a repeated quality failure must not create a second note');
+  assert.equal(vaultWrites.length, writesAfterInitial, 'a repeated quality failure must not rewrite the partial note');
+  assert.ok(notes.get(notePath).includes('保留这段用户编辑。'));
+  assert.equal(requests.some((item) => item.endpoint.endsWith('/synced')), false,
+    'a repeated quality failure must not ack');
+
+  const writesBeforeSuccess = vaultWrites.filter((item) => item.filePath === notePath).length;
+  const staleMarkdownBeforeProcess = notes.get(notePath);
+  processEditBeforeCallback = '这是 vault.process callback 执行前的新编辑。';
+  const processInputsBeforeSuccess = processCallbackInputs.length;
+  retryCount = 2;
+  transcriptionResult = 'success';
+  const successfulRetry = await plugin.syncBinding(binding, false);
+  assert.equal(successfulRetry.failed.length, 0);
+  assert.equal(successfulRetry.written.length, 1);
+  assert.equal(hydrationCount, 3);
+  assert.equal(Array.from(notes.keys()).filter((filePath) => filePath.endsWith('.md')).length, 1);
+  const completedMarkdown = notes.get(notePath);
+  assert.ok(processCallbackInputs.length > processInputsBeforeSuccess, 'successful retry must use vault.process');
+  const processInput = processCallbackInputs.at(-1);
+  assert.notEqual(processInput, staleMarkdownBeforeProcess, 'vault.process must receive the latest content after the earlier lookup');
+  assert.ok(processInput.includes('这是 vault.process callback 执行前的新编辑。'));
+  assert.ok(notes.get(notePath).includes('这是 vault.process callback 执行前的新编辑。'));
+  assert.ok(completedMarkdown.includes('保留这段用户编辑。'));
+  assert.ok(completedMarkdown.includes('视频号这次重试得到的有效口播转写。'));
+  assert.equal((completedMarkdown.match(/视频号这次重试得到的有效口播转写。/g) || []).length, 1);
+  assert.equal(partialUtils.getQualityPartialNoteState(completedMarkdown), 'complete');
+  assert.equal(requests.filter((item) => item.endpoint.endsWith('/synced')).length, 1,
+    'ack follows the successful in-place completion exactly once');
+  assert.equal(vaultWrites.filter((item) => item.filePath === notePath).length, writesBeforeSuccess + 1,
+    'the successful retry updates the existing note path once');
+  assert.equal(aggregateDiagnosticAfterInitial.status, 'failed', 'partial quality failure remains failed in aggregate diagnostic');
+  assert.ok(aggregateDiagnosticAfterInitial.message.includes('来源已保存'), 'sync notice explains that the source was saved');
+  const partialFailureDetail = (aggregateDiagnosticAfterInitial.failureDetails || []).find((item) => item.recordId === recordId);
+  assert.ok(partialFailureDetail, 'aggregate failure details retain the partial quality failure');
+  assert.equal(partialFailureDetail.sourceUrl, baseRecord.metadata.url);
+  plugin.lastSyncDiagnostic = aggregateDiagnosticAfterInitial;
+  let compactDiagnostic = '';
+  plugin.copyDiagnosticText = async (text) => { compactDiagnostic = text; return true; };
+  plugin.getLocalAsrInstallStatus = () => ({ ready: false });
+  plugin.getLocalOcrInstallStatus = () => ({ ready: false });
+  await plugin.copyCompactSyncDiagnosticText();
+  assert.ok(compactDiagnostic.includes(baseRecord.metadata.url), 'compact diagnostic retains the source link');
+  assert.ok(compactDiagnostic.includes('来源已保存'), 'compact diagnostic identifies the quality failure');
+
+  // Abort and ordinary download errors stay failed and never ack the source.
+  for (const error of [
+    Object.assign(new Error('transcription aborted'), { name: 'AbortError' }),
+    new Error('media download failed'),
+  ]) {
+    const errorPlugin = new SourcePluginClass();
+    const errorRequests = [];
+    errorPlugin.settings = helpers.mergeSettings({ apiBase: 'https://example.com/sync', token: binding.token });
+    errorPlugin.showSyncProgress = () => {};
+    errorPlugin.clearSyncProgressNotice = () => {};
+    errorPlugin.setTranscriptionStopAvailable = () => {};
+    errorPlugin.getConfiguredLocalAsrInstallRoot = () => '';
+    errorPlugin.requestJson = async (endpoint, method) => {
+      errorRequests.push(endpoint);
+      if (endpoint === '/records?status=pending') return { success: true, data: [baseRecord] };
+      if (endpoint.endsWith('/synced')) throw new Error('must not ack an incomplete transcription');
+      throw new Error('Unexpected request: ' + method + ' ' + endpoint);
+    };
+    errorPlugin.writeRecord = async () => { throw error; };
+    const failedAttempt = await errorPlugin.syncBinding(binding, false);
+    assert.equal(failedAttempt.written.length, 0);
+    assert.equal(failedAttempt.failed.length, 1);
+    assert.equal(errorRequests.some((endpoint) => endpoint.endsWith('/synced')), false);
+  }
+
+  // Conflicting state markers must remain a retry failure and preserve the
+  // user's note without sending a success acknowledgement.
+  const ambiguousPlugin = new SourcePluginClass();
+  const ambiguousNotes = new Map();
+  const ambiguousRequests = [];
+  const ambiguousProcessWrites = [];
+  ambiguousPlugin.settings = helpers.mergeSettings({ apiBase: 'https://example.com/sync', token: binding.token, inboxDir: '临时收集', noteSaveMode: 'root' });
+  ambiguousPlugin.showSyncProgress = () => {};
+  ambiguousPlugin.clearSyncProgressNotice = () => {};
+  ambiguousPlugin.setTranscriptionStopAvailable = () => {};
+  ambiguousPlugin.ensureFolder = async () => {};
+  ambiguousPlugin.nextRecordTitle = async () => '视频号来源标题';
+  ambiguousPlugin.nextTitle = async (_dir, title) => title;
+  ambiguousPlugin.saveSourceMediaAttachment = async (record) => record;
+  ambiguousPlugin.alignSocialArticleImageFolder = async (record) => ({ record, sourceImagePath: '', targetImagePath: '', folderName: '' });
+  ambiguousPlugin.enrichRecordMetadataWithAi = async (record) => record;
+  ambiguousPlugin.getConfiguredLocalAsrInstallRoot = () => '';
+  ambiguousPlugin.hydrateWebpageMarkdown = async (record) => ({
+    ...record,
+    metadata: { ...record.metadata, transcriptionStatus: 'failed', transcriptionErrorCode: 'TRANSCRIPTION_LOW_QUALITY', transcriptionQualityStatus: 'rejected' },
+  });
+  ambiguousPlugin.app = {
+    vault: {
+      adapter: {
+        read: async (filePath) => ambiguousNotes.get(filePath),
+        write: async (filePath, markdown) => { ambiguousNotes.set(filePath, markdown); },
+        exists: async (filePath) => ambiguousNotes.has(filePath),
+        remove: async (filePath) => { ambiguousNotes.delete(filePath); },
+      },
+      getMarkdownFiles: () => Array.from(ambiguousNotes.keys()).filter((filePath) => filePath.endsWith('.md')).map((filePath) => ({ path: filePath })),
+      cachedRead: async (file) => ambiguousNotes.get(file.path),
+      getAbstractFileByPath: (filePath) => ambiguousNotes.has(filePath) ? { path: filePath } : null,
+      process: async (file, callback) => {
+        const current = ambiguousNotes.get(file.path);
+        const updated = callback(current);
+        if (updated !== current) {
+          ambiguousNotes.set(file.path, updated);
+          ambiguousProcessWrites.push(file.path);
+        }
+        return updated;
+      },
+      create: async (filePath, markdown) => { ambiguousNotes.set(filePath, markdown); return { path: filePath }; },
+    },
+  };
+  let ambiguousRetryCount = 0;
+  let ambiguousOutcome = 'failed';
+  ambiguousPlugin.hydrateWebpageMarkdown = async (record) => ({
+    ...record,
+    metadata: ambiguousOutcome === 'failed'
+      ? { ...record.metadata, transcriptionStatus: 'failed', transcriptionErrorCode: 'TRANSCRIPTION_LOW_QUALITY', transcriptionQualityStatus: 'rejected' }
+      : { ...record.metadata, transcriptionStatus: 'success', transcription: '不应写入的转写。' },
+  });
+  ambiguousPlugin.requestJson = async (endpoint, method) => {
+    ambiguousRequests.push(endpoint);
+    if (endpoint === '/records?status=pending') return { success: true, data: [{ ...baseRecord, retryCount: ambiguousRetryCount }] };
+    if (endpoint.endsWith('/synced')) return { success: true, data: {} };
+    throw new Error('Unexpected request: ' + method + ' ' + endpoint);
+  };
+  const ambiguousInitial = await ambiguousPlugin.syncBinding(binding, false);
+  assert.equal(ambiguousInitial.failed.length, 1);
+  const ambiguousPath = Array.from(ambiguousNotes.keys()).find((filePath) => filePath.endsWith('.md'));
+  const beforeAmbiguousRetry = ambiguousNotes.get(ambiguousPath) + '\n' + partialUtils.QUALITY_COMPLETE_MARKER + '\n';
+  ambiguousNotes.set(ambiguousPath, beforeAmbiguousRetry);
+  ambiguousRetryCount = 1;
+  ambiguousOutcome = 'success';
+  const ambiguousRetry = await ambiguousPlugin.syncBinding(binding, false);
+  assert.equal(ambiguousRetry.failed.length, 1);
+  assert.equal(ambiguousNotes.get(ambiguousPath), beforeAmbiguousRetry, 'ambiguous note must be preserved unchanged');
+  assert.deepEqual(ambiguousProcessWrites, [], 'ambiguous marker state must not be committed through vault.process');
+  assert.equal(ambiguousRequests.some((endpoint) => endpoint.endsWith('/synced')), false,
+    'ambiguous partial state must never be acknowledged as success');
+}
 async function main() {
   runNoteOutputPlanModuleTests();
   runRecordBodyMarkdownModuleTests();
@@ -16090,6 +16627,7 @@ async function main() {
   await runBoundedBrowserTaskTests();
   await runBrowserTaskWatchdogTests();
   await runAsyncHydrationTests();
+  await runWechatChannelsPartialNoteSyncLifecycleTest();
   await runLocalTranscriptionQualityFallbackTests();
   await runOpenExternalUrlTests();
   await runCloudRequestFallbackTests();

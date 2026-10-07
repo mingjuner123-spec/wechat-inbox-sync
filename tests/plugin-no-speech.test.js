@@ -90,7 +90,7 @@ async function run() {
   assert.ok(h.getSyncLifecycleOutcomeError({ ...saved, metadata: { ...saved.metadata, noSpeechEvidence: '' } }));
   assert.ok(h.getSyncLifecycleOutcomeError({ ...saved, metadata: { ...saved.metadata, conversionError: 'download failed' } }));
   const body = h.buildWebpageMarkdownBody(saved, '测试视频');
-  assert.match(body, /未识别到可转写语音/);
+  assert.match(body, /本次未检测到可转写语音，已保存原内容和链接/);
   assert.match(body, /保留原始视频说明/);
   assert.ok(body.includes(url));
   assert.doesNotMatch(body, /转写处理中|转写失败/);
@@ -136,7 +136,7 @@ async function run() {
   p.alignSocialArticleImageFolder = async r => ({ record: r, folderName: '测试视频' });
   const committed = await p.writeRecord({ ...record, type: 'text' }, new Date().toISOString(), null, false, { skipAi: true });
   assert.equal(committed.committed, true);
-  assert.match(files.get(committed.filePath), /未识别到可转写语音/);
+  assert.match(files.get(committed.filePath), /本次未检测到可转写语音，已保存原内容和链接/);
   assert.match(files.get(committed.filePath), /保留原始视频说明/);
   assert.equal(files.size, 1, 'only the committed note remains');
   console.log('plugin no-speech tests passed');

@@ -2,6 +2,7 @@ const assert = require('assert');
 const {
   createSocialMetricsHtmlExtractor,
   buildSocialMetrics,
+  buildWechatChannelsSocialMetrics,
   buildSocialMetricsFromText,
   hasSocialMetrics,
   withCapturedSocialMetrics,
@@ -25,6 +26,30 @@ function run() {
     shares: 2,
   });
   assert.strictEqual(hasSocialMetrics(metrics), true);
+  assert.deepStrictEqual(buildWechatChannelsSocialMetrics({
+    stats: { favorites: '12', forwards: '4' },
+  }), {
+    collects: 12,
+    shares: 4,
+  }, '视频号 raw favorites/forwards 必须映射到既有收藏/转发字段');
+  assert.deepStrictEqual(buildWechatChannelsSocialMetrics({
+    stats: { favorites: 0, forwards: 0 },
+  }), {
+    collects: 0,
+    shares: 0,
+  }, '视频号 0 值必须保留，不能与缺失混淆');
+  assert.deepStrictEqual(buildWechatChannelsSocialMetrics({
+    stats: { favorite: 7, favorites: 12, forward: 8, forwards: 4 },
+  }), {
+    collects: 7,
+    shares: 8,
+  }, '既有别名优先级必须高于新 raw 别名');
+  assert.deepStrictEqual(buildWechatChannelsSocialMetrics({
+    stats: { favorites: 'missing', forwards: null },
+  }), {}, '无效或缺失 raw 别名不能造数');
+  assert.deepStrictEqual(buildSocialMetrics({
+    stats: { favorites: 12, forwards: 4 },
+  }), {}, '通用指标读取不能因视频号别名改变抖音等既有平台行为');
   assert.deepStrictEqual(withCapturedSocialMetrics(metrics, '2026-08-05T00:00:00.000Z'), {
     ...metrics,
     capturedAt: '2026-08-05T00:00:00.000Z',
