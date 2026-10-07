@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. (Join-Path $PSScriptRoot 'windows-vad-build-evidence.ps1')
+& (Join-Path $PSScriptRoot 'windows-vad-build-evidence.test.ps1')
 
 $sourceCommit = '86c40c3bd6fc86f1187fb751d111b49e0fc18e84'
 $vadModelUrl = 'https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin'
@@ -29,12 +31,16 @@ if ($patchResult -notcontains 'PASS applied Windows UTF-8 argv patch to pinned V
 
 $configureArgs = @(
   '-S', $sourceRoot, '-B', $buildRoot,
+  '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
+  '-DCMAKE_C_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG', '-DCMAKE_CXX_FLAGS_RELEASE=/O2 /Ob2 /DNDEBUG',
   '-DBUILD_SHARED_LIBS=ON', '-DWHISPER_BUILD_EXAMPLES=ON', '-DWHISPER_BUILD_TESTS=OFF',
   '-DWHISPER_SDL2=OFF', '-DWHISPER_COMMON_FFMPEG=OFF',
   '-DGGML_NATIVE=OFF', '-DGGML_CUDA=OFF', '-DGGML_VULKAN=OFF', '-DGGML_SYCL=OFF',
   '-DGGML_OPENCL=OFF', '-DGGML_HIP=OFF', '-DGGML_METAL=OFF', '-DGGML_ACCELERATE=OFF',
-  '-DGGML_AVX=OFF', '-DGGML_AVX2=OFF', '-DGGML_AVX512=OFF', '-DGGML_FMA=OFF', '-DGGML_F16C=OFF',
-  '-DGGML_BLAS=OFF', '-DGGML_OPENMP=OFF',
+  '-DGGML_AVX=OFF', '-DGGML_AVX2=OFF', '-DGGML_AVX512=OFF', '-DGGML_AVX512_BF16=OFF',
+  '-DGGML_AVX512_VBMI=OFF', '-DGGML_AVX512_VNNI=OFF', '-DGGML_AVX_VNNI=OFF',
+  '-DGGML_FMA=OFF', '-DGGML_F16C=OFF', '-DGGML_BLAS=OFF', '-DGGML_OPENMP=OFF',
+  '-DGGML_WEBGPU=OFF', '-DGGML_MUSA=OFF', '-DGGML_OPENVINO=OFF', '-DGGML_HEXAGON=OFF', '-DGGML_RPC=OFF',
   '-DCMAKE_POLICY_DEFAULT_CMP0091=NEW', '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'
 )
 & cmake @configureArgs 2>&1 | Tee-Object -FilePath (Join-Path $evidenceRoot 'cmake-configure.txt')
@@ -42,6 +48,9 @@ if ($LASTEXITCODE -ne 0) { throw 'cmake_configure_failed' }
 & cmake --build $buildRoot --config Release --target whisper-vad-speech-segments --parallel 3 2>&1 |
   Tee-Object -FilePath (Join-Path $evidenceRoot 'cmake-build.txt')
 if ($LASTEXITCODE -ne 0) { throw 'cmake_build_failed' }
+$buildConfigurationEvidence = Get-WindowsVadBuildConfigurationEvidence -BuildRoot $buildRoot
+$buildConfigurationEvidence | ConvertTo-Json -Depth 8 |
+  Set-Content -LiteralPath (Join-Path $evidenceRoot 'windows-vad-build-configuration.json') -Encoding utf8
 
 $builtSegmenter = Get-ChildItem -LiteralPath $buildRoot -Filter 'whisper-vad-speech-segments.exe' -File -Recurse |
   Select-Object -First 1
@@ -185,6 +194,7 @@ $report = [ordered]@{
   arch = 'x64'
   sourceCommit = $actualCommit
   buildMode = 'shared-cpu-ggml-native-off'
+  buildConfigurationEvidence = $buildConfigurationEvidence
   jfkSpeechSegments = [int]$jfkResult.speechSegments
   silenceSpeechSegments = [int]$silenceResult.speechSegments
   vadModelSha256 = $actualModelHash
