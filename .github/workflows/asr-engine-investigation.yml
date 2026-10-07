@@ -101,6 +101,39 @@ jobs:
               2>"$RUNNER_TEMP/asr-evidence/thread-sweep/time-${threads}.txt" \
               | tee "$RUNNER_TEMP/asr-evidence/thread-sweep/run-${threads}.txt"
           done
+          long_audio="$RUNNER_TEMP/asr-fixture/jfk-121s.wav"
+          python - "$audio" "$long_audio" <<'PY'
+          import sys
+          import wave
+
+          source_path, target_path = sys.argv[1:]
+          repeats = 11
+          with wave.open(source_path, "rb") as source:
+              params = source.getparams()
+              frames = source.readframes(source.getnframes())
+          with wave.open(target_path, "wb") as target:
+              target.setparams(params)
+              target.writeframes(frames * repeats)
+          duration = params.nframes * repeats / params.framerate
+          if duration < 120:
+              raise SystemExit("public long fixture is shorter than 120 seconds")
+          with open(target_path + ".meta", "w", encoding="utf-8") as receipt:
+              receipt.write(f"source=public-whisper.cpp-jfk.wav\nrepeats={repeats}\ndurationSeconds={duration:.3f}\n")
+          PY
+          cat "$long_audio.meta" >"$RUNNER_TEMP/asr-evidence/thread-sweep/long-fixture.txt"
+          for threads in 1 4; do
+            /usr/bin/time -p python scripts/asr-engine-investigation.py \
+              --audio "$long_audio" \
+              --model "$model" \
+              --engine "$candidate" \
+              --label "cpu-candidate-long-threads-${threads}" \
+              --output-dir "$RUNNER_TEMP/asr-evidence/thread-sweep" \
+              --timeout 900 \
+              --threads "$threads" \
+              --variants no-gpu \
+              2>"$RUNNER_TEMP/asr-evidence/thread-sweep/long-time-${threads}.txt" \
+              | tee "$RUNNER_TEMP/asr-evidence/thread-sweep/long-run-${threads}.txt"
+          done
       - name: Install pinned whisper.cpp-cli 0.0.3 wheel and verify digest
         shell: bash
         run: |

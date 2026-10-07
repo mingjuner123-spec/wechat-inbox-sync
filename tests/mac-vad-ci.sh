@@ -8,13 +8,26 @@ VAD_SOURCE="https://github.com/ggml-org/whisper.cpp.git"
 VAD_MODEL_URL="https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin"
 VAD_MODEL_SHA256="2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"
 VAD_MODEL_BYTES=885098
+VAD_PHASE=init
 
 mkdir -p "$EVIDENCE_DIR"
+vad_failure_report() {
+  local status="$?"
+  if [ "$status" -ne 0 ]; then
+    printf '::error title=VAD control failure::phase=%s exit=%s\n' "$VAD_PHASE" "$status"
+    printf 'phase=%s exitCode=%s\n' "$VAD_PHASE" "$status" >"$EVIDENCE_DIR/vad-failure.txt" 2>/dev/null || true
+  fi
+}
+trap vad_failure_report EXIT
+
+VAD_PHASE=clone
 git clone --depth 1 --branch v1.9.0 "$VAD_SOURCE" "$VAD_ROOT" \
   >"$RUNNER_TEMP_DIR/vad-clone.log" 2>&1
+VAD_PHASE=source_receipt
 git -C "$VAD_ROOT" rev-parse HEAD >"$EVIDENCE_DIR/vad-source-commit.txt"
 
 export MACOSX_DEPLOYMENT_TARGET=12.0
+VAD_PHASE=configure
 cmake -S "$VAD_ROOT" -B "$VAD_ROOT/build" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
@@ -32,6 +45,7 @@ cmake -S "$VAD_ROOT" -B "$VAD_ROOT/build" \
   -DGGML_BLAS=OFF \
   -DGGML_OPENMP=OFF \
   >"$RUNNER_TEMP_DIR/vad-configure.log" 2>&1
+VAD_PHASE=build
 cmake --build "$VAD_ROOT/build" --config Release \
   --target whisper-vad-speech-segments --parallel 3 \
   >"$RUNNER_TEMP_DIR/vad-build.log" 2>&1
@@ -40,6 +54,7 @@ VAD_BIN="$VAD_ROOT/build/bin/whisper-vad-speech-segments"
 MODEL="$VAD_ROOT/models/ggml-silero-v6.2.0.bin"
 JFK="${ASR_PUBLIC_AUDIO_FIXTURE:?ASR_PUBLIC_AUDIO_FIXTURE is required}"
 SILENCE="$RUNNER_TEMP_DIR/vad-silence-2s.wav"
+VAD_PHASE=binary_and_model
 test -x "$VAD_BIN"
 curl --fail --location --retry 3 --output "$MODEL" "$VAD_MODEL_URL" \
   >"$RUNNER_TEMP_DIR/vad-model-download.log" 2>&1
@@ -52,6 +67,7 @@ printf '%s  %s\n' "$VAD_MODEL_SHA256" "$MODEL" | shasum -a 256 --check
   printf 'model_bytes=%s\nmodel_sha256=%s\n' "$VAD_MODEL_BYTES" "$VAD_MODEL_SHA256"
   printf 'binary_sha256=%s\n' "$(shasum -a 256 "$VAD_BIN" | awk '{print $1}')"
 } >"$EVIDENCE_DIR/vad-identity.txt"
+VAD_PHASE=dependency_checks
 file "$VAD_BIN" >"$EVIDENCE_DIR/vad-binary-file.txt"
 otool -L "$VAD_BIN" >"$EVIDENCE_DIR/vad-linked-libraries.txt"
 if grep -Eiq 'Metal\.framework|Accelerate\.framework|vecLib\.framework|libomp' \
@@ -84,6 +100,7 @@ with wave.open(sys.argv[1], "wb") as handle:
     handle.writeframes(b"\x00\x00" * (16000 * 2))
 PY
 
+VAD_PHASE=controls
 run_case() {
   local label="$1"
   local input_path="$2"
@@ -130,7 +147,11 @@ run_case() {
 }
 
 : >"$EVIDENCE_DIR/vad-results.txt"
+VAD_PHASE=case_jfk
 run_case jfk "$JFK" 0.50 1 -
+VAD_PHASE=case_silence_035
 run_case silence-threshold-035 "$SILENCE" 0.35 0 0
+VAD_PHASE=case_silence_050
 run_case silence-threshold-050 "$SILENCE" 0.50 0 0
+VAD_PHASE=case_silence_070
 run_case silence-threshold-070 "$SILENCE" 0.70 0 0
