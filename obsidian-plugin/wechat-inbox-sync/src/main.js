@@ -21096,7 +21096,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             nativePids: nativePidList,
             peakRssKiB: Math.max(0, ...[...freshAttemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(m => Number(m[1]))) || null,
             runningCheckpoints: activeAttemptCheckpoints.slice(-asrDiagnosticEvidence.MAX_CHECKPOINTS),
-            runLog: logFreshness === 'fresh' ? asrRecovery.diagnosticRedact(attemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`, freeMemoryBytesAfter: os.freemem() });
+            runLog: logFreshness === 'fresh' ? asrRecovery.diagnosticRedact(freshAttemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`, freeMemoryBytesAfter: os.freemem() });
           session.activeAttempt = null;
           activeAttemptNumber = null;
           activeAttemptCheckpoints = [];
@@ -22383,6 +22383,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   async buildTranscriptRecordFromMedia(record, {
     url,
     platform,
+    workId = '',
     mediaUrl = '',
     mediaUrls = [],
     mediaItems = [],
@@ -22566,6 +22567,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               title: metadata.title || '',
               source: source || 'media-url',
               sourceUrl: url,
+              workId,
               durationSeconds: Number(candidate.durationSeconds || metadata.durationSeconds || metadata.duration || 0) || null,
               binding,
               recordId: getRecordId(record),
@@ -24905,6 +24907,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           return await this.buildTranscriptRecordFromMedia(mediaRecord, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
+            workId: isDouyinRecord ? douyinAwemeId : '',
             mediaUrl,
             mediaUrls,
             source: 'video',

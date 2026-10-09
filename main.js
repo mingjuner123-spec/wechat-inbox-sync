@@ -35823,7 +35823,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             nativePids: nativePidList,
             peakRssKiB: Math.max(0, ...[...freshAttemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map((m) => Number(m[1]))) || null,
             runningCheckpoints: activeAttemptCheckpoints.slice(-asrDiagnosticEvidence.MAX_CHECKPOINTS),
-            runLog: logFreshness === "fresh" ? asrRecovery.diagnosticRedact(attemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`,
+            runLog: logFreshness === "fresh" ? asrRecovery.diagnosticRedact(freshAttemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`,
             freeMemoryBytesAfter: os.freemem()
           });
           session.activeAttempt = null;
@@ -37010,6 +37010,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async buildTranscriptRecordFromMedia(record, {
     url,
     platform,
+    workId = "",
     mediaUrl = "",
     mediaUrls = [],
     mediaItems = [],
@@ -37172,6 +37173,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             title: metadata.title || "",
             source: source || "media-url",
             sourceUrl: url,
+            workId,
             durationSeconds: Number(candidate.durationSeconds || metadata.durationSeconds || metadata.duration || 0) || null,
             binding,
             recordId: getRecordId(record),
@@ -39206,6 +39208,7 @@ ${finalized.markdown}
           return await this.buildTranscriptRecordFromMedia(mediaRecord, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? "抖音" : "小红书",
+            workId: isDouyinRecord ? douyinAwemeId : "",
             mediaUrl,
             mediaUrls,
             source: "video",
