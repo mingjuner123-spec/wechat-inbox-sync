@@ -193,7 +193,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Install pinned plugin dependencies
+        run: npm ci --prefix obsidian-plugin/wechat-inbox-sync
       - name: Test startup races and preserve active transcription
+        shell: bash
         run: |
+          set -euo pipefail
           node tests/plugin-asr-startup-timeout.test.js
           node tests/plugin-asr-timeout-process-group.test.js
