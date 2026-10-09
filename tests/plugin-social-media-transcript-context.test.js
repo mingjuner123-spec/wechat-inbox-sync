@@ -647,6 +647,7 @@ async function run() {
   let targetedBrowserOptions = null;
   plugin.renderSocialMediaUrls = async (_url, options) => {
     targetedBrowserOptions = options;
+    options.onDouyinBrowserDiagnostic?.({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
     options.onDouyinTargetDetail?.(sessionFallbackDouyinDetail);
     return ['https://v.douyinvod.com/targeted-browser-video.mp4'];
   };
@@ -655,8 +656,8 @@ async function run() {
     content: `https://www.douyin.com/video/${sessionFallbackAwemeId}`,
     metadata: { url: `https://www.douyin.com/video/${sessionFallbackAwemeId}` },
   }, '', '', '抖音视频');
-  // Root-oriented fallback accepts page-player media when Douyin omits work IDs.
-  assert.strictEqual(targetedBrowserOptions.strictDouyinTarget, false);
+  // The browser fixture explicitly proves target identity before media acceptance.
+  assert.strictEqual(targetedBrowserOptions.strictDouyinTarget, true);
   assert.strictEqual(targetedBrowserDouyinRecord.metadata.transcriptionStatus, 'success');
   assert.strictEqual(targetedBrowserDouyinRecord.metadata.author, '会话作者');
   assert.match(targetedBrowserDouyinRecord.metadata.mediaUrl, /targeted-browser-video/);

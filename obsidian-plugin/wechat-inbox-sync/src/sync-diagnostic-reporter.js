@@ -1,7 +1,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { normalizeTechnicalReport, compactTechnicalReport, unavailableTechnicalReport, bytes } = require('./failure-technical-report');
+const zlib = require('node:zlib');
+const { normalizeTechnicalReport, compactTechnicalReport, unavailableTechnicalReport, bytes, UNAVAILABLE_REASONS } = require('./failure-technical-report');
 
 // Keep this contract deliberately small. The server owns any association with
 // a canonical content identity; the plugin only reports the sync record id.
@@ -331,6 +332,52 @@ function normalizeDiagnosticEvent(input = {}, defaults = {}) {
   }, {});
 }
 
+function encodeFullTechnicalReport(value) {
+  const report = normalizeTechnicalReport(value);
+  if (!report) return null;
+  try {
+    const buffer = zlib.gzipSync(Buffer.from(report.text, 'utf8'));
+    return {
+      schemaVersion: report.schemaVersion,
+      kind: report.kind,
+      encoding: 'gzip+base64',
+      data: buffer.toString('base64'),
+      sha256: crypto.createHash('sha256').update(report.text, 'utf8').digest('hex'),
+      capturedAt: report.capturedAt,
+      truncated: report.truncated === true,
+      originalBytes: report.originalBytes,
+      ...(report.unavailableReason ? { unavailableReason: report.unavailableReason } : {}),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+function decodeFullTechnicalReport(value) {
+  if (!value || typeof value !== 'object' || value.encoding !== 'gzip+base64' || typeof value.data !== 'string') return null;
+  if (value.data.length > 2 * 1024 * 1024 || !/^[A-Za-z0-9+/=]+$/.test(value.data)) return null;
+  try {
+    const text = zlib.gunzipSync(Buffer.from(value.data, 'base64')).toString('utf8');
+    const originalBytesValue = Number(value.originalBytes);
+    const originalBytes = Number.isSafeInteger(originalBytesValue) && originalBytesValue >= 0
+      ? originalBytesValue
+      : bytes(text);
+    const report = normalizeTechnicalReport({
+      schemaVersion: 1,
+      kind: 'sync_failure',
+      capturedAt: typeof value.capturedAt === 'string' ? value.capturedAt : new Date().toISOString(),
+      text,
+      truncated: value.truncated === true,
+      originalBytes,
+      ...(UNAVAILABLE_REASONS.has(value.unavailableReason) ? { unavailableReason: value.unavailableReason } : {}),
+    });
+    if (!report) return null;
+    if (/^[a-f0-9]{64}$/i.test(String(value.sha256 || ''))
+      && crypto.createHash('sha256').update(report.text, 'utf8').digest('hex') !== String(value.sha256).toLowerCase()) return null;
+    return report;
+  } catch (_) {
+    return null;
+  }
+}
 function normalizeOutbox(value, { now = Date.now(), maxItems = MAX_OUTBOX_ITEMS } = {}) {
   const current = Number(now) || Date.now();
   const byId = new Map();
@@ -356,8 +403,11 @@ function normalizeOutbox(value, { now = Date.now(), maxItems = MAX_OUTBOX_ITEMS 
       current,
       Number.isFinite(Number(item.nextAttemptAt)) ? Number(item.nextAttemptAt) : current,
     );
+    const fullEvidence = decodeFullTechnicalReport(item.fullEvidence)
+      || normalizeTechnicalReport(item.fullTechnicalReport);
     const normalized = {
       event,
+      ...(fullEvidence ? { fullEvidence: encodeFullTechnicalReport(fullEvidence) } : {}),
       bindingFingerprint,
       createdAt,
       nextAttemptAt,
@@ -375,9 +425,23 @@ function normalizeOutbox(value, { now = Date.now(), maxItems = MAX_OUTBOX_ITEMS 
     .slice(-Math.max(1, asFiniteInteger(maxItems, MAX_OUTBOX_ITEMS, { min: 1, max: 1000 })));
   const size = () => bytes(JSON.stringify(result));
   while (size() > MAX_OUTBOX_BYTES) {
-    const candidate = result.find(item => item.event.technicalReport && item.event.technicalReport.text.length > 200);
+    const candidate = result.find((item) => {
+      const report = item.event.technicalReport;
+      return report && report.text.length > 200 && !report.text.includes('"fullReportPending":true');
+    });
     if (!candidate) break;
-    candidate.event.technicalReport = compactTechnicalReport(candidate.event.technicalReport, 'outbox_limit');
+    const fullReport = decodeFullTechnicalReport(candidate.fullEvidence) || candidate.event.technicalReport;
+    const compacted = compactTechnicalReport(fullReport, 'outbox_limit');
+    if (!compacted) break;
+    candidate.fullEvidence = candidate.fullEvidence || encodeFullTechnicalReport(fullReport);
+    candidate.event.technicalReport = compacted;
+  }
+  // Complete evidence is retained for as many recent failures as the local
+  // budget allows. If compressed evidence itself fills the budget, evict the
+  // oldest entries only after every eligible report has been compacted.
+  while (size() > MAX_OUTBOX_BYTES && result.length > 1) {
+    const withoutFullEvidence = result.findIndex(item => !item.fullEvidence);
+    result.splice(withoutFullEvidence >= 0 ? withoutFullEvidence : 0, 1);
   }
   return result;
 }
@@ -458,7 +522,7 @@ function createSyncDiagnosticReporter(options = {}) {
   let disposed = false;
   const initialOutbox = Array.isArray(options.initialOutbox) ? options.initialOutbox : [];
   let outbox = normalizeOutbox(initialOutbox, { now: now(), maxItems });
-  const initialOutboxNeedsPersistence = outbox.length !== initialOutbox.length;
+  const initialOutboxNeedsPersistence = JSON.stringify(outbox) !== JSON.stringify(initialOutbox);
   let timer = null;
   let flushPromise = null;
   let persistPromise = Promise.resolve();
@@ -479,6 +543,7 @@ function createSyncDiagnosticReporter(options = {}) {
       createdAt: entry.createdAt,
       nextAttemptAt: entry.nextAttemptAt,
       uploadAttempts: entry.uploadAttempts,
+      ...(entry.fullEvidence ? { fullEvidence: JSON.parse(JSON.stringify(entry.fullEvidence)) } : {}),
     }));
     persistPromise = persistPromise
       .catch(() => {})
@@ -486,7 +551,6 @@ function createSyncDiagnosticReporter(options = {}) {
       .catch(() => {});
     return persistPromise;
   }
-
   // Persist the canonicalized snapshot when startup removed legacy success
   // events (or other invalid entries), so they do not return on the next
   // plugin reload.
@@ -585,22 +649,27 @@ function createSyncDiagnosticReporter(options = {}) {
           && entry.nextAttemptAt <= currentTime
         ));
         const entries = [];
+        const uploadEvents = [];
         let batchBytes = 13;
         for (const entry of eligible.filter(item => item.bindingFingerprint === bindingFingerprint)) {
           if (entries.length >= MAX_BATCH_SIZE) break;
-          let eventBytes = bytes(JSON.stringify(entry.event));
-          if (!entries.length && batchBytes + eventBytes > MAX_BATCH_BYTES && entry.event.technicalReport) {
-            entry.event.technicalReport = compactTechnicalReport(entry.event.technicalReport, 'outbox_limit');
-            eventBytes = bytes(JSON.stringify(entry.event));
-          }
+          const fullReport = decodeFullTechnicalReport(entry.fullEvidence);
+          const uploadEvent = fullReport
+            ? { ...entry.event, technicalReport: fullReport }
+            : { ...entry.event };
+          const eventBytes = bytes(JSON.stringify(uploadEvent));
+          // A normalized report is bounded below MAX_BATCH_BYTES. If a future
+          // schema violates that invariant, leave the complete evidence queued
+          // rather than replacing it with an unrecoverable compact payload.
           if (batchBytes + eventBytes + (entries.length ? 1 : 0) > MAX_BATCH_BYTES) break;
           entries.push(entry);
+          uploadEvents.push(uploadEvent);
           batchBytes += eventBytes + (entries.length > 1 ? 1 : 0);
         }
         if (!entries.length) continue;
         try {
           const response = await withTimeout(
-            postEvents(entries.map((entry) => ({ ...entry.event })), bindingValue),
+            postEvents(uploadEvents, bindingValue),
             requestTimeoutMs,
             setTimeoutImpl,
             clearTimeoutImpl,
@@ -700,6 +769,7 @@ function createSyncDiagnosticReporter(options = {}) {
       createdAt: entry.createdAt,
       nextAttemptAt: entry.nextAttemptAt,
       uploadAttempts: entry.uploadAttempts,
+      fullEvidencePending: Boolean(entry.fullEvidence),
     })),
     getPendingCount: () => currentOutbox().length,
     whenIdle: () => persistPromise,

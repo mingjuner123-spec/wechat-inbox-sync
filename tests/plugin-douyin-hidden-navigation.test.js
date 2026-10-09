@@ -72,7 +72,7 @@ async function lifecycleTests() {
       trackDouyinBrowserWindow() {},
       installHiddenBrowserChildWindowGuards: () => () => { counts.childrenCleaned++; },
       bindBrowserWindowToAbortSignal: () => () => { counts.abortCleaned++; },
-      extractDouyinAwemeId: () => '123',
+      extractDouyinAwemeId: () => '123', getDouyinDiagnosticUrlKind: () => 'canonical',
       throwIfAborted(signal) { if (signal?.aborted) throw Object.assign(Error('cancelled'), { name: 'AbortError' }); },
       waitForWebContents: async () => {},
       beginBestEffortBrowserLoad() { counts.loads++; return mode !== 'load-failure'; },
@@ -81,6 +81,7 @@ async function lifecycleTests() {
       waitForBrowserTasksWithin: async () => {},
       resolveDouyinMediaFromShareHtml: () => ({ exactUrls: [], primaryUrls: [] }),
       selectPrimaryDouyinDomMediaUrls: () => [], normalizeBrowserCapturedMediaUrls: () => [],
+      isTrustedDouyinPageUrl: () => false, selectIdentityBoundDouyinBrowserMedia: () => [],
       BROWSER_MEDIA_CAPTURE_MAX_REQUESTS: 100, BROWSER_MEDIA_CAPTURE_MAX_URLS: 100,
       douyinBrowserSafety: {
         LIMITS: {},

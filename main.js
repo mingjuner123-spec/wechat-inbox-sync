@@ -732,6 +732,8 @@ var require_douyin_browser_safety = __commonJS({
       result.targetIdRecognized = value.targetIdRecognized === true;
       result.targetIdState = TARGET_ID_STATES.has(value.targetIdState) ? value.targetIdState : Object.prototype.hasOwnProperty.call(value, "targetIdRecognized") ? value.targetIdRecognized === true ? "recognized" : "missing" : "unknown";
       result.targetStageEligible = value.targetStageEligible === true;
+      result.identityOutcome = ["target-id-matched", "identity-unverified", "target-id-mismatch", "unverified-primary-player"].includes(value.identityOutcome) ? value.identityOutcome : "";
+      result.preciseMediaFound = value.preciseMediaFound === true;
       result.debuggerCapability = enumValue(DEBUGGER_CAPABILITIES, value.debuggerCapability);
       result.debuggerReason = enumValue(DEBUGGER_REASONS, value.debuggerReason);
       result.pageEvent = ["dom-ready", "did-finish-load", "did-fail-load", "did-navigate", "did-redirect-navigation"].includes(value.pageEvent) ? value.pageEvent : "";
@@ -1759,13 +1761,326 @@ ${item.summary}`).join("\n\n") : readMatchingCrashSummary(session)
   }
 });
 
+// src/asr-diagnostic-evidence.js
+var require_asr_diagnostic_evidence = __commonJS({
+  "src/asr-diagnostic-evidence.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("node:fs");
+    var crypto2 = require("node:crypto");
+    var MAX_CHECKPOINTS = 128;
+    var MAX_SOURCE_URL_LENGTH = 2048;
+    var PRIVATE_HOST = /^(?:localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|\[::1\]|::1$)/i;
+    var SECRET_QUERY_KEY = /(?:access[_-]?key|access[_-]?token|authorization|auth|cookie|credential|csrf|nonce|password|secret|session|signature|sig|token|xsec|expires?|expiry|deadline|policy|key[_-]?pair)/i;
+    function safeText(value, maxLength = 128) {
+      const text = String(value || "").trim();
+      return text.length <= maxLength ? text : text.slice(0, maxLength);
+    }
+    __name(safeText, "safeText");
+    function safeIdentifier(value, { min = 1, max = 128 } = {}) {
+      const text = safeText(value, max);
+      return new RegExp(`^[A-Za-z0-9_-]{${min},${max}}$`).test(text) ? text : "";
+    }
+    __name(safeIdentifier, "safeIdentifier");
+    function safeWorkId(value) {
+      const text = safeText(value, 128);
+      return /^(?:\d{10,30}|[A-Za-z0-9_-]{3,128})$/.test(text) ? text : "";
+    }
+    __name(safeWorkId, "safeWorkId");
+    function safeSourceUrl(value) {
+      const raw = safeText(value, MAX_SOURCE_URL_LENGTH);
+      if (!raw) return "";
+      let parsed;
+      try {
+        parsed = new URL(raw);
+      } catch (_) {
+        return "";
+      }
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return "";
+      if (!parsed.hostname || PRIVATE_HOST.test(parsed.hostname)) return "";
+      for (const [key, queryValue] of [...parsed.searchParams.entries()]) {
+        if (SECRET_QUERY_KEY.test(key) || /(?:authorization|bearer|cookie|secret|signature|token|password)\s*=/i.test(queryValue)) {
+          parsed.searchParams.delete(key);
+        }
+      }
+      parsed.hash = "";
+      const normalized = parsed.toString();
+      return normalized.length <= MAX_SOURCE_URL_LENGTH ? normalized : "";
+    }
+    __name(safeSourceUrl, "safeSourceUrl");
+    function extractWorkId(sourceUrl) {
+      const safeUrl = safeSourceUrl(sourceUrl);
+      if (!safeUrl) return "";
+      try {
+        const parsed = new URL(safeUrl);
+        for (const key of ["modal_id", "aweme_id", "item_id", "video_id"]) {
+          const value = safeWorkId(parsed.searchParams.get(key));
+          if (value) return value;
+        }
+        const match = parsed.pathname.match(/\/(?:video|detail|note|item|aweme)\/(\d{10,30})(?:\/|$)/i);
+        return safeWorkId(match && match[1]);
+      } catch (_) {
+        return "";
+      }
+    }
+    __name(extractWorkId, "extractWorkId");
+    function normalizeDuration(value) {
+      if (value === null || value === void 0 || value === "") return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 && number <= 24 * 60 * 60 ? Math.round(number * 1e3) / 1e3 : null;
+    }
+    __name(normalizeDuration, "normalizeDuration");
+    function readMeasuredDurationFromLog(rawLog) {
+      const text = String(rawLog || "");
+      const matches = [...text.matchAll(/^durationSeconds=([0-9]+(?:\.[0-9]+)?)\s*$/gm)];
+      for (let index = matches.length - 1; index >= 0; index -= 1) {
+        const duration = normalizeDuration(matches[index][1]);
+        if (duration !== null) return duration;
+      }
+      return null;
+    }
+    __name(readMeasuredDurationFromLog, "readMeasuredDurationFromLog");
+    function buildAsrInputIdentity({
+      recordId = "",
+      attemptId = "",
+      sourceUrl = "",
+      workId = "",
+      durationSeconds = null,
+      durationHintSeconds = null
+    } = {}) {
+      const safeUrl = safeSourceUrl(sourceUrl);
+      const result = {
+        recordId: safeIdentifier(recordId),
+        attemptId: safeIdentifier(attemptId)
+      };
+      if (safeUrl) result.sourceUrl = safeUrl;
+      const safeId = safeWorkId(workId) || extractWorkId(safeUrl);
+      if (safeId) result.workId = safeId;
+      const duration = normalizeDuration(durationSeconds);
+      if (duration !== null) result.durationSeconds = duration;
+      const durationHint = normalizeDuration(durationHintSeconds);
+      if (durationHint !== null) result.durationHintSeconds = durationHint;
+      return result;
+    }
+    __name(buildAsrInputIdentity, "buildAsrInputIdentity");
+    function readFileIdentity(filePath, { fileSystem = fs2 } = {}) {
+      const file = String(filePath || "");
+      if (!file) return { status: "unavailable", reason: "missing_path" };
+      let descriptor;
+      try {
+        const stat = fileSystem.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink()) return { status: "unavailable", reason: "not_regular_file" };
+        const hash = crypto2.createHash("sha256");
+        descriptor = fileSystem.openSync(file, "r");
+        const buffer = Buffer.alloc(1024 * 1024);
+        let total = 0;
+        let count = 0;
+        while ((count = fileSystem.readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
+          hash.update(buffer.subarray(0, count));
+          total += count;
+        }
+        return { status: "captured", sha256: hash.digest("hex"), byteLength: total };
+      } catch (_) {
+        return { status: "unavailable", reason: "read_failed" };
+      } finally {
+        if (descriptor !== void 0) {
+          try {
+            fileSystem.closeSync(descriptor);
+          } catch (_) {
+          }
+        }
+      }
+    }
+    __name(readFileIdentity, "readFileIdentity");
+    async function readFileIdentityAsync(filePath, { fileSystem = fs2 } = {}) {
+      const file = String(filePath || "");
+      if (!file) return { status: "unavailable", reason: "missing_path" };
+      try {
+        const lstat = fileSystem.promises && typeof fileSystem.promises.lstat === "function" ? await fileSystem.promises.lstat(file) : fileSystem.lstatSync(file);
+        if (!lstat.isFile() || lstat.isSymbolicLink()) return { status: "unavailable", reason: "not_regular_file" };
+        if (typeof fileSystem.createReadStream !== "function") return readFileIdentity(file, { fileSystem });
+        return await new Promise((resolve) => {
+          const hash = crypto2.createHash("sha256");
+          let total = 0;
+          let settled = false;
+          const finish = /* @__PURE__ */ __name((result) => {
+            if (settled) return;
+            settled = true;
+            resolve(result);
+          }, "finish");
+          const stream = fileSystem.createReadStream(file, { highWaterMark: 1024 * 1024 });
+          stream.on("data", (chunk) => {
+            if (chunk) {
+              hash.update(chunk);
+              total += chunk.length;
+            }
+          });
+          stream.once("error", () => finish({ status: "unavailable", reason: "read_failed" }));
+          stream.once("end", () => finish({ status: "captured", sha256: hash.digest("hex"), byteLength: total }));
+        });
+      } catch (_) {
+        return { status: "unavailable", reason: "read_failed" };
+      }
+    }
+    __name(readFileIdentityAsync, "readFileIdentityAsync");
+    async function captureMediaIdentityAsync(filePath, { actualDurationSeconds = null, durationHintSeconds = null, now = (/* @__PURE__ */ new Date()).toISOString(), fileSystem = fs2 } = {}) {
+      const result = await readFileIdentityAsync(filePath, { fileSystem });
+      result.mediaKind = "downloaded_media";
+      result.audioStatus = "unavailable";
+      result.audioReason = "preprocessed_chunks_not_exposed";
+      const actualDuration = normalizeDuration(actualDurationSeconds);
+      if (actualDuration !== null) {
+        result.durationSeconds = actualDuration;
+        result.durationStatus = "measured";
+      } else {
+        result.durationStatus = "unavailable";
+        result.durationReason = "not_probed";
+      }
+      const durationHint = normalizeDuration(durationHintSeconds);
+      if (durationHint !== null) result.durationHintSeconds = durationHint;
+      const timestamp = Date.parse(now);
+      result.capturedAt = Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : (/* @__PURE__ */ new Date()).toISOString();
+      return result;
+    }
+    __name(captureMediaIdentityAsync, "captureMediaIdentityAsync");
+    function captureMediaIdentity(filePath, { actualDurationSeconds = null, durationHintSeconds = null, now = (/* @__PURE__ */ new Date()).toISOString(), fileSystem = fs2 } = {}) {
+      const result = readFileIdentity(filePath, { fileSystem });
+      result.mediaKind = "downloaded_media";
+      result.audioStatus = "unavailable";
+      result.audioReason = "preprocessed_chunks_not_exposed";
+      const actualDuration = normalizeDuration(actualDurationSeconds);
+      if (actualDuration !== null) {
+        result.durationSeconds = actualDuration;
+        result.durationStatus = "measured";
+      } else {
+        result.durationStatus = "unavailable";
+        result.durationReason = "not_probed";
+      }
+      const durationHint = normalizeDuration(durationHintSeconds);
+      if (durationHint !== null) result.durationHintSeconds = durationHint;
+      const timestamp = Date.parse(now);
+      result.capturedAt = Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : (/* @__PURE__ */ new Date()).toISOString();
+      return result;
+    }
+    __name(captureMediaIdentity, "captureMediaIdentity");
+    function normalizeProgress(progress) {
+      if (!progress || typeof progress !== "object" || Array.isArray(progress)) return null;
+      const result = {};
+      const stage = safeText(progress.stage, 64);
+      if (stage) result.stage = stage;
+      for (const key of ["current", "total"]) {
+        if (progress[key] === null || progress[key] === void 0 || progress[key] === "") continue;
+        const value = Number(progress[key]);
+        if (Number.isSafeInteger(value) && value >= 0 && value <= 1e6) result[key] = value;
+      }
+      const percentValue = progress.percent;
+      const percent = percentValue === null || percentValue === void 0 || percentValue === "" ? NaN : Number(percentValue);
+      if (Number.isFinite(percent) && percent >= 0 && percent <= 100) result.percent = Math.round(percent * 100) / 100;
+      for (const key of ["startedAt", "heartbeatAt"]) {
+        const value = Date.parse(progress[key] || "");
+        if (Number.isFinite(value)) result[key] = new Date(value).toISOString();
+      }
+      return Object.keys(result).length ? result : null;
+    }
+    __name(normalizeProgress, "normalizeProgress");
+    function progressKey(progress) {
+      if (!progress) return "";
+      return JSON.stringify({
+        stage: progress.stage || "",
+        current: progress.current ?? null,
+        total: progress.total ?? null,
+        percent: progress.percent ?? null
+      });
+    }
+    __name(progressKey, "progressKey");
+    function buildRunningCheckpoint({
+      attempt = null,
+      stage = "",
+      pid = null,
+      processState = "unknown",
+      processStateSource = "unknown",
+      pidSource = "unknown",
+      progressSource = "unknown",
+      wrapperPid = null,
+      wrapperProcessState = "unknown",
+      progress = null,
+      previous = [],
+      rssKiB = null,
+      cpuTimeMs = null,
+      now = (/* @__PURE__ */ new Date()).toISOString()
+    } = {}) {
+      const normalizedProgress = normalizeProgress(progress);
+      const key = progressKey(normalizedProgress);
+      const prior = Array.isArray(previous) ? [...previous].reverse().find((item) => item && item.progressKey) : null;
+      const progressObserved = Boolean(key && (!prior || key !== prior.progressKey));
+      const timestamp = Date.parse(now);
+      const capturedAt = Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : (/* @__PURE__ */ new Date()).toISOString();
+      const safePid = Number.isSafeInteger(Number(pid)) && Number(pid) > 0 ? Number(pid) : null;
+      const safeWrapperPid = Number.isSafeInteger(Number(wrapperPid)) && Number(wrapperPid) > 0 ? Number(wrapperPid) : null;
+      const safeState = ["running", "exited", "unknown"].includes(processState) ? processState : "unknown";
+      const safeWrapperState = ["running", "exited", "unknown"].includes(wrapperProcessState) ? wrapperProcessState : "unknown";
+      const safeSource = /* @__PURE__ */ __name((value) => ["native_log", "wrapper_process", "unknown"].includes(value) ? value : "unknown", "safeSource");
+      const attemptValue = attempt === null || attempt === void 0 || attempt === "" ? null : Number(attempt);
+      const result = {
+        attempt: Number.isSafeInteger(attemptValue) && attemptValue >= 0 ? attemptValue : null,
+        capturedAt,
+        stage: safeText(stage || (normalizedProgress == null ? void 0 : normalizedProgress.stage) || "transcribing", 64) || "unknown",
+        pid: safePid,
+        pidSource: safeSource(pidSource),
+        processState: safeState,
+        processStateSource: safeSource(processStateSource),
+        wrapperPid: safeWrapperPid,
+        wrapperProcessState: safeWrapperState,
+        progressSource: safeSource(progressSource),
+        kind: progressObserved ? "real_progress" : "heartbeat",
+        progressObserved,
+        progressKey: key
+      };
+      if (normalizedProgress) result.progress = normalizedProgress;
+      const safeRss = rssKiB === null || rssKiB === void 0 || rssKiB === "" ? NaN : Number(rssKiB);
+      if (Number.isSafeInteger(safeRss) && safeRss >= 0) result.rssKiB = safeRss;
+      const safeCpu = cpuTimeMs === null || cpuTimeMs === void 0 || cpuTimeMs === "" ? NaN : Number(cpuTimeMs);
+      if (Number.isSafeInteger(safeCpu) && safeCpu >= 0) result.cpuTimeMs = safeCpu;
+      return result;
+    }
+    __name(buildRunningCheckpoint, "buildRunningCheckpoint");
+    function appendRunningCheckpoint(previous, checkpoint, { max = MAX_CHECKPOINTS } = {}) {
+      const list = Array.isArray(previous) ? previous.filter((item) => item && typeof item === "object") : [];
+      if (!checkpoint || typeof checkpoint !== "object") return list.slice(-max);
+      const last = list[list.length - 1];
+      if (last && last.pid === checkpoint.pid && last.kind === checkpoint.kind && last.progressKey === checkpoint.progressKey && last.processState === checkpoint.processState && Date.parse(checkpoint.capturedAt || "") - Date.parse(last.capturedAt || "") < 1e3) {
+        return list;
+      }
+      return [...list, checkpoint].slice(-Math.max(1, Math.min(MAX_CHECKPOINTS, Number(max) || MAX_CHECKPOINTS)));
+    }
+    __name(appendRunningCheckpoint, "appendRunningCheckpoint");
+    module2.exports = {
+      MAX_CHECKPOINTS,
+      appendRunningCheckpoint,
+      buildAsrInputIdentity,
+      buildRunningCheckpoint,
+      captureMediaIdentity,
+      captureMediaIdentityAsync,
+      extractWorkId,
+      normalizeDuration,
+      readFileIdentity,
+      readMeasuredDurationFromLog,
+      readFileIdentityAsync,
+      safeIdentifier,
+      safeSourceUrl,
+      safeWorkId
+    };
+  }
+});
+
 // src/failure-technical-report.js
 var require_failure_technical_report = __commonJS({
   "src/failure-technical-report.js"(exports2, module2) {
     "use strict";
     var fs2 = require("node:fs");
     var path2 = require("node:path");
+    var crypto2 = require("node:crypto");
     var { diagnosticRedact, readMatchingCrashSummary } = require_asr_recovery_utils();
+    var asrDiagnosticEvidence2 = require_asr_diagnostic_evidence();
     var MAX_REPORT_TEXT_BYTES = 128 * 1024;
     var MAX_SESSION_BYTES = 768 * 1024;
     var UNAVAILABLE_REASONS = /* @__PURE__ */ new Set([
@@ -2020,6 +2335,9 @@ var require_failure_technical_report = __commonJS({
       stage.targetIdState = targetIdState;
       if (typeof value.targetIdRecognized === "boolean") stage.targetIdRecognized = value.targetIdRecognized;
       if (typeof value.targetStageEligible === "boolean") stage.targetStageEligible = value.targetStageEligible;
+      const identityOutcome = safeDiagnosticText(value.identityOutcome, settings, 64);
+      if (identityOutcome) stage.identityOutcome = identityOutcome;
+      if (typeof value.preciseMediaFound === "boolean") stage.preciseMediaFound = value.preciseMediaFound;
       const mediaCount = safeBoundedNumber(value.mediaCount, 100);
       const durationMs = safeBoundedNumber(value.durationMs, 30 * 60 * 1e3);
       if (mediaCount !== null) stage.mediaCount = mediaCount;
@@ -2116,6 +2434,90 @@ var require_failure_technical_report = __commonJS({
       }
     }
     __name(readSession, "readSession");
+    function safeRunningCheckpoint(item = {}) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+      const capturedAt = iso(item.capturedAt);
+      if (!capturedAt) return null;
+      const attemptValue = item.attempt === null || item.attempt === void 0 || item.attempt === "" ? null : nonnegativeInt(item.attempt);
+      const pidValue = item.pid === null || item.pid === void 0 || item.pid === "" ? null : nonnegativeInt(item.pid);
+      const wrapperPidValue = item.wrapperPid === null || item.wrapperPid === void 0 || item.wrapperPid === "" ? null : nonnegativeInt(item.wrapperPid);
+      const sourceValue = /* @__PURE__ */ __name((value) => ["native_log", "wrapper_process", "unknown"].includes(value) ? value : "unknown", "sourceValue");
+      const result = {
+        attempt: attemptValue,
+        capturedAt,
+        stage: safeDiagnosticText(item.stage, {}, 64) || "unknown",
+        pid: pidValue,
+        pidSource: sourceValue(item.pidSource),
+        processState: ["running", "exited", "unknown"].includes(item.processState) ? item.processState : "unknown",
+        processStateSource: sourceValue(item.processStateSource),
+        wrapperPid: wrapperPidValue,
+        wrapperProcessState: ["running", "exited", "unknown"].includes(item.wrapperProcessState) ? item.wrapperProcessState : "unknown",
+        progressSource: sourceValue(item.progressSource),
+        kind: item.kind === "real_progress" ? "real_progress" : "heartbeat",
+        progressObserved: item.progressObserved === true
+      };
+      const progress = item.progress && typeof item.progress === "object" && !Array.isArray(item.progress) ? item.progress : null;
+      if (progress) {
+        const safeProgress = {};
+        const stage = safeDiagnosticText(progress.stage, {}, 64);
+        if (stage) safeProgress.stage = stage;
+        for (const key of ["current", "total"]) {
+          const value = nonnegativeInt(progress[key]);
+          if (value !== null) safeProgress[key] = value;
+        }
+        const percent = Number(progress.percent);
+        if (Number.isFinite(percent) && percent >= 0 && percent <= 100) safeProgress.percent = Math.round(percent * 100) / 100;
+        for (const key of ["startedAt", "heartbeatAt"]) {
+          const value = iso(progress[key]);
+          if (value) safeProgress[key] = value;
+        }
+        if (Object.keys(safeProgress).length) result.progress = safeProgress;
+      }
+      const rssValue = item.rssKiB;
+      const rssKiB = rssValue === null || rssValue === void 0 || rssValue === "" ? null : nonnegativeInt(rssValue);
+      if (rssKiB !== null) result.rssKiB = rssKiB;
+      const cpuValue = item.cpuTimeMs;
+      const cpuTimeMs = cpuValue === null || cpuValue === void 0 || cpuValue === "" ? null : nonnegativeInt(cpuValue);
+      if (cpuTimeMs !== null) result.cpuTimeMs = cpuTimeMs;
+      return result;
+    }
+    __name(safeRunningCheckpoint, "safeRunningCheckpoint");
+    function safeInputIdentity(value = {}) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const source = asrDiagnosticEvidence2.buildAsrInputIdentity({
+        recordId: value.recordId,
+        attemptId: value.attemptId,
+        sourceUrl: value.sourceUrl,
+        workId: value.workId,
+        durationSeconds: value.durationSeconds,
+        durationHintSeconds: value.durationHintSeconds
+      });
+      if (value.media && typeof value.media === "object" && !Array.isArray(value.media)) {
+        const media = {};
+        if (value.media.status === "captured" || value.media.status === "unavailable") media.status = value.media.status;
+        if (value.media.mediaKind === "downloaded_media") media.mediaKind = "downloaded_media";
+        if (value.media.audioStatus === "unavailable" || value.media.audioStatus === "measured") media.audioStatus = value.media.audioStatus;
+        if (value.media.audioStatus === "unavailable" && /^[a-z0-9_-]{1,64}$/i.test(String(value.media.audioReason || ""))) media.audioReason = String(value.media.audioReason);
+        if (/^[a-f0-9]{64}$/i.test(String(value.media.sha256 || ""))) media.sha256 = String(value.media.sha256).toLowerCase();
+        const byteLengthValue = value.media.byteLength;
+        const byteLength = byteLengthValue === null || byteLengthValue === void 0 || byteLengthValue === "" ? null : nonnegativeInt(byteLengthValue);
+        if (byteLength !== null) media.byteLength = byteLength;
+        const durationValue = value.media.durationSeconds;
+        const duration = durationValue === null || durationValue === void 0 || durationValue === "" ? NaN : Number(durationValue);
+        if (Number.isFinite(duration) && duration >= 0 && duration <= 24 * 60 * 60) media.durationSeconds = Math.round(duration * 1e3) / 1e3;
+        const durationHintValue = value.media.durationHintSeconds;
+        const durationHint = durationHintValue === null || durationHintValue === void 0 || durationHintValue === "" ? NaN : Number(durationHintValue);
+        if (Number.isFinite(durationHint) && durationHint >= 0 && durationHint <= 24 * 60 * 60) media.durationHintSeconds = Math.round(durationHint * 1e3) / 1e3;
+        if (["measured", "measured_log", "unavailable"].includes(value.media.durationStatus)) media.durationStatus = value.media.durationStatus;
+        if (value.media.durationStatus === "unavailable" && /^[a-z0-9_-]{1,64}$/i.test(String(value.media.durationReason || ""))) media.durationReason = String(value.media.durationReason);
+        const capturedAt = iso(value.media.capturedAt);
+        if (capturedAt) media.capturedAt = capturedAt;
+        if (value.media.status === "unavailable" && /^[a-z0-9_-]{1,64}$/i.test(String(value.media.reason || ""))) media.reason = String(value.media.reason);
+        if (Object.keys(media).length) source.media = media;
+      }
+      return Object.values(source).some((valuePart) => valuePart !== "" && valuePart !== null && valuePart !== void 0) ? source : null;
+    }
+    __name(safeInputIdentity, "safeInputIdentity");
     function safeAttempt(item = {}) {
       const requestedMode = ["default", "cpu_compatibility"].includes(item.requestedMode) ? item.requestedMode : "unknown";
       const freshness = ["fresh", "stale", "unavailable"].includes(item.logFreshness) ? item.logFreshness : "unavailable";
@@ -2123,8 +2525,13 @@ var require_failure_technical_report = __commonJS({
       const qualityStatus = ["passed", "rejected"].includes(item.qualityStatus) ? item.qualityStatus : "unknown";
       const qualityIssue = ["repeated-lines", "prompt-leak"].includes(item.qualityIssue) ? item.qualityIssue : "unknown";
       const qualityReason = item.qualityReason === "quality_guard_rejected" ? item.qualityReason : "unknown";
+      const attemptValue = item.attempt === null || item.attempt === void 0 || item.attempt === "" ? null : nonnegativeInt(item.attempt);
+      const peakRssValue = item.peakRssKiB;
+      const peakRssKiB = peakRssValue === null || peakRssValue === void 0 || peakRssValue === "" ? null : nonnegativeInt(peakRssValue);
+      const freeMemoryValue = item.freeMemoryBytesAfter;
+      const freeMemoryBytesAfter = freeMemoryValue === null || freeMemoryValue === void 0 || freeMemoryValue === "" ? null : nonnegativeInt(freeMemoryValue);
       return {
-        attempt: nonnegativeInt(item.attempt),
+        attempt: attemptValue,
         cpuCompatibilityRequested: requestedMode === "cpu_compatibility" || item.cpu === true,
         requestedMode,
         qualityStatus,
@@ -2141,7 +2548,13 @@ var require_failure_technical_report = __commonJS({
         nativeExitCode: item.nativeExitCode == null ? null : signedInt(item.nativeExitCode),
         nativeExitAssociation: ["matched", "incomplete_native_process", "no_matched_native_exit", "stage_mismatch"].includes(item.nativeExitAssociation) ? item.nativeExitAssociation : "unknown",
         nativePids: (Array.isArray(item.nativePids) ? item.nativePids : []).map(nonnegativeInt).filter((pid) => pid > 0),
-        peakRssKiB: nonnegativeInt(item.peakRssKiB),
+        peakRssKiB,
+        timeoutCode: item.timeoutCode === "ASR_TIMEOUT" ? item.timeoutCode : "",
+        timeoutCleanupStatus: ["group_cleanup_attempted", "direct_child_fallback", "process_already_exited", "failed", "unknown"].includes(item.timeoutCleanupStatus) ? item.timeoutCleanupStatus : "",
+        timeoutCleanupError: /^[A-Za-z0-9_.-]{1,64}$/.test(item.timeoutCleanupError || "") ? String(item.timeoutCleanupError) : "",
+        logSnapshotAt: iso(item.logSnapshotAt),
+        freeMemoryBytesAfter,
+        runningCheckpoints: (Array.isArray(item.runningCheckpoints) ? item.runningCheckpoints : []).slice(-asrDiagnosticEvidence2.MAX_CHECKPOINTS).map(safeRunningCheckpoint).filter(Boolean),
         error: String(item.error || ""),
         runLog: freshness === "fresh" ? String(item.runLog || "") : "[" + freshness + ": per-attempt log omitted]"
       };
@@ -2185,6 +2598,7 @@ var require_failure_technical_report = __commonJS({
       const model = session.model || {};
       return { value: {
         status: String(session.status),
+        inputIdentity: safeInputIdentity(session.inputIdentity),
         startedAt,
         finishedAt,
         platform: ["darwin", "win32", "linux"].includes(session.platform) ? session.platform : "unknown",
@@ -2274,6 +2688,18 @@ var require_failure_technical_report = __commonJS({
         text = JSON.stringify(finalObject);
       }
       if (bytes(text) > MAX_REPORT_TEXT_BYTES) {
+        const failure = safeTechnical.failure && typeof safeTechnical.failure === "object" ? safeTechnical.failure : null;
+        const compactFailure = {};
+        if (failure) {
+          if (/^[A-Za-z][A-Za-z0-9_]{0,48}$/.test(String(failure.name || ""))) compactFailure.name = String(failure.name);
+          if (/^[A-Za-z0-9_-]{1,64}$/.test(String(failure.code || ""))) compactFailure.code = String(failure.code);
+          if (Number.isSafeInteger(failure.status) && failure.status >= 0) compactFailure.status = failure.status;
+          if (typeof failure.message === "string") {
+            const compactMessage = truncateUtf8(failure.message, 2048);
+            if (compactMessage.text) compactFailure.message = compactMessage.text;
+            if (failure.messageTruncated === true || compactMessage.truncated) compactFailure.messageTruncated = true;
+          }
+        }
         const fallback = {
           schemaVersion: 1,
           kind: "sync_failure",
@@ -2284,9 +2710,56 @@ var require_failure_technical_report = __commonJS({
           stage: safeTechnical.stage,
           retryCount: safeTechnical.retryCount,
           failureCode: safeTechnical.failure && safeTechnical.failure.code,
+          ...Object.keys(compactFailure).length ? { failure: compactFailure } : {},
           asrAttemptCount: safeTechnical.asr && Array.isArray(safeTechnical.asr.attempts) ? safeTechnical.asr.attempts.length : 0,
           omittedTechnicalEvidence: true
         };
+        if (safeTechnical.asr && typeof safeTechnical.asr === "object") {
+          const compactAsr = {};
+          if (safeTechnical.asr.inputIdentity && typeof safeTechnical.asr.inputIdentity === "object") {
+            compactAsr.inputIdentity = safeTechnical.asr.inputIdentity;
+          }
+          if (Array.isArray(safeTechnical.asr.attempts)) {
+            compactAsr.attempts = safeTechnical.asr.attempts.slice(-16).map((attempt) => {
+              const compactAttempt = {};
+              for (const key of [
+                "attempt",
+                "status",
+                "stage",
+                "exitCode",
+                "signal",
+                "nativeExitCode",
+                "nativeExitAssociation",
+                "timeoutCode",
+                "timeoutCleanupStatus",
+                "peakRssKiB"
+              ]) {
+                if (attempt[key] !== void 0 && attempt[key] !== "") compactAttempt[key] = attempt[key];
+              }
+              const checkpoints = Array.isArray(attempt.runningCheckpoints) ? attempt.runningCheckpoints : [];
+              compactAttempt.runningCheckpointCount = checkpoints.length;
+              const lastCheckpoint = checkpoints.at(-1);
+              if (lastCheckpoint && typeof lastCheckpoint === "object") {
+                compactAttempt.lastRunningCheckpoint = {
+                  capturedAt: lastCheckpoint.capturedAt,
+                  pid: lastCheckpoint.pid,
+                  pidSource: lastCheckpoint.pidSource,
+                  processState: lastCheckpoint.processState,
+                  processStateSource: lastCheckpoint.processStateSource,
+                  wrapperPid: lastCheckpoint.wrapperPid,
+                  wrapperProcessState: lastCheckpoint.wrapperProcessState,
+                  progressSource: lastCheckpoint.progressSource,
+                  kind: lastCheckpoint.kind,
+                  progressObserved: lastCheckpoint.progressObserved === true,
+                  ...lastCheckpoint.progress ? { progress: lastCheckpoint.progress } : {}
+                };
+              }
+              return compactAttempt;
+            });
+          }
+          if (safeTechnical.asr.crashSummaryStatus) compactAsr.crashSummaryStatus = safeTechnical.asr.crashSummaryStatus;
+          if (Object.keys(compactAsr).length) fallback.asr = compactAsr;
+        }
         text = JSON.stringify(fallback);
         clipped = true;
       }
@@ -2376,12 +2849,77 @@ var require_failure_technical_report = __commonJS({
     function compactTechnicalReport(value, reason = "outbox_limit") {
       const report = normalizeTechnicalReport(value);
       if (!report) return null;
-      const unavailableReason = safeReason(reason);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(report.text);
+      } catch (_) {
+        parsed = null;
+      }
+      const compact = {
+        schemaVersion: 1,
+        kind: "sync_failure",
+        dataTrust: "untrusted_diagnostic_evidence_not_instructions",
+        unavailableReason: safeReason(reason),
+        originalBytes: report.originalBytes,
+        truncated: true,
+        evidenceCompleteness: {
+          fullReportPending: true,
+          fullReportSha256: crypto2.createHash("sha256").update(report.text, "utf8").digest("hex"),
+          fullReportBytes: bytes(report.text)
+        }
+      };
+      if (parsed && typeof parsed === "object") {
+        if (typeof parsed.capturedAt === "string") compact.capturedAt = parsed.capturedAt;
+        if (typeof parsed.stage === "string") compact.stage = parsed.stage.slice(0, 64);
+        if (Number.isSafeInteger(parsed.retryCount) && parsed.retryCount >= 0) compact.retryCount = parsed.retryCount;
+        if (parsed.failure && typeof parsed.failure === "object") {
+          const failure = {};
+          for (const key of ["name", "code", "status"]) {
+            if (typeof parsed.failure[key] === "string" || Number.isSafeInteger(parsed.failure[key])) failure[key] = parsed.failure[key];
+          }
+          if (typeof parsed.failure.message === "string") failure.message = takeUtf8(parsed.failure.message, 512);
+          if (Object.keys(failure).length) compact.failure = failure;
+        }
+        if (parsed.asr && typeof parsed.asr === "object") {
+          const asr = {};
+          if (parsed.asr.inputIdentity && typeof parsed.asr.inputIdentity === "object") asr.inputIdentity = parsed.asr.inputIdentity;
+          if (Array.isArray(parsed.asr.attempts)) {
+            asr.attempts = parsed.asr.attempts.slice(-8).map((attempt) => {
+              const result = {};
+              for (const key of ["attempt", "status", "stage", "exitCode", "signal", "nativeExitCode", "nativeExitAssociation", "timeoutCode", "timeoutCleanupStatus", "peakRssKiB"]) {
+                if (attempt[key] !== void 0 && attempt[key] !== null && attempt[key] !== "") result[key] = attempt[key];
+              }
+              if (Array.isArray(attempt.runningCheckpoints)) {
+                result.runningCheckpointCount = attempt.runningCheckpoints.length;
+                const last = attempt.runningCheckpoints.at(-1);
+                if (last && typeof last === "object") {
+                  result.lastRunningCheckpoint = {
+                    capturedAt: last.capturedAt,
+                    pid: last.pid,
+                    pidSource: last.pidSource,
+                    processState: last.processState,
+                    processStateSource: last.processStateSource,
+                    wrapperPid: last.wrapperPid,
+                    wrapperProcessState: last.wrapperProcessState,
+                    progressSource: last.progressSource,
+                    kind: last.kind,
+                    progressObserved: last.progressObserved === true,
+                    ...last.progress ? { progress: last.progress } : {}
+                  };
+                }
+              }
+              return result;
+            });
+          }
+          if (parsed.asr.crashSummaryStatus) asr.crashSummaryStatus = parsed.asr.crashSummaryStatus;
+          if (Object.keys(asr).length) compact.asr = asr;
+        }
+      }
       return {
         ...report,
-        text: JSON.stringify({ schemaVersion: 1, kind: "sync_failure", unavailableReason, originalBytes: report.originalBytes }),
+        text: JSON.stringify(compact),
         truncated: true,
-        unavailableReason
+        unavailableReason: safeReason(reason)
       };
     }
     __name(compactTechnicalReport, "compactTechnicalReport");
@@ -2403,7 +2941,8 @@ var require_sync_diagnostic_reporter = __commonJS({
   "src/sync-diagnostic-reporter.js"(exports2, module2) {
     "use strict";
     var crypto2 = require("node:crypto");
-    var { normalizeTechnicalReport, compactTechnicalReport, unavailableTechnicalReport: unavailableTechnicalReport2, bytes } = require_failure_technical_report();
+    var zlib = require("node:zlib");
+    var { normalizeTechnicalReport, compactTechnicalReport, unavailableTechnicalReport: unavailableTechnicalReport2, bytes, UNAVAILABLE_REASONS } = require_failure_technical_report();
     var DIAGNOSTIC_ENDPOINT = "/diagnostics/events";
     var MAX_OUTBOX_ITEMS = 100;
     var OUTBOX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
@@ -2696,6 +3235,51 @@ var require_sync_diagnostic_reporter = __commonJS({
       }, {});
     }
     __name(normalizeDiagnosticEvent, "normalizeDiagnosticEvent");
+    function encodeFullTechnicalReport(value) {
+      const report = normalizeTechnicalReport(value);
+      if (!report) return null;
+      try {
+        const buffer = zlib.gzipSync(Buffer.from(report.text, "utf8"));
+        return {
+          schemaVersion: report.schemaVersion,
+          kind: report.kind,
+          encoding: "gzip+base64",
+          data: buffer.toString("base64"),
+          sha256: crypto2.createHash("sha256").update(report.text, "utf8").digest("hex"),
+          capturedAt: report.capturedAt,
+          truncated: report.truncated === true,
+          originalBytes: report.originalBytes,
+          ...report.unavailableReason ? { unavailableReason: report.unavailableReason } : {}
+        };
+      } catch (_) {
+        return null;
+      }
+    }
+    __name(encodeFullTechnicalReport, "encodeFullTechnicalReport");
+    function decodeFullTechnicalReport(value) {
+      if (!value || typeof value !== "object" || value.encoding !== "gzip+base64" || typeof value.data !== "string") return null;
+      if (value.data.length > 2 * 1024 * 1024 || !/^[A-Za-z0-9+/=]+$/.test(value.data)) return null;
+      try {
+        const text = zlib.gunzipSync(Buffer.from(value.data, "base64")).toString("utf8");
+        const originalBytesValue = Number(value.originalBytes);
+        const originalBytes = Number.isSafeInteger(originalBytesValue) && originalBytesValue >= 0 ? originalBytesValue : bytes(text);
+        const report = normalizeTechnicalReport({
+          schemaVersion: 1,
+          kind: "sync_failure",
+          capturedAt: typeof value.capturedAt === "string" ? value.capturedAt : (/* @__PURE__ */ new Date()).toISOString(),
+          text,
+          truncated: value.truncated === true,
+          originalBytes,
+          ...UNAVAILABLE_REASONS.has(value.unavailableReason) ? { unavailableReason: value.unavailableReason } : {}
+        });
+        if (!report) return null;
+        if (/^[a-f0-9]{64}$/i.test(String(value.sha256 || "")) && crypto2.createHash("sha256").update(report.text, "utf8").digest("hex") !== String(value.sha256).toLowerCase()) return null;
+        return report;
+      } catch (_) {
+        return null;
+      }
+    }
+    __name(decodeFullTechnicalReport, "decodeFullTechnicalReport");
     function normalizeOutbox2(value, { now = Date.now(), maxItems = MAX_OUTBOX_ITEMS } = {}) {
       const current = Number(now) || Date.now();
       const byId = /* @__PURE__ */ new Map();
@@ -2715,8 +3299,10 @@ var require_sync_diagnostic_reporter = __commonJS({
           current,
           Number.isFinite(Number(item.nextAttemptAt)) ? Number(item.nextAttemptAt) : current
         );
+        const fullEvidence = decodeFullTechnicalReport(item.fullEvidence) || normalizeTechnicalReport(item.fullTechnicalReport);
         const normalized = {
           event,
+          ...fullEvidence ? { fullEvidence: encodeFullTechnicalReport(fullEvidence) } : {},
           bindingFingerprint,
           createdAt,
           nextAttemptAt,
@@ -2732,9 +3318,20 @@ var require_sync_diagnostic_reporter = __commonJS({
       }).slice(-Math.max(1, asFiniteInteger(maxItems, MAX_OUTBOX_ITEMS, { min: 1, max: 1e3 })));
       const size = /* @__PURE__ */ __name(() => bytes(JSON.stringify(result)), "size");
       while (size() > MAX_OUTBOX_BYTES) {
-        const candidate = result.find((item) => item.event.technicalReport && item.event.technicalReport.text.length > 200);
+        const candidate = result.find((item) => {
+          const report = item.event.technicalReport;
+          return report && report.text.length > 200 && !report.text.includes('"fullReportPending":true');
+        });
         if (!candidate) break;
-        candidate.event.technicalReport = compactTechnicalReport(candidate.event.technicalReport, "outbox_limit");
+        const fullReport = decodeFullTechnicalReport(candidate.fullEvidence) || candidate.event.technicalReport;
+        const compacted = compactTechnicalReport(fullReport, "outbox_limit");
+        if (!compacted) break;
+        candidate.fullEvidence = candidate.fullEvidence || encodeFullTechnicalReport(fullReport);
+        candidate.event.technicalReport = compacted;
+      }
+      while (size() > MAX_OUTBOX_BYTES && result.length > 1) {
+        const withoutFullEvidence = result.findIndex((item) => !item.fullEvidence);
+        result.splice(withoutFullEvidence >= 0 ? withoutFullEvidence : 0, 1);
       }
       return result;
     }
@@ -2810,7 +3407,7 @@ var require_sync_diagnostic_reporter = __commonJS({
       let disposed = false;
       const initialOutbox = Array.isArray(options.initialOutbox) ? options.initialOutbox : [];
       let outbox = normalizeOutbox2(initialOutbox, { now: now(), maxItems });
-      const initialOutboxNeedsPersistence = outbox.length !== initialOutbox.length;
+      const initialOutboxNeedsPersistence = JSON.stringify(outbox) !== JSON.stringify(initialOutbox);
       let timer = null;
       let flushPromise = null;
       let persistPromise = Promise.resolve();
@@ -2827,7 +3424,8 @@ var require_sync_diagnostic_reporter = __commonJS({
           bindingFingerprint: entry.bindingFingerprint,
           createdAt: entry.createdAt,
           nextAttemptAt: entry.nextAttemptAt,
-          uploadAttempts: entry.uploadAttempts
+          uploadAttempts: entry.uploadAttempts,
+          ...entry.fullEvidence ? { fullEvidence: JSON.parse(JSON.stringify(entry.fullEvidence)) } : {}
         }));
         persistPromise = persistPromise.catch(() => {
         }).then(() => saveOutbox(snapshot)).catch(() => {
@@ -2916,22 +3514,22 @@ var require_sync_diagnostic_reporter = __commonJS({
             const currentTime = Number(now()) || Date.now();
             const eligible = currentOutbox().filter((entry) => available.has(entry.bindingFingerprint) && entry.nextAttemptAt <= currentTime);
             const entries = [];
+            const uploadEvents = [];
             let batchBytes = 13;
             for (const entry of eligible.filter((item) => item.bindingFingerprint === bindingFingerprint)) {
               if (entries.length >= MAX_BATCH_SIZE) break;
-              let eventBytes = bytes(JSON.stringify(entry.event));
-              if (!entries.length && batchBytes + eventBytes > MAX_BATCH_BYTES && entry.event.technicalReport) {
-                entry.event.technicalReport = compactTechnicalReport(entry.event.technicalReport, "outbox_limit");
-                eventBytes = bytes(JSON.stringify(entry.event));
-              }
+              const fullReport = decodeFullTechnicalReport(entry.fullEvidence);
+              const uploadEvent = fullReport ? { ...entry.event, technicalReport: fullReport } : { ...entry.event };
+              const eventBytes = bytes(JSON.stringify(uploadEvent));
               if (batchBytes + eventBytes + (entries.length ? 1 : 0) > MAX_BATCH_BYTES) break;
               entries.push(entry);
+              uploadEvents.push(uploadEvent);
               batchBytes += eventBytes + (entries.length > 1 ? 1 : 0);
             }
             if (!entries.length) continue;
             try {
               const response = await withTimeout(
-                postEvents(entries.map((entry) => ({ ...entry.event })), bindingValue),
+                postEvents(uploadEvents, bindingValue),
                 requestTimeoutMs,
                 setTimeoutImpl,
                 clearTimeoutImpl
@@ -3008,7 +3606,8 @@ var require_sync_diagnostic_reporter = __commonJS({
           bindingFingerprint: entry.bindingFingerprint,
           createdAt: entry.createdAt,
           nextAttemptAt: entry.nextAttemptAt,
-          uploadAttempts: entry.uploadAttempts
+          uploadAttempts: entry.uploadAttempts,
+          fullEvidencePending: Boolean(entry.fullEvidence)
         })), "getOutbox"),
         getPendingCount: /* @__PURE__ */ __name(() => currentOutbox().length, "getPendingCount"),
         whenIdle: /* @__PURE__ */ __name(() => persistPromise, "whenIdle"),
@@ -15347,6 +15946,9 @@ var require_douyin_media_utils = __commonJS({
         ['id', 'href', 'src', 'data-aweme-id', 'data-item-id', 'data-id'].forEach((name) => {
           try { addIdentityText(current.getAttribute && current.getAttribute(name)); } catch (error) {}
         });
+        // The closest identity-bearing node owns this player; ancestors may
+        // contain unrelated feed items.
+        if (ids.length) break;
         current = current.parentElement;
       }
       return ids;
@@ -15387,10 +15989,21 @@ var require_douyin_media_utils = __commonJS({
         const finalRouteId = extractDouyinAwemeId2(finalUrl);
         if (targetId && finalRouteId && finalRouteId !== targetId) return [];
         const exactPayloadMedia = normalizeCaptured([debuggerMediaUrls]);
-        if (exactPayloadMedia.length) return exactPayloadMedia;
+        if (exactPayloadMedia.length && targetId) return exactPayloadMedia;
+        const canonicalId = isTrustedDouyinPageUrl2(canonicalUrl) ? extractDouyinAwemeId2(canonicalUrl) : "";
+        const routeId = isTrustedDouyinPageUrl2(finalUrl) ? finalRouteId : "";
+        if (!targetId && routeId && canonicalId && routeId !== canonicalId) return [];
+        const boundIdentityId = targetId || routeId || canonicalId;
+        if (!boundIdentityId) return [];
         const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
-        if (candidates.length) return selectPrimaryDouyinDomMediaUrls2(candidates, targetId);
-        return normalizeCaptured([primaryDomMediaUrls]);
+        const identityBoundCandidates = candidates.filter((candidate) => {
+          const identityIds = Array.isArray(candidate && candidate.identityIds) ? candidate.identityIds.map((value) => String(value || "").trim()).filter(Boolean) : [];
+          return identityIds.length > 0 && identityIds.every((identityId) => identityId === boundIdentityId);
+        });
+        if (identityBoundCandidates.length) {
+          return selectPrimaryDouyinDomMediaUrls2(identityBoundCandidates, boundIdentityId);
+        }
+        return [];
       }
       __name(selectIdentityBoundDouyinBrowserMedia2, "selectIdentityBoundDouyinBrowserMedia");
       function normalizeDouyinTargetUrl2(originalUrl, resolvedUrl = "") {
@@ -15431,7 +16044,7 @@ var require_douyin_media_utils = __commonJS({
           requests.push({
             awemeId: target.awemeId,
             url: candidate,
-            strictDouyinTarget: false,
+            strictDouyinTarget: Boolean(target.awemeId),
             inputKind
           });
         }, "addCurrentPage");
@@ -15808,7 +16421,7 @@ var require_douyin_media_utils = __commonJS({
         });
         if (uniqueCandidates.size === 1) {
           const candidate = Array.from(uniqueCandidates.values())[0];
-          return { exactUrls: [], primaryUrls: candidate.urls, detail: candidate.detail, identityOutcome: "unverified-primary-player" };
+          return { exactUrls: [], primaryUrls: [], detail: candidate.detail, identityOutcome: "unverified-primary-player" };
         }
         return { exactUrls: [], primaryUrls: [], detail: exactDetail, identityOutcome: "" };
       }
@@ -15835,7 +16448,7 @@ var require_douyin_media_utils = __commonJS({
         const primaryCandidate = primaryCandidates.size === 1 ? Array.from(primaryCandidates.values())[0] : null;
         return {
           exactUrls: sortedExactUrls,
-          primaryUrls: sortedExactUrls.length || !primaryCandidate ? [] : primaryCandidate.urls,
+          primaryUrls: [],
           detail: exactDetail || primaryCandidate && primaryCandidate.detail || null,
           identityOutcome: sortedExactUrls.length ? "target-id-matched" : primaryCandidate ? "unverified-primary-player" : ""
         };
@@ -16448,6 +17061,7 @@ var asrRecovery = require_asr_recovery_utils();
 var asrTimeoutProcessGroup = require_asr_timeout_process_group();
 var macLegacyAsrCompat = require_mac_legacy_asr_compat();
 var { buildFailureTechnicalReport, unavailableTechnicalReport } = require_failure_technical_report();
+var asrDiagnosticEvidence = require_asr_diagnostic_evidence();
 var { formatCompactSyncDiagnostic } = require_compact_sync_diagnostic();
 var { runLocalAsrWithQualityRetry, shouldRetryLocalAsrQualityFailure } = require_local_asr_quality_retry();
 var { inspectChannelsVadAssets, runChannelsQualityRecovery } = require_channels_asr_quality_recovery();
@@ -16722,7 +17336,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.182";
+var PLUGIN_RUNTIME_VERSION = "1.3.183";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -27891,7 +28505,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   };
   const capturedRequests = [];
   const captureDouyinState = isDouyinUrl(url);
-  const targetDouyinAwemeId = isDouyinUrl(url) ? extractDouyinAwemeId(url) || (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || "")) ? String(options.targetDouyinAwemeId) : "") : "";
+  const targetDouyinAwemeId = isDouyinUrl(url) ? (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || "")) ? String(options.targetDouyinAwemeId) : "") || extractDouyinAwemeId(url) : "";
   const blockXiaohongshuCommentRequests = isXiaohongshuUrl(url) && options.includeComments === false;
   const browserSession = win.webContents && win.webContents.session || wechatSession;
   const installedWebRequestHandlers = [];
@@ -28091,7 +28705,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     if (captureDouyinState && targetDouyinAwemeId) {
       await douyinGuard.run(waitForBrowserTasksWithin(debuggerBodyTasks, 1500), "response-extraction");
       throwIfAborted(options.signal);
-      if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      if (debuggerMediaUrls.length) {
+        douyinGuard.emit({ identityOutcome: "target-id-matched", preciseMediaFound: true });
+        return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      }
     }
     if (captureDouyinState) {
       const challengeDetected = await douyinGuard.run(Promise.race([
@@ -28102,7 +28719,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         verifiedDouyinMedia.then(() => false)
       ]), "page-validation");
       throwIfAborted(options.signal);
-      if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      if (debuggerMediaUrls.length) {
+        douyinGuard.emit({ identityOutcome: "target-id-matched", preciseMediaFound: true });
+        return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      }
       if (challengeDetected) {
         const error = new Error("抖音当前会话需要安全验证");
         error.code = "DOUYIN_CHALLENGE";
@@ -28248,7 +28868,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       "xiaohongshu-media-extraction"
     ) : douyinGuard ? await douyinGuard.run(Promise.race([mediaExtractionTask, verifiedDouyinMedia.then(() => null)]), "media-extraction") : await mediaExtractionTask;
     throwIfAborted(options.signal);
-    if (captureDouyinState && debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
+    if (captureDouyinState && debuggerMediaUrls.length) {
+      douyinGuard.emit({ identityOutcome: "target-id-matched", preciseMediaFound: true });
+      return sortMediaUrlsForTranscription(debuggerMediaUrls);
+    }
     if (isXiaohongshuExtractionWindow) {
       recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
       appendXiaohongshuBrowserDiagnostic(options, {
@@ -28262,11 +28885,20 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     const bodiesReady = waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     await (douyinGuard ? douyinGuard.run(bodiesReady, "response-extraction") : bodiesReady);
     throwIfAborted(options.signal);
-    const paceStateResolution = captureDouyinState ? resolveDouyinMediaFromShareHtml(payload && payload.douyinPaceState, targetDouyinAwemeId) : { exactUrls: [], primaryUrls: [] };
-    if (paceStateResolution.exactUrls.length) return paceStateResolution.exactUrls;
-    if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
-    if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
-      return selectIdentityBoundDouyinBrowserMedia({
+    const loadedRouteId = isTrustedDouyinPageUrl(payload && payload.pageUrl) ? extractDouyinAwemeId(payload.pageUrl) : "";
+    const loadedCanonicalId = isTrustedDouyinPageUrl(payload && payload.canonicalUrl) ? extractDouyinAwemeId(payload.canonicalUrl) : "";
+    const snapshotTargetId = targetDouyinAwemeId || (loadedRouteId && loadedCanonicalId && loadedRouteId !== loadedCanonicalId ? "" : loadedRouteId || loadedCanonicalId);
+    const paceStateResolution = captureDouyinState ? resolveDouyinMediaFromShareHtml(payload && payload.douyinPaceState, snapshotTargetId) : { exactUrls: [], primaryUrls: [] };
+    if (captureDouyinState) {
+      if (paceStateResolution.exactUrls.length) {
+        douyinGuard == null ? void 0 : douyinGuard.emit({ identityOutcome: "target-id-matched", preciseMediaFound: true });
+        return paceStateResolution.exactUrls;
+      }
+      if (debuggerMediaUrls.length) {
+        douyinGuard == null ? void 0 : douyinGuard.emit({ identityOutcome: "target-id-matched", preciseMediaFound: true });
+        return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      }
+      const identityBoundMedia = selectIdentityBoundDouyinBrowserMedia({
         targetAwemeId: targetDouyinAwemeId,
         finalUrl: payload && payload.pageUrl,
         canonicalUrl: payload && payload.canonicalUrl,
@@ -28274,13 +28906,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         domMediaCandidates: payload && payload.domMediaCandidates,
         pageIdentityIds: payload && payload.pageIdentityIds
       });
+      if (identityBoundMedia.length) {
+        douyinGuard == null ? void 0 : douyinGuard.emit({ identityOutcome: "target-id-matched", preciseMediaFound: true });
+        return identityBoundMedia;
+      }
+      douyinGuard == null ? void 0 : douyinGuard.emit({ identityOutcome: "identity-unverified", preciseMediaFound: false });
+      return [];
     }
-    if (paceStateResolution.primaryUrls.length) return paceStateResolution.primaryUrls;
-    const primaryDomMediaUrls = selectPrimaryDouyinDomMediaUrls(
-      payload && payload.domMediaCandidates,
-      targetDouyinAwemeId
-    );
-    if (primaryDomMediaUrls.length) return primaryDomMediaUrls;
     return normalizeBrowserCapturedMediaUrls([
       capturedRequests,
       payload && Array.isArray(payload.urls) ? payload.urls : payload
@@ -30928,7 +31560,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (transportCode === "DOUYIN_CHALLENGE" || diagnosticCode === "DOUYIN_CHALLENGE" || browserCode === "DOUYIN_CHALLENGE" || diagnostic.challengeDetected === true || diagnosticStopReason === "douyin-challenge") {
       evidenceCodes.push("challenge_detected");
     }
-    if (transportCode === "TRANSCRIPTION_NO_SPEECH" || diagnosticCode === "TRANSCRIPTION_NO_SPEECH" || diagnostic.noSpeechEvidence === "non-speech-markers") {
+    const confirmedNoSpeechEvidence = diagnostic.noSpeechEvidence === "full-decode-and-vad-no-speech-segments" || error && error.noSpeechEvidence === "full-decode-and-vad-no-speech-segments";
+    if ((transportCode === "TRANSCRIPTION_NO_SPEECH" || diagnosticCode === "TRANSCRIPTION_NO_SPEECH") && confirmedNoSpeechEvidence) {
       evidenceCodes.push("asr_no_speech");
     }
     if (["DOUYIN_BROWSER_RENDERER_GONE", "ASR_PROCESS_CRASH", "WHISPER_NATIVE_CRASH"].includes(transportCode) || ["DOUYIN_BROWSER_RENDERER_GONE", "ASR_PROCESS_CRASH", "WHISPER_NATIVE_CRASH"].includes(diagnosticCode) || ["DOUYIN_BROWSER_RENDERER_GONE", "ASR_PROCESS_CRASH"].includes(browserCode) || diagnostic.processCrashed === true || [-1073740791, 3221226505].includes(Number(error && error.exitCode))) {
@@ -34661,7 +35294,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (this.douyinBrowserRetryAfter > Date.now()) {
       throw Object.assign(new Error("抖音网页解析刚发生异常，已暂停隐藏网页重试 60 秒；请复制诊断"), { code: "EXTRACTION_FAILED", browserCode: "DOUYIN_BROWSER_COOLDOWN" });
     }
-    const targetId = extractDouyinAwemeId(url) || (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || "")) ? String(options.targetDouyinAwemeId) : "");
+    const targetId = (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || "")) ? String(options.targetDouyinAwemeId) : "") || extractDouyinAwemeId(url);
     const targetIdState = options.targetIdState === "unknown" ? "unknown" : targetId ? "recognized" : "missing";
     const sourceKind = getDouyinDiagnosticUrlKind(options.sourceKind, options.sourceUrl || url);
     const resolvedKind = getDouyinDiagnosticUrlKind(options.resolvedKind, options.resolvedUrl || url);
@@ -34945,6 +35578,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       recordId: options.recordId || this.currentProcessingContext && this.currentProcessingContext.recordId || "",
       syncAttemptId: /^[A-Za-z0-9_-]{8,128}$/.test(options.syncAttemptId || this.currentProcessingContext && this.currentProcessingContext.attemptId || "") ? options.syncAttemptId || this.currentProcessingContext && this.currentProcessingContext.attemptId : "",
       diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || "") ? options.diagnosticAttemptId : "",
+      inputIdentity: asrDiagnosticEvidence.buildAsrInputIdentity({
+        recordId: options.recordId || this.currentProcessingContext && this.currentProcessingContext.recordId || "",
+        attemptId: options.syncAttemptId || this.currentProcessingContext && this.currentProcessingContext.attemptId || "",
+        sourceUrl: sanitizeSourceLink(options.sourceUrl || options.url || ""),
+        workId: options.workId || options.awemeId || options.targetDouyinAwemeId || "",
+        durationHintSeconds: options.durationSeconds
+      }),
       runtime,
       system: asrRecovery.systemIdentity(platform),
       model: asrRecovery.modelIdentity(installRoot, { managed }),
@@ -34957,8 +35597,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const progressTitle = options.title || "";
     const abortController = new AbortController();
     let ownedChild = null;
+    let activeAttemptNumber = null;
+    let activeAttemptCheckpoints = [];
+    let lastCheckpointPersistAt = 0;
     const attemptStartedAt = /* @__PURE__ */ new Map();
     const attemptLogBaseline = /* @__PURE__ */ new Map();
+    const attemptLogBaselineText = /* @__PURE__ */ new Map();
     const requestAbort = /* @__PURE__ */ __name((source = "unknown", attribution = null) => {
       if (!session.abort.requestedAt) {
         session.abort.requestedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -34999,16 +35643,69 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     this.setTranscriptionStopAvailable(true);
     let progressTimer = null;
     let lastProgressKey = "";
+    const getFreshAttemptLog = /* @__PURE__ */ __name((attemptNumber, currentLog) => {
+      const text = String(currentLog || "");
+      if (!text) return "";
+      const baseline = String(attemptLogBaselineText.get(attemptNumber) || "");
+      if (!baseline || /^\[unavailable:/.test(baseline)) return text;
+      return text.startsWith(baseline) ? text.slice(baseline.length) : text;
+    }, "getFreshAttemptLog");
     const emitLocalProgress = /* @__PURE__ */ __name((fallbackPercent = null) => {
-      if (typeof this.showSyncProgress !== "function") return;
-      const parsedProgress = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot));
+      const activeAttempt = activeAttemptNumber;
+      const runLog = activeAttempt === null ? "" : readLocalAsrRunLog(installRoot);
+      const logFreshness = activeAttempt === null ? "unavailable" : asrRecovery.diagnosticLogFreshness(
+        attemptLogBaseline.get(activeAttempt),
+        asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot))
+      );
+      const freshAttemptLog = logFreshness === "fresh" ? getFreshAttemptLog(activeAttempt, runLog) : "";
+      const parsedProgress = logFreshness === "fresh" ? parseLocalAsrProgressLog(freshAttemptLog) : null;
       const progress = parsedProgress || (fallbackPercent === null ? null : {
         stage: "",
         current: 0,
         total: 0,
         percent: fallbackPercent
       });
-      if (!progress) return;
+      if (activeAttempt !== null) {
+        const child = ownedChild;
+        const wrapperProcessState = !child ? "unknown" : (child.exitCode === null || child.exitCode === void 0) && (child.signalCode === null || child.signalCode === void 0) ? "running" : "exited";
+        const wrapperPid = child && Number.isSafeInteger(Number(child.pid)) && Number(child.pid) > 0 ? Number(child.pid) : null;
+        const hasFreshProgress = logFreshness === "fresh" && /^(?:progressStage|progressCurrent|progressTotal|progressPercent)=/m.test(freshAttemptLog);
+        const nativeProgress = hasFreshProgress ? parsedProgress : null;
+        const nativePidMatches = logFreshness === "fresh" ? [...freshAttemptLog.matchAll(/^progressPid=(\d+)$/gm)].map((match) => Number(match[1])).filter((pid) => pid > 0) : [];
+        const nativePid = nativePidMatches.length ? nativePidMatches[nativePidMatches.length - 1] : null;
+        const nativeEvidence = nativePid === null || logFreshness !== "fresh" ? null : asrRecovery.latestNativeExitForFinalStage(freshAttemptLog, (nativeProgress == null ? void 0 : nativeProgress.stage) || "unknown");
+        const nativeEvidenceMatches = Boolean(nativeEvidence && nativeEvidence.nativePid === nativePid);
+        const nativeProcessState = nativeEvidenceMatches && nativeEvidence.reason === "matched" ? "exited" : "unknown";
+        const rssMatches = logFreshness === "fresh" ? [...freshAttemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map((match) => Number(match[1])) : [];
+        const checkpoint = asrDiagnosticEvidence.buildRunningCheckpoint({
+          attempt: activeAttempt,
+          stage: (nativeProgress == null ? void 0 : nativeProgress.stage) || "transcribing",
+          pid: nativePid,
+          pidSource: nativePid === null ? "unknown" : "native_log",
+          processState: nativeProcessState,
+          processStateSource: nativePid === null ? "unknown" : "native_log",
+          progressSource: nativeProgress ? "native_log" : "unknown",
+          wrapperPid,
+          wrapperProcessState,
+          progress: nativeProgress,
+          previous: activeAttemptCheckpoints,
+          rssKiB: rssMatches.length ? Math.max(...rssMatches) : null
+        });
+        const beforeCheckpoints = activeAttemptCheckpoints;
+        activeAttemptCheckpoints = asrDiagnosticEvidence.appendRunningCheckpoint(activeAttemptCheckpoints, checkpoint);
+        if (activeAttemptCheckpoints !== beforeCheckpoints) {
+          session.activeAttempt = {
+            attempt: activeAttempt,
+            runningCheckpoints: activeAttemptCheckpoints.slice(-asrDiagnosticEvidence.MAX_CHECKPOINTS)
+          };
+          const checkpointTime = Date.parse(checkpoint.capturedAt) || Date.now();
+          if (checkpoint.progressObserved || checkpointTime - lastCheckpointPersistAt >= 5e3) {
+            lastCheckpointPersistAt = checkpointTime;
+            asrRecovery.saveSession(installRoot, session, this.settings);
+          }
+        }
+      }
+      if (!progress || typeof this.showSyncProgress !== "function") return;
       const key = buildLocalAsrProgressKey(progress);
       if (key === lastProgressKey) return;
       lastProgressKey = key;
@@ -35058,6 +35755,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }, "onProgress")
       });
       throwIfAborted(abortController.signal);
+      session.inputIdentity.media = await asrDiagnosticEvidence.captureMediaIdentityAsync(inputPath, {
+        durationHintSeconds: options.durationSeconds
+      });
+      asrRecovery.saveSession(installRoot, session, this.settings);
       channelsStage = "transcribe";
       outputPath = `${inputPath}.txt`;
       const quote = /* @__PURE__ */ __name((value) => `"${String(value).replace(/"/g, '\\"')}"`, "quote");
@@ -35068,7 +35769,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         signal: abortController.signal,
         cpuPreferred,
         onAttempt: /* @__PURE__ */ __name(({ attempt, cpu: cpu2, status, error }) => {
-          var _a2;
           const attemptNumber = attemptOffset + attempt;
           const observedAt = (/* @__PURE__ */ new Date()).toISOString();
           if (abortController.signal.aborted) {
@@ -35083,13 +35783,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           const freshnessSnapshot = asrRecovery.snapshotDiagnosticLog(logPath);
           const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attemptNumber), freshnessSnapshot);
           const attemptLog = logFreshness === "fresh" ? asrRecovery.readDiagnosticLog(logPath) : "";
-          const observedStage = status === "success" ? "completed" : logFreshness === "fresh" ? (error == null ? void 0 : error.asrStage) || ((_a2 = parseLocalAsrProgressLog(attemptLog)) == null ? void 0 : _a2.stage) || "unknown" : "unknown";
+          const freshAttemptLog = logFreshness === "fresh" ? getFreshAttemptLog(attemptNumber, attemptLog) : "";
+          const attemptProgress = logFreshness === "fresh" ? parseLocalAsrProgressLog(freshAttemptLog) : null;
+          const measuredDuration = logFreshness === "fresh" ? asrDiagnosticEvidence.readMeasuredDurationFromLog(freshAttemptLog) : null;
+          if (measuredDuration !== null && session.inputIdentity && session.inputIdentity.media) {
+            session.inputIdentity.media.durationSeconds = measuredDuration;
+            session.inputIdentity.media.durationStatus = "measured_log";
+            delete session.inputIdentity.media.durationReason;
+          }
+          const observedStage = status === "success" ? "completed" : logFreshness === "fresh" ? (error == null ? void 0 : error.asrStage) || (attemptProgress == null ? void 0 : attemptProgress.stage) || "unknown" : "unknown";
           if (abortController.signal.aborted && error) {
             session.abort.nativeCrash = logFreshness === "fresh" && observedStage !== "unknown" ? asrRecovery.isMacNativeCrash(error) : null;
             session.abort.nativeCrashEvidence = logFreshness === "fresh" ? observedStage : "unknown_stale_or_unavailable_log";
           }
-          const nativeExitEvidence = asrRecovery.latestNativeExitForFinalStage(attemptLog, observedStage === "completed" ? "unknown" : observedStage);
-          const nativePidList = [...new Set([...attemptLog.matchAll(/^progressPid=(\d+)$/gm)].map((m) => Number(m[1])).filter((pid) => pid > 0))];
+          const nativeExitCandidate = asrRecovery.latestNativeExitForFinalStage(freshAttemptLog, observedStage === "completed" ? "unknown" : observedStage);
+          const nativePidList = [...new Set([...freshAttemptLog.matchAll(/^progressPid=(\d+)$/gm)].map((m) => Number(m[1])).filter((pid) => pid > 0))];
+          const nativeExitEvidence = nativePidList.includes(nativeExitCandidate.nativePid) ? nativeExitCandidate : { nativeExitCode: null, nativePid: null, stage: "", reason: "no_matched_native_exit" };
           session.attempts.push({
             attempt: attemptNumber,
             cpu: cpu2,
@@ -35112,18 +35821,28 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             logSnapshotAt: observedAt,
             error: (error == null ? void 0 : error.message) || "",
             nativePids: nativePidList,
-            peakRssKiB: Math.max(0, ...[...attemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map((m) => Number(m[1]))) || null,
+            peakRssKiB: Math.max(0, ...[...freshAttemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map((m) => Number(m[1]))) || null,
+            runningCheckpoints: activeAttemptCheckpoints.slice(-asrDiagnosticEvidence.MAX_CHECKPOINTS),
             runLog: logFreshness === "fresh" ? asrRecovery.diagnosticRedact(attemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`,
             freeMemoryBytesAfter: os.freemem()
           });
+          session.activeAttempt = null;
+          activeAttemptNumber = null;
+          activeAttemptCheckpoints = [];
           asrRecovery.saveSession(installRoot, session, this.settings);
         }, "onAttempt"),
         execute: /* @__PURE__ */ __name(({ cpu: cpu2, attempt }) => new Promise((resolve, reject) => {
           var _a2;
           const attemptNumber = attemptOffset + attempt;
+          activeAttemptNumber = attemptNumber;
+          activeAttemptCheckpoints = [];
+          lastCheckpointPersistAt = 0;
+          session.activeAttempt = { attempt: attemptNumber, runningCheckpoints: [] };
           throwIfAborted(abortController.signal);
           attemptStartedAt.set(attemptNumber, (/* @__PURE__ */ new Date()).toISOString());
-          attemptLogBaseline.set(attemptNumber, asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
+          const attemptLogPath = getLocalAsrRunLogPath(installRoot);
+          attemptLogBaseline.set(attemptNumber, asrRecovery.snapshotDiagnosticLog(attemptLogPath));
+          attemptLogBaselineText.set(attemptNumber, asrRecovery.readDiagnosticLog(attemptLogPath));
           if (attempt > 1) {
             new Notice("本地转写引擎崩溃，正在用 CPU 兼容模式重试一次。", 6e3);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
@@ -35153,8 +35872,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 wrapped.cleanupStatus = ["group_cleanup_attempted", "direct_child_fallback", "process_already_exited", "failed"].includes(error.cleanupStatus) ? error.cleanupStatus : "unknown";
                 wrapped.cleanupError = /^[A-Za-z0-9_.-]{1,64}$/.test(error.cleanupError || "") ? error.cleanupError : "";
               }
-              const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attempt), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
-              wrapped.asrStage = logFreshness === "fresh" ? ((_a3 = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))) == null ? void 0 : _a3.stage) || "unknown" : "unknown";
+              const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attemptNumber), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
+              const wrappedLog = logFreshness === "fresh" ? getFreshAttemptLog(attemptNumber, readLocalAsrRunLog(installRoot)) : "";
+              wrapped.asrStage = logFreshness === "fresh" ? ((_a3 = parseLocalAsrProgressLog(wrappedLog)) == null ? void 0 : _a3.stage) || "" : "";
               reject(wrapped);
               return;
             }
@@ -36452,6 +37172,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             title: metadata.title || "",
             source: source || "media-url",
             sourceUrl: url,
+            durationSeconds: Number(candidate.durationSeconds || metadata.durationSeconds || metadata.duration || 0) || null,
             binding,
             recordId: getRecordId(record),
             diagnosticAttemptId: (mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser" ? mediaDiagnosticTrace.attemptId : "",
@@ -37967,22 +38688,36 @@ ${finalized.markdown}
                     if (["target-id-missing", "api-absent", "api-unsupported", "unknown"].includes(event.debuggerReason)) {
                       douyinDebuggerReason = event.debuggerReason;
                     }
+                    if (["target-id-matched", "identity-unverified", "target-id-mismatch", "unverified-primary-player"].includes(event.identityOutcome)) {
+                      browserStage.identityOutcome = event.identityOutcome;
+                    }
+                    if (typeof event.preciseMediaFound === "boolean") {
+                      browserStage.preciseMediaFound = event.preciseMediaFound;
+                    }
                   }, "onDouyinBrowserDiagnostic")
                 });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
-                  mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
-                  mediaUrl = mediaUrls[0] || mediaUrl;
-                  hasUsableDouyinMedia = true;
-                  douyinSelectedStage = douyinSelectedStage || `${browserStage.stage}:${browserRequest.inputKind}`;
-                  browserStage.ok = true;
-                  browserStage.identityOutcome = "primary-player-fallback";
+                  const browserIdentityOutcome = browserStage.identityOutcome || "identity-unverified";
+                  browserStage.identityOutcome = browserIdentityOutcome;
+                  browserStage.preciseMediaFound = browserIdentityOutcome === "target-id-matched";
+                  if (browserIdentityOutcome === "target-id-matched") {
+                    mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
+                    mediaUrl = mediaUrls[0] || mediaUrl;
+                    hasPreciseDouyinMedia = true;
+                    hasUsableDouyinMedia = true;
+                    douyinSelectedStage = douyinSelectedStage || `${browserStage.stage}:${browserRequest.inputKind}`;
+                    browserStage.ok = true;
+                  } else {
+                    browserStage.mediaCount = 0;
+                    browserStage.rejectionReason = "identity-unverified";
+                  }
                 }
               } catch (browserError) {
                 browserStage.error = browserError;
                 if (isAbortError(browserError)) throw browserError;
               } finally {
-                if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? "transport-error" : "no-target-bound-media";
+                if (!browserStage.ok && !browserStage.rejectionReason) browserStage.rejectionReason = browserStage.error ? "transport-error" : "no-target-bound-media";
                 browserStage.durationMs = Date.now() - browserStage.startedAt;
                 delete browserStage.startedAt;
                 douyinResolutionStages.push(browserStage);
@@ -38058,7 +38793,7 @@ ${finalized.markdown}
                 localResolverStage.resolverVersion = String(localResolution && localResolution.resolverVersion || "unknown");
                 const localUrls = Array.isArray(localResolution && localResolution.mediaUrls) ? localResolution.mediaUrls : [];
                 localResolverStage.mediaCount = localUrls.length;
-                if (localUrls.length) {
+                if (localUrls.length && localResolution.identityOutcome === "target-id-matched") {
                   mediaUrls = sortMediaUrlsForTranscription([...localUrls, ...mediaUrls]);
                   mediaUrl = mediaUrls[0] || mediaUrl;
                   hasUsableDouyinMedia = true;
@@ -38075,7 +38810,7 @@ ${finalized.markdown}
                   douyinLocalResolverLoginRequired = Boolean(localResolution && localResolution.loginRequired);
                   douyinLocalResolverNotInstalled = Boolean(localResolution && localResolution.notInstalled);
                   localResolverStage.attempted = !douyinLocalResolverNotInstalled;
-                  localResolverStage.rejectionReason = douyinLocalResolverNotInstalled ? "not-installed" : douyinLocalResolverLoginRequired ? "login-required" : "resolver-no-media";
+                  localResolverStage.rejectionReason = douyinLocalResolverNotInstalled ? "not-installed" : douyinLocalResolverLoginRequired ? "login-required" : localUrls.length && localResolution.identityOutcome !== "target-id-matched" ? "identity-unverified" : "resolver-no-media";
                   if (localResolution && localResolution.error && !douyinLocalResolverNotInstalled) {
                     localResolverStage.error = Object.assign(new Error(localResolution.error), {
                       code: localResolution.code || (localResolution.loginRequired ? "DOUYIN_LOGIN_REQUIRED" : "DOUYIN_RESOLVER_FAILED"),

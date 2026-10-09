@@ -37,6 +37,13 @@ jobs:
           node tests/plugin-build-foundation.test.js
           node tests/plugin-component-cloudbase.test.js
           node tests/plugin-architecture-integration.test.js
+          node tests/plugin-asr-diagnostic-evidence.test.js
+          node tests/plugin-failure-technical-report.test.js
+          node tests/plugin-diagnostic-reporter.test.js
+          node tests/plugin-macos-asr-recovery.test.js
+          node tests/plugin-douyin-media.test.js
+          node tests/plugin-douyin-hidden-navigation.test.js
+          node tests/plugin-douyin-target-identity-followup.test.js
           node tests/plugin-cloud-transcription-response-utils.test.js
           node tests/plugin-document-text-extraction.test.js
           node tests/plugin-feishu-markdown-utils.test.js

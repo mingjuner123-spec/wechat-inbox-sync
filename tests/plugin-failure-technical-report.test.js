@@ -219,7 +219,7 @@ try {
   const mainText = fs.readFileSync(path.resolve(__dirname, '../obsidian-plugin/wechat-inbox-sync/src/main.js'), 'utf8');
   assert.ok(mainText.includes('technicalReport,'));
   assert.ok(mainText.includes('buildFailureTechnicalReport({'));
-  assert.ok(mainText.includes('latestNativeExitForFinalStage(attemptLog'));  const originalLoad = Module._load;
+  assert.ok(mainText.includes('latestNativeExitForFinalStage(freshAttemptLog'));  const originalLoad = Module._load;
   const originalExtensions = {};
   for (const ext of ['.ps1', '.sh', '.py']) { originalExtensions[ext] = Module._extensions[ext]; Module._extensions[ext] = (mod, file) => { mod.exports = fs.readFileSync(file, 'utf8'); }; }
   Module._load = function(request, ...args) {

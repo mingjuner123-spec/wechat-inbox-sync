@@ -101,6 +101,9 @@ function createDouyinMediaHelpers({
         ['id', 'href', 'src', 'data-aweme-id', 'data-item-id', 'data-id'].forEach((name) => {
           try { addIdentityText(current.getAttribute && current.getAttribute(name)); } catch (error) {}
         });
+        // The closest identity-bearing node owns this player; ancestors may
+        // contain unrelated feed items.
+        if (ids.length) break;
         current = current.parentElement;
       }
       return ids;
@@ -155,11 +158,33 @@ function createDouyinMediaHelpers({
     if (targetId && finalRouteId && finalRouteId !== targetId) return [];
 
     const exactPayloadMedia = normalizeCaptured([debuggerMediaUrls]);
-    if (exactPayloadMedia.length) return exactPayloadMedia;
+    if (exactPayloadMedia.length && targetId) return exactPayloadMedia;
+
+    // A DOM player is only useful when the page gives us an identity that can
+    // be joined to the requested work.  Playing/visible/large is not an
+    // identity signal: Douyin pages can keep recommendation players mounted
+    // beside the target player.  In particular, do not let a short-link page
+    // with no recognized id fall through to its first player.
+    const canonicalId = isTrustedDouyinPageUrl(canonicalUrl) ? extractDouyinAwemeId(canonicalUrl) : '';
+    const routeId = isTrustedDouyinPageUrl(finalUrl) ? finalRouteId : '';
+    // Page-wide IDs include recommendations and cannot bind a player.
+    if (!targetId && routeId && canonicalId && routeId !== canonicalId) return [];
+    const boundIdentityId = targetId || routeId || canonicalId;
+    if (!boundIdentityId) return [];
 
     const candidates = Array.isArray(domMediaCandidates) ? domMediaCandidates : [];
-    if (candidates.length) return selectPrimaryDouyinDomMediaUrls(candidates, targetId);
-    return normalizeCaptured([primaryDomMediaUrls]);
+    const identityBoundCandidates = candidates.filter((candidate) => {
+      const identityIds = Array.isArray(candidate && candidate.identityIds)
+        ? candidate.identityIds.map(value => String(value || '').trim()).filter(Boolean)
+        : [];
+      return identityIds.length > 0 && identityIds.every(identityId => identityId === boundIdentityId);
+    });
+    if (identityBoundCandidates.length) {
+      return selectPrimaryDouyinDomMediaUrls(identityBoundCandidates, boundIdentityId);
+    }
+    // primaryDomMediaUrls contains no identity metadata and therefore cannot
+    // be accepted as a target-bound result.
+    return [];
   }
 
   function normalizeDouyinTargetUrl(originalUrl, resolvedUrl = '') {
@@ -202,7 +227,7 @@ function createDouyinMediaHelpers({
       requests.push({
         awemeId: target.awemeId,
         url: candidate,
-        strictDouyinTarget: false,
+        strictDouyinTarget: Boolean(target.awemeId),
         inputKind,
       });
     };
@@ -570,7 +595,7 @@ function createDouyinMediaHelpers({
     });
     if (uniqueCandidates.size === 1) {
       const candidate = Array.from(uniqueCandidates.values())[0];
-      return { exactUrls: [], primaryUrls: candidate.urls, detail: candidate.detail, identityOutcome: 'unverified-primary-player' };
+      return { exactUrls: [], primaryUrls: [], detail: candidate.detail, identityOutcome: 'unverified-primary-player' };
     }
     return { exactUrls: [], primaryUrls: [], detail: exactDetail, identityOutcome: '' };
   }
@@ -597,7 +622,7 @@ function createDouyinMediaHelpers({
     const primaryCandidate = primaryCandidates.size === 1 ? Array.from(primaryCandidates.values())[0] : null;
     return {
       exactUrls: sortedExactUrls,
-      primaryUrls: sortedExactUrls.length || !primaryCandidate ? [] : primaryCandidate.urls,
+      primaryUrls: [],
       detail: exactDetail || (primaryCandidate && primaryCandidate.detail) || null,
       identityOutcome: sortedExactUrls.length ? 'target-id-matched' : (primaryCandidate ? 'unverified-primary-player' : ''),
     };

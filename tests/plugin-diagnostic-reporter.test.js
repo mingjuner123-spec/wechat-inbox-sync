@@ -9,6 +9,7 @@ const {
   createSyncDiagnosticReporter,
   getBindingFingerprint,
   normalizeDiagnosticEvent,
+  normalizeOutbox,
   sanitizeSourceLink,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/sync-diagnostic-reporter');
 
@@ -396,7 +397,7 @@ async function runPluginHookTest() {
   const controlledEvidenceCases = [
     [{ code: 'DOUYIN_CHALLENGE' }, 'challenge_detected'],
     [{ code: 'DOUYIN_NO_MEDIA' }, 'parser_rejected'],
-    [{ code: 'TRANSCRIPTION_NO_SPEECH' }, 'asr_no_speech'],
+    [{ code: 'TRANSCRIPTION_NO_SPEECH', diagnostic: { noSpeechEvidence: 'full-decode-and-vad-no-speech-segments' } }, 'asr_no_speech'],
     [{ code: 'DOUYIN_BROWSER_RENDERER_GONE' }, 'process_crashed'],
     [{ code: 'COMPONENT_CLIENT_UPGRADE_REQUIRED' }, 'upgrade_required'],
     [{ status: 403 }, 'http_403'],
@@ -413,6 +414,15 @@ async function runPluginHookTest() {
       error: controlledError,
       retryCount: 0,
     });
+  });
+  const unconfirmedNoSpeechError = new Error('no speech code without full decode evidence');
+  unconfirmedNoSpeechError.code = 'TRANSCRIPTION_NO_SPEECH';
+  directPlugin.queueSyncDiagnosticFailure({
+    recordId: 'record-evidence-no-speech-unconfirmed',
+    attemptId: 'attempt-evidence-no-speech-unconfirmed',
+    binding: bindingA,
+    error: unconfirmedNoSpeechError,
+    retryCount: 0,
   });
   const genericComponentError = new Error('component install failed');
   genericComponentError.code = 'LOCAL_COMPONENT_UNAVAILABLE';
@@ -433,9 +443,26 @@ async function runPluginHookTest() {
     assert.ok(event, `controlled evidence event ${index + 1} is posted`);
     assert.ok(event.evidenceCodes.includes(expectedEvidence), `controlled evidence maps to ${expectedEvidence}`);
   });
+  const unconfirmedNoSpeechEvent = directEvidenceEvents.find((candidate) => candidate.syncRecordId === 'record-evidence-no-speech-unconfirmed');
+  assert.ok(unconfirmedNoSpeechEvent, 'unconfirmed no-speech event is posted');
+  assert.strictEqual(unconfirmedNoSpeechEvent.evidenceCodes.includes('asr_no_speech'), false, 'error code alone cannot claim no speech');
   const genericComponentEvent = directEvidenceEvents.find((candidate) => candidate.syncRecordId === 'record-evidence-generic-component');
   assert.deepStrictEqual(genericComponentEvent.evidenceCodes, ['no_matching_evidence']);
   directReporter.dispose();
+
+  const raceFixtureNow = Date.now();
+  const expiredRaceEvent = makeEvent({
+    eventId: 'event-race-expired-0001',
+    occurredAt: new Date(raceFixtureNow - (8 * 24 * 60 * 60 * 1000)).toISOString(),
+  });
+  const expiredRaceOutbox = normalizeOutbox([{
+    event: expiredRaceEvent,
+    bindingFingerprint: getBindingFingerprint(bindingA),
+    createdAt: expiredRaceEvent.occurredAt,
+    nextAttemptAt: raceFixtureNow,
+    uploadAttempts: 0,
+  }], { now: raceFixtureNow });
+  assert.deepStrictEqual(expiredRaceOutbox, [], 'diagnostic outbox entries beyond the TTL are dropped');
 
   const racePlugin = new PluginClass();
   racePlugin.settings = PluginClass.__test.mergeSettings({
@@ -449,7 +476,10 @@ async function runPluginHookTest() {
     delayedWrites.push({ snapshot: JSON.parse(JSON.stringify(settings)), resolve });
   });
   const raceReporter = racePlugin.getSyncDiagnosticReporter();
-  raceReporter.enqueue(makeEvent({ eventId: 'event-race-0001' }), bindingA);
+  raceReporter.enqueue(makeEvent({
+    eventId: 'event-race-0001',
+    occurredAt: new Date(raceFixtureNow - 60 * 1000).toISOString(),
+  }), bindingA);
   raceReporter.dispose();
   const outboxWrite = raceReporter.whenIdle();
   for (let index = 0; index < 5; index += 1) await Promise.resolve();
@@ -494,6 +524,7 @@ async function runPluginHookTest() {
   assert.strictEqual(successSent.some((call) => /\/synced$/.test(call.path)), true, 'success waits for local write before completion ack');
   successReporter.dispose();
 
+  const cleanupCreatedAt = new Date(raceFixtureNow - (2 * 60 * 1000)).toISOString();
   const cleanupOutbox = [
     {
       event: makeEvent({
@@ -503,8 +534,8 @@ async function runPluginHookTest() {
         syncRecordId: successRecord._id,
       }),
       bindingFingerprint: getBindingFingerprint(bindingA),
-      createdAt: new Date(nowValue).toISOString(),
-      nextAttemptAt: nowValue,
+      createdAt: cleanupCreatedAt,
+      nextAttemptAt: raceFixtureNow,
       uploadAttempts: 0,
     },
     {
@@ -515,8 +546,8 @@ async function runPluginHookTest() {
         syncRecordId: successRecord._id,
       }),
       bindingFingerprint: getBindingFingerprint(bindingB),
-      createdAt: new Date(nowValue).toISOString(),
-      nextAttemptAt: nowValue,
+      createdAt: cleanupCreatedAt,
+      nextAttemptAt: raceFixtureNow,
       uploadAttempts: 0,
     },
     {
@@ -526,8 +557,8 @@ async function runPluginHookTest() {
         syncRecordId: 'record-hook-other',
       }),
       bindingFingerprint: getBindingFingerprint(bindingA),
-      createdAt: new Date(nowValue).toISOString(),
-      nextAttemptAt: nowValue,
+      createdAt: cleanupCreatedAt,
+      nextAttemptAt: raceFixtureNow,
       uploadAttempts: 0,
     },
   ];

@@ -6525,7 +6525,7 @@ assert.deepStrictEqual(
     finalUrl: 'https://www.douyin.com/video/7644566503081119019',
     primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/target-main-video/?mime_type=video_mp4'],
   }),
-  ['https://v11-weba.douyinvod.com/target-main-video/?mime_type=video_mp4'],
+  [], // A page URL cannot bind a player without per-player identity.
 );
 assert.deepStrictEqual(
   helpers.selectIdentityBoundDouyinBrowserMedia({
@@ -6551,7 +6551,7 @@ assert.deepStrictEqual(
     canonicalUrl: 'https://www.douyin.com/video/9999999999999999999',
     primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/conflicting-canonical-video/?mime_type=video_mp4'],
   }),
-  ['https://v11-weba.douyinvod.com/conflicting-canonical-video/?mime_type=video_mp4'],
+  [], // A page URL cannot bind a player without per-player identity.
 );
 assert.deepStrictEqual(
   helpers.selectIdentityBoundDouyinBrowserMedia({
@@ -6560,7 +6560,7 @@ assert.deepStrictEqual(
     canonicalUrl: 'https://www.douyin.com/video/7644566503081119019',
     primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/canonical-target-video/?mime_type=video_mp4'],
   }),
-  ['https://v11-weba.douyinvod.com/canonical-target-video/?mime_type=video_mp4'],
+  [], // A page URL cannot bind a player without per-player identity.
 );
 assert.deepStrictEqual(
   helpers.selectIdentityBoundDouyinBrowserMedia({
@@ -6568,7 +6568,7 @@ assert.deepStrictEqual(
     finalUrl: 'https://www.douyin.com/',
     primaryDomMediaUrls: ['https://v11-weba.douyinvod.com/unbound-video/?mime_type=video_mp4'],
   }),
-  ['https://v11-weba.douyinvod.com/unbound-video/?mime_type=video_mp4'],
+  [], // A page URL cannot bind a player without per-player identity.
 );
 assert.deepStrictEqual(
   helpers.selectIdentityBoundDouyinBrowserMedia({
@@ -8221,7 +8221,8 @@ async function runAsyncHydrationTests() {
     assert.strictEqual(awemeId, '7644238277092174409');
     return ['https://v11-weba.douyinvod.com/session-first/?mime_type=video_mp4'];
   };
-  sessionFirstPlugin.renderSocialMediaUrls = async () => {
+  sessionFirstPlugin.renderSocialMediaUrls = async (_url, options) => {
+    options.onDouyinBrowserDiagnostic?.({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
     sessionFirstRenderCalls += 1;
     return ['https://v11-weba.douyinvod.com/rendered-target/?mime_type=video_mp4'];
   };
@@ -8256,7 +8257,8 @@ async function runAsyncHydrationTests() {
   sessionFallbackPlugin.settings = { aiProvider: 'off' };
   let sessionFallbackRenderCalls = 0;
   sessionFallbackPlugin.fetchDouyinMediaUrlsWithSession = async () => [];
-  sessionFallbackPlugin.renderSocialMediaUrls = async () => {
+  sessionFallbackPlugin.renderSocialMediaUrls = async (_url, options) => {
+    options.onDouyinBrowserDiagnostic?.({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
     sessionFallbackRenderCalls += 1;
     return ['https://www.douyin.com/aweme/v1/play/?video_id=sessionfallback&ratio=720p'];
   };
@@ -8297,8 +8299,8 @@ async function runAsyncHydrationTests() {
     ['https://v11-weba.douyinvod.com/refreshed-target/?mime_type=video_mp4'],
   );
   assert.strictEqual(refreshIdentityRenderCalls, 1);
-  // Refresh fallback intentionally accepts the rendered page player when Douyin omits the work ID.
-  assert.strictEqual(refreshIdentityRenderOptions.strictDouyinTarget, false);
+  // Known-target refresh keeps the target identity requirement.
+  assert.strictEqual(refreshIdentityRenderOptions.strictDouyinTarget, true);
 
   const refreshWithoutIdentityPlugin = new PluginClass();
   let refreshWithoutIdentityRenderCalls = 0;
@@ -8314,9 +8316,10 @@ async function runAsyncHydrationTests() {
 
   const renderedDouyinPlugin = new PluginClass();
   renderedDouyinPlugin.settings = { aiProvider: 'off' };
-  renderedDouyinPlugin.renderSocialMediaUrl = async (pageUrl) => {
+  renderedDouyinPlugin.renderSocialMediaUrls = async (pageUrl, options) => {
+    options.onDouyinBrowserDiagnostic?.({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
     assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
-    return 'https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000rendered&ratio=720p&line=0';
+    return ['https://www.douyin.com/aweme/v1/play/?video_id=v0200fg10000rendered&ratio=720p&line=0'];
   };
   requestUrlMock = async ({ url }) => {
     if (url === 'https://www.douyin.com/video/7644566503081119019') {
