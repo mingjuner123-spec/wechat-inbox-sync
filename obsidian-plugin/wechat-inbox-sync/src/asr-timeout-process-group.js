@@ -163,12 +163,16 @@ function execWithAsrTimeout(command, options, callback, {
   let settled = false;
   let timeoutStarted = false;
   let timer = null;
+  let startupTimer = null;
+  const startupGuard = options && options.startupGuard;
 
   const finish = (error, stdout, stderr) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
     timer = null;
+    if (startupTimer) clearInterval(startupTimer);
+    startupTimer = null;
     callback(error, stdout, stderr);
   };
 
@@ -176,6 +180,7 @@ function execWithAsrTimeout(command, options, callback, {
     ...options,
     timeout: ownsDetachedGroup ? 0 : timeoutMs,
   };
+  delete execOptions.startupGuard;
   const onExecComplete = (error, stdout, stderr) => {
     if (timeoutStarted) return;
     finish(error, stdout, stderr);
@@ -183,6 +188,48 @@ function execWithAsrTimeout(command, options, callback, {
   const child = ownsDetachedGroup && execImpl === childProcess.exec
     ? execDetachedShell(command, execOptions, onExecComplete, { spawnImpl, terminateGroup })
     : execImpl(command, execOptions, onExecComplete);
+
+  if (ownsDetachedGroup && startupGuard && startupGuard.enabled && !settled) {
+    startupTimer = setInterval(() => {
+      if (settled || timeoutStarted) return;
+      if (child && (child.killed || child.exitCode != null || child.signalCode != null)) {
+        clearInterval(startupTimer); startupTimer = null; return;
+      }
+      const timeoutError = startupGuard.poll();
+      if (!timeoutError) {
+        if (['permission_granted', 'disabled'].includes(startupGuard.evidence.status)) {
+          clearInterval(startupTimer); startupTimer = null;
+        }
+        return;
+      }
+      // poll won the atomic gate before cleanup: ASR cannot start afterwards.
+      timeoutStarted = true;
+      Promise.resolve().then(async () => {
+        try {
+          const exited = child && (child.exitCode != null || child.signalCode != null);
+          if (exited) {
+            timeoutError.cleanupStatus = 'process_already_exited';
+          } else if (await terminateGroup(child && child.pid)) {
+            timeoutError.cleanupStatus = 'group_cleanup_attempted';
+          } else {
+            const fallbackSent = Boolean(child && typeof child.kill === 'function' && child.kill('SIGKILL'));
+            timeoutError.cleanupStatus = fallbackSent ? 'direct_child_fallback' : 'process_already_exited';
+          }
+        } catch (error) {
+          timeoutError.cleanupError = safeErrorCode(error);
+          try {
+            const fallbackSent = Boolean(child && typeof child.kill === 'function' && child.kill('SIGKILL'));
+            timeoutError.cleanupStatus = fallbackSent ? 'direct_child_fallback' : 'failed';
+          } catch (fallbackError) {
+            timeoutError.cleanupStatus = 'failed';
+            timeoutError.cleanupError = safeErrorCode(fallbackError);
+          }
+        }
+        finish(timeoutError, '', '');
+      });
+    }, 500);
+    if (startupTimer.unref) startupTimer.unref();
+  }
 
   if (ownsDetachedGroup && timeoutMs > 0 && !settled) {
     timer = setTimeout(() => {
@@ -222,6 +269,8 @@ function execWithAsrTimeout(command, options, callback, {
     child.cancelAsrTimeout = () => {
       if (timer) clearTimeout(timer);
       timer = null;
+      if (startupTimer) clearInterval(startupTimer);
+      startupTimer = null;
     };
   }
   return child;

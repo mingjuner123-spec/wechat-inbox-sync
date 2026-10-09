@@ -425,6 +425,19 @@ function safeInputIdentity(value = {}) {
   return Object.values(source).some(valuePart => valuePart !== '' && valuePart !== null && valuePart !== undefined)
     ? source : null;
 }
+function safeStartupGuard(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    status: ['skipped', 'waiting', 'permission_granted', 'timed_out', 'disabled'].includes(value.status) ? value.status : 'skipped',
+    reason: /^[a-z0-9_]{1,64}$/.test(value.reason || '') ? value.reason : 'unknown',
+    timeoutMs: nonnegativeInt(value.timeoutMs),
+    elapsedIdleMs: nonnegativeInt(value.elapsedIdleMs),
+    permissionGranted: value.permissionGranted === true,
+    nativeStartStatus: value.status === 'timed_out' && value.reason === 'timeout_won_atomic_gate' ? 'not_started' : 'unknown',
+    originalScriptSha256: /^[a-f0-9]{64}$/i.test(value.originalScriptSha256 || '') ? value.originalScriptSha256 : '',
+    instrumentedScriptSha256: /^[a-f0-9]{64}$/i.test(value.instrumentedScriptSha256 || '') ? value.instrumentedScriptSha256 : '',
+  };
+}
 function safeAttempt(item = {}) {
   const requestedMode = ['default', 'cpu_compatibility'].includes(item.requestedMode) ? item.requestedMode : 'unknown';
   const freshness = ['fresh', 'stale', 'unavailable'].includes(item.logFreshness) ? item.logFreshness : 'unavailable';
@@ -456,7 +469,8 @@ function safeAttempt(item = {}) {
     nativeExitAssociation: ['matched', 'incomplete_native_process', 'no_matched_native_exit', 'stage_mismatch'].includes(item.nativeExitAssociation) ? item.nativeExitAssociation : 'unknown',
     nativePids: (Array.isArray(item.nativePids) ? item.nativePids : []).map(nonnegativeInt).filter(pid => pid > 0),
     peakRssKiB,
-    timeoutCode: item.timeoutCode === 'ASR_TIMEOUT' ? item.timeoutCode : '',
+    timeoutCode: ['ASR_TIMEOUT', 'ASR_STARTUP_TIMEOUT'].includes(item.timeoutCode) ? item.timeoutCode : '',
+    startupGuard: safeStartupGuard(item.startupGuard),
     timeoutCleanupStatus: ['group_cleanup_attempted', 'direct_child_fallback', 'process_already_exited', 'failed', 'unknown'].includes(item.timeoutCleanupStatus) ? item.timeoutCleanupStatus : '',
     timeoutCleanupError: /^[A-Za-z0-9_.-]{1,64}$/.test(item.timeoutCleanupError || '') ? String(item.timeoutCleanupError) : '',
     logSnapshotAt: iso(item.logSnapshotAt),
@@ -842,7 +856,7 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
           const compactAttempt = {};
           for (const key of [
             'attempt', 'status', 'stage', 'exitCode', 'signal', 'nativeExitCode',
-            'nativeExitAssociation', 'timeoutCode', 'timeoutCleanupStatus', 'peakRssKiB',
+            'nativeExitAssociation', 'timeoutCode', 'timeoutCleanupStatus', 'startupGuard', 'peakRssKiB',
           ]) {
             if (attempt[key] !== undefined && attempt[key] !== '') compactAttempt[key] = attempt[key];
           }
@@ -987,7 +1001,7 @@ function compactTechnicalReport(value, reason = 'outbox_limit') {
       if (Array.isArray(parsed.asr.attempts)) {
         asr.attempts = parsed.asr.attempts.slice(-8).map((attempt) => {
           const result = {};
-          for (const key of ['attempt', 'status', 'stage', 'exitCode', 'signal', 'nativeExitCode', 'nativeExitAssociation', 'timeoutCode', 'timeoutCleanupStatus', 'peakRssKiB']) {
+          for (const key of ['attempt', 'status', 'stage', 'exitCode', 'signal', 'nativeExitCode', 'nativeExitAssociation', 'timeoutCode', 'timeoutCleanupStatus', 'startupGuard', 'peakRssKiB']) {
             if (attempt[key] !== undefined && attempt[key] !== null && attempt[key] !== '') result[key] = attempt[key];
           }
           if (Array.isArray(attempt.runningCheckpoints)) {

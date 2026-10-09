@@ -81,6 +81,8 @@ jobs:
           node tests/plugin-diagnostic-reporter.test.js
           node tests/plugin-macos-asr-recovery.test.js
           node tests/plugin-diagnostic-native-evidence.test.js
+          node tests/plugin-asr-startup-timeout.test.js
+          node tests/plugin-asr-timeout-process-group.test.js
           node tests/plugin-douyin-media.test.js
           node tests/plugin-douyin-hidden-navigation.test.js
           node tests/plugin-douyin-target-identity-followup.test.js
