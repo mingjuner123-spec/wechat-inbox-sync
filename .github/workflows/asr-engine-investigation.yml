@@ -2,6 +2,10 @@ name: ASR engine investigation
 on:
   push:
     branches: [codex/asr-engine-investigation-20261006, codex/asr-compat-1.3.181-20261006, codex/asr-mac-vad-ci-20261007]
+    paths-ignore:
+      - 'tests/douyin-public-mac-probe/**'
+      - '.github/workflows/douyin-public-mac-probe.yml'
+      - '.github/workflows/asr-engine-investigation.yml'
   workflow_dispatch:
     inputs:
       windows_only:

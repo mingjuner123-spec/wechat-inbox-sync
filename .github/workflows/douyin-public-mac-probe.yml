@@ -1,0 +1,163 @@
+name: Douyin public mac probe
+
+on:
+  push:
+    branches:
+      - codex/asr-mac-vad-ci-20261007
+    paths:
+      - tests/douyin-public-mac-probe/**
+      - obsidian-plugin/wechat-inbox-sync/main.js
+      - obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh
+      - .github/workflows/douyin-public-mac-probe.yml
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: Public Douyin link to probe in a disposable anonymous Electron profile
+        required: true
+        default: https://v.douyin.com/8xzDUqRbQTQ/
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: douyin-public-mac-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Intel mac public media probe
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      DOUYIN_PUBLIC_URL: ${{ inputs.source_url || 'https://v.douyin.com/8xzDUqRbQTQ/' }}
+      PROBE_ROOT: ${{ github.workspace }}/tests/douyin-public-mac-probe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          ref: 6d321bd83de8e6f6e4fb5002f101ce98e34f9729
+          path: plugin-baseline
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare pinned public ASR inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$PROBE_ROOT/mac-intel-douyin-public-runner.cjs"
+          test -f "$PROBE_ROOT/prepare-mac-asr-runtime.cjs"
+          test -f "$PROBE_ROOT/validate-douyin-public-receipt.cjs"
+          mkdir -p "$RUNNER_TEMP/asr-fixture" "$RUNNER_TEMP/asr-evidence" "$RUNNER_TEMP/douyin-public-receipt" "$RUNNER_TEMP/douyin-public-private"
+          git clone --depth 1 --branch v1.5.5 https://github.com/ggml-org/whisper.cpp.git "$RUNNER_TEMP/whisper.cpp" >/dev/null 2>&1
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/asr-fixture/ggml-small.bin" \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/90a64d80ea254cf67575b41a5971f972c79f7b45/ggml-small.bin >/dev/null 2>&1
+          printf '%s  %s\n' '1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b' "$RUNNER_TEMP/asr-fixture/ggml-small.bin" | shasum -a 256 --check >/dev/null
+
+      - name: Build independent CPU candidate engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MACOSX_DEPLOYMENT_TARGET=12.0
+          cmake -S "$RUNNER_TEMP/whisper.cpp" -B "$RUNNER_TEMP/whisper.cpp/build" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DBUILD_SHARED_LIBS=OFF -DWHISPER_METAL=OFF -DWHISPER_COREML=OFF \
+            -DWHISPER_NO_ACCELERATE=ON -DWHISPER_NO_AVX512=ON \
+            -DWHISPER_BUILD_TESTS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 >/dev/null
+          cmake --build "$RUNNER_TEMP/whisper.cpp/build" --config Release --parallel 3 >/dev/null
+          test -x "$RUNNER_TEMP/whisper.cpp/build/bin/main"
+
+      - name: Install pinned legacy engine and ffmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/asr-fixture/wheels"
+          python -m pip download --no-deps --only-binary=:all: 'whisper.cpp-cli==0.0.3' -d "$RUNNER_TEMP/asr-fixture/wheels" >/dev/null
+          wheel=$(find "$RUNNER_TEMP/asr-fixture/wheels" -name '*.whl' -print -quit)
+          test -n "$wheel"
+          case "$RUNNER_ARCH" in
+            X64) expected='1d85c6ca3dbf907c07a59f8daa620b3d0e3b263356c5220357dd7e06b42bc523' ;;
+            *) exit 2 ;;
+          esac
+          test "$(shasum -a 256 "$wheel" | awk '{print $1}')" = "$expected"
+          python -m pip install --no-deps "$wheel" >/dev/null
+          python -m pip install --no-deps imageio-ffmpeg==0.6.0 >/dev/null
+          legacy=$(command -v whisper-cpp)
+          ffmpeg_path=$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')
+          test -x "$legacy"; test -x "$ffmpeg_path"
+          printf '%s\n' "$legacy" > "$RUNNER_TEMP/asr-evidence/legacy-engine-path"
+          printf '%s\n' "$ffmpeg_path" > "$RUNNER_TEMP/asr-evidence/ffmpeg-path"
+          printf 'ASR_FFMPEG=%s\n' "$ffmpeg_path" >> "$GITHUB_ENV"
+
+      - name: Install isolated Electron runtime and plugin dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/electron-runtime"
+          npm init --yes --prefix "$RUNNER_TEMP/electron-runtime" >/dev/null 2>&1
+          npm install --prefix "$RUNNER_TEMP/electron-runtime" electron@39.8.3 @electron/remote@2.1.3 --no-save --no-audit --no-fund >/dev/null 2>&1
+          npm ci --prefix "$GITHUB_WORKSPACE/plugin-baseline/obsidian-plugin/wechat-inbox-sync" --no-audit --no-fund >/dev/null 2>&1
+          test -x "$RUNNER_TEMP/electron-runtime/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+
+      - name: Prepare production wrapper layout in the disposable root
+        shell: bash
+        run: |
+          set -euo pipefail
+          node "$PROBE_ROOT/prepare-mac-asr-runtime.cjs" \
+            "$GITHUB_WORKSPACE/plugin-baseline/obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh" \
+            "$RUNNER_TEMP/asr-install" "$RUNNER_TEMP/asr-fixture/ggml-small.bin" "$ASR_FFMPEG" >/dev/null
+
+      - name: Run actual Electron extraction, native comparison, and product wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt_root="$RUNNER_TEMP/douyin-public-receipt"
+          private_root="$RUNNER_TEMP/douyin-public-private"
+          electron="$RUNNER_TEMP/electron-runtime/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+          remote_module="$RUNNER_TEMP/electron-runtime/node_modules/@electron/remote"
+          bundle="$GITHUB_WORKSPACE/plugin-baseline/obsidian-plugin/wechat-inbox-sync/main.js"
+          legacy="$(cat "$RUNNER_TEMP/asr-evidence/legacy-engine-path")"
+          candidate="$RUNNER_TEMP/whisper.cpp/build/bin/main"
+          model="$RUNNER_TEMP/asr-fixture/ggml-small.bin"
+          runner="$PROBE_ROOT/mac-intel-douyin-public-runner.cjs"
+          if "$electron" "$runner" "$receipt_root" "$private_root" "$remote_module" "$bundle" "$RUNNER_TEMP/asr-install" "" "$legacy" "$candidate" "$model" "$ASR_FFMPEG" "" >"$RUNNER_TEMP/douyin-public-runner.log" 2>&1; then
+            runner_status=0
+          else
+            runner_status=$?
+          fi
+          printf '%s\n' "$runner_status" > "$RUNNER_TEMP/douyin-public-runner-status"
+          rm -f "$RUNNER_TEMP/douyin-public-runner.log"
+
+      - name: Validate receipt and private-root cleanup
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          safe_receipt_root="$RUNNER_TEMP/douyin-public-safe-receipt"
+          rm -rf "$safe_receipt_root"
+          mkdir -p "$safe_receipt_root"
+          receipt=$(find "$RUNNER_TEMP/douyin-public-receipt" -maxdepth 1 -type f -name 'douyin-public-mac-receipt-*.json' -print -quit)
+          test -n "$receipt"
+          node "$PROBE_ROOT/validate-douyin-public-receipt.cjs" "$receipt" >/dev/null
+          cp -- "$receipt" "$safe_receipt_root/douyin-public-mac-receipt.json"
+          overall_status=0
+          if [ "$(cat "$RUNNER_TEMP/douyin-public-runner-status")" != 0 ]; then overall_status=1; fi
+          if ! node "$PROBE_ROOT/validate-douyin-public-receipt.cjs" "$receipt" --require-success >/dev/null; then overall_status=1; fi
+          if [ -n "$(find "$RUNNER_TEMP/douyin-public-private" -mindepth 1 -print -quit)" ]; then overall_status=1; fi
+          exit "$overall_status"
+
+      - name: Upload receipt only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: douyin-public-mac-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/douyin-public-safe-receipt/douyin-public-mac-receipt.json
+          if-no-files-found: error
+          retention-days: 14
