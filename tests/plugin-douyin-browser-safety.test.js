@@ -87,11 +87,12 @@ const previousWindow = global.window;
 global.window = { setTimeout: (fn, ms) => setTimeout(fn, ms === 2500 ? 0 : ms), clearTimeout }; 
 let Plugin;
 Module._load = function(id, parent, main) {
+  if (/\.(?:ps1|sh|py)$/i.test(id)) return '';
   if (id === 'obsidian') return { Plugin: class {}, PluginSettingTab: class {}, Modal: class {}, Notice: class {} };
   if (id === 'electron') return { remote: { BrowserWindow: Window, session: { fromPartition() { return session; } } } };
   return originalLoad.call(this, id, parent, main);
 };
-Plugin = require('../obsidian-plugin/wechat-inbox-sync/main');
+Plugin = require(process.env.PLUGIN_MAIN_PATH || '../obsidian-plugin/wechat-inbox-sync/main');
 
 const bounded = async promise => { let timer; try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error('test exceeded two seconds')), 2000); })]); } finally { clearTimeout(timer); } };
 async function run() {
@@ -124,7 +125,7 @@ async function run() {
     const result = await bounded(plugin.renderSocialMediaUrls(url)); assert.ok(result.includes(media)); cases++;
     assert.equal(safety.readAttempts(scratch).at(-1).outcome, 'success'); assert.ok(safety.readAttempts(scratch).at(-1).blockedMedia >= 2); cases++;
     fs.mkdirSync(path.join(__dirname, '../.artifacts'), { recursive: true });
-    fs.writeFileSync(path.join(__dirname, '../.artifacts/douyin-extraction-script.js'), capturedScript);
+    fs.writeFileSync(path.join(scratch, 'douyin-extraction-script.js'), capturedScript);
     const domPayload = await require('node:vm').runInNewContext(capturedScript, {
       setTimeout: fn => setImmediate(fn), performance: { getEntriesByType: () => [] },
       self: {}, window: {}, location: { href: url },
@@ -152,6 +153,7 @@ async function run() {
         const result = await bounded(plugin.renderSocialMediaUrls(shortLink ? 'https://v.douyin.com/fixture/' : url, { targetDouyinAwemeId: '7685198123559390506', strictDouyinTarget: true }));
         assert.deepEqual(result, [media]);
         const diag = safety.readAttempts(scratch).at(-1);
+        assert.equal(diag.identityOutcome, 'target-id-matched'); assert.equal(diag.preciseMediaFound, true);
         assert.equal(diag.debuggerStatus, 'ready'); assert.ok(diag.responseReads >= 1);
         assert.equal(lastWindow.webContents.debugger.isAttached(), false);
         assert.equal(lastWindow.webContents.debugger.listenerCount('message'), 0); cases++;

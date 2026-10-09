@@ -80,6 +80,20 @@ function buildSocialMetrics(source = {}) {
   return Object.fromEntries(Object.entries(metrics).filter(([, value]) => value !== null));
 }
 
+function buildWechatChannelsSocialMetrics(source = {}) {
+  const metrics = buildSocialMetrics(source);
+  const containers = getMetricContainerCandidates(source);
+  if (!Object.prototype.hasOwnProperty.call(metrics, 'collects')) {
+    const favorites = readMetric(containers, ['favorites']);
+    if (favorites !== null) metrics.collects = favorites;
+  }
+  if (!Object.prototype.hasOwnProperty.call(metrics, 'shares')) {
+    const forwards = readMetric(containers, ['forwards']);
+    if (forwards !== null) metrics.shares = forwards;
+  }
+  return metrics;
+}
+
 function buildSocialMetricsFromText(value = '') {
   const source = String(value || '')
     .replace(/<[^>]+>/g, ' ')
@@ -160,6 +174,7 @@ function createSocialMetricsHtmlExtractor(dependencies = {}) {
 
 module.exports = {
   buildSocialMetrics,
+  buildWechatChannelsSocialMetrics,
   buildSocialMetricsFromText,
   createSocialMetricsHtmlExtractor,
   hasSocialMetrics,

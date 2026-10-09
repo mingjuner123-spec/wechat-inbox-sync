@@ -18,7 +18,7 @@ const Plugin = require('../obsidian-plugin/wechat-inbox-sync/main');
 Module._load = originalLoad;
 const h = Plugin.__test;
 const quality = require('../obsidian-plugin/wechat-inbox-sync/src/transcription-quality-utils');
-const noSpeech = () => quality.createNoSpeechTranscriptionError('(音樂)\n(音樂)');
+const noSpeech = () => Object.assign(new Error('未检测到可转写的语音。'), { code: 'TRANSCRIPTION_NO_SPEECH', noSpeechEvidence: 'full-decode-and-vad-no-speech-segments' });
 function fixture() {
   const p = new Plugin();
   p.settings = h.mergeSettings({ aiProvider: 'local' });
@@ -28,7 +28,7 @@ function fixture() {
 const url = 'https://www.xiaohongshu.com/explore/fixture';
 const record = { _id: 'fixture', type: 'webpage', content: url, metadata: { url, transcriptionMode: 'local' } };
 const media = {
-  url, platform: '小红书', source: 'video',
+  url, platform: '视频号', source: 'video',
   mediaUrl: 'https://media.example.com/one.mp4',
   mediaUrls: ['https://media.example.com/two.mp4'],
   markdown: '## 视频说明\n\n保留原始视频说明。', sourceTitle: '测试视频',
@@ -36,14 +36,22 @@ const media = {
 
 async function run() {
   for (const text of ['(音樂)\n(音樂)', '[音乐]', '（靜音）', '[silence]\n(MUSIC)', '\n (音乐) \n']) {
-    assert.equal(quality.createNoSpeechTranscriptionError(text)?.code, 'TRANSCRIPTION_NO_SPEECH');
+    assert.equal(quality.createNoSpeechTranscriptionError(text)?.code, 'TRANSCRIPTION_NO_SPEECH_MARKER');
   }
   for (const text of ['', '   ', '音乐', 'music', '(音乐)\n这里有正常口播', '(音乐', '[笑声]']) {
     assert.equal(quality.createNoSpeechTranscriptionError(text), null);
   }
 
-  // Exercise the real local wrapper: only successful native execution with
-  // explicit markers qualifies, before repeated-line cleanup discards them.
+  assert.equal(quality.isRecognizedNoSpeechMetadata({
+    transcriptionStatus: 'no_speech', conversionStatus: 'no_speech',
+    transcription: '', noSpeechEvidence: 'non-speech-markers',
+  }), false, 'ASR marker alone is not accepted no-speech evidence');
+  assert.equal(quality.isRecognizedNoSpeechMetadata({
+    transcriptionStatus: 'no_speech', conversionStatus: 'no_speech',
+    transcription: '', noSpeechEvidence: 'full-decode-and-vad-no-speech-segments',
+  }), true, 'full decode + VAD remains accepted no-speech evidence');
+
+  // An unmanaged command cannot confirm no speech from ASR markers alone.
   const local = fixture();
   local.ensureLocalComponentReadyForUse = async () => {};
   local.recoverStaleLocalTranscriptionCommand = async () => {};
@@ -63,7 +71,7 @@ async function run() {
     return { kill() {} };
   };
   try {
-    await assert.rejects(local.runLocalTranscription(media.mediaUrl), { code: 'TRANSCRIPTION_NO_SPEECH' });
+    await assert.rejects(local.runLocalTranscription(media.mediaUrl), { code: 'TRANSCRIPTION_NO_SPEECH_UNCONFIRMED', noSpeechEvidence: 'non-speech-markers' });
     raw = '';
     await assert.rejects(local.runLocalTranscription(media.mediaUrl), e => e.code !== 'TRANSCRIPTION_NO_SPEECH' && /没有返回文本/.test(e.message));
     raw = '(音樂)\n(音樂)'; nativeError = Object.assign(new Error('native crash'), { code: 1 });
@@ -79,6 +87,15 @@ async function run() {
   configured.runLocalTranscription = async () => { throw new Error('native crash'); };
   await configured.runConfiguredTranscription(media.mediaUrl, { allowCloudUrlFallback: true });
   assert.equal(cloudCalls, 1, 'real failures retain existing fallback');
+  configured.runLocalTranscription = async () => { throw Object.assign(new Error('empty output'), {
+    code: 'TRANSCRIPTION_NO_SPEECH_UNCONFIRMED', noSpeechEvidence: 'empty-output',
+    noSpeechVerification: { decision: 'speech_detected' },
+  }); };
+  const priorFallback = await configured.runConfiguredTranscription(media.mediaUrl, { allowCloudUrlFallback: true });
+  assert.ok(priorFallback.transcription);
+  assert.equal(cloudCalls, 2, 'unconfirmed empty output retains explicitly allowed existing fallback');
+  await assert.rejects(configured.runConfiguredTranscription(media.mediaUrl), { code: 'TRANSCRIPTION_NO_SPEECH_UNCONFIRMED' });
+  assert.equal(cloudCalls, 2, 'fallback remains disabled without its existing authorization');
 
   const p = fixture(); let attempts = 0;
   p.runConfiguredTranscription = async () => { attempts++; throw noSpeech(); };
@@ -90,7 +107,7 @@ async function run() {
   assert.ok(h.getSyncLifecycleOutcomeError({ ...saved, metadata: { ...saved.metadata, noSpeechEvidence: '' } }));
   assert.ok(h.getSyncLifecycleOutcomeError({ ...saved, metadata: { ...saved.metadata, conversionError: 'download failed' } }));
   const body = h.buildWebpageMarkdownBody(saved, '测试视频');
-  assert.match(body, /未识别到可转写语音/);
+  assert.match(body, /本次未检测到可转写语音，已保存原内容和链接/);
   assert.match(body, /保留原始视频说明/);
   assert.ok(body.includes(url));
   assert.doesNotMatch(body, /转写处理中|转写失败/);
@@ -136,7 +153,7 @@ async function run() {
   p.alignSocialArticleImageFolder = async r => ({ record: r, folderName: '测试视频' });
   const committed = await p.writeRecord({ ...record, type: 'text' }, new Date().toISOString(), null, false, { skipAi: true });
   assert.equal(committed.committed, true);
-  assert.match(files.get(committed.filePath), /未识别到可转写语音/);
+  assert.match(files.get(committed.filePath), /本次未检测到可转写语音，已保存原内容和链接/);
   assert.match(files.get(committed.filePath), /保留原始视频说明/);
   assert.equal(files.size, 1, 'only the committed note remains');
   console.log('plugin no-speech tests passed');

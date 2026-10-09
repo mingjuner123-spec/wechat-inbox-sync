@@ -41,29 +41,139 @@ function parseVadSpeechSegments(output) {
   return segments.length === count ? segments : null;
 }
 
+function defineSpeechIntervals(target, intervals) {
+  Object.defineProperty(target, 'speechIntervals', {
+    value: intervals.map((interval) => ({
+      startSeconds: interval.startSeconds,
+      endSeconds: interval.endSeconds,
+    })),
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return target;
+}
+
+function readSpeechIntervals(target) {
+  if (!Array.isArray(target && target.speechIntervals)) return null;
+  return target.speechIntervals.map((interval) => ({
+    startSeconds: Number(interval && interval.startSeconds),
+    endSeconds: Number(interval && interval.endSeconds),
+  }));
+}
+
+function mergeSpeechIntervals(intervals) {
+  const sorted = (Array.isArray(intervals) ? intervals : [])
+    .map((interval) => ({
+      startSeconds: Number(interval && interval.startSeconds),
+      endSeconds: Number(interval && interval.endSeconds),
+    }))
+    .filter((interval) => Number.isFinite(interval.startSeconds)
+      && Number.isFinite(interval.endSeconds) && interval.endSeconds > interval.startSeconds)
+    .sort((left, right) => left.startSeconds - right.startSeconds);
+  const merged = [];
+  for (const interval of sorted) {
+    const previous = merged[merged.length - 1];
+    if (previous && interval.startSeconds <= previous.endSeconds) {
+      previous.endSeconds = Math.max(previous.endSeconds, interval.endSeconds);
+    } else {
+      merged.push(interval);
+    }
+  }
+  return merged;
+}
+
+function clipSpeechIntervals(intervals, startSeconds, endSeconds) {
+  return mergeSpeechIntervals(intervals).map((interval) => ({
+    startSeconds: Math.max(interval.startSeconds, startSeconds),
+    endSeconds: Math.min(interval.endSeconds, endSeconds),
+  })).filter((interval) => interval.endSeconds > interval.startSeconds);
+}
+
+function speechIntervalsDuration(intervals) {
+  return mergeSpeechIntervals(intervals).reduce((total, interval) => (
+    total + interval.endSeconds - interval.startSeconds
+  ), 0);
+}
+
 function mergeVadSpeechSegments(segments, { maxGapSeconds = MAX_GAP_SECONDS, maxWindowSeconds = MAX_WINDOW_SECONDS } = {}) {
   if (!Array.isArray(segments) || segments.length > MAX_VAD_SEGMENTS) return null;
+  const maxGap = Number(maxGapSeconds);
+  const maxWindow = Number(maxWindowSeconds);
+  if (!Number.isFinite(maxGap) || maxGap < 0 || !Number.isFinite(maxWindow) || maxWindow <= 0) return null;
   const sorted = segments.map((segment) => ({
     startSeconds: Number(segment && segment.startSeconds),
     endSeconds: Number(segment && segment.endSeconds),
   })).sort((left, right) => left.startSeconds - right.startSeconds);
-  const windows = [];
+  const clusters = [];
   for (const segment of sorted) {
     if (!Number.isFinite(segment.startSeconds) || !Number.isFinite(segment.endSeconds)
       || segment.startSeconds < 0 || segment.endSeconds <= segment.startSeconds) return null;
-    if (segment.endSeconds - segment.startSeconds > maxWindowSeconds) return null;
-    const current = windows[windows.length - 1];
-    if (current && segment.startSeconds < current.endSeconds
-      && segment.endSeconds - current.startSeconds > maxWindowSeconds) return null;
-    if (current && segment.startSeconds <= current.endSeconds + maxGapSeconds
-      && segment.endSeconds - current.startSeconds <= maxWindowSeconds) {
-      current.voicedSeconds += Math.max(0, segment.endSeconds - Math.max(segment.startSeconds, current.endSeconds));
+    const current = clusters[clusters.length - 1];
+    if (current && segment.startSeconds <= current.endSeconds + maxGap) {
       current.endSeconds = Math.max(current.endSeconds, segment.endSeconds);
+      current.speechIntervals.push(segment);
     } else {
-      windows.push({ ...segment, voicedSeconds: segment.endSeconds - segment.startSeconds });
+      clusters.push({
+        startSeconds: segment.startSeconds,
+        endSeconds: segment.endSeconds,
+        speechIntervals: [segment],
+      });
+    }
+  }
+
+  const windows = [];
+  for (const cluster of clusters) {
+    let startSeconds = cluster.startSeconds;
+    while (startSeconds < cluster.endSeconds - 1e-9) {
+      const endSeconds = Math.min(cluster.endSeconds, startSeconds + maxWindow);
+      if (endSeconds <= startSeconds) return null;
+      const speechIntervals = clipSpeechIntervals(cluster.speechIntervals, startSeconds, endSeconds);
+      const window = {
+        startSeconds,
+        endSeconds,
+        voicedSeconds: speechIntervalsDuration(speechIntervals),
+      };
+      defineSpeechIntervals(window, speechIntervals);
+      windows.push(window);
+      startSeconds = endSeconds;
+      if (windows.length > MAX_VAD_SEGMENTS) return null;
     }
   }
   return windows;
+}
+
+function estimateClippedVoicedSeconds(window, startSeconds, endSeconds) {
+  const duration = Math.max(0, Number(window.vadEndSeconds) - Number(window.vadStartSeconds));
+  const clipped = Math.max(0, Math.min(Number(window.vadEndSeconds), endSeconds)
+    - Math.max(Number(window.vadStartSeconds), startSeconds));
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(clipped)) return 0;
+  return Math.min(Number(window.voicedSeconds), Number(window.voicedSeconds) * clipped / duration);
+}
+
+function clipPaddedWindowVoicedSeconds(window, startSeconds, endSeconds) {
+  const speechIntervals = readSpeechIntervals(window);
+  if (speechIntervals) {
+    const clipped = clipSpeechIntervals(speechIntervals, startSeconds, endSeconds);
+    defineSpeechIntervals(window, clipped);
+    window.voicedSeconds = speechIntervalsDuration(clipped);
+  } else {
+    window.voicedSeconds = estimateClippedVoicedSeconds(window, startSeconds, endSeconds);
+  }
+}
+
+function mergePaddedVoicedSeconds(previous, current) {
+  const previousIntervals = readSpeechIntervals(previous);
+  const currentIntervals = readSpeechIntervals(current);
+  if (previousIntervals && currentIntervals) {
+    const merged = mergeSpeechIntervals(previousIntervals.concat(currentIntervals));
+    defineSpeechIntervals(previous, merged);
+    return speechIntervalsDuration(merged);
+  }
+  const overlap = Math.max(0, Math.min(previous.vadEndSeconds, current.vadEndSeconds)
+    - Math.max(previous.vadStartSeconds, current.vadStartSeconds));
+  return Math.max(0, previous.voicedSeconds + current.voicedSeconds
+    - Math.min(overlap, previous.voicedSeconds, current.voicedSeconds));
 }
 
 function padVadSpeechWindows(windows, audioDurationSeconds, {
@@ -79,6 +189,7 @@ function padVadSpeechWindows(windows, audioDurationSeconds, {
     vadStartSeconds: Number(window && window.startSeconds),
     vadEndSeconds: Number(window && window.endSeconds),
     voicedSeconds: Number(window && window.voicedSeconds),
+    speechIntervals: readSpeechIntervals(window),
   })).sort((left, right) => left.vadStartSeconds - right.vadStartSeconds);
   const padded = [];
   for (const window of sorted) {
@@ -95,13 +206,15 @@ function padVadSpeechWindows(windows, audioDurationSeconds, {
     if (remainingExtra > 0) {
       leftPadding += Math.min(remainingExtra, padding - leftPadding, window.vadStartSeconds - leftPadding);
     }
-    padded.push({
+    const paddedWindow = {
       startSeconds: window.vadStartSeconds - leftPadding,
       endSeconds: window.vadEndSeconds + rightPadding,
       vadStartSeconds: window.vadStartSeconds,
       vadEndSeconds: window.vadEndSeconds,
       voicedSeconds: window.voicedSeconds,
-    });
+    };
+    if (window.speechIntervals) defineSpeechIntervals(paddedWindow, window.speechIntervals);
+    padded.push(paddedWindow);
   }
   const nonOverlapping = [];
   for (const window of padded) {
@@ -109,14 +222,20 @@ function padVadSpeechWindows(windows, audioDurationSeconds, {
     if (previous && window.startSeconds < previous.endSeconds) {
       const combinedEnd = Math.max(previous.endSeconds, window.endSeconds);
       if (combinedEnd - previous.startSeconds <= maxWindow) {
+        const mergedVoicedSeconds = mergePaddedVoicedSeconds(previous, window);
         previous.endSeconds = combinedEnd;
-        previous.vadEndSeconds = window.vadEndSeconds;
-        previous.voicedSeconds += window.voicedSeconds;
+        previous.vadEndSeconds = Math.max(previous.vadEndSeconds, window.vadEndSeconds);
+        previous.voicedSeconds = mergedVoicedSeconds;
         continue;
       }
-      const boundary = (previous.vadEndSeconds + window.vadStartSeconds) / 2;
+      const preferredBoundary = (previous.vadEndSeconds + window.vadStartSeconds) / 2;
+      const minimumBoundary = Math.max(previous.startSeconds, window.endSeconds - maxWindow);
+      const maximumBoundary = Math.min(previous.startSeconds + maxWindow, window.endSeconds);
+      const boundary = Math.max(minimumBoundary, Math.min(maximumBoundary, preferredBoundary));
       previous.endSeconds = boundary;
       window.startSeconds = boundary;
+      clipPaddedWindowVoicedSeconds(previous, previous.startSeconds, previous.endSeconds);
+      clipPaddedWindowVoicedSeconds(window, window.startSeconds, window.endSeconds);
     }
     if (window.endSeconds - window.startSeconds > maxWindow + 1e-9) return null;
     nonOverlapping.push(window);
@@ -324,13 +443,15 @@ function readPcmWavDuration(filePath) {
 }
 
 async function runChannelsQualityRecovery(options = {}, dependencies = {}) {
-  if (options.qualityIssue !== 'repeated-lines') return { decision: 'not_applicable' };
+  const verificationOnly = options.verificationOnly === true;
+  if (options.qualityIssue !== 'repeated-lines' && !verificationOnly) return { decision: 'not_applicable' };
   if (options.signal && options.signal.aborted) return { decision: 'aborted', code: 'AbortError' };
   const run = dependencies.runProcess || runProcess;
   const hashFile = dependencies.sha256File || sha256File;
   const createTempDir = dependencies.createTempDir || (() => fs.promises.mkdtemp(path.join(os.tmpdir(), 'channels-asr-recovery-')));
   const cleanupTempDir = dependencies.cleanupTempDir || ((tempDir) => fs.promises.rm(tempDir, { recursive: true, force: true }));
-  const required = ['inputAudioPath', 'vadSegmenterPath', 'vadModelPath', 'ffmpegPath', 'whisperPath', 'asrModelPath'];
+  const required = ['inputAudioPath', 'vadSegmenterPath', 'vadModelPath', 'ffmpegPath'];
+  if (!verificationOnly) required.push('whisperPath', 'asrModelPath');
   if (required.some((key) => !options[key])) return { decision: 'retain_quality_failure', reason: 'recovery_inputs_unavailable' };
   let vadHash;
   try { vadHash = String(await hashFile(options.vadModelPath)).toLowerCase(); } catch (_error) {
@@ -377,6 +498,16 @@ async function runChannelsQualityRecovery(options = {}, dependencies = {}) {
         vadModelSha256: CHANNELS_VAD_MODEL_SHA256,
       };
     }
+    if (verificationOnly) {
+      return {
+        decision: 'speech_detected',
+        fullAudioProcessed: true,
+        audioDurationSeconds,
+        vadThreshold: CHANNELS_VAD_THRESHOLD,
+        vadModelSha256: CHANNELS_VAD_MODEL_SHA256,
+        speechSegmentCount: vadSegments.length,
+      };
+    }
     const windows = mergeVadSpeechSegments(vadSegments, {
       maxGapSeconds: options.maxGapSeconds ?? MAX_GAP_SECONDS,
       maxWindowSeconds: options.maxWindowSeconds ?? MAX_WINDOW_SECONDS,
@@ -396,25 +527,53 @@ async function runChannelsQualityRecovery(options = {}, dependencies = {}) {
     }
 
     const asrWindows = [];
+    const unresolvedWindows = [];
+    const markUnresolved = (index, window, reason, details = {}) => {
+      unresolvedWindows.push({
+        index,
+        startSeconds: window.startSeconds,
+        endSeconds: window.endSeconds,
+        reason,
+        ...(details.qualityIssue ? { qualityIssue: details.qualityIssue } : {}),
+      });
+    };
     for (let index = 0; index < clipWindows.length; index += 1) {
       if (signal && signal.aborted) return { decision: 'aborted', code: 'AbortError' };
       const window = clipWindows[index];
       const duration = window.endSeconds - window.startSeconds;
       const clipPath = path.join(tempDir, 'speech-window-' + index + '.wav');
-      const ffmpeg = await run(options.ffmpegPath, [
-        '-nostdin', '-y', '-ss', window.startSeconds.toFixed(3), '-i', fullAudioPath,
-        '-t', duration.toFixed(3), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', clipPath,
-      ], { signal, timeoutMs: options.processTimeoutMs || 120000 });
+      let ffmpeg;
+      try {
+        ffmpeg = await run(options.ffmpegPath, [
+          '-nostdin', '-y', '-ss', window.startSeconds.toFixed(3), '-i', fullAudioPath,
+          '-t', duration.toFixed(3), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', clipPath,
+        ], { signal, timeoutMs: options.processTimeoutMs || 120000 });
+      } catch (error) {
+        if ((signal && signal.aborted) || error && (error.name === 'AbortError' || error.code === 'ABORT_ERR')) {
+          return { decision: 'aborted', code: 'AbortError' };
+        }
+        markUnresolved(index, window, 'speech_clip_failed');
+        continue;
+      }
       if (ffmpeg.aborted || (signal && signal.aborted)) return { decision: 'aborted', code: 'AbortError' };
       if (ffmpeg.exitCode !== 0 || ffmpeg.timedOut || ffmpeg.spawnFailed || ffmpeg.outputLimitExceeded || !fs.existsSync(clipPath)) {
-        return { decision: 'retain_quality_failure', reason: 'speech_clip_failed' };
+        markUnresolved(index, window, 'speech_clip_failed');
+        continue;
       }
       const language = String(options.language || 'auto');
       const runWindowAsr = async (pass) => {
         const outputPrefix = path.join(tempDir, 'speech-window-' + index + '-pass-' + pass);
         const asrArgs = ['-m', options.asrModelPath, '-f', clipPath, '-l', language, '-t', String(options.threads || 4), '-ojf', '-of', outputPrefix];
         if (options.cpuOnly === true) asrArgs.push('-ng');
-        const asr = await run(options.whisperPath, asrArgs, { signal, timeoutMs: options.processTimeoutMs || 120000 });
+        let asr;
+        try {
+          asr = await run(options.whisperPath, asrArgs, { signal, timeoutMs: options.processTimeoutMs || 120000 });
+        } catch (error) {
+          if ((signal && signal.aborted) || error && (error.name === 'AbortError' || error.code === 'ABORT_ERR')) {
+            return { aborted: true };
+          }
+          return { failed: true };
+        }
         if (asr.aborted || (signal && signal.aborted)) return { aborted: true };
         if (asr.exitCode !== 0 || asr.timedOut || asr.spawnFailed || asr.outputLimitExceeded) return { failed: true };
         const outputSegments = readJsonTranscript(jsonOutputPrefix(asrArgs));
@@ -426,20 +585,36 @@ async function runChannelsQualityRecovery(options = {}, dependencies = {}) {
       };
       const firstPass = await runWindowAsr(1);
       if (firstPass.aborted || (signal && signal.aborted)) return { decision: 'aborted', code: 'AbortError' };
-      if (firstPass.failed) return { decision: 'retain_quality_failure', reason: 'speech_window_asr_failed' };
-      if (firstPass.missing) return { decision: 'retain_quality_failure', reason: 'speech_window_transcript_missing' };
+      if (firstPass.failed) {
+        markUnresolved(index, window, 'speech_window_asr_failed');
+        continue;
+      }
+      if (firstPass.missing) {
+        markUnresolved(index, window, 'speech_window_transcript_missing');
+        continue;
+      }
       const text = firstPass.text;
       const localQualityIssue = getTranscriptionQualityIssue(text);
-      if (localQualityIssue && localQualityIssue !== 'repeated-lines') return { decision: 'retain_quality_failure', reason: 'speech_window_quality_rejected', qualityIssue: localQualityIssue };
+      if (localQualityIssue && localQualityIssue !== 'repeated-lines') {
+        markUnresolved(index, window, 'speech_window_quality_rejected', { qualityIssue: localQualityIssue });
+        continue;
+      }
       const confidence = firstPass.confidence;
       if (!confidence || confidence.count < MIN_TOKENS || confidence.mean < MIN_MEAN_TOKEN_PROBABILITY || confidence.median < MIN_MEDIAN_TOKEN_PROBABILITY) {
-        return { decision: 'retain_quality_failure', reason: 'speech_window_confidence_low' };
+        markUnresolved(index, window, 'speech_window_confidence_low');
+        continue;
       }
       const secondPass = await runWindowAsr(2);
       if (secondPass.aborted || (signal && signal.aborted)) return { decision: 'aborted', code: 'AbortError' };
-      if (secondPass.failed || secondPass.missing) return { decision: 'retain_quality_failure', reason: 'speech_window_independent_rerun_failed' };
+      if (secondPass.failed || secondPass.missing) {
+        markUnresolved(index, window, 'speech_window_independent_rerun_failed');
+        continue;
+      }
       const rerunSimilarity = textSimilarity(text, secondPass.text);
-      if (rerunSimilarity < MIN_REPEAT_RERUN_SIMILARITY) return { decision: 'retain_quality_failure', reason: 'speech_window_rerun_inconsistent' };
+      if (rerunSimilarity < MIN_REPEAT_RERUN_SIMILARITY) {
+        markUnresolved(index, window, 'speech_window_rerun_inconsistent');
+        continue;
+      }
       asrWindows.push({
         startSeconds: window.startSeconds,
         endSeconds: window.endSeconds,
@@ -453,18 +628,43 @@ async function runChannelsQualityRecovery(options = {}, dependencies = {}) {
         rerunSimilarity,
       });
     }
+    const unresolvedAsrWindowCount = unresolvedWindows.length;
+    const unresolvedWindowCount = unresolvedVadWindowCount + unresolvedAsrWindowCount;
+    if (!asrWindows.length) {
+      const firstUnresolved = unresolvedWindows[0];
+      return {
+        decision: 'retain_quality_failure',
+        reason: firstUnresolved ? firstUnresolved.reason : 'speech_windows_unresolved',
+        ...(firstUnresolved && firstUnresolved.qualityIssue ? { qualityIssue: firstUnresolved.qualityIssue } : {}),
+        unresolvedVadWindowCount,
+        unresolvedAsrWindowCount,
+        unresolvedWindowCount,
+        unresolvedWindows,
+      };
+    }
     const transcript = asrWindows.map((window) => window.text).join('\n').trim();
     const finalQualityIssue = getTranscriptionQualityIssue(transcript);
     if (finalQualityIssue && finalQualityIssue !== 'repeated-lines') {
-      return { decision: 'retain_quality_failure', reason: 'recovered_transcript_quality_rejected', qualityIssue: finalQualityIssue };
+      return {
+        decision: 'retain_quality_failure',
+        reason: 'recovered_transcript_quality_rejected',
+        qualityIssue: finalQualityIssue,
+        unresolvedVadWindowCount,
+        unresolvedAsrWindowCount,
+        unresolvedWindowCount,
+        unresolvedWindows,
+      };
     }
     return {
-      decision: unresolvedVadWindowCount > 0 ? 'partial_recovery'
+      decision: unresolvedWindowCount > 0 ? 'partial_recovery'
         : (finalQualityIssue === 'repeated-lines' ? 'preserve_repeated_speech_candidate' : 'recovered'),
       confidence: 'limited',
-      requiresQualityWarning: unresolvedVadWindowCount > 0 || finalQualityIssue === 'repeated-lines',
+      requiresQualityWarning: unresolvedWindowCount > 0 || finalQualityIssue === 'repeated-lines',
       qualityIssue: finalQualityIssue || '',
       unresolvedVadWindowCount,
+      unresolvedAsrWindowCount,
+      unresolvedWindowCount,
+      unresolvedWindows,
       transcript,
       audioDurationSeconds,
       vadThreshold: CHANNELS_VAD_THRESHOLD,
@@ -474,7 +674,10 @@ async function runChannelsQualityRecovery(options = {}, dependencies = {}) {
       windows: asrWindows.map(({ text: _text, ...window }) => window),
       deduplicated: false,
     };
-  } catch (_error) {
+  } catch (error) {
+    if ((signal && signal.aborted) || error && (error.name === 'AbortError' || error.code === 'ABORT_ERR')) {
+      return { decision: 'aborted', code: 'AbortError' };
+    }
     return { decision: 'retain_quality_failure', reason: 'recovery_execution_failed' };
   } finally {
     if (tempDir) {

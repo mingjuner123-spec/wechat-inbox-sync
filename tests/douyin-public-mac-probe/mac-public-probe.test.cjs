@@ -8,6 +8,14 @@ const { validateReceiptObject, validateSuccessfulReceiptObject } = require('./va
 
 const runnerPath = path.join(__dirname, 'mac-intel-douyin-public-runner.cjs');
 const runnerSource = fs.readFileSync(runnerPath, 'utf8');
+const workflowSource = fs.readFileSync(path.join(__dirname, '../../.github/workflows/douyin-public-mac-probe.yml'), 'utf8');
+const expectedCandidateSha = fs.readFileSync(path.join(__dirname, 'candidate-bundle.sha256'), 'utf8').trim();
+assert.match(expectedCandidateSha, /^[a-f0-9]{64}$/);
+assert.equal(workflowSource.includes('plugin-baseline'), false);
+assert.equal(workflowSource.includes('candidate-bundle.sha256'), true);
+assert.equal(workflowSource.includes('mac-intel-asr-engine-runner.cjs'), true);
+assert.equal(workflowSource.includes('audio_fixture_sha256'), true);
+assert.equal(workflowSource.includes('inputs.mode == \'engine\''), true);
 assert.equal(runnerSource.toLowerCase().includes('powershell'), false);
 assert.equal(runnerSource.toLowerCase().includes('win32'), false);
 assert.equal(runnerSource.includes('credentials: \'omit\''), true);

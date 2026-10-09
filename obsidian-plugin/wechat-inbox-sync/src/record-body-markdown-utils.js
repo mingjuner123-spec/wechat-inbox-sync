@@ -1,6 +1,7 @@
 'use strict';
 
-const { toSimplifiedChinese, NO_SPEECH_MESSAGE, isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
+const { toSimplifiedChinese, NO_SPEECH_SAVED_MESSAGE, isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
+const { QUALITY_NOTICE_START, QUALITY_NOTICE_END, QUALITY_PARTIAL_NOTICE } = require('./transcription-partial-note-utils');
 
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
@@ -31,9 +32,13 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     transcriptionStatus = 'pending',
     transcriptionSource = '',
     transcriptionError = '',
+    transcriptionQualityStatus = '',
   }) {
     url = helpers.cleanDisplayUrl(url);
     const status = String(transcriptionStatus || '').toLowerCase();
+    if (String(transcriptionQualityStatus || '').toLowerCase() === 'rejected') {
+      return QUALITY_NOTICE_START + '\n> ' + QUALITY_PARTIAL_NOTICE + '\n' + QUALITY_NOTICE_END;
+    }
     const isCloudPending = ['queued', 'processing'].includes(status)
       && String(transcriptionSource || '').includes('cloud');
     const content = toSimplifiedChinese(transcription).trim()
@@ -60,7 +65,8 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       ].join('\n');
     }
     if (metadata.sourceMediaAttachmentError) {
-      return '> 原始音视频未能保存到本地，已保留转写结果。';
+      const errorText = String(metadata.sourceMediaAttachmentError || '原始音视频未能保存到本地。').trim();
+      return '> ' + errorText + '\n> 原始内容和来源已保留。';
     }
     return '';
   }
@@ -219,13 +225,14 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
         preserveListIndent: helpers.isXiaohongshuUrl(url),
       });
       const transcriptMarkdown = isRecognizedNoSpeechMetadata(metadata)
-        ? `## 语音识别结果\n\n${NO_SPEECH_MESSAGE}\n\n已保留视频说明和来源。如原视频中有人声，可重新提交后重试。\n\n来源：${url}`
+        ? `## 语音识别结果\n\n${NO_SPEECH_SAVED_MESSAGE}\n\n如原视频中有人声，可重新提交后重试。\n\n来源：${url}`
         : buildAudioTranscriptMarkdown({
         url,
         transcription: metadata.transcription || '',
         transcriptionStatus: metadata.transcriptionStatus || metadata.conversionStatus || 'pending',
         transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
         transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
+        transcriptionQualityStatus: metadata.transcriptionQualityStatus || '',
       });
       return [sourceMediaMarkdown, snapshot, transcriptMarkdown, trailingMarkdown, automaticShareTextMarkdown]
         .filter(Boolean)

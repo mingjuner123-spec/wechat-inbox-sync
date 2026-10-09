@@ -29,6 +29,10 @@ function sanitize(value = {}) {
       ? (value.targetIdRecognized === true ? 'recognized' : 'missing')
       : 'unknown');
   result.targetStageEligible = value.targetStageEligible === true;
+  result.identityOutcome = ['target-id-matched', 'identity-unverified', 'target-id-mismatch', 'unverified-primary-player'].includes(value.identityOutcome)
+    ? value.identityOutcome
+    : '';
+  result.preciseMediaFound = value.preciseMediaFound === true;
   result.debuggerCapability = enumValue(DEBUGGER_CAPABILITIES, value.debuggerCapability);
   result.debuggerReason = enumValue(DEBUGGER_REASONS, value.debuggerReason);
   result.pageEvent = ['dom-ready', 'did-finish-load', 'did-fail-load', 'did-navigate', 'did-redirect-navigation'].includes(value.pageEvent) ? value.pageEvent : '';
