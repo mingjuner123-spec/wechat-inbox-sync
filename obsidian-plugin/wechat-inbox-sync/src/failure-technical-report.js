@@ -2,7 +2,9 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { diagnosticRedact, readMatchingCrashSummary } = require('./asr-recovery-utils');
+const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
 
 const MAX_REPORT_TEXT_BYTES = 128 * 1024;
 const MAX_SESSION_BYTES = 768 * 1024;
@@ -242,6 +244,9 @@ function safeMediaStage(value, settings = {}) {
   stage.targetIdState = targetIdState;
   if (typeof value.targetIdRecognized === 'boolean') stage.targetIdRecognized = value.targetIdRecognized;
   if (typeof value.targetStageEligible === 'boolean') stage.targetStageEligible = value.targetStageEligible;
+  const identityOutcome = safeDiagnosticText(value.identityOutcome, settings, 64);
+  if (identityOutcome) stage.identityOutcome = identityOutcome;
+  if (typeof value.preciseMediaFound === 'boolean') stage.preciseMediaFound = value.preciseMediaFound;
   const mediaCount = safeBoundedNumber(value.mediaCount, 100);
   const durationMs = safeBoundedNumber(value.durationMs, 30 * 60 * 1000);
   if (mediaCount !== null) stage.mediaCount = mediaCount;
@@ -335,6 +340,90 @@ function readSession(root) {
     return { reason: error && error.code === 'ENOENT' ? 'no_matching_attempt' : 'read_failed' };
   }
 }
+function safeRunningCheckpoint(item = {}) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const capturedAt = iso(item.capturedAt);
+  if (!capturedAt) return null;
+  const attemptValue = item.attempt === null || item.attempt === undefined || item.attempt === '' ? null : nonnegativeInt(item.attempt);
+  const pidValue = item.pid === null || item.pid === undefined || item.pid === '' ? null : nonnegativeInt(item.pid);
+  const wrapperPidValue = item.wrapperPid === null || item.wrapperPid === undefined || item.wrapperPid === '' ? null : nonnegativeInt(item.wrapperPid);
+  const sourceValue = (value) => ['native_log', 'wrapper_process', 'unknown'].includes(value) ? value : 'unknown';
+  const result = {
+    attempt: attemptValue,
+    capturedAt,
+    stage: safeDiagnosticText(item.stage, {}, 64) || 'unknown',
+    pid: pidValue,
+    pidSource: sourceValue(item.pidSource),
+    processState: ['running', 'exited', 'unknown'].includes(item.processState) ? item.processState : 'unknown',
+    processStateSource: sourceValue(item.processStateSource),
+    wrapperPid: wrapperPidValue,
+    wrapperProcessState: ['running', 'exited', 'unknown'].includes(item.wrapperProcessState) ? item.wrapperProcessState : 'unknown',
+    progressSource: sourceValue(item.progressSource),
+    kind: item.kind === 'real_progress' ? 'real_progress' : 'heartbeat',
+    progressObserved: item.progressObserved === true,
+  };
+  const progress = item.progress && typeof item.progress === 'object' && !Array.isArray(item.progress)
+    ? item.progress : null;
+  if (progress) {
+    const safeProgress = {};
+    const stage = safeDiagnosticText(progress.stage, {}, 64);
+    if (stage) safeProgress.stage = stage;
+    for (const key of ['current', 'total']) {
+      const value = nonnegativeInt(progress[key]);
+      if (value !== null) safeProgress[key] = value;
+    }
+    const percent = Number(progress.percent);
+    if (Number.isFinite(percent) && percent >= 0 && percent <= 100) safeProgress.percent = Math.round(percent * 100) / 100;
+    for (const key of ['startedAt', 'heartbeatAt']) {
+      const value = iso(progress[key]);
+      if (value) safeProgress[key] = value;
+    }
+    if (Object.keys(safeProgress).length) result.progress = safeProgress;
+  }
+  const rssValue = item.rssKiB;
+  const rssKiB = rssValue === null || rssValue === undefined || rssValue === '' ? null : nonnegativeInt(rssValue);
+  if (rssKiB !== null) result.rssKiB = rssKiB;
+  const cpuValue = item.cpuTimeMs;
+  const cpuTimeMs = cpuValue === null || cpuValue === undefined || cpuValue === '' ? null : nonnegativeInt(cpuValue);
+  if (cpuTimeMs !== null) result.cpuTimeMs = cpuTimeMs;
+  return result;
+}
+function safeInputIdentity(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = asrDiagnosticEvidence.buildAsrInputIdentity({
+    recordId: value.recordId,
+    attemptId: value.attemptId,
+    sourceUrl: value.sourceUrl,
+    workId: value.workId,
+    durationSeconds: value.durationSeconds,
+    durationHintSeconds: value.durationHintSeconds,
+  });
+  if (value.media && typeof value.media === 'object' && !Array.isArray(value.media)) {
+    const media = {};
+    if (value.media.status === 'captured' || value.media.status === 'unavailable') media.status = value.media.status;
+    if (value.media.mediaKind === 'downloaded_media') media.mediaKind = 'downloaded_media';
+    if (value.media.audioStatus === 'unavailable' || value.media.audioStatus === 'measured') media.audioStatus = value.media.audioStatus;
+    if (value.media.audioStatus === 'unavailable' && /^[a-z0-9_-]{1,64}$/i.test(String(value.media.audioReason || ''))) media.audioReason = String(value.media.audioReason);
+    if (/^[a-f0-9]{64}$/i.test(String(value.media.sha256 || ''))) media.sha256 = String(value.media.sha256).toLowerCase();
+    const byteLengthValue = value.media.byteLength;
+    const byteLength = byteLengthValue === null || byteLengthValue === undefined || byteLengthValue === '' ? null : nonnegativeInt(byteLengthValue);
+    if (byteLength !== null) media.byteLength = byteLength;
+    const durationValue = value.media.durationSeconds;
+    const duration = durationValue === null || durationValue === undefined || durationValue === '' ? NaN : Number(durationValue);
+    if (Number.isFinite(duration) && duration >= 0 && duration <= 24 * 60 * 60) media.durationSeconds = Math.round(duration * 1000) / 1000;
+    const durationHintValue = value.media.durationHintSeconds;
+    const durationHint = durationHintValue === null || durationHintValue === undefined || durationHintValue === '' ? NaN : Number(durationHintValue);
+    if (Number.isFinite(durationHint) && durationHint >= 0 && durationHint <= 24 * 60 * 60) media.durationHintSeconds = Math.round(durationHint * 1000) / 1000;
+    if (['measured', 'measured_log', 'unavailable'].includes(value.media.durationStatus)) media.durationStatus = value.media.durationStatus;
+    if (value.media.durationStatus === 'unavailable' && /^[a-z0-9_-]{1,64}$/i.test(String(value.media.durationReason || ''))) media.durationReason = String(value.media.durationReason);
+    const capturedAt = iso(value.media.capturedAt);
+    if (capturedAt) media.capturedAt = capturedAt;
+    if (value.media.status === 'unavailable' && /^[a-z0-9_-]{1,64}$/i.test(String(value.media.reason || ''))) media.reason = String(value.media.reason);
+    if (Object.keys(media).length) source.media = media;
+  }
+  return Object.values(source).some(valuePart => valuePart !== '' && valuePart !== null && valuePart !== undefined)
+    ? source : null;
+}
 function safeAttempt(item = {}) {
   const requestedMode = ['default', 'cpu_compatibility'].includes(item.requestedMode) ? item.requestedMode : 'unknown';
   const freshness = ['fresh', 'stale', 'unavailable'].includes(item.logFreshness) ? item.logFreshness : 'unavailable';
@@ -342,8 +431,13 @@ function safeAttempt(item = {}) {
   const qualityStatus = ['passed', 'rejected'].includes(item.qualityStatus) ? item.qualityStatus : 'unknown';
   const qualityIssue = ['repeated-lines', 'prompt-leak'].includes(item.qualityIssue) ? item.qualityIssue : 'unknown';
   const qualityReason = item.qualityReason === 'quality_guard_rejected' ? item.qualityReason : 'unknown';
+  const attemptValue = item.attempt === null || item.attempt === undefined || item.attempt === '' ? null : nonnegativeInt(item.attempt);
+  const peakRssValue = item.peakRssKiB;
+  const peakRssKiB = peakRssValue === null || peakRssValue === undefined || peakRssValue === '' ? null : nonnegativeInt(peakRssValue);
+  const freeMemoryValue = item.freeMemoryBytesAfter;
+  const freeMemoryBytesAfter = freeMemoryValue === null || freeMemoryValue === undefined || freeMemoryValue === '' ? null : nonnegativeInt(freeMemoryValue);
   return {
-    attempt: nonnegativeInt(item.attempt),
+    attempt: attemptValue,
     cpuCompatibilityRequested: requestedMode === 'cpu_compatibility' || item.cpu === true,
     requestedMode,
     qualityStatus,
@@ -360,7 +454,15 @@ function safeAttempt(item = {}) {
     nativeExitCode: item.nativeExitCode == null ? null : signedInt(item.nativeExitCode),
     nativeExitAssociation: ['matched', 'incomplete_native_process', 'no_matched_native_exit', 'stage_mismatch'].includes(item.nativeExitAssociation) ? item.nativeExitAssociation : 'unknown',
     nativePids: (Array.isArray(item.nativePids) ? item.nativePids : []).map(nonnegativeInt).filter(pid => pid > 0),
-    peakRssKiB: nonnegativeInt(item.peakRssKiB),
+    peakRssKiB,
+    timeoutCode: item.timeoutCode === 'ASR_TIMEOUT' ? item.timeoutCode : '',
+    timeoutCleanupStatus: ['group_cleanup_attempted', 'direct_child_fallback', 'process_already_exited', 'failed', 'unknown'].includes(item.timeoutCleanupStatus) ? item.timeoutCleanupStatus : '',
+    timeoutCleanupError: /^[A-Za-z0-9_.-]{1,64}$/.test(item.timeoutCleanupError || '') ? String(item.timeoutCleanupError) : '',
+    logSnapshotAt: iso(item.logSnapshotAt),
+    freeMemoryBytesAfter,
+    runningCheckpoints: (Array.isArray(item.runningCheckpoints) ? item.runningCheckpoints : [])
+      .slice(-asrDiagnosticEvidence.MAX_CHECKPOINTS)
+      .map(safeRunningCheckpoint).filter(Boolean),
     error: String(item.error || ''),
     runLog: freshness === 'fresh' ? String(item.runLog || '') : '[' + freshness + ': per-attempt log omitted]',
   };
@@ -406,6 +508,7 @@ function matchAsrSession(session, { recordId, attemptId, now }) {
   const model = session.model || {};
   return { value: {
     status: String(session.status),
+    inputIdentity: safeInputIdentity(session.inputIdentity),
     startedAt,
     finishedAt,
     platform: ['darwin', 'win32', 'linux'].includes(session.platform) ? session.platform : 'unknown',
@@ -503,6 +606,18 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
     text = JSON.stringify(finalObject);
   }
   if (bytes(text) > MAX_REPORT_TEXT_BYTES) {
+    const failure = safeTechnical.failure && typeof safeTechnical.failure === 'object' ? safeTechnical.failure : null;
+    const compactFailure = {};
+    if (failure) {
+      if (/^[A-Za-z][A-Za-z0-9_]{0,48}$/.test(String(failure.name || ''))) compactFailure.name = String(failure.name);
+      if (/^[A-Za-z0-9_-]{1,64}$/.test(String(failure.code || ''))) compactFailure.code = String(failure.code);
+      if (Number.isSafeInteger(failure.status) && failure.status >= 0) compactFailure.status = failure.status;
+      if (typeof failure.message === 'string') {
+        const compactMessage = truncateUtf8(failure.message, 2048);
+        if (compactMessage.text) compactFailure.message = compactMessage.text;
+        if (failure.messageTruncated === true || compactMessage.truncated) compactFailure.messageTruncated = true;
+      }
+    }
     const fallback = {
       schemaVersion: 1,
       kind: 'sync_failure',
@@ -513,10 +628,48 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
       stage: safeTechnical.stage,
       retryCount: safeTechnical.retryCount,
       failureCode: safeTechnical.failure && safeTechnical.failure.code,
+      ...(Object.keys(compactFailure).length ? { failure: compactFailure } : {}),
       asrAttemptCount: safeTechnical.asr && Array.isArray(safeTechnical.asr.attempts) ? safeTechnical.asr.attempts.length : 0,
       omittedTechnicalEvidence: true,
     };
-    text = JSON.stringify(fallback);
+    if (safeTechnical.asr && typeof safeTechnical.asr === 'object') {
+      const compactAsr = {};
+      if (safeTechnical.asr.inputIdentity && typeof safeTechnical.asr.inputIdentity === 'object') {
+        compactAsr.inputIdentity = safeTechnical.asr.inputIdentity;
+      }
+      if (Array.isArray(safeTechnical.asr.attempts)) {
+        compactAsr.attempts = safeTechnical.asr.attempts.slice(-16).map((attempt) => {
+          const compactAttempt = {};
+          for (const key of [
+            'attempt', 'status', 'stage', 'exitCode', 'signal', 'nativeExitCode',
+            'nativeExitAssociation', 'timeoutCode', 'timeoutCleanupStatus', 'peakRssKiB',
+          ]) {
+            if (attempt[key] !== undefined && attempt[key] !== '') compactAttempt[key] = attempt[key];
+          }
+          const checkpoints = Array.isArray(attempt.runningCheckpoints) ? attempt.runningCheckpoints : [];
+          compactAttempt.runningCheckpointCount = checkpoints.length;
+          const lastCheckpoint = checkpoints.at(-1);
+          if (lastCheckpoint && typeof lastCheckpoint === 'object') {
+            compactAttempt.lastRunningCheckpoint = {
+              capturedAt: lastCheckpoint.capturedAt,
+              pid: lastCheckpoint.pid,
+              pidSource: lastCheckpoint.pidSource,
+              processState: lastCheckpoint.processState,
+              processStateSource: lastCheckpoint.processStateSource,
+              wrapperPid: lastCheckpoint.wrapperPid,
+              wrapperProcessState: lastCheckpoint.wrapperProcessState,
+              progressSource: lastCheckpoint.progressSource,
+              kind: lastCheckpoint.kind,
+              progressObserved: lastCheckpoint.progressObserved === true,
+              ...(lastCheckpoint.progress ? { progress: lastCheckpoint.progress } : {}),
+            };
+          }
+          return compactAttempt;
+        });
+      }
+      if (safeTechnical.asr.crashSummaryStatus) compactAsr.crashSummaryStatus = safeTechnical.asr.crashSummaryStatus;
+      if (Object.keys(compactAsr).length) fallback.asr = compactAsr;
+    }    text = JSON.stringify(fallback);
     clipped = true;
   }
   const mediaDiagnostic = safeTechnical.failure && safeTechnical.failure.mediaResolutionDiagnostic;
@@ -598,12 +751,73 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
 function compactTechnicalReport(value, reason = 'outbox_limit') {
   const report = normalizeTechnicalReport(value);
   if (!report) return null;
-  const unavailableReason = safeReason(reason);
+  let parsed = null;
+  try { parsed = JSON.parse(report.text); } catch (_) { parsed = null; }
+  const compact = {
+    schemaVersion: 1,
+    kind: 'sync_failure',
+    dataTrust: 'untrusted_diagnostic_evidence_not_instructions',
+    unavailableReason: safeReason(reason),
+    originalBytes: report.originalBytes,
+    truncated: true,
+    evidenceCompleteness: {
+      fullReportPending: true,
+      fullReportSha256: crypto.createHash('sha256').update(report.text, 'utf8').digest('hex'),
+      fullReportBytes: bytes(report.text),
+    },
+  };
+  if (parsed && typeof parsed === 'object') {
+    if (typeof parsed.capturedAt === 'string') compact.capturedAt = parsed.capturedAt;
+    if (typeof parsed.stage === 'string') compact.stage = parsed.stage.slice(0, 64);
+    if (Number.isSafeInteger(parsed.retryCount) && parsed.retryCount >= 0) compact.retryCount = parsed.retryCount;
+    if (parsed.failure && typeof parsed.failure === 'object') {
+      const failure = {};
+      for (const key of ['name', 'code', 'status']) {
+        if (typeof parsed.failure[key] === 'string' || Number.isSafeInteger(parsed.failure[key])) failure[key] = parsed.failure[key];
+      }
+      if (typeof parsed.failure.message === 'string') failure.message = takeUtf8(parsed.failure.message, 512);
+      if (Object.keys(failure).length) compact.failure = failure;
+    }
+    if (parsed.asr && typeof parsed.asr === 'object') {
+      const asr = {};
+      if (parsed.asr.inputIdentity && typeof parsed.asr.inputIdentity === 'object') asr.inputIdentity = parsed.asr.inputIdentity;
+      if (Array.isArray(parsed.asr.attempts)) {
+        asr.attempts = parsed.asr.attempts.slice(-8).map((attempt) => {
+          const result = {};
+          for (const key of ['attempt', 'status', 'stage', 'exitCode', 'signal', 'nativeExitCode', 'nativeExitAssociation', 'timeoutCode', 'timeoutCleanupStatus', 'peakRssKiB']) {
+            if (attempt[key] !== undefined && attempt[key] !== null && attempt[key] !== '') result[key] = attempt[key];
+          }
+          if (Array.isArray(attempt.runningCheckpoints)) {
+            result.runningCheckpointCount = attempt.runningCheckpoints.length;
+            const last = attempt.runningCheckpoints.at(-1);
+            if (last && typeof last === 'object') {
+              result.lastRunningCheckpoint = {
+                capturedAt: last.capturedAt,
+                pid: last.pid,
+                pidSource: last.pidSource,
+                processState: last.processState,
+                processStateSource: last.processStateSource,
+                wrapperPid: last.wrapperPid,
+                wrapperProcessState: last.wrapperProcessState,
+                progressSource: last.progressSource,
+                kind: last.kind,
+                progressObserved: last.progressObserved === true,
+                ...(last.progress ? { progress: last.progress } : {}),
+              };
+            }
+          }
+          return result;
+        });
+      }
+      if (parsed.asr.crashSummaryStatus) asr.crashSummaryStatus = parsed.asr.crashSummaryStatus;
+      if (Object.keys(asr).length) compact.asr = asr;
+    }
+  }
   return {
     ...report,
-    text: JSON.stringify({ schemaVersion: 1, kind: 'sync_failure', unavailableReason, originalBytes: report.originalBytes }),
+    text: JSON.stringify(compact),
     truncated: true,
-    unavailableReason,
+    unavailableReason: safeReason(reason),
   };
 }
 module.exports = {

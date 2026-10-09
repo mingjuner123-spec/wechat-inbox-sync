@@ -74,8 +74,8 @@ function runUniquePageIdentityFallbackTest() {
         area: 320000,
       }],
     }),
-    [targetMediaUrl],
-    'a uniquely target-bound page may use its visible playing media even if the player node has no id attribute',
+    [],
+    'page-wide identity alone does not bind an unidentified player',
   );
 
   assert.deepStrictEqual(
@@ -92,8 +92,8 @@ function runUniquePageIdentityFallbackTest() {
         area: 900000,
       }],
     }),
-    ['https://v11-weba.douyinvod.com/recommendation/?mime_type=video_mp4'],
-    'mixed page identities alone must not reject the visible playing media from the opened target page',
+    [],
+    'mixed page identities cannot bind a recommendation player',
   );
 
   assert.deepStrictEqual(
@@ -117,8 +117,8 @@ function runUniquePageIdentityFallbackTest() {
         area: 800000,
       }],
     }),
-    ['https://v11-weba.douyinvod.com/unbound-player-1/?mime_type=video_mp4'],
-    'multiple unbound players should select the strongest visible playing candidate instead of failing closed',
+    [],
+    'multiple unidentified players must not be guessed by visibility',
   );
 }
 
@@ -167,8 +167,8 @@ function runOnlyExplicitFinalRouteMismatchIsRejectedTest() {
         area: 900000,
       }],
     }),
-    [targetMediaUrl],
-    'candidate identity metadata must not block the visible playing media on the opened page',
+    [],
+    'a different candidate identity must be rejected',
   );
 
   assert.deepStrictEqual(
@@ -185,8 +185,8 @@ function runOnlyExplicitFinalRouteMismatchIsRejectedTest() {
         area: 900000,
       }],
     }),
-    [targetMediaUrl],
-    'canonical metadata from a preloaded work must not override the current playable page',
+    [],
+    'canonical metadata does not bind an unidentified player',
   );
 }
 
@@ -206,8 +206,8 @@ function runNoStableAwemeIdStillUsesPrimaryPlayerTest() {
         area: 900000,
       }],
     }),
-    [mediaUrl],
-    'missing aweme id must not fail closed when the current page has a playable primary video',
+    [],
+    'an unresolved page must not select an unidentified player',
   );
 }
 
@@ -233,12 +233,12 @@ function runBrowserFallbackRequestKeepsNonStrictCurrentPageTest() {
     [{
       awemeId: '7644566503081119019',
       url: 'https://v.douyin.com/example/',
-      strictDouyinTarget: false,
+      strictDouyinTarget: true,
       inputKind: 'original-page',
     }, {
       awemeId: '7644566503081119019',
       url: 'https://www.douyin.com/video/7644566503081119019',
-      strictDouyinTarget: false,
+      strictDouyinTarget: true,
       inputKind: 'resolved-page',
     }],
     'a known target id must not remove the original/current-page browser fallbacks that worked in 1.3.30',
@@ -253,17 +253,17 @@ function runBrowserFallbackRequestKeepsNonStrictCurrentPageTest() {
     [{
       awemeId: '7644566503081119019',
       url: 'https://v.douyin.com/example/',
-      strictDouyinTarget: false,
+      strictDouyinTarget: true,
       inputKind: 'original-page',
     }, {
       awemeId: '7644566503081119019',
       url: 'https://douyin.com/',
-      strictDouyinTarget: false,
+      strictDouyinTarget: true,
       inputKind: 'resolved-page',
     }, {
       awemeId: '7644566503081119019',
       url: 'https://www.douyin.com/video/7644566503081119019',
-      strictDouyinTarget: false,
+      strictDouyinTarget: true,
       inputKind: 'target-page',
     }],
     'a generic resolved page must be followed by the stable canonical work page when the work id is known',
@@ -553,13 +553,13 @@ function runDouyinPrimaryMediaFallbackWithoutExactIdTest() {
   const paceHtml = `<script>self.__pace_f.push([1, ${JSON.stringify(paceState)}]);</script>`;
   assert.deepStrictEqual(
     helpers.extractDouyinMediaUrlsFromShareHtml(paceHtml, requestedAwemeId),
-    [paceMediaUrl],
-    'an explicit page-level videoDetail must outrank recommendations when its identity field is absent or changed',
+    [],
+    'mismatched SSR identity must not satisfy the requested work',
   );
   assert.deepStrictEqual(
     helpers.extractDouyinMediaUrlsFromShareHtml(paceHtml, ''),
-    [paceMediaUrl],
-    'a short-link page must use its explicit primary video even before an aweme id is known',
+    [],
+    'unresolved SSR identity must await route binding',
   );
 
   const nestedRecommendationState = encodeURIComponent(JSON.stringify({
@@ -587,8 +587,8 @@ function runDouyinPrimaryMediaFallbackWithoutExactIdTest() {
   })};</script>`;
   assert.deepStrictEqual(
     helpers.extractDouyinMediaUrlsFromShareHtml(legacyHtml, requestedAwemeId),
-    [legacyMediaUrl],
-    'a legacy page with one explicit primary video must not fail only because its aweme id is missing',
+    [],
+    'legacy media without a work identity must remain unverified',
   );
 
 
@@ -663,8 +663,8 @@ function runTargetPlayerInsideMixedIdentityContainerTest() {
         area: 900000,
       }],
     }),
-    [targetMediaUrl],
-    'the visible playing target media must survive recommendation ids inherited from a shared feed container',
+    [],
+    'ambiguous player identities must not satisfy the requested work',
   );
 }
 

@@ -17,6 +17,7 @@ const expectedModules = [
   'douyin-diagnostic-utils',
   'ai-metadata-error-utils',
   'ai-metadata-utils',
+  'asr-diagnostic-evidence',
   'asr-recovery-utils',
   'asr-timeout-process-group',
   'auto-sync-controller',

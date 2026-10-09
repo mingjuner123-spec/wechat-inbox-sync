@@ -20,6 +20,7 @@ const asrRecovery = require('./asr-recovery-utils');
 const asrTimeoutProcessGroup = require('./asr-timeout-process-group');
 const macLegacyAsrCompat = require('./mac-legacy-asr-compat');
 const { buildFailureTechnicalReport, unavailableTechnicalReport } = require('./failure-technical-report');
+const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
 const { formatCompactSyncDiagnostic } = require('./compact-sync-diagnostic');
 const { runLocalAsrWithQualityRetry, shouldRetryLocalAsrQualityFailure } = require('./local-asr-quality-retry');
 const { inspectChannelsVadAssets, runChannelsQualityRecovery } = require('./channels-asr-quality-recovery');
@@ -302,7 +303,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.182';
+const PLUGIN_RUNTIME_VERSION = '1.3.183';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -13188,7 +13189,7 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
   const capturedRequests = [];
   const captureDouyinState = isDouyinUrl(url);
   const targetDouyinAwemeId = isDouyinUrl(url)
-    ? extractDouyinAwemeId(url) || (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || '')) ? String(options.targetDouyinAwemeId) : '')
+    ? (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || '')) ? String(options.targetDouyinAwemeId) : '') || extractDouyinAwemeId(url)
     : '';
   const blockXiaohongshuCommentRequests = isXiaohongshuUrl(url) && options.includeComments === false;
   const browserSession = (win.webContents && win.webContents.session) || wechatSession;
@@ -13380,7 +13381,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       // Unrelated page scripts must not turn that successful extraction into a timeout.
       await douyinGuard.run(waitForBrowserTasksWithin(debuggerBodyTasks, 1500), 'response-extraction');
       throwIfAborted(options.signal);
-      if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      if (debuggerMediaUrls.length) {
+        douyinGuard.emit({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
+        return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      }
     }
     if (captureDouyinState) {
       const challengeDetected = await douyinGuard.run(Promise.race([
@@ -13391,7 +13395,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         verifiedDouyinMedia.then(() => false),
       ]), 'page-validation');
       throwIfAborted(options.signal);
-      if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      if (debuggerMediaUrls.length) {
+        douyinGuard.emit({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
+        return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      }
       if (challengeDetected) {
         const error = new Error('抖音当前会话需要安全验证');
         error.code = 'DOUYIN_CHALLENGE';
@@ -13539,7 +13546,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       )
       : douyinGuard ? await douyinGuard.run(Promise.race([mediaExtractionTask, verifiedDouyinMedia.then(() => null)]), 'media-extraction') : await mediaExtractionTask;
     throwIfAborted(options.signal);
-    if (captureDouyinState && debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
+    if (captureDouyinState && debuggerMediaUrls.length) {
+      douyinGuard.emit({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
+      return sortMediaUrlsForTranscription(debuggerMediaUrls);
+    }
 
     if (isXiaohongshuExtractionWindow) {
       recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, 'media_extraction');
@@ -13555,13 +13565,25 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     const bodiesReady = waitForBrowserTasksWithin(debuggerBodyTasks, 2500);
     await (douyinGuard ? douyinGuard.run(bodiesReady, 'response-extraction') : bodiesReady);
     throwIfAborted(options.signal);
+    const loadedRouteId = isTrustedDouyinPageUrl(payload && payload.pageUrl) ? extractDouyinAwemeId(payload.pageUrl) : '';
+    const loadedCanonicalId = isTrustedDouyinPageUrl(payload && payload.canonicalUrl) ? extractDouyinAwemeId(payload.canonicalUrl) : '';
+    const snapshotTargetId = targetDouyinAwemeId || (
+      loadedRouteId && loadedCanonicalId && loadedRouteId !== loadedCanonicalId
+        ? '' : loadedRouteId || loadedCanonicalId
+    );
     const paceStateResolution = captureDouyinState
-      ? resolveDouyinMediaFromShareHtml(payload && payload.douyinPaceState, targetDouyinAwemeId)
+      ? resolveDouyinMediaFromShareHtml(payload && payload.douyinPaceState, snapshotTargetId)
       : { exactUrls: [], primaryUrls: [] };
-    if (paceStateResolution.exactUrls.length) return paceStateResolution.exactUrls;
-    if (debuggerMediaUrls.length) return sortMediaUrlsForTranscription(debuggerMediaUrls);
-    if (targetDouyinAwemeId && options.strictDouyinTarget === true) {
-      return selectIdentityBoundDouyinBrowserMedia({
+    if (captureDouyinState) {
+      if (paceStateResolution.exactUrls.length) {
+        douyinGuard?.emit({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
+        return paceStateResolution.exactUrls;
+      }
+      if (debuggerMediaUrls.length) {
+        douyinGuard?.emit({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
+        return sortMediaUrlsForTranscription(debuggerMediaUrls);
+      }
+      const identityBoundMedia = selectIdentityBoundDouyinBrowserMedia({
         targetAwemeId: targetDouyinAwemeId,
         finalUrl: payload && payload.pageUrl,
         canonicalUrl: payload && payload.canonicalUrl,
@@ -13569,13 +13591,13 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
         domMediaCandidates: payload && payload.domMediaCandidates,
         pageIdentityIds: payload && payload.pageIdentityIds,
       });
+      if (identityBoundMedia.length) {
+        douyinGuard?.emit({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
+        return identityBoundMedia;
+      }
+      douyinGuard?.emit({ identityOutcome: 'identity-unverified', preciseMediaFound: false });
+      return [];
     }
-    if (paceStateResolution.primaryUrls.length) return paceStateResolution.primaryUrls;
-    const primaryDomMediaUrls = selectPrimaryDouyinDomMediaUrls(
-      payload && payload.domMediaCandidates,
-      targetDouyinAwemeId,
-    );
-    if (primaryDomMediaUrls.length) return primaryDomMediaUrls;
     return normalizeBrowserCapturedMediaUrls([
       capturedRequests,
       payload && Array.isArray(payload.urls) ? payload.urls : payload,
@@ -16417,9 +16439,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       || diagnosticStopReason === 'douyin-challenge') {
       evidenceCodes.push('challenge_detected');
     }
-    if (transportCode === 'TRANSCRIPTION_NO_SPEECH'
-      || diagnosticCode === 'TRANSCRIPTION_NO_SPEECH'
-      || diagnostic.noSpeechEvidence === 'non-speech-markers') {
+    const confirmedNoSpeechEvidence = diagnostic.noSpeechEvidence === 'full-decode-and-vad-no-speech-segments'
+      || error && error.noSpeechEvidence === 'full-decode-and-vad-no-speech-segments';
+    if ((transportCode === 'TRANSCRIPTION_NO_SPEECH'
+      || diagnosticCode === 'TRANSCRIPTION_NO_SPEECH') && confirmedNoSpeechEvidence) {
       evidenceCodes.push('asr_no_speech');
     }
     if (['DOUYIN_BROWSER_RENDERER_GONE', 'ASR_PROCESS_CRASH', 'WHISPER_NATIVE_CRASH'].includes(transportCode)
@@ -20515,8 +20538,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (this.douyinBrowserRetryAfter > Date.now()) {
       throw Object.assign(new Error('抖音网页解析刚发生异常，已暂停隐藏网页重试 60 秒；请复制诊断'), { code: 'EXTRACTION_FAILED', browserCode: 'DOUYIN_BROWSER_COOLDOWN' });
     }
-    const targetId = extractDouyinAwemeId(url)
-      || (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || '')) ? String(options.targetDouyinAwemeId) : '');
+    const targetId = (/^\d{10,30}$/.test(String(options.targetDouyinAwemeId || '')) ? String(options.targetDouyinAwemeId) : '')
+      || extractDouyinAwemeId(url);
     const targetIdState = options.targetIdState === 'unknown'
       ? 'unknown'
       : (targetId ? 'recognized' : 'missing');
@@ -20815,6 +20838,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       recordId: options.recordId || (this.currentProcessingContext && this.currentProcessingContext.recordId) || '',
       syncAttemptId: /^[A-Za-z0-9_-]{8,128}$/.test(options.syncAttemptId || (this.currentProcessingContext && this.currentProcessingContext.attemptId) || '') ? (options.syncAttemptId || (this.currentProcessingContext && this.currentProcessingContext.attemptId)) : '',
       diagnosticAttemptId: /^[a-f0-9]{16}$/.test(options.diagnosticAttemptId || '') ? options.diagnosticAttemptId : '',
+      inputIdentity: asrDiagnosticEvidence.buildAsrInputIdentity({
+        recordId: options.recordId || (this.currentProcessingContext && this.currentProcessingContext.recordId) || '',
+        attemptId: options.syncAttemptId || (this.currentProcessingContext && this.currentProcessingContext.attemptId) || '',
+        sourceUrl: sanitizeSourceLink(options.sourceUrl || options.url || ''),
+        workId: options.workId || options.awemeId || options.targetDouyinAwemeId || '',
+        durationHintSeconds: options.durationSeconds,
+      }),
       runtime,
       system: asrRecovery.systemIdentity(platform),
       model: asrRecovery.modelIdentity(installRoot, { managed }),
@@ -20827,8 +20857,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     const progressTitle = options.title || '';
     const abortController = new AbortController();
     let ownedChild = null;
+    let activeAttemptNumber = null;
+    let activeAttemptCheckpoints = [];
+    let lastCheckpointPersistAt = 0;
     const attemptStartedAt = new Map();
     const attemptLogBaseline = new Map();
+    const attemptLogBaselineText = new Map();
     const requestAbort = (source = 'unknown', attribution = null) => {
       if (!session.abort.requestedAt) {
         session.abort.requestedAt = new Date().toISOString();
@@ -20865,9 +20899,26 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.setTranscriptionStopAvailable(true);
     let progressTimer = null;
     let lastProgressKey = '';
+    const getFreshAttemptLog = (attemptNumber, currentLog) => {
+      const text = String(currentLog || '');
+      if (!text) return '';
+      const baseline = String(attemptLogBaselineText.get(attemptNumber) || '');
+      if (!baseline || /^\[unavailable:/.test(baseline)) return text;
+      return text.startsWith(baseline) ? text.slice(baseline.length) : text;
+    };
     const emitLocalProgress = (fallbackPercent = null) => {
-      if (typeof this.showSyncProgress !== 'function') return;
-      const parsedProgress = parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot));
+      const activeAttempt = activeAttemptNumber;
+      const runLog = activeAttempt === null ? '' : readLocalAsrRunLog(installRoot);
+      const logFreshness = activeAttempt === null
+        ? 'unavailable'
+        : asrRecovery.diagnosticLogFreshness(
+          attemptLogBaseline.get(activeAttempt),
+          asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)),
+        );
+      const freshAttemptLog = logFreshness === 'fresh'
+        ? getFreshAttemptLog(activeAttempt, runLog)
+        : '';
+      const parsedProgress = logFreshness === 'fresh' ? parseLocalAsrProgressLog(freshAttemptLog) : null;
       const progress = parsedProgress || (
         fallbackPercent === null
           ? null
@@ -20878,7 +20929,61 @@ class WechatObsidianInboxPlugin extends Plugin {
             percent: fallbackPercent,
           }
       );
-      if (!progress) return;
+      if (activeAttempt !== null) {
+        const child = ownedChild;
+        const wrapperProcessState = !child
+          ? 'unknown'
+          : ((child.exitCode === null || child.exitCode === undefined)
+            && (child.signalCode === null || child.signalCode === undefined) ? 'running' : 'exited');
+        const wrapperPid = child && Number.isSafeInteger(Number(child.pid)) && Number(child.pid) > 0
+          ? Number(child.pid) : null;
+        const hasFreshProgress = logFreshness === 'fresh'
+          && /^(?:progressStage|progressCurrent|progressTotal|progressPercent)=/m.test(freshAttemptLog);
+        const nativeProgress = hasFreshProgress ? parsedProgress : null;
+        const nativePidMatches = logFreshness === 'fresh'
+          ? [...freshAttemptLog.matchAll(/^progressPid=(\d+)$/gm)]
+            .map(match => Number(match[1])).filter(pid => pid > 0)
+          : [];
+        const nativePid = nativePidMatches.length ? nativePidMatches[nativePidMatches.length - 1] : null;
+        const nativeEvidence = nativePid === null || logFreshness !== 'fresh'
+          ? null
+          : asrRecovery.latestNativeExitForFinalStage(freshAttemptLog, nativeProgress?.stage || 'unknown');
+        const nativeEvidenceMatches = Boolean(nativeEvidence && nativeEvidence.nativePid === nativePid);
+        const nativeProcessState = nativeEvidenceMatches && nativeEvidence.reason === 'matched'
+          ? 'exited'
+          : 'unknown';
+        const rssMatches = logFreshness === 'fresh'
+          ? [...freshAttemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(match => Number(match[1]))
+          : [];
+        const checkpoint = asrDiagnosticEvidence.buildRunningCheckpoint({
+          attempt: activeAttempt,
+          stage: nativeProgress?.stage || 'transcribing',
+          pid: nativePid,
+          pidSource: nativePid === null ? 'unknown' : 'native_log',
+          processState: nativeProcessState,
+          processStateSource: nativePid === null ? 'unknown' : 'native_log',
+          progressSource: nativeProgress ? 'native_log' : 'unknown',
+          wrapperPid,
+          wrapperProcessState,
+          progress: nativeProgress,
+          previous: activeAttemptCheckpoints,
+          rssKiB: rssMatches.length ? Math.max(...rssMatches) : null,
+        });
+        const beforeCheckpoints = activeAttemptCheckpoints;
+        activeAttemptCheckpoints = asrDiagnosticEvidence.appendRunningCheckpoint(activeAttemptCheckpoints, checkpoint);
+        if (activeAttemptCheckpoints !== beforeCheckpoints) {
+          session.activeAttempt = {
+            attempt: activeAttempt,
+            runningCheckpoints: activeAttemptCheckpoints.slice(-asrDiagnosticEvidence.MAX_CHECKPOINTS),
+          };
+          const checkpointTime = Date.parse(checkpoint.capturedAt) || Date.now();
+          if (checkpoint.progressObserved || checkpointTime - lastCheckpointPersistAt >= 5000) {
+            lastCheckpointPersistAt = checkpointTime;
+            asrRecovery.saveSession(installRoot, session, this.settings);
+          }
+        }
+      }
+      if (!progress || typeof this.showSyncProgress !== 'function') return;
       const key = buildLocalAsrProgressKey(progress);
       if (key === lastProgressKey) return;
       lastProgressKey = key;
@@ -20929,6 +21034,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       });
       throwIfAborted(abortController.signal);
+      session.inputIdentity.media = await asrDiagnosticEvidence.captureMediaIdentityAsync(inputPath, {
+        durationHintSeconds: options.durationSeconds,
+      });
+      asrRecovery.saveSession(installRoot, session, this.settings);
       channelsStage = 'transcribe';
       outputPath = `${inputPath}.txt`;
       const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
@@ -20955,13 +21064,26 @@ class WechatObsidianInboxPlugin extends Plugin {
           const freshnessSnapshot = asrRecovery.snapshotDiagnosticLog(logPath);
           const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attemptNumber), freshnessSnapshot);
           const attemptLog = logFreshness === 'fresh' ? asrRecovery.readDiagnosticLog(logPath) : '';
-          const observedStage = status === 'success' ? 'completed' : logFreshness === 'fresh' ? (error?.asrStage || parseLocalAsrProgressLog(attemptLog)?.stage || 'unknown') : 'unknown';
+          const freshAttemptLog = logFreshness === 'fresh' ? getFreshAttemptLog(attemptNumber, attemptLog) : '';
+          const attemptProgress = logFreshness === 'fresh' ? parseLocalAsrProgressLog(freshAttemptLog) : null;
+          const measuredDuration = logFreshness === 'fresh'
+            ? asrDiagnosticEvidence.readMeasuredDurationFromLog(freshAttemptLog)
+            : null;
+          if (measuredDuration !== null && session.inputIdentity && session.inputIdentity.media) {
+            session.inputIdentity.media.durationSeconds = measuredDuration;
+            session.inputIdentity.media.durationStatus = 'measured_log';
+            delete session.inputIdentity.media.durationReason;
+          }
+          const observedStage = status === 'success' ? 'completed' : logFreshness === 'fresh' ? (error?.asrStage || attemptProgress?.stage || 'unknown') : 'unknown';
           if (abortController.signal.aborted && error) {
             session.abort.nativeCrash = logFreshness === 'fresh' && observedStage !== 'unknown' ? asrRecovery.isMacNativeCrash(error) : null;
             session.abort.nativeCrashEvidence = logFreshness === 'fresh' ? observedStage : 'unknown_stale_or_unavailable_log';
           }
-          const nativeExitEvidence = asrRecovery.latestNativeExitForFinalStage(attemptLog, observedStage === 'completed' ? 'unknown' : observedStage);
-          const nativePidList = [...new Set([...attemptLog.matchAll(/^progressPid=(\d+)$/gm)].map(m => Number(m[1])).filter(pid => pid > 0))];
+          const nativeExitCandidate = asrRecovery.latestNativeExitForFinalStage(freshAttemptLog, observedStage === 'completed' ? 'unknown' : observedStage);
+          const nativePidList = [...new Set([...freshAttemptLog.matchAll(/^progressPid=(\d+)$/gm)].map(m => Number(m[1])).filter(pid => pid > 0))];
+          const nativeExitEvidence = nativePidList.includes(nativeExitCandidate.nativePid)
+            ? nativeExitCandidate
+            : { nativeExitCode: null, nativePid: null, stage: '', reason: 'no_matched_native_exit' };
           session.attempts.push({ attempt: attemptNumber, cpu, requestedMode: cpu ? 'cpu_compatibility' : 'default', backendObserved: 'unknown', backendObservationNote: '本机日志未确认引擎实际选择的CPU/GPU后端', status, stage: observedStage, logFreshness, at: observedAt,
             startedAt: attemptStartedAt.get(attemptNumber) || session.startedAt, finishedAt: observedAt,
             exitCode: error?.exitCode ?? error?.code ?? null, signal: error?.signal || '',
@@ -20972,15 +21094,25 @@ class WechatObsidianInboxPlugin extends Plugin {
             nativeExitAssociation: nativeExitEvidence.reason,
             logSnapshotAt: observedAt, error: error?.message || '',
             nativePids: nativePidList,
-            peakRssKiB: Math.max(0, ...[...attemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(m => Number(m[1]))) || null,
-            runLog: logFreshness === 'fresh' ? asrRecovery.diagnosticRedact(attemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`, freeMemoryBytesAfter: os.freemem() });
+            peakRssKiB: Math.max(0, ...[...freshAttemptLog.matchAll(/^nativeRssKiB=(\d+)$/gm)].map(m => Number(m[1]))) || null,
+            runningCheckpoints: activeAttemptCheckpoints.slice(-asrDiagnosticEvidence.MAX_CHECKPOINTS),
+            runLog: logFreshness === 'fresh' ? asrRecovery.diagnosticRedact(freshAttemptLog, this.settings) : `[${logFreshness}: prior ASR log omitted]`, freeMemoryBytesAfter: os.freemem() });
+          session.activeAttempt = null;
+          activeAttemptNumber = null;
+          activeAttemptCheckpoints = [];
           asrRecovery.saveSession(installRoot, session, this.settings);
         },
         execute: ({ cpu, attempt }) => new Promise((resolve, reject) => {
           const attemptNumber = attemptOffset + attempt;
+          activeAttemptNumber = attemptNumber;
+          activeAttemptCheckpoints = [];
+          lastCheckpointPersistAt = 0;
+          session.activeAttempt = { attempt: attemptNumber, runningCheckpoints: [] };
           throwIfAborted(abortController.signal);
           attemptStartedAt.set(attemptNumber, new Date().toISOString());
-          attemptLogBaseline.set(attemptNumber, asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
+          const attemptLogPath = getLocalAsrRunLogPath(installRoot);
+          attemptLogBaseline.set(attemptNumber, asrRecovery.snapshotDiagnosticLog(attemptLogPath));
+          attemptLogBaselineText.set(attemptNumber, asrRecovery.readDiagnosticLog(attemptLogPath));
           if (attempt > 1) {
             new Notice('本地转写引擎崩溃，正在用 CPU 兼容模式重试一次。', 6000);
             if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
@@ -21006,8 +21138,9 @@ class WechatObsidianInboxPlugin extends Plugin {
                   ? error.cleanupStatus : 'unknown';
                 wrapped.cleanupError = /^[A-Za-z0-9_.-]{1,64}$/.test(error.cleanupError || '') ? error.cleanupError : '';
               }
-              const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attempt), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
-              wrapped.asrStage = logFreshness === 'fresh' ? parseLocalAsrProgressLog(readLocalAsrRunLog(installRoot))?.stage || 'unknown' : 'unknown';
+              const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attemptNumber), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
+              const wrappedLog = logFreshness === 'fresh' ? getFreshAttemptLog(attemptNumber, readLocalAsrRunLog(installRoot)) : '';
+              wrapped.asrStage = logFreshness === 'fresh' ? parseLocalAsrProgressLog(wrappedLog)?.stage || '' : '';
               reject(wrapped); return;
             }
             if (abortController.signal.aborted) { reject(createAbortError()); return; }
@@ -22250,6 +22383,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   async buildTranscriptRecordFromMedia(record, {
     url,
     platform,
+    workId = '',
     mediaUrl = '',
     mediaUrls = [],
     mediaItems = [],
@@ -22433,6 +22567,8 @@ class WechatObsidianInboxPlugin extends Plugin {
               title: metadata.title || '',
               source: source || 'media-url',
               sourceUrl: url,
+              workId,
+              durationSeconds: Number(candidate.durationSeconds || metadata.durationSeconds || metadata.duration || 0) || null,
               binding,
               recordId: getRecordId(record),
               diagnosticAttemptId: mediaDiagnosticTrace?.source === 'xiaohongshu-browser' ? mediaDiagnosticTrace.attemptId : '',
@@ -24160,22 +24296,36 @@ class WechatObsidianInboxPlugin extends Plugin {
                     if (['target-id-missing', 'api-absent', 'api-unsupported', 'unknown'].includes(event.debuggerReason)) {
                       douyinDebuggerReason = event.debuggerReason;
                     }
+                    if (['target-id-matched', 'identity-unverified', 'target-id-mismatch', 'unverified-primary-player'].includes(event.identityOutcome)) {
+                      browserStage.identityOutcome = event.identityOutcome;
+                    }
+                    if (typeof event.preciseMediaFound === 'boolean') {
+                      browserStage.preciseMediaFound = event.preciseMediaFound;
+                    }
                   },
                 });
                 browserStage.mediaCount = Array.isArray(browserUrls) ? browserUrls.length : 0;
                 if (browserStage.mediaCount) {
-                  mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
-                  mediaUrl = mediaUrls[0] || mediaUrl;
-                  hasUsableDouyinMedia = true;
-                  douyinSelectedStage = douyinSelectedStage || `${browserStage.stage}:${browserRequest.inputKind}`;
-                  browserStage.ok = true;
-                  browserStage.identityOutcome = 'primary-player-fallback';
+                  const browserIdentityOutcome = browserStage.identityOutcome || 'identity-unverified';
+                  browserStage.identityOutcome = browserIdentityOutcome;
+                  browserStage.preciseMediaFound = browserIdentityOutcome === 'target-id-matched';
+                  if (browserIdentityOutcome === 'target-id-matched') {
+                    mediaUrls = sortMediaUrlsForTranscription([...browserUrls, ...mediaUrls]);
+                    mediaUrl = mediaUrls[0] || mediaUrl;
+                    hasPreciseDouyinMedia = true;
+                    hasUsableDouyinMedia = true;
+                    douyinSelectedStage = douyinSelectedStage || `${browserStage.stage}:${browserRequest.inputKind}`;
+                    browserStage.ok = true;
+                  } else {
+                    browserStage.mediaCount = 0;
+                    browserStage.rejectionReason = 'identity-unverified';
+                  }
                 }
               } catch (browserError) {
                 browserStage.error = browserError;
                 if (isAbortError(browserError)) throw browserError;
               } finally {
-                if (!browserStage.ok) browserStage.rejectionReason = browserStage.error ? 'transport-error' : 'no-target-bound-media';
+                if (!browserStage.ok && !browserStage.rejectionReason) browserStage.rejectionReason = browserStage.error ? 'transport-error' : 'no-target-bound-media';
                 browserStage.durationMs = Date.now() - browserStage.startedAt;
                 delete browserStage.startedAt;
               douyinResolutionStages.push(browserStage);
@@ -24268,7 +24418,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 ? localResolution.mediaUrls
                 : [];
               localResolverStage.mediaCount = localUrls.length;
-              if (localUrls.length) {
+              if (localUrls.length && localResolution.identityOutcome === 'target-id-matched') {
                 mediaUrls = sortMediaUrlsForTranscription([...localUrls, ...mediaUrls]);
                 mediaUrl = mediaUrls[0] || mediaUrl;
                 hasUsableDouyinMedia = true;
@@ -24289,7 +24439,9 @@ class WechatObsidianInboxPlugin extends Plugin {
                   ? 'not-installed'
                   : (douyinLocalResolverLoginRequired
                   ? 'login-required'
-                  : 'resolver-no-media');
+                  : (localUrls.length && localResolution.identityOutcome !== 'target-id-matched'
+                    ? 'identity-unverified'
+                    : 'resolver-no-media'));
                 if (localResolution && localResolution.error && !douyinLocalResolverNotInstalled) {
                   localResolverStage.error = Object.assign(new Error(localResolution.error), {
                     code: localResolution.code || (localResolution.loginRequired ? 'DOUYIN_LOGIN_REQUIRED' : 'DOUYIN_RESOLVER_FAILED'),
@@ -24755,6 +24907,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           return await this.buildTranscriptRecordFromMedia(mediaRecord, {
             url,
             platform: isDouyinUrl(url) || isDouyinUrl(resolvedUrl) ? '抖音' : '小红书',
+            workId: isDouyinRecord ? douyinAwemeId : '',
             mediaUrl,
             mediaUrls,
             source: 'video',

@@ -69,9 +69,10 @@ function shellFixture(cpu, nativeExit=0) {
 }
 async function pluginIntegration() {
   const originalLoad=Module._load;
+  let requestFixture=async()=>({});
   const originalExtensions={};
   for(const ext of ['.ps1','.sh','.py']){originalExtensions[ext]=Module._extensions[ext];Module._extensions[ext]=(mod,file)=>{mod.exports=fs.readFileSync(file,'utf8');};}
-  Module._load=function(request,...args){ if(request==='obsidian')return {Plugin:class{},Modal:class{},Notice:class{},PluginSettingTab:class{},Setting:class{},requestUrl:async()=>({})};return originalLoad.call(this,request,...args); };
+  Module._load=function(request,...args){ if(request==='obsidian')return {Plugin:class{},Modal:class{},Notice:class{},PluginSettingTab:class{},Setting:class{},requestUrl:(...args)=>requestFixture(...args)};return originalLoad.call(this,request,...args); };
   let Plugin;try{Plugin=require(path.join(pluginRoot,'src/main'));}finally{Module._load=originalLoad;for(const ext of Object.keys(originalExtensions)){if(originalExtensions[ext])Module._extensions[ext]=originalExtensions[ext];else delete Module._extensions[ext];}}
   const root=path.join(scratch,'integration').replace(/\\/g,'/');fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'transcribe.sh'),script);
   const plugin=new Plugin();plugin.settings={};plugin.ensureLocalComponentReadyForUse=async()=>{};plugin.recoverStaleLocalTranscriptionCommand=async()=>{};
@@ -100,7 +101,7 @@ async function pluginIntegration() {
     assert.ok(fs.readFileSync(path.join(root,'transcribe-last.log'),'utf8').includes('nativeExit=0'));
     cp.exec=(command,opts,callback)=>{setImmediate(()=>callback(Object.assign(new Error('spawn failed'),{code:'ENOENT'}),'',''));return {pid:9876};};
     await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'spawn-failure'}),/spawn failed/);
-    const spawnFailure=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8')).attempts[0];assert.equal(spawnFailure.logFreshness,'stale');assert.equal(spawnFailure.stage,'unknown');assert.equal(spawnFailure.nativeExitCode,null);assert.deepEqual(spawnFailure.nativePids,[]);assert.ok(spawnFailure.runLog.includes('[stale: prior ASR log omitted]'));assert.ok(!spawnFailure.runLog.includes('nativeExit=0'));assert.ok(!spawnFailure.runLog.includes('1237'));
+    const spawnFailure=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8')).attempts[0];assert.equal(spawnFailure.logFreshness,'stale');assert.equal(spawnFailure.stage,'unknown');assert.equal(spawnFailure.nativeExitCode,null);assert.deepEqual(spawnFailure.nativePids,[]);assert.ok(spawnFailure.runLog.includes('[stale: prior ASR log omitted]'));assert.ok(!spawnFailure.runLog.includes('nativeExit=0'));assert.ok(!spawnFailure.runLog.includes('1237'));assert.ok(spawnFailure.runningCheckpoints.length > 0);assert.ok(spawnFailure.runningCheckpoints.every(checkpoint => checkpoint.pid === null && checkpoint.processState === 'unknown' && checkpoint.pidSource === 'unknown' && checkpoint.progressSource === 'unknown'), 'stale prior log cannot become native checkpoint evidence');
     fs.unlinkSync(path.join(root,'asr-cpu-mode.json'));
     const stopped=[];
     cp.exec=(command,opts,callback)=>{stopped.push(opts.env.WECHAT_INBOX_ASR_CPU_ONLY);setImmediate(()=>{plugin.currentTranscriptionAbortRequest?.('user_stop');callback(Object.assign(new Error('stopped'),{code:139}),'','Segmentation fault: 11');});return {pid:1234};};
@@ -135,6 +136,49 @@ async function pluginIntegration() {
     await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'double-failure'}), /CPU 兼容重试仍失败/);
     assert.deepEqual(failed,['0','1']);assert.equal(JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8')).attempts.length,2);
     assert.ok(!fs.existsSync(path.join(root,'asr-cpu-mode.json')));
+    // Appending a new attempt must not reattribute a previous record's log.
+    fs.writeFileSync(path.join(root,'transcribe-last.log'),'OLD_RECORD_SENTINEL\nprogressStage=transcribing\nprogressPid=1111\nnativeExit=139\n');
+    cp.exec=(command,opts,callback)=>{setImmediate(()=>{
+      fs.appendFileSync(path.join(root,'transcribe-last.log'),'CURRENT_ATTEMPT_SENTINEL\nprogressStage=transcribing\nprogressPid=2222\nnativeExit=1\n');
+      callback(Object.assign(new Error('current controlled failure'),{code:1}),'','');
+    });return {pid:8888};};
+    await assert.rejects(plugin.runLocalTranscription('fixture',{recordId:'append-record',syncAttemptId:'attempt-append-0001'}),/current controlled failure/);
+    const appended=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8'));
+    assert.equal(appended.attempts.length,1);
+    assert.ok(appended.attempts[0].runLog.includes('CURRENT_ATTEMPT_SENTINEL'));
+    assert.ok(!appended.attempts[0].runLog.includes('OLD_RECORD_SENTINEL'));
+    assert.deepEqual(appended.attempts[0].nativePids,[2222]);
+    const report=require(path.join(pluginRoot,'src/failure-technical-report')).buildFailureTechnicalReport({error:new Error('current controlled failure'),recordId:'append-record',attemptId:'attempt-append-0001',stage:'transcribing',asrRoot:root});
+    assert.ok(report.text.includes('CURRENT_ATTEMPT_SENTINEL'));
+    assert.ok(!report.text.includes('OLD_RECORD_SENTINEL'));
+
+    // Short URL -> resolved work -> real helper/configured ASR -> persisted session.
+    const https=require('https'),originalRequest=https.request,EventEmitter=require('events');
+    const targetId='1234567890123456789',shortUrl='https://v.douyin.com/FixtureASR/';
+    https.request=(url,options,callback)=>{const req=new EventEmitter();req.setTimeout=()=>req;req.destroy=()=>{};req.end=()=>setImmediate(()=>callback({statusCode:200,headers:{},resume(){}}));return req;};
+    try {
+      for(const mode of ['direct-payload','browser-proof']) {
+        const detail={aweme_id:targetId,desc:'fixture title',video:{play_addr:{url_list:['https://v3.douyinvod.com/fixture.mp4']}}};
+        requestFixture=async({url})=>({status:200,url:'https://www.douyin.com/video/'+targetId,text:'<html></html>',...(mode==='direct-payload' && url.includes('/aweme/v1/web/aweme/detail/') ? {json:{aweme_detail:detail}} : {})});
+        plugin.checkDouyinLogin=async()=>false;
+        plugin.fetchDouyinMediaResolutionWithSession=async()=>({mediaUrls:[],stages:[]});
+        plugin.resolveDouyinMediaWithLocalResolver=async()=>({mediaUrls:[]});
+        let browserCalls=0;
+        plugin.renderSocialMediaUrls=async(_url,options)=>{browserCalls++;assert.equal(options.targetDouyinAwemeId,targetId);options.onDouyinBrowserDiagnostic({identityOutcome:'target-id-matched',preciseMediaFound:true});return ['https://v3.douyinvod.com/fixture.mp4'];};
+        cp.exec=(command,opts,callback)=>{setImmediate(()=>{fs.writeFileSync(path.join(root,'transcribe-last.log'),'progressStage=transcribing\nprogressPid=3333\nnativeExit=0\n');fs.writeFileSync(path.join(root,'input.mp4.txt'),'这是一段完整有效的中文音频转写结果，用来验证作品身份。');callback(null,'','');});return {pid:9999};};
+        const recordId='shortlink-'+mode;
+        plugin.currentProcessingContext={recordId,attemptId:'attempt-shortlink-0001'};
+        const hydrated=await plugin.hydrateWebpageMarkdown({_id:recordId,type:'webpage',content:shortUrl,metadata:{url:shortUrl,transcriptionMode:'local',title:'fixture title'}},'','','fixture');
+        assert.equal(hydrated.metadata.transcriptionStatus,'success');
+        const actual=JSON.parse(fs.readFileSync(path.join(root,'asr-diagnostic-last.json'),'utf8'));
+        assert.equal(actual.inputIdentity.workId,targetId,mode);
+        assert.equal(actual.inputIdentity.sourceUrl,helpers.diagnosticRedact(shortUrl,plugin.settings),mode);
+        assert.equal(actual.inputIdentity.recordId,recordId,mode);
+        assert.equal(actual.inputIdentity.attemptId,'attempt-shortlink-0001',mode);
+        assert.equal(actual.inputIdentity.media.audioStatus,'unavailable');
+        assert.equal(browserCalls,mode==='direct-payload'?0:1,mode);
+      }
+    } finally {https.request=originalRequest;plugin.currentProcessingContext=null;requestFixture=async()=>({});}
     const home=path.join(scratch,'fake-home').replace(/\\/g,'/');
     const homeRoot=home+'/.wechat-inbox-local-asr';fs.mkdirSync(homeRoot,{recursive:true});fs.writeFileSync(path.join(homeRoot,'transcribe.sh'),script);
     const oldHomedir=os.homedir;os.homedir=()=>home;

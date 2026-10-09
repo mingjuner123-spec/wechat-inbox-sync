@@ -9,11 +9,12 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-diagnostic-test-')
 const originalLoad = Module._load;
 let request = async () => ({ text: '<html><body></body></html>', status: 200 });
 Module._load = function(id, parent, main) {
+  if (/\.(?:ps1|sh|py)$/i.test(id)) return '';
   if (id === 'obsidian') return { Plugin: class {}, PluginSettingTab: class {}, Modal: class {}, Notice: class {}, requestUrl: (...args) => request(...args) };
   if (id === 'electron') return { remote: { session: { fromPartition: () => ({ cookies: { get: async () => [] } }) } } };
   return originalLoad.call(this, id, parent, main);
 };
-const Plugin = require('../obsidian-plugin/wechat-inbox-sync/main');
+const Plugin = require(process.env.PLUGIN_MAIN_PATH || '../obsidian-plugin/wechat-inbox-sync/main');
 function fixture() {
   const plugin = new Plugin(); plugin.settings = { aiProvider: 'off' };
   plugin.getConfiguredLocalAsrInstallRoot = () => scratch;
@@ -141,7 +142,7 @@ async function run() {
     assert.doesNotMatch(summary, /未检测到失败日志|最近小红书|飞书图片显示/);
     assert.match(summary, /DOUYIN_CHALLENGE/); cases++;
     browserCalls = 0; resolverCalls = 0;
-    plugin.resolveDouyinMediaWithLocalResolver = async () => { resolverCalls++; return { mediaUrls: ['https://v3.douyinvod.com/challenge-recovered.mp4'] }; };
+    plugin.resolveDouyinMediaWithLocalResolver = async () => { resolverCalls++; return { mediaUrls: ['https://v3.douyinvod.com/challenge-recovered.mp4'], identityOutcome: 'target-id-matched' }; };
     plugin.hydrateWebpageAudioVideo = async record => record;
     await plugin.hydrateWebpageMarkdown({ type: 'webpage', content: url, metadata: { url } }, '', '', 'fixture');
     assert.equal(browserCalls, 1); assert.equal(resolverCalls, 1);
@@ -166,7 +167,7 @@ async function run() {
     assert.equal(diagnostic.read(scratch).at(-1).stages.at(-1).stage, 'cancelled');
     assert.equal(diagnostic.read(scratch).at(-1).stages.find(s => s.stage === 'targeted-browser').error.code, 'ABORT_ERR');
     plugin.renderSocialMediaUrls = async () => { throw Object.assign(new Error('timeout'), { browserCode: 'DOUYIN_BROWSER_TIMEOUT' }); };
-    plugin.resolveDouyinMediaWithLocalResolver = async () => ({ mediaUrls: ['https://v3.douyinvod.com/fixture.mp4'] });
+    plugin.resolveDouyinMediaWithLocalResolver = async () => ({ mediaUrls: ['https://v3.douyinvod.com/fixture.mp4'], identityOutcome: 'target-id-matched' });
     plugin.hydrateWebpageAudioVideo = async record => record;
     await plugin.hydrateWebpageMarkdown({ type: 'webpage', content: url, metadata: { url } }, '', '', 'fixture');
     assert.equal(diagnostic.read(scratch).at(-1).outcome, 'success');
