@@ -9,7 +9,7 @@ async function main() {
   if (url.protocol !== 'https:' || url.hostname !== '6865-he02-d8gebzv050ed6c4ef-1428610652.cos.ap-shanghai.myqcloud.com' || url.port || url.username || url.password) throw Error('FIXTURE_HOST_REJECTED');
   if (process.env.ASR_FIXTURE_SHA256 !== HASH) throw Error('FIXTURE_PIN_MISMATCH');
   const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(120000) });
-  if (!response.ok) throw Error('FIXTURE_DOWNLOAD_FAILED');
+  if (!response.ok) throw Error('FIXTURE_HTTP_' + response.status);
   const chunks = []; let bytes = 0;
   for await (const chunk of response.body) {
     bytes += chunk.length;
@@ -22,4 +22,8 @@ async function main() {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(root, 'fixture.bin'), buffer, { mode: 0o600, flag: 'wx' });
 }
-main().catch(() => { process.stderr.write('PRIVATE_FIXTURE_PREPARE_FAILED\n'); process.exitCode = 1; });
+main().catch(error => {
+  const code = /^FIXTURE_[A-Z0-9_]+$/.test(error.message) ? error.message : 'FIXTURE_TRANSPORT_FAILED';
+  const cause = /^[A-Z0-9_]+$/.test(error.cause?.code || '') ? error.cause.code : 'NONE';
+  process.stderr.write(code + ' cause=' + cause + '\n'); process.exitCode = 1;
+});
