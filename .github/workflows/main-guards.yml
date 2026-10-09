@@ -42,6 +42,8 @@ jobs:
           node tests/plugin-diagnostic-reporter.test.js
           node tests/plugin-macos-asr-recovery.test.js
           node tests/plugin-diagnostic-native-evidence.test.js
+          node tests/plugin-asr-startup-timeout.test.js
+          node tests/plugin-asr-timeout-process-group.test.js
           node tests/plugin-douyin-media.test.js
           node tests/plugin-douyin-hidden-navigation.test.js
           node tests/plugin-douyin-target-identity-followup.test.js
@@ -177,3 +179,21 @@ jobs:
           node tests/social-engagement-utils.test.js
           node tests/plugin-marketplace-package.test.js
           node tests/plugin-release-candidate.test.js
+
+  asr-startup-platforms:
+    name: ASR startup guard / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test startup races and preserve active transcription
+        run: |
+          node tests/plugin-asr-startup-timeout.test.js
+          node tests/plugin-asr-timeout-process-group.test.js

@@ -3001,6 +3001,20 @@ var require_failure_technical_report = __commonJS({
       return Object.values(source).some((valuePart) => valuePart !== "" && valuePart !== null && valuePart !== void 0) ? source : null;
     }
     __name(safeInputIdentity, "safeInputIdentity");
+    function safeStartupGuard(value) {
+      if (!value || typeof value !== "object") return null;
+      return {
+        status: ["skipped", "waiting", "permission_granted", "timed_out", "disabled"].includes(value.status) ? value.status : "skipped",
+        reason: /^[a-z0-9_]{1,64}$/.test(value.reason || "") ? value.reason : "unknown",
+        timeoutMs: nonnegativeInt(value.timeoutMs),
+        elapsedIdleMs: nonnegativeInt(value.elapsedIdleMs),
+        permissionGranted: value.permissionGranted === true,
+        nativeStartStatus: value.status === "timed_out" && value.reason === "timeout_won_atomic_gate" ? "not_started" : "unknown",
+        originalScriptSha256: /^[a-f0-9]{64}$/i.test(value.originalScriptSha256 || "") ? value.originalScriptSha256 : "",
+        instrumentedScriptSha256: /^[a-f0-9]{64}$/i.test(value.instrumentedScriptSha256 || "") ? value.instrumentedScriptSha256 : ""
+      };
+    }
+    __name(safeStartupGuard, "safeStartupGuard");
     function safeAttempt(item = {}) {
       const requestedMode = ["default", "cpu_compatibility"].includes(item.requestedMode) ? item.requestedMode : "unknown";
       const freshness = ["fresh", "stale", "unavailable"].includes(item.logFreshness) ? item.logFreshness : "unavailable";
@@ -3032,7 +3046,8 @@ var require_failure_technical_report = __commonJS({
         nativeExitAssociation: ["matched", "incomplete_native_process", "no_matched_native_exit", "stage_mismatch"].includes(item.nativeExitAssociation) ? item.nativeExitAssociation : "unknown",
         nativePids: (Array.isArray(item.nativePids) ? item.nativePids : []).map(nonnegativeInt).filter((pid) => pid > 0),
         peakRssKiB,
-        timeoutCode: item.timeoutCode === "ASR_TIMEOUT" ? item.timeoutCode : "",
+        timeoutCode: ["ASR_TIMEOUT", "ASR_STARTUP_TIMEOUT"].includes(item.timeoutCode) ? item.timeoutCode : "",
+        startupGuard: safeStartupGuard(item.startupGuard),
         timeoutCleanupStatus: ["group_cleanup_attempted", "direct_child_fallback", "process_already_exited", "failed", "unknown"].includes(item.timeoutCleanupStatus) ? item.timeoutCleanupStatus : "",
         timeoutCleanupError: /^[A-Za-z0-9_.-]{1,64}$/.test(item.timeoutCleanupError || "") ? String(item.timeoutCleanupError) : "",
         logSnapshotAt: iso(item.logSnapshotAt),
@@ -3409,6 +3424,7 @@ var require_failure_technical_report = __commonJS({
                 "nativeExitAssociation",
                 "timeoutCode",
                 "timeoutCleanupStatus",
+                "startupGuard",
                 "peakRssKiB"
               ]) {
                 if (attempt[key] !== void 0 && attempt[key] !== "") compactAttempt[key] = attempt[key];
@@ -3565,7 +3581,7 @@ var require_failure_technical_report = __commonJS({
           if (Array.isArray(parsed.asr.attempts)) {
             asr.attempts = parsed.asr.attempts.slice(-8).map((attempt) => {
               const result = {};
-              for (const key of ["attempt", "status", "stage", "exitCode", "signal", "nativeExitCode", "nativeExitAssociation", "timeoutCode", "timeoutCleanupStatus", "peakRssKiB"]) {
+              for (const key of ["attempt", "status", "stage", "exitCode", "signal", "nativeExitCode", "nativeExitAssociation", "timeoutCode", "timeoutCleanupStatus", "startupGuard", "peakRssKiB"]) {
                 if (attempt[key] !== void 0 && attempt[key] !== null && attempt[key] !== "") result[key] = attempt[key];
               }
               if (Array.isArray(attempt.runningCheckpoints)) {
@@ -4921,22 +4937,70 @@ var require_asr_timeout_process_group = __commonJS({
       let settled = false;
       let timeoutStarted = false;
       let timer = null;
+      let startupTimer = null;
+      const startupGuard = options && options.startupGuard;
       const finish = /* @__PURE__ */ __name((error, stdout, stderr) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
         timer = null;
+        if (startupTimer) clearInterval(startupTimer);
+        startupTimer = null;
         callback(error, stdout, stderr);
       }, "finish");
       const execOptions = {
         ...options,
         timeout: ownsDetachedGroup ? 0 : timeoutMs
       };
+      delete execOptions.startupGuard;
       const onExecComplete = /* @__PURE__ */ __name((error, stdout, stderr) => {
         if (timeoutStarted) return;
         finish(error, stdout, stderr);
       }, "onExecComplete");
       const child = ownsDetachedGroup && execImpl === childProcess2.exec ? execDetachedShell(command, execOptions, onExecComplete, { spawnImpl, terminateGroup }) : execImpl(command, execOptions, onExecComplete);
+      if (ownsDetachedGroup && startupGuard && startupGuard.enabled && !settled) {
+        startupTimer = setInterval(() => {
+          if (settled || timeoutStarted) return;
+          if (child && (child.killed || child.exitCode != null || child.signalCode != null)) {
+            clearInterval(startupTimer);
+            startupTimer = null;
+            return;
+          }
+          const timeoutError = startupGuard.poll();
+          if (!timeoutError) {
+            if (["permission_granted", "disabled"].includes(startupGuard.evidence.status)) {
+              clearInterval(startupTimer);
+              startupTimer = null;
+            }
+            return;
+          }
+          timeoutStarted = true;
+          Promise.resolve().then(async () => {
+            try {
+              const exited = child && (child.exitCode != null || child.signalCode != null);
+              if (exited) {
+                timeoutError.cleanupStatus = "process_already_exited";
+              } else if (await terminateGroup(child && child.pid)) {
+                timeoutError.cleanupStatus = "group_cleanup_attempted";
+              } else {
+                const fallbackSent = Boolean(child && typeof child.kill === "function" && child.kill("SIGKILL"));
+                timeoutError.cleanupStatus = fallbackSent ? "direct_child_fallback" : "process_already_exited";
+              }
+            } catch (error) {
+              timeoutError.cleanupError = safeErrorCode(error);
+              try {
+                const fallbackSent = Boolean(child && typeof child.kill === "function" && child.kill("SIGKILL"));
+                timeoutError.cleanupStatus = fallbackSent ? "direct_child_fallback" : "failed";
+              } catch (fallbackError) {
+                timeoutError.cleanupStatus = "failed";
+                timeoutError.cleanupError = safeErrorCode(fallbackError);
+              }
+            }
+            finish(timeoutError, "", "");
+          });
+        }, 500);
+        if (startupTimer.unref) startupTimer.unref();
+      }
       if (ownsDetachedGroup && timeoutMs > 0 && !settled) {
         timer = setTimeout(() => {
           if (settled || timeoutStarted) return;
@@ -4972,6 +5036,8 @@ var require_asr_timeout_process_group = __commonJS({
         child.cancelAsrTimeout = () => {
           if (timer) clearTimeout(timer);
           timer = null;
+          if (startupTimer) clearInterval(startupTimer);
+          startupTimer = null;
         };
       }
       return child;
@@ -4982,6 +5048,206 @@ var require_asr_timeout_process_group = __commonJS({
       execWithAsrTimeout,
       terminateDetachedProcessGroup
     };
+  }
+});
+
+// src/asr-startup-timeout.js
+var require_asr_startup_timeout = __commonJS({
+  "src/asr-startup-timeout.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var os2 = require("os");
+    var crypto2 = require("crypto");
+    var ASR_STARTUP_TIMEOUT_MS = 12e4;
+    var ASR_STARTUP_POLL_MS = 500;
+    var sha = /* @__PURE__ */ __name((value) => crypto2.createHash("sha256").update(value).digest("hex"), "sha");
+    var quote = /* @__PURE__ */ __name((value) => "'" + String(value).replace(/'/g, "'\\''") + "'", "quote");
+    function extractManagedScript(installer) {
+      const marker = `cat > "$INSTALL_ROOT/transcribe.sh" <<'SCRIPT'
+`;
+      const normalized = String(installer || "").replace(/\r\n/g, "\n");
+      const start = normalized.indexOf(marker);
+      if (start < 0) return "";
+      const end = normalized.indexOf("\nSCRIPT", start + marker.length);
+      return end < 0 ? "" : normalized.slice(start + marker.length, end) + "\n";
+    }
+    __name(extractManagedScript, "extractManagedScript");
+    function replaceExactlyOnce(text, before, after) {
+      if (!text.includes(before) || text.indexOf(before) !== text.lastIndexOf(before)) throw Error("unsupported_wrapper_shape");
+      return text.replace(before, after);
+    }
+    __name(replaceExactlyOnce, "replaceExactlyOnce");
+    function instrumentManagedScript(source, { installRoot, directory }) {
+      const gate = quote(path2.join(directory, "gate").replace(/\\/g, "/"));
+      const started = quote(path2.join(directory, "started").replace(/\\/g, "/"));
+      const protocol = `
+WI_ASR_GATE=${gate}
+WI_ASR_STARTED=${started}
+WI_ASR_GRANTED=0
+wi_asr_start() {
+  if [ "$WI_ASR_GRANTED" = 1 ]; then return 0; fi
+  /bin/mkdir "$WI_ASR_GATE" 2>/dev/null || return 75
+  # Permission is conservative: NOT evidence of native exec or progress.
+  : > "$WI_ASR_STARTED" || return 75
+  WI_ASR_GRANTED=1
+}
+wi_asr_prep() {
+  /bin/mkdir "$WI_ASR_GATE" 2>/dev/null || return 75
+  local wi_rc=0
+  "$@" || wi_rc=$?
+  /bin/rmdir "$WI_ASR_GATE" || return 75
+  return "$wi_rc"
+}
+`;
+      let result = replaceExactlyOnce(source, "set -euo pipefail\n", "set -euo pipefail\n" + protocol);
+      result = replaceExactlyOnce(result, 'ROOT="$(cd "$(dirname "$0")" && pwd)"', "ROOT=" + quote(installRoot.replace(/\\/g, "/")));
+      result = replaceExactlyOnce(result, '"$FFMPEG" -hide_banner -i "$INPUT_PATH"', 'wi_asr_prep "$FFMPEG" -hide_banner -i "$INPUT_PATH"');
+      result = replaceExactlyOnce(result, '"$WHISPER" --help', 'wi_asr_prep "$WHISPER" --help');
+      result = replaceExactlyOnce(result, '  "$@" >> "$RUN_LOG" 2>&1 &', `  local wi_prep=0
+  if [ "$stage" = transcribing ]; then
+    wi_asr_start || return 75
+  else
+    /bin/mkdir "$WI_ASR_GATE" 2>/dev/null || return 75
+    wi_prep=1
+  fi
+  "$@" >> "$RUN_LOG" 2>&1 &`);
+      result = replaceExactlyOnce(result, '  wait "$native_pid" || native_exit=$?', '  wait "$native_pid" || native_exit=$?\n  if [ "$wi_prep" = 1 ]; then /bin/rmdir "$WI_ASR_GATE" || return 75; fi');
+      return result;
+    }
+    __name(instrumentManagedScript, "instrumentManagedScript");
+    function prepareStartupAttempt({ platform = process.platform, managed, installRoot, installerSource, commandTemplate, inputPath, outputPath, timeoutMs = ASR_STARTUP_TIMEOUT_MS, now = /* @__PURE__ */ __name(() => Number(process.hrtime.bigint() / 1000000n), "now") } = {}) {
+      const evidence = { status: "skipped", reason: "unsupported_platform", timeoutMs: ASR_STARTUP_TIMEOUT_MS, permissionGranted: false, nativeStartStatus: "unknown", elapsedIdleMs: 0 };
+      const skipped = /* @__PURE__ */ __name((reason) => ({ enabled: false, evidence: Object.assign(evidence, { reason }), dispose() {
+      } }), "skipped");
+      if (platform !== "darwin") return skipped("unsupported_platform");
+      if (!managed) return skipped("unmanaged_wrapper");
+      let directory = "";
+      try {
+        const scriptPath = path2.join(installRoot, "transcribe.sh");
+        const stat = fs2.lstatSync(scriptPath);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 256 * 1024) return skipped("unsupported_wrapper_file");
+        const original = fs2.readFileSync(scriptPath);
+        evidence.originalScriptSha256 = sha(original);
+        const source = original.toString("utf8").replace(/\r\n/g, "\n");
+        const expected = extractManagedScript(installerSource);
+        if (!expected || source !== expected) return skipped("unknown_wrapper_template");
+        const commandPath = installRoot.replace(/\\/g, "/") + "/transcribe.sh";
+        const homePath = "$HOME/" + path2.relative(os2.homedir(), installRoot).replace(/\\/g, "/") + "/transcribe.sh";
+        const accepted = [commandPath, homePath].map((p) => `/bin/bash "${p}" --input {input} --output {output}`);
+        if (!accepted.includes(commandTemplate)) return skipped("unknown_command_template");
+        directory = fs2.mkdtempSync(path2.join(os2.tmpdir(), "wechat-asr-startup-"));
+        const instrumented = instrumentManagedScript(source, { installRoot, directory });
+        const temporaryScript = path2.join(directory, "transcribe.sh");
+        fs2.writeFileSync(temporaryScript, instrumented, { flag: "wx", mode: 448 });
+        Object.assign(evidence, { status: "waiting", reason: "atomic_gate_pending", instrumentedScriptSha256: sha(instrumented), timeoutMs: Math.max(1, Number(timeoutMs) || ASR_STARTUP_TIMEOUT_MS) });
+        const gate = path2.join(directory, "gate");
+        const started = path2.join(directory, "started");
+        const runLog = path2.join(installRoot, "transcribe-last.log");
+        const logStamp = /* @__PURE__ */ __name(() => {
+          try {
+            const s = fs2.statSync(runLog);
+            return `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}`;
+          } catch (_) {
+            return "";
+          }
+        }, "logStamp");
+        let stamp = logStamp();
+        let lastActivity = now();
+        let stopped = false;
+        const exists = /* @__PURE__ */ __name((file) => {
+          try {
+            fs2.lstatSync(file);
+            return true;
+          } catch (e) {
+            if (e.code === "ENOENT") return false;
+            throw e;
+          }
+        }, "exists");
+        return {
+          enabled: true,
+          evidence,
+          directory,
+          command: `/bin/bash ${quote(temporaryScript.replace(/\\/g, "/"))} --input ${quote(inputPath.replace(/\\/g, "/"))} --output ${quote(outputPath.replace(/\\/g, "/"))}`,
+          observeGrant() {
+            try {
+              if (exists(started)) {
+                evidence.status = "permission_granted";
+                evidence.reason = "wrapper_won_atomic_gate";
+                evidence.permissionGranted = true;
+                stopped = true;
+              }
+            } catch (_) {
+            }
+          },
+          poll() {
+            if (stopped) return null;
+            try {
+              if (exists(started)) {
+                evidence.status = "permission_granted";
+                evidence.reason = "wrapper_won_atomic_gate";
+                evidence.permissionGranted = true;
+                stopped = true;
+                return null;
+              }
+              if (exists(gate)) {
+                lastActivity = now();
+                evidence.reason = "preparation_or_grant_in_progress";
+                return null;
+              }
+              const next = logStamp();
+              if (next !== stamp) {
+                stamp = next;
+                lastActivity = now();
+              }
+              evidence.elapsedIdleMs = Math.max(0, now() - lastActivity);
+              if (evidence.elapsedIdleMs < evidence.timeoutMs) return null;
+              try {
+                fs2.mkdirSync(gate);
+              } catch (e) {
+                if (e.code === "EEXIST") return null;
+                throw e;
+              }
+              stopped = true;
+              evidence.nativeStartStatus = "not_started";
+              evidence.status = "timed_out";
+              evidence.reason = "timeout_won_atomic_gate";
+              const error = new Error("本地转写引擎尚未启动，连续120秒无响应，已结束本次等待并记录诊断。");
+              error.code = "ASR_STARTUP_TIMEOUT";
+              error.asrStage = "transcribe_startup";
+              error.killed = true;
+              error.signal = "SIGTERM";
+              error.cleanupStatus = "pending";
+              return error;
+            } catch (_) {
+              stopped = true;
+              evidence.status = "disabled";
+              evidence.reason = "gate_io_unavailable";
+              return null;
+            }
+          },
+          dispose() {
+            stopped = true;
+            try {
+              const retired = directory + ".retired";
+              fs2.renameSync(directory, retired);
+              fs2.rmSync(retired, { recursive: true, force: true });
+            } catch (_) {
+            }
+          }
+        };
+      } catch (_) {
+        if (directory) {
+          try {
+            fs2.rmSync(directory, { recursive: true, force: true });
+          } catch (_2) {
+          }
+        }
+        return skipped("startup_guard_prepare_failed");
+      }
+    }
+    __name(prepareStartupAttempt, "prepareStartupAttempt");
+    module2.exports = { ASR_STARTUP_TIMEOUT_MS, ASR_STARTUP_POLL_MS, extractManagedScript, instrumentManagedScript, prepareStartupAttempt };
   }
 });
 
@@ -17740,6 +18006,7 @@ var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
 var asrTimeoutProcessGroup = require_asr_timeout_process_group();
+var asrStartupTimeout = require_asr_startup_timeout();
 var macLegacyAsrCompat = require_mac_legacy_asr_compat();
 var { buildFailureTechnicalReport, unavailableTechnicalReport } = require_failure_technical_report();
 var asrDiagnosticEvidence = require_asr_diagnostic_evidence();
@@ -18017,7 +18284,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.184";
+var PLUGIN_RUNTIME_VERSION = "1.3.185";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -36175,7 +36442,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       throw new Error("未配置本地转写命令");
     }
     const platform = this.getConfiguredLocalAsrPlatform();
-    const managed = platform === "darwin" && (commandTemplate === getDefaultLocalTranscriptionCommand("darwin") && installRoot === getLocalAsrInstallRoot(os.homedir(), "default", "darwin") || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot) && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
+    const managed = platform === "darwin" && (commandTemplate === getDefaultLocalTranscriptionCommand("darwin") && installRoot === getLocalAsrInstallRoot(os.homedir(), "default", "darwin") || commandTemplate === `/bin/bash "${String(installRoot).replace(/\\/g, "/")}/transcribe.sh" --input {input} --output {output}` || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot) && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
     let compatibility = { status: "not-applicable", reason: "not-target-runtime" };
     if (platform === "darwin" && managed && os.arch() === "x64") {
       let macOSVersion = String(this._macOSProductVersion || "");
@@ -36284,6 +36551,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const attemptStartedAt = /* @__PURE__ */ new Map();
     const attemptLogBaseline = /* @__PURE__ */ new Map();
     const attemptLogBaselineText = /* @__PURE__ */ new Map();
+    const attemptStartupGuards = /* @__PURE__ */ new Map();
     const requestAbort = /* @__PURE__ */ __name((source = "unknown", attribution = null) => {
       if (!session.abort.requestedAt) {
         session.abort.requestedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -36450,6 +36718,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         signal: abortController.signal,
         cpuPreferred,
         onAttempt: /* @__PURE__ */ __name(({ attempt, cpu: cpu2, status, error }) => {
+          var _a2;
           const attemptNumber = attemptOffset + attempt;
           const observedAt = (/* @__PURE__ */ new Date()).toISOString();
           if (abortController.signal.aborted) {
@@ -36472,7 +36741,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             session.inputIdentity.media.durationStatus = "measured_log";
             delete session.inputIdentity.media.durationReason;
           }
-          const observedStage = status === "success" ? "completed" : logFreshness === "fresh" ? (error == null ? void 0 : error.asrStage) || (attemptProgress == null ? void 0 : attemptProgress.stage) || "unknown" : "unknown";
+          const observedStage = status === "success" ? "completed" : (error == null ? void 0 : error.code) === "ASR_STARTUP_TIMEOUT" ? "transcribe_startup" : logFreshness === "fresh" ? (error == null ? void 0 : error.asrStage) || (attemptProgress == null ? void 0 : attemptProgress.stage) || "unknown" : "unknown";
           if (abortController.signal.aborted && error) {
             session.abort.nativeCrash = logFreshness === "fresh" && observedStage !== "unknown" ? asrRecovery.isMacNativeCrash(error) : null;
             session.abort.nativeCrashEvidence = logFreshness === "fresh" ? observedStage : "unknown_stale_or_unavailable_log";
@@ -36494,7 +36763,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             finishedAt: observedAt,
             exitCode: (error == null ? void 0 : error.exitCode) ?? (error == null ? void 0 : error.code) ?? null,
             signal: (error == null ? void 0 : error.signal) || "",
-            timeoutCode: (error == null ? void 0 : error.code) === "ASR_TIMEOUT" ? "ASR_TIMEOUT" : "",
+            timeoutCode: ["ASR_TIMEOUT", "ASR_STARTUP_TIMEOUT"].includes(error == null ? void 0 : error.code) ? error.code : "",
+            startupGuard: ((_a2 = attemptStartupGuards.get(attemptNumber)) == null ? void 0 : _a2.evidence) || null,
             timeoutCleanupStatus: ["group_cleanup_attempted", "direct_child_fallback", "process_already_exited", "failed", "unknown"].includes(error == null ? void 0 : error.cleanupStatus) ? error.cleanupStatus : "",
             timeoutCleanupError: /^[A-Za-z0-9_.-]{1,64}$/.test((error == null ? void 0 : error.cleanupError) || "") ? error.cleanupError : "",
             nativeExitCode: nativeExitEvidence.nativeExitCode,
@@ -36531,41 +36801,65 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           emitLocalProgress(0);
           progressTimer = setInterval(() => emitLocalProgress(), 1e3);
           if (progressTimer && typeof progressTimer.unref === "function") progressTimer.unref();
-          const child = asrTimeoutProcessGroup.execWithAsrTimeout(command, {
-            timeout: 2 * 60 * 60 * 1e3,
-            maxBuffer: 50 * 1024 * 1024,
-            windowsHide: true,
-            detached: process.platform === "darwin",
-            env: { ...process.env, WECHAT_INBOX_ASR_CPU_ONLY: cpu2 ? "1" : "0" }
-          }, (error, stdout2, stderr2) => {
-            var _a3;
-            stopProgressPolling();
-            ownedChild = null;
-            this.currentTranscriptionProcess = null;
-            if (error) {
-              const wrapped = new Error(stderr2 || error.message || String(error));
-              wrapped.stdout = stdout2;
-              wrapped.stderr = stderr2;
-              wrapped.exitCode = error.code;
-              wrapped.signal = error.signal;
-              if (error.code === "ASR_TIMEOUT") {
-                wrapped.code = "ASR_TIMEOUT";
-                wrapped.cleanupStatus = ["group_cleanup_attempted", "direct_child_fallback", "process_already_exited", "failed"].includes(error.cleanupStatus) ? error.cleanupStatus : "unknown";
-                wrapped.cleanupError = /^[A-Za-z0-9_.-]{1,64}$/.test(error.cleanupError || "") ? error.cleanupError : "";
-              }
-              const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attemptNumber), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
-              const wrappedLog = logFreshness === "fresh" ? getFreshAttemptLog(attemptNumber, readLocalAsrRunLog(installRoot)) : "";
-              wrapped.asrStage = logFreshness === "fresh" ? ((_a3 = parseLocalAsrProgressLog(wrappedLog)) == null ? void 0 : _a3.stage) || "" : "";
-              reject(wrapped);
-              return;
-            }
-            if (abortController.signal.aborted) {
-              reject(createAbortError());
-              return;
-            }
-            emitLocalProgress(100);
-            resolve({ stdout: stdout2, stderr: stderr2 });
+          const startupGuard = asrStartupTimeout.prepareStartupAttempt({
+            platform: process.platform,
+            managed,
+            installRoot,
+            installerSource: EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE,
+            commandTemplate,
+            inputPath,
+            outputPath
           });
+          attemptStartupGuards.set(attemptNumber, startupGuard);
+          let child;
+          let executionCompleted = false;
+          try {
+            child = asrTimeoutProcessGroup.execWithAsrTimeout(startupGuard.enabled ? startupGuard.command : command, {
+              startupGuard,
+              timeout: 2 * 60 * 60 * 1e3,
+              maxBuffer: 50 * 1024 * 1024,
+              windowsHide: true,
+              detached: process.platform === "darwin",
+              env: { ...process.env, WECHAT_INBOX_ASR_CPU_ONLY: cpu2 ? "1" : "0" }
+            }, (error, stdout2, stderr2) => {
+              var _a3;
+              stopProgressPolling();
+              executionCompleted = true;
+              if (startupGuard.enabled) startupGuard.observeGrant();
+              startupGuard.dispose();
+              ownedChild = null;
+              this.currentTranscriptionProcess = null;
+              if (error) {
+                const wrapped = new Error(stderr2 || error.message || String(error));
+                wrapped.stdout = stdout2;
+                wrapped.stderr = stderr2;
+                wrapped.exitCode = error.code;
+                wrapped.signal = error.signal;
+                if (["ASR_TIMEOUT", "ASR_STARTUP_TIMEOUT"].includes(error.code)) {
+                  wrapped.code = error.code;
+                  wrapped.cleanupStatus = ["group_cleanup_attempted", "direct_child_fallback", "process_already_exited", "failed"].includes(error.cleanupStatus) ? error.cleanupStatus : "unknown";
+                  wrapped.cleanupError = /^[A-Za-z0-9_.-]{1,64}$/.test(error.cleanupError || "") ? error.cleanupError : "";
+                }
+                const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attemptNumber), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
+                const wrappedLog = logFreshness === "fresh" ? getFreshAttemptLog(attemptNumber, readLocalAsrRunLog(installRoot)) : "";
+                wrapped.asrStage = error.code === "ASR_STARTUP_TIMEOUT" ? "transcribe_startup" : logFreshness === "fresh" ? ((_a3 = parseLocalAsrProgressLog(wrappedLog)) == null ? void 0 : _a3.stage) || "" : "";
+                reject(wrapped);
+                return;
+              }
+              if (abortController.signal.aborted) {
+                reject(createAbortError());
+                return;
+              }
+              emitLocalProgress(100);
+              resolve({ stdout: stdout2, stderr: stderr2 });
+            });
+          } catch (error) {
+            startupGuard.dispose();
+            stopProgressPolling();
+            reject(error);
+            return;
+          }
+          if (executionCompleted) return;
           ownedChild = child;
           this.currentTranscriptionProcess = child;
           if ((_a2 = options.signal) == null ? void 0 : _a2.aborted) cancelLocal();

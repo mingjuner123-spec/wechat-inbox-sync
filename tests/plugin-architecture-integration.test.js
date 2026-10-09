@@ -19,6 +19,7 @@ const expectedModules = [
   'ai-metadata-utils',
   'asr-diagnostic-evidence',
   'asr-recovery-utils',
+  'asr-startup-timeout',
   'asr-timeout-process-group',
   'auto-sync-controller',
   'bilibili-diagnostic-utils',

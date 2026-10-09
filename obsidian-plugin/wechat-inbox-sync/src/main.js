@@ -18,6 +18,7 @@ const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = requi
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
 const asrTimeoutProcessGroup = require('./asr-timeout-process-group');
+const asrStartupTimeout = require('./asr-startup-timeout');
 const macLegacyAsrCompat = require('./mac-legacy-asr-compat');
 const { buildFailureTechnicalReport, unavailableTechnicalReport } = require('./failure-technical-report');
 const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
@@ -303,7 +304,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.184';
+const PLUGIN_RUNTIME_VERSION = '1.3.185';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -20752,6 +20753,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const platform = this.getConfiguredLocalAsrPlatform();
     const managed = platform === 'darwin'
       && ((commandTemplate === getDefaultLocalTranscriptionCommand('darwin') && installRoot === getLocalAsrInstallRoot(os.homedir(), 'default', 'darwin'))
+        || commandTemplate === `/bin/bash "${String(installRoot).replace(/\\/g, '/')}/transcribe.sh" --input {input} --output {output}`
         || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot)
       && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
     let compatibility = { status: 'not-applicable', reason: 'not-target-runtime' };
@@ -20863,6 +20865,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const attemptStartedAt = new Map();
     const attemptLogBaseline = new Map();
     const attemptLogBaselineText = new Map();
+    const attemptStartupGuards = new Map();
     const requestAbort = (source = 'unknown', attribution = null) => {
       if (!session.abort.requestedAt) {
         session.abort.requestedAt = new Date().toISOString();
@@ -21074,7 +21077,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             session.inputIdentity.media.durationStatus = 'measured_log';
             delete session.inputIdentity.media.durationReason;
           }
-          const observedStage = status === 'success' ? 'completed' : logFreshness === 'fresh' ? (error?.asrStage || attemptProgress?.stage || 'unknown') : 'unknown';
+          const observedStage = status === 'success' ? 'completed' : error?.code === 'ASR_STARTUP_TIMEOUT' ? 'transcribe_startup' : logFreshness === 'fresh' ? (error?.asrStage || attemptProgress?.stage || 'unknown') : 'unknown';
           if (abortController.signal.aborted && error) {
             session.abort.nativeCrash = logFreshness === 'fresh' && observedStage !== 'unknown' ? asrRecovery.isMacNativeCrash(error) : null;
             session.abort.nativeCrashEvidence = logFreshness === 'fresh' ? observedStage : 'unknown_stale_or_unavailable_log';
@@ -21087,7 +21090,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           session.attempts.push({ attempt: attemptNumber, cpu, requestedMode: cpu ? 'cpu_compatibility' : 'default', backendObserved: 'unknown', backendObservationNote: '本机日志未确认引擎实际选择的CPU/GPU后端', status, stage: observedStage, logFreshness, at: observedAt,
             startedAt: attemptStartedAt.get(attemptNumber) || session.startedAt, finishedAt: observedAt,
             exitCode: error?.exitCode ?? error?.code ?? null, signal: error?.signal || '',
-            timeoutCode: error?.code === 'ASR_TIMEOUT' ? 'ASR_TIMEOUT' : '',
+            timeoutCode: ['ASR_TIMEOUT', 'ASR_STARTUP_TIMEOUT'].includes(error?.code) ? error.code : '',
+            startupGuard: attemptStartupGuards.get(attemptNumber)?.evidence || null,
             timeoutCleanupStatus: ['group_cleanup_attempted', 'direct_child_fallback', 'process_already_exited', 'failed', 'unknown'].includes(error?.cleanupStatus) ? error.cleanupStatus : '',
             timeoutCleanupError: /^[A-Za-z0-9_.-]{1,64}$/.test(error?.cleanupError || '') ? error.cleanupError : '',
             nativeExitCode: nativeExitEvidence.nativeExitCode,
@@ -21120,32 +21124,46 @@ class WechatObsidianInboxPlugin extends Plugin {
           emitLocalProgress(0);
           progressTimer = setInterval(() => emitLocalProgress(), 1000);
           if (progressTimer && typeof progressTimer.unref === 'function') progressTimer.unref();
-          const child = asrTimeoutProcessGroup.execWithAsrTimeout(command, {
+          const startupGuard = asrStartupTimeout.prepareStartupAttempt({
+            platform: process.platform, managed, installRoot,
+            installerSource: EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE,
+            commandTemplate, inputPath, outputPath,
+          });
+          attemptStartupGuards.set(attemptNumber, startupGuard);
+          let child;
+          let executionCompleted = false;
+          try { child = asrTimeoutProcessGroup.execWithAsrTimeout(startupGuard.enabled ? startupGuard.command : command, {
+            startupGuard,
             timeout: 2 * 60 * 60 * 1000, maxBuffer: 50 * 1024 * 1024,
             windowsHide: true, detached: process.platform === 'darwin',
             env: { ...process.env, WECHAT_INBOX_ASR_CPU_ONLY: cpu ? '1' : '0' },
           }, (error, stdout, stderr) => {
             stopProgressPolling();
+            executionCompleted = true;
+            if (startupGuard.enabled) startupGuard.observeGrant();
+            startupGuard.dispose();
             ownedChild = null;
             this.currentTranscriptionProcess = null;
             if (error) {
               const wrapped = new Error(stderr || error.message || String(error));
               wrapped.stdout = stdout; wrapped.stderr = stderr;
               wrapped.exitCode = error.code; wrapped.signal = error.signal;
-              if (error.code === 'ASR_TIMEOUT') {
-                wrapped.code = 'ASR_TIMEOUT';
+              if (['ASR_TIMEOUT', 'ASR_STARTUP_TIMEOUT'].includes(error.code)) {
+                wrapped.code = error.code;
                 wrapped.cleanupStatus = ['group_cleanup_attempted', 'direct_child_fallback', 'process_already_exited', 'failed'].includes(error.cleanupStatus)
                   ? error.cleanupStatus : 'unknown';
                 wrapped.cleanupError = /^[A-Za-z0-9_.-]{1,64}$/.test(error.cleanupError || '') ? error.cleanupError : '';
               }
               const logFreshness = asrRecovery.diagnosticLogFreshness(attemptLogBaseline.get(attemptNumber), asrRecovery.snapshotDiagnosticLog(getLocalAsrRunLogPath(installRoot)));
               const wrappedLog = logFreshness === 'fresh' ? getFreshAttemptLog(attemptNumber, readLocalAsrRunLog(installRoot)) : '';
-              wrapped.asrStage = logFreshness === 'fresh' ? parseLocalAsrProgressLog(wrappedLog)?.stage || '' : '';
+              wrapped.asrStage = error.code === 'ASR_STARTUP_TIMEOUT' ? 'transcribe_startup' : logFreshness === 'fresh' ? parseLocalAsrProgressLog(wrappedLog)?.stage || '' : '';
               reject(wrapped); return;
             }
             if (abortController.signal.aborted) { reject(createAbortError()); return; }
             emitLocalProgress(100); resolve({ stdout, stderr });
           });
+          } catch (error) { startupGuard.dispose(); stopProgressPolling(); reject(error); return; }
+          if (executionCompleted) return;
           ownedChild = child;
           this.currentTranscriptionProcess = child;
           if (options.signal?.aborted) cancelLocal();
