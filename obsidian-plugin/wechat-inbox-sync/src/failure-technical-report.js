@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { diagnosticRedact, readMatchingCrashSummary } = require('./asr-recovery-utils');
 const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
+const diagnosticNativeEvidence = require('./diagnostic-native-evidence');
 
 const MAX_REPORT_TEXT_BYTES = 128 * 1024;
 const MAX_SESSION_BYTES = 768 * 1024;
@@ -550,7 +551,198 @@ function matchAsrSession(session, { recordId, attemptId, now }) {
     attempts: (Array.isArray(session.attempts) ? session.attempts : []).map(safeAttempt),
   } };
 }
-function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryCount, asrRoot, settings = {}, now = new Date().toISOString() } = {}) {
+function selectNativeEvidenceAttempts(session) {
+  const attempts = Array.isArray(session && session.attempts) ? session.attempts : [];
+  const terminalStatuses = new Set(['failed', 'cancelled', 'no_speech']);
+  const candidates = attempts.map((attempt, index) => ({ attempt, index }))
+    .filter(({ attempt }) => attempt && typeof attempt === 'object' && !Array.isArray(attempt)
+      && terminalStatuses.has(String(attempt.status || '').toLowerCase())
+      && Array.isArray(attempt.nativePids) && attempt.nativePids.length)
+    .slice(-4);
+  return candidates
+    .sort((left, right) => {
+      const crashScore = item => {
+        const code = signedInt(item.attempt.nativeExitCode);
+        const signal = String(item.attempt.signal || '').toUpperCase();
+        return code === 139 || signal === 'SIGSEGV' ? 1 : 0;
+      };
+      return crashScore(right) - crashScore(left) || right.index - left.index;
+    })
+    .map(({ attempt }) => attempt);
+}
+function compactNativeDiagnosticObject(value, settings = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const result = {};
+  for (const key of ['type', 'name', 'code', 'signal', 'namespace', 'reason', 'subcode', 'description']) {
+    if (typeof value[key] === 'string') result[key] = safeDiagnosticText(value[key], settings, 256);
+    else if (Number.isSafeInteger(value[key])) result[key] = value[key];
+  }
+  return Object.keys(result).length ? result : null;
+}
+function compactNativeCrashEvidence(value, settings = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.kind === 'native_crash_evidence_set') return compactNativeEvidenceSet(value, settings);
+  const status = ['matched', 'unavailable', 'not_applicable'].includes(value.status) ? value.status : 'unavailable';
+  const result = {
+    schemaVersion: 1,
+    kind: 'native_crash_evidence',
+    status,
+    source: 'macos_diagnostic_report',
+  };
+  if (value.format === 'ips' || value.format === 'crash') result.format = value.format;
+  if (value.truncated === true) result.truncated = true;
+  const originalBytes = nonnegativeInt(value.originalBytes);
+  if (originalBytes !== null) result.originalBytes = originalBytes;
+  const unavailableReason = safeDiagnosticText(value.unavailableReason, settings, 160);
+  if (unavailableReason) result.unavailableReason = unavailableReason;
+  const summary = safeDiagnosticText(value.summary, settings, 2048);
+  if (summary) result.summary = summary;
+  const exception = compactNativeDiagnosticObject(value.exception, settings);
+  const termination = compactNativeDiagnosticObject(value.termination, settings);
+  if (exception) result.exception = exception;
+  if (termination) result.termination = termination;
+  if (value.faultThread && typeof value.faultThread === 'object' && !Array.isArray(value.faultThread)) {
+    const faultThread = {};
+    const rawThread = value.faultThread.thread;
+    const thread = rawThread === null || rawThread === undefined || rawThread === ''
+      ? null
+      : nonnegativeInt(rawThread);
+    if (thread !== null) faultThread.thread = thread;
+    if (value.format === 'ips' && Array.isArray(value.faultThread.frames)) {
+      const sourceFrames = value.faultThread.frames;
+      faultThread.frames = sourceFrames.slice(0, 64).map(frame => {
+        if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return null;
+        const safeFrameValue = {};
+        for (const key of ['symbol', 'name', 'module', 'function', 'library', 'imageIndex', 'imageOffset', 'address', 'instruction', 'line', 'column']) {
+          const item = frame[key];
+          if (typeof item === 'string') safeFrameValue[key] = safeDiagnosticText(item, settings, 256);
+          else if (Number.isSafeInteger(item)) safeFrameValue[key] = item;
+        }
+        return Object.keys(safeFrameValue).length ? safeFrameValue : null;
+      }).filter(Boolean);
+      const inheritedOmitted = nonnegativeInt(value.faultThread.framesOmitted) || 0;
+      const omitted = inheritedOmitted + Math.max(0, sourceFrames.length - faultThread.frames.length);
+      if (omitted) faultThread.framesOmitted = omitted;
+    } else if (Array.isArray(value.faultThread.lines)) {
+      const sourceLines = value.faultThread.lines;
+      faultThread.lines = sourceLines.slice(0, 64).map(line => safeDiagnosticText(line, settings, 512)).filter(Boolean);
+      const inheritedOmitted = nonnegativeInt(value.faultThread.linesOmitted) || 0;
+      const omitted = inheritedOmitted + Math.max(0, sourceLines.length - faultThread.lines.length);
+      if (omitted) faultThread.linesOmitted = omitted;
+    }
+    if (Object.keys(faultThread).length) result.faultThread = faultThread;
+  }
+  if (value.modules && typeof value.modules === 'object' && !Array.isArray(value.modules)) {
+    const modules = {};
+    if (value.format === 'ips' && Array.isArray(value.modules.items)) {
+      const sourceItems = value.modules.items;
+      modules.items = sourceItems.slice(0, 64).map(item => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+        const safeModuleValue = {};
+        for (const key of ['name', 'module', 'library', 'uuid', 'arch']) {
+          if (typeof item[key] === 'string') safeModuleValue[key] = safeDiagnosticText(item[key], settings, 256);
+        }
+        for (const key of ['base', 'size', 'index']) if (Number.isSafeInteger(item[key])) safeModuleValue[key] = item[key];
+        return Object.keys(safeModuleValue).length ? safeModuleValue : null;
+      }).filter(Boolean);
+      const inheritedOmitted = nonnegativeInt(value.modules.itemsOmitted) || 0;
+      const omitted = inheritedOmitted + Math.max(0, sourceItems.length - modules.items.length);
+      if (omitted) modules.itemsOmitted = omitted;
+    } else if (Array.isArray(value.modules.lines)) {
+      const sourceLines = value.modules.lines;
+      modules.lines = sourceLines.slice(0, 64).map(line => safeDiagnosticText(line, settings, 512)).filter(Boolean);
+      const inheritedOmitted = nonnegativeInt(value.modules.linesOmitted) || 0;
+      const omitted = inheritedOmitted + Math.max(0, sourceLines.length - modules.lines.length);
+      if (omitted) modules.linesOmitted = omitted;
+    }
+    if (Object.keys(modules).length) result.modules = modules;
+  }
+  return result;
+}
+function compactNativeEvidenceSet(value, settings = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const sourceAttempts = Array.isArray(value.attempts) ? value.attempts : [];
+  const attempts = sourceAttempts.slice(-4).map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const result = { attempt: nonnegativeInt(item.attempt) };
+    const exitCode = signedInt(item.nativeExitCode);
+    if (exitCode !== null) result.nativeExitCode = exitCode;
+    const signal = String(item.signal || '').toUpperCase();
+    if (/^SIG[A-Z0-9_]{1,16}$/.test(signal)) result.signal = signal;
+    const evidence = compactNativeCrashEvidence(item.evidence, settings);
+    if (evidence) {
+      result.status = evidence.status;
+      result.evidence = evidence;
+    } else if (['matched', 'unavailable', 'not_applicable'].includes(item.status)) {
+      result.status = item.status;
+    } else {
+      result.status = 'unavailable';
+    }
+    return result;
+  }).filter(Boolean);
+  const inheritedOmitted = nonnegativeInt(value.omittedAttempts) || 0;
+  const omittedAttempts = inheritedOmitted + Math.max(0, sourceAttempts.length - attempts.length);
+  const status = ['matched', 'unavailable', 'not_applicable'].includes(value.status) ? value.status
+    : attempts.some(item => item.status === 'matched') ? 'matched' : 'unavailable';
+  const result = {
+    schemaVersion: 1,
+    kind: 'native_crash_evidence_set',
+    status,
+    source: 'macos_diagnostic_report',
+    attempts,
+  };
+  if (value.truncated === true || omittedAttempts || attempts.some(item => item.evidence && item.evidence.truncated)) result.truncated = true;
+  if (omittedAttempts) result.omittedAttempts = omittedAttempts;
+  return result;
+}
+function collectNativeEvidenceSet(session, attempts, { directories, settings } = {}) {
+  if (!Array.isArray(attempts) || !attempts.length) return null;
+  const budget = 64 * 1024;
+  const perAttemptBudget = Math.max(4096, Math.floor((budget - 2048) / attempts.length));
+  const collected = attempts.map(attempt => {
+    let evidence;
+    try {
+      evidence = diagnosticNativeEvidence.collectNativeCrashEvidence({
+        session,
+        attempt,
+        directories,
+        settings,
+        maxBytes: perAttemptBudget,
+      });
+    } catch (_) {
+      evidence = {
+        schemaVersion: 1,
+        kind: 'native_crash_evidence',
+        status: 'unavailable',
+        source: 'macos_diagnostic_report',
+        unavailableReason: 'collection_failed',
+        summary: '[unavailable: native evidence collection failed]',
+      };
+    }
+    const item = {
+      attempt: nonnegativeInt(attempt.attempt),
+      status: evidence && ['matched', 'unavailable', 'not_applicable'].includes(evidence.status) ? evidence.status : 'unavailable',
+      evidence,
+    };
+    const exitCode = signedInt(attempt.nativeExitCode);
+    if (exitCode !== null) item.nativeExitCode = exitCode;
+    const signal = String(attempt.signal || '').toUpperCase();
+    if (/^SIG[A-Z0-9_]{1,16}$/.test(signal)) item.signal = signal;
+    return item;
+  });
+  const status = collected.some(item => item.status === 'matched') ? 'matched'
+    : collected.every(item => item.status === 'not_applicable') ? 'not_applicable' : 'unavailable';
+  const result = {
+    schemaVersion: 1,
+    kind: 'native_crash_evidence_set',
+    status,
+    source: 'macos_diagnostic_report',
+    attempts: collected,
+    truncated: collected.some(item => item.evidence && item.evidence.truncated === true),
+  };
+  return result;
+}
+function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryCount, asrRoot, settings = {}, now = new Date().toISOString(), nativeCrashReportDirectories } = {}) {
   const technical = {
     schemaVersion: 1,
     kind: 'sync_failure',
@@ -572,6 +764,14 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
         technical.asr.crashSummary = String(crashSummary || '');
         technical.asr.crashSummaryStatus = crashSummary && !String(crashSummary).startsWith('[unavailable:')
           ? 'matched' : 'unavailable';
+        const nativeAttempts = selectNativeEvidenceAttempts(loaded.session);
+        if (nativeAttempts.length) {
+          const nativeEvidenceSet = collectNativeEvidenceSet(loaded.session, nativeAttempts, {
+            directories: Array.isArray(nativeCrashReportDirectories) ? nativeCrashReportDirectories : undefined,
+            settings,
+          });
+          if (nativeEvidenceSet) technical.asr.nativeEvidence = nativeEvidenceSet;
+        }
       }
     }
   }
@@ -668,6 +868,8 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
         });
       }
       if (safeTechnical.asr.crashSummaryStatus) compactAsr.crashSummaryStatus = safeTechnical.asr.crashSummaryStatus;
+      const compactNativeEvidence = compactNativeCrashEvidence(safeTechnical.asr.nativeEvidence);
+      if (compactNativeEvidence) compactAsr.nativeEvidence = compactNativeEvidence;
       if (Object.keys(compactAsr).length) fallback.asr = compactAsr;
     }    text = JSON.stringify(fallback);
     clipped = true;
@@ -693,7 +895,8 @@ function buildFailureTechnicalReport({ error, recordId, attemptId, stage, retryC
     originalBytes: Math.max(originalBytes, bytes(text)),
     ...(unavailableReason ? { unavailableReason: safeReason(unavailableReason) } : {}),
   };
-}function normalizeTechnicalReport(value) {
+}
+function normalizeTechnicalReport(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || value.schemaVersion !== 1 || value.kind !== 'sync_failure' || typeof value.text !== 'string') return null;
   const originalBytes = nonnegativeInt(value.originalBytes);
@@ -810,6 +1013,8 @@ function compactTechnicalReport(value, reason = 'outbox_limit') {
         });
       }
       if (parsed.asr.crashSummaryStatus) asr.crashSummaryStatus = parsed.asr.crashSummaryStatus;
+      const compactNativeEvidence = compactNativeCrashEvidence(parsed.asr.nativeEvidence);
+      if (compactNativeEvidence) asr.nativeEvidence = compactNativeEvidence;
       if (Object.keys(asr).length) compact.asr = asr;
     }
   }

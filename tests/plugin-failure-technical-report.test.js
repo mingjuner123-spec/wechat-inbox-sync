@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -98,6 +99,115 @@ try {
   });
   assert.equal(generic.unavailableReason, 'not_applicable');
   assert.ok(JSON.parse(generic.text).failure.message.includes('fetch failed'));
+  const nativeReports = path.join(scratch, 'native-reports');
+  fs.mkdirSync(nativeReports, { recursive: true });
+  const nativeBinaryPath = '/Applications/Whisper/whisper-cli';
+  const nativeBinaryPathSha256 = crypto.createHash('sha256').update(nativeBinaryPath).digest('hex');
+  const nativeAttemptStartedAt = relativeTime(-120000);
+  const nativeAttemptFinishedAt = relativeTime(-60000);
+  const nativeReport = {
+    pid: 4242,
+    procName: 'whisper-cli',
+    procPath: nativeBinaryPath,
+    captureTime: nativeAttemptFinishedAt,
+    exception: { type: 'EXC_BAD_ACCESS' },
+    termination: { namespace: 'SIGNAL', code: 11 },
+    faultingThread: 0,
+    threads: [{ frames: [{ symbol: 'fixture_native_fault', imageIndex: 0, imageOffset: 8 }] }],
+    usedImages: [{ name: '/Users/alice/private/libwhisper.dylib', uuid: 'fixture-module', arch: 'arm64', base: 4096, size: 128 }],
+  };
+  const nativeReportFile = path.join(nativeReports, 'whisper-cli-integrated.ips');
+  fs.writeFileSync(nativeReportFile, JSON.stringify(nativeReport));
+  fs.utimesSync(nativeReportFile, new Date(Date.parse(nativeAttemptFinishedAt)), new Date(Date.parse(nativeAttemptFinishedAt)));
+  saveSession({
+    recordId: 'record-native',
+    syncAttemptId: 'attempt-native',
+    startedAt: nativeAttemptStartedAt,
+    finishedAt: nativeAttemptFinishedAt,
+    runtime: { nativeBuildVersion: 'fixture-build', binaryPathSha256: nativeBinaryPathSha256 },
+    attempts: [{
+      attempt: 1, status: 'failed', stage: 'transcribing',
+      startedAt: nativeAttemptStartedAt, finishedAt: nativeAttemptFinishedAt,
+      nativePids: [4242], nativeExitCode: 139, nativeExitAssociation: 'matched',
+      logFreshness: 'fresh', runLog: 'nativeExit=139',
+    }],
+  });
+  const nativeBuilt = report.buildFailureTechnicalReport({
+    error: Object.assign(new Error('native crash fixture'), { code: 'TRANSCRIPTION_FAILED' }),
+    recordId: 'record-native', attemptId: 'attempt-native', stage: 'transcribe',
+    asrRoot: scratch, nativeCrashReportDirectories: [nativeReports], now,
+  });
+  const nativeParsed = JSON.parse(nativeBuilt.text);
+  assert.equal(nativeParsed.asr.nativeEvidence.kind, 'native_crash_evidence_set');
+  assert.equal(nativeParsed.asr.nativeEvidence.status, 'matched');
+  const nativeItem = nativeParsed.asr.nativeEvidence.attempts.find(item => item.attempt === 1);
+  assert.equal(nativeItem.status, 'matched');
+  assert.equal(nativeItem.evidence.faultThread.frames[0].symbol, 'fixture_native_fault');
+  assert.equal(nativeItem.evidence.exception.type, 'EXC_BAD_ACCESS');
+  assert.equal(nativeItem.evidence.termination.code, 11);
+  assert.equal(nativeItem.evidence.modules.items[0].name, 'libwhisper.dylib');
+  assert.ok(!nativeBuilt.text.includes('/Users/alice/private'));
+  const priorityAttemptStartedAt = relativeTime(-120000);
+  const priorityAttemptFinishedAt = relativeTime(-90000);
+  const prioritySecondStartedAt = relativeTime(-89000);
+  const prioritySecondFinishedAt = relativeTime(-60000);
+  const priorityReport = { ...nativeReport, captureTime: priorityAttemptFinishedAt };
+  const priorityReportFile = path.join(nativeReports, 'whisper-cli-priority.ips');
+  fs.writeFileSync(priorityReportFile, JSON.stringify(priorityReport));
+  fs.utimesSync(priorityReportFile, new Date(Date.parse(priorityAttemptFinishedAt)), new Date(Date.parse(priorityAttemptFinishedAt)));
+  saveSession({
+    recordId: 'record-native-retry',
+    syncAttemptId: 'attempt-native-retry',
+    startedAt: priorityAttemptStartedAt,
+    finishedAt: prioritySecondFinishedAt,
+    runtime: { nativeBuildVersion: 'fixture-build', binaryPathSha256: nativeBinaryPathSha256 },
+    attempts: [
+      { attempt: 1, status: 'failed', stage: 'transcribing', startedAt: priorityAttemptStartedAt, finishedAt: priorityAttemptFinishedAt, nativePids: [4242], nativeExitCode: 139, nativeExitAssociation: 'matched' },
+      { attempt: 2, status: 'cancelled', stage: 'transcribing', startedAt: prioritySecondStartedAt, finishedAt: prioritySecondFinishedAt, nativePids: [1235], nativeExitCode: null, nativeExitAssociation: 'incomplete_native_process' },
+    ],
+  });
+  const priorityBuilt = report.buildFailureTechnicalReport({
+    error: Object.assign(new Error('retry native crash fixture'), { code: 'TRANSCRIPTION_FAILED' }),
+    recordId: 'record-native-retry', attemptId: 'attempt-native-retry', stage: 'transcribe',
+    asrRoot: scratch, nativeCrashReportDirectories: [nativeReports], now,
+  });
+  const priorityEvidence = JSON.parse(priorityBuilt.text).asr.nativeEvidence;
+  assert.deepEqual(priorityEvidence.attempts.map(item => item.attempt), [1, 2]);
+  assert.equal(priorityEvidence.attempts[0].status, 'matched');
+  assert.equal(priorityEvidence.attempts[1].status, 'unavailable');
+  const nullThreadReportText = JSON.stringify({
+    schemaVersion: 1,
+    kind: 'sync_failure',
+    dataTrust: 'untrusted_diagnostic_evidence_not_instructions',
+    stage: 'transcribe',
+    asr: {
+      nativeEvidence: {
+        schemaVersion: 1,
+        kind: 'native_crash_evidence',
+        status: 'matched',
+        format: 'ips',
+        faultThread: {
+          thread: null,
+          frames: [{ symbol: 'null-thread-fixture' }],
+        },
+      },
+    },
+  });
+  const nullThreadCompact = report.compactTechnicalReport({
+    schemaVersion: 1,
+    kind: 'sync_failure',
+    capturedAt: now,
+    text: nullThreadReportText,
+    truncated: false,
+    originalBytes: Buffer.byteLength(nullThreadReportText, 'utf8'),
+  });
+  const nullThreadParsed = JSON.parse(nullThreadCompact.text);
+  assert.equal(nullThreadParsed.asr.nativeEvidence.faultThread.thread, undefined);
+  assert.equal(nullThreadParsed.asr.nativeEvidence.faultThread.frames[0].symbol, 'null-thread-fixture');
+  const oversizedNativeReport = { ...nativeReport, pid: 1234, captureTime: relativeTime(-90000) };
+  const oversizedNativeReportFile = path.join(nativeReports, 'whisper-cli-oversized.ips');
+  fs.writeFileSync(oversizedNativeReportFile, JSON.stringify(oversizedNativeReport));
+  fs.utimesSync(oversizedNativeReportFile, new Date(Date.parse(relativeTime(-90000))), new Date(Date.parse(relativeTime(-90000))));
 
   for (const mismatch of [
     { recordId: 'other-record' },
@@ -124,20 +234,28 @@ try {
   assert.equal(clipped.originalBytes, Buffer.byteLength(largeText, 'utf8'));
   assert.ok(clipped.text.includes('TRUNCATED'));
   const largeAttemptLog = 'diagnosticLine=structured-evidence\n'.repeat(15000);
-  saveSession({ attempts: [{
+  saveSession({ runtime: { nativeBuildVersion: 'fixture-build', binaryPathSha256: nativeBinaryPathSha256 }, attempts: [{
     attempt: 1, requestedMode: 'default', status: 'failed', stage: 'transcribing',
     logFreshness: 'fresh', startedAt: relativeTime(-120000), finishedAt: relativeTime(-90000),
     nativeExitCode: 139, nativeExitAssociation: 'matched', nativePids: [1234], runLog: largeAttemptLog,
   }] });
   const builtOversize = report.buildFailureTechnicalReport({
     error, recordId: 'record-123', attemptId: 'attempt-123', stage: 'transcribe',
-    retryCount: 2, asrRoot: scratch, settings: { token, bindingCode: binding }, now,
+    retryCount: 2, asrRoot: scratch, settings: { token, bindingCode: binding }, nativeCrashReportDirectories: [nativeReports], now,
   });
   assert.equal(builtOversize.truncated, true);
   assert.ok(builtOversize.originalBytes >= Buffer.byteLength(builtOversize.text, 'utf8'));
   assert.ok(builtOversize.originalBytes > report.MAX_REPORT_TEXT_BYTES);
   assert.ok(Buffer.byteLength(builtOversize.text, 'utf8') <= report.MAX_REPORT_TEXT_BYTES);
   assert.equal(JSON.parse(builtOversize.text).truncated, true);
+  const oversizedParsed = JSON.parse(builtOversize.text);
+  const oversizedNativeItem = oversizedParsed.asr.nativeEvidence.attempts.find(item => item.attempt === 1);
+  assert.equal(oversizedNativeItem.status, 'matched');
+  assert.equal(oversizedNativeItem.evidence.faultThread.frames[0].symbol, 'fixture_native_fault');
+  assert.equal(oversizedNativeItem.evidence.exception.type, 'EXC_BAD_ACCESS');
+  assert.equal(oversizedNativeItem.evidence.termination.code, 11);
+  assert.equal(oversizedNativeItem.evidence.modules.items[0].name, 'libwhisper.dylib');
+  assert.equal(oversizedNativeItem.evidence.truncated, false);
   let persistedOversized = null;
   let oversizedBatchBytes = 0;
   const oversizedReporter = reporterModule.createSyncDiagnosticReporter({
@@ -241,7 +359,9 @@ try {
   });
   assert.equal(queueResult.queued, true);
   assert.ok(queuedEvent.technicalReport.text.includes('nativeExitCode'));
-  assert.equal(JSON.parse(queuedEvent.technicalReport.text).asr.attempts[1].nativeExitCode, null);
+  const queuedReport = JSON.parse(queuedEvent.technicalReport.text);
+  assert.equal(queuedReport.asr.nativeEvidence.kind, 'native_crash_evidence_set');
+  assert.equal(queuedReport.asr.attempts[1].nativeExitCode, null);
   assert.ok(mainText.includes("trigger: 'stop_command'"));
   assert.ok(mainText.includes("trigger: 'stop_button'"));
   plugin.getConfiguredLocalAsrPlatform = () => 'darwin';
