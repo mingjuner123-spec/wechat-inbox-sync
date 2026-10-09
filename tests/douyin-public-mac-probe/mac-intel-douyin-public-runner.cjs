@@ -155,6 +155,7 @@ function prepareRuntimeAsr() {
     `#!/usr/bin/env bash\nset -euo pipefail\nWHISPER_CPP_BIN=${shellQuote(candidateEngine)}\nGGML_METAL_RESOURCES_DIR=""\nexec "$WHISPER_CPP_BIN" "$@"\n`,
     { mode: 0o700 });
   fs.chmodSync(wrapperPath, 0o700);
+  copyVerifiedDouyinResolver(asrRoot, runtimeAsrRoot);
   process.env.WECHAT_INBOX_ASR_CPU_ONLY = '1';
 }
 
@@ -179,6 +180,29 @@ function sha256(value) {
 function sha256FileAtPath(filePath) {
   try { return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'); }
   catch (_) { return ''; }
+}
+
+function copyVerifiedDouyinResolver(sourceRoot, targetRoot) {
+  const sourceResolverRoot = path.join(sourceRoot, 'tools', 'yt-dlp');
+  const sourceExecutable = path.join(sourceResolverRoot, 'yt-dlp');
+  const sourceReceipt = `${sourceExecutable}.verified.json`;
+  const hasExecutable = fs.existsSync(sourceExecutable);
+  const hasReceipt = fs.existsSync(sourceReceipt);
+  if (!hasExecutable && !hasReceipt) return false;
+  if (!hasExecutable || !hasReceipt) throw new Error('verified Douyin resolver layout is incomplete');
+  const executableStat = fs.statSync(sourceExecutable);
+  const receiptStat = fs.statSync(sourceReceipt);
+  if (!executableStat.isFile() || executableStat.size <= 0 || receiptStat.size <= 0 || receiptStat.size > 4096) {
+    throw new Error('verified Douyin resolver layout is invalid');
+  }
+  const targetResolverRoot = path.join(targetRoot, 'tools', 'yt-dlp');
+  const targetExecutable = path.join(targetResolverRoot, 'yt-dlp');
+  const targetReceipt = `${targetExecutable}.verified.json`;
+  fs.mkdirSync(targetResolverRoot, { recursive: true });
+  fs.copyFileSync(sourceExecutable, targetExecutable);
+  fs.copyFileSync(sourceReceipt, targetReceipt);
+  fs.chmodSync(targetExecutable, 0o700);
+  return true;
 }
 
 function readPluginVersion(bundlePath) {

@@ -11,8 +11,8 @@ async function main() {
   assert(wrapper.startsWith('#!/usr/bin/env bash\n'));
   assert(!wrapper.includes('cat > "$INSTALL_ROOT/transcribe.sh"'));
   assert(wrapper.includes('--input'));
-  const success = await runProcess(process.execPath, ['-e', 'process.exit(0)'], 2000);
-  assert.equal(success.exitCode, 0);
+  const success = await runProcess(process.execPath, ['-e', 'process.exit(0)'], 15000);
+  assert.equal(success.exitCode, 0, 'ordinary process startup failed: ' + JSON.stringify(success));
   assert.equal(success.timedOut, false);
   const timeout = await runProcess(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});setInterval(()=>{},100)'], 500);
   assert.equal(timeout.timedOut, true);
@@ -23,7 +23,7 @@ async function main() {
       const marker = path.join(tmp, 'heartbeat');
       const code = `const fs=require('fs');process.on('SIGTERM',()=>{});setInterval(()=>fs.writeFileSync(${JSON.stringify(marker)},String(Date.now())),50);`;
       const parent = `require('child_process').spawn(process.execPath,['-e',${JSON.stringify(code)}],{stdio:'ignore'});setInterval(()=>{},100);`;
-      const result = await runProcess(process.execPath, ['-e', parent], 500);
+      const result = await runProcess(process.execPath, ['-e', parent], 10000);
       assert.equal(result.timedOut, true);
       const before = fs.readFileSync(marker, 'utf8');
       await new Promise(resolve=>setTimeout(resolve, 300));

@@ -125,6 +125,25 @@ jobs:
             "$GITHUB_WORKSPACE/obsidian-plugin/wechat-inbox-sync/local-asr/install-local-asr-macos.sh" \
             "$RUNNER_TEMP/asr-install" "$RUNNER_TEMP/asr-fixture/ggml-small.bin" "$ASR_FFMPEG" >/dev/null
 
+      - name: Install pinned local Douyin resolver for online fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolver_root="$RUNNER_TEMP/asr-install/tools/yt-dlp"
+          resolver="$resolver_root/yt-dlp"
+          receipt="$resolver.verified.json"
+          mkdir -p "$resolver_root"
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
+            --max-filesize 37146048 --output "$resolver" \
+            https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos >/dev/null 2>&1
+          test "$(wc -c < "$resolver" | tr -d '[:space:]')" = '37146048'
+          test "$(shasum -a 256 "$resolver" | awk '{print $1}')" = '0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202'
+          chmod 700 "$resolver"
+          cat > "$receipt" <<'JSON'
+          {"schema":1,"platform":"darwin","arch":"x64","version":"2026.08.19","sha256":"0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202","byteLength":37146048}
+          JSON
+          test -s "$receipt"
+
       - name: Run actual Electron extraction, native comparison, and product wrapper
         shell: bash
         run: |
