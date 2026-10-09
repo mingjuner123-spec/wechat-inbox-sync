@@ -1565,6 +1565,7 @@ ${sample}`).digest("hex")
     function readMatchingCrashSummary(session, options = {}) {
       var _a, _b;
       const { directory, directories, fileSystem = fs2, attempt, discoveryGraceMs = 3e5 } = options || {};
+      const onMatch = typeof (options == null ? void 0 : options.onMatch) === "function" ? options.onMatch : null;
       if (!session || session.platform !== "darwin" || !session.startedAt || !session.finishedAt) {
         return "[unavailable: no matching Mac run]";
       }
@@ -1639,7 +1640,24 @@ ${sample}`).digest("hex")
           if (!pids.includes(Number(report.pid)) || !processMatched2) continue;
           const captured = parseTimestamp(report.captureTime);
           if (captured === null || captured < start || captured > (attempt ? exactEnd : end)) continue;
-          return buildIpsCrashSummary(report, session, captured);
+          const summary2 = buildIpsCrashSummary(report, session, captured);
+          if (onMatch) {
+            try {
+              onMatch({
+                format: "ips",
+                name: candidate.name,
+                byteLength: size,
+                modifiedAt: candidate.modifiedAt,
+                pid: Number(report.pid),
+                process: processName,
+                captureTime: new Date(captured).toISOString(),
+                report,
+                text: result.text
+              });
+            } catch (_) {
+            }
+          }
+          return summary2;
         }
         const proc = result.text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
         const reportBinaryPath = (_a = result.text.match(/^Path:\s+(.+)$/m)) == null ? void 0 : _a[1];
@@ -1647,7 +1665,23 @@ ${sample}`).digest("hex")
         if (!proc || !processMatched || !pids.includes(Number(proc[2]))) continue;
         const crashTime = parseTimestamp((_b = result.text.match(/^Date\/Time:\s+(.+)$/m)) == null ? void 0 : _b[1]);
         if (crashTime === null || crashTime < start || crashTime > (attempt ? exactEnd : end)) continue;
-        return buildTextCrashSummary(result.text, session, proc[2], crashTime);
+        const summary = buildTextCrashSummary(result.text, session, proc[2], crashTime);
+        if (onMatch) {
+          try {
+            onMatch({
+              format: "crash",
+              name: candidate.name,
+              byteLength: size,
+              modifiedAt: candidate.modifiedAt,
+              pid: Number(proc[2]),
+              process: proc[1],
+              captureTime: new Date(crashTime).toISOString(),
+              text: result.text
+            });
+          } catch (_) {
+          }
+        }
+        return summary;
       }
       if (budgetExceeded) return CRASH_REPORT_BUDGET_UNAVAILABLE;
       if (unreadableCandidate) return "[unavailable: crash report candidate unreadable]";
@@ -2072,6 +2106,454 @@ var require_asr_diagnostic_evidence = __commonJS({
   }
 });
 
+// src/diagnostic-native-evidence.js
+var require_diagnostic_native_evidence = __commonJS({
+  "src/diagnostic-native-evidence.js"(exports2, module2) {
+    "use strict";
+    var path2 = require("node:path");
+    var crypto2 = require("node:crypto");
+    var fs2 = require("node:fs");
+    var {
+      diagnosticRedact,
+      readMatchingCrashSummary
+    } = require_asr_recovery_utils();
+    var DEFAULT_MAX_BYTES = 64 * 1024;
+    var HARD_MAX_BYTES = 128 * 1024;
+    var MAX_FRAMES = 4096;
+    var MAX_MODULES = 4096;
+    var MAX_TEXT_LINES = 4096;
+    var MAX_FIELD_BYTES = 1024;
+    var MAX_REASON_BYTES = 160;
+    var PRIVATE_KEY = /^(?:path|procPath|parentProcPath|workingDirectory|cwd|home|user|username|uid|gid|command|commandLine|arguments|argv|environment|env|url|cookie|token|secret|authorization|password|apiKey|api_key|input|output)$/i;
+    var PRIVATE_LINE = /^(?:Path|Parent Process|Responsible|User ID|Coalition|Bundle Identifier|Launch Arguments|Environment|Working Directory|Input|Output)\s*:/i;
+    var MODULE_PATH = /(?:\/|\\)(?:Users|home|private|Applications|Library|System|usr|opt)(?:\/|\\)[^ \t,;]+|[A-Za-z]:[\\/][^ \t,;]+/g;
+    function byteLength(value) {
+      return Buffer.byteLength(String(value || ""), "utf8");
+    }
+    __name(byteLength, "byteLength");
+    function normalizeLimit(value) {
+      const candidate = Number(value);
+      if (!Number.isFinite(candidate)) return DEFAULT_MAX_BYTES;
+      return Math.min(HARD_MAX_BYTES, Math.max(2048, Math.floor(candidate)));
+    }
+    __name(normalizeLimit, "normalizeLimit");
+    function safeString(value, limit = MAX_FIELD_BYTES) {
+      const text = String(value || "");
+      if (byteLength(text) <= limit) return text;
+      const marker = "…[truncated]";
+      const markerBytes = byteLength(marker);
+      const prefixLimit = Math.max(0, limit - markerBytes);
+      let result = "";
+      let used = 0;
+      for (const point of [...text]) {
+        const size = byteLength(point);
+        if (used + size > prefixLimit) break;
+        result += point;
+        used += size;
+      }
+      return result + (markerBytes <= limit ? marker : "");
+    }
+    __name(safeString, "safeString");
+    function safeNumber(value) {
+      if (value === null || value === void 0 || value === "") return null;
+      const number = Number(value);
+      return Number.isSafeInteger(number) ? number : null;
+    }
+    __name(safeNumber, "safeNumber");
+    function safeTimestamp(value) {
+      const parsed = Date.parse(value || "");
+      return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+    }
+    __name(safeTimestamp, "safeTimestamp");
+    function redactString(value, settings = {}) {
+      return diagnosticRedact(safeString(value), settings);
+    }
+    __name(redactString, "redactString");
+    function baseName(value) {
+      const text = String(value || "").replace(/\\/g, "/");
+      return text.split("/").pop() || "";
+    }
+    __name(baseName, "baseName");
+    function safeObject(value, settings = {}, depth = 0) {
+      if (depth > 4) return "[TRUNCATED]";
+      if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+      if (typeof value === "string") return redactString(value, settings);
+      if (Array.isArray(value)) return value.slice(0, 64).map((item) => safeObject(item, settings, depth + 1));
+      if (!value || typeof value !== "object") return void 0;
+      return Object.fromEntries(Object.entries(value).slice(0, 64).map(([key, item]) => [
+        key,
+        PRIVATE_KEY.test(key) ? "[REDACTED]" : safeObject(item, settings, depth + 1)
+      ]));
+    }
+    __name(safeObject, "safeObject");
+    function safeFrame(frame, settings = {}) {
+      if (!frame || typeof frame !== "object" || Array.isArray(frame)) return null;
+      const result = {};
+      for (const [key, value] of Object.entries(frame)) {
+        if (!/^(?:symbol|name|module|function|library|imageIndex|imageOffset|address|instruction|line|column|source|file)$/i.test(key)) continue;
+        if (PRIVATE_KEY.test(key)) {
+          result[key] = "[REDACTED]";
+        } else if (typeof value === "string") {
+          result[key] = redactString(value, settings);
+        } else if (Number.isSafeInteger(value)) {
+          result[key] = value;
+        }
+      }
+      return Object.keys(result).length ? result : null;
+    }
+    __name(safeFrame, "safeFrame");
+    function safeModule(image, settings = {}, sourceIndex = null) {
+      if (!image || typeof image !== "object" || Array.isArray(image)) return null;
+      const result = {};
+      const imageName = image.name || image.module || image.path;
+      if (imageName) result.name = redactString(baseName(imageName), settings);
+      for (const key of ["uuid", "arch"]) {
+        if (typeof image[key] === "string") result[key] = redactString(image[key], settings);
+      }
+      const embeddedIndex = safeNumber(image.index);
+      const moduleIndex = embeddedIndex !== null ? embeddedIndex : safeNumber(sourceIndex);
+      if (moduleIndex !== null && moduleIndex >= 0) result.index = moduleIndex;
+      for (const key of ["base", "size"]) {
+        const value = safeNumber(image[key]);
+        if (value !== null && value >= 0) result[key] = value;
+      }
+      return Object.keys(result).length ? result : null;
+    }
+    __name(safeModule, "safeModule");
+    function parseJson(value) {
+      try {
+        const parsed = JSON.parse(String(value || ""));
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    __name(parseJson, "parseJson");
+    function parseSummary(summary) {
+      const parsed = parseJson(summary);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    }
+    __name(parseSummary, "parseSummary");
+    function safePathLine(line, settings = {}) {
+      if (PRIVATE_LINE.test(String(line || ""))) return "";
+      const normalized = String(line || "").replace(MODULE_PATH, (match) => baseName(match));
+      return redactString(normalized, settings).slice(0, MAX_FIELD_BYTES);
+    }
+    __name(safePathLine, "safePathLine");
+    function textThreadEvidence(text, settings = {}) {
+      var _a;
+      const lines = String(text || "").split(/\r?\n/);
+      const crashed = lines.find((line) => /^Crashed Thread:\s*(\d+)/i.test(line));
+      const threadNumber = crashed ? Number((_a = crashed.match(/\d+/)) == null ? void 0 : _a[0]) : null;
+      const faultLines = [];
+      const moduleLines = [];
+      let faultLineCount = 0;
+      let moduleLineCount = 0;
+      let inFaultThread = false;
+      let inModules = false;
+      let faultHeader = "";
+      for (const line of lines) {
+        if (/^Binary Images:/i.test(line)) {
+          inModules = true;
+          inFaultThread = false;
+          const safe = safePathLine(line, settings);
+          if (safe) {
+            moduleLineCount += 1;
+            moduleLines.push(safe);
+          }
+          continue;
+        }
+        if (inModules) {
+          const safe = safePathLine(line, settings);
+          if (safe) {
+            moduleLineCount += 1;
+            if (moduleLines.length < MAX_TEXT_LINES) moduleLines.push(safe);
+          }
+          continue;
+        }
+        const thread = line.match(/^Thread\s+(\d+)(?:\s+Crashed)?\s*:/i);
+        if (thread) {
+          if (inFaultThread) inFaultThread = false;
+          const marked = /\s+Crashed\s*::?/i.test(line);
+          if (Number.isSafeInteger(threadNumber) && Number(thread[1]) === threadNumber || !Number.isSafeInteger(threadNumber) && marked) {
+            inFaultThread = true;
+            faultHeader = safePathLine(line, settings);
+            if (faultHeader) {
+              faultLineCount += 1;
+              faultLines.push(faultHeader);
+            }
+          }
+          continue;
+        }
+        if (inFaultThread) {
+          const safe = safePathLine(line, settings);
+          if (safe) {
+            faultLineCount += 1;
+            if (faultLines.length < MAX_TEXT_LINES) faultLines.push(safe);
+          }
+        }
+      }
+      return {
+        faultThread: {
+          thread: Number.isSafeInteger(threadNumber) ? threadNumber : null,
+          header: faultHeader || void 0,
+          lines: faultLines.slice(0, MAX_TEXT_LINES),
+          linesOmitted: Math.max(0, faultLineCount - MAX_TEXT_LINES)
+        },
+        modules: {
+          lines: moduleLines.slice(0, MAX_TEXT_LINES),
+          linesOmitted: Math.max(0, moduleLineCount - MAX_TEXT_LINES)
+        }
+      };
+    }
+    __name(textThreadEvidence, "textThreadEvidence");
+    function ipsEvidence(match, settings = {}) {
+      const parsed = match.report && typeof match.report === "object" ? match.report : parseJson(match.text);
+      if (!parsed) return null;
+      const threadIndex = safeNumber(parsed.faultingThread);
+      const thread = Number.isSafeInteger(threadIndex) && Array.isArray(parsed.threads) ? parsed.threads[threadIndex] : null;
+      const sourceFrames = Array.isArray(thread == null ? void 0 : thread.frames) ? thread.frames : [];
+      const sourceImages = Array.isArray(parsed.usedImages) ? parsed.usedImages : [];
+      const frames = sourceFrames.slice(0, MAX_FRAMES).map((frame) => safeFrame(frame, settings)).filter(Boolean);
+      const referencedIndexes = [...new Set(sourceFrames.map((frame) => safeNumber(frame && frame.imageIndex)).filter((index) => Number.isSafeInteger(index) && index >= 0 && index < sourceImages.length))];
+      const allIndexes = sourceImages.map((_, index) => index);
+      const orderedIndexes = [
+        ...referencedIndexes,
+        ...allIndexes.filter((index) => !referencedIndexes.includes(index))
+      ];
+      const selectedIndexes = orderedIndexes.slice(0, MAX_MODULES);
+      const modules = selectedIndexes.map((index) => safeModule(sourceImages[index], settings, index)).filter(Boolean);
+      const summary = parseSummary(match.summary);
+      return {
+        format: "ips",
+        process: safeString(match.process, 96),
+        pid: safeNumber(match.pid),
+        captureTime: safeTimestamp(match.captureTime),
+        reportByteLength: safeNumber(match.byteLength),
+        association: summary && summary.associationReliability ? summary.associationReliability : void 0,
+        exception: safeObject(parsed.exception, settings),
+        termination: safeObject(parsed.termination, settings),
+        faultThread: {
+          thread: threadIndex,
+          frames,
+          framesOmitted: Math.max(0, sourceFrames.length - frames.length)
+        },
+        modules: {
+          items: modules,
+          itemsOmitted: Math.max(0, sourceImages.length - modules.length)
+        }
+      };
+    }
+    __name(ipsEvidence, "ipsEvidence");
+    function textEvidence(match, settings = {}) {
+      const summary = parseSummary(match.summary);
+      const extracted = textThreadEvidence(match.text, settings);
+      return {
+        format: "crash",
+        process: safeString(match.process, 96),
+        pid: safeNumber(match.pid),
+        captureTime: safeTimestamp(match.captureTime),
+        reportByteLength: safeNumber(match.byteLength),
+        association: summary && summary.associationReliability ? summary.associationReliability : void 0,
+        ...extracted
+      };
+    }
+    __name(textEvidence, "textEvidence");
+    function hasProjectionTruncation(value) {
+      if (value === "[TRUNCATED]" || value === "[TRUNCATED: size limit]") return true;
+      if (Array.isArray(value)) return value.some(hasProjectionTruncation);
+      if (value && typeof value === "object") return Object.values(value).some(hasProjectionTruncation);
+      return false;
+    }
+    __name(hasProjectionTruncation, "hasProjectionTruncation");
+    function hasOmittedProjectionItems(value) {
+      const omitted = [
+        value && value.faultThread && value.faultThread.framesOmitted,
+        value && value.faultThread && value.faultThread.linesOmitted,
+        value && value.modules && value.modules.itemsOmitted,
+        value && value.modules && value.modules.linesOmitted
+      ];
+      return omitted.some((item) => item === "size_limit" || Number.isSafeInteger(item) && item > 0);
+    }
+    __name(hasOmittedProjectionItems, "hasOmittedProjectionItems");
+    function pruneEvidence(value, limit) {
+      const output = JSON.parse(JSON.stringify(value));
+      const originalBytes = byteLength(JSON.stringify(output));
+      const projectionTruncated = output.truncated === true || hasProjectionTruncation(output) || hasOmittedProjectionItems(output);
+      output.truncated = projectionTruncated;
+      output.originalBytes = originalBytes;
+      const serializedSize = /* @__PURE__ */ __name(() => byteLength(JSON.stringify(output)), "serializedSize");
+      if (serializedSize() <= limit) {
+        return { evidence: output, truncated: projectionTruncated, originalBytes };
+      }
+      output.truncated = true;
+      for (let pass = 0; pass < 64 && serializedSize() > limit; pass += 1) {
+        const candidates = [
+          { owner: output.faultThread, key: "frames", omitted: "framesOmitted" },
+          { owner: output.faultThread, key: "lines", omitted: "linesOmitted" },
+          { owner: output.modules, key: "items", omitted: "itemsOmitted" },
+          { owner: output.modules, key: "lines", omitted: "linesOmitted" }
+        ].filter((candidate2) => candidate2.owner && Array.isArray(candidate2.owner[candidate2.key]));
+        const candidate = candidates.sort((left, right) => right.owner[right.key].length - left.owner[left.key].length)[0];
+        if (candidate && candidate.owner[candidate.key].length > 0) {
+          const items = candidate.owner[candidate.key];
+          const keep = items.length > 1 ? Math.floor(items.length / 2) : 0;
+          const removed = items.length - keep;
+          items.splice(keep);
+          const previous = Number(candidate.owner[candidate.omitted]);
+          candidate.owner[candidate.omitted] = (Number.isFinite(previous) ? previous : 0) + removed;
+          continue;
+        }
+        if (output.exception && typeof output.exception === "object") {
+          output.exception = "[TRUNCATED]";
+          continue;
+        }
+        if (output.termination && typeof output.termination === "object") {
+          output.termination = "[TRUNCATED]";
+          continue;
+        }
+        if (output.association && typeof output.association === "object") {
+          output.association = "[TRUNCATED]";
+          continue;
+        }
+        break;
+      }
+      if (serializedSize() > limit) {
+        const minimal = {
+          schemaVersion: 1,
+          kind: "native_crash_evidence",
+          status: "matched",
+          source: output.source,
+          truncated: true,
+          originalBytes,
+          format: output.format,
+          process: output.process,
+          pid: output.pid,
+          captureTime: output.captureTime,
+          reportByteLength: output.reportByteLength,
+          association: output.association,
+          summary: output.summary,
+          exception: "[TRUNCATED: size limit]",
+          termination: "[TRUNCATED: size limit]",
+          faultThread: {
+            thread: output.faultThread && output.faultThread.thread,
+            frames: [{ symbol: "[TRUNCATED: size limit]" }],
+            framesOmitted: output.faultThread && output.faultThread.framesOmitted
+          },
+          modules: {
+            items: [{ index: 0, name: "[TRUNCATED: size limit]" }],
+            itemsOmitted: output.modules && output.modules.itemsOmitted
+          }
+        };
+        for (const key of ["summary", "association", "termination", "exception", "reportByteLength", "captureTime", "process"]) {
+          if (byteLength(JSON.stringify(minimal)) <= limit) break;
+          delete minimal[key];
+        }
+        if (byteLength(JSON.stringify(minimal)) > limit) {
+          return {
+            evidence: {
+              schemaVersion: 1,
+              kind: "native_crash_evidence",
+              status: "matched",
+              source: output.source,
+              truncated: true,
+              originalBytes,
+              faultThread: {
+                thread: output.faultThread && output.faultThread.thread,
+                frames: [{ symbol: "[TRUNCATED: size limit]" }],
+                framesOmitted: "size_limit"
+              },
+              modules: {
+                items: [{ index: 0, name: "[TRUNCATED: size limit]" }],
+                itemsOmitted: "size_limit"
+              }
+            },
+            truncated: true,
+            originalBytes
+          };
+        }
+        return { evidence: minimal, truncated: true, originalBytes };
+      }
+      output.originalBytes = originalBytes;
+      output.truncated = true;
+      return { evidence: output, truncated: true, originalBytes };
+    }
+    __name(pruneEvidence, "pruneEvidence");
+    function unavailable(status, reason, summary, extra = {}) {
+      return {
+        schemaVersion: 1,
+        kind: "native_crash_evidence",
+        status,
+        source: "macos_diagnostic_report",
+        unavailableReason: safeString(reason, MAX_REASON_BYTES),
+        summary: safeString(summary, MAX_FIELD_BYTES),
+        ...extra
+      };
+    }
+    __name(unavailable, "unavailable");
+    function collectNativeCrashEvidence({
+      session = null,
+      attempt = null,
+      directories,
+      fileSystem = fs2,
+      settings = {},
+      maxBytes = DEFAULT_MAX_BYTES
+    } = {}) {
+      if (!session || typeof session !== "object" || Array.isArray(session)) {
+        return unavailable("unavailable", "session_missing", "[unavailable: no matching Mac run]");
+      }
+      if (session.platform !== "darwin") {
+        return unavailable("not_applicable", "platform_not_macos", "[unavailable: no matching Mac run]");
+      }
+      const selectedAttempt = attempt && typeof attempt === "object" ? attempt : Array.isArray(session.attempts) && session.attempts.length === 1 ? session.attempts[0] : null;
+      if (!selectedAttempt) {
+        return unavailable("unavailable", "attempt_not_provided", "[unavailable: native attempt identity is required]");
+      }
+      let matchedPayload = null;
+      const summary = readMatchingCrashSummary(session, {
+        directories,
+        fileSystem,
+        attempt: selectedAttempt,
+        onMatch: /* @__PURE__ */ __name((payload) => {
+          matchedPayload = payload;
+        }, "onMatch")
+      });
+      if (!matchedPayload || String(summary || "").startsWith("[unavailable:")) {
+        const unavailableText = String(summary || "[unavailable: crash report payload missing]");
+        const reason = unavailableText.replace(/^\[unavailable:\s*/, "").replace(/\]$/, "").replace(/\s+/g, "_").slice(0, MAX_REASON_BYTES);
+        return unavailable(
+          unavailableText === "[unavailable: no matching Mac run]" ? "not_applicable" : "unavailable",
+          reason,
+          unavailableText
+        );
+      }
+      const base = matchedPayload.format === "ips" ? ipsEvidence({ ...matchedPayload, summary }, settings) : textEvidence({ ...matchedPayload, summary }, settings);
+      if (!base) return unavailable("unavailable", "matched_report_unreadable", summary);
+      const limit = normalizeLimit(maxBytes);
+      const bounded = pruneEvidence({
+        schemaVersion: 1,
+        kind: "native_crash_evidence",
+        status: "matched",
+        source: "macos_diagnostic_report",
+        truncated: false,
+        summary: redactString(summary, settings),
+        ...base
+      }, limit);
+      bounded.evidence.originalBytes = bounded.originalBytes;
+      bounded.evidence.truncated = bounded.truncated;
+      return bounded.evidence;
+    }
+    __name(collectNativeCrashEvidence, "collectNativeCrashEvidence");
+    module2.exports = {
+      DEFAULT_MAX_BYTES,
+      HARD_MAX_BYTES,
+      collectNativeCrashEvidence,
+      normalizeLimit,
+      pruneEvidence
+    };
+  }
+});
+
 // src/failure-technical-report.js
 var require_failure_technical_report = __commonJS({
   "src/failure-technical-report.js"(exports2, module2) {
@@ -2081,6 +2563,7 @@ var require_failure_technical_report = __commonJS({
     var crypto2 = require("node:crypto");
     var { diagnosticRedact, readMatchingCrashSummary } = require_asr_recovery_utils();
     var asrDiagnosticEvidence2 = require_asr_diagnostic_evidence();
+    var diagnosticNativeEvidence = require_diagnostic_native_evidence();
     var MAX_REPORT_TEXT_BYTES = 128 * 1024;
     var MAX_SESSION_BYTES = 768 * 1024;
     var UNAVAILABLE_REASONS = /* @__PURE__ */ new Set([
@@ -2636,7 +3119,193 @@ var require_failure_technical_report = __commonJS({
       } };
     }
     __name(matchAsrSession, "matchAsrSession");
-    function buildFailureTechnicalReport2({ error, recordId, attemptId, stage, retryCount, asrRoot, settings = {}, now = (/* @__PURE__ */ new Date()).toISOString() } = {}) {
+    function selectNativeEvidenceAttempts(session) {
+      const attempts = Array.isArray(session && session.attempts) ? session.attempts : [];
+      const terminalStatuses = /* @__PURE__ */ new Set(["failed", "cancelled", "no_speech"]);
+      const candidates = attempts.map((attempt, index) => ({ attempt, index })).filter(({ attempt }) => attempt && typeof attempt === "object" && !Array.isArray(attempt) && terminalStatuses.has(String(attempt.status || "").toLowerCase()) && Array.isArray(attempt.nativePids) && attempt.nativePids.length).slice(-4);
+      return candidates.sort((left, right) => {
+        const crashScore = /* @__PURE__ */ __name((item) => {
+          const code = signedInt(item.attempt.nativeExitCode);
+          const signal = String(item.attempt.signal || "").toUpperCase();
+          return code === 139 || signal === "SIGSEGV" ? 1 : 0;
+        }, "crashScore");
+        return crashScore(right) - crashScore(left) || right.index - left.index;
+      }).map(({ attempt }) => attempt);
+    }
+    __name(selectNativeEvidenceAttempts, "selectNativeEvidenceAttempts");
+    function compactNativeDiagnosticObject(value, settings = {}) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const result = {};
+      for (const key of ["type", "name", "code", "signal", "namespace", "reason", "subcode", "description"]) {
+        if (typeof value[key] === "string") result[key] = safeDiagnosticText(value[key], settings, 256);
+        else if (Number.isSafeInteger(value[key])) result[key] = value[key];
+      }
+      return Object.keys(result).length ? result : null;
+    }
+    __name(compactNativeDiagnosticObject, "compactNativeDiagnosticObject");
+    function compactNativeCrashEvidence(value, settings = {}) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      if (value.kind === "native_crash_evidence_set") return compactNativeEvidenceSet(value, settings);
+      const status = ["matched", "unavailable", "not_applicable"].includes(value.status) ? value.status : "unavailable";
+      const result = {
+        schemaVersion: 1,
+        kind: "native_crash_evidence",
+        status,
+        source: "macos_diagnostic_report"
+      };
+      if (value.format === "ips" || value.format === "crash") result.format = value.format;
+      if (value.truncated === true) result.truncated = true;
+      const originalBytes = nonnegativeInt(value.originalBytes);
+      if (originalBytes !== null) result.originalBytes = originalBytes;
+      const unavailableReason = safeDiagnosticText(value.unavailableReason, settings, 160);
+      if (unavailableReason) result.unavailableReason = unavailableReason;
+      const summary = safeDiagnosticText(value.summary, settings, 2048);
+      if (summary) result.summary = summary;
+      const exception = compactNativeDiagnosticObject(value.exception, settings);
+      const termination = compactNativeDiagnosticObject(value.termination, settings);
+      if (exception) result.exception = exception;
+      if (termination) result.termination = termination;
+      if (value.faultThread && typeof value.faultThread === "object" && !Array.isArray(value.faultThread)) {
+        const faultThread = {};
+        const rawThread = value.faultThread.thread;
+        const thread = rawThread === null || rawThread === void 0 || rawThread === "" ? null : nonnegativeInt(rawThread);
+        if (thread !== null) faultThread.thread = thread;
+        if (value.format === "ips" && Array.isArray(value.faultThread.frames)) {
+          const sourceFrames = value.faultThread.frames;
+          faultThread.frames = sourceFrames.slice(0, 64).map((frame) => {
+            if (!frame || typeof frame !== "object" || Array.isArray(frame)) return null;
+            const safeFrameValue = {};
+            for (const key of ["symbol", "name", "module", "function", "library", "imageIndex", "imageOffset", "address", "instruction", "line", "column"]) {
+              const item = frame[key];
+              if (typeof item === "string") safeFrameValue[key] = safeDiagnosticText(item, settings, 256);
+              else if (Number.isSafeInteger(item)) safeFrameValue[key] = item;
+            }
+            return Object.keys(safeFrameValue).length ? safeFrameValue : null;
+          }).filter(Boolean);
+          const inheritedOmitted = nonnegativeInt(value.faultThread.framesOmitted) || 0;
+          const omitted = inheritedOmitted + Math.max(0, sourceFrames.length - faultThread.frames.length);
+          if (omitted) faultThread.framesOmitted = omitted;
+        } else if (Array.isArray(value.faultThread.lines)) {
+          const sourceLines = value.faultThread.lines;
+          faultThread.lines = sourceLines.slice(0, 64).map((line) => safeDiagnosticText(line, settings, 512)).filter(Boolean);
+          const inheritedOmitted = nonnegativeInt(value.faultThread.linesOmitted) || 0;
+          const omitted = inheritedOmitted + Math.max(0, sourceLines.length - faultThread.lines.length);
+          if (omitted) faultThread.linesOmitted = omitted;
+        }
+        if (Object.keys(faultThread).length) result.faultThread = faultThread;
+      }
+      if (value.modules && typeof value.modules === "object" && !Array.isArray(value.modules)) {
+        const modules = {};
+        if (value.format === "ips" && Array.isArray(value.modules.items)) {
+          const sourceItems = value.modules.items;
+          modules.items = sourceItems.slice(0, 64).map((item) => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+            const safeModuleValue = {};
+            for (const key of ["name", "module", "library", "uuid", "arch"]) {
+              if (typeof item[key] === "string") safeModuleValue[key] = safeDiagnosticText(item[key], settings, 256);
+            }
+            for (const key of ["base", "size", "index"]) if (Number.isSafeInteger(item[key])) safeModuleValue[key] = item[key];
+            return Object.keys(safeModuleValue).length ? safeModuleValue : null;
+          }).filter(Boolean);
+          const inheritedOmitted = nonnegativeInt(value.modules.itemsOmitted) || 0;
+          const omitted = inheritedOmitted + Math.max(0, sourceItems.length - modules.items.length);
+          if (omitted) modules.itemsOmitted = omitted;
+        } else if (Array.isArray(value.modules.lines)) {
+          const sourceLines = value.modules.lines;
+          modules.lines = sourceLines.slice(0, 64).map((line) => safeDiagnosticText(line, settings, 512)).filter(Boolean);
+          const inheritedOmitted = nonnegativeInt(value.modules.linesOmitted) || 0;
+          const omitted = inheritedOmitted + Math.max(0, sourceLines.length - modules.lines.length);
+          if (omitted) modules.linesOmitted = omitted;
+        }
+        if (Object.keys(modules).length) result.modules = modules;
+      }
+      return result;
+    }
+    __name(compactNativeCrashEvidence, "compactNativeCrashEvidence");
+    function compactNativeEvidenceSet(value, settings = {}) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const sourceAttempts = Array.isArray(value.attempts) ? value.attempts : [];
+      const attempts = sourceAttempts.slice(-4).map((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+        const result2 = { attempt: nonnegativeInt(item.attempt) };
+        const exitCode = signedInt(item.nativeExitCode);
+        if (exitCode !== null) result2.nativeExitCode = exitCode;
+        const signal = String(item.signal || "").toUpperCase();
+        if (/^SIG[A-Z0-9_]{1,16}$/.test(signal)) result2.signal = signal;
+        const evidence = compactNativeCrashEvidence(item.evidence, settings);
+        if (evidence) {
+          result2.status = evidence.status;
+          result2.evidence = evidence;
+        } else if (["matched", "unavailable", "not_applicable"].includes(item.status)) {
+          result2.status = item.status;
+        } else {
+          result2.status = "unavailable";
+        }
+        return result2;
+      }).filter(Boolean);
+      const inheritedOmitted = nonnegativeInt(value.omittedAttempts) || 0;
+      const omittedAttempts = inheritedOmitted + Math.max(0, sourceAttempts.length - attempts.length);
+      const status = ["matched", "unavailable", "not_applicable"].includes(value.status) ? value.status : attempts.some((item) => item.status === "matched") ? "matched" : "unavailable";
+      const result = {
+        schemaVersion: 1,
+        kind: "native_crash_evidence_set",
+        status,
+        source: "macos_diagnostic_report",
+        attempts
+      };
+      if (value.truncated === true || omittedAttempts || attempts.some((item) => item.evidence && item.evidence.truncated)) result.truncated = true;
+      if (omittedAttempts) result.omittedAttempts = omittedAttempts;
+      return result;
+    }
+    __name(compactNativeEvidenceSet, "compactNativeEvidenceSet");
+    function collectNativeEvidenceSet(session, attempts, { directories, settings } = {}) {
+      if (!Array.isArray(attempts) || !attempts.length) return null;
+      const budget = 64 * 1024;
+      const perAttemptBudget = Math.max(4096, Math.floor((budget - 2048) / attempts.length));
+      const collected = attempts.map((attempt) => {
+        let evidence;
+        try {
+          evidence = diagnosticNativeEvidence.collectNativeCrashEvidence({
+            session,
+            attempt,
+            directories,
+            settings,
+            maxBytes: perAttemptBudget
+          });
+        } catch (_) {
+          evidence = {
+            schemaVersion: 1,
+            kind: "native_crash_evidence",
+            status: "unavailable",
+            source: "macos_diagnostic_report",
+            unavailableReason: "collection_failed",
+            summary: "[unavailable: native evidence collection failed]"
+          };
+        }
+        const item = {
+          attempt: nonnegativeInt(attempt.attempt),
+          status: evidence && ["matched", "unavailable", "not_applicable"].includes(evidence.status) ? evidence.status : "unavailable",
+          evidence
+        };
+        const exitCode = signedInt(attempt.nativeExitCode);
+        if (exitCode !== null) item.nativeExitCode = exitCode;
+        const signal = String(attempt.signal || "").toUpperCase();
+        if (/^SIG[A-Z0-9_]{1,16}$/.test(signal)) item.signal = signal;
+        return item;
+      });
+      const status = collected.some((item) => item.status === "matched") ? "matched" : collected.every((item) => item.status === "not_applicable") ? "not_applicable" : "unavailable";
+      const result = {
+        schemaVersion: 1,
+        kind: "native_crash_evidence_set",
+        status,
+        source: "macos_diagnostic_report",
+        attempts: collected,
+        truncated: collected.some((item) => item.evidence && item.evidence.truncated === true)
+      };
+      return result;
+    }
+    __name(collectNativeEvidenceSet, "collectNativeEvidenceSet");
+    function buildFailureTechnicalReport2({ error, recordId, attemptId, stage, retryCount, asrRoot, settings = {}, now = (/* @__PURE__ */ new Date()).toISOString(), nativeCrashReportDirectories } = {}) {
       const technical = {
         schemaVersion: 1,
         kind: "sync_failure",
@@ -2657,6 +3326,14 @@ var require_failure_technical_report = __commonJS({
             const crashSummary = readMatchingCrashSummary(loaded.session);
             technical.asr.crashSummary = String(crashSummary || "");
             technical.asr.crashSummaryStatus = crashSummary && !String(crashSummary).startsWith("[unavailable:") ? "matched" : "unavailable";
+            const nativeAttempts = selectNativeEvidenceAttempts(loaded.session);
+            if (nativeAttempts.length) {
+              const nativeEvidenceSet = collectNativeEvidenceSet(loaded.session, nativeAttempts, {
+                directories: Array.isArray(nativeCrashReportDirectories) ? nativeCrashReportDirectories : void 0,
+                settings
+              });
+              if (nativeEvidenceSet) technical.asr.nativeEvidence = nativeEvidenceSet;
+            }
           }
         }
       }
@@ -2758,6 +3435,8 @@ var require_failure_technical_report = __commonJS({
             });
           }
           if (safeTechnical.asr.crashSummaryStatus) compactAsr.crashSummaryStatus = safeTechnical.asr.crashSummaryStatus;
+          const compactNativeEvidence = compactNativeCrashEvidence(safeTechnical.asr.nativeEvidence);
+          if (compactNativeEvidence) compactAsr.nativeEvidence = compactNativeEvidence;
           if (Object.keys(compactAsr).length) fallback.asr = compactAsr;
         }
         text = JSON.stringify(fallback);
@@ -2912,6 +3591,8 @@ var require_failure_technical_report = __commonJS({
             });
           }
           if (parsed.asr.crashSummaryStatus) asr.crashSummaryStatus = parsed.asr.crashSummaryStatus;
+          const compactNativeEvidence = compactNativeCrashEvidence(parsed.asr.nativeEvidence);
+          if (compactNativeEvidence) asr.nativeEvidence = compactNativeEvidence;
           if (Object.keys(asr).length) compact.asr = asr;
         }
       }
@@ -17336,7 +18017,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.183";
+var PLUGIN_RUNTIME_VERSION = "1.3.184";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"

@@ -371,6 +371,7 @@ function buildTextCrashSummary(text, session, pid, crashTime) {
 }
 function readMatchingCrashSummary(session, options = {}) {
   const { directory, directories, fileSystem = fs, attempt, discoveryGraceMs = 300000 } = options || {};
+  const onMatch = typeof options?.onMatch === 'function' ? options.onMatch : null;
   if (!session || session.platform !== 'darwin' || !session.startedAt || !session.finishedAt) {
     return '[unavailable: no matching Mac run]';
   }
@@ -458,7 +459,23 @@ function readMatchingCrashSummary(session, options = {}) {
       if (!pids.includes(Number(report.pid)) || !processMatched) continue;
       const captured = parseTimestamp(report.captureTime);
       if (captured === null || captured < start || captured > (attempt ? exactEnd : end)) continue;
-      return buildIpsCrashSummary(report, session, captured);
+      const summary = buildIpsCrashSummary(report, session, captured);
+      if (onMatch) {
+        try {
+          onMatch({
+            format: 'ips',
+            name: candidate.name,
+            byteLength: size,
+            modifiedAt: candidate.modifiedAt,
+            pid: Number(report.pid),
+            process: processName,
+            captureTime: new Date(captured).toISOString(),
+            report,
+            text: result.text,
+          });
+        } catch (_) { /* A diagnostic export callback cannot change matching. */ }
+      }
+      return summary;
     }
 
     const proc = result.text.match(/^Process:\s+(\S+)\s+\[(\d+)\]/m);
@@ -469,7 +486,22 @@ function readMatchingCrashSummary(session, options = {}) {
     if (!proc || !processMatched || !pids.includes(Number(proc[2]))) continue;
     const crashTime = parseTimestamp(result.text.match(/^Date\/Time:\s+(.+)$/m)?.[1]);
     if (crashTime === null || crashTime < start || crashTime > (attempt ? exactEnd : end)) continue;
-    return buildTextCrashSummary(result.text, session, proc[2], crashTime);
+    const summary = buildTextCrashSummary(result.text, session, proc[2], crashTime);
+    if (onMatch) {
+      try {
+        onMatch({
+          format: 'crash',
+          name: candidate.name,
+          byteLength: size,
+          modifiedAt: candidate.modifiedAt,
+          pid: Number(proc[2]),
+          process: proc[1],
+          captureTime: new Date(crashTime).toISOString(),
+          text: result.text,
+        });
+      } catch (_) { /* A diagnostic export callback cannot change matching. */ }
+    }
+    return summary;
   }
   if (budgetExceeded) return CRASH_REPORT_BUDGET_UNAVAILABLE;
   if (unreadableCandidate) return '[unavailable: crash report candidate unreadable]';
