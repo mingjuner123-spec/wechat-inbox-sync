@@ -162,7 +162,32 @@ jobs:
           else
             runner_status=$?
           fi
+          case "$runner_status" in
+            ''|*[!0-9]*) runner_status=125 ;;
+          esac
+          printf 'ONLINE_RUNNER_EXIT=%s\n' "$runner_status"
+          cleanup_status=0
+          expected_private_root="${RUNNER_TEMP%/}/douyin-public-private"
+          if [ -z "$RUNNER_TEMP" ] || [ "$RUNNER_TEMP" = "/" ] || [ "$private_root" != "$expected_private_root" ] || [ -L "$private_root" ]; then
+            cleanup_status=1
+          else
+            if ! rm -rf -- "$private_root"; then
+              cleanup_status=1
+            fi
+            if [ "$cleanup_status" = 0 ]; then
+              if ! mkdir -m 700 -- "$private_root"; then
+                cleanup_status=1
+              fi
+            fi
+            if [ "$cleanup_status" = 0 ]; then
+              if [ -n "$(find "$private_root" -mindepth 1 -print -quit)" ]; then
+                cleanup_status=1
+              fi
+            fi
+          fi
+          printf 'ONLINE_PRIVATE_CLEANUP=%s\n' "$cleanup_status"
           printf '%s\n' "$runner_status" > "$RUNNER_TEMP/douyin-public-runner-status"
+          printf '%s\n' "$cleanup_status" > "$RUNNER_TEMP/douyin-public-private-cleanup-status"
           rm -f "$RUNNER_TEMP/douyin-public-runner.log"
 
       - name: Validate receipt and private-root cleanup
@@ -179,6 +204,7 @@ jobs:
           cp -- "$receipt" "$safe_receipt_root/douyin-public-mac-receipt.json"
           overall_status=0
           if [ "$(cat "$RUNNER_TEMP/douyin-public-runner-status")" != 0 ]; then overall_status=1; fi
+          if [ "$(cat "$RUNNER_TEMP/douyin-public-private-cleanup-status")" != 0 ]; then overall_status=1; fi
           if ! node "$PROBE_ROOT/validate-douyin-public-receipt.cjs" "$receipt" --require-success >/dev/null; then overall_status=1; fi
           if [ -n "$(find "$RUNNER_TEMP/douyin-public-private" -mindepth 1 -print -quit)" ]; then overall_status=1; fi
           exit "$overall_status"
