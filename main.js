@@ -18284,7 +18284,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.185";
+var PLUGIN_RUNTIME_VERSION = "1.3.186";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -35125,6 +35125,15 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (status && status.hasAccess && expiresAt && expiresAt <= Date.now()) {
       status = { ...status, hasAccess: false, status: "expired" };
     }
+    if (options.localTranscriptionSetup === true) {
+      const reason = status.status === "expired" ? "当前 Pro 会员已过期。" : status.status === "unbound" ? "请先在插件中绑定小程序。" : "当前账户尚无可用的 Pro 转写权限。";
+      const message = `${featureName}需要有效 Pro。${reason}请前往小程序领取试用会员（如可领取）或开通会员；会员生效后，在插件设置中点击“安装／更新本地组件”（已安装可跳过），再重试这条音视频。`;
+      const error = new Error(message);
+      error.code = "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED";
+      error.transcriptionSetupRequired = true;
+      new Notice(message, 12e3);
+      throw error;
+    }
     if (status.status === "missing_redeem_code") {
       throw new Error(`${featureName}需要有效 Pro。请先绑定小程序并开通 Pro。`);
     }
@@ -35622,7 +35631,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     };
   }
   async ensureLocalComponentReadyForUse(featureName = "该功能", options = {}) {
-    const status = await this.ensureProFeatureAccess(featureName);
+    const status = await this.ensureProFeatureAccess(featureName, {
+      localTranscriptionSetup: options.requireAsr === true
+    });
     const readiness = this.getLocalTranscriptionComponentReadiness();
     const requireAsr = options.requireAsr === true;
     const requireOcr = options.requireOcr === true;
@@ -36301,7 +36312,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (options.forceLocal) {
       return runLocalFallback("");
     }
-    if (provider === "off" && this.canRunLocalTranscription() && await this.hasProFeatureAccess()) {
+    if (provider === "off" || !provider) {
       return runLocalFallback("");
     }
     if (["aliyun", "doubao", "tencent"].includes(provider) && isHeaderProtectedMediaUrl(audioUrl)) {
@@ -36356,6 +36367,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           source: "local"
         };
       } catch (error) {
+        if (error.transcriptionSetupRequired) throw error;
         if (error.code === "TRANSCRIPTION_NO_SPEECH") throw error;
         if (isRetryableTranscriptionError(error)) {
           throw error;
@@ -36426,11 +36438,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async runLocalTranscription(audioUrl, options = {}) {
     var _a, _b, _c, _d, _e, _f;
     throwIfAborted(options.signal);
-    await this.ensureLocalComponentReadyForUse("音视频转写", {
-      reason: "first-use",
-      requireAsr: true,
-      requireOcr: false
-    });
+    try {
+      await this.ensureLocalComponentReadyForUse("音视频转写", {
+        reason: "first-use",
+        requireAsr: true,
+        requireOcr: false
+      });
+    } catch (error) {
+      error.transcriptionSetupRequired = true;
+      throw error;
+    }
     await this.recoverStaleLocalTranscriptionCommand();
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
@@ -37487,7 +37504,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         transcriptionSource: metadata.transcriptionSource || "cloud-pretranscription",
         transcriptionError: metadata.transcriptionError || (["queued", "processing"].includes(existingTranscriptionStatus) ? "云端转写中，下次同步会自动更新" : "")
       };
-    } else if (this.settings.aiProvider !== "off" || metadata.transcriptionMode === "local") {
+    } else if (!existingTranscription) {
       try {
         this.showSyncProgress({ ...progress, stage: "transcribing", title });
         const result = await this.runConfiguredTranscription(tempFileURL, {
@@ -38214,6 +38231,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "wechat-channels") {
             channelsDiagnostic.noteFailure(mediaDiagnosticTrace, candidateError, candidateStage);
           }
+          if (candidateError.transcriptionSetupRequired) throw candidateError;
           const candidateStatus = getTransportErrorDiagnostic(candidateError).status;
           if ([401, 403, 412].includes(candidateStatus) && ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) !== "wechat-channels" || candidateStage === "download")) shouldRefreshMediaUrls = true;
         }
