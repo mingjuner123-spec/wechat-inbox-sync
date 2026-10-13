@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "pluginId": "wechat-inbox-sync",
-  "pluginVersion": "1.3.185",
+  "pluginVersion": "1.3.186",
   "sourceRoot": "obsidian-plugin/wechat-inbox-sync",
-  "candidateId": "1.3.185-187051148bb341a3",
-  "aggregateSha256": "187051148bb341a3f3b1ac163154549dd05c2692515bca82e2ea833a40473a4f",
+  "candidateId": "1.3.186-67578bc6f79faa6d",
+  "aggregateSha256": "67578bc6f79faa6db2ef0b4f80e157f7e9f43e7f438ba5bd1e9b26428d7d946e",
   "looseAssets": [
     "main.js",
     "manifest.json",
@@ -69,13 +69,13 @@
     },
     {
       "path": "main.js",
-      "bytes": 6325358,
-      "sha256": "502b1e374fabdf99673a44674faaae9a141e81e91990219a02713e96c21dfabd"
+      "bytes": 6326301,
+      "sha256": "9040871309613716e10a2c853c3f436ca541c1a32a98295ed4785284adaa4280"
     },
     {
       "path": "manifest.json",
       "bytes": 410,
-      "sha256": "1b47b003d95f00eba4eb6577aa074fa8aabc0ff5ff45d0debc825cb7187209c4"
+      "sha256": "36169625617e29a6ed5ffc4f52cf0f99581d027111f370ec161b1980675e10dc"
     },
     {
       "path": "styles.css",
@@ -84,8 +84,8 @@
     },
     {
       "path": "versions.json",
-      "bytes": 6756,
-      "sha256": "86b2efa6f1e338564a246accda402391b5bfe7c3391e5ab90310a6f8525e01b0"
+      "bytes": 6778,
+      "sha256": "b9ed385c9e4843da07345eb04d8a4e79be2ef64326a07edc2d0532afc30af24f"
     }
   ]
 }

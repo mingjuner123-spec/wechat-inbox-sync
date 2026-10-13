@@ -304,7 +304,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.185';
+const PLUGIN_RUNTIME_VERSION = '1.3.186';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -19364,6 +19364,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (status && status.hasAccess && expiresAt && expiresAt <= Date.now()) {
       status = { ...status, hasAccess: false, status: 'expired' };
     }
+    if (options.localTranscriptionSetup === true) {
+      const reason = status.status === 'expired'
+        ? '当前 Pro 会员已过期。'
+        : status.status === 'unbound'
+          ? '请先在插件中绑定小程序。'
+          : '当前账户尚无可用的 Pro 转写权限。';
+      const message = `${featureName}需要有效 Pro。${reason}请前往小程序领取试用会员（如可领取）或开通会员；会员生效后，在插件设置中点击“安装／更新本地组件”（已安装可跳过），再重试这条音视频。`;
+      const error = new Error(message);
+      error.code = 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED';
+      error.transcriptionSetupRequired = true;
+      new Notice(message, 12000);
+      throw error;
+    }
     if (status.status === 'missing_redeem_code') {
       throw new Error(`${featureName}需要有效 Pro。请先绑定小程序并开通 Pro。`);
     }
@@ -19893,7 +19906,9 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async ensureLocalComponentReadyForUse(featureName = '该功能', options = {}) {
-    const status = await this.ensureProFeatureAccess(featureName);
+    const status = await this.ensureProFeatureAccess(featureName, {
+      localTranscriptionSetup: options.requireAsr === true,
+    });
     const readiness = this.getLocalTranscriptionComponentReadiness();
     const requireAsr = options.requireAsr === true;
     const requireOcr = options.requireOcr === true;
@@ -20602,11 +20617,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       return runLocalFallback('');
     }
 
-    // Local transcription is a Pro capability with no user-facing provider picker.
-    // Older installations can still retain the legacy "off" provider value after
-    // the ASR component has been installed, which must not silently disable every
-    // social-video transcription.
-    if (provider === 'off' && this.canRunLocalTranscription() && await this.hasProFeatureAccess()) {
+    // "off" is also the new-install default. Enter the local setup gate even
+    // without a command so membership and missing-component guidance can run.
+    if (provider === 'off' || !provider) {
       return runLocalFallback('');
     }
 
@@ -20663,6 +20676,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           source: 'local',
         };
       } catch (error) {
+        if (error.transcriptionSetupRequired) throw error;
         if (error.code === 'TRANSCRIPTION_NO_SPEECH') throw error;
         if (isRetryableTranscriptionError(error)) {
           throw error;
@@ -20734,11 +20748,18 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async runLocalTranscription(audioUrl, options = {}) {
     throwIfAborted(options.signal);
-    await this.ensureLocalComponentReadyForUse('音视频转写', {
-      reason: 'first-use',
-      requireAsr: true,
-      requireOcr: false,
-    });
+    try {
+      await this.ensureLocalComponentReadyForUse('音视频转写', {
+        reason: 'first-use',
+        requireAsr: true,
+        requireOcr: false,
+      });
+    } catch (error) {
+      // Setup/auth failures do not depend on the media URL. Preserve the action
+      // instead of retrying alternate media or replacing it with a cloud error.
+      error.transcriptionSetupRequired = true;
+      throw error;
+    }
     await this.recoverStaleLocalTranscriptionCommand();
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
@@ -21826,7 +21847,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             : ''
         ),
       };
-    } else if (this.settings.aiProvider !== 'off' || metadata.transcriptionMode === 'local') {
+    } else if (!existingTranscription) {
       try {
         this.showSyncProgress({ ...progress, stage: 'transcribing', title });
         const result = await this.runConfiguredTranscription(tempFileURL, {
@@ -22656,6 +22677,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (mediaDiagnosticTrace?.source === 'wechat-channels') {
             channelsDiagnostic.noteFailure(mediaDiagnosticTrace, candidateError, candidateStage);
           }
+          if (candidateError.transcriptionSetupRequired) throw candidateError;
           const candidateStatus = getTransportErrorDiagnostic(candidateError).status;
           if ([401, 403, 412].includes(candidateStatus) && (mediaDiagnosticTrace?.source !== 'wechat-channels' || candidateStage === 'download')) shouldRefreshMediaUrls = true;
         }
