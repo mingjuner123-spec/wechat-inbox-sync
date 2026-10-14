@@ -50,6 +50,9 @@ function createPlugin() {
     },
   };
   plugin.ensureFolder = async () => {};
+  // Keep fallback fixtures offline; individual recovery cases override these.
+  plugin.downloadWebpageHtmlViaNode = async () => { throw new Error('fixture node unavailable'); };
+  plugin.downloadWechatArticleHtmlViaSession = async () => { throw new Error('fixture session unavailable'); };
   plugin.downloadArrayBuffer = async (url, headers) => {
     downloads.push({ url, headers });
     return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);

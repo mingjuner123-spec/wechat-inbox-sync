@@ -32,6 +32,9 @@ function getSyncNoteTitleFromPath(filePath) {
 function categorizeSyncFailure(error) {
   const code = String(error && error.code || '').trim().toUpperCase();
   const message = String(error && error.message || error || '').trim().toUpperCase();
+  // Keep the existing server lifecycle contract; setup is not an ASR engine failure.
+  if (code === 'LOCAL_COMPONENT_SETUP_REQUIRED') return 'LOCAL_COMPONENT_UNAVAILABLE';
+  if (code === 'LOCAL_TRANSCRIPTION_BINDING_REQUIRED' || code === 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED') return 'SYNC_FAILED';
   if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
   if (code === 'UNSUPPORTED_PLATFORM'
     || /UNSUPPORTED_(?:PLATFORM|RECORD_TYPE|SITE)/.test(code)

@@ -11,7 +11,8 @@ function buildSyncResultNotice(
   failed = [],
 ) {
   const writtenCount = Array.isArray(written) ? written.length : 0;
-  const currentFailedItems = Array.isArray(failed) ? failed : [];
+  const pendingSetup = (Array.isArray(failed) ? failed : []).filter(item => item.setupRequired);
+  const currentFailedItems = (Array.isArray(failed) ? failed : []).filter(item => !item.setupRequired);
   let message = buildSyncNotice(writtenCount);
   if (!writtenCount && currentFailedItems.length) {
     message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
@@ -24,6 +25,10 @@ function buildSyncResultNotice(
   );
   if (writtenCount && currentFailedItems.length) {
     message += `，${currentFailedItems.length} 条失败：${currentFailedItems[0].message}`;
+  }
+  if (pendingSetup.length) {
+    const setupMessage = pendingSetup.length+' 条内容待准备：'+pendingSetup[0].message;
+    message = !writtenCount && !currentFailedItems.length ? setupMessage : message + '；' + setupMessage;
   }
   return message;
 }

@@ -166,6 +166,7 @@ async function testHydrationRequiresActualEvidence() {
       const plugin = new Plugin(); plugin.settings = { aiProvider: 'off' };
       plugin.getConfiguredLocalAsrInstallRoot = () => scratch;
       plugin.checkDouyinLogin = async () => false;
+      plugin.runConfiguredTranscription = async () => ({ transcription: 'Identity fixture transcript', source: 'fixture' });
       plugin.fetchDouyinMediaResolutionWithSession = async () => ({ mediaUrls: [], stages: [] });
       plugin.renderSocialMediaUrls = async (_url, options) => {
         if (mode.startsWith('resolver')) return [];

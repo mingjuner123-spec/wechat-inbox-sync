@@ -52,11 +52,10 @@ async function main() {
       const { plugin, calls } = fixture({ access, provider });
       plugin.runLocalTranscription = Plugin.prototype.runLocalTranscription;
       await assert.rejects(plugin.runConfiguredTranscription('https://example.test/audio.mp3', { allowCloudUrlFallback: true }), error => {
-        assert.match(error.message, /领取.*开通/);
-        assert.match(error.message, /安装／更新本地组件/);
+        if (access !== 'unbound') { assert.match(error.message, /领取.*开通/); assert.match(error.message, /安装／更新本地组件/); }
         if (access === 'expired') assert.match(error.message, /过期/);
         if (access === 'unbound') assert.match(error.message, /绑定/);
-        assert.equal(error.code, 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED');
+        assert.equal(error.code, access === 'unbound' ? 'LOCAL_TRANSCRIPTION_BINDING_REQUIRED' : 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED');
         return true;
       });
       assert.deepEqual(calls, { prompt: 0, install: 0, transcribe: 0, cloud: 0 });
@@ -87,9 +86,8 @@ async function main() {
     plugin.downloadArrayBuffer = async () => Buffer.from('audio');
     plugin.showSyncProgress = () => {};
     const record = { id: 'voice-fixture', type: 'voice', metadata: { audioFileID: 'fixture-audio', audioFileName: 'voice.mp3' } };
-    const result = await plugin.writeVoiceAttachment(record, 'inbox', '2026-10-14', 'voice');
-    assert.equal(result.metadata.transcriptionStatus, access === 'active' ? 'success' : 'failed');
-    if (access === 'inactive') assert.match(result.metadata.transcriptionError, /领取.*开通/);
+    if (access === 'inactive') await assert.rejects(plugin.writeVoiceAttachment(record, 'inbox', '2026-10-14', 'voice'), e => e.setupRequired && e.code === 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED');
+    else assert.equal((await plugin.writeVoiceAttachment(record, 'inbox', '2026-10-14', 'voice')).metadata.transcriptionStatus, 'success');
     assert.equal(calls.transcribe, access === 'active' ? 1 : 0);
     const count = { ...calls };
     const completed = await plugin.writeVoiceAttachment({ ...record, metadata: { ...record.metadata,
@@ -101,11 +99,10 @@ async function main() {
   media.plugin.runLocalTranscription = Plugin.prototype.runLocalTranscription;
   media.plugin.showSyncProgress = () => {};
   const beforeMediaNotices = notices.length;
-  const failedMedia = await media.plugin.buildTranscriptRecordFromMedia({ id: 'media-fixture', metadata: {} }, {
+  await assert.rejects(media.plugin.buildTranscriptRecordFromMedia({ id: 'media-fixture', metadata: {} }, {
     url: 'https://www.douyin.com/video/123', platform: '抖音',
     mediaUrls: ['https://example.test/a.mp4', 'https://example.test/b.mp4'],
-  });
-  assert.match(failedMedia.metadata.transcriptionError, /领取.*开通/);
+  }), e => e.setupRequired && e.code === 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED');
   assert.equal(notices.length - beforeMediaNotices, 1, 'alternate media must not repeat a setup prompt');
   const subtitleNotices = notices.length;
   const subtitled = await media.plugin.buildTranscriptRecordFromMedia({ id: 'subtitle-fixture', metadata: {} }, {
@@ -114,6 +111,65 @@ async function main() {
   assert.equal(subtitled.metadata.transcription, '已有字幕');
   assert.equal(notices.length, subtitleNotices, 'subtitles do not need ASR installation');
   assert.ok(notices.some(message => /领取.*开通/.test(message)));
+  const setup = require('../obsidian-plugin/wechat-inbox-sync/src/transcription-setup-utils');
+  const noticeUtils = require('../obsidian-plugin/wechat-inbox-sync/src/progress-notice-utils');
+  for (const bound of [false, true]) for (const installed of [false, true]) for (const pro of [false, true]) {
+    const status = {hasAccess: pro, status: pro ? 'active' : 'inactive', expiresAt: new Date(Date.now()+86400000).toISOString()};
+    const readiness = {asrStatus:{ready:installed},ocrStatus:{ready:installed},resolverStatus:{ready:installed}};
+    const view = setup.setupSummary(bound,status,readiness);
+    assert.match(view.message, !bound ? /待绑定/ : !pro ? /待开通会员/ : !installed ? /待安装组件/ : /准备已完成/);
+    assert.equal(view.components.length,3);
+  }
+  assert.match(setup.setupSummary(true,null).message,/待确认/);
+  assert.match(setup.setupSummary(true,{hasAccess:false,status:'expired'}).message,/过期/);
+  assert.match(noticeUtils.buildSyncResultNotice([],[],[],[{setupRequired:true,message:'待安装组件'}]),/待准备/);
+  assert.doesNotMatch(noticeUtils.buildSyncResultNotice([],[],[],[{setupRequired:true,message:'待安装组件'}]),/同步失败|已同步/);
+  assert.match(noticeUtils.buildSyncResultNotice([],[],[],[{message:'引擎崩溃'},{setupRequired:true,message:'待安装组件'}]),/1 条内容未同步/);
+  assert.equal(Plugin.__test.categorizeSyncFailure(setup.setupError('LOCAL_COMPONENT_SETUP_REQUIRED','待安装')), 'LOCAL_COMPONENT_UNAVAILABLE');
+  const isolated=fixture(); isolated.plugin.runLocalTranscription = Plugin.prototype.runLocalTranscription;
+  const calls=[]; isolated.plugin.getLocalTranscriptionComponentReadiness=()=>({asrStatus:{ready:false},ocrStatus:{ready:false},resolverStatus:{ready:false}});
+  isolated.plugin.installLocalAsr=async()=>calls.push('asr'); isolated.plugin.installLocalOcr=async()=>{throw Error('OCR must not run');}; isolated.plugin.ensureLocalDouyinResolver=async()=>{throw Error('resolver must not run');};
+  await Plugin.prototype.doInstallLocalTranscriptionComponents.call(isolated.plugin,{requireAsr:true});
+  assert.deepEqual(calls,['asr']);
+  const settingCalls=[]; isolated.plugin.app={setting:{open:()=>settingCalls.push('open'),openTabById:id=>settingCalls.push(id)}};
+  assert.equal(isolated.plugin.openTranscriptionSetupSettings(),true); assert.deepEqual(settingCalls,['open','wechat-inbox-sync']);
+  const broken=fixture(); broken.plugin.runLocalTranscription=Plugin.prototype.runLocalTranscription;
+  broken.plugin.installLocalTranscriptionComponents=async()=>{throw Error('OCR/ASR 安装下载失败');};
+  await assert.rejects(broken.plugin.runConfiguredTranscription('https://example.test/a.mp3'), e=>e.code==='LOCAL_COMPONENT_INSTALL_FAILED' && Plugin.__test.categorizeSyncFailure(e)==='LOCAL_COMPONENT_UNAVAILABLE');
+  const quiet=fixture({accept:false}); const beforeQuiet=notices.length;
+  await assert.rejects(quiet.plugin.runConfiguredTranscription('https://example.test/a.mp3'));
+  quiet.plugin.lastSetupNoticeAt=0;
+  await assert.rejects(quiet.plugin.runConfiguredTranscription('https://example.test/a.mp3'));
+  assert.equal(notices.length,beforeQuiet,'snooze suppresses repeated setup notices as well as modals');
+  const concurrent=fixture(); const c=concurrent.plugin; let ocrReady=false;
+  c.installLocalTranscriptionComponents=Plugin.prototype.installLocalTranscriptionComponents;
+  c.showLocalComponentInstallFailure=async()=>{};
+  c.doInstallLocalTranscriptionComponents=async options=>{await Promise.resolve();if(options.requireAsr)throw Error('ASR install failed');ocrReady=true;return {installed:true};};
+  const results=await Promise.allSettled([c.installLocalTranscriptionComponents({requireAsr:true}),c.installLocalTranscriptionComponents({requireOcr:true})]);
+  assert.equal(results[0].status,'rejected'); assert.equal(results[1].status,'fulfilled'); assert.equal(ocrReady,true);
+  const serialized=fixture();const reasons=[];
+  serialized.plugin.doRefreshProAndMaybePromptLocalComponentInstall=async opts=>{reasons.push(opts.reason);await Promise.resolve();return opts;};
+  await Promise.all([serialized.plugin.refreshProAndMaybePromptLocalComponentInstall({reason:'settings-open'}),serialized.plugin.refreshProAndMaybePromptLocalComponentInstall({reason:'manual-refresh',force:true})]);
+  assert.deepEqual(reasons,['settings-open','manual-refresh']);
+  let duplicateInstalls=0;
+  c.doInstallLocalTranscriptionComponents=async()=>{duplicateInstalls++;await Promise.resolve();throw Error('one installation failure');};
+  await Promise.allSettled([c.installLocalTranscriptionComponents({requireAsr:true}),c.installLocalTranscriptionComponents({requireAsr:true})]);
+  assert.equal(duplicateInstalls,1,'identical simultaneous requests must not repeat a failed download');
+  for (const pendingRestart of [false,true]) {
+    const pending=fixture(); pending.plugin.localComponentRestartRequired=pendingRestart;
+    pending.plugin.installLocalTranscriptionComponents=async()=>({pendingRestart});
+    await assert.rejects(pending.plugin.runConfiguredTranscription('https://example.test/a.mp3'), error=>error.setupRequired && error.code==='LOCAL_COMPONENT_SETUP_REQUIRED' && (pendingRestart ? /完全退出/.test(error.message) : /尚未就绪/.test(error.message)));
+    assert.equal(pending.calls.transcribe,0);
+  }
+  const pendingInstaller=fixture();pendingInstaller.plugin.installLocalAsr=async()=>({pendingRestart:true});
+  const pendingResult=await Plugin.prototype.doInstallLocalTranscriptionComponents.call(pendingInstaller.plugin,{requireAsr:true});
+  assert.equal(pendingResult.pendingRestart,true);assert.equal(pendingInstaller.plugin.localComponentRestartRequired,true);
+  const overlap=fixture(); const op=overlap.plugin;let asrReady=false,asrInstalls=0;
+  op.installLocalTranscriptionComponents=Plugin.prototype.installLocalTranscriptionComponents;
+  op.getLocalTranscriptionComponentReadiness=()=>({asrStatus:{ready:asrReady},ocrStatus:{ready:false},resolverStatus:{ready:true}});
+  op.installLocalAsr=async()=>{asrInstalls++;asrReady=true;};op.installLocalOcr=async()=>{throw Error('unrelated OCR failure');};op.showLocalComponentInstallFailure=async()=>{};
+  const overlapResults=await Promise.allSettled([op.installLocalTranscriptionComponents({allComponents:true}),op.installLocalTranscriptionComponents({requireAsr:true})]);
+  assert.equal(overlapResults[0].status,'rejected');assert.equal(overlapResults[1].status,'fulfilled');assert.equal(asrInstalls,1);
   console.log('transcription first-use tests passed');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -7458,6 +7458,7 @@ async function runAsyncHydrationTests() {
   try {
     const unsafeRedirectPlugin = new PluginClass();
     unsafeRedirectPlugin.settings = { aiProvider: 'off' };
+    unsafeRedirectPlugin.runConfiguredTranscription = async () => ({transcription:'安全跳转测试文案', source:'fixture'});
     unsafeRedirectPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
       assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
       assert.strictEqual(awemeId, '7644566503081119019');
@@ -8149,6 +8150,8 @@ async function runAsyncHydrationTests() {
     throw new Error(`unexpected request ${url}`);
   };
 
+  // These cases verify media identity and failure metadata, independently of onboarding.
+  plugin.runConfiguredTranscription = async () => { throw new Error('fixture transcription failure'); };
   const douyinRecord = await plugin.hydrateWebpageMarkdown({
     type: 'webpage',
     content: 'https://www.douyin.com/video/123',
@@ -8164,6 +8167,7 @@ async function runAsyncHydrationTests() {
 
   const preciseDouyinPlugin = new PluginClass();
   preciseDouyinPlugin.settings = { aiProvider: 'off' };
+  preciseDouyinPlugin.runConfiguredTranscription = async () => { throw new Error('fixture transcription failure'); };
   let preciseDouyinRenderCalled = false;
   preciseDouyinPlugin.renderSocialMediaUrls = async () => {
     preciseDouyinRenderCalled = true;
@@ -8214,6 +8218,7 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(helpers.isDouyinChallengeSnapshot({ verificationFrame: true }), true);
   const sessionFirstPlugin = new PluginClass();
   sessionFirstPlugin.settings = { aiProvider: 'off' };
+  sessionFirstPlugin.runConfiguredTranscription = async () => { throw new Error('fixture transcription failure'); };
   let sessionFirstRenderCalls = 0, sessionFirstFetchCalls = 0;
   sessionFirstPlugin.fetchDouyinMediaUrlsWithSession = async (pageUrl, awemeId) => {
     sessionFirstFetchCalls++;
@@ -8255,6 +8260,7 @@ async function runAsyncHydrationTests() {
 
   const sessionFallbackPlugin = new PluginClass();
   sessionFallbackPlugin.settings = { aiProvider: 'off' };
+  sessionFallbackPlugin.runConfiguredTranscription = async () => { throw new Error('fixture transcription failure'); };
   let sessionFallbackRenderCalls = 0;
   sessionFallbackPlugin.fetchDouyinMediaUrlsWithSession = async () => [];
   sessionFallbackPlugin.renderSocialMediaUrls = async (_url, options) => {
@@ -8316,6 +8322,7 @@ async function runAsyncHydrationTests() {
 
   const renderedDouyinPlugin = new PluginClass();
   renderedDouyinPlugin.settings = { aiProvider: 'off' };
+  renderedDouyinPlugin.runConfiguredTranscription = async () => { throw new Error('fixture transcription failure'); };
   renderedDouyinPlugin.renderSocialMediaUrls = async (pageUrl, options) => {
     options.onDouyinBrowserDiagnostic?.({ identityOutcome: 'target-id-matched', preciseMediaFound: true });
     assert.strictEqual(pageUrl, 'https://www.douyin.com/video/7644566503081119019');
@@ -9830,6 +9837,7 @@ async function runAsyncHydrationTests() {
 
   const bilibiliAudioFallbackPlugin = new PluginClass();
   bilibiliAudioFallbackPlugin.settings = { aiProvider: 'off' };
+  bilibiliAudioFallbackPlugin.runConfiguredTranscription = async () => { throw new Error('fixture transcription failure'); };
   const bilibiliAudioRecord = await bilibiliAudioFallbackPlugin.hydrateWebpageMarkdown({
     type: 'webpage',
     content: 'https://www.bilibili.com/video/BVNOSUB123',
@@ -13172,7 +13180,7 @@ async function runLocalTranscriptionEntitlementTests() {
   });
   ocrOnlyPlugin.installLocalAsr = async () => {
     ocrOnlyAsrCalls += 1;
-    // One accepted installation also prepares the missing ASR component.
+    // OCR first use must not download the unrelated ASR component.
   };
   ocrOnlyPlugin.installLocalOcr = async () => {
     ocrOnlyOcrCalls += 1;
@@ -13183,7 +13191,7 @@ async function runLocalTranscriptionEntitlementTests() {
     requireAsr: false,
     requireOcr: true,
   });
-  assert.strictEqual(ocrOnlyAsrCalls, 1);
+  assert.strictEqual(ocrOnlyAsrCalls, 0);
   assert.strictEqual(ocrOnlyOcrCalls, 1);
 
   const installAllPlugin = new PluginClass();
@@ -13330,7 +13338,7 @@ async function runLocalTranscriptionEntitlementTests() {
       reason: 'first-use',
       ...requested,
     });
-    assert.strictEqual(promptReadiness.missingComponents.length, 2);
+    assert.strictEqual(promptReadiness.missingComponents.length, 1);
   }
 
   const freeSetupPlugin = new PluginClass();

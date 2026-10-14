@@ -158,14 +158,16 @@ async function verifyDeclinedOrFailedAutomaticPromptDoesNotLoop() {
     assert.strictEqual(installs, outcome === 'failed' ? 1 : 0);
     assert.strictEqual(plugin.settings.localComponentAutoPromptedIssues.ocr, true);
 
+    await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
+    assert.strictEqual(prompts, 1, 'cooldown prevents repeated prompts');
     await plugin.saveSettings({
       ...plugin.settings,
       proSetupInstallPromptSnoozedUntil: '',
     });
     const second = await plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: 'settings-open', force: true });
     assert.strictEqual(second.hasAccess, true);
-    assert.strictEqual(prompts, 1);
-    assert.strictEqual(installs, outcome === 'failed' ? 1 : 0);
+    assert.strictEqual(prompts, 2, 'after cooldown the missing component remains recoverable');
+    assert.strictEqual(installs, outcome === 'failed' ? 2 : 0);
   }
 }
 
@@ -421,7 +423,7 @@ function verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested() {
   assert.deepStrictEqual(manualPlan.updateComponents, ['音视频转写']);
 }
 
-async function verifyFirstUseRepairsAllMissingComponents({ requireAsr, requireOcr }) {
+async function verifyFirstUseRepairsRequiredComponents({ requireAsr, requireOcr }) {
   const plugin = createPlugin();
   let asrReady = false;
   let ocrReady = false;
@@ -452,9 +454,9 @@ async function verifyFirstUseRepairsAllMissingComponents({ requireAsr, requireOc
 
   assert.strictEqual(prompts.length, 1);
   assert.strictEqual(prompts[0].reason, 'first-use');
-  assert.strictEqual(prompts[0].readiness.missingComponents.length, 2);
-  assert.strictEqual(asrInstalls, 1);
-  assert.strictEqual(ocrInstalls, 1);
+  assert.strictEqual(prompts[0].readiness.missingComponents.length, Number(requireAsr) + Number(requireOcr));
+  assert.strictEqual(asrInstalls, Number(requireAsr));
+  assert.strictEqual(ocrInstalls, Number(requireOcr));
 }
 
 async function verifyImplicitInstallIsNoOp() {
@@ -478,8 +480,8 @@ async function verifyImplicitInstallIsNoOp() {
   await verifyManualRefreshRequiresReloadWhenPluginFilesDoNotMatch();
   await verifyManualRefreshIgnoresPromptSnoozeAndClearsItAfterInstall();
   verifyRefreshPlanOnlyIncludesOptionalUpdatesWhenRequested();
-  await verifyFirstUseRepairsAllMissingComponents({ requireAsr: true, requireOcr: false });
-  await verifyFirstUseRepairsAllMissingComponents({ requireAsr: false, requireOcr: true });
+  await verifyFirstUseRepairsRequiredComponents({ requireAsr: true, requireOcr: false });
+  await verifyFirstUseRepairsRequiredComponents({ requireAsr: false, requireOcr: true });
   await verifyImplicitInstallIsNoOp();
   process.stdout.write('plugin local component on-demand tests passed\n');
 })().catch((error) => {
