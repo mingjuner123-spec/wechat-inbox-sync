@@ -1,3 +1,4 @@
+const { membershipGuidance, setupError, isSetupRequired, setupSummary } = require('./transcription-setup-utils');
 const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runtime-snapshot');
 const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils');
 const douyinBrowserSafety = require('./douyin-browser-safety');
@@ -304,7 +305,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.186';
+const PLUGIN_RUNTIME_VERSION = '1.3.187';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3352,6 +3353,7 @@ function normalizeRecentSyncFailures(value, settings = {}) {
       message: String(item && item.message || '').trim().slice(0, 500),
       failedAt: String(item && item.failedAt || '').trim(),
       retryCount: Math.max(0, Math.floor(Number(item && item.retryCount) || 0)),
+      ...(isSetupRequired({code: item && item.setupCode}) ? {setupRequired: true, setupCode: item.setupCode} : {}),
       ...(retainedSyncFailureDiagnostic(item && item.diagnostic, settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, settings) } : {}),
     });
   });
@@ -17852,7 +17854,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         .filter(Boolean),
     );
     if (!requestedImageUrls.length) return [];
-    await this.ensureProFeatureAccess('小红书图片 OCR');
+    await this.ensureProFeatureAccess('小红书图片 OCR', {localTranscriptionSetup:true});
     const images = await this.buildXiaohongshuOcrImagePayload(requestedImageUrls);
     if (!images.length) return [];
     await this.ensureLocalComponentReadyForUse('小红书图片 OCR', {
@@ -18087,6 +18089,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         message: String(item.message || '').trim().slice(0, 500),
         failedAt: new Date().toISOString(),
         retryCount: Math.max(0, Math.floor(Number(item.retryCount) || 0)),
+        ...(isSetupRequired({code: item.setupCode}) ? {setupRequired: true, setupCode: item.setupCode} : {}),
         ...(retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}),
       });
     });
@@ -19355,6 +19358,27 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  openTranscriptionSetupSettings() {
+    const settings = this.app && this.app.setting;
+    if (!settings || typeof settings.open !== 'function') return false;
+    settings.open();
+    if (typeof settings.openTabById === 'function') settings.openTabById(this.manifest?.id || 'wechat-inbox-sync');
+    return true;
+  }
+
+  showTranscriptionSetupNotice(message) {
+    // A batch can contain many media items; offer one actionable notice per minute.
+    if (this.lastSetupNoticeAt && Date.now() - this.lastSetupNoticeAt < 60000) return;
+    this.lastSetupNoticeAt = Date.now();
+    if (typeof document !== 'undefined' && typeof document.createDocumentFragment === 'function') {
+      const fragment = document.createDocumentFragment();
+      const text = document.createElement('div'); text.textContent = message; fragment.appendChild(text);
+      const button = document.createElement('button'); button.textContent = '打开转写设置';
+      button.addEventListener('click', () => this.openTranscriptionSetupSettings()); fragment.appendChild(button);
+      new Notice(fragment, 12000);
+    } else new Notice(message, 12000);
+  }
+
   async ensureProFeatureAccess(featureName = '该功能', options = {}) {
     let status = await this.getProFeatureAccessStatus({
       forceRefresh: options.forceRefresh === true,
@@ -19365,16 +19389,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       status = { ...status, hasAccess: false, status: 'expired' };
     }
     if (options.localTranscriptionSetup === true) {
-      const reason = status.status === 'expired'
-        ? '当前 Pro 会员已过期。'
-        : status.status === 'unbound'
-          ? '请先在插件中绑定小程序。'
-          : '当前账户尚无可用的 Pro 转写权限。';
-      const message = `${featureName}需要有效 Pro。${reason}请前往小程序领取试用会员（如可领取）或开通会员；会员生效后，在插件设置中点击“安装／更新本地组件”（已安装可跳过），再重试这条音视频。`;
-      const error = new Error(message);
-      error.code = 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED';
-      error.transcriptionSetupRequired = true;
-      new Notice(message, 12000);
+      const message = membershipGuidance(status, featureName);
+      const error = setupError(status.status === 'unbound' ? 'LOCAL_TRANSCRIPTION_BINDING_REQUIRED' : 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED', message);
+      this.showTranscriptionSetupNotice(message);
       throw error;
     }
     if (status.status === 'missing_redeem_code') {
@@ -19600,6 +19617,17 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async refreshProAndMaybePromptLocalComponentInstall(options = {}) {
+    if (this.localComponentSetupCheckPromise) {
+      if (options.reason !== 'manual-refresh') return await this.localComponentSetupCheckPromise;
+      try { await this.localComponentSetupCheckPromise; } catch (_) { /* Manual refresh retries with its own force/snooze policy. */ }
+      return await this.refreshProAndMaybePromptLocalComponentInstall(options);
+    }
+    this.localComponentSetupCheckPromise = this.doRefreshProAndMaybePromptLocalComponentInstall(options);
+    try { return await this.localComponentSetupCheckPromise; }
+    finally { this.localComponentSetupCheckPromise = null; }
+  }
+
+  async doRefreshProAndMaybePromptLocalComponentInstall(options = {}) {
     const reason = options.reason || 'settings-open';
     const now = Date.now();
     const lastCheckedAt = Date.parse(this.settings.proSetupLastCheckedAt || '');
@@ -19679,7 +19707,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const currentIssues = getLocalComponentRequiredIssueState(readiness);
       const automaticPromptReason = reason === 'settings-open' || reason === 'bind';
       const automaticComponentKeys = automaticPromptReason
-        ? ['asr', 'ocr', 'resolver'].filter((key) => currentIssues[key] && promptedIssues[key] !== true)
+        ? ['asr', 'ocr', 'resolver'].filter((key) => currentIssues[key] && (promptedIssues[key] !== true || !this.isLocalComponentInstallPromptSnoozed(reason)))
         : [];
       const automaticRepairPlan = buildLocalComponentAutomaticRepairPlan(
         refreshPlan,
@@ -19722,6 +19750,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         if (automaticComponentKeys.length) {
           await this.markLocalComponentAutoPromptedIssues(automaticComponentKeys);
+          await this.snoozeLocalComponentInstallPrompt(now);
         }
         const promptReadiness = {
           ...readiness,
@@ -19729,6 +19758,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           updateComponents: installPlan.updateComponents,
           updateRecommended: installPlan.updateComponents.length > 0,
         };
+        await this.snoozeLocalComponentInstallPrompt(now);
         const accepted = await this.confirmLocalComponentInstall(status, reason, promptReadiness);
         if (!accepted) {
           const snoozedUntil = await this.snoozeLocalComponentInstallPrompt(now);
@@ -19806,7 +19836,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const reasonText = reason === 'first-use'
       ? '当前操作需要使用本地转写组件。'
       : reason === 'manual-refresh' && hasMissing
-        ? '检测到本地转写组件确实缺失或损坏。请确认插件已更新，并完全退出后重新打开 Obsidian，再继续修复。'
+        ? '以下组件尚未就绪。首次使用请安装；已有组件不可用时会尝试修复。'
       : hasMissing
         ? '检测到你已开通 Pro，但本地转写组件还没有准备完整。'
         : hasUpdates
@@ -19818,12 +19848,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         ? '更新'
         : '安装/修复';
     const messageLines = [reasonText];
-    if (hasMissing) messageLines.push(`需要修复：${missingText}`);
+    if (hasMissing) messageLines.push(`待安装或修复：${missingText}`);
     if (hasUpdates) messageLines.push(`建议更新：${updateText}`);
     messageLines.push(
       `当前电脑：${readiness.platformName || '当前系统'}`,
       '本次只会处理上面列出的组件，已经可用且无需更新的部分不会下载。',
-      '一次检查并补齐音视频转写、图片文字识别和抖音解析；图片识别在本机完成。',
+      '音视频转写、图片文字识别和抖音解析分别检查；仅准备当前列出的组件。',
       `现在开始${actionText}吗？`,
     );
     const message = messageLines.join('\n');
@@ -19839,19 +19869,25 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async installLocalTranscriptionComponents(options = {}) {
+    const scope = ['Asr','Ocr','Resolver'].map(key => ({required: !!(options.allComponents || options['require'+key] || options['force'+key]), force: options['force'+key] === true}));
     if (this.localComponentInstallPromise) {
-      new Notice('本地转写组件正在准备中，请等待当前安装完成后再重试。');
-      return await this.localComponentInstallPromise;
+      const currentScope = this.localComponentInstallScope || [];
+      if (scope.every((item,index) => item.required === currentScope[index]?.required && item.force === currentScope[index]?.force)) return await this.localComponentInstallPromise;
+      try { await this.localComponentInstallPromise; } catch (error) {
+        const requiredKeys = ['asr','ocr','resolver'].filter((_, index) => scope[index].required);
+        if (Array.isArray(error.componentResults) && error.componentResults.some(item => item.status === 'failed' && requiredKeys.includes(item.component))) throw error;
+        // An unrelated failure must not invalidate components already prepared for this caller.
+      }
+      return await this.installLocalTranscriptionComponents(options);
     }
-    this.localComponentInstallPromise = this.doInstallLocalTranscriptionComponents(options);
-    try {
-      return await this.localComponentInstallPromise;
-    } catch (error) {
-      await this.showLocalComponentInstallFailure(error);
-      throw error;
-    } finally {
-      this.localComponentInstallPromise = null;
-    }
+    const operation = (async () => {
+      try { return await this.doInstallLocalTranscriptionComponents(options); }
+      catch (error) { await this.showLocalComponentInstallFailure(error); throw error; }
+    })();
+    this.localComponentInstallScope = scope;
+    this.localComponentInstallPromise = operation;
+    try { return await operation; }
+    finally { if (this.localComponentInstallPromise === operation) { this.localComponentInstallPromise = null; this.localComponentInstallScope = null; } }
   }
 
   async showLocalComponentInstallFailure(error) {
@@ -19872,7 +19908,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!options.requireAsr && !options.requireOcr && !options.requireResolver && !options.allComponents) {
       return { installed: false, skipped: true, reason: options.reason || '' };
     }
-    await this.ensureProFeatureAccess('本地组件安装');
+    await this.ensureProFeatureAccess('本地组件安装', { localTranscriptionSetup: true });
     const readiness = this.getLocalTranscriptionComponentReadiness();
     const failures = [];
     const results = [];
@@ -19885,11 +19921,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         force: options.forceResolver === true, run: () => this.ensureLocalDouyinResolver({ force: options.forceResolver === true, checkedAsset: options.resolverUpdateAsset }) },
     ];
     for (const component of components) {
+      const required = {asr: options.requireAsr, ocr: options.requireOcr, resolver: options.requireResolver};
+      if (!options.allComponents && !required[component.key] && !component.force) continue;
       if (component.ready && !component.force) { results.push({ component: component.key, status: 'skipped' }); continue; }
       new Notice('正在准备本地组件：' + component.name);
       try {
-        await component.run();
-        results.push({ component: component.key, status: 'installed' });
+        const result = await component.run();
+        results.push({ component: component.key, status: result?.pendingRestart ? 'pending_restart' : 'installed' });
+        if (result?.pendingRestart) this.localComponentRestartRequired = true;
       } catch (error) {
         failures.push({ component: component.name, error });
         results.push({ component: component.key, status: 'failed' });
@@ -19901,13 +19940,13 @@ class WechatObsidianInboxPlugin extends Plugin {
       error.componentResults = results;
       throw error;
     }
-    return { installed: results.some(item => item.status === 'installed'), skipped: results.every(item => item.status === 'skipped'),
+    return { pendingRestart: results.some(item => item.status === 'pending_restart'), installed: results.some(item => item.status === 'installed'), skipped: results.every(item => item.status === 'skipped'),
       reason: options.reason || '', readiness: this.getLocalTranscriptionComponentReadiness(), componentResults: results };
   }
 
   async ensureLocalComponentReadyForUse(featureName = '该功能', options = {}) {
     const status = await this.ensureProFeatureAccess(featureName, {
-      localTranscriptionSetup: options.requireAsr === true,
+      localTranscriptionSetup: options.requireAsr === true || options.requireOcr === true,
     });
     const readiness = this.getLocalTranscriptionComponentReadiness();
     const requireAsr = options.requireAsr === true;
@@ -19922,32 +19961,39 @@ class WechatObsidianInboxPlugin extends Plugin {
     const requiredReadiness = {
       ...readiness,
       ready: false,
-      missingComponents: buildLocalComponentRefreshPlan(readiness).missingComponents,
+      missingComponents,
     };
 
     const promptReason = options.reason || 'first-use';
     if (this.isLocalComponentInstallPromptSnoozed(promptReason)) {
-      throw new Error(`${featureName}需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“安装／更新本地组件”。`);
+      const error = setupError('LOCAL_COMPONENT_SETUP_REQUIRED', '待安装组件：'+featureName+'需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“安装／更新本地组件”。');
+      throw error;
     }
     const accepted = await this.confirmLocalComponentInstall(status, promptReason, requiredReadiness);
     if (!accepted) {
       await this.snoozeLocalComponentInstallPrompt();
-      throw new Error(`${featureName}需要先安装本地转写组件。`);
+      const error = setupError('LOCAL_COMPONENT_SETUP_REQUIRED', '待安装组件：'+featureName+'需要先安装本地转写组件。准备好后在小程序同步历史中重试。');
+      throw error;
     }
-    await this.installLocalTranscriptionComponents({
+    try { await this.installLocalTranscriptionComponents({
       reason: promptReason,
       readiness: requiredReadiness,
       requireAsr,
       requireOcr,
-    });
-    await this.clearLocalComponentInstallPromptSnooze();
-
+    }); } catch (error) {
+      if (!isSetupRequired(error)) { error.code = error.code || "LOCAL_COMPONENT_INSTALL_FAILED"; error.diagnostic = {...error.diagnostic, setupPhase:"install"}; }
+      throw error;
+    }
     const nextReadiness = this.getLocalTranscriptionComponentReadiness();
     const stillAsrMissing = requireAsr && (!nextReadiness.asrStatus || !nextReadiness.asrStatus.ready);
     const stillOcrMissing = requireOcr && (!nextReadiness.ocrStatus || !nextReadiness.ocrStatus.ready);
     if (stillAsrMissing || stillOcrMissing) {
-      throw new Error(`${featureName}需要本地转写组件安装完整后才能使用。`);
+      await this.snoozeLocalComponentInstallPrompt();
+      throw setupError('LOCAL_COMPONENT_SETUP_REQUIRED', this.localComponentRestartRequired
+        ? '待完成组件切换：安装程序已确认需要重启。请完全退出并重新打开 Obsidian，再在小程序同步历史中重试。'
+        : featureName+'待安装组件：安装尚未就绪，请在插件设置中继续安装／修复后重试。');
     }
+    await this.clearLocalComponentInstallPromptSnooze();
     return status;
   }
 
@@ -21822,7 +21868,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           cloudTranscriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || 'cloud-pretranscription',
         };
       } catch (error) {
-        if (isRetryableTranscriptionError(error)) throw error;
+        if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
         const message = error.message || String(error);
         nextMetadata = {
           ...nextMetadata,
@@ -21868,7 +21914,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || 0,
         };
       } catch (error) {
-        if (isRetryableTranscriptionError(error)) throw error;
+        if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
         const message = error.message || String(error);
         nextMetadata = {
           ...nextMetadata,
@@ -22012,7 +22058,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.aiMetadataSource = nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource;
           nextMetadata.contentCategory = nextMetadata.contentCategory || (['mp4', 'mov', 'm4v'].includes(fileExt) ? '视频' : '音频');
         } catch (error) {
-          if (isRetryableTranscriptionError(error)) throw error;
+          if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
           nextMetadata.transcription = '';
           nextMetadata.transcriptionStatus = 'failed';
           nextMetadata.transcriptionError = error.message || String(error);
@@ -22028,7 +22074,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         metadata: nextMetadata,
       };
     } catch (error) {
-      if (isRetryableTranscriptionError(error)) throw error;
+      if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
       return {
         ...record,
         metadata: {
@@ -22721,6 +22767,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           recoveryCandidate.length > 32000 ? '（候选文本较长，后续内容已截断。）' : '',
         ].filter(Boolean).join('\n')
         : '';
+      if (isSetupRequired(error)) throw error;
       const failureMetadata = buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
         url,
         platform,
@@ -25537,6 +25584,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         },
       };
     } catch (error) {
+      if (isSetupRequired(error)) throw error;
       if (isDouyinUrl(url) && !douyinResolutionDiagnostic) {
         const douyinCatchContext = {
           sourceKind: getDouyinDiagnosticUrlKind('', url),
@@ -26652,6 +26700,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           continue;
         }
         const message = error.message || String(error);
+        const setupRequired = isSetupRequired(error);
         const partialSavedInfo = error.partialSaved || null;
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
         if (deletionResult && deletionResult.deleted) {
@@ -26714,11 +26763,11 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         this.lastSyncDiagnostic = {
           ...progress,
-          status: 'failed',
-          stage: progress.stage || 'processing',
+          status: setupRequired ? 'action_required' : 'failed',
+          stage: setupRequired ? 'setup' : (progress.stage || 'processing'),
           title: failedTitle,
           recordId: getRecordId(record),
-          message: partialSavedInfo ? QUALITY_PARTIAL_NOTICE : '单条内容同步失败',
+          message: setupRequired ? message : (partialSavedInfo ? QUALITY_PARTIAL_NOTICE : '单条内容同步失败'),
           error: message,
           ...(diagnosticSourceUrl ? { sourceUrl: diagnosticSourceUrl } : {}),
           ...(diagnostic ? { diagnostic } : {}),
@@ -26731,6 +26780,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           await this.updateRecentSyncFailures({ failed: [{
             recordId, bindingToken: binding.token, bindingLabel, message,
             retryCount: Number(record.retryCount) || 0,
+            ...(setupRequired ? {setupRequired:true,setupCode:error.code} : {}),
             ...(diagnostic ? { diagnostic } : {}),
           }] });
         } catch (persistError) {
@@ -26741,6 +26791,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           retryCount: Number(record.retryCount) || 0,
           message,
           ...(diagnostic ? { diagnostic } : {}),
+          ...(setupRequired ? { setupRequired: true, setupCode: error.code } : {}),
           ...(partialSavedInfo ? { partialSaved: partialSavedInfo } : {}),
           ...(lifecycleReportError ? { lifecycleReportError } : {}),
         };
@@ -26842,6 +26893,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               bindingLabel: binding.label,
               message: item.message,
               retryCount: item.retryCount,
+              ...(item.setupRequired ? {setupRequired:true,setupCode:item.setupCode} : {}),
               ...(retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}),
             });
           });
@@ -26977,6 +27029,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const historicalFailures = outstandingFailures.filter((item) => !currentFailureKeys.has(
         `${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || '').trim()}`,
       ));
+      const pendingSetupEntries = outstandingFailures.filter(item => item.setupRequired);
       const displayedFailures = failed.filter((item) => !item.partialSaved);
       let finalMessage = buildSyncResultNotice(
         written,
@@ -26995,13 +27048,17 @@ class WechatObsidianInboxPlugin extends Plugin {
       } else if (pendingReviewNotice) {
         finalMessage += `；${pendingReviewNotice}`;
       }
+      if (pendingSetupEntries.length && !failed.some(item => item.setupRequired)) {
+        const pendingMessage = pendingSetupEntries.length + ' 条内容待准备：' + pendingSetupEntries[0].message;
+        finalMessage = !written.length && !displayedFailures.length ? pendingMessage : finalMessage + '；' + pendingMessage;
+      }
       if (completionWarnings.length) {
         finalMessage += this.backgroundSyncActive
           ? `；本地笔记已保存，${completionWarnings.length} 条状态回报暂未成功，将自动补报`
           : `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
       }
 
-      if (!this.autoSyncDisposed && (showNotice || written.length || recentFailureEntries.length)) {
+      if (!this.autoSyncDisposed && (showNotice || written.length || recentFailureEntries.some(item => !item.setupRequired))) {
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
@@ -27043,7 +27100,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         .filter(Boolean)
         .slice(0, 100);
       this.lastSyncDiagnostic = {
-        status: failed.length ? 'failed' : ((partialSavedNotes.length || conversionWarnings.length || completionWarnings.length) ? 'warning' : 'success'),
+        status: failed.some(item => !item.setupRequired) ? 'failed' : ((failed.some(item => item.setupRequired) || pendingSetupEntries.length) ? 'action_required' : ((partialSavedNotes.length || conversionWarnings.length || completionWarnings.length) ? 'warning' : 'success')),
         stage: 'finished',
         current: written.length,
         total: written.length + failed.length + skipped.length,
@@ -27051,7 +27108,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         error: failed.length
           ? failed.map((item) => `${item.recordId}: ${item.message}`).join('\n')
           : '',
-        historicalFailureCount: historicalFailures.length,
+        historicalFailureCount: historicalFailures.filter(item => !item.setupRequired).length,
+        pendingSetupCount: failed.filter(item => item.setupRequired).length + historicalFailures.filter(item => item.setupRequired).length,
         historicalFailures: historicalFailures.map((item) => ({
           recordId: item.recordId,
           message: item.message,
@@ -27076,7 +27134,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         && typeof this.syncStatusBar.setText === 'function' && (failed.length || conversionWarnings.length)) {
         this.syncStatusBar.setText('自动同步有未完成内容，可在小程序“同步记录”中查看并重试');
       }
-      return { pollFailed, written: written.length, failed: failed.length };
+      return { pollFailed, written: written.length, failed: failed.filter(item => !item.setupRequired).length, pendingSetup: Math.max(pendingSetupEntries.length, failed.filter(item => item.setupRequired).length) };
     } catch (error) {
       this.lastSyncDiagnostic = {
         status: 'failed',
@@ -27213,6 +27271,30 @@ class WechatInboxSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl('h2', { text: 'Obsidian 内容同步助手' });
+    const setupPanel = containerEl.createDiv({ cls: 'wechat-inbox-sync-setup-panel' });
+    setupPanel.createEl('h3', { text: '转写准备' });
+    const setupView = setupSummary(this.plugin.getActiveBindings().length > 0,
+      this.plugin.settings.localTranscriptionEntitlementStatus,
+      this.plugin.getLocalTranscriptionComponentReadiness(), !!this.plugin.localComponentInstallPromise);
+    setupPanel.createDiv({text: this.plugin.localComponentRestartRequired && setupView.components.some(item => !item.ready) ? '待完成组件切换：请完全退出并重新打开 Obsidian，安装程序已确认此步骤必需。' : setupView.message});
+    for (const component of setupView.components) setupPanel.createDiv({text: component.label + '：' + (component.ready ? '已就绪' : '未就绪')});
+    new Setting(setupPanel).setName('下一步').setDesc('会员在微信小程序领取或开通；安装完成后，在小程序同步历史中重试未完成的内容。')
+      .addButton(button => button.setButtonText(!setupView.bound ? '前往绑定' : !setupView.active ? '刷新会员状态' : '安装／更新本地组件')
+        .setCta().onClick(async () => {
+          if (!setupView.bound) {
+            const input = containerEl.querySelector('input[type="text"]');
+            if (input) { input.scrollIntoView({block:'center'}); input.focus(); }
+            return;
+          }
+          button.setDisabled(true);
+          try {
+            const status = await this.plugin.refreshProAndMaybePromptLocalComponentInstall({reason:'manual-refresh',force:true});
+            if (!isCachedProStatusActive(status)) this.plugin.showTranscriptionSetupNotice(membershipGuidance(status));
+            else if (status.localComponentInstallResult?.pendingRestart) new Notice('组件安装待完成切换：请完全退出并重新打开 Obsidian，然后重试。', 12000);
+            else if (status.localComponentInstallError) new Notice('组件准备未完成：'+status.localComponentInstallError, 12000);
+          } catch(error) { new Notice('准备检查未完成：'+(error.message || error), 10000); }
+          finally { button.setDisabled(false); this.display(); }
+        }));
 
     containerEl.createEl('h3', {
       text: '使用教程',
@@ -27436,6 +27518,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
       cls: 'wechat-inbox-sync-section-heading',
     });
 
+    const renderedComponentReadiness = JSON.stringify(setupView.components);
     const renderedProStatusFingerprint = getProEntitlementStatusFingerprint(
       this.plugin.settings.localTranscriptionEntitlementStatus,
     );
@@ -27444,7 +27527,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
     proPanel.open = true;
     proPanel.createEl('summary', { text: 'Pro 状态' });
     proPanel.createDiv({
-      text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；本地组件缺失或损坏时会提示一次，兼容可用时保持静默。${proStatusText}`,
+      text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；本地组件未就绪时会提示；稍后再试会暂停提醒 24 小时，仍可随时点击安装。兼容可用时保持静默。${proStatusText}`,
       cls: 'wechat-inbox-sync-muted',
     });
     new Setting(proPanel)
@@ -27463,7 +27546,9 @@ class WechatInboxSettingTab extends PluginSettingTab {
             });
             if (status.hasAccess) {
               const proAccessNotice = `Pro 权限有效${status.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status.expiresAt)}` : ''}`;
-              if (status.localComponentInstallError) {
+              if (status.localComponentInstallResult?.pendingRestart) {
+                new Notice('组件安装待完成切换：请完全退出并重新打开 Obsidian，然后重试。', 12000);
+              } else if (status.localComponentInstallError) {
                 new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8000);
               } else if (status.localComponentUpdateCheckError) {
                 new Notice(`${proAccessNotice}；抖音组件更新检查未完成：${status.localComponentUpdateCheckError}。已有可用组件保留。`, 10000);
@@ -27476,10 +27561,8 @@ class WechatInboxSettingTab extends PluginSettingTab {
               } else {
                 new Notice(proAccessNotice);
               }
-            } else if (status.status === 'missing_redeem_code') {
-              new Notice('未识别到 Pro，请确认已绑定小程序并在小程序里开通 Pro。');
             } else {
-              new Notice(status.message || 'Pro 未开通或已过期，请在小程序开通/续费后刷新。');
+              this.plugin.showTranscriptionSetupNotice(membershipGuidance(status));
             }
             this.display();
           } catch (error) {
@@ -27531,7 +27614,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
             return;
           }
           try {
-            await this.plugin.ensureProFeatureAccess('小红书图片 OCR', { forceRefresh: true });
+            await this.plugin.ensureProFeatureAccess('小红书图片 OCR', { forceRefresh: true, localTranscriptionSetup: true });
             await this.plugin.saveSettings({
               ...this.plugin.settings,
               xiaohongshuImageOcrEnabled: true,
@@ -27687,7 +27770,8 @@ class WechatInboxSettingTab extends PluginSettingTab {
         const currentProStatusFingerprint = getProEntitlementStatusFingerprint(
           this.plugin.settings.localTranscriptionEntitlementStatus,
         );
-        if (currentProStatusFingerprint !== renderedProStatusFingerprint) {
+        const currentSetupView = setupSummary(this.plugin.getActiveBindings().length > 0, this.plugin.settings.localTranscriptionEntitlementStatus, this.plugin.getLocalTranscriptionComponentReadiness());
+        if (currentProStatusFingerprint !== renderedProStatusFingerprint || JSON.stringify(currentSetupView.components) !== renderedComponentReadiness) {
           this.display();
         }
       })

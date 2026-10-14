@@ -23,6 +23,8 @@ function fixture() {
   plugin.getLocalDouyinResolverInstallStatus = () => ({ ready: true });
   plugin.getActiveBindings = () => [];
   plugin.getRecentXiaohongshuBrowserResults = plugin.getRecentXiaohongshuCommentResults = plugin.getRecentSyncFailureCleanupErrors = plugin.getLocalDouyinResolverInstallDiagnostic = () => [];
+  // Media-resolution diagnostics are isolated from account onboarding and ASR.
+  plugin.runConfiguredTranscription = async () => 'fixture transcript';
   plugin.checkDouyinLogin = async () => true;
   plugin.fetchDouyinMediaResolutionWithSession = async () => ({ mediaUrls: [], stages: [] });
   return plugin;

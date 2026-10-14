@@ -290,6 +290,44 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/transcription-setup-utils.js
+var require_transcription_setup_utils = __commonJS({
+  "src/transcription-setup-utils.js"(exports2, module2) {
+    "use strict";
+    var SETUP_CODES = /* @__PURE__ */ new Set(["LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED", "LOCAL_TRANSCRIPTION_BINDING_REQUIRED", "LOCAL_COMPONENT_SETUP_REQUIRED"]);
+    function membershipGuidance2(status = {}, feature = "音视频转写") {
+      if (status.status === "unbound") return "待绑定：请先在插件设置中完成小程序绑定，再刷新会员状态。";
+      const reason = status.status === "expired" ? "Pro 会员已过期" : "当前没有有效 Pro 会员";
+      return "待开通会员：" + reason + "。" + feature + "需要有效 Pro。请前往微信小程序「Obsidian 内容同步助手」领取试用会员（如可领取）或开通/续费会员；生效后点击「安装／更新本地组件」（已安装可跳过），再在小程序同步历史中重试。";
+    }
+    __name(membershipGuidance2, "membershipGuidance");
+    function setupError2(code, message, diagnostic = {}) {
+      return Object.assign(new Error(message), {
+        code,
+        transcriptionSetupRequired: true,
+        setupRequired: true,
+        diagnostic: { ...diagnostic, setupRequired: true, setupCode: code, setupMessage: message }
+      });
+    }
+    __name(setupError2, "setupError");
+    function isSetupRequired2(error) {
+      return !!error && SETUP_CODES.has(error.code);
+    }
+    __name(isSetupRequired2, "isSetupRequired");
+    function setupSummary2(bound, status, readiness = {}, installing = false) {
+      const components = [["asr", "音视频转写"], ["ocr", "图片文字识别"], ["resolver", "抖音解析"]].map(([key, label]) => {
+        var _a;
+        return { key, label, ready: ((_a = readiness[key + "Status"]) == null ? void 0 : _a.ready) === true };
+      });
+      const active = !!(status == null ? void 0 : status.hasAccess) && status.status !== "expired" && Date.parse(status.expiresAt || "") > Date.now();
+      const message = !bound ? membershipGuidance2({ status: "unbound" }) : !status ? "会员状态待确认，请刷新检查。" : !active ? membershipGuidance2(status) : installing ? "组件正在安装，请等待完成。" : components.every((x) => x.ready) ? "转写准备已完成。兼容可用的组件无需更新。" : "待安装组件：" + components.filter((x) => !x.ready).map((x) => x.label).join("、") + "。已就绪的功能可以继续使用。";
+      return { message, components, active, bound };
+    }
+    __name(setupSummary2, "setupSummary");
+    module2.exports = { membershipGuidance: membershipGuidance2, setupError: setupError2, isSetupRequired: isSetupRequired2, setupSummary: setupSummary2 };
+  }
+});
+
 // src/xiaohongshu-runtime-snapshot.js
 var require_xiaohongshu_runtime_snapshot = __commonJS({
   "src/xiaohongshu-runtime-snapshot.js"(exports2, module2) {
@@ -12861,7 +12899,8 @@ var require_progress_notice_utils = __commonJS({
     __name(buildSyncNotice2, "buildSyncNotice");
     function buildSyncResultNotice2(written = [], skipped = [], conversionWarnings = [], failed = []) {
       const writtenCount = Array.isArray(written) ? written.length : 0;
-      const currentFailedItems = Array.isArray(failed) ? failed : [];
+      const pendingSetup = (Array.isArray(failed) ? failed : []).filter((item) => item.setupRequired);
+      const currentFailedItems = (Array.isArray(failed) ? failed : []).filter((item) => !item.setupRequired);
       let message = buildSyncNotice2(writtenCount);
       if (!writtenCount && currentFailedItems.length) {
         message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
@@ -12874,6 +12913,10 @@ var require_progress_notice_utils = __commonJS({
       );
       if (writtenCount && currentFailedItems.length) {
         message += `，${currentFailedItems.length} 条失败：${currentFailedItems[0].message}`;
+      }
+      if (pendingSetup.length) {
+        const setupMessage = pendingSetup.length + " 条内容待准备：" + pendingSetup[0].message;
+        message = !writtenCount && !currentFailedItems.length ? setupMessage : message + "；" + setupMessage;
       }
       return message;
     }
@@ -13368,6 +13411,8 @@ var require_sync_lifecycle_utils = __commonJS({
     function categorizeSyncFailure2(error) {
       const code = String(error && error.code || "").trim().toUpperCase();
       const message = String(error && error.message || error || "").trim().toUpperCase();
+      if (code === "LOCAL_COMPONENT_SETUP_REQUIRED") return "LOCAL_COMPONENT_UNAVAILABLE";
+      if (code === "LOCAL_TRANSCRIPTION_BINDING_REQUIRED" || code === "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED") return "SYNC_FAILED";
       if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
       if (code === "UNSUPPORTED_PLATFORM" || /UNSUPPORTED_(?:PLATFORM|RECORD_TYPE|SITE)/.test(code) || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)/.test(message) || /\u6682\u4e0d\u652f\u6301\u6b64\u5e73\u53f0|\u4e0d\u652f\u6301(?:\u6b64|\u8be5)?\u5e73\u53f0/.test(message)) {
         return "UNSUPPORTED_PLATFORM";
@@ -15489,7 +15534,7 @@ var require_document_text_extraction_utils = __commonJS({
         }
         const buffer = toNodeBuffer2(bufferLike);
         let loadingTask;
-        let document;
+        let document2;
         try {
           loadingTask = resolvedPdfJs.getDocument({
             data: Uint8Array.from(buffer),
@@ -15498,7 +15543,7 @@ var require_document_text_extraction_utils = __commonJS({
             isEvalSupported: false,
             useSystemFonts: true
           });
-          document = await loadingTask.promise;
+          document2 = await loadingTask.promise;
         } catch (error) {
           throw normalizePdfJsFailure(error);
         }
@@ -15507,9 +15552,9 @@ var require_document_text_extraction_utils = __commonJS({
         const ocrPageNumbers = [];
         const missingPageNumbers = [];
         try {
-          const pageCount = Math.max(0, Number(document && document.numPages) || 0);
+          const pageCount = Math.max(0, Number(document2 && document2.numPages) || 0);
           for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-            const page = await document.getPage(pageNumber);
+            const page = await document2.getPage(pageNumber);
             const textContent = await page.getTextContent({
               disableCombineTextItems: false,
               includeMarkedContent: false
@@ -15558,9 +15603,9 @@ var require_document_text_extraction_utils = __commonJS({
             diagnostic
           };
         } finally {
-          if (document && typeof document.destroy === "function") {
+          if (document2 && typeof document2.destroy === "function") {
             try {
-              await document.destroy();
+              await document2.destroy();
             } catch (error) {
             }
           } else if (loadingTask && typeof loadingTask.destroy === "function") {
@@ -17985,6 +18030,7 @@ var require_transcription_note_title_utils = __commonJS({
 });
 
 // src/main.js
+var { membershipGuidance, setupError, isSetupRequired, setupSummary } = require_transcription_setup_utils();
 var { getXiaohongshuRuntimeSnapshotExpression } = require_xiaohongshu_runtime_snapshot();
 var { getWechatPlaceholderRecoveryUrl } = require_wechat_placeholder_utils();
 var douyinBrowserSafety = require_douyin_browser_safety();
@@ -18284,7 +18330,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.186";
+var PLUGIN_RUNTIME_VERSION = "1.3.187";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -20746,6 +20792,7 @@ function normalizeRecentSyncFailures(value, settings = {}) {
       message: String(item && item.message || "").trim().slice(0, 500),
       failedAt: String(item && item.failedAt || "").trim(),
       retryCount: Math.max(0, Math.floor(Number(item && item.retryCount) || 0)),
+      ...isSetupRequired({ code: item && item.setupCode }) ? { setupRequired: true, setupCode: item.setupCode } : {},
       ...retainedSyncFailureDiagnostic(item && item.diagnostic, settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, settings) } : {}
     });
   });
@@ -31976,8 +32023,8 @@ async function fetchFeishuOpenApiDocumentTitle(documentInfo, token, { requestJso
       token,
       requestJson
     });
-    const document = payload && payload.data && payload.data.document;
-    return String(document && document.title || payload.title || documentInfo.title || "").trim();
+    const document2 = payload && payload.data && payload.data.document;
+    return String(document2 && document2.title || payload.title || documentInfo.title || "").trim();
   } catch (error) {
     return documentInfo.title || "";
   }
@@ -33768,7 +33815,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       (Array.isArray(imageUrls) ? imageUrls : []).map((imageUrl) => String(imageUrl || "").trim()).filter(Boolean)
     );
     if (!requestedImageUrls.length) return [];
-    await this.ensureProFeatureAccess("小红书图片 OCR");
+    await this.ensureProFeatureAccess("小红书图片 OCR", { localTranscriptionSetup: true });
     const images = await this.buildXiaohongshuOcrImagePayload(requestedImageUrls);
     if (!images.length) return [];
     await this.ensureLocalComponentReadyForUse("小红书图片 OCR", {
@@ -33977,6 +34024,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         message: String(item.message || "").trim().slice(0, 500),
         failedAt: (/* @__PURE__ */ new Date()).toISOString(),
         retryCount: Math.max(0, Math.floor(Number(item.retryCount) || 0)),
+        ...isSetupRequired({ code: item.setupCode }) ? { setupRequired: true, setupCode: item.setupCode } : {},
         ...retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}
       });
     });
@@ -35116,6 +35164,29 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       return false;
     }
   }
+  openTranscriptionSetupSettings() {
+    var _a;
+    const settings = this.app && this.app.setting;
+    if (!settings || typeof settings.open !== "function") return false;
+    settings.open();
+    if (typeof settings.openTabById === "function") settings.openTabById(((_a = this.manifest) == null ? void 0 : _a.id) || "wechat-inbox-sync");
+    return true;
+  }
+  showTranscriptionSetupNotice(message) {
+    if (this.lastSetupNoticeAt && Date.now() - this.lastSetupNoticeAt < 6e4) return;
+    this.lastSetupNoticeAt = Date.now();
+    if (typeof document !== "undefined" && typeof document.createDocumentFragment === "function") {
+      const fragment = document.createDocumentFragment();
+      const text = document.createElement("div");
+      text.textContent = message;
+      fragment.appendChild(text);
+      const button = document.createElement("button");
+      button.textContent = "打开转写设置";
+      button.addEventListener("click", () => this.openTranscriptionSetupSettings());
+      fragment.appendChild(button);
+      new Notice(fragment, 12e3);
+    } else new Notice(message, 12e3);
+  }
   async ensureProFeatureAccess(featureName = "该功能", options = {}) {
     let status = await this.getProFeatureAccessStatus({
       forceRefresh: options.forceRefresh === true
@@ -35126,12 +35197,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       status = { ...status, hasAccess: false, status: "expired" };
     }
     if (options.localTranscriptionSetup === true) {
-      const reason = status.status === "expired" ? "当前 Pro 会员已过期。" : status.status === "unbound" ? "请先在插件中绑定小程序。" : "当前账户尚无可用的 Pro 转写权限。";
-      const message = `${featureName}需要有效 Pro。${reason}请前往小程序领取试用会员（如可领取）或开通会员；会员生效后，在插件设置中点击“安装／更新本地组件”（已安装可跳过），再重试这条音视频。`;
-      const error = new Error(message);
-      error.code = "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED";
-      error.transcriptionSetupRequired = true;
-      new Notice(message, 12e3);
+      const message = membershipGuidance(status, featureName);
+      const error = setupError(status.status === "unbound" ? "LOCAL_TRANSCRIPTION_BINDING_REQUIRED" : "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED", message);
+      this.showTranscriptionSetupNotice(message);
       throw error;
     }
     if (status.status === "missing_redeem_code") {
@@ -35343,6 +35411,22 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     return next;
   }
   async refreshProAndMaybePromptLocalComponentInstall(options = {}) {
+    if (this.localComponentSetupCheckPromise) {
+      if (options.reason !== "manual-refresh") return await this.localComponentSetupCheckPromise;
+      try {
+        await this.localComponentSetupCheckPromise;
+      } catch (_) {
+      }
+      return await this.refreshProAndMaybePromptLocalComponentInstall(options);
+    }
+    this.localComponentSetupCheckPromise = this.doRefreshProAndMaybePromptLocalComponentInstall(options);
+    try {
+      return await this.localComponentSetupCheckPromise;
+    } finally {
+      this.localComponentSetupCheckPromise = null;
+    }
+  }
+  async doRefreshProAndMaybePromptLocalComponentInstall(options = {}) {
     var _a;
     const reason = options.reason || "settings-open";
     const now = Date.now();
@@ -35414,7 +35498,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       const promptedIssues = await this.reconcileLocalComponentAutoPromptedIssues(readiness);
       const currentIssues = getLocalComponentRequiredIssueState(readiness);
       const automaticPromptReason = reason === "settings-open" || reason === "bind";
-      const automaticComponentKeys = automaticPromptReason ? ["asr", "ocr", "resolver"].filter((key) => currentIssues[key] && promptedIssues[key] !== true) : [];
+      const automaticComponentKeys = automaticPromptReason ? ["asr", "ocr", "resolver"].filter((key) => currentIssues[key] && (promptedIssues[key] !== true || !this.isLocalComponentInstallPromptSnoozed(reason))) : [];
       const automaticRepairPlan = buildLocalComponentAutomaticRepairPlan(
         refreshPlan,
         automaticComponentKeys
@@ -35448,6 +35532,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         }
         if (automaticComponentKeys.length) {
           await this.markLocalComponentAutoPromptedIssues(automaticComponentKeys);
+          await this.snoozeLocalComponentInstallPrompt(now);
         }
         const promptReadiness = {
           ...readiness,
@@ -35455,6 +35540,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
           updateComponents: installPlan.updateComponents,
           updateRecommended: installPlan.updateComponents.length > 0
         };
+        await this.snoozeLocalComponentInstallPrompt(now);
         const accepted = await this.confirmLocalComponentInstall(status, reason, promptReadiness);
         if (!accepted) {
           const snoozedUntil = await this.snoozeLocalComponentInstallPrompt(now);
@@ -35521,15 +35607,15 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const hasMissing = missingComponents.length > 0;
     const hasUpdates = updateComponents.length > 0;
     const fallbackComponentText = missingText || updateText || "本地转写组件";
-    const reasonText = reason === "first-use" ? "当前操作需要使用本地转写组件。" : reason === "manual-refresh" && hasMissing ? "检测到本地转写组件确实缺失或损坏。请确认插件已更新，并完全退出后重新打开 Obsidian，再继续修复。" : hasMissing ? "检测到你已开通 Pro，但本地转写组件还没有准备完整。" : hasUpdates ? "本地组件可以正常使用，将检查或安装以下组件的更新。" : "检测到本地转写组件需要确认。";
+    const reasonText = reason === "first-use" ? "当前操作需要使用本地转写组件。" : reason === "manual-refresh" && hasMissing ? "以下组件尚未就绪。首次使用请安装；已有组件不可用时会尝试修复。" : hasMissing ? "检测到你已开通 Pro，但本地转写组件还没有准备完整。" : hasUpdates ? "本地组件可以正常使用，将检查或安装以下组件的更新。" : "检测到本地转写组件需要确认。";
     const actionText = hasMissing && hasUpdates ? "修复/更新" : hasUpdates ? "更新" : "安装/修复";
     const messageLines = [reasonText];
-    if (hasMissing) messageLines.push(`需要修复：${missingText}`);
+    if (hasMissing) messageLines.push(`待安装或修复：${missingText}`);
     if (hasUpdates) messageLines.push(`建议更新：${updateText}`);
     messageLines.push(
       `当前电脑：${readiness.platformName || "当前系统"}`,
       "本次只会处理上面列出的组件，已经可用且无需更新的部分不会下载。",
-      "一次检查并补齐音视频转写、图片文字识别和抖音解析；图片识别在本机完成。",
+      "音视频转写、图片文字识别和抖音解析分别检查；仅准备当前列出的组件。",
       `现在开始${actionText}吗？`
     );
     const message = messageLines.join("\n");
@@ -35544,18 +35630,38 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     return false;
   }
   async installLocalTranscriptionComponents(options = {}) {
+    const scope = ["Asr", "Ocr", "Resolver"].map((key) => ({ required: !!(options.allComponents || options["require" + key] || options["force" + key]), force: options["force" + key] === true }));
     if (this.localComponentInstallPromise) {
-      new Notice("本地转写组件正在准备中，请等待当前安装完成后再重试。");
-      return await this.localComponentInstallPromise;
+      const currentScope = this.localComponentInstallScope || [];
+      if (scope.every((item, index) => {
+        var _a, _b;
+        return item.required === ((_a = currentScope[index]) == null ? void 0 : _a.required) && item.force === ((_b = currentScope[index]) == null ? void 0 : _b.force);
+      })) return await this.localComponentInstallPromise;
+      try {
+        await this.localComponentInstallPromise;
+      } catch (error) {
+        const requiredKeys = ["asr", "ocr", "resolver"].filter((_, index) => scope[index].required);
+        if (Array.isArray(error.componentResults) && error.componentResults.some((item) => item.status === "failed" && requiredKeys.includes(item.component))) throw error;
+      }
+      return await this.installLocalTranscriptionComponents(options);
     }
-    this.localComponentInstallPromise = this.doInstallLocalTranscriptionComponents(options);
+    const operation = (async () => {
+      try {
+        return await this.doInstallLocalTranscriptionComponents(options);
+      } catch (error) {
+        await this.showLocalComponentInstallFailure(error);
+        throw error;
+      }
+    })();
+    this.localComponentInstallScope = scope;
+    this.localComponentInstallPromise = operation;
     try {
-      return await this.localComponentInstallPromise;
-    } catch (error) {
-      await this.showLocalComponentInstallFailure(error);
-      throw error;
+      return await operation;
     } finally {
-      this.localComponentInstallPromise = null;
+      if (this.localComponentInstallPromise === operation) {
+        this.localComponentInstallPromise = null;
+        this.localComponentInstallScope = null;
+      }
     }
   }
   async showLocalComponentInstallFailure(error) {
@@ -35575,7 +35681,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (!options.requireAsr && !options.requireOcr && !options.requireResolver && !options.allComponents) {
       return { installed: false, skipped: true, reason: options.reason || "" };
     }
-    await this.ensureProFeatureAccess("本地组件安装");
+    await this.ensureProFeatureAccess("本地组件安装", { localTranscriptionSetup: true });
     const readiness = this.getLocalTranscriptionComponentReadiness();
     const failures = [];
     const results = [];
@@ -35603,14 +35709,17 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }
     ];
     for (const component of components) {
+      const required = { asr: options.requireAsr, ocr: options.requireOcr, resolver: options.requireResolver };
+      if (!options.allComponents && !required[component.key] && !component.force) continue;
       if (component.ready && !component.force) {
         results.push({ component: component.key, status: "skipped" });
         continue;
       }
       new Notice("正在准备本地组件：" + component.name);
       try {
-        await component.run();
-        results.push({ component: component.key, status: "installed" });
+        const result = await component.run();
+        results.push({ component: component.key, status: (result == null ? void 0 : result.pendingRestart) ? "pending_restart" : "installed" });
+        if (result == null ? void 0 : result.pendingRestart) this.localComponentRestartRequired = true;
       } catch (error) {
         failures.push({ component: component.name, error });
         results.push({ component: component.key, status: "failed" });
@@ -35623,6 +35732,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       throw error;
     }
     return {
+      pendingRestart: results.some((item) => item.status === "pending_restart"),
       installed: results.some((item) => item.status === "installed"),
       skipped: results.every((item) => item.status === "skipped"),
       reason: options.reason || "",
@@ -35632,7 +35742,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   }
   async ensureLocalComponentReadyForUse(featureName = "该功能", options = {}) {
     const status = await this.ensureProFeatureAccess(featureName, {
-      localTranscriptionSetup: options.requireAsr === true
+      localTranscriptionSetup: options.requireAsr === true || options.requireOcr === true
     });
     const readiness = this.getLocalTranscriptionComponentReadiness();
     const requireAsr = options.requireAsr === true;
@@ -35646,30 +35756,41 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const requiredReadiness = {
       ...readiness,
       ready: false,
-      missingComponents: buildLocalComponentRefreshPlan(readiness).missingComponents
+      missingComponents
     };
     const promptReason = options.reason || "first-use";
     if (this.isLocalComponentInstallPromptSnoozed(promptReason)) {
-      throw new Error(`${featureName}需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“安装／更新本地组件”。`);
+      const error = setupError("LOCAL_COMPONENT_SETUP_REQUIRED", "待安装组件：" + featureName + "需要先安装本地转写组件；你已选择稍后再试，请在插件设置里点击“安装／更新本地组件”。");
+      throw error;
     }
     const accepted = await this.confirmLocalComponentInstall(status, promptReason, requiredReadiness);
     if (!accepted) {
       await this.snoozeLocalComponentInstallPrompt();
-      throw new Error(`${featureName}需要先安装本地转写组件。`);
+      const error = setupError("LOCAL_COMPONENT_SETUP_REQUIRED", "待安装组件：" + featureName + "需要先安装本地转写组件。准备好后在小程序同步历史中重试。");
+      throw error;
     }
-    await this.installLocalTranscriptionComponents({
-      reason: promptReason,
-      readiness: requiredReadiness,
-      requireAsr,
-      requireOcr
-    });
-    await this.clearLocalComponentInstallPromptSnooze();
+    try {
+      await this.installLocalTranscriptionComponents({
+        reason: promptReason,
+        readiness: requiredReadiness,
+        requireAsr,
+        requireOcr
+      });
+    } catch (error) {
+      if (!isSetupRequired(error)) {
+        error.code = error.code || "LOCAL_COMPONENT_INSTALL_FAILED";
+        error.diagnostic = { ...error.diagnostic, setupPhase: "install" };
+      }
+      throw error;
+    }
     const nextReadiness = this.getLocalTranscriptionComponentReadiness();
     const stillAsrMissing = requireAsr && (!nextReadiness.asrStatus || !nextReadiness.asrStatus.ready);
     const stillOcrMissing = requireOcr && (!nextReadiness.ocrStatus || !nextReadiness.ocrStatus.ready);
     if (stillAsrMissing || stillOcrMissing) {
-      throw new Error(`${featureName}需要本地转写组件安装完整后才能使用。`);
+      await this.snoozeLocalComponentInstallPrompt();
+      throw setupError("LOCAL_COMPONENT_SETUP_REQUIRED", this.localComponentRestartRequired ? "待完成组件切换：安装程序已确认需要重启。请完全退出并重新打开 Obsidian，再在小程序同步历史中重试。" : featureName + "待安装组件：安装尚未就绪，请在插件设置中继续安装／修复后重试。");
     }
+    await this.clearLocalComponentInstallPromptSnooze();
     return status;
   }
   async ensureLocalTranscriptionAccess() {
@@ -37483,7 +37604,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           cloudTranscriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || "cloud-pretranscription"
         };
       } catch (error) {
-        if (isRetryableTranscriptionError(error)) throw error;
+        if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
         const message = error.message || String(error);
         nextMetadata = {
           ...nextMetadata,
@@ -37525,7 +37646,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           cloudTranscriptionRemainingSeconds: result.cloudRemainingSeconds || 0
         };
       } catch (error) {
-        if (isRetryableTranscriptionError(error)) throw error;
+        if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
         const message = error.message || String(error);
         nextMetadata = {
           ...nextMetadata,
@@ -37657,7 +37778,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           nextMetadata.aiMetadataSource = nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource;
           nextMetadata.contentCategory = nextMetadata.contentCategory || (["mp4", "mov", "m4v"].includes(fileExt) ? "视频" : "音频");
         } catch (error) {
-          if (isRetryableTranscriptionError(error)) throw error;
+          if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
           nextMetadata.transcription = "";
           nextMetadata.transcriptionStatus = "failed";
           nextMetadata.transcriptionError = error.message || String(error);
@@ -37672,7 +37793,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         metadata: nextMetadata
       };
     } catch (error) {
-      if (isRetryableTranscriptionError(error)) throw error;
+      if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
       return {
         ...record,
         metadata: {
@@ -38272,6 +38393,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         recoveryCandidate.slice(0, 32e3),
         recoveryCandidate.length > 32e3 ? "（候选文本较长，后续内容已截断。）" : ""
       ].filter(Boolean).join("\n") : "";
+      if (isSetupRequired(error)) throw error;
       const failureMetadata = buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
         url,
         platform,
@@ -40733,6 +40855,7 @@ ${finalized.markdown}
         }
       };
     } catch (error) {
+      if (isSetupRequired(error)) throw error;
       if (isDouyinUrl(url) && !douyinResolutionDiagnostic) {
         const douyinCatchContext = {
           sourceKind: getDouyinDiagnosticUrlKind("", url),
@@ -41776,6 +41899,7 @@ ${finalized.markdown}
           continue;
         }
         const message = error.message || String(error);
+        const setupRequired = isSetupRequired(error);
         const partialSavedInfo = error.partialSaved || null;
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));
         if (deletionResult && deletionResult.deleted) {
@@ -41833,11 +41957,11 @@ ${finalized.markdown}
         }
         this.lastSyncDiagnostic = {
           ...progress,
-          status: "failed",
-          stage: progress.stage || "processing",
+          status: setupRequired ? "action_required" : "failed",
+          stage: setupRequired ? "setup" : progress.stage || "processing",
           title: failedTitle,
           recordId: getRecordId(record),
-          message: partialSavedInfo ? QUALITY_PARTIAL_NOTICE : "单条内容同步失败",
+          message: setupRequired ? message : partialSavedInfo ? QUALITY_PARTIAL_NOTICE : "单条内容同步失败",
           error: message,
           ...diagnosticSourceUrl ? { sourceUrl: diagnosticSourceUrl } : {},
           ...diagnostic ? { diagnostic } : {},
@@ -41853,6 +41977,7 @@ ${finalized.markdown}
             bindingLabel,
             message,
             retryCount: Number(record.retryCount) || 0,
+            ...setupRequired ? { setupRequired: true, setupCode: error.code } : {},
             ...diagnostic ? { diagnostic } : {}
           }] });
         } catch (persistError) {
@@ -41862,6 +41987,7 @@ ${finalized.markdown}
           retryCount: Number(record.retryCount) || 0,
           message,
           ...diagnostic ? { diagnostic } : {},
+          ...setupRequired ? { setupRequired: true, setupCode: error.code } : {},
           ...partialSavedInfo ? { partialSaved: partialSavedInfo } : {},
           ...lifecycleReportError ? { lifecycleReportError } : {}
         };
@@ -41953,6 +42079,7 @@ ${finalized.markdown}
               bindingLabel: binding.label,
               message: item.message,
               retryCount: item.retryCount,
+              ...item.setupRequired ? { setupRequired: true, setupCode: item.setupCode } : {},
               ...retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}
             });
           });
@@ -42062,6 +42189,7 @@ ${finalized.markdown}
       const historicalFailures = outstandingFailures.filter((item) => !currentFailureKeys.has(
         `${normalizeBindCodeInput(item.bindingToken)}:${String(item.recordId || "").trim()}`
       ));
+      const pendingSetupEntries = outstandingFailures.filter((item) => item.setupRequired);
       const displayedFailures = failed.filter((item) => !item.partialSaved);
       let finalMessage = buildSyncResultNotice(
         written,
@@ -42080,10 +42208,14 @@ ${finalized.markdown}
       } else if (pendingReviewNotice) {
         finalMessage += `；${pendingReviewNotice}`;
       }
+      if (pendingSetupEntries.length && !failed.some((item) => item.setupRequired)) {
+        const pendingMessage = pendingSetupEntries.length + " 条内容待准备：" + pendingSetupEntries[0].message;
+        finalMessage = !written.length && !displayedFailures.length ? pendingMessage : finalMessage + "；" + pendingMessage;
+      }
       if (completionWarnings.length) {
         finalMessage += this.backgroundSyncActive ? `；本地笔记已保存，${completionWarnings.length} 条状态回报暂未成功，将自动补报` : `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;
       }
-      if (!this.autoSyncDisposed && (showNotice || written.length || recentFailureEntries.length)) {
+      if (!this.autoSyncDisposed && (showNotice || written.length || recentFailureEntries.some((item) => !item.setupRequired))) {
         new Notice(finalMessage);
       }
       const latestFailedDiagnostic = failed.find((item) => item.diagnostic);
@@ -42109,13 +42241,14 @@ ${finalized.markdown}
         };
       }).filter(Boolean).slice(0, 100);
       this.lastSyncDiagnostic = {
-        status: failed.length ? "failed" : partialSavedNotes.length || conversionWarnings.length || completionWarnings.length ? "warning" : "success",
+        status: failed.some((item) => !item.setupRequired) ? "failed" : failed.some((item) => item.setupRequired) || pendingSetupEntries.length ? "action_required" : partialSavedNotes.length || conversionWarnings.length || completionWarnings.length ? "warning" : "success",
         stage: "finished",
         current: written.length,
         total: written.length + failed.length + skipped.length,
         message: finalMessage,
         error: failed.length ? failed.map((item) => `${item.recordId}: ${item.message}`).join("\n") : "",
-        historicalFailureCount: historicalFailures.length,
+        historicalFailureCount: historicalFailures.filter((item) => !item.setupRequired).length,
+        pendingSetupCount: failed.filter((item) => item.setupRequired).length + historicalFailures.filter((item) => item.setupRequired).length,
         historicalFailures: historicalFailures.map((item) => ({
           recordId: item.recordId,
           message: item.message,
@@ -42135,7 +42268,7 @@ ${finalized.markdown}
       if (this.backgroundSyncActive && !this.autoSyncDisposed && this.syncStatusBar && typeof this.syncStatusBar.setText === "function" && (failed.length || conversionWarnings.length)) {
         this.syncStatusBar.setText("自动同步有未完成内容，可在小程序“同步记录”中查看并重试");
       }
-      return { pollFailed, written: written.length, failed: failed.length };
+      return { pollFailed, written: written.length, failed: failed.filter((item) => !item.setupRequired).length, pendingSetup: Math.max(pendingSetupEntries.length, failed.filter((item) => item.setupRequired).length) };
     } catch (error) {
       this.lastSyncDiagnostic = {
         status: "failed",
@@ -42222,6 +42355,39 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Obsidian 内容同步助手" });
+    const setupPanel = containerEl.createDiv({ cls: "wechat-inbox-sync-setup-panel" });
+    setupPanel.createEl("h3", { text: "转写准备" });
+    const setupView = setupSummary(
+      this.plugin.getActiveBindings().length > 0,
+      this.plugin.settings.localTranscriptionEntitlementStatus,
+      this.plugin.getLocalTranscriptionComponentReadiness(),
+      !!this.plugin.localComponentInstallPromise
+    );
+    setupPanel.createDiv({ text: this.plugin.localComponentRestartRequired && setupView.components.some((item) => !item.ready) ? "待完成组件切换：请完全退出并重新打开 Obsidian，安装程序已确认此步骤必需。" : setupView.message });
+    for (const component of setupView.components) setupPanel.createDiv({ text: component.label + "：" + (component.ready ? "已就绪" : "未就绪") });
+    new Setting(setupPanel).setName("下一步").setDesc("会员在微信小程序领取或开通；安装完成后，在小程序同步历史中重试未完成的内容。").addButton((button) => button.setButtonText(!setupView.bound ? "前往绑定" : !setupView.active ? "刷新会员状态" : "安装／更新本地组件").setCta().onClick(async () => {
+      var _a;
+      if (!setupView.bound) {
+        const input = containerEl.querySelector('input[type="text"]');
+        if (input) {
+          input.scrollIntoView({ block: "center" });
+          input.focus();
+        }
+        return;
+      }
+      button.setDisabled(true);
+      try {
+        const status2 = await this.plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: "manual-refresh", force: true });
+        if (!isCachedProStatusActive(status2)) this.plugin.showTranscriptionSetupNotice(membershipGuidance(status2));
+        else if ((_a = status2.localComponentInstallResult) == null ? void 0 : _a.pendingRestart) new Notice("组件安装待完成切换：请完全退出并重新打开 Obsidian，然后重试。", 12e3);
+        else if (status2.localComponentInstallError) new Notice("组件准备未完成：" + status2.localComponentInstallError, 12e3);
+      } catch (error) {
+        new Notice("准备检查未完成：" + (error.message || error), 1e4);
+      } finally {
+        button.setDisabled(false);
+        this.display();
+      }
+    }));
     containerEl.createEl("h3", {
       text: "使用教程",
       cls: "wechat-inbox-sync-section-heading"
@@ -42344,6 +42510,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       text: "Pro 高级功能",
       cls: "wechat-inbox-sync-section-heading"
     });
+    const renderedComponentReadiness = JSON.stringify(setupView.components);
     const renderedProStatusFingerprint = getProEntitlementStatusFingerprint(
       this.plugin.settings.localTranscriptionEntitlementStatus
     );
@@ -42352,10 +42519,11 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     proPanel.open = true;
     proPanel.createEl("summary", { text: "Pro 状态" });
     proPanel.createDiv({
-      text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；本地组件缺失或损坏时会提示一次，兼容可用时保持静默。${proStatusText}`,
+      text: `插件会通过已绑定的小程序绑定码自动识别 Pro 权限；本地组件未就绪时会提示；稍后再试会暂停提醒 24 小时，仍可随时点击安装。兼容可用时保持静默。${proStatusText}`,
       cls: "wechat-inbox-sync-muted"
     });
     new Setting(proPanel).setName("本地转写组件").setDesc(this.plugin.settings.pendingRedeemCode ? `兑换码：${this.plugin.settings.pendingRedeemCode}` : "点击后会先刷新 Pro 权益，再检查本地组件；缺失则安装，损坏或不兼容则修复，有新版时提示更新。").addButton((button) => button.setButtonText("安装／更新本地组件").setCta().onClick(async () => {
+      var _a;
       try {
         const status2 = await this.plugin.refreshProAndMaybePromptLocalComponentInstall({
           reason: "manual-refresh",
@@ -42363,7 +42531,9 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         });
         if (status2.hasAccess) {
           const proAccessNotice = `Pro 权限有效${status2.expiresAt ? `，有效期至 ${formatEntitlementExpiresAt(status2.expiresAt)}` : ""}`;
-          if (status2.localComponentInstallError) {
+          if ((_a = status2.localComponentInstallResult) == null ? void 0 : _a.pendingRestart) {
+            new Notice("组件安装待完成切换：请完全退出并重新打开 Obsidian，然后重试。", 12e3);
+          } else if (status2.localComponentInstallError) {
             new Notice(`${proAccessNotice}；但本地转写组件安装/修复失败，请按弹窗提示处理后重试。`, 8e3);
           } else if (status2.localComponentUpdateCheckError) {
             new Notice(`${proAccessNotice}；抖音组件更新检查未完成：${status2.localComponentUpdateCheckError}。已有可用组件保留。`, 1e4);
@@ -42376,10 +42546,8 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
           } else {
             new Notice(proAccessNotice);
           }
-        } else if (status2.status === "missing_redeem_code") {
-          new Notice("未识别到 Pro，请确认已绑定小程序并在小程序里开通 Pro。");
         } else {
-          new Notice(status2.message || "Pro 未开通或已过期，请在小程序开通/续费后刷新。");
+          this.plugin.showTranscriptionSetupNotice(membershipGuidance(status2));
         }
         this.display();
       } catch (error) {
@@ -42419,7 +42587,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         return;
       }
       try {
-        await this.plugin.ensureProFeatureAccess("小红书图片 OCR", { forceRefresh: true });
+        await this.plugin.ensureProFeatureAccess("小红书图片 OCR", { forceRefresh: true, localTranscriptionSetup: true });
         await this.plugin.saveSettings({
           ...this.plugin.settings,
           xiaohongshuImageOcrEnabled: true,
@@ -42526,7 +42694,8 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       const currentProStatusFingerprint = getProEntitlementStatusFingerprint(
         this.plugin.settings.localTranscriptionEntitlementStatus
       );
-      if (currentProStatusFingerprint !== renderedProStatusFingerprint) {
+      const currentSetupView = setupSummary(this.plugin.getActiveBindings().length > 0, this.plugin.settings.localTranscriptionEntitlementStatus, this.plugin.getLocalTranscriptionComponentReadiness());
+      if (currentProStatusFingerprint !== renderedProStatusFingerprint || JSON.stringify(currentSetupView.components) !== renderedComponentReadiness) {
         this.display();
       }
     }).catch((error) => {

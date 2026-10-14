@@ -58,6 +58,7 @@ const expectedModules = [
   'transcription-note-title-utils',
   'transcription-partial-note-utils',
   'transcription-quality-utils',
+  'transcription-setup-utils',
   'vault-path-utils',
   'wechat-article-pipeline',
   'wechat-article-utils',
