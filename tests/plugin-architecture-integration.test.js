@@ -60,6 +60,7 @@ const expectedModules = [
   'transcription-quality-utils',
   'transcription-setup-utils',
   'vault-path-utils',
+  'wechat-access-recovery',
   'wechat-article-pipeline',
   'wechat-article-utils',
   'wechat-channels-decrypt-utils',

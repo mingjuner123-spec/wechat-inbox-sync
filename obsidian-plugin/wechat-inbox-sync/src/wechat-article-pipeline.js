@@ -28,7 +28,10 @@ const SENSITIVE_DIAGNOSTIC_KEYS = new Set([
 ]);
 
 function redactDiagnosticText(value) {
-  return String(value || '').replace(/https?:\/\/[^\s"'<>]+/gi, (match) => {
+  return String(value || '')
+    .replace(/(\bHTTP\s+[1-5]\d{2})\b[\s\S]*/i, '$1 [RESPONSE_BODY_OMITTED]')
+    .replace(/<(?:!doctype|html|body|div|script|article|section|p)\b[\s\S]*/i, '[HTML_RESPONSE_OMITTED]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, (match) => {
     try {
       const parsed = new URL(match);
       for (const name of Array.from(parsed.searchParams.keys())) parsed.searchParams.set(name, '[REDACTED]');
@@ -258,6 +261,7 @@ async function runWechatArticlePipeline({
   fetchStatic,
   renderBrowser,
   isUsableBrowserArticle,
+  preferVerifiedBrowser = false,
 } = {}) {
   if (typeof fetchStatic !== 'function') throw new Error('fetchStatic is required');
   const normalizedUrl = normalizeWechatArticleUrl(url);
@@ -270,8 +274,9 @@ async function runWechatArticlePipeline({
   let lastStaticDiagnostic = null;
   let terminalState = '';
   let terminalHtml = '';
+  let staticVerification = null;
 
-  for (const profile of requestProfiles) {
+  for (const profile of (preferVerifiedBrowser ? [] : requestProfiles)) {
     const safeProfile = getSafeProfileDiagnostic(profile);
     try {
       const staticResult = normalizeStaticResult(await fetchStatic(profile.url, profile));
@@ -293,7 +298,10 @@ async function runWechatArticlePipeline({
           ? { transportDiagnostic: sanitizeDiagnosticValue(staticResult.diagnostic) }
           : {}),
       });
-      if (staticState === 'captcha') return buildWechatAccessPausedResult({ reason: 'wechat-verification-required' }, attempts);
+      if (staticState === 'captcha') {
+        staticVerification = { reason: 'wechat-verification-required', retryAfterMs: 0 };
+        break;
+      }
       if (staticState === 'article') {
         clearFailure(normalizedUrl);
         return {
@@ -324,6 +332,10 @@ async function runWechatArticlePipeline({
       if (staticError && staticError.name === 'AbortError') throw staticError;
       if (isWechatAccessPaused(staticError)) {
         attempts.push({ channel: 'static', ...safeProfile, outcome: 'access_paused', error: getSafeErrorMessage(staticError) });
+        if (staticError.reason === 'wechat-verification-required') {
+          staticVerification = staticError;
+          break;
+        }
         return buildWechatAccessPausedResult(staticError, attempts);
       }
       attempts.push({
@@ -337,8 +349,9 @@ async function runWechatArticlePipeline({
 
   let lastBrowserState = '';
   let lastBrowserError = null;
+  if (staticVerification && typeof renderBrowser !== 'function') return buildWechatAccessPausedResult(staticVerification, attempts);
   if (typeof renderBrowser === 'function') {
-    for (const profile of requestProfiles) {
+    for (const profile of (staticVerification ? requestProfiles.slice(0, 1) : requestProfiles)) {
       const safeProfile = getSafeProfileDiagnostic(profile);
       try {
         const browser = normalizeBrowserResult(await renderBrowser(profile.url, profile));
