@@ -290,6 +290,164 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/readable-content-utils.js
+var require_readable_content_utils = __commonJS({
+  "src/readable-content-utils.js"(exports2, module2) {
+    "use strict";
+    var SOUND_LINE = /^(?:\(\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\)|（\s*(?:音乐|音樂|静音|靜音|music|silence)\s*）|\[\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\])[\s.。!！…]*$/iu;
+    var CREDIT_LINE = /^(?:\((?:CC\s*)?(?:字幕制作|字幕製作|字幕|subtitles?)\s*[:：]\s*[^()\r\n]{1,50}\)|（(?:CC\s*)?(?:字幕制作|字幕製作|字幕)\s*[:：]\s*[^（）\r\n]{1,50}）)[.。\s]*$/iu;
+    var PUNCTUATION_LINE = /^[.。…\s]+$/u;
+    function hasOnlySoundAnnotations(text) {
+      const lines = String(text || "").split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      return lines.some((x) => SOUND_LINE.test(x)) && lines.every((x) => SOUND_LINE.test(x) || CREDIT_LINE.test(x) || PUNCTUATION_LINE.test(x));
+    }
+    __name(hasOnlySoundAnnotations, "hasOnlySoundAnnotations");
+    function cleanTranscriptionTail2(text) {
+      const source = String(text || "").replace(/\r\n/g, "\n");
+      const lines = source.split("\n");
+      let index = lines.length - 1, markers = 0;
+      while (index >= 0) {
+        const line = lines[index].trim();
+        if (SOUND_LINE.test(line)) markers++;
+        else if (line && !CREDIT_LINE.test(line) && !PUNCTUATION_LINE.test(line)) break;
+        index--;
+      }
+      const prefix = lines.slice(0, index + 1).join("\n").trim();
+      if (markers >= 2 && (prefix.match(/[\p{L}\p{N}]/gu) || []).length >= 20) return prefix;
+      return source.trim();
+    }
+    __name(cleanTranscriptionTail2, "cleanTranscriptionTail");
+    function formatTranscriptForReading2(text) {
+      const source = cleanTranscriptionTail2(text);
+      if (!source) return "";
+      if (/^(?:\s*(?:```|~~~|#{1,6}\s|>\s|[-*+]\s|\d+[.)]\s|\|)|\s*\[?\d{1,2}:\d{2})/m.test(source) || /!?\[[^\]\n]*\]\(/.test(source)) return source;
+      const paragraphs = [];
+      for (const block of source.split(/\n\s*\n/)) {
+        const lines = block.split("\n").map((x) => x.trim()).filter(Boolean);
+        let joined = "";
+        for (const line of lines) {
+          const separator = /[\p{Script=Han}]$/u.test(joined) && /^[\p{Script=Han}]/u.test(line) ? "" : " ";
+          joined += (joined ? separator : "") + line;
+        }
+        const sentences = joined.match(/[\s\S]+?(?:[。！？!?]+[”’」』"']*|\.(?=\s|$)|$)/gu) || [];
+        let paragraph = "";
+        for (const sentence of sentences) {
+          if (paragraph.length >= 140) {
+            paragraphs.push(paragraph.trim());
+            paragraph = "";
+          }
+          const parts = sentence.length > 500 ? sentence.match(/\S+\s*|\s+/g) || [sentence] : [sentence];
+          for (const part of parts) {
+            if (paragraph.length >= 240 && /\s$/.test(paragraph)) {
+              paragraphs.push(paragraph.trim());
+              paragraph = "";
+            }
+            paragraph += part;
+          }
+        }
+        if (paragraph.trim()) paragraphs.push(paragraph.trim());
+      }
+      return paragraphs.join("\n\n");
+    }
+    __name(formatTranscriptForReading2, "formatTranscriptForReading");
+    function prepareBrowserArticleImages2(root, baseUrl) {
+      const assets = [];
+      root.querySelectorAll("img").forEach((image) => {
+        let src = "";
+        const candidates = [image.currentSrc, image.getAttribute("data-src"), image.getAttribute("data-original"), image.getAttribute("data-lazy-src"), image.getAttribute("src")];
+        for (const candidate of candidates) {
+          if (!candidate || /^data:/i.test(candidate)) continue;
+          try {
+            const url = new URL(String(candidate).trim(), baseUrl);
+            if (/^https?:$/.test(url.protocol)) {
+              src = url.href;
+              break;
+            }
+          } catch (_) {
+          }
+        }
+        if (!src) {
+          image.remove();
+          return;
+        }
+        const alt = String(image.getAttribute("alt") || image.getAttribute("data-alt") || "图片").replace(/\s+/g, " ").trim();
+        assets.push({ src, alt });
+        image.setAttribute("src", src);
+        image.setAttribute("alt", alt);
+        for (const attribute of ["srcset", "data-src", "data-original", "data-lazy-src", "data-fail"]) image.removeAttribute(attribute);
+      });
+      return assets;
+    }
+    __name(prepareBrowserArticleImages2, "prepareBrowserArticleImages");
+    function preserveHtmlReadingStructure2(html) {
+      const protectedBlocks = [];
+      const input = String(html || "").replace(/<(pre|table|script|style|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi, (block) => {
+        const marker = `READABLE${protectedBlocks.length}`;
+        protectedBlocks.push(block);
+        return marker;
+      });
+      const root = { tag: "", children: [] }, stack = [root];
+      const tokens = input.match(/<!--[\s\S]*?-->|<[^>]*>|[^<]+|</g) || [];
+      for (const token of tokens) {
+        const match = token.match(/^<(\/?)\s*([a-z][\w-]*)\b[^>]*>/i);
+        if (!match) {
+          stack[stack.length - 1].children.push(token);
+          continue;
+        }
+        const closing = Boolean(match[1]), tag = match[2].toLowerCase();
+        if (closing) {
+          const index = stack.map((x) => x.tag).lastIndexOf(tag);
+          if (index > 0) stack.length = index;
+        } else {
+          const node = { tag, token, children: [] };
+          stack[stack.length - 1].children.push(node);
+          if (!["br", "img", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed"].includes(tag) && !/\/\s*>$/.test(token)) stack.push(node);
+        }
+      }
+      function render(node, context = {}) {
+        var _a;
+        if (typeof node === "string") return node;
+        const { tag, token = "" } = node;
+        const bold = ["strong", "b"].includes(tag) || tag === "span" && /font-weight\s*:\s*(?:bold|[6-9]00)/i.test(token);
+        const italic = ["em", "i"].includes(tag);
+        if (tag === "br") return "\n";
+        if (tag === "img" || tag === "hr") return token;
+        if (tag === "ol" || tag === "ul") {
+          let count = Number(((_a = token.match(/\bstart=["']?(\d+)/i)) == null ? void 0 : _a[1]) || 1);
+          const items = node.children.map((child) => {
+            if (typeof child === "string") return child.trim();
+            if (child.tag !== "li") return render(child, context);
+            const body = render(child, context).trim();
+            const marker2 = tag === "ol" ? `${count++}. ` : "- ";
+            const lines = body.split("\n");
+            return marker2 + lines[0] + lines.slice(1).map((line) => "\n" + " ".repeat(marker2.length) + line).join("");
+          }).filter(Boolean);
+          return "\n\n" + items.join("\n") + "\n\n";
+        }
+        const content = node.children.map((child) => render(child, { ...context, bold: context.bold || bold, italic: context.italic || italic })).join("");
+        if (tag === "a") return token + content + "</a>";
+        if (tag === "blockquote") return "\n\n" + content.trim().replace(/\n\s*\n(?:\s*\n)+/g, "\n\n").split("\n").map((line) => "> " + line).join("\n") + "\n\n";
+        if (/^h[1-6]$/.test(tag)) {
+          const visible = content.replace(/<[^>]*>/g, "").replace(/&(?:nbsp|#160|#x0*a0);/gi, " ").trim();
+          return "\n\n" + (visible ? "#".repeat(Number(tag[1])) + " " : "") + content.trim() + "\n\n";
+        }
+        if (["p", "div", "section", "article", "main", "header", "footer"].includes(tag)) return "\n\n" + content.trim() + "\n\n";
+        const marker = bold && !context.bold ? "**" : italic && !context.italic ? "*" : "";
+        if (marker) return content.split(/(\n\s*\n)/).map((part) => {
+          if (!part.replace(/<[^>]*>/g, "").replace(/&(?:nbsp|#160|#x0*a0);/gi, " ").trim()) return part;
+          return part.replace(/^(\s*)([\s\S]*?\S)(\s*)$/, (_, before, value, after) => before + marker + value + marker + after);
+        }).join("");
+        return content;
+      }
+      __name(render, "render");
+      const out = render(root);
+      return out.replace(/\uE000READABLE(\d+)\uE001/g, (_, index) => protectedBlocks[Number(index)]);
+    }
+    __name(preserveHtmlReadingStructure2, "preserveHtmlReadingStructure");
+    module2.exports = { cleanTranscriptionTail: cleanTranscriptionTail2, formatTranscriptForReading: formatTranscriptForReading2, hasOnlySoundAnnotations, preserveHtmlReadingStructure: preserveHtmlReadingStructure2, prepareBrowserArticleImages: prepareBrowserArticleImages2 };
+  }
+});
+
 // src/transcription-setup-utils.js
 var require_transcription_setup_utils = __commonJS({
   "src/transcription-setup-utils.js"(exports2, module2) {
@@ -6004,6 +6162,7 @@ var require_t2cn = __commonJS({
 var require_transcription_quality_utils = __commonJS({
   "src/transcription-quality-utils.js"(exports2, module2) {
     "use strict";
+    var { hasOnlySoundAnnotations } = require_readable_content_utils();
     var { Converter } = require_t2cn();
     var toSimplifiedConverter = Converter({ from: "t", to: "cn" });
     var NO_SPEECH_MESSAGE = "仅识别到音乐/静音标记，未识别到可转写语音。";
@@ -6013,8 +6172,7 @@ var require_transcription_quality_utils = __commonJS({
       "full-decode-and-vad-no-speech-segments"
     ]);
     function createNoSpeechTranscriptionError2(text) {
-      const lines = String(text || "").trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-      if (!lines.length || !lines.every((line) => /^(?:\(\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\)|\[\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\]|（\s*(?:音乐|音樂|静音|靜音|music|silence)\s*）)$/iu.test(line))) return null;
+      if (!hasOnlySoundAnnotations(text)) return null;
       return Object.assign(new Error(NO_SPEECH_MESSAGE), {
         code: "TRANSCRIPTION_NO_SPEECH",
         noSpeechEvidence: "non-speech-markers"
@@ -13967,6 +14125,7 @@ var require_sync_lifecycle_utils = __commonJS({
 var require_note_output_plan_utils = __commonJS({
   "src/note-output-plan-utils.js"(exports2, module2) {
     "use strict";
+    var { formatTranscriptForReading: formatTranscriptForReading2 } = require_readable_content_utils();
     var { toSimplifiedChinese } = require_transcription_quality_utils();
     function requireFunction(value, name) {
       if (typeof value !== "function") {
@@ -14124,7 +14283,7 @@ var require_note_output_plan_utils = __commonJS({
           body = helpers.buildWebpageMarkdownBody(record, title);
         } else if (type === "voice") {
           const errorText = metadata.transcriptionError || metadata.aiError || "";
-          const transcription = toSimplifiedChinese(metadata.transcription || "") || (metadata.transcriptionStatus === "failed" ? `语音转写失败。${errorText}` : "未开启语音转写。");
+          const transcription = formatTranscriptForReading2(toSimplifiedChinese(metadata.transcription || "")) || (metadata.transcriptionStatus === "failed" ? `语音转写失败。${errorText}` : "未开启语音转写。");
           body = ["## 转写全文", "", transcription, "", "## 录音文件", "", `![[${audioFileName}]]`, ""].join("\n");
         } else if (type === "file") {
           body = helpers.buildFileMarkdownBody(record);
@@ -14258,6 +14417,7 @@ var require_social_article_folder_utils = __commonJS({
 var require_record_body_markdown_utils = __commonJS({
   "src/record-body-markdown-utils.js"(exports2, module2) {
     "use strict";
+    var { cleanTranscriptionTail: cleanTranscriptionTail2, formatTranscriptForReading: formatTranscriptForReading2 } = require_readable_content_utils();
     var { toSimplifiedChinese, NO_SPEECH_SAVED_MESSAGE, isRecognizedNoSpeechMetadata: isRecognizedNoSpeechMetadata2 } = require_transcription_quality_utils();
     var { QUALITY_NOTICE_START, QUALITY_NOTICE_END, QUALITY_PARTIAL_NOTICE: QUALITY_PARTIAL_NOTICE2 } = require_transcription_partial_note_utils();
     function requireFunction(value, name) {
@@ -14296,7 +14456,7 @@ var require_record_body_markdown_utils = __commonJS({
           return QUALITY_NOTICE_START + "\n> " + QUALITY_PARTIAL_NOTICE2 + "\n" + QUALITY_NOTICE_END;
         }
         const isCloudPending = ["queued", "processing"].includes(status) && String(transcriptionSource || "").includes("cloud");
-        const content = toSimplifiedChinese(transcription).trim() || (status === "failed" ? `转写失败。${transcriptionError || "未能提取到视频/音频文案。"}` : isCloudPending ? "云端转写中，下次同步会自动更新。" : "转写处理中，或未配置可用的转写方案。");
+        const content = formatTranscriptForReading2(toSimplifiedChinese(transcription)) || (status === "failed" ? `转写失败。${transcriptionError || "未能提取到视频/音频文案。"}` : isCloudPending ? "云端转写中，下次同步会自动更新。" : "转写处理中，或未配置可用的转写方案。");
         return [
           "## 口播/音频文案",
           "",
@@ -14325,7 +14485,7 @@ var require_record_body_markdown_utils = __commonJS({
         transcription = "",
         title = ""
       } = {}) {
-        const text = helpers.cleanMarkdownForStorage(helpers.stripMarkdownCodeBlocks(toSimplifiedChinese(String(transcription || "")))).replace(/\s+/g, " ").trim();
+        const text = helpers.cleanMarkdownForStorage(helpers.stripMarkdownCodeBlocks(toSimplifiedChinese(cleanTranscriptionTail2(transcription)))).replace(/\s+/g, " ").trim();
         if (!text) {
           return {
             description: "",
@@ -14385,7 +14545,7 @@ var require_record_body_markdown_utils = __commonJS({
           audioUrl: mediaUrl,
           mediaUrls: normalizedMediaUrls,
           subtitleUrl,
-          transcription: toSimplifiedChinese(transcription),
+          transcription: toSimplifiedChinese(cleanTranscriptionTail2(transcription)),
           transcriptionStatus,
           transcriptionSource,
           transcriptionError,
@@ -14517,7 +14677,7 @@ ${NO_SPEECH_SAVED_MESSAGE}
         const status = metadata.conversionStatus || "pending";
         const errorText = metadata.conversionError || "";
         const transcriptionStatus = String(metadata.transcriptionStatus || "").toLowerCase();
-        const transcription = toSimplifiedChinese(metadata.transcription || "").trim();
+        const transcription = formatTranscriptForReading2(toSimplifiedChinese(metadata.transcription || ""));
         if (transcriptionStatus || transcription) {
           const transcriptionError = metadata.transcriptionError || "";
           const content = transcription || (transcriptionStatus === "failed" ? `转写失败。${transcriptionError || "未能提取到音视频文案。"}` : "转写处理中，或未配置可用的转写方案。");
@@ -18267,6 +18427,7 @@ var require_transcription_note_title_utils = __commonJS({
 });
 
 // src/main.js
+var { cleanTranscriptionTail, formatTranscriptForReading, preserveHtmlReadingStructure, prepareBrowserArticleImages } = require_readable_content_utils();
 var { membershipGuidance, setupError, isSetupRequired, setupSummary } = require_transcription_setup_utils();
 var { getXiaohongshuRuntimeSnapshotExpression } = require_xiaohongshu_runtime_snapshot();
 var { getWechatPlaceholderRecoveryUrl } = require_wechat_placeholder_utils();
@@ -18568,7 +18729,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.188";
+var PLUGIN_RUNTIME_VERSION = "1.3.189";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -21808,7 +21969,7 @@ function isVideoPlatform(platform, url = "") {
 }
 __name(isVideoPlatform, "isVideoPlatform");
 function cleanTrailingTranscriptionHallucinations(text) {
-  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = cleanTranscriptionTail(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length < 2) return lines.join("\n");
   const isCredit = /* @__PURE__ */ __name((line) => /^(?:字幕|字幕\s*by|字幕\s*:|翻译|校对|制作|subtitles?\s*(?:by|:))/i.test(line), "isCredit");
   const isCorruptedClosing = /* @__PURE__ */ __name((line) => /(?:我们|咱们).{0,10}(?:下身|下生|下声|下省)(?:再见|见)[。！!]?$/u.test(line), "isCorruptedClosing");
@@ -21986,7 +22147,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
   let feishuOpeningContentStarted = false;
   lines.forEach((line) => {
     const rawLine = String(line || "").replace(/\u200b/g, "").replace(/\ufeff/g, "");
-    const listIndentMatch = options.preserveListIndent ? rawLine.match(/^([ \t]+)(?=[-*]\s+)/) : null;
+    const listIndentMatch = options.preserveListIndent ? rawLine.match(/^([ \t]+)(?=(?:[-*]|\d+[.)])\s+)/) : null;
     const listIndent = listIndentMatch && listIndentMatch[1] ? listIndentMatch[1] : "";
     if (/^\s*```/.test(rawLine)) {
       out.push(rawLine.trim());
@@ -22048,7 +22209,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
       }
       seen.set(key, count + 1);
     }
-    out.push(listIndent && /^[-*]\s+/.test(text) ? `${listIndent}${text}` : text);
+    out.push(listIndent && /^(?:[-*]|\d+[.)])\s+/.test(text) ? `${listIndent}${text}` : text);
     lastWasBlank = false;
   });
   let cleaned = restoreFlattenedSarBandTables(out).join("\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -28050,11 +28211,12 @@ function restoreFlattenedSarBandTables(lines) {
 __name(restoreFlattenedSarBandTables, "restoreFlattenedSarBandTables");
 function htmlToMarkdown(html) {
   const sourceHtml = String(html || "");
-  let readable = selectReadableHtml(sourceHtml).replace(/<[^>]+id=["']js_cmt_area["'][^>]*>[\s\S]*?(?=<script\b|<\/body>|$)/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<noscript[\s\S]*?<\/noscript>/gi, "").replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code)).replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => htmlTableToMarkdown(table)).replace(/<img\b[^>]*>/gi, imageTagToMarkdown).replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level, content) => stripHtmlTags(content).trim() ? "\n" + "#".repeat(Number(level)) + " " + content + "\n" : "\n").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n\n").replace(/<\/div>/gi, "\n").replace(/<li[^>]*>/gi, "\n- ").replace(/<\/li>/gi, "").replace(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
+  let readable = selectReadableHtml(sourceHtml).replace(/<[^>]+id=["']js_cmt_area["'][^>]*>[\s\S]*?(?=<script\b|<\/body>|$)/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
+  readable = preserveHtmlReadingStructure(readable).replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code)).replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => htmlTableToMarkdown(table)).replace(/<img\b[^>]*>/gi, imageTagToMarkdown).replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_, level, content) => stripHtmlTags(content).trim() ? "\n" + "#".repeat(Number(level)) + " " + content + "\n" : "\n").replace(/<br\s*\/?>/gi, "\n").replace(/<\/p>/gi, "\n\n").replace(/<\/div>/gi, "\n").replace(/<li[^>]*>/gi, "\n- ").replace(/<\/li>/gi, "").replace(/<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_, href, label) => {
     const text = stripHtmlTags(label);
     return text ? `[${text}](${decodeHtmlEntities(href)})` : decodeHtmlEntities(href);
   });
-  readable = cleanMarkdownForStorage(stripHtmlTags(readable));
+  readable = cleanMarkdownForStorage(stripHtmlTags(readable), { preserveListIndent: true });
   if (readable.length < 20) {
     throw new Error("网页正文太短，无法转为 Markdown");
   }
@@ -29062,26 +29224,11 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         const stateText = clean(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 600);
         if (!root) return { title, markdown: '', assets: [], stateText };
         const clone = root.cloneNode(true);
-        const assets = [];
         clone.querySelectorAll('script,style,noscript,iframe,form').forEach((node) => node.remove());
-        clone.querySelectorAll('br').forEach((node) => node.replaceWith(document.createTextNode('\\n')));
-        clone.querySelectorAll('img').forEach((image) => {
-          const src = String(image.currentSrc || image.getAttribute('data-src') || image.getAttribute('src') || '').trim();
-          const alt = clean(image.getAttribute('alt') || image.getAttribute('data-alt') || '图片');
-          if (!src || /^data:image\\/gif/i.test(src)) {
-            image.remove();
-            return;
-          }
-          assets.push({ src, alt });
-          image.replaceWith(document.createTextNode('\\n\\n![' + alt + '](' + src + ')\\n\\n'));
-        });
-        clone.querySelectorAll('p,div,section,article,li,blockquote,h1,h2,h3,h4,h5,h6').forEach((node) => {
-          if (node.parentElement === clone || node.children.length === 0) {
-            node.appendChild(document.createTextNode('\\n\\n'));
-          }
-        });
+        const assets = (${prepareBrowserArticleImages.toString()})(clone, location.href);
         return {
           title,
+          html: clone.outerHTML,
           markdown: clean(clone.innerText || clone.textContent || ''),
           assets,
           stateText,
@@ -29099,6 +29246,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
     `);
     throwIfAborted(options.signal);
     assertWechatTransportResponse(mainResponse);
+    if (result && result.html) result.markdown = htmlToMarkdown(result.html);
     if (!result || !String(result.markdown || "").trim() && !(result.assets && result.assets.length)) {
       throw new Error("微信公众号页面未返回 #js_content 正文");
     }
@@ -41625,7 +41773,7 @@ ${finalized.markdown}
       const retriedMetadata = recordForMarkdown.metadata || {};
       if (retriedMetadata.transcriptionStatus === "success" && String(retriedMetadata.transcription || "").trim()) {
         throwIfAborted(signal);
-        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => completeQualityPartialNote(current, retriedMetadata.transcription));
+        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => completeQualityPartialNote(current, formatTranscriptForReading(retriedMetadata.transcription)));
         return { recordId: getRecordId(recordForMarkdown), filePath: partialQualityNotePath, title: getSyncNoteTitleFromPath(partialQualityNotePath), committed: true, transcriptionResumed: true, mediaResolutionDiagnostic: retriedMetadata.mediaResolutionDiagnostic || null };
       }
       if (isRecognizedNoSpeechMetadata(retriedMetadata)) {
@@ -41662,6 +41810,9 @@ ${finalized.markdown}
         lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
       }
       throw lifecycleOutcomeError;
+    }
+    if (recordForMarkdown.metadata && typeof recordForMarkdown.metadata.transcription === "string") {
+      recordForMarkdown = { ...recordForMarkdown, metadata: { ...recordForMarkdown.metadata, transcription: cleanTranscriptionTail(recordForMarkdown.metadata.transcription) } };
     }
     if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);

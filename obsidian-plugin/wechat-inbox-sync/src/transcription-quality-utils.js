@@ -1,4 +1,5 @@
 'use strict';
+const { hasOnlySoundAnnotations } = require('./readable-content-utils');
 
 const { Converter } = require('opencc-js/t2cn');
 const toSimplifiedConverter = Converter({ from: 't', to: 'cn' });
@@ -11,8 +12,7 @@ const RECOGNIZED_NO_SPEECH_EVIDENCE = new Set([
 ]);
 
 function createNoSpeechTranscriptionError(text) {
-  const lines = String(text || '').trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  if (!lines.length || !lines.every(line => /^(?:\(\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\)|\[\s*(?:音乐|音樂|静音|靜音|music|silence)\s*\]|（\s*(?:音乐|音樂|静音|靜音|music|silence)\s*）)$/iu.test(line))) return null;
+  if (!hasOnlySoundAnnotations(text)) return null;
   return Object.assign(new Error(NO_SPEECH_MESSAGE), {
     code: 'TRANSCRIPTION_NO_SPEECH', noSpeechEvidence: 'non-speech-markers',
   });

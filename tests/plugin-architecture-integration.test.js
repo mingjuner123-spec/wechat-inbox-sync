@@ -43,6 +43,7 @@ const expectedModules = [
   'media-file-utils',
   'note-output-plan-utils',
   'progress-notice-utils',
+  'readable-content-utils',
   'record-body-markdown-utils',
   'record-identity-utils',
   'record-metadata-utils',

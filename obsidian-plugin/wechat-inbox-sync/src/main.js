@@ -1,3 +1,4 @@
+const { cleanTranscriptionTail, formatTranscriptForReading, preserveHtmlReadingStructure, prepareBrowserArticleImages } = require('./readable-content-utils');
 const { membershipGuidance, setupError, isSetupRequired, setupSummary } = require('./transcription-setup-utils');
 const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runtime-snapshot');
 const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils');
@@ -306,7 +307,7 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.188';
+const PLUGIN_RUNTIME_VERSION = '1.3.189';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -4240,7 +4241,7 @@ function isVideoPlatform(platform, url = '') {
 }
 
 function cleanTrailingTranscriptionHallucinations(text) {
-  const lines = String(text || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = cleanTranscriptionTail(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length < 2) return lines.join('\n');
   const isCredit = (line) => /^(?:字幕|字幕\s*by|字幕\s*:|翻译|校对|制作|subtitles?\s*(?:by|:))/i.test(line);
   const isCorruptedClosing = (line) => /(?:我们|咱们).{0,10}(?:下身|下生|下声|下省)(?:再见|见)[。！!]?$/u.test(line);
@@ -4438,7 +4439,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
   lines.forEach((line) => {
     const rawLine = String(line || '').replace(/\u200b/g, '').replace(/\ufeff/g, '');
     const listIndentMatch = options.preserveListIndent
-      ? rawLine.match(/^([ \t]+)(?=[-*]\s+)/)
+      ? rawLine.match(/^([ \t]+)(?=(?:[-*]|\d+[.)])\s+)/)
       : null;
     const listIndent = listIndentMatch && listIndentMatch[1] ? listIndentMatch[1] : '';
     if (/^\s*```/.test(rawLine)) {
@@ -4519,7 +4520,7 @@ function cleanMarkdownForStorage(markdown, options = {}) {
       seen.set(key, count + 1);
     }
 
-    out.push(listIndent && /^[-*]\s+/.test(text) ? `${listIndent}${text}` : text);
+    out.push(listIndent && /^(?:[-*]|\d+[.)])\s+/.test(text) ? `${listIndent}${text}` : text);
     lastWasBlank = false;
   });
 
@@ -11377,7 +11378,8 @@ function htmlToMarkdown(html) {
     .replace(/<[^>]+id=["']js_cmt_area["'][^>]*>[\s\S]*?(?=<script\b|<\/body>|$)/gi, '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '');
+  readable = preserveHtmlReadingStructure(readable)
     .replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_, code) => htmlCodeBlockToMarkdown(code))
     .replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (table) => htmlTableToMarkdown(table))
     .replace(/<img\b[^>]*>/gi, imageTagToMarkdown)
@@ -11394,7 +11396,7 @@ function htmlToMarkdown(html) {
       return text ? `[${text}](${decodeHtmlEntities(href)})` : decodeHtmlEntities(href);
     });
 
-  readable = cleanMarkdownForStorage(stripHtmlTags(readable));
+  readable = cleanMarkdownForStorage(stripHtmlTags(readable), { preserveListIndent: true });
 
   if (readable.length < 20) {
     throw new Error('网页正文太短，无法转为 Markdown');
@@ -12503,26 +12505,11 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
         const stateText = clean(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 600);
         if (!root) return { title, markdown: '', assets: [], stateText };
         const clone = root.cloneNode(true);
-        const assets = [];
         clone.querySelectorAll('script,style,noscript,iframe,form').forEach((node) => node.remove());
-        clone.querySelectorAll('br').forEach((node) => node.replaceWith(document.createTextNode('\\n')));
-        clone.querySelectorAll('img').forEach((image) => {
-          const src = String(image.currentSrc || image.getAttribute('data-src') || image.getAttribute('src') || '').trim();
-          const alt = clean(image.getAttribute('alt') || image.getAttribute('data-alt') || '图片');
-          if (!src || /^data:image\\/gif/i.test(src)) {
-            image.remove();
-            return;
-          }
-          assets.push({ src, alt });
-          image.replaceWith(document.createTextNode('\\n\\n![' + alt + '](' + src + ')\\n\\n'));
-        });
-        clone.querySelectorAll('p,div,section,article,li,blockquote,h1,h2,h3,h4,h5,h6').forEach((node) => {
-          if (node.parentElement === clone || node.children.length === 0) {
-            node.appendChild(document.createTextNode('\\n\\n'));
-          }
-        });
+        const assets = (${prepareBrowserArticleImages.toString()})(clone, location.href);
         return {
           title,
+          html: clone.outerHTML,
           markdown: clean(clone.innerText || clone.textContent || ''),
           assets,
           stateText,
@@ -12540,6 +12527,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
     `);
     throwIfAborted(options.signal);
     assertWechatTransportResponse(mainResponse);
+    if (result && result.html) result.markdown = htmlToMarkdown(result.html);
     if (!result || (!String(result.markdown || '').trim() && !(result.assets && result.assets.length))) {
       throw new Error('微信公众号页面未返回 #js_content 正文');
     }
@@ -26077,7 +26065,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const retriedMetadata = recordForMarkdown.metadata || {};
       if (retriedMetadata.transcriptionStatus === 'success' && String(retriedMetadata.transcription || '').trim()) {
         throwIfAborted(signal);
-        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => completeQualityPartialNote(current, retriedMetadata.transcription));
+        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => completeQualityPartialNote(current, formatTranscriptForReading(retriedMetadata.transcription)));
         return { recordId: getRecordId(recordForMarkdown), filePath: partialQualityNotePath, title: getSyncNoteTitleFromPath(partialQualityNotePath), committed: true, transcriptionResumed: true, mediaResolutionDiagnostic: retriedMetadata.mediaResolutionDiagnostic || null };
       }
       if (isRecognizedNoSpeechMetadata(retriedMetadata)) {
@@ -26122,6 +26110,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         lifecycleOutcomeError.diagnostic = attachmentDiagnostic;
       }
       throw lifecycleOutcomeError;
+    }
+    if (recordForMarkdown.metadata && typeof recordForMarkdown.metadata.transcription === 'string') {
+      recordForMarkdown = { ...recordForMarkdown, metadata: { ...recordForMarkdown.metadata, transcription: cleanTranscriptionTail(recordForMarkdown.metadata.transcription) } };
     }
     if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     throwIfAborted(signal);
