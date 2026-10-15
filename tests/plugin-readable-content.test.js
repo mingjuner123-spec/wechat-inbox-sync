@@ -58,6 +58,27 @@ try{
  assert.ok(!blankStyles.includes('*'));
  const comments=h.htmlToMarkdown('<body><p>这是正常文章的正文内容，长度足够并且应该完整保留。</p><div id="js_cmt_area">评论区域不能当正文保存。</div></body>');
  assert.ok(!comments.includes('评论区域'));
+ const chapter='<section style="text-align:center"><section><span style="font-size:36px"><strong>01</strong></span></section>\n<p><strong><span style="font-size:17px">章节标题内容</span></strong></p></section>';
+ const headings=h.htmlToMarkdown('<div id="js_content">'+chapter+'<p>这一段是正常正文，保持文字和顺序不变。</p></div>');
+ assert.ok(headings.includes('## 01 章节标题内容'));
+ assert.equal((headings.match(/^## /gm)||[]).length,1);
+ const semantic=h.htmlToMarkdown('<div id="js_content"><h1>文章标题</h1><h3>第三层标题</h3><div role="heading" aria-level="4">第四层标题</div><p role="heading" aria-level="9">默认标题</p></div>');
+ assert.ok(semantic.includes('# 文章标题')&&semantic.includes('### 第三层标题')&&semantic.includes('#### 第四层标题')&&semantic.includes('## 默认标题'));
+ const unquoted=h.htmlToMarkdown('<div id="js_content"><div role=heading aria-level=4>无引号属性标题</div><p>保留合法HTML中的无引号属性及正常文章正文。</p></div>');
+ assert.ok(unquoted.includes('#### 无引号属性标题'));
+ for(const body of [
+  '<p style="text-align:center;font-size:15px"><strong>点击查看详情</strong></p>',
+  '<p style="text-align:center;font-size:20px"><strong>只有部分</strong>内容加粗</p>',
+  '<p style="text-align:left;font-size:20px"><strong>普通粗体正文</strong></p>',
+  '<p style="text-align:center;font-size:36px"><strong>99</strong></p>',
+  '<p style="text-align:center;font-size:20px"><strong>2026-10-16</strong></p>',
+  '<p style="text-align:center;font-size:20px"><strong>图片说明<img src="https://example.com/a.png"></strong></p>',
+  '<ul><li>'+chapter+'</li></ul>', '<blockquote>'+chapter+'</blockquote>', '<pre><code>'+chapter+'</code></pre>', '<table><tr><td>'+chapter+'</td></tr></table>',
+  '<p style="text-align:center;font-size:20px;font-weight:bold">强调里的<span style="font-weight:normal">普通文字</span></p>',
+  '<p style="text-align:center;font-size:20px;font-weight:bold">大字和<span style="font-size:15px">正常小字</span></p>',
+ ]){const converted=h.htmlToMarkdown('<div id="js_content">'+body+'<p>这是用于验证排版的普通正文，必须保持正常段落。</p></div>');assert.ok(!/^#{1,6} /m.test(converted),body);}
+ const siblings=h.htmlToMarkdown('<div id="js_content"><section style="text-align:center"><section><p style="font-size:36px"><strong>01</strong></p></section><section><p style="font-size:20px"><strong>另一个容器的标题</strong></p></section></section><p>正常正文，两个独立容器不能跨容器合并。</p></div>');
+ assert.ok(!siblings.includes('## 01 '));
  for(const platform of ['抖音','视频号','B站','小红书','小宇宙']){
    const metadata=h.buildTranscriptOnlyMetadata({}, {platform,transcription:noisy,transcriptionStatus:'success'});
    assert.equal(metadata.transcription,speech);
