@@ -16,6 +16,29 @@ const reading=formatTranscriptForReading(text);
 assert.ok(reading.includes('\n\n'));
 assert.equal(reading.replace(/\s/g,''),text);
 assert.equal(formatTranscriptForReading(reading),reading);
+assert.equal(reading.split('\n\n').length,40);
+for(const [input,expected] of [
+ ['第一句，保留逗号。第二句！第三句？','第一句，保留逗号。\n\n第二句！\n\n第三句？'],
+ ['他说：“先保存。”然后重试！','他说：“先保存。”\n\n然后重试！'],
+ ['Version 3.14 is ready. "Save now." Next sentence!','Version 3.14 is ready.\n\n"Save now."\n\nNext sentence!'],
+ ['Visit https://example.com. Next sentence.','Visit https://example.com.\n\nNext sentence.'],
+ ['Mr. Smith saved this note. Next sentence.','Mr. Smith saved this note.\n\nNext sentence.'],
+ ['Dr. Jones met J. Smith in the U.S. office. Save it.','Dr. Jones met J. Smith in the U.S. office.\n\nSave it.'],
+ ['Open https://example.com/path,segment,another and then continue with the remaining detailed instructions','Open https://example.com/path,segment,another and then continue with the remaining detailed instructions'],
+ ['链接 https://example.com/a?q=1&v=3.14 仍需保留。下一句。','链接 https://example.com/a?q=1&v=3.14 仍需保留。\n\n下一句。'],
+ ['先\n打开\n设置。\n然后\n点击\n保存。','先打开设置。\n\n然后点击保存。'],
+ ['hello\nworld.\nSave\nthis\nnote!','hello world.\n\nSave this note!'],
+ ['先在侧边栏找到第三方插件设置，然后点击检查更新按钮完成升级，接下来重新同步刚才的视频链接','先在侧边栏找到第三方插件设置，\n\n然后点击检查更新按钮完成升级，\n\n接下来重新同步刚才的视频链接'],
+ ['好，先打开设置，然后找到本地转写组件，好','好，先打开设置，然后找到本地转写组件，好'],
+ ['保存成功。然后找到插件设置并检查更新，再把刚才的视频重新同步一次','保存成功。\n\n然后找到插件设置并检查更新，\n\n再把刚才的视频重新同步一次'],
+ ['总共有1,000个结果需要同步，随后确认所有结果都已经保存到本地','总共有1,000个结果需要同步，\n\n随后确认所有结果都已经保存到本地'],
+ ['完整词组'.repeat(160),'完整词组'.repeat(160)],
+ ]){
+   const actual=formatTranscriptForReading(input);
+   assert.equal(actual,expected,input);
+   assert.equal(actual.replace(/\s/g,''),input.replace(/\s/g,''));
+   assert.equal(formatTranscriptForReading(actual),actual);
+ }
 const en='This is a complete sentence with decimal 3.14 and normal English words. '.repeat(20).trim();
 assert.equal(formatTranscriptForReading(en).replace(/\s/g,''),en.replace(/\s/g,''));
 assert.ok(formatTranscriptForReading(en).includes('\n\n'));
@@ -84,6 +107,7 @@ try{
    assert.equal(metadata.transcription,speech);
    const body=h.buildAudioTranscriptMarkdown({transcription:noisy,transcriptionStatus:'success'});
    assert.ok(!body.includes('(音乐)')&&!body.includes('CC字幕'));
+   assert.ok(body.includes('联系我们。\n\n以上就是'));
  }
  const metadata=h.buildTranscriptPropertyMetadata({transcription:noisy,title:'课程'});
  assert.ok(!JSON.stringify(metadata).includes('CC字幕'));
