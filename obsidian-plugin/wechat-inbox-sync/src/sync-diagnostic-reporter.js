@@ -122,7 +122,7 @@ function looksLikeEmbeddedCredential(value) {
  */
 function sanitizeSourceLink(value) {
   const raw = String(value || '').trim();
-  if (!raw || raw.length > MAX_SOURCE_LINK_LENGTH) return '';
+  if (!raw || raw.length > 32768) return '';
   let parsed;
   try {
     parsed = new URL(raw);
@@ -130,6 +130,12 @@ function sanitizeSourceLink(value) {
     return '';
   }
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return '';
+  // Keep the reproducible article identity, not temporary WeChat share credentials.
+  if (parsed.hostname === 'mp.weixin.qq.com' && /^\/s(?:\/[^/]+)?$/.test(parsed.pathname)) {
+    const normalized = require('./wechat-article-utils').normalizeWechatArticleUrl(parsed.href);
+    if (!normalized) return '';
+    parsed = new URL(normalized);
+  } else if (raw.length > MAX_SOURCE_LINK_LENGTH) return '';
   if (isPrivateSourceLinkHost(parsed.hostname)) return '';
   if (SOURCE_LINK_MEDIA_PATH.test(parsed.pathname) || SOURCE_LINK_MEDIA_HOST.test(parsed.hostname)) return '';
   for (const [key, valuePart] of [...parsed.searchParams.entries()]) {

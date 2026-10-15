@@ -260,8 +260,8 @@ async function runPipelineTests() {
     fetchStatic: async () => captchaHtml,
     renderBrowser: async () => { browserCalls += 1; return { html: articleHtml }; },
   });
-  assert.strictEqual(browserCalls, 0);
-  assert.strictEqual(captcha.state, 'access_paused');
+  assert.strictEqual(browserCalls, 1);
+  assert.strictEqual(captcha.state, 'complete');
 
   const terminalCaptcha = await runWechatArticlePipeline({
     url: 'https://mp.weixin.qq.com/s/terminal-captcha',

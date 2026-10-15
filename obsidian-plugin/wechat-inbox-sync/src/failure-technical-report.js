@@ -64,14 +64,15 @@ const MEDIA_OUTCOMES = new Set(['success', 'failed', 'cancelled']);
 const MEDIA_COOKIE_STATES = new Set(['saved-unverified', 'not-found', 'unknown']);
 const MEDIA_DEBUGGER_CAPABILITIES = new Set(['present', 'absent', 'unsupported', 'not-eligible', 'unknown']);
 const MEDIA_DEBUGGER_REASONS = new Set(['target-id-missing', 'api-absent', 'api-unsupported', 'unknown']);
-const WECHAT_ARTICLE_STAGES = new Set(['obsidian-request', 'node-fallback', 'wechat-session', 'hidden-browser']);
+const WECHAT_ARTICLE_STAGES = new Set(['obsidian-request', 'node-fallback', 'wechat-session', 'hidden-browser', 'request-guard']);
 const WECHAT_ARTICLE_PAGE_STATES = new Set(['article', 'captcha', 'guide', 'unavailable', 'empty-shell', 'unknown']);
-const WECHAT_ARTICLE_FINAL_STATES = new Set([...WECHAT_ARTICLE_PAGE_STATES, 'body_missing']);
-const WECHAT_ARTICLE_OUTCOMES = new Set(['response', 'error', 'unknown']);
+const WECHAT_ARTICLE_FINAL_STATES = new Set([...WECHAT_ARTICLE_PAGE_STATES, 'body_missing', 'access_paused']);
+const WECHAT_ARTICLE_OUTCOMES = new Set(['response', 'error', 'unknown', 'access_paused']);
 const WECHAT_ARTICLE_FAILURE_CATEGORIES = new Set([
   'extractor-selector-mismatch', 'wechat-verification-required', 'article-unavailable',
   'browser-transport-failed', 'request-profile-sensitive-response',
   'identical-empty-shell-across-request-profiles', 'wechat-empty-shell',
+  'wechat-rate-limited',
 ]);
 function safeDiagnosticEnum(value, allowed) {
   const text = String(value || '').trim();
@@ -114,14 +115,39 @@ function safeWechatArticleCount(value, max = 10_000_000) {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return null;
   return Math.min(value, max);
 }
-function safeWechatArticleExtractionDiagnostic(value) {
+function safeWechatAccessPause(value, policy = false) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const result = {};
+  if (/^[a-f0-9]{24}$/.test(value.incidentId || '')) result.incidentId = value.incidentId;
+  if (/^[a-f0-9]{12,64}$/.test(value.sourceFingerprint || '')) result.sourceFingerprint = value.sourceFingerprint;
+  if (['trigger', 'cooldown'].includes(value.pauseOrigin)) result.pauseOrigin = value.pauseOrigin;
+  if (['article', 'global'].includes(value.scope)) result.scope = value.scope;
+  if (typeof value.requestStarted === 'boolean') result.requestStarted = value.requestStarted;
+  if (['http-429', 'captcha-redirect', 'verification-marker', 'captcha-page'].includes(value.triggerKind)) result.triggerKind = value.triggerKind;
+  if (WECHAT_ARTICLE_STAGES.has(value.triggerStage)) result.triggerStage = value.triggerStage;
+  for (const key of ['retryAfterMs', 'remainingCooldownMs', 'minRequestGapMs']) {
+    const n = safeBoundedNumber(value[key], 24 * 60 * 60 * 1000); if (n !== null) result[key] = n;
+  }
+  const timestamp = safeBoundedNumber(value.triggeredAt, Number.MAX_SAFE_INTEGER); if (timestamp !== null) result.triggeredAt = timestamp;
+  const status = safeBoundedNumber(value.httpStatus, 599); if (status >= 100) result.httpStatus = status;
+  if (policy) { const n = safeBoundedNumber(value.requestCount, 1000000); if (n !== null) result.requestCount = n; }
+  return Object.keys(result).length ? result : null;
+}
+function safeWechatArticleExtractionDiagnostic(value, settings = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.source !== 'wechat-article') return null;
   const result = { component: 'wechat-article' };
   if (value.reason === 'wechat-article-body-missing') result.reasonCode = 'wechat-article-body-missing';
+  if (value.reason === 'wechat-access-paused') result.reasonCode = 'wechat-access-paused';
+  const accessPause = safeWechatAccessPause(value.accessPause);
+  if (accessPause) result.accessPause = accessPause;
+  const requestPolicy = safeWechatAccessPause(value.requestPolicy, true);
+  if (requestPolicy) result.requestPolicy = requestPolicy;
+  const retryAfterMs = safeBoundedNumber(value.retryAfterMs, 24 * 60 * 60 * 1000);
+  if (retryAfterMs !== null) result.retryAfterMs = retryAfterMs;
   if (WECHAT_ARTICLE_FAILURE_CATEGORIES.has(value.failureCategory)) result.failureCategory = value.failureCategory;
   if (value.finalKind === 'retryable' || value.finalKind === 'fallback') result.finalKind = value.finalKind;
   if (WECHAT_ARTICLE_FINAL_STATES.has(value.finalState)) result.finalState = value.finalState;
-  if (['static', 'browser', 'fallback'].includes(value.finalSource)) result.finalSource = value.finalSource;
+  if (['static', 'browser', 'fallback', 'request-guard'].includes(value.finalSource)) result.finalSource = value.finalSource;
   if (WECHAT_ARTICLE_PAGE_STATES.has(value.staticState)) result.staticState = value.staticState;
   if (WECHAT_ARTICLE_PAGE_STATES.has(value.browserState)) result.browserState = value.browserState;
   if (Array.isArray(value.requestProfiles)) result.requestProfileCount = Math.min(value.requestProfiles.length, 8);
@@ -130,7 +156,13 @@ function safeWechatArticleExtractionDiagnostic(value) {
   result.stages = stages.slice(0, 12).flatMap((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item) || !WECHAT_ARTICLE_STAGES.has(item.stage)) return [];
     const stage = { stage: item.stage, outcome: WECHAT_ARTICLE_OUTCOMES.has(item.outcome) ? item.outcome : 'unknown' };
-    if (WECHAT_ARTICLE_PAGE_STATES.has(item.state)) stage.state = item.state;
+    if (WECHAT_ARTICLE_FINAL_STATES.has(item.state)) stage.state = item.state;
+    const pause = safeWechatAccessPause(item.accessPause); if (pause) stage.accessPause = pause;
+    if (item.outcome === 'error' && typeof item.error === 'string') {
+      const message = item.error.replace(/(\bHTTP\s+[1-5]\d{2})\b[\s\S]*/i, '$1 [RESPONSE_BODY_OMITTED]')
+        .replace(/<(?:!doctype|html|body|div|script|article|section|p)\b[\s\S]*/i, '[HTML_RESPONSE_OMITTED]');
+      stage.error = safeDiagnosticText(message, settings, 512);
+    }
     const status = safeWechatArticleCount(item.status, 599);
     if (status !== null && status >= 100) stage.httpStatus = status;
     if (item.statusSource === 'actual' || item.statusSource === 'inferred-success') stage.statusSource = item.statusSource;
@@ -144,9 +176,13 @@ function safeWechatArticleExtractionDiagnostic(value) {
       const evidence = {};
       if (WECHAT_ARTICLE_PAGE_STATES.has(diagnostic.pageKind)) evidence.pageKind = diagnostic.pageKind;
       if (WECHAT_ARTICLE_PAGE_STATES.has(diagnostic.classifiedState)) evidence.classifiedState = diagnostic.classifiedState;
-      for (const key of ['hasHtml', 'hasJsContent']) {
+      for (const key of ['hasHtml', 'hasJsContent', 'verificationMarker', 'unavailableMarker', 'browserStarted', 'loadCompleted', 'bodyFound', 'captchaRedirect']) {
         if (typeof diagnostic[key] === 'boolean') evidence[key] = diagnostic[key];
       }
+      if (['created', 'loading', 'loaded', 'waiting-body', 'extracting', 'complete'].includes(diagnostic.browserPhase)) evidence.browserPhase = diagnostic.browserPhase;
+      if (['article', 'captcha', 'other'].includes(diagnostic.finalPageKind)) evidence.finalPageKind = diagnostic.finalPageKind;
+      const responseStatus = safeWechatArticleCount(diagnostic.httpStatus, 599);
+      if (responseStatus >= 100) evidence.httpStatus = responseStatus;
       for (const key of ['bodyHtmlChars', 'bodyTextChars', 'imageCount', 'mediaCount', 'imageCandidateCount']) {
         const count = safeWechatArticleCount(diagnostic[key], 10_000_000);
         if (count !== null) evidence[key] = count;
@@ -203,6 +239,7 @@ function safeMediaError(value, settings = {}) {
   return Object.keys(result).length ? result : undefined;
 }
 function isMediaResolutionDiagnostic(value) {
+  if (value && value.source === 'wechat-article') return false;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   if (MEDIA_DIAGNOSTIC_SOURCES.has(String(value.source || ''))) return true;
   if (value.platform === 'bilibili' && Array.isArray(value.stages)) return true;
@@ -500,7 +537,7 @@ function safeError(error, settings = {}) {
   };
   const mediaResolutionDiagnostic = safeMediaResolutionDiagnostic(source, settings);
   if (mediaResolutionDiagnostic) value.mediaResolutionDiagnostic = mediaResolutionDiagnostic;
-  const extractionDiagnostic = safeWechatArticleExtractionDiagnostic(source.diagnostic);
+  const extractionDiagnostic = safeWechatArticleExtractionDiagnostic(source.diagnostic, settings);
   if (extractionDiagnostic) value.extractionDiagnostic = extractionDiagnostic;
   return redactTree(value, settings);
 }

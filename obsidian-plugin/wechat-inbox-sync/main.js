@@ -2669,10 +2669,10 @@ var require_failure_technical_report = __commonJS({
     var MEDIA_COOKIE_STATES = /* @__PURE__ */ new Set(["saved-unverified", "not-found", "unknown"]);
     var MEDIA_DEBUGGER_CAPABILITIES = /* @__PURE__ */ new Set(["present", "absent", "unsupported", "not-eligible", "unknown"]);
     var MEDIA_DEBUGGER_REASONS = /* @__PURE__ */ new Set(["target-id-missing", "api-absent", "api-unsupported", "unknown"]);
-    var WECHAT_ARTICLE_STAGES = /* @__PURE__ */ new Set(["obsidian-request", "node-fallback", "wechat-session", "hidden-browser"]);
+    var WECHAT_ARTICLE_STAGES = /* @__PURE__ */ new Set(["obsidian-request", "node-fallback", "wechat-session", "hidden-browser", "request-guard"]);
     var WECHAT_ARTICLE_PAGE_STATES = /* @__PURE__ */ new Set(["article", "captcha", "guide", "unavailable", "empty-shell", "unknown"]);
-    var WECHAT_ARTICLE_FINAL_STATES = /* @__PURE__ */ new Set([...WECHAT_ARTICLE_PAGE_STATES, "body_missing"]);
-    var WECHAT_ARTICLE_OUTCOMES = /* @__PURE__ */ new Set(["response", "error", "unknown"]);
+    var WECHAT_ARTICLE_FINAL_STATES = /* @__PURE__ */ new Set([...WECHAT_ARTICLE_PAGE_STATES, "body_missing", "access_paused"]);
+    var WECHAT_ARTICLE_OUTCOMES = /* @__PURE__ */ new Set(["response", "error", "unknown", "access_paused"]);
     var WECHAT_ARTICLE_FAILURE_CATEGORIES = /* @__PURE__ */ new Set([
       "extractor-selector-mismatch",
       "wechat-verification-required",
@@ -2680,7 +2680,8 @@ var require_failure_technical_report = __commonJS({
       "browser-transport-failed",
       "request-profile-sensitive-response",
       "identical-empty-shell-across-request-profiles",
-      "wechat-empty-shell"
+      "wechat-empty-shell",
+      "wechat-rate-limited"
     ]);
     function safeDiagnosticEnum(value, allowed) {
       const text = String(value || "").trim();
@@ -2730,14 +2731,46 @@ var require_failure_technical_report = __commonJS({
       return Math.min(value, max);
     }
     __name(safeWechatArticleCount, "safeWechatArticleCount");
-    function safeWechatArticleExtractionDiagnostic(value) {
+    function safeWechatAccessPause(value, policy = false) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const result = {};
+      if (/^[a-f0-9]{24}$/.test(value.incidentId || "")) result.incidentId = value.incidentId;
+      if (/^[a-f0-9]{12,64}$/.test(value.sourceFingerprint || "")) result.sourceFingerprint = value.sourceFingerprint;
+      if (["trigger", "cooldown"].includes(value.pauseOrigin)) result.pauseOrigin = value.pauseOrigin;
+      if (["article", "global"].includes(value.scope)) result.scope = value.scope;
+      if (typeof value.requestStarted === "boolean") result.requestStarted = value.requestStarted;
+      if (["http-429", "captcha-redirect", "verification-marker", "captcha-page"].includes(value.triggerKind)) result.triggerKind = value.triggerKind;
+      if (WECHAT_ARTICLE_STAGES.has(value.triggerStage)) result.triggerStage = value.triggerStage;
+      for (const key of ["retryAfterMs", "remainingCooldownMs", "minRequestGapMs"]) {
+        const n = safeBoundedNumber(value[key], 24 * 60 * 60 * 1e3);
+        if (n !== null) result[key] = n;
+      }
+      const timestamp = safeBoundedNumber(value.triggeredAt, Number.MAX_SAFE_INTEGER);
+      if (timestamp !== null) result.triggeredAt = timestamp;
+      const status = safeBoundedNumber(value.httpStatus, 599);
+      if (status >= 100) result.httpStatus = status;
+      if (policy) {
+        const n = safeBoundedNumber(value.requestCount, 1e6);
+        if (n !== null) result.requestCount = n;
+      }
+      return Object.keys(result).length ? result : null;
+    }
+    __name(safeWechatAccessPause, "safeWechatAccessPause");
+    function safeWechatArticleExtractionDiagnostic(value, settings = {}) {
       if (!value || typeof value !== "object" || Array.isArray(value) || value.source !== "wechat-article") return null;
       const result = { component: "wechat-article" };
       if (value.reason === "wechat-article-body-missing") result.reasonCode = "wechat-article-body-missing";
+      if (value.reason === "wechat-access-paused") result.reasonCode = "wechat-access-paused";
+      const accessPause = safeWechatAccessPause(value.accessPause);
+      if (accessPause) result.accessPause = accessPause;
+      const requestPolicy = safeWechatAccessPause(value.requestPolicy, true);
+      if (requestPolicy) result.requestPolicy = requestPolicy;
+      const retryAfterMs = safeBoundedNumber(value.retryAfterMs, 24 * 60 * 60 * 1e3);
+      if (retryAfterMs !== null) result.retryAfterMs = retryAfterMs;
       if (WECHAT_ARTICLE_FAILURE_CATEGORIES.has(value.failureCategory)) result.failureCategory = value.failureCategory;
       if (value.finalKind === "retryable" || value.finalKind === "fallback") result.finalKind = value.finalKind;
       if (WECHAT_ARTICLE_FINAL_STATES.has(value.finalState)) result.finalState = value.finalState;
-      if (["static", "browser", "fallback"].includes(value.finalSource)) result.finalSource = value.finalSource;
+      if (["static", "browser", "fallback", "request-guard"].includes(value.finalSource)) result.finalSource = value.finalSource;
       if (WECHAT_ARTICLE_PAGE_STATES.has(value.staticState)) result.staticState = value.staticState;
       if (WECHAT_ARTICLE_PAGE_STATES.has(value.browserState)) result.browserState = value.browserState;
       if (Array.isArray(value.requestProfiles)) result.requestProfileCount = Math.min(value.requestProfiles.length, 8);
@@ -2745,7 +2778,13 @@ var require_failure_technical_report = __commonJS({
       result.stages = stages.slice(0, 12).flatMap((item) => {
         if (!item || typeof item !== "object" || Array.isArray(item) || !WECHAT_ARTICLE_STAGES.has(item.stage)) return [];
         const stage = { stage: item.stage, outcome: WECHAT_ARTICLE_OUTCOMES.has(item.outcome) ? item.outcome : "unknown" };
-        if (WECHAT_ARTICLE_PAGE_STATES.has(item.state)) stage.state = item.state;
+        if (WECHAT_ARTICLE_FINAL_STATES.has(item.state)) stage.state = item.state;
+        const pause = safeWechatAccessPause(item.accessPause);
+        if (pause) stage.accessPause = pause;
+        if (item.outcome === "error" && typeof item.error === "string") {
+          const message = item.error.replace(/(\bHTTP\s+[1-5]\d{2})\b[\s\S]*/i, "$1 [RESPONSE_BODY_OMITTED]").replace(/<(?:!doctype|html|body|div|script|article|section|p)\b[\s\S]*/i, "[HTML_RESPONSE_OMITTED]");
+          stage.error = safeDiagnosticText(message, settings, 512);
+        }
         const status = safeWechatArticleCount(item.status, 599);
         if (status !== null && status >= 100) stage.httpStatus = status;
         if (item.statusSource === "actual" || item.statusSource === "inferred-success") stage.statusSource = item.statusSource;
@@ -2758,9 +2797,13 @@ var require_failure_technical_report = __commonJS({
           const evidence = {};
           if (WECHAT_ARTICLE_PAGE_STATES.has(diagnostic.pageKind)) evidence.pageKind = diagnostic.pageKind;
           if (WECHAT_ARTICLE_PAGE_STATES.has(diagnostic.classifiedState)) evidence.classifiedState = diagnostic.classifiedState;
-          for (const key of ["hasHtml", "hasJsContent"]) {
+          for (const key of ["hasHtml", "hasJsContent", "verificationMarker", "unavailableMarker", "browserStarted", "loadCompleted", "bodyFound", "captchaRedirect"]) {
             if (typeof diagnostic[key] === "boolean") evidence[key] = diagnostic[key];
           }
+          if (["created", "loading", "loaded", "waiting-body", "extracting", "complete"].includes(diagnostic.browserPhase)) evidence.browserPhase = diagnostic.browserPhase;
+          if (["article", "captcha", "other"].includes(diagnostic.finalPageKind)) evidence.finalPageKind = diagnostic.finalPageKind;
+          const responseStatus = safeWechatArticleCount(diagnostic.httpStatus, 599);
+          if (responseStatus >= 100) evidence.httpStatus = responseStatus;
           for (const key of ["bodyHtmlChars", "bodyTextChars", "imageCount", "mediaCount", "imageCandidateCount"]) {
             const count = safeWechatArticleCount(diagnostic[key], 1e7);
             if (count !== null) evidence[key] = count;
@@ -2816,6 +2859,7 @@ var require_failure_technical_report = __commonJS({
     }
     __name(safeMediaError, "safeMediaError");
     function isMediaResolutionDiagnostic(value) {
+      if (value && value.source === "wechat-article") return false;
       if (!value || typeof value !== "object" || Array.isArray(value)) return false;
       if (MEDIA_DIAGNOSTIC_SOURCES.has(String(value.source || ""))) return true;
       if (value.platform === "bilibili" && Array.isArray(value.stages)) return true;
@@ -3113,7 +3157,7 @@ var require_failure_technical_report = __commonJS({
       };
       const mediaResolutionDiagnostic = safeMediaResolutionDiagnostic(source, settings);
       if (mediaResolutionDiagnostic) value.mediaResolutionDiagnostic = mediaResolutionDiagnostic;
-      const extractionDiagnostic = safeWechatArticleExtractionDiagnostic(source.diagnostic);
+      const extractionDiagnostic = safeWechatArticleExtractionDiagnostic(source.diagnostic, settings);
       if (extractionDiagnostic) value.extractionDiagnostic = extractionDiagnostic;
       return redactTree(value, settings);
     }
@@ -3777,7 +3821,7 @@ var require_sync_diagnostic_reporter = __commonJS({
     __name(looksLikeEmbeddedCredential, "looksLikeEmbeddedCredential");
     function sanitizeSourceLink2(value) {
       const raw = String(value || "").trim();
-      if (!raw || raw.length > MAX_SOURCE_LINK_LENGTH) return "";
+      if (!raw || raw.length > 32768) return "";
       let parsed;
       try {
         parsed = new URL(raw);
@@ -3785,6 +3829,11 @@ var require_sync_diagnostic_reporter = __commonJS({
         return "";
       }
       if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return "";
+      if (parsed.hostname === "mp.weixin.qq.com" && /^\/s(?:\/[^/]+)?$/.test(parsed.pathname)) {
+        const normalized2 = require_wechat_article_utils().normalizeWechatArticleUrl(parsed.href);
+        if (!normalized2) return "";
+        parsed = new URL(normalized2);
+      } else if (raw.length > MAX_SOURCE_LINK_LENGTH) return "";
       if (isPrivateSourceLinkHost(parsed.hostname)) return "";
       if (SOURCE_LINK_MEDIA_PATH.test(parsed.pathname) || SOURCE_LINK_MEDIA_HOST.test(parsed.hostname)) return "";
       for (const [key, valuePart] of [...parsed.searchParams.entries()]) {
@@ -7772,6 +7821,7 @@ var require_wechat_request_gate = __commonJS({
   "src/wechat-request-gate.js"(exports2, module2) {
     "use strict";
     var { classifyWechatArticleHtml } = require_wechat_article_utils();
+    var { randomBytes } = require("crypto");
     var WECHAT_REQUEST_GAP_MS = 1500;
     var WECHAT_RISK_COOLDOWN_MS = 10 * 60 * 1e3;
     function isWechatAccessPaused2(error) {
@@ -7799,8 +7849,14 @@ var require_wechat_request_gate = __commonJS({
       let blockedUntil = 0;
       let reason = "";
       let requestCount = 0;
-      const paused = /* @__PURE__ */ __name(() => Object.assign(new Error("微信要求验证或限制访问，已暂停公众号抓取。请稍后在微信中确认可正常打开，再重试；请勿连续点击重试。"), { code: "WECHAT_ACCESS_PAUSED", retryAfterMs: Math.max(0, blockedUntil - now()), reason }), "paused");
-      const markRisk = /* @__PURE__ */ __name((value) => {
+      let incident = null;
+      const paused = /* @__PURE__ */ __name((pauseOrigin = "cooldown") => Object.assign(new Error("公众号访问暂时暂停"), {
+        code: "WECHAT_ACCESS_PAUSED",
+        retryAfterMs: Math.max(0, blockedUntil - now()),
+        reason,
+        accessPause: { ...incident, pauseOrigin, requestStarted: pauseOrigin === "trigger", retryAfterMs: Math.max(0, blockedUntil - now()) }
+      }), "paused");
+      const markRisk = /* @__PURE__ */ __name((value, context = {}) => {
         var _a;
         const status = Number(value && (value.status || value.statusCode)) || (/\b(?:HTTP|status)\s*[:=]?\s*429\b/i.test(String((value == null ? void 0 : value.message) || "")) ? 429 : 0);
         const html = typeof value === "string" ? value : String(value && (value.text || value.html || value.markdown) || "");
@@ -7813,20 +7869,52 @@ var require_wechat_request_gate = __commonJS({
         } catch (_) {
         }
         if (status === 429 || verification || captchaRedirect || !completedBrowserArticle && html && classifyWechatArticleHtml(html) === "captcha") {
-          reason = status === 429 ? "wechat-rate-limited" : "wechat-verification-required";
-          blockedUntil = Math.max(blockedUntil, now() + cooldownMs);
-          throw paused();
+          const riskReason = status === 429 ? "wechat-rate-limited" : "wechat-verification-required";
+          const riskIncident = {
+            incidentId: randomBytes(12).toString("hex"),
+            triggeredAt: now(),
+            scope: status === 429 ? "global" : "article",
+            triggerKind: status === 429 ? "http-429" : captchaRedirect ? "captcha-redirect" : verification ? "verification-marker" : "captcha-page",
+            triggerStage: context.stage || "unknown",
+            sourceFingerprint: /^[a-f0-9]{12,64}$/.test(context.sourceFingerprint || "") ? context.sourceFingerprint : "",
+            ...status >= 100 && status <= 599 ? { httpStatus: status } : {}
+          };
+          if (status === 429) {
+            reason = riskReason;
+            blockedUntil = Math.max(blockedUntil, now() + cooldownMs);
+            incident = riskIncident;
+          }
+          throw Object.assign(new Error("公众号访问受限"), {
+            code: "WECHAT_ACCESS_PAUSED",
+            reason: riskReason,
+            retryAfterMs: status === 429 ? Math.max(0, blockedUntil - now()) : 0,
+            accessPause: {
+              ...riskIncident,
+              pauseOrigin: "trigger",
+              requestStarted: true,
+              retryAfterMs: status === 429 ? Math.max(0, blockedUntil - now()) : 0
+            },
+            ...(value == null ? void 0 : value.wechatArticleDiagnostic) ? { wechatArticleDiagnostic: value.wechatArticleDiagnostic } : {}
+          });
         }
       }, "markRisk");
       return {
-        snapshot: /* @__PURE__ */ __name(() => ({ minRequestGapMs: gapMs, remainingCooldownMs: Math.max(0, blockedUntil - now()), requestCount, reason }), "snapshot"),
-        run(operation, { signal } = {}) {
+        snapshot: /* @__PURE__ */ __name(() => ({ minRequestGapMs: gapMs, remainingCooldownMs: Math.max(0, blockedUntil - now()), requestCount, reason, ...incident || {} }), "snapshot"),
+        confirmRecovery(incidentId) {
+          if (reason === "wechat-rate-limited") return false;
+          if (!incidentId || (incident == null ? void 0 : incident.incidentId) !== incidentId) return false;
+          blockedUntil = 0;
+          reason = "";
+          incident = null;
+          return true;
+        },
+        run(operation, { signal, context = {} } = {}) {
           const aborted = /* @__PURE__ */ __name(() => {
             if (signal == null ? void 0 : signal.aborted) throw Object.assign(new Error("Aborted"), { name: "AbortError" });
           }, "aborted");
           let pendingTransport = Promise.resolve();
           const holdUntil = /* @__PURE__ */ __name((promise) => {
-            pendingTransport = Promise.resolve(promise).then(markRisk, markRisk).catch(() => {
+            pendingTransport = Promise.resolve(promise).then((v) => markRisk(v, context), (e) => markRisk(e, context)).catch(() => {
             });
           }, "holdUntil");
           const result = queue.then(async () => {
@@ -7839,11 +7927,11 @@ var require_wechat_request_gate = __commonJS({
             try {
               requestCount += 1;
               const result2 = await operation({ holdUntil });
-              markRisk(result2);
+              markRisk(result2, context);
               aborted();
               return result2;
             } catch (error) {
-              if (!isWechatAccessPaused2(error)) markRisk(error);
+              if (!isWechatAccessPaused2(error)) markRisk(error, context);
               throw error;
             } finally {
               nextAt = now() + gapMs;
@@ -7866,10 +7954,149 @@ var require_wechat_request_gate = __commonJS({
     }
     __name(createWechatArticleRequestGate2, "createWechatArticleRequestGate");
     function buildWechatAccessPausedResult(error, attempts = []) {
-      return { kind: "retryable", state: "access_paused", source: "request-guard", diagnostic: { reason: "wechat-access-paused", failureCategory: error.reason || "wechat-verification-required", retryAfterMs: error.retryAfterMs || WECHAT_RISK_COOLDOWN_MS, attempts, retryable: true } };
+      return { kind: "retryable", state: "access_paused", source: "request-guard", diagnostic: { reason: "wechat-access-paused", failureCategory: error.reason || "wechat-verification-required", retryAfterMs: error.retryAfterMs ?? (error.reason === "wechat-rate-limited" ? WECHAT_RISK_COOLDOWN_MS : 0), ...error.accessPause ? { accessPause: error.accessPause } : {}, attempts, retryable: true } };
     }
     __name(buildWechatAccessPausedResult, "buildWechatAccessPausedResult");
-    module2.exports = { assertWechatTransportResponse: assertWechatTransportResponse2, createWechatArticleRequestGate: createWechatArticleRequestGate2, isWechatAccessPaused: isWechatAccessPaused2, buildWechatAccessPausedResult, WECHAT_REQUEST_GAP_MS, WECHAT_RISK_COOLDOWN_MS };
+    function wechatAccessPauseMessage2(diagnostic = {}) {
+      const pause = diagnostic.accessPause || {};
+      const minutes = Math.max(1, Math.ceil(Number(pause.retryAfterMs || diagnostic.retryAfterMs || WECHAT_RISK_COOLDOWN_MS) / 6e4));
+      if (pause.pauseOrigin === "cooldown") return `受前一次公众号访问限制影响，已暂停公众号抓取；本条尚未重新请求，不能据此判断这篇文章无法访问。约 ${minutes} 分钟后可重试，或到插件设置“公众号访问验证”处理。`;
+      if (diagnostic.failureCategory === "wechat-rate-limited") return `微信返回访问频率限制（HTTP 429），已暂停公众号抓取约 ${minutes} 分钟。请等待后重试，不要连续点击。`;
+      return "这篇公众号文章暂时无法读取，访问时遇到验证提示；其他内容将继续同步。可在插件设置“公众号访问验证”打开原文查看；若页面提供验证，请按页面操作；没有验证入口时无需反复重试。";
+    }
+    __name(wechatAccessPauseMessage2, "wechatAccessPauseMessage");
+    module2.exports = { assertWechatTransportResponse: assertWechatTransportResponse2, createWechatArticleRequestGate: createWechatArticleRequestGate2, isWechatAccessPaused: isWechatAccessPaused2, buildWechatAccessPausedResult, wechatAccessPauseMessage: wechatAccessPauseMessage2, WECHAT_REQUEST_GAP_MS, WECHAT_RISK_COOLDOWN_MS };
+  }
+});
+
+// src/wechat-access-recovery.js
+var require_wechat_access_recovery = __commonJS({
+  "src/wechat-access-recovery.js"(exports2, module2) {
+    "use strict";
+    var { normalizeWechatArticleUrl: normalizeWechatArticleUrl2 } = require_wechat_article_utils();
+    function articleIdentity2(value) {
+      try {
+        const url = new URL(String(value || "").trim());
+        if (url.protocol !== "https:" || url.hostname !== "mp.weixin.qq.com" || url.username || url.password || url.port) return "";
+        const normalized = normalizeWechatArticleUrl2(url.href);
+        if (!normalized) return "";
+        const target = new URL(normalized);
+        if (target.pathname === "/s") {
+          if (!["__biz", "mid", "idx", "sn"].every((k) => target.searchParams.get(k))) return "";
+          for (const k of [...target.searchParams.keys()]) if (!["__biz", "mid", "idx", "sn"].includes(k)) target.searchParams.delete(k);
+        }
+        return target.href;
+      } catch (_) {
+        return "";
+      }
+    }
+    __name(articleIdentity2, "articleIdentity");
+    function createVerifiedArticleCache2({ now = Date.now, ttlMs = 5 * 60 * 1e3 } = {}) {
+      let entry = null, timer = null;
+      const clear = /* @__PURE__ */ __name(() => {
+        entry = null;
+        if (timer) clearTimeout(timer);
+        timer = null;
+      }, "clear");
+      return {
+        clear,
+        put(url, result) {
+          var _a;
+          const key = articleIdentity2(url);
+          if (!key || !(result == null ? void 0 : result.bodyFound) || !String(result.markdown || "").trim()) return false;
+          clear();
+          entry = { key, result, expiresAt: now() + ttlMs };
+          timer = setTimeout(clear, ttlMs);
+          (_a = timer.unref) == null ? void 0 : _a.call(timer);
+          return true;
+        },
+        peek(url) {
+          if (entry && now() >= entry.expiresAt) clear();
+          if (!entry || entry.key !== articleIdentity2(url)) return null;
+          return entry.result;
+        },
+        take(url, expected) {
+          if (!this.peek(url) || expected && entry.result !== expected) return null;
+          const result = entry.result;
+          clear();
+          return result;
+        }
+      };
+    }
+    __name(createVerifiedArticleCache2, "createVerifiedArticleCache");
+    function openWechatArticleVerification2({ url, BrowserWindow, session, renderArticle, gate, onWindow = /* @__PURE__ */ __name(() => {
+    }, "onWindow"), timeoutMs = 5 * 60 * 1e3, pollMs = 1e3 }) {
+      const target = articleIdentity2(url);
+      if (!target || !BrowserWindow || !session) return Promise.reject(new Error("请粘贴完整的微信公众号文章 HTTPS 链接，并在桌面版 Obsidian 中打开。"));
+      const epoch = gate.snapshot().incidentId;
+      return new Promise((resolve, reject) => {
+        const controller = new AbortController();
+        let settled = false, checking = false, timer, interval;
+        const win = new BrowserWindow({ width: 900, height: 800, show: true, title: "公众号访问验证 — 完成验证后将自动检查正文", webPreferences: { session, contextIsolation: true, nodeIntegration: false, sandbox: true } });
+        onWindow(win);
+        const wc = win.webContents;
+        const finish = /* @__PURE__ */ __name((error, result) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          clearInterval(interval);
+          controller.abort();
+          wc.removeListener("did-finish-load", check);
+          for (const event of ["will-navigate", "will-frame-navigate", "will-redirect"]) wc.removeListener(event, guard);
+          win.removeListener("closed", closed);
+          if (!win.isDestroyed()) win.destroy();
+          onWindow(null);
+          if (error) reject(error);
+          else resolve(result);
+        }, "finish");
+        const closed = /* @__PURE__ */ __name(() => finish(null, { verified: false }), "closed");
+        const guard = /* @__PURE__ */ __name((event, navigation) => {
+          const value = typeof navigation === "string" ? navigation : (navigation == null ? void 0 : navigation.url) || (event == null ? void 0 : event.url);
+          try {
+            const u = new URL(value);
+            if (u.protocol === "https:" && u.hostname === "mp.weixin.qq.com" && !u.username && !u.password && !u.port) return;
+          } catch (_) {
+          }
+          event.preventDefault();
+        }, "guard");
+        const check = /* @__PURE__ */ __name(async () => {
+          if (settled || checking || win.isDestroyed() || articleIdentity2(wc.getURL()) !== target) return;
+          checking = true;
+          try {
+            const ready = await wc.executeJavaScript(`(() => { const root = document.querySelector('#js_content'); return Boolean(root && (String(root.innerText || root.textContent || '').trim() || root.querySelector('img,video,audio'))); })()`);
+            if (!ready || settled || win.isDestroyed() || articleIdentity2(wc.getURL()) !== target) return;
+            const result = await renderArticle(target, { signal: controller.signal });
+            if (settled || win.isDestroyed() || articleIdentity2(wc.getURL()) !== target) return;
+            if ((result == null ? void 0 : result.bodyFound) && String(result.markdown || "").trim()) {
+              const cooldownCleared = gate.confirmRecovery(epoch);
+              finish(null, { verified: true, cooldownCleared, url: target, result });
+            }
+          } catch (_) {
+            clearInterval(interval);
+            wc.removeListener("did-finish-load", check);
+            finish(new Error("页面已打开，但插件仍未能提取正文；本次未解除访问保护，请保留诊断信息。"));
+          } finally {
+            checking = false;
+          }
+        }, "check");
+        if (typeof wc.removeAllListeners !== "function" || typeof wc.setWindowOpenHandler !== "function") {
+          finish(new Error("无法隔离公众号验证窗口的跳转处理"));
+          return;
+        }
+        for (const event of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
+          wc.removeAllListeners(event);
+          wc.on(event, guard);
+        }
+        wc.setWindowOpenHandler(() => ({ action: "deny" }));
+        wc.on("did-finish-load", check);
+        win.on("closed", closed);
+        interval = setInterval(check, pollMs);
+        timer = setTimeout(() => finish(new Error("验证窗口已超时；未确认正文恢复，访问保护保持不变。")), timeoutMs);
+        Promise.resolve(win.loadURL(target)).catch(() => finish(new Error("原文打开失败；访问保护保持不变。")));
+      });
+    }
+    __name(openWechatArticleVerification2, "openWechatArticleVerification");
+    module2.exports = { articleIdentity: articleIdentity2, createVerifiedArticleCache: createVerifiedArticleCache2, openWechatArticleVerification: openWechatArticleVerification2 };
   }
 });
 
@@ -14367,7 +14594,7 @@ var require_wechat_article_pipeline = __commonJS({
       "token"
     ]);
     function redactDiagnosticText2(value) {
-      return String(value || "").replace(/https?:\/\/[^\s"'<>]+/gi, (match) => {
+      return String(value || "").replace(/(\bHTTP\s+[1-5]\d{2})\b[\s\S]*/i, "$1 [RESPONSE_BODY_OMITTED]").replace(/<(?:!doctype|html|body|div|script|article|section|p)\b[\s\S]*/i, "[HTML_RESPONSE_OMITTED]").replace(/https?:\/\/[^\s"'<>]+/gi, (match) => {
         try {
           const parsed = new URL(match);
           for (const name of Array.from(parsed.searchParams.keys())) parsed.searchParams.set(name, "[REDACTED]");
@@ -14585,7 +14812,8 @@ var require_wechat_article_pipeline = __commonJS({
       url = "",
       fetchStatic,
       renderBrowser,
-      isUsableBrowserArticle
+      isUsableBrowserArticle,
+      preferVerifiedBrowser = false
     } = {}) {
       if (typeof fetchStatic !== "function") throw new Error("fetchStatic is required");
       const normalizedUrl = normalizeWechatArticleUrl2(url);
@@ -14597,7 +14825,8 @@ var require_wechat_article_pipeline = __commonJS({
       let lastStaticDiagnostic = null;
       let terminalState = "";
       let terminalHtml = "";
-      for (const profile of requestProfiles) {
+      let staticVerification = null;
+      for (const profile of preferVerifiedBrowser ? [] : requestProfiles) {
         const safeProfile = getSafeProfileDiagnostic(profile);
         try {
           const staticResult = normalizeStaticResult(await fetchStatic(profile.url, profile));
@@ -14617,7 +14846,10 @@ var require_wechat_article_pipeline = __commonJS({
             responseSignature: getResponseSignature(staticDiagnostic),
             ...Object.keys(staticResult.diagnostic).length ? { transportDiagnostic: sanitizeDiagnosticValue2(staticResult.diagnostic) } : {}
           });
-          if (staticState === "captcha") return buildWechatAccessPausedResult({ reason: "wechat-verification-required" }, attempts);
+          if (staticState === "captcha") {
+            staticVerification = { reason: "wechat-verification-required", retryAfterMs: 0 };
+            break;
+          }
           if (staticState === "article") {
             clearFailure(normalizedUrl);
             return {
@@ -14648,6 +14880,10 @@ var require_wechat_article_pipeline = __commonJS({
           if (staticError && staticError.name === "AbortError") throw staticError;
           if (isWechatAccessPaused2(staticError)) {
             attempts.push({ channel: "static", ...safeProfile, outcome: "access_paused", error: getSafeErrorMessage(staticError) });
+            if (staticError.reason === "wechat-verification-required") {
+              staticVerification = staticError;
+              break;
+            }
             return buildWechatAccessPausedResult(staticError, attempts);
           }
           attempts.push({
@@ -14660,8 +14896,9 @@ var require_wechat_article_pipeline = __commonJS({
       }
       let lastBrowserState = "";
       let lastBrowserError = null;
+      if (staticVerification && typeof renderBrowser !== "function") return buildWechatAccessPausedResult(staticVerification, attempts);
       if (typeof renderBrowser === "function") {
-        for (const profile of requestProfiles) {
+        for (const profile of staticVerification ? requestProfiles.slice(0, 1) : requestProfiles) {
           const safeProfile = getSafeProfileDiagnostic(profile);
           try {
             const browser = normalizeBrowserResult(await renderBrowser(profile.url, profile));
@@ -18076,7 +18313,8 @@ var {
 var douyinDiagnostic = require_douyin_diagnostic_utils();
 var { summarizeResolverAttempts, hasFeishuActivity } = require_component_diagnostic_summary();
 var xhsDiagnostic = require_xiaohongshu_diagnostic_utils();
-var { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse } = require_wechat_request_gate();
+var { createWechatArticleRequestGate, isWechatAccessPaused, assertWechatTransportResponse, wechatAccessPauseMessage } = require_wechat_request_gate();
+var { articleIdentity, createVerifiedArticleCache, openWechatArticleVerification } = require_wechat_access_recovery();
 var sharedWechatArticleGate = createWechatArticleRequestGate();
 var childProcess = require("child_process");
 var dns = require("dns");
@@ -18330,7 +18568,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.187";
+var PLUGIN_RUNTIME_VERSION = "1.3.188";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -20598,7 +20836,7 @@ function isRetryableXiaohongshuContentError(error) {
 __name(isRetryableXiaohongshuContentError, "isRetryableXiaohongshuContentError");
 function createRetryableWechatArticleContentError(diagnostic = {}) {
   const error = new Error("微信公众号内容提取失败，已保留记录。请在小程序“同步记录”中点击“重试”，再回到 Obsidian 同步。");
-  if (diagnostic.reason === "wechat-access-paused") error.message = "微信要求验证或限制访问，已暂停公众号抓取。请稍后在微信中确认可正常打开，再到同步记录重试；请勿连续重试。";
+  if (diagnostic.reason === "wechat-access-paused") error.message = wechatAccessPauseMessage(diagnostic);
   error.retryable = true;
   error.code = "WECHAT_ARTICLE_BODY_MISSING";
   error.diagnostic = redactSensitiveObject(
@@ -28705,6 +28943,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
   });
   installExternalAppNavigationGuards(win.webContents);
   const cleanupAbort = bindBrowserWindowToAbortSignal(win, options.signal);
+  const browserTrace = { browserStarted: true, loadCompleted: false, bodyFound: false, browserPhase: "created" };
   let mainResponse = null;
   const onMainResponse = /* @__PURE__ */ __name((_event, finalUrl, status) => {
     mainResponse = { url: finalUrl, status };
@@ -28725,10 +28964,14 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
       win.webContents.setUserAgent(userAgent);
     }
     const loaded = waitForWebContents(win.webContents);
+    browserTrace.browserPhase = "loading";
     await win.loadURL(url, { userAgent });
     await loaded;
+    browserTrace.loadCompleted = true;
+    browserTrace.browserPhase = "loaded";
     throwIfAborted(options.signal);
     assertWechatTransportResponse(mainResponse);
+    browserTrace.browserPhase = "waiting-body";
     const bodyReady = await win.webContents.executeJavaScript(`
       (async () => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -28791,7 +29034,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
             visibleTextChars: bodyText.length,
             imageCount: root ? root.querySelectorAll('img').length : 0,
             pageTitleKind: clean(document.title || '') ? 'present' : 'missing',
-            verificationMarker: /环境异常|安全验证|完成验证|访问频繁|去验证/.test(bodyText),
+            verificationMarker: !root && ((/环境异常|安全验证/.test(bodyText) && /完成验证|去验证/.test(bodyText)) || /访问(?:过于)?频繁|操作(?:过于)?频繁/.test(bodyText)),
             unavailableMarker: /内容不存在|已删除|暂时无法查看|加载失败/.test(bodyText),
           };
         })()
@@ -28805,6 +29048,7 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
       };
       throw error;
     }
+    browserTrace.browserPhase = "extracting";
     const result = await win.webContents.executeJavaScript(`
       (() => {
         const clean = (value) => String(value || '')
@@ -28859,13 +29103,31 @@ async function renderWechatArticleToMarkdownWithElectron(url, options = {}) {
       throw new Error("微信公众号页面未返回 #js_content 正文");
     }
     result.bodyFound = true;
+    browserTrace.bodyFound = true;
+    browserTrace.browserPhase = "complete";
     result.diagnostic = {
       ...result.diagnostic || {},
+      ...browserTrace,
       requestProfile,
       userAgentProfile,
       finalHost: getSafeUrlDiagnostic(win.webContents && win.webContents.getURL ? win.webContents.getURL() : url).host
     };
     return result;
+  } catch (error) {
+    let finalPageKind = "other";
+    try {
+      const target = new URL((mainResponse == null ? void 0 : mainResponse.url) || win.webContents.getURL());
+      finalPageKind = target.hostname === "mp.weixin.qq.com" && /^\/mp\/wappoc_appmsgcaptcha\b/.test(target.pathname) ? "captcha" : articleIdentity(target.href) ? "article" : "other";
+    } catch (_) {
+    }
+    error.wechatArticleDiagnostic = {
+      ...error.wechatArticleDiagnostic || {},
+      ...browserTrace,
+      finalPageKind,
+      captchaRedirect: finalPageKind === "captcha",
+      ...Number(mainResponse == null ? void 0 : mainResponse.status) >= 100 ? { httpStatus: Number(mainResponse.status) } : {}
+    };
+    throw error;
   } finally {
     if (win.webContents && typeof win.webContents.removeListener === "function") win.webContents.removeListener("did-navigate", onMainResponse);
     cleanupAbort();
@@ -32654,6 +32916,16 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       callback: /* @__PURE__ */ __name(() => this.syncInbox(), "callback")
     });
     this.addCommand({
+      id: "verify-wechat-article-access",
+      name: "处理公众号访问验证",
+      callback: /* @__PURE__ */ __name(() => this.verifyWechatArticleAccess(), "callback")
+    });
+    this.register(() => {
+      var _a;
+      (_a = this.wechatVerifiedArticleCache) == null ? void 0 : _a.clear();
+      if (this.wechatVerificationWindow && !this.wechatVerificationWindow.isDestroyed()) this.wechatVerificationWindow.destroy();
+    });
+    this.addCommand({
       id: "recover-wechat-article-placeholder",
       name: "重新提取当前失败的公众号笔记",
       callback: /* @__PURE__ */ __name(() => this.recoverCurrentWechatArticlePlaceholder(), "callback")
@@ -32844,6 +33116,39 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   setTranscriptionStopAvailable(available) {
     if (!this.transcriptionStopRibbon || !this.transcriptionStopRibbon.style) return;
     this.transcriptionStopRibbon.style.display = "";
+  }
+  async verifyWechatArticleAccess(targetUrl = "") {
+    var _a;
+    if (this.wechatVerificationWindow && !this.wechatVerificationWindow.isDestroyed()) {
+      this.wechatVerificationWindow.focus();
+      return;
+    }
+    const url = targetUrl || this.wechatAccessRecoveryUrl || ((_a = this.lastSyncDiagnostic) == null ? void 0 : _a.sourceUrl);
+    if (!articleIdentity(url)) {
+      new Notice("请在插件设置“公众号访问验证”中粘贴失败文章的完整链接。", 8e3);
+      return;
+    }
+    try {
+      const verified = await openWechatArticleVerification({
+        url,
+        BrowserWindow: getElectronBrowserWindow(),
+        session: getWechatSession(),
+        gate: this.wechatArticleRequestGate || sharedWechatArticleGate,
+        renderArticle: /* @__PURE__ */ __name((target, options) => this.renderWechatArticleWithElectron(target, options), "renderArticle"),
+        onWindow: /* @__PURE__ */ __name((win) => {
+          this.wechatVerificationWindow = win;
+        }, "onWindow")
+      });
+      if (!verified.verified) {
+        new Notice("未确认正文恢复，验证窗口已关闭。");
+        return;
+      }
+      this.wechatVerifiedArticleCache ||= createVerifiedArticleCache();
+      this.wechatVerifiedArticleCache.put(verified.url, verified.result);
+      new Notice("已确认这篇文章可提取。请在5分钟内到小程序同步历史重试该篇，再回到 Obsidian 同步。" + (verified.cooldownCleared ? "" : "其他文章若仍处于访问暂停，请等待冷却。"), 15e3);
+    } catch (error) {
+      new Notice(error.message || "公众号验证未完成", 12e3);
+    }
   }
   async checkWechatLogin() {
     try {
@@ -38889,6 +39194,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     };
   }
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null, options = {}) {
+    var _a;
     const signal = options.signal || null;
     throwIfAborted(signal);
     const metadata = record.metadata || {};
@@ -40381,10 +40687,28 @@ ${finalized.markdown}
       }
       if (isWechatArticleUrl(url)) {
         const requestGate = this.wechatArticleRequestGate || sharedWechatArticleGate;
-        const pacedRequestUrl = /* @__PURE__ */ __name((requestOptions) => requestGate.run(() => requestUrl(requestOptions), { signal: options.signal }), "pacedRequestUrl");
-        const pacedNodeHtml = /* @__PURE__ */ __name((...args) => requestGate.run(() => this.downloadWebpageHtmlViaNode(...args), { signal: options.signal }), "pacedNodeHtml");
-        const pacedSessionHtml = /* @__PURE__ */ __name((targetUrl, headers) => requestGate.run(({ holdUntil }) => this.downloadWechatArticleHtmlViaSession(targetUrl, headers, { signal: options.signal, onPendingRequest: holdUntil }), { signal: options.signal }), "pacedSessionHtml");
-        const pacedBrowser = /* @__PURE__ */ __name((targetUrl, renderOptions) => requestGate.run(() => this.renderWechatArticleWithElectron(targetUrl, { ...renderOptions, signal: options.signal }), { signal: options.signal }), "pacedBrowser");
+        const sourceFingerprint = crypto.createHash("sha256").update(articleIdentity(url) || normalizeWechatArticleUrl(url)).digest("hex").slice(0, 24);
+        throwIfAborted(options.signal);
+        const verifiedArticle = (_a = this.wechatVerifiedArticleCache) == null ? void 0 : _a.peek(url);
+        const runWechatTransport = /* @__PURE__ */ __name(async (stage, operation) => {
+          try {
+            return await requestGate.run(operation, { signal: options.signal, context: { stage, sourceFingerprint } });
+          } catch (error) {
+            if (isWechatAccessPaused(error)) {
+              this.wechatAccessRecoveryUrl = normalizeWechatArticleUrl(url);
+              wechatArticleDiagnostic.accessPause = error.accessPause;
+              wechatArticleDiagnostic.stages.push({ stage: "request-guard", outcome: "access_paused", state: "access_paused", accessPause: error.accessPause });
+            }
+            throw error;
+          }
+        }, "runWechatTransport");
+        const pacedRequestUrl = /* @__PURE__ */ __name((requestOptions) => runWechatTransport("obsidian-request", () => requestUrl(requestOptions)), "pacedRequestUrl");
+        const pacedNodeHtml = /* @__PURE__ */ __name((...args) => runWechatTransport("node-fallback", () => this.downloadWebpageHtmlViaNode(...args)), "pacedNodeHtml");
+        const pacedSessionHtml = /* @__PURE__ */ __name((targetUrl, headers) => runWechatTransport("wechat-session", ({ holdUntil }) => this.downloadWechatArticleHtmlViaSession(targetUrl, headers, { signal: options.signal, onPendingRequest: holdUntil })), "pacedSessionHtml");
+        const pacedBrowser = /* @__PURE__ */ __name(async (targetUrl, renderOptions) => {
+          throwIfAborted(options.signal);
+          return verifiedArticle || runWechatTransport("hidden-browser", () => this.renderWechatArticleWithElectron(targetUrl, { ...renderOptions, signal: options.signal }));
+        }, "pacedBrowser");
         const originalWechatArticleUrl = String(url || "").trim();
         const wechatArticleUrl = normalizeWechatArticleUrl(originalWechatArticleUrl);
         const wechatRequestProfiles = buildWechatArticleRequestProfiles(originalWechatArticleUrl);
@@ -40430,9 +40754,10 @@ ${finalized.markdown}
         }, "addWechatArticleStage");
         const extracted = await runWechatArticlePipeline({
           url: originalWechatArticleUrl,
+          preferVerifiedBrowser: Boolean(verifiedArticle),
           requiresTranscription: metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly === true || metadata.transcriptionStatus === "failed",
           fetchStatic: /* @__PURE__ */ __name(async (targetUrl, profile = {}) => {
-            var _a, _b, _c, _d;
+            var _a2, _b, _c, _d;
             currentWechatProfileDetails = {
               profile: String(profile.id || ""),
               inputKind: String(profile.inputKind || ""),
@@ -40457,7 +40782,7 @@ ${finalized.markdown}
                 outcome: "response",
                 state: staticState,
                 status: Number(staticResponse && staticResponse.status) || 200,
-                statusSource: Number(staticResponse && staticResponse.status) ? "response" : "inferred-success",
+                statusSource: Number(staticResponse && staticResponse.status) ? "actual" : "inferred-success",
                 contentType: String(staticResponse && staticResponse.headers && (staticResponse.headers["content-type"] || staticResponse.headers["Content-Type"]) || ""),
                 finalHost: getSafeUrlDiagnostic(staticResponse && staticResponse.url || targetUrl).host,
                 htmlChars: staticHtml.length,
@@ -40465,7 +40790,7 @@ ${finalized.markdown}
               });
               if (staticState !== "guide" && staticState !== "unknown" && staticState !== "empty-shell") return staticHtml;
               const tryWechatSession = /* @__PURE__ */ __name(async () => {
-                var _a2;
+                var _a3;
                 try {
                   const sessionHtml = String(await pacedSessionHtml(targetUrl, articleHeaders) || "");
                   const sessionDiagnosis = diagnoseWechatArticleHtml(sessionHtml);
@@ -40483,7 +40808,7 @@ ${finalized.markdown}
                     return sessionHtml;
                   }
                 } catch (sessionError) {
-                  if (isAbortError(sessionError) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
+                  if (isAbortError(sessionError) || ((_a3 = options.signal) == null ? void 0 : _a3.aborted)) throw createAbortError();
                   if (isWechatAccessPaused(sessionError)) throw sessionError;
                   addWechatArticleStage("wechat-session", {
                     outcome: "error",
@@ -40508,7 +40833,7 @@ ${finalized.markdown}
                 if (nodeState === "article") return nodeHtml;
                 return await tryWechatSession() || staticHtml;
               } catch (nodeError) {
-                if (isAbortError(nodeError) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
+                if (isAbortError(nodeError) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
                 if (isWechatAccessPaused(nodeError)) throw nodeError;
                 addWechatArticleStage("node-fallback", {
                   outcome: "error",
@@ -40574,7 +40899,7 @@ ${finalized.markdown}
             }
           }, "fetchStatic"),
           renderBrowser: /* @__PURE__ */ __name(async (targetUrl, profile = {}) => {
-            var _a;
+            var _a2;
             currentWechatProfileDetails = {
               profile: String(profile.id || ""),
               inputKind: String(profile.inputKind || ""),
@@ -40599,8 +40924,7 @@ ${finalized.markdown}
                 diagnostic: rendered && rendered.diagnostic && Object.keys(rendered.diagnostic).length ? rendered.diagnostic : diagnoseWechatArticleHtml(renderedText)
               });
             } catch (browserError) {
-              if (isAbortError(browserError) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
-              if (isWechatAccessPaused(browserError)) throw browserError;
+              if (isAbortError(browserError) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
               addWechatArticleStage("hidden-browser", {
                 outcome: "error",
                 error: browserError && (browserError.message || browserError),
@@ -40622,6 +40946,7 @@ ${finalized.markdown}
           }, "renderBrowser"),
           isUsableBrowserArticle: /* @__PURE__ */ __name(({ markdown: markdown3, bodyFound }) => Boolean(bodyFound && String(markdown3 || "").trim()), "isUsableBrowserArticle")
         });
+        throwIfAborted(options.signal);
         wechatArticleDiagnostic.source = "wechat-article";
         if (extracted.kind === "retryable") {
           throw createRetryableWechatArticleContentError({
@@ -40726,6 +41051,8 @@ ${finalized.markdown}
           imageLocalizationErrors2.length ? `image-localize-failed=${imageLocalizationErrors2.length}: ${imageLocalizationErrors2.slice(0, 3).join(" | ")}` : ""
         ].filter(Boolean).join("; ");
         const correctStaleMediaHint = false;
+        throwIfAborted(options.signal);
+        if (verifiedArticle && typeof options.onVerifiedArticle === "function") options.onVerifiedArticle(url, verifiedArticle);
         return {
           ...record,
           metadata: {
@@ -41221,7 +41548,9 @@ ${finalized.markdown}
     });
   }
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
+    var _a;
     const signal = progress.signal || null;
+    let verifiedArticleLease = null;
     throwIfAborted(signal);
     const dateFolder = getDateFolderName(record.createdAt);
     const rootDir = normalizeConfiguredVaultPath(this.settings.inboxDir);
@@ -41265,7 +41594,9 @@ ${finalized.markdown}
         dateFolder,
         title,
         binding,
-        { signal }
+        { signal, onVerifiedArticle: /* @__PURE__ */ __name((url, article) => {
+          verifiedArticleLease = { url, article };
+        }, "onVerifiedArticle") }
       );
       throwIfAborted(signal);
       if (textAsWebpage && !isAutomaticWebpageHydrationSuccessful(recordForMarkdown)) {
@@ -41399,6 +41730,7 @@ ${finalized.markdown}
         }
       }
     }
+    if (verifiedArticleLease) (_a = this.wechatVerifiedArticleCache) == null ? void 0 : _a.take(verifiedArticleLease.url, verifiedArticleLease.article);
     return {
       recordId: getRecordId(record),
       filePath,
@@ -42484,6 +42816,9 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       await this.plugin.saveSettings({ ...this.plugin.settings, autoSyncEnabled: value });
     }));
     new Setting(containerEl).setName("立即同步").setDesc("手动拉取云端收集箱，并写入当前 vault。").addButton((button) => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
+    new Setting(containerEl).setName("公众号访问验证").setDesc("遇到微信验证时，在插件使用的会话中打开原文并完成验证。只确认实际提取到正文的文章；不会自动绕过验证。可粘贴失败文章链接，留空则使用最近一次公众号访问暂停的链接。").addText((text) => text.setPlaceholder("失败的公众号文章链接（可选）").onChange((value) => {
+      this.plugin.wechatAccessRecoveryInput = value.trim();
+    })).addButton((button) => button.setButtonText("打开原文验证").onClick(() => this.plugin.verifyWechatArticleAccess(this.plugin.wechatAccessRecoveryInput || "")));
     new Setting(containerEl).setName("同步失败记录").setDesc("失败内容保留在小程序“同步记录”中，不会自动重试或反复提醒。可在近 7 天的记录中点击“重试”，重新加入同步队列。");
     new Setting(containerEl).setName("同步/安装失败诊断").setDesc("默认复制本次失败摘要；需要历史和详细日志时，可复制完整诊断。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
       try {

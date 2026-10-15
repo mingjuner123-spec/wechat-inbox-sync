@@ -39,9 +39,17 @@ async function runPluginIntegration(){
     let afterTimeout=false;const after=pendingGate.run(async()=>{afterTimeout=true;return '';});await new Promise(r=>setImmediate(r));assert.equal(afterTimeout,false);settleLate({status:429});await assert.rejects(after,{code:'WECHAT_ACCESS_PAUSED'});assert.equal(afterTimeout,false);
     for(const response of [{status:429,text:async()=> 'busy'},{status:429,text:async()=>{throw Error('response body stream failed');}},{status:200,url:'https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha',text:async()=>''}]){
       p=fresh();staticCount=0;let sessionCount=0;request=async()=>{staticCount++;return {text:''};};sessionFetch=async()=>{sessionCount++;return response;};const loadsBefore=browserLoads;
-      await assert.rejects(hydrate(p),e=>e.wechatArticleDiagnostic?.reason==='wechat-access-paused'||e.diagnostic?.reason==='wechat-access-paused'||/已暂停公众号抓取/.test(e.message));assert.equal(staticCount,1);assert.equal(sessionCount,1);assert.equal(browserLoads,loadsBefore);assert.ok(p.wechatArticleRequestGate.snapshot().remainingCooldownMs>0);
+      await assert.rejects(hydrate(p),e=>e.wechatArticleDiagnostic?.reason==='wechat-access-paused'||e.diagnostic?.reason==='wechat-access-paused'||/已暂停公众号抓取/.test(e.message));assert.equal(staticCount,1);assert.equal(sessionCount,1);assert.equal(browserLoads-loadsBefore,response.status===429?0:1);assert.ok(p.wechatArticleRequestGate.snapshot().remainingCooldownMs>0);
     }
-    p=fresh();sessionFetch=async()=>({status:200,text:async()=>''});request=async()=>({text:''});const loadsBefore=browserLoads;await assert.rejects(hydrate(p),e=>/已暂停公众号抓取/.test(e.message));assert.equal(browserLoads-loadsBefore,1);assert.equal(scriptCalls,0);assert.equal(lastWindow.isDestroyed(),true);assert.equal(lastWindow.webContents.listenerCount('did-navigate'),0);
+    p=fresh();sessionFetch=async()=>({status:200,text:async()=>''});request=async()=>({text:''});const loadsBefore=browserLoads;await assert.rejects(hydrate(p),e=>{
+      const stage=e.diagnostic?.stages.find(s=>s.stage==='hidden-browser');
+      assert.equal(stage.diagnostic.browserStarted,true);assert.equal(stage.diagnostic.loadCompleted,true);
+      assert.equal(stage.diagnostic.browserPhase,'loaded');assert.equal(stage.diagnostic.httpStatus,429);
+      const report=JSON.parse(require('../obsidian-plugin/wechat-inbox-sync/src/failure-technical-report').buildFailureTechnicalReport({error:e}).text);
+      const evidence=report.failure.extractionDiagnostic.stages.find(s=>s.stage==='hidden-browser').evidence;
+      assert.equal(evidence.browserStarted,true);assert.equal(evidence.httpStatus,429);
+      return /已暂停公众号抓取/.test(e.message);
+    });assert.equal(browserLoads-loadsBefore,1);assert.equal(scriptCalls,0);assert.equal(lastWindow.isDestroyed(),true);assert.equal(lastWindow.webContents.listenerCount('did-navigate'),0);
     // A subframe's 429 must not classify a successful main document as blocked.
     browserStatus=200;p=fresh();const rendered=await p.renderWechatArticleWithElectron(url);assert.equal(rendered.bodyFound,true);assert.equal(scriptCalls,2);
   }finally{Module._load=originalLoad;global.window=previousWindow;}
@@ -54,7 +62,7 @@ async function main(){
  let count=0;const pausedGate=createWechatArticleRequestGate({now:()=>now,sleep:async ms=>{now+=ms;},gapMs:0,cooldownMs:600000});const blocked=Object.assign(new Error('429 busy'),{status:429});
  await assert.rejects(pausedGate.run(async()=>{count++;throw blocked;}));await assert.rejects(pausedGate.run(async()=>{count++;return article;}),{code:'WECHAT_ACCESS_PAUSED'});assert.equal(count,1);
  const verificationCalls=[];const verification=await runWechatArticlePipeline({url:'https://mp.weixin.qq.com/s/browser-verification-fixture',fetchStatic:async()=>{verificationCalls.push('static');return '<html><body>WeChat guide shell</body></html>';},renderBrowser:async()=>{verificationCalls.push('browser');throw Object.assign(Error('verification page has no article body'),{wechatArticleDiagnostic:{verificationMarker:true,hasJsContent:false,visibleTextChars:320}});}});assert.equal(verification.state,'access_paused');assert.deepEqual(verificationCalls,['static','static','browser']);
- const calls=[];const result=await runWechatArticlePipeline({url:'https://mp.weixin.qq.com/s/captcha-fixture',fetchStatic:async()=>{calls.push('static');return captcha;},renderBrowser:async()=>{calls.push('browser');return article;}});assert.equal(result.state,'access_paused');assert.deepEqual(calls,['static']);
+ const calls=[];const result=await runWechatArticlePipeline({url:'https://mp.weixin.qq.com/s/captcha-fixture',fetchStatic:async()=>{calls.push('static');return captcha;},renderBrowser:async()=>{calls.push('browser');return article;}});assert.equal(result.state,'complete');assert.deepEqual(calls,['static','browser']);
  calls.length=0;await assert.rejects(runWechatArticlePipeline({url:'https://mp.weixin.qq.com/s/cancel-fixture',fetchStatic:async()=>{calls.push('static');throw Object.assign(Error('cancelled'),{name:'AbortError'});},renderBrowser:async()=>{calls.push('browser');}}),{name:'AbortError'});assert.deepEqual(calls,['static']);
  await runPluginIntegration();
  console.log('PASS: WeChat article throttle spacing, cooldown, captcha stop, cancellation and browser transport guards');
