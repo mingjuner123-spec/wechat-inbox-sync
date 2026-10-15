@@ -1,4 +1,5 @@
 'use strict';
+const { cleanTranscriptionTail, formatTranscriptForReading } = require('./readable-content-utils');
 
 const { toSimplifiedChinese, NO_SPEECH_SAVED_MESSAGE, isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
 const { QUALITY_NOTICE_START, QUALITY_NOTICE_END, QUALITY_PARTIAL_NOTICE } = require('./transcription-partial-note-utils');
@@ -41,7 +42,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     }
     const isCloudPending = ['queued', 'processing'].includes(status)
       && String(transcriptionSource || '').includes('cloud');
-    const content = toSimplifiedChinese(transcription).trim()
+    const content = formatTranscriptForReading(toSimplifiedChinese(transcription))
       || (status === 'failed'
         ? `转写失败。${transcriptionError || '未能提取到视频/音频文案。'}`
         : isCloudPending
@@ -75,7 +76,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     transcription = '',
     title = '',
   } = {}) {
-    const text = helpers.cleanMarkdownForStorage(helpers.stripMarkdownCodeBlocks(toSimplifiedChinese(String(transcription || ''))))
+    const text = helpers.cleanMarkdownForStorage(helpers.stripMarkdownCodeBlocks(toSimplifiedChinese(cleanTranscriptionTail(transcription))))
       .replace(/\s+/g, ' ')
       .trim();
     if (!text) {
@@ -142,7 +143,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       audioUrl: mediaUrl,
       mediaUrls: normalizedMediaUrls,
       subtitleUrl,
-      transcription: toSimplifiedChinese(transcription),
+      transcription: toSimplifiedChinese(cleanTranscriptionTail(transcription)),
       transcriptionStatus,
       transcriptionSource,
       transcriptionError,
@@ -303,7 +304,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     const status = metadata.conversionStatus || 'pending';
     const errorText = metadata.conversionError || '';
     const transcriptionStatus = String(metadata.transcriptionStatus || '').toLowerCase();
-    const transcription = toSimplifiedChinese(metadata.transcription || '').trim();
+    const transcription = formatTranscriptForReading(toSimplifiedChinese(metadata.transcription || ''));
     if (transcriptionStatus || transcription) {
       const transcriptionError = metadata.transcriptionError || '';
       const content = transcription || (transcriptionStatus === 'failed'
