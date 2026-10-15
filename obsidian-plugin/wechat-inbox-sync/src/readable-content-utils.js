@@ -102,9 +102,66 @@ function preserveHtmlReadingStructure(html) {
       if (!['br','img','hr','input','meta','link','source','wbr','area','base','embed'].includes(tag) && !/\/\s*>$/.test(token)) stack.push(node);
     }
   }
+  function attribute(token, name) {
+    const match = String(token || '').match(new RegExp('\\s' + name + '\\s*=\\s*(?:(["\\\'])([\\s\\S]*?)\\1|([^\\s"\\\'=<>`]+))', 'i'));
+    return match?.[2] || match?.[3] || '';
+  }
+  function visualContext(node, parent = {}) {
+    const style = attribute(node.token, 'style');
+    const align = style.match(/(?:^|;)\s*text-align\s*:\s*(\w+)/i)?.[1];
+    const size = style.match(/(?:^|;)\s*font-size\s*:\s*([\d.]+)px\b/i)?.[1];
+    const weight = style.match(/(?:^|;)\s*font-weight\s*:\s*(bold|normal|[1-9]00)\b/i)?.[1];
+    return {
+      centered: align ? align.toLowerCase() === 'center' : parent.centered,
+      size: size ? Number(size) : parent.size || 0,
+      allBold: weight ? /^(?:bold|[6-9]00)$/i.test(weight) : ['strong','b'].includes(node.tag) || parent.allBold,
+      suppressVisual: parent.suppressVisual || attribute(node.token, 'role').toLowerCase() === 'heading' || /^(?:li|ul|ol|blockquote|pre|code|table|h[1-6])$/.test(node.tag),
+    };
+  }
+  function visualHeading(node, context) {
+    if (!node || typeof node === 'string' || !['p','section','div'].includes(node.tag) || context.suppressVisual) return null;
+    const state = visualContext(node, context);
+    if (!state.centered || attribute(node.token, 'role') === 'heading') return null;
+    let text = '', minSize = Infinity, valid = true;
+    function collect(child, inherited) {
+      if (typeof child === 'string') {
+        const meaningful = child.replace(/&(?:nbsp|#160|#x0*a0);/gi, ' ').trim();
+        text += child;
+        if (meaningful) { valid = valid && Boolean(inherited.allBold); minSize = Math.min(minSize, inherited.size); }
+        return;
+      }
+      if (/^(?:p|section|div|br|img|a|hr|li|ul|ol|blockquote|pre|code|table|h[1-6]|video|audio|iframe)$/.test(child.tag)) { valid = false; return; }
+      const next = visualContext(child, inherited);
+      child.children.forEach(x => collect(x, next));
+    }
+    node.children.forEach(child => collect(child, state));
+    text = text.replace(/&(?:nbsp|#160|#x0*a0);/gi, ' ').replace(/\s+/g, ' ').trim();
+    if (!valid || !text || text.length > 60) return null;
+    if (/^\d{1,2}$/.test(text) && minSize >= 24) return { kind: 'number', text };
+    if (minSize >= 17 && (text.match(/[\p{L}]/gu) || []).length >= 2 && !/[。；;！!]/.test(text)) return { kind: 'title', text };
+    return null;
+  }
+  function renderChildren(children, context) {
+    let result = '';
+    for (let i = 0; i < children.length; i++) {
+      const number = visualHeading(children[i], context);
+      if (number?.kind === 'number') {
+        let next = i + 1;
+        while (typeof children[next] === 'string' && !children[next].trim()) next++;
+        const title = visualHeading(children[next], context);
+        if (title?.kind === 'title') {
+          result += '\n\n## ' + number.text + ' ' + title.text + '\n\n'; i = next; continue;
+        }
+      }
+      result += render(children[i], context);
+    }
+    return result;
+  }
   function render(node, context = {}) {
+    if (!node) return '';
     if (typeof node === 'string') return node;
     const { tag, token = '' } = node;
+    const state = { ...context, ...visualContext(node, context) };
     const bold = ['strong','b'].includes(tag) || (tag === 'span' && /font-weight\s*:\s*(?:bold|[6-9]00)/i.test(token));
     const italic = ['em','i'].includes(tag);
     if (tag === 'br') return '\n';
@@ -114,20 +171,27 @@ function preserveHtmlReadingStructure(html) {
       const items = node.children.map(child => {
         if (typeof child === 'string') return child.trim();
         if (child.tag !== 'li') return render(child, context);
-        const body = render(child, context).trim();
+        const body = render(child, { ...state, suppressVisual: true }).trim();
         const marker = tag === 'ol' ? `${count++}. ` : '- ';
         const lines = body.split('\n');
         return marker + lines[0] + lines.slice(1).map(line => '\n' + ' '.repeat(marker.length) + line).join('');
       }).filter(Boolean);
       return '\n\n' + items.join('\n') + '\n\n';
     }
-    const content = node.children.map(child => render(child, { ...context, bold: context.bold || bold, italic: context.italic || italic })).join('');
+    const content = renderChildren(node.children, { ...state, bold: context.bold || bold, italic: context.italic || italic });
     if (tag === 'a') return token + content + '</a>';
     if (tag === 'blockquote') return '\n\n' + content.trim().replace(/\n\s*\n(?:\s*\n)+/g, '\n\n').split('\n').map(line => '> ' + line).join('\n') + '\n\n';
     if (/^h[1-6]$/.test(tag)) {
       const visible = content.replace(/<[^>]*>/g, '').replace(/&(?:nbsp|#160|#x0*a0);/gi, ' ').trim();
       return '\n\n' + (visible ? '#'.repeat(Number(tag[1])) + ' ' : '') + content.trim() + '\n\n';
     }
+    if (attribute(token, 'role').toLowerCase() === 'heading') {
+      const level = attribute(token, 'aria-level');
+      const visible = content.replace(/<[^>]*>/g, '').replace(/&(?:nbsp|#160|#x0*a0);/gi, ' ').trim();
+      return '\n\n' + (visible ? '#'.repeat(/^[1-6]$/.test(level) ? Number(level) : 2) + ' ' : '') + content.trim() + '\n\n';
+    }
+    const visual = visualHeading(node, context);
+    if (visual?.kind === 'title') return '\n\n## ' + visual.text + '\n\n';
     if (['p','div','section','article','main','header','footer'].includes(tag)) return '\n\n' + content.trim() + '\n\n';
     const marker = bold && !context.bold ? '**' : italic && !context.italic ? '*' : '';
     if (marker) return content.split(/(\n\s*\n)/).map(part => {

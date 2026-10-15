@@ -404,10 +404,81 @@ var require_readable_content_utils = __commonJS({
           if (!["br", "img", "hr", "input", "meta", "link", "source", "wbr", "area", "base", "embed"].includes(tag) && !/\/\s*>$/.test(token)) stack.push(node);
         }
       }
+      function attribute(token, name) {
+        const match = String(token || "").match(new RegExp("\\s" + name + `\\s*=\\s*(?:(["\\'])([\\s\\S]*?)\\1|([^\\s"\\'=<>\`]+))`, "i"));
+        return (match == null ? void 0 : match[2]) || (match == null ? void 0 : match[3]) || "";
+      }
+      __name(attribute, "attribute");
+      function visualContext(node, parent = {}) {
+        var _a, _b, _c;
+        const style = attribute(node.token, "style");
+        const align = (_a = style.match(/(?:^|;)\s*text-align\s*:\s*(\w+)/i)) == null ? void 0 : _a[1];
+        const size = (_b = style.match(/(?:^|;)\s*font-size\s*:\s*([\d.]+)px\b/i)) == null ? void 0 : _b[1];
+        const weight = (_c = style.match(/(?:^|;)\s*font-weight\s*:\s*(bold|normal|[1-9]00)\b/i)) == null ? void 0 : _c[1];
+        return {
+          centered: align ? align.toLowerCase() === "center" : parent.centered,
+          size: size ? Number(size) : parent.size || 0,
+          allBold: weight ? /^(?:bold|[6-9]00)$/i.test(weight) : ["strong", "b"].includes(node.tag) || parent.allBold,
+          suppressVisual: parent.suppressVisual || attribute(node.token, "role").toLowerCase() === "heading" || /^(?:li|ul|ol|blockquote|pre|code|table|h[1-6])$/.test(node.tag)
+        };
+      }
+      __name(visualContext, "visualContext");
+      function visualHeading(node, context) {
+        if (!node || typeof node === "string" || !["p", "section", "div"].includes(node.tag) || context.suppressVisual) return null;
+        const state = visualContext(node, context);
+        if (!state.centered || attribute(node.token, "role") === "heading") return null;
+        let text = "", minSize = Infinity, valid = true;
+        function collect(child, inherited) {
+          if (typeof child === "string") {
+            const meaningful = child.replace(/&(?:nbsp|#160|#x0*a0);/gi, " ").trim();
+            text += child;
+            if (meaningful) {
+              valid = valid && Boolean(inherited.allBold);
+              minSize = Math.min(minSize, inherited.size);
+            }
+            return;
+          }
+          if (/^(?:p|section|div|br|img|a|hr|li|ul|ol|blockquote|pre|code|table|h[1-6]|video|audio|iframe)$/.test(child.tag)) {
+            valid = false;
+            return;
+          }
+          const next = visualContext(child, inherited);
+          child.children.forEach((x) => collect(x, next));
+        }
+        __name(collect, "collect");
+        node.children.forEach((child) => collect(child, state));
+        text = text.replace(/&(?:nbsp|#160|#x0*a0);/gi, " ").replace(/\s+/g, " ").trim();
+        if (!valid || !text || text.length > 60) return null;
+        if (/^\d{1,2}$/.test(text) && minSize >= 24) return { kind: "number", text };
+        if (minSize >= 17 && (text.match(/[\p{L}]/gu) || []).length >= 2 && !/[。；;！!]/.test(text)) return { kind: "title", text };
+        return null;
+      }
+      __name(visualHeading, "visualHeading");
+      function renderChildren(children, context) {
+        let result = "";
+        for (let i = 0; i < children.length; i++) {
+          const number = visualHeading(children[i], context);
+          if ((number == null ? void 0 : number.kind) === "number") {
+            let next = i + 1;
+            while (typeof children[next] === "string" && !children[next].trim()) next++;
+            const title = visualHeading(children[next], context);
+            if ((title == null ? void 0 : title.kind) === "title") {
+              result += "\n\n## " + number.text + " " + title.text + "\n\n";
+              i = next;
+              continue;
+            }
+          }
+          result += render(children[i], context);
+        }
+        return result;
+      }
+      __name(renderChildren, "renderChildren");
       function render(node, context = {}) {
         var _a;
+        if (!node) return "";
         if (typeof node === "string") return node;
         const { tag, token = "" } = node;
+        const state = { ...context, ...visualContext(node, context) };
         const bold = ["strong", "b"].includes(tag) || tag === "span" && /font-weight\s*:\s*(?:bold|[6-9]00)/i.test(token);
         const italic = ["em", "i"].includes(tag);
         if (tag === "br") return "\n";
@@ -417,20 +488,27 @@ var require_readable_content_utils = __commonJS({
           const items = node.children.map((child) => {
             if (typeof child === "string") return child.trim();
             if (child.tag !== "li") return render(child, context);
-            const body = render(child, context).trim();
+            const body = render(child, { ...state, suppressVisual: true }).trim();
             const marker2 = tag === "ol" ? `${count++}. ` : "- ";
             const lines = body.split("\n");
             return marker2 + lines[0] + lines.slice(1).map((line) => "\n" + " ".repeat(marker2.length) + line).join("");
           }).filter(Boolean);
           return "\n\n" + items.join("\n") + "\n\n";
         }
-        const content = node.children.map((child) => render(child, { ...context, bold: context.bold || bold, italic: context.italic || italic })).join("");
+        const content = renderChildren(node.children, { ...state, bold: context.bold || bold, italic: context.italic || italic });
         if (tag === "a") return token + content + "</a>";
         if (tag === "blockquote") return "\n\n" + content.trim().replace(/\n\s*\n(?:\s*\n)+/g, "\n\n").split("\n").map((line) => "> " + line).join("\n") + "\n\n";
         if (/^h[1-6]$/.test(tag)) {
           const visible = content.replace(/<[^>]*>/g, "").replace(/&(?:nbsp|#160|#x0*a0);/gi, " ").trim();
           return "\n\n" + (visible ? "#".repeat(Number(tag[1])) + " " : "") + content.trim() + "\n\n";
         }
+        if (attribute(token, "role").toLowerCase() === "heading") {
+          const level = attribute(token, "aria-level");
+          const visible = content.replace(/<[^>]*>/g, "").replace(/&(?:nbsp|#160|#x0*a0);/gi, " ").trim();
+          return "\n\n" + (visible ? "#".repeat(/^[1-6]$/.test(level) ? Number(level) : 2) + " " : "") + content.trim() + "\n\n";
+        }
+        const visual = visualHeading(node, context);
+        if ((visual == null ? void 0 : visual.kind) === "title") return "\n\n## " + visual.text + "\n\n";
         if (["p", "div", "section", "article", "main", "header", "footer"].includes(tag)) return "\n\n" + content.trim() + "\n\n";
         const marker = bold && !context.bold ? "**" : italic && !context.italic ? "*" : "";
         if (marker) return content.split(/(\n\s*\n)/).map((part) => {
@@ -18729,7 +18807,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.189";
+var PLUGIN_RUNTIME_VERSION = "1.3.190";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
