@@ -318,63 +318,7 @@ var require_readable_content_utils = __commonJS({
     }
     __name(cleanTranscriptionTail2, "cleanTranscriptionTail");
     function formatTranscriptForReading2(text) {
-      const source = cleanTranscriptionTail2(text);
-      if (!source) return "";
-      if (/^(?:\s*(?:```|~~~|#{1,6}\s|>\s|[-*+]\s|\d+[.)]\s|\|)|\s*\[?\d{1,2}:\d{2})/m.test(source) || /!?\[[^\]\n]*\]\(/.test(source)) return source;
-      const paragraphs = [];
-      for (const block of source.split(/\n\s*\n/)) {
-        const lines = block.split("\n").map((x) => x.trim()).filter(Boolean);
-        let joined = "";
-        for (const line of lines) {
-          const separator = /[\p{Script=Han}]$/u.test(joined) && /^[\p{Script=Han}]/u.test(line) ? "" : " ";
-          joined += (joined ? separator : "") + line;
-        }
-        const urls = [...joined.matchAll(/https?:\/\/[^\s<>“”「」『』。！？]+/giu)].map((match) => [match.index, match.index + match[0].replace(/[.!?,;:"')\]]+$/, "").length]);
-        const insideUrl = /* @__PURE__ */ __name((index) => urls.some(([from, to]) => index >= from && index < to), "insideUrl");
-        const boundaries = /[。！？!?]+[”’」』"']*|\.[”’"']*(?=\s|$)/gu;
-        let start = 0;
-        for (const match of joined.matchAll(boundaries)) {
-          if (insideUrl(match.index)) continue;
-          if (match[0][0] === "." && joined.slice(match.index + 1).trim() && /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\.|\b[A-Z]\.|\b(?:[A-Za-z]\.){2,})$/u.test(joined.slice(0, match.index + 1))) continue;
-          paragraphs.push(joined.slice(start, match.index + match[0].length).trim());
-          start = match.index + match[0].length;
-        }
-        const remainder = joined.slice(start);
-        const clauses = [];
-        let clauseStart = 0;
-        for (const match of remainder.matchAll(/，|,(?!\d)/gu)) {
-          if (insideUrl(start + match.index)) continue;
-          clauses.push(remainder.slice(clauseStart, match.index + 1));
-          clauseStart = match.index + 1;
-        }
-        if (remainder.slice(clauseStart).trim()) clauses.push(remainder.slice(clauseStart));
-        const groups = [];
-        let group = "";
-        for (const clause of clauses) {
-          group += clause;
-          if (group.replace(/[\s\p{P}]/gu, "").length >= 12) {
-            groups.push(group);
-            group = "";
-          }
-        }
-        if (group) {
-          if (groups.length) groups[groups.length - 1] += group;
-          else groups.push(group);
-        }
-        for (const sentence of groups) {
-          let paragraph = "";
-          const parts = sentence.length > 500 ? sentence.match(/\S+\s*|\s+/g) || [sentence] : [sentence];
-          for (const part of parts) {
-            if (paragraph.length >= 240 && /\s$/.test(paragraph)) {
-              paragraphs.push(paragraph.trim());
-              paragraph = "";
-            }
-            paragraph += part;
-          }
-          if (paragraph.trim()) paragraphs.push(paragraph.trim());
-        }
-      }
-      return paragraphs.join("\n\n");
+      return cleanTranscriptionTail2(text);
     }
     __name(formatTranscriptForReading2, "formatTranscriptForReading");
     function prepareBrowserArticleImages2(root, baseUrl) {
@@ -10371,6 +10315,52 @@ verify_sha256() {
   [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]
 }
 
+content_sha256_from_url() {
+  printf '%s' "$1" | sed -nE 's#.*\\/by-sha256\\/([A-Fa-f0-9]{64})\\/[^?]*.*#\\1#p' | tr '[:lower:]' '[:upper:]'
+}
+
+# Keep one partial per asset, bound to content rather than an expiring signed URL.
+# Network interruptions keep the prefix. Only a corrupt completion or rejected
+# Range gets one clean retry. Never promote an HTTP error or an unverified file.
+download_verified_file() {
+  local url="$1" out_file="$2" expected_sha256="$3"
+  local part_file="$out_file.part" identity_file="$out_file.part.sha256"
+  local previous_identity="" attempt status
+  expected_sha256="$(printf '%s' "$expected_sha256" | tr '[:lower:]' '[:upper:]')"
+  [[ "$expected_sha256" =~ ^[A-F0-9]{64}$ ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$out_file")"
+  if verify_sha256 "$out_file" "$expected_sha256"; then return 0; fi
+  if [ -f "$identity_file" ]; then previous_identity="$(cat "$identity_file")"; fi
+  if [ "$previous_identity" != "$expected_sha256" ]; then rm -f "$part_file"; fi
+  printf '%s\\n' "$expected_sha256" > "$identity_file"
+  for attempt in 0 1; do
+    if verify_sha256 "$part_file" "$expected_sha256"; then
+      mv -f "$part_file" "$out_file"
+      rm -f "$identity_file"
+      return 0
+    fi
+    status=0
+    curl -fL --retry 2 --retry-delay 2 --connect-timeout 30 \\
+      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\
+      --max-time 900 -C - -o "$part_file" "$url" || status=$?
+    if [ "$status" -eq 0 ] && verify_sha256 "$part_file" "$expected_sha256"; then
+      mv -f "$part_file" "$out_file"
+      rm -f "$identity_file"
+      return 0
+    fi
+    case "$status" in
+      0|33|36)
+        # Complete but corrupt, or the server cannot resume. One clean retry.
+        rm -f "$part_file"
+        [ "$attempt" -eq 0 ] || return 1
+        ;;
+      *) return 1 ;; # Preserve a known-identity prefix on transport/HTTP errors.
+    esac
+  done
+  return 1
+}
+
 install_portable_python() {
   if portable_python_is_usable "$PORTABLE_PYTHON"; then
     echo "Pinned portable Python is already ready: $PORTABLE_PYTHON"
@@ -10395,16 +10385,11 @@ install_portable_python() {
   rm -rf "$stage_dir"
   mkdir -p "$CACHE_ROOT" "$stage_dir"
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
-    rm -f "$archive_path"
     if [ -n "$AUTHORIZED_PYTHON_RUNTIME_URL" ]; then runtime_urls+=("$AUTHORIZED_PYTHON_RUNTIME_URL"); fi
     runtime_urls+=("\${GITHUB_PYTHON_DOWNLOAD_BASE%/}/\${PYTHON_BUILD_STANDALONE_BUILD}/\${archive_name}")
     for archive_url in "\${runtime_urls[@]}"; do
       echo "Downloading pinned portable Python from an authorized or official source..."
-      rm -f "$archive_path"
-      if curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \\
-        --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\
-        --max-time 900 -o "$archive_path" "$archive_url" \\
-        && verify_sha256 "$archive_path" "$expected_sha256"; then
+      if download_verified_file "$archive_url" "$archive_path" "$expected_sha256"; then
         break
       fi
       echo "Pinned portable Python source failed or did not match SHA256." >&2
@@ -10932,15 +10917,20 @@ find_command() {
 download_file() {
   local url="$1"
   local out_file="$2"
-  echo "Downloading $url"
+  local expected_sha256
+  expected_sha256="$(content_sha256_from_url "$url")"
+  if [ -n "$expected_sha256" ]; then
+    download_verified_file "$url" "$out_file" "$expected_sha256"
+    return $?
+  fi
+  echo "Downloading component from an official source..."
   if command -v curl >/dev/null 2>&1; then
-    if curl -L \\
+    if curl -fL \\
       --retry 2 \\
       --retry-delay 2 \\
       --connect-timeout 30 \\
       --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \\
       --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \\
-      -C - \\
       -o "$out_file" \\
       "$url"; then
       return 0
@@ -10956,10 +10946,20 @@ download_file() {
 
 download_model() {
   local out_file="$1"
-  local temp_file="$out_file.part"
+  local temp_file="$TEMP_ROOT/model-unverified.bin"
+  local expected_sha256
+  expected_sha256="$(content_sha256_from_url "$AUTHORIZED_MODEL_URL")"
   local urls=("\${MODEL_URLS[@]}")
 
   for url in "\${urls[@]}"; do
+    if [ -n "$expected_sha256" ]; then
+      if download_verified_file "$url" "$out_file" "$expected_sha256"; then return 0; fi
+      echo "Model source interrupted or failed validation; retaining verified-identity download progress." >&2
+      continue
+    fi
+    # Older standalone installers have no authorized manifest. Preserve their
+    # official full-download fallback without reusing an unknown-identity prefix.
+    rm -f "$temp_file"
     if download_file "$url" "$temp_file"; then
       local model_size
       model_size="$(wc -c < "$temp_file" | tr -d ' ')"
@@ -10967,10 +10967,10 @@ download_model() {
         mv -f "$temp_file" "$out_file"
         return 0
       fi
-      echo "Downloaded model is too small from $url, trying next source." >&2
+      echo "Downloaded model is too small, trying next source." >&2
       rm -f "$temp_file"
     else
-      echo "Model download failed from $url, trying next source." >&2
+      echo "Model download failed, trying next source." >&2
       rm -f "$temp_file"
     fi
   done
@@ -11155,7 +11155,10 @@ if [ -f "$MODEL_PATH" ]; then
   fi
 fi
 if [ ! -f "$MODEL_PATH" ]; then
-  if [ -f "$CACHE_ROOT/ggml-small.bin" ]; then
+  if [ -n "$(content_sha256_from_url "$AUTHORIZED_MODEL_URL")" ]; then
+    # Reuse only a hash-verified complete cache, never the historical size-only cache.
+    download_model "$CACHE_ROOT/ggml-small.bin"
+  elif [ -f "$CACHE_ROOT/ggml-small.bin" ]; then
     cached_model_size="$(wc -c < "$CACHE_ROOT/ggml-small.bin" | tr -d ' ')"
     if [ "$cached_model_size" -lt 400000000 ]; then
       rm -f "$CACHE_ROOT/ggml-small.bin"
@@ -18834,7 +18837,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.191";
+var PLUGIN_RUNTIME_VERSION = "1.3.193";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"

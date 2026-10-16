@@ -12,42 +12,21 @@ assert.equal(createNoSpeechTranscriptionError('(音乐).\n（静音）。').code
 assert.equal(createNoSpeechTranscriptionError(noisy),null);
 assert.equal(createNoSpeechTranscriptionError('音乐创作非常有趣。'),null);
 const text='这是第一个完整的中文句子，没有删减任何内容。'.repeat(40);
-const reading=formatTranscriptForReading(text);
-assert.ok(reading.includes('\n\n'));
-assert.equal(reading.replace(/\s/g,''),text);
-assert.equal(formatTranscriptForReading(reading),reading);
-assert.equal(reading.split('\n\n').length,40);
-for(const [input,expected] of [
- ['第一句，保留逗号。第二句！第三句？','第一句，保留逗号。\n\n第二句！\n\n第三句？'],
- ['他说：“先保存。”然后重试！','他说：“先保存。”\n\n然后重试！'],
- ['Version 3.14 is ready. "Save now." Next sentence!','Version 3.14 is ready.\n\n"Save now."\n\nNext sentence!'],
- ['Visit https://example.com. Next sentence.','Visit https://example.com.\n\nNext sentence.'],
- ['Mr. Smith saved this note. Next sentence.','Mr. Smith saved this note.\n\nNext sentence.'],
- ['Dr. Jones met J. Smith in the U.S. office. Save it.','Dr. Jones met J. Smith in the U.S. office.\n\nSave it.'],
- ['Open https://example.com/path,segment,another and then continue with the remaining detailed instructions','Open https://example.com/path,segment,another and then continue with the remaining detailed instructions'],
- ['链接 https://example.com/a?q=1&v=3.14 仍需保留。下一句。','链接 https://example.com/a?q=1&v=3.14 仍需保留。\n\n下一句。'],
- ['先\n打开\n设置。\n然后\n点击\n保存。','先打开设置。\n\n然后点击保存。'],
- ['hello\nworld.\nSave\nthis\nnote!','hello world.\n\nSave this note!'],
- ['先在侧边栏找到第三方插件设置，然后点击检查更新按钮完成升级，接下来重新同步刚才的视频链接','先在侧边栏找到第三方插件设置，\n\n然后点击检查更新按钮完成升级，\n\n接下来重新同步刚才的视频链接'],
- ['好，先打开设置，然后找到本地转写组件，好','好，先打开设置，然后找到本地转写组件，好'],
- ['保存成功。然后找到插件设置并检查更新，再把刚才的视频重新同步一次','保存成功。\n\n然后找到插件设置并检查更新，\n\n再把刚才的视频重新同步一次'],
- ['总共有1,000个结果需要同步，随后确认所有结果都已经保存到本地','总共有1,000个结果需要同步，\n\n随后确认所有结果都已经保存到本地'],
- ['完整词组'.repeat(160),'完整词组'.repeat(160)],
- ]){
-   const actual=formatTranscriptForReading(input);
-   assert.equal(actual,expected,input);
-   assert.equal(actual.replace(/\s/g,''),input.replace(/\s/g,''));
-   assert.equal(formatTranscriptForReading(actual),actual);
- }
-const en='This is a complete sentence with decimal 3.14 and normal English words. '.repeat(20).trim();
-assert.equal(formatTranscriptForReading(en).replace(/\s/g,''),en.replace(/\s/g,''));
-assert.ok(formatTranscriptForReading(en).includes('\n\n'));
-assert.equal(formatTranscriptForReading('hello\nworld'),'hello world');
-assert.equal(formatTranscriptForReading('你好\n世界'),'你好世界');
-const noPunctuation=Array(80).fill('这里是一个原有的短语').join(' ');
-assert.ok(formatTranscriptForReading(noPunctuation).includes('\n\n'));
-assert.equal(formatTranscriptForReading(noPunctuation).replace(/\s/g,''),noPunctuation.replace(/\s/g,''));
-for(const structured of ['## 标题\n\n'+text,'- 列表\n- 列表二','```js\nconsole.log(1)\n```','[01:20] 第一段\n[01:30] 第二段','链接 [原视频](https://example.com)'])assert.equal(formatTranscriptForReading(structured),structured);
+for(const input of [text,
+ '第一句，保留逗号。第二句！第三句？',
+ '先\n打开\n设置。\n然后\n点击\n保存。',
+ 'hello\nworld.\nSave\nthis\nnote!',
+ '第一段原始空行。\n\n第二段原始空行。',
+ '先在侧边栏找到第三方插件设置，然后点击检查更新按钮完成升级，接下来重新同步刚才的视频链接',
+ 'Version 3.14 is ready. "Save now." Next sentence!',
+ '链接 https://example.com/a?q=1&v=3.14 仍需保留。下一句。',
+ Array(80).fill('这里是一个原有的短语').join(' '),
+ '## 标题\n\n'+text,'- 列表\n- 列表二','[01:20] 第一段\n[01:30] 第二段',
+]){
+ assert.equal(formatTranscriptForReading(input),input,'Original transcript layout must be preserved');
+ assert.equal(formatTranscriptForReading(formatTranscriptForReading(input)),input);
+}
+assert.equal(formatTranscriptForReading(noisy),speech,'Noise cleanup remains independent of layout');
 const load=Module._load;Module._load=function(name,...args){if(name==='obsidian')return {Plugin:class{},PluginSettingTab:class{},Setting:class{},Notice:class{},TFile:class{},normalizePath:x=>x};return load.call(this,name,...args);};
 try{
  const Plugin=require('../obsidian-plugin/wechat-inbox-sync/main.js'),h=Plugin.__test;
@@ -107,7 +86,7 @@ try{
    assert.equal(metadata.transcription,speech);
    const body=h.buildAudioTranscriptMarkdown({transcription:noisy,transcriptionStatus:'success'});
    assert.ok(!body.includes('(音乐)')&&!body.includes('CC字幕'));
-   assert.ok(body.includes('联系我们。\n\n以上就是'));
+   assert.ok(body.includes('联系我们。\n以上就是'));
  }
  const metadata=h.buildTranscriptPropertyMetadata({transcription:noisy,title:'课程'});
  assert.ok(!JSON.stringify(metadata).includes('CC字幕'));
@@ -115,5 +94,14 @@ try{
  assert.ok(!voice.includes('(音乐)')&&voice.includes('我们下条视频再见'));
  const file=h.buildFileMarkdownBody({type:'file',metadata:{transcription:noisy,transcriptionStatus:'success',fileName:'video.mp4'}},'video');
  assert.ok(!file.includes('(音乐)')&&file.includes('我们下条视频再见'));
+ const originalLayout='原始第一行。第二句话保留同一行。\n原始第二行，保留逗号。\n\n原始第三段不添加新断句。';
+ const routes=[
+   h.buildAudioTranscriptMarkdown({transcription:originalLayout,transcriptionStatus:'success'}),
+   h.buildFileMarkdownBody({type:'file',metadata:{transcription:originalLayout,transcriptionStatus:'success',fileName:'video.mp4'}},'video'),
+   h.buildMarkdownForRecord({record:{id:'original-layout-voice',type:'voice',metadata:{transcription:originalLayout,transcriptionStatus:'success'}},title:'录音',syncedAt:'2026-10-16'}),
+ ];
+ const partial=require('../obsidian-plugin/wechat-inbox-sync/src/transcription-partial-note-utils');
+ routes.push(partial.completeQualityPartialNote(partial.QUALITY_PARTIAL_MARKER+'\n'+partial.QUALITY_NOTICE_START+'\n> '+partial.QUALITY_PARTIAL_NOTICE+'\n'+partial.QUALITY_NOTICE_END,formatTranscriptForReading(originalLayout)));
+ for(const body of routes)assert.ok(body.includes(originalLayout),'All transcript paths preserve original layout');
  console.log('Readable content regressions passed');
 }finally{Module._load=load;}

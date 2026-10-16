@@ -28,67 +28,9 @@ function cleanTranscriptionTail(text) {
 }
 
 function formatTranscriptForReading(text) {
-  const source = cleanTranscriptionTail(text);
-  if (!source) return '';
-  // Already-structured Markdown must retain code, lists, timestamps and links.
-  if (/^(?:\s*(?:```|~~~|#{1,6}\s|>\s|[-*+]\s|\d+[.)]\s|\|)|\s*\[?\d{1,2}:\d{2})/m.test(source)
-    || /!?\[[^\]\n]*\]\(/.test(source)) return source;
-  const paragraphs = [];
-  for (const block of source.split(/\n\s*\n/)) {
-    const lines = block.split('\n').map(x => x.trim()).filter(Boolean);
-    let joined = '';
-    for (const line of lines) {
-      // Never concatenate two English words while joining subtitle fragments.
-      const separator = /[\p{Script=Han}]$/u.test(joined) && /^[\p{Script=Han}]/u.test(line) ? '' : ' ';
-      joined += (joined ? separator : '') + line;
-    }
-    // Keep URL query/path punctuation opaque, but not prose punctuation after it.
-    const urls = [...joined.matchAll(/https?:\/\/[^\s<>“”「」『』。！？]+/giu)]
-      .map(match => [match.index, match.index + match[0].replace(/[.!?,;:"')\]]+$/, '').length]);
-    const insideUrl = index => urls.some(([from, to]) => index >= from && index < to);
-    const boundaries = /[。！？!?]+[”’」』"']*|\.[”’"']*(?=\s|$)/gu;
-    let start = 0;
-    for (const match of joined.matchAll(boundaries)) {
-      if (insideUrl(match.index)) continue;
-      if (match[0][0] === '.' && joined.slice(match.index + 1).trim()
-        && /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\.|\b[A-Z]\.|\b(?:[A-Za-z]\.){2,})$/u.test(joined.slice(0, match.index + 1))) continue;
-      paragraphs.push(joined.slice(start, match.index + match[0].length).trim());
-      start = match.index + match[0].length;
-    }
-    const remainder = joined.slice(start);
-    // No sentence-ending punctuation: use existing commas, grouping short
-    // fragments so recognizer output never becomes one word per paragraph.
-    const clauses = [];
-    let clauseStart = 0;
-    for (const match of remainder.matchAll(/，|,(?!\d)/gu)) {
-      if (insideUrl(start + match.index)) continue;
-      clauses.push(remainder.slice(clauseStart, match.index + 1));
-      clauseStart = match.index + 1;
-    }
-    if (remainder.slice(clauseStart).trim()) clauses.push(remainder.slice(clauseStart));
-    const groups = [];
-    let group = '';
-    for (const clause of clauses) {
-      group += clause;
-      if (group.replace(/[\s\p{P}]/gu, '').length >= 12) { groups.push(group); group = ''; }
-    }
-    if (group) {
-      if (groups.length) groups[groups.length - 1] += group;
-      else groups.push(group);
-    }
-    for (const sentence of groups) {
-      let paragraph = '';
-      // Some recognizers emit no punctuation but separate phrases with spaces.
-      // Use only those existing boundaries; never cut an unbroken token.
-      const parts = sentence.length > 500 ? sentence.match(/\S+\s*|\s+/g) || [sentence] : [sentence];
-      for (const part of parts) {
-        if (paragraph.length >= 240 && /\s$/.test(paragraph)) { paragraphs.push(paragraph.trim()); paragraph = ''; }
-        paragraph += part;
-      }
-      if (paragraph.trim()) paragraphs.push(paragraph.trim());
-    }
-  }
-  return paragraphs.join('\n\n');
+  // Preserve the recognizer's original line breaks and punctuation. The only
+  // cleanup retained here is the independently verified terminal sound noise.
+  return cleanTranscriptionTail(text);
 }
 
 // Self-contained: injected into the hidden browser as well as tested in Node.

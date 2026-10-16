@@ -4,8 +4,8 @@
     {
       "id": "asr-macos-installer",
       "sourcePath": "local-asr/install-local-asr-macos.sh",
-      "sha256": "9c9d671143a8b8c6ab99dc3c3dedd8fd342b1d56fea1e5e8da387bf5fd1a70ef",
-      "immutablePath": "local-components/by-sha256/9c9d671143a8b8c6ab99dc3c3dedd8fd342b1d56fea1e5e8da387bf5fd1a70ef/install-local-asr-macos.sh",
+      "sha256": "9ab0a9a548f0ddddfc5d2ff3399310a039644d1c463bad5621a56fdcb666a34c",
+      "immutablePath": "local-components/by-sha256/9ab0a9a548f0ddddfc5d2ff3399310a039644d1c463bad5621a56fdcb666a34c/install-local-asr-macos.sh",
       "compatibilityAlias": "local-asr/common/install-local-asr-macos.sh"
     },
     {

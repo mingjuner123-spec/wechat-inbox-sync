@@ -116,6 +116,52 @@ verify_sha256() {
   [ "$(file_sha256 "$file_path")" = "$expected_sha256" ]
 }
 
+content_sha256_from_url() {
+  printf '%s' "$1" | sed -nE 's#.*\/by-sha256\/([A-Fa-f0-9]{64})\/[^?]*.*#\1#p' | tr '[:lower:]' '[:upper:]'
+}
+
+# Keep one partial per asset, bound to content rather than an expiring signed URL.
+# Network interruptions keep the prefix. Only a corrupt completion or rejected
+# Range gets one clean retry. Never promote an HTTP error or an unverified file.
+download_verified_file() {
+  local url="$1" out_file="$2" expected_sha256="$3"
+  local part_file="$out_file.part" identity_file="$out_file.part.sha256"
+  local previous_identity="" attempt status
+  expected_sha256="$(printf '%s' "$expected_sha256" | tr '[:lower:]' '[:upper:]')"
+  [[ "$expected_sha256" =~ ^[A-F0-9]{64}$ ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$out_file")"
+  if verify_sha256 "$out_file" "$expected_sha256"; then return 0; fi
+  if [ -f "$identity_file" ]; then previous_identity="$(cat "$identity_file")"; fi
+  if [ "$previous_identity" != "$expected_sha256" ]; then rm -f "$part_file"; fi
+  printf '%s\n' "$expected_sha256" > "$identity_file"
+  for attempt in 0 1; do
+    if verify_sha256 "$part_file" "$expected_sha256"; then
+      mv -f "$part_file" "$out_file"
+      rm -f "$identity_file"
+      return 0
+    fi
+    status=0
+    curl -fL --retry 2 --retry-delay 2 --connect-timeout 30 \
+      --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
+      --max-time 900 -C - -o "$part_file" "$url" || status=$?
+    if [ "$status" -eq 0 ] && verify_sha256 "$part_file" "$expected_sha256"; then
+      mv -f "$part_file" "$out_file"
+      rm -f "$identity_file"
+      return 0
+    fi
+    case "$status" in
+      0|33|36)
+        # Complete but corrupt, or the server cannot resume. One clean retry.
+        rm -f "$part_file"
+        [ "$attempt" -eq 0 ] || return 1
+        ;;
+      *) return 1 ;; # Preserve a known-identity prefix on transport/HTTP errors.
+    esac
+  done
+  return 1
+}
+
 install_portable_python() {
   if portable_python_is_usable "$PORTABLE_PYTHON"; then
     echo "Pinned portable Python is already ready: $PORTABLE_PYTHON"
@@ -140,16 +186,11 @@ install_portable_python() {
   rm -rf "$stage_dir"
   mkdir -p "$CACHE_ROOT" "$stage_dir"
   if ! verify_sha256 "$archive_path" "$expected_sha256"; then
-    rm -f "$archive_path"
     if [ -n "$AUTHORIZED_PYTHON_RUNTIME_URL" ]; then runtime_urls+=("$AUTHORIZED_PYTHON_RUNTIME_URL"); fi
     runtime_urls+=("${GITHUB_PYTHON_DOWNLOAD_BASE%/}/${PYTHON_BUILD_STANDALONE_BUILD}/${archive_name}")
     for archive_url in "${runtime_urls[@]}"; do
       echo "Downloading pinned portable Python from an authorized or official source..."
-      rm -f "$archive_path"
-      if curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 \
-        --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
-        --max-time 900 -o "$archive_path" "$archive_url" \
-        && verify_sha256 "$archive_path" "$expected_sha256"; then
+      if download_verified_file "$archive_url" "$archive_path" "$expected_sha256"; then
         break
       fi
       echo "Pinned portable Python source failed or did not match SHA256." >&2
@@ -677,15 +718,20 @@ find_command() {
 download_file() {
   local url="$1"
   local out_file="$2"
-  echo "Downloading $url"
+  local expected_sha256
+  expected_sha256="$(content_sha256_from_url "$url")"
+  if [ -n "$expected_sha256" ]; then
+    download_verified_file "$url" "$out_file" "$expected_sha256"
+    return $?
+  fi
+  echo "Downloading component from an official source..."
   if command -v curl >/dev/null 2>&1; then
-    if curl -L \
+    if curl -fL \
       --retry 2 \
       --retry-delay 2 \
       --connect-timeout 30 \
       --speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT" \
       --speed-time "$DOWNLOAD_LOW_SPEED_TIME" \
-      -C - \
       -o "$out_file" \
       "$url"; then
       return 0
@@ -701,10 +747,20 @@ download_file() {
 
 download_model() {
   local out_file="$1"
-  local temp_file="$out_file.part"
+  local temp_file="$TEMP_ROOT/model-unverified.bin"
+  local expected_sha256
+  expected_sha256="$(content_sha256_from_url "$AUTHORIZED_MODEL_URL")"
   local urls=("${MODEL_URLS[@]}")
 
   for url in "${urls[@]}"; do
+    if [ -n "$expected_sha256" ]; then
+      if download_verified_file "$url" "$out_file" "$expected_sha256"; then return 0; fi
+      echo "Model source interrupted or failed validation; retaining verified-identity download progress." >&2
+      continue
+    fi
+    # Older standalone installers have no authorized manifest. Preserve their
+    # official full-download fallback without reusing an unknown-identity prefix.
+    rm -f "$temp_file"
     if download_file "$url" "$temp_file"; then
       local model_size
       model_size="$(wc -c < "$temp_file" | tr -d ' ')"
@@ -712,10 +768,10 @@ download_model() {
         mv -f "$temp_file" "$out_file"
         return 0
       fi
-      echo "Downloaded model is too small from $url, trying next source." >&2
+      echo "Downloaded model is too small, trying next source." >&2
       rm -f "$temp_file"
     else
-      echo "Model download failed from $url, trying next source." >&2
+      echo "Model download failed, trying next source." >&2
       rm -f "$temp_file"
     fi
   done
@@ -900,7 +956,10 @@ if [ -f "$MODEL_PATH" ]; then
   fi
 fi
 if [ ! -f "$MODEL_PATH" ]; then
-  if [ -f "$CACHE_ROOT/ggml-small.bin" ]; then
+  if [ -n "$(content_sha256_from_url "$AUTHORIZED_MODEL_URL")" ]; then
+    # Reuse only a hash-verified complete cache, never the historical size-only cache.
+    download_model "$CACHE_ROOT/ggml-small.bin"
+  elif [ -f "$CACHE_ROOT/ggml-small.bin" ]; then
     cached_model_size="$(wc -c < "$CACHE_ROOT/ggml-small.bin" | tr -d ' ')"
     if [ "$cached_model_size" -lt 400000000 ]; then
       rm -f "$CACHE_ROOT/ggml-small.bin"
