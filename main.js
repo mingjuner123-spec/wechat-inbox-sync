@@ -37686,6 +37686,74 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       return false;
     }
   }
+  /**
+   * Cloud fallback only covers platform-side capture/transcription failures.
+   * Missing Pro, an uninstalled local component, or a missing Douyin login are
+   * the user's own setup gaps: they must fail locally with guidance instead of
+   * being handed to the paid worker.
+   */
+  async evaluateCloudFallbackUserGate({
+    binding = null,
+    requireDouyinLogin = false,
+    requireDouyinResolver = false,
+    pluginDouyinLogin = null,
+    featureName = "云端转写兜底"
+  } = {}) {
+    const activeBinding = binding || this.getActiveBindings()[0] || null;
+    if (!activeBinding || !activeBinding.token) {
+      return {
+        allowed: false,
+        code: "CLOUD_FALLBACK_BINDING_REQUIRED",
+        message: "云端兜底未启用：请先完成小程序绑定。"
+      };
+    }
+    let status = {};
+    try {
+      status = await this.getProFeatureAccessStatus();
+    } catch (error) {
+      status = { hasAccess: false, status: "inactive" };
+    }
+    if (!isCachedProStatusActive(status)) {
+      return {
+        allowed: false,
+        code: "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED",
+        message: membershipGuidance(status, featureName)
+      };
+    }
+    const readiness = this.getLocalTranscriptionComponentReadiness();
+    if (!readiness.asrStatus || readiness.asrStatus.ready !== true) {
+      return {
+        allowed: false,
+        code: "LOCAL_COMPONENT_SETUP_REQUIRED",
+        message: "待安装组件：云端兜底只在本地转写组件已安装并实际尝试失败后使用。请先在插件设置中安装／更新本地组件，再在小程序同步历史中重试。"
+      };
+    }
+    if (requireDouyinResolver && (!readiness.resolverStatus || readiness.resolverStatus.ready !== true)) {
+      return {
+        allowed: false,
+        code: "DOUYIN_RESOLVER_NOT_INSTALLED",
+        message: "待安装组件：抖音解析组件未安装或未通过校验，云端兜底不会替代本地解析。请先在插件设置中安装／更新本地组件后重试。"
+      };
+    }
+    if (requireDouyinLogin) {
+      let loggedIn = pluginDouyinLogin;
+      if (loggedIn === null || loggedIn === void 0) {
+        try {
+          loggedIn = await this.checkDouyinLogin();
+        } catch (error) {
+          loggedIn = false;
+        }
+      }
+      if (loggedIn !== true) {
+        return {
+          allowed: false,
+          code: "DOUYIN_LOGIN_REQUIRED",
+          message: "未登录抖音：请先在插件设置中完成抖音登录后重试；云端兜底只处理平台侧取不到媒体的情况。"
+        };
+      }
+    }
+    return { allowed: true, binding: activeBinding };
+  }
   openTranscriptionSetupSettings() {
     var _a;
     const settings = this.app && this.app.setting;
@@ -41296,8 +41364,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const getCandidates = /* @__PURE__ */ __name(() => (preparedMedia ? Array.from(candidateMap.keys()) : sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
     const candidates = getCandidates();
     if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
+    const fallbackGate = !candidates.length && this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding ? await this.evaluateCloudFallbackUserGate({
+      binding,
+      requireDouyinLogin: true,
+      requireDouyinResolver: true
+    }) : null;
     if (!candidates.length) {
-      if (this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding) {
+      if (fallbackGate && fallbackGate.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
             sourceType: "douyin_url",
@@ -41335,6 +41408,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
           noMediaError = [noMediaError, `云端兜底未提交：${cloudError && cloudError.message || cloudError}`].filter(Boolean).join("；");
         }
+      } else if (fallbackGate) {
+        noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join("；");
       }
       return {
         ...record,
@@ -41497,7 +41572,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         throw error;
       }
       let finalError = error;
-      if (this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding && !isAbortError(error) && error.code !== "TRANSCRIPTION_NO_SPEECH") {
+      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding && !isAbortError(error) && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate({ binding }) : null;
+      if (fallbackGate2 && fallbackGate2.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
             sourceType: "douyin_url",
@@ -41540,6 +41616,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           ].filter(Boolean).join("；"));
           finalError.code = error.code;
         }
+      } else if (fallbackGate2) {
+        finalError = new Error([error.message || String(error), fallbackGate2.message].filter(Boolean).join("；"));
+        finalError.code = error.code;
       }
       const recoveryCandidate = platform === "视频号" && finalError.code === "TRANSCRIPTION_LOW_QUALITY" && finalError.qualityRecoveryCandidate && finalError.qualityRecoveryCandidate.fullAudioProcessed === true && getChannelsUnresolvedWindowCount(finalError.qualityRecoveryCandidate) > 0 && Number(finalError.qualityRecoveryCandidate.windowCount) > 0 ? String(finalError.qualityRecoveryCandidate.transcription || "").trim() : "";
       const candidateNote = recoveryCandidate ? [
@@ -43497,37 +43576,47 @@ ${finalized.markdown}
           });
         }
         if (isVideoIntent && isDouyinRecord) {
-          const noMediaError = douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === "DOUYIN_NO_MEDIA" ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : douyinDiagnostic.failureMessage(douyinFailureCode);
+          let noMediaError = douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === "DOUYIN_NO_MEDIA" ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : douyinDiagnostic.failureMessage(douyinFailureCode);
           if (this.settings.cloudFallbackEnabled === true && binding) {
-            try {
-              const job = await this.submitCloudFallbackJob({
-                sourceType: "douyin_url",
-                sourceUrl: url,
-                recordId: getRecordId(record),
-                retryCount: record.retryCount,
-                title: title || metadata.title || "抖音链接",
-                localError: noMediaError,
-                provider: this.settings.aiProvider || "",
-                binding,
-                signal
-              });
-              if (job.status === "succeeded" && String(job.transcription || "").trim()) {
-                return {
-                  ...record,
-                  metadata: buildTranscriptOnlyMetadata(metadata, {
-                    url,
-                    platform: "抖音",
-                    transcription: job.transcription,
-                    transcriptionStatus: "success",
-                    transcriptionSource: "cloud-fallback",
-                    conversionStatus: "success",
-                    sourceTitle: metadata.title || title || "抖音链接"
-                  })
-                };
+            const fallbackGate = await this.evaluateCloudFallbackUserGate({
+              binding,
+              requireDouyinLogin: true,
+              requireDouyinResolver: true,
+              pluginDouyinLogin: hasPluginDouyinLogin
+            });
+            if (!fallbackGate.allowed) {
+              noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join("；");
+            } else {
+              try {
+                const job = await this.submitCloudFallbackJob({
+                  sourceType: "douyin_url",
+                  sourceUrl: url,
+                  recordId: getRecordId(record),
+                  retryCount: record.retryCount,
+                  title: title || metadata.title || "抖音链接",
+                  localError: noMediaError,
+                  provider: this.settings.aiProvider || "",
+                  binding,
+                  signal
+                });
+                if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+                  return {
+                    ...record,
+                    metadata: buildTranscriptOnlyMetadata(metadata, {
+                      url,
+                      platform: "抖音",
+                      transcription: job.transcription,
+                      transcriptionStatus: "success",
+                      transcriptionSource: "cloud-fallback",
+                      conversionStatus: "success",
+                      sourceTitle: metadata.title || title || "抖音链接"
+                    })
+                  };
+                }
+                throw createCloudFallbackPendingError(job, noMediaError);
+              } catch (cloudError) {
+                if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
               }
-              throw createCloudFallbackPendingError(job, noMediaError);
-            } catch (cloudError) {
-              if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
             }
           }
           return {

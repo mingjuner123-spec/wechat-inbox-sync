@@ -175,6 +175,20 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   plugin.showSyncProgress = () => {};
   plugin.refreshProAndMaybePromptLocalComponentInstall = async () => {};
   plugin.autoSyncController = null;
+  // The cloud fallback gate only lets a fully set-up Pro user reach the paid
+  // path. Default the fixture to that state; individual tests opt out.
+  plugin.getProFeatureAccessStatus = async () => ({
+    hasAccess: true,
+    status: 'active',
+    expiresAt: new Date(Date.now() + 86400000).toISOString(),
+  });
+  plugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: true,
+    asrStatus: { ready: true },
+    ocrStatus: { ready: true },
+    resolverStatus: { ready: true },
+  });
+  plugin.checkDouyinLogin = async () => true;
   plugin.__getSavedSnapshot = () => savedSnapshot;
   return plugin;
 }
@@ -408,6 +422,93 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     error => error && error.name === 'AbortError',
   );
   assert.strictEqual(cancelledCandidateSubmitted, false);
+
+  // Cloud fallback is only for platform-side failures. Missing Pro, a missing
+  // local component, or a missing Douyin login must stop locally with guidance
+  // instead of submitting paid cloud work.
+  const membershipDeniedPlugin = makePlugin();
+  membershipDeniedPlugin.getProFeatureAccessStatus = async () => ({ hasAccess: false, status: 'expired', expiresAt: '' });
+  const membershipGate = await membershipDeniedPlugin.evaluateCloudFallbackUserGate({
+    binding: membershipDeniedPlugin.settings.bindings[0],
+  });
+  assert.strictEqual(membershipGate.allowed, false);
+  assert.strictEqual(membershipGate.code, 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED');
+  assert.match(membershipGate.message, /开通|续费/);
+
+  const componentDeniedPlugin = makePlugin();
+  componentDeniedPlugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: false,
+    asrStatus: { ready: false },
+    ocrStatus: { ready: true },
+    resolverStatus: { ready: true },
+  });
+  const componentGate = await componentDeniedPlugin.evaluateCloudFallbackUserGate({
+    binding: componentDeniedPlugin.settings.bindings[0],
+  });
+  assert.strictEqual(componentGate.allowed, false);
+  assert.strictEqual(componentGate.code, 'LOCAL_COMPONENT_SETUP_REQUIRED');
+
+  const resolverDeniedPlugin = makePlugin();
+  resolverDeniedPlugin.getLocalTranscriptionComponentReadiness = () => ({
+    ready: false,
+    asrStatus: { ready: true },
+    ocrStatus: { ready: true },
+    resolverStatus: { ready: false },
+  });
+  const resolverGate = await resolverDeniedPlugin.evaluateCloudFallbackUserGate({
+    binding: resolverDeniedPlugin.settings.bindings[0],
+    requireDouyinResolver: true,
+  });
+  assert.strictEqual(resolverGate.allowed, false);
+  assert.strictEqual(resolverGate.code, 'DOUYIN_RESOLVER_NOT_INSTALLED');
+
+  const loginDeniedPlugin = makePlugin();
+  loginDeniedPlugin.checkDouyinLogin = async () => false;
+  const loginGate = await loginDeniedPlugin.evaluateCloudFallbackUserGate({
+    binding: loginDeniedPlugin.settings.bindings[0],
+    requireDouyinLogin: true,
+  });
+  assert.strictEqual(loginGate.allowed, false);
+  assert.strictEqual(loginGate.code, 'DOUYIN_LOGIN_REQUIRED');
+
+  const allowedGatePlugin = makePlugin();
+  const allowedGate = await allowedGatePlugin.evaluateCloudFallbackUserGate({
+    binding: allowedGatePlugin.settings.bindings[0],
+    requireDouyinLogin: true,
+    requireDouyinResolver: true,
+  });
+  assert.strictEqual(allowedGate.allowed, true);
+
+  // A setup failure that surfaces after candidate transcription must not be
+  // re-submitted as a cloud job by the outer catch.
+  const setupErrorPlugin = makePlugin();
+  let setupErrorSubmitted = false;
+  setupErrorPlugin.runConfiguredTranscription = async () => {
+    throw Object.assign(new Error('待安装组件：音视频转写需要先安装本地转写组件。'), {
+      code: 'LOCAL_COMPONENT_SETUP_REQUIRED',
+      transcriptionSetupRequired: true,
+    });
+  };
+  setupErrorPlugin.submitCloudFallbackJob = async () => {
+    setupErrorSubmitted = true;
+    throw new Error('setup errors must not submit cloud work');
+  };
+  await assert.rejects(
+    setupErrorPlugin.buildTranscriptRecordFromMedia({
+      id: 'record-douyin-setup',
+      type: 'webpage',
+      content: douyinUrl,
+      metadata: { url: douyinUrl },
+    }, {
+      url: douyinUrl,
+      platform: '抖音',
+      mediaUrl: 'https://cdn.example.test/video.mp4',
+      preparedMedia: true,
+      binding: setupErrorPlugin.settings.bindings[0],
+    }),
+    error => error && error.code === 'LOCAL_COMPONENT_SETUP_REQUIRED',
+  );
+  assert.strictEqual(setupErrorSubmitted, false);
 
   const pollPlugin = makePlugin({ jobs: submitPlugin.settings.cloudFallbackJobs });
   let pollCount = 0;
