@@ -95,6 +95,33 @@ const {
   tryParseJson,
 } = require('./cloud-transcription-response-utils');
 const {
+  normalizeConnectionTicket,
+  isConnectionTicket,
+  normalizeCloudFallbackJob,
+  normalizeCloudFallbackJobs,
+  normalizeCloudFallbackAck,
+  normalizeCloudFallbackAcks,
+  normalizeCloudFallbackRecordSnapshot,
+  isCloudFallbackJobTerminal,
+  isCloudFallbackJobPending,
+  normalizeCloudFallbackSourceType,
+  isControlledCloudFallbackFileId,
+} = require('./cloud-fallback-job-utils');
+const {
+  MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+  hashFileSha256,
+  uploadMultipartFile,
+} = require('./cloud-media-upload');
+const {
+  createOperatorMediaNode,
+  OPERATOR_NODE_API_BASE_ENV,
+  OPERATOR_NODE_ENABLED_ENV,
+  OPERATOR_NODE_ID_ENV,
+  OPERATOR_NODE_TOKEN_ENV,
+  WORKER_PROTOCOL_VERSION,
+  requestJsonViaNode: requestOperatorJsonViaNode,
+} = require('./operator-media-node');
+const {
   generateWechatChannelsDecryptorBytes,
   decryptWechatChannelsMediaBuffer,
 } = require('./wechat-channels-decrypt-utils');
@@ -479,6 +506,7 @@ const DEFAULT_SETTINGS = {
   settingsVersion: 2,
   token: '',
   pendingBindCode: '',
+  pendingConnectionTicket: '',
   pendingRedeemCode: '',
   localTranscriptionEntitlementStatus: null,
   proEntitlementLastError: '',
@@ -511,6 +539,10 @@ const DEFAULT_SETTINGS = {
   deepseekBaseUrl: 'https://api.deepseek.com/v1/chat/completions',
   cloudPreTranscriptionEnabled: false,
   cloudPreTranscriptionThresholdMinutes: 10,
+  cloudFallbackEnabled: false,
+  cloudFallbackJobs: [],
+  cloudFallbackSubmissions: [],
+  cloudFallbackPendingAcks: [],
   localAsrPlatform: 'auto',
   localAsrInstallMode: 'default',
   localTranscriptionCommand: '',
@@ -3421,6 +3453,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     (rawEntitlementStatus && (rawEntitlementStatus.code || rawEntitlementStatus.redeemCode)) || '',
   );
   const pendingBindToken = normalizeBindCodeInput(merged.pendingBindCode);
+  merged.pendingConnectionTicket = normalizeConnectionTicket(merged.pendingConnectionTicket);
   if (entitlementRedeemCode && !merged.pendingRedeemCode) {
     merged.pendingRedeemCode = entitlementRedeemCode;
   }
@@ -3518,6 +3551,10 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || '').trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
+  merged.cloudFallbackEnabled = merged.cloudFallbackEnabled === true;
+  merged.cloudFallbackJobs = normalizeCloudFallbackJobs(merged.cloudFallbackJobs);
+  merged.cloudFallbackSubmissions = normalizeCloudFallbackSubmissions(merged.cloudFallbackSubmissions);
+  merged.cloudFallbackPendingAcks = normalizeCloudFallbackAcks(merged.cloudFallbackPendingAcks);
   // Platform selection is no longer user-configurable. Old settings may still
   // contain a Windows/macOS override copied from a different computer.
   merged.localAsrPlatform = 'auto';
@@ -3569,6 +3606,156 @@ function validateSettings(settings) {
     && settings.bindings.some((item) => item && item.enabled !== false && item.status !== 'unbound' && item.token);
   if (!settings.token && !hasEnabledBinding) errors.push('请填写小程序绑定码');
   return errors;
+}
+
+function normalizeCloudFallbackRecordRetryCount(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : 0;
+}
+
+function normalizeCloudFallbackSubmission(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const sourceType = normalizeCloudFallbackSourceType(value.sourceType);
+  const fileID = String(value.fileID || value.audioFileID || value.fileId || '').trim();
+  const recordId = String(value.recordId || '').trim().slice(0, 180);
+  const bindingFingerprint = String(value.bindingFingerprint || '').trim().slice(0, 80);
+  const clientId = String(value.clientId || '').trim().slice(0, 180);
+  const clientRequestId = String(value.clientRequestId || value.idempotencyKey || '').trim().slice(0, 240);
+  if (sourceType !== 'uploaded_file'
+    || !fileID
+    || !isControlledCloudFallbackFileId(fileID)
+    || !recordId
+    || !bindingFingerprint
+    || !clientId
+    || !clientRequestId) return null;
+  return {
+    sourceType,
+    fileID,
+    recordId,
+    bindingFingerprint,
+    clientId,
+    sourceFingerprint: String(value.sourceFingerprint || '').trim().slice(0, 80),
+    clientRequestId,
+    recordRetryCount: normalizeCloudFallbackRecordRetryCount(value.recordRetryCount),
+    createdAt: String(value.createdAt || '').trim().slice(0, 80),
+    updatedAt: String(value.updatedAt || '').trim().slice(0, 80),
+  };
+}
+
+function normalizeCloudFallbackSubmissions(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value.map(normalizeCloudFallbackSubmission).filter((submission) => {
+    if (!submission) return false;
+    const identity = [
+      submission.bindingFingerprint,
+      submission.clientId,
+      submission.recordId,
+      submission.recordRetryCount,
+      submission.clientRequestId,
+    ].join('\u001f');
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+function isCloudFallbackSubmissionUncertain(error) {
+  if (!error || isAbortError(error)) return false;
+  const status = Number(error.statusCode || error.status) || 0;
+  if (status >= 500 || status === 0) return true;
+  return /network|网络|request failed|timeout|超时|连接失败|fetch/i.test(String(error.message || ''));
+}
+
+function getCloudFallbackRecordRetryCount(record) {
+  return normalizeCloudFallbackRecordRetryCount(record && record.retryCount);
+}
+
+function getCloudFallbackJobRecordRetryCount(job) {
+  if (!job || !Object.prototype.hasOwnProperty.call(job, 'recordRetryCount')) return null;
+  const numeric = Number(job.recordRetryCount);
+  return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : null;
+}
+
+function isCloudFallbackRecordGenerationCurrent(record) {
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  const currentRetryCount = getCloudFallbackRecordRetryCount(record);
+  if (!Object.prototype.hasOwnProperty.call(metadata, 'cloudFallbackRecordRetryCount')) {
+    // Metadata written before request generations were persisted can only be
+    // trusted for the initial attempt. Once the mini-program increments the
+    // retry counter, that old cloud result must not gate the new attempt.
+    return currentRetryCount === 0;
+  }
+  const marker = Number(metadata.cloudFallbackRecordRetryCount);
+  return Number.isFinite(marker)
+    && Math.max(0, Math.floor(marker)) === currentRetryCount;
+}
+
+function isCloudFallbackJobForRecord(job, record) {
+  const jobRetryCount = getCloudFallbackJobRecordRetryCount(job);
+  if (jobRetryCount === null) return getCloudFallbackRecordRetryCount(record) === 0;
+  return jobRetryCount === getCloudFallbackRecordRetryCount(record);
+}
+
+function isCloudFallbackPendingRecord(record) {
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  return isCloudFallbackRecordGenerationCurrent(record)
+    && Boolean(metadata.cloudFallbackJobId)
+    && isCloudFallbackJobPending({
+      status: metadata.cloudFallbackStatus || metadata.transcriptionStatus,
+      retryable: metadata.cloudFallbackRetryable === true,
+    });
+}
+
+function isCloudFallbackTerminalRecord(record) {
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  if (!isCloudFallbackRecordGenerationCurrent(record)
+    || !metadata.cloudFallbackJobId
+    || isCloudFallbackPendingRecord(record)) return false;
+  const status = String(metadata.cloudFallbackStatus || metadata.transcriptionStatus || '').trim().toLowerCase();
+  if (!['no_speech', 'failed', 'needs_action', 'cancelled'].includes(status)) return false;
+  if (Object.prototype.hasOwnProperty.call(metadata, 'cloudFallbackRecordRetryCount')) {
+    return normalizeCloudFallbackRecordRetryCount(metadata.cloudFallbackRecordRetryCount)
+      === getCloudFallbackRecordRetryCount(record);
+  }
+  return getCloudFallbackRecordRetryCount(record) === 0;
+}
+
+function isCloudFallbackCompletedRecord(record) {
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  return isCloudFallbackRecordGenerationCurrent(record)
+    && Boolean(metadata.cloudFallbackJobId)
+    && String(metadata.transcriptionStatus || '').trim().toLowerCase() === 'success'
+    && Boolean(String(metadata.transcription || '').trim());
+}
+
+function getActiveCloudFallbackLifecycle(record) {
+  if (!isCloudFallbackRecordGenerationCurrent(record)) return null;
+  const metadata = record && record.metadata && typeof record.metadata === 'object'
+    ? record.metadata
+    : {};
+  const attemptId = String(metadata.cloudFallbackSyncAttemptId || '').trim();
+  const leaseUntil = String(metadata.cloudFallbackSyncLeaseUntil || '').trim();
+  if (!attemptId || !leaseUntil) return null;
+  const leaseAt = Date.parse(leaseUntil);
+  if (!Number.isFinite(leaseAt) || leaseAt <= Date.now()) return null;
+  return { enabled: true, attemptId, leaseUntil, resumedCloudFallback: true };
+}
+
+function createCloudFallbackPendingError(job, localError = '') {
+  const error = new Error('云端兜底任务已提交，等待转写结果');
+  error.code = 'CLOUD_FALLBACK_QUEUED';
+  error.cloudFallbackJob = job || null;
+  error.localError = String(localError || '').trim();
+  return error;
 }
 
 function isBindingInvalidMessage(message) {
@@ -11506,7 +11693,26 @@ async function downloadArrayBufferViaElectronSession(
   if (!response || !response.ok) {
     throw new Error(`媒体下载失败：HTTP ${response ? response.status : 0}`);
   }
-  return response.arrayBuffer();
+  const maxBytes = Math.max(0, Number(options.maxBytes) || 0);
+  if (maxBytes > 0) {
+    const contentLength = Number(
+      response.headers && typeof response.headers.get === 'function'
+        ? response.headers.get('content-length')
+        : 0,
+    );
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      const error = new Error('媒体文件超过云端兜底大小限制');
+      error.code = 'MEDIA_DOWNLOAD_TOO_LARGE';
+      throw error;
+    }
+  }
+  const body = await response.arrayBuffer();
+  if (maxBytes > 0 && body && Number(body.byteLength) > maxBytes) {
+    const error = new Error('媒体文件超过云端兜底大小限制');
+    error.code = 'MEDIA_DOWNLOAD_TOO_LARGE';
+    throw error;
+  }
+  return body;
 }
 
 function isMediaAuthorizationError(error) {
@@ -16542,6 +16748,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.currentTranscriptionProcess = null;
     this.currentTranscriptionProcessDetached = false;
     this.currentTranscriptionContext = null;
+    this.operatorLocalAsrActive = false;
+    this.localAsrMutexOwner = null;
     this.currentProcessingAbortController = null;
     this.currentProcessingContext = null;
     this.pendingStoppedTranscriptionDeletes = new Map();
@@ -16620,6 +16828,21 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.setTranscriptionStopAvailable(false);
 
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
+
+    // The operator media node is intentionally outside normal binding and
+    // sync paths. It is enabled only by an explicit process environment
+    // switch; its worker token never enters settings/data.json or UI text.
+    this.operatorMediaNode = createOperatorMediaNode({
+      plugin: this,
+      apiBase: this.settings.apiBase,
+    });
+    this.register(() => {
+      if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === 'function') {
+        return this.operatorMediaNode.stop();
+      }
+      return undefined;
+    });
+    if (this.operatorMediaNode.isEnabled()) this.operatorMediaNode.start();
 
     this.startAutoSync();
     this.getSyncDiagnosticReporter().kick();
@@ -17349,6 +17572,59 @@ class WechatObsidianInboxPlugin extends Plugin {
     return payload;
   }
 
+  async requestUnauthenticatedJson(path, method = 'GET', body = {}, options = {}) {
+    const signal = options.signal || null;
+    throwIfAborted(signal);
+    const apiBase = trimTrailingSlash(this.settings && this.settings.apiBase || '');
+    if (!apiBase) throw new Error('请填写同步 API 地址');
+    const requestOptions = {
+      url: `${apiBase}${path}`,
+      method,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-Wechat-Inbox-Client-Id': String(this.settings && this.settings.clientId || '').trim(),
+        ...(options.noCache === true ? {
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+        } : {}),
+      },
+      body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
+      signal,
+      ...(Number(options.timeoutMs) > 0 ? { timeout: Math.min(Number(options.timeoutMs), 120000) } : {}),
+    };
+    let response;
+    try {
+      response = signal
+        ? await requestJsonViaNode(requestOptions)
+        : await requestUrl({ ...requestOptions, throw: false });
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw createAbortError();
+      const message = error && error.message ? error.message : String(error || '');
+      if (!isRequestUrlTransportError(message)) throw error;
+      try {
+        response = await requestJsonViaNode(requestOptions);
+      } catch (fallbackError) {
+        if (isAbortError(fallbackError) || signal?.aborted) throw createAbortError();
+        throw fallbackError;
+      }
+    }
+    throwIfAborted(signal);
+    const payload = response && (response.json || (response.text ? tryParseJson(response.text) : null));
+    const status = Number(response && response.status) || 0;
+    const errorPayload = payload && (payload.errMsg || payload.message || payload.error && payload.error.message);
+    if ((status && (status < 200 || status >= 300)) || !payload || payload.success === false) {
+      const requestError = new Error(String(errorPayload || `同步 API 请求失败${status ? `：HTTP ${status}` : ''}`));
+      requestError.status = status;
+      requestError.statusCode = status;
+      if (payload && (payload.errCode || payload.code || payload.error && payload.error.code)) {
+        requestError.code = String(payload.errCode || payload.code || payload.error.code);
+      }
+      throw requestError;
+    }
+    return payload;
+  }
+
   async requestExternalJson(url, { method = 'POST', headers = {}, body = null } = {}) {
     const requestOptions = {
       url,
@@ -17690,6 +17966,10 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async bindCurrentCode() {
+    const pendingCode = this.settings.pendingBindCode || this.settings.token;
+    if (isConnectionTicket(pendingCode)) {
+      return await this.connectWithConnectionTicket(pendingCode);
+    }
     if (!this.settings.clientId) {
       await this.saveSettings({
         ...this.settings,
@@ -17785,6 +18065,700 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       new Notice(`绑定失败：${message || '请稍后重试'}`);
     }
+  }
+
+  async connectWithConnectionTicket(ticketInput = this.settings.pendingConnectionTicket || this.settings.pendingBindCode) {
+    const ticket = normalizeConnectionTicket(ticketInput);
+    if (!ticket) {
+      new Notice('请填写有效的短期连接码（CNT-XXXX-XXXX-XXXX）');
+      return null;
+    }
+    if (!this.settings.apiBase) {
+      new Notice('请填写同步 API 地址');
+      return null;
+    }
+    const currentBindings = normalizeBindings(this.settings);
+    const activeBindingCount = currentBindings.filter((item) => item.status !== 'needs_rebind').length;
+    if (activeBindingCount >= MAX_PLUGIN_BINDINGS) {
+      new Notice(`最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码`);
+      return null;
+    }
+    const clientId = String(this.settings.clientId || '').trim() || createClientId();
+    if (clientId !== this.settings.clientId) {
+      await this.saveSettings({ ...this.settings, clientId });
+    }
+    try {
+      const payload = await this.requestUnauthenticatedJson('/connection/consume', 'POST', {
+        version: 'v1',
+        ticket,
+        purpose: 'obsidian_bind',
+        clientId,
+        clientVersion: String(this.manifest && this.manifest.version || PLUGIN_RUNTIME_VERSION || '').trim(),
+        platform: process.platform,
+      });
+      const data = payload && payload.data ? payload.data : payload;
+      const credentialType = String(data && data.credentialType || '').trim();
+      const bindingToken = normalizeBindCodeInput(data && data.bindingToken);
+      // connection-core names the existing plugin credential `bind_code`.
+      // `binding_token` was used by an earlier client draft; accepting both
+      // labels keeps the short-ticket protocol compatible while the payload
+      // remains restricted to the server-issued bindingToken field.
+      if (!['bind_code', 'binding_token'].includes(credentialType) || !bindingToken) {
+        const malformed = new Error('连接服务未返回有效绑定凭据');
+        malformed.code = 'CONNECTION_RESPONSE_INVALID';
+        throw malformed;
+      }
+      const replacement = currentBindings.length >= MAX_PLUGIN_BINDINGS
+        ? currentBindings.find((item) => item.status === 'needs_rebind')
+        : null;
+      const existing = currentBindings.find((item) => item.token === bindingToken);
+      const nextBinding = existing
+        ? {
+          ...existing,
+          enabled: true,
+          status: 'bound',
+          lastError: '',
+          unboundAt: '',
+        }
+        : {
+          token: bindingToken,
+          label: `微信 ${currentBindings.length + 1}`,
+          enabled: true,
+          status: 'bound',
+          boundAt: String(data && data.boundAt || new Date().toISOString()),
+          lastSyncAt: '',
+          unboundAt: '',
+          lastError: '',
+        };
+      const nextBindings = [
+        nextBinding,
+        ...currentBindings.filter((item) => item.token !== bindingToken && (!replacement || item.token !== replacement.token)),
+      ];
+      await this.saveSettings({
+        ...this.settings,
+        clientId,
+        token: getPrimaryBindingToken(nextBindings),
+        pendingConnectionTicket: '',
+        ...(isConnectionTicket(this.settings.pendingBindCode) ? { pendingBindCode: '' } : {}),
+        bindings: nextBindings,
+      });
+      new Notice('连接成功');
+      if (this.autoSyncController) this.autoSyncController.wake();
+      this.refreshProAndMaybePromptLocalComponentInstall({ reason: 'bind', force: true }).catch((error) => {
+        new Notice(`Pro 组件检查失败：${error.message || error}`);
+      });
+      return nextBinding;
+    } catch (error) {
+      const code = String(error && error.code || '').trim().toUpperCase();
+      const status = Number(error && (error.status || error.statusCode)) || 0;
+      const message = String(error && error.message || error || '').trim();
+      if (['CONNECTION_TICKET_INVALID', 'INVALID_CONNECTION_TICKET'].includes(code)) {
+        new Notice('连接码无效，请回到小程序重新生成后再试');
+      } else if (code === 'CONNECTION_TICKET_EXPIRED') {
+        new Notice('连接码已过期，请回到小程序重新生成后再试');
+      } else if (code === 'CONNECTION_TICKET_USED') {
+        new Notice('连接码已使用，请回到小程序重新生成后再试');
+      } else if (code === 'DEVICE_LIMIT_EXCEEDED') {
+        new Notice('绑定电脑名额已满，请在小程序绑定页增加设备名额后再试');
+      } else if (code === 'TEMPORARY_UNAVAILABLE' || status === 404 || status === 405 || status >= 500
+        || /not found|route|暂不可用|网络连接失败|连接失败|request failed,?\s*status\s*[45]\d\d|http\s*[45]\d\d/i.test(message)) {
+        // A deployment without the new endpoint must not invalidate an old
+        // binding or make the user believe that a working binding disappeared.
+        new Notice('新版连接服务暂不可用，请暂时使用旧绑定码');
+      } else {
+        new Notice(`连接失败：${message || '请稍后重试'}`);
+      }
+      return null;
+    }
+  }
+
+  async persistCloudFallbackJobs(value) {
+    this.ensureSerializedSaveData();
+    const cloudFallbackJobs = normalizeCloudFallbackJobs(value);
+    this.settings = { ...(this.settings || {}), cloudFallbackJobs };
+    if (typeof this.saveData === 'function') await this.saveData(this.settings);
+    return cloudFallbackJobs;
+  }
+
+  async persistCloudFallbackSubmissions(value) {
+    this.ensureSerializedSaveData();
+    const cloudFallbackSubmissions = normalizeCloudFallbackSubmissions(value);
+    this.settings = { ...(this.settings || {}), cloudFallbackSubmissions };
+    if (typeof this.saveData === 'function') await this.saveData(this.settings);
+    return cloudFallbackSubmissions;
+  }
+
+  async persistCloudFallbackAcks(value) {
+    this.ensureSerializedSaveData();
+    const cloudFallbackPendingAcks = normalizeCloudFallbackAcks(value);
+    this.settings = { ...(this.settings || {}), cloudFallbackPendingAcks };
+    if (typeof this.saveData === 'function') await this.saveData(this.settings);
+    return cloudFallbackPendingAcks;
+  }
+
+  async rememberCloudFallbackAck(value = {}) {
+    const ack = normalizeCloudFallbackAck(value);
+    if (!ack) return normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const acks = normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const sameTarget = (item) => item.jobId === ack.jobId
+      && item.bindingFingerprint === ack.bindingFingerprint
+      && item.clientId === ack.clientId;
+    const previous = acks.find(sameTarget) || null;
+    return await this.persistCloudFallbackAcks([
+      ...acks.filter((item) => !sameTarget(item)),
+      {
+        ...ack,
+        queuedAt: previous && previous.queuedAt ? previous.queuedAt : (ack.queuedAt || new Date().toISOString()),
+        attempts: (previous ? previous.attempts : 0) + 1,
+      },
+    ]);
+  }
+
+  async clearCloudFallbackAck(value = {}) {
+    const jobId = String(value.jobId || '').trim();
+    const bindingFingerprint = String(value.bindingFingerprint || '').trim();
+    const clientId = String(value.clientId || '').trim();
+    if (!jobId) return normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const acks = normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const next = acks.filter((item) => !(item.jobId === jobId
+      && item.bindingFingerprint === bindingFingerprint
+      && item.clientId === clientId));
+    if (next.length !== acks.length) await this.persistCloudFallbackAcks(next);
+    return next;
+  }
+
+  async forgetCloudFallbackJob(jobId, scope = {}) {
+    const normalizedJobId = String(jobId || '').trim();
+    if (!normalizedJobId) return normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const bindingFingerprint = String(scope.bindingFingerprint || '').trim();
+    const clientId = String(scope.clientId || '').trim();
+    const jobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const next = jobs.filter((item) => !(item.jobId === normalizedJobId
+      && (!bindingFingerprint || item.bindingFingerprint === bindingFingerprint)
+      && (!clientId || item.clientId === clientId)));
+    if (next.length !== jobs.length) await this.persistCloudFallbackJobs(next);
+    return next;
+  }
+
+  async rememberCloudFallbackSubmission(value) {
+    const submission = normalizeCloudFallbackSubmission(value);
+    if (!submission) throw new Error('云端兜底待提交记录无效');
+    const submissions = normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions);
+    const sameRequest = (item) => item.bindingFingerprint === submission.bindingFingerprint
+      && item.clientId === submission.clientId
+      && item.recordId === submission.recordId
+      && item.recordRetryCount === submission.recordRetryCount
+      && item.clientRequestId === submission.clientRequestId;
+    return await this.persistCloudFallbackSubmissions([
+      ...submissions.filter((item) => !sameRequest(item)),
+      submission,
+    ]);
+  }
+
+  async clearCloudFallbackSubmission(value = {}) {
+    const bindingFingerprint = String(value.bindingFingerprint || '').trim();
+    const clientId = String(value.clientId || '').trim();
+    const recordId = String(value.recordId || '').trim();
+    const recordRetryCount = normalizeCloudFallbackRecordRetryCount(value.recordRetryCount);
+    const clientRequestId = String(value.clientRequestId || '').trim();
+    const submissions = normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions);
+    const next = submissions.filter((item) => !(item.bindingFingerprint === bindingFingerprint
+      && item.clientId === clientId
+      && item.recordId === recordId
+      && item.recordRetryCount === recordRetryCount
+      && (!clientRequestId || item.clientRequestId === clientRequestId)));
+    if (next.length !== submissions.length) await this.persistCloudFallbackSubmissions(next);
+    return next;
+  }
+
+  findCloudFallbackSubmission(options = {}) {
+    const binding = options.binding || null;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const clientId = String(this.settings && this.settings.clientId || '').trim();
+    const recordId = String(options.recordId || '').trim();
+    const recordRetryCount = normalizeCloudFallbackRecordRetryCount(options.retryCount);
+    return normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions)
+      .find((item) => item.bindingFingerprint === bindingFingerprint
+        && item.clientId === clientId
+        && item.recordId === recordId
+        && item.recordRetryCount === recordRetryCount);
+  }
+
+  async upsertCloudFallbackJob(value) {
+    const job = normalizeCloudFallbackJob(value);
+    if (!job) throw new Error('云端兜底任务响应无效');
+    const jobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const sameIdentity = (item) => item.jobId === job.jobId && (
+      (!item.bindingFingerprint && !item.clientId && !item.sourceFingerprint)
+      || (item.bindingFingerprint === job.bindingFingerprint
+        && item.clientId === job.clientId
+        && item.recordId === job.recordId
+        && (!item.sourceFingerprint || !job.sourceFingerprint || item.sourceFingerprint === job.sourceFingerprint))
+    );
+    return await this.persistCloudFallbackJobs([
+      ...jobs.filter((item) => !sameIdentity(item)),
+      job,
+    ]);
+  }
+
+  buildCloudFallbackClientRequestId(options = {}) {
+    const explicit = String(options.clientRequestId || options.idempotencyKey || '').trim();
+    if (explicit) return explicit.slice(0, 240);
+    const recordId = String(options.recordId || '').trim();
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    const source = String(options.sourceUrl || options.fileID || '').trim();
+    const retryCount = Math.max(0, Math.floor(Number(options.retryCount) || 0));
+    const retrySalt = options.retry === true ? `|retry|${createRequestId()}` : '';
+    const basis = [recordId, sourceType, source, retryCount].join('|') + retrySalt;
+    return `plugin-${crypto.createHash('sha256').update(basis).digest('hex').slice(0, 48)}`;
+  }
+
+  buildCloudFallbackSourceFingerprint(options = {}) {
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    const source = String(options.sourceUrl || options.fileID || '').trim();
+    const recordId = String(options.recordId || '').trim();
+    return crypto.createHash('sha256')
+      .update([sourceType, recordId, source].join('|'), 'utf8')
+      .digest('hex')
+      .slice(0, 32);
+  }
+
+  rememberCloudFallbackJobContext(job, options = {}) {
+    const normalized = normalizeCloudFallbackJob(job);
+    if (!normalized) return null;
+    const recordId = String(options.recordId || normalized.recordId || '').trim();
+    const contexts = [this.currentProcessingContext, this.currentTranscriptionContext]
+      .filter((context, index, list) => context && context.recordId === recordId
+        && list.indexOf(context) === index);
+    contexts.forEach((context) => {
+      context.cloudFallbackJobId = normalized.jobId;
+      context.cloudFallbackBinding = options.binding && options.binding.token
+        ? { ...options.binding }
+        : (context.binding ? { ...context.binding } : null);
+    });
+    return normalized;
+  }
+
+  async attachCloudFallbackRecordContext(job, record, binding, lifecycle = {}) {
+    const normalized = normalizeCloudFallbackJob(job);
+    if (!normalized) return null;
+    const recordSnapshot = normalizeCloudFallbackRecordSnapshot(record);
+    const recordId = getRecordId(record) || normalized.recordId;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const clientId = String(this.settings && this.settings.clientId || '').trim();
+    const sourceFingerprint = normalized.sourceFingerprint
+      || this.buildCloudFallbackSourceFingerprint({
+        sourceType: normalized.sourceType,
+        sourceUrl: normalized.sourceUrl,
+        fileID: normalized.fileID,
+        recordId,
+      });
+    const syncAttemptId = String(lifecycle && lifecycle.attemptId || '').trim();
+    const syncLeaseUntil = String(lifecycle && lifecycle.leaseUntil || '').trim();
+    const enriched = normalizeCloudFallbackJob({
+      ...normalized,
+      recordId,
+      bindingFingerprint,
+      clientId,
+      sourceFingerprint,
+      recordRetryCount: getCloudFallbackRecordRetryCount(record),
+      ...(recordSnapshot ? { recordSnapshot } : {}),
+      ...(syncAttemptId ? { syncAttemptId } : {}),
+      ...(syncLeaseUntil ? { syncLeaseUntil } : {}),
+    });
+    if (!enriched) return null;
+    this.rememberCloudFallbackJobContext(enriched, {
+      recordId: getRecordId(record) || enriched.recordId,
+      binding,
+    });
+    await this.upsertCloudFallbackJob(enriched);
+    return enriched;
+  }
+
+  async submitCloudFallbackJob(options = {}) {
+    if (this.settings.cloudFallbackEnabled !== true) {
+      const error = new Error('云端兜底尚未启用');
+      error.code = 'CLOUD_FALLBACK_DISABLED';
+      throw error;
+    }
+    const binding = options.binding || this.getActiveBindings()[0] || null;
+    if (!binding || !binding.token) {
+      const error = new Error('云端兜底失败：未绑定小程序');
+      error.code = 'CLOUD_FALLBACK_BINDING_REQUIRED';
+      throw error;
+    }
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    if (!sourceType) {
+      const error = new Error('云端兜底来源类型无效');
+      error.code = 'CLOUD_FALLBACK_SOURCE_INVALID';
+      throw error;
+    }
+    const recordId = String(options.recordId || '').trim();
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding.token);
+    const clientId = String(this.settings.clientId || '').trim() || createClientId();
+    if (clientId !== String(this.settings.clientId || '').trim()) {
+      await this.saveSettings({ ...this.settings, clientId });
+    }
+    let sourceUrl = '';
+    let fileID = '';
+    if (sourceType === 'douyin_url') {
+      sourceUrl = String(options.sourceUrl || options.url || '').trim();
+      if (!/^https?:\/\//i.test(sourceUrl) || !isDouyinUrl(sourceUrl)) {
+        const error = new Error('云端兜底只接受有效的抖音原始链接');
+        error.code = 'CLOUD_FALLBACK_SOURCE_INVALID';
+        throw error;
+      }
+    } else {
+      fileID = String(options.fileID || options.audioFileID || options.fileId || '').trim();
+      if (!fileID || !isControlledCloudFallbackFileId(fileID)) {
+        const error = new Error('云端兜底失败：缺少受控的云端文件 ID');
+        error.code = 'CLOUD_FALLBACK_SOURCE_INVALID';
+        throw error;
+      }
+    }
+    const sourceFingerprint = this.buildCloudFallbackSourceFingerprint({
+      sourceType,
+      sourceUrl,
+      fileID,
+      recordId,
+    });
+    const retryCount = Math.max(0, Math.floor(Number(options.retryCount) || 0));
+    const scopedJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs)
+      .filter((item) => item.bindingFingerprint === bindingFingerprint
+        && item.clientId === clientId
+        && item.recordId === recordId
+        && item.sourceType === sourceType
+        && item.sourceFingerprint === sourceFingerprint
+        && isCloudFallbackJobForRecord(item, { retryCount }));
+    const hasCancelledJob = scopedJobs.some((item) => item.status === 'cancelled');
+    const explicitClientRequestId = String(options.clientRequestId || options.idempotencyKey || '').trim();
+    if (hasCancelledJob && !explicitClientRequestId && options.retry !== true && retryCount <= 0) {
+      const error = new Error('该云端兜底任务已取消，请明确发起新的重试');
+      error.code = 'CLOUD_FALLBACK_RETRY_REQUIRED';
+      throw error;
+    }
+    const requestBody = {
+      sourceType,
+      recordId,
+      clientRequestId: this.buildCloudFallbackClientRequestId({
+        ...options,
+        sourceType,
+        sourceUrl,
+        fileID,
+        retryCount,
+      }),
+      title: String(options.title || '').trim(),
+      localError: String(options.localError || '').trim(),
+      provider: String(options.provider || '').trim(),
+    };
+    if (Number(options.durationSeconds) > 0) requestBody.durationSeconds = Number(options.durationSeconds);
+    if (sourceType === 'douyin_url') {
+      requestBody.sourceUrl = sourceUrl;
+    } else {
+      requestBody.fileID = fileID;
+    }
+    delete requestBody.cookie;
+    delete requestBody.cookies;
+    delete requestBody.authorization;
+    delete requestBody.headers;
+    delete requestBody.proxy;
+    this.showSyncProgress({
+      stage: 'transcribing',
+      title: requestBody.title,
+      message: '本地转写不可用，正在提交云端兜底任务',
+    });
+    // Keep the response observable when cancellation races with creation. If
+    // the server accepted the job, the returned ID is persisted and cancelled
+    // explicitly below instead of leaving an untracked paid task behind.
+    throwIfAborted(options.signal || null);
+    const payload = await this.requestJson('/transcriptions/fallback/jobs', 'POST', requestBody, binding);
+    const data = payload && payload.data ? payload.data : payload;
+    const job = normalizeCloudFallbackJob({
+      ...data,
+      recordId: data && data.recordId || requestBody.recordId,
+      sourceType: data && data.sourceType || sourceType,
+      sourceUrl: data && data.sourceUrl || requestBody.sourceUrl,
+      fileID: data && (data.fileID || data.audioFileID) || requestBody.fileID,
+      clientRequestId: data && data.clientRequestId || requestBody.clientRequestId,
+      bindingFingerprint,
+      clientId,
+      sourceFingerprint,
+      recordRetryCount: retryCount,
+    });
+    if (!job) throw new Error('云端兜底未返回有效任务');
+    this.rememberCloudFallbackJobContext(job, { recordId, binding });
+    await this.upsertCloudFallbackJob(job);
+    await this.clearCloudFallbackSubmission({
+      bindingFingerprint,
+      clientId,
+      recordId,
+      recordRetryCount: retryCount,
+      clientRequestId: requestBody.clientRequestId,
+    });
+    // A freshly queued job is the best signal that the next poll may find a
+    // result, so shorten an idle backoff without bypassing failure cooldowns.
+    if (this.autoSyncController && typeof this.autoSyncController.wake === 'function') {
+      this.autoSyncController.wake();
+    }
+    if (options.signal && options.signal.aborted) {
+      try {
+        await this.cancelCloudFallbackJob(job.jobId, binding);
+      } catch (cancelError) {
+        // Retain an explicit terminal local state even if the cancellation
+        // request itself is unavailable; the task remains visible for repair.
+        await this.upsertCloudFallbackJob({
+          ...job,
+          status: 'cancelled',
+          retryable: false,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      throw createAbortError();
+    }
+    return job;
+  }
+
+  async cancelCloudFallbackJob(jobId, binding = null) {
+    const normalizedJobId = String(jobId || '').trim();
+    if (!normalizedJobId) return null;
+    const candidateBinding = binding || this.getActiveBindings()[0] || null;
+    if (!candidateBinding || !candidateBinding.token) return null;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(candidateBinding.token);
+    const clientId = String(this.settings && this.settings.clientId || '').trim();
+    const currentJob = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs)
+      .find((item) => item.jobId === normalizedJobId
+        && item.bindingFingerprint === bindingFingerprint
+        && item.clientId === clientId);
+    const payload = await this.requestJson(
+      `/transcriptions/fallback/jobs/${encodeURIComponent(normalizedJobId)}/cancel`,
+      'POST',
+      {},
+      candidateBinding,
+    );
+    const data = payload && payload.data ? payload.data : payload;
+    const job = normalizeCloudFallbackJob({
+      ...data,
+      jobId: data && (data.jobId || data.id) || normalizedJobId,
+      bindingFingerprint,
+      clientId,
+      sourceType: data && data.sourceType || currentJob && currentJob.sourceType,
+      recordId: data && data.recordId || currentJob && currentJob.recordId,
+      sourceUrl: data && data.sourceUrl || currentJob && currentJob.sourceUrl,
+      fileID: data && (data.fileID || data.audioFileID) || currentJob && currentJob.fileID,
+      clientRequestId: data && data.clientRequestId || currentJob && currentJob.clientRequestId,
+      sourceFingerprint: currentJob && currentJob.sourceFingerprint,
+      recordRetryCount: currentJob && currentJob.recordRetryCount,
+      status: data && data.status || 'cancelled',
+    }) || (currentJob && { ...currentJob, status: 'cancelled', updatedAt: new Date().toISOString() });
+    if (job) await this.upsertCloudFallbackJob(job);
+    return job;
+  }
+
+  // Releases the stored media and transcription once the user has the note.
+  // The intent is persisted first so an offline request is retried by the
+  // next sync rather than leaking the cloud copy until its expiry sweep.
+  async acknowledgeCloudFallbackJob(jobId, binding = null) {
+    const normalizedJobId = String(jobId || '').trim();
+    if (!normalizedJobId) return null;
+    const candidateBinding = binding || this.getActiveBindings()[0] || null;
+    if (!candidateBinding || !candidateBinding.token) return null;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(candidateBinding.token);
+    const clientId = String(this.settings && this.settings.clientId || '').trim();
+    if (!clientId) return null;
+    const scope = { jobId: normalizedJobId, bindingFingerprint, clientId };
+    try {
+      await this.rememberCloudFallbackAck(scope);
+      const payload = await this.requestJson(
+        `/transcriptions/fallback/jobs/${encodeURIComponent(normalizedJobId)}/ack`,
+        'POST',
+        {},
+        candidateBinding,
+      );
+      await this.clearCloudFallbackAck(scope);
+      await this.forgetCloudFallbackJob(normalizedJobId, { bindingFingerprint, clientId });
+      const data = payload && payload.data ? payload.data : payload;
+      return data || null;
+    } catch (error) {
+      const status = Number(error && (error.statusCode || error.status)) || 0;
+      const code = String(error && error.code || '');
+      // The server no longer stores this job, so the release already happened
+      // (or the job never existed). Retrying would keep a dead ack forever.
+      if (status === 404 || code === 'JOB_NOT_FOUND') {
+        await this.clearCloudFallbackAck(scope);
+        await this.forgetCloudFallbackJob(normalizedJobId, { bindingFingerprint, clientId });
+      }
+      return null;
+    }
+  }
+
+  async acknowledgeCloudFallbackJobForRecord(record, binding = null) {
+    const metadata = record && record.metadata && typeof record.metadata === 'object' ? record.metadata : {};
+    const jobId = String(metadata.cloudFallbackJobId || '').trim();
+    if (!jobId) return null;
+    // Only a path that actually produced the local note calls this. Failed
+    // records keep the job until the server's expiry sweep reclaims it.
+    return await this.acknowledgeCloudFallbackJob(jobId, binding);
+  }
+
+  async flushCloudFallbackAcks(binding = null) {
+    const candidateBinding = binding || this.getActiveBindings()[0] || null;
+    if (!candidateBinding || !candidateBinding.token) return { acknowledged: 0 };
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(candidateBinding.token);
+    const clientId = String(this.settings && this.settings.clientId || '').trim();
+    if (!clientId) return { acknowledged: 0 };
+    const acks = normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks)
+      .filter((item) => item.bindingFingerprint === bindingFingerprint && item.clientId === clientId);
+    let acknowledged = 0;
+    for (const ack of acks) {
+      // eslint-disable-next-line no-await-in-loop
+      const done = await this.acknowledgeCloudFallbackJob(ack.jobId, candidateBinding);
+      if (done) acknowledged += 1;
+    }
+    return { acknowledged };
+  }
+
+  async pollCloudFallbackJobs(binding, records = []) {
+    const allJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const clientId = String(this.settings && this.settings.clientId || '').trim();
+    const recordsById = new Map((Array.isArray(records) ? records : [])
+      .map((record) => [getRecordId(record), record])
+      .filter(([recordId]) => Boolean(recordId)));
+    const currentJobs = allJobs.filter((job) => job.bindingFingerprint === bindingFingerprint
+      && Boolean(clientId)
+      && job.clientId === clientId
+      && (() => {
+        const currentRecord = recordsById.get(job.recordId) || job.recordSnapshot || null;
+        // If the server lease temporarily hides the record and no local
+        // snapshot exists, preserve a scoped job for polling. Generation
+        // filtering is strict whenever the current record is available.
+        return !currentRecord || isCloudFallbackJobForRecord(job, currentRecord);
+      })());
+    if (!currentJobs.length) return { records, jobs: [] };
+    const refreshedJobs = [];
+    let changed = false;
+    for (const current of currentJobs) {
+      if (isCloudFallbackJobTerminal(current)) {
+        refreshedJobs.push(current);
+        continue;
+      }
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const payload = await this.requestJson(
+          `/transcriptions/fallback/jobs/${encodeURIComponent(current.jobId)}`,
+          'GET',
+          {},
+          binding,
+          { noCache: true },
+        );
+        const data = payload && payload.data ? payload.data : payload;
+        const refreshed = normalizeCloudFallbackJob({
+          ...data,
+          jobId: data && (data.jobId || data.id) || current.jobId,
+          recordId: data && data.recordId || current.recordId,
+          sourceType: data && data.sourceType || current.sourceType,
+          sourceUrl: data && data.sourceUrl || current.sourceUrl,
+          fileID: data && (data.fileID || data.audioFileID) || current.fileID,
+          clientRequestId: data && data.clientRequestId || current.clientRequestId,
+          bindingFingerprint,
+          clientId,
+          sourceFingerprint: current.sourceFingerprint,
+          syncAttemptId: current.syncAttemptId,
+          syncLeaseUntil: current.syncLeaseUntil,
+          recordSnapshot: current.recordSnapshot,
+          recordRetryCount: current.recordRetryCount,
+        });
+        if (refreshed) {
+          refreshedJobs.push(refreshed);
+          changed = changed || JSON.stringify(refreshed) !== JSON.stringify(current);
+        } else {
+          refreshedJobs.push(current);
+        }
+      } catch (error) {
+        // A transient backend outage must retain the local job and must not
+        // invalidate the binding or silently drop a user's pending result.
+        refreshedJobs.push(current);
+      }
+    }
+    if (changed || refreshedJobs.length !== currentJobs.length) {
+      await this.persistCloudFallbackJobs([
+        ...allJobs.filter((job) => job.bindingFingerprint !== bindingFingerprint
+          || job.clientId !== clientId),
+        ...refreshedJobs,
+      ]);
+    }
+    const latestByRecord = new Map();
+    const timestamp = (job) => job ? (Date.parse(job.updatedAt || job.createdAt || '') || 0) : 0;
+    refreshedJobs.forEach((job) => {
+      if (!job.recordId) return;
+      const previous = latestByRecord.get(job.recordId);
+      const newerTimestamp = timestamp(job) > timestamp(previous);
+      const sameTimestampActive = timestamp(job) === timestamp(previous)
+        && isCloudFallbackJobPending(job)
+        && !isCloudFallbackJobPending(previous);
+      if (!previous || newerTimestamp || sameTimestampActive) latestByRecord.set(job.recordId, job);
+    });
+    const applyJobToRecord = (record, job) => {
+      const recordId = getRecordId(record);
+      const metadata = record && record.metadata && typeof record.metadata === 'object' ? record.metadata : {};
+      if (metadata.cloudFallbackJobId && metadata.cloudFallbackJobId !== job.jobId) return record;
+      const recordRetryCount = getCloudFallbackJobRecordRetryCount(job) === null
+        ? getCloudFallbackRecordRetryCount(record)
+        : getCloudFallbackJobRecordRetryCount(job);
+      const nextMetadata = {
+        ...metadata,
+        cloudFallbackJobId: job.jobId,
+        cloudFallbackStatus: job.status,
+        cloudFallbackRetryable: job.retryable === true,
+        cloudFallbackRecordRetryCount: recordRetryCount,
+        cloudFallbackRetryCount: recordRetryCount,
+        cloudFallbackWorkerRetryCount: Number(job.retryCount) || 0,
+        cloudFallbackAttemptId: job.attemptId || metadata.cloudFallbackAttemptId || '',
+        cloudFallbackSyncAttemptId: job.syncAttemptId || metadata.cloudFallbackSyncAttemptId || '',
+        cloudFallbackSyncLeaseUntil: job.syncLeaseUntil || metadata.cloudFallbackSyncLeaseUntil || '',
+        cloudFallbackUpdatedAt: job.updatedAt || new Date().toISOString(),
+        transcriptionSource: 'cloud-fallback',
+        webpageMediaType: 'audio_video',
+        transcriptOnly: true,
+      };
+      if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+        nextMetadata.transcription = job.transcription;
+        nextMetadata.transcriptionStatus = 'success';
+        nextMetadata.conversionStatus = 'success';
+        nextMetadata.transcriptionError = '';
+      } else if (job.status === 'no_speech') {
+        nextMetadata.transcription = '';
+        nextMetadata.transcriptionStatus = 'no_speech';
+        nextMetadata.conversionStatus = 'no_speech';
+        nextMetadata.transcriptionError = job.error && job.error.message || '云端未检测到语音';
+      } else if (isCloudFallbackJobPending(job)) {
+        nextMetadata.transcriptionStatus = 'pending';
+        nextMetadata.conversionStatus = 'pending';
+      } else if (job.status === 'failed' || job.status === 'needs_action' || job.status === 'cancelled') {
+        nextMetadata.transcriptionStatus = 'failed';
+        nextMetadata.conversionStatus = 'failed';
+        nextMetadata.transcriptionError = job.error && job.error.message || `云端兜底${job.status}`;
+      }
+      return { ...record, metadata: nextMetadata };
+    };
+    const nextRecords = (Array.isArray(records) ? records : []).map((record) => {
+      const recordId = getRecordId(record);
+      const job = latestByRecord.get(recordId);
+      return job ? applyJobToRecord(record, job) : record;
+    });
+    const existingRecordIds = new Set(nextRecords.map((record) => getRecordId(record)).filter(Boolean));
+    // A lifecycle claim keeps the server row in `processing` for its lease,
+    // so listPendingRecords may temporarily omit it. Keep the original local
+    // record snapshot with the job and resume the normal write/complete path
+    // as soon as the cloud result is ready.
+    refreshedJobs.forEach((job) => {
+      if (job.status !== 'succeeded' || !String(job.transcription || '').trim()) return;
+      if (!job.recordId || existingRecordIds.has(job.recordId) || !job.recordSnapshot) return;
+      const syntheticRecord = applyJobToRecord({ ...job.recordSnapshot }, job);
+      nextRecords.push(syntheticRecord);
+      existingRecordIds.add(job.recordId);
+    });
+    return { records: nextRecords, jobs: refreshedJobs };
   }
 
   async markBindingUnbound(token, reason = '') {
@@ -18249,6 +19223,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       new Notice('已停止当前转写，会继续处理后面的同步内容。');
       return true;
     }
+    let cloudFallbackCancelError = null;
+    if (context.cloudFallbackJobId) {
+      const localJob = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs)
+        .find((job) => job.jobId === context.cloudFallbackJobId);
+      if (!localJob || isCloudFallbackJobPending(localJob)) {
+        try {
+          await this.cancelCloudFallbackJob(context.cloudFallbackJobId, context.cloudFallbackBinding || context.binding);
+        } catch (error) {
+          cloudFallbackCancelError = error;
+        }
+      }
+    }
     const pendingDeletes = this.getPendingStoppedTranscriptionDeletes();
     let deletePromise = pendingDeletes.get(String(context.recordId));
     if (!deletePromise) {
@@ -18270,13 +19256,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       const cleanupWarning = deleteResult.response && deleteResult.response.cleanupComplete === false
         ? '；记录已删除，但部分关联文件清理失败'
         : '';
-      new Notice(`已停止当前转写，并从云端删除这条内容；后续同步不会再出现${cleanupWarning}。`);
+      const cloudWarning = cloudFallbackCancelError ? '；云端兜底任务取消未确认' : '';
+      new Notice(`已停止当前转写，并从云端删除这条内容；后续同步不会再出现${cleanupWarning}${cloudWarning}。`);
       return true;
     }
     const message = deleteResult && deleteResult.error
       ? (deleteResult.error.message || String(deleteResult.error))
       : '云端未确认删除成功';
-    new Notice(`已停止当前转写，但删除云端内容失败：${message}；这条内容下次同步可能还会出现。`);
+    const cloudWarning = cloudFallbackCancelError ? '；云端兜底任务取消未确认' : '';
+    new Notice(`已停止当前转写，但删除云端内容失败：${message}；这条内容下次同步可能还会出现${cloudWarning}。`);
     return true;
   }
 
@@ -20676,22 +21664,525 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async transcodeCloudFallbackMediaToMp3(inputPath, { signal = null } = {}) {
+    throwIfAborted(signal);
+    const normalizedPath = String(inputPath || '').trim();
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      const error = new Error('本地媒体文件不可用');
+      error.code = 'CLOUD_MEDIA_FILE_UNAVAILABLE';
+      throw error;
+    }
+    if (path.extname(normalizedPath).toLowerCase() === '.mp3') {
+      return { path: normalizedPath, owned: false };
+    }
+    const installStatus = this.getLocalAsrInstallStatus();
+    const ffmpegPath = String(installStatus && installStatus.ffmpegPath || '').trim();
+    if (!ffmpegPath) {
+      const error = new Error('本地转写组件缺少 ffmpeg，无法准备云端音频');
+      error.code = 'CLOUD_MEDIA_TRANSCODER_UNAVAILABLE';
+      throw error;
+    }
+    const outputPath = path.join(
+      os.tmpdir(),
+      `wechat-inbox-cloud-media-${Date.now()}-${crypto.randomBytes(5).toString('hex')}.mp3`,
+    );
+    let child = null;
+    let settled = false;
+    const cleanupOutput = () => {
+      try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) { /* Best-effort temp cleanup. */ }
+    };
+    try {
+      await new Promise((resolve, reject) => {
+        const finish = (error) => {
+          if (settled) return;
+          settled = true;
+          if (signal && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', abort);
+          if (error) reject(error);
+          else resolve();
+        };
+        const abort = () => {
+          try { child && child.kill(); } catch (_) { /* Process may already have exited. */ }
+          const error = new Error('云端媒体准备已取消');
+          error.code = 'CLOUD_MEDIA_UPLOAD_ABORTED';
+          error.name = 'AbortError';
+          finish(error);
+        };
+        if (signal && typeof signal.addEventListener === 'function') signal.addEventListener('abort', abort, { once: true });
+        try {
+          child = childProcess.execFile(ffmpegPath, [
+            '-y', '-i', normalizedPath, '-vn', '-ac', '1', '-ar', '16000',
+            '-codec:a', 'libmp3lame', '-b:a', '64k', outputPath,
+          ], { windowsHide: true, timeout: 120000, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => {
+            if (error) {
+              const wrapped = new Error('本地媒体无法转换为 MP3');
+              wrapped.code = 'CLOUD_MEDIA_TRANSCODE_FAILED';
+              wrapped.stderr = String(stderr || '').slice(-2000);
+              finish(wrapped);
+              return;
+            }
+            finish();
+          });
+        } catch (error) {
+          const wrapped = new Error('本地媒体无法启动 MP3 转换');
+          wrapped.code = 'CLOUD_MEDIA_TRANSCODE_FAILED';
+          wrapped.cause = error;
+          finish(wrapped);
+        }
+        if (signal && signal.aborted) abort();
+      });
+      throwIfAborted(signal);
+      const stat = fs.statSync(outputPath);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_CLOUD_FALLBACK_MEDIA_BYTES) {
+        const error = new Error('转换后的云端音频无效');
+        error.code = stat.size > MAX_CLOUD_FALLBACK_MEDIA_BYTES ? 'CLOUD_MEDIA_TOO_LARGE' : 'CLOUD_MEDIA_TRANSCODE_EMPTY';
+        throw error;
+      }
+      return { path: outputPath, owned: true };
+    } catch (error) {
+      cleanupOutput();
+      throw error;
+    }
+  }
+
+  async uploadLocalMediaForCloudFallback(inputPath, options = {}) {
+    const binding = options.binding || this.getActiveBindings()[0] || null;
+    if (!binding || !binding.token) {
+      const error = new Error('云端兜底上传失败：未绑定小程序');
+      error.code = 'CLOUD_FALLBACK_BINDING_REQUIRED';
+      throw error;
+    }
+    throwIfAborted(options.signal || null);
+    const preparedMedia = await this.transcodeCloudFallbackMediaToMp3(inputPath, { signal: options.signal || null });
+    try {
+      const digest = await hashFileSha256(preparedMedia.path, {
+        signal: options.signal || null,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+      });
+      const preparedPayload = await this.requestJson('/transcriptions/fallback/media/prepare', 'POST', {
+        size: digest.size,
+        sha256: digest.sha256,
+        format: 'mp3',
+      }, binding, {
+        signal: options.signal || null,
+        noCache: true,
+        timeoutMs: 30000,
+      });
+      const preparedData = preparedPayload && preparedPayload.data ? preparedPayload.data : preparedPayload;
+      const uploadId = String(preparedData && preparedData.uploadId || '').trim();
+      const uploadUrl = String(preparedData && preparedData.uploadUrl || '').trim();
+      const fields = preparedData && preparedData.fields && typeof preparedData.fields === 'object' ? preparedData.fields : {};
+      const uploadHeaders = preparedData && preparedData.headers && typeof preparedData.headers === 'object' ? preparedData.headers : {};
+      if (!uploadId || !uploadUrl) {
+        const error = new Error('云端媒体上传凭据无效');
+        error.code = 'CLOUD_MEDIA_PREPARE_INVALID';
+        throw error;
+      }
+      await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
+        signal: options.signal || null,
+        timeoutMs: 120000,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+        fileName: 'audio.mp3',
+        contentType: 'audio/mpeg',
+        method: preparedData && preparedData.method ? preparedData.method : '',
+        headers: uploadHeaders,
+      });
+      const completedPayload = await this.requestJson('/transcriptions/fallback/media/complete', 'POST', { uploadId }, binding, {
+        signal: options.signal || null,
+        noCache: true,
+        timeoutMs: 30000,
+      });
+      const completedData = completedPayload && completedPayload.data ? completedPayload.data : completedPayload;
+      const fileID = String(completedData && (completedData.fileID || completedData.audioFileID || completedData.fileId) || '').trim();
+      if (!isControlledCloudFallbackFileId(fileID)) {
+        const error = new Error('云端媒体上传未返回受控文件 ID');
+        error.code = 'CLOUD_MEDIA_COMPLETE_INVALID';
+        throw error;
+      }
+      return { fileID, uploadId, size: digest.size, sha256: digest.sha256 };
+    } finally {
+      if (preparedMedia.owned) {
+        try { if (fs.existsSync(preparedMedia.path)) fs.unlinkSync(preparedMedia.path); } catch (_) { /* Best-effort temp cleanup. */ }
+      }
+    }
+  }
+
+  async acquireOperatorDouyinMediaToTempFile(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || '').trim();
+    if (!isDouyinUrl(pageUrl)) {
+      const error = new Error('运营节点只接受抖音原始链接');
+      error.code = 'OPERATOR_MEDIA_SOURCE_INVALID';
+      throw error;
+    }
+    throwIfAborted(signal);
+    const candidates = [];
+    const addCandidate = (value) => {
+      const candidate = String(value && typeof value === 'object' ? value.url || value.mediaUrl || '' : value || '').trim();
+      if (!/^https?:\/\//i.test(candidate) || candidates.includes(candidate)) return;
+      candidates.push(candidate);
+    };
+    const awemeId = extractDouyinAwemeId(pageUrl);
+    if (awemeId && typeof this.fetchDouyinMediaResolutionWithSession === 'function') {
+      try {
+        const sessionResolution = await this.fetchDouyinMediaResolutionWithSession(pageUrl, awemeId);
+        (Array.isArray(sessionResolution && sessionResolution.mediaUrls) ? sessionResolution.mediaUrls : []).forEach(addCandidate);
+      } catch (_) { /* Browser refresh below can recover an expired or incomplete API response. */ }
+    }
+    if (!candidates.length && typeof this.refreshDouyinMediaUrls === 'function') {
+      try {
+        const refreshed = await this.refreshDouyinMediaUrls(pageUrl);
+        (Array.isArray(refreshed) ? refreshed : []).forEach(addCandidate);
+      } catch (error) {
+        if (isAbortError(error) || signal?.aborted) throw createAbortError();
+      }
+    }
+    if (!candidates.length && typeof this.renderSocialMediaUrls === 'function') {
+      try {
+        const rendered = await this.renderSocialMediaUrls(pageUrl, { signal, targetDouyinAwemeId: awemeId });
+        (Array.isArray(rendered) ? rendered : []).forEach(addCandidate);
+      } catch (error) {
+        if (isAbortError(error) || signal?.aborted) throw createAbortError();
+      }
+    }
+    let lastError = null;
+    for (const candidate of candidates.slice(0, 5)) {
+      throwIfAborted(signal);
+      try {
+        return await this.downloadMediaToTempFile(candidate, {
+          sourceUrl: pageUrl,
+          signal,
+          maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+        });
+      } catch (error) {
+        lastError = error;
+        if (isAbortError(error) || signal?.aborted) throw createAbortError();
+      }
+    }
+    const error = new Error('运营节点未能从抖音会话获得可下载媒体');
+    error.code = 'OPERATOR_MEDIA_RESOLUTION_EMPTY';
+    error.retryable = true;
+    error.cause = lastError || null;
+    throw error;
+  }
+
+  async verifyOperatorControlledMediaFile(filePath, job, { signal = null } = {}) {
+    const expectedSize = Number(job && (job.mediaSize ?? job.artifactSize));
+    const expectedSha256 = String(job && (job.mediaSha256 || job.artifactSha256) || '').trim().toLowerCase();
+    const mediaIntegrity = String(job && job.mediaIntegrity || '').trim().toLowerCase();
+    const legacyOwnedFile = job && (job.legacyOwnedFile === true || mediaIntegrity === 'legacy_owned_file');
+    const hasExpectedSize = Number.isSafeInteger(expectedSize) && expectedSize > 0;
+    const hasExpectedSha256 = /^[a-f0-9]{64}$/.test(expectedSha256);
+    if ((!hasExpectedSize || !hasExpectedSha256) && !legacyOwnedFile) {
+      const error = new Error('运营节点受控媒体缺少完整性信息');
+      error.code = 'OPERATOR_MEDIA_INTEGRITY_REQUIRED';
+      error.retryable = false;
+      throw error;
+    }
+    const digest = await hashFileSha256(filePath, {
+      signal,
+      maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+    });
+    if ((hasExpectedSize && digest.size !== expectedSize) || (hasExpectedSha256 && digest.sha256 !== expectedSha256)) {
+      const error = new Error('运营节点受控媒体完整性校验失败');
+      error.code = 'OPERATOR_MEDIA_INTEGRITY_MISMATCH';
+      error.retryable = false;
+      throw error;
+    }
+    return digest;
+  }
+
+  async uploadWorkerMediaForJob(inputPath, job, {
+    signal = null,
+    workerConfig = null,
+    request = null,
+    beforeComplete = null,
+  } = {}) {
+    const suppliedConfig = workerConfig && typeof workerConfig === 'object' ? workerConfig : {};
+    const workerToken = String(suppliedConfig.workerToken || process.env[OPERATOR_NODE_TOKEN_ENV] || '').trim();
+    const workerId = String(suppliedConfig.workerId || process.env[OPERATOR_NODE_ID_ENV] || '').trim();
+    const apiBase = String(suppliedConfig.apiBase || process.env[OPERATOR_NODE_API_BASE_ENV] || this.settings.apiBase || '').trim().replace(/\/+$/, '');
+    const enabled = suppliedConfig.enabled === true || String(process.env[OPERATOR_NODE_ENABLED_ENV] || '').trim() === '1';
+    if (!enabled || !workerToken || !workerId || !apiBase) {
+      const error = new Error('运营节点未启用');
+      error.code = 'OPERATOR_NODE_DISABLED';
+      throw error;
+    }
+    throwIfAborted(signal);
+    const preparedMedia = await this.transcodeCloudFallbackMediaToMp3(inputPath, { signal });
+    const lease = {
+      jobId: String(job && job.jobId || '').trim(),
+      attemptId: String(job && job.attemptId || '').trim(),
+      fencingVersion: job && job.fencingVersion,
+      leaseToken: String(job && job.leaseToken || '').trim(),
+      workerId,
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+    };
+    const requestWorker = typeof request === 'function'
+      ? request
+      : (requestPath, body, options) => requestOperatorJsonViaNode(apiBase, requestPath, workerToken, body, options);
+    try {
+      const digest = await hashFileSha256(preparedMedia.path, { signal, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES });
+      const preparedPayload = await requestWorker('/transcriptions/fallback/worker/media/prepare', {
+        ...lease,
+        size: digest.size,
+        sha256: digest.sha256,
+        format: 'mp3',
+      }, { signal, timeoutMs: 30000 });
+      const preparedData = preparedPayload && preparedPayload.data ? preparedPayload.data : preparedPayload;
+      const uploadId = String(preparedData && preparedData.uploadId || '').trim();
+      const uploadUrl = String(preparedData && preparedData.uploadUrl || '').trim();
+      const fields = preparedData && preparedData.fields && typeof preparedData.fields === 'object' ? preparedData.fields : {};
+      const uploadHeaders = preparedData && preparedData.headers && typeof preparedData.headers === 'object' ? preparedData.headers : {};
+      if (!uploadId || !uploadUrl) {
+        const error = new Error('运营节点媒体上传凭据无效');
+        error.code = 'OPERATOR_MEDIA_PREPARE_INVALID';
+        throw error;
+      }
+      await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
+        signal,
+        timeoutMs: 120000,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+        fileName: 'audio.mp3',
+        contentType: 'audio/mpeg',
+        method: preparedData && preparedData.method ? preparedData.method : '',
+        headers: uploadHeaders,
+      });
+      if (typeof beforeComplete === 'function') await beforeComplete();
+      const completedPayload = await requestWorker('/transcriptions/fallback/worker/media/complete', {
+        ...lease,
+        uploadId,
+      }, { signal, timeoutMs: 30000 });
+      const completedData = completedPayload && completedPayload.data ? completedPayload.data : completedPayload;
+      const fileID = String(completedData && (completedData.fileID || completedData.audioFileID || completedData.fileId || preparedData.fileID) || '').trim();
+      if (!isControlledCloudFallbackFileId(fileID)) {
+        const error = new Error('运营节点媒体上传未返回受控文件 ID');
+        error.code = 'OPERATOR_MEDIA_COMPLETE_INVALID';
+        throw error;
+      }
+      return { fileID, uploadId, size: digest.size, sha256: digest.sha256, completion: completedPayload };
+    } finally {
+      if (preparedMedia.owned) {
+        try { if (fs.existsSync(preparedMedia.path)) fs.unlinkSync(preparedMedia.path); } catch (_) { /* Best-effort temp cleanup. */ }
+      }
+    }
+  }
+
+  isOperatorLocalAsrAvailable() {
+    return this.operatorLocalAsrActive !== true
+      && !this.localAsrMutexOwner
+      && !this.currentTranscriptionAbortController
+      && !this.currentTranscriptionProcess
+      && !this.currentTranscriptionContext;
+  }
+
+  async runOperatorLocalTranscription(inputPath, options = {}) {
+    if (!this.isOperatorLocalAsrAvailable()) {
+      const error = new Error('负责人本地转写正忙，运营节点暂不领取本地转写任务');
+      error.code = 'OPERATOR_ASR_BUSY';
+      error.retryable = true;
+      throw error;
+    }
+    const mutexToken = { kind: 'operator' };
+    this.localAsrMutexOwner = mutexToken;
+    this.operatorLocalAsrActive = true;
+    try {
+      return await this.runLocalTranscription(inputPath, {
+        ...options,
+        inputPath,
+        operatorNode: true,
+        _localAsrMutexToken: mutexToken,
+      });
+    } finally {
+      if (this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
+      this.operatorLocalAsrActive = false;
+    }
+  }
+
+  async resumePendingCloudFallbackSubmission(options = {}) {
+    if (this.settings.cloudFallbackEnabled !== true) return null;
+    const pending = this.findCloudFallbackSubmission(options);
+    if (!pending) return null;
+    throwIfAborted(options.signal || null);
+    let job;
+    try {
+      job = await this.submitCloudFallbackJob({
+        sourceType: 'uploaded_file',
+        fileID: pending.fileID,
+        recordId: pending.recordId,
+        retryCount: pending.recordRetryCount,
+        clientRequestId: pending.clientRequestId,
+        title: options.title,
+        durationSeconds: options.durationSeconds,
+        localError: options.localError || '恢复未确认的云端兜底提交',
+        provider: this.settings.aiProvider || '',
+        binding: options.binding,
+        signal: options.signal,
+      });
+    } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
+      // A durable pending source must never be replaced by the original URL
+      // after any failed replay; the server may already have accepted the
+      // same idempotency key.
+      error.code = 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN';
+      throw error;
+    }
+    if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+      return {
+        transcription: job.transcription,
+        source: 'cloud-fallback',
+        cloudProvider: job.provider || 'cloud',
+        cloudRequestId: job.providerRequestId || '',
+      };
+    }
+    throw createCloudFallbackPendingError(job, '恢复未确认的云端兜底提交');
+  }
+
   async runConfiguredTranscription(audioUrl, options = {}) {
     const provider = this.settings.aiProvider;
+    const runLocalWithCloudFallback = async ({ sourcePrefix = '', includeQualityDetails = false } = {}) => {
+      const preserveLocalMedia = options.preserveLocalMediaForCloudFallback === true;
+      let retainedInputPath = '';
+      const localOptions = {
+        ...options,
+        ...(includeQualityDetails ? { includeQualityDetails: true } : {}),
+        ...(preserveLocalMedia ? {
+          retainInputFileOnError: true,
+          onInputPathReady: async (inputPath) => {
+            retainedInputPath = String(inputPath || '').trim();
+            if (typeof options.onInputPathReady === 'function') await options.onInputPathReady(inputPath);
+          },
+        } : {}),
+      };
+      const resumedSubmission = await this.resumePendingCloudFallbackSubmission(options);
+      if (resumedSubmission) return resumedSubmission;
+      try {
+        const localResult = await this.runLocalTranscription(audioUrl, localOptions);
+        const normalizedResult = localResult && typeof localResult === 'object'
+          ? localResult
+          : { transcription: localResult };
+        return {
+          transcription: normalizedResult.transcription,
+          source: sourcePrefix ? sourcePrefix + '-local' : 'local',
+          ...(normalizedResult.qualityStatus ? { transcriptionQualityStatus: normalizedResult.qualityStatus } : {}),
+          ...(normalizedResult.qualityWarning ? { transcriptionQualityWarning: normalizedResult.qualityWarning } : {}),
+        };
+      } catch (error) {
+        if ((isAbortError(error) && !isRetryableTranscriptionError(error)) || options.signal?.aborted) throw createAbortError();
+        if (error.transcriptionSetupRequired
+          || error.code === 'TRANSCRIPTION_NO_SPEECH'
+          || isRetryableTranscriptionError(error)) throw error;
+
+        // A downloaded Douyin candidate is retained only for this failed local
+        // attempt. Upload failure deliberately falls through to the original
+        // URL submission below, so the backend can resolve fresh media itself.
+        if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true) {
+          let uploadedArtifactReady = false;
+          try {
+            const uploaded = await this.uploadLocalMediaForCloudFallback(retainedInputPath, {
+              ...options,
+              binding: options.binding,
+              signal: options.signal,
+            });
+            uploadedArtifactReady = true;
+            const retryCount = Math.max(0, Math.floor(Number(options.retryCount) || 0));
+            const clientId = String(this.settings && this.settings.clientId || '').trim() || createClientId();
+            if (clientId !== String(this.settings && this.settings.clientId || '').trim()) {
+              await this.saveSettings({ ...this.settings, clientId });
+            }
+            const clientRequestId = this.buildCloudFallbackClientRequestId({
+              sourceType: 'uploaded_file',
+              fileID: uploaded.fileID,
+              recordId: options.recordId,
+              retryCount,
+            });
+            await this.rememberCloudFallbackSubmission({
+              sourceType: 'uploaded_file',
+              fileID: uploaded.fileID,
+              recordId: options.recordId,
+              bindingFingerprint: getSyncLifecycleBindingFingerprint((options.binding || {}).token),
+              clientId,
+              sourceFingerprint: this.buildCloudFallbackSourceFingerprint({
+                sourceType: 'uploaded_file',
+                fileID: uploaded.fileID,
+                recordId: options.recordId,
+              }),
+              clientRequestId,
+              recordRetryCount: retryCount,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+            const job = await this.submitCloudFallbackJob({
+              sourceType: 'uploaded_file',
+              fileID: uploaded.fileID,
+              recordId: options.recordId,
+              retryCount: options.retryCount,
+              title: options.title,
+              durationSeconds: options.durationSeconds,
+              localError: error && error.message ? error.message : String(error || ''),
+              provider,
+              clientRequestId,
+              binding: options.binding,
+              signal: options.signal,
+            });
+            if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+              return {
+                transcription: job.transcription,
+                source: 'cloud-fallback',
+                cloudProvider: job.provider || 'cloud',
+                cloudRequestId: job.providerRequestId || '',
+              };
+            }
+            throw createCloudFallbackPendingError(job, error && error.message);
+          } catch (fallbackError) {
+            if (fallbackError && fallbackError.code === 'CLOUD_FALLBACK_QUEUED') throw fallbackError;
+            if (isAbortError(fallbackError) || options.signal?.aborted) throw createAbortError();
+            if (uploadedArtifactReady && isCloudFallbackSubmissionUncertain(fallbackError)) {
+              fallbackError.code = 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN';
+              throw fallbackError;
+            }
+            // Upload/prepare/complete failures leave the original Douyin URL
+            // as the only accepted cloud source. Do not expose signed URL or
+            // local path details in the eventual user-facing error.
+          }
+        }
+
+        const controlledFileId = String(options.fileID || options.audioFileID || '').trim();
+        if (this.settings.cloudFallbackEnabled === true
+          && controlledFileId
+          && isControlledCloudFallbackFileId(controlledFileId)) {
+          const job = await this.submitCloudFallbackJob({
+            sourceType: 'uploaded_file',
+            fileID: controlledFileId,
+            recordId: options.recordId,
+            retryCount: options.retryCount,
+            title: options.title,
+            durationSeconds: options.durationSeconds,
+            localError: error && error.message ? error.message : String(error || ''),
+            provider,
+            binding: options.binding,
+            signal: options.signal,
+          });
+          if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+            return {
+              transcription: job.transcription,
+              source: 'cloud-fallback',
+              cloudProvider: job.provider || 'cloud',
+              cloudRequestId: job.providerRequestId || '',
+            };
+          }
+          throw createCloudFallbackPendingError(job, error && error.message);
+        }
+        throw error;
+      } finally {
+        if (retainedInputPath) {
+          try { if (fs.existsSync(retainedInputPath)) fs.unlinkSync(retainedInputPath); } catch (_) { /* Best-effort temp cleanup. */ }
+        }
+      }
+    };
     const runLocalFallback = async (sourcePrefix) => {
       if (provider === 'doubao') {
         await this.clearPendingDoubaoTask(getDoubaoTaskKey(audioUrl));
       }
-      const localResult = await this.runLocalTranscription(audioUrl, { ...options, includeQualityDetails: true });
-      const normalizedResult = localResult && typeof localResult === 'object'
-        ? localResult
-        : { transcription: localResult };
-      return {
-        transcription: normalizedResult.transcription,
-        source: sourcePrefix ? sourcePrefix + '-local' : 'local',
-        ...(normalizedResult.qualityStatus ? { transcriptionQualityStatus: normalizedResult.qualityStatus } : {}),
-        ...(normalizedResult.qualityWarning ? { transcriptionQualityWarning: normalizedResult.qualityWarning } : {}),
-      };
+      return await runLocalWithCloudFallback({ sourcePrefix, includeQualityDetails: true });
     };
 
     if (options.forceLocal) {
@@ -20751,20 +22242,18 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
     if (this.settings.aiProvider === 'local') {
+      if (this.settings.cloudFallbackEnabled === true || options.preserveLocalMediaForCloudFallback === true) {
+        return await runLocalWithCloudFallback({ sourcePrefix: '', includeQualityDetails: false });
+      }
       try {
         return {
           transcription: await this.runLocalTranscription(audioUrl, options),
           source: 'local',
         };
       } catch (error) {
-        if (error.transcriptionSetupRequired) throw error;
-        if (error.code === 'TRANSCRIPTION_NO_SPEECH') throw error;
-        if (isRetryableTranscriptionError(error)) {
-          throw error;
-        }
-        if (!options.fileID && !options.allowCloudUrlFallback) {
-          throw error;
-        }
+        if ((isAbortError(error) && !isRetryableTranscriptionError(error)) || options.signal?.aborted) throw createAbortError();
+        if (error.transcriptionSetupRequired || error.code === 'TRANSCRIPTION_NO_SPEECH' || isRetryableTranscriptionError(error)) throw error;
+        if (!options.fileID && !options.allowCloudUrlFallback) throw error;
         return await this.runCloudFallbackTranscription(audioUrl, {
           ...options,
           localError: error && error.message ? error.message : String(error || ''),
@@ -20828,6 +22317,34 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async runLocalTranscription(audioUrl, options = {}) {
+    const requestedOwner = options.operatorNode === true ? 'operator' : 'foreground';
+    const inheritedToken = options._localAsrMutexToken || null;
+    const currentOwner = this.localAsrMutexOwner || null;
+    if (currentOwner && currentOwner !== inheritedToken) {
+      const error = new Error(requestedOwner === 'operator'
+        ? '负责人前台正在进行本地转写，运营节点暂不领取本地转写任务'
+        : '本机运营节点正在进行本地转写，请稍后重试');
+      error.code = 'LOCAL_ASR_BUSY';
+      error.retryable = true;
+      throw error;
+    }
+    const acquiredHere = !currentOwner;
+    const mutexToken = inheritedToken || { kind: requestedOwner };
+    if (acquiredHere) this.localAsrMutexOwner = mutexToken;
+    try {
+      return await this.runLocalTranscriptionCore(audioUrl, { ...options, _localAsrMutexToken: mutexToken });
+    } finally {
+      if (acquiredHere && this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
+    }
+  }
+
+  async runLocalTranscriptionCore(audioUrl, options = {}) {
+    if (this.operatorLocalAsrActive === true && options.operatorNode !== true) {
+      const error = new Error('本机运营节点正在进行本地转写，请稍后重试');
+      error.code = 'LOCAL_ASR_BUSY';
+      error.retryable = true;
+      throw error;
+    }
     throwIfAborted(options.signal);
     try {
       await this.ensureLocalComponentReadyForUse('音视频转写', {
@@ -21112,6 +22629,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
 
     let inputPath = '';
+    const suppliedInputPath = String(options.inputPath || '').trim();
+    const ownsInputPath = !suppliedInputPath;
     let outputPath = '';
     let command = '';
     let channelsStage = 'download';
@@ -21122,26 +22641,38 @@ class WechatObsidianInboxPlugin extends Plugin {
         title: progressTitle,
         percent: 0,
       });
-      inputPath = await this.downloadMediaToTempFile(audioUrl, {
-        sourceUrl: options.sourceUrl || options.url || '',
-        decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || '',
-        signal: abortController.signal,
-        onMediaDownloadDiagnostic: options.onMediaDownloadDiagnostic,
-        onProgress: (progress = {}) => {
-          if (typeof progress.percent === 'number') {
-            this.showSyncProgress({
-              ...options,
-              stage: 'downloading',
-              title: progressTitle,
-              percent: progress.percent,
-            });
-          }
-        },
-      });
+      if (suppliedInputPath) {
+        if (!fs.existsSync(suppliedInputPath)) {
+          const error = new Error('本地转写输入文件不可用');
+          error.code = 'LOCAL_ASR_INPUT_UNAVAILABLE';
+          throw error;
+        }
+        inputPath = suppliedInputPath;
+      } else {
+        inputPath = await this.downloadMediaToTempFile(audioUrl, {
+          sourceUrl: options.sourceUrl || options.url || '',
+          decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || '',
+          signal: abortController.signal,
+          onMediaDownloadDiagnostic: options.onMediaDownloadDiagnostic,
+          onProgress: (progress = {}) => {
+            if (typeof progress.percent === 'number') {
+              this.showSyncProgress({
+                ...options,
+                stage: 'downloading',
+                title: progressTitle,
+                percent: progress.percent,
+              });
+            }
+          },
+        });
+      }
       throwIfAborted(abortController.signal);
       session.inputIdentity.media = await asrDiagnosticEvidence.captureMediaIdentityAsync(inputPath, {
         durationHintSeconds: options.durationSeconds,
       });
+      if (typeof options.onInputPathReady === 'function') {
+        await options.onInputPathReady(inputPath);
+      }
       asrRecovery.saveSession(installRoot, session, this.settings);
       channelsStage = 'transcribe';
       outputPath = `${inputPath}.txt`;
@@ -21479,9 +23010,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (_) { /* Evidence collection cannot mask the original result. */ }
       try { asrRecovery.saveSession(installRoot, session, this.settings); }
       finally {
-        [inputPath, outputPath].forEach((filePath) => {
+        [inputPath, outputPath].forEach((filePath, index) => {
           try {
-            if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            const canDelete = index === 0
+              ? ownsInputPath && !(options.retainInputFileOnError === true && session.status === 'failed')
+              : true;
+            if (canDelete && filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
           } catch (error) {
             // Ignore temp cleanup failures.
           }
@@ -21505,6 +23039,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         idleTimeoutMs: 90000,
         totalTimeoutMs: remainingMs,
         timeout: Math.max(100, Math.min(30000, remainingMs)),
+        ...(Number(options.maxBytes) > 0
+          ? { maxBytes: Math.min(MAX_CLOUD_FALLBACK_MEDIA_BYTES, Number(options.maxBytes)) }
+          : {}),
       };
     };
     const sourceUrl = String(options.sourceUrl || '').trim();
@@ -21889,6 +23426,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           binding,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
+          retryCount: record.retryCount,
           title,
           forceLocal: true,
           cloudFallbackReason: 'cloud-pretranscription-failed',
@@ -21935,6 +23473,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           binding,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
+          retryCount: record.retryCount,
           title,
           forceLocal: metadata.transcriptionMode === 'local',
         });
@@ -22070,6 +23609,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             binding,
             fileID: metadata.fileID,
             recordId: getRecordId(record),
+            retryCount: record.retryCount,
             title,
             source: 'file-attachment',
             forceLocal: metadata.transcriptionMode === 'local',
@@ -22093,6 +23633,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           nextMetadata.aiMetadataSource = nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource;
           nextMetadata.contentCategory = nextMetadata.contentCategory || (['mp4', 'mov', 'm4v'].includes(fileExt) ? '视频' : '音频');
         } catch (error) {
+          if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
           if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
           nextMetadata.transcription = '';
           nextMetadata.transcriptionStatus = 'failed';
@@ -22621,6 +24162,51 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
 
     if (!candidates.length) {
+      if (this.settings.cloudFallbackEnabled === true
+        && isDouyinUrl(url)
+        && binding) {
+        try {
+          const job = await this.submitCloudFallbackJob({
+            sourceType: 'douyin_url',
+            sourceUrl: url,
+            recordId: getRecordId(record),
+            retryCount: record.retryCount,
+            title: title || metadata.title || '',
+            durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
+            localError: noMediaError || '抖音媒体地址获取失败',
+            provider: this.settings.aiProvider || '',
+            binding,
+            signal,
+          });
+          if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+            return {
+              ...record,
+              metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
+                url,
+                platform,
+                mediaUrl,
+                subtitleUrl,
+                transcription: job.transcription,
+                transcriptionStatus: 'success',
+                transcriptionSource: 'cloud-fallback',
+                conversionStatus: 'success',
+                markdown,
+                trailingMarkdown,
+                sourceTitle: normalizedSourceTitle,
+                mediaResolutionDiagnostic: getMediaResolutionDiagnostic('transcription-ready'),
+              }),
+            };
+          }
+          throw createCloudFallbackPendingError(job, noMediaError);
+        } catch (cloudError) {
+          if (cloudError && cloudError.code === 'CLOUD_FALLBACK_QUEUED') throw cloudError;
+          // Keep the old failed-record behavior when the optional endpoint is
+          // unavailable. The record remains retryable and no success is shown.
+          noMediaError = [noMediaError, `云端兜底未提交：${cloudError && cloudError.message || cloudError}`]
+            .filter(Boolean)
+            .join('；');
+        }
+      }
       return {
         ...record,
         metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
@@ -22696,6 +24282,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               forceLocal: platform === '视频号' || metadata.transcriptionMode === 'local',
               sourcePlatform: platform,
               retryLocalQualityOnce: platform === '视频号',
+              preserveLocalMediaForCloudFallback: isDouyinUrl(url) && this.settings.cloudFallbackEnabled === true,
               signal,
               onMediaDownloadDiagnostic: reportMediaDownloadAttempt,
             });
@@ -22734,6 +24321,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           };
         } catch (candidateError) {
           if (isAbortError(candidateError) || signal?.aborted) throw createAbortError();
+          if (candidateError && candidateError.code === 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN') throw candidateError;
           lastError = candidateError;
           if (candidateError.code === 'TRANSCRIPTION_NO_SPEECH'
             && (candidateError.noSpeechEvidence === 'non-speech-markers'
@@ -22766,6 +24354,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw (noSpeechCount > 0 ? firstRealError : null) || lastError || new Error('未能完成音视频转写');
     } catch (error) {
       if (isAbortError(error)) throw error;
+      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
+      if (error && error.code === 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN') throw error;
       if (error.code === 'TRANSCRIPTION_NO_SPEECH' && noSpeechCount > 0
         && noSpeechCount === processedCandidateUrls.size && !firstRealError) {
         return { ...record, metadata: {
@@ -22784,13 +24374,67 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (mediaDiagnosticTrace?.source === 'wechat-channels') error.diagnostic = channelsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
         throw error;
       }
+      let finalError = error;
+      // The direct and logged-in Douyin media candidates have all been
+      // attempted at this point. Submit the original share URL so the cloud
+      // worker can resolve it independently; a stale media URL is not a
+      // usable fallback source. No-speech and user-stop paths return above or
+      // are retryable and therefore never enter this branch.
+      if (this.settings.cloudFallbackEnabled === true
+        && isDouyinUrl(url)
+        && binding
+        && !isAbortError(error)
+        && error.code !== 'TRANSCRIPTION_NO_SPEECH') {
+        try {
+          const job = await this.submitCloudFallbackJob({
+            sourceType: 'douyin_url',
+            sourceUrl: url,
+            recordId: getRecordId(record),
+            retryCount: record.retryCount,
+            title: title || metadata.title || '',
+            durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
+            localError: error.message || String(error),
+            provider: this.settings.aiProvider || '',
+            binding,
+            signal,
+          });
+          if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+            return {
+              ...record,
+              metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
+                url,
+                platform,
+                mediaUrl,
+                mediaUrls: getCandidates().map((item) => item.url),
+                subtitleUrl,
+                transcription: job.transcription,
+                transcriptionStatus: 'success',
+                transcriptionSource: 'cloud-fallback',
+                conversionStatus: 'success',
+                markdown,
+                trailingMarkdown,
+                sourceTitle: normalizedSourceTitle,
+                mediaResolutionDiagnostic: getMediaResolutionDiagnostic('transcription-ready'),
+              }),
+            };
+          }
+          throw createCloudFallbackPendingError(job, error.message || String(error));
+        } catch (cloudError) {
+          if (cloudError && cloudError.code === 'CLOUD_FALLBACK_QUEUED') throw cloudError;
+          finalError = new Error([
+            error.message || String(error),
+            `云端兜底未提交：${cloudError && cloudError.message || cloudError}`,
+          ].filter(Boolean).join('；'));
+          finalError.code = error.code;
+        }
+      }
       const recoveryCandidate = platform === '视频号'
-        && error.code === 'TRANSCRIPTION_LOW_QUALITY'
-        && error.qualityRecoveryCandidate
-        && error.qualityRecoveryCandidate.fullAudioProcessed === true
-        && getChannelsUnresolvedWindowCount(error.qualityRecoveryCandidate) > 0
-        && Number(error.qualityRecoveryCandidate.windowCount) > 0
-        ? String(error.qualityRecoveryCandidate.transcription || '').trim()
+        && finalError.code === 'TRANSCRIPTION_LOW_QUALITY'
+        && finalError.qualityRecoveryCandidate
+        && finalError.qualityRecoveryCandidate.fullAudioProcessed === true
+        && getChannelsUnresolvedWindowCount(finalError.qualityRecoveryCandidate) > 0
+        && Number(finalError.qualityRecoveryCandidate.windowCount) > 0
+        ? String(finalError.qualityRecoveryCandidate.transcription || '').trim()
         : '';
       const candidateNote = recoveryCandidate
         ? [
@@ -22810,7 +24454,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         subtitleUrl,
         transcription: '',
         transcriptionStatus: 'failed',
-        transcriptionError: bilibiliDiagnostic.summary(mediaDiagnosticTrace) || error.message || String(error),
+        transcriptionError: bilibiliDiagnostic.summary(mediaDiagnosticTrace) || finalError.message || String(finalError),
         transcriptionSource: source || this.settings.aiProvider || 'unknown',
         conversionStatus: 'failed',
         markdown,
@@ -25059,6 +26703,40 @@ class WechatObsidianInboxPlugin extends Plugin {
           const noMediaError = (douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === 'DOUYIN_NO_MEDIA'
               ? '插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。'
             : douyinDiagnostic.failureMessage(douyinFailureCode));
+          if (this.settings.cloudFallbackEnabled === true && binding) {
+            try {
+              const job = await this.submitCloudFallbackJob({
+                sourceType: 'douyin_url',
+                sourceUrl: url,
+                recordId: getRecordId(record),
+                retryCount: record.retryCount,
+                title: title || metadata.title || '抖音链接',
+                localError: noMediaError,
+                provider: this.settings.aiProvider || '',
+                binding,
+                signal,
+              });
+              if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+                return {
+                  ...record,
+                  metadata: buildTranscriptOnlyMetadata(metadata, {
+                    url,
+                    platform: '抖音',
+                    transcription: job.transcription,
+                    transcriptionStatus: 'success',
+                    transcriptionSource: 'cloud-fallback',
+                    conversionStatus: 'success',
+                    sourceTitle: metadata.title || title || '抖音链接',
+                  }),
+                };
+              }
+              throw createCloudFallbackPendingError(job, noMediaError);
+            } catch (cloudError) {
+              if (cloudError && cloudError.code === 'CLOUD_FALLBACK_QUEUED') throw cloudError;
+              // Preserve the existing link-saved failure state if the new
+              // optional endpoint is not available yet.
+            }
+          }
           return {
             ...record,
             metadata: {
@@ -25677,6 +27355,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         updateCommentResult({ status: isAbortError(error) ? 'aborted' : 'not_attempted', reason: 'content_failed', errorCode: getXiaohongshuCommentErrorCode(error) });
       }
       if (isAbortError(error)) throw error;
+      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
       }
@@ -25997,6 +27676,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
     const linkAsWebpage = recordType === 'link' && shouldHydrateLinkAsWebpage((record.metadata && record.metadata.url) || record.content || '');
+    const cloudFallbackCompleted = isCloudFallbackCompletedRecord(record);
     const textWebpageUrl = recordType === 'text'
       ? selectAutomaticWebpageUrlFromText([
         record.content || '',
@@ -26004,51 +27684,78 @@ class WechatObsidianInboxPlugin extends Plugin {
       ].filter(Boolean).join('\n'))
       : '';
     const textAsWebpage = Boolean(textWebpageUrl);
-    if (recordType === 'voice') {
+    if (cloudFallbackCompleted && !(recordType === 'webpage' || linkAsWebpage || textAsWebpage)) {
+      recordForMarkdown = {
+        ...record,
+        metadata: {
+          ...(record.metadata || {}),
+          transcriptOnly: true,
+          webpageMediaType: 'audio_video',
+          conversionStatus: 'success',
+        },
+      };
+    } else if (recordType === 'voice') {
       recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === 'file') {
       recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === 'webpage' || linkAsWebpage || textAsWebpage) {
       this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
-      recordForMarkdown = await this.hydrateWebpageMarkdown(
-        linkAsWebpage || textAsWebpage
-          ? {
-            ...record,
-            type: 'webpage',
-            metadata: {
-              ...(record.metadata || {}),
-              url: textAsWebpage
-                ? textWebpageUrl
-                : (record.metadata && record.metadata.url) || record.content || '',
-              ...(textAsWebpage
-                ? {
-                  shareText: (record.metadata && record.metadata.shareText) || record.content || '',
-                  automaticWebpageExtraction: true,
-                }
-                : {}),
-              conversionStatus: (record.metadata && record.metadata.conversionStatus) || 'pending',
-            },
-          }
-          : record,
-        rootDir,
-        dateFolder,
-        title,
-        binding,
-        { signal, onVerifiedArticle: (url, article) => { verifiedArticleLease = { url, article }; } },
-      );
-      throwIfAborted(signal);
-      if (textAsWebpage && !isAutomaticWebpageHydrationSuccessful(recordForMarkdown)) {
-        const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(textWebpageUrl)
-          ? this.lastXiaohongshuBrowserDiagnostic
-          : null;
-        throw createAutomaticWebpageExtractionError(
-          textWebpageUrl,
-          buildAutomaticWebpageFailureDiagnostic(
-            textWebpageUrl,
-            recordForMarkdown,
-            xiaohongshuBrowserDiagnostic,
-          ),
+      if (cloudFallbackCompleted) {
+        // The server result already contains the authoritative transcript. Use
+        // the normal note builder directly so a completed fallback never
+        // re-downloads a stale/expired Douyin media URL.
+        recordForMarkdown = {
+          ...record,
+          type: 'webpage',
+          metadata: {
+            ...(record.metadata || {}),
+            url: (record.metadata && record.metadata.url) || record.content || '',
+            transcriptOnly: true,
+            webpageMediaType: 'audio_video',
+            conversionStatus: 'success',
+          },
+        };
+      } else {
+        recordForMarkdown = await this.hydrateWebpageMarkdown(
+          linkAsWebpage || textAsWebpage
+            ? {
+              ...record,
+              type: 'webpage',
+              metadata: {
+                ...(record.metadata || {}),
+                url: textAsWebpage
+                  ? textWebpageUrl
+                  : (record.metadata && record.metadata.url) || record.content || '',
+                ...(textAsWebpage
+                  ? {
+                    shareText: (record.metadata && record.metadata.shareText) || record.content || '',
+                    automaticWebpageExtraction: true,
+                  }
+                  : {}),
+                conversionStatus: (record.metadata && record.metadata.conversionStatus) || 'pending',
+              },
+            }
+            : record,
+          rootDir,
+          dateFolder,
+          title,
+          binding,
+          { signal, onVerifiedArticle: (url, article) => { verifiedArticleLease = { url, article }; } },
         );
+        throwIfAborted(signal);
+        if (textAsWebpage && !isAutomaticWebpageHydrationSuccessful(recordForMarkdown)) {
+          const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(textWebpageUrl)
+            ? this.lastXiaohongshuBrowserDiagnostic
+            : null;
+          throw createAutomaticWebpageExtractionError(
+            textWebpageUrl,
+            buildAutomaticWebpageFailureDiagnostic(
+              textWebpageUrl,
+              recordForMarkdown,
+              xiaohongshuBrowserDiagnostic,
+            ),
+          );
+        }
       }
       recordForMarkdown = await this.saveSourceMediaAttachment(recordForMarkdown, rootDir, dateFolder, title);
       title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
@@ -26369,6 +28076,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       const retryKey = `completion:${this.getAutoSyncRecordKey(binding, item.recordId)}`;
       if (this.backgroundSyncActive && this.autoSyncController && !this.autoSyncController.canRetry(retryKey)) continue;
       try {
+        if (item.stage === 'cloud-fallback') {
+          // The server record is intentionally still leased while the cloud
+          // fallback runs. Polling the fallback job, rather than reporting a
+          // synthetic local failure, preserves that attempt for completion.
+          continue;
+        }
         if (item.stage === 'committed') {
           await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || '', binding, {
             enabled: true,
@@ -26416,7 +28129,11 @@ class WechatObsidianInboxPlugin extends Plugin {
         : (payload && typeof payload === 'object' ? payload : {});
       const attemptId = String(data.attemptId || data.syncAttemptId || '').trim();
       if (!attemptId) throw new Error('sync processing claim is missing an attempt id');
-      return { enabled: true, attemptId };
+      return {
+        enabled: true,
+        attemptId,
+        leaseUntil: String(data.leaseUntil || data.processingLeaseUntil || '').trim(),
+      };
     } catch (error) {
       if (isLegacySyncLifecycleError(error)) return { enabled: false, legacyFallback: true };
       if (isSyncRecordBusyError(error)) return { enabled: true, conflict: true };
@@ -26501,9 +28218,16 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.ensureSerializedSaveData();
     const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
     await this.replayPendingSyncLifecycleAttempts(binding);
+    // A previous run may have written the note but failed to release its
+    // cloud copy. Retry those releases before fetching new work.
+    try {
+      await this.flushCloudFallbackAcks(binding);
+    } catch (_) { /* A release retry must never block syncing. */ }
     this.showSyncProgress({ bindingLabel, stage: 'fetching' });
     const payload = await this.requestJson('/records?status=pending', 'GET', {}, binding);
-    const records = payload.data || [];
+    let records = payload.data || [];
+    const cloudFallbackPoll = await this.pollCloudFallbackJobs(binding, records);
+    records = cloudFallbackPoll.records;
     const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
     const syncSnapshot = normalizeSyncRecordDiagnosticSnapshot(payload && payload.meta && payload.meta.syncSnapshot);
     const lifecycleAdvertised = Boolean(payload && payload.meta && payload.meta.syncLifecycleStatus === true);
@@ -26526,13 +28250,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (this.backgroundSyncActive && !this.getAutoSyncBindings().some((item) => item.token === binding.token)) break;
       const record = records[index];
       const recordId = getRecordId(record);
+      const cloudFallbackPending = isCloudFallbackPendingRecord(record);
+      const cloudFallbackCompleted = isCloudFallbackCompletedRecord(record);
       const autoRetryKey = this.getAutoSyncRecordKey(binding, recordId);
       const previousFailure = this.getRecentSyncFailures().find((item) => (
         item.recordId === recordId && item.bindingToken === normalizeBindCodeInput(binding.token)
       ));
       // Only an explicit mini-program retry (higher counter), or a new record,
       // starts another attempt. Restarting or pressing Sync is not a retry.
-      if (previousFailure && (Number(record.retryCount) || 0) <= previousFailure.retryCount
+      if (previousFailure && !cloudFallbackCompleted
+        && (Number(record.retryCount) || 0) <= previousFailure.retryCount
         && !this.findCompletedSyncReceipt(binding, recordId)) {
         skipped.push({ recordId, reason: 'failed-awaiting-manual-retry' });
         continue;
@@ -26546,13 +28273,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         .find((item) => item.recordId === recordId
           && item.bindingFingerprint === getSyncLifecycleBindingFingerprint(binding.token)
           && item.stage !== 'committed');
-      if (pendingAttempt && String(record.syncAttemptId || '') === pendingAttempt.attemptId) {
+      if (pendingAttempt && !cloudFallbackPending && !cloudFallbackCompleted
+        && String(record.syncAttemptId || '') === pendingAttempt.attemptId) {
         // Failure report could not reach the server. Replay that report without
         // reclaiming an expired lease and transcribing the same content again.
         skipped.push({ recordId, reason: 'failure-report-pending' });
         continue;
       }
-      if (this.backgroundSyncActive && (
+      if (!cloudFallbackCompleted && this.backgroundSyncActive && (
         (this.settings.autoSyncStoppedRecords || []).includes(autoRetryKey)
         || (this.autoSyncController && (!this.autoSyncController.canRetry(autoRetryKey)
           || !this.autoSyncController.canRetry(`completion:${autoRetryKey}`)))
@@ -26572,6 +28300,26 @@ class WechatObsidianInboxPlugin extends Plugin {
         skipped.push({
           recordId,
           reason: 'locally-quarantined-unrecoverable',
+        });
+        continue;
+      }
+      if (cloudFallbackPending) {
+        skipped.push({
+          recordId,
+          reason: 'cloud-fallback-processing',
+          jobId: record.metadata && record.metadata.cloudFallbackJobId,
+        });
+        if (!this.backgroundSyncActive) {
+          this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端兜底中` });
+        }
+        continue;
+      }
+      if (isCloudFallbackTerminalRecord(record)) {
+        skipped.push({
+          recordId,
+          reason: 'cloud-fallback-terminal',
+          jobId: record.metadata && record.metadata.cloudFallbackJobId,
+          status: record.metadata && (record.metadata.cloudFallbackStatus || record.metadata.transcriptionStatus),
         });
         continue;
       }
@@ -26604,12 +28352,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
-        lifecycle = await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        lifecycle = getActiveCloudFallbackLifecycle(record)
+          || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
         if (lifecycle.conflict) {
           skipped.push({ recordId, reason: 'record-busy' });
           continue;
         }
-        if (this.currentProcessingContext && this.currentProcessingContext.recordId === recordId) this.currentProcessingContext.attemptId = lifecycle.attemptId || '';
+        if (this.currentProcessingContext && this.currentProcessingContext.recordId === recordId) {
+          this.currentProcessingContext.attemptId = lifecycle.attemptId || '';
+          this.currentProcessingContext.leaseUntil = lifecycle.leaseUntil || '';
+        }
         diagnosticId = createDiagnosticId({
           binding,
           syncRecordId: recordId,
@@ -26669,6 +28421,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
             if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
           }
+          await this.acknowledgeCloudFallbackJobForRecord(record, binding).catch(() => {});
           continue;
         }
         if (existingFilePath) {
@@ -26707,6 +28460,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
             if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
           }
+          await this.acknowledgeCloudFallbackJobForRecord(record, binding).catch(() => {});
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -26719,6 +28473,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         localCommitFact = item;
         if (this.autoSyncController) this.autoSyncController.succeeded(autoRetryKey);
         written.push(item);
+        // The note now exists locally, so the server may drop the media and
+        // transcription it was holding for this record.
+        await this.acknowledgeCloudFallbackJobForRecord(record, binding).catch(() => {});
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
@@ -26757,6 +28514,35 @@ class WechatObsidianInboxPlugin extends Plugin {
             code: 'POST_COMMIT_RECOVERY_FAILED',
             message: 'local note is saved; post-commit recovery will retry without marking sync failed',
           });
+          continue;
+        }
+        if (error && error.code === 'CLOUD_FALLBACK_QUEUED') {
+          const queuedJob = error.cloudFallbackJob && normalizeCloudFallbackJob(error.cloudFallbackJob);
+          if (queuedJob) {
+            try {
+              await this.attachCloudFallbackRecordContext(queuedJob, record, binding, lifecycle);
+              if (lifecycle.enabled && lifecycle.attemptId) {
+                await this.upsertPendingSyncLifecycleAttempt(binding, {
+                  recordId,
+                  attemptId: lifecycle.attemptId,
+                  stage: 'cloud-fallback',
+                  code: `CLOUD_FALLBACK_${queuedJob.jobId}`,
+                });
+              }
+            } catch (persistError) {
+              // Keep the original queued job error visible. The server job is
+              // still pollable; a later lease-expiry fetch remains the final
+              // recovery path if local snapshot persistence fails.
+            }
+          }
+          skipped.push({
+            recordId,
+            reason: 'cloud-fallback-processing',
+            jobId: queuedJob && queuedJob.jobId || '',
+          });
+          if (!this.backgroundSyncActive) {
+            this.showSyncProgress({ ...progress, stage: 'processing', title: `${processingTitle} 云端兜底中` });
+          }
           continue;
         }
         const message = error.message || String(error);
@@ -26878,7 +28664,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     }
 
-    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview, syncSnapshot };
+    // Waiting cloud jobs count as activity so the scheduler keeps checking
+    // instead of backing off as if the inbox were empty.
+    const cloudFallbackPending = skipped.filter((item) => item.reason === 'cloud-fallback-processing').length;
+    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview, syncSnapshot, cloudFallbackPending };
   }
 
   async syncInbox(showNotice = true, options = {}) {
@@ -26929,6 +28718,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const recentFailureEntries = [];
       const recentResolvedEntries = [];
       let pollFailed = false;
+      let cloudFallbackPending = 0;
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: 'fetching' });
 
@@ -26983,6 +28773,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (result.syncSnapshot) {
             syncSnapshots.push(result.syncSnapshot);
           }
+          cloudFallbackPending += Math.max(0, Number(result.cloudFallbackPending) || 0);
         } catch (error) {
           const message = error.message || String(error);
           pollFailed = true;
@@ -27194,7 +28985,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         && typeof this.syncStatusBar.setText === 'function' && (failed.length || conversionWarnings.length)) {
         this.syncStatusBar.setText('自动同步有未完成内容，可在小程序“同步记录”中查看并重试');
       }
-      return { pollFailed, written: written.length, failed: failed.filter(item => !item.setupRequired).length, pendingSetup: Math.max(pendingSetupEntries.length, failed.filter(item => item.setupRequired).length) };
+      return { pollFailed, written: written.length, failed: failed.filter(item => !item.setupRequired).length, pendingSetup: Math.max(pendingSetupEntries.length, failed.filter(item => item.setupRequired).length), cloudFallbackPending };
     } catch (error) {
       this.lastSyncDiagnostic = {
         status: 'failed',
@@ -27440,6 +29231,22 @@ class WechatInboxSettingTab extends PluginSettingTab {
         });
     };
     new Setting(containerEl)
+      .setName('输入短期连接码')
+      .setDesc('小程序生成的 CNT-XXXX-XXXX-XXXX 连接码，通常 10 分钟内有效；消费后会直接保存绑定凭据，不会清除已有绑定。')
+      .addText((text) => text
+        .setPlaceholder('例如 CNT-ABCD-EFGH-JKLM')
+        .setValue(this.plugin.settings.pendingConnectionTicket || '')
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({ ...this.plugin.settings, pendingConnectionTicket: value });
+        }))
+      .addButton((button) => button
+        .setButtonText('连接')
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.connectWithConnectionTicket();
+          this.display();
+        }));
+    new Setting(containerEl)
       .setName('输入绑定码')
       .setDesc(primaryBinding
         ? '绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 高级功能里增加设备。'
@@ -27529,6 +29336,48 @@ class WechatInboxSettingTab extends PluginSettingTab {
         .onChange(async (value) => {
           await this.plugin.saveSettings({ ...this.plugin.settings, autoSyncEnabled: value });
         }));
+
+    new Setting(containerEl)
+      .setName('云端兜底转写')
+      .setDesc('Pro 用户可用。默认关闭；开启后，本地转写或抖音媒体获取失败时，插件会按当前兜底路径将原始抖音链接或受控云端音频文件交给云端处理；不会上传 Cookie。')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.cloudFallbackEnabled === true)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({ ...this.plugin.settings, cloudFallbackEnabled: value });
+        }));
+
+    const pendingCloudFallbackJobs = normalizeCloudFallbackJobs(this.plugin.settings.cloudFallbackJobs)
+      .filter((job) => isCloudFallbackJobPending(job));
+    if (pendingCloudFallbackJobs.length) {
+      const bindingByFingerprint = new Map(this.plugin.getActiveBindings().map((binding) => [
+        getSyncLifecycleBindingFingerprint(binding.token),
+        binding,
+      ]));
+      new Setting(containerEl)
+        .setName('正在处理的云端兜底任务')
+        .setDesc('任务会在后台轮询；如果不再需要，可取消对应任务。');
+      pendingCloudFallbackJobs.forEach((job) => {
+        const binding = bindingByFingerprint.get(job.bindingFingerprint) || null;
+        const sourceLabel = job.sourceType === 'douyin_url' ? '抖音链接' : '云端音频文件';
+        new Setting(containerEl)
+          .setName(`${sourceLabel} · ${job.jobId.slice(0, 12)}`)
+          .setDesc(binding ? '已提交，等待云端转写结果。' : '原绑定已不可用，无法从此处取消。')
+          .addButton((button) => button
+            .setButtonText('取消任务')
+            .onClick(async () => {
+              if (!binding) return;
+              button.setDisabled(true);
+              try {
+                await this.plugin.cancelCloudFallbackJob(job.jobId, binding);
+                new Notice('云端兜底任务已取消');
+                this.display();
+              } catch (error) {
+                button.setDisabled(false);
+                new Notice(`取消云端兜底任务失败：${error.message || error}`);
+              }
+            }));
+      });
+    }
 
     new Setting(containerEl)
       .setName('立即同步')

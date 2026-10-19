@@ -76,7 +76,7 @@ function normalizePendingSyncLifecycleAttempts(value) {
     if (!recordId
       || !/^[A-Za-z0-9_-]{8,128}$/.test(attemptId)
       || !/^[a-f0-9]{16,64}$/.test(bindingFingerprint)
-      || !['processing', 'failed', 'committed'].includes(stage)) continue;
+      || !['processing', 'failed', 'committed', 'cloud-fallback'].includes(stage)) continue;
     const normalized = {
       recordId,
       attemptId,

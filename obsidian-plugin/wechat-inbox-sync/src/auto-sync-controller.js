@@ -80,7 +80,8 @@ function createAutoSyncController({
       failures = 0;
       // A content-processing failure still means work arrived. Records skipped
       // by retry cooldown do not count as failed attempts and remain idle.
-      const hadActivity = result && (result.written > 0 || result.failed > 0);
+      // A waiting cloud job also counts: its result may arrive at any moment.
+      const hadActivity = result && (result.written > 0 || result.failed > 0 || result.cloudFallbackPending > 0);
       idleRuns = hadActivity ? 0 : Math.min(idleRuns + 1, 7);
     }
     const delay = failures
